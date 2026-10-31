@@ -35,6 +35,7 @@ All commands return JSON over the socket API.
 | Talk to agent | `agent prompt <name> "…" --wait --timeout <ms>`, `agent send-keys` |
 | Read output | `agent read`, `pane` read commands |
 | Synchronize | `agent wait <name> --until <states>` |
+| Subscribe | socket `events.subscribe` (no CLI wrapper), see [herdr-events.md](herdr-events.md) |
 | Remote | global `--machine <label>` prefix; IDs are per-server |
 | Display metadata | `workspace report-metadata` |
 

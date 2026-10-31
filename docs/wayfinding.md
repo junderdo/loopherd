@@ -87,7 +87,7 @@ its row here.
 | Q1 | LH-5 | Where do herd files live: in each repo, in `~/.config/loopherd/`, or both? |
 | Q2 | LH-4 | Is this for work (zagops) as well as personal projects? |
 | Q3 | LH-8 | Ledger storage: a TOML/JSON file or SQLite? Blocked on LH-4 and LH-5. |
-| Q4 | LH-2 | Does herdr offer an event stream, or do we poll `agent list`? |
+| Q4 | LH-2 | Does herdr offer an event stream, or do we poll `agent list`? **Answer:** yes, `events.subscribe` on the socket pushes per-pane agent status; bootstrap and reconcile with `session.snapshot` ([research](research/herdr-events.md)). |
 | Q5 | LH-7 | May loopherd answer `blocked` agents, or only surface them? |
 | Q6 | LH-6 | Should a herd map to one herdr workspace, or can members be scattered? |
 | Q7 | LH-3 | Which slice ships first: templates (D3) or revive (herdr's gap)? |
