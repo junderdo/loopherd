@@ -77,14 +77,17 @@ Each one is usable end to end on its own.
 
 ## Open questions
 
-- [ ] Q1: Where do herd files live: in each repo, in `~/.config/loopherd/`, or both?
-- [ ] Q2: Is this for work (zagops) as well as personal projects? That decides
-      multi-machine and `--machine` support, and how careful we are about
-      prompts.
-- [ ] Q3: Ledger storage: a TOML/JSON file or SQLite?
-- [ ] Q4: Does herdr's API offer an event stream, or do we poll `agent list`?
-      (`herdr api schema` is worth reading.)
-- [ ] Q5: Should loopherd be able to answer `blocked` agents, or only surface them?
-- [ ] Q6: Should a herd map to one herdr workspace, or can members be scattered?
-- [ ] Q7: Is slice 1 really first? Revive is the gap herdr can't fill, while
-      templates are something herdr might add itself.
+Each question is tracked as a card on the
+[board](https://trello.com/b/MtiTIrp1/loopherd), where its details and
+discussion live. When one is resolved, record it under Decisions and remove
+its row here.
+
+| Q | Card | Question |
+|---|---|---|
+| Q1 | LH-5 | Where do herd files live: in each repo, in `~/.config/loopherd/`, or both? |
+| Q2 | LH-4 | Is this for work (zagops) as well as personal projects? |
+| Q3 | LH-8 | Ledger storage: a TOML/JSON file or SQLite? Blocked on LH-4 and LH-5. |
+| Q4 | LH-2 | Does herdr offer an event stream, or do we poll `agent list`? |
+| Q5 | LH-7 | May loopherd answer `blocked` agents, or only surface them? |
+| Q6 | LH-6 | Should a herd map to one herdr workspace, or can members be scattered? |
+| Q7 | LH-3 | Which slice ships first: templates (D3) or revive (herdr's gap)? |
