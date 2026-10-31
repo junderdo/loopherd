@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# Minimal Trello CLI for the loopherd board. Cards are addressed by number: 12 or LH-12.
+set -euo pipefail
+
+BOARD="${TRELLO_BOARD:-MtiTIrp1}"
+API="https://api.trello.com/1"
+ENV_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/loopherd/trello.env"
+
+# name, color — meanings live in docs/agents/issue-tracking.md
+LABELS=(
+  "wayfinding:research sky"
+  "wayfinding:grilling purple"
+  "wayfinding:prototype pink"
+  "wayfinding:domain blue"
+  "impl:feat green"
+  "impl:fix red"
+  "impl:refactor lime"
+  "impl:chore black_light"
+  "ready-for-agent green_dark"
+  "need-human orange"
+  "blocked red_dark"
+)
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/trello <command> [args]
+
+  lists                              Open lists on the board
+  labels                             Labels on the board
+  cards [--list NAME] [--label NAME] Open cards: key, list, labels, title
+  show CARD                          Title, url, list, labels, description, comments
+  create LIST TITLE [--label NAME]... [--desc TEXT | --desc-file FILE|-]
+  move CARD LIST
+  label CARD +NAME|-NAME...          Add (+) or remove (-) labels
+  comment CARD TEXT|-                Add a comment (- reads stdin)
+  setup-labels                       Create/recolor the standard labels (idempotent)
+
+CARD is the card number, e.g. 12 or LH-12.
+Credentials: TRELLO_API_KEY and TRELLO_TOKEN, from the environment or
+~/.config/loopherd/trello.env.
+EOF
+}
+
+die() { echo "trello: $*" >&2; exit 1; }
+
+load_credentials() {
+  if [[ -z "${TRELLO_API_KEY:-}" || -z "${TRELLO_TOKEN:-}" ]] && [[ -f "$ENV_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+  fi
+  [[ -n "${TRELLO_API_KEY:-}" && -n "${TRELLO_TOKEN:-}" ]] ||
+    die "missing TRELLO_API_KEY/TRELLO_TOKEN (set them or create $ENV_FILE)"
+}
+
+# api METHOD PATH [curl args...]; GET args become query params.
+api() {
+  local method=$1 path=$2; shift 2
+  local get=()
+  [[ $method == GET ]] && get=(-G)
+  curl -sS --fail-with-body "${get[@]}" -X "$method" \
+    -H "Authorization: OAuth oauth_consumer_key=\"$TRELLO_API_KEY\", oauth_token=\"$TRELLO_TOKEN\"" \
+    "$API$path" "$@"
+}
+
+card_number() { local n=${1#LH-}; [[ $n =~ ^[0-9]+$ ]] || die "bad card '$1' (want 12 or LH-12)"; echo "$n"; }
+
+card_id() {
+  local n id
+  n=$(card_number "$1")
+  id=$(api GET "/boards/$BOARD/cards/all" --data-urlencode "fields=idShort" |
+    jq -r --argjson n "$n" '.[] | select(.idShort == $n) | .id')
+  [[ -n $id ]] || die "no card LH-$n"
+  echo "$id"
+}
+
+list_id() {
+  local id
+  id=$(api GET "/boards/$BOARD/lists" --data-urlencode "fields=name" |
+    jq -r --arg name "$1" '.[] | select(.name | ascii_downcase == ($name | ascii_downcase)) | .id')
+  [[ -n $id ]] || die "no list '$1' (see: scripts/trello lists)"
+  echo "$id"
+}
+
+label_id() {
+  local id
+  id=$(api GET "/boards/$BOARD/labels" --data-urlencode "fields=name" --data-urlencode "limit=1000" |
+    jq -r --arg name "$1" '.[] | select(.name == $name) | .id' | head -n1)
+  [[ -n $id ]] || die "no label '$1' (see: scripts/trello labels)"
+  echo "$id"
+}
+
+cmd_lists() { api GET "/boards/$BOARD/lists" --data-urlencode "fields=name" | jq -r '.[].name'; }
+
+cmd_labels() {
+  api GET "/boards/$BOARD/labels" --data-urlencode "fields=name,color" --data-urlencode "limit=1000" |
+    jq -r '.[] | select(.name != "") | "\(.name)\t\(.color // "none")"'
+}
+
+cmd_cards() {
+  local list="" label=""
+  while (($#)); do
+    case $1 in
+      --list) list=$2; shift 2 ;;
+      --label) label=$2; shift 2 ;;
+      *) die "unknown option $1" ;;
+    esac
+  done
+  local lists cards
+  lists=$(api GET "/boards/$BOARD/lists" --data-urlencode "fields=name")
+  cards=$(api GET "/boards/$BOARD/cards" --data-urlencode "fields=idShort,name,idList,labels")
+  jq -r --argjson lists "$lists" --arg list "$list" --arg label "$label" '
+    ($lists | map({(.id): .name}) | add // {}) as $names
+    | .[]
+    | {key: "LH-\(.idShort)", list: $names[.idList], labels: [.labels[].name], name}
+    | select($list == "" or (.list | ascii_downcase) == ($list | ascii_downcase))
+    | select($label == "" or (.labels | index($label)))
+    | "\(.key)\t\(.list)\t\(.labels | join(","))\t\(.name)"
+  ' <<<"$cards"
+}
+
+cmd_show() {
+  local id
+  id=$(card_id "${1:?CARD required}")
+  api GET "/cards/$id" --data-urlencode "fields=idShort,name,desc,shortUrl,labels" \
+    --data-urlencode "list=true" --data-urlencode "list_fields=name" |
+    jq -r '"LH-\(.idShort): \(.name)\nurl: \(.shortUrl)\nlist: \(.list.name)\nlabels: \([.labels[].name] | join(", "))\n\n\(.desc)"'
+  echo
+  echo "--- comments (oldest first) ---"
+  api GET "/cards/$id/actions" --data-urlencode "filter=commentCard" |
+    jq -r 'reverse | .[] | "[\(.date)] \(.memberCreator.username):\n\(.data.text)\n"'
+}
+
+cmd_create() {
+  local list=${1:?LIST required} title=${2:?TITLE required}; shift 2
+  local desc="" label_ids=()
+  while (($#)); do
+    case $1 in
+      --label) label_ids+=("$(label_id "$2")"); shift 2 ;;
+      --desc) desc=$2; shift 2 ;;
+      --desc-file) if [[ $2 == - ]]; then desc=$(cat); else desc=$(<"$2"); fi; shift 2 ;;
+      *) die "unknown option $1" ;;
+    esac
+  done
+  local ids
+  ids=$(IFS=,; echo "${label_ids[*]}")
+  api POST /cards --data-urlencode "idList=$(list_id "$list")" --data-urlencode "name=$title" \
+    --data-urlencode "desc=$desc" --data-urlencode "idLabels=$ids" |
+    jq -r '"LH-\(.idShort)\t\(.shortUrl)"'
+}
+
+cmd_move() {
+  local id
+  id=$(card_id "${1:?CARD required}")
+  api PUT "/cards/$id" --data-urlencode "idList=$(list_id "${2:?LIST required}")" >/dev/null
+  echo "moved LH-$(card_number "$1") to $2"
+}
+
+cmd_label() {
+  local id
+  id=$(card_id "${1:?CARD required}"); shift
+  (($#)) || die "give at least one +NAME or -NAME"
+  for change in "$@"; do
+    case $change in
+      +*) api POST "/cards/$id/idLabels" --data-urlencode "value=$(label_id "${change:1}")" >/dev/null ;;
+      -*) api DELETE "/cards/$id/idLabels/$(label_id "${change:1}")" >/dev/null ;;
+      *) die "label change must start with + or -: $change" ;;
+    esac
+    echo "$change"
+  done
+}
+
+cmd_comment() {
+  local id text=${2:?TEXT required}
+  id=$(card_id "${1:?CARD required}")
+  [[ $text == - ]] && text=$(cat)
+  api POST "/cards/$id/actions/comments" --data-urlencode "text=$text" >/dev/null
+  echo "commented on LH-$(card_number "$1")"
+}
+
+cmd_setup_labels() {
+  local existing
+  existing=$(api GET "/boards/$BOARD/labels" --data-urlencode "fields=name,color" --data-urlencode "limit=1000")
+  for entry in "${LABELS[@]}"; do
+    local name=${entry% *} color=${entry##* } current
+    current=$(jq -c --arg name "$name" 'map(select(.name == $name)) | first // empty' <<<"$existing")
+    if [[ -z $current ]]; then
+      api POST "/boards/$BOARD/labels" --data-urlencode "name=$name" --data-urlencode "color=$color" >/dev/null
+      echo "created  $name ($color)"
+    elif [[ $(jq -r .color <<<"$current") != "$color" ]]; then
+      api PUT "/labels/$(jq -r .id <<<"$current")" --data-urlencode "color=$color" >/dev/null
+      echo "recolored $name ($color)"
+    else
+      echo "ok       $name"
+    fi
+  done
+}
+
+main() {
+  local cmd=${1:-help}; shift || true
+  case $cmd in
+    help | -h | --help) usage; return ;;
+  esac
+  load_credentials
+  case $cmd in
+    lists) cmd_lists ;;
+    labels) cmd_labels ;;
+    cards) cmd_cards "$@" ;;
+    show) cmd_show "$@" ;;
+    create) cmd_create "$@" ;;
+    move) cmd_move "$@" ;;
+    label) cmd_label "$@" ;;
+    comment) cmd_comment "$@" ;;
+    setup-labels) cmd_setup_labels ;;
+    *) usage >&2; exit 2 ;;
+  esac
+}
+
+main "$@"
