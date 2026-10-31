@@ -12,7 +12,7 @@ names, PR titles, and commits.
 | List | Meaning |
 |---|---|
 | Backlog | Not started. Top of the list is highest priority. |
-| Doing | Claimed. Someone is actively on it. |
+| In Progress | Claimed. Someone is actively on it. |
 | Review | Output is waiting for the human: an open PR, or a doc to read. |
 | Done | Merged or accepted. |
 
@@ -46,8 +46,8 @@ A card is **claimable** when it sits in Backlog, has `ready-for-agent`, and has 
 1. **Pick.** Run `scripts/trello cards --list Backlog --label ready-for-agent`
    and take the first claimable card. Then run `scripts/trello show LH-<n>`
    and read the description and every comment.
-2. **Claim.** Run `scripts/trello move LH-<n> Doing`, then comment
-   `claimed by <agent name or HERDR_PANE_ID>`. A card already in Doing belongs
+2. **Claim.** Run `scripts/trello move LH-<n> "In Progress"`, then comment
+   `claimed by <agent name or HERDR_PANE_ID>`. A card already in In Progress belongs
    to someone else, so pick another.
 3. **Work.** Use the skill its kind label names. Implementation goes on a
    branch named `<type>/LH-<n>-<slug>`, where `<type>` comes from the `impl:`

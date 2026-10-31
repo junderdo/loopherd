@@ -57,9 +57,14 @@ api() {
   local method=$1 path=$2; shift 2
   local get=()
   [[ $method == GET ]] && get=(-G)
-  curl -sS --fail-with-body "${get[@]}" -X "$method" \
+  local response status
+  response=$(curl -sS "${get[@]}" -X "$method" -w '\n%{http_code}' \
     -H "Authorization: OAuth oauth_consumer_key=\"$TRELLO_API_KEY\", oauth_token=\"$TRELLO_TOKEN\"" \
-    "$API$path" "$@"
+    "$API$path" "$@")
+  status=${response##*$'\n'}
+  response=${response%$'\n'*}
+  [[ $status == 2* ]] || die "$method $path → HTTP $status: $response"
+  printf '%s\n' "$response"
 }
 
 card_number() { local n=${1#LH-}; [[ $n =~ ^[0-9]+$ ]] || die "bad card '$1' (want 12 or LH-12)"; echo "$n"; }
