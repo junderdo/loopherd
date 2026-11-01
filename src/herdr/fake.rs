@@ -55,6 +55,7 @@ struct State {
     started: Vec<Started>,
     prompts: Vec<(String, String)>,
     agent_polls: u32,
+    mutations: u32,
 }
 
 pub struct FakeHerdr {
@@ -68,6 +69,8 @@ pub struct FakeHerdr {
     /// Agents added with [`FakeHerdr::with_resuming_agent`] stay launch-pending,
     /// unnamed and sessionless for this many `agents()` calls; `None` is forever.
     pub resume_settles_after: Option<u32>,
+    /// Every call fails, as when no herdr server is running.
+    pub unreachable: bool,
     state: RefCell<State>,
 }
 
@@ -86,6 +89,7 @@ impl FakeHerdr {
             fail_close_tab: false,
             new_tab_prompt_after: Some(0),
             resume_settles_after: Some(0),
+            unreachable: false,
             state: RefCell::default(),
         }
     }
@@ -104,6 +108,20 @@ impl FakeHerdr {
     pub fn with_live_agent(self, name: Option<&str>, session: Option<&str>, pane_id: &str) -> Self {
         self.push_agent(name, session, pane_id, false);
         self
+    }
+
+    pub fn with_raw_agent(self, agent: Agent) -> Self {
+        self.state.borrow_mut().agents.push(agent);
+        self
+    }
+
+    /// Calls that create, close, start or prompt anything.
+    pub fn mutations(&self) -> u32 {
+        self.state.borrow().mutations
+    }
+
+    fn mutating(&self) {
+        self.state.borrow_mut().mutations += 1;
     }
 
     /// An agent herdr is still resuming after a restart.
@@ -163,6 +181,8 @@ impl FakeHerdr {
             status: AgentStatus::Idle,
             session_id: session.map(str::to_string),
             launch_pending: pending,
+            cwd: None,
+            title: None,
         });
     }
 
@@ -208,10 +228,16 @@ impl FakeHerdr {
 
 impl Herdr for FakeHerdr {
     fn workspaces(&self) -> Result<Vec<Workspace>> {
+        if self.unreachable {
+            bail!("herdr server not running");
+        }
         Ok(self.workspaces.clone())
     }
 
     fn agents(&self) -> Result<Vec<Agent>> {
+        if self.unreachable {
+            bail!("herdr server not running");
+        }
         let mut state = self.state.borrow_mut();
         state.agent_polls += 1;
         let settled = self
@@ -292,6 +318,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<NewTab> {
+        self.mutating();
         if self.fail_create_tab {
             bail!("tab create refused");
         }
@@ -306,6 +333,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn close_tab(&self, tab_id: &str) -> Result<()> {
+        self.mutating();
         if self.fail_close_tab {
             bail!("tab close refused");
         }
@@ -323,6 +351,7 @@ impl Herdr for FakeHerdr {
         _timeout: Duration,
         args: &[String],
     ) -> Result<StartOutcome> {
+        self.mutating();
         if self.startup == Startup::Fails {
             bail!("claude exited during startup");
         }
@@ -355,6 +384,8 @@ impl Herdr for FakeHerdr {
                 status: AgentStatus::Unknown,
                 session_id: resumed,
                 launch_pending: false,
+                cwd: None,
+                title: None,
             });
         }
         match self.startup {
@@ -384,6 +415,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn prompt(&self, name: &str, text: &str) -> Result<()> {
+        self.mutating();
         if self.agent(name)?.status == AgentStatus::Blocked {
             bail!("agent {name} is blocked");
         }

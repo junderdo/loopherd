@@ -1,10 +1,13 @@
 mod herd;
+mod herd_view;
 mod herdr;
 mod ledger;
+mod matching;
 mod prompt;
 mod retire;
 mod revive;
 mod spawn;
+mod status;
 mod template;
 mod worktree;
 
@@ -16,12 +19,14 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
 use crate::herd::{AddRequest, Paths, add, dry_run, herds};
+use crate::herd_view::Options;
 use crate::herdr::CliHerdr;
 use crate::ledger::FileLedger;
 use crate::prompt::prompt;
 use crate::retire::{retire, retire_and_close};
 use crate::revive::{ReviveRequest, revive};
 use crate::spawn::{Checkout, Prompt, SpawnRequest, spawn};
+use crate::status::{Format, status};
 use crate::worktree::repo_root;
 
 #[derive(Parser)]
@@ -55,6 +60,19 @@ enum Command {
         /// Only this ledger entry.
         #[arg(long)]
         name: Option<String>,
+    },
+    /// List ledger members by herd with herdr's live status; read-only.
+    /// Exits 2 when herdr is unreachable, showing every status as unknown.
+    Status {
+        /// Also show retired entries and herds with no live members.
+        #[arg(long)]
+        all: bool,
+        /// List live herdr agents missing from the ledger, not just count them.
+        #[arg(long)]
+        strays: bool,
+        /// Print JSON. Its shape is unstable until the TUI ships.
+        #[arg(long)]
+        json: bool,
     },
     /// Send a ledger entry's stored prompt to its live agent, e.g. after spawn exited 3.
     Prompt {
@@ -115,6 +133,7 @@ fn main() -> ExitCode {
         Command::Retire { name, close } => ("retire", run_retire(&name, close)),
         Command::Revive { dry_run, name } => ("revive", run_revive(dry_run, name)),
         Command::Prompt { name, force } => ("prompt", run_prompt(&name, force)),
+        Command::Status { all, strays, json } => ("status", run_status(all, strays, json)),
     };
     match result {
         Ok(code) => ExitCode::from(code as u8),
@@ -162,6 +181,23 @@ fn run_revive(dry_run: bool, name: Option<String>) -> Result<i32> {
         println!("{message}");
     }
     Ok(code)
+}
+
+fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
+    use std::io::IsTerminal;
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let format = match json {
+        true => Format::Json,
+        false => Format::Text {
+            color: std::io::stdout().is_terminal(),
+        },
+    };
+    let out = status(&CliHerdr, &ledger, Options { all, strays }, format)?;
+    print!("{}", out.stdout);
+    for line in out.stderr.lines() {
+        eprintln!("loopherd status: {line}");
+    }
+    Ok(out.code)
 }
 
 fn run_prompt(name: &str, force: bool) -> Result<i32> {
