@@ -413,12 +413,15 @@ fn default_branch_and_warning(repo: &Path) -> Result<(String, Option<String>)> {
             );
             return Ok((local, Some(warning)));
         }
-        RemoteHead::Unreachable(error) => {
+        RemoteHead::Unreachable { error, hint } => {
             let local = local_default_branch(repo)?;
-            let warning = format!(
+            let mut warning = format!(
                 "warning: couldn't ask origin for its default branch ({error}); \
                  using the local origin/HEAD, {local}"
             );
+            if let Some(hint) = hint {
+                warning = format!("{warning}\n{hint}");
+            }
             return Ok((local, Some(warning)));
         }
     };
@@ -462,17 +465,21 @@ enum RemoteHead {
     Branch(String),
     /// Detached or unborn.
     NoBranch,
-    /// The first line of why ls-remote failed.
-    Unreachable(String),
+    Unreachable {
+        /// The first line of why ls-remote failed.
+        error: String,
+        hint: Option<&'static str>,
+    },
 }
 
 fn remote_head(repo: &Path) -> Result<RemoteHead> {
     match remote_git(repo, &["ls-remote", "--symref", "origin", "HEAD"]) {
         Ok(out) => Ok(parse_head_symref(&out).map_or(RemoteHead::NoBranch, RemoteHead::Branch)),
         Err(e) if e.is::<TimedOut>() => Err(e),
-        Err(e) => Ok(RemoteHead::Unreachable(
-            e.to_string().lines().next().unwrap_or_default().to_string(),
-        )),
+        Err(e) => Ok(RemoteHead::Unreachable {
+            error: e.to_string().lines().next().unwrap_or_default().to_string(),
+            hint: e.downcast_ref::<RemoteFailed>().and_then(|f| f.hint),
+        }),
     }
 }
 
@@ -563,7 +570,8 @@ fn remote_git_within(repo: &Path, args: &[&str], timeout: Duration) -> Result<St
         .stderr(Stdio::piped())
         // Its own group, so a timeout can kill the transport helpers git spawns.
         .process_group(0);
-    if !has_own_ssh_setting(repo) {
+    let batch_mode = !has_own_ssh_setting(repo);
+    if batch_mode {
         command.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
     }
     let mut child = command.spawn().context("run git")?;
@@ -589,14 +597,47 @@ fn remote_git_within(repo: &Path, args: &[&str], timeout: Duration) -> Result<St
     };
     let stdout = stdout.join().unwrap_or_default();
     if !status.success() {
-        bail!(
-            "git {}: {}",
-            args.join(" "),
-            stderr.join().unwrap_or_default().trim()
-        );
+        let stderr = stderr.join().unwrap_or_default();
+        let stderr = stderr.trim();
+        let hint = (batch_mode && ssh_refused(stderr)).then_some(SSH_PROMPT_HINT);
+        let message = format!("git {}: {stderr}", args.join(" "));
+        return Err(RemoteFailed { message, hint }.into());
     }
     Ok(stdout)
 }
+
+const SSH_PROMPT_HINT: &str = "hint: ssh couldn't prompt; to allow a GUI passphrase prompt, \
+                               set SSH_ASKPASS_REQUIRE=prefer (with SSH_ASKPASS and a display)";
+
+/// Whether git's stderr shows ssh giving up where it would have asked.
+fn ssh_refused(stderr: &str) -> bool {
+    [
+        "Permission denied",
+        "Host key verification failed",
+        "passphrase",
+    ]
+    .iter()
+    .any(|sign| stderr.contains(sign))
+}
+
+/// A remote call that ran and failed.
+#[derive(Debug)]
+struct RemoteFailed {
+    message: String,
+    hint: Option<&'static str>,
+}
+
+impl std::fmt::Display for RemoteFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)?;
+        if let Some(hint) = self.hint {
+            write!(f, "\n{hint}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for RemoteFailed {}
 
 /// Whether the user chose how git runs ssh or how ssh prompts, which BatchMode
 /// must not override.
@@ -1114,6 +1155,124 @@ mod tests {
             .filter(|l| l.starts_with("GIT_SSH"))
             .map(String::from)
             .collect()
+    }
+
+    const SSH_HINT: &str = "hint: ssh couldn't prompt; to allow a GUI passphrase prompt, \
+                            set SSH_ASKPASS_REQUIRE=prefer (with SSH_ASKPASS and a display)";
+
+    /// Points origin at a transport that writes `stderr` and fails.
+    fn origin_fails_with(root: &Path, repo: &Path, stderr: &str) {
+        let script = root.join("failing-origin");
+        std::fs::write(&script, format!("printf '%s\\n' '{stderr}' >&2\nexit 1\n")).unwrap();
+        origin_runs(repo, &format!("sh {}", script.display()));
+    }
+
+    #[test]
+    fn an_ssh_failure_under_batch_mode_hints_how_to_allow_a_prompt() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        for stderr in [
+            "git@example.com: Permission denied (publickey).",
+            "Host key verification failed.",
+            "Load key \"/home/me/.ssh/id_ed25519\": incorrect passphrase supplied",
+        ] {
+            origin_fails_with(root.path(), &repo, stderr);
+
+            let out = fetch_in_child(&repo, &[]);
+
+            assert!(out.contains(&format!("{stderr}\n")), "{out}");
+            assert!(out.contains(&format!("\n{SSH_HINT}\n")), "{out}");
+        }
+    }
+
+    #[test]
+    fn a_failure_that_isnt_ssh_gets_no_hint() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        origin_fails_with(root.path(), &repo, "fatal: repository not found");
+
+        let out = fetch_in_child(&repo, &[]);
+
+        assert!(out.contains("fatal: repository not found"), "{out}");
+        assert!(!out.contains("hint:"), "{out}");
+    }
+
+    #[test]
+    fn a_users_own_ssh_or_askpass_setting_gets_no_hint() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        origin_fails_with(root.path(), &repo, "Permission denied (publickey).");
+        let cases: [&[(&str, &str)]; 4] = [
+            &[("GIT_SSH_COMMAND", "my-ssh")],
+            &[("GIT_SSH", "my-ssh")],
+            &[("SSH_ASKPASS_REQUIRE", "force")],
+            &[
+                ("SSH_ASKPASS_REQUIRE", "prefer"),
+                ("SSH_ASKPASS", "my-askpass"),
+                ("DISPLAY", ":0"),
+            ],
+        ];
+        for env in cases {
+            let out = fetch_in_child(&repo, env);
+            assert!(out.contains("Permission denied"), "{env:?}: {out}");
+            assert!(!out.contains("hint:"), "{env:?}: {out}");
+        }
+
+        git_in(&repo, &["config", "core.sshCommand", "my-ssh"]);
+        let out = fetch_in_child(&repo, &[]);
+        assert!(out.contains("Permission denied"), "{out}");
+        assert!(!out.contains("hint:"), "{out}");
+    }
+
+    #[test]
+    fn a_timeout_gets_no_hint() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let script = root.path().join("hung-origin");
+        std::fs::write(&script, "echo 'Permission denied' >&2\nsleep 30\n").unwrap();
+        origin_runs(&repo, &format!("sh {}", script.display()));
+
+        let out = fetch_in_child(&repo, &[("LOOPHERD_GIT_TIMEOUT", "1")]);
+
+        assert!(out.contains("origin didn't answer within 1s"), "{out}");
+        assert!(!out.contains("hint:"), "{out}");
+    }
+
+    #[test]
+    fn an_ssh_failure_asking_for_the_default_branch_hints_in_the_warning() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        origin_fails_with(root.path(), &repo, "Permission denied (publickey).");
+
+        let out = default_branch_in_child(&repo, &[]);
+
+        assert!(
+            out.contains(&format!(
+                "warning: couldn't ask origin for its default branch \
+                 (git ls-remote --symref origin HEAD: Permission denied (publickey).); \
+                 using the local origin/HEAD, origin/main\\n{SSH_HINT}\")"
+            )),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn an_ssh_failure_setting_origins_head_hints_in_the_error() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        git_in(&repo, &["remote", "set-head", "origin", "--delete"]);
+        origin_fails_with(root.path(), &repo, "Permission denied (publickey).");
+
+        let out = default_branch_in_child(&repo, &[]);
+
+        assert!(
+            out.contains(
+                "default branch failed: find origin's default branch: \
+                 git remote set-head origin --auto: Permission denied (publickey).\n"
+            ),
+            "{out}"
+        );
+        assert!(out.contains(&format!("\n{SSH_HINT}\n")), "{out}");
     }
 
     #[test]
