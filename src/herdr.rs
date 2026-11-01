@@ -11,7 +11,7 @@ use serde_json::Value;
 #[cfg(test)]
 pub mod fake;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentStatus {
     Idle,
@@ -22,7 +22,7 @@ pub enum AgentStatus {
 }
 
 impl AgentStatus {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             AgentStatus::Idle => "idle",
             AgentStatus::Working => "working",
@@ -48,6 +48,9 @@ pub struct Agent {
     pub session_id: Option<String>,
     /// herdr is still launching or resuming it.
     pub launch_pending: bool,
+    pub cwd: Option<PathBuf>,
+    /// The terminal title, without the spinner glyph herdr strips.
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,6 +225,12 @@ struct AgentJson {
     agent_session: Option<SessionJson>,
     #[serde(default)]
     launch_pending: Option<bool>,
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+    #[serde(default)]
+    terminal_title: Option<String>,
+    #[serde(default)]
+    terminal_title_stripped: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -238,6 +247,8 @@ impl From<AgentJson> for Agent {
             status: a.agent_status,
             session_id: a.agent_session.map(|s| s.value),
             launch_pending: a.launch_pending.unwrap_or(false),
+            cwd: a.cwd,
+            title: a.terminal_title_stripped.or(a.terminal_title),
         }
     }
 }

@@ -8,6 +8,7 @@ use anyhow::{Result, anyhow, bail};
 
 use crate::herdr::{Agent, Herdr, Pane};
 use crate::ledger::{AgentRecord, Ledger};
+use crate::matching::{by_name, same_session, session_conflict};
 use crate::revive::find_workspace;
 use crate::worktree::{Gone, Removal, remove_if_gone, remove_if_merged, same_dir};
 
@@ -146,9 +147,7 @@ fn agent_tab(
     own_pane: Option<&str>,
 ) -> Result<TabFate> {
     let agents = herdr.agents()?;
-    let live = agents
-        .iter()
-        .find(|a| a.name.as_deref() == Some(record.name.as_str()));
+    let live = by_name(record, &agents);
     let kept = |tab_id: &str, reason: String| {
         Ok(TabFate::Kept {
             tab_id: tab_id.to_string(),
@@ -156,9 +155,7 @@ fn agent_tab(
         })
     };
     if let Some(live) = live
-        && live.session_id.is_some()
-        && record.session_id.is_some()
-        && live.session_id != record.session_id
+        && session_conflict(live, record)
     {
         return kept(&live.tab_id, "the name is held by another session".into());
     }
@@ -252,7 +249,7 @@ fn reused_by(
         return Ok(Some(format!("pane belongs to {}", other.name)));
     }
     if let Some(agent) = agents.iter().find(|a| a.pane_id == pane_id) {
-        let ours = agent.session_id.is_some() && agent.session_id == record.session_id;
+        let ours = same_session(agent, record);
         return Ok(match (ours, &agent.name) {
             (true, _) => None,
             (false, Some(name)) => Some(format!("pane hosts agent {name}")),
