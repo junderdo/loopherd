@@ -126,12 +126,14 @@ pub fn remove_if_merged(repo: &Path, path: &Path) -> Result<Removal> {
 
 /// Markers in a worktree's git dir that git leaves while an operation is
 /// stopped part way.
-const IN_PROGRESS: [(&str, &str); 6] = [
+const IN_PROGRESS: [(&str, &str); 7] = [
     ("rebase-merge", "rebase"),
     ("rebase-apply", "rebase"),
     ("MERGE_HEAD", "merge"),
     ("CHERRY_PICK_HEAD", "cherry-pick"),
     ("REVERT_HEAD", "revert"),
+    // Outlives the *_HEAD files between steps of a multi-commit pick or revert.
+    ("sequencer", "cherry-pick or revert"),
     ("BISECT_LOG", "bisect"),
 ];
 
