@@ -1,6 +1,7 @@
 //! End-to-end runs of `loopherd spawn`, `add`, `revive` and `retire --close` against the real `loopherd-dev` herdr
 //! session. Skipped unless `LOOPHERD_LIVE=1`; start the session first with
-//! `scripts/herdr-dev --start`.
+//! `scripts/herdr-dev --start`, then run through it:
+//! `LOOPHERD_LIVE=1 scripts/herdr-dev cargo test --test live`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -51,12 +52,27 @@ fn labels(out: Output) -> Vec<String> {
         .collect()
 }
 
-/// Fails unless herdr resolves to the running dev session and that session
-/// shares no workspace label with the inherited (live) one. Returns a dev
-/// workspace label.
+/// Passes only when the run inherited the dev socket, i.e. it was launched
+/// through `scripts/herdr-dev`, which checks the dev session against the live
+/// one so the tests never have to call the live session themselves.
+fn check_inherited_socket(inherited: Option<&Path>, dev: &Path) -> Result<(), String> {
+    match inherited {
+        Some(socket) if socket == dev => Ok(()),
+        Some(socket) => Err(format!(
+            "HERDR_SOCKET_PATH is {}, not the dev socket; run via scripts/herdr-dev",
+            socket.display()
+        )),
+        None => Err("HERDR_SOCKET_PATH is unset; run via scripts/herdr-dev".into()),
+    }
+}
+
+/// Fails unless the run came through `scripts/herdr-dev` and herdr resolves
+/// to the running dev session. Returns a dev workspace label.
 fn assert_dev_session() -> String {
     let inherited = std::env::var_os("HERDR_SOCKET_PATH").map(PathBuf::from);
-    assert_ne!(inherited.as_deref(), Some(dev_socket().as_path()));
+    if let Err(e) = check_inherited_socket(inherited.as_deref(), &dev_socket()) {
+        panic!("{e}");
+    }
 
     let status = dev("herdr").arg("status").output().unwrap();
     let status = String::from_utf8_lossy(&status.stdout);
@@ -70,21 +86,7 @@ fn assert_dev_session() -> String {
         "loopherd-dev is not running; start it with scripts/herdr-dev --start"
     );
 
-    let dev_labels = labels(dev("herdr").args(["workspace", "list"]).output().unwrap());
-    let live = Command::new("herdr")
-        .args(["workspace", "list"])
-        .output()
-        .unwrap();
-    if live.status.success() {
-        let live_labels = labels(live);
-        for label in &dev_labels {
-            assert!(
-                !live_labels.contains(label),
-                "dev session has live workspace label {label:?}"
-            );
-        }
-    }
-    dev_labels
+    labels(dev("herdr").args(["workspace", "list"]).output().unwrap())
         .into_iter()
         .next()
         .expect("loopherd-dev has no workspace")
@@ -490,4 +492,23 @@ fn retire_close_closes_the_tab_and_removes_a_clean_merged_worktree() {
             wt.display()
         )
     );
+}
+
+#[test]
+fn guard_accepts_the_dev_socket_set_by_herdr_dev() {
+    let dev = Path::new("/home/u/.config/herdr/sessions/loopherd-dev/herdr.sock");
+    assert_eq!(check_inherited_socket(Some(dev), dev), Ok(()));
+}
+
+#[test]
+fn guard_rejects_an_inherited_live_socket() {
+    let dev = Path::new("/home/u/.config/herdr/sessions/loopherd-dev/herdr.sock");
+    let live = Path::new("/home/u/.config/herdr/herdr.sock");
+    assert!(check_inherited_socket(Some(live), dev).is_err());
+}
+
+#[test]
+fn guard_rejects_a_run_outside_herdr_dev() {
+    let dev = Path::new("/home/u/.config/herdr/sessions/loopherd-dev/herdr.sock");
+    assert!(check_inherited_socket(None, dev).is_err());
 }
