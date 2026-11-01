@@ -381,6 +381,45 @@ mod tests {
     }
 
     #[test]
+    fn close_keeps_a_worktree_stopped_mid_rebase() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        commit(&wt, "one");
+        commit(&wt, "two");
+        git_in(
+            &wt,
+            &[
+                "-c",
+                "sequence.editor=sed -i 1s/^pick/edit/",
+                "rebase",
+                "--quiet",
+                "-i",
+                "HEAD~2",
+            ],
+        );
+
+        let out = close(&herdr, &mut ledger);
+
+        kept_line(&out, &wt, "rebase in progress");
+    }
+
+    #[test]
+    fn close_keeps_a_worktree_mid_bisect() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        for message in ["one", "two", "three"] {
+            commit(&wt, message);
+        }
+        git_in(&wt, &["bisect", "start", "HEAD", "HEAD~3"]);
+
+        let out = close(&herdr, &mut ledger);
+
+        kept_line(&out, &wt, "bisect in progress");
+    }
+
+    #[test]
     fn close_never_removes_the_repo_checkout_even_if_the_ledger_names_it() {
         let root = tempfile::tempdir().unwrap();
         let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
