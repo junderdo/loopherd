@@ -606,10 +606,12 @@ fn remote_git_within(repo: &Path, args: &[&str], timeout: Duration) -> Result<St
     Ok(stdout)
 }
 
-const SSH_PROMPT_HINT: &str = "hint: ssh couldn't prompt; to allow a GUI passphrase prompt, \
-                               set SSH_ASKPASS_REQUIRE=prefer (with SSH_ASKPASS and a display)";
+const SSH_PROMPT_HINT: &str = "hint: if ssh needed a passphrase or host-key prompt, set \
+                               SSH_ASKPASS_REQUIRE=prefer (with SSH_ASKPASS and a display) \
+                               to allow a GUI one";
 
-/// Whether git's stderr shows ssh giving up where it would have asked.
+/// Whether git's stderr looks like an ssh auth or host-key failure, which a
+/// blocked prompt can cause.
 fn ssh_refused(stderr: &str) -> bool {
     [
         "Permission denied",
@@ -1157,8 +1159,9 @@ mod tests {
             .collect()
     }
 
-    const SSH_HINT: &str = "hint: ssh couldn't prompt; to allow a GUI passphrase prompt, \
-                            set SSH_ASKPASS_REQUIRE=prefer (with SSH_ASKPASS and a display)";
+    const SSH_HINT: &str = "hint: if ssh needed a passphrase or host-key prompt, set \
+                            SSH_ASKPASS_REQUIRE=prefer (with SSH_ASKPASS and a display) \
+                            to allow a GUI one";
 
     /// Points origin at a transport that writes `stderr` and fails.
     fn origin_fails_with(root: &Path, repo: &Path, stderr: &str) {
