@@ -24,6 +24,25 @@ Early wayfinding: nothing runs yet. Direction, decisions, and open questions
 are in [docs/wayfinding.md](docs/wayfinding.md), and what herdr offers is in
 [docs/research/herdr.md](docs/research/herdr.md).
 
+## One-time setup: trust each repo
+
+Claude Code asks "Is this a project you created or one you trust?" the first
+time it starts in a repo, and `loopherd spawn` stops there (exit 3). Trust is
+keyed on the repo's **main checkout**, and every worktree of the repo shares
+it ([details](docs/research/claude-workspace-trust.md)). So trust each repo
+once, before spawning into its worktrees:
+
+```bash
+cd <project>/<project>   # the main checkout
+claude                   # accept the trust dialog, then exit
+```
+
+Trusting a parent directory such as `<project>/` or `<project>/worktrees/`
+doesn't count for the repos inside it.
+
+If a spawn still blocks, answer the dialog in the pane it names, then send
+the stored prompt with `loopherd prompt <name>`.
+
 ## How it's built
 
 loopherd is also a loop-engineering experiment: much of it is meant to be
