@@ -158,9 +158,19 @@ fn status_with_a_malformed_agent_list_names_herdrs_output_and_exits_3() {
     for reply in ["not json", r#"{"result": {"agents": "nope"}}"#] {
         let state = tempfile::tempdir().unwrap();
         let bin = tempfile::tempdir().unwrap();
-        write_ledger(state.path());
-        stub_herdr(bin.path(), Some(reply));
+        let ledger = write_ledger(state.path());
+        let calls = stub_herdr(bin.path(), Some(reply));
         let out = run_status(state.path(), bin.path(), &[]);
+        assert_eq!(
+            fs::read_to_string(&calls).unwrap(),
+            "agent list\n",
+            "{reply}"
+        );
+        assert_eq!(
+            fs::read_to_string(state.path().join("loopherd/ledger.json")).unwrap(),
+            ledger,
+            "{reply}"
+        );
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
             "prs\n  lh-1  unknown  -  -  w1:p1\n\
