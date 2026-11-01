@@ -20,6 +20,11 @@ pub fn worktree_path(repo: &Path, branch: &str) -> PathBuf {
     }
 }
 
+/// Where `ensure_worktree` would put `branch`, without touching git state.
+pub fn planned_worktree(repo: &Path, branch: &str) -> Result<PathBuf> {
+    Ok(find_worktree(repo, branch)?.unwrap_or_else(|| worktree_path(repo, branch)))
+}
+
 /// The main checkout of the repo containing `dir`, even from a linked worktree.
 pub fn repo_root(dir: &Path) -> Result<PathBuf> {
     let common = git(
