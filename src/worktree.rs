@@ -510,6 +510,10 @@ const TIMEOUT_VAR: &str = "LOOPHERD_GIT_TIMEOUT";
 /// How long a call to origin may take before loopherd gives up on it.
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// The most [`TIMEOUT_VAR`] may ask for. It keeps the deadline well inside
+/// what `Instant` can hold, so computing it can't overflow.
+const MAX_REMOTE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+
 fn fetch(repo: &Path) -> Result<()> {
     remote_git(repo, &["fetch", "--quiet", "origin"])?;
     Ok(())
@@ -525,8 +529,7 @@ fn remote_timeout() -> Result<Duration> {
     };
     let secs = secs.to_string_lossy();
     match secs.parse().map(Duration::from_secs) {
-        // A deadline past what Instant can hold would panic.
-        Ok(t) if !t.is_zero() && Instant::now().checked_add(t).is_some() => Ok(t),
+        Ok(t) if !t.is_zero() && t <= MAX_REMOTE_TIMEOUT => Ok(t),
         _ => bail!("{TIMEOUT_VAR} must be a whole number of seconds above 0, not '{secs}'"),
     }
 }
@@ -595,10 +598,21 @@ fn remote_git_within(repo: &Path, args: &[&str], timeout: Duration) -> Result<St
 /// Whether the user chose how git runs ssh or how ssh prompts, which BatchMode
 /// must not override.
 fn has_own_ssh_setting(repo: &Path) -> bool {
-    ["GIT_SSH_COMMAND", "GIT_SSH", "SSH_ASKPASS_REQUIRE"]
+    ["GIT_SSH_COMMAND", "GIT_SSH"]
         .iter()
         .any(|var| std::env::var_os(var).is_some())
+        || askpass_will_prompt()
         || !core_ssh_command_unset(repo)
+}
+
+/// Whether ssh will ask through `SSH_ASKPASS` rather than the terminal.
+fn askpass_will_prompt() -> bool {
+    let askpass_set = std::env::var_os("SSH_ASKPASS").is_some_and(|p| !p.is_empty());
+    match std::env::var_os("SSH_ASKPASS_REQUIRE") {
+        Some(v) if v == "force" => true,
+        Some(v) if v == "prefer" => askpass_set,
+        _ => false,
+    }
 }
 
 /// Only a clean "not set" counts: a config git can't read may hold one.
@@ -1063,6 +1077,7 @@ mod tests {
             "GIT_SSH_COMMAND",
             "GIT_SSH",
             "SSH_ASKPASS_REQUIRE",
+            "SSH_ASKPASS",
             "LOOPHERD_GIT_TIMEOUT",
         ] {
             child.env_remove(var);
@@ -1123,6 +1138,47 @@ mod tests {
             transport_env(root.path(), &repo, &[("SSH_ASKPASS_REQUIRE", "force")]),
             [] as [&str; 0]
         );
+    }
+
+    #[test]
+    fn a_preferred_askpass_keeps_its_prompt() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        assert_eq!(
+            transport_env(
+                root.path(),
+                &repo,
+                &[
+                    ("SSH_ASKPASS_REQUIRE", "prefer"),
+                    ("SSH_ASKPASS", "my-askpass")
+                ]
+            ),
+            [] as [&str; 0]
+        );
+    }
+
+    #[test]
+    fn an_askpass_require_that_wont_prompt_still_gets_batch_mode() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let cases: [&[(&str, &str)]; 6] = [
+            &[("SSH_ASKPASS_REQUIRE", "never")],
+            &[("SSH_ASKPASS_REQUIRE", "")],
+            &[("SSH_ASKPASS_REQUIRE", "bogus")],
+            &[("SSH_ASKPASS_REQUIRE", "prefer")],
+            &[("SSH_ASKPASS_REQUIRE", "prefer"), ("SSH_ASKPASS", "")],
+            &[
+                ("SSH_ASKPASS_REQUIRE", "never"),
+                ("SSH_ASKPASS", "my-askpass"),
+            ],
+        ];
+        for env in cases {
+            assert_eq!(
+                transport_env(root.path(), &repo, env),
+                ["GIT_SSH_COMMAND=ssh -o BatchMode=yes"],
+                "{env:?}"
+            );
+        }
     }
 
     #[test]
@@ -1209,7 +1265,7 @@ mod tests {
     fn a_bad_loopherd_git_timeout_is_named_in_the_error() {
         let root = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(root.path());
-        for bad in ["2m", "0", "", "18446744073709551615"] {
+        for bad in ["2m", "0", "", "86401", "18446744073709551615"] {
             let stderr = fetch_in_child(&repo, &[("LOOPHERD_GIT_TIMEOUT", bad)]);
             assert!(
                 stderr.contains(&format!(
@@ -1219,6 +1275,16 @@ mod tests {
                 "{stderr}"
             );
         }
+    }
+
+    #[test]
+    fn a_loopherd_git_timeout_of_one_day_is_allowed() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+
+        let stderr = fetch_in_child(&repo, &[("LOOPHERD_GIT_TIMEOUT", "86400")]);
+
+        assert!(!stderr.contains("fetch failed"), "{stderr}");
     }
 
     #[test]
