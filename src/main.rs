@@ -13,6 +13,7 @@ use clap::{Args, Parser, Subcommand};
 use crate::herdr::CliHerdr;
 use crate::ledger::FileLedger;
 use crate::spawn::{SpawnRequest, spawn};
+use crate::worktree::repo_root;
 
 #[derive(Parser)]
 #[command(version, about = "Herd coding agents across herdr sessions")]
@@ -29,8 +30,9 @@ enum Command {
 
 #[derive(Args)]
 struct SpawnArgs {
+    /// Defaults to the main checkout of the repo containing the current directory.
     #[arg(long)]
-    repo: PathBuf,
+    repo: Option<PathBuf>,
     #[arg(long)]
     name: String,
     /// Run in a worktree for this branch, created if needed.
@@ -70,10 +72,13 @@ fn run_spawn(args: SpawnArgs) -> Result<i32> {
         ),
         None => args.prompt,
     };
-    let repo = args
-        .repo
-        .canonicalize()
-        .with_context(|| format!("repo: {}", args.repo.display()))?;
+    let repo = match &args.repo {
+        Some(repo) => repo
+            .canonicalize()
+            .with_context(|| format!("repo: {}", repo.display()))?,
+        None => repo_root(&std::env::current_dir().context("repo: current directory")?)
+            .context("repo")?,
+    };
     let req = SpawnRequest {
         repo,
         name: args.name,

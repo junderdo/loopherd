@@ -20,6 +20,21 @@ pub fn worktree_path(repo: &Path, branch: &str) -> PathBuf {
     }
 }
 
+/// The main checkout of the repo containing `dir`, even from a linked worktree.
+pub fn repo_root(dir: &Path) -> Result<PathBuf> {
+    let common = git(
+        dir,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .with_context(|| format!("{} is not in a git repo; pass --repo", dir.display()))?;
+    let common = PathBuf::from(common.trim());
+    let root = common
+        .parent()
+        .with_context(|| format!("no checkout above {}", common.display()))?;
+    root.canonicalize()
+        .with_context(|| format!("repo: {}", root.display()))
+}
+
 /// Returns a worktree checked out on `branch`, reusing an existing one.
 ///
 /// A branch on origin is checked out; otherwise the branch is created from
@@ -213,6 +228,30 @@ mod tests {
         let base = git(&wt, &["merge-base", "HEAD", "origin/main"]).unwrap();
         let head = git(&wt, &["rev-parse", "HEAD"]).unwrap();
         assert_eq!(base, head);
+    }
+
+    #[test]
+    fn repo_root_from_a_subdirectory_is_the_main_checkout() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let sub = repo.join("a/b");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(repo_root(&sub).unwrap(), repo.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn repo_root_from_a_linked_worktree_is_the_main_checkout() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_worktree(&repo, "feat/new").unwrap();
+        assert_eq!(repo_root(&wt).unwrap(), repo.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn repo_root_outside_a_repo_names_the_repo_flag() {
+        let root = tempfile::tempdir().unwrap();
+        let err = repo_root(root.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("--repo"), "{err:#}");
     }
 
     #[test]
