@@ -16,10 +16,7 @@ pub fn retire(ledger: &mut dyn Ledger, name: &str, now: SystemTime) -> Result<Ag
         .get_mut(name)
         .ok_or_else(|| anyhow!("{name} is not in the ledger"))?;
     if record.retired {
-        bail!(
-            "{name} is already retired (since {})",
-            record.retired_at.as_deref().unwrap_or("an unknown time")
-        );
+        bail!("{name} is {}", retired_since(record));
     }
     record.retired = true;
     record.retired_at = Some(humantime::format_rfc3339_seconds(now).to_string());
@@ -27,7 +24,13 @@ pub fn retire(ledger: &mut dyn Ledger, name: &str, now: SystemTime) -> Result<Ag
     Ok(record.clone())
 }
 
-/// Retires `name`, then closes its tab and removes its worktree when safe.
+fn retired_since(record: &AgentRecord) -> String {
+    let since = record.retired_at.as_deref().unwrap_or("an unknown time");
+    format!("already retired (since {since})")
+}
+
+/// Retires `name` unless it already is, then closes its tab and removes its
+/// worktree when safe, so a failed or deferred close can be re-run.
 /// `own_pane` is the pane running loopherd, whose tab is never closed.
 /// Pushes one line per action to `out`, including before an error.
 pub fn retire_and_close(
@@ -38,10 +41,22 @@ pub fn retire_and_close(
     own_pane: Option<&str>,
     out: &mut Vec<String>,
 ) -> Result<()> {
-    let record = retire(ledger, name, now)?;
-    out.push(format!("retired {name}"));
+    let record = match ledger.entries()?.remove(name) {
+        Some(record) if record.retired => {
+            out.push(format!("{name} is {}", retired_since(&record)));
+            record
+        }
+        _ => {
+            let record = retire(ledger, name, now)?;
+            out.push(format!("retired {name}"));
+            record
+        }
+    };
     let tab_kept = match agent_tab(herdr, &record, own_pane)? {
-        TabFate::Gone => false,
+        TabFate::Gone => {
+            out.push("tab already gone".into());
+            false
+        }
         TabFate::Ours(tab_id) => {
             herdr.close_tab(&tab_id)?;
             out.push(format!("closed tab {tab_id}"));
@@ -53,6 +68,10 @@ pub fn retire_and_close(
         }
     };
     if let Some(path) = &record.worktree {
+        if !path.exists() {
+            out.push(format!("{} already gone", path.display()));
+            return Ok(());
+        }
         let removal = match tab_kept {
             true => Removal::Kept("its tab was kept".into()),
             false => remove_if_merged(&record.repo, path)?,
@@ -413,7 +432,11 @@ mod tests {
 
         assert_eq!(
             out,
-            ["retired a".to_string(), format!("removed {}", wt.display())]
+            [
+                "retired a".to_string(),
+                "tab already gone".into(),
+                format!("removed {}", wt.display()),
+            ]
         );
         assert!(!wt.exists());
     }
@@ -454,7 +477,10 @@ mod tests {
         let pane = herdr.add_tab("w1", "other", elsewhere.path(), true);
         let mut ledger = plain(cwd.path(), &pane);
 
-        assert_eq!(close(&herdr, &mut ledger), ["retired a"]);
+        assert_eq!(
+            close(&herdr, &mut ledger),
+            ["retired a", "tab already gone"]
+        );
         assert_eq!(herdr.tabs().len(), 1);
     }
 
@@ -526,7 +552,10 @@ mod tests {
         let pane = herdr.add_tab("w1", "a", cwd.path(), true);
         let mut ledger = plain(cwd.path(), &pane);
 
-        assert_eq!(close(&herdr, &mut ledger), ["retired a"]);
+        assert_eq!(
+            close(&herdr, &mut ledger),
+            ["retired a", "tab already gone"]
+        );
         assert_eq!(herdr.tabs().len(), 1);
     }
 
@@ -544,6 +573,88 @@ mod tests {
         assert_eq!(out, ["retired a"]);
         assert!(ledger.0["a"].retired);
         assert!(root.path().join("proj/worktrees/feat-new").is_dir());
+    }
+
+    #[test]
+    fn close_retried_after_a_failed_tab_close_finishes_and_keeps_the_first_retire_time() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        herdr.fail_close_tab = true;
+        retire_and_close(
+            &herdr,
+            &mut ledger,
+            "a",
+            halloween_noon(),
+            None,
+            &mut vec![],
+        )
+        .unwrap_err();
+        herdr.fail_close_tab = false;
+        let later = halloween_noon() + Duration::from_secs(3600);
+        let mut out = vec![];
+
+        retire_and_close(&herdr, &mut ledger, "a", later, None, &mut out).unwrap();
+
+        assert_eq!(
+            out,
+            [
+                "a is already retired (since 2026-10-31T12:00:00Z)".to_string(),
+                "closed tab w1:t1".into(),
+                format!("removed {}", wt.display()),
+            ]
+        );
+        assert_eq!(
+            ledger.0["a"].retired_at.as_deref(),
+            Some("2026-10-31T12:00:00Z")
+        );
+        assert!(herdr.tabs().is_empty());
+        assert!(!wt.exists());
+    }
+
+    #[test]
+    fn close_on_an_entry_retired_earlier_closes_the_tab_and_removes_the_worktree() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        let earlier = halloween_noon() - Duration::from_secs(86400);
+        retire(&mut ledger, "a", earlier).unwrap();
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(
+            out,
+            [
+                "a is already retired (since 2026-10-30T12:00:00Z)".to_string(),
+                "closed tab w1:t1".into(),
+                format!("removed {}", wt.display()),
+            ]
+        );
+        assert_eq!(
+            ledger.0["a"].retired_at.as_deref(),
+            Some("2026-10-30T12:00:00Z")
+        );
+        assert!(herdr.tabs().is_empty());
+        assert!(!wt.exists());
+    }
+
+    #[test]
+    fn close_rerun_after_cleanup_reports_the_tab_and_worktree_already_gone() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        close(&herdr, &mut ledger);
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(
+            out,
+            [
+                "a is already retired (since 2026-10-31T12:00:00Z)".to_string(),
+                "tab already gone".into(),
+                format!("{} already gone", wt.display()),
+            ]
+        );
     }
 
     #[test]

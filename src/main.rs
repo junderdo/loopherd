@@ -43,6 +43,7 @@ enum Command {
     Retire {
         name: String,
         /// Also close its tab, and remove its worktree and branch if clean and merged.
+        /// Works on an already-retired entry, to finish or retry cleanup.
         #[arg(long)]
         close: bool,
     },
