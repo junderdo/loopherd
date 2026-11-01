@@ -6,7 +6,7 @@ use std::time::SystemTime;
 
 use anyhow::{Result, anyhow, bail};
 
-use crate::herdr::{Agent, Herdr};
+use crate::herdr::{Agent, Herdr, Pane};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::revive::find_workspace;
 use crate::worktree::{Gone, Removal, remove_if_gone, remove_if_merged};
@@ -55,19 +55,23 @@ pub fn retire_and_close(
             record
         }
     };
-    let tab_kept = match agent_tab(herdr, &record, &others, own_pane)? {
+    let tab_open = match agent_tab(herdr, &record, &others, own_pane)? {
         TabFate::Gone => {
             out.push("tab already gone".into());
-            false
+            None
         }
         TabFate::Ours(tab_id) => {
             herdr.close_tab(&tab_id)?;
             out.push(format!("closed tab {tab_id}"));
-            false
+            None
         }
         TabFate::Kept { tab_id, reason } => {
             out.push(format!("kept tab {tab_id}: {reason}"));
-            true
+            Some("its tab was kept")
+        }
+        TabFate::Unmatched(line) => {
+            out.push(line);
+            Some("tab not confirmed closed")
         }
     };
     if let Some(path) = &record.worktree {
@@ -93,9 +97,9 @@ pub fn retire_and_close(
             }
             None => {}
         }
-        let removal = match tab_kept {
-            true => Removal::Kept("its tab was kept".into()),
-            false => remove_if_merged(&record.repo, path)?,
+        let removal = match tab_open {
+            Some(reason) => Removal::Kept(reason.into()),
+            None => remove_if_merged(&record.repo, path)?,
         };
         out.push(match removal {
             Removal::Removed => format!("removed {}", path.display()),
@@ -127,7 +131,12 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 enum TabFate {
     Gone,
     Ours(String),
-    Kept { tab_id: String, reason: String },
+    Kept {
+        tab_id: String,
+        reason: String,
+    },
+    /// No tab matched, but it may still be open; holds the line to print.
+    Unmatched(String),
 }
 
 /// Finds the entry's tab through its live agent, else its recorded pane, and
@@ -162,9 +171,14 @@ fn agent_tab(
         None => find_workspace(herdr, |w| w.id == record.workspace)?,
     };
     let shown = record.workspace_label.as_ref().unwrap_or(&record.workspace);
-    let panes = match &workspace {
-        Some(ws) => herdr.panes_in(&ws.id)?,
-        None => vec![],
+    let panes = match (&workspace, live) {
+        (Some(ws), _) => herdr.panes_in(&ws.id)?,
+        (None, Some(_)) => vec![],
+        (None, None) => {
+            return Ok(TabFate::Unmatched(format!(
+                "no matching tab: workspace {shown} not found"
+            )));
+        }
     };
     let pane = panes.iter().find(|p| &p.id == pane_id).cloned();
     if let Some(pane) = &pane
@@ -182,7 +196,12 @@ fn agent_tab(
     }
     let cwd = record.worktree.as_ref().unwrap_or(&record.repo);
     match (pane, live) {
-        (None, None) => Ok(TabFate::Gone),
+        (None, None) => Ok(match workspace_holding(herdr, pane_id)? {
+            Some(label) => TabFate::Unmatched(format!(
+                "no matching tab (pane {pane_id} is in workspace {label})"
+            )),
+            None => TabFate::Gone,
+        }),
         (None, Some(live)) => kept(&live.tab_id, format!("not in workspace {shown}")),
         (Some(pane), _) if pane.is_in(cwd) => {
             // Closing a tab closes every pane in it, not just the agent's.
@@ -191,18 +210,35 @@ fn agent_tab(
                 n => kept(&pane.tab_id, format!("it has {n} panes")),
             }
         }
-        // The recorded pane ID was reused by another pane after a restart.
-        (Some(_), None) => Ok(TabFate::Gone),
+        (Some(pane), None) => Ok(TabFate::Unmatched(format!(
+            "no matching tab (pane {} is in {})",
+            pane.id,
+            shown_cwd(&pane)
+        ))),
         (Some(pane), Some(_)) => {
-            let actual = pane
-                .cwd
-                .map_or("unknown".into(), |c| c.display().to_string());
+            let actual = shown_cwd(&pane);
             kept(
                 &pane.tab_id,
                 format!("its cwd is {actual}, not {}", cwd.display()),
             )
         }
     }
+}
+
+/// The label of the workspace, if any, that holds a pane with `pane_id`.
+fn workspace_holding(herdr: &dyn Herdr, pane_id: &str) -> Result<Option<String>> {
+    for ws in herdr.workspaces()? {
+        if herdr.panes_in(&ws.id)?.iter().any(|p| p.id == pane_id) {
+            return Ok(Some(ws.label));
+        }
+    }
+    Ok(None)
+}
+
+fn shown_cwd(pane: &Pane) -> String {
+    pane.cwd
+        .as_ref()
+        .map_or("unknown".into(), |c| c.display().to_string())
 }
 
 /// Why the recorded pane may be someone else's after a restart reused its id:
@@ -702,9 +738,54 @@ mod tests {
 
         assert_eq!(
             close(&herdr, &mut ledger),
-            ["retired a", "tab already gone"]
+            [
+                "retired a".to_string(),
+                format!(
+                    "no matching tab (pane {pane} is in {})",
+                    elsewhere.path().display()
+                ),
+            ]
         );
         assert_eq!(herdr.tabs().len(), 1);
+    }
+
+    #[test]
+    fn close_reports_no_matching_tab_for_a_recorded_pane_in_another_workspace() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = FakeHerdr::new(&[("w1", "zagops"), ("w2", "loopherd")]);
+        let pane = herdr.add_tab("w1", "a", cwd.path(), true);
+        let mut ledger = plain(cwd.path(), &pane);
+
+        assert_eq!(
+            close(&herdr, &mut ledger),
+            [
+                "retired a".to_string(),
+                format!("no matching tab (pane {pane} is in workspace zagops)"),
+            ]
+        );
+        assert_eq!(herdr.tabs().len(), 1);
+    }
+
+    #[test]
+    fn close_keeps_the_worktree_when_the_exited_agents_shell_moved_into_a_subdirectory() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        let src = wt.join("src");
+        std::fs::create_dir(&src).unwrap();
+        let pane = restored_after_exit(&herdr, &mut ledger, &src);
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(
+            out,
+            [
+                "retired a".to_string(),
+                format!("no matching tab (pane {pane} is in {})", src.display()),
+                format!("kept {}: tab not confirmed closed", wt.display()),
+            ]
+        );
+        assert!(wt.is_dir());
     }
 
     #[test]
@@ -768,8 +849,17 @@ mod tests {
         assert_eq!(herdr.tabs().len(), 1);
     }
 
+    /// Replaces the spawned tab with one whose agent has exited, its shell in
+    /// `cwd`, and records that pane. Returns the pane ID.
+    fn restored_after_exit(herdr: &FakeHerdr, ledger: &mut MemLedger, cwd: &Path) -> String {
+        herdr.close_tab("w1:t1").unwrap();
+        let pane = herdr.add_tab("w1", "a", cwd, true);
+        ledger.0.get_mut("a").unwrap().pane_id = pane.clone();
+        pane
+    }
+
     #[test]
-    fn close_with_the_workspace_gone_treats_the_tab_as_gone() {
+    fn close_with_the_workspace_gone_reports_no_matching_tab() {
         let cwd = tempfile::tempdir().unwrap();
         let herdr = FakeHerdr::new(&[("w1", "renamed")]);
         let pane = herdr.add_tab("w1", "a", cwd.path(), true);
@@ -777,8 +867,30 @@ mod tests {
 
         assert_eq!(
             close(&herdr, &mut ledger),
-            ["retired a", "tab already gone"]
+            ["retired a", "no matching tab: workspace loopherd not found"]
         );
+        assert_eq!(herdr.tabs().len(), 1);
+    }
+
+    #[test]
+    fn close_with_the_workspace_gone_keeps_a_clean_merged_worktree() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        restored_after_exit(&herdr, &mut ledger, &wt);
+        ledger.0.get_mut("a").unwrap().workspace_label = Some("renamed".into());
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(
+            out,
+            [
+                "retired a".to_string(),
+                "no matching tab: workspace renamed not found".into(),
+                format!("kept {}: tab not confirmed closed", wt.display()),
+            ]
+        );
+        assert!(wt.is_dir());
         assert_eq!(herdr.tabs().len(), 1);
     }
 
