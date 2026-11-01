@@ -87,16 +87,19 @@ pub enum Removal {
     Kept(String),
 }
 
-/// Removes the linked worktree at `path` when it's clean and either detached
-/// or merged into origin's default branch, then deletes its branch. Never forces.
+/// Removes the linked worktree at `path` when it's clean, ignored files
+/// included, and either detached or merged into origin's default branch, then
+/// deletes its branch. Never forces.
 pub fn remove_if_merged(repo: &Path, path: &Path) -> Result<Removal> {
     let path_str = path.to_str().context("worktree path is not UTF-8")?;
     if !is_linked_worktree(repo, path)? {
         let reason = format!("not a linked worktree of {}", repo.display());
         return Ok(Removal::Kept(reason));
     }
-    if !git(path, &["status", "--porcelain"])?.is_empty() {
-        return Ok(Removal::Kept("uncommitted or untracked changes".into()));
+    if !git(path, &["status", "--porcelain", "--ignored"])?.is_empty() {
+        return Ok(Removal::Kept(
+            "uncommitted, untracked or ignored files".into(),
+        ));
     }
     let head = git(path, &["rev-parse", "HEAD"])?.trim().to_string();
     let branch = git(path, &["symbolic-ref", "--quiet", "--short", "HEAD"])

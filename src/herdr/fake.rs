@@ -125,6 +125,23 @@ impl FakeHerdr {
         tab.pane_id
     }
 
+    /// Splits a new shell pane into `tab_id`. Returns the pane ID.
+    pub fn split(&self, tab_id: &str, cwd: &Path) -> String {
+        let mut state = self.state.borrow_mut();
+        state.next_id += 1;
+        let workspace_id = tab_id.split_once(':').expect("fake tab id").0.to_string();
+        let id = format!("{workspace_id}:p{}", state.next_id);
+        state.panes.push(FakePane {
+            id: id.clone(),
+            tab_id: tab_id.to_string(),
+            workspace_id,
+            cwd: cwd.to_path_buf(),
+            at_prompt: true,
+            polls_until_prompt: Some(0),
+        });
+        id
+    }
+
     pub fn tabs(&self) -> Vec<FakeTab> {
         self.state.borrow().tabs.clone()
     }

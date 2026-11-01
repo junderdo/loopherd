@@ -114,7 +114,11 @@ fn agent_tab(herdr: &dyn Herdr, record: &AgentRecord, own_pane: Option<&str>) ->
         (None, None) => Ok(TabFate::Gone),
         (None, Some(live)) => kept(&live.tab_id, format!("not in workspace {shown}")),
         (Some(pane), _) if pane.cwd.as_deref() == Some(cwd.as_path()) => {
-            Ok(TabFate::Ours(pane.tab_id))
+            // Closing a tab closes every pane in it, not just the agent's.
+            match panes.iter().filter(|p| p.tab_id == pane.tab_id).count() {
+                1 => Ok(TabFate::Ours(pane.tab_id)),
+                n => kept(&pane.tab_id, format!("it has {n} panes")),
+            }
         }
         // The recorded pane ID was reused by another pane after a restart.
         (Some(_), None) => Ok(TabFate::Gone),
@@ -325,7 +329,7 @@ mod tests {
 
         let out = close(&herdr, &mut ledger);
 
-        kept_line(&out, &wt, "uncommitted or untracked changes");
+        kept_line(&out, &wt, "uncommitted, untracked or ignored files");
         assert!(has_branch(&repo, "feat/new"));
     }
 
@@ -338,7 +342,7 @@ mod tests {
 
         let out = close(&herdr, &mut ledger);
 
-        kept_line(&out, &wt, "uncommitted or untracked changes");
+        kept_line(&out, &wt, "uncommitted, untracked or ignored files");
         assert!(wt.join("notes.txt").exists());
     }
 
@@ -565,5 +569,44 @@ mod tests {
             ["retired a", "kept tab w1:t1: it is running this command"]
         );
         assert_eq!(herdr.tabs().len(), 1);
+    }
+
+    #[test]
+    fn close_keeps_a_merged_worktree_holding_ignored_files() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        std::fs::write(wt.join(".gitignore"), ".env\n").unwrap();
+        git_in(&wt, &["add", ".gitignore"]);
+        commit(&wt, "ignore .env");
+        push_head(&wt, "main");
+        std::fs::write(wt.join(".env"), "SECRET=1").unwrap();
+
+        let out = close(&herdr, &mut ledger);
+
+        kept_line(&out, &wt, "uncommitted, untracked or ignored files");
+        assert!(wt.join(".env").exists());
+        assert!(has_branch(&repo, "feat/new"));
+    }
+
+    #[test]
+    fn close_keeps_a_tab_split_with_another_pane_and_its_worktree() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        herdr.split("w1:t1", root.path());
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(
+            out,
+            [
+                "retired a".to_string(),
+                "kept tab w1:t1: it has 2 panes".into(),
+                format!("kept {}: its tab was kept", wt.display()),
+            ]
+        );
+        assert_eq!(herdr.tabs().len(), 1);
+        assert!(wt.is_dir());
     }
 }
