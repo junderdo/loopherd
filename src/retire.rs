@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow, bail};
 use crate::herdr::{Agent, Herdr, Pane};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::revive::find_workspace;
-use crate::worktree::{Gone, Removal, remove_if_gone, remove_if_merged};
+use crate::worktree::{Gone, Removal, remove_if_gone, remove_if_merged, same_dir};
 
 /// Marks `name` retired at `now`. Touches only the ledger.
 pub fn retire(ledger: &mut dyn Ledger, name: &str, now: SystemTime) -> Result<AgentRecord> {
@@ -123,14 +123,6 @@ fn other_user(ledger: &dyn Ledger, name: &str, path: &Path) -> Result<Option<Str
             !r.retired && r.name != name && r.worktree.as_deref().is_some_and(|w| same_dir(w, path))
         })
         .map(|r| r.name))
-}
-
-/// Falls back to an exact comparison when either can't be canonicalized.
-fn same_dir(a: &Path, b: &Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    }
 }
 
 enum TabFate {
@@ -786,6 +778,81 @@ mod tests {
         );
         assert_eq!(current_branch(&wt), "feat/new");
         assert!(has_branch(&repo, "feat/new"));
+    }
+
+    /// Spawns `b` onto `a`'s worktree after retiring `a`; returns the repo and
+    /// the worktree's real path.
+    fn shared_with_b(root: &Path) -> (FakeHerdr, MemLedger, PathBuf, PathBuf) {
+        let (herdr, mut ledger, repo) = spawned_in_worktree(root, "feat/new");
+        retire(&mut ledger, "a", halloween_noon()).unwrap();
+        let req = SpawnRequest {
+            repo: repo.clone(),
+            name: "b".into(),
+            worktree: Some("feat/new".into()),
+            workspace: None,
+            prompt: None,
+            ready_timeout: Duration::from_secs(60),
+            claude_args: vec![],
+            member_of: None,
+        };
+        spawn(&herdr, &mut ledger, &req, Some("w1")).unwrap();
+        (herdr, ledger, repo, root.join("proj/worktrees/feat-new"))
+    }
+
+    #[test]
+    fn close_keeps_a_missing_shared_worktree_recorded_under_two_spellings() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo, wt) = shared_with_b(root.path());
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(root.path().join("proj/worktrees"), &alias).unwrap();
+        let aliased = alias.join("feat-new");
+        ledger.0.get_mut("a").unwrap().worktree = Some(aliased.clone());
+        std::fs::remove_dir_all(&wt).unwrap();
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(
+            out.last().unwrap(),
+            &format!("kept {}: in use by b", aliased.display())
+        );
+        assert!(worktree_list(&repo).contains("feat-new"));
+        assert!(has_branch(&repo, "feat/new"));
+    }
+
+    #[test]
+    fn close_keeps_a_worktree_shared_with_an_entry_recorded_under_another_repo() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo, wt) = shared_with_b(root.path());
+        ledger.0.get_mut("b").unwrap().repo = root.path().join("elsewhere");
+        std::fs::remove_dir_all(&wt).unwrap();
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(
+            out.last().unwrap(),
+            &format!("kept {}: in use by b", wt.display())
+        );
+        assert!(has_branch(&repo, "feat/new"));
+    }
+
+    #[test]
+    fn close_does_not_count_the_closed_entry_as_a_sharer_of_its_missing_worktree() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(root.path().join("proj/worktrees"), &alias).unwrap();
+        let aliased = alias.join("feat-new");
+        ledger.0.get_mut("a").unwrap().worktree = Some(aliased.clone());
+        std::fs::remove_dir_all(root.path().join("proj/worktrees/feat-new")).unwrap();
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(
+            out.last().unwrap(),
+            &format!("removed {} (already gone)", aliased.display())
+        );
+        assert!(!worktree_list(&repo).contains("feat-new"));
+        assert!(!has_branch(&repo, "feat/new"));
     }
 
     /// An entry with no worktree whose cwd is a fresh directory.

@@ -187,17 +187,15 @@ struct ListedWorktree {
     locked: Option<Option<String>>,
 }
 
-/// `repo`'s linked worktree entry at `path`, compared without canonicalizing
-/// `path` itself since it may not exist.
+/// `repo`'s linked worktree entry at `path`, which may no longer exist.
 fn listed_worktree(repo: &Path, path: &Path) -> Result<Option<ListedWorktree>> {
-    let wanted = with_real_parent(path);
     let list = git(repo, &["worktree", "list", "--porcelain"])?;
     for block in list.split("\n\n").skip(1) {
         let mut lines = block.lines();
         let Some(listed) = lines.next().and_then(|l| l.strip_prefix("worktree ")) else {
             continue;
         };
-        if with_real_parent(Path::new(listed)) != wanted {
+        if !same_dir(Path::new(listed), path) {
             continue;
         }
         let mut entry = ListedWorktree {
@@ -220,6 +218,15 @@ fn listed_worktree(repo: &Path, path: &Path) -> Result<Option<ListedWorktree>> {
         return Ok(Some(entry));
     }
     Ok(None)
+}
+
+/// Whether `a` and `b` name the same directory, even when it no longer exists
+/// and the two reach it through different symlinked parents.
+pub fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => with_real_parent(a) == with_real_parent(b),
+    }
 }
 
 fn with_real_parent(path: &Path) -> PathBuf {
