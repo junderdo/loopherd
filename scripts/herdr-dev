@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Run a command against the loopherd-dev herdr session, never the inherited one.
+#
+#   scripts/herdr-dev cargo run -- spawn --workspace <label> ...
+#   scripts/herdr-dev herdr agent list
+#   scripts/herdr-dev --start      # start the dev server in the background
+set -euo pipefail
+
+dev_socket="$HOME/.config/herdr/sessions/loopherd-dev/herdr.sock"
+live_socket="${HERDR_SOCKET_PATH:-$HOME/.config/herdr/herdr.sock}"
+
+# Captured before the env is scrubbed: read-only, used only for the safety check.
+live_labels=$(herdr workspace list 2>/dev/null | jq -r '.result.workspaces[].label' || true)
+
+unset HERDR_ENV HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID
+export HERDR_SOCKET_PATH="$dev_socket"
+
+if [[ "${1:-}" == --start ]]; then
+  nohup herdr --session loopherd-dev server >/dev/null 2>&1 &
+  for _ in $(seq 50); do
+    herdr status | grep -q 'status: running' && exit 0
+    sleep 0.1
+  done
+  echo "herdr-dev: dev server did not start" >&2
+  exit 1
+fi
+
+die() { echo "herdr-dev: $*" >&2; exit 1; }
+
+[[ "$dev_socket" != "$live_socket" ]] || die "inherited socket is the dev socket"
+status=$(herdr status)
+grep -qx "  socket: $dev_socket" <<<"$status" || die "herdr is not targeting $dev_socket"
+grep -q 'status: running' <<<"$status" || die "dev server not running; run: scripts/herdr-dev --start"
+dev_labels=$(herdr workspace list | jq -r '.result.workspaces[].label')
+if [[ -n "$live_labels" ]]; then
+  while IFS= read -r label; do
+    grep -qxF -- "$label" <<<"$live_labels" && die "dev session has live workspace label '$label'"
+  done <<<"$dev_labels"
+fi
+
+exec "$@"

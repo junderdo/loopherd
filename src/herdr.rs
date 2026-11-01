@@ -1,0 +1,277 @@
+//! herdr, reached only through the [`Herdr`] trait.
+
+use std::path::Path;
+use std::process::Command;
+use std::time::Duration;
+
+use anyhow::{Context, Result, anyhow, bail};
+use serde::Deserialize;
+use serde_json::Value;
+
+#[cfg(test)]
+pub mod fake;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentStatus {
+    Idle,
+    Working,
+    Blocked,
+    Done,
+    Unknown,
+}
+
+impl AgentStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            AgentStatus::Idle => "idle",
+            AgentStatus::Working => "working",
+            AgentStatus::Blocked => "blocked",
+            AgentStatus::Done => "done",
+            AgentStatus::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Workspace {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Agent {
+    pub name: Option<String>,
+    pub pane_id: String,
+    pub tab_id: String,
+    pub status: AgentStatus,
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewTab {
+    pub tab_id: String,
+    pub pane_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartOutcome {
+    Ready(Agent),
+    /// herdr saw an approval or question dialog during startup.
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaitOutcome {
+    Reached,
+    TimedOut,
+}
+
+pub trait Herdr {
+    fn workspaces(&self) -> Result<Vec<Workspace>>;
+    fn agents(&self) -> Result<Vec<Agent>>;
+    fn agent(&self, name: &str) -> Result<Agent>;
+    /// Creates a tab without focusing it.
+    fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<NewTab>;
+    fn close_tab(&self, tab_id: &str) -> Result<()>;
+    /// Starts a Claude agent named `name` in `pane_id`.
+    fn start_claude(
+        &self,
+        name: &str,
+        pane_id: &str,
+        timeout: Duration,
+        args: &[String],
+    ) -> Result<StartOutcome>;
+    fn wait(&self, name: &str, until: &[AgentStatus], timeout: Duration) -> Result<WaitOutcome>;
+    /// Submits `text` without waiting for the agent's turn.
+    fn prompt(&self, name: &str, text: &str) -> Result<()>;
+}
+
+/// herdr's longest `agent start --timeout`.
+const MAX_START_TIMEOUT: Duration = Duration::from_millis(300_000);
+
+/// The `herdr` CLI. It talks to whichever session its environment points at.
+pub struct CliHerdr;
+
+impl CliHerdr {
+    fn command(&self, args: &[&str]) -> Command {
+        let mut cmd = Command::new("herdr");
+        cmd.args(args);
+        cmd
+    }
+
+    fn call(&self, args: &[&str]) -> Result<std::result::Result<Value, ApiError>> {
+        let out = self
+            .command(args)
+            .output()
+            .with_context(|| format!("run herdr {}", args.join(" ")))?;
+        if out.status.success() {
+            let json: Value = serde_json::from_slice(&out.stdout)
+                .with_context(|| format!("parse herdr {} output", args.join(" ")))?;
+            return Ok(Ok(json["result"].clone()));
+        }
+        let parsed = [&out.stderr, &out.stdout]
+            .into_iter()
+            .find_map(|bytes| serde_json::from_slice::<ErrorEnvelope>(bytes).ok());
+        match parsed {
+            Some(env) => Ok(Err(env.error)),
+            None => bail!(
+                "herdr {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        }
+    }
+
+    fn call_ok(&self, args: &[&str]) -> Result<Value> {
+        self.call(args)?
+            .map_err(|e| anyhow!("herdr {}: {} ({})", args[..2].join(" "), e.message, e.code))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ErrorEnvelope {
+    error: ApiError,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiError {
+    code: String,
+    message: String,
+}
+
+#[derive(Deserialize)]
+struct AgentJson {
+    name: Option<String>,
+    pane_id: String,
+    tab_id: String,
+    agent_status: AgentStatus,
+    agent_session: Option<SessionJson>,
+}
+
+#[derive(Deserialize)]
+struct SessionJson {
+    value: String,
+}
+
+impl From<AgentJson> for Agent {
+    fn from(a: AgentJson) -> Self {
+        Agent {
+            name: a.name,
+            pane_id: a.pane_id,
+            tab_id: a.tab_id,
+            status: a.agent_status,
+            session_id: a.agent_session.map(|s| s.value),
+        }
+    }
+}
+
+fn parse<T: serde::de::DeserializeOwned>(value: &Value, what: &str) -> Result<T> {
+    T::deserialize(value).with_context(|| format!("parse herdr {what}"))
+}
+
+fn millis(d: Duration) -> String {
+    d.as_millis().max(1).to_string()
+}
+
+impl Herdr for CliHerdr {
+    fn workspaces(&self) -> Result<Vec<Workspace>> {
+        #[derive(Deserialize)]
+        struct Ws {
+            workspace_id: String,
+            label: String,
+        }
+        let result = self.call_ok(&["workspace", "list"])?;
+        let list: Vec<Ws> = parse(&result["workspaces"], "workspace list")?;
+        Ok(list
+            .into_iter()
+            .map(|w| Workspace {
+                id: w.workspace_id,
+                label: w.label,
+            })
+            .collect())
+    }
+
+    fn agents(&self) -> Result<Vec<Agent>> {
+        let result = self.call_ok(&["agent", "list"])?;
+        let list: Vec<AgentJson> = parse(&result["agents"], "agent list")?;
+        Ok(list.into_iter().map(Agent::from).collect())
+    }
+
+    fn agent(&self, name: &str) -> Result<Agent> {
+        let result = self.call_ok(&["agent", "get", name])?;
+        Ok(parse::<AgentJson>(&result["agent"], "agent get")?.into())
+    }
+
+    fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<NewTab> {
+        let cwd = cwd.to_str().context("cwd is not UTF-8")?;
+        let result = self.call_ok(&[
+            "tab",
+            "create",
+            "--workspace",
+            workspace_id,
+            "--cwd",
+            cwd,
+            "--label",
+            label,
+            "--no-focus",
+        ])?;
+        Ok(NewTab {
+            tab_id: parse(&result["tab"]["tab_id"], "tab create")?,
+            pane_id: parse(&result["root_pane"]["pane_id"], "tab create")?,
+        })
+    }
+
+    fn close_tab(&self, tab_id: &str) -> Result<()> {
+        self.call_ok(&["tab", "close", tab_id]).map(drop)
+    }
+
+    fn start_claude(
+        &self,
+        name: &str,
+        pane_id: &str,
+        timeout: Duration,
+        args: &[String],
+    ) -> Result<StartOutcome> {
+        let timeout = millis(timeout.min(MAX_START_TIMEOUT));
+        let mut argv = vec![
+            "agent",
+            "start",
+            name,
+            "--kind",
+            "claude",
+            "--pane",
+            pane_id,
+            "--timeout",
+            &timeout,
+        ];
+        if !args.is_empty() {
+            argv.push("--");
+            argv.extend(args.iter().map(String::as_str));
+        }
+        match self.call(&argv)? {
+            Ok(result) => Ok(StartOutcome::Ready(
+                parse::<AgentJson>(&result["agent"], "agent start")?.into(),
+            )),
+            Err(e) if e.code == "agent_not_ready" => Ok(StartOutcome::Blocked),
+            Err(e) => bail!("herdr agent start: {} ({})", e.message, e.code),
+        }
+    }
+
+    fn wait(&self, name: &str, until: &[AgentStatus], timeout: Duration) -> Result<WaitOutcome> {
+        let timeout = millis(timeout);
+        let mut argv = vec!["agent", "wait", name, "--timeout", &timeout];
+        for status in until {
+            argv.extend(["--until", status.as_str()]);
+        }
+        match self.call(&argv)? {
+            Ok(_) => Ok(WaitOutcome::Reached),
+            Err(e) if e.code == "timeout" => Ok(WaitOutcome::TimedOut),
+            Err(e) => bail!("herdr agent wait: {} ({})", e.message, e.code),
+        }
+    }
+
+    fn prompt(&self, name: &str, text: &str) -> Result<()> {
+        self.call_ok(&["agent", "prompt", name, text]).map(drop)
+    }
+}
