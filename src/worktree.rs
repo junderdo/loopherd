@@ -1,5 +1,6 @@
 //! Git worktrees for spawned agents.
 
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -115,40 +116,43 @@ pub fn remove_if_merged(repo: &Path, path: &Path) -> Result<Removal> {
     Ok(Removal::Removed)
 }
 
-/// What [`prune_if_gone`] did with a worktree whose directory is missing.
+/// What [`remove_if_gone`] did with a worktree whose directory is missing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Gone {
     /// git doesn't list it either.
     Unlisted,
-    /// Its git record was pruned; `kept_branch` names a branch left in place
+    /// Its git record was removed; `kept_branch` names a branch left in place
     /// and why.
-    Pruned {
+    Removed {
         kept_branch: Option<(String, String)>,
     },
+    /// The directory couldn't be checked, so it was left alone.
+    Unchecked(String),
 }
 
-/// When git reports the worktree at `path` prunable, prunes it and deletes its
-/// branch if merged into origin's default branch. `None` when the directory
-/// is still there as far as git can tell.
-pub fn prune_if_gone(repo: &Path, path: &Path) -> Result<Option<Gone>> {
-    let Some(entry) = listed_worktree(repo, path)? else {
-        return Ok((!path.exists()).then_some(Gone::Unlisted));
-    };
-    if !entry.prunable {
-        return Ok(None);
+/// When the directory at `path` is missing, removes `repo`'s record of it and
+/// deletes its branch if merged into origin's default branch. `None` when the
+/// directory is there.
+pub fn remove_if_gone(repo: &Path, path: &Path) -> Result<Option<Gone>> {
+    match path.symlink_metadata() {
+        Ok(_) => return Ok(None),
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Ok(Some(Gone::Unchecked(format!("cannot check it: {e}")))),
     }
-    git(repo, &["worktree", "prune"])?;
+    let Some(entry) = listed_worktree(repo, path)? else {
+        return Ok(Some(Gone::Unlisted));
+    };
+    // Decide on the branch first: a failed fetch must leave the record for a rerun.
     let kept_branch = match &entry.branch {
-        Some(branch) => match unmerged(repo, branch, &entry.head)? {
-            Some(reason) => Some((branch.clone(), reason)),
-            None => {
-                delete_branch(repo, branch, &entry.head)?;
-                None
-            }
-        },
+        Some(branch) => unmerged(repo, branch, &entry.head)?.map(|r| (branch.clone(), r)),
         None => None,
     };
-    Ok(Some(Gone::Pruned { kept_branch }))
+    // Unlike `worktree prune`, this touches only this record and refuses a locked one.
+    git(repo, &["worktree", "remove", &entry.path])?;
+    if let (Some(branch), None) = (&entry.branch, &kept_branch) {
+        delete_branch(repo, branch, &entry.head)?;
+    }
+    Ok(Some(Gone::Removed { kept_branch }))
 }
 
 /// Why `branch` at `head` isn't merged into origin's default branch, if it isn't.
@@ -169,9 +173,9 @@ fn delete_branch(repo: &Path, branch: &str, head: &str) -> Result<()> {
 }
 
 struct ListedWorktree {
+    path: String,
     head: String,
     branch: Option<String>,
-    prunable: bool,
 }
 
 /// `repo`'s linked worktree entry at `path`, compared without canonicalizing
@@ -188,17 +192,15 @@ fn listed_worktree(repo: &Path, path: &Path) -> Result<Option<ListedWorktree>> {
             continue;
         }
         let mut entry = ListedWorktree {
+            path: listed.into(),
             head: String::new(),
             branch: None,
-            prunable: false,
         };
         for line in lines {
             if let Some(head) = line.strip_prefix("HEAD ") {
                 entry.head = head.into();
             } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
                 entry.branch = Some(branch.into());
-            } else if line.starts_with("prunable") {
-                entry.prunable = true;
             }
         }
         return Ok(Some(entry));

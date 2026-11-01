@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow, bail};
 use crate::herdr::Herdr;
 use crate::ledger::{AgentRecord, Ledger};
 use crate::revive::find_workspace;
-use crate::worktree::{Gone, Removal, prune_if_gone, remove_if_merged};
+use crate::worktree::{Gone, Removal, remove_if_gone, remove_if_merged};
 
 /// Marks `name` retired at `now`. Touches only the ledger.
 pub fn retire(ledger: &mut dyn Ledger, name: &str, now: SystemTime) -> Result<AgentRecord> {
@@ -68,12 +68,16 @@ pub fn retire_and_close(
         }
     };
     if let Some(path) = &record.worktree {
-        match prune_if_gone(&record.repo, path)? {
+        match remove_if_gone(&record.repo, path)? {
             Some(Gone::Unlisted) => {
                 out.push(format!("worktree {} already gone", path.display()));
                 return Ok(());
             }
-            Some(Gone::Pruned { kept_branch }) => {
+            Some(Gone::Unchecked(reason)) => {
+                out.push(format!("kept {}: {reason}", path.display()));
+                return Ok(());
+            }
+            Some(Gone::Removed { kept_branch }) => {
                 out.push(format!("removed {} (already gone)", path.display()));
                 if let Some((branch, reason)) = kept_branch {
                     out.push(format!("kept branch {branch}: {reason}"));
@@ -668,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn close_prunes_a_deleted_worktree_and_deletes_its_merged_branch() {
+    fn close_removes_a_deleted_worktrees_record_and_deletes_its_merged_branch() {
         let root = tempfile::tempdir().unwrap();
         let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
         let wt = root.path().join("proj/worktrees/feat-new");
@@ -689,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    fn close_prunes_a_deleted_worktree_but_keeps_its_unmerged_branch() {
+    fn close_removes_a_deleted_worktrees_record_but_keeps_its_unmerged_branch() {
         let root = tempfile::tempdir().unwrap();
         let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
         let wt = root.path().join("proj/worktrees/feat-new");
@@ -706,6 +710,73 @@ mod tests {
             ]
         );
         assert!(!worktree_list(&repo).contains("feat-new"));
+        assert!(has_branch(&repo, "feat/new"));
+    }
+
+    #[test]
+    fn close_of_a_deleted_worktree_leaves_another_missing_worktrees_record() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let other = crate::worktree::ensure_worktree(&repo, "feat/other").unwrap();
+        std::fs::remove_dir_all(root.path().join("proj/worktrees/feat-new")).unwrap();
+        std::fs::remove_dir_all(&other).unwrap();
+
+        close(&herdr, &mut ledger);
+
+        let list = worktree_list(&repo);
+        assert!(!list.contains("feat-new"));
+        assert!(list.contains("feat-other"));
+    }
+
+    #[test]
+    fn close_keeps_a_worktree_it_cannot_look_at() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let parent = root.path().join("proj/worktrees");
+        let wt = parent.join("feat-new");
+        let mode = |m| {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(m)).unwrap();
+        };
+        mode(0o000);
+
+        let out = close(&herdr, &mut ledger);
+
+        mode(0o755);
+        assert_eq!(
+            out.last().unwrap(),
+            &format!(
+                "kept {}: cannot check it: Permission denied (os error 13)",
+                wt.display()
+            )
+        );
+        assert!(wt.is_dir());
+        assert!(worktree_list(&repo).contains("feat-new"));
+        assert!(has_branch(&repo, "feat/new"));
+    }
+
+    #[test]
+    fn close_keeps_a_deleted_worktrees_record_when_the_fetch_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        std::fs::remove_dir_all(root.path().join("proj/worktrees/feat-new")).unwrap();
+        let missing = root.path().join("no-origin.git");
+        git_in(
+            &repo,
+            &["remote", "set-url", "origin", missing.to_str().unwrap()],
+        );
+
+        retire_and_close(
+            &herdr,
+            &mut ledger,
+            "a",
+            halloween_noon(),
+            None,
+            &mut vec![],
+        )
+        .unwrap_err();
+
+        assert!(worktree_list(&repo).contains("feat-new"));
         assert!(has_branch(&repo, "feat/new"));
     }
 
