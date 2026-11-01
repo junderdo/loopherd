@@ -1,6 +1,7 @@
 //! `loopherd spawn`: start a named Claude agent in a new tab and record it.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -9,11 +10,14 @@ use crate::herdr::{
     Agent, AgentStatus, Herdr, NewTab, StartOutcome, WaitOutcome, Workspace, wait_for_shell_prompt,
 };
 use crate::ledger::{AgentRecord, Ledger};
+use crate::template::Template;
 use crate::worktree::ensure_worktree;
 
 pub const BLOCKED_EXIT: i32 = 3;
 
 const SHELL_POLL: Duration = Duration::from_millis(50);
+
+const PROMPT_KEYS: [&str; 4] = ["name", "branch", "worktree", "pane"];
 
 #[derive(Debug, Clone)]
 pub struct SpawnRequest {
@@ -77,6 +81,7 @@ pub fn spawn(
     inherited_workspace: Option<&str>,
 ) -> Result<Spawned> {
     validate_name(&req.name).context("name")?;
+    let template = parse_prompt(req.prompt.as_deref()).context("prompt")?;
     ensure_name_free(herdr, &req.name).context("name")?;
     let workspace = resolve_workspace(herdr, req.workspace.as_deref(), inherited_workspace)
         .context("workspace")?;
@@ -88,6 +93,14 @@ pub fn spawn(
     let tab = herdr
         .create_tab(&workspace.id, cwd, &req.name)
         .context("tab")?;
+
+    let prompt = match template {
+        Some(t) => match render_prompt(&t, req, cwd, &tab) {
+            Ok(text) => Some(text),
+            Err(e) => return Err(close_after_failure(herdr, &tab, e.context("prompt"))),
+        },
+        None => None,
+    };
 
     let readiness = match start_until_ready(herdr, req, &tab) {
         Ok(r) => r,
@@ -103,7 +116,7 @@ pub fn spawn(
         workspace: workspace.id,
         workspace_label: Some(workspace.label),
         claude_args: req.claude_args.clone(),
-        prompt: req.prompt.clone(),
+        prompt: prompt.clone(),
         prompt_sent: false,
         created: humantime::format_rfc3339_seconds(SystemTime::now()).to_string(),
         retired: false,
@@ -123,11 +136,11 @@ pub fn spawn(
         Readiness::Ready(agent) => agent,
     };
     record.session_id = agent.session_id.clone();
-    let sent = match &req.prompt {
+    let sent = match &prompt {
         Some(text) => herdr.prompt(&req.name, text).context("prompt"),
         None => Ok(()),
     };
-    record.prompt_sent = sent.is_ok() && req.prompt.is_some();
+    record.prompt_sent = sent.is_ok() && prompt.is_some();
     ledger.record(record).context("ledger")?;
     sent?;
     Ok(Spawned {
@@ -137,6 +150,31 @@ pub fn spawn(
         session_id: agent.session_id,
         blocked: false,
     })
+}
+
+fn parse_prompt(prompt: Option<&str>) -> Result<Option<Template>> {
+    let Some(text) = prompt else {
+        return Ok(None);
+    };
+    let template = Template::parse(text)?;
+    template.check(PROMPT_KEYS)?;
+    Ok(Some(template))
+}
+
+fn render_prompt(
+    template: &Template,
+    req: &SpawnRequest,
+    cwd: &Path,
+    tab: &NewTab,
+) -> Result<String> {
+    let worktree = cwd.display().to_string();
+    let values = HashMap::from([
+        ("name", req.name.as_str()),
+        ("branch", req.worktree.as_deref().unwrap_or("")),
+        ("worktree", worktree.as_str()),
+        ("pane", tab.pane_id.as_str()),
+    ]);
+    template.render(&values)
 }
 
 fn validate_name(name: &str) -> Result<()> {
@@ -527,5 +565,75 @@ mod tests {
         assert_eq!(spawned.report("a").1, 0);
         assert!(herdr.prompts().is_empty());
         assert!(!ledger.0["a"].prompt_sent);
+    }
+
+    const BUILT_INS: &str = "{name}|{branch}|{worktree}|{pane}|{{x}}";
+
+    #[test]
+    fn the_prompt_gets_name_branch_worktree_and_pane() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        let req = SpawnRequest {
+            repo,
+            worktree: Some("feat/new".into()),
+            prompt: Some(BUILT_INS.into()),
+            ..request("a")
+        };
+        run(&herdr, &mut ledger, &req).unwrap();
+        let wt = root.path().join("proj/worktrees/feat-new");
+        let rendered = format!("a|feat/new|{}|w1:p1|{{x}}", wt.display());
+        assert_eq!(herdr.prompts(), vec![("a".into(), rendered.clone())]);
+        assert_eq!(ledger.0["a"].prompt, Some(rendered));
+    }
+
+    #[test]
+    fn without_a_worktree_branch_is_empty_and_worktree_is_the_repo() {
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        let req = SpawnRequest {
+            prompt: Some(BUILT_INS.into()),
+            ..request("a")
+        };
+        run(&herdr, &mut ledger, &req).unwrap();
+        assert_eq!(herdr.prompts()[0].1, "a||/src/repo|w1:p1|{x}");
+    }
+
+    #[test]
+    fn a_blocked_agent_is_recorded_with_the_rendered_prompt() {
+        let mut herdr = herdr();
+        herdr.startup = Startup::BlockedForever;
+        let mut ledger = MemLedger::default();
+        let req = SpawnRequest {
+            prompt: Some("I am {name} in {pane}".into()),
+            ..request("a")
+        };
+        run(&herdr, &mut ledger, &req).unwrap();
+        assert_eq!(ledger.0["a"].prompt.as_deref(), Some("I am a in w1:p1"));
+    }
+
+    #[test]
+    fn an_invalid_prompt_template_fails_before_anything_is_created() {
+        for (prompt, message) in [
+            ("hi {nmae}", "prompt: unknown placeholder {nmae}"),
+            ("hi {name", "prompt: unclosed placeholder {name"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let repo = repo_with_origin(root.path());
+            let herdr = herdr();
+            let mut ledger = MemLedger::default();
+            let req = SpawnRequest {
+                repo,
+                worktree: Some("feat/new".into()),
+                prompt: Some(prompt.into()),
+                ..request("a")
+            };
+            let err = run(&herdr, &mut ledger, &req).unwrap_err();
+            assert_eq!(format!("{err:#}"), message);
+            assert!(herdr.tabs().is_empty());
+            assert!(!root.path().join("proj/worktrees").exists());
+            assert!(ledger.0.is_empty());
+        }
     }
 }
