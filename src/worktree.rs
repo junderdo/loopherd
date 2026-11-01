@@ -88,7 +88,8 @@ pub enum Removal {
 }
 
 /// Removes the linked worktree at `path` when it's clean, with no ignored
-/// files outside build directories, and either detached or merged into origin's default branch, then
+/// files outside build directories, no rebase, merge or bisect in progress, and
+/// either detached or merged into origin's default branch, then
 /// deletes its branch. Never forces.
 pub fn remove_if_merged(repo: &Path, path: &Path) -> Result<Removal> {
     let path_str = path.to_str().context("worktree path is not UTF-8")?;
@@ -96,13 +97,14 @@ pub fn remove_if_merged(repo: &Path, path: &Path) -> Result<Removal> {
         let reason = format!("not a linked worktree of {}", repo.display());
         return Ok(Removal::Kept(reason));
     }
+    if let Some(op) = operation_in_progress(path)? {
+        return Ok(Removal::Kept(format!("{op} in progress")));
+    }
     if let Some(reason) = unclean(path)? {
         return Ok(Removal::Kept(reason));
     }
     let head = git(path, &["rev-parse", "HEAD"])?.trim().to_string();
-    let branch = git(path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .ok()
-        .map(|b| b.trim().to_string());
+    let branch = checked_out_branch(path)?;
     if let Some(branch) = &branch {
         git(repo, &["fetch", "--quiet", "origin"])?;
         let base = default_branch(repo)?;
@@ -120,6 +122,27 @@ pub fn remove_if_merged(repo: &Path, path: &Path) -> Result<Removal> {
         )?;
     }
     Ok(Removal::Removed)
+}
+
+/// Markers in a worktree's git dir that git leaves while an operation is
+/// stopped part way.
+const IN_PROGRESS: [(&str, &str); 7] = [
+    ("rebase-merge", "rebase"),
+    ("rebase-apply", "rebase"),
+    ("MERGE_HEAD", "merge"),
+    ("CHERRY_PICK_HEAD", "cherry-pick"),
+    ("REVERT_HEAD", "revert"),
+    // Outlives the *_HEAD files between steps of a multi-commit pick or revert.
+    ("sequencer", "cherry-pick or revert"),
+    ("BISECT_LOG", "bisect"),
+];
+
+fn operation_in_progress(path: &Path) -> Result<Option<&'static str>> {
+    let git_dir = PathBuf::from(git(path, &["rev-parse", "--absolute-git-dir"])?.trim());
+    Ok(IN_PROGRESS
+        .iter()
+        .find(|(marker, _)| git_dir.join(marker).exists())
+        .map(|(_, op)| *op))
 }
 
 /// Ignored directories that are regenerated, so removing them loses nothing.
@@ -159,6 +182,27 @@ fn is_linked_worktree(repo: &Path, path: &Path) -> Result<bool> {
         .filter_map(|line| line.strip_prefix("worktree "))
         .skip(1)
         .any(|linked| Path::new(linked).canonicalize().ok().as_ref() == Some(&path)))
+}
+
+/// The branch checked out at `path`, or `None` when HEAD is detached.
+fn checked_out_branch(path: &Path) -> Result<Option<String>> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .output()
+        .context("run git")?;
+    match out.status.code() {
+        Some(0) => Ok(Some(
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        )),
+        // --quiet reports "not a symbolic ref" as exit 1 and nothing else.
+        Some(1) => Ok(None),
+        _ => bail!(
+            "git symbolic-ref HEAD: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+    }
 }
 
 fn is_ancestor(repo: &Path, commit: &str, of: &str) -> Result<bool> {
