@@ -165,7 +165,7 @@ impl CliHerdr {
             .with_context(|| format!("run herdr {}", args.join(" ")))?;
         if out.status.success() {
             let json: Value = serde_json::from_slice(&out.stdout)
-                .with_context(|| format!("parse herdr {} output", args.join(" ")))?;
+                .with_context(|| MalformedReply(args.join(" ")))?;
             return Ok(Ok(json["result"].clone()));
         }
         let parsed = [&out.stderr, &out.stdout]
@@ -253,8 +253,20 @@ impl From<AgentJson> for Agent {
     }
 }
 
+/// herdr answered, but not in a shape loopherd understands: unlike a failed
+/// call, retrying or starting the server won't help. Find it with
+/// `anyhow::Error::downcast_ref`.
+#[derive(Debug)]
+pub struct MalformedReply(pub String);
+
+impl std::fmt::Display for MalformedReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "parse herdr {} output", self.0)
+    }
+}
+
 fn parse<T: serde::de::DeserializeOwned>(value: &Value, what: &str) -> Result<T> {
-    T::deserialize(value).with_context(|| format!("parse herdr {what}"))
+    T::deserialize(value).with_context(|| MalformedReply(what.into()))
 }
 
 fn millis(d: Duration) -> String {
