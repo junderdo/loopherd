@@ -33,6 +33,11 @@ pub struct AgentRecord {
     /// RFC 3339, UTC.
     #[serde(default)]
     pub retired_at: Option<String>,
+    /// Set by `loopherd add`; spawn leaves it empty.
+    #[serde(default)]
+    pub herd: Option<String>,
+    #[serde(default)]
+    pub template: Option<String>,
 }
 
 pub trait Ledger {
@@ -136,6 +141,8 @@ mod tests {
             created: "2026-10-31T00:00:00Z".into(),
             retired: false,
             retired_at: None,
+            herd: None,
+            template: None,
         }
     }
 
@@ -183,5 +190,7 @@ mod tests {
         assert_eq!(entry.retired_at, None);
         assert_eq!(entry.workspace_label, None);
         assert!(entry.claude_args.is_empty());
+        assert_eq!(entry.herd, None);
+        assert_eq!(entry.template, None);
     }
 }

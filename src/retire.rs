@@ -49,6 +49,8 @@ mod tests {
             created: "2026-10-31T00:00:00Z".into(),
             retired: false,
             retired_at: None,
+            herd: None,
+            template: None,
         }
     }
 
@@ -106,6 +108,7 @@ mod tests {
             prompt: None,
             ready_timeout: Duration::from_secs(60),
             claude_args: vec![],
+            member_of: None,
         };
         spawn(&herdr, &mut ledger, &req, Some("w1")).unwrap();
         let (tabs, agents) = (herdr.tabs(), herdr.agents().unwrap());

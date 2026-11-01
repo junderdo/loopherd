@@ -1,3 +1,4 @@
+mod herd;
 mod herdr;
 mod ledger;
 mod prompt;
@@ -14,6 +15,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
+use crate::herd::{AddRequest, Paths, add, dry_run};
 use crate::herdr::CliHerdr;
 use crate::ledger::FileLedger;
 use crate::prompt::prompt;
@@ -33,6 +35,8 @@ struct Cli {
 enum Command {
     /// Start a named Claude agent in a new herdr tab and record it in the ledger.
     Spawn(SpawnArgs),
+    /// Spawn a herd member from a template in the herd's file.
+    Add(AddArgs),
     /// Mark a ledger entry finished so revive leaves it alone. Changes only the ledger.
     Retire { name: String },
     /// Resume ledger agents after a herdr restart or a closed tab.
@@ -78,9 +82,27 @@ struct SpawnArgs {
     claude_args: Vec<String>,
 }
 
+#[derive(Args)]
+struct AddArgs {
+    herd: String,
+    template: String,
+    /// The template's params, in order.
+    params: Vec<String>,
+    /// Print the resolved member; create nothing.
+    #[arg(long)]
+    dry_run: bool,
+    /// Seconds to wait for the agent to become idle.
+    #[arg(long, default_value_t = 60)]
+    ready_timeout: u64,
+    /// Passed to claude after the herd's and the template's args.
+    #[arg(last = true)]
+    claude_args: Vec<String>,
+}
+
 fn main() -> ExitCode {
     let (command, result) = match Cli::parse().command {
         Command::Spawn(args) => ("spawn", run_spawn(args)),
+        Command::Add(args) => ("add", run_add(args)),
         Command::Retire { name } => ("retire", run_retire(&name)),
         Command::Revive { dry_run, name } => ("revive", run_revive(dry_run, name)),
         Command::Prompt { name, force } => ("prompt", run_prompt(&name, force)),
@@ -147,13 +169,42 @@ fn run_spawn(args: SpawnArgs) -> Result<i32> {
         prompt,
         ready_timeout: Duration::from_secs(args.ready_timeout),
         claude_args: args.claude_args,
+        member_of: None,
     };
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    let inherited = std::env::var("HERDR_WORKSPACE_ID")
-        .ok()
-        .filter(|v| !v.is_empty());
+    let inherited = inherited_workspace();
     let spawned = spawn(&CliHerdr, &mut ledger, &req, inherited.as_deref())?;
     let (message, code) = spawned.report(&req.name);
     println!("{message}");
     Ok(code)
+}
+
+fn run_add(args: AddArgs) -> Result<i32> {
+    let paths = Paths::from_env().context("herd")?;
+    let req = AddRequest {
+        herd: args.herd,
+        template: args.template,
+        params: args.params,
+        claude_args: args.claude_args,
+        ready_timeout: Duration::from_secs(args.ready_timeout),
+    };
+    let inherited = inherited_workspace();
+    if args.dry_run {
+        println!(
+            "{}",
+            dry_run(&CliHerdr, &paths, &req, inherited.as_deref())?
+        );
+        return Ok(0);
+    }
+    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let (name, spawned) = add(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
+    let (message, code) = spawned.report(&name);
+    println!("{message}");
+    Ok(code)
+}
+
+fn inherited_workspace() -> Option<String> {
+    std::env::var("HERDR_WORKSPACE_ID")
+        .ok()
+        .filter(|v| !v.is_empty())
 }
