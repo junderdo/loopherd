@@ -103,23 +103,114 @@ pub fn remove_if_merged(repo: &Path, path: &Path) -> Result<Removal> {
     let branch = git(path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .ok()
         .map(|b| b.trim().to_string());
-    if let Some(branch) = &branch {
-        git(repo, &["fetch", "--quiet", "origin"])?;
-        let base = default_branch(repo)?;
-        if !is_ancestor(repo, &head, &base)? {
-            return Ok(Removal::Kept(format!("{branch} is not merged into {base}")));
-        }
+    if let Some(branch) = &branch
+        && let Some(reason) = unmerged(repo, branch, &head)?
+    {
+        return Ok(Removal::Kept(reason));
     }
     git(repo, &["worktree", "remove", path_str])?;
     if let Some(branch) = &branch {
-        // `branch -d` judges against the checkout's HEAD, which may lag origin;
-        // merging was checked above, and the old value guards the delete.
-        git(
-            repo,
-            &["update-ref", "-d", &format!("refs/heads/{branch}"), &head],
-        )?;
+        delete_branch(repo, branch, &head)?;
     }
     Ok(Removal::Removed)
+}
+
+/// What [`prune_if_gone`] did with a worktree whose directory is missing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Gone {
+    /// git doesn't list it either.
+    Unlisted,
+    /// Its git record was pruned; `kept_branch` names a branch left in place
+    /// and why.
+    Pruned {
+        kept_branch: Option<(String, String)>,
+    },
+}
+
+/// When git reports the worktree at `path` prunable, prunes it and deletes its
+/// branch if merged into origin's default branch. `None` when the directory
+/// is still there as far as git can tell.
+pub fn prune_if_gone(repo: &Path, path: &Path) -> Result<Option<Gone>> {
+    let Some(entry) = listed_worktree(repo, path)? else {
+        return Ok((!path.exists()).then_some(Gone::Unlisted));
+    };
+    if !entry.prunable {
+        return Ok(None);
+    }
+    git(repo, &["worktree", "prune"])?;
+    let kept_branch = match &entry.branch {
+        Some(branch) => match unmerged(repo, branch, &entry.head)? {
+            Some(reason) => Some((branch.clone(), reason)),
+            None => {
+                delete_branch(repo, branch, &entry.head)?;
+                None
+            }
+        },
+        None => None,
+    };
+    Ok(Some(Gone::Pruned { kept_branch }))
+}
+
+/// Why `branch` at `head` isn't merged into origin's default branch, if it isn't.
+fn unmerged(repo: &Path, branch: &str, head: &str) -> Result<Option<String>> {
+    git(repo, &["fetch", "--quiet", "origin"])?;
+    let base = default_branch(repo)?;
+    Ok((!is_ancestor(repo, head, &base)?).then(|| format!("{branch} is not merged into {base}")))
+}
+
+fn delete_branch(repo: &Path, branch: &str, head: &str) -> Result<()> {
+    // `branch -d` judges against the checkout's HEAD, which may lag origin;
+    // callers check merging, and the old value guards the delete.
+    git(
+        repo,
+        &["update-ref", "-d", &format!("refs/heads/{branch}"), head],
+    )?;
+    Ok(())
+}
+
+struct ListedWorktree {
+    head: String,
+    branch: Option<String>,
+    prunable: bool,
+}
+
+/// `repo`'s linked worktree entry at `path`, compared without canonicalizing
+/// `path` itself since it may not exist.
+fn listed_worktree(repo: &Path, path: &Path) -> Result<Option<ListedWorktree>> {
+    let wanted = with_real_parent(path);
+    let list = git(repo, &["worktree", "list", "--porcelain"])?;
+    for block in list.split("\n\n").skip(1) {
+        let mut lines = block.lines();
+        let Some(listed) = lines.next().and_then(|l| l.strip_prefix("worktree ")) else {
+            continue;
+        };
+        if with_real_parent(Path::new(listed)) != wanted {
+            continue;
+        }
+        let mut entry = ListedWorktree {
+            head: String::new(),
+            branch: None,
+            prunable: false,
+        };
+        for line in lines {
+            if let Some(head) = line.strip_prefix("HEAD ") {
+                entry.head = head.into();
+            } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
+                entry.branch = Some(branch.into());
+            } else if line.starts_with("prunable") {
+                entry.prunable = true;
+            }
+        }
+        return Ok(Some(entry));
+    }
+    Ok(None)
+}
+
+fn with_real_parent(path: &Path) -> PathBuf {
+    match (path.parent().map(Path::canonicalize), path.file_name()) {
+        (Some(Ok(parent)), Some(name)) => parent.join(name),
+        _ => path.to_path_buf(),
+    }
 }
 
 /// Ignored directories that are regenerated, so removing them loses nothing.
@@ -351,6 +442,10 @@ pub mod testing {
 
     pub fn branches(repo: &Path) -> String {
         git(repo, &["branch", "--list", "--format=%(refname)"]).unwrap()
+    }
+
+    pub fn worktree_list(repo: &Path) -> String {
+        git(repo, &["worktree", "list", "--porcelain"]).unwrap()
     }
 
     pub fn upstream(dir: &Path) -> Option<String> {
