@@ -53,6 +53,20 @@ fn herds_lists_herd_files_flags_invalid_ones_and_never_calls_herdr() {
     assert!(stdout.contains("loopherd add prs pr <number>"), "{stdout}");
     assert_eq!(invalid.status.code(), Some(1));
 
+    fs::remove_file(herds.join("broken.toml")).unwrap();
+    fs::write(
+        herds.join("typo.toml"),
+        "repo = \"/r\"\n[template.t]\nparams = []\nprompt = \"hi {nmae}\"\n",
+    )
+    .unwrap();
+    let typo = run_herds(config.path(), bin.path());
+    let stdout = String::from_utf8_lossy(&typo.stdout);
+    assert!(
+        stdout.ends_with("invalid typo.toml: template t: prompt: unknown placeholder {nmae}\n"),
+        "{stdout}"
+    );
+    assert_eq!(typo.status.code(), Some(1));
+
     assert!(!calls.exists(), "herdr was called");
 }
 

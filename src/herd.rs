@@ -116,7 +116,6 @@ fn quote(arg: &str) -> String {
 
 /// The spawn request for `req`, from the named herd file alone.
 fn resolve(paths: &Paths, req: &AddRequest) -> Result<SpawnRequest> {
-    let herd_file = paths.herds.join(format!("{}.toml", req.herd));
     let herd = load(&paths.herds, &req.herd).context("herd")?;
     let template = herd.template.get(&req.template).with_context(|| {
         let known: Vec<&str> = herd.template.keys().map(String::as_str).collect();
@@ -127,6 +126,7 @@ fn resolve(paths: &Paths, req: &AddRequest) -> Result<SpawnRequest> {
             known.join(", ")
         )
     })?;
+    let checked = check_template(&req.template, template, paths)?;
     if req.params.len() != template.params.len() {
         bail!(
             "template {} takes {} param{} ({}), got {}\n{USAGE}",
@@ -149,8 +149,8 @@ fn resolve(paths: &Paths, req: &AddRequest) -> Result<SpawnRequest> {
         .collect();
     values.insert("herd", &req.herd);
 
-    let name = match &template.name {
-        Some(pattern) => render(pattern, &values).context("name")?,
+    let name = match &checked.name {
+        Some(pattern) => pattern.render(&values)?,
         None => [req.template.as_str()]
             .into_iter()
             .chain(req.params.iter().map(String::as_str))
@@ -158,25 +158,9 @@ fn resolve(paths: &Paths, req: &AddRequest) -> Result<SpawnRequest> {
             .join("-"),
     };
     values.insert("name", &name);
-    let branch = match &template.branch {
-        Some(pattern) => Some(render(pattern, &values).context("branch")?),
+    let branch = match &checked.branch {
+        Some(pattern) => Some(pattern.render(&values)?),
         None => None,
-    };
-    let prompt = match (&template.prompt, &template.prompt_file) {
-        (Some(text), _) => Prompt {
-            source: format!("template {} prompt", req.template),
-            text: text.clone(),
-        },
-        (None, Some(file)) => {
-            let base = herd_file.parent().unwrap_or(Path::new("."));
-            let path = base.join(expand_home(file, &paths.home));
-            Prompt {
-                source: format!("template {} prompt_file {}", req.template, path.display()),
-                text: std::fs::read_to_string(&path)
-                    .with_context(|| format!("prompt: read {}", path.display()))?,
-            }
-        }
-        (None, None) => unreachable!("load rejects a template without a prompt"),
     };
 
     Ok(SpawnRequest {
@@ -184,7 +168,10 @@ fn resolve(paths: &Paths, req: &AddRequest) -> Result<SpawnRequest> {
         name,
         worktree: branch,
         workspace: herd.workspace.clone(),
-        prompt: Some(prompt),
+        prompt: Some(Prompt {
+            source: format!("template {} {}", req.template, checked.prompt.source),
+            text: checked.prompt.text,
+        }),
         ready_timeout: req.ready_timeout,
         claude_args: [&herd.args[..], &template.args, &req.claude_args].concat(),
         member_of: Some(MemberOf {
@@ -197,8 +184,56 @@ fn resolve(paths: &Paths, req: &AddRequest) -> Result<SpawnRequest> {
 
 const USAGE: &str = "usage: loopherd add <herd> <template> <param>…";
 
-fn render(pattern: &str, values: &HashMap<&str, &str>) -> Result<String> {
-    Template::parse(pattern)?.render(values)
+/// A template's patterns and prompt, checked as far as they can be without param values.
+struct CheckedTemplate {
+    name: Option<Template>,
+    branch: Option<Template>,
+    prompt: Prompt,
+}
+
+/// Every check `add` makes on a template before it knows the params' values,
+/// shared with `herds`. Errors name the template and the offending field or file.
+fn check_template(
+    template_name: &str,
+    template: &TemplateFile,
+    paths: &Paths,
+) -> Result<CheckedTemplate> {
+    check_fields(template, paths).with_context(|| format!("template {template_name}"))
+}
+
+fn check_fields(template: &TemplateFile, paths: &Paths) -> Result<CheckedTemplate> {
+    let name = pattern(template.name.as_deref(), &template.params, &["herd"]).context("name")?;
+    let branch = pattern(
+        template.branch.as_deref(),
+        &template.params,
+        &["herd", "name"],
+    )
+    .context("branch")?;
+
+    let prompt = match (&template.prompt, &template.prompt_file) {
+        (Some(text), _) => Prompt {
+            source: "prompt".into(),
+            text: text.clone(),
+        },
+        (None, Some(file)) => {
+            let path = paths.herds.join(expand_home(file, &paths.home));
+            Prompt {
+                source: format!("prompt_file {}", path.display()),
+                text: std::fs::read_to_string(&path)
+                    .with_context(|| format!("prompt_file: read {}", path.display()))?,
+            }
+        }
+        (None, None) => unreachable!("load rejects a template without a prompt"),
+    };
+    if prompt.text.trim().is_empty() {
+        bail!("{} is empty", prompt.source);
+    }
+    pattern(Some(&prompt.text), &template.params, &BUILT_INS).context(prompt.source.clone())?;
+    Ok(CheckedTemplate {
+        name,
+        branch,
+        prompt,
+    })
 }
 
 fn expand_home(path: &str, home: &Path) -> PathBuf {
@@ -227,7 +262,12 @@ pub fn herds(paths: &Paths) -> Result<(String, i32)> {
         match std::fs::read_to_string(file)
             .map_err(anyhow::Error::from)
             .and_then(|text| parse(&text))
-        {
+            .and_then(|parsed| {
+                for (name, template) in &parsed.template {
+                    check_template(name, template, paths)?;
+                }
+                Ok(parsed)
+            }) {
             Ok(parsed) => lines.extend(describe(&herd, &parsed)),
             Err(e) => {
                 let name = file.file_name().unwrap_or_default().to_string_lossy();
@@ -269,6 +309,21 @@ fn describe(herd: &str, parsed: &HerdFile) -> Vec<String> {
         format!("  loopherd add {herd} {template}{params}")
     });
     std::iter::once(header).chain(usages).collect()
+}
+
+/// `text` parsed, failing on a placeholder that is neither a param nor in `built_ins`.
+fn pattern(text: Option<&str>, params: &[String], built_ins: &[&str]) -> Result<Option<Template>> {
+    let Some(text) = text else {
+        return Ok(None);
+    };
+    let pattern = Template::parse(text)?;
+    pattern.check(
+        params
+            .iter()
+            .map(String::as_str)
+            .chain(built_ins.iter().copied()),
+    )?;
+    Ok(Some(pattern))
 }
 
 /// Placeholders every template gets, so no param may take their names.
@@ -538,19 +593,29 @@ args = ["--model", "opus"]
         let root = tempfile::tempdir().unwrap();
         let repo = crate::worktree::testing::repo_with_origin(root.path());
         for (name, branch, prompt, message) in [
-            ("z-{nmber}", "b", "go", "name: unknown placeholder {nmber}"),
-            ("z-{pane}", "b", "go", "name: unknown placeholder {pane}"),
+            (
+                "z-{nmber}",
+                "b",
+                "go",
+                "template pr: name: unknown placeholder {nmber}",
+            ),
+            (
+                "z-{pane}",
+                "b",
+                "go",
+                "template pr: name: unknown placeholder {pane}",
+            ),
             (
                 "z",
                 "b-{worktree}",
                 "go",
-                "branch: unknown placeholder {worktree}",
+                "template pr: branch: unknown placeholder {worktree}",
             ),
             (
                 "z",
                 "b",
                 "hi {nmber}",
-                "prompt: unknown placeholder {nmber}",
+                "template pr: prompt: unknown placeholder {nmber}",
             ),
         ] {
             let herd = format!(
@@ -590,7 +655,10 @@ args = ["--model", "opus"]
         let err = add_err(&config, &request("h", "t", &[]));
         let path = config.path().join("herds/t.md");
         assert!(
-            err.starts_with(&format!("prompt: read {}: ", path.display())),
+            err.starts_with(&format!(
+                "template t: prompt_file: read {}: ",
+                path.display()
+            )),
             "{err}"
         );
     }
@@ -608,11 +676,11 @@ args = ["--model", "opus"]
             let req = request("h", "t", &[]);
             let err = add(&herdr, &mut ledger, &config.paths(), &req, Some("w1")).unwrap_err();
             let source = if prompt.starts_with("prompt_file") {
-                format!("template t prompt_file {}", path.display())
+                format!("prompt_file {}", path.display())
             } else {
-                "template t prompt".into()
+                "prompt".into()
             };
-            assert_eq!(format!("{err:#}"), format!("prompt: {source} is empty"));
+            assert_eq!(format!("{err:#}"), format!("template t: {source} is empty"));
             assert!(herdr.tabs().is_empty());
             assert!(ledger.0.is_empty());
         }
@@ -826,6 +894,81 @@ args = ["--model", "opus"]
             ]
         );
         assert_eq!(code, 1);
+    }
+
+    fn herds_line(template: &str, files: &[(&str, &str)]) -> (String, i32) {
+        let herd = format!("repo = \"/r\"\n[template.t]\nparams = [\"n\"]\n{template}\n");
+        let config = Config::with(&[("h", &herd)]);
+        for (name, text) in files {
+            fs::write(config.path().join("herds").join(name), text).unwrap();
+        }
+        let (report, code) = herds(&config.paths()).unwrap();
+        let report = report.replace(&config.path().display().to_string(), "CONFIG");
+        (report, code)
+    }
+
+    #[test]
+    fn herds_reports_templates_add_would_reject() {
+        for (template, files, message) in [
+            (
+                "name = \"z-{nmber}\"\nprompt = \"go\"",
+                &[][..],
+                "name: unknown placeholder {nmber}",
+            ),
+            (
+                "name = \"z-{pane}\"\nprompt = \"go\"",
+                &[],
+                "name: unknown placeholder {pane}",
+            ),
+            (
+                "branch = \"b-{worktree}\"\nprompt = \"go\"",
+                &[],
+                "branch: unknown placeholder {worktree}",
+            ),
+            (
+                "branch = \"b-{n\"\nprompt = \"go\"",
+                &[],
+                "branch: unclosed placeholder {n",
+            ),
+            (
+                "prompt = \"hi {nmber}\"",
+                &[],
+                "prompt: unknown placeholder {nmber}",
+            ),
+            (
+                "prompt_file = \"t.md\"",
+                &[("t.md", "{n} in {wrktree}\n")],
+                "prompt_file CONFIG/herds/t.md: unknown placeholder {wrktree}",
+            ),
+            (
+                "prompt_file = \"t.md\"",
+                &[],
+                "prompt_file: read CONFIG/herds/t.md: No such file or directory (os error 2)",
+            ),
+            ("prompt = \" \\n\"", &[], "prompt is empty"),
+            (
+                "prompt_file = \"t.md\"",
+                &[("t.md", "\n")],
+                "prompt_file CONFIG/herds/t.md is empty",
+            ),
+        ] {
+            let (report, code) = herds_line(template, files);
+            assert_eq!(report, format!("invalid h.toml: template t: {message}"));
+            assert_eq!(code, 1);
+        }
+    }
+
+    #[test]
+    fn herds_accepts_every_placeholder_add_accepts() {
+        let template = "name = \"z-{herd}-{n}\"\nbranch = \"{herd}/{name}/{n}\"\n\
+                        prompt_file = \"t.md\"";
+        let prompt = "{name} {herd} {branch} {worktree} {pane} {n} {{x}}";
+        let (report, code) = herds_line(template, &[("t.md", prompt)]);
+        assert_eq!(
+            report,
+            "h  repo /r  workspace (current)\n  loopherd add h t <n>"
+        );
+        assert_eq!(code, 0);
     }
 
     #[test]
