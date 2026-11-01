@@ -152,7 +152,7 @@ fn agent_tab(
     }
     if live.is_none()
         && let Some(pane) = &pane
-        && let Some(reason) = held_elsewhere(&pane.id, &agents, others)
+        && let Some(reason) = reused_by(herdr, record, &pane.id, &agents, others)?
     {
         return kept(&pane.tab_id, reason);
     }
@@ -181,20 +181,31 @@ fn agent_tab(
     }
 }
 
-/// Who else holds a reused pane: a non-retired entry that recorded it, or an agent.
-fn held_elsewhere(
+/// Why the recorded pane may be someone else's after a restart reused its id:
+/// another entry recorded it, it runs an agent from another session, or its
+/// shell is busy. `None` means it is safe to treat as the entry's.
+fn reused_by(
+    herdr: &dyn Herdr,
+    record: &AgentRecord,
     pane_id: &str,
     agents: &[Agent],
     others: &BTreeMap<String, AgentRecord>,
-) -> Option<String> {
+) -> Result<Option<String>> {
     if let Some(other) = others.values().find(|r| !r.retired && r.pane_id == pane_id) {
-        return Some(format!("pane belongs to {}", other.name));
+        return Ok(Some(format!("pane belongs to {}", other.name)));
     }
-    agents
-        .iter()
-        .find(|a| a.pane_id == pane_id)
-        .and_then(|a| a.name.as_ref())
-        .map(|name| format!("pane hosts agent {name}"))
+    if let Some(agent) = agents.iter().find(|a| a.pane_id == pane_id) {
+        let ours = agent.session_id.is_some() && agent.session_id == record.session_id;
+        return Ok(match (ours, &agent.name) {
+            (true, _) => None,
+            (false, Some(name)) => Some(format!("pane hosts agent {name}")),
+            (false, None) => Some("pane hosts another agent".into()),
+        });
+    }
+    Ok(match herdr.at_shell_prompt(pane_id)? {
+        true => None,
+        false => Some("pane is running a command".into()),
+    })
 }
 
 #[cfg(test)]
@@ -1024,9 +1035,14 @@ mod tests {
 
     /// A worktree entry whose agent is gone and whose pane id a restart gave
     /// to a new single-pane tab in the same worktree. Returns that pane.
-    fn reused_after_restart(herdr: &FakeHerdr, ledger: &mut MemLedger, wt: &Path) -> String {
+    fn reused_after_restart(
+        herdr: &FakeHerdr,
+        ledger: &mut MemLedger,
+        wt: &Path,
+        at_prompt: bool,
+    ) -> String {
         herdr.close_tab("w1:t1").unwrap();
-        let pane = herdr.add_tab("w1", "b", wt, false);
+        let pane = herdr.add_tab("w1", "b", wt, at_prompt);
         ledger.0.get_mut("a").unwrap().pane_id = pane.clone();
         pane
     }
@@ -1036,7 +1052,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
         let wt = root.path().join("proj/worktrees/feat-new");
-        let pane = reused_after_restart(&herdr, &mut ledger, &wt);
+        let pane = reused_after_restart(&herdr, &mut ledger, &wt, false);
         let mut b = record("b");
         b.pane_id = pane;
         ledger.0.insert("b".into(), b);
@@ -1060,7 +1076,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
         let wt = root.path().join("proj/worktrees/feat-new");
-        let pane = reused_after_restart(&herdr, &mut ledger, &wt);
+        let pane = reused_after_restart(&herdr, &mut ledger, &wt, true);
         let mut old = record("old");
         old.pane_id = pane;
         old.retired = true;
@@ -1077,7 +1093,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
         let wt = root.path().join("proj/worktrees/feat-new");
-        let pane = reused_after_restart(&herdr, &mut ledger, &wt);
+        let pane = reused_after_restart(&herdr, &mut ledger, &wt, false);
         let herdr = herdr.with_live_agent(Some("stranger"), None, &pane);
 
         let out = close(&herdr, &mut ledger);
@@ -1092,5 +1108,101 @@ mod tests {
         );
         assert_eq!(herdr.tabs().len(), 1);
         assert!(wt.is_dir());
+    }
+
+    fn kept_reused(out: &[String], wt: &Path, reason: &str) {
+        assert_eq!(
+            out,
+            [
+                "retired a".to_string(),
+                format!("kept tab w1:t2: {reason}"),
+                format!("kept {}: its tab was kept", wt.display()),
+            ]
+        );
+    }
+
+    #[test]
+    fn close_keeps_a_reused_pane_hosting_an_unnamed_agent_from_another_session() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        ledger.0.get_mut("a").unwrap().session_id = Some("sess-a".into());
+        let pane = reused_after_restart(&herdr, &mut ledger, &wt, false);
+        let herdr = herdr.with_live_agent(None, Some("sess-user"), &pane);
+
+        kept_reused(&close(&herdr, &mut ledger), &wt, "pane hosts another agent");
+        assert_eq!(herdr.tabs().len(), 1);
+        assert!(wt.is_dir());
+    }
+
+    #[test]
+    fn close_keeps_a_reused_pane_hosting_an_agent_when_the_entry_has_no_session() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        ledger.0.get_mut("a").unwrap().session_id = None;
+        let pane = reused_after_restart(&herdr, &mut ledger, &wt, false);
+        let herdr = herdr.with_live_agent(None, None, &pane);
+
+        kept_reused(&close(&herdr, &mut ledger), &wt, "pane hosts another agent");
+        assert_eq!(herdr.tabs().len(), 1);
+    }
+
+    #[test]
+    fn close_closes_the_recorded_pane_hosting_its_own_unnamed_session() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        ledger.0.get_mut("a").unwrap().session_id = Some("sess-a".into());
+        let pane = reused_after_restart(&herdr, &mut ledger, &wt, false);
+        let herdr = herdr.with_live_agent(None, Some("sess-a"), &pane);
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(
+            out,
+            [
+                "retired a".to_string(),
+                "closed tab w1:t2".into(),
+                format!("removed {}", wt.display()),
+            ]
+        );
+        assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
+    fn close_keeps_a_reused_pane_whose_shell_is_running_a_command() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        reused_after_restart(&herdr, &mut ledger, &wt, false);
+
+        kept_reused(
+            &close(&herdr, &mut ledger),
+            &wt,
+            "pane is running a command",
+        );
+        assert_eq!(herdr.tabs().len(), 1);
+        assert!(wt.is_dir());
+    }
+
+    #[test]
+    fn close_closes_the_recorded_pane_idle_at_a_shell_prompt() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        reused_after_restart(&herdr, &mut ledger, &wt, true);
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(
+            out,
+            [
+                "retired a".to_string(),
+                "closed tab w1:t2".into(),
+                format!("removed {}", wt.display()),
+            ]
+        );
+        assert!(herdr.tabs().is_empty());
     }
 }
