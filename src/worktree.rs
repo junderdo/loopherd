@@ -130,6 +130,8 @@ pub enum Gone {
     },
     /// The directory couldn't be checked, so it was left alone.
     Unchecked(String),
+    /// git has it locked, so its record and branch were left alone.
+    Locked { reason: Option<String> },
 }
 
 /// When the directory at `path` is missing, removes `repo`'s record of it and
@@ -144,6 +146,9 @@ pub fn remove_if_gone(repo: &Path, path: &Path) -> Result<Option<Gone>> {
     let Some(entry) = listed_worktree(repo, path)? else {
         return Ok(Some(Gone::Unlisted));
     };
+    if let Some(reason) = entry.locked {
+        return Ok(Some(Gone::Locked { reason }));
+    }
     // Decide on the branch first: a failed fetch must leave the record for a rerun.
     let kept_branch = match &entry.branch {
         Some(branch) => unmerged(repo, branch, &entry.head)?.map(|r| (branch.clone(), r)),
@@ -178,6 +183,8 @@ struct ListedWorktree {
     path: String,
     head: String,
     branch: Option<String>,
+    /// `Some` when locked, holding git's reason if it has one.
+    locked: Option<Option<String>>,
 }
 
 /// `repo`'s linked worktree entry at `path`, compared without canonicalizing
@@ -197,12 +204,17 @@ fn listed_worktree(repo: &Path, path: &Path) -> Result<Option<ListedWorktree>> {
             path: listed.into(),
             head: String::new(),
             branch: None,
+            locked: None,
         };
         for line in lines {
             if let Some(head) = line.strip_prefix("HEAD ") {
                 entry.head = head.into();
             } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
                 entry.branch = Some(branch.into());
+            } else if line == "locked" {
+                entry.locked = Some(None);
+            } else if let Some(reason) = line.strip_prefix("locked ") {
+                entry.locked = Some(Some(reason.into()));
             }
         }
         return Ok(Some(entry));
