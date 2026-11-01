@@ -1,6 +1,7 @@
 mod herdr;
 mod ledger;
 mod retire;
+mod revive;
 mod spawn;
 mod worktree;
 
@@ -14,6 +15,7 @@ use clap::{Args, Parser, Subcommand};
 use crate::herdr::CliHerdr;
 use crate::ledger::FileLedger;
 use crate::retire::retire;
+use crate::revive::{ReviveRequest, revive};
 use crate::spawn::{SpawnRequest, spawn};
 use crate::worktree::repo_root;
 
@@ -30,6 +32,15 @@ enum Command {
     Spawn(SpawnArgs),
     /// Mark a ledger entry finished so revive leaves it alone. Changes only the ledger.
     Retire { name: String },
+    /// Resume ledger agents after a herdr restart or a closed tab.
+    Revive {
+        /// Print what would happen; start nothing and leave the ledger alone.
+        #[arg(long)]
+        dry_run: bool,
+        /// Only this ledger entry.
+        #[arg(long)]
+        name: Option<String>,
+    },
 }
 
 #[derive(Args)]
@@ -61,6 +72,7 @@ fn main() -> ExitCode {
     let (command, result) = match Cli::parse().command {
         Command::Spawn(args) => ("spawn", run_spawn(args)),
         Command::Retire { name } => ("retire", run_retire(&name)),
+        Command::Revive { dry_run, name } => ("revive", run_revive(dry_run, name)),
     };
     match result {
         Ok(code) => ExitCode::from(code as u8),
@@ -76,6 +88,22 @@ fn run_retire(name: &str) -> Result<i32> {
     retire(&mut ledger, name, SystemTime::now())?;
     println!("retired {name}");
     Ok(0)
+}
+
+fn run_revive(dry_run: bool, name: Option<String>) -> Result<i32> {
+    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let req = ReviveRequest {
+        name,
+        dry_run,
+        settle_timeout: Duration::from_secs(30),
+        poll_interval: Duration::from_millis(250),
+        start_timeout: Duration::from_secs(60),
+    };
+    let (message, code) = revive(&CliHerdr, &mut ledger, &req)?.report();
+    if !message.is_empty() {
+        println!("{message}");
+    }
+    Ok(code)
 }
 
 fn run_spawn(args: SpawnArgs) -> Result<i32> {

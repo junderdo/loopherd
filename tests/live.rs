@@ -1,4 +1,4 @@
-//! End-to-end runs of `loopherd spawn` against the real `loopherd-dev` herdr
+//! End-to-end runs of `loopherd spawn` and `revive` against the real `loopherd-dev` herdr
 //! session. Skipped unless `LOOPHERD_LIVE=1`; start the session first with
 //! `scripts/herdr-dev --start`.
 
@@ -118,6 +118,27 @@ fn spawn(state: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 
+fn revive(state: &Path, args: &[&str]) -> Output {
+    dev(env!("CARGO_BIN_EXE_loopherd"))
+        .env("XDG_STATE_HOME", state)
+        .arg("revive")
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+fn herdr_ok(args: &[&str]) -> Value {
+    let out = dev("herdr").args(args).output().unwrap();
+    assert!(
+        out.status.success(),
+        "herdr {}: {}{}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    json(&out)
+}
+
 fn ledger_entry(state: &Path, name: &str) -> Value {
     let text = std::fs::read_to_string(state.join("loopherd/ledger.json")).unwrap();
     serde_json::from_str::<Value>(&text).unwrap()[name].clone()
@@ -200,4 +221,80 @@ fn leaves_an_agent_blocked_at_a_dialog_and_records_it_unprompted() {
     assert!(stdout.starts_with("tab "), "{stdout}");
     assert!(stdout.contains("\nblocked: answer it in pane "), "{stdout}");
     assert_eq!(ledger_entry(state.path(), &name)["prompt_sent"], false);
+}
+
+#[test]
+fn revives_an_agent_whose_tab_was_closed_under_its_name_and_session() {
+    if !live_enabled() {
+        return;
+    }
+    let workspace = assert_dev_session();
+    let state = tempfile::tempdir().unwrap();
+    let name = format!("lh-live-revive-{}", std::process::id());
+    let _cleanup = CloseTab(name.clone());
+
+    let out = spawn(
+        state.path(),
+        &[
+            "--repo",
+            env!("CARGO_MANIFEST_DIR"),
+            "--name",
+            &name,
+            "--workspace",
+            &workspace,
+        ],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // claude --resume finds no conversation until a turn has been taken.
+    herdr_ok(&[
+        "agent",
+        "prompt",
+        &name,
+        "Reply with just the word ok. Do not use tools.",
+        "--wait",
+        "--timeout",
+        "120000",
+    ]);
+    let session = ledger_entry(state.path(), &name)["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let tab = herdr_ok(&["agent", "get", &name])["result"]["agent"]["tab_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    herdr_ok(&["tab", "close", &tab]);
+
+    let out = revive(state.path(), &["--name", &name]);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let prefix = format!("resumed {name} ");
+    assert!(stdout.starts_with(&prefix), "{stdout}");
+    assert!(
+        stdout.contains(&format!("(prompt not sent, run loopherd prompt {name})")),
+        "{stdout}"
+    );
+    let agent = &herdr_ok(&["agent", "get", &name])["result"]["agent"];
+    assert_eq!(agent["agent_session"]["value"], session.as_str());
+    assert_ne!(agent["tab_id"], tab.as_str());
+    let pane = agent["pane_id"].as_str().unwrap();
+    assert!(stdout.starts_with(&format!("{prefix}{pane}")), "{stdout}");
+    assert_eq!(ledger_entry(state.path(), &name)["pane_id"], pane);
+
+    let again = revive(state.path(), &["--name", &name]);
+    assert_eq!(
+        String::from_utf8_lossy(&again.stdout).lines().next(),
+        Some(format!("alive {name} {pane} (prompt not sent, run loopherd prompt {name})").as_str())
+    );
 }

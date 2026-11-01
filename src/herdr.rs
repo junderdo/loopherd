@@ -1,6 +1,6 @@
 //! herdr, reached only through the [`Herdr`] trait.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -46,6 +46,21 @@ pub struct Agent {
     pub tab_id: String,
     pub status: AgentStatus,
     pub session_id: Option<String>,
+    /// herdr is still launching or resuming it.
+    pub launch_pending: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tab {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pane {
+    pub id: String,
+    pub tab_id: String,
+    pub cwd: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +86,10 @@ pub trait Herdr {
     fn workspaces(&self) -> Result<Vec<Workspace>>;
     fn agents(&self) -> Result<Vec<Agent>>;
     fn agent(&self, name: &str) -> Result<Agent>;
+    fn tabs_in(&self, workspace_id: &str) -> Result<Vec<Tab>>;
+    fn panes_in(&self, workspace_id: &str) -> Result<Vec<Pane>>;
+    /// The shell itself is in the foreground: no command, editor, or agent running.
+    fn at_shell_prompt(&self, pane_id: &str) -> Result<bool>;
     /// Creates a tab without focusing it.
     fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<NewTab>;
     fn close_tab(&self, tab_id: &str) -> Result<()>;
@@ -147,6 +166,8 @@ struct AgentJson {
     tab_id: String,
     agent_status: AgentStatus,
     agent_session: Option<SessionJson>,
+    #[serde(default)]
+    launch_pending: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -162,6 +183,7 @@ impl From<AgentJson> for Agent {
             tab_id: a.tab_id,
             status: a.agent_status,
             session_id: a.agent_session.map(|s| s.value),
+            launch_pending: a.launch_pending.unwrap_or(false),
         }
     }
 }
@@ -201,6 +223,53 @@ impl Herdr for CliHerdr {
     fn agent(&self, name: &str) -> Result<Agent> {
         let result = self.call_ok(&["agent", "get", name])?;
         Ok(parse::<AgentJson>(&result["agent"], "agent get")?.into())
+    }
+
+    fn tabs_in(&self, workspace_id: &str) -> Result<Vec<Tab>> {
+        #[derive(Deserialize)]
+        struct TabJson {
+            tab_id: String,
+            label: String,
+        }
+        let result = self.call_ok(&["tab", "list", "--workspace", workspace_id])?;
+        let list: Vec<TabJson> = parse(&result["tabs"], "tab list")?;
+        Ok(list
+            .into_iter()
+            .map(|t| Tab {
+                id: t.tab_id,
+                label: t.label,
+            })
+            .collect())
+    }
+
+    fn panes_in(&self, workspace_id: &str) -> Result<Vec<Pane>> {
+        #[derive(Deserialize)]
+        struct PaneJson {
+            pane_id: String,
+            tab_id: String,
+            cwd: Option<PathBuf>,
+        }
+        let result = self.call_ok(&["pane", "list", "--workspace", workspace_id])?;
+        let list: Vec<PaneJson> = parse(&result["panes"], "pane list")?;
+        Ok(list
+            .into_iter()
+            .map(|p| Pane {
+                id: p.pane_id,
+                tab_id: p.tab_id,
+                cwd: p.cwd,
+            })
+            .collect())
+    }
+
+    fn at_shell_prompt(&self, pane_id: &str) -> Result<bool> {
+        #[derive(Deserialize)]
+        struct ProcessInfo {
+            shell_pid: Option<u32>,
+            foreground_process_group_id: Option<u32>,
+        }
+        let result = self.call_ok(&["pane", "process-info", "--pane", pane_id])?;
+        let info: ProcessInfo = parse(&result["process_info"], "pane process-info")?;
+        Ok(info.shell_pid.is_some() && info.shell_pid == info.foreground_process_group_id)
     }
 
     fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<NewTab> {

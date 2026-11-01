@@ -15,7 +15,14 @@ pub struct AgentRecord {
     pub session_id: Option<String>,
     pub repo: PathBuf,
     pub worktree: Option<PathBuf>,
+    /// Workspace ID at spawn time; IDs can be reused after a restart.
     pub workspace: String,
+    /// Missing in ledgers written before revive existed.
+    #[serde(default)]
+    pub workspace_label: Option<String>,
+    /// Passed to claude at spawn, and again on resume.
+    #[serde(default)]
+    pub claude_args: Vec<String>,
     pub prompt: Option<String>,
     pub prompt_sent: bool,
     /// RFC 3339, UTC.
@@ -122,6 +129,8 @@ mod tests {
             repo: "/src/repo".into(),
             worktree: None,
             workspace: "w1".into(),
+            workspace_label: Some("loopherd".into()),
+            claude_args: vec!["--model".into(), "opus".into()],
             prompt: Some("go".into()),
             prompt_sent,
             created: "2026-10-31T00:00:00Z".into(),
@@ -158,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn a_ledger_written_before_retire_existed_loads_as_not_retired() {
+    fn a_ledger_written_before_retire_and_revive_loads_with_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ledger.json");
         fs::write(
@@ -169,7 +178,10 @@ mod tests {
         )
         .unwrap();
         let entries = FileLedger::new(path).entries().unwrap();
-        assert!(!entries["lh-8"].retired);
-        assert_eq!(entries["lh-8"].retired_at, None);
+        let entry = &entries["lh-8"];
+        assert!(!entry.retired);
+        assert_eq!(entry.retired_at, None);
+        assert_eq!(entry.workspace_label, None);
+        assert!(entry.claude_args.is_empty());
     }
 }

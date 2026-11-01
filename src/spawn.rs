@@ -5,7 +5,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::herdr::{Agent, AgentStatus, Herdr, NewTab, StartOutcome, WaitOutcome};
+use crate::herdr::{Agent, AgentStatus, Herdr, NewTab, StartOutcome, WaitOutcome, Workspace};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::worktree::ensure_worktree;
 
@@ -82,7 +82,7 @@ pub fn spawn(
     };
     let cwd = worktree.as_ref().unwrap_or(&req.repo);
     let tab = herdr
-        .create_tab(&workspace, cwd, &req.name)
+        .create_tab(&workspace.id, cwd, &req.name)
         .context("tab")?;
 
     let readiness = match start_until_ready(herdr, req, &tab) {
@@ -96,7 +96,9 @@ pub fn spawn(
         session_id: None,
         repo: req.repo.clone(),
         worktree: worktree.clone(),
-        workspace,
+        workspace: workspace.id,
+        workspace_label: Some(workspace.label),
+        claude_args: req.claude_args.clone(),
         prompt: req.prompt.clone(),
         prompt_sent: false,
         created: humantime::format_rfc3339_seconds(SystemTime::now()).to_string(),
@@ -159,15 +161,19 @@ fn resolve_workspace(
     herdr: &dyn Herdr,
     label: Option<&str>,
     inherited: Option<&str>,
-) -> Result<String> {
+) -> Result<Workspace> {
+    let workspaces = herdr.workspaces()?;
     let Some(label) = label else {
-        return inherited
-            .map(str::to_string)
-            .ok_or_else(|| anyhow!("not running inside herdr; pass --workspace <label>"));
+        let id = inherited
+            .ok_or_else(|| anyhow!("not running inside herdr; pass --workspace <label>"))?;
+        return workspaces
+            .into_iter()
+            .find(|w| w.id == id)
+            .ok_or_else(|| anyhow!("no workspace {id}"));
     };
-    let mut matches = herdr.workspaces()?.into_iter().filter(|w| w.label == label);
+    let mut matches = workspaces.into_iter().filter(|w| w.label == label);
     match (matches.next(), matches.next()) {
-        (Some(w), None) => Ok(w.id),
+        (Some(w), None) => Ok(w),
         (None, _) => bail!("no workspace labeled {label:?}"),
         (Some(_), Some(_)) => bail!("more than one workspace is labeled {label:?}"),
     }
@@ -367,6 +373,24 @@ mod tests {
         assert_eq!(started[0].name, "worker");
         assert_eq!(started[0].pane_id, "w1:p1");
         assert_eq!(started[0].args, vec!["--model", "opus"]);
+    }
+
+    #[test]
+    fn records_the_workspace_label_and_claude_args_for_revive() {
+        for (flag, inherited) in [(Some("zagops"), None), (None, Some("w2"))] {
+            let herdr = herdr();
+            let mut ledger = MemLedger::default();
+            let req = SpawnRequest {
+                workspace: flag.map(str::to_string),
+                claude_args: vec!["--model".into(), "opus".into()],
+                ..request("a")
+            };
+            spawn(&herdr, &mut ledger, &req, inherited).unwrap();
+            let rec = &ledger.0["a"];
+            assert_eq!(rec.workspace, "w2");
+            assert_eq!(rec.workspace_label.as_deref(), Some("zagops"));
+            assert_eq!(rec.claude_args, vec!["--model", "opus"]);
+        }
     }
 
     #[test]
