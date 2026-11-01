@@ -329,7 +329,7 @@ mod tests {
 
         let out = close(&herdr, &mut ledger);
 
-        kept_line(&out, &wt, "uncommitted, untracked or ignored files");
+        kept_line(&out, &wt, "uncommitted or untracked changes");
         assert!(has_branch(&repo, "feat/new"));
     }
 
@@ -342,7 +342,7 @@ mod tests {
 
         let out = close(&herdr, &mut ledger);
 
-        kept_line(&out, &wt, "uncommitted, untracked or ignored files");
+        kept_line(&out, &wt, "uncommitted or untracked changes");
         assert!(wt.join("notes.txt").exists());
     }
 
@@ -571,22 +571,63 @@ mod tests {
         assert_eq!(herdr.tabs().len(), 1);
     }
 
+    /// Commits `.gitignore` with `patterns` in the worktree and lands it on origin's main.
+    fn merged_with_ignores(wt: &Path, patterns: &str) {
+        std::fs::write(wt.join(".gitignore"), patterns).unwrap();
+        git_in(wt, &["add", ".gitignore"]);
+        commit(wt, "ignore");
+        push_head(wt, "main");
+    }
+
+    fn write(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "x").unwrap();
+    }
+
     #[test]
     fn close_keeps_a_merged_worktree_holding_ignored_files() {
         let root = tempfile::tempdir().unwrap();
         let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
         let wt = root.path().join("proj/worktrees/feat-new");
-        std::fs::write(wt.join(".gitignore"), ".env\n").unwrap();
-        git_in(&wt, &["add", ".gitignore"]);
-        commit(&wt, "ignore .env");
-        push_head(&wt, "main");
-        std::fs::write(wt.join(".env"), "SECRET=1").unwrap();
+        merged_with_ignores(&wt, ".env\n");
+        write(&wt.join(".env"));
 
         let out = close(&herdr, &mut ledger);
 
-        kept_line(&out, &wt, "uncommitted, untracked or ignored files");
+        kept_line(&out, &wt, "ignored file .env");
         assert!(wt.join(".env").exists());
         assert!(has_branch(&repo, "feat/new"));
+    }
+
+    #[test]
+    fn close_removes_a_merged_worktree_whose_only_ignored_files_are_build_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        merged_with_ignores(&wt, "target/\nnode_modules/\n");
+        write(&wt.join("target/debug/loopherd"));
+        write(&wt.join("web/node_modules/pkg/index.js"));
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(out.last().unwrap(), &format!("removed {}", wt.display()));
+        assert!(!wt.exists());
+        assert!(!has_branch(&repo, "feat/new"));
+    }
+
+    #[test]
+    fn close_keeps_a_worktree_with_a_build_dir_and_another_ignored_file() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        merged_with_ignores(&wt, "target/\n.env\n");
+        write(&wt.join("target/debug/loopherd"));
+        write(&wt.join(".env"));
+
+        let out = close(&herdr, &mut ledger);
+
+        kept_line(&out, &wt, "ignored file .env");
+        assert!(wt.join(".env").exists());
     }
 
     #[test]

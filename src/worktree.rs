@@ -87,8 +87,8 @@ pub enum Removal {
     Kept(String),
 }
 
-/// Removes the linked worktree at `path` when it's clean, ignored files
-/// included, and either detached or merged into origin's default branch, then
+/// Removes the linked worktree at `path` when it's clean, with no ignored
+/// files outside build directories, and either detached or merged into origin's default branch, then
 /// deletes its branch. Never forces.
 pub fn remove_if_merged(repo: &Path, path: &Path) -> Result<Removal> {
     let path_str = path.to_str().context("worktree path is not UTF-8")?;
@@ -96,10 +96,8 @@ pub fn remove_if_merged(repo: &Path, path: &Path) -> Result<Removal> {
         let reason = format!("not a linked worktree of {}", repo.display());
         return Ok(Removal::Kept(reason));
     }
-    if !git(path, &["status", "--porcelain", "--ignored"])?.is_empty() {
-        return Ok(Removal::Kept(
-            "uncommitted, untracked or ignored files".into(),
-        ));
+    if let Some(reason) = unclean(path)? {
+        return Ok(Removal::Kept(reason));
     }
     let head = git(path, &["rev-parse", "HEAD"])?.trim().to_string();
     let branch = git(path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
@@ -122,6 +120,32 @@ pub fn remove_if_merged(repo: &Path, path: &Path) -> Result<Removal> {
         )?;
     }
     Ok(Removal::Removed)
+}
+
+/// Ignored directories that are regenerated, so removing them loses nothing.
+const BUILD_DIRS: [&str; 2] = ["target", "node_modules"];
+
+/// Why the worktree at `path` isn't clean: changes, or an ignored file outside
+/// [`BUILD_DIRS`].
+fn unclean(path: &Path) -> Result<Option<String>> {
+    // -z leaves paths unquoted. Rename entries carry a second path, but any
+    // change returns before that matters.
+    let status = git(path, &["status", "--porcelain", "-z", "--ignored=matching"])?;
+    for entry in status.split('\0').filter(|e| !e.is_empty()) {
+        let Some(ignored) = entry.strip_prefix("!! ") else {
+            return Ok(Some("uncommitted or untracked changes".into()));
+        };
+        if !in_build_dir(ignored) {
+            return Ok(Some(format!("ignored file {ignored}")));
+        }
+    }
+    Ok(None)
+}
+
+/// `entry` is a path git reports, with a trailing `/` for a directory.
+fn in_build_dir(entry: &str) -> bool {
+    let (dirs, _file) = entry.rsplit_once('/').unwrap_or(("", entry));
+    dirs.split('/').any(|dir| BUILD_DIRS.contains(&dir))
 }
 
 /// `path` is one of `repo`'s worktrees other than its main checkout.
