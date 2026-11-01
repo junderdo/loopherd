@@ -12,7 +12,7 @@ use crate::matching::live_agent;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Options {
-    /// Show retired entries and herds with no live members.
+    /// Show retired entries and herds with only retired entries.
     pub all: bool,
     /// List strays, not just count them.
     pub strays: bool,
@@ -90,7 +90,7 @@ pub fn view(
         herdr_reachable: agents.is_some(),
         herds: herds
             .into_iter()
-            .filter(|(_, members)| options.all || members.iter().any(|m| !m.gone))
+            .filter(|(_, members)| options.all || !members.is_empty())
             .map(|(name, members)| Herd {
                 name: name.to_string(),
                 members: sorted(members),
@@ -371,10 +371,9 @@ mod tests {
     }
 
     #[test]
-    fn hides_herds_with_no_live_members_unless_all() {
+    fn hides_a_herd_with_only_retired_entries_unless_all() {
         let entries = ledger(vec![
             entry("a", Some("live")),
-            entry("b", Some("gone")),
             retired("c", Some("retired")),
         ]);
         let agents = [named("a", AgentStatus::Idle)];
@@ -389,7 +388,17 @@ mod tests {
             .iter()
             .map(|h| (h.name.as_str(), h.members.len()))
             .collect();
-        assert_eq!(herds, [("gone", 1), ("live", 1), ("retired", 0)]);
+        assert_eq!(herds, [("live", 1), ("retired", 0)]);
+    }
+
+    #[test]
+    fn shows_a_herd_whose_members_are_all_gone_without_all() {
+        let entries = ledger(vec![entry("b", Some("gone")), entry("d", Some("gone"))]);
+        let view = view(&entries, Some(&[]), Options::default(), no_branch);
+        assert_eq!(view.herds.len(), 1);
+        assert_eq!(view.herds[0].name, "gone");
+        assert_eq!(names(&view.herds[0].members), ["b", "d"]);
+        assert!(view.herds[0].members.iter().all(|m| m.gone));
     }
 
     #[test]

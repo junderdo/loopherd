@@ -64,7 +64,7 @@ enum Command {
     /// List ledger members by herd with herdr's live status; read-only.
     /// Exits 2 when herdr is unreachable, showing every status as unknown.
     Status {
-        /// Also show retired entries and herds with no live members.
+        /// Also show retired entries and herds with only retired entries.
         #[arg(long)]
         all: bool,
         /// List live herdr agents missing from the ledger, not just count them.
