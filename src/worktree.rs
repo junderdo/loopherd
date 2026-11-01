@@ -1,8 +1,13 @@
 //! Git worktrees for spawned agents.
 
-use std::io::ErrorKind;
+use std::collections::BTreeSet;
+use std::io::{ErrorKind, Read};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
@@ -49,7 +54,7 @@ pub fn ensure_worktree(repo: &Path, branch: &str) -> Result<PathBuf> {
     if let Some(existing) = find_worktree(repo, branch)? {
         return Ok(existing);
     }
-    git(repo, &["fetch", "--quiet", "origin"])?;
+    fetch(repo)?;
     let path = worktree_path(repo, branch);
     let path_str = path.to_str().context("worktree path is not UTF-8")?;
     let remote = format!("origin/{branch}");
@@ -164,7 +169,7 @@ pub fn remove_if_gone(repo: &Path, path: &Path) -> Result<Option<Gone>> {
 
 /// Why `branch` at `head` isn't merged into origin's default branch, if it isn't.
 fn unmerged(repo: &Path, branch: &str, head: &str) -> Result<Option<String>> {
-    git(repo, &["fetch", "--quiet", "origin"])?;
+    fetch(repo)?;
     let base = default_branch(repo)?;
     Ok((!is_ancestor(repo, head, &base)?).then(|| format!("{branch} is not merged into {base}")))
 }
@@ -340,7 +345,7 @@ pub fn ensure_detached_worktree(repo: &Path, slug: &str) -> Result<PathBuf> {
     if is_worktree(repo, &path)? {
         return Ok(path);
     }
-    git(repo, &["fetch", "--quiet", "origin"])?;
+    fetch(repo)?;
     let base = default_branch(repo)?;
     let path_str = path.to_str().context("worktree path is not UTF-8")?;
     git(
@@ -375,21 +380,42 @@ fn find_worktree(repo: &Path, branch: &str) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
-/// Origin's default branch, printing a warning when the local origin/HEAD is stale.
+/// Origin's default branch, warning once per run when it falls back or the
+/// local origin/HEAD is stale.
 fn default_branch(repo: &Path) -> Result<String> {
     let (branch, warning) = default_branch_and_warning(repo)?;
     if let Some(warning) = warning {
-        eprintln!("{warning}");
+        warn_once(warning);
     }
     Ok(branch)
+}
+
+/// Prints `warning` to stderr unless this run already has.
+fn warn_once(warning: String) {
+    static SHOWN: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+    let mut shown = SHOWN.lock().unwrap_or_else(|e| e.into_inner());
+    if !shown.contains(&warning) {
+        eprintln!("{warning}");
+        shown.insert(warning);
+    }
 }
 
 /// Origin's default branch as the remote reports it, falling back to the local
 /// origin/HEAD, which git never updates after the clone.
 fn default_branch_and_warning(repo: &Path) -> Result<(String, Option<String>)> {
-    let Some(remote) = remote_default_branch(repo) else {
-        return Ok((local_default_branch(repo)?, None));
+    let remote = match remote_head(repo)? {
+        RemoteHead::Branch(remote) => remote,
+        RemoteHead::NoBranch => {
+            let local = local_default_branch(repo)?;
+            let warning = format!(
+                "warning: origin's HEAD names no branch (detached or unborn); \
+                 using the local origin/HEAD, {local}"
+            );
+            return Ok((local, Some(warning)));
+        }
+        RemoteHead::Unreachable => return Ok((local_default_branch(repo)?, None)),
     };
+    require_fetched(repo, &remote)?;
     let local = git(
         repo,
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
@@ -409,14 +435,43 @@ fn default_branch_and_warning(repo: &Path) -> Result<(String, Option<String>)> {
     Ok((remote, warning))
 }
 
-/// `None` when origin can't be reached or names no HEAD branch.
-fn remote_default_branch(repo: &Path) -> Option<String> {
-    let out = git(repo, &["ls-remote", "--symref", "origin", "HEAD"]).ok()?;
-    let line = out
-        .lines()
-        .find_map(|l| l.strip_prefix("ref: refs/heads/"))?;
-    let (branch, _) = line.split_once('\t')?;
-    Some(format!("origin/{branch}"))
+/// Errors unless the clone's fetch refspec brought `remote` down.
+fn require_fetched(repo: &Path, remote: &str) -> Result<()> {
+    if has_ref(repo, &format!("refs/remotes/{remote}")) {
+        return Ok(());
+    }
+    let branch = remote.strip_prefix("origin/").unwrap_or(remote);
+    let refspecs = git(repo, &["config", "--get-all", "remote.origin.fetch"]).unwrap_or_default();
+    let refspecs = refspecs.lines().collect::<Vec<_>>().join(", ");
+    bail!(
+        "origin's default branch is {branch}, but this clone's fetch refspec \
+         ({refspecs}) doesn't fetch it; add it with \
+         `git -C {} remote set-branches --add origin {branch}`",
+        repo.display()
+    )
+}
+
+enum RemoteHead {
+    Branch(String),
+    /// Detached or unborn.
+    NoBranch,
+    Unreachable,
+}
+
+fn remote_head(repo: &Path) -> Result<RemoteHead> {
+    match remote_git(repo, &["ls-remote", "--symref", "origin", "HEAD"]) {
+        Ok(out) => Ok(parse_head_symref(&out).map_or(RemoteHead::NoBranch, RemoteHead::Branch)),
+        Err(e) if e.is::<TimedOut>() => Err(e),
+        Err(_) => Ok(RemoteHead::Unreachable),
+    }
+}
+
+/// The `origin/<branch>` that `ls-remote --symref` output names as HEAD.
+fn parse_head_symref(out: &str) -> Option<String> {
+    out.lines()
+        .filter_map(|l| l.strip_prefix("ref: refs/heads/")?.split_once('\t'))
+        .find(|(_, name)| *name == "HEAD")
+        .map(|(branch, _)| format!("origin/{branch}"))
 }
 
 fn local_default_branch(repo: &Path) -> Result<String> {
@@ -425,7 +480,7 @@ fn local_default_branch(repo: &Path) -> Result<String> {
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
     )
     .or_else(|_| {
-        git(repo, &["remote", "set-head", "origin", "--auto"])?;
+        remote_git(repo, &["remote", "set-head", "origin", "--auto"])?;
         git(
             repo,
             &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
@@ -437,6 +492,94 @@ fn local_default_branch(repo: &Path) -> Result<String> {
 
 fn has_ref(repo: &Path, name: &str) -> bool {
     git(repo, &["show-ref", "--verify", "--quiet", name]).is_ok()
+}
+
+/// How long a call to origin may take before loopherd gives up on it.
+const REMOTE_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn fetch(repo: &Path) -> Result<()> {
+    remote_git(repo, &["fetch", "--quiet", "origin"])?;
+    Ok(())
+}
+
+fn remote_git(repo: &Path, args: &[&str]) -> Result<String> {
+    remote_git_within(repo, args, REMOTE_TIMEOUT)
+}
+
+/// A remote call that didn't finish in time.
+#[derive(Debug)]
+struct TimedOut(String);
+
+impl std::fmt::Display for TimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TimedOut {}
+
+/// Runs git against origin with no credential prompt, killing it and its
+/// helpers after `timeout`.
+fn remote_git_within(repo: &Path, args: &[&str], timeout: Duration) -> Result<String> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // Its own group, so a timeout can kill the transport helpers git spawns.
+        .process_group(0)
+        .spawn()
+        .context("run git")?;
+    let stdout = read_in_background(child.stdout.take());
+    let stderr = read_in_background(child.stderr.take());
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait().context("wait for git")? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            kill_group(&mut child);
+            return Err(TimedOut(format!(
+                "git {}: origin didn't answer within {}; \
+                 check that it's reachable and needs no credential prompt",
+                args.join(" "),
+                humantime::format_duration(timeout)
+            ))
+            .into());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let stdout = stdout.join().unwrap_or_default();
+    if !status.success() {
+        bail!(
+            "git {}: {}",
+            args.join(" "),
+            stderr.join().unwrap_or_default().trim()
+        );
+    }
+    Ok(stdout)
+}
+
+fn read_in_background(pipe: Option<impl Read + Send + 'static>) -> JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut out = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut out);
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    })
+}
+
+fn kill_group(child: &mut Child) {
+    let _ = Command::new("kill")
+        .args(["-KILL", "--", &format!("-{}", child.id())])
+        .stderr(Stdio::null())
+        .status();
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -507,6 +650,39 @@ pub mod testing {
         );
         let head = format!("refs/heads/{branch}");
         run(&root.join("origin.git"), &["symbolic-ref", "HEAD", &head]);
+    }
+
+    /// Points the bare origin's HEAD straight at `main`'s commit.
+    pub fn detach_origin_head(root: &Path) {
+        let origin = root.join("origin.git");
+        let main = head_of(&origin, "main");
+        run(&origin, &["update-ref", "--no-deref", "HEAD", &main]);
+    }
+
+    /// Points the bare origin's HEAD at a branch that doesn't exist.
+    pub fn unborn_origin_head(root: &Path) {
+        let origin = root.join("origin.git");
+        run(&origin, &["symbolic-ref", "HEAD", "refs/heads/gone"]);
+    }
+
+    /// Like [`repo_with_origin`], but a `--single-branch` clone of `main`.
+    pub fn single_branch_repo(root: &Path) -> PathBuf {
+        let full = repo_with_origin(root);
+        let repo = root.join("narrow/narrow");
+        std::fs::create_dir_all(repo.parent().unwrap()).unwrap();
+        let origin = root.join("origin.git");
+        run(
+            root,
+            &[
+                "clone",
+                "--quiet",
+                "--single-branch",
+                path(&origin),
+                path(&repo),
+            ],
+        );
+        std::fs::remove_dir_all(full).unwrap();
+        repo
     }
 
     fn path(p: &Path) -> &str {
@@ -646,6 +822,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(root.path());
         move_origin_default(root.path(), "staging");
+        git_in(&repo, &["fetch", "--quiet", "origin"]);
         let (branch, warning) = default_branch_and_warning(&repo).unwrap();
         assert_eq!(branch, "origin/staging");
         assert_eq!(
@@ -666,6 +843,143 @@ mod tests {
         let (branch, warning) = default_branch_and_warning(&repo).unwrap();
         assert_eq!(branch, "origin/main");
         assert_eq!(warning, None);
+    }
+
+    #[test]
+    fn the_symref_parser_takes_only_heads_symref() {
+        let out = "ref: refs/heads/other\trefs/remotes/x\nref: refs/heads/main\tHEAD\nabc\tHEAD\n";
+        assert_eq!(parse_head_symref(out).as_deref(), Some("origin/main"));
+        assert_eq!(parse_head_symref("ref: refs/heads/other\tnot-head\n"), None);
+    }
+
+    #[test]
+    fn a_branch_spawn_starts_from_origins_moved_default() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        move_origin_default(root.path(), "staging");
+        let wt = ensure_worktree(&repo, "feat/new").unwrap();
+        assert_eq!(head(&wt), head_of(&repo, "origin/staging"));
+    }
+
+    #[test]
+    fn a_detached_origin_head_warns_and_names_the_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        detach_origin_head(root.path());
+        let (branch, warning) = default_branch_and_warning(&repo).unwrap();
+        assert_eq!(branch, "origin/main");
+        assert_eq!(
+            warning.unwrap(),
+            "warning: origin's HEAD names no branch (detached or unborn); \
+             using the local origin/HEAD, origin/main"
+        );
+    }
+
+    #[test]
+    fn an_unborn_origin_head_warns_and_names_the_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        unborn_origin_head(root.path());
+        let (branch, warning) = default_branch_and_warning(&repo).unwrap();
+        assert_eq!(branch, "origin/main");
+        assert!(warning.unwrap().contains("origin/HEAD, origin/main"));
+    }
+
+    #[test]
+    fn a_single_branch_clone_names_the_unfetched_default_and_its_refspec() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = single_branch_repo(root.path());
+        move_origin_default(root.path(), "staging");
+
+        let err = ensure_worktree(&repo, "feat/new").unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "origin's default branch is staging, but this clone's fetch refspec \
+                 (+refs/heads/main:refs/remotes/origin/main) doesn't fetch it; add it with \
+                 `git -C {} remote set-branches --add origin staging`",
+                repo.display()
+            )
+        );
+        assert!(!has_branch(&repo, "feat/new"));
+    }
+
+    /// Points origin at an `ext::` command, which git runs in place of a transport.
+    fn origin_runs(repo: &Path, command: &str) {
+        git_in(repo, &["config", "protocol.ext.allow", "always"]);
+        git_in(
+            repo,
+            &["remote", "set-url", "origin", &format!("ext::{command}")],
+        );
+    }
+
+    #[test]
+    fn a_hung_remote_call_times_out_with_a_clear_error() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        origin_runs(&repo, "sleep 30");
+        let start = std::time::Instant::now();
+
+        let err = remote_git_within(
+            &repo,
+            &["fetch", "--quiet", "origin"],
+            std::time::Duration::from_millis(300),
+        )
+        .unwrap_err();
+
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(
+            format!("{err:#}"),
+            "git fetch --quiet origin: origin didn't answer within 300ms; \
+             check that it's reachable and needs no credential prompt"
+        );
+    }
+
+    #[test]
+    fn remote_calls_never_prompt_for_credentials() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let env = root.path().join("env");
+        origin_runs(&repo, &format!("sh -c env>{};false", env.display()));
+
+        assert!(fetch(&repo).is_err());
+
+        let env = std::fs::read_to_string(env).unwrap();
+        assert!(env.lines().any(|l| l == "GIT_TERMINAL_PROMPT=0"), "{env}");
+    }
+
+    const WARN_TWICE_REPO: &str = "LOOPHERD_TEST_WARN_TWICE_REPO";
+
+    /// Runs only as the child of the test below, which sets its repo.
+    #[test]
+    fn looks_up_the_default_branch_twice() {
+        if let Some(repo) = std::env::var_os(WARN_TWICE_REPO) {
+            default_branch(Path::new(&repo)).unwrap();
+            default_branch(Path::new(&repo)).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_stale_origin_head_warns_on_stderr_once_per_run() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        move_origin_default(root.path(), "staging");
+        git_in(&repo, &["fetch", "--quiet", "origin"]);
+
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "--nocapture"])
+            .arg("worktree::tests::looks_up_the_default_branch_twice")
+            .env(WARN_TWICE_REPO, &repo)
+            .output()
+            .unwrap();
+
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let warnings = stderr
+            .lines()
+            .filter(|l| l.starts_with("warning: origin's default branch is origin/staging"))
+            .count();
+        assert_eq!(warnings, 1, "{stderr}");
     }
 
     #[test]
