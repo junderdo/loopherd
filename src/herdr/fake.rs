@@ -69,11 +69,15 @@ impl FakeHerdr {
 
     /// Adds a live agent that already exists in the session.
     pub fn with_agent(self, name: &str) -> Self {
+        self.with_agent_in(name, AgentStatus::Idle)
+    }
+
+    pub fn with_agent_in(self, name: &str, status: AgentStatus) -> Self {
         self.state.borrow_mut().agents.push(Agent {
             name: Some(name.to_string()),
             pane_id: "w9:p9".into(),
             tab_id: "w9:t9".into(),
-            status: AgentStatus::Idle,
+            status,
             session_id: None,
         });
         self

@@ -35,7 +35,7 @@ pub struct Spawned {
 
 impl Spawned {
     /// One `key value` line per fact, then the blocked message if any.
-    pub fn report(&self) -> (String, i32) {
+    pub fn report(&self, name: &str) -> (String, i32) {
         let mut lines = vec![
             format!("tab {}", self.tab_id),
             format!("pane {}", self.pane_id),
@@ -51,7 +51,7 @@ impl Spawned {
             return (lines.join("\n"), 0);
         }
         lines.push(format!(
-            "blocked: answer it in pane {}, then send the prompt yourself",
+            "blocked: answer it in pane {}, then run loopherd prompt {name}",
             self.pane_id
         ));
         (lines.join("\n"), BLOCKED_EXIT)
@@ -339,7 +339,7 @@ mod tests {
         let spawned = run(&herdr, &mut ledger, &req).unwrap();
         let wt = root.path().join("proj/worktrees/feature-existing");
         assert_eq!(
-            spawned.report().0,
+            spawned.report("a").0,
             format!(
                 "tab w1:t1\npane w1:p1\nworktree {}\nsession session-a",
                 wt.display()
@@ -375,7 +375,7 @@ mod tests {
         let mut ledger = MemLedger::default();
         let spawned = run(&herdr, &mut ledger, &request("a")).unwrap();
         assert_eq!(
-            spawned.report(),
+            spawned.report("a"),
             ("tab w1:t1\npane w1:p1\nsession session-a".into(), 0)
         );
         assert_eq!(herdr.prompts(), vec![("a".into(), "start work".into())]);
@@ -410,10 +410,10 @@ mod tests {
         let mut ledger = MemLedger::default();
         let spawned = run(&herdr, &mut ledger, &request("a")).unwrap();
         assert_eq!(
-            spawned.report(),
+            spawned.report("a"),
             (
                 "tab w1:t1\npane w1:p1\nsession unknown\n\
-                 blocked: answer it in pane w1:p1, then send the prompt yourself"
+                 blocked: answer it in pane w1:p1, then run loopherd prompt a"
                     .into(),
                 3
             )
@@ -465,7 +465,7 @@ mod tests {
             ..request("a")
         };
         let spawned = run(&herdr, &mut ledger, &req).unwrap();
-        assert_eq!(spawned.report().1, 0);
+        assert_eq!(spawned.report("a").1, 0);
         assert!(herdr.prompts().is_empty());
         assert!(!ledger.0["a"].prompt_sent);
     }
