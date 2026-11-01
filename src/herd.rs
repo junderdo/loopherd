@@ -209,6 +209,68 @@ fn expand_home(path: &str, home: &Path) -> PathBuf {
     }
 }
 
+/// Every herd file in `paths.herds`, sorted by herd name, with a usage line
+/// per template. Exits 1 if any file is invalid.
+pub fn herds(paths: &Paths) -> Result<(String, i32)> {
+    let files = herd_files(&paths.herds)?;
+    if files.is_empty() {
+        let hint = format!(
+            "no herds: add a herd file at {}/<herd>.toml",
+            paths.herds.display()
+        );
+        return Ok((hint, 0));
+    }
+    let mut lines = Vec::new();
+    let mut code = 0;
+    for file in &files {
+        let herd = file.file_stem().unwrap_or_default().to_string_lossy();
+        match std::fs::read_to_string(file)
+            .map_err(anyhow::Error::from)
+            .and_then(|text| parse(&text))
+        {
+            Ok(parsed) => lines.extend(describe(&herd, &parsed)),
+            Err(e) => {
+                let name = file.file_name().unwrap_or_default().to_string_lossy();
+                lines.push(format!("invalid {name}: {}", format!("{e:#}").trim_end()));
+                code = 1;
+            }
+        }
+    }
+    Ok((lines.join("\n"), code))
+}
+
+/// The `*.toml` files in `dir` by herd name, skipping hidden ones; none if `dir` is missing.
+fn herd_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let entries = match std::fs::read_dir(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        entries => entries.with_context(|| format!("read {}", dir.display()))?,
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("read {}", dir.display()))?
+            .path();
+        let hidden = path
+            .file_name()
+            .is_some_and(|n| n.as_encoded_bytes().starts_with(b"."));
+        if !hidden && path.extension().is_some_and(|e| e == "toml") {
+            files.push(path);
+        }
+    }
+    files.sort_by(|a, b| a.file_stem().cmp(&b.file_stem()));
+    Ok(files)
+}
+
+fn describe(herd: &str, parsed: &HerdFile) -> Vec<String> {
+    let workspace = parsed.workspace.as_deref().unwrap_or("(current)");
+    let header = format!("{herd}  repo {}  workspace {workspace}", parsed.repo);
+    let usages = parsed.template.iter().map(|(template, t)| {
+        let params: String = t.params.iter().map(|p| format!(" <{p}>")).collect();
+        format!("  loopherd add {herd} {template}{params}")
+    });
+    std::iter::once(header).chain(usages).collect()
+}
+
 /// Placeholders every template gets, so no param may take their names.
 const BUILT_INS: [&str; 5] = ["name", "herd", "branch", "worktree", "pane"];
 
@@ -219,9 +281,13 @@ fn load(dir: &Path, herd: &str) -> Result<HerdFile> {
     let file = dir.join(format!("{herd}.toml"));
     let text =
         std::fs::read_to_string(&file).with_context(|| format!("read {}", file.display()))?;
-    let parsed: HerdFile = toml::from_str(&text).with_context(|| file.display().to_string())?;
+    parse(&text).with_context(|| file.display().to_string())
+}
+
+fn parse(text: &str) -> Result<HerdFile> {
+    let parsed: HerdFile = toml::from_str(text)?;
     for (name, template) in &parsed.template {
-        validate(template).with_context(|| format!("{}: template {name}", file.display()))?;
+        validate(template).with_context(|| format!("template {name}"))?;
     }
     Ok(parsed)
 }
@@ -704,5 +770,83 @@ args = ["--model", "opus"]
         )
         .unwrap_err();
         assert!(format!("{err:#}").starts_with("workspace: "), "{err:#}");
+    }
+
+    #[test]
+    fn herds_lists_each_herd_with_a_usage_line_per_template_sorted_by_name() {
+        let issues = "repo = \"~/src/z\"\nworkspace = \"zagops\"\n\
+                      [template.issue]\nparams = [\"key\", \"slug\"]\nprompt = \"go\"\n\
+                      [template.chat]\nparams = []\nprompt = \"go\"\n";
+        let config = Config::with(&[("zissues", issues), ("prs", PR_HERD)]);
+
+        let (report, code) = herds(&config.paths()).unwrap();
+
+        assert_eq!(
+            report,
+            "prs  repo /src/repo  workspace (current)\n\
+             \x20 loopherd add prs pr <number>\n\
+             zissues  repo ~/src/z  workspace zagops\n\
+             \x20 loopherd add zissues chat\n\
+             \x20 loopherd add zissues issue <key> <slug>"
+        );
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn herds_sorts_by_herd_name_not_file_name() {
+        let config = Config::with(&[("prs-old", PR_HERD), ("prs", PR_HERD)]);
+        let (report, _) = herds(&config.paths()).unwrap();
+        let headers: Vec<&str> = report.lines().filter(|l| !l.starts_with(' ')).collect();
+        assert_eq!(headers[0], "prs  repo /src/repo  workspace (current)");
+        assert!(headers[1].starts_with("prs-old  "), "{report}");
+    }
+
+    #[test]
+    fn herds_reports_invalid_files_lists_the_rest_and_exits_1() {
+        let config = Config::with(&[
+            ("a-broken", "repo = "),
+            ("prs", PR_HERD),
+            ("z-bad", "repo = \"/r\"\n[template.t]\nparams = []\n"),
+        ]);
+
+        let (report, code) = herds(&config.paths()).unwrap();
+
+        let lines: Vec<&str> = report.lines().collect();
+        assert!(
+            lines[0].starts_with("invalid a-broken.toml: TOML parse error"),
+            "{report}"
+        );
+        assert!(!lines[0].contains(&config.path().display().to_string()));
+        assert_eq!(
+            lines[lines.len() - 3..],
+            [
+                "prs  repo /src/repo  workspace (current)",
+                "  loopherd add prs pr <number>",
+                "invalid z-bad.toml: template t: set one of prompt and prompt_file",
+            ]
+        );
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn herds_with_no_herd_files_hints_at_the_directory_and_exits_0() {
+        let config = Config::with(&[]);
+        fs::write(config.path().join("herds/notes.md"), "").unwrap();
+        fs::write(config.path().join("herds/.draft.toml"), "repo = ").unwrap();
+        let missing = Paths {
+            herds: config.path().join("nope/herds"),
+            ..config.paths()
+        };
+        for paths in [config.paths(), missing] {
+            let (report, code) = herds(&paths).unwrap();
+            assert_eq!(
+                report,
+                format!(
+                    "no herds: add a herd file at {}/<herd>.toml",
+                    paths.herds.display()
+                )
+            );
+            assert_eq!(code, 0);
+        }
     }
 }

@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
-use crate::herd::{AddRequest, Paths, add, dry_run};
+use crate::herd::{AddRequest, Paths, add, dry_run, herds};
 use crate::herdr::CliHerdr;
 use crate::ledger::FileLedger;
 use crate::prompt::prompt;
@@ -37,6 +37,8 @@ enum Command {
     Spawn(SpawnArgs),
     /// Spawn a herd member from a template in the herd's file.
     Add(AddArgs),
+    /// List herd files with a usage line per template; exits 1 if any is invalid.
+    Herds,
     /// Mark a ledger entry finished so revive leaves it alone. Changes only the ledger.
     Retire { name: String },
     /// Resume ledger agents after a herdr restart or a closed tab.
@@ -103,6 +105,7 @@ fn main() -> ExitCode {
     let (command, result) = match Cli::parse().command {
         Command::Spawn(args) => ("spawn", run_spawn(args)),
         Command::Add(args) => ("add", run_add(args)),
+        Command::Herds => ("herds", run_herds()),
         Command::Retire { name } => ("retire", run_retire(&name)),
         Command::Revive { dry_run, name } => ("revive", run_revive(dry_run, name)),
         Command::Prompt { name, force } => ("prompt", run_prompt(&name, force)),
@@ -204,6 +207,12 @@ fn run_add(args: AddArgs) -> Result<i32> {
     let (name, spawned) = add(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
     let (message, code) = spawned.report(&name);
     println!("{message}");
+    Ok(code)
+}
+
+fn run_herds() -> Result<i32> {
+    let (report, code) = herds(&Paths::from_env().context("herd")?)?;
+    println!("{report}");
     Ok(code)
 }
 
