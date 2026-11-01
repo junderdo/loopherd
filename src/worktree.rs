@@ -413,12 +413,15 @@ fn default_branch_and_warning(repo: &Path) -> Result<(String, Option<String>)> {
             );
             return Ok((local, Some(warning)));
         }
-        RemoteHead::Unreachable(error) => {
+        RemoteHead::Unreachable { error, hint } => {
             let local = local_default_branch(repo)?;
-            let warning = format!(
+            let mut warning = format!(
                 "warning: couldn't ask origin for its default branch ({error}); \
                  using the local origin/HEAD, {local}"
             );
+            if let Some(hint) = hint {
+                warning = format!("{warning}\n{hint}");
+            }
             return Ok((local, Some(warning)));
         }
     };
@@ -462,17 +465,21 @@ enum RemoteHead {
     Branch(String),
     /// Detached or unborn.
     NoBranch,
-    /// The first line of why ls-remote failed.
-    Unreachable(String),
+    Unreachable {
+        /// The first line of why ls-remote failed.
+        error: String,
+        hint: Option<&'static str>,
+    },
 }
 
 fn remote_head(repo: &Path) -> Result<RemoteHead> {
     match remote_git(repo, &["ls-remote", "--symref", "origin", "HEAD"]) {
         Ok(out) => Ok(parse_head_symref(&out).map_or(RemoteHead::NoBranch, RemoteHead::Branch)),
         Err(e) if e.is::<TimedOut>() => Err(e),
-        Err(e) => Ok(RemoteHead::Unreachable(
-            e.to_string().lines().next().unwrap_or_default().to_string(),
-        )),
+        Err(e) => Ok(RemoteHead::Unreachable {
+            error: e.to_string().lines().next().unwrap_or_default().to_string(),
+            hint: e.downcast_ref::<RemoteFailed>().and_then(|f| f.hint),
+        }),
     }
 }
 
@@ -510,6 +517,10 @@ const TIMEOUT_VAR: &str = "LOOPHERD_GIT_TIMEOUT";
 /// How long a call to origin may take before loopherd gives up on it.
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// The most [`TIMEOUT_VAR`] may ask for. It keeps the deadline well inside
+/// what `Instant` can hold, so computing it can't overflow.
+const MAX_REMOTE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+
 fn fetch(repo: &Path) -> Result<()> {
     remote_git(repo, &["fetch", "--quiet", "origin"])?;
     Ok(())
@@ -525,9 +536,11 @@ fn remote_timeout() -> Result<Duration> {
     };
     let secs = secs.to_string_lossy();
     match secs.parse().map(Duration::from_secs) {
-        // A deadline past what Instant can hold would panic.
-        Ok(t) if !t.is_zero() && Instant::now().checked_add(t).is_some() => Ok(t),
-        _ => bail!("{TIMEOUT_VAR} must be a whole number of seconds above 0, not '{secs}'"),
+        Ok(t) if !t.is_zero() && t <= MAX_REMOTE_TIMEOUT => Ok(t),
+        _ => bail!(
+            "{TIMEOUT_VAR} must be a whole number of seconds from 1 to {}, not '{secs}'",
+            MAX_REMOTE_TIMEOUT.as_secs()
+        ),
     }
 }
 
@@ -557,7 +570,8 @@ fn remote_git_within(repo: &Path, args: &[&str], timeout: Duration) -> Result<St
         .stderr(Stdio::piped())
         // Its own group, so a timeout can kill the transport helpers git spawns.
         .process_group(0);
-    if !has_own_ssh_setting(repo) {
+    let batch_mode = !has_own_ssh_setting(repo);
+    if batch_mode {
         command.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
     }
     let mut child = command.spawn().context("run git")?;
@@ -583,22 +597,78 @@ fn remote_git_within(repo: &Path, args: &[&str], timeout: Duration) -> Result<St
     };
     let stdout = stdout.join().unwrap_or_default();
     if !status.success() {
-        bail!(
-            "git {}: {}",
-            args.join(" "),
-            stderr.join().unwrap_or_default().trim()
-        );
+        let stderr = stderr.join().unwrap_or_default();
+        let stderr = stderr.trim();
+        let hint = (batch_mode && ssh_refused(stderr)).then_some(SSH_PROMPT_HINT);
+        let message = format!("git {}: {stderr}", args.join(" "));
+        return Err(RemoteFailed { message, hint }.into());
     }
     Ok(stdout)
 }
 
+const SSH_PROMPT_HINT: &str = "hint: if ssh needed a passphrase or host-key prompt, set \
+                               SSH_ASKPASS_REQUIRE=prefer (with SSH_ASKPASS and a display) \
+                               to allow a GUI one";
+
+/// Whether git's stderr looks like an ssh auth or host-key failure, which a
+/// blocked prompt can cause.
+fn ssh_refused(stderr: &str) -> bool {
+    [
+        "Permission denied",
+        "Host key verification failed",
+        "passphrase",
+    ]
+    .iter()
+    .any(|sign| stderr.contains(sign))
+}
+
+/// A remote call that ran and failed.
+#[derive(Debug)]
+struct RemoteFailed {
+    message: String,
+    hint: Option<&'static str>,
+}
+
+impl std::fmt::Display for RemoteFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)?;
+        if let Some(hint) = self.hint {
+            write!(f, "\n{hint}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for RemoteFailed {}
+
 /// Whether the user chose how git runs ssh or how ssh prompts, which BatchMode
 /// must not override.
 fn has_own_ssh_setting(repo: &Path) -> bool {
-    ["GIT_SSH_COMMAND", "GIT_SSH", "SSH_ASKPASS_REQUIRE"]
+    ["GIT_SSH_COMMAND", "GIT_SSH"]
         .iter()
         .any(|var| std::env::var_os(var).is_some())
+        || askpass_will_prompt()
         || !core_ssh_command_unset(repo)
+}
+
+/// Whether ssh will ask through an askpass program rather than the terminal.
+/// ssh matches `SSH_ASKPASS_REQUIRE` case-insensitively but untrimmed.
+fn askpass_will_prompt() -> bool {
+    let Some(require) = std::env::var_os("SSH_ASKPASS_REQUIRE") else {
+        return false;
+    };
+    let require = require.to_string_lossy();
+    if require.eq_ignore_ascii_case("force") {
+        return true;
+    }
+    // Without a display, prefer falls back to the terminal.
+    require.eq_ignore_ascii_case("prefer")
+        && non_empty_var("SSH_ASKPASS")
+        && (non_empty_var("DISPLAY") || non_empty_var("WAYLAND_DISPLAY"))
+}
+
+fn non_empty_var(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|v| !v.is_empty())
 }
 
 /// Only a clean "not set" counts: a config git can't read may hold one.
@@ -1020,10 +1090,11 @@ mod tests {
     /// Runs only as the child of [`fetch_in_child`], which sets its repo.
     #[test]
     fn fetches_origin() {
-        if let Some(repo) = std::env::var_os(CHILD_REPO)
-            && let Err(e) = fetch(Path::new(&repo))
-        {
-            eprintln!("fetch failed: {e:#}");
+        if let Some(repo) = std::env::var_os(CHILD_REPO) {
+            match fetch(Path::new(&repo)) {
+                Ok(()) => eprintln!("fetched"),
+                Err(e) => eprintln!("fetch failed: {e:#}"),
+            }
         }
     }
 
@@ -1063,6 +1134,9 @@ mod tests {
             "GIT_SSH_COMMAND",
             "GIT_SSH",
             "SSH_ASKPASS_REQUIRE",
+            "SSH_ASKPASS",
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
             "LOOPHERD_GIT_TIMEOUT",
         ] {
             child.env_remove(var);
@@ -1083,6 +1157,125 @@ mod tests {
             .filter(|l| l.starts_with("GIT_SSH"))
             .map(String::from)
             .collect()
+    }
+
+    const SSH_HINT: &str = "hint: if ssh needed a passphrase or host-key prompt, set \
+                            SSH_ASKPASS_REQUIRE=prefer (with SSH_ASKPASS and a display) \
+                            to allow a GUI one";
+
+    /// Points origin at a transport that writes `stderr` and fails.
+    fn origin_fails_with(root: &Path, repo: &Path, stderr: &str) {
+        let script = root.join("failing-origin");
+        std::fs::write(&script, format!("printf '%s\\n' '{stderr}' >&2\nexit 1\n")).unwrap();
+        origin_runs(repo, &format!("sh {}", script.display()));
+    }
+
+    #[test]
+    fn an_ssh_failure_under_batch_mode_hints_how_to_allow_a_prompt() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        for stderr in [
+            "git@example.com: Permission denied (publickey).",
+            "Host key verification failed.",
+            "Load key \"/home/me/.ssh/id_ed25519\": incorrect passphrase supplied",
+        ] {
+            origin_fails_with(root.path(), &repo, stderr);
+
+            let out = fetch_in_child(&repo, &[]);
+
+            assert!(out.contains(&format!("{stderr}\n")), "{out}");
+            assert!(out.contains(&format!("\n{SSH_HINT}\n")), "{out}");
+        }
+    }
+
+    #[test]
+    fn a_failure_that_isnt_ssh_gets_no_hint() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        origin_fails_with(root.path(), &repo, "fatal: repository not found");
+
+        let out = fetch_in_child(&repo, &[]);
+
+        assert!(out.contains("fatal: repository not found"), "{out}");
+        assert!(!out.contains("hint:"), "{out}");
+    }
+
+    #[test]
+    fn a_users_own_ssh_or_askpass_setting_gets_no_hint() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        origin_fails_with(root.path(), &repo, "Permission denied (publickey).");
+        let cases: [&[(&str, &str)]; 4] = [
+            &[("GIT_SSH_COMMAND", "my-ssh")],
+            &[("GIT_SSH", "my-ssh")],
+            &[("SSH_ASKPASS_REQUIRE", "force")],
+            &[
+                ("SSH_ASKPASS_REQUIRE", "prefer"),
+                ("SSH_ASKPASS", "my-askpass"),
+                ("DISPLAY", ":0"),
+            ],
+        ];
+        for env in cases {
+            let out = fetch_in_child(&repo, env);
+            assert!(out.contains("Permission denied"), "{env:?}: {out}");
+            assert!(!out.contains("hint:"), "{env:?}: {out}");
+        }
+
+        git_in(&repo, &["config", "core.sshCommand", "my-ssh"]);
+        let out = fetch_in_child(&repo, &[]);
+        assert!(out.contains("Permission denied"), "{out}");
+        assert!(!out.contains("hint:"), "{out}");
+    }
+
+    #[test]
+    fn a_timeout_gets_no_hint() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let script = root.path().join("hung-origin");
+        std::fs::write(&script, "echo 'Permission denied' >&2\nsleep 30\n").unwrap();
+        origin_runs(&repo, &format!("sh {}", script.display()));
+
+        let out = fetch_in_child(&repo, &[("LOOPHERD_GIT_TIMEOUT", "1")]);
+
+        assert!(out.contains("origin didn't answer within 1s"), "{out}");
+        assert!(!out.contains("hint:"), "{out}");
+    }
+
+    #[test]
+    fn an_ssh_failure_asking_for_the_default_branch_hints_in_the_warning() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        origin_fails_with(root.path(), &repo, "Permission denied (publickey).");
+
+        let out = default_branch_in_child(&repo, &[]);
+
+        assert!(
+            out.contains(&format!(
+                "warning: couldn't ask origin for its default branch \
+                 (git ls-remote --symref origin HEAD: Permission denied (publickey).); \
+                 using the local origin/HEAD, origin/main\\n{SSH_HINT}\")"
+            )),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn an_ssh_failure_setting_origins_head_hints_in_the_error() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        git_in(&repo, &["remote", "set-head", "origin", "--delete"]);
+        origin_fails_with(root.path(), &repo, "Permission denied (publickey).");
+
+        let out = default_branch_in_child(&repo, &[]);
+
+        assert!(
+            out.contains(
+                "default branch failed: find origin's default branch: \
+                 git remote set-head origin --auto: Permission denied (publickey).\n"
+            ),
+            "{out}"
+        );
+        assert!(out.contains(&format!("\n{SSH_HINT}\n")), "{out}");
     }
 
     #[test]
@@ -1123,6 +1316,80 @@ mod tests {
             transport_env(root.path(), &repo, &[("SSH_ASKPASS_REQUIRE", "force")]),
             [] as [&str; 0]
         );
+    }
+
+    #[test]
+    fn askpass_require_ignores_case_like_ssh() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let cases: [&[(&str, &str)]; 2] = [
+            &[("SSH_ASKPASS_REQUIRE", "FORCE")],
+            &[
+                ("SSH_ASKPASS_REQUIRE", "Prefer"),
+                ("SSH_ASKPASS", "my-askpass"),
+                ("WAYLAND_DISPLAY", "wayland-0"),
+            ],
+        ];
+        for env in cases {
+            assert_eq!(
+                transport_env(root.path(), &repo, env),
+                [] as [&str; 0],
+                "{env:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_preferred_askpass_keeps_its_prompt() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        assert_eq!(
+            transport_env(
+                root.path(),
+                &repo,
+                &[
+                    ("SSH_ASKPASS_REQUIRE", "prefer"),
+                    ("SSH_ASKPASS", "my-askpass"),
+                    ("DISPLAY", ":0"),
+                ]
+            ),
+            [] as [&str; 0]
+        );
+    }
+
+    #[test]
+    fn an_askpass_require_that_wont_prompt_still_gets_batch_mode() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let cases: [&[(&str, &str)]; 9] = [
+            &[("SSH_ASKPASS_REQUIRE", "never")],
+            &[("SSH_ASKPASS_REQUIRE", "")],
+            &[("SSH_ASKPASS_REQUIRE", "bogus")],
+            &[("SSH_ASKPASS_REQUIRE", "prefer")],
+            &[("SSH_ASKPASS_REQUIRE", "prefer"), ("SSH_ASKPASS", "")],
+            &[
+                ("SSH_ASKPASS_REQUIRE", "never"),
+                ("SSH_ASKPASS", "my-askpass"),
+            ],
+            &[("SSH_ASKPASS_REQUIRE", " force")],
+            &[
+                ("SSH_ASKPASS_REQUIRE", "prefer"),
+                ("SSH_ASKPASS", "my-askpass"),
+            ],
+            &[
+                ("SSH_ASKPASS_REQUIRE", "prefer"),
+                ("SSH_ASKPASS", "my-askpass"),
+                ("DISPLAY", ""),
+                ("WAYLAND_DISPLAY", ""),
+            ],
+        ];
+        for env in cases {
+            assert_eq!(
+                transport_env(root.path(), &repo, env),
+                ["GIT_SSH_COMMAND=ssh -o BatchMode=yes"],
+                "{env:?}"
+            );
+        }
     }
 
     #[test]
@@ -1209,16 +1476,26 @@ mod tests {
     fn a_bad_loopherd_git_timeout_is_named_in_the_error() {
         let root = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(root.path());
-        for bad in ["2m", "0", "", "18446744073709551615"] {
+        for bad in ["2m", "0", "", "86401", "18446744073709551615"] {
             let stderr = fetch_in_child(&repo, &[("LOOPHERD_GIT_TIMEOUT", bad)]);
             assert!(
                 stderr.contains(&format!(
                     "fetch failed: LOOPHERD_GIT_TIMEOUT must be a whole number \
-                     of seconds above 0, not '{bad}'"
+                     of seconds from 1 to 86400, not '{bad}'"
                 )),
                 "{stderr}"
             );
         }
+    }
+
+    #[test]
+    fn a_loopherd_git_timeout_of_one_day_is_allowed() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+
+        let stderr = fetch_in_child(&repo, &[("LOOPHERD_GIT_TIMEOUT", "86400")]);
+
+        assert_eq!(stderr.lines().last(), Some("fetched"), "{stderr}");
     }
 
     #[test]
