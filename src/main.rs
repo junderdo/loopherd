@@ -9,6 +9,7 @@ mod revive;
 mod spawn;
 mod status;
 mod template;
+mod tui;
 mod worktree;
 
 use std::path::PathBuf;
@@ -71,9 +72,19 @@ enum Command {
         /// List live herdr agents missing from the ledger, not just count them.
         #[arg(long)]
         strays: bool,
-        /// Print JSON. Its shape is unstable until the TUI ships.
+        /// Print JSON. Its shape is unstable.
         #[arg(long)]
         json: bool,
+    },
+    /// The herd view as a live TUI, refreshed every 2s. Read-only except that
+    /// Enter focuses the selected agent's pane in herdr.
+    View {
+        /// Start with retired entries shown (toggle with `a`).
+        #[arg(long)]
+        all: bool,
+        /// Start with strays listed (toggle with `s`).
+        #[arg(long)]
+        strays: bool,
     },
     /// Send a ledger entry's stored prompt to its live agent, e.g. after spawn exited 3.
     Prompt {
@@ -135,6 +146,7 @@ fn main() -> ExitCode {
         Command::Revive { dry_run, name } => ("revive", run_revive(dry_run, name)),
         Command::Prompt { name, force } => ("prompt", run_prompt(&name, force)),
         Command::Status { all, strays, json } => ("status", run_status(all, strays, json)),
+        Command::View { all, strays } => ("view", run_view(all, strays)),
     };
     match result {
         Ok(code) => ExitCode::from(code as u8),
@@ -199,6 +211,11 @@ fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
         eprintln!("loopherd status: {line}");
     }
     Ok(out.code)
+}
+
+fn run_view(all: bool, strays: bool) -> Result<i32> {
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    tui::run(CliHerdr, ledger, Options { all, strays })
 }
 
 fn run_prompt(name: &str, force: bool) -> Result<i32> {

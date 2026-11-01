@@ -122,6 +122,8 @@ pub trait Herdr {
     fn wait(&self, name: &str, until: &[AgentStatus], timeout: Duration) -> Result<WaitOutcome>;
     /// Submits `text` without waiting for the agent's turn.
     fn prompt(&self, name: &str, text: &str) -> Result<()>;
+    /// Brings the agent in `pane_id` to the front of the human's herdr client.
+    fn focus(&self, pane_id: &str) -> Result<()>;
 }
 
 /// Polls until `pane_id`'s shell is at its prompt. A new tab's shell takes a
@@ -433,5 +435,9 @@ impl Herdr for CliHerdr {
 
     fn prompt(&self, name: &str, text: &str) -> Result<()> {
         self.call_ok(&["agent", "prompt", name, text]).map(drop)
+    }
+
+    fn focus(&self, pane_id: &str) -> Result<()> {
+        self.call_ok(&["agent", "focus", pane_id]).map(drop)
     }
 }

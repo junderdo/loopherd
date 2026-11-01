@@ -2,11 +2,15 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 
-use super::{Agent, AgentStatus, Herdr, NewTab, Pane, StartOutcome, Tab, WaitOutcome, Workspace};
+use super::{
+    Agent, AgentStatus, Herdr, MalformedReply, NewTab, Pane, StartOutcome, Tab, WaitOutcome,
+    Workspace,
+};
 
 /// How a Claude agent started by the fake behaves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +58,7 @@ struct State {
     agents: Vec<Agent>,
     started: Vec<Started>,
     prompts: Vec<(String, String)>,
+    focused: Vec<String>,
     agent_polls: u32,
     mutations: u32,
 }
@@ -71,6 +76,10 @@ pub struct FakeHerdr {
     pub resume_settles_after: Option<u32>,
     /// Every call fails, as when no herdr server is running.
     pub unreachable: bool,
+    /// `agents()` fails as herdr answering in a shape loopherd can't parse.
+    pub malformed_agents: bool,
+    /// `agents()` blocks until a value arrives or the sender drops, like a hung herdr.
+    pub agents_gate: Option<Receiver<()>>,
     state: RefCell<State>,
 }
 
@@ -90,6 +99,8 @@ impl FakeHerdr {
             new_tab_prompt_after: Some(0),
             resume_settles_after: Some(0),
             unreachable: false,
+            malformed_agents: false,
+            agents_gate: None,
             state: RefCell::default(),
         }
     }
@@ -172,6 +183,11 @@ impl FakeHerdr {
         self.state.borrow().prompts.clone()
     }
 
+    /// Panes passed to `focus`, in order. Focusing isn't a mutation.
+    pub fn focused(&self) -> Vec<String> {
+        self.state.borrow().focused.clone()
+    }
+
     fn push_agent(&self, name: Option<&str>, session: Option<&str>, pane_id: &str, pending: bool) {
         let (ws, n) = pane_id.split_once(":p").expect("fake pane id");
         self.state.borrow_mut().agents.push(Agent {
@@ -211,7 +227,7 @@ impl FakeHerdr {
         tab
     }
 
-    fn set_status(&self, name: &str, status: AgentStatus) {
+    pub fn set_status(&self, name: &str, status: AgentStatus) {
         let mut state = self.state.borrow_mut();
         if let Some(a) = state
             .agents
@@ -235,8 +251,14 @@ impl Herdr for FakeHerdr {
     }
 
     fn agents(&self) -> Result<Vec<Agent>> {
+        if let Some(gate) = &self.agents_gate {
+            let _ = gate.recv();
+        }
         if self.unreachable {
             bail!("herdr server not running");
+        }
+        if self.malformed_agents {
+            return Err(anyhow!("expected an array").context(MalformedReply("agent list".into())));
         }
         let mut state = self.state.borrow_mut();
         state.agent_polls += 1;
@@ -423,6 +445,23 @@ impl Herdr for FakeHerdr {
             .borrow_mut()
             .prompts
             .push((name.to_string(), text.to_string()));
+        Ok(())
+    }
+
+    fn focus(&self, pane_id: &str) -> Result<()> {
+        if self.unreachable {
+            bail!("herdr server not running");
+        }
+        if !self
+            .state
+            .borrow()
+            .agents
+            .iter()
+            .any(|a| a.pane_id == pane_id)
+        {
+            bail!("no agent in pane {pane_id}");
+        }
+        self.state.borrow_mut().focused.push(pane_id.to_string());
         Ok(())
     }
 }
