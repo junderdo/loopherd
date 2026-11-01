@@ -395,6 +395,81 @@ mod tests {
     }
 
     #[test]
+    fn close_keeps_a_worktree_stopped_mid_rebase() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        commit(&wt, "one");
+        commit(&wt, "two");
+        git_in(
+            &wt,
+            &[
+                "-c",
+                "sequence.editor=sed -i 1s/^pick/edit/",
+                "rebase",
+                "--quiet",
+                "-i",
+                "HEAD~2",
+            ],
+        );
+
+        let out = close(&herdr, &mut ledger);
+
+        kept_line(&out, &wt, "rebase in progress");
+    }
+
+    #[test]
+    fn close_keeps_a_worktree_mid_bisect() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        for message in ["one", "two", "three"] {
+            commit(&wt, message);
+        }
+        git_in(&wt, &["bisect", "start", "HEAD", "HEAD~3"]);
+
+        let out = close(&herdr, &mut ledger);
+
+        kept_line(&out, &wt, "bisect in progress");
+    }
+
+    #[test]
+    fn close_keeps_a_worktree_with_only_a_sequencer_left() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&wt)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        let commit_file = |name: &str, body: &str| {
+            std::fs::write(wt.join(name), body).unwrap();
+            git(&["add", name]);
+            git(&["commit", "--quiet", "-m", name]);
+        };
+        git(&["checkout", "--quiet", "-b", "side"]);
+        commit_file("f", "side");
+        commit_file("g", "side");
+        git(&["checkout", "--quiet", "--detach", "feat/new"]);
+        commit_file("f", "here");
+        let picked = git(&["cherry-pick", "side~1", "side"]);
+        assert!(!picked.status.success(), "the first pick should conflict");
+        git(&["reset", "--quiet", "--merge"]);
+        let git_dir = repo.join(".git/worktrees/feat-new");
+        assert!(git_dir.join("sequencer").is_dir());
+        assert!(!git_dir.join("CHERRY_PICK_HEAD").exists());
+
+        let out = close(&herdr, &mut ledger);
+
+        kept_line(&out, &wt, "cherry-pick or revert in progress");
+    }
+
+    #[test]
     fn close_never_removes_the_repo_checkout_even_if_the_ledger_names_it() {
         let root = tempfile::tempdir().unwrap();
         let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
