@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
@@ -88,7 +88,8 @@ pub trait Herdr {
     fn agent(&self, name: &str) -> Result<Agent>;
     fn tabs_in(&self, workspace_id: &str) -> Result<Vec<Tab>>;
     fn panes_in(&self, workspace_id: &str) -> Result<Vec<Pane>>;
-    /// The shell itself is in the foreground: no command, editor, or agent running.
+    /// The shell is alone in the foreground and has drawn its prompt: no
+    /// command, editor, agent, or rc file running.
     fn at_shell_prompt(&self, pane_id: &str) -> Result<bool>;
     /// Creates a tab without focusing it.
     fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<NewTab>;
@@ -104,6 +105,27 @@ pub trait Herdr {
     fn wait(&self, name: &str, until: &[AgentStatus], timeout: Duration) -> Result<WaitOutcome>;
     /// Submits `text` without waiting for the agent's turn.
     fn prompt(&self, name: &str, text: &str) -> Result<()>;
+}
+
+/// Polls until `pane_id`'s shell is at its prompt. A new tab's shell takes a
+/// moment to get there, and `agent start` refuses a pane that isn't.
+pub fn wait_for_shell_prompt(
+    herdr: &dyn Herdr,
+    pane_id: &str,
+    timeout: Duration,
+    poll: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    while !herdr.at_shell_prompt(pane_id)? {
+        if Instant::now() >= deadline {
+            bail!(
+                "pane {pane_id} shell not at its prompt after {}",
+                humantime::format_duration(timeout)
+            );
+        }
+        std::thread::sleep(poll);
+    }
+    Ok(())
 }
 
 /// herdr's longest `agent start --timeout`.
@@ -140,6 +162,24 @@ impl CliHerdr {
                 String::from_utf8_lossy(&out.stderr).trim()
             ),
         }
+    }
+
+    /// `pane read` prints plain text, not a JSON envelope.
+    fn visible_text(&self, pane_id: &str) -> Result<String> {
+        let args = [
+            "pane", "read", pane_id, "--source", "visible", "--format", "text",
+        ];
+        let out = self
+            .command(&args)
+            .output()
+            .with_context(|| format!("run herdr {}", args.join(" ")))?;
+        if !out.status.success() {
+            bail!(
+                "herdr pane read failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
     fn call_ok(&self, args: &[&str]) -> Result<Value> {
@@ -266,10 +306,24 @@ impl Herdr for CliHerdr {
         struct ProcessInfo {
             shell_pid: Option<u32>,
             foreground_process_group_id: Option<u32>,
+            #[serde(default)]
+            foreground_processes: Vec<Process>,
+        }
+        #[derive(Deserialize)]
+        struct Process {
+            pid: u32,
         }
         let result = self.call_ok(&["pane", "process-info", "--pane", pane_id])?;
         let info: ProcessInfo = parse(&result["process_info"], "pane process-info")?;
-        Ok(info.shell_pid.is_some() && info.shell_pid == info.foreground_process_group_id)
+        let shell_alone = info.shell_pid.is_some()
+            && info.shell_pid == info.foreground_process_group_id
+            && info
+                .foreground_processes
+                .iter()
+                .all(|p| Some(p.pid) == info.shell_pid);
+        // A shell still running its rc files is in the foreground too; only the
+        // drawn prompt says it's done, and `agent start` refuses it until then.
+        Ok(shell_alone && !self.visible_text(pane_id)?.trim().is_empty())
     }
 
     fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<NewTab> {
