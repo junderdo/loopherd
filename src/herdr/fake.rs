@@ -35,6 +35,8 @@ struct FakePane {
     workspace_id: String,
     cwd: PathBuf,
     at_prompt: bool,
+    /// `at_shell_prompt` polls left before the shell reaches its prompt; `None` is never.
+    polls_until_prompt: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +61,9 @@ pub struct FakeHerdr {
     pub workspaces: Vec<Workspace>,
     pub startup: Startup,
     pub fail_create_tab: bool,
+    /// A tab from `create_tab` reaches its shell prompt after this many
+    /// `at_shell_prompt` polls; `None` is never.
+    pub new_tab_prompt_after: Option<u32>,
     /// Agents added with [`FakeHerdr::with_resuming_agent`] stay launch-pending,
     /// unnamed and sessionless for this many `agents()` calls; `None` is forever.
     pub resume_settles_after: Option<u32>,
@@ -77,6 +82,7 @@ impl FakeHerdr {
                 .collect(),
             startup: Startup::Ready,
             fail_create_tab: false,
+            new_tab_prompt_after: Some(0),
             resume_settles_after: Some(0),
             state: RefCell::default(),
         }
@@ -161,6 +167,7 @@ impl FakeHerdr {
             workspace_id: workspace_id.to_string(),
             cwd: cwd.to_path_buf(),
             at_prompt: true,
+            polls_until_prompt: Some(0),
         });
         tab
     }
@@ -251,13 +258,18 @@ impl Herdr for FakeHerdr {
     }
 
     fn at_shell_prompt(&self, pane_id: &str) -> Result<bool> {
-        let state = self.state.borrow();
+        let mut state = self.state.borrow_mut();
         let pane = state
             .panes
-            .iter()
+            .iter_mut()
             .find(|p| p.id == pane_id)
             .ok_or_else(|| anyhow!("pane {pane_id} not found"))?;
-        Ok(pane.at_prompt)
+        match &mut pane.polls_until_prompt {
+            Some(0) => {}
+            Some(n) => *n -= 1,
+            None => return Ok(false),
+        }
+        Ok(pane.at_prompt && pane.polls_until_prompt == Some(0))
     }
 
     fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<NewTab> {
@@ -267,7 +279,11 @@ impl Herdr for FakeHerdr {
         if !self.workspaces.iter().any(|w| w.id == workspace_id) {
             bail!("workspace {workspace_id} not found");
         }
-        Ok(self.new_tab(workspace_id, cwd, label))
+        let tab = self.new_tab(workspace_id, cwd, label);
+        let mut state = self.state.borrow_mut();
+        let pane = state.panes.last_mut().unwrap();
+        pane.polls_until_prompt = self.new_tab_prompt_after;
+        Ok(tab)
     }
 
     fn close_tab(&self, tab_id: &str) -> Result<()> {
@@ -295,7 +311,7 @@ impl Herdr for FakeHerdr {
                 .iter_mut()
                 .find(|p| p.id == pane_id)
                 .ok_or_else(|| anyhow!("pane {pane_id} not found"))?;
-            if !pane.at_prompt {
+            if !pane.at_prompt || pane.polls_until_prompt != Some(0) {
                 bail!("pane {pane_id} is not at a shell prompt");
             }
             pane.at_prompt = false;

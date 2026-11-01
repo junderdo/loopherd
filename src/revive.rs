@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::herdr::{Agent, Herdr, StartOutcome, Workspace};
+use crate::herdr::{Agent, Herdr, StartOutcome, Workspace, wait_for_shell_prompt};
 use crate::ledger::{AgentRecord, Ledger};
 
 #[derive(Debug, Clone)]
@@ -233,7 +233,12 @@ fn revive_one(
     };
     let mut args = vec!["--resume".to_string(), session.clone()];
     args.extend(record.claude_args.iter().cloned());
-    match herdr.start_claude(&record.name, &pane_id, req.start_timeout, &args) {
+    let started = match new_tab {
+        Some(_) => wait_for_shell_prompt(herdr, &pane_id, req.start_timeout, req.poll_interval),
+        None => Ok(()),
+    }
+    .and_then(|()| herdr.start_claude(&record.name, &pane_id, req.start_timeout, &args));
+    match started {
         Ok(StartOutcome::Ready(agent)) => Outcome::Started {
             pane_id,
             session_id: agent.session_id,
@@ -578,6 +583,43 @@ mod tests {
             "failed a: start: claude exited during startup\nalive b w1:p4"
         );
         assert_eq!(code, 1);
+        assert!(herdr.tabs().is_empty());
+        assert_eq!(ledger.0, before);
+    }
+
+    #[test]
+    fn waits_for_a_new_tabs_shell_prompt_before_resuming() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut herdr = herdr();
+        herdr.new_tab_prompt_after = Some(3);
+        let mut ledger = ledger([record("a", cwd.path())]);
+        assert_eq!(
+            run(&herdr, &mut ledger, &request()),
+            ("resumed a w1:p1".into(), 0)
+        );
+        assert_eq!(herdr.started().len(), 1);
+    }
+
+    #[test]
+    fn a_new_tab_whose_shell_never_reaches_its_prompt_fails_start_and_closes() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut herdr = herdr();
+        herdr.new_tab_prompt_after = None;
+        let mut ledger = ledger([record("a", cwd.path())]);
+        let before = ledger.0.clone();
+        let req = ReviveRequest {
+            start_timeout: Duration::from_millis(20),
+            ..request()
+        };
+        let (out, code) = run(&herdr, &mut ledger, &req);
+        assert_eq!(
+            (out.as_str(), code),
+            (
+                "failed a: start: pane w1:p1 shell not at its prompt after 20ms",
+                1
+            )
+        );
+        assert!(herdr.started().is_empty());
         assert!(herdr.tabs().is_empty());
         assert_eq!(ledger.0, before);
     }

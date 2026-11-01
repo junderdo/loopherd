@@ -31,7 +31,7 @@ All commands return JSON over the socket API.
 | Observe everything | `herdr api snapshot`, `agent list`, `workspace list`, `pane list` |
 | Build layout | `workspace create`, `tab create`, `pane split --cwd … --no-focus` |
 | Worktrees | `worktree create/open/list/remove` |
-| Launch agent | `agent start <name> --kind claude --pane <id> -- <args>` (pane must be at a shell prompt) |
+| Launch agent | `agent start <name> --kind claude --pane <id> -- <args>` (pane must be at a shell prompt; a new tab's shell is in the foreground while its rc files run, so wait for `pane process-info` to list only the shell *and* `pane read --source visible` to show the prompt, else `agent_pane_busy`) |
 | Talk to agent | `agent prompt <name> "…" --wait --timeout <ms>`, `agent send-keys` |
 | Read output | `agent read`, `pane` read commands |
 | Synchronize | `agent wait <name> --until <states>` |

@@ -5,11 +5,15 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::herdr::{Agent, AgentStatus, Herdr, NewTab, StartOutcome, WaitOutcome, Workspace};
+use crate::herdr::{
+    Agent, AgentStatus, Herdr, NewTab, StartOutcome, WaitOutcome, Workspace, wait_for_shell_prompt,
+};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::worktree::ensure_worktree;
 
 pub const BLOCKED_EXIT: i32 = 3;
+
+const SHELL_POLL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone)]
 pub struct SpawnRequest {
@@ -180,6 +184,8 @@ fn resolve_workspace(
 }
 
 fn start_until_ready(herdr: &dyn Herdr, req: &SpawnRequest, tab: &NewTab) -> Result<Readiness> {
+    // The shell's rc files get their own ready_timeout, not a cut of Claude's.
+    wait_for_shell_prompt(herdr, &tab.pane_id, req.ready_timeout, SHELL_POLL)?;
     let deadline = Instant::now() + req.ready_timeout;
     match herdr.start_claude(&req.name, &tab.pane_id, req.ready_timeout, &req.claude_args)? {
         StartOutcome::Ready(agent) => return Ok(Readiness::Ready(agent)),
@@ -468,6 +474,35 @@ mod tests {
             assert!(root.path().join("proj/worktrees/feat-new").is_dir());
             assert!(ledger.0.is_empty());
         }
+    }
+
+    #[test]
+    fn waits_for_a_new_tabs_shell_prompt_before_starting_claude() {
+        let mut herdr = herdr();
+        herdr.new_tab_prompt_after = Some(3);
+        let mut ledger = MemLedger::default();
+        run(&herdr, &mut ledger, &request("a")).unwrap();
+        assert_eq!(herdr.started().len(), 1);
+        assert!(ledger.0["a"].prompt_sent);
+    }
+
+    #[test]
+    fn a_shell_that_never_reaches_its_prompt_is_a_start_failure_that_closes_the_tab() {
+        let mut herdr = herdr();
+        herdr.new_tab_prompt_after = None;
+        let mut ledger = MemLedger::default();
+        let req = SpawnRequest {
+            ready_timeout: Duration::from_millis(20),
+            ..request("a")
+        };
+        let err = run(&herdr, &mut ledger, &req).unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            "start: pane w1:p1 shell not at its prompt after 20ms"
+        );
+        assert!(herdr.started().is_empty());
+        assert!(herdr.tabs().is_empty());
+        assert!(ledger.0.is_empty());
     }
 
     #[test]
