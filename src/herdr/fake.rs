@@ -2,11 +2,15 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 
-use super::{Agent, AgentStatus, Herdr, NewTab, Pane, StartOutcome, Tab, WaitOutcome, Workspace};
+use super::{
+    Agent, AgentStatus, Herdr, MalformedReply, NewTab, Pane, StartOutcome, Tab, WaitOutcome,
+    Workspace,
+};
 
 /// How a Claude agent started by the fake behaves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +76,10 @@ pub struct FakeHerdr {
     pub resume_settles_after: Option<u32>,
     /// Every call fails, as when no herdr server is running.
     pub unreachable: bool,
+    /// `agents()` fails as herdr answering in a shape loopherd can't parse.
+    pub malformed_agents: bool,
+    /// `agents()` blocks until a value arrives or the sender drops, like a hung herdr.
+    pub agents_gate: Option<Receiver<()>>,
     state: RefCell<State>,
 }
 
@@ -91,6 +99,8 @@ impl FakeHerdr {
             new_tab_prompt_after: Some(0),
             resume_settles_after: Some(0),
             unreachable: false,
+            malformed_agents: false,
+            agents_gate: None,
             state: RefCell::default(),
         }
     }
@@ -241,8 +251,14 @@ impl Herdr for FakeHerdr {
     }
 
     fn agents(&self) -> Result<Vec<Agent>> {
+        if let Some(gate) = &self.agents_gate {
+            let _ = gate.recv();
+        }
         if self.unreachable {
             bail!("herdr server not running");
+        }
+        if self.malformed_agents {
+            return Err(anyhow!("expected an array").context(MalformedReply("agent list".into())));
         }
         let mut state = self.state.borrow_mut();
         state.agent_polls += 1;

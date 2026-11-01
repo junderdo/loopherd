@@ -72,7 +72,7 @@ enum Command {
         /// List live herdr agents missing from the ledger, not just count them.
         #[arg(long)]
         strays: bool,
-        /// Print JSON. Its shape is unstable until the TUI ships.
+        /// Print JSON. Its shape is unstable.
         #[arg(long)]
         json: bool,
     },
@@ -215,7 +215,7 @@ fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
 
 fn run_view(all: bool, strays: bool) -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    tui::run(&CliHerdr, &ledger, Options { all, strays })
+    tui::run(CliHerdr, ledger, Options { all, strays })
 }
 
 fn run_prompt(name: &str, force: bool) -> Result<i32> {

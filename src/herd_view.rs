@@ -10,7 +10,7 @@ use crate::herdr::{Agent, AgentStatus};
 use crate::ledger::AgentRecord;
 use crate::matching::live_agent;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Options {
     /// Show retired entries and herds with only retired entries.
     pub all: bool,
