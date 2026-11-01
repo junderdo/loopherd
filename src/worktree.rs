@@ -532,6 +532,16 @@ pub mod testing {
         );
     }
 
+    /// Fast-forwards origin's `main` to its `branch` from a separate clone, as
+    /// a PR merged on the forge would, leaving the repo's `origin/main` stale.
+    pub fn merge_on_origin(root: &Path, branch: &str) {
+        let other = root.join("other-clone");
+        let origin = root.join("origin.git");
+        run(root, &["clone", "--quiet", path(&origin), path(&other)]);
+        let refspec = format!("origin/{branch}:main");
+        run(&other, &["push", "--quiet", "origin", &refspec]);
+    }
+
     pub fn has_branch(repo: &Path, branch: &str) -> bool {
         has_ref(repo, &format!("refs/heads/{branch}"))
     }
@@ -679,5 +689,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ensure_worktree(&repo, "feat/x").unwrap(), elsewhere);
+    }
+
+    /// Installs a hook that moves `branch` one commit on when a fetch updates
+    /// a remote-tracking ref, standing in for a push racing `--close`.
+    fn move_branch_on_next_fetch(repo: &Path, branch: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let hook = repo.join(".git/hooks/reference-transaction");
+        let script = format!(
+            "#!/bin/sh\n\
+             [ \"$1\" = committed ] && grep -q refs/remotes/ || exit 0\n\
+             moved=$(git -c user.name=t -c user.email=t@t commit-tree '{branch}^{{tree}}' -p '{branch}' -m moved)\n\
+             git update-ref 'refs/heads/{branch}' \"$moved\"\n"
+        );
+        std::fs::write(&hook, script).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn remove_keeps_a_branch_that_moved_after_its_head_was_checked() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_worktree(&repo, "feat/new").unwrap();
+        commit(&wt, "work");
+        push_head(&wt, "feat/new");
+        merge_on_origin(root.path(), "feat/new");
+        let checked = head(&wt);
+        move_branch_on_next_fetch(&repo, "feat/new");
+
+        let err = remove_if_merged(&repo, &wt).unwrap_err();
+
+        assert!(format!("{err:#}").contains("update-ref"), "{err:#}");
+        assert!(has_branch(&repo, "feat/new"));
+        assert_ne!(head_of(&repo, "feat/new"), checked);
     }
 }

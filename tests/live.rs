@@ -478,16 +478,19 @@ fn retire_close_closes_the_tab_and_removes_a_clean_merged_worktree() {
     );
     assert!(!wt.exists());
     assert!(repo.join(".git").is_dir());
+    let retired_at = ledger_entry(state.path(), &name)["retired_at"].clone();
+    // Retire times have one-second resolution, so a fast rerun could hide a rewrite.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
 
     let rerun = retire_close(state.path(), config.path(), &name);
 
     let stdout = String::from_utf8_lossy(&rerun.stdout);
     assert_eq!(rerun.status.code(), Some(0), "{stdout}");
-    let retired_at = ledger_entry(state.path(), &name)["retired_at"].clone();
+    assert_eq!(ledger_entry(state.path(), &name)["retired_at"], retired_at);
     assert_eq!(
         stdout,
         format!(
-            "{name} is already retired (since {})\ntab already gone\n{} already gone\n",
+            "{name} is already retired (since {})\ntab already gone\nworktree {} already gone\n",
             retired_at.as_str().unwrap(),
             wt.display()
         )

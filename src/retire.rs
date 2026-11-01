@@ -242,8 +242,8 @@ mod tests {
     use crate::ledger::MemLedger;
     use crate::spawn::{SpawnRequest, spawn};
     use crate::worktree::testing::{
-        commit, current_branch, git_in, has_branch, move_origin_default, push_head,
-        repo_with_origin, worktree_list,
+        commit, current_branch, git_in, has_branch, head, head_of, merge_on_origin,
+        move_origin_default, push_head, repo_with_origin, worktree_list,
     };
 
     fn record(name: &str) -> AgentRecord {
@@ -387,7 +387,9 @@ mod tests {
         let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
         let wt = root.path().join("proj/worktrees/feat-new");
         commit(&wt, "work");
-        push_head(&wt, "main");
+        push_head(&wt, "feat/new");
+        merge_on_origin(root.path(), "feat/new");
+        assert_ne!(head_of(&repo, "origin/main"), head(&wt));
 
         let out = close(&herdr, &mut ledger);
 
