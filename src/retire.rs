@@ -146,7 +146,7 @@ fn agent_tab(herdr: &dyn Herdr, record: &AgentRecord, own_pane: Option<&str>) ->
     match (pane, live) {
         (None, None) => Ok(TabFate::Gone),
         (None, Some(live)) => kept(&live.tab_id, format!("not in workspace {shown}")),
-        (Some(pane), _) if pane.cwd.as_deref() == Some(cwd.as_path()) => {
+        (Some(pane), _) if pane.is_in(cwd) => {
             // Closing a tab closes every pane in it, not just the agent's.
             match panes.iter().filter(|p| p.tab_id == pane.tab_id).count() {
                 1 => Ok(TabFate::Ours(pane.tab_id)),
@@ -549,6 +549,23 @@ mod tests {
         let cwd = tempfile::tempdir().unwrap();
         let herdr = two_workspaces();
         let pane = herdr.add_tab("w1", "a", cwd.path(), true);
+        let mut ledger = plain(cwd.path(), &pane);
+
+        assert_eq!(
+            close(&herdr, &mut ledger),
+            ["retired a", "closed tab w1:t1"]
+        );
+        assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
+    fn close_treats_a_pane_whose_cwd_is_a_symlink_to_the_entrys_dir_as_its_tab() {
+        let cwd = tempfile::tempdir().unwrap();
+        let links = tempfile::tempdir().unwrap();
+        let link = links.path().join("link");
+        std::os::unix::fs::symlink(cwd.path(), &link).unwrap();
+        let herdr = two_workspaces();
+        let pane = herdr.add_tab("w1", "a", &link, true);
         let mut ledger = plain(cwd.path(), &pane);
 
         assert_eq!(

@@ -63,6 +63,20 @@ pub struct Pane {
     pub cwd: Option<PathBuf>,
 }
 
+impl Pane {
+    /// Whether the pane's cwd is `dir`, however either path is spelled.
+    /// Falls back to an exact comparison when either can't be canonicalized.
+    pub fn is_in(&self, dir: &Path) -> bool {
+        let Some(cwd) = &self.cwd else {
+            return false;
+        };
+        match (cwd.canonicalize(), dir.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => cwd == dir,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewTab {
     pub tab_id: String,

@@ -290,10 +290,7 @@ fn shell_pane(
         .map(|t| t.id)
         .collect();
     for pane in herdr.panes_in(workspace_id)? {
-        if tabs.contains(&pane.tab_id)
-            && pane.cwd.as_deref() == Some(cwd)
-            && herdr.at_shell_prompt(&pane.id)?
-        {
+        if tabs.contains(&pane.tab_id) && pane.is_in(cwd) && herdr.at_shell_prompt(&pane.id)? {
             return Ok(Some(pane.id));
         }
     }
@@ -518,6 +515,20 @@ mod tests {
         assert_eq!(herdr.tabs().len(), 1);
         assert_eq!(herdr.started()[0].pane_id, pane);
         assert_eq!(ledger.0["a"].pane_id, pane);
+    }
+
+    #[test]
+    fn reuses_a_shell_pane_whose_cwd_is_a_symlink_to_the_entrys_dir() {
+        let cwd = tempfile::tempdir().unwrap();
+        let links = tempfile::tempdir().unwrap();
+        let link = links.path().join("link");
+        std::os::unix::fs::symlink(cwd.path(), &link).unwrap();
+        let herdr = herdr();
+        let pane = herdr.add_tab("w1", "a", &link, true);
+        let mut ledger = ledger([record("a", cwd.path())]);
+        let (out, _) = run(&herdr, &mut ledger, &request());
+        assert_eq!(out, format!("resumed a {pane}"));
+        assert_eq!(herdr.tabs().len(), 1);
     }
 
     #[test]
