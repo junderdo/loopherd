@@ -19,6 +19,7 @@ them working together across sessions, by layering on top of herdr.
 | D5 | Slice 1 is `loopherd spawn` (LH-9): a herd-less tracer bullet that creates an optional worktree, a herdr tab, a named Claude agent, and its opening prompt, and records the agent in a ledger. CLI only. herdr sits behind a trait over its CLI. Tests use a fake, plus live tests gated on `LOOPHERD_LIVE=1`. | Proves the loop on a small, testable slice that fixes the most frequent pain (D3). Recording agents at birth feeds revive without a background recorder. Grilled in LH-3. |
 | D6 | loopherd covers work (zagops) and personal projects on one machine, and stays a personal tool: teammates never consume herd definitions. Multi-machine (`herdr --machine`) is out of v1; the `Herdr` trait must not rule it out. No special guards for work repos: loopherd sends only prompts you wrote, under the permission mode you chose. | Work PRs are the D3 pain, and they already run in the same herdr session. Teammates don't run herdr. There's no second machine yet. Grilled in LH-4. |
 | D7 | Herd files live only in `$XDG_CONFIG_HOME/loopherd/herds/<herd>.toml` (default `~/.config/loopherd/herds/`), one file per herd, named by its filename. `LOOPHERD_CONFIG_DIR` overrides the directory for tests and dev. No repo-local lookup, no merging. Versioning them (e.g. in dotfiles) is the user's business. | They're personal config spanning repos (D6). Committing them to a work repo would be noise for teammates. Grilled in LH-5. |
+| D8 | Revive (slice 2) is a manual, repeatable `loopherd revive [--dry-run] [--name]` over ledger entries only. It waits for herdr's own resume to settle, then for each entry that isn't retired and whose cwd and workspace still exist: a live agent with its session ID is `alive`; otherwise it reuses a matching shell pane or opens a tab named for the agent and runs `claude --resume <session> <claude_args>`. It never answers dialogs, re-sends prompts, replaces a name held by another session, or recreates workspaces. The ledger gains `claude_args`, `workspace_label`, and `retired`; `loopherd retire <name>` only marks an entry finished. Built as LH-17 (retire) then LH-18 (revive). | herdr already resumes agents it started but drops their args, and closed tabs aren't resumed at all (LH-10). Session ID is the only handle that survives everything. Retire stops merged agents being resurrected. Grilled in LH-16. |
 | D8 | The ledger is a JSON file at `$XDG_STATE_HOME/loopherd/ledger.json`, written by temp file + rename. Lost updates from concurrent writers are a known gap, closed with `flock` when needed. Revisit SQLite only if the queue slice needs many concurrent writers. | A few loopherd processes on one machine (D6). The file is easy to inspect. LH-8, [ADR 0001](adr/0001-json-file-ledger.md). |
 
 ## Emerging model
@@ -60,12 +61,9 @@ Each one is usable end to end on its own, and they're in build order.
 
 1. **Spawn** (LH-9, D5). `loopherd spawn` sets up and starts one named agent
    and records it in the ledger. Kills D3.
-2. **Revive.** After a herdr restart, rebuilds missing agents from the ledger
-   using `claude --resume`, falling back to herdr's own session file for
-   agents spawned elsewhere. Pane, tab and workspace IDs survive a restart,
-   but a closed workspace's ID can be reused, and herdr itself resumes
-   integrated agents (name kept, launch args dropped). Revive keys on
-   `agent_session`, falling back to workspace label + cwd
+2. **Revive** (LH-17, LH-18, D8). `loopherd revive` brings non-retired
+   ledger agents back after a herdr restart or a closed tab, keyed on the
+   Claude session ID, and re-passes the launch args herdr drops
    ([research](research/herdr-restart-ids.md)).
 3. **Herds and templates.** Herd files and `loopherd add <herd> <template>
    <params>`, built as sugar over spawn.
