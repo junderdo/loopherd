@@ -151,6 +151,34 @@ fn is_ancestor(repo: &Path, commit: &str, of: &str) -> Result<bool> {
     }
 }
 
+/// Returns a worktree at `slug`'s path detached at origin's default branch,
+/// reusing a worktree already there. Creates no local branch.
+pub fn ensure_detached_worktree(repo: &Path, slug: &str) -> Result<PathBuf> {
+    let path = worktree_path(repo, slug);
+    if is_worktree(repo, &path)? {
+        return Ok(path);
+    }
+    git(repo, &["fetch", "--quiet", "origin"])?;
+    let base = default_branch(repo)?;
+    let path_str = path.to_str().context("worktree path is not UTF-8")?;
+    git(
+        repo,
+        &["worktree", "add", "--quiet", "--detach", path_str, &base],
+    )?;
+    Ok(path)
+}
+
+fn is_worktree(repo: &Path, path: &Path) -> Result<bool> {
+    let Ok(wanted) = path.canonicalize() else {
+        return Ok(false);
+    };
+    let list = git(repo, &["worktree", "list", "--porcelain"])?;
+    Ok(list
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .any(|p| Path::new(p).canonicalize().is_ok_and(|p| p == wanted)))
+}
+
 fn find_worktree(repo: &Path, branch: &str) -> Result<Option<PathBuf>> {
     let list = git(repo, &["worktree", "list", "--porcelain"])?;
     let wanted = format!("branch refs/heads/{branch}");
@@ -287,6 +315,18 @@ pub mod testing {
 
     pub fn has_branch(repo: &Path, branch: &str) -> bool {
         has_ref(repo, &format!("refs/heads/{branch}"))
+    }
+
+    pub fn head(dir: &Path) -> String {
+        head_of(dir, "HEAD")
+    }
+
+    pub fn head_of(dir: &Path, rev: &str) -> String {
+        git(dir, &["rev-parse", rev]).unwrap().trim().to_string()
+    }
+
+    pub fn branches(repo: &Path) -> String {
+        git(repo, &["branch", "--list", "--format=%(refname)"]).unwrap()
     }
 
     pub fn upstream(dir: &Path) -> Option<String> {
