@@ -6,7 +6,7 @@ use std::process::Command;
 use anyhow::Result;
 
 use crate::herd_view::{Member, Options, View, view};
-use crate::herdr::Herdr;
+use crate::herdr::{Herdr, MalformedReply};
 use crate::ledger::{AgentRecord, Ledger};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,8 +25,9 @@ pub struct Output {
     pub code: i32,
 }
 
-/// Reads herdr once and the ledger once; changes neither. Exits 2 when herdr
-/// is unreachable, still printing the ledger.
+/// Reads herdr once and the ledger once; changes neither. When herdr's agents
+/// can't be read it still prints the ledger, exiting 2 if herdr is unreachable
+/// and 3 if its `agent list` reply is malformed.
 pub fn status(
     herdr: &dyn Herdr,
     ledger: &dyn Ledger,
@@ -34,15 +35,25 @@ pub fn status(
     format: Format,
 ) -> Result<Output> {
     let entries = ledger.entries()?;
-    let (agents, stderr, code) = match herdr.agents() {
-        Ok(agents) => (Some(agents), String::new(), 0),
+    let (agents, malformed, stderr, code) = match herdr.agents() {
+        Ok(agents) => (Some(agents), false, String::new(), 0),
+        Err(e) if e.downcast_ref::<MalformedReply>().is_some() => (
+            None,
+            true,
+            format!(
+                "error: herdr's `agent list` output is malformed, every status is unknown: {e:#}\n"
+            ),
+            3,
+        ),
         Err(e) => (
             None,
+            false,
             format!("warning: herdr unreachable, every status is unknown: {e:#}\n"),
             2,
         ),
     };
-    let view = view(&entries, agents.as_deref(), options, branch);
+    let mut view = view(&entries, agents.as_deref(), options, branch);
+    view.herdr_reachable = agents.is_some() || malformed;
     let stdout = match format {
         Format::Text { color } => text(&view, color),
         Format::Json => serde_json::to_string_pretty(&view)? + "\n",
@@ -54,10 +65,10 @@ pub fn status(
     })
 }
 
-/// The checked-out branch, `detached`, or `None` when git can't say.
+/// The worktree's checked-out branch, `detached`, or `None` when there's no
+/// worktree or git can't say. The repo's own branch says nothing about the agent's.
 fn branch(record: &AgentRecord) -> Option<String> {
-    let dir = record.worktree.as_deref().unwrap_or(&record.repo);
-    branch_at(dir)
+    branch_at(record.worktree.as_deref()?)
 }
 
 fn branch_at(dir: &Path) -> Option<String> {
@@ -68,6 +79,10 @@ fn branch_at(dir: &Path) -> Option<String> {
         .arg("-C")
         .arg(dir)
         .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        // These override -C, so every row would show the same branch.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .output()
         .ok()?;
     match out.status.code() {
@@ -79,16 +94,20 @@ fn branch_at(dir: &Path) -> Option<String> {
 }
 
 fn text(view: &View, color: bool) -> String {
-    let mut sections: Vec<(&str, &[Member])> = view
+    // Only --all shows a herd with no active members; its entries are under `retired`.
+    let mut sections: Vec<(String, &[Member])> = view
         .herds
         .iter()
-        .map(|h| (h.name.as_str(), h.members.as_slice()))
+        .map(|h| match h.members.is_empty() {
+            true => (format!("{} (retired only)", h.name), h.members.as_slice()),
+            false => (h.name.clone(), h.members.as_slice()),
+        })
         .collect();
     if !view.ungrouped.is_empty() {
-        sections.push(("ungrouped", &view.ungrouped));
+        sections.push(("ungrouped".into(), &view.ungrouped));
     }
     if let Some(retired) = &view.retired {
-        sections.push(("retired", retired));
+        sections.push(("retired".into(), retired));
     }
     let rows: Vec<Vec<Vec<String>>> = sections
         .iter()
@@ -126,14 +145,17 @@ fn row(member: &Member) -> Vec<String> {
         member.name.clone(),
         status,
         member.branch.clone().unwrap_or_else(|| "-".into()),
-        member.worktree.clone(),
+        member.worktree.clone().unwrap_or_else(|| "-".into()),
         place,
     ]
 }
 
 fn stray_lines(view: &View) -> String {
     let Some(count) = view.strays.count else {
-        return "strays unknown (herdr unreachable)\n".into();
+        return match view.herdr_reachable {
+            true => "strays unknown (herdr's agent list unreadable)\n".into(),
+            false => "strays unknown (herdr unreachable)\n".into(),
+        };
     };
     let noun = if count == 1 { "stray" } else { "strays" };
     let mut out = format!("+{count} {noun} (live in herdr, not in loopherd's ledger)\n");
@@ -322,6 +344,24 @@ gone: no live agent matches it; `loopherd revive` can bring it back
     }
 
     #[test]
+    fn all_marks_a_herd_with_only_retired_entries_instead_of_a_bare_header() {
+        let mut ledger = ledger();
+        for name in ["zpr-1", "zpr-2"] {
+            ledger.0.get_mut(name).unwrap().retired = true;
+        }
+        let all = Options {
+            all: true,
+            strays: false,
+        };
+        let out = status(&herdr(), &ledger, all, PLAIN).unwrap();
+        assert!(
+            out.stdout.starts_with("prs (retired only)\nungrouped\n"),
+            "{}",
+            out.stdout
+        );
+    }
+
+    #[test]
     fn json_has_the_documented_shape() {
         let mut ledger = ledger();
         ledger.0.get_mut("old").unwrap().retired = true;
@@ -389,5 +429,33 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         crate::worktree::testing::git_in(&repo, &["checkout", "--quiet", "--detach"]);
         assert_eq!(branch(&on_branch).as_deref(), Some("detached"));
         assert_eq!(branch(&entry("b", None, "missing")), None);
+    }
+
+    #[test]
+    fn an_entry_without_a_worktree_shows_no_branch_or_worktree_not_the_repos() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = crate::worktree::testing::repo_with_origin(root.path());
+        let mut ledger = MemLedger::default();
+        let mut e = entry("lh-1", None, "unused");
+        e.repo = repo;
+        e.worktree = None;
+        ledger.0.insert(e.name.clone(), e);
+        let herdr = FakeHerdr::new(&[("w1", "main")]).with_raw_agent(agent(
+            Some("lh-1"),
+            "w1:plh-1",
+            AgentStatus::Idle,
+        ));
+        let out = status(&herdr, &ledger, Options::default(), PLAIN).unwrap();
+        assert_eq!(
+            out.stdout.lines().nth(1),
+            Some("  lh-1  idle  -  -  w1:tlh-1/w1:plh-1")
+        );
+        let json = status(&herdr, &ledger, Options::default(), Format::Json).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
+        let member = &json["ungrouped"][0];
+        assert_eq!(
+            (&member["branch"], &member["worktree"]),
+            (&serde_json::Value::Null, &serde_json::Value::Null)
+        );
     }
 }

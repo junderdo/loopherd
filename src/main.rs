@@ -62,7 +62,8 @@ enum Command {
         name: Option<String>,
     },
     /// List ledger members by herd with herdr's live status; read-only.
-    /// Exits 2 when herdr is unreachable, showing every status as unknown.
+    /// Exits 2 when herdr is unreachable, or 3 when its `agent list` reply is
+    /// malformed, showing every status as unknown.
     Status {
         /// Also show retired entries and herds with only retired entries.
         #[arg(long)]

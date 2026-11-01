@@ -25,7 +25,8 @@ pub struct Member {
     /// Not retired, yet no live agent matches it.
     pub gone: bool,
     pub branch: Option<String>,
-    pub worktree: String,
+    /// The worktree's basename; `None` when the entry has no worktree.
+    pub worktree: Option<String>,
     pub pane: String,
     pub tab: Option<String>,
 }
@@ -81,9 +82,10 @@ pub fn view(
             Some(herd) => herds.entry(herd).or_default(),
             None => &mut ungrouped,
         };
-        match record.retired {
-            true => retired.push(member(record, agents, &branch)),
-            false => group.push(member(record, agents, &branch)),
+        match (record.retired, options.all) {
+            (false, _) => group.push(member(record, agents, &branch)),
+            (true, true) => retired.push(member(record, agents, &branch)),
+            (true, false) => {}
         }
     }
     View {
@@ -161,15 +163,15 @@ fn member(
     branch: impl Fn(&AgentRecord) -> Option<String>,
 ) -> Member {
     let live = agents.and_then(|a| live_agent(record, a));
-    let dir = record.worktree.as_ref().unwrap_or(&record.repo);
     Member {
         name: record.name.clone(),
         status: live.map_or(AgentStatus::Unknown, |a| a.status),
         gone: !record.retired && agents.is_some() && live.is_none(),
         branch: branch(record),
-        worktree: dir
-            .file_name()
-            .map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into()),
+        worktree: record.worktree.as_ref().map(|dir| {
+            dir.file_name()
+                .map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into())
+        }),
         pane: live.map_or(&record.pane_id, |a| &a.pane_id).clone(),
         tab: live.map(|a| a.tab_id.clone()),
     }
@@ -368,6 +370,27 @@ mod tests {
         let retired = all.retired.unwrap();
         assert_eq!(names(&retired), ["c", "b"]);
         assert!(!retired[1].gone, "a retired entry is never gone");
+    }
+
+    #[test]
+    fn looks_up_branches_only_for_entries_it_shows() {
+        let entries = ledger(vec![
+            entry("a", Some("prs")),
+            retired("b", Some("prs")),
+            retired("c", None),
+        ]);
+        let looked_up = std::cell::RefCell::new(vec![]);
+        let counting = |r: &AgentRecord| {
+            looked_up.borrow_mut().push(r.name.clone());
+            None
+        };
+
+        view(&entries, Some(&[]), Options::default(), counting);
+        assert_eq!(*looked_up.borrow(), ["a"]);
+
+        looked_up.borrow_mut().clear();
+        view(&entries, Some(&[]), ALL, counting);
+        assert_eq!(*looked_up.borrow(), ["a", "b", "c"]);
     }
 
     #[test]
