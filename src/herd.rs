@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::herdr::Herdr;
 use crate::ledger::Ledger;
-use crate::spawn::{MemberOf, Prompt, SpawnRequest, Spawned, preview, spawn};
+use crate::spawn::{Checkout, MemberOf, Prompt, SpawnRequest, Spawned, preview, spawn};
 use crate::template::Template;
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +29,8 @@ struct TemplateFile {
     params: Vec<String>,
     name: Option<String>,
     branch: Option<String>,
+    /// A detached worktree's slug pattern, instead of `branch`.
+    worktree: Option<String>,
     prompt: Option<String>,
     prompt_file: Option<String>,
     #[serde(default)]
@@ -96,7 +98,7 @@ pub fn dry_run(
     let args: Vec<String> = spawn_req.claude_args.iter().map(|a| quote(a)).collect();
     Ok([
         format!("name {}", spawn_req.name),
-        format!("branch {}", spawn_req.worktree.as_deref().unwrap_or("none")),
+        format!("branch {}", spawn_req.branch().unwrap_or("none")),
         format!("worktree {}", worktree.as_deref().unwrap_or("none")),
         format!("workspace {}", plan.workspace_label),
         format!("args {}", args.join(" ")),
@@ -158,15 +160,16 @@ fn resolve(paths: &Paths, req: &AddRequest) -> Result<SpawnRequest> {
             .join("-"),
     };
     values.insert("name", &name);
-    let branch = match &checked.branch {
-        Some(pattern) => Some(pattern.render(&values)?),
-        None => None,
+    let checkout = match (&checked.branch, &checked.worktree) {
+        (Some(pattern), _) => Some(Checkout::Branch(pattern.render(&values)?)),
+        (None, Some(pattern)) => Some(Checkout::Detached(pattern.render(&values)?)),
+        (None, None) => None,
     };
 
     Ok(SpawnRequest {
         repo: expand_home(&herd.repo, &paths.home),
         name,
-        worktree: branch,
+        worktree: checkout,
         workspace: herd.workspace.clone(),
         prompt: Some(Prompt {
             source: format!("template {} {}", req.template, checked.prompt.source),
@@ -188,6 +191,7 @@ const USAGE: &str = "usage: loopherd add <herd> <template> <param>…";
 struct CheckedTemplate {
     name: Option<Template>,
     branch: Option<Template>,
+    worktree: Option<Template>,
     prompt: Prompt,
 }
 
@@ -209,6 +213,12 @@ fn check_fields(template: &TemplateFile, paths: &Paths) -> Result<CheckedTemplat
         &["herd", "name"],
     )
     .context("branch")?;
+    let worktree = pattern(
+        template.worktree.as_deref(),
+        &template.params,
+        &["herd", "name"],
+    )
+    .context("worktree")?;
 
     let prompt = match (&template.prompt, &template.prompt_file) {
         (Some(text), _) => Prompt {
@@ -232,6 +242,7 @@ fn check_fields(template: &TemplateFile, paths: &Paths) -> Result<CheckedTemplat
     Ok(CheckedTemplate {
         name,
         branch,
+        worktree,
         prompt,
     })
 }
@@ -352,6 +363,9 @@ fn validate(template: &TemplateFile) -> Result<()> {
         (Some(_), Some(_)) => bail!("set one of prompt and prompt_file, not both"),
         (None, None) => bail!("set one of prompt and prompt_file"),
         _ => {}
+    }
+    if template.branch.is_some() && template.worktree.is_some() {
+        bail!("set one of branch and worktree, not both");
     }
     for (i, param) in template.params.iter().enumerate() {
         if BUILT_INS.contains(&param.as_str()) {
@@ -522,6 +536,10 @@ args = ["--model", "opus"]
                 "repo = \"/r\"\n[template.pr]\nparams = [\"name\"]\nprompt = \"go\"\n".to_string(),
                 "template pr: param name is a built-in placeholder",
             ),
+            (
+                format!("repo = \"/r\"\n{template}branch = \"b\"\nworktree = \"w\"\n"),
+                "template pr: set one of branch and worktree, not both",
+            ),
         ] {
             let config = Config::with(&[("h", &text)]);
             let err = add_err(&config, &request("h", "pr", &[]));
@@ -586,6 +604,85 @@ args = ["--model", "opus"]
             format!("on prs/z-7/7 in {}", wt.display())
         );
         assert_eq!(ledger.0["z-7"].worktree, Some(wt));
+    }
+
+    fn detached_herd(repo: &Path) -> String {
+        format!(
+            "repo = {:?}\n[template.pr]\nparams = [\"n\"]\nname = \"z-{{n}}\"\n\
+             worktree = \"{{herd}}-review-{{name}}\"\nprompt = \"on [{{branch}}] in {{worktree}}\"\n",
+            repo.display().to_string()
+        )
+    }
+
+    #[test]
+    fn a_worktree_pattern_adds_a_member_in_a_detached_worktree_at_origins_default_branch() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = crate::worktree::testing::repo_with_origin(root.path());
+        let config = Config::with(&[("prs", &detached_herd(&repo))]);
+        let branches_before = crate::worktree::testing::branches(&repo);
+
+        let (herdr, ledger, _) = add_ok(&config, &request("prs", "pr", &["7"]));
+
+        let wt = root.path().join("proj/worktrees/prs-review-z-7");
+        assert_eq!(herdr.tabs()[0].cwd, wt);
+        assert_eq!(herdr.prompts()[0].1, format!("on [] in {}", wt.display()));
+        assert_eq!(ledger.0["z-7"].worktree, Some(wt.clone()));
+        assert_eq!(crate::worktree::testing::current_branch(&wt), "");
+        assert_eq!(
+            crate::worktree::testing::head(&wt),
+            crate::worktree::testing::head_of(&repo, "origin/main")
+        );
+        assert_eq!(crate::worktree::testing::branches(&repo), branches_before);
+    }
+
+    #[test]
+    fn a_detached_member_reuses_an_existing_worktree_at_its_path() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = crate::worktree::testing::repo_with_origin(root.path());
+        let config = Config::with(&[("prs", &detached_herd(&repo))]);
+        let (_, _, _) = add_ok(&config, &request("prs", "pr", &["7"]));
+        let wt = root.path().join("proj/worktrees/prs-review-z-7");
+        fs::write(wt.join("work.txt"), "keep").unwrap();
+
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        add(
+            &herdr,
+            &mut ledger,
+            &config.paths(),
+            &request("prs", "pr", &["7"]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert_eq!(herdr.tabs()[0].cwd, wt);
+        assert_eq!(fs::read_to_string(wt.join("work.txt")).unwrap(), "keep");
+    }
+
+    #[test]
+    fn dry_run_of_a_detached_member_shows_no_branch_and_creates_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = crate::worktree::testing::repo_with_origin(root.path());
+        let config = Config::with(&[("prs", &detached_herd(&repo))]);
+
+        let report = dry_run(
+            &herdr(),
+            &config.paths(),
+            &request("prs", "pr", &["7"]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        let wt = root.path().join("proj/worktrees/prs-review-z-7");
+        assert!(
+            report.starts_with(&format!(
+                "name z-7\nbranch none\nworktree {}\n",
+                wt.display()
+            )),
+            "{report}"
+        );
+        assert!(report.ends_with(&format!("on [] in {}", wt.display())));
+        assert!(!root.path().join("proj/worktrees").exists());
     }
 
     #[test]
@@ -926,6 +1023,16 @@ args = ["--model", "opus"]
                 "branch: unknown placeholder {worktree}",
             ),
             (
+                "worktree = \"w-{branch}\"\nprompt = \"go\"",
+                &[],
+                "worktree: unknown placeholder {branch}",
+            ),
+            (
+                "branch = \"b\"\nworktree = \"w\"\nprompt = \"go\"",
+                &[],
+                "set one of branch and worktree, not both",
+            ),
+            (
                 "branch = \"b-{n\"\nprompt = \"go\"",
                 &[],
                 "branch: unclosed placeholder {n",
@@ -969,6 +1076,29 @@ args = ["--model", "opus"]
             "h  repo /r  workspace (current)\n  loopherd add h t <n>"
         );
         assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn herds_lists_a_detached_template_like_any_other() {
+        let template = "name = \"z-{n}\"\nworktree = \"{herd}-review-{name}-{n}\"\n\
+                        prompt = \"{branch} {worktree}\"";
+        let (report, code) = herds_line(template, &[]);
+        assert_eq!(
+            report,
+            "h  repo /r  workspace (current)\n  loopherd add h t <n>"
+        );
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn a_worktree_pattern_with_an_unknown_placeholder_fails_before_anything_is_created() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = crate::worktree::testing::repo_with_origin(root.path());
+        let herd = detached_herd(&repo).replace("{herd}-review", "{nmber}-review");
+        let config = Config::with(&[("prs", &herd)]);
+        let err = add_err(&config, &request("prs", "pr", &["1"]));
+        assert_eq!(err, "template pr: worktree: unknown placeholder {nmber}");
+        assert!(!root.path().join("proj/worktrees").exists());
     }
 
     #[test]

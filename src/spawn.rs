@@ -11,7 +11,7 @@ use crate::herdr::{
 };
 use crate::ledger::{AgentRecord, Ledger};
 use crate::template::Template;
-use crate::worktree::{ensure_worktree, planned_worktree};
+use crate::worktree::{ensure_detached_worktree, ensure_worktree, planned_worktree, worktree_path};
 
 pub const BLOCKED_EXIT: i32 = 3;
 
@@ -23,12 +23,51 @@ const PROMPT_KEYS: [&str; 4] = ["name", "branch", "worktree", "pane"];
 pub struct SpawnRequest {
     pub repo: PathBuf,
     pub name: String,
-    pub worktree: Option<String>,
+    pub worktree: Option<Checkout>,
     pub workspace: Option<String>,
     pub prompt: Option<Prompt>,
     pub ready_timeout: Duration,
     pub claude_args: Vec<String>,
     pub member_of: Option<MemberOf>,
+}
+
+/// What the agent's worktree has checked out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Checkout {
+    /// A worktree on this branch, created if needed.
+    Branch(String),
+    /// A worktree at this slug's path, detached at origin's default branch.
+    Detached(String),
+}
+
+impl Checkout {
+    fn branch(&self) -> Option<&str> {
+        match self {
+            Checkout::Branch(branch) => Some(branch),
+            Checkout::Detached(_) => None,
+        }
+    }
+
+    fn ensure(&self, repo: &Path) -> Result<PathBuf> {
+        match self {
+            Checkout::Branch(branch) => ensure_worktree(repo, branch),
+            Checkout::Detached(slug) => ensure_detached_worktree(repo, slug),
+        }
+    }
+
+    fn planned(&self, repo: &Path) -> Result<PathBuf> {
+        match self {
+            Checkout::Branch(branch) => planned_worktree(repo, branch),
+            Checkout::Detached(slug) => Ok(worktree_path(repo, slug)),
+        }
+    }
+}
+
+#[cfg(test)]
+impl From<&str> for Checkout {
+    fn from(branch: &str) -> Self {
+        Checkout::Branch(branch.into())
+    }
 }
 
 /// Set by `loopherd add`: the herd and template a member came from.
@@ -109,7 +148,7 @@ pub fn spawn(
 ) -> Result<Spawned> {
     let (template, workspace) = check(herdr, req, inherited_workspace)?;
     let worktree = match &req.worktree {
-        Some(branch) => Some(ensure_worktree(&req.repo, branch).context("worktree")?),
+        Some(checkout) => Some(checkout.ensure(&req.repo).context("worktree")?),
         None => None,
     };
     let cwd = worktree.as_ref().unwrap_or(&req.repo);
@@ -177,6 +216,13 @@ pub fn spawn(
     })
 }
 
+impl SpawnRequest {
+    /// The worktree's branch; `None` without a worktree or when detached.
+    pub fn branch(&self) -> Option<&str> {
+        self.worktree.as_ref().and_then(Checkout::branch)
+    }
+}
+
 /// What spawn would do, found with read-only herdr and git calls.
 #[derive(Debug)]
 pub struct Preview {
@@ -194,7 +240,7 @@ pub fn preview(
 ) -> Result<Preview> {
     let (template, workspace) = check(herdr, req, inherited_workspace)?;
     let worktree = match &req.worktree {
-        Some(branch) => Some(planned_worktree(&req.repo, branch).context("worktree")?),
+        Some(checkout) => Some(checkout.planned(&req.repo).context("worktree")?),
         None => None,
     };
     let cwd = worktree.as_ref().unwrap_or(&req.repo);
@@ -258,7 +304,7 @@ fn render_prompt(
     let mut values = member_values(req);
     values.extend([
         ("name", req.name.as_str()),
-        ("branch", req.worktree.as_deref().unwrap_or("")),
+        ("branch", req.branch().unwrap_or("")),
         ("worktree", worktree.as_str()),
         ("pane", tab.pane_id.as_str()),
     ]);

@@ -21,7 +21,7 @@ use crate::ledger::FileLedger;
 use crate::prompt::prompt;
 use crate::retire::retire;
 use crate::revive::{ReviveRequest, revive};
-use crate::spawn::{Prompt, SpawnRequest, spawn};
+use crate::spawn::{Checkout, Prompt, SpawnRequest, spawn};
 use crate::worktree::repo_root;
 
 #[derive(Parser)]
@@ -171,7 +171,7 @@ fn run_spawn(args: SpawnArgs) -> Result<i32> {
     let req = SpawnRequest {
         repo,
         name: args.name,
-        worktree: args.worktree,
+        worktree: args.worktree.map(Checkout::Branch),
         workspace: args.workspace,
         prompt,
         ready_timeout: Duration::from_secs(args.ready_timeout),
