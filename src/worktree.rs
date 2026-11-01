@@ -524,8 +524,9 @@ fn remote_timeout() -> Result<Duration> {
         return Ok(REMOTE_TIMEOUT);
     };
     let secs = secs.to_string_lossy();
-    match secs.parse() {
-        Ok(n) if n > 0 => Ok(Duration::from_secs(n)),
+    match secs.parse().map(Duration::from_secs) {
+        // A deadline past what Instant can hold would panic.
+        Ok(t) if !t.is_zero() && Instant::now().checked_add(t).is_some() => Ok(t),
         _ => bail!("{TIMEOUT_VAR} must be a whole number of seconds above 0, not '{secs}'"),
     }
 }
@@ -591,12 +592,25 @@ fn remote_git_within(repo: &Path, args: &[&str], timeout: Duration) -> Result<St
     Ok(stdout)
 }
 
-/// Whether the user chose how git runs ssh, which BatchMode must not override.
+/// Whether the user chose how git runs ssh or how ssh prompts, which BatchMode
+/// must not override.
 fn has_own_ssh_setting(repo: &Path) -> bool {
-    ["GIT_SSH_COMMAND", "GIT_SSH"]
+    ["GIT_SSH_COMMAND", "GIT_SSH", "SSH_ASKPASS_REQUIRE"]
         .iter()
         .any(|var| std::env::var_os(var).is_some())
-        || git(repo, &["config", "--get", "core.sshCommand"]).is_ok()
+        || !core_ssh_command_unset(repo)
+}
+
+/// Only a clean "not set" counts: a config git can't read may hold one.
+fn core_ssh_command_unset(repo: &Path) -> bool {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["config", "--get", "core.sshCommand"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    matches!(status, Ok(s) if s.code() == Some(1))
 }
 
 fn read_in_background(pipe: Option<impl Read + Send + 'static>) -> JoinHandle<String> {
@@ -1001,28 +1015,56 @@ mod tests {
         assert!(env.lines().any(|l| l == "GIT_TERMINAL_PROMPT=0"), "{env}");
     }
 
-    const FETCH_REPO: &str = "LOOPHERD_TEST_FETCH_REPO";
+    const CHILD_REPO: &str = "LOOPHERD_TEST_CHILD_REPO";
 
     /// Runs only as the child of [`fetch_in_child`], which sets its repo.
     #[test]
     fn fetches_origin() {
-        if let Some(repo) = std::env::var_os(FETCH_REPO)
+        if let Some(repo) = std::env::var_os(CHILD_REPO)
             && let Err(e) = fetch(Path::new(&repo))
         {
             eprintln!("fetch failed: {e:#}");
         }
     }
 
-    /// Fetches `repo` in a child process whose environment and global git
-    /// config are clean apart from `env`.
+    /// Runs only as the child of [`default_branch_in_child`], which sets its repo.
+    #[test]
+    fn looks_up_origins_default_branch() {
+        if let Some(repo) = std::env::var_os(CHILD_REPO) {
+            match default_branch_and_warning(Path::new(&repo)) {
+                Ok((branch, warning)) => eprintln!("default branch: {branch}, {warning:?}"),
+                Err(e) => eprintln!("default branch failed: {e:#}"),
+            }
+        }
+    }
+
     fn fetch_in_child(repo: &Path, env: &[(&str, &str)]) -> String {
+        in_child("fetches_origin", repo, env)
+    }
+
+    fn default_branch_in_child(repo: &Path, env: &[(&str, &str)]) -> String {
+        in_child("looks_up_origins_default_branch", repo, env)
+    }
+
+    /// Runs the child-only test `test` against `repo` in a process whose
+    /// environment and global git config are clean apart from `env`.
+    fn in_child(test: &str, repo: &Path, env: &[(&str, &str)]) -> String {
         let mut child = Command::new(std::env::current_exe().unwrap());
         child
-            .args(["--exact", "--nocapture", "worktree::tests::fetches_origin"])
-            .env(FETCH_REPO, repo)
+            .args([
+                "--exact",
+                "--nocapture",
+                &format!("worktree::tests::{test}"),
+            ])
+            .env(CHILD_REPO, repo)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1");
-        for var in ["GIT_SSH_COMMAND", "GIT_SSH", "LOOPHERD_GIT_TIMEOUT"] {
+        for var in [
+            "GIT_SSH_COMMAND",
+            "GIT_SSH",
+            "SSH_ASKPASS_REQUIRE",
+            "LOOPHERD_GIT_TIMEOUT",
+        ] {
             child.env_remove(var);
         }
         let out = child.envs(env.iter().copied()).output().unwrap();
@@ -1074,6 +1116,16 @@ mod tests {
     }
 
     #[test]
+    fn a_users_ssh_askpass_require_keeps_its_prompt() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        assert_eq!(
+            transport_env(root.path(), &repo, &[("SSH_ASKPASS_REQUIRE", "force")]),
+            [] as [&str; 0]
+        );
+    }
+
+    #[test]
     fn a_repos_core_ssh_command_is_left_alone() {
         let root = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(root.path());
@@ -1092,6 +1144,47 @@ mod tests {
             transport_env(root.path(), &repo, &[("GIT_CONFIG_GLOBAL", global)]),
             [] as [&str; 0]
         );
+    }
+
+    #[test]
+    fn a_config_that_cant_be_read_is_not_overridden() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let global = root.path().join("gitconfig");
+        std::fs::write(&global, "[core]\n\tsshCommand = my-ssh\n[broken\n").unwrap();
+        let bin = root.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let log = root.path().join("git.log");
+        let real_git = Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap();
+        let real_git = String::from_utf8(real_git.stdout).unwrap();
+        std::fs::write(
+            bin.join("git"),
+            format!(
+                "#!/bin/sh\necho \"$* ${{GIT_SSH_COMMAND-unset}}\" >>{}\nexec {} \"$@\"\n",
+                log.display(),
+                real_git.trim()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+
+        let stderr = fetch_in_child(
+            &repo,
+            &[
+                ("PATH", &path),
+                ("GIT_CONFIG_GLOBAL", global.to_str().unwrap()),
+            ],
+        );
+
+        assert!(stderr.contains("fatal: bad config line 3"), "{stderr}");
+        let log = std::fs::read_to_string(log).unwrap();
+        let fetch = log.lines().find(|l| l.contains(" fetch ")).unwrap();
+        assert!(fetch.ends_with(" unset"), "{log}");
     }
 
     #[test]
@@ -1116,7 +1209,7 @@ mod tests {
     fn a_bad_loopherd_git_timeout_is_named_in_the_error() {
         let root = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(root.path());
-        for bad in ["2m", "0", ""] {
+        for bad in ["2m", "0", "", "18446744073709551615"] {
             let stderr = fetch_in_child(&repo, &[("LOOPHERD_GIT_TIMEOUT", bad)]);
             assert!(
                 stderr.contains(&format!(
@@ -1126,6 +1219,24 @@ mod tests {
                 "{stderr}"
             );
         }
+    }
+
+    #[test]
+    fn a_default_branch_lookup_that_times_out_is_an_error_not_a_warning() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        origin_runs(&repo, "sleep 30");
+
+        let stderr = default_branch_in_child(&repo, &[("LOOPHERD_GIT_TIMEOUT", "1")]);
+
+        assert!(
+            stderr.contains(
+                "default branch failed: git ls-remote --symref origin HEAD: \
+                 origin didn't answer within 1s;"
+            ),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("warning"), "{stderr}");
     }
 
     /// A `PATH` holding only `tools`, linked from where they're found now.
