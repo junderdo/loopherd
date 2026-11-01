@@ -87,6 +87,12 @@ impl FakeHerdr {
         self.with_live_agent(Some(name), None, "w9:p9")
     }
 
+    pub fn with_agent_in(self, name: &str, status: AgentStatus) -> Self {
+        self.push_agent(Some(name), None, "w9:p9", false);
+        self.state.borrow_mut().agents.last_mut().unwrap().status = status;
+        self
+    }
+
     pub fn with_live_agent(self, name: Option<&str>, session: Option<&str>, pane_id: &str) -> Self {
         self.push_agent(name, session, pane_id, false);
         self

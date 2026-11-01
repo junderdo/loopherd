@@ -1,5 +1,6 @@
 mod herdr;
 mod ledger;
+mod prompt;
 mod retire;
 mod revive;
 mod spawn;
@@ -14,6 +15,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::herdr::CliHerdr;
 use crate::ledger::FileLedger;
+use crate::prompt::prompt;
 use crate::retire::retire;
 use crate::revive::{ReviveRequest, revive};
 use crate::spawn::{SpawnRequest, spawn};
@@ -40,6 +42,13 @@ enum Command {
         /// Only this ledger entry.
         #[arg(long)]
         name: Option<String>,
+    },
+    /// Send a ledger entry's stored prompt to its live agent, e.g. after spawn exited 3.
+    Prompt {
+        name: String,
+        /// Send it even if it was already sent.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -73,6 +82,7 @@ fn main() -> ExitCode {
         Command::Spawn(args) => ("spawn", run_spawn(args)),
         Command::Retire { name } => ("retire", run_retire(&name)),
         Command::Revive { dry_run, name } => ("revive", run_revive(dry_run, name)),
+        Command::Prompt { name, force } => ("prompt", run_prompt(&name, force)),
     };
     match result {
         Ok(code) => ExitCode::from(code as u8),
@@ -106,6 +116,13 @@ fn run_revive(dry_run: bool, name: Option<String>) -> Result<i32> {
     Ok(code)
 }
 
+fn run_prompt(name: &str, force: bool) -> Result<i32> {
+    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    prompt(&CliHerdr, &mut ledger, name, force)?;
+    println!("prompted {name}");
+    Ok(0)
+}
+
 fn run_spawn(args: SpawnArgs) -> Result<i32> {
     let prompt = match &args.prompt_file {
         Some(path) => Some(
@@ -135,7 +152,7 @@ fn run_spawn(args: SpawnArgs) -> Result<i32> {
         .ok()
         .filter(|v| !v.is_empty());
     let spawned = spawn(&CliHerdr, &mut ledger, &req, inherited.as_deref())?;
-    let (message, code) = spawned.report();
+    let (message, code) = spawned.report(&req.name);
     println!("{message}");
     Ok(code)
 }
