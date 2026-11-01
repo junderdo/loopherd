@@ -154,7 +154,8 @@ fn spawns_a_ready_agent_and_submits_its_prompt() {
         "{stdout}{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(stdout.starts_with("pane "), "{stdout}");
+    assert!(stdout.starts_with("tab "), "{stdout}");
+    assert!(stdout.contains("\npane "), "{stdout}");
     let entry = ledger_entry(state.path(), &name);
     assert_eq!(entry["prompt_sent"], true);
     assert!(entry["session_id"].is_string(), "{entry}");
@@ -196,9 +197,7 @@ fn leaves_an_agent_blocked_at_a_dialog_and_records_it_unprompted() {
         "{stdout}{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(
-        stdout.starts_with("blocked: answer it in pane "),
-        "{stdout}"
-    );
+    assert!(stdout.starts_with("tab "), "{stdout}");
+    assert!(stdout.contains("\nblocked: answer it in pane "), "{stdout}");
     assert_eq!(ledger_entry(state.path(), &name)["prompt_sent"], false);
 }

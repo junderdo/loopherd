@@ -22,34 +22,39 @@ pub struct SpawnRequest {
     pub claude_args: Vec<String>,
 }
 
+/// Where the agent went, and whether it got past startup.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Spawned {
-    Ready {
-        pane_id: String,
-        session_id: Option<String>,
-    },
+pub struct Spawned {
+    pub tab_id: String,
+    pub pane_id: String,
+    pub worktree: Option<PathBuf>,
+    pub session_id: Option<String>,
     /// Still at a dialog when the ready timeout ran out.
-    Blocked { pane_id: String },
+    pub blocked: bool,
 }
 
 impl Spawned {
+    /// One `key value` line per fact, then the blocked message if any.
     pub fn report(&self) -> (String, i32) {
-        match self {
-            Spawned::Ready {
-                pane_id,
-                session_id,
-            } => (
-                format!(
-                    "pane {pane_id}\nsession {}",
-                    session_id.as_deref().unwrap_or("unknown")
-                ),
-                0,
-            ),
-            Spawned::Blocked { pane_id } => (
-                format!("blocked: answer it in pane {pane_id}, then send the prompt yourself"),
-                BLOCKED_EXIT,
-            ),
+        let mut lines = vec![
+            format!("tab {}", self.tab_id),
+            format!("pane {}", self.pane_id),
+        ];
+        if let Some(path) = &self.worktree {
+            lines.push(format!("worktree {}", path.display()));
         }
+        lines.push(format!(
+            "session {}",
+            self.session_id.as_deref().unwrap_or("unknown")
+        ));
+        if !self.blocked {
+            return (lines.join("\n"), 0);
+        }
+        lines.push(format!(
+            "blocked: answer it in pane {}, then send the prompt yourself",
+            self.pane_id
+        ));
+        (lines.join("\n"), BLOCKED_EXIT)
     }
 }
 
@@ -90,7 +95,7 @@ pub fn spawn(
         pane_id: tab.pane_id.clone(),
         session_id: None,
         repo: req.repo.clone(),
-        worktree,
+        worktree: worktree.clone(),
         workspace,
         prompt: req.prompt.clone(),
         prompt_sent: false,
@@ -99,8 +104,12 @@ pub fn spawn(
     let agent = match readiness {
         Readiness::Blocked => {
             ledger.record(record).context("ledger")?;
-            return Ok(Spawned::Blocked {
+            return Ok(Spawned {
+                tab_id: tab.tab_id,
                 pane_id: tab.pane_id,
+                worktree,
+                session_id: None,
+                blocked: true,
             });
         }
         Readiness::Ready(agent) => agent,
@@ -113,9 +122,12 @@ pub fn spawn(
     record.prompt_sent = sent.is_ok() && req.prompt.is_some();
     ledger.record(record).context("ledger")?;
     sent?;
-    Ok(Spawned::Ready {
+    Ok(Spawned {
+        tab_id: tab.tab_id,
         pane_id: tab.pane_id,
+        worktree,
         session_id: agent.session_id,
+        blocked: false,
     })
 }
 
@@ -322,8 +334,15 @@ mod tests {
             worktree: Some("feature/existing".into()),
             ..request("a")
         };
-        run(&herdr, &mut ledger, &req).unwrap();
+        let spawned = run(&herdr, &mut ledger, &req).unwrap();
         let wt = root.path().join("proj/worktrees/feature-existing");
+        assert_eq!(
+            spawned.report().0,
+            format!(
+                "tab w1:t1\npane w1:p1\nworktree {}\nsession session-a",
+                wt.display()
+            )
+        );
         assert_eq!(herdr.tabs()[0].cwd, wt);
         assert_eq!(current_branch(&wt), "feature/existing");
         assert_eq!(ledger.0["a"].worktree, Some(wt));
@@ -354,15 +373,8 @@ mod tests {
         let mut ledger = MemLedger::default();
         let spawned = run(&herdr, &mut ledger, &request("a")).unwrap();
         assert_eq!(
-            spawned,
-            Spawned::Ready {
-                pane_id: "w1:p1".into(),
-                session_id: Some("session-a".into())
-            }
-        );
-        assert_eq!(
             spawned.report(),
-            ("pane w1:p1\nsession session-a".into(), 0)
+            ("tab w1:t1\npane w1:p1\nsession session-a".into(), 0)
         );
         assert_eq!(herdr.prompts(), vec![("a".into(), "start work".into())]);
         let rec = &ledger.0["a"];
@@ -384,7 +396,7 @@ mod tests {
         herdr.startup = Startup::BlockedThenIdle;
         let mut ledger = MemLedger::default();
         let spawned = run(&herdr, &mut ledger, &request("a")).unwrap();
-        assert!(matches!(spawned, Spawned::Ready { .. }));
+        assert!(!spawned.blocked);
         assert_eq!(herdr.prompts().len(), 1);
         assert!(ledger.0["a"].prompt_sent);
     }
@@ -398,7 +410,9 @@ mod tests {
         assert_eq!(
             spawned.report(),
             (
-                "blocked: answer it in pane w1:p1, then send the prompt yourself".into(),
+                "tab w1:t1\npane w1:p1\nsession unknown\n\
+                 blocked: answer it in pane w1:p1, then send the prompt yourself"
+                    .into(),
                 3
             )
         );
