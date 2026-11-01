@@ -25,9 +25,26 @@ pub struct SpawnRequest {
     pub name: String,
     pub worktree: Option<String>,
     pub workspace: Option<String>,
-    pub prompt: Option<String>,
+    pub prompt: Option<Prompt>,
     pub ready_timeout: Duration,
     pub claude_args: Vec<String>,
+}
+
+/// Prompt text and the flag it came from, which errors name.
+#[derive(Debug, Clone)]
+pub struct Prompt {
+    pub source: String,
+    pub text: String,
+}
+
+#[cfg(test)]
+impl From<&str> for Prompt {
+    fn from(text: &str) -> Self {
+        Prompt {
+            source: "--prompt".into(),
+            text: text.into(),
+        }
+    }
 }
 
 /// Where the agent went, and whether it got past startup.
@@ -81,7 +98,7 @@ pub fn spawn(
     inherited_workspace: Option<&str>,
 ) -> Result<Spawned> {
     validate_name(&req.name).context("name")?;
-    let template = parse_prompt(req.prompt.as_deref()).context("prompt")?;
+    let template = parse_prompt(req.prompt.as_ref()).context("prompt")?;
     ensure_name_free(herdr, &req.name).context("name")?;
     let workspace = resolve_workspace(herdr, req.workspace.as_deref(), inherited_workspace)
         .context("workspace")?;
@@ -95,7 +112,7 @@ pub fn spawn(
         .context("tab")?;
 
     let prompt = match template {
-        Some(t) => match render_prompt(&t, req, cwd, &tab) {
+        Some((t, source)) => match render_prompt(&t, source, req, cwd, &tab) {
             Ok(text) => Some(text),
             Err(e) => return Err(close_after_failure(herdr, &tab, e.context("prompt"))),
         },
@@ -152,17 +169,21 @@ pub fn spawn(
     })
 }
 
-fn parse_prompt(prompt: Option<&str>) -> Result<Option<Template>> {
-    let Some(text) = prompt else {
+fn parse_prompt(prompt: Option<&Prompt>) -> Result<Option<(Template, &str)>> {
+    let Some(Prompt { source, text }) = prompt else {
         return Ok(None);
     };
+    if text.trim().is_empty() {
+        bail!("{source} is empty");
+    }
     let template = Template::parse(text)?;
     template.check(PROMPT_KEYS)?;
-    Ok(Some(template))
+    Ok(Some((template, source)))
 }
 
 fn render_prompt(
     template: &Template,
+    source: &str,
     req: &SpawnRequest,
     cwd: &Path,
     tab: &NewTab,
@@ -174,7 +195,11 @@ fn render_prompt(
         ("worktree", worktree.as_str()),
         ("pane", tab.pane_id.as_str()),
     ]);
-    template.render(&values)
+    let text = template.render(&values)?;
+    if text.trim().is_empty() {
+        bail!("{source} is empty once rendered");
+    }
+    Ok(text)
 }
 
 fn validate_name(name: &str) -> Result<()> {
@@ -635,5 +660,54 @@ mod tests {
             assert!(!root.path().join("proj/worktrees").exists());
             assert!(ledger.0.is_empty());
         }
+    }
+
+    #[test]
+    fn an_empty_prompt_fails_before_anything_is_created() {
+        for (prompt, message) in [
+            (Prompt::from(""), "prompt: --prompt is empty"),
+            (
+                Prompt {
+                    source: "--prompt-file p.md".into(),
+                    text: " \n\t".into(),
+                },
+                "prompt: --prompt-file p.md is empty",
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let repo = repo_with_origin(root.path());
+            // A clash on the name would surface if herdr were asked first.
+            let herdr = herdr().with_agent("a");
+            let mut ledger = MemLedger::default();
+            let req = SpawnRequest {
+                repo,
+                worktree: Some("feat/new".into()),
+                prompt: Some(prompt),
+                ..request("a")
+            };
+            let err = run(&herdr, &mut ledger, &req).unwrap_err();
+            assert_eq!(format!("{err:#}"), message);
+            assert!(herdr.tabs().is_empty());
+            assert!(!root.path().join("proj/worktrees").exists());
+            assert!(ledger.0.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_prompt_that_renders_empty_closes_the_tab_and_records_nothing() {
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        let req = SpawnRequest {
+            prompt: Some(" {branch} ".into()),
+            ..request("a")
+        };
+        let err = run(&herdr, &mut ledger, &req).unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            "prompt: --prompt is empty once rendered"
+        );
+        assert!(herdr.tabs().is_empty());
+        assert!(herdr.prompts().is_empty());
+        assert!(ledger.0.is_empty());
     }
 }
