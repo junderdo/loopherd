@@ -1,4 +1,4 @@
-//! End-to-end runs of `loopherd spawn` and `revive` against the real `loopherd-dev` herdr
+//! End-to-end runs of `loopherd spawn`, `add` and `revive` against the real `loopherd-dev` herdr
 //! session. Skipped unless `LOOPHERD_LIVE=1`; start the session first with
 //! `scripts/herdr-dev --start`.
 
@@ -113,6 +113,16 @@ fn spawn(state: &Path, args: &[&str]) -> Output {
     dev(env!("CARGO_BIN_EXE_loopherd"))
         .env("XDG_STATE_HOME", state)
         .arg("spawn")
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+fn add(state: &Path, config: &Path, args: &[&str]) -> Output {
+    dev(env!("CARGO_BIN_EXE_loopherd"))
+        .env("XDG_STATE_HOME", state)
+        .env("LOOPHERD_CONFIG_DIR", config)
+        .arg("add")
         .args(args)
         .output()
         .unwrap()
@@ -296,5 +306,50 @@ fn revives_an_agent_whose_tab_was_closed_under_its_name_and_session() {
     assert_eq!(
         String::from_utf8_lossy(&again.stdout).lines().next(),
         Some(format!("alive {name} {pane} (prompt not sent, run loopherd prompt {name})").as_str())
+    );
+}
+
+#[test]
+fn adds_a_member_from_a_temp_herd_file() {
+    if !live_enabled() {
+        return;
+    }
+    let workspace = assert_dev_session();
+    let state = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let herds = config.path().join("herds");
+    std::fs::create_dir(&herds).unwrap();
+    let herd = format!("lh-live-herd-{}", std::process::id());
+    std::fs::write(
+        herds.join(format!("{herd}.toml")),
+        format!(
+            "repo = {:?}\nworkspace = {workspace:?}\n\
+             [template.echo]\nparams = [\"n\"]\nname = \"lh-live-add-{{n}}\"\n\
+             prompt = \"You're {{name}} in {{herd}}. Reply with just the word ok.\"\n",
+            env!("CARGO_MANIFEST_DIR")
+        ),
+    )
+    .unwrap();
+    let n = std::process::id().to_string();
+    let name = format!("lh-live-add-{n}");
+    let _cleanup = CloseTab(name.clone());
+
+    let out = add(state.path(), config.path(), &[&herd, "echo", &n]);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.starts_with("tab "), "{stdout}");
+    let entry = ledger_entry(state.path(), &name);
+    assert_eq!(entry["herd"], herd.as_str());
+    assert_eq!(entry["template"], "echo");
+    assert_eq!(entry["prompt_sent"], true);
+    assert_eq!(
+        entry["prompt"],
+        format!("You're {name} in {herd}. Reply with just the word ok.").as_str()
     );
 }

@@ -11,7 +11,7 @@ use crate::herdr::{
 };
 use crate::ledger::{AgentRecord, Ledger};
 use crate::template::Template;
-use crate::worktree::ensure_worktree;
+use crate::worktree::{ensure_worktree, planned_worktree};
 
 pub const BLOCKED_EXIT: i32 = 3;
 
@@ -28,6 +28,16 @@ pub struct SpawnRequest {
     pub prompt: Option<String>,
     pub ready_timeout: Duration,
     pub claude_args: Vec<String>,
+    pub member_of: Option<MemberOf>,
+}
+
+/// Set by `loopherd add`: the herd and template a member came from.
+#[derive(Debug, Clone)]
+pub struct MemberOf {
+    pub herd: String,
+    pub template: String,
+    /// Each param's name and value, also prompt placeholders.
+    pub params: Vec<(String, String)>,
 }
 
 /// Where the agent went, and whether it got past startup.
@@ -80,11 +90,7 @@ pub fn spawn(
     req: &SpawnRequest,
     inherited_workspace: Option<&str>,
 ) -> Result<Spawned> {
-    validate_name(&req.name).context("name")?;
-    let template = parse_prompt(req.prompt.as_deref()).context("prompt")?;
-    ensure_name_free(herdr, &req.name).context("name")?;
-    let workspace = resolve_workspace(herdr, req.workspace.as_deref(), inherited_workspace)
-        .context("workspace")?;
+    let (template, workspace) = check(herdr, req, inherited_workspace)?;
     let worktree = match &req.worktree {
         Some(branch) => Some(ensure_worktree(&req.repo, branch).context("worktree")?),
         None => None,
@@ -121,6 +127,8 @@ pub fn spawn(
         created: humantime::format_rfc3339_seconds(SystemTime::now()).to_string(),
         retired: false,
         retired_at: None,
+        herd: req.member_of.as_ref().map(|m| m.herd.clone()),
+        template: req.member_of.as_ref().map(|m| m.template.clone()),
     };
     let agent = match readiness {
         Readiness::Blocked => {
@@ -152,13 +160,72 @@ pub fn spawn(
     })
 }
 
-fn parse_prompt(prompt: Option<&str>) -> Result<Option<Template>> {
-    let Some(text) = prompt else {
+/// What spawn would do, found with read-only herdr and git calls.
+#[derive(Debug)]
+pub struct Preview {
+    pub workspace_label: String,
+    pub worktree: Option<PathBuf>,
+    /// Rendered, with `{pane}` left in since no pane exists yet.
+    pub prompt: Option<String>,
+}
+
+/// Runs spawn's checks and renders its prompt, creating nothing.
+pub fn preview(
+    herdr: &dyn Herdr,
+    req: &SpawnRequest,
+    inherited_workspace: Option<&str>,
+) -> Result<Preview> {
+    let (template, workspace) = check(herdr, req, inherited_workspace)?;
+    let worktree = match &req.worktree {
+        Some(branch) => Some(planned_worktree(&req.repo, branch).context("worktree")?),
+        None => None,
+    };
+    let cwd = worktree.as_ref().unwrap_or(&req.repo);
+    let unborn = NewTab {
+        tab_id: String::new(),
+        pane_id: "{pane}".into(),
+    };
+    let prompt = template
+        .map(|t| render_prompt(&t, req, cwd, &unborn))
+        .transpose()
+        .context("prompt")?;
+    Ok(Preview {
+        workspace_label: workspace.label,
+        worktree,
+        prompt,
+    })
+}
+
+/// Everything spawn checks before it creates anything.
+fn check(
+    herdr: &dyn Herdr,
+    req: &SpawnRequest,
+    inherited_workspace: Option<&str>,
+) -> Result<(Option<Template>, Workspace)> {
+    validate_name(&req.name).context("name")?;
+    let template = parse_prompt(req).context("prompt")?;
+    ensure_name_free(herdr, &req.name).context("name")?;
+    let workspace = resolve_workspace(herdr, req.workspace.as_deref(), inherited_workspace)
+        .context("workspace")?;
+    Ok((template, workspace))
+}
+
+fn parse_prompt(req: &SpawnRequest) -> Result<Option<Template>> {
+    let Some(text) = &req.prompt else {
         return Ok(None);
     };
     let template = Template::parse(text)?;
-    template.check(PROMPT_KEYS)?;
+    template.check(member_values(req).keys().copied().chain(PROMPT_KEYS))?;
     Ok(Some(template))
+}
+
+/// `{herd}` and the params, for a herd member; nothing otherwise.
+fn member_values(req: &SpawnRequest) -> HashMap<&str, &str> {
+    let Some(member) = &req.member_of else {
+        return HashMap::new();
+    };
+    let params = member.params.iter().map(|(k, v)| (k.as_str(), v.as_str()));
+    params.chain([("herd", member.herd.as_str())]).collect()
 }
 
 fn render_prompt(
@@ -168,7 +235,8 @@ fn render_prompt(
     tab: &NewTab,
 ) -> Result<String> {
     let worktree = cwd.display().to_string();
-    let values = HashMap::from([
+    let mut values = member_values(req);
+    values.extend([
         ("name", req.name.as_str()),
         ("branch", req.worktree.as_deref().unwrap_or("")),
         ("worktree", worktree.as_str()),
@@ -268,6 +336,7 @@ mod tests {
             prompt: Some("start work".into()),
             ready_timeout: Duration::from_secs(60),
             claude_args: vec![],
+            member_of: None,
         }
     }
 
@@ -611,6 +680,47 @@ mod tests {
         };
         run(&herdr, &mut ledger, &req).unwrap();
         assert_eq!(ledger.0["a"].prompt.as_deref(), Some("I am a in w1:p1"));
+    }
+
+    #[test]
+    fn spawn_records_no_herd_or_template() {
+        let mut ledger = MemLedger::default();
+        run(&herdr(), &mut ledger, &request("a")).unwrap();
+        assert_eq!(ledger.0["a"].herd, None);
+        assert_eq!(ledger.0["a"].template, None);
+    }
+
+    fn member_of() -> MemberOf {
+        MemberOf {
+            herd: "prs".into(),
+            template: "pr".into(),
+            params: vec![("number".into(), "1050".into())],
+        }
+    }
+
+    #[test]
+    fn a_herd_member_gets_its_params_and_herd_in_the_prompt_and_ledger() {
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        let req = SpawnRequest {
+            prompt: Some("{name} {herd} {number}".into()),
+            member_of: Some(member_of()),
+            ..request("a")
+        };
+        run(&herdr, &mut ledger, &req).unwrap();
+        assert_eq!(herdr.prompts()[0].1, "a prs 1050");
+        assert_eq!(ledger.0["a"].herd.as_deref(), Some("prs"));
+        assert_eq!(ledger.0["a"].template.as_deref(), Some("pr"));
+    }
+
+    #[test]
+    fn params_are_not_placeholders_outside_a_herd() {
+        let req = SpawnRequest {
+            prompt: Some("{herd} {number}".into()),
+            ..request("a")
+        };
+        let err = run(&herdr(), &mut MemLedger::default(), &req).unwrap_err();
+        assert_eq!(format!("{err:#}"), "prompt: unknown placeholder {herd}");
     }
 
     #[test]
