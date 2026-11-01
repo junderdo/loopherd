@@ -4,6 +4,7 @@ mod prompt;
 mod retire;
 mod revive;
 mod spawn;
+mod template;
 mod worktree;
 
 use std::path::PathBuf;
