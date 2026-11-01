@@ -23,6 +23,10 @@ fn live_enabled() -> bool {
     on
 }
 
+fn live_socket() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap()).join(".config/herdr/herdr.sock")
+}
+
 fn dev_socket() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap())
         .join(".config/herdr/sessions/loopherd-dev/herdr.sock")
@@ -54,9 +58,15 @@ fn labels(out: Output) -> Vec<String> {
 
 /// Passes only when the run inherited the dev socket, i.e. it was launched
 /// through `scripts/herdr-dev`, which checks the dev session against the live
-/// one so the tests never have to call the live session themselves.
-fn check_inherited_socket(inherited: Option<&Path>, dev: &Path) -> Result<(), String> {
+/// one so the tests never have to call the live session themselves, and the
+/// dev socket is not the live socket under another name.
+fn check_inherited_socket(inherited: Option<&Path>, dev: &Path, live: &Path) -> Result<(), String> {
     match inherited {
+        Some(socket) if socket == dev && same_file(dev, live) => Err(format!(
+            "dev socket {} resolves to the live socket {}",
+            dev.display(),
+            live.display()
+        )),
         Some(socket) if socket == dev => Ok(()),
         Some(socket) => Err(format!(
             "HERDR_SOCKET_PATH is {}, not the dev socket; run via scripts/herdr-dev",
@@ -66,11 +76,19 @@ fn check_inherited_socket(inherited: Option<&Path>, dev: &Path) -> Result<(), St
     }
 }
 
+fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+        _ => false,
+    }
+}
+
 /// Fails unless the run came through `scripts/herdr-dev` and herdr resolves
 /// to the running dev session. Returns a dev workspace label.
 fn assert_dev_session() -> String {
     let inherited = std::env::var_os("HERDR_SOCKET_PATH").map(PathBuf::from);
-    if let Err(e) = check_inherited_socket(inherited.as_deref(), &dev_socket()) {
+    if let Err(e) = check_inherited_socket(inherited.as_deref(), &dev_socket(), &live_socket()) {
         panic!("{e}");
     }
 
@@ -497,21 +515,41 @@ fn retire_close_closes_the_tab_and_removes_a_clean_merged_worktree() {
     );
 }
 
+const LIVE: &str = "/home/u/.config/herdr/herdr.sock";
+
 #[test]
 fn guard_accepts_the_dev_socket_set_by_herdr_dev() {
     let dev = Path::new("/home/u/.config/herdr/sessions/loopherd-dev/herdr.sock");
-    assert_eq!(check_inherited_socket(Some(dev), dev), Ok(()));
+    assert_eq!(
+        check_inherited_socket(Some(dev), dev, Path::new(LIVE)),
+        Ok(())
+    );
 }
 
 #[test]
 fn guard_rejects_an_inherited_live_socket() {
     let dev = Path::new("/home/u/.config/herdr/sessions/loopherd-dev/herdr.sock");
-    let live = Path::new("/home/u/.config/herdr/herdr.sock");
-    assert!(check_inherited_socket(Some(live), dev).is_err());
+    let live = Path::new(LIVE);
+    assert!(check_inherited_socket(Some(live), dev, live).is_err());
 }
 
 #[test]
 fn guard_rejects_a_run_outside_herdr_dev() {
     let dev = Path::new("/home/u/.config/herdr/sessions/loopherd-dev/herdr.sock");
-    assert!(check_inherited_socket(None, dev).is_err());
+    assert!(check_inherited_socket(None, dev, Path::new(LIVE)).is_err());
+}
+
+#[test]
+fn guard_rejects_a_dev_socket_symlinked_to_the_live_socket() {
+    let home = tempfile::tempdir().unwrap();
+    let live = home.path().join(".config/herdr/herdr.sock");
+    let dev = home
+        .path()
+        .join(".config/herdr/sessions/loopherd-dev/herdr.sock");
+    std::fs::create_dir_all(dev.parent().unwrap()).unwrap();
+    let _listener = std::os::unix::net::UnixListener::bind(&live).unwrap();
+    std::os::unix::fs::symlink(&live, &dev).unwrap();
+
+    let err = check_inherited_socket(Some(&dev), &dev, &live).unwrap_err();
+    assert!(err.contains("live socket"), "{err}");
 }
