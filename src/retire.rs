@@ -1,10 +1,11 @@
 //! `loopherd retire`: mark a ledger entry finished so revive leaves it alone.
 
+use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use anyhow::{Result, anyhow, bail};
 
-use crate::herdr::Herdr;
+use crate::herdr::{Agent, Herdr};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::revive::find_workspace;
 use crate::worktree::{Gone, Removal, remove_if_gone, remove_if_merged};
@@ -41,7 +42,8 @@ pub fn retire_and_close(
     own_pane: Option<&str>,
     out: &mut Vec<String>,
 ) -> Result<()> {
-    let record = match ledger.entries()?.remove(name) {
+    let mut others = ledger.entries()?;
+    let record = match others.remove(name) {
         Some(record) if record.retired => {
             out.push(format!("{name} is {}", retired_since(&record)));
             record
@@ -52,7 +54,7 @@ pub fn retire_and_close(
             record
         }
     };
-    let tab_kept = match agent_tab(herdr, &record, own_pane)? {
+    let tab_kept = match agent_tab(herdr, &record, &others, own_pane)? {
         TabFate::Gone => {
             out.push("tab already gone".into());
             false
@@ -105,8 +107,14 @@ enum TabFate {
 }
 
 /// Finds the entry's tab through its live agent, else its recorded pane, and
-/// checks its workspace label and cwd as revive does (D8).
-fn agent_tab(herdr: &dyn Herdr, record: &AgentRecord, own_pane: Option<&str>) -> Result<TabFate> {
+/// checks its workspace label and cwd as revive does (D8). A recorded pane
+/// that `others` or another agent now holds is kept.
+fn agent_tab(
+    herdr: &dyn Herdr,
+    record: &AgentRecord,
+    others: &BTreeMap<String, AgentRecord>,
+    own_pane: Option<&str>,
+) -> Result<TabFate> {
     let agents = herdr.agents()?;
     let live = agents
         .iter()
@@ -142,6 +150,12 @@ fn agent_tab(herdr: &dyn Herdr, record: &AgentRecord, own_pane: Option<&str>) ->
     {
         return kept(&pane.tab_id, "it is running this command".into());
     }
+    if live.is_none()
+        && let Some(pane) = &pane
+        && let Some(reason) = held_elsewhere(&pane.id, &agents, others)
+    {
+        return kept(&pane.tab_id, reason);
+    }
     let cwd = record.worktree.as_ref().unwrap_or(&record.repo);
     match (pane, live) {
         (None, None) => Ok(TabFate::Gone),
@@ -165,6 +179,22 @@ fn agent_tab(herdr: &dyn Herdr, record: &AgentRecord, own_pane: Option<&str>) ->
             )
         }
     }
+}
+
+/// Who else holds a reused pane: a non-retired entry that recorded it, or an agent.
+fn held_elsewhere(
+    pane_id: &str,
+    agents: &[Agent],
+    others: &BTreeMap<String, AgentRecord>,
+) -> Option<String> {
+    if let Some(other) = others.values().find(|r| !r.retired && r.pane_id == pane_id) {
+        return Some(format!("pane belongs to {}", other.name));
+    }
+    agents
+        .iter()
+        .find(|a| a.pane_id == pane_id)
+        .and_then(|a| a.name.as_ref())
+        .map(|name| format!("pane hosts agent {name}"))
 }
 
 #[cfg(test)]
@@ -985,6 +1015,78 @@ mod tests {
             [
                 "retired a".to_string(),
                 "kept tab w1:t1: it has 2 panes".into(),
+                format!("kept {}: its tab was kept", wt.display()),
+            ]
+        );
+        assert_eq!(herdr.tabs().len(), 1);
+        assert!(wt.is_dir());
+    }
+
+    /// A worktree entry whose agent is gone and whose pane id a restart gave
+    /// to a new single-pane tab in the same worktree. Returns that pane.
+    fn reused_after_restart(herdr: &FakeHerdr, ledger: &mut MemLedger, wt: &Path) -> String {
+        herdr.close_tab("w1:t1").unwrap();
+        let pane = herdr.add_tab("w1", "b", wt, false);
+        ledger.0.get_mut("a").unwrap().pane_id = pane.clone();
+        pane
+    }
+
+    #[test]
+    fn close_keeps_a_reused_pane_recorded_by_another_entry_and_the_worktree() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        let pane = reused_after_restart(&herdr, &mut ledger, &wt);
+        let mut b = record("b");
+        b.pane_id = pane;
+        ledger.0.insert("b".into(), b);
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(
+            out,
+            [
+                "retired a".to_string(),
+                "kept tab w1:t2: pane belongs to b".into(),
+                format!("kept {}: its tab was kept", wt.display()),
+            ]
+        );
+        assert_eq!(herdr.tabs().len(), 1);
+        assert!(wt.is_dir());
+    }
+
+    #[test]
+    fn close_ignores_a_retired_entry_that_recorded_the_same_pane() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        let pane = reused_after_restart(&herdr, &mut ledger, &wt);
+        let mut old = record("old");
+        old.pane_id = pane;
+        old.retired = true;
+        ledger.0.insert("old".into(), old);
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(out[1], "closed tab w1:t2");
+        assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
+    fn close_keeps_a_reused_pane_hosting_a_differently_named_agent_and_the_worktree() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        let pane = reused_after_restart(&herdr, &mut ledger, &wt);
+        let herdr = herdr.with_live_agent(Some("stranger"), None, &pane);
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(
+            out,
+            [
+                "retired a".to_string(),
+                "kept tab w1:t2: pane hosts agent stranger".into(),
                 format!("kept {}: its tab was kept", wt.display()),
             ]
         );
