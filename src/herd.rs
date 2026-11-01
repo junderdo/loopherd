@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::herdr::Herdr;
 use crate::ledger::Ledger;
-use crate::spawn::{MemberOf, SpawnRequest, Spawned, preview, spawn};
+use crate::spawn::{MemberOf, Prompt, SpawnRequest, Spawned, preview, spawn};
 use crate::template::Template;
 
 #[derive(Debug, Deserialize)]
@@ -163,12 +163,18 @@ fn resolve(paths: &Paths, req: &AddRequest) -> Result<SpawnRequest> {
         None => None,
     };
     let prompt = match (&template.prompt, &template.prompt_file) {
-        (Some(text), _) => text.clone(),
+        (Some(text), _) => Prompt {
+            source: format!("template {} prompt", req.template),
+            text: text.clone(),
+        },
         (None, Some(file)) => {
             let base = herd_file.parent().unwrap_or(Path::new("."));
             let path = base.join(expand_home(file, &paths.home));
-            std::fs::read_to_string(&path)
-                .with_context(|| format!("prompt: read {}", path.display()))?
+            Prompt {
+                source: format!("template {} prompt_file {}", req.template, path.display()),
+                text: std::fs::read_to_string(&path)
+                    .with_context(|| format!("prompt: read {}", path.display()))?,
+            }
         }
         (None, None) => unreachable!("load rejects a template without a prompt"),
     };
@@ -521,6 +527,29 @@ args = ["--model", "opus"]
             err.starts_with(&format!("prompt: read {}: ", path.display())),
             "{err}"
         );
+    }
+
+    #[test]
+    fn an_empty_prompt_fails_before_anything_is_created() {
+        for prompt in ["prompt = \" \\n\"", "prompt_file = \"t.md\""] {
+            let herd = format!("repo = \"/src/repo\"\n[template.t]\nparams = []\n{prompt}\n");
+            let config = Config::with(&[("h", &herd)]);
+            let path = config.path().join("herds/t.md");
+            fs::write(&path, "\n").unwrap();
+            // A clash on the name would surface if herdr were asked first.
+            let herdr = herdr().with_agent("t");
+            let mut ledger = MemLedger::default();
+            let req = request("h", "t", &[]);
+            let err = add(&herdr, &mut ledger, &config.paths(), &req, Some("w1")).unwrap_err();
+            let source = if prompt.starts_with("prompt_file") {
+                format!("template t prompt_file {}", path.display())
+            } else {
+                "template t prompt".into()
+            };
+            assert_eq!(format!("{err:#}"), format!("prompt: {source} is empty"));
+            assert!(herdr.tabs().is_empty());
+            assert!(ledger.0.is_empty());
+        }
     }
 
     #[test]

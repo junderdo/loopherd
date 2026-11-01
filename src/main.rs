@@ -21,7 +21,7 @@ use crate::ledger::FileLedger;
 use crate::prompt::prompt;
 use crate::retire::retire;
 use crate::revive::{ReviveRequest, revive};
-use crate::spawn::{SpawnRequest, spawn};
+use crate::spawn::{Prompt, SpawnRequest, spawn};
 use crate::worktree::repo_root;
 
 #[derive(Parser)]
@@ -148,11 +148,15 @@ fn run_prompt(name: &str, force: bool) -> Result<i32> {
 
 fn run_spawn(args: SpawnArgs) -> Result<i32> {
     let prompt = match &args.prompt_file {
-        Some(path) => Some(
-            std::fs::read_to_string(path)
+        Some(path) => Some(Prompt {
+            source: format!("--prompt-file {}", path.display()),
+            text: std::fs::read_to_string(path)
                 .with_context(|| format!("prompt: read {}", path.display()))?,
-        ),
-        None => args.prompt,
+        }),
+        None => args.prompt.map(|text| Prompt {
+            source: "--prompt".into(),
+            text,
+        }),
     };
     let repo = match &args.repo {
         Some(repo) => repo
