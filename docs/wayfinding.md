@@ -61,7 +61,11 @@ Each one is usable end to end on its own, and they're in build order.
    and records it in the ledger. Kills D3.
 2. **Revive.** After a herdr restart, rebuilds missing agents from the ledger
    using `claude --resume`, falling back to herdr's own session file for
-   agents spawned elsewhere. Open fact: do pane IDs survive a herdr restart?
+   agents spawned elsewhere. Pane, tab and workspace IDs survive a restart,
+   but a closed workspace's ID can be reused, and herdr itself resumes
+   integrated agents (name kept, launch args dropped). Revive keys on
+   `agent_session`, falling back to workspace label + cwd
+   ([research](research/herdr-restart-ids.md)).
 3. **Herds and templates.** Herd files and `loopherd add <herd> <template>
    <params>`, built as sugar over spawn.
 4. **Herd view.** A TUI listing members grouped by herd with live state
