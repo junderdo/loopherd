@@ -1,5 +1,6 @@
 //! `loopherd retire`: mark a ledger entry finished so revive leaves it alone.
 
+use std::path::Path;
 use std::time::SystemTime;
 
 use anyhow::{Result, anyhow, bail};
@@ -68,6 +69,10 @@ pub fn retire_and_close(
         }
     };
     if let Some(path) = &record.worktree {
+        if let Some(other) = other_user(ledger, name, path)? {
+            out.push(format!("kept {}: in use by {other}", path.display()));
+            return Ok(());
+        }
         match remove_if_gone(&record.repo, path)? {
             Some(Gone::Unlisted) => {
                 out.push(format!("worktree {} already gone", path.display()));
@@ -96,6 +101,25 @@ pub fn retire_and_close(
         });
     }
     Ok(())
+}
+
+/// An active entry other than `name` whose worktree is `path`.
+fn other_user(ledger: &dyn Ledger, name: &str, path: &Path) -> Result<Option<String>> {
+    Ok(ledger
+        .entries()?
+        .into_values()
+        .find(|r| {
+            !r.retired && r.name != name && r.worktree.as_deref().is_some_and(|w| same_dir(w, path))
+        })
+        .map(|r| r.name))
+}
+
+/// Falls back to an exact comparison when either can't be canonicalized.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 enum TabFate {
@@ -169,7 +193,7 @@ fn agent_tab(herdr: &dyn Herdr, record: &AgentRecord, own_pane: Option<&str>) ->
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::time::Duration;
 
     use super::*;
@@ -543,6 +567,41 @@ mod tests {
             ]
         );
         assert!(!wt.exists());
+    }
+
+    #[test]
+    fn close_keeps_a_worktree_and_branch_another_active_entry_uses() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        retire(&mut ledger, "a", halloween_noon()).unwrap();
+        let req = SpawnRequest {
+            repo: repo.clone(),
+            name: "b".into(),
+            worktree: Some("feat/new".into()),
+            workspace: None,
+            prompt: None,
+            ready_timeout: Duration::from_secs(60),
+            claude_args: vec![],
+            member_of: None,
+        };
+        spawn(&herdr, &mut ledger, &req, Some("w1")).unwrap();
+        let wt = root.path().join("proj/worktrees/feat-new");
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(root.path().join("proj/worktrees"), &alias).unwrap();
+        ledger.0.get_mut("b").unwrap().worktree = Some(alias.join("feat-new"));
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(
+            out,
+            [
+                "a is already retired (since 2026-10-31T12:00:00Z)".to_string(),
+                "closed tab w1:t1".into(),
+                format!("kept {}: in use by b", wt.display()),
+            ]
+        );
+        assert_eq!(current_branch(&wt), "feat/new");
+        assert!(has_branch(&repo, "feat/new"));
     }
 
     /// An entry with no worktree whose cwd is a fresh directory.
