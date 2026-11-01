@@ -20,7 +20,9 @@ them working together across sessions, by layering on top of herdr.
 | D6 | loopherd covers work (zagops) and personal projects on one machine, and stays a personal tool: teammates never consume herd definitions. Multi-machine (`herdr --machine`) is out of v1; the `Herdr` trait must not rule it out. No special guards for work repos: loopherd sends only prompts you wrote, under the permission mode you chose. | Work PRs are the D3 pain, and they already run in the same herdr session. Teammates don't run herdr. There's no second machine yet. Grilled in LH-4. |
 | D7 | Herd files live only in `$XDG_CONFIG_HOME/loopherd/herds/<herd>.toml` (default `~/.config/loopherd/herds/`), one file per herd, named by its filename. `LOOPHERD_CONFIG_DIR` overrides the directory for tests and dev. No repo-local lookup, no merging. Versioning them (e.g. in dotfiles) is the user's business. | They're personal config spanning repos (D6). Committing them to a work repo would be noise for teammates. Grilled in LH-5. |
 | D8 | Revive (slice 2) is a manual, repeatable `loopherd revive [--dry-run] [--name]` over ledger entries only. It waits for herdr's own resume to settle, then for each entry that isn't retired and whose cwd and workspace still exist: a live agent with its session ID is `alive`; otherwise it reuses a matching shell pane or opens a tab named for the agent and runs `claude --resume <session> <claude_args>`. It never answers dialogs, re-sends prompts, replaces a name held by another session, or recreates workspaces. The ledger gains `claude_args`, `workspace_label`, and `retired`; `loopherd retire <name>` only marks an entry finished. Built as LH-17 (retire) then LH-18 (revive). | herdr already resumes agents it started but drops their args, and closed tabs aren't resumed at all (LH-10). Session ID is the only handle that survives everything. Retire stops merged agents being resurrected. Grilled in LH-16. |
-| D8 | The ledger is a JSON file at `$XDG_STATE_HOME/loopherd/ledger.json`, written by temp file + rename. Lost updates from concurrent writers are a known gap, closed with `flock` when needed. Revisit SQLite only if the queue slice needs many concurrent writers. | A few loopherd processes on one machine (D6). The file is easy to inspect. LH-8, [ADR 0001](adr/0001-json-file-ledger.md). |
+| D9 | Slice 3: a herd file (`<herd>.toml`, D7) holds `repo`, an optional `workspace` label (default: current workspace; an unknown label is an error), optional `args`, and `[template.<t>]` entries with `params`, a `name` pattern (default `{template}-{params}`), an optional `branch` pattern (unset: no worktree), `prompt` or `prompt_file`, and `args`. `loopherd add <herd> <template> <params…> [--dry-run] [-- args]` takes positional params and spawns through spawn's code path; args go herd, then template, then CLI; the ledger records `herd` and `template`. Placeholders are `{param}` plus the built-ins `{name}` `{herd}` `{branch}` `{worktree}` `{pane}`, with `{{`/`}}` escapes; spawn prompts get the built-ins. Unknown placeholders fail before anything is created. loopherd stays free of GitHub knowledge: a PR template's prompt runs `gh pr checkout`. `loopherd herds` lists and validates herd files. Built as LH-14, LH-20, LH-21. | Matches how workspaces are already used (by domain: `milk lab`, `zagops`), and several herds can share one. Members are tracked by name and session, so they may move. Grilled in LH-6, with LH-14. |
+| D10 | loopherd never answers `blocked` agents: spawn, revive, prompt and add only report them. Revisit with a per-dialog allowlist only if a real loop keeps stalling on the same dialog. | The only routine blocker, the trust dialog, has a setup fix (LH-15). Answering on the human's behalf is the riskiest thing loopherd could do. Grilled in LH-7. |
+| D11 | The ledger is a JSON file at `$XDG_STATE_HOME/loopherd/ledger.json`, written by temp file + rename. Lost updates from concurrent writers are a known gap, closed with `flock` when needed. Revisit SQLite only if the queue slice needs many concurrent writers. | A few loopherd processes on one machine (D6). The file is easy to inspect. LH-8, [ADR 0001](adr/0001-json-file-ledger.md). |
 
 ## Emerging model
 
@@ -36,17 +38,19 @@ One concept seems to carry all four outcomes: a **herd** declared in a file.
   restarts survivable (`claude --resume <session-id>`).
 - **Task / queue** — later: work items a herd's idle members pull from.
 
-Sketch (format not decided):
+Herd file (D9):
 
 ```toml
 # ~/.config/loopherd/herds/zagops-prs.toml  (herd name = filename)
 repo = "~/work/projects/zagops/zagops"
+workspace = "zagops"
+args = ["--permission-mode", "auto"]
 
 [template.pr]
 params = ["number"]
-worktree = "pr-{number}"
-agent = "claude"
-prompt = "Check out PR {number}, read review comments and CI, and report what's needed."
+name = "zpr-{number}"
+branch = "pr-{number}"
+prompt = "You're {name}. Run `gh pr checkout {number}`, read review comments and CI, and report what's needed."
 ```
 
 ```bash
@@ -65,8 +69,8 @@ Each one is usable end to end on its own, and they're in build order.
    ledger agents back after a herdr restart or a closed tab, keyed on the
    Claude session ID, and re-passes the launch args herdr drops
    ([research](research/herdr-restart-ids.md)).
-3. **Herds and templates.** Herd files and `loopherd add <herd> <template>
-   <params>`, built as sugar over spawn.
+3. **Herds and templates** (LH-14, LH-20, LH-21, D9). Herd files and
+   `loopherd add <herd> <template> <params>`, built as sugar over spawn.
 4. **Herd view.** A TUI listing members grouped by herd with live state
    (`blocked` / `done` first). It is read-only.
 5. **Queue.** Each herd gets a task list, and idle members are fed the next
@@ -92,5 +96,3 @@ its row here.
 | Q | Card | Question |
 |---|---|---|
 | Q4 | LH-2 | Does herdr offer an event stream, or do we poll `agent list`? **Answer:** yes, `events.subscribe` on the socket pushes per-pane agent status; bootstrap and reconcile with `session.snapshot` ([research](research/herdr-events.md)). |
-| Q5 | LH-7 | May loopherd answer `blocked` agents, or only surface them? |
-| Q6 | LH-6 | Should a herd map to one herdr workspace, or can members be scattered? |
