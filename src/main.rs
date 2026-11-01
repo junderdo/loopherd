@@ -1,17 +1,19 @@
 mod herdr;
 mod ledger;
+mod retire;
 mod spawn;
 mod worktree;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
 use crate::herdr::CliHerdr;
 use crate::ledger::FileLedger;
+use crate::retire::retire;
 use crate::spawn::{SpawnRequest, spawn};
 use crate::worktree::repo_root;
 
@@ -26,6 +28,8 @@ struct Cli {
 enum Command {
     /// Start a named Claude agent in a new herdr tab and record it in the ledger.
     Spawn(SpawnArgs),
+    /// Mark a ledger entry finished so revive leaves it alone. Changes only the ledger.
+    Retire { name: String },
 }
 
 #[derive(Args)]
@@ -54,14 +58,24 @@ struct SpawnArgs {
 }
 
 fn main() -> ExitCode {
-    let Command::Spawn(args) = Cli::parse().command;
-    match run_spawn(args) {
+    let (command, result) = match Cli::parse().command {
+        Command::Spawn(args) => ("spawn", run_spawn(args)),
+        Command::Retire { name } => ("retire", run_retire(&name)),
+    };
+    match result {
         Ok(code) => ExitCode::from(code as u8),
         Err(e) => {
-            eprintln!("loopherd spawn: {e:#}");
+            eprintln!("loopherd {command}: {e:#}");
             ExitCode::FAILURE
         }
     }
+}
+
+fn run_retire(name: &str) -> Result<i32> {
+    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    retire(&mut ledger, name, SystemTime::now())?;
+    println!("retired {name}");
+    Ok(0)
 }
 
 fn run_spawn(args: SpawnArgs) -> Result<i32> {

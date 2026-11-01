@@ -100,6 +100,8 @@ pub fn spawn(
         prompt: req.prompt.clone(),
         prompt_sent: false,
         created: humantime::format_rfc3339_seconds(SystemTime::now()).to_string(),
+        retired: false,
+        retired_at: None,
     };
     let agent = match readiness {
         Readiness::Blocked => {

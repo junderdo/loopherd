@@ -20,9 +20,16 @@ pub struct AgentRecord {
     pub prompt_sent: bool,
     /// RFC 3339, UTC.
     pub created: String,
+    /// Finished; revive leaves it alone.
+    #[serde(default)]
+    pub retired: bool,
+    /// RFC 3339, UTC.
+    #[serde(default)]
+    pub retired_at: Option<String>,
 }
 
 pub trait Ledger {
+    fn entries(&self) -> Result<BTreeMap<String, AgentRecord>>;
     /// Inserts or replaces the entry for `record.name`.
     fn record(&mut self, record: AgentRecord) -> Result<()>;
 }
@@ -76,6 +83,10 @@ fn temp_path(path: &Path) -> PathBuf {
 }
 
 impl Ledger for FileLedger {
+    fn entries(&self) -> Result<BTreeMap<String, AgentRecord>> {
+        self.load()
+    }
+
     fn record(&mut self, record: AgentRecord) -> Result<()> {
         let mut entries = self.load()?;
         entries.insert(record.name.clone(), record);
@@ -89,6 +100,10 @@ pub struct MemLedger(pub BTreeMap<String, AgentRecord>);
 
 #[cfg(test)]
 impl Ledger for MemLedger {
+    fn entries(&self) -> Result<BTreeMap<String, AgentRecord>> {
+        Ok(self.0.clone())
+    }
+
     fn record(&mut self, record: AgentRecord) -> Result<()> {
         self.0.insert(record.name.clone(), record);
         Ok(())
@@ -110,6 +125,8 @@ mod tests {
             prompt: Some("go".into()),
             prompt_sent,
             created: "2026-10-31T00:00:00Z".into(),
+            retired: false,
+            retired_at: None,
         }
     }
 
@@ -138,5 +155,21 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(names, vec!["ledger.json"]);
+    }
+
+    #[test]
+    fn a_ledger_written_before_retire_existed_loads_as_not_retired() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.json");
+        fs::write(
+            &path,
+            r#"{"lh-8": {"name": "lh-8", "pane_id": "w1:p1", "session_id": "abc",
+                "repo": "/src/repo", "worktree": null, "workspace": "w1",
+                "prompt": null, "prompt_sent": true, "created": "2026-10-31T00:00:00Z"}}"#,
+        )
+        .unwrap();
+        let entries = FileLedger::new(path).entries().unwrap();
+        assert!(!entries["lh-8"].retired);
+        assert_eq!(entries["lh-8"].retired_at, None);
     }
 }
