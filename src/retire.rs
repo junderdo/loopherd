@@ -163,7 +163,8 @@ mod tests {
     use crate::ledger::MemLedger;
     use crate::spawn::{SpawnRequest, spawn};
     use crate::worktree::testing::{
-        commit, current_branch, git_in, has_branch, push_head, repo_with_origin,
+        commit, current_branch, git_in, has_branch, move_origin_default, push_head,
+        repo_with_origin,
     };
 
     fn record(name: &str) -> AgentRecord {
@@ -314,6 +315,20 @@ mod tests {
         assert_eq!(out.last().unwrap(), &format!("removed {}", wt.display()));
         assert!(!wt.exists());
         assert!(!has_branch(&repo, "feat/new"));
+    }
+
+    #[test]
+    fn close_judges_merged_against_origins_current_default_not_a_stale_origin_head() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _repo) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        move_origin_default(root.path(), "staging");
+        commit(&wt, "work");
+        push_head(&wt, "main");
+
+        let out = close(&herdr, &mut ledger);
+
+        kept_line(&out, &wt, "feat/new is not merged into origin/staging");
     }
 
     fn kept_line(out: &[String], wt: &Path, reason: &str) {
