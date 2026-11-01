@@ -88,6 +88,11 @@ pub fn retire_and_close(
                 out.push(format!("kept {}: {reason}", path.display()));
                 return Ok(());
             }
+            Some(Gone::Locked { reason }) => {
+                let reason = reason.map(|r| format!(" ({r})")).unwrap_or_default();
+                out.push(format!("kept {}: locked{reason}", path.display()));
+                return Ok(());
+            }
             Some(Gone::Removed { kept_branch }) => {
                 out.push(format!("removed {} (already gone)", path.display()));
                 if let Some((branch, reason)) = kept_branch {
@@ -1147,6 +1152,48 @@ mod tests {
         let list = worktree_list(&repo);
         assert!(!list.contains("feat-new"));
         assert!(list.contains("feat-other"));
+    }
+
+    #[test]
+    fn close_keeps_a_deleted_worktree_that_is_locked_with_its_reason() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        git_in(
+            &repo,
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                "on a USB drive",
+                wt.to_str().unwrap(),
+            ],
+        );
+        std::fs::remove_dir_all(&wt).unwrap();
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(
+            out[2..],
+            [format!("kept {}: locked (on a USB drive)", wt.display())]
+        );
+        assert!(worktree_list(&repo).contains("feat-new"));
+        assert!(has_branch(&repo, "feat/new"));
+    }
+
+    #[test]
+    fn close_keeps_a_deleted_worktree_that_is_locked_without_a_reason() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        git_in(&repo, &["worktree", "lock", wt.to_str().unwrap()]);
+        std::fs::remove_dir_all(&wt).unwrap();
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(out[2..], [format!("kept {}: locked", wt.display())]);
+        assert!(worktree_list(&repo).contains("feat-new"));
+        assert!(has_branch(&repo, "feat/new"));
     }
 
     #[test]
