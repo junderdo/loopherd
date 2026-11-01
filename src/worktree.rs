@@ -1,5 +1,6 @@
 //! Git worktrees for spawned agents.
 
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -105,23 +106,115 @@ pub fn remove_if_merged(repo: &Path, path: &Path) -> Result<Removal> {
     }
     let head = git(path, &["rev-parse", "HEAD"])?.trim().to_string();
     let branch = checked_out_branch(path)?;
-    if let Some(branch) = &branch {
-        git(repo, &["fetch", "--quiet", "origin"])?;
-        let base = default_branch(repo)?;
-        if !is_ancestor(repo, &head, &base)? {
-            return Ok(Removal::Kept(format!("{branch} is not merged into {base}")));
-        }
+    if let Some(branch) = &branch
+        && let Some(reason) = unmerged(repo, branch, &head)?
+    {
+        return Ok(Removal::Kept(reason));
     }
     git(repo, &["worktree", "remove", path_str])?;
     if let Some(branch) = &branch {
-        // `branch -d` judges against the checkout's HEAD, which may lag origin;
-        // merging was checked above, and the old value guards the delete.
-        git(
-            repo,
-            &["update-ref", "-d", &format!("refs/heads/{branch}"), &head],
-        )?;
+        delete_branch(repo, branch, &head)?;
     }
     Ok(Removal::Removed)
+}
+
+/// What [`remove_if_gone`] did with a worktree whose directory is missing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Gone {
+    /// git doesn't list it either.
+    Unlisted,
+    /// Its git record was removed; `kept_branch` names a branch left in place
+    /// and why.
+    Removed {
+        kept_branch: Option<(String, String)>,
+    },
+    /// The directory couldn't be checked, so it was left alone.
+    Unchecked(String),
+}
+
+/// When the directory at `path` is missing, removes `repo`'s record of it and
+/// deletes its branch if merged into origin's default branch. `None` when the
+/// directory is there.
+pub fn remove_if_gone(repo: &Path, path: &Path) -> Result<Option<Gone>> {
+    match path.symlink_metadata() {
+        Ok(_) => return Ok(None),
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Ok(Some(Gone::Unchecked(format!("cannot check it: {e}")))),
+    }
+    let Some(entry) = listed_worktree(repo, path)? else {
+        return Ok(Some(Gone::Unlisted));
+    };
+    // Decide on the branch first: a failed fetch must leave the record for a rerun.
+    let kept_branch = match &entry.branch {
+        Some(branch) => unmerged(repo, branch, &entry.head)?.map(|r| (branch.clone(), r)),
+        None => None,
+    };
+    // Unlike `worktree prune`, this touches only this record and refuses a locked one.
+    git(repo, &["worktree", "remove", &entry.path])?;
+    if let (Some(branch), None) = (&entry.branch, &kept_branch) {
+        delete_branch(repo, branch, &entry.head)?;
+    }
+    Ok(Some(Gone::Removed { kept_branch }))
+}
+
+/// Why `branch` at `head` isn't merged into origin's default branch, if it isn't.
+fn unmerged(repo: &Path, branch: &str, head: &str) -> Result<Option<String>> {
+    git(repo, &["fetch", "--quiet", "origin"])?;
+    let base = default_branch(repo)?;
+    Ok((!is_ancestor(repo, head, &base)?).then(|| format!("{branch} is not merged into {base}")))
+}
+
+fn delete_branch(repo: &Path, branch: &str, head: &str) -> Result<()> {
+    // `branch -d` judges against the checkout's HEAD, which may lag origin;
+    // callers check merging, and the old value guards the delete.
+    git(
+        repo,
+        &["update-ref", "-d", &format!("refs/heads/{branch}"), head],
+    )?;
+    Ok(())
+}
+
+struct ListedWorktree {
+    path: String,
+    head: String,
+    branch: Option<String>,
+}
+
+/// `repo`'s linked worktree entry at `path`, compared without canonicalizing
+/// `path` itself since it may not exist.
+fn listed_worktree(repo: &Path, path: &Path) -> Result<Option<ListedWorktree>> {
+    let wanted = with_real_parent(path);
+    let list = git(repo, &["worktree", "list", "--porcelain"])?;
+    for block in list.split("\n\n").skip(1) {
+        let mut lines = block.lines();
+        let Some(listed) = lines.next().and_then(|l| l.strip_prefix("worktree ")) else {
+            continue;
+        };
+        if with_real_parent(Path::new(listed)) != wanted {
+            continue;
+        }
+        let mut entry = ListedWorktree {
+            path: listed.into(),
+            head: String::new(),
+            branch: None,
+        };
+        for line in lines {
+            if let Some(head) = line.strip_prefix("HEAD ") {
+                entry.head = head.into();
+            } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
+                entry.branch = Some(branch.into());
+            }
+        }
+        return Ok(Some(entry));
+    }
+    Ok(None)
+}
+
+fn with_real_parent(path: &Path) -> PathBuf {
+    match (path.parent().map(Path::canonicalize), path.file_name()) {
+        (Some(Ok(parent)), Some(name)) => parent.join(name),
+        _ => path.to_path_buf(),
+    }
 }
 
 /// Markers in a worktree's git dir that git leaves while an operation is
@@ -395,6 +488,10 @@ pub mod testing {
 
     pub fn branches(repo: &Path) -> String {
         git(repo, &["branch", "--list", "--format=%(refname)"]).unwrap()
+    }
+
+    pub fn worktree_list(repo: &Path) -> String {
+        git(repo, &["worktree", "list", "--porcelain"]).unwrap()
     }
 
     pub fn upstream(dir: &Path) -> Option<String> {
