@@ -16,6 +16,7 @@ them working together across sessions, by layering on top of herdr.
 | D2 | All four outcomes are in scope: survive restarts, group by goal, agents cooperate, work queue/loops. | Stated goals; sequenced below. |
 | D3 | First pain to kill: **repeating setup**. | Today: a tab + worktree + agent per PR, and a "next priorities" agent per personal repo, all set up by hand. |
 | D4 | Name: `loopherd`. | — |
+| D5 | Slice 1 is `loopherd spawn` (LH-9): a herd-less tracer bullet that creates an optional worktree, a herdr tab, a named Claude agent, and its opening prompt, and records the agent in a ledger. CLI only. herdr sits behind a trait over its CLI. Tests use a fake, plus live tests gated on `LOOPHERD_LIVE=1`. | Proves the loop on a small, testable slice that fixes the most frequent pain (D3). Recording agents at birth feeds revive without a background recorder. Grilled in LH-3. |
 
 ## Emerging model
 
@@ -53,18 +54,20 @@ loopherd revive                   # after reboot: resume every member from the l
 
 ## Candidate vertical slices
 
-Each one is usable end to end on its own.
+Each one is usable end to end on its own, and they're in build order.
 
-1. **Spawn from a template.** `loopherd add <herd> <template> <params>` creates the
-   worktree, tab, and agent via herdr, sends the prompt, and records the
-   member in the ledger. Kills D3.
-2. **Herd view.** A TUI listing members grouped by herd with live state
+1. **Spawn** (LH-9, D5). `loopherd spawn` sets up and starts one named agent
+   and records it in the ledger. Kills D3.
+2. **Revive.** After a herdr restart, rebuilds missing agents from the ledger
+   using `claude --resume`, falling back to herdr's own session file for
+   agents spawned elsewhere. Open fact: do pane IDs survive a herdr restart?
+3. **Herds and templates.** Herd files and `loopherd add <herd> <template>
+   <params>`, built as sugar over spawn.
+4. **Herd view.** A TUI listing members grouped by herd with live state
    (`blocked` / `done` first). It is read-only.
-3. **Revive.** Rebuilds missing members from the ledger after a herdr
-   restart, using `claude --resume`.
-4. **Queue.** Each herd gets a task list, and idle members are fed the next
+5. **Queue.** Each herd gets a task list, and idle members are fed the next
    task, with checks and stop conditions.
-5. **Cooperate.** Lead and worker roles: a lead dispatches to workers and
+6. **Cooperate.** Lead and worker roles: a lead dispatches to workers and
    collects their reports.
 
 ## Dev-loop constraints (loop engineering applied to loopherd itself)
@@ -90,4 +93,3 @@ its row here.
 | Q4 | LH-2 | Does herdr offer an event stream, or do we poll `agent list`? **Answer:** yes, `events.subscribe` on the socket pushes per-pane agent status; bootstrap and reconcile with `session.snapshot` ([research](research/herdr-events.md)). |
 | Q5 | LH-7 | May loopherd answer `blocked` agents, or only surface them? |
 | Q6 | LH-6 | Should a herd map to one herdr workspace, or can members be scattered? |
-| Q7 | LH-3 | Which slice ships first: templates (D3) or revive (herdr's gap)? |
