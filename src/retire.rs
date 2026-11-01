@@ -551,6 +551,106 @@ mod tests {
         kept_line(&out, &wt, "cherry-pick or revert in progress");
     }
 
+    /// Runs git in `wt` as a committer, returning the output whether or not it failed.
+    fn try_git(wt: &Path, args: &[&str]) -> std::process::Output {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(wt)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap()
+    }
+
+    fn commit_file(wt: &Path, name: &str, body: &str) {
+        std::fs::write(wt.join(name), body).unwrap();
+        try_git(wt, &["add", name]);
+        try_git(wt, &["commit", "--quiet", "-m", body]);
+    }
+
+    /// Leaves `wt` on its branch with `f` committed as "here", and a `side`
+    /// branch whose one commit adds `f` as "side".
+    fn diverge(wt: &Path) {
+        try_git(wt, &["checkout", "--quiet", "-b", "side"]);
+        commit_file(wt, "f", "side");
+        try_git(wt, &["checkout", "--quiet", "-"]);
+        commit_file(wt, "f", "here");
+    }
+
+    fn assert_conflicts(wt: &Path, args: &[&str]) {
+        let out = try_git(wt, args);
+        assert!(!out.status.success(), "git {args:?} should conflict");
+    }
+
+    #[test]
+    fn close_reports_a_conflicted_merge_rather_than_its_uncommitted_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        diverge(&wt);
+        assert_conflicts(&wt, &["merge", "--quiet", "side"]);
+
+        let out = close(&herdr, &mut ledger);
+
+        kept_line(&out, &wt, "merge in progress");
+    }
+
+    #[test]
+    fn close_keeps_a_worktree_with_a_conflicted_cherry_pick() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        diverge(&wt);
+        assert_conflicts(&wt, &["cherry-pick", "side"]);
+
+        let out = close(&herdr, &mut ledger);
+
+        kept_line(&out, &wt, "cherry-pick in progress");
+    }
+
+    #[test]
+    fn close_keeps_a_worktree_with_a_conflicted_revert() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        commit_file(&wt, "f", "one");
+        commit_file(&wt, "f", "two");
+        assert_conflicts(&wt, &["revert", "--no-edit", "HEAD~1"]);
+
+        let out = close(&herdr, &mut ledger);
+
+        kept_line(&out, &wt, "revert in progress");
+    }
+
+    #[test]
+    fn close_names_a_conflicted_am_as_am_not_rebase() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        diverge(&wt);
+        let patch = root.path().join("side.patch");
+        let formatted = try_git(&wt, &["format-patch", "-1", "--stdout", "side"]);
+        std::fs::write(&patch, formatted.stdout).unwrap();
+        assert_conflicts(&wt, &["am", "--quiet", patch.to_str().unwrap()]);
+
+        let out = close(&herdr, &mut ledger);
+
+        kept_line(&out, &wt, "am in progress");
+    }
+
+    #[test]
+    fn close_keeps_a_worktree_with_a_conflicted_apply_rebase() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        diverge(&wt);
+        assert_conflicts(&wt, &["rebase", "--quiet", "--apply", "side"]);
+
+        let out = close(&herdr, &mut ledger);
+
+        kept_line(&out, &wt, "rebase in progress");
+    }
+
     #[test]
     fn close_never_removes_the_repo_checkout_even_if_the_ledger_names_it() {
         let root = tempfile::tempdir().unwrap();

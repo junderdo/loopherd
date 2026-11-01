@@ -219,8 +219,10 @@ fn with_real_parent(path: &Path) -> PathBuf {
 
 /// Markers in a worktree's git dir that git leaves while an operation is
 /// stopped part way.
-const IN_PROGRESS: [(&str, &str); 7] = [
+const IN_PROGRESS: [(&str, &str); 8] = [
     ("rebase-merge", "rebase"),
+    // git am also uses rebase-apply, marking itself with this file.
+    ("rebase-apply/applying", "am"),
     ("rebase-apply", "rebase"),
     ("MERGE_HEAD", "merge"),
     ("CHERRY_PICK_HEAD", "cherry-pick"),
