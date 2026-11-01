@@ -636,6 +636,22 @@ args = ["--model", "opus"]
     }
 
     #[test]
+    fn a_detached_member_starts_at_origins_current_default_not_a_stale_origin_head() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = crate::worktree::testing::repo_with_origin(root.path());
+        crate::worktree::testing::move_origin_default(root.path(), "staging");
+        let config = Config::with(&[("prs", &detached_herd(&repo))]);
+
+        add_ok(&config, &request("prs", "pr", &["7"]));
+
+        let wt = root.path().join("proj/worktrees/prs-review-z-7");
+        assert_eq!(
+            crate::worktree::testing::head(&wt),
+            crate::worktree::testing::head_of(&repo, "origin/staging")
+        );
+    }
+
+    #[test]
     fn a_detached_member_reuses_an_existing_worktree_at_its_path() {
         let root = tempfile::tempdir().unwrap();
         let repo = crate::worktree::testing::repo_with_origin(root.path());

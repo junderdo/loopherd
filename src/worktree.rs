@@ -354,7 +354,51 @@ fn find_worktree(repo: &Path, branch: &str) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
+/// Origin's default branch, printing a warning when the local origin/HEAD is stale.
 fn default_branch(repo: &Path) -> Result<String> {
+    let (branch, warning) = default_branch_and_warning(repo)?;
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
+    }
+    Ok(branch)
+}
+
+/// Origin's default branch as the remote reports it, falling back to the local
+/// origin/HEAD, which git never updates after the clone.
+fn default_branch_and_warning(repo: &Path) -> Result<(String, Option<String>)> {
+    let Some(remote) = remote_default_branch(repo) else {
+        return Ok((local_default_branch(repo)?, None));
+    };
+    let local = git(
+        repo,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    );
+    let warning = local
+        .ok()
+        .map(|local| local.trim().to_string())
+        .filter(|local| *local != remote)
+        .map(|local| {
+            format!(
+                "warning: origin's default branch is {remote}, but the local \
+                 origin/HEAD points at {local}; fix it with \
+                 `git -C {} remote set-head origin --auto`",
+                repo.display()
+            )
+        });
+    Ok((remote, warning))
+}
+
+/// `None` when origin can't be reached or names no HEAD branch.
+fn remote_default_branch(repo: &Path) -> Option<String> {
+    let out = git(repo, &["ls-remote", "--symref", "origin", "HEAD"]).ok()?;
+    let line = out
+        .lines()
+        .find_map(|l| l.strip_prefix("ref: refs/heads/"))?;
+    let (branch, _) = line.split_once('\t')?;
+    Some(format!("origin/{branch}"))
+}
+
+fn local_default_branch(repo: &Path) -> Result<String> {
     let head = git(
         repo,
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
@@ -428,6 +472,20 @@ pub mod testing {
         std::fs::create_dir_all(repo.parent().unwrap()).unwrap();
         run(root, &["clone", "--quiet", path(&origin), path(&repo)]);
         repo
+    }
+
+    /// Points the bare origin of [`repo_with_origin`] at a new default
+    /// `branch`, one commit past `main`, leaving the clone's origin/HEAD stale.
+    pub fn move_origin_default(root: &Path, branch: &str) {
+        let seed = root.join("seed");
+        run(&seed, &["checkout", "--quiet", "-b", branch]);
+        commit(&seed, "on the new default");
+        run(
+            &seed,
+            &["push", "--quiet", path(&root.join("origin.git")), branch],
+        );
+        let head = format!("refs/heads/{branch}");
+        run(&root.join("origin.git"), &["symbolic-ref", "HEAD", &head]);
     }
 
     fn path(p: &Path) -> &str {
@@ -542,6 +600,41 @@ mod tests {
         let base = git(&wt, &["merge-base", "HEAD", "origin/main"]).unwrap();
         let head = git(&wt, &["rev-parse", "HEAD"]).unwrap();
         assert_eq!(base, head);
+    }
+
+    #[test]
+    fn an_unreachable_origin_falls_back_to_the_local_origin_head() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        git_in(&repo, &["remote", "set-url", "origin", "/nowhere"]);
+        assert_eq!(default_branch(&repo).unwrap(), "origin/main");
+    }
+
+    #[test]
+    fn a_stale_origin_head_warns_with_both_branches_and_the_fix() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        move_origin_default(root.path(), "staging");
+        let (branch, warning) = default_branch_and_warning(&repo).unwrap();
+        assert_eq!(branch, "origin/staging");
+        assert_eq!(
+            warning.unwrap(),
+            format!(
+                "warning: origin's default branch is origin/staging, but the local \
+                 origin/HEAD points at origin/main; fix it with \
+                 `git -C {} remote set-head origin --auto`",
+                repo.display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_current_origin_head_gives_no_warning() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let (branch, warning) = default_branch_and_warning(&repo).unwrap();
+        assert_eq!(branch, "origin/main");
+        assert_eq!(warning, None);
     }
 
     #[test]
