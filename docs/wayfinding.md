@@ -17,6 +17,8 @@ them working together across sessions, by layering on top of herdr.
 | D3 | First pain to kill: **repeating setup**. | Today: a tab + worktree + agent per PR, and a "next priorities" agent per personal repo, all set up by hand. |
 | D4 | Name: `loopherd`. | — |
 | D5 | Slice 1 is `loopherd spawn` (LH-9): a herd-less tracer bullet that creates an optional worktree, a herdr tab, a named Claude agent, and its opening prompt, and records the agent in a ledger. CLI only. herdr sits behind a trait over its CLI. Tests use a fake, plus live tests gated on `LOOPHERD_LIVE=1`. | Proves the loop on a small, testable slice that fixes the most frequent pain (D3). Recording agents at birth feeds revive without a background recorder. Grilled in LH-3. |
+| D6 | loopherd covers work (zagops) and personal projects on one machine, and stays a personal tool: teammates never consume herd definitions. Multi-machine (`herdr --machine`) is out of v1; the `Herdr` trait must not rule it out. No special guards for work repos: loopherd sends only prompts you wrote, under the permission mode you chose. | Work PRs are the D3 pain, and they already run in the same herdr session. Teammates don't run herdr. There's no second machine yet. Grilled in LH-4. |
+| D7 | Herd files live only in `$XDG_CONFIG_HOME/loopherd/herds/<herd>.toml` (default `~/.config/loopherd/herds/`), one file per herd, named by its filename. `LOOPHERD_CONFIG_DIR` overrides the directory for tests and dev. No repo-local lookup, no merging. Versioning them (e.g. in dotfiles) is the user's business. | They're personal config spanning repos (D6). Committing them to a work repo would be noise for teammates. Grilled in LH-5. |
 
 ## Emerging model
 
@@ -35,8 +37,7 @@ One concept seems to carry all four outcomes: a **herd** declared in a file.
 Sketch (format not decided):
 
 ```toml
-# herds/zagops-prs.toml
-name = "zagops-prs"
+# ~/.config/loopherd/herds/zagops-prs.toml  (herd name = filename)
 repo = "~/work/projects/zagops/zagops"
 
 [template.pr]
@@ -87,9 +88,7 @@ its row here.
 
 | Q | Card | Question |
 |---|---|---|
-| Q1 | LH-5 | Where do herd files live: in each repo, in `~/.config/loopherd/`, or both? |
-| Q2 | LH-4 | Is this for work (zagops) as well as personal projects? |
-| Q3 | LH-8 | Ledger storage: a TOML/JSON file or SQLite? Blocked on LH-4 and LH-5. |
+| Q3 | LH-8 | Ledger storage: a TOML/JSON file or SQLite? Keep JSON for now (settled while grilling LH-4/LH-5); the ADR is pending. |
 | Q4 | LH-2 | Does herdr offer an event stream, or do we poll `agent list`? **Answer:** yes, `events.subscribe` on the socket pushes per-pane agent status; bootstrap and reconcile with `session.snapshot` ([research](research/herdr-events.md)). |
 | Q5 | LH-7 | May loopherd answer `blocked` agents, or only surface them? |
 | Q6 | LH-6 | Should a herd map to one herdr workspace, or can members be scattered? |
