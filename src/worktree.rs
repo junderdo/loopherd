@@ -80,6 +80,74 @@ pub fn ensure_worktree(repo: &Path, branch: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// What [`remove_if_merged`] did with a worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Removal {
+    Removed,
+    Kept(String),
+}
+
+/// Removes the linked worktree at `path` when it's clean and either detached
+/// or merged into origin's default branch, then deletes its branch. Never forces.
+pub fn remove_if_merged(repo: &Path, path: &Path) -> Result<Removal> {
+    let path_str = path.to_str().context("worktree path is not UTF-8")?;
+    if !is_linked_worktree(repo, path)? {
+        let reason = format!("not a linked worktree of {}", repo.display());
+        return Ok(Removal::Kept(reason));
+    }
+    if !git(path, &["status", "--porcelain"])?.is_empty() {
+        return Ok(Removal::Kept("uncommitted or untracked changes".into()));
+    }
+    let head = git(path, &["rev-parse", "HEAD"])?.trim().to_string();
+    let branch = git(path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .ok()
+        .map(|b| b.trim().to_string());
+    if let Some(branch) = &branch {
+        git(repo, &["fetch", "--quiet", "origin"])?;
+        let base = default_branch(repo)?;
+        if !is_ancestor(repo, &head, &base)? {
+            return Ok(Removal::Kept(format!("{branch} is not merged into {base}")));
+        }
+    }
+    git(repo, &["worktree", "remove", path_str])?;
+    if let Some(branch) = &branch {
+        // `branch -d` judges against the checkout's HEAD, which may lag origin;
+        // merging was checked above, and the old value guards the delete.
+        git(
+            repo,
+            &["update-ref", "-d", &format!("refs/heads/{branch}"), &head],
+        )?;
+    }
+    Ok(Removal::Removed)
+}
+
+/// `path` is one of `repo`'s worktrees other than its main checkout.
+fn is_linked_worktree(repo: &Path, path: &Path) -> Result<bool> {
+    let Ok(path) = path.canonicalize() else {
+        return Ok(false);
+    };
+    let list = git(repo, &["worktree", "list", "--porcelain"])?;
+    Ok(list
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .skip(1)
+        .any(|linked| Path::new(linked).canonicalize().ok().as_ref() == Some(&path)))
+}
+
+fn is_ancestor(repo: &Path, commit: &str, of: &str) -> Result<bool> {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["merge-base", "--is-ancestor", commit, of])
+        .status()
+        .context("run git")?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!("git merge-base --is-ancestor {commit} {of} failed"),
+    }
+}
+
 fn find_worktree(repo: &Path, branch: &str) -> Result<Option<PathBuf>> {
     let list = git(repo, &["worktree", "list", "--porcelain"])?;
     let wanted = format!("branch refs/heads/{branch}");
@@ -178,11 +246,44 @@ pub mod testing {
         git(dir, args).unwrap();
     }
 
+    pub fn git_in(dir: &Path, args: &[&str]) {
+        run(dir, args);
+    }
+
     pub fn current_branch(dir: &Path) -> String {
         git(dir, &["branch", "--show-current"])
             .unwrap()
             .trim()
             .to_string()
+    }
+
+    pub fn commit(dir: &Path, message: &str) {
+        run(
+            dir,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                message,
+            ],
+        );
+    }
+
+    /// Pushes `dir`'s HEAD to origin's `branch`, as a merged PR would land.
+    pub fn push_head(dir: &Path, branch: &str) {
+        run(
+            dir,
+            &["push", "--quiet", "origin", &format!("HEAD:{branch}")],
+        );
+    }
+
+    pub fn has_branch(repo: &Path, branch: &str) -> bool {
+        has_ref(repo, &format!("refs/heads/{branch}"))
     }
 
     pub fn upstream(dir: &Path) -> Option<String> {

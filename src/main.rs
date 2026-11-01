@@ -19,7 +19,7 @@ use crate::herd::{AddRequest, Paths, add, dry_run, herds};
 use crate::herdr::CliHerdr;
 use crate::ledger::FileLedger;
 use crate::prompt::prompt;
-use crate::retire::retire;
+use crate::retire::{retire, retire_and_close};
 use crate::revive::{ReviveRequest, revive};
 use crate::spawn::{Prompt, SpawnRequest, spawn};
 use crate::worktree::repo_root;
@@ -39,8 +39,13 @@ enum Command {
     Add(AddArgs),
     /// List herd files with a usage line per template; exits 1 if any is invalid.
     Herds,
-    /// Mark a ledger entry finished so revive leaves it alone. Changes only the ledger.
-    Retire { name: String },
+    /// Mark a ledger entry finished so revive leaves it alone. Without --close, changes only the ledger.
+    Retire {
+        name: String,
+        /// Also close its tab, and remove its worktree and branch if clean and merged.
+        #[arg(long)]
+        close: bool,
+    },
     /// Resume ledger agents after a herdr restart or a closed tab.
     Revive {
         /// Print what would happen; start nothing and leave the ledger alone.
@@ -106,7 +111,7 @@ fn main() -> ExitCode {
         Command::Spawn(args) => ("spawn", run_spawn(args)),
         Command::Add(args) => ("add", run_add(args)),
         Command::Herds => ("herds", run_herds()),
-        Command::Retire { name } => ("retire", run_retire(&name)),
+        Command::Retire { name, close } => ("retire", run_retire(&name, close)),
         Command::Revive { dry_run, name } => ("revive", run_revive(dry_run, name)),
         Command::Prompt { name, force } => ("prompt", run_prompt(&name, force)),
     };
@@ -119,11 +124,27 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_retire(name: &str) -> Result<i32> {
+fn run_retire(name: &str, close: bool) -> Result<i32> {
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    retire(&mut ledger, name, SystemTime::now())?;
-    println!("retired {name}");
-    Ok(0)
+    if !close {
+        retire(&mut ledger, name, SystemTime::now())?;
+        println!("retired {name}");
+        return Ok(0);
+    }
+    let own_pane = std::env::var("HERDR_PANE_ID").ok();
+    let mut lines = vec![];
+    let result = retire_and_close(
+        &CliHerdr,
+        &mut ledger,
+        name,
+        SystemTime::now(),
+        own_pane.as_deref(),
+        &mut lines,
+    );
+    for line in lines {
+        println!("{line}");
+    }
+    result.map(|()| 0)
 }
 
 fn run_revive(dry_run: bool, name: Option<String>) -> Result<i32> {

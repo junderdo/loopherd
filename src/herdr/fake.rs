@@ -61,6 +61,7 @@ pub struct FakeHerdr {
     pub workspaces: Vec<Workspace>,
     pub startup: Startup,
     pub fail_create_tab: bool,
+    pub fail_close_tab: bool,
     /// A tab from `create_tab` reaches its shell prompt after this many
     /// `at_shell_prompt` polls; `None` is never.
     pub new_tab_prompt_after: Option<u32>,
@@ -82,6 +83,7 @@ impl FakeHerdr {
                 .collect(),
             startup: Startup::Ready,
             fail_create_tab: false,
+            fail_close_tab: false,
             new_tab_prompt_after: Some(0),
             resume_settles_after: Some(0),
             state: RefCell::default(),
@@ -287,6 +289,9 @@ impl Herdr for FakeHerdr {
     }
 
     fn close_tab(&self, tab_id: &str) -> Result<()> {
+        if self.fail_close_tab {
+            bail!("tab close refused");
+        }
         let mut state = self.state.borrow_mut();
         state.tabs.retain(|t| t.id != tab_id);
         state.panes.retain(|p| p.tab_id != tab_id);

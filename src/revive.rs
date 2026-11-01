@@ -264,7 +264,7 @@ fn revive_one(
     }
 }
 
-fn find_workspace(
+pub(crate) fn find_workspace(
     herdr: &dyn Herdr,
     matches: impl FnMut(&Workspace) -> bool,
 ) -> Result<Option<Workspace>> {

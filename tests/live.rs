@@ -1,4 +1,4 @@
-//! End-to-end runs of `loopherd spawn`, `add` and `revive` against the real `loopherd-dev` herdr
+//! End-to-end runs of `loopherd spawn`, `add`, `revive` and `retire --close` against the real `loopherd-dev` herdr
 //! session. Skipped unless `LOOPHERD_LIVE=1`; start the session first with
 //! `scripts/herdr-dev --start`.
 
@@ -135,6 +135,58 @@ fn revive(state: &Path, args: &[&str]) -> Output {
         .args(args)
         .output()
         .unwrap()
+}
+
+fn retire_close(state: &Path, config: &Path, name: &str) -> Output {
+    dev(env!("CARGO_BIN_EXE_loopherd"))
+        .env("XDG_STATE_HOME", state)
+        .env("LOOPHERD_CONFIG_DIR", config)
+        .args(["retire", name, "--close"])
+        .output()
+        .unwrap()
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {}: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A clone at `<root>/proj/proj` of a bare origin with one commit on `main`.
+fn repo_with_origin(root: &Path) -> PathBuf {
+    let origin = root.join("origin.git");
+    let repo = root.join("proj/proj");
+    git(
+        root,
+        &[
+            "init",
+            "--quiet",
+            "--bare",
+            "-b",
+            "main",
+            origin.to_str().unwrap(),
+        ],
+    );
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "--quiet", "-b", "main"]);
+    git(&repo, &["commit", "--quiet", "--allow-empty", "-m", "root"]);
+    git(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git(&repo, &["push", "--quiet", "-u", "origin", "main"]);
+    git(&repo, &["remote", "set-head", "origin", "main"]);
+    repo
 }
 
 fn herdr_ok(args: &[&str]) -> Value {
@@ -352,4 +404,76 @@ fn adds_a_member_from_a_temp_herd_file() {
         entry["prompt"],
         format!("You're {name} in {herd}. Reply with just the word ok.").as_str()
     );
+}
+
+#[test]
+fn retire_close_closes_the_tab_and_removes_a_clean_merged_worktree() {
+    if !live_enabled() {
+        return;
+    }
+    let workspace = assert_dev_session();
+    let state = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let repo = repo_with_origin(root.path());
+    let name = format!("lh-live-close-{}", std::process::id());
+    let branch = format!("feat/{name}");
+    let wt = root.path().join(format!("proj/worktrees/feat-{name}"));
+    let _cleanup = CloseTab(name.clone());
+
+    // A fresh repo stops Claude at its trust dialog; the tab and worktree are what matter.
+    let out = spawn(
+        state.path(),
+        &[
+            "--repo",
+            repo.to_str().unwrap(),
+            "--name",
+            &name,
+            "--workspace",
+            &workspace,
+            "--worktree",
+            &branch,
+            "--ready-timeout",
+            "5",
+        ],
+    );
+    assert!(
+        matches!(out.status.code(), Some(0 | 3)),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let tab = herdr_ok(&["agent", "get", &name])["result"]["agent"]["tab_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(wt.is_dir());
+
+    let out = retire_close(state.path(), config.path(), &name);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        stdout,
+        format!(
+            "retired {name}\nclosed tab {tab}\nremoved {}\n",
+            wt.display()
+        )
+    );
+    assert_eq!(ledger_entry(state.path(), &name)["retired"], true);
+    let tabs = herdr_ok(&["tab", "list"]);
+    assert!(
+        !tabs["result"]["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["tab_id"] == tab.as_str()),
+        "{tabs}"
+    );
+    assert!(!wt.exists());
+    assert!(repo.join(".git").is_dir());
 }
