@@ -42,6 +42,8 @@ mod tests {
             repo: "/src/repo".into(),
             worktree: None,
             workspace: "w1".into(),
+            workspace_label: Some("loopherd".into()),
+            claude_args: vec![],
             prompt: None,
             prompt_sent: true,
             created: "2026-10-31T00:00:00Z".into(),
