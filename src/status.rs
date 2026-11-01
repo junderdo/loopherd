@@ -25,42 +25,68 @@ pub struct Output {
     pub code: i32,
 }
 
+/// One read of herdr and the ledger, shared by `status` and the TUI.
+#[derive(Debug)]
+pub struct Read {
+    pub view: View,
+    /// Why every status is unknown, when it is.
+    pub problem: Option<String>,
+    /// 2 when herdr is unreachable, 3 when its `agent list` reply is malformed.
+    pub code: i32,
+}
+
 /// Reads herdr once and the ledger once; changes neither. When herdr's agents
-/// can't be read it still prints the ledger, exiting 2 if herdr is unreachable
-/// and 3 if its `agent list` reply is malformed.
+/// can't be read it still returns the ledger, every status unknown.
+pub fn read(herdr: &dyn Herdr, ledger: &dyn Ledger, options: Options) -> Result<Read> {
+    let entries = ledger.entries()?;
+    let (agents, malformed, problem, code) = match herdr.agents() {
+        Ok(agents) => (Some(agents), false, None, 0),
+        Err(e) if e.downcast_ref::<MalformedReply>().is_some() => (
+            None,
+            true,
+            Some(format!(
+                "error: herdr's `agent list` output is malformed, every status is unknown: {e:#}"
+            )),
+            3,
+        ),
+        Err(e) => (
+            None,
+            false,
+            Some(format!(
+                "warning: herdr unreachable, every status is unknown: {e:#}"
+            )),
+            2,
+        ),
+    };
+    let mut view = view(&entries, agents.as_deref(), options, branch);
+    view.herdr_reachable = agents.is_some() || malformed;
+    Ok(Read {
+        view,
+        problem,
+        code,
+    })
+}
+
+/// Prints [`read`]'s view, exiting 2 if herdr is unreachable and 3 if its
+/// `agent list` reply is malformed.
 pub fn status(
     herdr: &dyn Herdr,
     ledger: &dyn Ledger,
     options: Options,
     format: Format,
 ) -> Result<Output> {
-    let entries = ledger.entries()?;
-    let (agents, malformed, stderr, code) = match herdr.agents() {
-        Ok(agents) => (Some(agents), false, String::new(), 0),
-        Err(e) if e.downcast_ref::<MalformedReply>().is_some() => (
-            None,
-            true,
-            format!(
-                "error: herdr's `agent list` output is malformed, every status is unknown: {e:#}\n"
-            ),
-            3,
-        ),
-        Err(e) => (
-            None,
-            false,
-            format!("warning: herdr unreachable, every status is unknown: {e:#}\n"),
-            2,
-        ),
-    };
-    let mut view = view(&entries, agents.as_deref(), options, branch);
-    view.herdr_reachable = agents.is_some() || malformed;
+    let Read {
+        view,
+        problem,
+        code,
+    } = read(herdr, ledger, options)?;
     let stdout = match format {
         Format::Text { color } => text(&view, color),
         Format::Json => serde_json::to_string_pretty(&view)? + "\n",
     };
     Ok(Output {
         stdout,
-        stderr,
+        stderr: problem.map(|p| p + "\n").unwrap_or_default(),
         code,
     })
 }
@@ -93,7 +119,8 @@ fn branch_at(dir: &Path) -> Option<String> {
     }
 }
 
-fn text(view: &View, color: bool) -> String {
+/// Member sections in display order, each with its header.
+pub fn sections(view: &View) -> Vec<(String, &[Member])> {
     // Only --all shows a herd with no active members; its entries are under `retired`.
     let mut sections: Vec<(String, &[Member])> = view
         .herds
@@ -109,6 +136,11 @@ fn text(view: &View, color: bool) -> String {
     if let Some(retired) = &view.retired {
         sections.push(("retired".into(), retired));
     }
+    sections
+}
+
+fn text(view: &View, color: bool) -> String {
+    let sections = sections(view);
     let rows: Vec<Vec<Vec<String>>> = sections
         .iter()
         .map(|(_, members)| members.iter().map(row).collect())
@@ -132,7 +164,7 @@ fn text(view: &View, color: bool) -> String {
     out
 }
 
-fn row(member: &Member) -> Vec<String> {
+pub fn row(member: &Member) -> Vec<String> {
     let status = match member.gone {
         true => "gone".into(),
         false => member.status.as_str().into(),
@@ -150,7 +182,7 @@ fn row(member: &Member) -> Vec<String> {
     ]
 }
 
-fn stray_lines(view: &View) -> String {
+pub fn stray_lines(view: &View) -> String {
     let Some(count) = view.strays.count else {
         return match view.herdr_reachable {
             true => "strays unknown (herdr's agent list unreadable)\n".into(),
@@ -180,7 +212,7 @@ fn stray_lines(view: &View) -> String {
     out
 }
 
-fn widths<'a>(rows: impl IntoIterator<Item = &'a Vec<String>>) -> Vec<usize> {
+pub fn widths<'a>(rows: impl IntoIterator<Item = &'a Vec<String>>) -> Vec<usize> {
     let mut widths = vec![];
     for row in rows {
         widths.resize(widths.len().max(row.len()), 0);
@@ -191,7 +223,7 @@ fn widths<'a>(rows: impl IntoIterator<Item = &'a Vec<String>>) -> Vec<usize> {
     widths
 }
 
-fn aligned(row: &[String], widths: &[usize]) -> String {
+pub fn aligned(row: &[String], widths: &[usize]) -> String {
     let cells: Vec<String> = row
         .iter()
         .zip(widths)

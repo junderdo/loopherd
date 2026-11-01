@@ -54,6 +54,7 @@ struct State {
     agents: Vec<Agent>,
     started: Vec<Started>,
     prompts: Vec<(String, String)>,
+    focused: Vec<String>,
     agent_polls: u32,
     mutations: u32,
 }
@@ -172,6 +173,11 @@ impl FakeHerdr {
         self.state.borrow().prompts.clone()
     }
 
+    /// Panes passed to `focus`, in order. Focusing isn't a mutation.
+    pub fn focused(&self) -> Vec<String> {
+        self.state.borrow().focused.clone()
+    }
+
     fn push_agent(&self, name: Option<&str>, session: Option<&str>, pane_id: &str, pending: bool) {
         let (ws, n) = pane_id.split_once(":p").expect("fake pane id");
         self.state.borrow_mut().agents.push(Agent {
@@ -211,7 +217,7 @@ impl FakeHerdr {
         tab
     }
 
-    fn set_status(&self, name: &str, status: AgentStatus) {
+    pub fn set_status(&self, name: &str, status: AgentStatus) {
         let mut state = self.state.borrow_mut();
         if let Some(a) = state
             .agents
@@ -423,6 +429,23 @@ impl Herdr for FakeHerdr {
             .borrow_mut()
             .prompts
             .push((name.to_string(), text.to_string()));
+        Ok(())
+    }
+
+    fn focus(&self, pane_id: &str) -> Result<()> {
+        if self.unreachable {
+            bail!("herdr server not running");
+        }
+        if !self
+            .state
+            .borrow()
+            .agents
+            .iter()
+            .any(|a| a.pane_id == pane_id)
+        {
+            bail!("no agent in pane {pane_id}");
+        }
+        self.state.borrow_mut().focused.push(pane_id.to_string());
         Ok(())
     }
 }
