@@ -4,7 +4,6 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -13,6 +12,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::ledger::Ledger;
+use crate::lock::Lock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -51,17 +51,7 @@ pub fn report(
     };
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join(format!("{name}.jsonl"));
-    let mut file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .append(true)
-        .open(&path)
-        .with_context(|| format!("open {}", path.display()))?;
-    // Held so no other reporter's write is mid-copy while we read the last byte.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("lock {}", path.display()));
-    }
+    let mut file = lock_mailbox(&path)?;
     let mut bytes = vec![];
     // A torn last line would swallow this report; start it on a line of its own.
     if !ends_in_newline(&mut file).with_context(|| format!("read {}", path.display()))? {
@@ -77,6 +67,18 @@ pub fn report(
         bail!("short write to {}", path.display());
     }
     Ok(name)
+}
+
+/// Opens `path` for append, locked so no other reporter's write is mid-copy
+/// while we read the last byte.
+fn lock_mailbox(path: &Path) -> Result<Lock> {
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    Lock::wait(file).with_context(|| format!("lock {}", path.display()))
 }
 
 /// True for an empty file too.
@@ -232,7 +234,7 @@ impl Cursor {
     }
 
     /// Held across load and save, so concurrent readers never move it back.
-    fn lock(dir: &Path) -> Result<fs::File> {
+    fn lock(dir: &Path) -> Result<Lock> {
         let path = dir.join(".cursor.lock");
         let file = OpenOptions::new()
             .create(true)
@@ -240,11 +242,7 @@ impl Cursor {
             .write(true)
             .open(&path)
             .with_context(|| format!("open {}", path.display()))?;
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error())
-                .with_context(|| format!("lock {}", path.display()));
-        }
-        Ok(file)
+        Lock::wait(file).with_context(|| format!("lock {}", path.display()))
     }
 
     fn load(dir: &Path) -> Result<Cursor> {
@@ -311,6 +309,34 @@ mod tests {
             own_pane: Some(pane),
             as_name: None,
         }
+    }
+
+    fn is_free(path: &Path) -> bool {
+        let file = fs::File::options().write(true).open(path).unwrap();
+        Lock::try_take(file).unwrap().is_some()
+    }
+
+    #[test]
+    fn dropping_the_mailbox_lock_frees_it_while_a_spawning_thread_holds_a_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zpr-1.jsonl");
+        let held = lock_mailbox(&path).unwrap();
+        assert!(!is_free(&path));
+        // A child forked by another test thread holds this copy until it execs.
+        let _inherited = held.try_clone().unwrap();
+        drop(held);
+        assert!(is_free(&path));
+    }
+
+    #[test]
+    fn dropping_the_cursor_lock_frees_it_while_a_spawning_thread_holds_a_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = Cursor::lock(dir.path()).unwrap();
+        let path = dir.path().join(".cursor.lock");
+        assert!(!is_free(&path));
+        let _inherited = held.try_clone().unwrap();
+        drop(held);
+        assert!(is_free(&path));
     }
 
     #[test]
