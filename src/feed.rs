@@ -16,6 +16,9 @@ use crate::retire::retire_and_close;
 use crate::shell::run_within;
 use crate::spawn::{BLOCKED_EXIT, spawn};
 
+/// Feed's exit code when every error was a malformed source line.
+pub const LINE_ERRORS_EXIT: i32 = 4;
+
 pub struct FeedRequest {
     pub herd: String,
     /// Run the source and the done checks and report; retire and spawn nothing.
@@ -65,7 +68,7 @@ pub fn feed(
     let mut free = queue.max.saturating_sub(held);
     let mut taken: HashSet<String> = entries.into_keys().collect();
 
-    let (mut added, mut skipped) = (0, 0);
+    let (mut added, mut skipped, mut line_errors) = (0, 0, 0);
     let mut code = 0;
     for task in output.lines().map(str::trim) {
         if task.is_empty() || task.starts_with('#') {
@@ -76,6 +79,7 @@ pub fn feed(
             Err(e) => {
                 lines.push(format!("error: {task}: {e:#}"));
                 errors += 1;
+                line_errors += 1;
                 continue;
             }
         };
@@ -128,7 +132,11 @@ pub fn feed(
         if errors == 1 { "" } else { "s" }
     ));
     if code == 0 && errors > 0 {
-        code = 1;
+        code = if errors == line_errors {
+            LINE_ERRORS_EXIT
+        } else {
+            1
+        };
     }
     Ok(Fed { lines, code })
 }
@@ -472,6 +480,23 @@ mod tests {
                 "added zpr-3",
                 "prs: 0 retired, 1 added, 0 skipped, 1 error",
             ]
+        );
+        assert_eq!(fed.code, LINE_ERRORS_EXIT);
+    }
+
+    #[test]
+    fn a_malformed_line_with_another_error_exits_1() {
+        let setup = Setup::with_done("cat tasks", 1, "exit 0");
+        let mut herdr = herdr();
+        let mut ledger = fed_one(&setup, &herdr);
+        herdr.fail_close_tab = true;
+        setup.tasks("1 2\n");
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(
+            fed.lines.last().unwrap(),
+            "prs: 0 retired, 0 added, 0 skipped, 2 errors"
         );
         assert_eq!(fed.code, 1);
     }
