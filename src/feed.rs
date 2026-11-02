@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 
-use crate::herd::{AddRequest, Paths, Queue, queue, resolve};
+use crate::herd::{AddRequest, Paths, Queue, members, queue, resolve};
 use crate::herdr::Herdr;
 use crate::ledger::Ledger;
 use crate::retire::retire_and_close;
@@ -58,18 +58,14 @@ pub fn feed(
     let reaped = reap(herdr, ledger, &queue, req, &mut lines)?;
     let mut errors = reaped.errors;
 
-    let entries = ledger.entries().context("ledger")?;
-    let held = entries
-        .values()
-        .filter(|e| !e.retired && e.herd.as_deref() == Some(&req.herd))
-        .count();
+    let held = members(ledger, &req.herd)?;
     let held = if req.dry_run {
         held.saturating_sub(reaped.retired)
     } else {
         held
     };
     let mut free = queue.max.saturating_sub(held);
-    let mut taken: HashSet<String> = entries.into_keys().collect();
+    let mut taken: HashSet<String> = ledger.entries().context("ledger")?.into_keys().collect();
 
     let (mut added, mut skipped, mut line_errors) = (0, 0, 0);
     let mut code = 0;
@@ -381,6 +377,7 @@ mod tests {
             Paths {
                 herds: self.config.path().join("herds"),
                 home: PathBuf::from("/home/me"),
+                feed_lock: self.config.path().join("feed.lock"),
             }
         }
 
