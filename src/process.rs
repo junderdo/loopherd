@@ -12,6 +12,7 @@ pub trait Procs {
     fn parent(&self, pid: u32) -> Option<u32>;
     /// Clock ticks since boot at which `pid` started.
     fn start(&self, pid: u32) -> Option<u64>;
+    fn cmdline(&self, pid: u32) -> Option<Vec<String>>;
 }
 
 pub struct ProcFs;
@@ -27,6 +28,15 @@ impl Procs for ProcFs {
 
     fn start(&self, pid: u32) -> Option<u64> {
         stat_field(pid, 19)?.parse().ok()
+    }
+
+    fn cmdline(&self, pid: u32) -> Option<Vec<String>> {
+        let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let args = raw.split(|b| *b == 0).filter(|a| !a.is_empty());
+        Some(
+            args.map(|a| String::from_utf8_lossy(a).into_owned())
+                .collect(),
+        )
     }
 }
 
@@ -68,7 +78,7 @@ pub fn live(procs: &dyn Procs, recorded: Option<Process>) -> Option<Process> {
 }
 
 /// `pid` is the Claude of a pane, not one nested under it: walking up from its
-/// parent reaches the herdr server without meeting another Claude binary. A walk
+/// parent reaches the herdr server without meeting another Claude. A walk
 /// that ends any other way (init, a vanished process, too many steps) is not.
 pub fn is_top_level(procs: &dyn Procs, pid: u32) -> bool {
     let mut at = procs.parent(pid);
@@ -78,7 +88,7 @@ pub fn is_top_level(procs: &dyn Procs, pid: u32) -> bool {
         };
         match procs.exe(current) {
             Some(exe) if is_herdr(&exe) => return true,
-            Some(exe) if is_claude_binary(&exe) => return false,
+            Some(exe) if is_claude(procs, current, &exe) => return false,
             Some(_) => {}
             None => return false,
         }
@@ -146,12 +156,25 @@ fn is_herdr(exe: &Path) -> bool {
     name.is_some_and(|n| n.strip_suffix(" (deleted)").unwrap_or(n) == "herdr")
 }
 
-fn is_claude_binary(exe: &Path) -> bool {
-    exe.to_string_lossy().contains("/claude/versions/")
+/// A native install runs from `…/claude/versions/`; an npm install is `node`
+/// running `…/@anthropic-ai/claude-code/cli.js`.
+fn is_claude(procs: &dyn Procs, pid: u32, exe: &Path) -> bool {
+    if exe.to_string_lossy().contains("/claude/versions/") {
+        return true;
+    }
+    let is_node = exe
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with("node"));
+    is_node
+        && procs.cmdline(pid).is_some_and(|args| {
+            args.iter()
+                .any(|a| a.contains("@anthropic-ai/claude-code/"))
+        })
 }
 
 #[cfg(test)]
-pub use fake::{CLAUDE, FakeProcs};
+pub use fake::{CLAUDE, FakeProcs, NODE};
 
 #[cfg(test)]
 mod fake {
@@ -159,15 +182,30 @@ mod fake {
 
     use super::*;
 
-    /// pid → (exe, parent, start).
+    /// pid → (exe, parent, start), and pid → cmdline.
     #[derive(Default)]
-    pub struct FakeProcs(pub BTreeMap<u32, (PathBuf, u32, u64)>);
+    pub struct FakeProcs(
+        pub BTreeMap<u32, (PathBuf, u32, u64)>,
+        pub BTreeMap<u32, Vec<String>>,
+    );
 
     pub const CLAUDE: &str = "/home/u/.local/share/claude/versions/2.1.316";
+    pub const NODE: &str = "/usr/bin/node";
+    const NPM_CLI: &str = "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js";
 
     impl FakeProcs {
         pub fn add(&mut self, pid: u32, exe: &str, parent: u32, start: u64) {
             self.0.insert(pid, (exe.into(), parent, start));
+        }
+
+        pub fn set_cmdline(&mut self, pid: u32, args: &[&str]) {
+            self.1
+                .insert(pid, args.iter().map(|a| a.to_string()).collect());
+        }
+
+        pub fn add_npm_claude(&mut self, pid: u32, parent: u32, start: u64) {
+            self.add(pid, NODE, parent, start);
+            self.set_cmdline(pid, &["node", NPM_CLI, "--permission-mode", "auto"]);
         }
 
         /// herdr server 10 → pane shell 20 → claude 30.
@@ -190,6 +228,9 @@ mod fake {
         fn start(&self, pid: u32) -> Option<u64> {
             self.0.get(&pid).map(|p| p.2)
         }
+        fn cmdline(&self, pid: u32) -> Option<Vec<String>> {
+            self.1.get(&pid).cloned()
+        }
     }
 }
 
@@ -204,6 +245,7 @@ mod tests {
         assert!(ProcFs.start(me).is_some());
         assert_eq!(ProcFs.parent(me), Some(std::os::unix::process::parent_id()));
         assert!(ProcFs.exe(me).is_some());
+        assert!(ProcFs.cmdline(me).is_some_and(|args| !args.is_empty()));
     }
 
     #[test]
@@ -217,6 +259,49 @@ mod tests {
         p.add(40, "/bin/sh", 30, 400);
         p.add(50, CLAUDE, 40, 500);
         assert!(!is_top_level(&p, 50));
+    }
+
+    #[test]
+    fn an_npm_claude_under_the_pane_shell_is_top_level() {
+        let mut p = FakeProcs::pane();
+        p.add_npm_claude(30, 20, 300);
+        assert!(is_top_level(&p, 30));
+    }
+
+    #[test]
+    fn an_npm_claude_nested_in_an_npm_claude_is_not() {
+        let mut p = FakeProcs::pane();
+        p.add_npm_claude(30, 20, 300);
+        p.add(40, "/bin/sh", 30, 400);
+        p.add_npm_claude(50, 40, 500);
+        assert!(!is_top_level(&p, 50));
+    }
+
+    #[test]
+    fn claudes_nested_across_install_kinds_are_not_top_level() {
+        let mut native_in_npm = FakeProcs::pane();
+        native_in_npm.add_npm_claude(30, 20, 300);
+        native_in_npm.add(40, "/bin/sh", 30, 400);
+        native_in_npm.add(50, CLAUDE, 40, 500);
+        assert!(!is_top_level(&native_in_npm, 50));
+
+        let mut npm_in_native = FakeProcs::pane();
+        npm_in_native.add(40, "/bin/sh", 30, 400);
+        npm_in_native.add_npm_claude(50, 40, 500);
+        assert!(!is_top_level(&npm_in_native, 50));
+    }
+
+    #[test]
+    fn a_plain_node_process_above_the_claude_does_not_nest_it() {
+        let mut p = FakeProcs::pane();
+        p.add(25, NODE, 20, 250);
+        p.set_cmdline(25, &[NODE, "/home/u/tools/watcher.js"]);
+        p.add(30, CLAUDE, 25, 300);
+        assert!(is_top_level(&p, 30));
+
+        p.0.remove(&25);
+        p.add(25, "/usr/bin/nodejs", 20, 250);
+        assert!(is_top_level(&p, 30));
     }
 
     #[test]
