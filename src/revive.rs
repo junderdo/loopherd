@@ -55,7 +55,7 @@ pub fn revive(herdr: &dyn Herdr, ledger: &mut dyn Ledger, req: &ReviveRequest) -
             let updated = AgentRecord {
                 pane_id: pane_id.clone(),
                 session_id: session_id.clone().or(record.session_id.clone()),
-                socket: herdr.socket(),
+                socket: herdr.socket().or(record.socket.clone()),
                 ..record.clone()
             };
             match ledger.record(updated) {
@@ -537,6 +537,23 @@ mod tests {
             )
         );
         assert_eq!(ledger.0.0["a"].pane_id, "w1:p1");
+    }
+
+    #[test]
+    fn a_revive_outside_herdr_keeps_the_recorded_socket() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut herdr = herdr();
+        herdr.socket = None;
+        let mut ledger = ledger([AgentRecord {
+            socket: Some("/run/live.sock".into()),
+            ..record("a", cwd.path())
+        }]);
+        run(&herdr, &mut ledger, &request());
+        assert_eq!(ledger.0["a"].pane_id, "w1:p1");
+        assert_eq!(
+            ledger.0["a"].socket.as_deref(),
+            Some(Path::new("/run/live.sock"))
+        );
     }
 
     #[test]

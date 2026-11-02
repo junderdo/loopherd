@@ -30,7 +30,7 @@ are in [docs/wayfinding.md](docs/wayfinding.md), and what herdr offers is in
 scripts/install
 ```
 
-builds loopherd, installs it as `~/.local/bin/loopherd`, and adds its Stop
+(needs `cargo` and `jq`) builds loopherd, installs it as `~/.local/bin/loopherd`, and adds its Stop
 and StopFailure hooks to `~/.claude/settings.json` (backing the file up
 first). The hooks record each stop of a herd member in its mailbox and do
 nothing in any other Claude session. Re-run it after pulling; it changes

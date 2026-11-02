@@ -260,4 +260,21 @@ mod tests {
             Some("lh-1")
         );
     }
+
+    #[test]
+    fn an_exact_socket_match_beats_an_older_socketless_entry_on_the_same_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![
+            member("aaa-old", "w1:p3", None),
+            member("zzz-live", "w1:p3", Some(SOCKET)),
+        ]);
+        assert_eq!(
+            run(&ledger, dir.path(), "w1:p3", Some(SOCKET), "{}").as_deref(),
+            Some("zzz-live")
+        );
+        assert_eq!(
+            run(&ledger, dir.path(), "w1:p3", Some("/run/other.sock"), "{}").as_deref(),
+            Some("aaa-old")
+        );
+    }
 }

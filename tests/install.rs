@@ -115,6 +115,34 @@ fn a_failed_build_leaves_the_old_binary() {
     assert!(!sandbox.log.exists());
 }
 
+#[test]
+fn install_without_jq_stops_before_building() {
+    let sandbox = Sandbox::new(false);
+    let no_jq = tempfile::tempdir().unwrap();
+    for tool in ["bash", "dirname", "cargo"] {
+        let found = String::from_utf8(
+            Command::new("sh")
+                .args(["-c", &format!("command -v {tool}")])
+                .env("PATH", &sandbox.path)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(found.trim(), no_jq.path().join(tool)).unwrap();
+    }
+
+    let out = Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install"))
+        .env("HOME", &sandbox.home)
+        .env("PATH", no_jq.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("needs jq"));
+    assert!(!sandbox.installed().exists());
+}
+
 /// The command `install-hook` wrote for this test's binary, run by `sh` as
 /// Claude runs hooks.
 fn installed_hook_command(dir: &Path) -> String {

@@ -17,7 +17,7 @@ session. Read `herdr --skill` before controlling herdr.
    ```bash
    scripts/install
    ```
-   It builds, copies the binary to `~/.local/bin/loopherd` through a temp
+   It needs `jq`. It builds, copies the binary to `~/.local/bin/loopherd` through a temp
    file and a rename, so a failed build keeps the last good one, and runs
    `loopherd install-hook` to keep the Stop/StopFailure hooks in
    `~/.claude/settings.json` (backed up first; re-running changes nothing).

@@ -169,10 +169,18 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".{}.tmp", std::process::id()));
     let tmp = path.with_file_name(name);
-    fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
-    if let Ok(meta) = fs::metadata(path) {
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(meta.permissions().mode()))?;
-    }
+    // Mode set before any byte lands, so a private file is never briefly readable.
+    let mode = fs::metadata(path).map_or(0o644, |m| m.permissions().mode());
+    let _ = fs::remove_file(&tmp);
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&tmp)
+        .with_context(|| format!("create {}", tmp.display()))?;
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
+    file.write_all(bytes)
+        .with_context(|| format!("write {}", tmp.display()))?;
     fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))
 }
 

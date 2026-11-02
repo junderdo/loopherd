@@ -6,6 +6,8 @@
 #   scripts/install --settings <file>    # hooks in another settings file
 set -euo pipefail
 
+command -v jq >/dev/null || { echo "install: needs jq (to read cargo's build output); install it first" >&2; exit 1; }
+
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 bin_dir="$HOME/.local/bin"
 

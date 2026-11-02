@@ -187,15 +187,17 @@ fn ends_in_newline(file: &mut fs::File) -> std::io::Result<bool> {
 }
 
 /// The non-retired member running in `pane` of the herdr at `socket`. An
-/// entry recorded without a socket matches on its pane alone.
+/// entry recorded without a socket matches on its pane alone, but only when
+/// no entry matches the socket exactly.
 pub fn member_in<'a>(
     entries: &'a BTreeMap<String, AgentRecord>,
     pane: &str,
     socket: Option<&Path>,
 ) -> Option<&'a AgentRecord> {
-    entries.values().find(|e| {
-        !e.retired && e.pane_id == pane && e.socket.as_deref().is_none_or(|s| Some(s) == socket)
-    })
+    let in_pane = || entries.values().filter(|e| !e.retired && e.pane_id == pane);
+    in_pane()
+        .find(|e| socket.is_some() && e.socket.as_deref() == socket)
+        .or_else(|| in_pane().find(|e| e.socket.is_none()))
 }
 
 fn reporter(ledger: &dyn Ledger, who: &Reporter) -> Result<String> {
@@ -1276,5 +1278,27 @@ mod tests {
              \"background\":{\"shells\":1,\"subagents\":2,\"other\":3},\"crons\":\"unknown\"}"
         );
         assert_eq!(serde_json::from_str::<Entry>(&line).unwrap(), entry);
+    }
+
+    #[test]
+    fn a_report_goes_to_the_exact_socket_match_over_a_socketless_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut live = member("zzz-live", "w1:p3", None, false);
+        live.socket = Some("/run/live.sock".into());
+        let ledger = ledger(vec![member("aaa-old", "w1:p3", None, false), live]);
+        let who = Reporter {
+            own_pane: Some("w1:p3"),
+            own_socket: Some(Path::new("/run/live.sock")),
+            as_name: None,
+        };
+        let name = report(
+            &ledger,
+            dir.path(),
+            &who,
+            Kind::Note,
+            "hi",
+            at("2026-11-01T09:00:00Z"),
+        );
+        assert_eq!(name.unwrap(), "zzz-live");
     }
 }
