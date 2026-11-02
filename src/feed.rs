@@ -1,8 +1,6 @@
 //! `loopherd feed`: fill a herd's free slots from its queue's source (D14).
 
 use std::collections::HashSet;
-use std::fs::File;
-use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::process::{Command, Output};
 use std::time::{Duration, SystemTime};
@@ -287,36 +285,6 @@ fn task_request(
             ready_timeout: req.ready_timeout,
         },
     )
-}
-
-/// An exclusive lock on `path`, held until the guard is dropped.
-#[derive(Debug)]
-pub struct FeedLock(File);
-
-impl Drop for FeedLock {
-    fn drop(&mut self) {
-        // Unlock before close: a child forked by another thread shares this open
-        // file description until it execs, and closing alone leaves it locked.
-        // SAFETY: flock on a descriptor this guard owns.
-        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
-    }
-}
-
-/// Takes the lock on `path`; fails at once if another run holds it.
-pub fn lock(path: &Path) -> Result<FeedLock> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    }
-    let file = File::create(path).with_context(|| format!("open {}", path.display()))?;
-    // SAFETY: flock on a descriptor this function owns.
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            bail!("feed already running");
-        }
-        return Err(err).with_context(|| format!("lock {}", path.display()));
-    }
-    Ok(FeedLock(file))
 }
 
 /// The source's stdout; fails if it exits non-zero or outruns `timeout`.
@@ -1180,28 +1148,6 @@ mod tests {
 
         assert!(started.elapsed() < Duration::from_secs(10));
         assert_eq!(fed.lines[0], "added zpr-1");
-    }
-
-    #[test]
-    fn a_second_lock_is_refused_until_the_first_is_dropped() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("loopherd/feed.lock");
-        let first = lock(&path).unwrap();
-        let err = lock(&path).unwrap_err();
-        assert_eq!(format!("{err:#}"), "feed already running");
-        drop(first);
-        lock(&path).unwrap();
-    }
-
-    #[test]
-    fn dropping_a_lock_frees_it_while_a_spawning_thread_holds_a_copy() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("loopherd/feed.lock");
-        let first = lock(&path).unwrap();
-        // A child forked by another test thread holds this copy until it execs.
-        let _inherited = first.0.try_clone().unwrap();
-        drop(first);
-        lock(&path).unwrap();
     }
 
     #[test]

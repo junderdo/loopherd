@@ -7,9 +7,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::feed::lock;
 use crate::herdr::Herdr;
 use crate::ledger::{AgentRecord, FileLedger, Ledger};
+use crate::lock::Lock;
 use crate::spawn::{Checkout, MemberOf, Prompt, SpawnRequest, Spawned, preview, spawn};
 use crate::template::Template;
 
@@ -77,6 +77,20 @@ impl Paths {
             feed_lock: FileLedger::default_path()?.with_file_name("feed.lock"),
         })
     }
+
+    /// Takes the feed lock; fails at once if another run holds it.
+    pub fn lock_feed(&self) -> Result<Lock> {
+        let path = &self.feed_lock;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        }
+        let file =
+            std::fs::File::create(path).with_context(|| format!("open {}", path.display()))?;
+        match Lock::try_take(file).with_context(|| format!("lock {}", path.display()))? {
+            Some(lock) => Ok(lock),
+            None => bail!("feed already running"),
+        }
+    }
 }
 
 pub struct AddRequest {
@@ -112,7 +126,7 @@ pub fn add(
         .context("herd")?
         .queue
         .map(|q| q.max as usize);
-    let _feed = max.map(|_| lock(&paths.feed_lock)).transpose()?;
+    let _feed = max.map(|_| paths.lock_feed()).transpose()?;
     let held = match max {
         Some(_) => members(ledger, &req.herd)?,
         None => 0,
@@ -654,9 +668,31 @@ args = ["--model", "opus"]
     }
 
     #[test]
+    fn a_second_feed_lock_is_refused_until_the_first_is_dropped() {
+        let config = Config::with(&[]);
+        let paths = config.paths();
+        let first = paths.lock_feed().unwrap();
+        let err = paths.lock_feed().unwrap_err();
+        assert_eq!(format!("{err:#}"), "feed already running");
+        drop(first);
+        paths.lock_feed().unwrap();
+    }
+
+    #[test]
+    fn dropping_the_feed_lock_frees_it_while_a_spawning_thread_holds_a_copy() {
+        let config = Config::with(&[]);
+        let paths = config.paths();
+        let first = paths.lock_feed().unwrap();
+        // A child forked by another test thread holds this copy until it execs.
+        let _inherited = first.try_clone().unwrap();
+        drop(first);
+        paths.lock_feed().unwrap();
+    }
+
+    #[test]
     fn add_into_a_queue_herd_is_refused_while_feed_runs() {
         let config = Config::with(&[("prs", &queue_herd(5))]);
-        let _feed = crate::feed::lock(&config.paths().feed_lock).unwrap();
+        let _feed = config.paths().lock_feed().unwrap();
         let err = add_err(&config, &request("prs", "pr", &["1"]));
         assert_eq!(err, "feed already running");
     }
@@ -664,7 +700,7 @@ args = ["--model", "opus"]
     #[test]
     fn add_into_a_herd_without_a_queue_ignores_a_running_feed() {
         let config = Config::with(&[("prs", PR_HERD)]);
-        let _feed = crate::feed::lock(&config.paths().feed_lock).unwrap();
+        let _feed = config.paths().lock_feed().unwrap();
         let (herdr, _, name) = add_ok(&config, &request("prs", "pr", &["1"]));
         assert_eq!(name, "zpr-1");
         assert_eq!(herdr.tabs().len(), 1);
