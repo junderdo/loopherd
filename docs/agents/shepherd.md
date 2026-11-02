@@ -113,6 +113,8 @@ differs from the shepherd:
   task. Exit 2 is a heartbeat, not idleness: check each Review card's PR
   (`gh pr view <n> --json state`) and run the after-merge steps for any the
   human merged. Re-arm after every exit.
+  After a herdr restart, `loopherd revive` resumes you and prompts you to
+  re-arm it.
 - **On each wake** re-read `loopherd status` and `loopherd reports --all`
   before acting: auto-compaction drops detail, and your state lives on the
   board, ledger and mailbox, not in your context.
