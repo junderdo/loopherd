@@ -41,6 +41,7 @@ pub struct Fed {
 /// until the herd's slots are full.
 ///
 /// Fails, changing nothing, if the source fails or herdr is unreachable.
+/// A dry run never calls herdr.
 pub fn feed(
     herdr: &dyn Herdr,
     ledger: &mut dyn Ledger,
@@ -49,7 +50,9 @@ pub fn feed(
     inherited_workspace: Option<&str>,
 ) -> Result<Fed> {
     let queue = queue(paths, &req.herd)?;
-    herdr.workspaces().context("herdr")?;
+    if !req.dry_run {
+        herdr.workspaces().context("herdr")?;
+    }
     let output = run_source(&queue, req.command_timeout).context("source")?;
     let mut lines = vec![];
     let reaped = reap(herdr, ledger, &queue, req, &mut lines)?;
@@ -677,6 +680,30 @@ mod tests {
         assert!(herdr.tabs().is_empty());
         assert!(herdr.started().is_empty());
         assert_eq!(ledger.0.keys().collect::<Vec<_>>(), ["zpr-1"]);
+    }
+
+    #[test]
+    fn dry_run_makes_no_herdr_call() {
+        let setup = Setup::with_done("printf '1\\n2\\n'", 1, "test -f done-{number}");
+        setup.touch("done-1");
+        let mut herdr = herdr();
+        herdr.unreachable = true;
+        let mut zpr = member("zpr-1", Some("prs"), false);
+        zpr.params = Some([("number".to_string(), "1".to_string())].into());
+        let mut ledger = ledger(&[zpr]);
+
+        let fed = setup.feed(&herdr, &mut ledger, true).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "would retire zpr-1",
+                "skipped: exists zpr-1",
+                "would add zpr-2",
+                "prs: 1 would retire, 1 would add, 1 skipped, 0 errors",
+            ]
+        );
+        assert_eq!(fed.code, 0);
     }
 
     #[test]
