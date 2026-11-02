@@ -13,6 +13,7 @@ mod spawn;
 mod status;
 mod template;
 mod tui;
+mod watch;
 mod worktree;
 
 use std::path::PathBuf;
@@ -132,6 +133,16 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    /// Block until a member needs the shepherd, print what happened, and exit:
+    /// an unread report (marked read), a blocked member, or one going from
+    /// working to done or idle. Polls herdr every 2s, read-only.
+    Watch {
+        /// Only members of these herds.
+        herds: Vec<String>,
+        /// Give up after this many seconds, exiting 2 with no output.
+        #[arg(long)]
+        timeout: Option<u64>,
+    },
 }
 
 #[derive(Args)]
@@ -197,6 +208,7 @@ fn main() -> ExitCode {
             text,
         } => ("report", run_report(kind, as_name, &text)),
         Command::Reports { names, herd, all } => ("reports", run_reports(names, herd, all)),
+        Command::Watch { herds, timeout } => ("watch", run_watch(&herds, timeout)),
     };
     match result {
         Ok(code) => ExitCode::from(code as u8),
@@ -308,6 +320,31 @@ fn run_reports(names: Vec<String>, herd: Option<String>, all: bool) -> Result<i3
     }
     for warning in read.warnings {
         eprintln!("loopherd reports: warning: {warning}");
+    }
+    Ok(0)
+}
+
+fn run_watch(herds: &[String], timeout: Option<u64>) -> Result<i32> {
+    let path = FileLedger::default_path().context("ledger")?;
+    let dir = reports_dir(&path)?;
+    let req = watch::Request {
+        herds,
+        timeout: timeout.map(Duration::from_secs),
+        poll: Duration::from_secs(2),
+    };
+    let woke = watch::watch(
+        &CliHerdr,
+        &FileLedger::new(path),
+        &dir,
+        &req,
+        &mut watch::RealClock::start(),
+        &mut |warning| eprintln!("loopherd watch: {warning}"),
+    )?;
+    let Some(lines) = woke else {
+        return Ok(2);
+    };
+    for line in lines {
+        println!("{line}");
     }
     Ok(0)
 }
