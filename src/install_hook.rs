@@ -1,5 +1,6 @@
-//! `loopherd install-hook`: merge loopherd's Stop, StopFailure and SessionStart
-//! hooks into Claude's user settings, or take them out with `--remove`.
+//! `loopherd install-hook`: merge loopherd's Stop, StopFailure, SessionStart
+//! and PreToolUse hooks into Claude's user settings, or take them out with
+//! `--remove`.
 
 use std::fs;
 use std::io::Write;
@@ -10,13 +11,52 @@ use std::time::SystemTime;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Map, Value, json};
 
-/// Each hook event with the loopherd subcommand it runs.
-const HOOKS: [(&str, &str); 3] = [
-    ("Stop", "stop-hook"),
-    ("StopFailure", "stop-hook"),
-    ("SessionStart", "session-hook"),
+struct Hook {
+    event: &'static str,
+    subcommand: &'static str,
+    matcher: Option<&'static str>,
+    timeout: u64,
+    /// Its exit 2 reaches Claude, to block a tool call.
+    can_block: bool,
+    /// `watch` refuses to run without it.
+    watched: bool,
+}
+
+const HOOKS: [Hook; 4] = [
+    Hook {
+        event: "Stop",
+        subcommand: "stop-hook",
+        matcher: None,
+        timeout: 10,
+        can_block: false,
+        watched: true,
+    },
+    Hook {
+        event: "StopFailure",
+        subcommand: "stop-hook",
+        matcher: None,
+        timeout: 10,
+        can_block: false,
+        watched: true,
+    },
+    Hook {
+        event: "SessionStart",
+        subcommand: "session-hook",
+        matcher: None,
+        timeout: 10,
+        can_block: false,
+        watched: true,
+    },
+    // Runs before every Bash call in every session, so it must stay quick.
+    Hook {
+        event: "PreToolUse",
+        subcommand: "tool-hook",
+        matcher: Some("Bash"),
+        timeout: 5,
+        can_block: true,
+        watched: false,
+    },
 ];
-const TIMEOUT_SECS: u64 = 10;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -36,14 +76,16 @@ pub fn default_settings() -> Result<PathBuf> {
     Ok(dir.join("settings.json"))
 }
 
-/// The hook's shell command. `|| true` because a Stop hook exiting 2 keeps
-/// Claude from stopping, and a missing or old binary must never do that.
-pub fn hook_command(exe: &Path, subcommand: &str) -> Result<String> {
+/// The hook's shell command. `|| true` unless it `can_block`, because a Stop
+/// hook exiting 2 keeps Claude from stopping, and a missing or old binary
+/// must never do that.
+pub fn hook_command(exe: &Path, subcommand: &str, can_block: bool) -> Result<String> {
     let path = exe
         .to_str()
         .ok_or_else(|| anyhow!("{} is not UTF-8", exe.display()))?;
+    let or_true = if can_block { "" } else { " || true" };
     Ok(format!(
-        "'{}' {subcommand} || true",
+        "'{}' {subcommand}{or_true}",
         path.replace('\'', r"'\''")
     ))
 }
@@ -52,15 +94,20 @@ pub fn hook_command(exe: &Path, subcommand: &str) -> Result<String> {
 pub fn install(settings: &Path, exe: &Path, now: SystemTime) -> Result<Outcome> {
     edit(settings, now, |root| {
         let hooks = object_at(root, "hooks", "settings")?;
-        for (event, subcommand) in HOOKS {
+        for hook in &HOOKS {
             let ours = json!({
                 "type": "command",
-                "command": hook_command(exe, subcommand)?,
-                "timeout": TIMEOUT_SECS,
+                "command": hook_command(exe, hook.subcommand, hook.can_block)?,
+                "timeout": hook.timeout,
             });
-            let groups = array_at(hooks, event)?;
-            if !keep_first_of_ours(groups, &ours, subcommand) {
-                groups.push(json!({"hooks": [ours.clone()]}));
+            let groups = array_at(hooks, hook.event)?;
+            if !keep_first_of_ours(groups, &ours, hook.subcommand) {
+                let mut group = Map::new();
+                if let Some(matcher) = hook.matcher {
+                    group.insert("matcher".into(), matcher.into());
+                }
+                group.insert("hooks".into(), json!([ours]));
+                groups.push(Value::Object(group));
             }
         }
         Ok(())
@@ -78,17 +125,17 @@ pub fn remove(settings: &Path, now: SystemTime) -> Result<Outcome> {
             .as_object_mut()
             .ok_or_else(|| anyhow!("hooks is not an object"))?;
         let mut dropped = false;
-        for (event, subcommand) in HOOKS {
-            let Some(groups) = hooks.get_mut(event) else {
+        for hook in &HOOKS {
+            let Some(groups) = hooks.get_mut(hook.event) else {
                 continue;
             };
             let groups = groups
                 .as_array_mut()
-                .ok_or_else(|| anyhow!("hooks.{event} is not an array"))?;
-            if drop_ours(groups, subcommand) {
+                .ok_or_else(|| anyhow!("hooks.{} is not an array", hook.event))?;
+            if drop_ours(groups, hook.subcommand) {
                 dropped = true;
                 if groups.is_empty() {
-                    hooks.remove(event);
+                    hooks.remove(hook.event);
                 }
             }
         }
@@ -99,7 +146,8 @@ pub fn remove(settings: &Path, now: SystemTime) -> Result<Outcome> {
     })
 }
 
-/// Whether `settings` has loopherd's hook on Stop, StopFailure and SessionStart.
+/// Whether `settings` has the hooks `watch` needs: Stop, StopFailure and
+/// SessionStart. The PreToolUse hook only guards leads.
 pub fn installed(settings: &Path) -> Result<bool> {
     let bytes = match fs::read(settings) {
         Ok(bytes) => bytes,
@@ -117,7 +165,10 @@ pub fn installed(settings: &Path) -> Result<bool> {
             .flatten()
             .any(|hook| is_ours(hook, subcommand))
     };
-    Ok(HOOKS.iter().all(|(event, sub)| has_ours(event, sub)))
+    Ok(HOOKS
+        .iter()
+        .filter(|h| h.watched)
+        .all(|h| has_ours(h.event, h.subcommand)))
 }
 
 /// Applies `change` to the settings object and writes it back only if it
@@ -284,11 +335,13 @@ fn drop_ours(groups: &mut Vec<Value>, subcommand: &str) -> bool {
     dropped
 }
 
-/// A command [`hook_command`] built, for a binary named `loopherd` anywhere.
+/// A command [`hook_command`] built, with or without `|| true`, for a binary
+/// named `loopherd` anywhere.
 fn is_ours(hook: &Value, subcommand: &str) -> bool {
     hook.get("command")
         .and_then(Value::as_str)
-        .and_then(|c| c.strip_suffix(&format!(" {subcommand} || true")))
+        .map(|c| c.strip_suffix(" || true").unwrap_or(c))
+        .and_then(|c| c.strip_suffix(&format!(" {subcommand}")))
         .and_then(unquote)
         .is_some_and(|path| {
             Path::new(&path)
@@ -339,6 +392,62 @@ mod tests {
 
     fn ours_running(subcommand: &str) -> Value {
         json!({"type": "command", "command": format!("'{EXE}' {subcommand} || true"), "timeout": 10})
+    }
+
+    fn tool_hook() -> Value {
+        json!({"type": "command", "command": format!("'{EXE}' tool-hook"), "timeout": 5})
+    }
+
+    #[test]
+    fn adds_a_pre_tool_use_hook_on_bash_whose_exit_2_reaches_claude() {
+        let user = r#"{"hooks": {"PreToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": "lint"}]}]}}"#;
+        let (_dir, path) = settings_with(user);
+
+        install(&path, Path::new(EXE), now()).unwrap();
+
+        let groups = read(&path)["hooks"]["PreToolUse"].clone();
+        assert_eq!(
+            groups,
+            json!([
+                {"matcher": "Edit", "hooks": [{"type": "command", "command": "lint"}]},
+                {"matcher": "Bash", "hooks": [tool_hook()]},
+            ])
+        );
+        assert!(!groups.to_string().contains("onFailure"));
+        assert_eq!(
+            install(&path, Path::new(EXE), later()).unwrap(),
+            Outcome::Unchanged
+        );
+        remove(&path, later()).unwrap();
+        assert_eq!(read(&path), read_str(user));
+    }
+
+    #[test]
+    fn an_old_tool_hook_with_or_true_is_replaced() {
+        let old = json!({"hooks": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": "'/old/loopherd' tool-hook || true"}]},
+        ]}});
+        let (_dir, path) = settings_with(&old.to_string());
+
+        install(&path, Path::new(EXE), now()).unwrap();
+
+        assert_eq!(
+            read(&path)["hooks"]["PreToolUse"],
+            json!([{"matcher": "Bash", "hooks": [tool_hook()]}])
+        );
+    }
+
+    #[test]
+    fn the_tool_hook_command_passes_exit_2_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocking = dir.path().join("loopherd");
+        fs::write(&blocking, "#!/bin/sh\nexit 2\n").unwrap();
+        fs::set_permissions(&blocking, fs::Permissions::from_mode(0o755)).unwrap();
+        let status = Command::new("sh")
+            .args(["-c", &hook_command(&blocking, "tool-hook", true).unwrap()])
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(2));
     }
 
     fn settings_with(contents: &str) -> (tempfile::TempDir, PathBuf) {
@@ -441,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn installed_needs_ours_on_all_three_events() {
+    fn installed_needs_ours_on_the_three_watched_events() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         assert!(!installed(&path).unwrap());
@@ -451,6 +560,17 @@ mod tests {
 
         install(&path, Path::new("/opt/bin/loopherd"), now()).unwrap();
         assert!(installed(&path).unwrap());
+
+        let mut no_tool_hook = read(&path);
+        no_tool_hook["hooks"]
+            .as_object_mut()
+            .unwrap()
+            .remove("PreToolUse");
+        fs::write(&path, no_tool_hook.to_string()).unwrap();
+        assert!(
+            installed(&path).unwrap(),
+            "watch doesn't need the tool hook"
+        );
 
         let mut half = read(&path);
         half["hooks"].as_object_mut().unwrap().remove("StopFailure");
@@ -521,7 +641,12 @@ mod tests {
         assert_eq!(outcome, Outcome::Changed { backup: None });
         assert_eq!(
             read(&path),
-            json!({"hooks": {"Stop": [{"hooks": [ours()]}], "StopFailure": [{"hooks": [ours()]}], "SessionStart": [{"hooks": [ours_running("session-hook")]}]}})
+            json!({"hooks": {
+                "Stop": [{"hooks": [ours()]}],
+                "StopFailure": [{"hooks": [ours()]}],
+                "SessionStart": [{"hooks": [ours_running("session-hook")]}],
+                "PreToolUse": [{"matcher": "Bash", "hooks": [tool_hook()]}],
+            }})
         );
         assert_eq!(files(dir.path()), ["settings.json"]);
     }
@@ -596,11 +721,13 @@ mod tests {
     #[test]
     fn the_command_round_trips_paths_with_spaces_and_quotes() {
         for exe in ["/a b/loopherd", "/it's/loopherd"] {
-            let command = hook_command(Path::new(exe), "stop-hook").unwrap();
-            assert!(
-                is_ours(&json!({"command": command}), "stop-hook"),
-                "{command}"
-            );
+            for can_block in [false, true] {
+                let command = hook_command(Path::new(exe), "stop-hook", can_block).unwrap();
+                assert!(
+                    is_ours(&json!({"command": command}), "stop-hook"),
+                    "{command}"
+                );
+            }
         }
         assert!(!is_ours(
             &json!({"command": "'/bin/other' stop-hook || true"}),
@@ -610,13 +737,13 @@ mod tests {
             &json!({"command": "notify-send done"}),
             "stop-hook"
         ));
-        let session = hook_command(Path::new(EXE), "session-hook").unwrap();
+        let session = hook_command(Path::new(EXE), "session-hook", false).unwrap();
         assert!(!is_ours(&json!({"command": session}), "stop-hook"));
     }
 
     fn run_hook(exe: &Path) -> std::process::ExitStatus {
         Command::new("sh")
-            .args(["-c", &hook_command(exe, "stop-hook").unwrap()])
+            .args(["-c", &hook_command(exe, "stop-hook", false).unwrap()])
             .stdin(std::process::Stdio::null())
             .status()
             .unwrap()

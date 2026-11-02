@@ -20,8 +20,10 @@ session. Read `herdr --skill` before controlling herdr.
    ```
    It needs `jq`. It builds, copies the binary to `~/.local/bin/loopherd` through a temp
    file and a rename, so a failed build keeps the last good one, and runs
-   `loopherd install-hook` to keep the Stop/StopFailure/SessionStart hooks in
+   `loopherd install-hook` to keep the Stop/StopFailure/SessionStart hooks, and
+   the PreToolUse hook that holds leads to their switches, in
    `~/.claude/settings.json` (backed up first; re-running changes nothing).
+   `watch` needs the first three, not the PreToolUse one.
    Running Claude sessions pick up a newly added hook without a restart. Then
    `loopherd feed loopherd-cards --dry-run` and, if it reads right,
    `loopherd feed loopherd-cards`. The herd file
@@ -107,8 +109,11 @@ differs from the shepherd:
   | `design_escalation` | settle a design question a member raises |
   | `blocked_dialogs` | answer a member's blocking dialog |
 
-  `merge`, `install` and `rebase` are also blocked by a hook when off
-  (LH-77). Grilling is always the human's.
+  When `merge`, `install` or `rebase` is off, a hook also blocks the Bash
+  commands that need it (`gh pr merge` or the merge API, `scripts/install`
+  or `loopherd install-hook`, a rebase or force-push), in your pane and in
+  any Claude nested in it, with a line naming the switch; ask instead. A
+  herd file it can't read blocks all three. Grilling is always the human's.
 - **Heartbeat.** Keep `loopherd watch <herd> --timeout 600` as a background
   task. Exit 2 is a heartbeat, not idleness: check each Review card's PR
   (`gh pr view <n> --json state`) and run the after-merge steps for any the
