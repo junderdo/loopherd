@@ -5,6 +5,8 @@ together across sessions, built as a layer over herdr's CLI/socket API.
 
 - **Issues**: claiming, working, or creating a card on the Trello board →
   read `docs/agents/issue-tracking.md` first.
+- **Shepherding**: running the herd live with the human (feeding, watching,
+  verifying and cleaning up members) → read `docs/agents/shepherd.md` first.
 - **Direction**: decisions, the herd model, and open questions →
   `docs/wayfinding.md`. herdr's capabilities → `docs/research/herdr.md`.
 - **herdr in tests** goes through the fake behind the herdr trait, and manual
