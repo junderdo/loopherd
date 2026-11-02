@@ -1,4 +1,4 @@
-//! End-to-end runs of `loopherd spawn`, `add`, `revive` and `retire --close` against the real `loopherd-dev` herdr
+//! End-to-end runs of `loopherd spawn`, `add`, `revive`, `retire --close` and `feed` against the real `loopherd-dev` herdr
 //! session. Skipped unless `LOOPHERD_LIVE=1`; start the session first with
 //! `scripts/herdr-dev --start`, then run through it:
 //! `LOOPHERD_LIVE=1 scripts/herdr-dev cargo test --test live`.
@@ -516,10 +516,15 @@ fn retire_close_closes_the_tab_and_removes_a_clean_merged_worktree() {
 }
 
 fn feed(state: &Path, config: &Path, herd: &str) -> Output {
+    feed_with(state, config, &[herd])
+}
+
+fn feed_with(state: &Path, config: &Path, args: &[&str]) -> Output {
     dev(env!("CARGO_BIN_EXE_loopherd"))
         .env("XDG_STATE_HOME", state)
         .env("LOOPHERD_CONFIG_DIR", config)
-        .args(["feed", herd])
+        .arg("feed")
+        .args(args)
         .output()
         .unwrap()
 }
@@ -604,6 +609,184 @@ fn feed_fills_a_slot_then_reaps_the_member_once_its_done_check_passes() {
             .any(|t| t["tab_id"] == tab.as_str()),
         "{tabs}"
     );
+}
+
+fn branch_exists(repo: &Path, branch: &str) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{branch}"))
+        .output()
+        .unwrap()
+        .status
+        .success()
+}
+
+/// A member fed on its own branch in a fresh repo, waiting on its done file.
+struct BranchMember {
+    state: tempfile::TempDir,
+    config: tempfile::TempDir,
+    root: tempfile::TempDir,
+    repo: PathBuf,
+    herd: String,
+    name: String,
+    branch: String,
+    wt: PathBuf,
+    tab: String,
+    _cleanup: CloseTab,
+}
+
+impl BranchMember {
+    fn feed(&self) -> Output {
+        feed_with(self.state.path(), self.config.path(), &[&self.herd])
+    }
+
+    fn finish(&self) {
+        std::fs::write(self.root.path().join("done-1"), "").unwrap();
+    }
+}
+
+fn feed_a_branch_member(kind: &str) -> BranchMember {
+    let workspace = assert_dev_session();
+    let state = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let repo = repo_with_origin(root.path());
+    let herds = config.path().join("herds");
+    std::fs::create_dir(&herds).unwrap();
+    let herd = format!("lh-live-{kind}-{}", std::process::id());
+    let tasks = root.path().join("tasks");
+    std::fs::write(&tasks, "1\n").unwrap();
+    std::fs::write(
+        herds.join(format!("{herd}.toml")),
+        format!(
+            "repo = {:?}\nworkspace = {workspace:?}\n\
+             [template.echo]\nparams = [\"n\"]\nname = \"{{herd}}-{{n}}\"\n\
+             branch = \"feat/{{name}}\"\nprompt = \"Reply with just the word ok.\"\n\
+             done = \"test -f {}/done-{{n}}\"\n\
+             [queue]\ntemplate = \"echo\"\nsource = \"cat {}\"\nmax = 1\n",
+            repo.display().to_string(),
+            root.path().display(),
+            tasks.display()
+        ),
+    )
+    .unwrap();
+    let name = format!("{herd}-1");
+    let branch = format!("feat/{name}");
+    let wt = root.path().join(format!("proj/worktrees/feat-{name}"));
+    let cleanup = CloseTab(name.clone());
+
+    // A fresh repo stops Claude at its trust dialog; the tab and worktree are what matter.
+    let out = feed_with(
+        state.path(),
+        config.path(),
+        &[&herd, "--ready-timeout", "5"],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        matches!(out.status.code(), Some(0 | 3)),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.starts_with(&format!("added {name}\n")), "{stdout}");
+    let tab = herdr_ok(&["agent", "get", &name])["result"]["agent"]["tab_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(wt.is_dir());
+    assert!(branch_exists(&repo, &branch));
+
+    BranchMember {
+        state,
+        config,
+        root,
+        repo,
+        herd,
+        name,
+        branch,
+        wt,
+        tab,
+        _cleanup: cleanup,
+    }
+}
+
+#[test]
+fn feed_reaps_a_member_and_removes_its_clean_merged_worktree_and_branch() {
+    if !live_enabled() {
+        return;
+    }
+    let m = feed_a_branch_member("feed-wt");
+
+    let out = m.feed();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!(
+            "still open {0}\nskipped: exists {0}\n{1}: 0 retired, 0 added, 1 skipped, 0 errors\n",
+            m.name, m.herd
+        )
+    );
+    assert!(m.wt.is_dir());
+
+    m.finish();
+    let out = m.feed();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        stdout,
+        format!(
+            "retired {0}; closed tab {1}; removed {2}\nskipped: exists {0}\n\
+             {3}: 1 retired, 0 added, 1 skipped, 0 errors\n",
+            m.name,
+            m.tab,
+            m.wt.display(),
+            m.herd
+        )
+    );
+    assert_eq!(ledger_entry(m.state.path(), &m.name)["retired"], true);
+    assert!(!m.wt.exists());
+    assert!(!branch_exists(&m.repo, &m.branch));
+    assert!(m.repo.join(".git").is_dir());
+}
+
+#[test]
+fn feed_reaps_a_member_but_keeps_its_dirty_worktree_and_says_why() {
+    if !live_enabled() {
+        return;
+    }
+    let m = feed_a_branch_member("feed-dirty");
+    std::fs::write(m.wt.join("scratch.txt"), "unsaved work").unwrap();
+
+    m.finish();
+    let out = m.feed();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        stdout,
+        format!(
+            "retired {0}; closed tab {1}; kept {2}: uncommitted or untracked changes\n\
+             skipped: exists {0}\n{3}: 1 retired, 0 added, 1 skipped, 0 errors\n",
+            m.name,
+            m.tab,
+            m.wt.display(),
+            m.herd
+        )
+    );
+    assert_eq!(ledger_entry(m.state.path(), &m.name)["retired"], true);
+    assert!(m.wt.join("scratch.txt").is_file());
+    assert!(branch_exists(&m.repo, &m.branch));
 }
 
 const LIVE: &str = "/home/u/.config/herdr/herdr.sock";
