@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::herdr::{
     Agent, AgentStatus, Herdr, NewTab, StartOutcome, WaitOutcome, Workspace, wait_for_shell_prompt,
 };
-use crate::ledger::{AgentRecord, Ledger};
+use crate::ledger::{AgentRecord, Ledger, Role};
 use crate::template::Template;
 use crate::worktree::{ensure_detached_worktree, ensure_worktree, planned_worktree, worktree_path};
 
@@ -75,13 +75,17 @@ impl From<&str> for Checkout {
     }
 }
 
-/// Set by `loopherd add`: the herd and template a member came from.
+/// Set by `loopherd add` and `lead`: the herd and template a member came from.
 #[derive(Debug, Clone)]
 pub struct MemberOf {
     pub herd: String,
-    pub template: String,
+    /// `None` for a lead.
+    pub template: Option<String>,
     /// Each param's name and value, also prompt placeholders.
     pub params: Vec<(String, String)>,
+    /// Prompt placeholders the ledger doesn't record.
+    pub values: Vec<(String, String)>,
+    pub role: Option<Role>,
 }
 
 /// Prompt text and the flag it came from, which errors name.
@@ -195,13 +199,14 @@ pub fn spawn(
         retired: false,
         retired_at: None,
         herd: req.member_of.as_ref().map(|m| m.herd.clone()),
-        template: req.member_of.as_ref().map(|m| m.template.clone()),
+        template: req.member_of.as_ref().and_then(|m| m.template.clone()),
         params: req
             .member_of
             .as_ref()
             .map(|m| m.params.iter().cloned().collect()),
         socket: herdr.socket(),
         process: None,
+        role: req.member_of.as_ref().and_then(|m| m.role),
     };
     let agent = match readiness {
         Readiness::Blocked => {
@@ -320,8 +325,11 @@ fn member_values(req: &SpawnRequest) -> HashMap<&str, &str> {
     let Some(member) = &req.member_of else {
         return HashMap::new();
     };
-    let params = member.params.iter().map(|(k, v)| (k.as_str(), v.as_str()));
-    params.chain([("herd", member.herd.as_str())]).collect()
+    let params = member.params.iter().chain(&member.values);
+    params
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .chain([("herd", member.herd.as_str())])
+        .collect()
 }
 
 fn render_prompt(
@@ -843,8 +851,10 @@ mod tests {
     fn member_of() -> MemberOf {
         MemberOf {
             herd: "prs".into(),
-            template: "pr".into(),
+            template: Some("pr".into()),
             params: vec![("number".into(), "1050".into())],
+            values: vec![],
+            role: None,
         }
     }
 

@@ -3,8 +3,9 @@
 The **shepherd** is the agent working live with the human to run the herd:
 it grills and writes cards, feeds members, watches them, verifies their PRs,
 and cleans up after merges. Members work cards per
-[issue-tracking.md](issue-tracking.md); the shepherd keeps them moving. (Slice
-6's *lead* is a different thing: an agent loopherd itself would run.)
+[issue-tracking.md](issue-tracking.md); the shepherd keeps them moving. A
+herd's **lead** runs the same loop for one herd with no human in its pane;
+it follows this playbook plus [As a lead](#as-a-lead) (D17).
 
 The shepherd runs in a herdr pane (`$HERDR_PANE_ID`) of the human's live
 session. Read `herdr --skill` before controlling herdr.
@@ -83,6 +84,46 @@ session. Read `herdr --skill` before controlling herdr.
    and closes the member and refills the slot. If the human merged before
    verification finished, point the verifier at the merge commit in a
    detached temp worktree, since reaping removes the member's.
+
+## As a lead
+
+A lead is member `lead-<herd>`, started by the shepherd with `loopherd lead
+<herd>` from the herd file's `[lead]` table, in a detached worktree of the
+same name. It runs the card's life above for its own herd's workers. What
+differs from the shepherd:
+
+- **No human in the pane.** Nobody reads your screen or answers there. A
+  decision that isn't yours goes out as `loopherd report --kind question
+  "<the exact question>"`, then end your turn; the shepherd's watch sees it
+  and relays it. Don't wait in a loop for an answer.
+- **Switches.** Your prompt lists six, each `on` or `off`; off means the
+  human does it, so ask instead:
+  | Switch | When on, you may |
+  |---|---|
+  | `merge` | merge a verified PR |
+  | `install` | run `scripts/install` while feeding |
+  | `rebase` | have a member rebase and force-push |
+  | `new_cards` | create cards for out-of-scope gaps |
+  | `design_escalation` | settle a design question a member raises |
+  | `blocked_dialogs` | answer a member's blocking dialog |
+
+  `merge`, `install` and `rebase` are also blocked by a hook when off
+  (LH-77). Grilling is always the human's.
+- **Heartbeat.** Keep `loopherd watch <herd> --timeout 600` as a background
+  task. Exit 2 is a heartbeat, not idleness: check each Review card's PR
+  (`gh pr view <n> --json state`) and run the after-merge steps for any the
+  human merged. Re-arm after every exit.
+- **On each wake** re-read `loopherd status` and `loopherd reports --all`
+  before acting: auto-compaction drops detail, and your state lives on the
+  board, ledger and mailbox, not in your context.
+- **Your checkout** is detached; refresh it with `git fetch origin && git
+  checkout --detach origin/main` rather than `git pull`, and never commit
+  in it.
+- Until watch readers land (LH-78), only one watch runs at a time, so a
+  lead and a shepherd can't both watch.
+
+[examples/loopherd-cards-lead.toml](../examples/loopherd-cards-lead.toml)
+is the `[lead]` table and prompt for `loopherd-cards`.
 
 ## Talking to members
 

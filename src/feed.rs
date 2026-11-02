@@ -165,7 +165,8 @@ fn reap(
         errors: 0,
     };
     let members = ledger.entries().context("ledger")?.into_values();
-    for member in members.filter(|e| !e.retired && e.herd.as_deref() == Some(&req.herd)) {
+    let workers = members.filter(|e| !e.retired && !e.is_lead());
+    for member in workers.filter(|e| e.herd.as_deref() == Some(&req.herd)) {
         let name = &member.name;
         let Some(check) = member.template.as_ref().and_then(|t| queue.done.get(t)) else {
             continue;
@@ -408,6 +409,7 @@ mod tests {
             params: None,
             socket: None,
             process: None,
+            role: None,
         }
     }
 
@@ -1163,6 +1165,28 @@ mod tests {
 
         assert!(started.elapsed() < Duration::from_secs(10));
         assert_eq!(fed.lines[0], "added zpr-1");
+    }
+
+    #[test]
+    fn the_herds_lead_takes_no_slot_and_is_never_checked_or_retired() {
+        let setup = Setup::with_done("printf '1\\n'", 1, "touch checked; true");
+        let herdr = herdr().with_agent("lead-prs");
+        let mut lead = member("lead-prs", Some("prs"), false);
+        lead.role = Some(crate::ledger::Role::Lead);
+        lead.params = Some(Default::default());
+        let mut ledger = ledger(&[lead]);
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "added zpr-1",
+                "prs: 0 retired, 1 added, 0 skipped, 0 errors"
+            ]
+        );
+        assert!(!ledger.0["lead-prs"].retired);
+        assert!(!setup.repo.path().join("checked").exists());
     }
 
     #[test]

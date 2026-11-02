@@ -3,6 +3,7 @@ mod herd;
 mod herd_view;
 mod herdr;
 mod install_hook;
+mod lead;
 mod ledger;
 mod lock;
 mod matching;
@@ -33,6 +34,7 @@ use crate::feed::{FeedRequest, feed};
 use crate::herd::{AddRequest, Paths, add, dry_run, herds};
 use crate::herd_view::Options;
 use crate::herdr::{CliHerdr, socket_from_env};
+use crate::lead::{LeadRequest, lead};
 use crate::ledger::FileLedger;
 use crate::prompt::prompt;
 use crate::report::{Filter, Kind, Reporter, report, reports};
@@ -57,6 +59,9 @@ enum Command {
     Add(AddArgs),
     /// List herd files with a usage line per template; exits 1 if any is invalid.
     Herds,
+    /// Start the herd's lead member, lead-<herd>, from its herd file's [lead] table,
+    /// in a detached worktree of the same name.
+    Lead(LeadArgs),
     /// Retire members whose template's done check exits 0, then fill the herd's
     /// free slots with members, one per task its queue's source prints.
     /// Exits 3 when a member is blocked at startup, 4 when the only errors are
@@ -200,6 +205,20 @@ struct SpawnArgs {
 }
 
 #[derive(Args)]
+struct LeadArgs {
+    herd: String,
+    /// Print the resolved lead; create nothing.
+    #[arg(long)]
+    dry_run: bool,
+    /// Seconds to wait for the agent to become idle.
+    #[arg(long, default_value_t = 60)]
+    ready_timeout: u64,
+    /// Passed to claude after [lead].args, else the herd's args.
+    #[arg(last = true)]
+    claude_args: Vec<String>,
+}
+
+#[derive(Args)]
 struct AddArgs {
     herd: String,
     template: String,
@@ -221,6 +240,7 @@ fn main() -> ExitCode {
         Command::Spawn(args) => ("spawn", run_spawn(args)),
         Command::Add(args) => ("add", run_add(args)),
         Command::Herds => ("herds", run_herds()),
+        Command::Lead(args) => ("lead", run_lead(args)),
         Command::Feed {
             herd,
             dry_run,
@@ -556,6 +576,26 @@ fn run_add(args: AddArgs) -> Result<i32> {
     if let Some(warning) = added.warning {
         eprintln!("loopherd add: warning: {warning}");
     }
+    Ok(code)
+}
+
+fn run_lead(args: LeadArgs) -> Result<i32> {
+    let paths = Paths::from_env().context("herd")?;
+    let req = LeadRequest {
+        herd: args.herd,
+        claude_args: args.claude_args,
+        ready_timeout: Duration::from_secs(args.ready_timeout),
+    };
+    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let inherited = inherited_workspace();
+    if args.dry_run {
+        let plan = lead::dry_run(&CliHerdr, &ledger, &paths, &req, inherited.as_deref())?;
+        println!("{plan}");
+        return Ok(0);
+    }
+    let (name, spawned) = lead(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
+    let (message, code) = spawned.report(&name);
+    println!("{message}");
     Ok(code)
 }
 

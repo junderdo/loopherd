@@ -55,6 +55,22 @@ pub struct AgentRecord {
     /// The member's own Claude process, claimed by a hook (LH-71).
     #[serde(default)]
     pub process: Option<Process>,
+    /// `None` is a worker.
+    #[serde(default)]
+    pub role: Option<Role>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    /// Runs its herd's routine loop unattended (D17).
+    Lead,
+}
+
+impl AgentRecord {
+    pub fn is_lead(&self) -> bool {
+        self.role == Some(Role::Lead)
+    }
 }
 
 /// A process by PID and start time, so a reused PID isn't mistaken for it.
@@ -278,6 +294,7 @@ mod tests {
             params: None,
             socket: None,
             process: None,
+            role: None,
         }
     }
 
@@ -400,6 +417,25 @@ mod tests {
         assert_eq!(entry.params, None);
         assert_eq!(entry.branch, None);
         assert_eq!(entry.socket, None);
+        assert_eq!(entry.role, None);
+    }
+
+    #[test]
+    fn a_lead_role_survives_a_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.json");
+        let lead = AgentRecord {
+            role: Some(Role::Lead),
+            ..record("lead-h", true)
+        };
+        FileLedger::new(path.clone()).record(lead).unwrap();
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("\"role\": \"lead\"")
+        );
+        let entries = FileLedger::new(path).entries().unwrap();
+        assert_eq!(entries["lead-h"].role, Some(Role::Lead));
     }
 
     #[test]

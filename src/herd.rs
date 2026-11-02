@@ -25,6 +25,55 @@ struct HerdFile {
     #[serde(default)]
     template: BTreeMap<String, TemplateFile>,
     queue: Option<QueueFile>,
+    lead: Option<LeadFile>,
+}
+
+/// A herd's lead member (D17).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LeadFile {
+    prompt: Option<String>,
+    prompt_file: Option<String>,
+    args: Option<Vec<String>>,
+    #[serde(default)]
+    merge: bool,
+    #[serde(default)]
+    install: bool,
+    #[serde(default)]
+    rebase: bool,
+    #[serde(default)]
+    new_cards: bool,
+    #[serde(default)]
+    design_escalation: bool,
+    #[serde(default)]
+    blocked_dialogs: bool,
+}
+
+/// What a lead may do on its own; off means the human does it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Switches {
+    pub merge: bool,
+    pub install: bool,
+    pub rebase: bool,
+    pub new_cards: bool,
+    pub design_escalation: bool,
+    pub blocked_dialogs: bool,
+}
+
+impl Switches {
+    /// One `<switch> on|off` line each, for the lead's `{switches}`.
+    pub fn lines(&self) -> String {
+        [
+            ("merge", self.merge),
+            ("install", self.install),
+            ("rebase", self.rebase),
+            ("new_cards", self.new_cards),
+            ("design_escalation", self.design_escalation),
+            ("blocked_dialogs", self.blocked_dialogs),
+        ]
+        .map(|(name, on)| format!("{name} {}", if on { "on" } else { "off" }))
+        .join("\n")
+    }
 }
 
 /// What `loopherd feed` spawns (D14).
@@ -148,12 +197,12 @@ pub fn add(
     })
 }
 
-/// How many unretired ledger entries belong to `herd`.
+/// How many unretired ledger entries belong to `herd`, not counting its lead.
 pub fn members(ledger: &dyn Ledger, herd: &str) -> Result<usize> {
     let entries = ledger.entries().context("ledger")?;
     Ok(entries
         .values()
-        .filter(|e| !e.retired && e.herd.as_deref() == Some(herd))
+        .filter(|e| !e.retired && !e.is_lead() && e.herd.as_deref() == Some(herd))
         .count())
 }
 
@@ -167,19 +216,27 @@ pub fn dry_run(
     inherited_workspace: Option<&str>,
 ) -> Result<String> {
     let spawn_req = resolve(paths, req)?;
-    let plan = preview(herdr, &spawn_req, inherited_workspace)?;
+    let (facts, prompt) = plan(herdr, &spawn_req, inherited_workspace)?;
+    Ok([facts, vec!["prompt".into(), prompt]].concat().join("\n"))
+}
+
+/// What spawning `req` would do: `key value` lines, and the rendered prompt.
+pub fn plan(
+    herdr: &dyn Herdr,
+    req: &SpawnRequest,
+    inherited_workspace: Option<&str>,
+) -> Result<(Vec<String>, String)> {
+    let plan = preview(herdr, req, inherited_workspace)?;
     let worktree = plan.worktree.map(|p| p.display().to_string());
-    let args: Vec<String> = spawn_req.claude_args.iter().map(|a| quote(a)).collect();
-    Ok([
-        format!("name {}", spawn_req.name),
-        format!("branch {}", spawn_req.branch().unwrap_or("none")),
+    let args: Vec<String> = req.claude_args.iter().map(|a| quote(a)).collect();
+    let facts = vec![
+        format!("name {}", req.name),
+        format!("branch {}", req.branch().unwrap_or("none")),
         format!("worktree {}", worktree.as_deref().unwrap_or("none")),
         format!("workspace {}", plan.workspace_label),
         format!("args {}", args.join(" ")),
-        "prompt".into(),
-        plan.prompt.unwrap_or_default(),
-    ]
-    .join("\n"))
+    ];
+    Ok((facts, plan.prompt.unwrap_or_default()))
 }
 
 fn quote(arg: &str) -> String {
@@ -345,8 +402,10 @@ pub fn resolve(paths: &Paths, req: &AddRequest) -> Result<SpawnRequest> {
         claude_args: [&herd.args[..], &template.args, &req.claude_args].concat(),
         member_of: Some(MemberOf {
             herd: req.herd.clone(),
-            template: req.template.clone(),
+            template: Some(req.template.clone()),
             params,
+            values: vec![],
+            role: None,
         }),
     })
 }
@@ -386,7 +445,72 @@ fn check_fields(template: &TemplateFile, paths: &Paths) -> Result<CheckedTemplat
     )
     .context("worktree")?;
 
-    let prompt = match (&template.prompt, &template.prompt_file) {
+    let prompt = read_prompt(&template.prompt, &template.prompt_file, paths)?;
+    if prompt.text.trim().is_empty() {
+        bail!("{} is empty", prompt.source);
+    }
+    pattern(Some(&prompt.text), &template.params, &BUILT_INS).context(prompt.source.clone())?;
+    pattern(template.done.as_deref(), &template.params, &BUILT_INS).context("done")?;
+    Ok(CheckedTemplate {
+        name,
+        branch,
+        worktree,
+        prompt,
+    })
+}
+
+/// A herd's `[lead]`, with what `loopherd lead` needs from the herd around it.
+#[derive(Debug)]
+pub struct LeadConfig {
+    pub repo: PathBuf,
+    pub workspace: Option<String>,
+    pub prompt: Prompt,
+    /// `[lead].args`, else the herd's `args`.
+    pub args: Vec<String>,
+    pub switches: Switches,
+}
+
+/// Placeholders a lead's prompt may use.
+pub const LEAD_KEYS: [&str; 4] = ["name", "herd", "worktree", "switches"];
+
+pub fn lead_config(paths: &Paths, herd: &str) -> Result<LeadConfig> {
+    let file = load(&paths.herds, herd).context("herd")?;
+    let lead = file
+        .lead
+        .with_context(|| format!("herd: {herd} has no [lead]"))?;
+    let prompt = read_prompt(&lead.prompt, &lead.prompt_file, paths).context("lead")?;
+    check_lead_prompt(&prompt).context("lead")?;
+    Ok(LeadConfig {
+        repo: expand_home(&file.repo, &paths.home),
+        workspace: file.workspace,
+        prompt,
+        args: lead.args.unwrap_or(file.args),
+        switches: Switches {
+            merge: lead.merge,
+            install: lead.install,
+            rebase: lead.rebase,
+            new_cards: lead.new_cards,
+            design_escalation: lead.design_escalation,
+            blocked_dialogs: lead.blocked_dialogs,
+        },
+    })
+}
+
+fn check_lead_prompt(prompt: &Prompt) -> Result<()> {
+    if prompt.text.trim().is_empty() {
+        bail!("{} is empty", prompt.source);
+    }
+    pattern(Some(&prompt.text), &[], &LEAD_KEYS).context(prompt.source.clone())?;
+    Ok(())
+}
+
+/// `prompt`, else `prompt_file` read relative to the herds directory.
+fn read_prompt(
+    prompt: &Option<String>,
+    prompt_file: &Option<String>,
+    paths: &Paths,
+) -> Result<Prompt> {
+    Ok(match (prompt, prompt_file) {
         (Some(text), _) => Prompt {
             source: "prompt".into(),
             text: text.clone(),
@@ -399,18 +523,7 @@ fn check_fields(template: &TemplateFile, paths: &Paths) -> Result<CheckedTemplat
                     .with_context(|| format!("prompt_file: read {}", path.display()))?,
             }
         }
-        (None, None) => unreachable!("load rejects a template without a prompt"),
-    };
-    if prompt.text.trim().is_empty() {
-        bail!("{} is empty", prompt.source);
-    }
-    pattern(Some(&prompt.text), &template.params, &BUILT_INS).context(prompt.source.clone())?;
-    pattern(template.done.as_deref(), &template.params, &BUILT_INS).context("done")?;
-    Ok(CheckedTemplate {
-        name,
-        branch,
-        worktree,
-        prompt,
+        (None, None) => unreachable!("load rejects a prompt-less template or lead"),
     })
 }
 
@@ -443,6 +556,10 @@ pub fn herds(paths: &Paths) -> Result<(String, i32)> {
             .and_then(|parsed| {
                 for (name, template) in &parsed.template {
                     check_template(name, template, paths)?;
+                }
+                if let Some(lead) = &parsed.lead {
+                    let prompt = read_prompt(&lead.prompt, &lead.prompt_file, paths);
+                    prompt.and_then(|p| check_lead_prompt(&p)).context("lead")?;
                 }
                 Ok(parsed)
             }) {
@@ -492,7 +609,15 @@ fn describe(herd: &str, parsed: &HerdFile) -> Vec<String> {
             q.template, q.max
         )
     });
-    std::iter::once(header).chain(usages).chain(feed).collect()
+    let lead = parsed
+        .lead
+        .as_ref()
+        .map(|_| format!("  loopherd lead {herd}"));
+    std::iter::once(header)
+        .chain(usages)
+        .chain(lead)
+        .chain(feed)
+        .collect()
 }
 
 /// `text` parsed, failing on a placeholder that is neither a param nor in `built_ins`.
@@ -531,6 +656,9 @@ fn parse(text: &str) -> Result<HerdFile> {
     if let Some(queue) = &parsed.queue {
         validate_queue(queue, &parsed.template).context("queue")?;
     }
+    if let Some(lead) = &parsed.lead {
+        one_prompt(&lead.prompt, &lead.prompt_file).context("lead")?;
+    }
     Ok(parsed)
 }
 
@@ -549,12 +677,16 @@ fn validate_queue(queue: &QueueFile, templates: &BTreeMap<String, TemplateFile>)
     Ok(())
 }
 
-fn validate(template: &TemplateFile) -> Result<()> {
-    match (&template.prompt, &template.prompt_file) {
+fn one_prompt(prompt: &Option<String>, prompt_file: &Option<String>) -> Result<()> {
+    match (prompt, prompt_file) {
         (Some(_), Some(_)) => bail!("set one of prompt and prompt_file, not both"),
         (None, None) => bail!("set one of prompt and prompt_file"),
-        _ => {}
+        _ => Ok(()),
     }
+}
+
+fn validate(template: &TemplateFile) -> Result<()> {
+    one_prompt(&template.prompt, &template.prompt_file)?;
     if template.branch.is_some() && template.worktree.is_some() {
         bail!("set one of branch and worktree, not both");
     }
@@ -1478,5 +1610,110 @@ args = ["--model", "opus"]
             assert!(report.contains(message), "{queue}: {report}");
             assert_eq!(code, 1);
         }
+    }
+
+    const LEAD_HERD: &str = "repo = \"/r\"\nargs = [\"--model\", \"opus\"]\n\
+                             [template.t]\nparams = []\nprompt = \"go\"\n";
+
+    #[test]
+    fn a_lead_table_parses_with_every_switch_off_by_default() {
+        let herd = format!("{LEAD_HERD}[lead]\nprompt = \"lead {{herd}}\"\nmerge = true\n");
+        let config = Config::with(&[("h", &herd)]);
+
+        let lead = lead_config(&config.paths(), "h").unwrap();
+
+        assert_eq!(lead.prompt.text, "lead {herd}");
+        assert_eq!(lead.args, ["--model", "opus"]);
+        assert_eq!(
+            lead.switches.lines(),
+            "merge on\ninstall off\nrebase off\nnew_cards off\n\
+             design_escalation off\nblocked_dialogs off"
+        );
+    }
+
+    #[test]
+    fn a_lead_tables_args_replace_the_herds() {
+        let herd = format!("{LEAD_HERD}[lead]\nprompt = \"go\"\nargs = [\"--effort\", \"max\"]\n");
+        let config = Config::with(&[("h", &herd)]);
+        assert_eq!(
+            lead_config(&config.paths(), "h").unwrap().args,
+            ["--effort", "max"]
+        );
+    }
+
+    #[test]
+    fn a_lead_prompt_file_is_read_relative_to_the_herds_directory() {
+        let herd = format!("{LEAD_HERD}[lead]\nprompt_file = \"lead.md\"\n");
+        let config = Config::with(&[("h", &herd)]);
+        fs::write(config.path().join("herds/lead.md"), "from file {name}").unwrap();
+        assert_eq!(
+            lead_config(&config.paths(), "h").unwrap().prompt.text,
+            "from file {name}"
+        );
+    }
+
+    #[test]
+    fn an_invalid_lead_table_is_an_error_naming_the_problem() {
+        for (lead, expected) in [
+            (
+                "prompt = \"go\"\nmerge_prs = true",
+                "unknown field `merge_prs`",
+            ),
+            ("prompt = \"go\"\nmerge = \"yes\"", "invalid type"),
+            (
+                "prompt = \"go\"\nprompt_file = \"p.md\"",
+                "lead: set one of prompt and prompt_file, not both",
+            ),
+            ("merge = true", "lead: set one of prompt and prompt_file"),
+            (
+                "prompt = \"{branch}\"",
+                "lead: prompt: unknown placeholder {branch}",
+            ),
+        ] {
+            let config = Config::with(&[("h", &format!("{LEAD_HERD}[lead]\n{lead}\n"))]);
+            let err = format!("{:#}", lead_config(&config.paths(), "h").unwrap_err());
+            assert!(err.contains(expected), "{lead}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_herd_without_a_lead_table_has_no_lead() {
+        let config = Config::with(&[("h", LEAD_HERD)]);
+        let err = format!("{:#}", lead_config(&config.paths(), "h").unwrap_err());
+        assert_eq!(err, "herd: h has no [lead]");
+    }
+
+    #[test]
+    fn herds_lists_a_lead_and_reports_an_invalid_lead_prompt() {
+        let ok = format!("{LEAD_HERD}[lead]\nprompt = \"go\"\n");
+        let bad = format!("{LEAD_HERD}[lead]\nprompt = \"{{pane}}\"\n");
+        let config = Config::with(&[("a", &ok), ("b", &bad)]);
+
+        let (report, code) = herds(&config.paths()).unwrap();
+
+        assert_eq!(
+            report,
+            "a  repo /r  workspace (current)\n\
+             \x20 loopherd add a t\n\
+             \x20 loopherd lead a\n\
+             invalid b.toml: lead: prompt: unknown placeholder {pane}"
+        );
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn the_documented_loopherd_cards_lead_parses() {
+        let table = include_str!("../docs/examples/loopherd-cards-lead.toml");
+        let config = Config::with(&[("loopherd-cards", &format!("{LEAD_HERD}{table}"))]);
+        fs::write(
+            config.path().join("herds/loopherd-cards-lead.md"),
+            include_str!("../docs/examples/loopherd-cards-lead.md"),
+        )
+        .unwrap();
+
+        let lead = lead_config(&config.paths(), "loopherd-cards").unwrap();
+
+        assert_eq!(lead.switches, Switches::default());
+        assert_eq!(lead.args, ["--model", "opus"]);
     }
 }
