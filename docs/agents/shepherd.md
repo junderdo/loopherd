@@ -25,9 +25,10 @@ session. Read `herdr --skill` before controlling herdr.
    It wakes the shepherd when the member stops. Treat `idle` like `done`:
    focusing a pane marks it seen. Start a new wait after every `agent prompt`
    too. Waits die with the shepherd's session.
-3. **On wake,** read the member's last report
-   (`herdr agent read lh-<n> --source recent-unwrapped --lines 40`) and its
-   card. `blocked` means a dialog only the human answers (D10): tell them.
+3. **On wake,** read members' unread reports (`loopherd reports`; `--all`
+   for history) and the card. A member that left none: read its screen
+   (`herdr agent read lh-<n> --source recent-unwrapped --lines 40`).
+   `blocked` means a dialog only the human answers (D10): tell them.
    A card back in Backlog with `need-human` carries the question.
 4. **Verify** a card in Review with a read-only subagent against the card's
    acceptance criteria: no `LOOPHERD_LIVE=1`, no loopherd or mutating herdr
