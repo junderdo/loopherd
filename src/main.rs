@@ -160,7 +160,7 @@ enum Command {
     /// an unread report (marked read), a stop from the Stop hook that leaves a
     /// member paused, finished or failed, or one going blocked or gone in
     /// herdr. Polls every 2s, read-only toward herdr. One watch at a time, and
-    /// only with loopherd's Stop hook installed.
+    /// only with loopherd's Stop, StopFailure and SessionStart hooks installed.
     Watch {
         /// Only members of these herds.
         herds: Vec<String>,
@@ -421,7 +421,14 @@ fn run_stop_hook() -> Result<i32> {
         socket: socket.as_deref(),
     };
     let reports = ledger.reports_dir()?;
-    stop_hook::stop_hook(&ledger, &reports, &pane, &input, SystemTime::now())?;
+    stop_hook::stop_hook(
+        &ledger,
+        &reports,
+        &pane,
+        &input,
+        SystemTime::now(),
+        &mut |warning| eprintln!("loopherd stop-hook: {warning}"),
+    )?;
     Ok(0)
 }
 
@@ -456,8 +463,8 @@ fn run_install_hook(remove: bool, settings: Option<PathBuf>) -> Result<i32> {
         }
     };
     let done = match remove {
-        true => "removed loopherd's Stop and StopFailure hooks from",
-        false => "installed loopherd's Stop and StopFailure hooks in",
+        true => "removed loopherd's Stop, StopFailure and SessionStart hooks from",
+        false => "installed loopherd's Stop, StopFailure and SessionStart hooks in",
     };
     match outcome {
         install_hook::Outcome::Unchanged => println!("{} already up to date", settings.display()),

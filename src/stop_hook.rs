@@ -25,6 +25,7 @@ pub fn stop_hook(
     pane: &Pane,
     input: &[u8],
     now: SystemTime,
+    warn: &mut dyn FnMut(String),
 ) -> Result<Option<String>> {
     let entries = ledger.entries()?;
     let Some(member) = member_in(&entries, pane.id, pane.socket) else {
@@ -34,6 +35,10 @@ pub fn stop_hook(
     if let (Some(ours), Some(theirs)) = (&member.session_id, &stop.session)
         && ours != theirs
     {
+        warn(format!(
+            "dropped a stop from session {theirs} in {}'s pane; its session is {ours}",
+            member.name
+        ));
         return Ok(None);
     }
     append(dir, &member.name, &Entry::new(now, Body::Stop(stop)))?;
@@ -131,7 +136,7 @@ mod tests {
             id: pane,
             socket: socket.map(Path::new),
         };
-        stop_hook(ledger, dir, &pane, input.as_bytes(), at()).unwrap()
+        stop_hook(ledger, dir, &pane, input.as_bytes(), at(), &mut |_| {}).unwrap()
     }
 
     fn mailbox(dir: &Path, name: &str) -> String {
@@ -329,6 +334,30 @@ mod tests {
         assert_eq!(who, None);
         assert_eq!(mailbox(dir.path(), "lh-1"), "");
         assert_eq!(ledger.0, before);
+    }
+
+    #[test]
+    fn a_dropped_stop_says_which_member_and_both_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = in_session(Some("sess-a"));
+        let pane = Pane {
+            id: "w1:p1",
+            socket: Some(Path::new(SOCKET)),
+        };
+        let mut warnings = vec![];
+        stop_hook(
+            &ledger,
+            dir.path(),
+            &pane,
+            stop_from("sess-b").as_bytes(),
+            at(),
+            &mut |w| warnings.push(w),
+        )
+        .unwrap();
+        assert_eq!(
+            warnings,
+            ["dropped a stop from session sess-b in lh-1's pane; its session is sess-a"]
+        );
     }
 
     #[test]
