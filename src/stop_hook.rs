@@ -9,7 +9,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::ledger::{AgentRecord, Ledger};
-use crate::process::{self, Procs};
+use crate::process::{self, Claim, Procs};
 use crate::report::{Background, Body, Entry, Stop, Tally, Unknown, append, member_in};
 
 /// Where the hook runs: `$HERDR_PANE_ID`, `$HERDR_SOCKET_PATH` and `$CLAUDE_PID`.
@@ -23,8 +23,9 @@ pub struct Pane<'a> {
 /// member's name, or `None` when the pane is no member's or the stop came from
 /// another Claude than the member's. With the member's process known, that is
 /// the test, and a stop from it carries the member's current session into the
-/// ledger; otherwise the hook tries to claim the process, and failing that
-/// compares sessions.
+/// ledger; otherwise the hook tries to claim the process. A Claude that isn't
+/// the pane's top-level one is dropped; if the claim fails for another reason,
+/// or there is no usable `$CLAUDE_PID`, sessions are compared.
 pub fn stop_hook(
     ledger: &mut dyn Ledger,
     procs: &dyn Procs,
@@ -43,8 +44,11 @@ pub fn stop_hook(
         let exact = pane.socket.is_some() && member.socket.as_deref() == pane.socket;
         match process::live(procs, member.process) {
             Some(ours) if ours.pid == pid => {
-                follow_session(ledger, &entries, member, &stop)?;
-                return file(dir, member, stop, now);
+                let filed = file(dir, member, stop.clone(), now)?;
+                if let Err(e) = follow_session(ledger, &entries, member, &stop) {
+                    warn(format!("could not update {}'s session: {e:#}", member.name));
+                }
+                return Ok(filed);
             }
             Some(ours) => {
                 warn(format!(
@@ -54,8 +58,22 @@ pub fn stop_hook(
                 return Ok(None);
             }
             None => {
-                if process::claim(ledger, procs, member, exact, pid, stop.session.as_deref())? {
-                    return file(dir, member, stop, now);
+                let claim =
+                    process::claim(ledger, procs, member, exact, pid, stop.session.as_deref())
+                        .unwrap_or_else(|e| {
+                            warn(format!("could not claim {}'s process: {e:#}", member.name));
+                            Claim::Declined
+                        });
+                match claim {
+                    Claim::Claimed => return file(dir, member, stop, now),
+                    Claim::Nested => {
+                        warn(format!(
+                            "dropped a stop from process {pid} in {}'s pane; it is not the pane's top-level Claude",
+                            member.name
+                        ));
+                        return Ok(None);
+                    }
+                    Claim::Declined => {}
                 }
             }
         }
@@ -515,16 +533,115 @@ mod tests {
     }
 
     #[test]
-    fn a_nested_claude_does_not_claim_and_falls_back_to_the_session_check() {
-        let mut l = in_session(Some("sess-a"));
-        let (who, warnings, _) = from_pid(&mut l, Some(50), &stop_from("sess-b"));
-        assert_eq!(who, None);
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(l.0["lh-1"].process, None);
+    fn a_nested_claude_is_dropped_with_a_line_and_never_claims() {
+        for session in ["sess-a", "sess-b"] {
+            let mut l = in_session(Some("sess-a"));
+            let (who, warnings, mailbox) = from_pid(&mut l, Some(50), &stop_from(session));
+            assert_eq!(who, None, "{session}");
+            assert_eq!(mailbox, "");
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(warnings[0].contains("top-level"), "{warnings:?}");
+            assert_eq!(l.0["lh-1"].process, None);
+        }
+    }
 
+    #[test]
+    fn a_nested_stop_after_the_members_process_died_is_dropped() {
+        let mut l = claimed(Some("sess-a"), 30, 299);
         let (who, _, _) = from_pid(&mut l, Some(50), &stop_from("sess-a"));
+        assert_eq!(who, None);
+        assert_eq!(
+            l.0["lh-1"].process,
+            Some(Process {
+                pid: 30,
+                start: 299
+            })
+        );
+    }
+
+    #[test]
+    fn a_nested_claude_reparented_to_init_is_dropped() {
+        let mut l = in_session(Some("sess-a"));
+        let mut procs = two_claudes();
+        procs.add(60, CLAUDE, 1, 600);
+        let dir = tempfile::tempdir().unwrap();
+        let who = run_as(
+            &mut l,
+            &procs,
+            Some(60),
+            dir.path(),
+            "w1:p1",
+            Some(SOCKET),
+            &stop_from("sess-a"),
+            &mut |_| {},
+        );
+        assert_eq!(who, None);
+        assert_eq!(l.0["lh-1"].process, None);
+    }
+
+    #[test]
+    fn a_socketless_entry_is_filed_by_the_session_check_but_never_claimed() {
+        let mut l = ledger(vec![member("lh-1", "w1:p1", None)]);
+        l.0.get_mut("lh-1").unwrap().session_id = Some("sess-a".into());
+        let (who, _, _) = from_pid(&mut l, Some(30), &stop_from("sess-a"));
         assert_eq!(who.as_deref(), Some("lh-1"));
         assert_eq!(l.0["lh-1"].process, None);
+    }
+
+    #[test]
+    fn a_session_another_member_owns_is_not_followed() {
+        let mut l = claimed(Some("old"), 30, 300);
+        let mut other = member("lh-2", "w1:p2", Some(SOCKET));
+        other.session_id = Some("theirs".into());
+        l.0.insert("lh-2".into(), other);
+        let (who, _, mailbox) = from_pid(&mut l, Some(30), &stop_from("theirs"));
+        assert_eq!(who.as_deref(), Some("lh-1"));
+        assert!(mailbox.contains("theirs"));
+        assert_eq!(l.0["lh-1"].session_id.as_deref(), Some("old"));
+    }
+
+    #[test]
+    fn a_ledger_error_after_the_stop_is_filed_does_not_lose_it() {
+        struct Failing(MemLedger);
+        impl Ledger for Failing {
+            fn entries(&self) -> anyhow::Result<std::collections::BTreeMap<String, AgentRecord>> {
+                self.0.entries()
+            }
+            fn record(&mut self, r: AgentRecord) -> anyhow::Result<()> {
+                self.0.record(r)
+            }
+            fn update(
+                &mut self,
+                _: &str,
+                _: &mut dyn FnMut(&mut AgentRecord) -> anyhow::Result<()>,
+            ) -> anyhow::Result<AgentRecord> {
+                anyhow::bail!("disk full")
+            }
+            fn started(&mut self, n: &str, at: SystemTime) -> anyhow::Result<()> {
+                self.0.started(n, at)
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = Failing(claimed(Some("old"), 30, 300));
+        let mut warnings = vec![];
+        let pane = Pane {
+            id: "w1:p1",
+            socket: Some(Path::new(SOCKET)),
+            claude_pid: Some(30),
+        };
+        let who = stop_hook(
+            &mut l,
+            &two_claudes(),
+            dir.path(),
+            &pane,
+            stop_from("branched").as_bytes(),
+            at(),
+            &mut |w| warnings.push(w),
+        )
+        .unwrap();
+        assert_eq!(who.as_deref(), Some("lh-1"));
+        assert!(mailbox(dir.path(), "lh-1").contains("branched"));
+        assert!(warnings[0].contains("disk full"), "{warnings:?}");
     }
 
     #[test]

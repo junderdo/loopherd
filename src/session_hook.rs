@@ -8,7 +8,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::ledger::Ledger;
-use crate::process::{self, Procs};
+use crate::process::{self, Claim, Procs};
 
 /// Where the hook runs: `$HERDR_PANE_ID`, `$HERDR_SOCKET_PATH` and `$CLAUDE_PID`.
 pub struct Pane<'a> {
@@ -27,6 +27,7 @@ pub fn session_hook(
     procs: &dyn Procs,
     pane: &Pane,
     input: &[u8],
+    warn: &mut dyn FnMut(String),
 ) -> Result<Option<String>> {
     let Some((source, session)) = parse(input) else {
         return Ok(None);
@@ -43,18 +44,31 @@ pub fn session_hook(
     if live().any(|e| e.name != member.name && e.session_id.as_deref() == Some(session.as_str())) {
         return Ok(None);
     }
+    let from_clear_or_resume = matches!(source.as_str(), "clear" | "resume");
     let adopt = match pane.claude_pid {
         Some(pid) if process::live(procs, member.process).is_some() => {
             if member.process.map(|p| p.pid) != Some(pid) {
+                warn(format!(
+                    "ignored a session start from process {pid} in {}'s pane; its process is {}",
+                    member.name,
+                    member.process.map_or(0, |p| p.pid)
+                ));
                 return Ok(None);
             }
             true
         }
-        Some(pid) => {
-            process::claim(ledger, procs, member, true, pid, Some(&session))?
-                || matches!(source.as_str(), "clear" | "resume")
-        }
-        None => matches!(source.as_str(), "clear" | "resume"),
+        Some(pid) => match process::claim(ledger, procs, member, true, pid, Some(&session))? {
+            Claim::Claimed => true,
+            Claim::Nested => {
+                warn(format!(
+                    "ignored a session start from process {pid} in {}'s pane; it is not the pane's top-level Claude",
+                    member.name
+                ));
+                return Ok(None);
+            }
+            Claim::Declined => from_clear_or_resume,
+        },
+        None => from_clear_or_resume,
     };
     if !adopt || member.session_id.as_deref() == Some(session.as_str()) {
         return Ok(adopt.then(|| member.name.clone()));
@@ -130,7 +144,7 @@ mod tests {
             socket: socket.map(Path::new),
             claude_pid,
         };
-        session_hook(ledger, procs, &pane, input.as_bytes()).unwrap()
+        session_hook(ledger, procs, &pane, input.as_bytes(), &mut |_| {}).unwrap()
     }
 
     fn start(source: &str, session: &str) -> String {
@@ -375,6 +389,64 @@ mod tests {
             assert_eq!(who, None, "{source}");
             assert_eq!(session_of(&l, "lh-1").as_deref(), Some("old"), "{source}");
         }
+    }
+
+    #[test]
+    fn a_nested_clear_or_resume_is_not_adopted_by_an_unclaimed_member() {
+        for source in ["clear", "resume", "fork"] {
+            let mut l = ledger(vec![member("lh-1", "w1:p1", Some(SOCKET), "old")]);
+            let who = run_as(
+                &mut l,
+                &two_claudes(),
+                Some(50),
+                Some(SOCKET),
+                &start(source, "new"),
+            );
+            assert_eq!(who, None, "{source}");
+            assert_eq!(session_of(&l, "lh-1").as_deref(), Some("old"), "{source}");
+            assert_eq!(l.0["lh-1"].process, None);
+        }
+    }
+
+    #[test]
+    fn a_nested_claude_reparented_to_init_does_not_claim() {
+        let mut procs = FakeProcs::pane();
+        procs.add(60, CLAUDE, 1, 600);
+        let mut l = ledger(vec![member("lh-1", "w1:p1", Some(SOCKET), "s1")]);
+        run_as(
+            &mut l,
+            &procs,
+            Some(60),
+            Some(SOCKET),
+            &start("resume", "s1"),
+        );
+        assert_eq!(l.0["lh-1"].process, None);
+    }
+
+    #[test]
+    fn a_dropped_session_start_says_why() {
+        let procs = two_claudes();
+        let pane = Pane {
+            id: "w1:p1",
+            socket: Some(Path::new(SOCKET)),
+            claude_pid: Some(50),
+        };
+        let mut l = ledger(vec![claimed(
+            member("lh-1", "w1:p1", Some(SOCKET), "s"),
+            30,
+            300,
+        )]);
+        let mut said = vec![];
+        session_hook(
+            &mut l,
+            &procs,
+            &pane,
+            start("fork", "n").as_bytes(),
+            &mut |w| said.push(w),
+        )
+        .unwrap();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("process 50") && said[0].contains("lh-1"));
     }
 
     #[test]

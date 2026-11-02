@@ -30,7 +30,7 @@ impl Procs for ProcFs {
     }
 }
 
-/// Field `index` of `/proc/<pid>/stat` counted from the state (0) in `/proc/<pid>/stat`; the command name
+/// Field `index` of `/proc/<pid>/stat` counted from the state (0); the command name
 /// before it may hold spaces and parentheses.
 fn stat_field(pid: u32, index: usize) -> Option<String> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -38,9 +38,27 @@ fn stat_field(pid: u32, index: usize) -> Option<String> {
     after_comm.split_whitespace().nth(index).map(str::to_string)
 }
 
-/// `$CLAUDE_PID`, when set to a PID.
-pub fn claude_pid_from_env() -> Option<u32> {
-    std::env::var("CLAUDE_PID").ok()?.parse().ok()
+/// `$CLAUDE_PID` as the hook sees it: only a PID that is an ancestor of this
+/// process counts, since an environment can pass down another Claude's.
+pub fn claude_pid_from_env(procs: &dyn Procs) -> Option<u32> {
+    claude_pid(
+        procs,
+        std::env::var("CLAUDE_PID").ok().as_deref(),
+        std::process::id(),
+    )
+}
+
+fn claude_pid(procs: &dyn Procs, env: Option<&str>, me: u32) -> Option<u32> {
+    let pid: u32 = env?.parse().ok()?;
+    let mut at = procs.parent(me);
+    for _ in 0..64 {
+        let current = at.filter(|p| *p > 1)?;
+        if current == pid {
+            return Some(pid);
+        }
+        at = procs.parent(current);
+    }
+    None
 }
 
 /// The member's recorded process, if it is still that process.
@@ -50,26 +68,36 @@ pub fn live(procs: &dyn Procs, recorded: Option<Process>) -> Option<Process> {
 }
 
 /// `pid` is the Claude of a pane, not one nested under it: walking up from its
-/// parent to the herdr server meets no other Claude binary.
+/// parent reaches the herdr server without meeting another Claude binary. A walk
+/// that ends any other way (init, a vanished process, too many steps) is not.
 pub fn is_top_level(procs: &dyn Procs, pid: u32) -> bool {
     let mut at = procs.parent(pid);
     for _ in 0..64 {
         let Some(current) = at.filter(|p| *p > 1) else {
-            return true;
+            return false;
         };
         match procs.exe(current) {
             Some(exe) if is_herdr(&exe) => return true,
             Some(exe) if is_claude_binary(&exe) => return false,
-            _ => {}
+            Some(_) => {}
+            None => return false,
         }
         at = procs.parent(current);
     }
-    true
+    false
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Claim {
+    Claimed,
+    /// `pid` is a Claude nested under another, or not under the herdr server.
+    Nested,
+    Declined,
 }
 
 /// Records `pid` as `member`'s Claude when it is the pane's top-level Claude
 /// in the member's own session (or the member has none yet), and the member has
-/// no live process. `socket_exact` is whether the pane matched on its socket.
+/// no live process; a `pid` that isn't top-level is `Nested`. `socket_exact` is whether the pane matched on its socket.
 /// Writes only the process (and the session, if the member had none).
 pub fn claim(
     ledger: &mut dyn Ledger,
@@ -78,21 +106,20 @@ pub fn claim(
     socket_exact: bool,
     pid: u32,
     session: Option<&str>,
-) -> Result<bool> {
+) -> Result<Claim> {
     let session_agrees = match (&member.session_id, session) {
         (Some(ours), Some(theirs)) => ours == theirs,
         (Some(_), None) => false,
         (None, _) => true,
     };
-    if !socket_exact
-        || !session_agrees
-        || live(procs, member.process).is_some()
-        || !is_top_level(procs, pid)
-    {
-        return Ok(false);
+    if live(procs, member.process).is_some() {
+        return Ok(Claim::Declined);
     }
-    let Some(start) = procs.start(pid) else {
-        return Ok(false);
+    if !is_top_level(procs, pid) {
+        return Ok(Claim::Nested);
+    }
+    let Some(start) = procs.start(pid).filter(|_| socket_exact && session_agrees) else {
+        return Ok(Claim::Declined);
     };
     let mut claimed = false;
     ledger.update(&member.name, &mut |record| {
@@ -107,7 +134,11 @@ pub fn claim(
         claimed = true;
         Ok(())
     })?;
-    Ok(claimed)
+    Ok(if claimed {
+        Claim::Claimed
+    } else {
+        Claim::Declined
+    })
 }
 
 fn is_herdr(exe: &Path) -> bool {
@@ -194,6 +225,33 @@ mod tests {
         p.add(10, "/usr/bin/herdr (deleted)", 5, 100);
         p.add(5, CLAUDE, 1, 50);
         assert!(is_top_level(&p, 30));
+    }
+
+    #[test]
+    fn a_walk_that_never_reaches_herdr_is_not_top_level() {
+        let mut orphan = FakeProcs::default();
+        orphan.add(50, CLAUDE, 1, 500);
+        assert!(!is_top_level(&orphan, 50));
+
+        let mut vanished = FakeProcs::pane();
+        vanished.add(30, CLAUDE, 25, 300);
+        assert!(!is_top_level(&vanished, 30));
+
+        let mut no_exe = FakeProcs::pane();
+        no_exe.0.remove(&20);
+        no_exe.add(30, CLAUDE, 20, 300);
+        assert!(!is_top_level(&no_exe, 30));
+    }
+
+    #[test]
+    fn claude_pid_counts_only_as_an_ancestor_of_the_hook() {
+        let mut p = FakeProcs::pane();
+        p.add(35, "/bin/sh", 30, 350);
+        p.add(99, CLAUDE, 1, 900);
+        assert_eq!(claude_pid(&p, Some("30"), 35), Some(30));
+        assert_eq!(claude_pid(&p, Some("99"), 35), None);
+        assert_eq!(claude_pid(&p, Some("x"), 35), None);
+        assert_eq!(claude_pid(&p, None, 35), None);
     }
 
     #[test]
