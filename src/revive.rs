@@ -56,6 +56,7 @@ pub fn revive(herdr: &dyn Herdr, ledger: &mut dyn Ledger, req: &ReviveRequest) -
                 current.pane_id = pane_id.clone();
                 current.session_id = session_id.clone().or(current.session_id.take());
                 current.socket = herdr.socket().or(current.socket.take());
+                current.process = None;
                 Ok(())
             });
             match restarted {
@@ -522,6 +523,37 @@ mod tests {
             Some(Path::new(crate::herdr::fake::FAKE_SOCKET))
         );
         assert_eq!(ledger.1, ["a"]);
+    }
+
+    const OLD_PROCESS: crate::ledger::Process = crate::ledger::Process {
+        pid: 4242,
+        start: 99,
+    };
+
+    #[test]
+    fn starting_a_new_claude_clears_the_recorded_process() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut ledger = ledger([AgentRecord {
+            process: Some(OLD_PROCESS),
+            ..record("a", cwd.path())
+        }]);
+        let (out, _) = run(&herdr, &mut ledger, &request());
+        assert_eq!(out, "resumed a w1:p1");
+        assert_eq!(ledger.0["a"].process, None);
+    }
+
+    #[test]
+    fn a_member_already_alive_keeps_its_recorded_process() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr().with_live_agent(Some("a"), Some("sess-a"), "w1:p4");
+        let mut ledger = ledger([AgentRecord {
+            process: Some(OLD_PROCESS),
+            ..record("a", cwd.path())
+        }]);
+        let (out, _) = run(&herdr, &mut ledger, &request());
+        assert_eq!(out, "alive a w1:p4");
+        assert_eq!(ledger.0["a"].process, Some(OLD_PROCESS));
     }
 
     #[test]
