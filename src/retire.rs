@@ -353,6 +353,7 @@ mod tests {
             workspace: None,
             prompt: None,
             ready_timeout: Duration::from_secs(60),
+            shell_timeout: crate::spawn::SHELL_TIMEOUT,
             claude_args: vec![],
             member_of: None,
         };
@@ -379,6 +380,7 @@ mod tests {
             workspace: None,
             prompt: None,
             ready_timeout: Duration::from_secs(60),
+            shell_timeout: crate::spawn::SHELL_TIMEOUT,
             claude_args: vec![],
             member_of: None,
         };
@@ -715,6 +717,7 @@ mod tests {
             workspace: None,
             prompt: None,
             ready_timeout: Duration::from_secs(60),
+            shell_timeout: crate::spawn::SHELL_TIMEOUT,
             claude_args: vec![],
             member_of: None,
         };
@@ -758,6 +761,7 @@ mod tests {
             workspace: None,
             prompt: None,
             ready_timeout: Duration::from_secs(60),
+            shell_timeout: crate::spawn::SHELL_TIMEOUT,
             claude_args: vec![],
             member_of: None,
         };
@@ -793,6 +797,7 @@ mod tests {
             workspace: None,
             prompt: None,
             ready_timeout: Duration::from_secs(60),
+            shell_timeout: crate::spawn::SHELL_TIMEOUT,
             claude_args: vec![],
             member_of: None,
         };

@@ -38,7 +38,7 @@ use crate::prompt::prompt;
 use crate::report::{Filter, Kind, Reporter, report, reports};
 use crate::retire::{retire, retire_and_close};
 use crate::revive::{ReviveRequest, revive};
-use crate::spawn::{Checkout, Prompt, SpawnRequest, spawn};
+use crate::spawn::{Checkout, Prompt, SHELL_TIMEOUT, SpawnRequest, spawn};
 use crate::status::{Format, status};
 use crate::worktree::{remote_timeout, repo_root};
 
@@ -520,6 +520,7 @@ fn run_spawn(args: SpawnArgs) -> Result<i32> {
         workspace: args.workspace,
         prompt,
         ready_timeout: Duration::from_secs(args.ready_timeout),
+        shell_timeout: SHELL_TIMEOUT,
         claude_args: args.claude_args,
         member_of: None,
     };

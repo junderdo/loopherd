@@ -10,7 +10,9 @@ use serde::Deserialize;
 use crate::herdr::Herdr;
 use crate::ledger::{AgentRecord, FileLedger, Ledger};
 use crate::lock::Lock;
-use crate::spawn::{Checkout, MemberOf, Prompt, SpawnRequest, Spawned, preview, spawn};
+use crate::spawn::{
+    Checkout, MemberOf, Prompt, SHELL_TIMEOUT, SpawnRequest, Spawned, preview, spawn,
+};
 use crate::template::Template;
 
 #[derive(Debug, Deserialize)]
@@ -339,6 +341,7 @@ pub fn resolve(paths: &Paths, req: &AddRequest) -> Result<SpawnRequest> {
             text: checked.prompt.text,
         }),
         ready_timeout: req.ready_timeout,
+        shell_timeout: SHELL_TIMEOUT,
         claude_args: [&herd.args[..], &template.args, &req.claude_args].concat(),
         member_of: Some(MemberOf {
             herd: req.herd.clone(),

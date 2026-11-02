@@ -17,6 +17,9 @@ pub const BLOCKED_EXIT: i32 = 3;
 
 const SHELL_POLL: Duration = Duration::from_millis(50);
 
+/// How long a new tab's shell gets to run its rc files, apart from `ready_timeout`.
+pub const SHELL_TIMEOUT: Duration = Duration::from_secs(60);
+
 const PROMPT_KEYS: [&str; 4] = ["name", "branch", "worktree", "pane"];
 
 #[derive(Debug, Clone)]
@@ -26,7 +29,9 @@ pub struct SpawnRequest {
     pub worktree: Option<Checkout>,
     pub workspace: Option<String>,
     pub prompt: Option<Prompt>,
+    /// How long Claude gets to become idle.
     pub ready_timeout: Duration,
+    pub shell_timeout: Duration,
     pub claude_args: Vec<String>,
     pub member_of: Option<MemberOf>,
 }
@@ -387,8 +392,7 @@ fn resolve_workspace(
 }
 
 fn start_until_ready(herdr: &dyn Herdr, req: &SpawnRequest, tab: &NewTab) -> Result<Readiness> {
-    // The shell's rc files get their own ready_timeout, not a cut of Claude's.
-    wait_for_shell_prompt(herdr, &tab.pane_id, req.ready_timeout, SHELL_POLL)?;
+    wait_for_shell_prompt(herdr, &tab.pane_id, req.shell_timeout, SHELL_POLL)?;
     let deadline = Instant::now() + req.ready_timeout;
     match herdr.start_claude(&req.name, &tab.pane_id, req.ready_timeout, &req.claude_args)? {
         StartOutcome::Ready(agent) => return Ok(Readiness::Ready(agent)),
@@ -432,6 +436,7 @@ mod tests {
             workspace: None,
             prompt: Some("start work".into()),
             ready_timeout: Duration::from_secs(60),
+            shell_timeout: SHELL_TIMEOUT,
             claude_args: vec![],
             member_of: None,
         }
@@ -726,12 +731,25 @@ mod tests {
     }
 
     #[test]
+    fn a_short_ready_timeout_leaves_the_shell_its_own_time_to_reach_its_prompt() {
+        let mut herdr = herdr();
+        herdr.new_tab_prompt_after = Some(3);
+        let mut ledger = MemLedger::default();
+        let req = SpawnRequest {
+            ready_timeout: Duration::from_millis(20),
+            ..request("a")
+        };
+        run(&herdr, &mut ledger, &req).unwrap();
+        assert_eq!(herdr.started().len(), 1);
+    }
+
+    #[test]
     fn a_shell_that_never_reaches_its_prompt_is_a_start_failure_that_closes_the_tab() {
         let mut herdr = herdr();
         herdr.new_tab_prompt_after = None;
         let mut ledger = MemLedger::default();
         let req = SpawnRequest {
-            ready_timeout: Duration::from_millis(20),
+            shell_timeout: Duration::from_millis(20),
             ..request("a")
         };
         let err = run(&herdr, &mut ledger, &req).unwrap_err();
