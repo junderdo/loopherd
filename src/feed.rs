@@ -289,9 +289,21 @@ fn task_request(
     )
 }
 
-/// An exclusive lock on `path`, held until the file is dropped; fails at once
-/// if another run holds it.
-pub fn lock(path: &Path) -> Result<File> {
+/// An exclusive lock on `path`, held until the guard is dropped.
+#[derive(Debug)]
+pub struct FeedLock(File);
+
+impl Drop for FeedLock {
+    fn drop(&mut self) {
+        // Unlock before close: a child forked by another thread shares this open
+        // file description until it execs, and closing alone leaves it locked.
+        // SAFETY: flock on a descriptor this guard owns.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+/// Takes the lock on `path`; fails at once if another run holds it.
+pub fn lock(path: &Path) -> Result<FeedLock> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
@@ -304,7 +316,7 @@ pub fn lock(path: &Path) -> Result<File> {
         }
         return Err(err).with_context(|| format!("lock {}", path.display()));
     }
-    Ok(file)
+    Ok(FeedLock(file))
 }
 
 /// The source's stdout; fails if it exits non-zero or outruns `timeout`.
@@ -1177,6 +1189,17 @@ mod tests {
         let first = lock(&path).unwrap();
         let err = lock(&path).unwrap_err();
         assert_eq!(format!("{err:#}"), "feed already running");
+        drop(first);
+        lock(&path).unwrap();
+    }
+
+    #[test]
+    fn dropping_a_lock_frees_it_while_a_spawning_thread_holds_a_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("loopherd/feed.lock");
+        let first = lock(&path).unwrap();
+        // A child forked by another test thread holds this copy until it execs.
+        let _inherited = first.0.try_clone().unwrap();
         drop(first);
         lock(&path).unwrap();
     }
