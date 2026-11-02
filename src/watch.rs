@@ -547,6 +547,7 @@ mod tests {
 
     fn stop(shells: u32, crons: u32) -> Body {
         Body::Stop(Stop {
+            session: None,
             background: Tally::Known(Background {
                 shells,
                 ..Background::default()
@@ -558,6 +559,7 @@ mod tests {
 
     fn failed(error: &str) -> Body {
         Body::Stop(Stop {
+            session: None,
             background: Tally::Unknown(Unknown::Unknown),
             crons: Tally::Unknown(Unknown::Unknown),
             error: Some(error.into()),
@@ -647,6 +649,7 @@ mod tests {
             dir.path(),
             "lh-1",
             Body::Stop(Stop {
+                session: None,
                 background: Tally::Unknown(Unknown::Unknown),
                 crons: Tally::Known(0),
                 error: None,

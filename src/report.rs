@@ -104,6 +104,9 @@ pub struct Stop {
     /// Set for a StopFailure: the API error that ended the turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Claude session that stopped; missing in entries written before LH-70.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1191,8 +1194,21 @@ mod tests {
         assert_eq!(inode(), before);
     }
 
+    #[test]
+    fn a_stop_line_without_a_session_still_parses() {
+        let entry: Entry = serde_json::from_str(
+            r#"{"at":"2026-11-02T09:00:00.000000000Z","kind":"stop","background":"unknown","crons":0}"#,
+        )
+        .unwrap();
+        let Body::Stop(stop) = entry.body else {
+            panic!("not a stop")
+        };
+        assert_eq!(stop.session, None);
+    }
+
     fn stop(shells: u32, crons: Tally<u32>, error: Option<&str>) -> Body {
         Body::Stop(Stop {
+            session: None,
             background: Tally::Known(Background {
                 shells,
                 ..Background::default()
@@ -1429,6 +1445,7 @@ mod tests {
             (stop(1, unknown, None), "paused: 1 shell; crons unknown"),
             (
                 Body::Stop(Stop {
+                    session: None,
                     background: Tally::Unknown(Unknown::Unknown),
                     crons: unknown,
                     error: Some("rate_limit".into()),
@@ -1454,6 +1471,7 @@ mod tests {
             (stop(1, unknown, None), Some("1 shell; crons unknown")),
             (
                 Body::Stop(Stop {
+                    session: None,
                     background: Tally::Unknown(Unknown::Unknown),
                     crons: Tally::Known(0),
                     error: None,
@@ -1474,6 +1492,7 @@ mod tests {
         let entry = Entry::new(
             at("2026-11-01T09:00:00Z"),
             Body::Stop(Stop {
+                session: None,
                 background: Tally::Known(Background {
                     shells: 1,
                     subagents: 2,

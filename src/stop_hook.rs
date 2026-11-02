@@ -7,7 +7,8 @@ use std::time::SystemTime;
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::ledger::Ledger;
+use crate::herdr::Herdr;
+use crate::ledger::{AgentRecord, Ledger};
 use crate::report::{Background, Body, Entry, Stop, Tally, Unknown, append, member_in};
 
 /// Where the hook runs: `$HERDR_PANE_ID` and `$HERDR_SOCKET_PATH`.
@@ -17,9 +18,11 @@ pub struct Pane<'a> {
 }
 
 /// Records the stop `input` describes for the member in `pane`; returns the
-/// member's name, or `None` when the pane is no member's.
+/// member's name, or `None` when the pane is no member's or the stop came from
+/// a session other than the member's.
 pub fn stop_hook(
-    ledger: &dyn Ledger,
+    ledger: &mut dyn Ledger,
+    herdr: &dyn Herdr,
     dir: &Path,
     pane: &Pane,
     input: &[u8],
@@ -30,8 +33,30 @@ pub fn stop_hook(
         return Ok(None);
     };
     let stop = parse(input);
+    if let Some(hook) = stop
+        .session
+        .as_ref()
+        .filter(|h| member.session_id.as_ref() != Some(*h))
+    {
+        if member.session_id.is_some() && !is_current(herdr, pane.id, hook) {
+            return Ok(None);
+        }
+        ledger.record(AgentRecord {
+            session_id: Some(hook.clone()),
+            ..member.clone()
+        })?;
+    }
     append(dir, &member.name, &Entry::new(now, Body::Stop(stop)))?;
     Ok(Some(member.name.clone()))
+}
+
+/// Whether herdr reports `session` as the current one of the agent in `pane_id`.
+fn is_current(herdr: &dyn Herdr, pane_id: &str, session: &str) -> bool {
+    herdr.agents().is_ok_and(|agents| {
+        agents
+            .iter()
+            .any(|a| a.pane_id == pane_id && a.session_id.as_deref() == Some(session))
+    })
 }
 
 /// Unparseable input still records the stop, with everything unknown.
@@ -59,10 +84,15 @@ fn parse(input: &[u8]) -> Stop {
         Some(Value::Null) | None => None,
         Some(other) => Some(other.to_string()),
     };
+    let session = input
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     Stop {
         background,
         crons,
         error,
+        session,
     }
 }
 
@@ -71,6 +101,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::herdr::fake::FakeHerdr;
     use crate::ledger::{AgentRecord, MemLedger};
 
     const SOCKET: &str = "/run/herdr/herdr.sock";
@@ -116,11 +147,23 @@ mod tests {
         socket: Option<&str>,
         input: &str,
     ) -> Option<String> {
+        let mut ledger = ledger.clone();
+        run_with(&mut ledger, &FakeHerdr::new(&[]), dir, pane, socket, input)
+    }
+
+    fn run_with(
+        ledger: &mut MemLedger,
+        herdr: &FakeHerdr,
+        dir: &Path,
+        pane: &str,
+        socket: Option<&str>,
+        input: &str,
+    ) -> Option<String> {
         let pane = Pane {
             id: pane,
             socket: socket.map(Path::new),
         };
-        stop_hook(ledger, dir, &pane, input.as_bytes(), at()).unwrap()
+        stop_hook(ledger, herdr, dir, &pane, input.as_bytes(), at()).unwrap()
     }
 
     fn mailbox(dir: &Path, name: &str) -> String {
@@ -276,5 +319,139 @@ mod tests {
             run(&ledger, dir.path(), "w1:p3", Some("/run/other.sock"), "{}").as_deref(),
             Some("aaa-old")
         );
+    }
+
+    fn in_session(session: Option<&str>) -> MemLedger {
+        let mut m = member("lh-1", "w1:p1", Some(SOCKET));
+        m.session_id = session.map(str::to_string);
+        ledger(vec![m])
+    }
+
+    fn stop_from(session: &str) -> String {
+        format!(r#"{{"hook_event_name":"Stop","session_id":"{session}"}}"#)
+    }
+
+    fn herdr_with(session: &str) -> FakeHerdr {
+        FakeHerdr::new(&[]).with_live_agent(Some("lh-1"), Some(session), "w1:p1")
+    }
+
+    #[test]
+    fn a_stop_from_the_members_own_session_records_it_with_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = in_session(Some("sess-a"));
+        let herdr = herdr_with("sess-a");
+        run_with(
+            &mut ledger,
+            &herdr,
+            dir.path(),
+            "w1:p1",
+            Some(SOCKET),
+            &stop_from("sess-a"),
+        );
+        assert!(mailbox(dir.path(), "lh-1").contains(r#""session":"sess-a""#));
+    }
+
+    #[test]
+    fn a_stop_from_another_session_is_dropped_when_herdr_reports_the_members_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = in_session(Some("sess-a"));
+        let herdr = herdr_with("sess-a");
+        let who = run_with(
+            &mut ledger,
+            &herdr,
+            dir.path(),
+            "w1:p1",
+            Some(SOCKET),
+            &stop_from("sess-b"),
+        );
+        assert_eq!(who, None);
+        assert_eq!(mailbox(dir.path(), "lh-1"), "");
+        assert_eq!(ledger.0["lh-1"].session_id.as_deref(), Some("sess-a"));
+    }
+
+    #[test]
+    fn a_session_herdr_reports_as_current_is_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = in_session(Some("sess-a"));
+        let herdr = herdr_with("sess-b");
+        let who = run_with(
+            &mut ledger,
+            &herdr,
+            dir.path(),
+            "w1:p1",
+            Some(SOCKET),
+            &stop_from("sess-b"),
+        );
+        assert_eq!(who.as_deref(), Some("lh-1"));
+        assert_eq!(ledger.0["lh-1"].session_id.as_deref(), Some("sess-b"));
+        assert!(mailbox(dir.path(), "lh-1").contains(r#""session":"sess-b""#));
+    }
+
+    #[test]
+    fn a_mismatch_with_herdr_unreachable_records_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = in_session(Some("sess-a"));
+        let herdr = herdr_with("sess-b");
+        herdr.set_unreachable(true);
+        let who = run_with(
+            &mut ledger,
+            &herdr,
+            dir.path(),
+            "w1:p1",
+            Some(SOCKET),
+            &stop_from("sess-b"),
+        );
+        assert_eq!(who, None);
+        assert_eq!(mailbox(dir.path(), "lh-1"), "");
+        assert_eq!(ledger.0["lh-1"].session_id.as_deref(), Some("sess-a"));
+    }
+
+    #[test]
+    fn a_mismatch_with_no_agent_in_the_pane_records_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = in_session(Some("sess-a"));
+        let who = run_with(
+            &mut ledger,
+            &FakeHerdr::new(&[]),
+            dir.path(),
+            "w1:p1",
+            Some(SOCKET),
+            &stop_from("sess-b"),
+        );
+        assert_eq!(who, None);
+        assert_eq!(mailbox(dir.path(), "lh-1"), "");
+    }
+
+    #[test]
+    fn an_entry_without_a_session_takes_the_hooks_and_records_the_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = in_session(None);
+        let who = run_with(
+            &mut ledger,
+            &FakeHerdr::new(&[]),
+            dir.path(),
+            "w1:p1",
+            Some(SOCKET),
+            &stop_from("sess-b"),
+        );
+        assert_eq!(who.as_deref(), Some("lh-1"));
+        assert_eq!(ledger.0["lh-1"].session_id.as_deref(), Some("sess-b"));
+        assert!(mailbox(dir.path(), "lh-1").contains(r#""session":"sess-b""#));
+    }
+
+    #[test]
+    fn a_stop_without_a_session_id_is_recorded_as_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = in_session(Some("sess-a"));
+        let who = run_with(
+            &mut ledger,
+            &FakeHerdr::new(&[]),
+            dir.path(),
+            "w1:p1",
+            Some(SOCKET),
+            "{}",
+        );
+        assert_eq!(who.as_deref(), Some("lh-1"));
+        assert!(!mailbox(dir.path(), "lh-1").contains("session"));
     }
 }

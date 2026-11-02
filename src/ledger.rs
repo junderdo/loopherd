@@ -136,7 +136,7 @@ impl Ledger for FileLedger {
 
 /// Entries, and the names `started` was called with, in order.
 #[cfg(test)]
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct MemLedger(pub BTreeMap<String, AgentRecord>, pub Vec<String>);
 
 #[cfg(test)]

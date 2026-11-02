@@ -409,14 +409,16 @@ fn run_stop_hook() -> Result<i32> {
         .read_to_end(&mut input)
         .context("read hook input")?;
     let socket = socket_from_env();
-    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let pane = stop_hook::Pane {
         id: &pane,
         socket: socket.as_deref(),
     };
+    let reports = ledger.reports_dir()?;
     stop_hook::stop_hook(
-        &ledger,
-        &ledger.reports_dir()?,
+        &mut ledger,
+        &CliHerdr,
+        &reports,
         &pane,
         &input,
         SystemTime::now(),
