@@ -198,9 +198,10 @@ impl DoneCheck {
             .collect();
         values.insert("herd", member.herd.as_deref().unwrap_or_default());
         values.insert("name", &member.name);
-        let branch = match &self.branch {
-            Some(pattern) => pattern.render(&values)?,
-            None => String::new(),
+        let branch = match (&member.branch, &self.branch) {
+            (Some(recorded), _) => recorded.clone(),
+            (None, Some(pattern)) => pattern.render(&values)?,
+            (None, None) => String::new(),
         };
         let worktree = member
             .worktree
@@ -760,6 +761,7 @@ args = ["--model", "opus"]
         assert_eq!(herdr.tabs()[0].cwd, wt);
         assert_eq!(herdr.prompts()[0].1, format!("on [] in {}", wt.display()));
         assert_eq!(ledger.0["z-7"].worktree, Some(wt.clone()));
+        assert_eq!(ledger.0["z-7"].branch.as_deref(), Some(""));
         assert_eq!(crate::worktree::testing::current_branch(&wt), "");
         assert_eq!(
             crate::worktree::testing::head(&wt),

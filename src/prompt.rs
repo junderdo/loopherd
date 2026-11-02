@@ -47,6 +47,7 @@ mod tests {
             session_id: None,
             repo: "/src/repo".into(),
             worktree: None,
+            branch: None,
             workspace: "w9".into(),
             workspace_label: Some("loopherd".into()),
             claude_args: vec![],

@@ -407,6 +407,7 @@ mod tests {
             session_id: None,
             repo: "/src/repo".into(),
             worktree: None,
+            branch: None,
             workspace: "w1".into(),
             workspace_label: None,
             claude_args: vec![],
@@ -900,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn the_done_check_renders_params_and_built_ins_and_runs_in_the_repo() {
+    fn the_done_check_renders_params_built_ins_and_an_unrecorded_branch_from_the_template() {
         let setup = Setup::with_template(
             "cat tasks",
             5,
@@ -919,6 +920,71 @@ mod tests {
         assert_eq!(
             fs::read_to_string(setup.repo.path().join("seen")).unwrap(),
             "4|zpr-4|prs|review/4-zpr-4|/src/wt/zpr-4|w1:p9|"
+        );
+    }
+
+    #[test]
+    fn the_done_check_sees_the_branch_and_worktree_recorded_at_spawn() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = crate::worktree::testing::repo_with_origin(root.path());
+        let config = tempfile::tempdir().unwrap();
+        fs::create_dir(config.path().join("herds")).unwrap();
+        let write_herd = |branch: &str| {
+            let herd = format!(
+                "repo = {:?}\n[template.pr]\nparams = [\"number\"]\nname = \"zpr-{{number}}\"\n\
+                 branch = {branch:?}\nprompt = \"review {{number}}\"\n\
+                 done = \"printf '%s|' {{branch}} {{worktree}} > seen; exit 1\"\n\
+                 [queue]\ntemplate = \"pr\"\nsource = \"cat tasks\"\nmax = 1\n",
+                repo.display().to_string(),
+            );
+            fs::write(config.path().join("herds/prs.toml"), herd).unwrap();
+        };
+        let paths = Paths {
+            herds: config.path().join("herds"),
+            home: PathBuf::from("/home/me"),
+        };
+        let req = FeedRequest {
+            herd: "prs".into(),
+            dry_run: false,
+            ready_timeout: Duration::from_secs(60),
+            command_timeout: Duration::from_secs(1),
+            own_pane: None,
+        };
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        write_herd("old/{number}");
+        fs::write(repo.join("tasks"), "7\n").unwrap();
+        feed(&herdr, &mut ledger, &paths, &req, Some("w1")).unwrap();
+
+        write_herd("new/{number}");
+        let fed = feed(&herdr, &mut ledger, &paths, &req, Some("w1")).unwrap();
+
+        assert_eq!(fed.lines[0], "still open zpr-7");
+        let wt = root.path().join("proj/worktrees/old-7");
+        assert_eq!(
+            fs::read_to_string(repo.join("seen")).unwrap(),
+            format!("old/7|{}|", wt.display())
+        );
+    }
+
+    #[test]
+    fn a_member_with_a_recorded_empty_branch_gets_an_empty_branch() {
+        let setup = Setup::with_template(
+            "cat tasks",
+            5,
+            "branch = \"review/{number}\"\ndone = \"printf '[%s]' {branch} > seen; exit 1\"\n",
+        );
+        setup.tasks("");
+        let mut zpr = member("zpr-4", Some("prs"), false);
+        zpr.params = Some([("number".to_string(), "4".to_string())].into());
+        zpr.branch = Some(String::new());
+        let mut ledger = ledger(&[zpr]);
+
+        setup.feed(&herdr(), &mut ledger, false).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(setup.repo.path().join("seen")).unwrap(),
+            "[]"
         );
     }
 
