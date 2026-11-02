@@ -308,7 +308,11 @@ fn run_add(args: AddArgs) -> Result<i32> {
 
 fn run_feed(herd: String, dry_run: bool, ready_timeout: u64) -> Result<i32> {
     let ledger_path = FileLedger::default_path().context("ledger")?;
-    let _lock = lock(&ledger_path.with_file_name("feed.lock"))?;
+    // A dry run changes nothing, so it must not block a real one.
+    let _lock = match dry_run {
+        true => None,
+        false => Some(lock(&ledger_path.with_file_name("feed.lock"))?),
+    };
     let paths = Paths::from_env().context("herd")?;
     let mut ledger = FileLedger::new(ledger_path);
     let req = FeedRequest {
