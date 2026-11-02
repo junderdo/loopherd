@@ -59,13 +59,26 @@ pub fn tool_hook(
     input: &[u8],
     switches: &dyn Fn(&str) -> Result<Switches>,
 ) -> Result<Option<String>> {
+    decide(ledger, pane, input, switches, &needs)
+}
+
+/// [`tool_hook`] with the matcher passed in. A panicking matcher counts as
+/// needing every switch, since a panic would otherwise print no deny.
+fn decide(
+    ledger: &dyn Ledger,
+    pane: &Pane,
+    input: &[u8],
+    switches: &dyn Fn(&str) -> Result<Switches>,
+    needs: &dyn Fn(&str) -> Vec<Switch>,
+) -> Result<Option<String>> {
     let Some(socket) = pane.socket else {
         return Ok(None);
     };
     let Some(command) = bash_command(input) else {
         return Ok(None);
     };
-    let needed = needs(&command);
+    let needed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| needs(&command)))
+        .unwrap_or_else(|_| vec![Switch::Merge, Switch::Install, Switch::Rebase]);
     if needed.is_empty() {
         return Ok(None);
     }
@@ -165,6 +178,12 @@ fn commands(script: &str) -> Vec<Vec<String>> {
                 Some('\n') | None => {}
                 Some(c) => word.get_or_insert_default().push(c),
             },
+            // `2>&1`, `<&3` and `&>file` are redirections, not `&`.
+            '&' if word.as_deref().is_some_and(|w| w.ends_with(['>', '<']))
+                || chars.peek() == Some(&'>') =>
+            {
+                word.get_or_insert_default().push(c);
+            }
             ';' | '&' | '|' | '\n' | '(' | ')' | '`' | '$'
                 if c != '$' || chars.peek() == Some(&'(') =>
             {
@@ -231,7 +250,9 @@ fn needs_one(words: &[String]) -> Vec<Switch> {
             return vec![];
         };
         let program = file_name(word);
-        if is_assignment(word) || KEYWORDS.contains(&word.as_str()) || word == "." {
+        if let Some(bare) = redirection(word) {
+            i += if bare { 2 } else { 1 };
+        } else if is_assignment(word) || KEYWORDS.contains(&word.as_str()) || word == "." {
             i += 1;
         } else if let Some((_, with_value)) = WRAPPERS.iter().find(|(w, _)| *w == program) {
             i = skip_options(words, i + 1, with_value);
@@ -240,13 +261,22 @@ fn needs_one(words: &[String]) -> Vec<Switch> {
             }
         } else if SHELLS.contains(&program) {
             i += 1;
+            // `-o pipefail`, `-O extglob`: the next word is the option's value.
+            const WITH_VALUE: [&str; 4] = ["-o", "+o", "-O", "+O"];
             while let Some(option) = words.get(i).filter(|w| w.starts_with(['-', '+'])) {
-                if !option.starts_with("--") && option.contains('c') {
-                    return words.get(i + 1).map_or(vec![], |script| needs(script));
+                if option == "--" {
+                    i += 1;
+                    break;
                 }
-                // `-o pipefail`, `-O extglob`: the next word is the option's value.
-                let has_value = ["-o", "+o", "-O", "+O"].contains(&option.as_str());
-                i += if has_value { 2 } else { 1 };
+                if !option.starts_with("--") && option.contains('c') {
+                    let script = skip_options(words, i + 1, &WITH_VALUE);
+                    return words.get(script).map_or(vec![], |script| needs(script));
+                }
+                i += if WITH_VALUE.contains(&option.as_str()) {
+                    2
+                } else {
+                    1
+                };
             }
         } else if program == "eval" {
             return needs(&words[i + 1..].join(" "));
@@ -264,13 +294,21 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
     match file_name(path) {
         "gh" => {
             let positional = positionals(args, &["-R", "--repo"]);
-            let pr_merge = positional.starts_with(&["pr", "merge"]);
-            let api_merge = positional.first() == Some(&"api") && args.iter().any(|a| merges(a));
+            let help = args.iter().any(|a| a == "--help" || a == "-h");
+            let pr_merge = positional.starts_with(&["pr", "merge"]) && !help;
+            let api_merge = positional.first() == Some(&"api")
+                && args.iter().any(|a| merges(a))
+                && gh_api_writes(args);
             (pr_merge || api_merge).then_some(Switch::Merge)
         }
-        "curl" | "wget" => args.iter().any(|a| merges(a)).then_some(Switch::Merge),
+        "curl" | "wget" => {
+            (args.iter().any(|a| merges(a)) && http_writes(args)).then_some(Switch::Merge)
+        }
         "git" => git_needs(args),
         "loopherd" => (positional.first() == Some(&"install-hook")).then_some(Switch::Install),
+        // `cargo run -- install-hook` in a loopherd checkout.
+        "cargo" => (positional.first() == Some(&"run") && args.iter().any(|a| a == "install-hook"))
+            .then_some(Switch::Install),
         _ => None,
     }
 }
@@ -286,7 +324,7 @@ fn git_needs(args: &[String]) -> Option<Switch> {
         "--super-prefix",
     ];
     let start = skip_options(args, 0, &GLOBAL_WITH_VALUE);
-    let (subcommand, rest) = args[start..].split_first()?;
+    let (subcommand, rest) = args.get(start..)?.split_first()?;
     let rebases = |a: &String| {
         a == "-r" || a == "--rebase" || a.strip_prefix("--rebase=").is_some_and(|v| v != "false")
     };
@@ -295,14 +333,93 @@ fn git_needs(args: &[String]) -> Option<Switch> {
             || a.starts_with("--force-with-lease")
             || (a.starts_with('-') && !a.starts_with("--") && a.contains('f'))
             || a.starts_with('+')
+            || a == "--mirror"
     };
+    const NOT_STARTING: [&str; 6] = [
+        "--abort",
+        "--continue",
+        "--quit",
+        "--skip",
+        "--show-current-patch",
+        "--help",
+    ];
     let needed = match subcommand.as_str() {
-        "rebase" => true,
+        "rebase" => !rest.iter().any(|a| NOT_STARTING.contains(&a.as_str())),
         "pull" => rest.iter().any(rebases),
         "push" => rest.iter().any(forces),
         _ => false,
     };
     needed.then_some(Switch::Rebase)
+}
+
+/// The value of the first of `names` in `args`, as `-X PUT`, `-XPUT` or
+/// `--method=PUT`.
+fn option_value<'a>(args: &'a [String], names: &[&str]) -> Option<&'a str> {
+    args.iter().enumerate().find_map(|(i, arg)| {
+        names.iter().find_map(|name| {
+            if arg == name {
+                return args.get(i + 1).map(String::as_str);
+            }
+            let rest = arg.strip_prefix(name)?;
+            match name.starts_with("--") {
+                true => rest.strip_prefix('='),
+                false => (!rest.is_empty()).then_some(rest),
+            }
+        })
+    })
+}
+
+fn not_get(method: Option<&str>) -> bool {
+    method.is_some_and(|m| !m.eq_ignore_ascii_case("GET") && !m.eq_ignore_ascii_case("HEAD"))
+}
+
+fn has_flag(args: &[String], flags: &[&str]) -> bool {
+    args.iter().any(|a| {
+        flags
+            .iter()
+            .any(|f| a == f || (f.starts_with("--") && a.starts_with(&format!("{f}="))))
+    })
+}
+
+/// `gh api` sends a GET unless given a method or fields.
+fn gh_api_writes(args: &[String]) -> bool {
+    not_get(option_value(args, &["-X", "--method"]))
+        || has_flag(args, &["-f", "-F", "--field", "--raw-field", "--input"])
+}
+
+/// curl and wget send a GET unless given a method or a body.
+fn http_writes(args: &[String]) -> bool {
+    not_get(option_value(args, &["-X", "--request", "--method"]))
+        || args
+            .iter()
+            .any(|a| a.starts_with("--data") || a.starts_with("-d"))
+        || has_flag(
+            args,
+            &[
+                "-T",
+                "--upload-file",
+                "--json",
+                "--post-data",
+                "--post-file",
+                "--body-data",
+                "--body-file",
+            ],
+        )
+}
+
+/// Whether `word` is a redirection, and if so whether it's bare (`>`, `2>`),
+/// so its target is the next word.
+fn redirection(word: &str) -> Option<bool> {
+    let op = word.trim_start_matches(|c: char| c.is_ascii_digit());
+    let op = op
+        .strip_prefix('&')
+        .filter(|o| o.starts_with('>'))
+        .unwrap_or(op);
+    if !op.starts_with(['>', '<']) {
+        return None;
+    }
+    let target = op.trim_start_matches(['>', '<', '&', '|']);
+    Some(target.is_empty() && !op.ends_with('&'))
 }
 
 /// A GitHub API path that merges a pull request: `…/pulls/<n>/merge`.
@@ -335,7 +452,7 @@ fn skip_options(words: &[String], mut i: usize, with_value: &[&str]) -> usize {
             1
         };
     }
-    i
+    i.min(words.len())
 }
 
 fn positionals<'a>(args: &'a [String], with_value: &[&str]) -> Vec<&'a str> {
@@ -420,6 +537,21 @@ mod tests {
         "(gh pr merge 12)",
         "out=\"$(gh pr merge 12 --squash 2>&1)\"; echo \"$out\"",
         "echo \"merged: $(echo $(date) && gh pr merge 12)\"",
+        "2>/dev/null gh pr merge 3",
+        "2>&1 gh pr merge 3",
+        "&>/dev/null gh pr merge 3",
+        "> out.txt gh pr merge 3",
+        "bash -c -- \"gh pr merge 3\"",
+        "sh -c -- \"gh pr merge 3\"",
+        "bash -c -e \"gh pr merge 3\"",
+        "curl -d {} https://api.github.com/repos/o/r/pulls/12/merge",
+        "curl --data-raw x https://api.github.com/repos/o/r/pulls/12/merge",
+        "curl -XPUT https://api.github.com/repos/o/r/pulls/12/merge",
+        "curl -T body.json https://api.github.com/repos/o/r/pulls/12/merge",
+        "wget --post-data x https://api.github.com/repos/o/r/pulls/12/merge",
+        "gh api -f merge_method=squash repos/o/r/pulls/12/merge",
+        "gh api --input body.json repos/o/r/pulls/12/merge",
+        "gh api --method=PUT repos/o/r/pulls/12/merge",
     ];
     const INSTALLS: &[&str] = &[
         "scripts/install",
@@ -436,11 +568,14 @@ mod tests {
         ". scripts/install",
         "bash -e -o pipefail scripts/install",
         "x=\"$(scripts/install)\"",
+        "cargo run -- install-hook",
+        "cargo run --release -- install-hook",
+        "cargo run -q --bin loopherd -- install-hook --remove",
     ];
     const REBASES: &[&str] = &[
         "git rebase origin/main",
         "git -C /src/repo rebase -i HEAD~3",
-        "git -c core.editor=true rebase --continue",
+        "git -c core.editor=true rebase -i HEAD~2",
         "/usr/bin/git rebase main",
         "git pull --rebase",
         "git pull --rebase=merges origin main",
@@ -461,6 +596,8 @@ mod tests {
         "git --super-prefix x/ rebase main",
         "echo \"`git rebase main`\"",
         "if ! out=\"$(git push --force-with-lease 2>&1)\"; then echo \"$out\"; fi",
+        "</dev/null git push -f",
+        "git push --mirror backup",
     ];
     const ALLOWED: &[&str] = &[
         "gh pr view 12",
@@ -489,6 +626,24 @@ mod tests {
         "out=\"$(gh pr view 12)\"",
         "cargo test",
         "",
+        "gh api repos/o/r/pulls/12/merge",
+        "gh api -X GET repos/o/r/pulls/12/merge",
+        "gh api --jq .merged repos/o/r/pulls/12/merge",
+        "curl https://api.github.com/repos/o/r/pulls/12/merge",
+        "curl -s -o /dev/null -w %{http_code} https://api.github.com/repos/o/r/pulls/12/merge",
+        "curl -X GET https://api.github.com/repos/o/r/pulls/12/merge",
+        "wget -qO- https://api.github.com/repos/o/r/pulls/12/merge",
+        "git rebase --abort",
+        "git rebase --continue",
+        "git rebase --quit",
+        "git rebase --skip",
+        "git rebase --show-current-patch",
+        "git rebase --help",
+        "gh pr merge --help",
+        "gh pr merge 12 -h",
+        "cargo run -- status",
+        "cargo build",
+        "cargo test install-hook",
     ];
 
     #[test]
@@ -502,6 +657,60 @@ mod tests {
         for (commands, want) in tables {
             for command in commands {
                 assert_eq!(needs(command), Vec::from_iter(want), "{command}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_trailing_git_option_without_its_value_still_reads_the_rest() {
+        for option in ["-C", "-c", "--git-dir", "--work-tree"] {
+            let command = format!("gh pr merge 3; git {option}");
+            assert_eq!(needs(&command), [Switch::Merge], "{command}");
+        }
+    }
+
+    #[test]
+    fn a_panicking_matcher_denies_a_lead_and_frees_everyone_else() {
+        let panics = |_: &str| -> Vec<Switch> { panic!("matcher bug") };
+        let all_off = |_: &str| Ok(Switches::default());
+        let pane = Pane {
+            id: PANE,
+            socket: Some(Path::new(SOCKET)),
+        };
+        let lead_ledger = ledger(vec![lead()]);
+        let denied = decide(
+            &lead_ledger,
+            &pane,
+            input("ls").as_bytes(),
+            &all_off,
+            &panics,
+        )
+        .unwrap()
+        .expect("a lead was allowed after a panic");
+        assert!(denied.contains("switch is off"), "{denied}");
+        let on = |_: &str| Ok(all_on());
+        assert_eq!(
+            decide(&lead_ledger, &pane, input("ls").as_bytes(), &on, &panics).unwrap(),
+            None
+        );
+        let worker = ledger(vec![entry("lh-1", None)]);
+        assert_eq!(
+            decide(&worker, &pane, input("ls").as_bytes(), &all_off, &panics).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_lead_without_a_recorded_herd_is_denied_all_three() {
+        let mut herdless = lead();
+        herdless.herd = None;
+        let l = ledger(vec![herdless]);
+        let on = |_: &str| -> Result<Switches> { panic!("no herd to read") };
+        for (commands, _) in tables() {
+            for command in commands {
+                let message = run_with(&l, Some(SOCKET), &input(command), &on)
+                    .unwrap_or_else(|| panic!("{command} was allowed"));
+                assert!(message.contains("no herd recorded"), "{message}");
             }
         }
     }

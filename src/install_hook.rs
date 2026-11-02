@@ -94,7 +94,7 @@ pub fn install(settings: &Path, exe: &Path, now: SystemTime) -> Result<Outcome> 
                 "timeout": hook.timeout,
             });
             let groups = array_at(hooks, hook.event)?;
-            if !keep_first_of_ours(groups, &ours, hook.subcommand) {
+            if !keep_first_of_ours(groups, &ours, hook.subcommand, hook.matcher) {
                 let mut group = Map::new();
                 if let Some(matcher) = hook.matcher {
                     group.insert("matcher".into(), matcher.into());
@@ -125,7 +125,7 @@ pub fn remove(settings: &Path, now: SystemTime) -> Result<Outcome> {
             let groups = groups
                 .as_array_mut()
                 .ok_or_else(|| anyhow!("hooks.{} is not an array", hook.event))?;
-            if drop_ours(groups, hook.subcommand) {
+            if drop_ours(groups, hook.subcommand, hook.matcher) {
                 dropped = true;
                 if groups.is_empty() {
                     hooks.remove(hook.event);
@@ -282,10 +282,15 @@ fn array_at<'a>(hooks: &'a mut Map<String, Value>, event: &str) -> Result<&'a mu
 
 /// Sets the first of loopherd's hooks in `groups` to `ours` and drops any
 /// others; false when there was none.
-fn keep_first_of_ours(groups: &mut Vec<Value>, ours: &Value, subcommand: &str) -> bool {
+fn keep_first_of_ours(
+    groups: &mut Vec<Value>,
+    ours: &Value,
+    subcommand: &str,
+    matcher: Option<&str>,
+) -> bool {
     let mut found = false;
     for group in groups.iter_mut() {
-        let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+        let Some(hooks) = hooks_of(group, matcher) else {
             continue;
         };
         let before = hooks.len();
@@ -309,11 +314,20 @@ fn keep_first_of_ours(groups: &mut Vec<Value>, ours: &Value, subcommand: &str) -
     found
 }
 
+/// A group's hooks, unless loopherd's hook needs a `matcher` the group lacks;
+/// ours under any other matcher isn't ours.
+fn hooks_of<'a>(group: &'a mut Value, matcher: Option<&str>) -> Option<&'a mut Vec<Value>> {
+    if matcher.is_some_and(|m| group.get("matcher").and_then(Value::as_str) != Some(m)) {
+        return None;
+    }
+    group.get_mut("hooks").and_then(Value::as_array_mut)
+}
+
 /// Drops loopherd's hooks, and groups left empty; true if any was dropped.
-fn drop_ours(groups: &mut Vec<Value>, subcommand: &str) -> bool {
+fn drop_ours(groups: &mut Vec<Value>, subcommand: &str, matcher: Option<&str>) -> bool {
     let mut dropped = false;
     for group in groups.iter_mut() {
-        if let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) {
+        if let Some(hooks) = hooks_of(group, matcher) {
             let before = hooks.len();
             hooks.retain(|hook| !is_ours(hook, subcommand));
             if hooks.len() != before {
@@ -413,6 +427,24 @@ mod tests {
         );
         remove(&path, later()).unwrap();
         assert_eq!(read(&path), read_str(user));
+    }
+
+    #[test]
+    fn a_tool_hook_under_another_matcher_is_left_and_the_bash_group_added() {
+        let moved = json!({"hooks": {"PreToolUse": [
+            {"matcher": "Edit", "hooks": [{"type": "command", "command": format!("'{EXE}' tool-hook || true")}]},
+        ]}});
+        let (_dir, path) = settings_with(&moved.to_string());
+
+        install(&path, Path::new(EXE), now()).unwrap();
+
+        let mut want = moved["hooks"]["PreToolUse"].clone();
+        want.as_array_mut()
+            .unwrap()
+            .push(json!({"matcher": "Bash", "hooks": [tool_hook()]}));
+        assert_eq!(read(&path)["hooks"]["PreToolUse"], want);
+        remove(&path, later()).unwrap();
+        assert_eq!(read(&path), moved);
     }
 
     #[test]
