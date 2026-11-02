@@ -1,15 +1,15 @@
 //! Git worktrees for spawned agents.
 
 use std::collections::BTreeSet;
-use std::io::{ErrorKind, Read};
-use std::os::unix::process::CommandExt;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+
+use crate::shell::run_within;
 
 /// Where the worktree for `branch` lives: `<parent>/worktrees/<slug>` when the
 /// repo sits at `<project>/<project>/`, otherwise `<repo>-worktrees/<slug>`.
@@ -530,7 +530,8 @@ fn remote_git(repo: &Path, args: &[&str]) -> Result<String> {
     remote_git_within(repo, args, remote_timeout()?)
 }
 
-fn remote_timeout() -> Result<Duration> {
+/// How long loopherd lets git, a queue's source or a done check run.
+pub fn remote_timeout() -> Result<Duration> {
     let Some(secs) = std::env::var_os(TIMEOUT_VAR) else {
         return Ok(REMOTE_TIMEOUT);
     };
@@ -564,46 +565,29 @@ fn remote_git_within(repo: &Path, args: &[&str], timeout: Duration) -> Result<St
         .arg("-C")
         .arg(repo)
         .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // Its own group, so a timeout can kill the transport helpers git spawns.
-        .process_group(0);
+        .env("GIT_TERMINAL_PROMPT", "0");
     let batch_mode = !has_own_ssh_setting(repo);
     if batch_mode {
         command.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
     }
-    let mut child = command.spawn().context("run git")?;
-    let stdout = read_in_background(child.stdout.take());
-    let stderr = read_in_background(child.stderr.take());
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        if let Some(status) = child.try_wait().context("wait for git")? {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            kill_group(&mut child);
-            return Err(TimedOut(format!(
-                "git {}: origin didn't answer within {}; \
-                 check your credentials, ssh agent and network, or raise the \
-                 limit with {TIMEOUT_VAR}=<seconds>",
-                args.join(" "),
-                humantime::format_duration(timeout)
-            ))
-            .into());
-        }
-        std::thread::sleep(Duration::from_millis(20));
+    let Some(out) = run_within(&mut command, timeout).context("run git")? else {
+        return Err(TimedOut(format!(
+            "git {}: origin didn't answer within {}; \
+             check your credentials, ssh agent and network, or raise the \
+             limit with {TIMEOUT_VAR}=<seconds>",
+            args.join(" "),
+            humantime::format_duration(timeout)
+        ))
+        .into());
     };
-    let stdout = stdout.join().unwrap_or_default();
-    if !status.success() {
-        let stderr = stderr.join().unwrap_or_default();
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
         let stderr = stderr.trim();
         let hint = (batch_mode && ssh_refused(stderr)).then_some(SSH_PROMPT_HINT);
         let message = format!("git {}: {stderr}", args.join(" "));
         return Err(RemoteFailed { message, hint }.into());
     }
-    Ok(stdout)
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 const SSH_PROMPT_HINT: &str = "hint: if ssh needed a passphrase or host-key prompt, set \
@@ -681,24 +665,6 @@ fn core_ssh_command_unset(repo: &Path) -> bool {
         .stderr(Stdio::null())
         .status();
     matches!(status, Ok(s) if s.code() == Some(1))
-}
-
-fn read_in_background(pipe: Option<impl Read + Send + 'static>) -> JoinHandle<String> {
-    std::thread::spawn(move || {
-        let mut out = Vec::new();
-        if let Some(mut pipe) = pipe {
-            let _ = pipe.read_to_end(&mut out);
-        }
-        String::from_utf8_lossy(&out).into_owned()
-    })
-}
-
-fn kill_group(child: &mut Child) {
-    let group = child.id() as libc::pid_t;
-    // SAFETY: killpg only sends a signal; the group is git's own, made by process_group(0).
-    unsafe { libc::killpg(group, libc::SIGKILL) };
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -887,6 +853,8 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::testing::*;
     use super::*;
 

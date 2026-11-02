@@ -515,6 +515,97 @@ fn retire_close_closes_the_tab_and_removes_a_clean_merged_worktree() {
     );
 }
 
+fn feed(state: &Path, config: &Path, herd: &str) -> Output {
+    dev(env!("CARGO_BIN_EXE_loopherd"))
+        .env("XDG_STATE_HOME", state)
+        .env("LOOPHERD_CONFIG_DIR", config)
+        .args(["feed", herd])
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn feed_fills_a_slot_then_reaps_the_member_once_its_done_check_passes() {
+    if !live_enabled() {
+        return;
+    }
+    let workspace = assert_dev_session();
+    let state = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let herds = config.path().join("herds");
+    std::fs::create_dir(&herds).unwrap();
+    let herd = format!("lh-live-feed-{}", std::process::id());
+    let tasks = work.path().join("tasks");
+    let done = work.path().join("done");
+    std::fs::write(
+        herds.join(format!("{herd}.toml")),
+        format!(
+            "repo = {:?}\nworkspace = {workspace:?}\n\
+             [template.echo]\nparams = [\"n\"]\nname = \"{{herd}}-{{n}}\"\n\
+             prompt = \"Reply with just the word ok.\"\ndone = \"test -f {}-{{n}}\"\n\
+             [queue]\ntemplate = \"echo\"\nsource = \"cat {}\"\nmax = 1\n",
+            env!("CARGO_MANIFEST_DIR"),
+            done.display(),
+            tasks.display()
+        ),
+    )
+    .unwrap();
+    let name = format!("{herd}-1");
+    let _cleanup = CloseTab(name.clone());
+    std::fs::write(&tasks, "1\n").unwrap();
+
+    let out = feed(state.path(), config.path(), &herd);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        stdout,
+        format!("added {name}\n{herd}: 0 retired, 1 added, 0 skipped, 0 errors\n")
+    );
+    let tab = herdr_ok(&["agent", "get", &name])["result"]["agent"]["tab_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let out = feed(state.path(), config.path(), &herd);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout,
+        format!(
+            "still open {name}\nskipped: exists {name}\n{herd}: 0 retired, 0 added, 1 skipped, 0 errors\n"
+        )
+    );
+
+    std::fs::write(format!("{}-1", done.display()), "").unwrap();
+    let out = feed(state.path(), config.path(), &herd);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert_eq!(
+        stdout,
+        format!(
+            "retired {name}; closed tab {tab}\nskipped: exists {name}\n\
+             {herd}: 1 retired, 0 added, 1 skipped, 0 errors\n"
+        )
+    );
+    assert_eq!(ledger_entry(state.path(), &name)["retired"], true);
+    let tabs = herdr_ok(&["tab", "list"]);
+    assert!(
+        !tabs["result"]["tabs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["tab_id"] == tab.as_str()),
+        "{tabs}"
+    );
+}
+
 const LIVE: &str = "/home/u/.config/herdr/herdr.sock";
 
 #[test]

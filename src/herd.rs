@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::herdr::Herdr;
-use crate::ledger::Ledger;
+use crate::ledger::{AgentRecord, Ledger};
 use crate::spawn::{Checkout, MemberOf, Prompt, SpawnRequest, Spawned, preview, spawn};
 use crate::template::Template;
 
@@ -46,6 +46,9 @@ struct TemplateFile {
     prompt_file: Option<String>,
     #[serde(default)]
     args: Vec<String>,
+    /// A shell command that exits 0 once a member is finished, for `feed` to
+    /// retire it. Placeholder values are substituted already shell-quoted.
+    done: Option<String>,
 }
 
 /// Where herd files live, and the home a leading `~` expands to.
@@ -135,6 +138,8 @@ pub struct Queue {
     pub repo: PathBuf,
     /// The template's param names, in order.
     pub params: Vec<String>,
+    /// Each template's done check, for those that have one.
+    pub done: BTreeMap<String, DoneCheck>,
 }
 
 pub fn queue(paths: &Paths, herd: &str) -> Result<Queue> {
@@ -142,13 +147,77 @@ pub fn queue(paths: &Paths, herd: &str) -> Result<Queue> {
     let queue = file
         .queue
         .with_context(|| format!("herd: {herd} has no [queue]"))?;
+    let mut done = BTreeMap::new();
+    for (name, template) in &file.template {
+        if let Some(check) = DoneCheck::of(template).with_context(|| format!("template {name}"))? {
+            done.insert(name.clone(), check);
+        }
+    }
     Ok(Queue {
         params: file.template[&queue.template].params.clone(),
         template: queue.template,
         source: queue.source,
         max: queue.max as usize,
         repo: expand_home(&file.repo, &paths.home),
+        done,
     })
+}
+
+/// A template's `done` command, rendered per member like its prompt.
+pub struct DoneCheck {
+    command: Template,
+    branch: Option<Template>,
+}
+
+impl DoneCheck {
+    fn of(template: &TemplateFile) -> Result<Option<DoneCheck>> {
+        let Some(command) =
+            pattern(template.done.as_deref(), &template.params, &BUILT_INS).context("done")?
+        else {
+            return Ok(None);
+        };
+        let branch = pattern(
+            template.branch.as_deref(),
+            &template.params,
+            &["herd", "name"],
+        )
+        .context("branch")?;
+        Ok(Some(DoneCheck { command, branch }))
+    }
+
+    /// The command for `member`, whose `params` are its recorded values, each
+    /// value shell-quoted since params come from the source's output.
+    pub fn render(
+        &self,
+        member: &AgentRecord,
+        params: &BTreeMap<String, String>,
+    ) -> Result<String> {
+        let mut values: HashMap<&str, &str> = params
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        values.insert("herd", member.herd.as_deref().unwrap_or_default());
+        values.insert("name", &member.name);
+        let branch = match &self.branch {
+            Some(pattern) => pattern.render(&values)?,
+            None => String::new(),
+        };
+        let worktree = member
+            .worktree
+            .as_ref()
+            .unwrap_or(&member.repo)
+            .display()
+            .to_string();
+        values.insert("branch", &branch);
+        values.insert("worktree", &worktree);
+        values.insert("pane", &member.pane_id);
+        let quoted: HashMap<&str, String> = values
+            .iter()
+            .map(|(&k, v)| (k, crate::shell::quote(v)))
+            .collect();
+        self.command
+            .render(&quoted.iter().map(|(&k, v)| (k, v.as_str())).collect())
+    }
 }
 
 /// The spawn request for `req`, from the named herd file alone.
@@ -274,6 +343,7 @@ fn check_fields(template: &TemplateFile, paths: &Paths) -> Result<CheckedTemplat
         bail!("{} is empty", prompt.source);
     }
     pattern(Some(&prompt.text), &template.params, &BUILT_INS).context(prompt.source.clone())?;
+    pattern(template.done.as_deref(), &template.params, &BUILT_INS).context("done")?;
     Ok(CheckedTemplate {
         name,
         branch,
@@ -1133,6 +1203,11 @@ args = ["--model", "opus"]
             ),
             ("prompt = \" \\n\"", &[], "prompt is empty"),
             (
+                "prompt = \"go\"\ndone = \"gh pr view {nmber}\"",
+                &[],
+                "done: unknown placeholder {nmber}",
+            ),
+            (
                 "prompt_file = \"t.md\"",
                 &[("t.md", "\n")],
                 "prompt_file CONFIG/herds/t.md is empty",
@@ -1147,7 +1222,8 @@ args = ["--model", "opus"]
     #[test]
     fn herds_accepts_every_placeholder_add_accepts() {
         let template = "name = \"z-{herd}-{n}\"\nbranch = \"{herd}/{name}/{n}\"\n\
-                        prompt_file = \"t.md\"";
+                        prompt_file = \"t.md\"\n\
+                        done = \"{name} {herd} {branch} {worktree} {pane} {n} {{x}}\"";
         let prompt = "{name} {herd} {branch} {worktree} {pane} {n} {{x}}";
         let (report, code) = herds_line(template, &[("t.md", prompt)]);
         assert_eq!(
