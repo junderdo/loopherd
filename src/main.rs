@@ -7,6 +7,7 @@ mod matching;
 mod prompt;
 mod retire;
 mod revive;
+mod shell;
 mod spawn;
 mod status;
 mod template;
@@ -30,7 +31,7 @@ use crate::retire::{retire, retire_and_close};
 use crate::revive::{ReviveRequest, revive};
 use crate::spawn::{Checkout, Prompt, SpawnRequest, spawn};
 use crate::status::{Format, status};
-use crate::worktree::repo_root;
+use crate::worktree::{remote_timeout, repo_root};
 
 #[derive(Parser)]
 #[command(version, about = "Herd coding agents across herdr sessions")]
@@ -47,11 +48,12 @@ enum Command {
     Add(AddArgs),
     /// List herd files with a usage line per template; exits 1 if any is invalid.
     Herds,
-    /// Fill a herd's free slots with members, one per task its queue's source prints.
+    /// Retire members whose template's done check exits 0, then fill the herd's
+    /// free slots with members, one per task its queue's source prints.
     /// Exits 1 on any error and 3 when a member is blocked at startup.
     Feed {
         herd: String,
-        /// Run the source and print what would happen; spawn nothing.
+        /// Run the source and done checks and print what would happen; retire and spawn nothing.
         #[arg(long)]
         dry_run: bool,
         /// Seconds to wait for each agent to become idle.
@@ -313,6 +315,8 @@ fn run_feed(herd: String, dry_run: bool, ready_timeout: u64) -> Result<i32> {
         herd,
         dry_run,
         ready_timeout: Duration::from_secs(ready_timeout),
+        command_timeout: remote_timeout()?,
+        own_pane: std::env::var("HERDR_PANE_ID").ok(),
     };
     let inherited = inherited_workspace();
     let fed = feed(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
