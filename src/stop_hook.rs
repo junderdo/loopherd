@@ -1,6 +1,7 @@
 //! `loopherd stop-hook`: Claude's Stop and StopFailure hook. Each stop of a
 //! member lands as a `stop` entry in its mailbox; anything else is ignored.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -42,7 +43,7 @@ pub fn stop_hook(
         let exact = pane.socket.is_some() && member.socket.as_deref() == pane.socket;
         match process::live(procs, member.process) {
             Some(ours) if ours.pid == pid => {
-                follow_session(ledger, member, &stop)?;
+                follow_session(ledger, &entries, member, &stop)?;
                 return file(dir, member, stop, now);
             }
             Some(ours) => {
@@ -71,11 +72,21 @@ pub fn stop_hook(
     file(dir, member, stop, now)
 }
 
-fn follow_session(ledger: &mut dyn Ledger, member: &AgentRecord, stop: &Stop) -> Result<()> {
+fn follow_session(
+    ledger: &mut dyn Ledger,
+    entries: &BTreeMap<String, AgentRecord>,
+    member: &AgentRecord,
+    stop: &Stop,
+) -> Result<()> {
+    let owned_by_other = |s: &String| {
+        entries
+            .values()
+            .any(|e| !e.retired && e.name != member.name && e.session_id.as_ref() == Some(s))
+    };
     let Some(session) = stop
         .session
         .as_ref()
-        .filter(|s| member.session_id.as_ref() != Some(s))
+        .filter(|s| member.session_id.as_ref() != Some(s) && !owned_by_other(s))
     else {
         return Ok(());
     };

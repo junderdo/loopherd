@@ -30,7 +30,7 @@ impl Procs for ProcFs {
     }
 }
 
-/// Field `index` after the state in `/proc/<pid>/stat`; the command name
+/// Field `index` of `/proc/<pid>/stat` counted from the state (0) in `/proc/<pid>/stat`; the command name
 /// before it may hold spaces and parentheses.
 fn stat_field(pid: u32, index: usize) -> Option<String> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -111,7 +111,8 @@ pub fn claim(
 }
 
 fn is_herdr(exe: &Path) -> bool {
-    exe.file_name().is_some_and(|name| name == "herdr")
+    let name = exe.file_name().and_then(|n| n.to_str());
+    name.is_some_and(|n| n.strip_suffix(" (deleted)").unwrap_or(n) == "herdr")
 }
 
 fn is_claude_binary(exe: &Path) -> bool {
@@ -185,6 +186,14 @@ mod tests {
         p.add(40, "/bin/sh", 30, 400);
         p.add(50, CLAUDE, 40, 500);
         assert!(!is_top_level(&p, 50));
+    }
+
+    #[test]
+    fn a_herdr_binary_replaced_while_running_is_still_herdr() {
+        let mut p = FakeProcs::pane();
+        p.add(10, "/usr/bin/herdr (deleted)", 5, 100);
+        p.add(5, CLAUDE, 1, 50);
+        assert!(is_top_level(&p, 30));
     }
 
     #[test]

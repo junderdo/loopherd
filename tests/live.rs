@@ -1054,15 +1054,10 @@ fn only_the_members_own_stops_are_filed_across_a_nested_claude_and_a_branch() {
             settings.display()
         ),
     );
-    let both = wait_for_stops(state, &member.name, 2);
+    wait_for_stops(state, &member.name, 2);
     std::thread::sleep(std::time::Duration::from_secs(10));
     let all = stops(state, &member.name);
-    assert_eq!(
-        all.len(),
-        both.len().max(2),
-        "a nested stop was filed: {all:?}"
-    );
-    assert_eq!(all.len(), 2, "{all:?}");
+    assert_eq!(all.len(), 2, "a nested stop was filed: {all:?}");
 
     say(&member.name, "/branch");
     std::thread::sleep(std::time::Duration::from_secs(8));
