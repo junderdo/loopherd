@@ -201,6 +201,7 @@ mod tests {
             herd: herd.map(str::to_string),
             template: herd.map(|_| "t".to_string()),
             params: None,
+            socket: None,
         }
     }
 

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -55,13 +55,19 @@ pub fn revive(herdr: &dyn Herdr, ledger: &mut dyn Ledger, req: &ReviveRequest) -
             let updated = AgentRecord {
                 pane_id: pane_id.clone(),
                 session_id: session_id.clone().or(record.session_id.clone()),
+                socket: herdr.socket(),
                 ..record.clone()
             };
-            if let Err(error) = ledger.record(updated) {
-                outcome = Outcome::Failed {
-                    step: "ledger",
-                    error,
-                };
+            let recorded = ledger
+                .record(updated)
+                .map_err(|e| ("ledger", e))
+                .and_then(|()| {
+                    ledger
+                        .started(&record.name, SystemTime::now())
+                        .map_err(|e| ("mailbox", e))
+                });
+            if let Err((step, error)) = recorded {
+                outcome = Outcome::Failed { step, error };
             }
         }
         revived.lines.extend(
@@ -333,11 +339,15 @@ mod tests {
             herd: None,
             template: None,
             params: None,
+            socket: None,
         }
     }
 
     fn ledger(records: impl IntoIterator<Item = AgentRecord>) -> MemLedger {
-        MemLedger(records.into_iter().map(|r| (r.name.clone(), r)).collect())
+        MemLedger(
+            records.into_iter().map(|r| (r.name.clone(), r)).collect(),
+            vec![],
+        )
     }
 
     fn herdr() -> FakeHerdr {
@@ -504,6 +514,11 @@ mod tests {
         );
         assert_eq!(ledger.0["a"].pane_id, "w1:p1");
         assert_eq!(ledger.0["a"].session_id.as_deref(), Some("sess-a"));
+        assert_eq!(
+            ledger.0["a"].socket.as_deref(),
+            Some(Path::new(crate::herdr::fake::FAKE_SOCKET))
+        );
+        assert_eq!(ledger.1, ["a"]);
     }
 
     #[test]
@@ -667,6 +682,7 @@ mod tests {
         assert_eq!(herdr.tabs().len(), 1);
         assert!(herdr.started().is_empty());
         assert_eq!(ledger.0, before);
+        assert!(ledger.1.is_empty());
     }
 
     #[test]

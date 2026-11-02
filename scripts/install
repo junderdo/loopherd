@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Build loopherd, install it as ~/.local/bin/loopherd, and add its Claude
+# Stop/StopFailure hooks. Arguments go to `loopherd install-hook`:
+#
+#   scripts/install                      # hooks in ~/.claude/settings.json
+#   scripts/install --settings <file>    # hooks in another settings file
+set -euo pipefail
+
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+bin_dir="$HOME/.local/bin"
+
+built=$(cargo build --release --manifest-path "$root/Cargo.toml" \
+  --message-format=json-render-diagnostics |
+  jq -r 'select(.reason == "compiler-artifact" and .target.name == "loopherd" and .executable != null) | .executable')
+[[ -x "$built" ]] || { echo "install: cargo built no loopherd binary" >&2; exit 1; }
+
+mkdir -p "$bin_dir"
+tmp=$(mktemp "$bin_dir/.loopherd.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+cp "$built" "$tmp"
+chmod 755 "$tmp"
+# A rename, so a running loopherd or a hook mid-call never sees a half-copied file.
+mv -f "$tmp" "$bin_dir/loopherd"
+trap - EXIT
+
+"$bin_dir/loopherd" install-hook "$@"

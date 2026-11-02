@@ -190,10 +190,11 @@ pub fn spawn(
             .member_of
             .as_ref()
             .map(|m| m.params.iter().cloned().collect()),
+        socket: herdr.socket(),
     };
     let agent = match readiness {
         Readiness::Blocked => {
-            ledger.record(record).context("ledger")?;
+            record_started(ledger, record)?;
             return Ok(Spawned {
                 tab_id: tab.tab_id,
                 pane_id: tab.pane_id,
@@ -210,7 +211,7 @@ pub fn spawn(
         None => Ok(()),
     };
     record.prompt_sent = sent.is_ok() && prompt.is_some();
-    ledger.record(record).context("ledger")?;
+    record_started(ledger, record)?;
     sent?;
     Ok(Spawned {
         tab_id: tab.tab_id,
@@ -219,6 +220,12 @@ pub fn spawn(
         session_id: agent.session_id,
         blocked: false,
     })
+}
+
+fn record_started(ledger: &mut dyn Ledger, record: AgentRecord) -> Result<()> {
+    let name = record.name.clone();
+    ledger.record(record).context("ledger")?;
+    ledger.started(&name, SystemTime::now()).context("mailbox")
 }
 
 impl SpawnRequest {
@@ -609,6 +616,21 @@ mod tests {
     }
 
     #[test]
+    fn records_herdrs_socket_and_marks_the_start_in_the_mailbox() {
+        for startup in [Startup::Ready, Startup::BlockedForever] {
+            let mut herdr = herdr();
+            herdr.startup = startup;
+            let mut ledger = MemLedger::default();
+            run(&herdr, &mut ledger, &request("a")).unwrap();
+            assert_eq!(
+                ledger.0["a"].socket.as_deref(),
+                Some(Path::new(crate::herdr::fake::FAKE_SOCKET))
+            );
+            assert_eq!(ledger.1, ["a"]);
+        }
+    }
+
+    #[test]
     fn an_agent_blocked_at_startup_that_turns_idle_gets_the_prompt() {
         let mut herdr = herdr();
         herdr.startup = Startup::BlockedThenIdle;
@@ -659,6 +681,7 @@ mod tests {
             assert!(herdr.tabs().is_empty(), "{startup:?}");
             assert!(root.path().join("proj/worktrees/feat-new").is_dir());
             assert!(ledger.0.is_empty());
+            assert!(ledger.1.is_empty());
         }
     }
 

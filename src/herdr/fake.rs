@@ -63,6 +63,8 @@ struct State {
     mutations: u32,
 }
 
+pub const FAKE_SOCKET: &str = "/run/fake/herdr.sock";
+
 pub struct FakeHerdr {
     pub workspaces: Vec<Workspace>,
     pub startup: Startup,
@@ -80,6 +82,7 @@ pub struct FakeHerdr {
     pub malformed_agents: bool,
     /// `agents()` blocks until a value arrives or the sender drops, like a hung herdr.
     pub agents_gate: Option<Receiver<()>>,
+    pub socket: Option<PathBuf>,
     state: RefCell<State>,
 }
 
@@ -101,6 +104,7 @@ impl FakeHerdr {
             unreachable: false,
             malformed_agents: false,
             agents_gate: None,
+            socket: Some(FAKE_SOCKET.into()),
             state: RefCell::default(),
         }
     }
@@ -471,5 +475,9 @@ impl Herdr for FakeHerdr {
         }
         self.state.borrow_mut().focused.push(pane_id.to_string());
         Ok(())
+    }
+
+    fn socket(&self) -> Option<PathBuf> {
+        self.socket.clone()
     }
 }

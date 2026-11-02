@@ -4,30 +4,45 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+const SOCKET: &str = "/run/herdr/herdr.sock";
+
+/// lh-1 recorded without a socket, lh-2 in the herdr at [`SOCKET`].
 fn write_ledger(state: &Path) {
     fs::create_dir_all(state.join("loopherd")).unwrap();
-    let entry = |name: &str, pane: &str| {
+    let entry = |name: &str, pane: &str, socket: Option<&str>| {
+        let socket = socket.map_or("null".into(), |s| format!("\"{s}\""));
         format!(
             r#""{name}": {{"name": "{name}", "pane_id": "{pane}", "session_id": null,
                 "repo": "/", "worktree": null, "workspace": "w1", "prompt": null,
-                "prompt_sent": true, "created": "2026-11-01T00:00:00Z"}}"#
+                "prompt_sent": true, "created": "2026-11-01T00:00:00Z", "socket": {socket}}}"#
         )
     };
     fs::write(
         state.join("loopherd/ledger.json"),
-        format!("{{{}, {}}}", entry("lh-1", "w1:p1"), entry("lh-2", "w1:p2")),
+        format!(
+            "{{{}, {}}}",
+            entry("lh-1", "w1:p1", None),
+            entry("lh-2", "w1:p2", Some(SOCKET))
+        ),
     )
     .unwrap();
 }
 
+/// Run from `pane` of the herdr at [`SOCKET`], or outside herdr.
 fn loopherd(state: &Path, pane: Option<&str>, args: &[&str]) -> Command {
+    loopherd_in(state, pane.map(|p| (p, SOCKET)), args)
+}
+
+fn loopherd_in(state: &Path, pane: Option<(&str, &str)>, args: &[&str]) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_loopherd"));
     cmd.args(args)
         .env("XDG_STATE_HOME", state)
         .env("PATH", "")
-        .env_remove("HERDR_PANE_ID");
-    if let Some(pane) = pane {
-        cmd.env("HERDR_PANE_ID", pane);
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("HERDR_SOCKET_PATH");
+    if let Some((pane, socket)) = pane {
+        cmd.env("HERDR_PANE_ID", pane)
+            .env("HERDR_SOCKET_PATH", socket);
     }
     cmd
 }
@@ -70,7 +85,7 @@ fn a_stray_pane_is_refused_and_nothing_is_written() {
 
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
-        "loopherd report: pane w1:p7 is not a member\n"
+        format!("loopherd report: pane w1:p7 of {SOCKET} is not a member\n")
     );
     assert_eq!(out.status.code(), Some(1));
     assert!(!state.path().join("loopherd/reports").exists());
@@ -168,4 +183,110 @@ fn watch_warns_about_a_herd_with_no_herd_file() {
     );
     assert!(!stderr.contains("for cards"), "{stderr}");
     assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn a_pane_of_another_herdr_is_not_the_member_recorded_with_a_socket() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+
+    let out = loopherd_in(
+        state.path(),
+        Some(("w1:p2", "/run/other/herdr.sock")),
+        &["report", "hello"],
+    )
+    .output()
+    .unwrap();
+
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "loopherd report: pane w1:p2 of /run/other/herdr.sock is not a member\n"
+    );
+    assert!(!state.path().join("loopherd/reports").exists());
+
+    let out = loopherd_in(
+        state.path(),
+        Some(("w1:p1", "/run/other/herdr.sock")),
+        &["report", "hello"],
+    )
+    .output()
+    .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "",
+        "lh-1 has no socket"
+    );
+}
+
+fn stop_hook(state: &Path, pane: Option<(&str, &str)>, input: &str) -> Output {
+    use std::io::Write;
+    let mut child = loopherd_in(state, pane, &["stop-hook"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn the_stop_hook_files_a_members_stops_which_only_reports_all_shows() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    let paused =
+        r#"{"hook_event_name":"Stop","background_tasks":[{"type":"shell"}],"session_crons":[]}"#;
+    let finished = r#"{"hook_event_name":"Stop","background_tasks":[],"session_crons":[]}"#;
+
+    let out = stop_hook(state.path(), Some(("w1:p2", SOCKET)), paused);
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert_eq!(out.status.code(), Some(0));
+    run(
+        state.path(),
+        Some("w1:p2"),
+        &["report", "--kind", "done", "PR #9"],
+    );
+    stop_hook(state.path(), Some(("w1:p2", SOCKET)), finished);
+
+    let unread = run(state.path(), None, &["reports"]);
+    let unread = String::from_utf8_lossy(&unread.stdout);
+    assert_eq!(unread.lines().count(), 1, "{unread}");
+    assert!(unread.contains("lh-2 done "), "{unread}");
+
+    let all = run(state.path(), None, &["reports", "--all"]);
+    let kinds: Vec<String> = String::from_utf8_lossy(&all.stdout)
+        .lines()
+        .map(|l| {
+            let (_, rest) = l.split_once(' ').unwrap();
+            let (kind, rest) = rest.split_once(' ').unwrap();
+            format!("{kind}{}", rest.get(16..).unwrap_or_default())
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        ["stop paused: 1 shell", "done PR #9", "stop finished"]
+    );
+}
+
+#[test]
+fn the_stop_hook_records_nothing_outside_a_members_pane_and_exits_0() {
+    for pane in [
+        None,
+        Some(("w1:p2", "/run/other/herdr.sock")),
+        Some(("w1:p9", SOCKET)),
+    ] {
+        let state = tempfile::tempdir().unwrap();
+        write_ledger(state.path());
+
+        let out = stop_hook(state.path(), pane, "{}");
+
+        assert_eq!(out.status.code(), Some(0), "{pane:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "", "{pane:?}");
+        assert!(!state.path().join("loopherd/reports").exists(), "{pane:?}");
+    }
 }

@@ -24,6 +24,18 @@ Early wayfinding: nothing runs yet. Direction, decisions, and open questions
 are in [docs/wayfinding.md](docs/wayfinding.md), and what herdr offers is in
 [docs/research/herdr.md](docs/research/herdr.md).
 
+## Install
+
+```bash
+scripts/install
+```
+
+builds loopherd, installs it as `~/.local/bin/loopherd`, and adds its Stop
+and StopFailure hooks to `~/.claude/settings.json` (backing the file up
+first). The hooks record each stop of a herd member in its mailbox and do
+nothing in any other Claude session. Re-run it after pulling; it changes
+only what's out of date. `loopherd install-hook --remove` takes the hooks out.
+
 ## One-time setup: trust each repo
 
 Claude Code asks "Is this a project you created or one you trust?" the first

@@ -295,11 +295,15 @@ mod tests {
             herd: None,
             template: None,
             params: None,
+            socket: None,
         }
     }
 
     fn ledger_with(names: &[&str]) -> MemLedger {
-        MemLedger(names.iter().map(|n| (n.to_string(), record(n))).collect())
+        MemLedger(
+            names.iter().map(|n| (n.to_string(), record(n))).collect(),
+            vec![],
+        )
     }
 
     fn halloween_noon() -> SystemTime {

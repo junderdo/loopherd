@@ -124,6 +124,8 @@ pub trait Herdr {
     fn prompt(&self, name: &str, text: &str) -> Result<()>;
     /// Brings the agent in `pane_id` to the front of the human's herdr client.
     fn focus(&self, pane_id: &str) -> Result<()>;
+    /// The socket of the herdr these calls reach, when known.
+    fn socket(&self) -> Option<PathBuf>;
 }
 
 /// Polls until `pane_id`'s shell is at its prompt. A new tab's shell takes a
@@ -440,4 +442,15 @@ impl Herdr for CliHerdr {
     fn focus(&self, pane_id: &str) -> Result<()> {
         self.call_ok(&["agent", "focus", pane_id]).map(drop)
     }
+
+    fn socket(&self) -> Option<PathBuf> {
+        socket_from_env()
+    }
+}
+
+/// `$HERDR_SOCKET_PATH`, which herdr sets in its panes.
+pub fn socket_from_env() -> Option<PathBuf> {
+    std::env::var_os("HERDR_SOCKET_PATH")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
 }

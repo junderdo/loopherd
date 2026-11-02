@@ -1,17 +1,19 @@
 //! `loopherd report` and `loopherd reports`: a mailbox members write and the
-//! shepherd reads, kept as one JSON-lines file per member.
+//! shepherd reads, kept as one JSON-lines file per member. Besides reports it
+//! holds `stop` entries from the Stop hook and `start` boundaries from spawn
+//! and revive, which `reports` shows only with `--all`.
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::FileExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::ledger::Ledger;
+use crate::ledger::{AgentRecord, Ledger};
 use crate::lock::Lock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -22,16 +24,107 @@ pub enum Kind {
     Note,
 }
 
+impl Kind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Kind::Done => "done",
+            Kind::Question => "question",
+            Kind::Note => "note",
+        }
+    }
+}
+
 pub struct Reporter<'a> {
     pub own_pane: Option<&'a str>,
+    /// `$HERDR_SOCKET_PATH`: which herdr the pane belongs to.
+    pub own_socket: Option<&'a Path>,
     pub as_name: Option<&'a str>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct Line {
-    at: String,
-    kind: Kind,
-    text: String,
+/// One line of a mailbox.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Entry {
+    pub at: String,
+    #[serde(flatten)]
+    pub body: Body,
+}
+
+impl Entry {
+    pub fn new(at: SystemTime, body: Body) -> Entry {
+        Entry {
+            at: humantime::format_rfc3339_nanos(at).to_string(),
+            body,
+        }
+    }
+
+    fn report(&self) -> Option<(Kind, &str)> {
+        match &self.body {
+            Body::Done { text } => Some((Kind::Done, text)),
+            Body::Question { text } => Some((Kind::Question, text)),
+            Body::Note { text } => Some((Kind::Note, text)),
+            Body::Stop(_) | Body::Start => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Body {
+    Done {
+        text: String,
+    },
+    Question {
+        text: String,
+    },
+    Note {
+        text: String,
+    },
+    /// Claude ended a turn; written only by the Stop hook.
+    Stop(Stop),
+    /// spawn or revive started the member's Claude.
+    Start,
+}
+
+impl Body {
+    fn report(kind: Kind, text: &str) -> Body {
+        let text = text.to_string();
+        match kind {
+            Kind::Done => Body::Done { text },
+            Kind::Question => Body::Question { text },
+            Kind::Note => Body::Note { text },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Stop {
+    /// Work still in flight that can wake Claude again.
+    pub background: Tally<Background>,
+    pub crons: Tally<u32>,
+    /// Set for a StopFailure: the API error that ended the turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Background {
+    pub shells: u32,
+    pub subagents: u32,
+    pub other: u32,
+}
+
+/// A count, or `"unknown"` when Claude didn't say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Tally<T> {
+    Known(T),
+    Unknown(Unknown),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Unknown {
+    Unknown,
 }
 
 /// Appends a report from the member `who` resolves to; returns its name.
@@ -44,33 +137,34 @@ pub fn report(
     now: SystemTime,
 ) -> Result<String> {
     let name = reporter(ledger, who)?;
-    let line = Line {
-        at: humantime::format_rfc3339_nanos(now).to_string(),
-        kind,
-        text: text.into(),
-    };
+    append(dir, &name, &Entry::new(now, Body::report(kind, text)))?;
+    Ok(name)
+}
+
+/// Appends `entry` to `name`'s mailbox in `dir`.
+pub fn append(dir: &Path, name: &str, entry: &Entry) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join(format!("{name}.jsonl"));
     let mut file = lock_mailbox(&path)?;
     let mut bytes = vec![];
-    // A torn last line would swallow this report; start it on a line of its own.
+    // A torn last line would swallow this entry; start it on a line of its own.
     if !ends_in_newline(&mut file).with_context(|| format!("read {}", path.display()))? {
         bytes.push(b'\n');
     }
-    serde_json::to_writer(&mut bytes, &line)?;
+    serde_json::to_writer(&mut bytes, entry)?;
     bytes.push(b'\n');
-    // One write, so concurrent reporters' lines never interleave.
+    // One write, so concurrent writers' lines never interleave.
     let written = file
         .write(&bytes)
         .with_context(|| format!("append to {}", path.display()))?;
     if written != bytes.len() {
         bail!("short write to {}", path.display());
     }
-    Ok(name)
+    Ok(())
 }
 
-/// Opens `path` for append, locked so no other reporter's write is mid-copy
-/// while we read the last byte.
+/// Opens `path` for append, locked so no other writer is mid-copy while we
+/// read the last byte.
 fn lock_mailbox(path: &Path) -> Result<Lock> {
     let file = OpenOptions::new()
         .create(true)
@@ -92,6 +186,18 @@ fn ends_in_newline(file: &mut fs::File) -> std::io::Result<bool> {
     Ok(last[0] == b'\n')
 }
 
+/// The non-retired member running in `pane` of the herdr at `socket`. An
+/// entry recorded without a socket matches on its pane alone.
+pub fn member_in<'a>(
+    entries: &'a BTreeMap<String, AgentRecord>,
+    pane: &str,
+    socket: Option<&Path>,
+) -> Option<&'a AgentRecord> {
+    entries.values().find(|e| {
+        !e.retired && e.pane_id == pane && e.socket.as_deref().is_none_or(|s| Some(s) == socket)
+    })
+}
+
 fn reporter(ledger: &dyn Ledger, who: &Reporter) -> Result<String> {
     let entries = ledger.entries()?;
     if let Some(name) = who.as_name {
@@ -104,11 +210,12 @@ fn reporter(ledger: &dyn Ledger, who: &Reporter) -> Result<String> {
         return Ok(entry.name.clone());
     }
     let pane = who.own_pane.context("no HERDR_PANE_ID; pass --as <name>")?;
-    entries
-        .values()
-        .find(|e| !e.retired && e.pane_id == pane)
+    member_in(&entries, pane, who.own_socket)
         .map(|e| e.name.clone())
-        .ok_or_else(|| anyhow!("pane {pane} is not a member"))
+        .ok_or_else(|| match who.own_socket {
+            Some(socket) => anyhow!("pane {pane} of {} is not a member", socket.display()),
+            None => anyhow!("pane {pane} is not a member"),
+        })
 }
 
 #[derive(Default)]
@@ -122,21 +229,18 @@ pub struct Read {
 pub struct Filter<'a> {
     pub names: &'a [String],
     pub herd: Option<&'a str>,
-    /// Full history, leaving the cursor alone.
+    /// Full history, `stop` and `start` entries included, leaving the cursor alone.
     pub all: bool,
 }
 
 /// The reports `filter` selects, one rendered line each, unread only unless
-/// `filter.all`; marks those read.
+/// `filter.all`; marks those read. Unread, questions come first.
 pub fn reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<Read> {
     let mut names = mailboxes(dir)?;
-    if names.is_empty() {
-        return Ok(Read::default());
-    }
     if !filter.names.is_empty() {
         names.retain(|n| filter.names.contains(n));
     }
-    if let Some(herd) = filter.herd {
+    if let (Some(herd), false) = (filter.herd, names.is_empty()) {
         let entries = ledger.entries()?;
         names.retain(|n| {
             entries
@@ -144,54 +248,95 @@ pub fn reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<Read>
                 .is_some_and(|e| e.herd.as_deref() == Some(herd))
         });
     }
-    let _lock = match filter.all {
-        true => None,
-        false => Some(Cursor::lock(dir)?),
+    let (mut found, warnings) = match filter.all {
+        true => read_all(dir, &names)?,
+        false => Cursor::Reports.read(dir, &names, |e| e.report().is_some())?,
     };
-    let mut cursor = Cursor::load(dir)?;
-    let mut found = vec![];
-    let mut warnings = vec![];
-    let mut moved = false;
-    for name in names {
-        let path = dir.join(format!("{name}.jsonl"));
-        let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-        // A line still being appended has no newline yet; leave it for next time.
-        let end = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
-        let start = match cursor.read_to(&name) {
-            _ if filter.all => 0,
-            // Past the end: the file was truncated or replaced, so all of it is new.
-            offset if offset > end => 0,
-            offset => offset,
-        };
-        for raw in bytes[start..end]
-            .split(|&b| b == b'\n')
-            .filter(|l| !l.is_empty())
-        {
-            match serde_json::from_slice::<Line>(raw) {
-                Ok(line) => found.push((name.clone(), line)),
-                Err(e) => warnings.push(format!("skipped a bad line in {}: {e}", path.display())),
-            }
-        }
-        moved |= cursor.read_to(&name) != end;
-        cursor.0.insert(name, end);
-    }
-    found.sort_by(|(_, a), (_, b)| {
-        (a.kind != Kind::Question, &a.at).cmp(&(b.kind != Kind::Question, &b.at))
-    });
-    if !filter.all && moved {
-        cursor.save(dir)?;
+    if !filter.all {
+        found.sort_by(|(_, a), (_, b)| {
+            let question = |e: &Entry| e.report().is_some_and(|(k, _)| k == Kind::Question);
+            (!question(a), &a.at).cmp(&(!question(b), &b.at))
+        });
     }
     Ok(Read {
         lines: found
             .iter()
-            .flat_map(|(name, line)| render(name, line))
+            .flat_map(|(name, entry)| render(name, entry))
             .collect(),
         warnings,
         senders: found
-            .into_iter()
-            .map(|(name, line)| (name, line.kind))
+            .iter()
+            .filter_map(|(name, entry)| entry.report().map(|(kind, _)| (name.clone(), kind)))
             .collect(),
     })
+}
+
+/// Unread `stop` entries of `names`, each with its member, oldest first;
+/// marks them read on the watch cursor, which `reports` never moves.
+#[allow(dead_code)] // `watch` reads stops from LH-69.
+pub fn unread_stops(dir: &Path, names: &[String]) -> Result<Stops> {
+    let names: Vec<String> = mailboxes(dir)?
+        .into_iter()
+        .filter(|n| names.contains(n))
+        .collect();
+    let (found, warnings) = Cursor::Watch.read(dir, &names, |e| matches!(e.body, Body::Stop(_)))?;
+    let stops = found
+        .into_iter()
+        .filter_map(|(name, entry)| match entry.body {
+            Body::Stop(stop) => Some((name, stop)),
+            _ => None,
+        })
+        .collect();
+    Ok(Stops { stops, warnings })
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Default)]
+pub struct Stops {
+    /// Each with its member's name.
+    pub stops: Vec<(String, Stop)>,
+    pub warnings: Vec<String>,
+}
+
+type Found = (Vec<(String, Entry)>, Vec<String>);
+
+/// Every entry of `names`, by time.
+fn read_all(dir: &Path, names: &[String]) -> Result<Found> {
+    let mut found = vec![];
+    let mut warnings = vec![];
+    for name in names {
+        let (bytes, end) = complete_lines(dir, name)?;
+        parse(dir, name, &bytes[..end], &mut found, &mut warnings);
+    }
+    found.sort_by(|(_, a), (_, b)| a.at.cmp(&b.at));
+    Ok((found, warnings))
+}
+
+/// The mailbox's bytes and where its last complete line ends; a line still
+/// being appended has no newline yet.
+fn complete_lines(dir: &Path, name: &str) -> Result<(Vec<u8>, usize)> {
+    let path = dir.join(format!("{name}.jsonl"));
+    let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let end = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    Ok((bytes, end))
+}
+
+fn parse(
+    dir: &Path,
+    name: &str,
+    bytes: &[u8],
+    found: &mut Vec<(String, Entry)>,
+    warnings: &mut Vec<String>,
+) {
+    for raw in bytes.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+        match serde_json::from_slice::<Entry>(raw) {
+            Ok(entry) => found.push((name.to_string(), entry)),
+            Err(e) => warnings.push(format!(
+                "skipped a bad line in {}: {e}",
+                dir.join(format!("{name}.jsonl")).display()
+            )),
+        }
+    }
 }
 
 fn mailboxes(dir: &Path) -> Result<Vec<String>> {
@@ -211,35 +356,117 @@ fn mailboxes(dir: &Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
-fn render(name: &str, line: &Line) -> Vec<String> {
-    let kind = match line.kind {
-        Kind::Done => "done",
-        Kind::Question => "question",
-        Kind::Note => "note",
-    };
-    let when = match (line.at.get(..10), line.at.get(11..16)) {
+fn render(name: &str, entry: &Entry) -> Vec<String> {
+    let when = match (entry.at.get(..10), entry.at.get(11..16)) {
         (Some(day), Some(minute)) => format!("{day} {minute}"),
-        _ => line.at.clone(),
+        _ => entry.at.clone(),
     };
-    let mut body = line.text.lines();
+    let (kind, text) = match &entry.body {
+        Body::Stop(stop) => ("stop", describe(stop)),
+        Body::Start => return vec![format!("{name} start {when}")],
+        _ => {
+            let (kind, text) = entry.report().expect("a report");
+            (kind.as_str(), text.to_string())
+        }
+    };
+    let mut body = text.lines();
     let first = body.next().unwrap_or_default();
     let mut out = vec![format!("{name} {kind} {when} {first}")];
     out.extend(body.map(|l| format!("    {l}")));
     out
 }
 
-/// How far into each member's file the reader has read, in bytes.
+/// `finished`, `paused: 1 shell, 2 crons`, or what's unknown, after any error.
+fn describe(stop: &Stop) -> String {
+    let mut pending = vec![];
+    let mut unknown = vec![];
+    match stop.background {
+        Tally::Known(b) => {
+            pending.extend(counted(b.shells, "shell"));
+            pending.extend(counted(b.subagents, "subagent"));
+            pending.extend(counted(b.other, "other task"));
+        }
+        Tally::Unknown(_) => unknown.push("background"),
+    }
+    match stop.crons {
+        Tally::Known(n) => pending.extend(counted(n, "cron")),
+        Tally::Unknown(_) => unknown.push("crons"),
+    }
+    let mut parts = vec![];
+    if let Some(error) = &stop.error {
+        parts.push(format!("error {error}"));
+    }
+    if !pending.is_empty() {
+        parts.push(format!("paused: {}", pending.join(", ")));
+    }
+    if !unknown.is_empty() {
+        parts.push(format!("{} unknown", unknown.join(" and ")));
+    }
+    if pending.is_empty() && unknown.is_empty() {
+        parts.push("finished".into());
+    }
+    parts.join("; ")
+}
+
+fn counted(n: u32, what: &str) -> Option<String> {
+    match n {
+        0 => None,
+        1 => Some(format!("1 {what}")),
+        n => Some(format!("{n} {what}s")),
+    }
+}
+
+/// How far into each member's file a reader has read, in bytes. `reports`
+/// and `watch` each keep their own.
+#[derive(Clone, Copy)]
+enum Cursor {
+    Reports,
+    Watch,
+}
+
 #[derive(Default, Serialize, Deserialize)]
-struct Cursor(BTreeMap<String, usize>);
+struct Offsets(BTreeMap<String, usize>);
 
 impl Cursor {
-    fn path(dir: &Path) -> PathBuf {
-        dir.join(".cursor")
+    fn file(self) -> &'static str {
+        match self {
+            Cursor::Reports => ".cursor",
+            Cursor::Watch => ".watch-cursor",
+        }
+    }
+
+    /// Entries of `names` past the cursor that `keep` selects, in file
+    /// order; moves the cursor past every complete line, kept or not.
+    fn read(self, dir: &Path, names: &[String], keep: impl Fn(&Entry) -> bool) -> Result<Found> {
+        if names.is_empty() {
+            return Ok((vec![], vec![]));
+        }
+        let _lock = self.lock(dir)?;
+        let mut offsets = self.load(dir)?;
+        let mut found = vec![];
+        let mut warnings = vec![];
+        let mut moved = false;
+        for name in names {
+            let (bytes, end) = complete_lines(dir, name)?;
+            let start = match offsets.read_to(name) {
+                // Past the end: the file was truncated or replaced, so all of it is new.
+                offset if offset > end => 0,
+                offset => offset,
+            };
+            parse(dir, name, &bytes[start..end], &mut found, &mut warnings);
+            moved |= offsets.read_to(name) != end;
+            offsets.0.insert(name.clone(), end);
+        }
+        found.retain(|(_, e)| keep(e));
+        if moved {
+            self.save(dir, &offsets)?;
+        }
+        Ok((found, warnings))
     }
 
     /// Held across load and save, so concurrent readers never move it back.
-    fn lock(dir: &Path) -> Result<Lock> {
-        let path = dir.join(".cursor.lock");
+    fn lock(self, dir: &Path) -> Result<Lock> {
+        let path = dir.join(format!("{}.lock", self.file()));
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -249,32 +476,36 @@ impl Cursor {
         Lock::wait(file).with_context(|| format!("lock {}", path.display()))
     }
 
-    fn load(dir: &Path) -> Result<Cursor> {
-        let path = Cursor::path(dir);
+    fn load(self, dir: &Path) -> Result<Offsets> {
+        let path = dir.join(self.file());
         match fs::read(&path) {
             Ok(bytes) => {
                 serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Cursor::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Offsets::default()),
             Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
         }
     }
 
-    fn read_to(&self, name: &str) -> usize {
-        self.0.get(name).copied().unwrap_or(0)
-    }
-
-    fn save(&self, dir: &Path) -> Result<()> {
-        let path = Cursor::path(dir);
-        let tmp = dir.join(format!(".cursor.{}.tmp", std::process::id()));
-        fs::write(&tmp, serde_json::to_vec(self)?)
+    fn save(self, dir: &Path, offsets: &Offsets) -> Result<()> {
+        let path = dir.join(self.file());
+        let tmp = dir.join(format!("{}.{}.tmp", self.file(), std::process::id()));
+        fs::write(&tmp, serde_json::to_vec(offsets)?)
             .with_context(|| format!("write {}", tmp.display()))?;
         fs::rename(&tmp, &path).with_context(|| format!("replace {}", path.display()))
     }
 }
 
+impl Offsets {
+    fn read_to(&self, name: &str) -> usize {
+        self.0.get(name).copied().unwrap_or(0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::ledger::{AgentRecord, MemLedger};
 
@@ -297,11 +528,15 @@ mod tests {
             herd: herd.map(Into::into),
             template: None,
             params: None,
+            socket: None,
         }
     }
 
     fn ledger(members: Vec<AgentRecord>) -> MemLedger {
-        MemLedger(members.into_iter().map(|m| (m.name.clone(), m)).collect())
+        MemLedger(
+            members.into_iter().map(|m| (m.name.clone(), m)).collect(),
+            vec![],
+        )
     }
 
     fn at(time: &str) -> SystemTime {
@@ -311,6 +546,7 @@ mod tests {
     fn from_pane(pane: &str) -> Reporter<'_> {
         Reporter {
             own_pane: Some(pane),
+            own_socket: None,
             as_name: None,
         }
     }
@@ -335,7 +571,7 @@ mod tests {
     #[test]
     fn dropping_the_cursor_lock_frees_it_while_a_spawning_thread_holds_a_copy() {
         let dir = tempfile::tempdir().unwrap();
-        let held = Cursor::lock(dir.path()).unwrap();
+        let held = Cursor::Reports.lock(dir.path()).unwrap();
         let path = dir.path().join(".cursor.lock");
         assert!(!is_free(&path));
         let _inherited = held.try_clone().unwrap();
@@ -377,6 +613,7 @@ mod tests {
         ]);
         let who = Reporter {
             own_pane: Some("w1:p2"),
+            own_socket: None,
             as_name: Some("lh-1"),
         };
 
@@ -424,7 +661,11 @@ mod tests {
         ];
         for (case, own_pane, as_name, error) in refused {
             let dir = tempfile::tempdir().unwrap();
-            let who = Reporter { own_pane, as_name };
+            let who = Reporter {
+                own_pane,
+                own_socket: None,
+                as_name,
+            };
             let err = report(
                 &ledger,
                 dir.path(),
@@ -442,6 +683,7 @@ mod tests {
     fn send(ledger: &MemLedger, dir: &Path, name: &str, kind: Kind, text: &str, time: &str) {
         let who = Reporter {
             own_pane: None,
+            own_socket: None,
             as_name: Some(name),
         };
         report(ledger, dir, &who, kind, text, at(time)).unwrap();
@@ -825,5 +1067,214 @@ mod tests {
         );
 
         assert_eq!(inode(), before);
+    }
+
+    fn stop(shells: u32, crons: Tally<u32>, error: Option<&str>) -> Body {
+        Body::Stop(Stop {
+            background: Tally::Known(Background {
+                shells,
+                ..Background::default()
+            }),
+            crons,
+            error: error.map(Into::into),
+        })
+    }
+
+    fn put(dir: &Path, name: &str, time: &str, body: Body) {
+        super::append(dir, name, &Entry::new(at(time), body)).unwrap();
+    }
+
+    #[test]
+    fn reports_skips_stop_and_start_entries_and_all_shows_the_timeline_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![
+            member("lh-1", "w1:p1", None, false),
+            member("lh-2", "w1:p2", None, false),
+        ]);
+        put(dir.path(), "lh-1", "2026-11-01T09:00:00Z", Body::Start);
+        put(dir.path(), "lh-2", "2026-11-01T09:01:00Z", Body::Start);
+        send(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            Kind::Note,
+            "hi",
+            "2026-11-01T09:02:00Z",
+        );
+        put(
+            dir.path(),
+            "lh-1",
+            "2026-11-01T09:03:00Z",
+            stop(1, Tally::Known(0), None),
+        );
+        send(
+            &ledger,
+            dir.path(),
+            "lh-2",
+            Kind::Question,
+            "which?",
+            "2026-11-01T09:04:00Z",
+        );
+
+        assert_eq!(
+            reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
+            [
+                "lh-2 question 2026-11-01 09:04 which?",
+                "lh-1 note 2026-11-01 09:02 hi",
+            ]
+        );
+        let all = Filter {
+            all: true,
+            ..UNREAD
+        };
+        assert_eq!(
+            reports(&ledger, dir.path(), &all).unwrap().lines,
+            [
+                "lh-1 start 2026-11-01 09:00",
+                "lh-2 start 2026-11-01 09:01",
+                "lh-1 note 2026-11-01 09:02 hi",
+                "lh-1 stop 2026-11-01 09:03 paused: 1 shell",
+                "lh-2 question 2026-11-01 09:04 which?",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_stop_after_the_last_report_does_not_count_as_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![member("lh-1", "w1:p1", None, false)]);
+        send(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            Kind::Done,
+            "PR",
+            "2026-11-01T09:00:00Z",
+        );
+        reports(&ledger, dir.path(), &UNREAD).unwrap();
+        put(
+            dir.path(),
+            "lh-1",
+            "2026-11-01T09:01:00Z",
+            stop(0, Tally::Known(0), None),
+        );
+
+        let read = reports(&ledger, dir.path(), &UNREAD).unwrap();
+
+        assert!(read.lines.is_empty());
+        assert!(read.senders.is_empty());
+    }
+
+    #[test]
+    fn the_watch_cursor_reads_stops_apart_from_the_reports_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![
+            member("lh-1", "w1:p1", None, false),
+            member("lh-2", "w1:p2", None, false),
+        ]);
+        let names = ["lh-1".to_string(), "lh-2".to_string()];
+        put(dir.path(), "lh-1", "2026-11-01T09:00:00Z", Body::Start);
+        send(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            Kind::Done,
+            "PR",
+            "2026-11-01T09:01:00Z",
+        );
+        put(
+            dir.path(),
+            "lh-1",
+            "2026-11-01T09:02:00Z",
+            stop(1, Tally::Known(0), None),
+        );
+        put(
+            dir.path(),
+            "lh-2",
+            "2026-11-01T09:03:00Z",
+            stop(0, Tally::Known(0), Some("rate_limit")),
+        );
+
+        assert_eq!(
+            reports(&ledger, dir.path(), &UNREAD).unwrap().lines.len(),
+            1
+        );
+        let read = unread_stops(dir.path(), &names).unwrap();
+        assert!(read.warnings.is_empty());
+        let stopped: Vec<(&str, Option<&str>)> = read
+            .stops
+            .iter()
+            .map(|(name, stop)| (name.as_str(), stop.error.as_deref()))
+            .collect();
+        assert_eq!(stopped, [("lh-1", None), ("lh-2", Some("rate_limit"))]);
+
+        assert!(unread_stops(dir.path(), &names).unwrap().stops.is_empty());
+        put(
+            dir.path(),
+            "lh-1",
+            "2026-11-01T09:04:00Z",
+            stop(0, Tally::Known(0), None),
+        );
+        assert_eq!(unread_stops(dir.path(), &names).unwrap().stops.len(), 1);
+        send(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            Kind::Note,
+            "more",
+            "2026-11-01T09:05:00Z",
+        );
+        assert_eq!(
+            reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
+            ["lh-1 note 2026-11-01 09:05 more"]
+        );
+    }
+
+    #[test]
+    fn a_stop_says_what_is_pending_unknown_or_failed() {
+        let unknown = Tally::Unknown(Unknown::Unknown);
+        let cases = [
+            (stop(0, Tally::Known(0), None), "finished"),
+            (stop(2, Tally::Known(1), None), "paused: 2 shells, 1 cron"),
+            (stop(0, unknown, None), "crons unknown"),
+            (stop(1, unknown, None), "paused: 1 shell; crons unknown"),
+            (
+                Body::Stop(Stop {
+                    background: Tally::Unknown(Unknown::Unknown),
+                    crons: unknown,
+                    error: Some("rate_limit".into()),
+                }),
+                "error rate_limit; background and crons unknown",
+            ),
+        ];
+        for (body, want) in cases {
+            let Body::Stop(stop) = body else {
+                unreachable!()
+            };
+            assert_eq!(describe(&stop), want);
+        }
+    }
+
+    #[test]
+    fn a_stop_entry_round_trips_through_its_json_line() {
+        let entry = Entry::new(
+            at("2026-11-01T09:00:00Z"),
+            Body::Stop(Stop {
+                background: Tally::Known(Background {
+                    shells: 1,
+                    subagents: 2,
+                    other: 3,
+                }),
+                crons: Tally::Unknown(Unknown::Unknown),
+                error: None,
+            }),
+        );
+        let line = serde_json::to_string(&entry).unwrap();
+        assert_eq!(
+            line,
+            "{\"at\":\"2026-11-01T09:00:00.000000000Z\",\"kind\":\"stop\",\
+             \"background\":{\"shells\":1,\"subagents\":2,\"other\":3},\"crons\":\"unknown\"}"
+        );
+        assert_eq!(serde_json::from_str::<Entry>(&line).unwrap(), entry);
     }
 }
