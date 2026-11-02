@@ -303,6 +303,8 @@ mod tests {
     use crate::herdr::AgentStatus;
     use crate::herdr::fake::{FakeHerdr, Startup};
     use crate::ledger::{AgentRecord, MemLedger};
+    use crate::stop::{Hooked, StopHook};
+    use std::fs;
 
     fn request() -> ReviveRequest {
         ReviveRequest {
@@ -504,6 +506,45 @@ mod tests {
         );
         assert_eq!(ledger.0["a"].pane_id, "w1:p1");
         assert_eq!(ledger.0["a"].session_id.as_deref(), Some("sess-a"));
+    }
+
+    #[test]
+    fn a_revived_member_resumes_with_the_stop_hook_added() {
+        let cwd = tempfile::tempdir().unwrap();
+        let settings = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let hooked = Hooked {
+            inner: &herdr,
+            hook: StopHook {
+                settings: settings.path().into(),
+                command: "loopherd stop-hook".into(),
+            },
+        };
+        let mut ledger = ledger([AgentRecord {
+            pane_id: "w1:p7".into(),
+            ..record("a", cwd.path())
+        }]);
+
+        revive(&hooked, &mut ledger, &request()).unwrap();
+
+        let file = settings.path().join("a.json");
+        assert_eq!(
+            herdr.started()[0].args,
+            [
+                "--resume",
+                "sess-a",
+                "--model",
+                "opus",
+                "--settings",
+                file.to_str().unwrap()
+            ]
+        );
+        assert!(
+            fs::read_to_string(&file)
+                .unwrap()
+                .contains("loopherd stop-hook")
+        );
+        assert_eq!(ledger.0["a"].claude_args, ["--model", "opus"]);
     }
 
     #[test]

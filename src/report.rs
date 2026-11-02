@@ -92,7 +92,7 @@ fn ends_in_newline(file: &mut fs::File) -> std::io::Result<bool> {
     Ok(last[0] == b'\n')
 }
 
-fn reporter(ledger: &dyn Ledger, who: &Reporter) -> Result<String> {
+pub fn reporter(ledger: &dyn Ledger, who: &Reporter) -> Result<String> {
     let entries = ledger.entries()?;
     if let Some(name) = who.as_name {
         let entry = entries

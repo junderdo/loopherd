@@ -1,4 +1,4 @@
-//! End-to-end runs of `loopherd spawn`, `add`, `revive`, `retire --close` and `feed` against the real `loopherd-dev` herdr
+//! End-to-end runs of `loopherd spawn`, `add`, `revive`, `retire --close`, `feed` and `watch` against the real `loopherd-dev` herdr
 //! session. Skipped unless `LOOPHERD_LIVE=1`; start the session first with
 //! `scripts/herdr-dev --start`, then run through it:
 //! `LOOPHERD_LIVE=1 scripts/herdr-dev cargo test --test live`.
@@ -263,6 +263,70 @@ fn spawns_a_ready_agent_and_submits_its_prompt() {
     assert_eq!(entry["prompt_sent"], true);
     assert!(entry["session_id"].is_string(), "{entry}");
     assert!(stdout.contains(entry["session_id"].as_str().unwrap()));
+}
+
+fn watch(state: &Path, timeout: &str) -> String {
+    let out = dev(env!("CARGO_BIN_EXE_loopherd"))
+        .env("XDG_STATE_HOME", state)
+        .args(["watch", "--timeout", timeout])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "watch: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn watch_shows_a_member_paused_on_a_background_shell_then_its_finish() {
+    if !live_enabled() {
+        return;
+    }
+    let workspace = assert_dev_session();
+    let state = tempfile::tempdir().unwrap();
+    let name = format!("lh-live-paused-{}", std::process::id());
+    let _cleanup = CloseTab(name.clone());
+
+    let out = spawn(
+        state.path(),
+        &[
+            "--repo",
+            env!("CARGO_MANIFEST_DIR"),
+            "--name",
+            &name,
+            "--workspace",
+            &workspace,
+            "--prompt",
+            "Run the shell command `sleep 30` with run_in_background set to true, \
+             then end your turn at once without waiting for it.",
+            "--",
+            "--allowedTools",
+            "Bash(sleep:*)",
+        ],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let paused = watch(state.path(), "120");
+    let finished = watch(state.path(), "120");
+
+    let stop = std::fs::read_to_string(state.path().join(format!("loopherd/stops/{name}.json")));
+    let paused_re = format!("{name} ");
+    assert!(
+        paused.starts_with(&paused_re) && paused.trim_end().ends_with("(paused: 1 shell)"),
+        "{paused}"
+    );
+    assert!(
+        finished.starts_with(&paused_re) && finished.trim_end().ends_with("(was working)"),
+        "{finished}\nlast stop: {stop:?}"
+    );
 }
 
 #[test]

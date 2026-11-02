@@ -12,11 +12,13 @@ mod revive;
 mod shell;
 mod spawn;
 mod status;
+mod stop;
 mod template;
 mod tui;
 mod watch;
 mod worktree;
 
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
@@ -35,6 +37,7 @@ use crate::retire::{retire, retire_and_close};
 use crate::revive::{ReviveRequest, revive};
 use crate::spawn::{Checkout, Prompt, SpawnRequest, spawn};
 use crate::status::{Format, status};
+use crate::stop::{Hooked, StopHook};
 use crate::worktree::{remote_timeout, repo_root};
 
 #[derive(Parser)]
@@ -136,13 +139,22 @@ enum Command {
     },
     /// Block until a member needs the shepherd, print what happened, and exit:
     /// an unread report (marked read), a member going blocked, or one going
-    /// from working to done, idle or gone. Polls herdr every 2s, read-only.
+    /// from working to done, idle or gone. A member that stopped with
+    /// background work in flight shows `(paused: …)`, and wakes it again when
+    /// it finishes. Polls herdr every 2s, read-only.
     Watch {
         /// Only members of these herds.
         herds: Vec<String>,
         /// Give up after this many seconds, exiting 2 with no output.
         #[arg(long)]
         timeout: Option<u64>,
+    },
+    /// The Claude Stop hook loopherd installs in members: records the stop
+    /// read from stdin for `watch`. Always exits 0, so it never blocks a stop.
+    #[command(hide = true)]
+    StopHook {
+        #[arg(long)]
+        ledger: PathBuf,
     },
 }
 
@@ -210,6 +222,7 @@ fn main() -> ExitCode {
         } => ("report", run_report(kind, as_name, &text)),
         Command::Reports { names, herd, all } => ("reports", run_reports(names, herd, all)),
         Command::Watch { herds, timeout } => ("watch", run_watch(&herds, timeout)),
+        Command::StopHook { ledger } => ("stop-hook", run_stop_hook(ledger)),
     };
     match result {
         Ok(code) => ExitCode::from(code as u8),
@@ -252,7 +265,7 @@ fn run_revive(dry_run: bool, name: Option<String>) -> Result<i32> {
         poll_interval: Duration::from_millis(250),
         start_timeout: Duration::from_secs(60),
     };
-    let (message, code) = revive(&CliHerdr, &mut ledger, &req)?.report();
+    let (message, code) = revive(&hooked(&CliHerdr)?, &mut ledger, &req)?.report();
     if !message.is_empty() {
         println!("{message}");
     }
@@ -333,7 +346,10 @@ fn run_watch(herds: &[String], timeout: Option<u64>) -> Result<i32> {
         }
     }
     let path = FileLedger::default_path().context("ledger")?;
-    let dir = reports_dir(&path)?;
+    let dirs = watch::Dirs {
+        reports: reports_dir(&path)?,
+        stops: stops_dir(&path)?,
+    };
     let req = watch::Request {
         herds,
         timeout: timeout.map(Duration::from_secs),
@@ -342,7 +358,7 @@ fn run_watch(herds: &[String], timeout: Option<u64>) -> Result<i32> {
     let woke = watch::watch(
         &CliHerdr,
         &FileLedger::new(path),
-        &dir,
+        &dirs,
         &req,
         &mut watch::RealClock::start(),
         &mut |warning| eprintln!("loopherd watch: {warning}"),
@@ -354,6 +370,57 @@ fn run_watch(herds: &[String], timeout: Option<u64>) -> Result<i32> {
         println!("{line}");
     }
     Ok(0)
+}
+
+fn run_stop_hook(ledger: PathBuf) -> Result<i32> {
+    let mut input = vec![];
+    let recorded = std::io::stdin()
+        .read_to_end(&mut input)
+        .context("read stdin")
+        .and_then(|_| {
+            let own_pane = std::env::var("HERDR_PANE_ID").ok();
+            let who = Reporter {
+                own_pane: own_pane.as_deref().filter(|p| !p.is_empty()),
+                as_name: None,
+            };
+            stop::record(
+                &FileLedger::new(ledger.clone()),
+                &stops_dir(&ledger)?,
+                &who,
+                &input,
+                SystemTime::now(),
+            )
+        });
+    if let Err(e) = recorded {
+        eprintln!("loopherd stop-hook: {e:#}");
+    }
+    Ok(0)
+}
+
+/// Adds loopherd's Stop hook to every Claude it starts.
+fn hooked(herdr: &dyn herdr::Herdr) -> Result<Hooked<'_>> {
+    let ledger = FileLedger::default_path().context("ledger")?;
+    let exe = std::env::current_exe().context("locate the loopherd binary")?;
+    let command = format!(
+        "{} stop-hook --ledger {}",
+        shell::quote(&exe.to_string_lossy()),
+        shell::quote(&ledger.to_string_lossy()),
+    );
+    let settings = ledger
+        .parent()
+        .context("ledger path has no parent")?
+        .join("settings");
+    Ok(Hooked {
+        inner: herdr,
+        hook: StopHook { settings, command },
+    })
+}
+
+fn stops_dir(ledger: &std::path::Path) -> Result<PathBuf> {
+    Ok(ledger
+        .parent()
+        .context("ledger path has no parent")?
+        .join("stops"))
 }
 
 fn reports_dir(ledger: &std::path::Path) -> Result<PathBuf> {
@@ -394,7 +461,7 @@ fn run_spawn(args: SpawnArgs) -> Result<i32> {
     };
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let inherited = inherited_workspace();
-    let spawned = spawn(&CliHerdr, &mut ledger, &req, inherited.as_deref())?;
+    let spawned = spawn(&hooked(&CliHerdr)?, &mut ledger, &req, inherited.as_deref())?;
     let (message, code) = spawned.report(&req.name);
     println!("{message}");
     Ok(code)
@@ -418,7 +485,13 @@ fn run_add(args: AddArgs) -> Result<i32> {
         return Ok(0);
     }
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    let added = add(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
+    let added = add(
+        &hooked(&CliHerdr)?,
+        &mut ledger,
+        &paths,
+        &req,
+        inherited.as_deref(),
+    )?;
     let (message, code) = added.spawned.report(&added.name);
     println!("{message}");
     if let Some(warning) = added.warning {
@@ -443,7 +516,13 @@ fn run_feed(herd: String, dry_run: bool, ready_timeout: u64) -> Result<i32> {
         own_pane: std::env::var("HERDR_PANE_ID").ok(),
     };
     let inherited = inherited_workspace();
-    let fed = feed(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
+    let fed = feed(
+        &hooked(&CliHerdr)?,
+        &mut ledger,
+        &paths,
+        &req,
+        inherited.as_deref(),
+    )?;
     for line in fed.lines {
         println!("{line}");
     }

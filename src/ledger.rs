@@ -95,7 +95,7 @@ impl FileLedger {
     }
 }
 
-fn temp_path(path: &Path) -> PathBuf {
+pub fn temp_path(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".{}.tmp", std::process::id()));
     path.with_file_name(name)

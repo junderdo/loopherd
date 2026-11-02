@@ -38,6 +38,11 @@ session. Read `herdr --skill` before controlling herdr.
    members already blocked. Exit 2 means the timeout passed with nothing to
    do. Start the next watch after handling every wake. It dies with the
    shepherd's session.
+   A line ending `(paused: 1 shell)` means the member stopped with
+   background work still running (shells, subagents, crons), so it isn't
+   finished: leave it. Its real finish wakes a later watch as
+   `(was working)`. Members spawned before loopherd installed its Stop hook
+   never show as paused.
 3. **On wake,** read the watch's lines and the card (`loopherd reports
    --all` for report history). A member that left none: read its screen
    (`herdr agent read lh-<n> --source recent-unwrapped --lines 40`).
