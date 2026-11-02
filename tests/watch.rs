@@ -125,23 +125,50 @@ fn a_second_concurrent_watch_exits_naming_the_lock() {
         .spawn()
         .unwrap();
 
+    // The lock holds the holder's PID once taken.
+    let lock = reports.join("watch.lock");
+    let pid = first.id().to_string();
     let deadline = Instant::now() + Duration::from_secs(10);
-    let refused = loop {
-        let out = sandbox.watch(&["--timeout", "0"]);
-        if out.status.code() == Some(1) || Instant::now() > deadline {
-            break out;
-        }
-        // Started before the first took the lock; try again.
-        std::thread::sleep(Duration::from_millis(50));
-    };
+    while fs::read_to_string(&lock).unwrap_or_default().trim() != pid {
+        assert!(
+            Instant::now() < deadline,
+            "the first watch never took the lock"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let refused = sandbox.watch(&["--timeout", "0"]);
     first.kill().unwrap();
     first.wait().unwrap();
 
     assert_eq!(refused.status.code(), Some(1), "{refused:?}");
-    let lock = reports.join("watch.lock");
     assert!(
         stderr(&refused).contains(&lock.display().to_string()),
         "{}",
         stderr(&refused)
+    );
+    assert!(
+        stderr(&refused).contains(&format!("(pid {pid})")),
+        "{}",
+        stderr(&refused)
+    );
+}
+
+#[test]
+fn a_watch_that_fails_after_reading_stops_leaves_them_for_the_next() {
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+    let reports = sandbox.dir.path().join("state/loopherd/reports");
+    fs::write(reports.join(".cursor"), "corrupt").unwrap();
+
+    let out = sandbox.watch(&["--timeout", "0"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(out.stdout.is_empty());
+
+    fs::remove_file(reports.join(".cursor")).unwrap();
+    let out = sandbox.watch(&["--timeout", "0"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "lh-1 paused  1 shell\n"
     );
 }

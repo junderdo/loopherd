@@ -3,16 +3,17 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, bail};
 
 use crate::herd_view::{Member, Options, View};
 use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::Ledger;
 use crate::lock::Lock;
-use crate::report::{Body, Filter, Mailbox, Stop, reports, unread_stops};
+use crate::report::{Body, Filter, Mailbox, Pending, Stop, peek_reports, unread_stops};
 use crate::status;
 
 pub trait Clock {
@@ -45,10 +46,24 @@ pub struct Request<'a> {
     pub poll: Duration,
 }
 
-/// Polls until a member needs the shepherd and returns what woke it, one
-/// rendered line each; `None` when `req.timeout` passes first. Calls `warn`
-/// as herdr becomes unreadable and for each bad mailbox line. Refuses to run
-/// beside another watch on `dir`.
+/// What woke the watch, one rendered line each. Nothing is marked read until
+/// [`Wake::mark_read`], so a wake lost before it's printed comes back.
+#[must_use = "what woke it stays unread until mark_read"]
+pub struct Wake {
+    pub lines: Vec<String>,
+    pending: Vec<Pending>,
+}
+
+impl Wake {
+    pub fn mark_read(self) -> Result<()> {
+        self.pending.into_iter().try_for_each(Pending::save)
+    }
+}
+
+/// Polls until a member needs the shepherd and returns what woke it; `None`
+/// when `req.timeout` passes first. Calls `warn` as herdr becomes unreadable
+/// and for each bad mailbox line. Refuses to run beside another watch on
+/// `dir`.
 pub fn watch(
     herdr: &dyn Herdr,
     ledger: &dyn Ledger,
@@ -56,33 +71,46 @@ pub fn watch(
     req: &Request,
     clock: &mut dyn Clock,
     warn: &mut dyn FnMut(&str),
-) -> Result<Option<Vec<String>>> {
+) -> Result<Option<Wake>> {
     let _only = only_watch(dir)?;
     // Each member's last known status; an unreadable poll keeps it.
     let mut last: HashMap<String, AgentStatus> = HashMap::new();
-    // Members herdr showed live at the last poll; a herdr restart passes
-    // through unreachable, so resuming agents that briefly match no member
-    // don't read as gone.
-    let mut alive: HashSet<String> = HashSet::new();
+    let mut gone = Gone::default();
     let mut code = 0;
     loop {
-        let read = status::read_statuses(herdr, ledger, Options::default())?;
+        let read = status::read_statuses(
+            herdr,
+            ledger,
+            Options {
+                all: false,
+                strays: true,
+            },
+        )?;
         if read.code != code {
             if let Some(problem) = &read.problem {
                 warn(problem);
             }
             code = read.code;
         }
-        let reachable = read.view.herdr_reachable;
+        let agents_read = read.code == 0;
+        let occupied: HashSet<String> = read
+            .view
+            .strays
+            .agents
+            .iter()
+            .flatten()
+            .map(|stray| stray.pane.clone())
+            .collect();
         let members = in_scope(read.view, req);
         let names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
         let mut lines = vec![];
+        let mut pending = vec![];
         // An empty filter means every mailbox.
         if !names.is_empty() {
             // Stops first: a stop is appended after its report, so any stop
             // read here has its report visible to the read after it.
-            let stops = unread_stops(dir, &names)?;
-            let read = reports(
+            let (stops, stops_read) = unread_stops(dir, &names)?;
+            let (read, reports_read) = peek_reports(
                 ledger,
                 dir,
                 &Filter {
@@ -96,18 +124,19 @@ pub fn watch(
                 .for_each(|w| warn(&format!("warning: {w}")));
             lines.extend(read.lines);
             lines.extend(stops.iter().flat_map(stop_wakes));
+            pending.extend([stops_read, reports_read]);
         }
-        let was_alive = std::mem::take(&mut alive);
+        if !agents_read {
+            gone = Gone::default();
+        }
         for member in &members {
             if member.gone {
-                if was_alive.contains(&member.name) {
+                if gone.confirm(member, &occupied) {
                     lines.push(format!("{} gone", member.name));
                 }
                 continue;
             }
-            if reachable {
-                alive.insert(member.name.clone());
-            }
+            gone.seen(member, agents_read);
             let was = last.get(&member.name).copied();
             // Only on change: one blocked at start would re-wake every re-armed watch.
             if member.status == AgentStatus::Blocked
@@ -120,8 +149,10 @@ pub fn watch(
             }
         }
         if !lines.is_empty() {
-            return Ok(Some(lines));
+            return Ok(Some(Wake { lines, pending }));
         }
+        // Nothing to print, so nothing to lose.
+        pending.into_iter().try_for_each(Pending::save)?;
         let left = req.timeout.map(|t| t.saturating_sub(clock.elapsed()));
         if left == Some(Duration::ZERO) {
             return Ok(None);
@@ -130,19 +161,60 @@ pub fn watch(
     }
 }
 
-/// Holds `watch.lock` in `dir`, or fails naming it while another watch does.
+/// When a member herdr no longer matches counts as gone. herdr resumes
+/// agents seconds after a restart, unnamed at first, so it takes a member
+/// seen live since herdr was last unreadable, then two polls in a row with
+/// no agent at all in its pane.
+#[derive(Default)]
+struct Gone {
+    alive: HashSet<String>,
+    missing: HashSet<String>,
+}
+
+impl Gone {
+    fn seen(&mut self, member: &Member, agents_read: bool) {
+        self.missing.remove(&member.name);
+        if agents_read {
+            self.alive.insert(member.name.clone());
+        }
+    }
+
+    /// True on the second poll in a row that `member` is really gone.
+    fn confirm(&mut self, member: &Member, occupied: &HashSet<String>) -> bool {
+        if !self.alive.contains(&member.name) || occupied.contains(&member.pane) {
+            self.missing.remove(&member.name);
+            return false;
+        }
+        !self.missing.insert(member.name.clone())
+    }
+}
+
+/// Holds `watch.lock` in `dir`, with this process's PID in it, or fails
+/// naming the lock and its holder while another watch has it.
 fn only_watch(dir: &Path) -> Result<Lock> {
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join("watch.lock");
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
+        .read(true)
         .write(true)
         .open(&path)
         .with_context(|| format!("open {}", path.display()))?;
-    Lock::try_take(file)
-        .with_context(|| format!("lock {}", path.display()))?
-        .ok_or_else(|| anyhow!("another watch holds {}", path.display()))
+    let Some(mut lock) =
+        Lock::try_take(file).with_context(|| format!("lock {}", path.display()))?
+    else {
+        let holder = fs::read_to_string(&path).unwrap_or_default();
+        let holder = match holder.trim() {
+            "" => String::new(),
+            pid => format!(" (pid {pid})"),
+        };
+        bail!("another watch{holder} holds {}", path.display());
+    };
+    lock.set_len(0)
+        .and_then(|()| writeln!(lock, "{}", std::process::id()))
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(lock)
 }
 
 /// A wake line for each unread stop that changes the member's state:
@@ -291,7 +363,13 @@ mod tests {
     ) -> Option<Vec<String>> {
         let woke = watch(herdr, ledger, dir, req, clock, &mut |_| {}).unwrap();
         assert_eq!(herdr.mutations(), 0);
-        woke
+        woke.map(printed)
+    }
+
+    fn printed(wake: Wake) -> Vec<String> {
+        let lines = wake.lines.clone();
+        wake.mark_read().unwrap();
+        lines
     }
 
     #[test]
@@ -412,7 +490,10 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(woke.unwrap(), ["lh-1 question 2026-11-01 09:00 which DB?"]);
+        assert_eq!(
+            printed(woke.unwrap()),
+            ["lh-1 question 2026-11-01 09:00 which DB?"]
+        );
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("herdr unreachable"), "{warnings:?}");
     }
@@ -449,6 +530,8 @@ mod tests {
         let mut clock = steps(|poll| match poll {
             1 | 2 => {}
             3 => herdr.remove_agent("lh-1"),
+            // Gone counts on the second poll in a row.
+            4 => {}
             _ => panic!("slept past the wake"),
         });
         assert_eq!(
@@ -683,7 +766,7 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         let mut warnings = vec![];
 
-        watch(
+        let wake = watch(
             &herdr,
             &ledger,
             dir.path(),
@@ -692,6 +775,7 @@ mod tests {
             &mut |w| warnings.push(w.to_string()),
         )
         .unwrap();
+        printed(wake.unwrap());
 
         assert_eq!(warnings.len(), 1, "{warnings:?}");
     }
@@ -710,19 +794,121 @@ mod tests {
         let (ledger, herdr) = working_pair();
         let _first = only_watch(dir.path()).unwrap();
 
-        let err = watch(
+        let Err(err) = watch(
             &herdr,
             &ledger,
             dir.path(),
             &ONCE,
             &mut steps(|_| {}),
             &mut |_| {},
-        )
-        .unwrap_err();
+        ) else {
+            panic!("a second watch ran");
+        };
+        let lock = dir.path().join("watch.lock").display().to_string();
+        let pid = format!("(pid {})", std::process::id());
+        assert!(err.to_string().contains(&lock), "{err}");
+        assert!(err.to_string().contains(&pid), "{err}");
+    }
+
+    #[test]
+    fn an_error_after_reading_stops_leaves_them_unread() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = working_pair();
+        put(dir.path(), "lh-1", failed("rate_limit"));
+        std::fs::write(dir.path().join(".cursor"), "corrupt").unwrap();
         assert!(
-            err.to_string()
-                .contains(&dir.path().join("watch.lock").display().to_string()),
-            "{err}"
+            watch(
+                &herdr,
+                &ledger,
+                dir.path(),
+                &ONCE,
+                &mut steps(|_| {}),
+                &mut |_| {}
+            )
+            .is_err()
         );
+
+        std::fs::remove_file(dir.path().join(".cursor")).unwrap();
+        assert_eq!(
+            once(&herdr, &ledger, dir.path()).unwrap(),
+            ["lh-1 failed  rate_limit"]
+        );
+    }
+
+    #[test]
+    fn a_wake_never_marked_read_comes_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = working_pair();
+        send(&ledger, dir.path(), "lh-1", Kind::Done, "PR #9");
+        put(dir.path(), "lh-1", stop(0, 0));
+        let lost = watch(
+            &herdr,
+            &ledger,
+            dir.path(),
+            &ONCE,
+            &mut steps(|_| {}),
+            &mut |_| {},
+        );
+        drop(lost.unwrap().unwrap());
+
+        let want = ["lh-1 done 2026-11-01 09:00 PR #9", "lh-1 finished"];
+        assert_eq!(once(&herdr, &ledger, dir.path()).unwrap(), want);
+        assert_eq!(once(&herdr, &ledger, dir.path()), None);
+    }
+
+    #[test]
+    fn a_member_gone_while_herdrs_reply_was_malformed_at_start_does_not_wake_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = working_pair();
+        herdr.remove_agent("lh-1");
+        herdr.set_malformed(true);
+        let req = Request {
+            timeout: Some(Duration::from_secs(6)),
+            ..EVERY
+        };
+        let mut clock = steps(|_| herdr.set_malformed(false));
+        assert_eq!(run(&herdr, &ledger, dir.path(), &req, &mut clock), None);
+    }
+
+    #[test]
+    fn a_restart_inside_one_poll_gap_does_not_wake_it_gone_while_agents_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, mut herdr) = working_pair();
+        herdr.resume_settles_after = None;
+        let req = Request {
+            timeout: Some(Duration::from_secs(10)),
+            ..EVERY
+        };
+        let mut clock = steps(|poll| match poll {
+            1 => {
+                herdr.remove_agent("lh-1");
+                herdr.remove_agent("lh-2");
+                herdr.resume_agent("lh-1", "s1", "w9:p1");
+            }
+            // lh-2's resume lands a poll later.
+            2 => herdr.resume_agent("lh-2", "s2", "w9:p2"),
+            4 => herdr.settle(),
+            _ => {}
+        });
+        assert_eq!(run(&herdr, &ledger, dir.path(), &req, &mut clock), None);
+    }
+
+    #[test]
+    fn a_pane_empty_for_only_one_poll_does_not_wake_it_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = working_pair();
+        let req = Request {
+            timeout: Some(Duration::from_secs(6)),
+            ..EVERY
+        };
+        let mut clock = steps(|poll| match poll {
+            1 => herdr.remove_agent("lh-1"),
+            2 => {
+                herdr.resume_agent("lh-1", "s1", "w9:p1");
+                herdr.settle();
+            }
+            _ => {}
+        });
+        assert_eq!(run(&herdr, &ledger, dir.path(), &req, &mut clock), None);
     }
 }

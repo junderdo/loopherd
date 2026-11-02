@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::FileExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -236,6 +236,38 @@ pub struct Filter<'a> {
 /// The reports `filter` selects, one rendered line each, unread only unless
 /// `filter.all`; marks those read. Unread, questions come first.
 pub fn reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<Read> {
+    // Held from read to save, so concurrent readers print each report once.
+    if !dir.is_dir() {
+        return Ok(Read::default());
+    }
+    let _lock = match filter.all {
+        true => None,
+        false => Some(Cursor::Reports.lock(dir)?),
+    };
+    let (read, pending) = reports_with(ledger, dir, filter, Locked::Held)?;
+    pending.save_with(Locked::Held)?;
+    Ok(read)
+}
+
+/// [`reports`], leaving the cursor where it was until the caller saves
+/// `Pending`, once what was read is safely out.
+pub fn peek_reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<(Read, Pending)> {
+    reports_with(ledger, dir, filter, Locked::Take)
+}
+
+/// Whether the caller already holds the cursor's lock.
+#[derive(Clone, Copy)]
+enum Locked {
+    Held,
+    Take,
+}
+
+fn reports_with(
+    ledger: &dyn Ledger,
+    dir: &Path,
+    filter: &Filter,
+    locked: Locked,
+) -> Result<(Read, Pending)> {
     let mut names = mailboxes(dir)?;
     if !filter.names.is_empty() {
         names.retain(|n| filter.names.contains(n));
@@ -248,9 +280,12 @@ pub fn reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<Read>
                 .is_some_and(|e| e.herd.as_deref() == Some(herd))
         });
     }
-    let (mut found, warnings) = match filter.all {
-        true => read_all(dir, &names)?,
-        false => Cursor::Reports.read(dir, &names, |e| e.report().is_some())?,
+    let ((mut found, warnings), pending) = match filter.all {
+        true => (
+            read_all(dir, &names)?,
+            Pending::nothing(Cursor::Reports, dir),
+        ),
+        false => Cursor::Reports.read(dir, &names, locked, |e| e.report().is_some())?,
     };
     if !filter.all {
         found.sort_by(|(_, a), (_, b)| {
@@ -258,25 +293,26 @@ pub fn reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<Read>
             (!question(a), &a.at).cmp(&(!question(b), &b.at))
         });
     }
-    Ok(Read {
+    let read = Read {
         lines: found
             .iter()
             .flat_map(|(name, entry)| render(name, entry))
             .collect(),
         warnings,
-    })
+    };
+    Ok((read, pending))
 }
 
 /// Each of `names` with an unread `stop` entry, with its whole mailbox so a
-/// stop can be judged against what came before; marks everything read on
-/// the watch cursor, which `reports` never moves.
-pub fn unread_stops(dir: &Path, names: &[String]) -> Result<Vec<Mailbox>> {
+/// stop can be judged against what came before. Saving `Pending` marks
+/// everything read on the watch cursor, which `reports` never moves.
+pub fn unread_stops(dir: &Path, names: &[String]) -> Result<(Vec<Mailbox>, Pending)> {
     let names: Vec<String> = mailboxes(dir)?
         .into_iter()
         .filter(|n| names.contains(n))
         .collect();
     let mut stops = vec![];
-    Cursor::Watch.advance(dir, &names, |name, read, unread| {
+    let pending = Cursor::Watch.peek(dir, &names, Locked::Take, |name, read, unread| {
         let mut entries = vec![];
         // `reports` warns about bad lines; its cursor reads the same bytes.
         parse(dir, name, unread, &mut entries, &mut vec![]);
@@ -294,7 +330,53 @@ pub fn unread_stops(dir: &Path, names: &[String]) -> Result<Vec<Mailbox>> {
             unread,
         });
     })?;
-    Ok(stops)
+    Ok((stops, pending))
+}
+
+/// Cursor moves read but not yet saved.
+#[must_use = "the cursor moves only once saved"]
+pub struct Pending {
+    cursor: Cursor,
+    dir: PathBuf,
+    /// Each name's offset as read, and where it moves to.
+    moves: Vec<(String, usize, usize)>,
+}
+
+impl Pending {
+    fn nothing(cursor: Cursor, dir: &Path) -> Pending {
+        Pending {
+            cursor,
+            dir: dir.to_path_buf(),
+            moves: vec![],
+        }
+    }
+
+    /// Moves the cursor, except for a name another reader moved meanwhile.
+    pub fn save(self) -> Result<()> {
+        self.save_with(Locked::Take)
+    }
+
+    fn save_with(self, locked: Locked) -> Result<()> {
+        if self.moves.iter().all(|(_, from, to)| from == to) {
+            return Ok(());
+        }
+        let _lock = match locked {
+            Locked::Held => None,
+            Locked::Take => Some(self.cursor.lock(&self.dir)?),
+        };
+        let mut offsets = self.cursor.load(&self.dir)?;
+        let mut moved = false;
+        for (name, from, to) in self.moves {
+            if from != to && offsets.read_to(&name) == from {
+                offsets.0.insert(name, to);
+                moved = true;
+            }
+        }
+        if moved {
+            self.cursor.save(&self.dir, &offsets)?;
+        }
+        Ok(())
+    }
 }
 
 /// A member's mailbox in file order; `entries[unread..]` are new.
@@ -456,46 +538,52 @@ impl Cursor {
     }
 
     /// Entries of `names` past the cursor that `keep` selects, in file
-    /// order; moves the cursor past every complete line, kept or not.
-    fn read(self, dir: &Path, names: &[String], keep: impl Fn(&Entry) -> bool) -> Result<Found> {
-        let mut found = vec![];
-        let mut warnings = vec![];
-        self.advance(dir, names, |name, _, unread| {
-            parse(dir, name, unread, &mut found, &mut warnings)
-        })?;
-        found.retain(|(_, e)| keep(e));
-        Ok((found, warnings))
-    }
-
-    /// Calls `visit` with each of `names`' complete lines split at the
-    /// cursor, already read then unread; moves the cursor past them.
-    fn advance(
+    /// order; saving `Pending` moves the cursor past every complete line.
+    fn read(
         self,
         dir: &Path,
         names: &[String],
+        locked: Locked,
+        keep: impl Fn(&Entry) -> bool,
+    ) -> Result<(Found, Pending)> {
+        let mut found = vec![];
+        let mut warnings = vec![];
+        let pending = self.peek(dir, names, locked, |name, _, unread| {
+            parse(dir, name, unread, &mut found, &mut warnings)
+        })?;
+        found.retain(|(_, e)| keep(e));
+        Ok(((found, warnings), pending))
+    }
+
+    /// Calls `visit` with each of `names`' complete lines split at the
+    /// cursor, already read then unread; returns the move past them.
+    fn peek(
+        self,
+        dir: &Path,
+        names: &[String],
+        locked: Locked,
         mut visit: impl FnMut(&str, &[u8], &[u8]),
-    ) -> Result<()> {
+    ) -> Result<Pending> {
+        let mut pending = Pending::nothing(self, dir);
         if names.is_empty() {
-            return Ok(());
+            return Ok(pending);
         }
-        let _lock = self.lock(dir)?;
-        let mut offsets = self.load(dir)?;
-        let mut moved = false;
+        let offsets = match locked {
+            Locked::Held => self.load(dir)?,
+            Locked::Take => {
+                let _lock = self.lock(dir)?;
+                self.load(dir)?
+            }
+        };
         for name in names {
             let (bytes, end) = complete_lines(dir, name)?;
-            let start = match offsets.read_to(name) {
-                // Past the end: the file was truncated or replaced, so all of it is new.
-                offset if offset > end => 0,
-                offset => offset,
-            };
+            let from = offsets.read_to(name);
+            // Past the end: the file was truncated or replaced, so all of it is new.
+            let start = if from > end { 0 } else { from };
             visit(name, &bytes[..start], &bytes[start..end]);
-            moved |= offsets.read_to(name) != end;
-            offsets.0.insert(name.clone(), end);
+            pending.moves.push((name.clone(), from, end));
         }
-        if moved {
-            self.save(dir, &offsets)?;
-        }
-        Ok(())
+        Ok(pending)
     }
 
     /// Held across load and save, so concurrent readers never move it back.
@@ -1198,6 +1286,58 @@ mod tests {
         assert!(read.lines.is_empty());
     }
 
+    fn read_stops(dir: &Path, names: &[String]) -> Vec<Mailbox> {
+        let (stops, pending) = unread_stops(dir, names).unwrap();
+        pending.save().unwrap();
+        stops
+    }
+
+    #[test]
+    fn unsaved_reads_leave_the_cursor_and_a_concurrent_readers_move_stands() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![member("lh-1", "w1:p1", None, false)]);
+        let names = ["lh-1".to_string()];
+        put(
+            dir.path(),
+            "lh-1",
+            "2026-11-01T09:00:00Z",
+            stop(0, Tally::Known(0), None),
+        );
+        send(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            Kind::Note,
+            "hi",
+            "2026-11-01T09:01:00Z",
+        );
+
+        let (stops, _unsaved) = unread_stops(dir.path(), &names).unwrap();
+        assert_eq!(stops.len(), 1);
+        let (_, pending) = peek_reports(&ledger, dir.path(), &UNREAD).unwrap();
+        drop(pending);
+        assert_eq!(read_stops(dir.path(), &names).len(), 1);
+
+        let (read, stale) = peek_reports(&ledger, dir.path(), &UNREAD).unwrap();
+        assert_eq!(read.lines.len(), 1);
+        send(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            Kind::Note,
+            "more",
+            "2026-11-01T09:02:00Z",
+        );
+        reports(&ledger, dir.path(), &UNREAD).unwrap();
+        stale.save().unwrap();
+        assert!(
+            reports(&ledger, dir.path(), &UNREAD)
+                .unwrap()
+                .lines
+                .is_empty()
+        );
+    }
+
     #[test]
     fn the_watch_cursor_reads_stops_apart_from_the_reports_cursor() {
         let dir = tempfile::tempdir().unwrap();
@@ -1232,14 +1372,14 @@ mod tests {
             reports(&ledger, dir.path(), &UNREAD).unwrap().lines.len(),
             1
         );
-        let read = unread_stops(dir.path(), &names).unwrap();
+        let read = read_stops(dir.path(), &names);
         let unread: Vec<(&str, usize, usize)> = read
             .iter()
             .map(|m| (m.name.as_str(), m.entries.len(), m.unread))
             .collect();
         assert_eq!(unread, [("lh-1", 3, 0), ("lh-2", 1, 0)]);
 
-        assert!(unread_stops(dir.path(), &names).unwrap().is_empty());
+        assert!(read_stops(dir.path(), &names).is_empty());
         put(
             dir.path(),
             "lh-1",
@@ -1254,7 +1394,7 @@ mod tests {
             "no stop",
             "2026-11-01T09:04:30Z",
         );
-        let read = unread_stops(dir.path(), &names).unwrap();
+        let read = read_stops(dir.path(), &names);
         assert_eq!(read.len(), 1);
         let lh1 = &read[0];
         assert_eq!(

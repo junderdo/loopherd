@@ -34,17 +34,21 @@ session. Read `herdr --skill` before controlling herdr.
    ```
    (`loopherd watch loopherd-cards` narrows it to a herd.) It returns when a
    member leaves a report or its Claude stops in a new state, printing a
-   line per event and marking what it prints read. Stops come from the
-   Stop hook's entries in the mailbox, so a stop that lands between watches
-   wakes the next one. herdr adds `blocked` and `gone`, on change only: a
-   member already `blocked` when the watch starts doesn't wake it, so on
-   starting a session run `loopherd status` first. Exit 2 means the timeout
-   passed with nothing to do. Start the next watch after handling every
-   wake. It dies with the shepherd's session. It refuses to start while
-   another watch holds `watch.lock`, or when the hook isn't in
-   `~/.claude/settings.json` (run `scripts/install`). The first watch after
-   an install, or over members a herd-scoped watch skipped, prints every
-   unread change since, oldest first; judge each against `reports --all`.
+   line per event, and marks them read only once printed. Stops come from
+   the Stop hook's entries in the mailbox, so a stop that lands between
+   watches wakes the next one. herdr adds `blocked` and `gone`, seen only
+   while a watch runs: a change between watches is never replayed, so run
+   `loopherd status` before each re-arm. Exit 2 means the timeout passed
+   with nothing to do. Start the next watch after handling every wake. It
+   dies with the shepherd's session. It refuses to start while another
+   watch holds `watch.lock` (the error names its PID; an orphaned one can
+   hold it until its timeout), or when the hook isn't in
+   `~/.claude/settings.json` (run `scripts/install`). Lines come in this
+   order: reports, questions first then by time; then stop lines grouped
+   by member in name order, oldest first within a member; then `blocked`
+   and `gone`. The first watch after an install, or over members a
+   herd-scoped watch skipped, prints every unread stop change since;
+   judge each against `reports --all`.
 3. **On wake,** read the watch's lines and the card (`loopherd reports
    --all` for the timeline, stops included). Members' reports print as
    `lh-65 done <time> <text>`; the rest read:
@@ -57,7 +61,7 @@ session. Read `herdr --skill` before controlling herdr.
    | `lh-65 finished  no report` | The same, with no `done` or `question` since its last finish or start. |
    | `lh-65 failed  rate_limit` | Turn ended on an API error; it may need a nudge once that clears. |
    | `lh-65 blocked` | A dialog only the human answers (D10): tell them. |
-   | `lh-65 gone` | Its pane disappeared. |
+   | `lh-65 gone` | No agent in its pane for two polls in a row; it was live earlier in this watch. |
 
    A turn you prompt into a member still `paused` finishes silently, since
    the stop reads paused again; check it with `loopherd reports --all`. A

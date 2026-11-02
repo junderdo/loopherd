@@ -54,6 +54,8 @@ pub struct Started {
 struct State {
     /// Set by [`FakeHerdr::set_unreachable`], for a herdr going down mid-test.
     down: bool,
+    /// Set by [`FakeHerdr::set_malformed`].
+    malformed: bool,
     next_id: u32,
     tabs: Vec<FakeTab>,
     panes: Vec<FakePane>,
@@ -245,6 +247,24 @@ impl FakeHerdr {
         self.state.borrow_mut().down = down;
     }
 
+    pub fn set_malformed(&self, malformed: bool) {
+        self.state.borrow_mut().malformed = malformed;
+    }
+
+    /// Puts `name` back in `pane_id` as a restart's resume does, pending
+    /// until [`FakeHerdr::settle`] or `resume_settles_after`.
+    pub fn resume_agent(&self, name: &str, session: &str, pane_id: &str) {
+        self.push_agent(Some(name), Some(session), pane_id, true);
+    }
+
+    pub fn settle(&self) {
+        self.state
+            .borrow_mut()
+            .agents
+            .iter_mut()
+            .for_each(|a| a.launch_pending = false);
+    }
+
     fn is_down(&self) -> bool {
         self.unreachable || self.state.borrow().down
     }
@@ -279,7 +299,7 @@ impl Herdr for FakeHerdr {
         if self.is_down() {
             bail!("herdr server not running");
         }
-        if self.malformed_agents {
+        if self.malformed_agents || self.state.borrow().malformed {
             return Err(anyhow!("expected an array").context(MalformedReply("agent list".into())));
         }
         let mut state = self.state.borrow_mut();

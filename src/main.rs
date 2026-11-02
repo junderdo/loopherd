@@ -19,7 +19,7 @@ mod tui;
 mod watch;
 mod worktree;
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
@@ -386,12 +386,16 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         &mut watch::RealClock::start(),
         &mut |warning| eprintln!("loopherd watch: {warning}"),
     )?;
-    let Some(lines) = woke else {
+    let Some(wake) = woke else {
         return Ok(2);
     };
-    for line in lines {
-        println!("{line}");
-    }
+    let mut out = std::io::stdout().lock();
+    wake.lines
+        .iter()
+        .try_for_each(|line| writeln!(out, "{line}"))
+        .and_then(|()| out.flush())
+        .context("print the wake; left it unread")?;
+    wake.mark_read()?;
     Ok(0)
 }
 
