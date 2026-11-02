@@ -342,6 +342,7 @@ mod tests {
             template: None,
             params: None,
             socket: None,
+            process: None,
         }
     }
 
@@ -546,6 +547,7 @@ mod tests {
         herdr.socket = None;
         let mut ledger = ledger([AgentRecord {
             socket: Some("/run/live.sock".into()),
+            process: None,
             ..record("a", cwd.path())
         }]);
         run(&herdr, &mut ledger, &request());

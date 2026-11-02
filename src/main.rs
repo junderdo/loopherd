@@ -6,6 +6,7 @@ mod install_hook;
 mod ledger;
 mod lock;
 mod matching;
+mod process;
 mod prompt;
 mod report;
 mod retire;
@@ -415,14 +416,16 @@ fn run_stop_hook() -> Result<i32> {
         .read_to_end(&mut input)
         .context("read hook input")?;
     let socket = socket_from_env();
-    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let pane = stop_hook::Pane {
         id: &pane,
         socket: socket.as_deref(),
+        claude_pid: process::claude_pid_from_env(&process::ProcFs),
     };
     let reports = ledger.reports_dir()?;
     stop_hook::stop_hook(
-        &ledger,
+        &mut ledger,
+        &process::ProcFs,
         &reports,
         &pane,
         &input,
@@ -445,8 +448,15 @@ fn run_session_hook() -> Result<i32> {
     let pane = session_hook::Pane {
         id: &pane,
         socket: socket.as_deref(),
+        claude_pid: process::claude_pid_from_env(&process::ProcFs),
     };
-    session_hook::session_hook(&mut ledger, &pane, &input)?;
+    session_hook::session_hook(
+        &mut ledger,
+        &process::ProcFs,
+        &pane,
+        &input,
+        &mut |warning| eprintln!("loopherd session-hook: {warning}"),
+    )?;
     Ok(0)
 }
 

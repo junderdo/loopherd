@@ -202,6 +202,7 @@ mod tests {
             template: herd.map(|_| "t".to_string()),
             params: None,
             socket: None,
+            process: None,
         }
     }
 

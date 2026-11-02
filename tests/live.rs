@@ -858,6 +858,11 @@ const SLEEPER: &str = "Run `sleep 30` with the Bash tool and run_in_background s
      When it finishes, reply with just the word done.";
 
 fn spawn_hooked(tag: &str, prompt: &str) -> Hooked {
+    spawn_hooked_with(tag, prompt, &[])
+}
+
+/// `claude_args` go to the member's Claude after the `--settings` file.
+fn spawn_hooked_with(tag: &str, prompt: &str, claude_args: &[&str]) -> Hooked {
     let workspace = assert_dev_session();
     let state = tempfile::tempdir().unwrap();
     let live_state = tempfile::tempdir().unwrap();
@@ -871,15 +876,25 @@ fn spawn_hooked(tag: &str, prompt: &str) -> Hooked {
         )
     };
     let settings = state.path().join("settings.json");
+    let session_hooks = serde_json::json!([{"hooks": [{
+        "type": "command",
+        "command": format!(
+            "XDG_STATE_HOME='{}' '{}' session-hook || true",
+            state.path().display(),
+            env!("CARGO_BIN_EXE_loopherd")
+        ),
+        "timeout": 10,
+    }]}]);
     let hooks = serde_json::json!([{"hooks": [
         {"type": "command", "command": hook(state.path()), "timeout": 10},
         {"type": "command", "command": hook(live_state.path()), "timeout": 10},
+        {"type": "command", "command": format!("echo $CLAUDE_PID >> '{}'", state.path().join("stop-pids").display()), "timeout": 10},
     ]}]);
     std::fs::write(
         &settings,
         serde_json::json!({
-            "hooks": {"Stop": hooks, "StopFailure": hooks},
-            "permissions": {"allow": ["Bash(sleep:*)"]},
+            "hooks": {"Stop": hooks, "StopFailure": hooks, "SessionStart": session_hooks},
+            "permissions": {"allow": ["Bash(sleep:*)", "Bash(claude:*)"]},
         })
         .to_string(),
     )
@@ -899,7 +914,10 @@ fn spawn_hooked(tag: &str, prompt: &str) -> Hooked {
             "--",
             "--settings",
             settings.to_str().unwrap(),
-        ],
+        ]
+        .into_iter()
+        .chain(claude_args.iter().copied())
+        .collect::<Vec<_>>(),
     );
     assert_eq!(
         out.status.code(),
@@ -1003,5 +1021,74 @@ fn watch_wakes_paused_then_a_rearmed_watch_wakes_finished() {
 
     assert_eq!(watch(), format!("{} paused  1 shell\n", member.name));
     assert_eq!(watch(), format!("{} finished  no report\n", member.name));
+    member.assert_live_state_untouched();
+}
+
+fn wait_for_stops(state: &Path, name: &str, count: usize) -> Vec<Value> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+    while stops(state, name).len() < count && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    stops(state, name)
+}
+
+fn say(name: &str, text: &str) {
+    herdr_ok(&["agent", "prompt", name, text]);
+}
+
+#[test]
+fn only_the_members_own_stops_are_filed_across_a_nested_claude_and_a_branch() {
+    if !live_enabled() {
+        return;
+    }
+    let member = spawn_hooked_with(
+        "branch",
+        "Reply with just the word zero.",
+        &["--model", "haiku"],
+    );
+    let state = member.state.path();
+    let settings = state.join("settings.json");
+
+    let first = wait_for_stops(state, &member.name, 1);
+    assert_eq!(first.len(), 1, "{first:?}");
+    let entry = ledger_entry(state, &member.name);
+    assert!(entry["process"]["pid"].is_u64(), "unclaimed: {entry}");
+    let session = entry["session_id"].clone();
+    assert!(session.is_string(), "{session}");
+
+    let nested_out = state.join("nested.out");
+    say(
+        &member.name,
+        &format!(
+            "Run `claude -p --model haiku --resume {} --settings {} 'Reply with just ok.' > {}` \
+             with the Bash tool and wait for it. Then reply with just the word one.",
+            session.as_str().unwrap(),
+            settings.display(),
+            nested_out.display()
+        ),
+    );
+    wait_for_stops(state, &member.name, 2);
+    std::thread::sleep(std::time::Duration::from_secs(10));
+    let all = stops(state, &member.name);
+    assert_eq!(all.len(), 2, "a nested stop was filed: {all:?}");
+    let nested = std::fs::read_to_string(&nested_out).unwrap_or_default();
+    assert!(!nested.trim().is_empty(), "the nested claude never ran");
+    let pids = std::fs::read_to_string(state.join("stop-pids")).unwrap();
+    let distinct: std::collections::BTreeSet<_> = pids.split_whitespace().collect();
+    assert_eq!(
+        distinct.len(),
+        2,
+        "the nested claude's Stop hook never fired: {pids}"
+    );
+
+    say(&member.name, "/branch");
+    std::thread::sleep(std::time::Duration::from_secs(8));
+    say(&member.name, "Reply with just the word two.");
+
+    let all = wait_for_stops(state, &member.name, 3);
+    assert_eq!(all.len(), 3, "{all:?}");
+    let branched = ledger_entry(state, &member.name)["session_id"].clone();
+    assert_ne!(branched, session, "the ledger did not follow /branch");
+    assert_eq!(all[2]["session"], branched, "{all:?}");
     member.assert_live_state_untouched();
 }
