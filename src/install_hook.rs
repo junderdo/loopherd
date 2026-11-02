@@ -88,6 +88,27 @@ pub fn remove(settings: &Path, now: SystemTime) -> Result<Outcome> {
     })
 }
 
+/// Whether `settings` has loopherd's hook on both Stop and StopFailure.
+pub fn installed(settings: &Path) -> Result<bool> {
+    let bytes = match fs::read(settings) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e).with_context(|| format!("read {}", settings.display())),
+    };
+    let root: Value =
+        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", settings.display()))?;
+    let has_ours = |event: &str| {
+        root.pointer(&format!("/hooks/{event}"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+            .flatten()
+            .any(is_ours)
+    };
+    Ok(EVENTS.iter().all(|event| has_ours(event)))
+}
+
 /// Applies `change` to the settings object and writes it back only if it
 /// changed, backing up the old file first. Changes nothing on any error.
 fn edit(
@@ -383,6 +404,27 @@ mod tests {
             }
         );
         assert_eq!(fs::read_to_string(backup).unwrap(), USER_SETTINGS);
+    }
+
+    #[test]
+    fn installed_needs_ours_on_both_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        assert!(!installed(&path).unwrap());
+
+        fs::write(&path, USER_SETTINGS).unwrap();
+        assert!(!installed(&path).unwrap());
+
+        install(&path, Path::new("/opt/bin/loopherd"), now()).unwrap();
+        assert!(installed(&path).unwrap());
+
+        let mut half = read(&path);
+        half["hooks"].as_object_mut().unwrap().remove("StopFailure");
+        fs::write(&path, half.to_string()).unwrap();
+        assert!(!installed(&path).unwrap());
+
+        fs::write(&path, "not json").unwrap();
+        assert!(installed(&path).is_err());
     }
 
     #[test]

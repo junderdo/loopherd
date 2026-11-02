@@ -52,6 +52,10 @@ pub struct Started {
 
 #[derive(Default)]
 struct State {
+    /// Set by [`FakeHerdr::set_unreachable`], for a herdr going down mid-test.
+    down: bool,
+    /// Set by [`FakeHerdr::set_malformed`].
+    malformed: bool,
     next_id: u32,
     tabs: Vec<FakeTab>,
     panes: Vec<FakePane>,
@@ -239,6 +243,32 @@ impl FakeHerdr {
             .retain(|a| a.name.as_deref() != Some(name));
     }
 
+    pub fn set_unreachable(&self, down: bool) {
+        self.state.borrow_mut().down = down;
+    }
+
+    pub fn set_malformed(&self, malformed: bool) {
+        self.state.borrow_mut().malformed = malformed;
+    }
+
+    /// Puts `name` back in `pane_id` as a restart's resume does, pending
+    /// until [`FakeHerdr::settle`] or `resume_settles_after`.
+    pub fn resume_agent(&self, name: &str, session: &str, pane_id: &str) {
+        self.push_agent(Some(name), Some(session), pane_id, true);
+    }
+
+    pub fn settle(&self) {
+        self.state
+            .borrow_mut()
+            .agents
+            .iter_mut()
+            .for_each(|a| a.launch_pending = false);
+    }
+
+    fn is_down(&self) -> bool {
+        self.unreachable || self.state.borrow().down
+    }
+
     pub fn set_status(&self, name: &str, status: AgentStatus) {
         let mut state = self.state.borrow_mut();
         if let Some(a) = state
@@ -256,7 +286,7 @@ impl FakeHerdr {
 
 impl Herdr for FakeHerdr {
     fn workspaces(&self) -> Result<Vec<Workspace>> {
-        if self.unreachable {
+        if self.is_down() {
             bail!("herdr server not running");
         }
         Ok(self.workspaces.clone())
@@ -266,10 +296,10 @@ impl Herdr for FakeHerdr {
         if let Some(gate) = &self.agents_gate {
             let _ = gate.recv();
         }
-        if self.unreachable {
+        if self.is_down() {
             bail!("herdr server not running");
         }
-        if self.malformed_agents {
+        if self.malformed_agents || self.state.borrow().malformed {
             return Err(anyhow!("expected an array").context(MalformedReply("agent list".into())));
         }
         let mut state = self.state.borrow_mut();
@@ -461,7 +491,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn focus(&self, pane_id: &str) -> Result<()> {
-        if self.unreachable {
+        if self.is_down() {
             bail!("herdr server not running");
         }
         if !self

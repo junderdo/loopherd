@@ -19,12 +19,12 @@ mod tui;
 mod watch;
 mod worktree;
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 
 use crate::feed::{FeedRequest, feed};
@@ -152,14 +152,19 @@ enum Command {
         settings: Option<PathBuf>,
     },
     /// Block until a member needs the shepherd, print what happened, and exit:
-    /// an unread report (marked read), a member going blocked, or one going
-    /// from working to done, idle or gone. Polls herdr every 2s, read-only.
+    /// an unread report (marked read), a stop from the Stop hook that leaves a
+    /// member paused, finished or failed, or one going blocked or gone in
+    /// herdr. Polls every 2s, read-only toward herdr. One watch at a time, and
+    /// only with loopherd's Stop hook installed.
     Watch {
         /// Only members of these herds.
         herds: Vec<String>,
         /// Give up after this many seconds, exiting 2 with no output.
         #[arg(long)]
         timeout: Option<u64>,
+        /// Check for the hook in this file instead of $CLAUDE_CONFIG_DIR/settings.json or ~/.claude/settings.json.
+        #[arg(long)]
+        settings: Option<PathBuf>,
     },
 }
 
@@ -226,7 +231,11 @@ fn main() -> ExitCode {
             text,
         } => ("report", run_report(kind, as_name, &text)),
         Command::Reports { names, herd, all } => ("reports", run_reports(names, herd, all)),
-        Command::Watch { herds, timeout } => ("watch", run_watch(&herds, timeout)),
+        Command::Watch {
+            herds,
+            timeout,
+            settings,
+        } => ("watch", run_watch(&herds, timeout, settings)),
         Command::StopHook => ("stop-hook", run_stop_hook()),
         Command::InstallHook { remove, settings } => {
             ("install-hook", run_install_hook(remove, settings))
@@ -346,7 +355,17 @@ fn run_reports(names: Vec<String>, herd: Option<String>, all: bool) -> Result<i3
     Ok(0)
 }
 
-fn run_watch(herds: &[String], timeout: Option<u64>) -> Result<i32> {
+fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) -> Result<i32> {
+    let settings = match settings {
+        Some(settings) => settings,
+        None => install_hook::default_settings()?,
+    };
+    if !install_hook::installed(&settings)? {
+        bail!(
+            "loopherd's Stop hook is not in {}, so no stops would wake it; run scripts/install",
+            settings.display()
+        );
+    }
     let herd_files = Paths::from_env().context("herd")?.herds;
     for herd in herds {
         if !herd_files.join(format!("{herd}.toml")).is_file() {
@@ -367,12 +386,16 @@ fn run_watch(herds: &[String], timeout: Option<u64>) -> Result<i32> {
         &mut watch::RealClock::start(),
         &mut |warning| eprintln!("loopherd watch: {warning}"),
     )?;
-    let Some(lines) = woke else {
+    let Some(wake) = woke else {
         return Ok(2);
     };
-    for line in lines {
-        println!("{line}");
-    }
+    let mut out = std::io::stdout().lock();
+    wake.lines
+        .iter()
+        .try_for_each(|line| writeln!(out, "{line}"))
+        .and_then(|()| out.flush())
+        .context("print the wake; left it unread")?;
+    wake.mark_read()?;
     Ok(0)
 }
 

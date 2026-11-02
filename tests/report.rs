@@ -37,6 +37,8 @@ fn loopherd_in(state: &Path, pane: Option<(&str, &str)>, args: &[&str]) -> Comma
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_loopherd"));
     cmd.args(args)
         .env("XDG_STATE_HOME", state)
+        // Never the real ~/.claude/settings.json.
+        .env("CLAUDE_CONFIG_DIR", state.join("claude"))
         .env("PATH", "")
         .env_remove("HERDR_PANE_ID")
         .env_remove("HERDR_SOCKET_PATH");
@@ -49,6 +51,12 @@ fn loopherd_in(state: &Path, pane: Option<(&str, &str)>, args: &[&str]) -> Comma
 
 fn run(state: &Path, pane: Option<&str>, args: &[&str]) -> Output {
     loopherd(state, pane, args).output().unwrap()
+}
+
+/// Into `state`'s own Claude settings, which `watch` requires.
+fn install_hook(state: &Path) {
+    let out = run(state, None, &["install-hook"]);
+    assert!(out.status.success(), "{out:?}");
 }
 
 #[test]
@@ -146,6 +154,7 @@ fn a_bad_line_warns_on_stderr_and_does_not_jam_the_mailbox() {
 fn watch_wakes_on_an_unread_report_and_times_out_silently_once_read() {
     let state = tempfile::tempdir().unwrap();
     write_ledger(state.path());
+    install_hook(state.path());
     run(state.path(), None, &["report", "--as", "lh-2", "PR #9"]);
 
     let out = run(state.path(), None, &["watch", "--timeout", "0"]);
@@ -164,6 +173,7 @@ fn watch_warns_about_a_herd_with_no_herd_file() {
     let state = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();
     write_ledger(state.path());
+    install_hook(state.path());
     fs::create_dir_all(config.path().join("herds")).unwrap();
     fs::write(config.path().join("herds/cards.toml"), "").unwrap();
 
