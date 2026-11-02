@@ -60,10 +60,14 @@ A card is **claimable** when it sits in Backlog, has `ready-for-agent`, and has 
      first line of the description.
    - Comment the PR link on the card and move the card to Review.
    - Wayfinding cards also comment a three-line summary of the outcome.
+   - Last, run `loopherd report --kind done "<summary>"`, with the PR link in
+     the summary. This is the one loopherd command a member runs against the
+     real state dir; every other manual run uses a temp `XDG_STATE_HOME`.
 5. **Stop cleanly** when you hit a question only the human can answer:
    - Run `scripts/trello label LH-<n> +need-human -ready-for-agent`.
    - Comment the specific question and the options you see.
    - Move the card back to Backlog.
+   - Run `loopherd report --kind question "<the question>"`.
 
    Stopping like this beats guessing at a decision.
 

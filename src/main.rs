@@ -5,6 +5,7 @@ mod herdr;
 mod ledger;
 mod matching;
 mod prompt;
+mod report;
 mod retire;
 mod revive;
 mod shell;
@@ -27,6 +28,7 @@ use crate::herd_view::Options;
 use crate::herdr::CliHerdr;
 use crate::ledger::FileLedger;
 use crate::prompt::prompt;
+use crate::report::{Filter, Kind, Reporter, report, reports};
 use crate::retire::{retire, retire_and_close};
 use crate::revive::{ReviveRequest, revive};
 use crate::spawn::{Checkout, Prompt, SpawnRequest, spawn};
@@ -109,6 +111,27 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Leave a report for the shepherd from the member running in this pane.
+    /// The one command members run against the real state dir.
+    Report {
+        #[arg(long, value_enum, default_value_t = Kind::Note)]
+        kind: Kind,
+        /// Report as this member instead of the one whose pane is $HERDR_PANE_ID.
+        #[arg(long = "as")]
+        as_name: Option<String>,
+        text: String,
+    },
+    /// Print members' unread reports, questions first, and mark them read.
+    Reports {
+        /// Only these members, retired ones included.
+        names: Vec<String>,
+        /// Only members of this herd.
+        #[arg(long)]
+        herd: Option<String>,
+        /// Print every report, read or not, and mark none read.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Args)]
@@ -168,6 +191,12 @@ fn main() -> ExitCode {
         Command::Prompt { name, force } => ("prompt", run_prompt(&name, force)),
         Command::Status { all, strays, json } => ("status", run_status(all, strays, json)),
         Command::View { all, strays } => ("view", run_view(all, strays)),
+        Command::Report {
+            kind,
+            as_name,
+            text,
+        } => ("report", run_report(kind, as_name, &text)),
+        Command::Reports { names, herd, all } => ("reports", run_reports(names, herd, all)),
     };
     match result {
         Ok(code) => ExitCode::from(code as u8),
@@ -244,6 +273,46 @@ fn run_prompt(name: &str, force: bool) -> Result<i32> {
     prompt(&CliHerdr, &mut ledger, name, force)?;
     println!("prompted {name}");
     Ok(0)
+}
+
+fn run_report(kind: Kind, as_name: Option<String>, text: &str) -> Result<i32> {
+    let path = FileLedger::default_path().context("ledger")?;
+    let dir = reports_dir(&path)?;
+    let own_pane = std::env::var("HERDR_PANE_ID").ok();
+    let who = Reporter {
+        own_pane: own_pane.as_deref().filter(|p| !p.is_empty()),
+        as_name: as_name.as_deref(),
+    };
+    report(
+        &FileLedger::new(path),
+        &dir,
+        &who,
+        kind,
+        text,
+        SystemTime::now(),
+    )?;
+    Ok(0)
+}
+
+fn run_reports(names: Vec<String>, herd: Option<String>, all: bool) -> Result<i32> {
+    let path = FileLedger::default_path().context("ledger")?;
+    let dir = reports_dir(&path)?;
+    let filter = Filter {
+        names: &names,
+        herd: herd.as_deref(),
+        all,
+    };
+    for line in reports(&FileLedger::new(path), &dir, &filter)? {
+        println!("{line}");
+    }
+    Ok(0)
+}
+
+fn reports_dir(ledger: &std::path::Path) -> Result<PathBuf> {
+    Ok(ledger
+        .parent()
+        .context("ledger path has no parent")?
+        .join("reports"))
 }
 
 fn run_spawn(args: SpawnArgs) -> Result<i32> {
