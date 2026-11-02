@@ -11,7 +11,7 @@ use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::Ledger;
 use crate::report::{Filter, Read, reports};
 use crate::status;
-use crate::stop::{self, Stop};
+use crate::stop::{self, Mark, State, Stop};
 
 pub trait Clock {
     /// Time since the watch started.
@@ -62,8 +62,8 @@ pub fn watch(
 ) -> Result<Option<Vec<String>>> {
     // Each member's last known status; an unreadable poll keeps it.
     let mut last: HashMap<String, AgentStatus> = HashMap::new();
-    // Each member's stop record at the last poll.
-    let mut stops: HashMap<String, Option<Stop>> = HashMap::new();
+    // Members seen going working -> done/idle whose stop record hadn't landed.
+    let mut awaiting: HashMap<String, AgentStatus> = HashMap::new();
     let mut code = 0;
     loop {
         let read = status::read_statuses(herdr, ledger, Options::default())?;
@@ -95,53 +95,99 @@ pub fn watch(
             .iter()
             .for_each(|w| warn(&format!("warning: {w}")));
         let mut lines = read.lines;
-        for member in &members {
-            let was = last.get(&member.name).copied();
-            let stop = latest_stop(&dirs.stops, &member.name, warn);
-            // Only a record new since the last poll is this stop's; an older one
-            // is a past turn's, or the hook hasn't written yet.
-            let before = stops.insert(member.name.clone(), stop.clone());
-            let fresh = before.as_ref().is_some_and(|before| *before != stop);
-            let paused = stop.as_ref().filter(|_| fresh).and_then(Stop::paused);
-            let was_paused = before.flatten().as_ref().and_then(Stop::paused).is_some();
-            if member.gone {
-                if was == Some(AgentStatus::Working) {
-                    lines.push(format!("{} gone  (was working)", member.name));
+        let waited = std::mem::take(&mut awaiting);
+        let left = req.timeout.map(|t| t.saturating_sub(clock.elapsed()));
+        let last_poll = left == Some(Duration::ZERO);
+        stop::with_marks(&dirs.stops, |marks| {
+            for member in &members {
+                let name = &member.name;
+                let was = last.get(name).copied();
+                if member.gone {
+                    if was == Some(AgentStatus::Working) {
+                        lines.push(format!("{name} gone  (was working)"));
+                    }
+                    continue;
                 }
-                continue;
+                let stop = latest_stop(&dirs.stops, name, warn);
+                // First sight: stops before it are history, not news.
+                let mark = marks
+                    .entry(name.clone())
+                    .or_insert_with(|| Mark::of(stop.as_ref()));
+                match member.status {
+                    // Only on change: one blocked at start would re-wake every re-armed watch.
+                    AgentStatus::Blocked if was.is_some_and(|w| w != AgentStatus::Blocked) => {
+                        lines.push(format!("{name} blocked"))
+                    }
+                    now @ (AgentStatus::Done | AgentStatus::Idle) => {
+                        let stopped = was == Some(AgentStatus::Working);
+                        match judge(stop.as_ref(), mark, stopped, waited.contains_key(name)) {
+                            Judged::Wake(why) => {
+                                lines.push(format!("{name} {}  ({why})", now.as_str()))
+                            }
+                            Judged::Await => {
+                                awaiting.insert(name.clone(), now);
+                            }
+                            Judged::Quiet => {}
+                        }
+                    }
+                    _ => {}
+                }
+                if member.status != AgentStatus::Unknown {
+                    last.insert(name.clone(), member.status);
+                }
             }
-            match member.status {
-                // Only on change: one blocked at start would re-wake every re-armed watch.
-                AgentStatus::Blocked if was.is_some_and(|w| w != AgentStatus::Blocked) => {
-                    lines.push(format!("{} blocked", member.name))
+            // This run ends here, so stops still awaiting their record go out now.
+            if !lines.is_empty() || last_poll {
+                let mut flushed: Vec<_> = awaiting.drain().collect();
+                flushed.sort_by(|a, b| a.0.cmp(&b.0));
+                for (name, now) in flushed {
+                    lines.push(format!("{name} {}  (was working)", now.as_str()));
+                    marks.entry(name).or_default().unrecorded = true;
                 }
-                now @ (AgentStatus::Done | AgentStatus::Idle)
-                    if was == Some(AgentStatus::Working) =>
-                {
-                    let why = paused.map_or("was working".into(), |p| format!("paused: {p}"));
-                    lines.push(format!("{} {}  ({why})", member.name, now.as_str()))
-                }
-                // Its resume shows as working for about a second, so a poll can
-                // miss it; the paused record turning empty is the finish.
-                now @ (AgentStatus::Done | AgentStatus::Idle)
-                    if fresh && was_paused && paused.is_none() =>
-                {
-                    lines.push(format!("{} {}  (was working)", member.name, now.as_str()))
-                }
-                _ => {}
             }
-            if member.status != AgentStatus::Unknown {
-                last.insert(member.name.clone(), member.status);
-            }
-        }
+        })?;
         if !lines.is_empty() {
             return Ok(Some(lines));
         }
-        let left = req.timeout.map(|t| t.saturating_sub(clock.elapsed()));
-        if left == Some(Duration::ZERO) {
+        if last_poll {
             return Ok(None);
         }
         clock.sleep(left.map_or(req.poll, |left| left.min(req.poll)));
+    }
+}
+
+enum Judged {
+    Wake(String),
+    /// Seen stopping, but the hook hasn't written its record yet.
+    Await,
+    Quiet,
+}
+
+/// What a done or idle member's latest `stop` means, given the last one
+/// judged (`mark`, advanced here), whether this poll saw it stop working, and
+/// whether the last poll was already awaiting its record.
+fn judge(stop: Option<&Stop>, mark: &mut Mark, stopped: bool, awaited: bool) -> Judged {
+    let Some(stop) = stop.filter(|s| mark.at.as_ref() != Some(&s.at)) else {
+        return match (stopped, awaited) {
+            // No hook (spawned before it), or it failed: wake as before.
+            (_, true) => {
+                mark.unrecorded = true;
+                Judged::Wake("was working".into())
+            }
+            (true, false) => Judged::Await,
+            (false, false) => Judged::Quiet,
+        };
+    };
+    let (was_paused, woken) = (mark.paused, mark.unrecorded);
+    *mark = Mark::of(Some(stop));
+    match stop.state() {
+        State::Paused(work) if !was_paused => Judged::Wake(format!("paused: {work}")),
+        // Its stop already woke the shepherd; only news of a pause is worth more.
+        _ if woken => Judged::Quiet,
+        // Still paused, e.g. a /loop turn: it wakes the shepherd when it finishes.
+        State::Paused(_) => Judged::Quiet,
+        State::Finished => Judged::Wake("was working".into()),
+        State::Unknown => Judged::Wake("was working, background unknown".into()),
     }
 }
 
@@ -219,13 +265,33 @@ mod tests {
 
     /// Records a stop for `name` with these in-flight tasks and crons.
     fn stop(ledger: &MemLedger, dir: &Path, name: &str, at: &str, tasks: &str, crons: &str) {
+        let input = format!(r#"{{"background_tasks":[{tasks}],"session_crons":[{crons}]}}"#);
+        stop_with(ledger, dir, name, at, &input);
+    }
+
+    /// Records a stop for `name` from this Stop hook input.
+    fn stop_with(ledger: &MemLedger, dir: &Path, name: &str, at: &str, input: &str) {
         let who = Reporter {
             own_pane: None,
             as_name: Some(name),
         };
-        let input = format!(r#"{{"background_tasks":[{tasks}],"session_crons":[{crons}]}}"#);
         let at = humantime::parse_rfc3339(at).unwrap();
         stop::record(ledger, &dirs(dir).stops, &who, input.as_bytes(), at).unwrap();
+    }
+
+    /// One member, `lh-1`, live in herdr with `status`.
+    fn one(status: AgentStatus) -> (MemLedger, FakeHerdr) {
+        let ledger = ledger(vec![member("lh-1", "w9:p1", None)]);
+        let herdr = FakeHerdr::new(&[]).with_live_agent(Some("lh-1"), None, "w9:p1");
+        herdr.set_status("lh-1", status);
+        (ledger, herdr)
+    }
+
+    fn timeout(secs: u64) -> Request<'static> {
+        Request {
+            timeout: Some(Duration::from_secs(secs)),
+            ..EVERY
+        }
     }
 
     const SHELL: &str = r#"{"id":"b1","type":"shell","status":"running","command":"sleep 240"}"#;
@@ -347,6 +413,8 @@ mod tests {
                 herdr.set_status("lh-1", AgentStatus::Done);
                 herdr.set_status("lh-2", AgentStatus::Idle);
             }
+            // A stop with no record yet waits one poll for the hook.
+            3 => {}
             _ => panic!("slept past the wake"),
         });
         assert_eq!(
@@ -577,6 +645,13 @@ mod tests {
             run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
             ["lh-1 done  (was working)", "lh-2 done  (was working)"]
         );
+
+        // lh-2's record lands after its stop already woke the shepherd.
+        stop(&ledger, dir.path(), "lh-2", "2026-11-02T08:05:43Z", "", "");
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &timeout(4), &mut steps(|_| {})),
+            None
+        );
     }
 
     #[test]
@@ -638,5 +713,179 @@ mod tests {
             }
         });
         assert_eq!(run(&herdr, &ledger, dir.path(), &req, &mut clock), None);
+    }
+
+    #[test]
+    fn a_finish_after_a_paused_wake_wakes_the_next_watch_whenever_it_lands() {
+        for written_after_polls in [0, 2] {
+            let dir = tempfile::tempdir().unwrap();
+            let (ledger, herdr) = one(AgentStatus::Working);
+            let mut clock = steps(|poll| {
+                if poll == 1 {
+                    stop(
+                        &ledger,
+                        dir.path(),
+                        "lh-1",
+                        "2026-11-02T08:05:40Z",
+                        SHELL,
+                        "",
+                    );
+                    herdr.set_status("lh-1", AgentStatus::Done);
+                }
+            });
+            assert_eq!(
+                run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
+                ["lh-1 done  (paused: 1 shell)"]
+            );
+
+            // The shepherd re-arms; the resume as `working` falls between polls.
+            let finish = || stop(&ledger, dir.path(), "lh-1", "2026-11-02T08:09:52Z", "", "");
+            if written_after_polls == 0 {
+                finish();
+            }
+            let mut clock = steps(|poll| {
+                if poll == written_after_polls {
+                    finish();
+                }
+            });
+            assert_eq!(
+                run(&herdr, &ledger, dir.path(), &timeout(60), &mut clock),
+                Some(vec!["lh-1 done  (was working)".to_string()]),
+                "finish written after {written_after_polls} polls"
+            );
+        }
+    }
+
+    #[test]
+    fn the_paused_label_survives_the_record_and_the_flip_to_done_landing_in_different_polls() {
+        for record_first in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let (ledger, herdr) = one(AgentStatus::Working);
+            let paused = || {
+                stop(
+                    &ledger,
+                    dir.path(),
+                    "lh-1",
+                    "2026-11-02T08:05:40Z",
+                    SHELL,
+                    "",
+                )
+            };
+            let done = || herdr.set_status("lh-1", AgentStatus::Done);
+
+            let mut clock = steps(|poll| match (poll, record_first) {
+                (1, true) | (2, false) => paused(),
+                (2, true) | (1, false) => done(),
+                (3, _) => {}
+                _ => panic!("slept past the wake"),
+            });
+            assert_eq!(
+                run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
+                ["lh-1 done  (paused: 1 shell)"],
+                "record first: {record_first}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_member_without_a_stop_record_still_wakes_it_one_poll_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = one(AgentStatus::Working);
+
+        let mut clock = steps(|poll| match poll {
+            1 => herdr.set_status("lh-1", AgentStatus::Idle),
+            2 => {}
+            _ => panic!("slept past the wake"),
+        });
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
+            ["lh-1 idle  (was working)"]
+        );
+
+        herdr.set_status("lh-1", AgentStatus::Working);
+        let mut clock = steps(|poll| {
+            if poll == 1 {
+                herdr.set_status("lh-1", AgentStatus::Done);
+            }
+        });
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &timeout(3), &mut clock).unwrap(),
+            ["lh-1 done  (was working)"],
+            "the timeout doesn't swallow a stop still waiting on its record"
+        );
+    }
+
+    #[test]
+    fn a_stop_whose_background_work_is_unknown_wakes_it_saying_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = one(AgentStatus::Done);
+        stop(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            "2026-11-02T08:05:40Z",
+            SHELL,
+            "",
+        );
+
+        let mut clock = steps(|poll| match poll {
+            1 => stop_with(&ledger, dir.path(), "lh-1", "2026-11-02T08:09:52Z", "{}"),
+            _ => panic!("slept past the wake"),
+        });
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
+            ["lh-1 done  (was working, background unknown)"]
+        );
+    }
+
+    #[test]
+    fn a_looping_member_wakes_it_once_when_it_pauses_and_again_when_it_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = one(AgentStatus::Working);
+        let mut clock = steps(|poll| {
+            if poll == 1 {
+                stop(
+                    &ledger,
+                    dir.path(),
+                    "lh-1",
+                    "2026-11-02T08:00:00Z",
+                    "",
+                    CRON,
+                );
+                herdr.set_status("lh-1", AgentStatus::Done);
+            }
+        });
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
+            ["lh-1 done  (paused: 1 cron)"]
+        );
+
+        // Each turn the cron fires ends paused on it again.
+        let mut clock = steps(|poll| match poll % 3 {
+            1 => herdr.set_status("lh-1", AgentStatus::Working),
+            2 => {
+                let at = format!("2026-11-02T08:{:02}:00Z", poll);
+                stop(&ledger, dir.path(), "lh-1", &at, "", CRON);
+                herdr.set_status("lh-1", AgentStatus::Done);
+            }
+            _ => {}
+        });
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &timeout(60), &mut clock),
+            None
+        );
+
+        let mut clock = steps(|poll| match poll {
+            1 => herdr.set_status("lh-1", AgentStatus::Working),
+            2 => {
+                stop(&ledger, dir.path(), "lh-1", "2026-11-02T09:00:00Z", "", "");
+                herdr.set_status("lh-1", AgentStatus::Done);
+            }
+            _ => panic!("slept past the wake"),
+        });
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
+            ["lh-1 done  (was working)"]
+        );
     }
 }

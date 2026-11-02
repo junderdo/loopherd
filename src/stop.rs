@@ -1,18 +1,17 @@
 //! Members' stop records, written by a Claude Stop hook loopherd installs, so
 //! `watch` can tell a member paused on background work from a finished one.
 
-use std::fs;
+use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::herdr::{
-    Agent, AgentStatus, Herdr, NewTab, Pane, StartOutcome, Tab, WaitOutcome, Workspace,
-};
 use crate::ledger::{Ledger, temp_path};
+use crate::lock::Lock;
 use crate::report::{Reporter, reporter};
 
 /// A member's latest stop. A `None` array is unknown, not empty.
@@ -23,10 +22,18 @@ pub struct Stop {
     pub session_crons: Option<Vec<Value>>,
 }
 
+/// What a stop says about the member's background work.
+#[derive(Debug, PartialEq)]
+pub enum State {
+    /// Work still in flight, e.g. `1 shell, 1 cron`.
+    Paused(String),
+    Finished,
+    /// The hook input lacked an array.
+    Unknown,
+}
+
 impl Stop {
-    /// What it left in flight, e.g. `1 shell, 1 cron`; `None` when nothing
-    /// is known to be.
-    pub fn paused(&self) -> Option<String> {
+    pub fn state(&self) -> State {
         let mut counts: Vec<(&str, usize)> = vec![];
         for task in self.background_tasks.iter().flatten() {
             let kind = task.get("type").and_then(Value::as_str).unwrap_or("task");
@@ -39,9 +46,65 @@ impl Stop {
         if crons > 0 {
             counts.push(("cron", crons));
         }
-        let parts: Vec<String> = counts.iter().map(|(k, n)| format!("{n} {k}")).collect();
-        (!parts.is_empty()).then(|| parts.join(", "))
+        if !counts.is_empty() {
+            let parts: Vec<String> = counts.iter().map(|(k, n)| format!("{n} {k}")).collect();
+            return State::Paused(parts.join(", "));
+        }
+        match self.background_tasks.is_some() && self.session_crons.is_some() {
+            true => State::Finished,
+            false => State::Unknown,
+        }
     }
+}
+
+/// The latest stop `watch` has judged for a member, kept across runs so a
+/// re-armed watch still sees what changed since.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Mark {
+    pub at: Option<String>,
+    pub paused: bool,
+    /// Its last stop woke watch before the hook recorded it, so the next
+    /// record is that stop's.
+    #[serde(default)]
+    pub unrecorded: bool,
+}
+
+impl Mark {
+    pub fn of(stop: Option<&Stop>) -> Mark {
+        Mark {
+            at: stop.map(|s| s.at.clone()),
+            paused: stop.is_some_and(|s| matches!(s.state(), State::Paused(_))),
+            unrecorded: false,
+        }
+    }
+}
+
+/// Runs `f` on the marks kept in `dir`, locked so concurrent watches don't
+/// lose each other's, and saves them if `f` changed any.
+pub fn with_marks<T>(dir: &Path, f: impl FnOnce(&mut BTreeMap<String, Mark>) -> T) -> Result<T> {
+    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let lock = dir.join(".marks.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock)
+        .with_context(|| format!("open {}", lock.display()))?;
+    let _lock = Lock::wait(file).with_context(|| format!("lock {}", lock.display()))?;
+    let path = dir.join(".marks");
+    let mut marks: BTreeMap<String, Mark> = match fs::read(&path) {
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+    };
+    let before = marks.clone();
+    let out = f(&mut marks);
+    if marks != before {
+        replace(&path, &serde_json::to_vec(&marks)?)?;
+    }
+    Ok(out)
 }
 
 /// Records the Stop hook `input` as the latest stop of the member `who`
@@ -66,7 +129,7 @@ pub fn record(
 }
 
 /// Writes `bytes` aside and renames them in, so a reader never sees half.
-fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
+pub fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().context("no parent directory")?;
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let tmp = temp_path(path);
@@ -90,127 +153,10 @@ pub fn latest(dir: &Path, name: &str) -> Result<Option<Stop>> {
     }
 }
 
-/// The Stop hook loopherd adds to every member it starts.
-pub struct StopHook {
-    /// Where each member's merged settings file goes.
-    pub settings: PathBuf,
-    /// The shell command the hook runs.
-    pub command: String,
-}
-
-impl StopHook {
-    /// `args` with their `--settings` replaced by one file that adds the hook
-    /// to it. Merged rather than passed alongside, since claude doesn't
-    /// document how two `--settings` flags combine.
-    fn add_to(&self, name: &str, args: &[String]) -> Result<Vec<String>> {
-        let mut theirs = None;
-        let mut rest = vec![];
-        let mut args = args.iter();
-        while let Some(arg) = args.next() {
-            match arg.strip_prefix("--settings") {
-                Some("") => {
-                    theirs = Some(args.next().context("--settings needs a value")?.as_str())
-                }
-                Some(value) if value.starts_with('=') => theirs = Some(&value[1..]),
-                _ => rest.push(arg.clone()),
-            }
-        }
-        let mut settings = match theirs {
-            Some(value) => user_settings(value)?,
-            None => serde_json::json!({}),
-        };
-        let stop = serde_json::json!({"hooks": [{"type": "command", "command": self.command}]});
-        settings
-            .as_object_mut()
-            .context("--settings is not a JSON object")?
-            .entry("hooks")
-            .or_insert_with(|| serde_json::json!({}))
-            .as_object_mut()
-            .context("--settings hooks is not a JSON object")?
-            .entry("Stop")
-            .or_insert_with(|| serde_json::json!([]))
-            .as_array_mut()
-            .context("--settings hooks.Stop is not an array")?
-            .push(stop);
-        let path = self.settings.join(format!("{name}.json"));
-        replace(&path, &serde_json::to_vec_pretty(&settings)?)?;
-        rest.extend(["--settings".into(), path.to_string_lossy().into_owned()]);
-        Ok(rest)
-    }
-}
-
-/// The user's `--settings` value: inline JSON or an absolute file path.
-fn user_settings(value: &str) -> Result<Value> {
-    if value.trim_start().starts_with('{') {
-        return serde_json::from_str(value).context("parse --settings JSON");
-    }
-    let path = Path::new(value);
-    // claude resolves a relative path from the member's cwd, which isn't ours.
-    if !path.is_absolute() {
-        bail!("--settings {value}: give an absolute path so loopherd can add its Stop hook");
-    }
-    let bytes = fs::read(path).with_context(|| format!("read --settings {value}"))?;
-    serde_json::from_slice(&bytes).with_context(|| format!("parse --settings {value}"))
-}
-
-/// A herdr that starts every Claude with `hook` added to its settings.
-pub struct Hooked<'a> {
-    pub inner: &'a dyn Herdr,
-    pub hook: StopHook,
-}
-
-impl Herdr for Hooked<'_> {
-    fn workspaces(&self) -> Result<Vec<Workspace>> {
-        self.inner.workspaces()
-    }
-    fn agents(&self) -> Result<Vec<Agent>> {
-        self.inner.agents()
-    }
-    fn agent(&self, name: &str) -> Result<Agent> {
-        self.inner.agent(name)
-    }
-    fn tabs_in(&self, workspace_id: &str) -> Result<Vec<Tab>> {
-        self.inner.tabs_in(workspace_id)
-    }
-    fn panes_in(&self, workspace_id: &str) -> Result<Vec<Pane>> {
-        self.inner.panes_in(workspace_id)
-    }
-    fn at_shell_prompt(&self, pane_id: &str) -> Result<bool> {
-        self.inner.at_shell_prompt(pane_id)
-    }
-    fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<NewTab> {
-        self.inner.create_tab(workspace_id, cwd, label)
-    }
-    fn close_tab(&self, tab_id: &str) -> Result<()> {
-        self.inner.close_tab(tab_id)
-    }
-    fn start_claude(
-        &self,
-        name: &str,
-        pane_id: &str,
-        timeout: Duration,
-        args: &[String],
-    ) -> Result<StartOutcome> {
-        let args = self.hook.add_to(name, args)?;
-        self.inner.start_claude(name, pane_id, timeout, &args)
-    }
-    fn wait(&self, name: &str, until: &[AgentStatus], timeout: Duration) -> Result<WaitOutcome> {
-        self.inner.wait(name, until, timeout)
-    }
-    fn prompt(&self, name: &str, text: &str) -> Result<()> {
-        self.inner.prompt(name, text)
-    }
-    fn focus(&self, pane_id: &str) -> Result<()> {
-        self.inner.focus(pane_id)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::herdr::fake::FakeHerdr;
     use crate::ledger::{AgentRecord, MemLedger};
-    use crate::spawn::{SpawnRequest, spawn};
 
     pub(crate) fn member(name: &str, pane: &str) -> AgentRecord {
         AgentRecord {
@@ -321,108 +267,5 @@ mod tests {
 
         assert!(err.unwrap_err().to_string().contains("not a member"));
         assert_eq!(latest(dir.path(), "lh-1").unwrap(), None);
-    }
-
-    const HOOK: &str = "'/bin/loopherd' stop-hook --ledger '/state/ledger.json'";
-
-    fn hooked<'a>(herdr: &'a FakeHerdr, settings: &Path) -> Hooked<'a> {
-        Hooked {
-            inner: herdr,
-            hook: StopHook {
-                settings: settings.into(),
-                command: HOOK.into(),
-            },
-        }
-    }
-
-    fn spawned_with(claude_args: &[&str]) -> (Vec<String>, Value, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let herdr = FakeHerdr::new(&[("w1", "loopherd")]);
-        let req = SpawnRequest {
-            repo: "/src/repo".into(),
-            name: "lh-1".into(),
-            worktree: None,
-            workspace: None,
-            prompt: None,
-            ready_timeout: Duration::from_secs(60),
-            claude_args: claude_args.iter().map(|a| a.to_string()).collect(),
-            member_of: None,
-        };
-        let mut ledger = MemLedger::default();
-        spawn(&hooked(&herdr, dir.path()), &mut ledger, &req, Some("w1")).unwrap();
-        assert_eq!(
-            ledger.0["lh-1"].claude_args, req.claude_args,
-            "ledger keeps the user's args"
-        );
-        let args = herdr.started().remove(0).args;
-        let at = args
-            .iter()
-            .rposition(|a| a == "--settings")
-            .expect("--settings");
-        let settings = fs::read(&args[at + 1]).unwrap();
-        (args, serde_json::from_slice(&settings).unwrap(), dir)
-    }
-
-    fn stop_hook() -> Value {
-        serde_json::json!({"hooks": [{"type": "command", "command": HOOK}]})
-    }
-
-    #[test]
-    fn spawn_starts_a_member_with_a_settings_file_adding_the_stop_hook() {
-        let (args, settings, dir) = spawned_with(&["--model", "opus"]);
-
-        let file = dir.path().join("lh-1.json");
-        assert_eq!(
-            args,
-            ["--model", "opus", "--settings", file.to_str().unwrap()]
-        );
-        assert_eq!(
-            settings,
-            serde_json::json!({"hooks": {"Stop": [stop_hook()]}})
-        );
-    }
-
-    #[test]
-    fn a_users_settings_file_is_merged_and_passed_once() {
-        let user = tempfile::NamedTempFile::new().unwrap();
-        let theirs = serde_json::json!({"type": "command", "command": "notify"});
-        let user_settings = serde_json::json!({
-            "model": "opus",
-            "hooks": {
-                "Stop": [{"hooks": [theirs]}],
-                "SessionStart": [{"hooks": [theirs]}],
-            },
-        });
-        fs::write(user.path(), user_settings.to_string()).unwrap();
-
-        let (args, settings, _dir) =
-            spawned_with(&["--settings", user.path().to_str().unwrap(), "--verbose"]);
-
-        assert_eq!(
-            args.iter().filter(|a| a.starts_with("--settings")).count(),
-            1
-        );
-        assert_eq!(args[0], "--verbose");
-        assert_eq!(
-            settings,
-            serde_json::json!({
-                "model": "opus",
-                "hooks": {
-                    "Stop": [{"hooks": [theirs]}, stop_hook()],
-                    "SessionStart": [{"hooks": [theirs]}],
-                },
-            })
-        );
-    }
-
-    #[test]
-    fn inline_json_settings_are_merged_too() {
-        let (args, settings, _dir) = spawned_with(&[r#"--settings={"model": "opus"}"#]);
-
-        assert_eq!(args.len(), 2);
-        assert_eq!(
-            settings,
-            serde_json::json!({"model": "opus", "hooks": {"Stop": [stop_hook()]}})
-        );
     }
 }

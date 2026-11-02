@@ -111,11 +111,12 @@ pub trait Herdr {
     /// Creates a tab without focusing it.
     fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<NewTab>;
     fn close_tab(&self, tab_id: &str) -> Result<()>;
-    /// Starts a Claude agent named `name` in `pane_id`.
+    /// Starts a Claude agent named `name` in `pane_id`, whose shell is in `cwd`.
     fn start_claude(
         &self,
         name: &str,
         pane_id: &str,
+        cwd: &Path,
         timeout: Duration,
         args: &[String],
     ) -> Result<StartOutcome>;
@@ -392,6 +393,7 @@ impl Herdr for CliHerdr {
         &self,
         name: &str,
         pane_id: &str,
+        _cwd: &Path,
         timeout: Duration,
         args: &[String],
     ) -> Result<StartOutcome> {

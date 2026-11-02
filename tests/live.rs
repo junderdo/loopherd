@@ -221,6 +221,14 @@ fn herdr_ok(args: &[&str]) -> Value {
     json(&out)
 }
 
+/// The member was started through loopherd's Stop hook.
+fn assert_hooked(state: &Path, name: &str) {
+    let file = state.join(format!("loopherd/settings/{name}.json"));
+    let settings =
+        std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+    assert!(settings.contains("stop-hook --ledger"), "{settings}");
+}
+
 fn ledger_entry(state: &Path, name: &str) -> Value {
     let text = std::fs::read_to_string(state.join("loopherd/ledger.json")).unwrap();
     serde_json::from_str::<Value>(&text).unwrap()[name].clone()
@@ -416,6 +424,8 @@ fn revives_an_agent_whose_tab_was_closed_under_its_name_and_session() {
         .to_string();
     herdr_ok(&["tab", "close", &tab]);
 
+    // Spawn wrote one too; revive must write its own.
+    std::fs::remove_file(state.path().join(format!("loopherd/settings/{name}.json"))).unwrap();
     let out = revive(state.path(), &["--name", &name]);
 
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -436,6 +446,7 @@ fn revives_an_agent_whose_tab_was_closed_under_its_name_and_session() {
     assert_ne!(agent["tab_id"], tab.as_str());
     let pane = agent["pane_id"].as_str().unwrap();
     assert!(stdout.starts_with(&format!("{prefix}{pane}")), "{stdout}");
+    assert_hooked(state.path(), &name);
     assert_eq!(ledger_entry(state.path(), &name)["pane_id"], pane);
 
     let again = revive(state.path(), &["--name", &name]);
@@ -484,6 +495,7 @@ fn adds_a_member_from_a_temp_herd_file() {
     assert_eq!(entry["herd"], herd.as_str());
     assert_eq!(entry["template"], "echo");
     assert_eq!(entry["prompt_sent"], true);
+    assert_hooked(state.path(), &name);
     assert_eq!(
         entry["prompt"],
         format!("You're {name} in {herd}. Reply with just the word ok.").as_str()
@@ -637,6 +649,7 @@ fn feed_fills_a_slot_then_reaps_the_member_once_its_done_check_passes() {
         stdout,
         format!("added {name}\n{herd}: 0 retired, 1 added, 0 skipped, 0 errors\n")
     );
+    assert_hooked(state.path(), &name);
     let tab = herdr_ok(&["agent", "get", &name])["result"]["agent"]["tab_id"]
         .as_str()
         .unwrap()

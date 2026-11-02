@@ -164,7 +164,7 @@ pub fn spawn(
         None => None,
     };
 
-    let readiness = match start_until_ready(herdr, req, &tab) {
+    let readiness = match start_until_ready(herdr, req, &tab, cwd) {
         Ok(r) => r,
         Err(e) => return Err(close_after_failure(herdr, &tab, e.context("start"))),
     };
@@ -366,11 +366,22 @@ fn resolve_workspace(
     }
 }
 
-fn start_until_ready(herdr: &dyn Herdr, req: &SpawnRequest, tab: &NewTab) -> Result<Readiness> {
+fn start_until_ready(
+    herdr: &dyn Herdr,
+    req: &SpawnRequest,
+    tab: &NewTab,
+    cwd: &Path,
+) -> Result<Readiness> {
     // The shell's rc files get their own ready_timeout, not a cut of Claude's.
     wait_for_shell_prompt(herdr, &tab.pane_id, req.ready_timeout, SHELL_POLL)?;
     let deadline = Instant::now() + req.ready_timeout;
-    match herdr.start_claude(&req.name, &tab.pane_id, req.ready_timeout, &req.claude_args)? {
+    match herdr.start_claude(
+        &req.name,
+        &tab.pane_id,
+        cwd,
+        req.ready_timeout,
+        &req.claude_args,
+    )? {
         StartOutcome::Ready(agent) => return Ok(Readiness::Ready(agent)),
         StartOutcome::Blocked => {}
     }

@@ -378,6 +378,7 @@ impl Herdr for FakeHerdr {
         &self,
         name: &str,
         pane_id: &str,
+        _cwd: &Path,
         _timeout: Duration,
         args: &[String],
     ) -> Result<StartOutcome> {

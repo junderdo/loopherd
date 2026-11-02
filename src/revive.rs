@@ -237,7 +237,7 @@ fn revive_one(
         Some(_) => wait_for_shell_prompt(herdr, &pane_id, req.start_timeout, req.poll_interval),
         None => Ok(()),
     }
-    .and_then(|()| herdr.start_claude(&record.name, &pane_id, req.start_timeout, &args));
+    .and_then(|()| herdr.start_claude(&record.name, &pane_id, cwd, req.start_timeout, &args));
     match started {
         Ok(StartOutcome::Ready(agent)) => Outcome::Started {
             pane_id,
@@ -302,8 +302,8 @@ mod tests {
     use super::*;
     use crate::herdr::AgentStatus;
     use crate::herdr::fake::{FakeHerdr, Startup};
+    use crate::hook::{Hooked, StopHook};
     use crate::ledger::{AgentRecord, MemLedger};
-    use crate::stop::{Hooked, StopHook};
     use std::fs;
 
     fn request() -> ReviveRequest {
@@ -509,42 +509,36 @@ mod tests {
     }
 
     #[test]
-    fn a_revived_member_resumes_with_the_stop_hook_added() {
+    fn a_revived_member_resumes_with_the_stop_hook_merged_into_its_relative_settings() {
         let cwd = tempfile::tempdir().unwrap();
-        let settings = tempfile::tempdir().unwrap();
+        fs::write(cwd.path().join("mine.json"), r#"{"model": "opus"}"#).unwrap();
+        let state = tempfile::tempdir().unwrap();
         let herdr = herdr();
+        let ledger_path = state.path().join("ledger.json");
         let hooked = Hooked {
             inner: &herdr,
-            hook: StopHook {
-                settings: settings.path().into(),
-                command: "loopherd stop-hook".into(),
-            },
+            hook: StopHook::new(Path::new("/bin/loopherd"), &ledger_path).unwrap(),
         };
         let mut ledger = ledger([AgentRecord {
             pane_id: "w1:p7".into(),
+            // Spawned before loopherd added its hook, with claude's own cwd-relative path.
+            claude_args: vec!["--settings".into(), "mine.json".into()],
             ..record("a", cwd.path())
         }]);
 
-        revive(&hooked, &mut ledger, &request()).unwrap();
+        let (out, code) = revive(&hooked, &mut ledger, &request()).unwrap().report();
 
-        let file = settings.path().join("a.json");
+        assert_eq!((out.as_str(), code), ("resumed a w1:p1", 0));
+        let file = state.path().join("settings/a.json");
         assert_eq!(
             herdr.started()[0].args,
-            [
-                "--resume",
-                "sess-a",
-                "--model",
-                "opus",
-                "--settings",
-                file.to_str().unwrap()
-            ]
+            ["--resume", "sess-a", "--settings", file.to_str().unwrap()]
         );
-        assert!(
-            fs::read_to_string(&file)
-                .unwrap()
-                .contains("loopherd stop-hook")
-        );
-        assert_eq!(ledger.0["a"].claude_args, ["--model", "opus"]);
+        let settings: serde_json::Value =
+            serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        assert_eq!(settings["model"], "opus");
+        assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert_eq!(ledger.0["a"].claude_args, ["--settings", "mine.json"]);
     }
 
     #[test]

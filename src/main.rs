@@ -2,6 +2,7 @@ mod feed;
 mod herd;
 mod herd_view;
 mod herdr;
+mod hook;
 mod ledger;
 mod lock;
 mod matching;
@@ -30,6 +31,7 @@ use crate::feed::{FeedRequest, feed};
 use crate::herd::{AddRequest, Paths, add, dry_run, herds};
 use crate::herd_view::Options;
 use crate::herdr::CliHerdr;
+use crate::hook::{Hooked, StopHook};
 use crate::ledger::FileLedger;
 use crate::prompt::prompt;
 use crate::report::{Filter, Kind, Reporter, report, reports};
@@ -37,7 +39,6 @@ use crate::retire::{retire, retire_and_close};
 use crate::revive::{ReviveRequest, revive};
 use crate::spawn::{Checkout, Prompt, SpawnRequest, spawn};
 use crate::status::{Format, status};
-use crate::stop::{Hooked, StopHook};
 use crate::worktree::{remote_timeout, repo_root};
 
 #[derive(Parser)]
@@ -401,18 +402,9 @@ fn run_stop_hook(ledger: PathBuf) -> Result<i32> {
 fn hooked(herdr: &dyn herdr::Herdr) -> Result<Hooked<'_>> {
     let ledger = FileLedger::default_path().context("ledger")?;
     let exe = std::env::current_exe().context("locate the loopherd binary")?;
-    let command = format!(
-        "{} stop-hook --ledger {}",
-        shell::quote(&exe.to_string_lossy()),
-        shell::quote(&ledger.to_string_lossy()),
-    );
-    let settings = ledger
-        .parent()
-        .context("ledger path has no parent")?
-        .join("settings");
     Ok(Hooked {
         inner: herdr,
-        hook: StopHook { settings, command },
+        hook: StopHook::new(&exe, &ledger)?,
     })
 }
 
