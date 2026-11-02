@@ -9,7 +9,7 @@ use anyhow::Result;
 use crate::herd_view::{Member, Options, View};
 use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::Ledger;
-use crate::report::{Filter, Read, reports};
+use crate::report::{Filter, Kind, Read, reports};
 use crate::status;
 
 pub trait Clock {
@@ -55,7 +55,12 @@ pub fn watch(
 ) -> Result<Option<Vec<String>>> {
     // Each member's last known status; an unreadable poll keeps it.
     let mut last: HashMap<String, AgentStatus> = HashMap::new();
+    // Reports are consumed as read, so whether one came since a member went
+    // working is only known from what this run saw.
+    let mut went_working: HashMap<String, u64> = HashMap::new();
+    let mut reported: HashMap<String, u64> = HashMap::new();
     let mut code = 0;
+    let mut poll: u64 = 0;
     loop {
         let read = status::read_statuses(herdr, ledger, Options::default())?;
         if read.code != code {
@@ -68,10 +73,7 @@ pub fn watch(
         let names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
         let read = match names.is_empty() {
             // An empty filter means every mailbox.
-            true => Read {
-                lines: vec![],
-                warnings: vec![],
-            },
+            true => Read::default(),
             false => reports(
                 ledger,
                 dir,
@@ -85,12 +87,25 @@ pub fn watch(
         read.warnings
             .iter()
             .for_each(|w| warn(&format!("warning: {w}")));
+        for (name, kind) in read.senders {
+            if kind != Kind::Note {
+                reported.insert(name, poll);
+            }
+        }
         let mut lines = read.lines;
         for member in &members {
             let was = last.get(&member.name).copied();
+            let stopped = |now: &str| {
+                let since = went_working.get(&member.name);
+                let note = match reported.get(&member.name) >= since {
+                    true => "",
+                    false => ", no report",
+                };
+                format!("{} {now}  (was working{note})", member.name)
+            };
             if member.gone {
                 if was == Some(AgentStatus::Working) {
-                    lines.push(format!("{} gone  (was working)", member.name));
+                    lines.push(stopped("gone"));
                 }
                 continue;
             }
@@ -102,7 +117,10 @@ pub fn watch(
                 now @ (AgentStatus::Done | AgentStatus::Idle)
                     if was == Some(AgentStatus::Working) =>
                 {
-                    lines.push(format!("{} {}  (was working)", member.name, now.as_str()))
+                    lines.push(stopped(now.as_str()))
+                }
+                AgentStatus::Working if was != Some(AgentStatus::Working) => {
+                    went_working.insert(member.name.clone(), poll);
                 }
                 _ => {}
             }
@@ -118,6 +136,7 @@ pub fn watch(
             return Ok(None);
         }
         clock.sleep(left.map_or(req.poll, |left| left.min(req.poll)));
+        poll += 1;
     }
 }
 
@@ -140,7 +159,7 @@ mod tests {
     use super::*;
     use crate::herdr::fake::FakeHerdr;
     use crate::ledger::{AgentRecord, MemLedger};
-    use crate::report::{Kind, Reporter, report};
+    use crate::report::{Reporter, report};
 
     fn member(name: &str, pane: &str, herd: Option<&str>) -> AgentRecord {
         AgentRecord {
@@ -297,7 +316,10 @@ mod tests {
         });
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
-            ["lh-1 done  (was working)", "lh-2 idle  (was working)"]
+            [
+                "lh-1 done  (was working, no report)",
+                "lh-2 idle  (was working, no report)"
+            ]
         );
     }
 
@@ -433,7 +455,113 @@ mod tests {
         });
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
-            ["lh-1 gone  (was working)"]
+            ["lh-1 gone  (was working, no report)"]
+        );
+    }
+
+    fn working_pair() -> (MemLedger, FakeHerdr) {
+        let ledger = ledger(vec![
+            member("lh-1", "w9:p1", None),
+            member("lh-2", "w9:p2", None),
+        ]);
+        let herdr = FakeHerdr::new(&[])
+            .with_live_agent(Some("lh-1"), None, "w9:p1")
+            .with_live_agent(Some("lh-2"), None, "w9:p2");
+        herdr.set_status("lh-1", AgentStatus::Working);
+        herdr.set_status("lh-2", AgentStatus::Working);
+        (ledger, herdr)
+    }
+
+    #[test]
+    fn a_report_filed_before_the_stop_keeps_the_plain_wake() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = working_pair();
+
+        let mut clock = steps(|poll| match poll {
+            1 => {}
+            2 => {
+                send(&ledger, dir.path(), "lh-1", Kind::Done, "PR #9");
+                send(&ledger, dir.path(), "lh-2", Kind::Question, "which DB?");
+                herdr.set_status("lh-1", AgentStatus::Idle);
+                herdr.set_status("lh-2", AgentStatus::Idle);
+            }
+            _ => panic!("slept past the wake"),
+        });
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
+            [
+                "lh-2 question 2026-11-01 09:00 which DB?",
+                "lh-1 done 2026-11-01 09:00 PR #9",
+                "lh-1 idle  (was working)",
+                "lh-2 idle  (was working)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_report_filed_after_the_stop_still_counts_when_read_in_the_same_poll() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = working_pair();
+
+        let mut clock = steps(|poll| match poll {
+            1 => {}
+            2 => {
+                herdr.set_status("lh-1", AgentStatus::Done);
+                send(&ledger, dir.path(), "lh-1", Kind::Done, "PR #9");
+            }
+            _ => panic!("slept past the wake"),
+        });
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
+            [
+                "lh-1 done 2026-11-01 09:00 PR #9",
+                "lh-1 done  (was working)"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_report_filed_after_the_wake_is_left_for_the_next_watch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = working_pair();
+
+        let mut clock = steps(|poll| match poll {
+            1 => herdr.set_status("lh-1", AgentStatus::Idle),
+            _ => panic!("slept past the wake"),
+        });
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
+            ["lh-1 idle  (was working, no report)"]
+        );
+
+        send(&ledger, dir.path(), "lh-1", Kind::Done, "PR #9");
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut steps(|_| {})).unwrap(),
+            ["lh-1 done 2026-11-01 09:00 PR #9"]
+        );
+    }
+
+    #[test]
+    fn notes_and_other_members_reports_do_not_count_as_a_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = working_pair();
+
+        let mut clock = steps(|poll| match poll {
+            1 => {}
+            2 => {
+                send(&ledger, dir.path(), "lh-1", Kind::Note, "pausing");
+                send(&ledger, dir.path(), "lh-2", Kind::Done, "PR #9");
+                herdr.set_status("lh-1", AgentStatus::Idle);
+            }
+            _ => panic!("slept past the wake"),
+        });
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
+            [
+                "lh-1 note 2026-11-01 09:00 pausing",
+                "lh-2 done 2026-11-01 09:00 PR #9",
+                "lh-1 idle  (was working, no report)",
+            ]
         );
     }
 }
