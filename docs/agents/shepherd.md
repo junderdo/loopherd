@@ -33,19 +33,30 @@ session. Read `herdr --skill` before controlling herdr.
    member leaves a report, goes `blocked`, or goes from `working` to `done`,
    `idle` or `gone` (its pane disappeared), printing a line per event and
    marking the reports it prints read. Only changes wake it: a member
-   already `blocked` or `done` when the watch starts wakes it only by a
-   report, so on starting a session run `loopherd status` first to catch
-   members already blocked. Exit 2 means the timeout passed with nothing to
-   do. Start the next watch after handling every wake. It dies with the
-   shepherd's session.
+   already `blocked` when the watch starts wakes it only by a report, so on
+   starting a session run `loopherd status` first to catch members already
+   blocked. A stop recorded since the last watch judged it still wakes the
+   next one, so a member that finished between watches isn't lost. Exit 2
+   means the timeout passed with nothing to do. Start the next watch after
+   handling every wake. It dies with the shepherd's session.
    A line ending `(paused: 1 shell)` means the member stopped with
    background work still running (shells, subagents, crons), so it isn't
-   finished: leave it. Its real finish wakes a later watch as
-   `(was working)`. Members spawned before loopherd installed its Stop hook
-   never show as paused.
+   finished: leave it. It stays quiet while it remains paused, so a `/loop`
+   member wakes the watch once, not every turn. Its real finish wakes a
+   later watch as `(was working…)`. `background unknown` in that line means
+   the stop didn't say what was in flight. Only members loopherd started
+   (`spawn`, `add`, `feed`, `revive`) have the Stop hook. One started before
+   the hook existed, or one herdr auto-resumed after a server restart
+   (herdr relaunches it as bare `claude --resume <id>`), never shows as
+   paused.
 3. **On wake,** read the watch's lines and the card (`loopherd reports
-   --all` for report history). A member that left none: read its screen
-   (`herdr agent read lh-<n> --source recent-unwrapped --lines 40`).
+   --all` for report history). `(was working, no report)` means the watch
+   read no `done` or `question` from that member in the poll where it
+   stopped. A report an earlier watch printed doesn't count, so check the
+   history before calling it a false stop. A plain `loopherd reports` while
+   a watch is armed consumes reports the watch would have used, so look with
+   `reports --all`. A member that left none: read
+   its screen (`herdr agent read lh-<n> --source recent-unwrapped --lines 40`).
    `blocked` means a dialog only the human answers (D10): tell them.
    A card back in Backlog with `need-human` carries the question.
 4. **Verify** a card in Review with a read-only subagent against the card's

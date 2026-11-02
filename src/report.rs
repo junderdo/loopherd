@@ -111,9 +111,12 @@ pub fn reporter(ledger: &dyn Ledger, who: &Reporter) -> Result<String> {
         .ok_or_else(|| anyhow!("pane {pane} is not a member"))
 }
 
+#[derive(Default)]
 pub struct Read {
     pub lines: Vec<String>,
     pub warnings: Vec<String>,
+    /// Who sent each report read, and its kind.
+    pub senders: Vec<(String, Kind)>,
 }
 
 pub struct Filter<'a> {
@@ -128,10 +131,7 @@ pub struct Filter<'a> {
 pub fn reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<Read> {
     let mut names = mailboxes(dir)?;
     if names.is_empty() {
-        return Ok(Read {
-            lines: vec![],
-            warnings: vec![],
-        });
+        return Ok(Read::default());
     }
     if !filter.names.is_empty() {
         names.retain(|n| filter.names.contains(n));
@@ -187,6 +187,10 @@ pub fn reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<Read>
             .flat_map(|(name, line)| render(name, line))
             .collect(),
         warnings,
+        senders: found
+            .into_iter()
+            .map(|(name, line)| (name, line.kind))
+            .collect(),
     })
 }
 

@@ -1,6 +1,6 @@
 //! `loopherd watch`: block until a member needs the shepherd.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -9,7 +9,7 @@ use anyhow::Result;
 use crate::herd_view::{Member, Options, View};
 use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::Ledger;
-use crate::report::{Filter, Read, reports};
+use crate::report::{Filter, Kind, Read, reports};
 use crate::status;
 use crate::stop::{self, Mark, State, Stop};
 
@@ -77,10 +77,7 @@ pub fn watch(
         let names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
         let read = match names.is_empty() {
             // An empty filter means every mailbox.
-            true => Read {
-                lines: vec![],
-                warnings: vec![],
-            },
+            true => Read::default(),
             false => reports(
                 ledger,
                 &dirs.reports,
@@ -94,6 +91,13 @@ pub fn watch(
         read.warnings
             .iter()
             .for_each(|w| warn(&format!("warning: {w}")));
+        // Any report read ends this run, so only this poll's can precede a stop.
+        let reported: HashSet<String> = read
+            .senders
+            .into_iter()
+            .filter(|(_, kind)| *kind != Kind::Note)
+            .map(|(name, _)| name)
+            .collect();
         let mut lines = read.lines;
         let waited = std::mem::take(&mut awaiting);
         let left = req.timeout.map(|t| t.saturating_sub(clock.elapsed()));
@@ -104,7 +108,7 @@ pub fn watch(
                 let was = last.get(name).copied();
                 if member.gone {
                     if was == Some(AgentStatus::Working) {
-                        lines.push(format!("{name} gone  (was working)"));
+                        lines.push(stopped(&reported, name, "gone", ""));
                     }
                     continue;
                 }
@@ -119,10 +123,14 @@ pub fn watch(
                         lines.push(format!("{name} blocked"))
                     }
                     now @ (AgentStatus::Done | AgentStatus::Idle) => {
-                        let stopped = was == Some(AgentStatus::Working);
-                        match judge(stop.as_ref(), mark, stopped, waited.contains_key(name)) {
-                            Judged::Wake(why) => {
-                                lines.push(format!("{name} {}  ({why})", now.as_str()))
+                        let seen = was == Some(AgentStatus::Working);
+                        match judge(stop.as_ref(), mark, seen, waited.contains_key(name)) {
+                            // Not a finish, so no report is expected yet.
+                            Judged::Paused(work) => {
+                                lines.push(format!("{name} {}  (paused: {work})", now.as_str()))
+                            }
+                            Judged::Stopped(also) => {
+                                lines.push(stopped(&reported, name, now.as_str(), also))
                             }
                             Judged::Await => {
                                 awaiting.insert(name.clone(), now);
@@ -141,7 +149,7 @@ pub fn watch(
                 let mut flushed: Vec<_> = awaiting.drain().collect();
                 flushed.sort_by(|a, b| a.0.cmp(&b.0));
                 for (name, now) in flushed {
-                    lines.push(format!("{name} {}  (was working)", now.as_str()));
+                    lines.push(stopped(&reported, &name, now.as_str(), ""));
                     marks.entry(name).or_default().unrecorded = true;
                 }
             }
@@ -156,8 +164,20 @@ pub fn watch(
     }
 }
 
+/// A finished stop's wake line; `also` adds to its note.
+fn stopped(reported: &HashSet<String>, name: &str, now: &str, also: &str) -> String {
+    let note = match reported.contains(name) {
+        true => "",
+        false => ", no report",
+    };
+    format!("{name} {now}  (was working{also}{note})")
+}
+
 enum Judged {
-    Wake(String),
+    /// Background work in flight, e.g. `1 shell`.
+    Paused(String),
+    /// Finished, with `also` to add to its note.
+    Stopped(&'static str),
     /// Seen stopping, but the hook hasn't written its record yet.
     Await,
     Quiet,
@@ -172,7 +192,7 @@ fn judge(stop: Option<&Stop>, mark: &mut Mark, stopped: bool, awaited: bool) -> 
             // No hook (spawned before it), or it failed: wake as before.
             (_, true) => {
                 mark.unrecorded = true;
-                Judged::Wake("was working".into())
+                Judged::Stopped("")
             }
             (true, false) => Judged::Await,
             (false, false) => Judged::Quiet,
@@ -181,13 +201,13 @@ fn judge(stop: Option<&Stop>, mark: &mut Mark, stopped: bool, awaited: bool) -> 
     let (was_paused, woken) = (mark.paused, mark.unrecorded);
     *mark = Mark::of(Some(stop));
     match stop.state() {
-        State::Paused(work) if !was_paused => Judged::Wake(format!("paused: {work}")),
+        State::Paused(work) if !was_paused => Judged::Paused(work),
         // Its stop already woke the shepherd; only news of a pause is worth more.
         _ if woken => Judged::Quiet,
         // Still paused, e.g. a /loop turn: it wakes the shepherd when it finishes.
         State::Paused(_) => Judged::Quiet,
-        State::Finished => Judged::Wake("was working".into()),
-        State::Unknown => Judged::Wake("was working, background unknown".into()),
+        State::Finished => Judged::Stopped(""),
+        State::Unknown => Judged::Stopped(", background unknown"),
     }
 }
 
@@ -218,7 +238,7 @@ mod tests {
     use super::*;
     use crate::herdr::fake::FakeHerdr;
     use crate::ledger::{AgentRecord, MemLedger};
-    use crate::report::{Kind, Reporter, report};
+    use crate::report::{Reporter, report};
     use crate::stop;
 
     fn member(name: &str, pane: &str, herd: Option<&str>) -> AgentRecord {
@@ -419,7 +439,10 @@ mod tests {
         });
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
-            ["lh-1 done  (was working)", "lh-2 idle  (was working)"]
+            [
+                "lh-1 done  (was working, no report)",
+                "lh-2 idle  (was working, no report)"
+            ]
         );
     }
 
@@ -560,7 +583,93 @@ mod tests {
         });
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
-            ["lh-1 gone  (was working)"]
+            ["lh-1 gone  (was working, no report)"]
+        );
+    }
+
+    fn working_pair() -> (MemLedger, FakeHerdr) {
+        let ledger = ledger(vec![
+            member("lh-1", "w9:p1", None),
+            member("lh-2", "w9:p2", None),
+        ]);
+        let herdr = FakeHerdr::new(&[])
+            .with_live_agent(Some("lh-1"), None, "w9:p1")
+            .with_live_agent(Some("lh-2"), None, "w9:p2");
+        herdr.set_status("lh-1", AgentStatus::Working);
+        herdr.set_status("lh-2", AgentStatus::Working);
+        (ledger, herdr)
+    }
+
+    #[test]
+    fn a_report_read_in_the_poll_of_the_stop_keeps_the_plain_wake() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = working_pair();
+
+        let mut clock = steps(|poll| match poll {
+            1 => {}
+            2 => {
+                send(&ledger, dir.path(), "lh-1", Kind::Done, "PR #9");
+                send(&ledger, dir.path(), "lh-2", Kind::Question, "which DB?");
+                herdr.set_status("lh-1", AgentStatus::Idle);
+                herdr.set_status("lh-2", AgentStatus::Idle);
+            }
+            _ => panic!("slept past the wake"),
+        });
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
+            [
+                "lh-2 question 2026-11-01 09:00 which DB?",
+                "lh-1 done 2026-11-01 09:00 PR #9",
+                "lh-1 idle  (was working)",
+                "lh-2 idle  (was working)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_report_consumed_by_an_earlier_watch_does_not_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = working_pair();
+        send(&ledger, dir.path(), "lh-1", Kind::Done, "PR #9");
+
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut steps(|_| {})).unwrap(),
+            ["lh-1 done 2026-11-01 09:00 PR #9"]
+        );
+
+        let mut clock = steps(|poll| match poll {
+            1 => herdr.set_status("lh-1", AgentStatus::Idle),
+            // A stop with no record yet waits one poll for the hook.
+            2 => {}
+            _ => panic!("slept past the wake"),
+        });
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
+            ["lh-1 idle  (was working, no report)"]
+        );
+    }
+
+    #[test]
+    fn notes_and_other_members_reports_do_not_count_as_a_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = working_pair();
+
+        let mut clock = steps(|poll| match poll {
+            1 => {}
+            2 => {
+                send(&ledger, dir.path(), "lh-1", Kind::Note, "pausing");
+                send(&ledger, dir.path(), "lh-2", Kind::Done, "PR #9");
+                herdr.set_status("lh-1", AgentStatus::Idle);
+            }
+            _ => panic!("slept past the wake"),
+        });
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
+            [
+                "lh-1 note 2026-11-01 09:00 pausing",
+                "lh-2 done 2026-11-01 09:00 PR #9",
+                "lh-1 idle  (was working, no report)",
+            ]
         );
     }
 
@@ -643,7 +752,10 @@ mod tests {
         });
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
-            ["lh-1 done  (was working)", "lh-2 done  (was working)"]
+            [
+                "lh-1 done  (was working, no report)",
+                "lh-2 done  (was working, no report)"
+            ]
         );
 
         // lh-2's record lands after its stop already woke the shepherd.
@@ -677,7 +789,7 @@ mod tests {
         });
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
-            ["lh-1 done  (was working)"]
+            ["lh-1 done  (was working, no report)"]
         );
     }
 
@@ -750,7 +862,7 @@ mod tests {
             });
             assert_eq!(
                 run(&herdr, &ledger, dir.path(), &timeout(60), &mut clock),
-                Some(vec!["lh-1 done  (was working)".to_string()]),
+                Some(vec!["lh-1 done  (was working, no report)".to_string()]),
                 "finish written after {written_after_polls} polls"
             );
         }
@@ -799,7 +911,7 @@ mod tests {
         });
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
-            ["lh-1 idle  (was working)"]
+            ["lh-1 idle  (was working, no report)"]
         );
 
         herdr.set_status("lh-1", AgentStatus::Working);
@@ -810,7 +922,7 @@ mod tests {
         });
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &timeout(3), &mut clock).unwrap(),
-            ["lh-1 done  (was working)"],
+            ["lh-1 done  (was working, no report)"],
             "the timeout doesn't swallow a stop still waiting on its record"
         );
     }
@@ -834,7 +946,7 @@ mod tests {
         });
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
-            ["lh-1 done  (was working, background unknown)"]
+            ["lh-1 done  (was working, background unknown, no report)"]
         );
     }
 
@@ -885,7 +997,7 @@ mod tests {
         });
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
-            ["lh-1 done  (was working)"]
+            ["lh-1 done  (was working, no report)"]
         );
     }
 }

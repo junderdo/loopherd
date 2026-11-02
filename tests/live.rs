@@ -332,7 +332,8 @@ fn watch_shows_a_member_paused_on_a_background_shell_then_its_finish() {
         "{paused}"
     );
     assert!(
-        finished.starts_with(&paused_re) && finished.trim_end().ends_with("(was working)"),
+        finished.starts_with(&paused_re)
+            && finished.trim_end().ends_with("(was working, no report)"),
         "{finished}\nlast stop: {stop:?}"
     );
 }
