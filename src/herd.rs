@@ -7,8 +7,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::feed::lock;
 use crate::herdr::Herdr;
-use crate::ledger::{AgentRecord, Ledger};
+use crate::ledger::{AgentRecord, FileLedger, Ledger};
 use crate::spawn::{Checkout, MemberOf, Prompt, SpawnRequest, Spawned, preview, spawn};
 use crate::template::Template;
 
@@ -51,10 +52,12 @@ struct TemplateFile {
     done: Option<String>,
 }
 
-/// Where herd files live, and the home a leading `~` expands to.
+/// Where herd files live, the home a leading `~` expands to, and the lock
+/// that keeps `feed` and `add` from filling a queue's slots at once.
 pub struct Paths {
     pub herds: PathBuf,
     pub home: PathBuf,
+    pub feed_lock: PathBuf,
 }
 
 impl Paths {
@@ -71,6 +74,7 @@ impl Paths {
         Ok(Paths {
             herds: config.join("herds"),
             home,
+            feed_lock: FileLedger::default_path()?.with_file_name("feed.lock"),
         })
     }
 }
@@ -84,17 +88,57 @@ pub struct AddRequest {
     pub ready_timeout: Duration,
 }
 
-/// Spawns a member of `req.herd`; returns its name with the outcome.
+#[derive(Debug)]
+pub struct Added {
+    pub name: String,
+    pub spawned: Spawned,
+    /// Set when the member took the herd past its queue's `max`.
+    pub warning: Option<String>,
+}
+
+/// Spawns a member of `req.herd`.
+///
+/// Into a herd with a `[queue]`, fails while `feed` runs, and adds past the
+/// queue's `max` with a warning: `add` is the human's override.
 pub fn add(
     herdr: &dyn Herdr,
     ledger: &mut dyn Ledger,
     paths: &Paths,
     req: &AddRequest,
     inherited_workspace: Option<&str>,
-) -> Result<(String, Spawned)> {
+) -> Result<Added> {
     let spawn_req = resolve(paths, req)?;
+    let max = load(&paths.herds, &req.herd)
+        .context("herd")?
+        .queue
+        .map(|q| q.max as usize);
+    let _feed = max.map(|_| lock(&paths.feed_lock)).transpose()?;
+    let held = match max {
+        Some(_) => members(ledger, &req.herd)?,
+        None => 0,
+    };
     let spawned = spawn(herdr, ledger, &spawn_req, inherited_workspace)?;
-    Ok((spawn_req.name, spawned))
+    let warning = max.filter(|&max| held >= max).map(|max| {
+        format!(
+            "{} now has {} members, past its queue max of {max}",
+            req.herd,
+            held + 1
+        )
+    });
+    Ok(Added {
+        name: spawn_req.name,
+        spawned,
+        warning,
+    })
+}
+
+/// How many unretired ledger entries belong to `herd`.
+pub fn members(ledger: &dyn Ledger, herd: &str) -> Result<usize> {
+    let entries = ledger.entries().context("ledger")?;
+    Ok(entries
+        .values()
+        .filter(|e| !e.retired && e.herd.as_deref() == Some(herd))
+        .count())
 }
 
 /// What `add` would do, one `key value` line each, then the prompt.
@@ -547,6 +591,7 @@ args = ["--model", "opus"]
             Paths {
                 herds: self.dir.path().join("herds"),
                 home: PathBuf::from("/home/me"),
+                feed_lock: self.dir.path().join("feed.lock"),
             }
         }
 
@@ -575,7 +620,7 @@ args = ["--model", "opus"]
         let herdr = herdr();
         let mut ledger = MemLedger::default();
 
-        let (name, spawned) = add(
+        let Added { name, spawned, .. } = add(
             &herdr,
             &mut ledger,
             &config.paths(),
@@ -602,6 +647,82 @@ args = ["--model", "opus"]
         let rec = &ledger.0["zpr-1050"];
         assert_eq!(rec.herd.as_deref(), Some("prs"));
         assert_eq!(rec.template.as_deref(), Some("pr"));
+    }
+
+    fn queue_herd(max: i64) -> String {
+        format!("{PR_HERD}\n[queue]\ntemplate = \"pr\"\nsource = \"true\"\nmax = {max}\n")
+    }
+
+    #[test]
+    fn add_into_a_queue_herd_is_refused_while_feed_runs() {
+        let config = Config::with(&[("prs", &queue_herd(5))]);
+        let _feed = crate::feed::lock(&config.paths().feed_lock).unwrap();
+        let err = add_err(&config, &request("prs", "pr", &["1"]));
+        assert_eq!(err, "feed already running");
+    }
+
+    #[test]
+    fn add_into_a_herd_without_a_queue_ignores_a_running_feed() {
+        let config = Config::with(&[("prs", PR_HERD)]);
+        let _feed = crate::feed::lock(&config.paths().feed_lock).unwrap();
+        let (herdr, _, name) = add_ok(&config, &request("prs", "pr", &["1"]));
+        assert_eq!(name, "zpr-1");
+        assert_eq!(herdr.tabs().len(), 1);
+    }
+
+    #[test]
+    fn add_past_a_queue_max_still_adds_with_a_warning() {
+        let config = Config::with(&[("prs", &queue_herd(1))]);
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        let mut add_pr = |number| {
+            add(
+                &herdr,
+                &mut ledger,
+                &config.paths(),
+                &request("prs", "pr", &[number]),
+                Some("w1"),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(add_pr("1").warning, None);
+        let past = add_pr("2");
+
+        assert_eq!(past.name, "zpr-2");
+        assert_eq!(
+            past.warning.as_deref(),
+            Some("prs now has 2 members, past its queue max of 1")
+        );
+        assert_eq!(herdr.tabs().len(), 2);
+    }
+
+    #[test]
+    fn a_retired_member_frees_its_queue_slot_for_add() {
+        let config = Config::with(&[("prs", &queue_herd(1))]);
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        let paths = config.paths();
+        add(
+            &herdr,
+            &mut ledger,
+            &paths,
+            &request("prs", "pr", &["1"]),
+            Some("w1"),
+        )
+        .unwrap();
+        ledger.0.get_mut("zpr-1").unwrap().retired = true;
+
+        let added = add(
+            &herdr,
+            &mut ledger,
+            &paths,
+            &request("prs", "pr", &["2"]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert_eq!(added.warning, None);
     }
 
     fn add_err(config: &Config, req: &AddRequest) -> String {
@@ -708,7 +829,8 @@ args = ["--model", "opus"]
     fn add_ok(config: &Config, req: &AddRequest) -> (FakeHerdr, MemLedger, String) {
         let herdr = herdr();
         let mut ledger = MemLedger::default();
-        let (name, _) = add(&herdr, &mut ledger, &config.paths(), req, Some("w1")).unwrap();
+        let Added { name, .. } =
+            add(&herdr, &mut ledger, &config.paths(), req, Some("w1")).unwrap();
         (herdr, ledger, name)
     }
 
@@ -1002,7 +1124,7 @@ args = ["--model", "opus"]
         let mut herdr = herdr();
         herdr.startup = Startup::BlockedForever;
         let mut ledger = MemLedger::default();
-        let (name, spawned) = add(
+        let Added { name, spawned, .. } = add(
             &herdr,
             &mut ledger,
             &config.paths(),

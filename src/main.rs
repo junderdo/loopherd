@@ -301,21 +301,23 @@ fn run_add(args: AddArgs) -> Result<i32> {
         return Ok(0);
     }
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    let (name, spawned) = add(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
-    let (message, code) = spawned.report(&name);
+    let added = add(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
+    let (message, code) = added.spawned.report(&added.name);
     println!("{message}");
+    if let Some(warning) = added.warning {
+        eprintln!("loopherd add: warning: {warning}");
+    }
     Ok(code)
 }
 
 fn run_feed(herd: String, dry_run: bool, ready_timeout: u64) -> Result<i32> {
-    let ledger_path = FileLedger::default_path().context("ledger")?;
+    let paths = Paths::from_env().context("herd")?;
     // A dry run changes nothing, so it must not block a real one.
     let _lock = match dry_run {
         true => None,
-        false => Some(lock(&ledger_path.with_file_name("feed.lock"))?),
+        false => Some(lock(&paths.feed_lock)?),
     };
-    let paths = Paths::from_env().context("herd")?;
-    let mut ledger = FileLedger::new(ledger_path);
+    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let req = FeedRequest {
         herd,
         dry_run,
