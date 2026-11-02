@@ -302,8 +302,12 @@ fn run_reports(names: Vec<String>, herd: Option<String>, all: bool) -> Result<i3
         herd: herd.as_deref(),
         all,
     };
-    for line in reports(&FileLedger::new(path), &dir, &filter)? {
+    let read = reports(&FileLedger::new(path), &dir, &filter)?;
+    for line in read.lines {
         println!("{line}");
+    }
+    for warning in read.warnings {
+        eprintln!("loopherd reports: warning: {warning}");
     }
     Ok(0)
 }

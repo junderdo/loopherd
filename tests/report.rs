@@ -103,3 +103,26 @@ fn concurrent_reports_from_two_processes_do_not_interleave() {
         assert!(bodies.iter().any(|b| b == body));
     }
 }
+
+#[test]
+fn a_bad_line_warns_on_stderr_and_does_not_jam_the_mailbox() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    run(state.path(), None, &["report", "--as", "lh-1", "one"]);
+    let mailbox = state.path().join("loopherd/reports/lh-1.jsonl");
+    let mut text = fs::read_to_string(&mailbox).unwrap();
+    text.push_str("{\"at\":");
+    fs::write(&mailbox, text).unwrap();
+    run(state.path(), None, &["report", "--as", "lh-1", "two"]);
+
+    let out = run(state.path(), None, &["reports"]);
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with("loopherd reports: warning: skipped a bad line in "),
+        "{stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout.lines().count(), 2, "{stdout}");
+    assert_eq!(out.status.code(), Some(0));
+}

@@ -4,6 +4,8 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -47,15 +49,26 @@ pub fn report(
         kind,
         text: text.into(),
     };
-    let mut bytes = serde_json::to_vec(&line)?;
-    bytes.push(b'\n');
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join(format!("{name}.jsonl"));
     let mut file = OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .open(&path)
         .with_context(|| format!("open {}", path.display()))?;
+    // Held so no other reporter's write is mid-copy while we read the last byte.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("lock {}", path.display()));
+    }
+    let mut bytes = vec![];
+    // A torn last line would swallow this report; start it on a line of its own.
+    if !ends_in_newline(&mut file).with_context(|| format!("read {}", path.display()))? {
+        bytes.push(b'\n');
+    }
+    serde_json::to_writer(&mut bytes, &line)?;
+    bytes.push(b'\n');
     // One write, so concurrent reporters' lines never interleave.
     let written = file
         .write(&bytes)
@@ -64,6 +77,17 @@ pub fn report(
         bail!("short write to {}", path.display());
     }
     Ok(name)
+}
+
+/// True for an empty file too.
+fn ends_in_newline(file: &mut fs::File) -> std::io::Result<bool> {
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(true);
+    }
+    let mut last = [0];
+    file.read_exact_at(&mut last, len - 1)?;
+    Ok(last[0] == b'\n')
 }
 
 fn reporter(ledger: &dyn Ledger, who: &Reporter) -> Result<String> {
@@ -85,6 +109,11 @@ fn reporter(ledger: &dyn Ledger, who: &Reporter) -> Result<String> {
         .ok_or_else(|| anyhow!("pane {pane} is not a member"))
 }
 
+pub struct Read {
+    pub lines: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
 pub struct Filter<'a> {
     pub names: &'a [String],
     pub herd: Option<&'a str>,
@@ -94,10 +123,13 @@ pub struct Filter<'a> {
 
 /// The reports `filter` selects, one rendered line each, unread only unless
 /// `filter.all`; marks those read.
-pub fn reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<Vec<String>> {
+pub fn reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<Read> {
     let mut names = mailboxes(dir)?;
     if names.is_empty() {
-        return Ok(vec![]);
+        return Ok(Read {
+            lines: vec![],
+            warnings: vec![],
+        });
     }
     if !filter.names.is_empty() {
         names.retain(|n| filter.names.contains(n));
@@ -112,22 +144,26 @@ pub fn reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<Vec<S
     }
     let mut cursor = Cursor::load(dir)?;
     let mut found = vec![];
+    let mut warnings = vec![];
     for name in names {
         let path = dir.join(format!("{name}.jsonl"));
         let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
         // A line still being appended has no newline yet; leave it for next time.
         let end = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
-        let start = match filter.all {
-            true => 0,
-            false => cursor.read_to(&name).min(end),
+        let start = match cursor.read_to(&name) {
+            _ if filter.all => 0,
+            // Past the end: the file was truncated or replaced, so all of it is new.
+            offset if offset > end => 0,
+            offset => offset,
         };
         for raw in bytes[start..end]
             .split(|&b| b == b'\n')
             .filter(|l| !l.is_empty())
         {
-            let line: Line = serde_json::from_slice(raw)
-                .with_context(|| format!("parse a report in {}", path.display()))?;
-            found.push((name.clone(), line));
+            match serde_json::from_slice::<Line>(raw) {
+                Ok(line) => found.push((name.clone(), line)),
+                Err(e) => warnings.push(format!("skipped a bad line in {}: {e}", path.display())),
+            }
         }
         cursor.0.insert(name, end);
     }
@@ -137,10 +173,13 @@ pub fn reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<Vec<S
     if !filter.all {
         cursor.save(dir)?;
     }
-    Ok(found
-        .iter()
-        .flat_map(|(name, line)| render(name, line))
-        .collect())
+    Ok(Read {
+        lines: found
+            .iter()
+            .flat_map(|(name, line)| render(name, line))
+            .collect(),
+        warnings,
+    })
 }
 
 fn mailboxes(dir: &Path) -> Result<Vec<String>> {
@@ -395,14 +434,19 @@ mod tests {
         );
 
         assert_eq!(
-            reports(&ledger, dir.path(), &UNREAD).unwrap(),
+            reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
             [
                 "lh-2 question 2026-11-01 11:00 which DB?",
                 "lh-2 note 2026-11-01 09:00 starting",
                 "lh-1 done 2026-11-01 10:00 PR #9",
             ]
         );
-        assert!(reports(&ledger, dir.path(), &UNREAD).unwrap().is_empty());
+        assert!(
+            reports(&ledger, dir.path(), &UNREAD)
+                .unwrap()
+                .lines
+                .is_empty()
+        );
 
         send(
             &ledger,
@@ -413,7 +457,7 @@ mod tests {
             "2026-11-01T12:00:00Z",
         );
         assert_eq!(
-            reports(&ledger, dir.path(), &UNREAD).unwrap(),
+            reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
             ["lh-1 note 2026-11-01 12:00 merged main"]
         );
     }
@@ -445,14 +489,14 @@ mod tests {
         };
 
         assert_eq!(
-            reports(&ledger, dir.path(), &all).unwrap(),
+            reports(&ledger, dir.path(), &all).unwrap().lines,
             [
                 "lh-1 note 2026-11-01 09:00 one",
                 "lh-1 note 2026-11-01 10:00 two",
             ]
         );
         assert_eq!(
-            reports(&ledger, dir.path(), &UNREAD).unwrap(),
+            reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
             ["lh-1 note 2026-11-01 10:00 two"]
         );
     }
@@ -483,7 +527,7 @@ mod tests {
             ..UNREAD
         };
         assert_eq!(
-            reports(&ledger, dir.path(), &by_name).unwrap(),
+            reports(&ledger, dir.path(), &by_name).unwrap().lines,
             ["lh-1 note 2026-11-01 09:00 hi"]
         );
         let by_herd = Filter {
@@ -491,11 +535,11 @@ mod tests {
             ..UNREAD
         };
         assert_eq!(
-            reports(&ledger, dir.path(), &by_herd).unwrap(),
+            reports(&ledger, dir.path(), &by_herd).unwrap().lines,
             ["lh-2 note 2026-11-01 09:00 hi"]
         );
         assert_eq!(
-            reports(&ledger, dir.path(), &UNREAD).unwrap(),
+            reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
             ["zpr-3 note 2026-11-01 09:00 hi"]
         );
     }
@@ -514,7 +558,7 @@ mod tests {
         );
 
         assert_eq!(
-            reports(&ledger, dir.path(), &UNREAD).unwrap(),
+            reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
             [
                 "lh-1 question 2026-11-01 09:00 Which store?",
                 "    - sqlite",
@@ -530,8 +574,140 @@ mod tests {
         assert!(
             reports(&MemLedger::default(), &missing, &UNREAD)
                 .unwrap()
+                .lines
                 .is_empty()
         );
         assert!(!missing.exists());
+    }
+
+    fn mailbox(dir: &Path, name: &str) -> PathBuf {
+        dir.join(format!("{name}.jsonl"))
+    }
+
+    fn append(path: &Path, bytes: &str) {
+        let mut file = OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(bytes.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn a_torn_line_does_not_swallow_the_next_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![member("lh-1", "w1:p1", None, false)]);
+        send(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            Kind::Note,
+            "one",
+            "2026-11-01T09:00:00Z",
+        );
+        append(&mailbox(dir.path(), "lh-1"), "{\"at\":\"2026-11-01T09:30");
+        send(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            Kind::Done,
+            "two",
+            "2026-11-01T10:00:00Z",
+        );
+
+        let read = reports(&ledger, dir.path(), &UNREAD).unwrap();
+
+        assert_eq!(
+            read.lines,
+            [
+                "lh-1 note 2026-11-01 09:00 one",
+                "lh-1 done 2026-11-01 10:00 two",
+            ]
+        );
+        assert_eq!(read.warnings.len(), 1);
+    }
+
+    #[test]
+    fn a_bad_line_is_skipped_with_a_warning_and_the_cursor_still_advances() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![
+            member("lh-1", "w1:p1", None, false),
+            member("lh-2", "w1:p2", None, false),
+        ]);
+        send(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            Kind::Note,
+            "one",
+            "2026-11-01T09:00:00Z",
+        );
+        append(&mailbox(dir.path(), "lh-1"), "not json\n");
+        send(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            Kind::Note,
+            "two",
+            "2026-11-01T10:00:00Z",
+        );
+        send(
+            &ledger,
+            dir.path(),
+            "lh-2",
+            Kind::Note,
+            "hi",
+            "2026-11-01T11:00:00Z",
+        );
+        let all = Filter {
+            all: true,
+            ..UNREAD
+        };
+
+        let read = reports(&ledger, dir.path(), &UNREAD).unwrap();
+        assert_eq!(
+            read.lines,
+            [
+                "lh-1 note 2026-11-01 09:00 one",
+                "lh-1 note 2026-11-01 10:00 two",
+                "lh-2 note 2026-11-01 11:00 hi",
+            ]
+        );
+        assert_eq!(read.warnings.len(), 1);
+        assert!(
+            read.warnings[0].contains("lh-1.jsonl"),
+            "{:?}",
+            read.warnings
+        );
+
+        let again = reports(&ledger, dir.path(), &UNREAD).unwrap();
+        assert!(again.lines.is_empty());
+        assert!(again.warnings.is_empty());
+        assert_eq!(reports(&ledger, dir.path(), &all).unwrap().lines.len(), 3);
+    }
+
+    #[test]
+    fn a_file_shorter_than_the_cursor_was_replaced_and_is_read_from_the_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![member("lh-1", "w1:p1", None, false)]);
+        send(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            Kind::Note,
+            "a long first report",
+            "2026-11-01T09:00:00Z",
+        );
+        reports(&ledger, dir.path(), &UNREAD).unwrap();
+        std::fs::remove_file(mailbox(dir.path(), "lh-1")).unwrap();
+        send(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            Kind::Note,
+            "new",
+            "2026-11-01T10:00:00Z",
+        );
+
+        assert_eq!(
+            reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
+            ["lh-1 note 2026-11-01 10:00 new"]
+        );
     }
 }
