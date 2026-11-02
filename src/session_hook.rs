@@ -118,6 +118,7 @@ mod tests {
             params: None,
             socket: socket.map(PathBuf::from),
             process: None,
+            role: None,
         }
     }
 

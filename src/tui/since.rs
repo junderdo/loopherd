@@ -70,6 +70,7 @@ mod tests {
             worktree: None,
             pane: format!("w1:p{name}"),
             tab: None,
+            lead: false,
         }
     }
 

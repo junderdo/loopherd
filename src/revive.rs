@@ -344,6 +344,7 @@ mod tests {
             params: None,
             socket: None,
             process: None,
+            role: None,
         }
     }
 

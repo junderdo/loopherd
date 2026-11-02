@@ -187,8 +187,12 @@ pub fn row(member: &Member) -> Vec<String> {
         Some(tab) => format!("{tab}/{}", member.pane),
         None => member.pane.clone(),
     };
+    let name = match member.lead {
+        true => format!("{} (lead)", member.name),
+        false => member.name.clone(),
+    };
     vec![
-        member.name.clone(),
+        name,
         status,
         member.branch.clone().unwrap_or_else(|| "-".into()),
         member.worktree.clone().unwrap_or_else(|| "-".into()),
@@ -274,6 +278,7 @@ mod tests {
             params: None,
             socket: None,
             process: None,
+            role: None,
         }
     }
 
@@ -336,6 +341,33 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         assert_eq!(out.code, 0);
         assert_eq!(herdr.mutations(), 0);
         assert_eq!(ledger.0, before);
+    }
+
+    #[test]
+    fn a_herds_lead_comes_first_in_its_herd_marked_as_the_lead() {
+        let herdr = herdr().with_raw_agent(agent(
+            Some("lead-prs"),
+            "w1:plead-prs",
+            AgentStatus::Working,
+        ));
+        let mut ledger = ledger();
+        let mut lead = entry("lead-prs", Some("prs"), "lead-prs");
+        lead.role = Some(crate::ledger::Role::Lead);
+        ledger.0.insert(lead.name.clone(), lead);
+
+        let out = status(&herdr, &ledger, Options::default(), PLAIN).unwrap();
+
+        assert!(
+            out.stdout.starts_with(
+                "\
+prs
+  lead-prs (lead)  working  -  lead-prs  w1:tlead-prs/w1:plead-prs
+  zpr-2            blocked  -  pr-2      w1:tzpr-2/w1:pzpr-2
+"
+            ),
+            "{}",
+            out.stdout
+        );
     }
 
     #[test]
@@ -428,7 +460,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         let json: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
         let member = |name: &str, status: &str, gone: bool, wt: &str, pane: &str, tab| {
             serde_json::json!({"name": name, "status": status, "gone": gone, "branch": null,
-                "worktree": wt, "pane": pane, "tab": tab})
+                "worktree": wt, "pane": pane, "tab": tab, "lead": false})
         };
         assert_eq!(
             json,

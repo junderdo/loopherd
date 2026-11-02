@@ -29,6 +29,8 @@ pub struct Member {
     pub worktree: Option<String>,
     pub pane: String,
     pub tab: Option<String>,
+    /// Its herd's lead, not a worker.
+    pub lead: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -138,9 +140,9 @@ fn strays(
     }
 }
 
-/// What needs the human first.
+/// The lead, then what needs the human first.
 fn sorted(mut members: Vec<Member>) -> Vec<Member> {
-    members.sort_by_key(|m| (rank(m), m.name.clone()));
+    members.sort_by_key(|m| (!m.lead, rank(m), m.name.clone()));
     members
 }
 
@@ -174,6 +176,7 @@ fn member(
         }),
         pane: live.map_or(&record.pane_id, |a| &a.pane_id).clone(),
         tab: live.map(|a| a.tab_id.clone()),
+        lead: record.is_lead(),
     }
 }
 
@@ -203,6 +206,7 @@ mod tests {
             params: None,
             socket: None,
             process: None,
+            role: None,
         }
     }
 

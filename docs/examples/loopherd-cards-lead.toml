@@ -1,0 +1,12 @@
+# Append to ~/.config/loopherd/herds/loopherd-cards.toml, and copy
+# loopherd-cards-lead.md beside it. Start the lead with
+# `loopherd lead loopherd-cards --dry-run`, then without --dry-run.
+[lead]
+prompt_file = "loopherd-cards-lead.md"
+# args defaults to the herd's args. Every switch is off until the human turns it on.
+merge = false
+install = false
+rebase = false
+new_cards = false
+design_escalation = false
+blocked_dialogs = false
