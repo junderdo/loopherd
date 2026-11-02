@@ -16,8 +16,6 @@ struct Hook {
     subcommand: &'static str,
     matcher: Option<&'static str>,
     timeout: u64,
-    /// Its exit 2 reaches Claude, to block a tool call.
-    can_block: bool,
     /// `watch` refuses to run without it.
     watched: bool,
 }
@@ -28,7 +26,6 @@ const HOOKS: [Hook; 4] = [
         subcommand: "stop-hook",
         matcher: None,
         timeout: 10,
-        can_block: false,
         watched: true,
     },
     Hook {
@@ -36,7 +33,6 @@ const HOOKS: [Hook; 4] = [
         subcommand: "stop-hook",
         matcher: None,
         timeout: 10,
-        can_block: false,
         watched: true,
     },
     Hook {
@@ -44,7 +40,6 @@ const HOOKS: [Hook; 4] = [
         subcommand: "session-hook",
         matcher: None,
         timeout: 10,
-        can_block: false,
         watched: true,
     },
     // Runs before every Bash call in every session, so it must stay quick.
@@ -53,7 +48,6 @@ const HOOKS: [Hook; 4] = [
         subcommand: "tool-hook",
         matcher: Some("Bash"),
         timeout: 5,
-        can_block: true,
         watched: false,
     },
 ];
@@ -76,16 +70,15 @@ pub fn default_settings() -> Result<PathBuf> {
     Ok(dir.join("settings.json"))
 }
 
-/// The hook's shell command. `|| true` unless it `can_block`, because a Stop
-/// hook exiting 2 keeps Claude from stopping, and a missing or old binary
-/// must never do that.
-pub fn hook_command(exe: &Path, subcommand: &str, can_block: bool) -> Result<String> {
+/// The hook's shell command. `|| true` because exit 2 blocks: a Stop hook
+/// keeps Claude from stopping, a PreToolUse hook the tool call, and a missing
+/// or old binary must never do that. tool-hook blocks with JSON instead.
+pub fn hook_command(exe: &Path, subcommand: &str) -> Result<String> {
     let path = exe
         .to_str()
         .ok_or_else(|| anyhow!("{} is not UTF-8", exe.display()))?;
-    let or_true = if can_block { "" } else { " || true" };
     Ok(format!(
-        "'{}' {subcommand}{or_true}",
+        "'{}' {subcommand} || true",
         path.replace('\'', r"'\''")
     ))
 }
@@ -97,7 +90,7 @@ pub fn install(settings: &Path, exe: &Path, now: SystemTime) -> Result<Outcome> 
         for hook in &HOOKS {
             let ours = json!({
                 "type": "command",
-                "command": hook_command(exe, hook.subcommand, hook.can_block)?,
+                "command": hook_command(exe, hook.subcommand)?,
                 "timeout": hook.timeout,
             });
             let groups = array_at(hooks, hook.event)?;
@@ -335,8 +328,8 @@ fn drop_ours(groups: &mut Vec<Value>, subcommand: &str) -> bool {
     dropped
 }
 
-/// A command [`hook_command`] built, with or without `|| true`, for a binary
-/// named `loopherd` anywhere.
+/// A command [`hook_command`] built, for a binary named `loopherd` anywhere;
+/// also without `|| true`, as tool-hook was first installed.
 fn is_ours(hook: &Value, subcommand: &str) -> bool {
     hook.get("command")
         .and_then(Value::as_str)
@@ -395,11 +388,11 @@ mod tests {
     }
 
     fn tool_hook() -> Value {
-        json!({"type": "command", "command": format!("'{EXE}' tool-hook"), "timeout": 5})
+        json!({"type": "command", "command": format!("'{EXE}' tool-hook || true"), "timeout": 5})
     }
 
     #[test]
-    fn adds_a_pre_tool_use_hook_on_bash_whose_exit_2_reaches_claude() {
+    fn adds_a_pre_tool_use_hook_on_bash() {
         let user = r#"{"hooks": {"PreToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": "lint"}]}]}}"#;
         let (_dir, path) = settings_with(user);
 
@@ -423,9 +416,9 @@ mod tests {
     }
 
     #[test]
-    fn an_old_tool_hook_with_or_true_is_replaced() {
+    fn an_old_tool_hook_without_or_true_is_replaced() {
         let old = json!({"hooks": {"PreToolUse": [
-            {"matcher": "Bash", "hooks": [{"type": "command", "command": "'/old/loopherd' tool-hook || true"}]},
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": "'/old/loopherd' tool-hook"}]},
         ]}});
         let (_dir, path) = settings_with(&old.to_string());
 
@@ -435,19 +428,6 @@ mod tests {
             read(&path)["hooks"]["PreToolUse"],
             json!([{"matcher": "Bash", "hooks": [tool_hook()]}])
         );
-    }
-
-    #[test]
-    fn the_tool_hook_command_passes_exit_2_through() {
-        let dir = tempfile::tempdir().unwrap();
-        let blocking = dir.path().join("loopherd");
-        fs::write(&blocking, "#!/bin/sh\nexit 2\n").unwrap();
-        fs::set_permissions(&blocking, fs::Permissions::from_mode(0o755)).unwrap();
-        let status = Command::new("sh")
-            .args(["-c", &hook_command(&blocking, "tool-hook", true).unwrap()])
-            .status()
-            .unwrap();
-        assert_eq!(status.code(), Some(2));
     }
 
     fn settings_with(contents: &str) -> (tempfile::TempDir, PathBuf) {
@@ -721,8 +701,8 @@ mod tests {
     #[test]
     fn the_command_round_trips_paths_with_spaces_and_quotes() {
         for exe in ["/a b/loopherd", "/it's/loopherd"] {
-            for can_block in [false, true] {
-                let command = hook_command(Path::new(exe), "stop-hook", can_block).unwrap();
+            let command = hook_command(Path::new(exe), "stop-hook").unwrap();
+            for command in [command.as_str(), command.trim_end_matches(" || true")] {
                 assert!(
                     is_ours(&json!({"command": command}), "stop-hook"),
                     "{command}"
@@ -737,13 +717,13 @@ mod tests {
             &json!({"command": "notify-send done"}),
             "stop-hook"
         ));
-        let session = hook_command(Path::new(EXE), "session-hook", false).unwrap();
+        let session = hook_command(Path::new(EXE), "session-hook").unwrap();
         assert!(!is_ours(&json!({"command": session}), "stop-hook"));
     }
 
     fn run_hook(exe: &Path) -> std::process::ExitStatus {
         Command::new("sh")
-            .args(["-c", &hook_command(exe, "stop-hook", false).unwrap()])
+            .args(["-c", &hook_command(exe, "stop-hook").unwrap()])
             .stdin(std::process::Stdio::null())
             .status()
             .unwrap()

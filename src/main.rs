@@ -153,9 +153,10 @@ enum Command {
     /// points its ledger entry at the new session, read from the hook input on
     /// stdin. Outside a member's pane it changes nothing. Set up by install-hook.
     SessionHook,
-    /// Claude's PreToolUse hook on Bash: in a lead's pane, exits 2 on a merge,
-    /// install, rebase or force-push its herd file's switch leaves to the human,
-    /// read from the hook input on stdin. Elsewhere it exits 0. Set up by install-hook.
+    /// Claude's PreToolUse hook on Bash: in a lead's pane, denies a merge, install,
+    /// rebase or force-push its herd file's switch leaves to the human, read from the
+    /// hook input on stdin, by printing a deny decision. Elsewhere it prints nothing.
+    /// Always exits 0. Set up by install-hook.
     ToolHook,
     /// Add loopherd's Stop, StopFailure, SessionStart and PreToolUse hooks to Claude's
     /// user settings, calling this binary; safe to re-run. Backs the file up before changing it.
@@ -503,13 +504,10 @@ fn run_tool_hook() -> Result<i32> {
         socket: Some(&socket),
     };
     let switches = |herd: &str| herd::lead_switches(&Paths::from_env()?, herd);
-    match tool_hook::tool_hook(&ledger, &pane, &input, &switches)? {
-        Some(message) => {
-            eprintln!("{message}");
-            Ok(2)
-        }
-        None => Ok(0),
+    if let Some(reason) = tool_hook::tool_hook(&ledger, &pane, &input, &switches)? {
+        println!("{}", tool_hook::deny(&reason));
     }
+    Ok(0)
 }
 
 fn run_install_hook(remove: bool, settings: Option<PathBuf>) -> Result<i32> {

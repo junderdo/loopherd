@@ -97,6 +97,15 @@ pub fn tool_hook(
     Ok(Some(message))
 }
 
+/// The PreToolUse output that denies the Bash call, telling Claude `reason`.
+pub fn deny(reason: &str) -> Value {
+    serde_json::json!({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason,
+    }})
+}
+
 fn bash_command(input: &[u8]) -> Option<String> {
     let input: Value = serde_json::from_slice(input).ok()?;
     if input.get("tool_name")?.as_str()? != "Bash" {
@@ -495,6 +504,18 @@ mod tests {
                 assert_eq!(needs(command), Vec::from_iter(want), "{command}");
             }
         }
+    }
+
+    #[test]
+    fn deny_is_the_pre_tool_use_decision() {
+        assert_eq!(
+            deny("no"),
+            serde_json::json!({"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": "no",
+            }})
+        );
     }
 
     #[test]
