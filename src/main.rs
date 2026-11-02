@@ -3,6 +3,7 @@ mod herd;
 mod herd_view;
 mod herdr;
 mod ledger;
+mod lock;
 mod matching;
 mod prompt;
 mod report;
@@ -23,7 +24,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
-use crate::feed::{FeedRequest, feed, lock};
+use crate::feed::{FeedRequest, feed};
 use crate::herd::{AddRequest, Paths, add, dry_run, herds};
 use crate::herd_view::Options;
 use crate::herdr::CliHerdr;
@@ -431,7 +432,7 @@ fn run_feed(herd: String, dry_run: bool, ready_timeout: u64) -> Result<i32> {
     // A dry run changes nothing, so it must not block a real one.
     let _lock = match dry_run {
         true => None,
-        false => Some(lock(&paths.feed_lock)?),
+        false => Some(paths.lock_feed()?),
     };
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let req = FeedRequest {
