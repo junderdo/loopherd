@@ -120,7 +120,8 @@ differs from the shepherd:
   checkout --detach origin/main` rather than `git pull`, and never commit
   in it.
 - Until watch readers land (LH-78), only one watch runs at a time, so a
-  lead and a shepherd can't both watch.
+  lead and a shepherd can't both watch, and a lead's own watch also reads
+  its own reports. Don't run a lead live before LH-78.
 
 [examples/loopherd-cards-lead.toml](../examples/loopherd-cards-lead.toml)
 is the `[lead]` table and prompt for `loopherd-cards`.

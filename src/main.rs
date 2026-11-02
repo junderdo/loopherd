@@ -34,7 +34,7 @@ use crate::feed::{FeedRequest, feed};
 use crate::herd::{AddRequest, Paths, add, dry_run, herds};
 use crate::herd_view::Options;
 use crate::herdr::{CliHerdr, socket_from_env};
-use crate::lead::{LeadRequest, lead};
+use crate::lead::LeadRequest;
 use crate::ledger::FileLedger;
 use crate::prompt::prompt;
 use crate::report::{Filter, Kind, Reporter, report, reports};
@@ -588,13 +588,14 @@ fn run_lead(args: LeadArgs) -> Result<i32> {
     };
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let inherited = inherited_workspace();
-    if args.dry_run {
-        let plan = lead::dry_run(&CliHerdr, &ledger, &paths, &req, inherited.as_deref())?;
-        println!("{plan}");
-        return Ok(0);
-    }
-    let (name, spawned) = lead(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
-    let (message, code) = spawned.report(&name);
+    let (message, code) = lead::run(
+        &CliHerdr,
+        &mut ledger,
+        &paths,
+        &req,
+        args.dry_run,
+        inherited.as_deref(),
+    )?;
     println!("{message}");
     Ok(code)
 }

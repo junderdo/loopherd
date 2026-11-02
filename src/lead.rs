@@ -30,6 +30,23 @@ pub fn lead(
     Ok((spawn_req.name, spawned))
 }
 
+/// `dry_run`'s plan, or `lead`'s spawn report, with the exit code.
+pub fn run(
+    herdr: &dyn Herdr,
+    ledger: &mut dyn Ledger,
+    paths: &Paths,
+    req: &LeadRequest,
+    dry_run: bool,
+    inherited_workspace: Option<&str>,
+) -> Result<(String, i32)> {
+    if dry_run {
+        let plan = self::dry_run(herdr, ledger, paths, req, inherited_workspace)?;
+        return Ok((plan, 0));
+    }
+    let (name, spawned) = lead(herdr, ledger, paths, req, inherited_workspace)?;
+    Ok(spawned.report(&name))
+}
+
 /// What `lead` would do, like `add --dry-run` with a `role` line.
 pub fn dry_run(
     herdr: &dyn Herdr,
@@ -46,6 +63,7 @@ pub fn dry_run(
 
 fn resolve(ledger: &dyn Ledger, paths: &Paths, req: &LeadRequest) -> Result<SpawnRequest> {
     let config = lead_config(paths, &req.herd)?;
+    let name = lead_name(&req.herd)?;
     let entries = ledger.entries().context("ledger")?;
     let existing = entries
         .values()
@@ -57,7 +75,9 @@ fn resolve(ledger: &dyn Ledger, paths: &Paths, req: &LeadRequest) -> Result<Spaw
             existing.name
         );
     }
-    let name = format!("lead-{}", req.herd);
+    if entries.get(&name).is_some_and(|e| !e.retired) {
+        bail!("{name} is already in the ledger as another member; retire it first");
+    }
     Ok(SpawnRequest {
         repo: config.repo,
         worktree: Some(Checkout::Detached(name.clone())),
@@ -77,6 +97,21 @@ fn resolve(ledger: &dyn Ledger, paths: &Paths, req: &LeadRequest) -> Result<Spaw
     })
 }
 
+/// `lead-<herd>`, failing unless that is a valid member name.
+fn lead_name(herd: &str) -> Result<String> {
+    let valid = herd.len() <= 27
+        && herd
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+    if !valid {
+        bail!(
+            "herd {herd:?} can't name a lead: lead-<herd> must match [a-z][a-z0-9_-]{{0,31}}, \
+             so the herd name must be at most 27 of a-z, 0-9, _ and -"
+        );
+    }
+    Ok(format!("lead-{herd}"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -86,7 +121,7 @@ mod tests {
     use super::*;
     use crate::herd::Paths;
     use crate::herdr::fake::FakeHerdr;
-    use crate::ledger::{MemLedger, Role};
+    use crate::ledger::{AgentRecord, MemLedger, Role};
     use crate::worktree::testing;
 
     struct Setup {
@@ -128,6 +163,19 @@ mod tests {
 
         fn worktree(&self) -> PathBuf {
             self.root.join("proj/worktrees/lead-h")
+        }
+
+        /// Herd `name`, a copy of `h`.
+        fn copy_herd(&self, name: &str) {
+            let herds = self.root.join("herds");
+            fs::copy(herds.join("h.toml"), herds.join(format!("{name}.toml"))).unwrap();
+        }
+    }
+
+    fn request_for(herd: &str) -> LeadRequest {
+        LeadRequest {
+            herd: herd.into(),
+            ..request(&[])
         }
     }
 
@@ -319,5 +367,140 @@ mod tests {
         assert!(ledger.0["lead-h"].retired);
         assert!(herdr.tabs().is_empty(), "{out:?}");
         assert!(!setup.worktree().exists(), "{out:?}");
+    }
+
+    #[test]
+    fn only_an_unretired_lead_of_the_same_herd_blocks_a_new_lead() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        setup.copy_herd("a");
+        setup.copy_herd("b");
+        let mut ledger = MemLedger::default();
+        let paths = setup.paths();
+        lead(&herdr(), &mut ledger, &paths, &request_for("a"), Some("w1")).unwrap();
+        let worker = AgentRecord {
+            name: "b-worker".into(),
+            herd: Some("b".into()),
+            role: None,
+            ..ledger.0["lead-a"].clone()
+        };
+        ledger.0.insert(worker.name.clone(), worker);
+
+        lead(&herdr(), &mut ledger, &paths, &request_for("b"), Some("w1")).unwrap();
+        assert!(ledger.0["lead-b"].is_lead());
+
+        let err = lead(&herdr(), &mut ledger, &paths, &request_for("a"), Some("w1")).unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            "a already has a lead, lead-a; retire it first"
+        );
+    }
+
+    #[test]
+    fn an_unretired_non_lead_entry_holding_the_leads_name_is_refused_not_overwritten() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let mut ledger = MemLedger::default();
+        lead(
+            &herdr(),
+            &mut ledger,
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+        let squatter = AgentRecord {
+            herd: None,
+            role: None,
+            prompt: Some("a plain spawn".into()),
+            ..ledger.0["lead-h"].clone()
+        };
+        ledger.0.insert(squatter.name.clone(), squatter.clone());
+
+        assert_eq!(
+            lead_err(&setup, &mut ledger),
+            "lead-h is already in the ledger as another member; retire it first"
+        );
+        assert_eq!(ledger.0["lead-h"], squatter);
+
+        ledger.0.get_mut("lead-h").unwrap().retired = true;
+        lead(
+            &herdr(),
+            &mut ledger,
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+        assert!(ledger.0["lead-h"].is_lead());
+    }
+
+    #[test]
+    fn a_herd_name_that_cannot_make_a_member_name_is_refused_naming_the_rule() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let long = "h".repeat(28);
+        for herd in ["Cards", long.as_str()] {
+            setup.copy_herd(herd);
+            let herdr = herdr();
+            let err = lead(
+                &herdr,
+                &mut MemLedger::default(),
+                &setup.paths(),
+                &request_for(herd),
+                Some("w1"),
+            )
+            .unwrap_err();
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "herd {herd:?} can't name a lead: lead-<herd> must match \
+                     [a-z][a-z0-9_-]{{0,31}}, so the herd name must be at most 27 \
+                     of a-z, 0-9, _ and -"
+                )
+            );
+            assert!(herdr.tabs().is_empty());
+        }
+        setup.copy_herd(&"h".repeat(27));
+        lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request_for(&"h".repeat(27)),
+            Some("w1"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn run_prints_the_plan_on_a_dry_run_and_the_spawn_report_otherwise() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+
+        let (plan, code) = run(
+            &herdr,
+            &mut ledger,
+            &setup.paths(),
+            &request(&[]),
+            true,
+            Some("w1"),
+        )
+        .unwrap();
+        assert!(plan.starts_with("name lead-h\n"), "{plan}");
+        assert!(plan.contains("\nrole lead\n"), "{plan}");
+        assert_eq!(code, 0);
+        assert!(herdr.tabs().is_empty());
+        assert!(ledger.0.is_empty());
+
+        let (report, code) = run(
+            &herdr,
+            &mut ledger,
+            &setup.paths(),
+            &request(&[]),
+            false,
+            Some("w1"),
+        )
+        .unwrap();
+        assert!(report.starts_with("tab "), "{report}");
+        assert_eq!(code, 0);
+        assert!(ledger.0["lead-h"].is_lead());
     }
 }

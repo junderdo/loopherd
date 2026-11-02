@@ -1716,4 +1716,31 @@ args = ["--model", "opus"]
         assert_eq!(lead.switches, Switches::default());
         assert_eq!(lead.args, ["--model", "opus"]);
     }
+
+    #[test]
+    fn every_switch_maps_to_its_own_line() {
+        let herd = format!(
+            "{LEAD_HERD}[lead]\nprompt = \"go\"\nmerge = true\ninstall = true\nrebase = true\n\
+             new_cards = true\ndesign_escalation = true\nblocked_dialogs = true\n"
+        );
+        let config = Config::with(&[("h", &herd)]);
+        assert_eq!(
+            lead_config(&config.paths(), "h").unwrap().switches.lines(),
+            "merge on\ninstall on\nrebase on\nnew_cards on\n\
+             design_escalation on\nblocked_dialogs on"
+        );
+        for switch in [
+            "install",
+            "rebase",
+            "new_cards",
+            "design_escalation",
+            "blocked_dialogs",
+        ] {
+            let herd = format!("{LEAD_HERD}[lead]\nprompt = \"go\"\n{switch} = true\n");
+            let config = Config::with(&[("h", &herd)]);
+            let lines = lead_config(&config.paths(), "h").unwrap().switches.lines();
+            let on: Vec<&str> = lines.lines().filter(|l| l.ends_with(" on")).collect();
+            assert_eq!(on, [format!("{switch} on")], "{switch}");
+        }
+    }
 }
