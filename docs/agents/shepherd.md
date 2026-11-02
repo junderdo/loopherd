@@ -29,7 +29,7 @@ session. Read `herdr --skill` before controlling herdr.
    cards into members `lh-<n>` on `<type>/LH-<n>-<slug>`, at most `max` open.
    Hand-spawn (`loopherd spawn … --prompt-file`) only for work that isn't a
    card; check the prompt's placeholders with `grep -o '{[a-z]*}'`.
-2. **Watch.** Keep one wait in the background for the whole herd:
+2. **Watch.** Keep one wait in the background for everything you read:
    ```bash
    loopherd watch --timeout 3600
    ```
@@ -37,7 +37,8 @@ session. Read `herdr --skill` before controlling herdr.
    (a `gone` lead still holds its herd until retired), and members in no
    herd; a led herd's workers are its lead's to watch. Naming herds
    (`loopherd watch loopherd-cards`) narrows it, and naming a led herd
-   narrows it to that herd's lead. It returns when a
+   narrows it to that herd's lead. Run it from a pane that isn't a lead's.
+   It returns when a
    member leaves a report or its Claude stops in a new state, printing a
    line per event, and marks them read only once printed. Stops come from
    the Stop hook's entries in the mailbox, so a stop that lands between
@@ -118,7 +119,9 @@ differs from the shepherd:
   task. Run from your pane, it's your watch: it reads your herd's workers
   only, never you, and naming any other herd is an error. It holds
   `watch-<your name>.lock`, so it runs beside the shepherd's watch, which
-  reads you. Exit 2 is a heartbeat, not idleness: check each Review card's PR
+  reads you. Run it from your own pane in your own herdr: a pane that
+  matches you but not your socket is refused. If you're retired, it exits
+  with an error and leaves your herd's events for the shepherd. Exit 2 is a heartbeat, not idleness: check each Review card's PR
   (`gh pr view <n> --json state`) and run the after-merge steps for any the
   human merged. Re-arm after every exit.
 - **On each wake** re-read `loopherd status` and `loopherd reports --all`
@@ -127,6 +130,7 @@ differs from the shepherd:
 - **Your checkout** is detached; refresh it with `git fetch origin && git
   checkout --detach origin/main` rather than `git pull`, and never commit
   in it.
+
 [examples/loopherd-cards-lead.toml](../examples/loopherd-cards-lead.toml)
 is the `[lead]` table and prompt for `loopherd-cards`.
 

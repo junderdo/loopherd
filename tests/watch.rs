@@ -183,7 +183,7 @@ fn a_leads_watch_runs_beside_the_shepherds() {
         r#"{"lead-cards": {"name": "lead-cards", "pane_id": "w1:p0", "session_id": null,
             "repo": "/", "worktree": null, "workspace": "w1", "prompt": null,
             "prompt_sent": true, "created": "2026-11-01T00:00:00Z",
-            "herd": "cards", "role": "lead"}}"#,
+            "herd": "cards", "role": "lead", "socket": "/run/live.sock"}}"#,
     )
     .unwrap();
     let mut shepherd = sandbox
@@ -206,6 +206,7 @@ fn a_leads_watch_runs_beside_the_shepherds() {
     let lead = sandbox
         .loopherd(&["watch", "--timeout", "0"])
         .env("HERDR_PANE_ID", "w1:p0")
+        .env("HERDR_SOCKET_PATH", "/run/live.sock")
         .output()
         .unwrap();
     shepherd.kill().unwrap();
