@@ -142,9 +142,14 @@ pub fn reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<Read>
                 .is_some_and(|e| e.herd.as_deref() == Some(herd))
         });
     }
+    let _lock = match filter.all {
+        true => None,
+        false => Some(Cursor::lock(dir)?),
+    };
     let mut cursor = Cursor::load(dir)?;
     let mut found = vec![];
     let mut warnings = vec![];
+    let mut moved = false;
     for name in names {
         let path = dir.join(format!("{name}.jsonl"));
         let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
@@ -165,12 +170,13 @@ pub fn reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<Read>
                 Err(e) => warnings.push(format!("skipped a bad line in {}: {e}", path.display())),
             }
         }
+        moved |= cursor.read_to(&name) != end;
         cursor.0.insert(name, end);
     }
     found.sort_by(|(_, a), (_, b)| {
         (a.kind != Kind::Question, &a.at).cmp(&(b.kind != Kind::Question, &b.at))
     });
-    if !filter.all {
+    if !filter.all && moved {
         cursor.save(dir)?;
     }
     Ok(Read {
@@ -223,6 +229,22 @@ struct Cursor(BTreeMap<String, usize>);
 impl Cursor {
     fn path(dir: &Path) -> PathBuf {
         dir.join(".cursor")
+    }
+
+    /// Held across load and save, so concurrent readers never move it back.
+    fn lock(dir: &Path) -> Result<fs::File> {
+        let path = dir.join(".cursor.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("lock {}", path.display()));
+        }
+        Ok(file)
     }
 
     fn load(dir: &Path) -> Result<Cursor> {
@@ -709,5 +731,69 @@ mod tests {
             reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
             ["lh-1 note 2026-11-01 10:00 new"]
         );
+    }
+
+    #[test]
+    fn concurrent_readers_print_each_report_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![member("lh-1", "w1:p1", None, false)]);
+        let sent = 200;
+        let printed = std::thread::scope(|s| {
+            let readers: Vec<_> = (0..4)
+                .map(|_| {
+                    s.spawn(|| {
+                        let mut printed = 0;
+                        for _ in 0..sent {
+                            printed += reports(&ledger, dir.path(), &UNREAD).unwrap().lines.len();
+                        }
+                        printed
+                    })
+                })
+                .collect();
+            for n in 0..sent {
+                send(
+                    &ledger,
+                    dir.path(),
+                    "lh-1",
+                    Kind::Note,
+                    &n.to_string(),
+                    "2026-11-01T09:00:00Z",
+                );
+            }
+            readers
+                .into_iter()
+                .map(|r| r.join().unwrap())
+                .sum::<usize>()
+        });
+        let rest = reports(&ledger, dir.path(), &UNREAD).unwrap().lines.len();
+
+        assert_eq!(printed + rest, sent);
+    }
+
+    #[test]
+    fn a_read_with_nothing_new_leaves_the_cursor_file_alone() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![member("lh-1", "w1:p1", None, false)]);
+        send(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            Kind::Note,
+            "one",
+            "2026-11-01T09:00:00Z",
+        );
+        reports(&ledger, dir.path(), &UNREAD).unwrap();
+        let inode = || std::fs::metadata(dir.path().join(".cursor")).unwrap().ino();
+        let before = inode();
+
+        assert!(
+            reports(&ledger, dir.path(), &UNREAD)
+                .unwrap()
+                .lines
+                .is_empty()
+        );
+
+        assert_eq!(inode(), before);
     }
 }

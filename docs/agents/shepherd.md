@@ -18,15 +18,21 @@ session. Read `herdr --skill` before controlling herdr.
    cards into members `lh-<n>` on `<type>/LH-<n>-<slug>`, at most `max` open.
    Hand-spawn (`loopherd spawn … --prompt-file`) only for work that isn't a
    card; check the prompt's placeholders with `grep -o '{[a-z]*}'`.
-2. **Watch.** Once the member reads `working`, start in the background:
+2. **Watch.** Keep one wait in the background for the whole herd:
    ```bash
-   herdr agent wait lh-<n> --until done --until idle --until blocked --timeout 3600000
+   loopherd watch --timeout 3600
    ```
-   It wakes the shepherd when the member stops. Treat `idle` like `done`:
-   focusing a pane marks it seen. Start a new wait after every `agent prompt`
-   too. Waits die with the shepherd's session.
-3. **On wake,** read members' unread reports (`loopherd reports`; `--all`
-   for history) and the card. A member that left none: read its screen
+   (`loopherd watch loopherd-cards` narrows it to a herd.) It returns when a
+   member leaves a report, goes `blocked`, or goes from `working` to `done`,
+   `idle` or `gone` (its pane disappeared), printing a line per event and
+   marking the reports it prints read. Only changes wake it: a member
+   already `blocked` or `done` when the watch starts wakes it only by a
+   report, so on starting a session run `loopherd status` first to catch
+   members already blocked. Exit 2 means the timeout passed with nothing to
+   do. Start the next watch after handling every wake. It dies with the
+   shepherd's session.
+3. **On wake,** read the watch's lines and the card (`loopherd reports
+   --all` for report history). A member that left none: read its screen
    (`herdr agent read lh-<n> --source recent-unwrapped --lines 40`).
    `blocked` means a dialog only the human answers (D10): tell them.
    A card back in Backlog with `need-human` carries the question.

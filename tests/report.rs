@@ -126,3 +126,46 @@ fn a_bad_line_warns_on_stderr_and_does_not_jam_the_mailbox() {
     assert_eq!(stdout.lines().count(), 2, "{stdout}");
     assert_eq!(out.status.code(), Some(0));
 }
+
+#[test]
+fn watch_wakes_on_an_unread_report_and_times_out_silently_once_read() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    run(state.path(), None, &["report", "--as", "lh-2", "PR #9"]);
+
+    let out = run(state.path(), None, &["watch", "--timeout", "0"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.starts_with("lh-2 note 20"), "{stdout}");
+    assert!(stdout.ends_with(" PR #9\n"), "{stdout}");
+    assert_eq!(out.status.code(), Some(0));
+
+    let out = run(state.path(), None, &["watch", "--timeout", "0"]);
+    assert_eq!(out.stdout, b"");
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn watch_warns_about_a_herd_with_no_herd_file() {
+    let state = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    fs::create_dir_all(config.path().join("herds")).unwrap();
+    fs::write(config.path().join("herds/cards.toml"), "").unwrap();
+
+    let out = loopherd(
+        state.path(),
+        None,
+        &["watch", "cards", "crads", "--timeout", "0"],
+    )
+    .env("LOOPHERD_CONFIG_DIR", config.path())
+    .output()
+    .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("loopherd watch: warning: no herd file for crads"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("for cards"), "{stderr}");
+    assert_eq!(out.status.code(), Some(2));
+}
