@@ -9,6 +9,7 @@ use std::time::SystemTime;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::lock::Lock;
 use crate::report::{self, Body, Entry};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +58,14 @@ pub trait Ledger {
     fn entries(&self) -> Result<BTreeMap<String, AgentRecord>>;
     /// Inserts or replaces the entry for `record.name`.
     fn record(&mut self, record: AgentRecord) -> Result<()>;
+    /// Applies `change` to the current entry for `name`, read fresh under the
+    /// ledger lock, so a write made since the caller's `entries` survives.
+    /// Saves nothing when `change` fails. Returns the entry as saved.
+    fn update(
+        &mut self,
+        name: &str,
+        change: &mut dyn FnMut(&mut AgentRecord) -> Result<()>,
+    ) -> Result<AgentRecord>;
     /// Appends a `start` boundary to `name`'s mailbox.
     fn started(&mut self, name: &str, at: SystemTime) -> Result<()>;
 }
@@ -81,6 +90,11 @@ impl FileLedger {
         Ok(state.join("loopherd/ledger.json"))
     }
 
+    #[cfg(test)]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// The members' mailboxes, beside the ledger.
     pub fn reports_dir(&self) -> Result<PathBuf> {
         Ok(self
@@ -88,6 +102,21 @@ impl FileLedger {
             .parent()
             .context("ledger path has no parent")?
             .join("reports"))
+    }
+
+    /// Held by every writer for its read-modify-write; readers see whole
+    /// files, since `save` renames into place.
+    fn lock(&self) -> Result<Lock> {
+        let dir = self.path.parent().context("ledger path has no parent")?;
+        fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        let path = self.path.with_extension("lock");
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        Lock::wait(file).with_context(|| format!("lock {}", path.display()))
     }
 
     fn load(&self) -> Result<BTreeMap<String, AgentRecord>> {
@@ -124,9 +153,26 @@ impl Ledger for FileLedger {
     }
 
     fn record(&mut self, record: AgentRecord) -> Result<()> {
+        let _lock = self.lock()?;
         let mut entries = self.load()?;
         entries.insert(record.name.clone(), record);
         self.save(&entries)
+    }
+
+    fn update(
+        &mut self,
+        name: &str,
+        change: &mut dyn FnMut(&mut AgentRecord) -> Result<()>,
+    ) -> Result<AgentRecord> {
+        let _lock = self.lock()?;
+        let mut entries = self.load()?;
+        let record = entries
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("{name} is not in the ledger"))?;
+        change(record)?;
+        let saved = record.clone();
+        self.save(&entries)?;
+        Ok(saved)
     }
 
     fn started(&mut self, name: &str, at: SystemTime) -> Result<()> {
@@ -136,7 +182,7 @@ impl Ledger for FileLedger {
 
 /// Entries, and the names `started` was called with, in order.
 #[cfg(test)]
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct MemLedger(pub BTreeMap<String, AgentRecord>, pub Vec<String>);
 
 #[cfg(test)]
@@ -148,6 +194,19 @@ impl Ledger for MemLedger {
     fn record(&mut self, record: AgentRecord) -> Result<()> {
         self.0.insert(record.name.clone(), record);
         Ok(())
+    }
+
+    fn update(
+        &mut self,
+        name: &str,
+        change: &mut dyn FnMut(&mut AgentRecord) -> Result<()>,
+    ) -> Result<AgentRecord> {
+        let record = self
+            .0
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("{name} is not in the ledger"))?;
+        change(record)?;
+        Ok(record.clone())
     }
 
     fn started(&mut self, name: &str, _at: SystemTime) -> Result<()> {
@@ -169,6 +228,14 @@ impl Ledger for NoMailbox {
 
     fn record(&mut self, record: AgentRecord) -> Result<()> {
         self.0.record(record)
+    }
+
+    fn update(
+        &mut self,
+        name: &str,
+        change: &mut dyn FnMut(&mut AgentRecord) -> Result<()>,
+    ) -> Result<AgentRecord> {
+        self.0.update(name, change)
     }
 
     fn started(&mut self, _: &str, _: SystemTime) -> Result<()> {
@@ -223,11 +290,73 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut ledger = FileLedger::new(dir.path().join("ledger.json"));
         ledger.record(record("a", true)).unwrap();
-        let names: Vec<_> = fs::read_dir(dir.path())
+        let mut names: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name())
             .collect();
-        assert_eq!(names, vec!["ledger.json"]);
+        names.sort();
+        assert_eq!(names, vec!["ledger.json", "ledger.lock"]);
+    }
+
+    #[test]
+    fn update_changes_the_current_entry_and_keeps_a_write_made_since_the_caller_read_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.json");
+        let mut hook = FileLedger::new(path.clone());
+        let mut retire = FileLedger::new(path);
+        hook.record(record("a", true)).unwrap();
+        let stale = hook.entries().unwrap()["a"].clone();
+
+        retire
+            .update("a", &mut |r| {
+                r.retired = true;
+                Ok(())
+            })
+            .unwrap();
+        let saved = hook
+            .update("a", &mut |r| {
+                r.session_id = Some("new".into());
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(!stale.retired);
+        assert!(saved.retired);
+        let now = hook.entries().unwrap()["a"].clone();
+        assert!(now.retired);
+        assert_eq!(now.session_id.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn update_saves_nothing_when_the_change_fails_or_the_entry_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = FileLedger::new(dir.path().join("ledger.json"));
+        ledger.record(record("a", true)).unwrap();
+        let failed = ledger.update("a", &mut |r| {
+            r.retired = true;
+            anyhow::bail!("no")
+        });
+        assert!(failed.is_err());
+        assert!(!ledger.entries().unwrap()["a"].retired);
+        assert!(ledger.update("zz", &mut |_| Ok(())).is_err());
+    }
+
+    #[test]
+    fn writers_in_parallel_all_land() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.json");
+        let writers: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    FileLedger::new(path)
+                        .record(record(&format!("m{i}"), true))
+                        .unwrap();
+                })
+            })
+            .collect();
+        writers.into_iter().for_each(|w| w.join().unwrap());
+        assert_eq!(FileLedger::new(path).entries().unwrap().len(), 8);
     }
 
     #[test]

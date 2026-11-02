@@ -1050,6 +1050,14 @@ mod tests {
             anyhow::bail!("read-only")
         }
 
+        fn update(
+            &mut self,
+            _: &str,
+            _: &mut dyn FnMut(&mut AgentRecord) -> Result<()>,
+        ) -> Result<AgentRecord> {
+            anyhow::bail!("read-only")
+        }
+
         fn started(&mut self, _: &str, _: std::time::SystemTime) -> Result<()> {
             anyhow::bail!("read-only")
         }

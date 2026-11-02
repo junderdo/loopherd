@@ -52,14 +52,14 @@ pub fn revive(herdr: &dyn Herdr, ledger: &mut dyn Ledger, req: &ReviveRequest) -
             ..
         } = &outcome
         {
-            let updated = AgentRecord {
-                pane_id: pane_id.clone(),
-                session_id: session_id.clone().or(record.session_id.clone()),
-                socket: herdr.socket().or(record.socket.clone()),
-                ..record.clone()
-            };
-            match ledger.record(updated) {
-                Ok(()) => {
+            let restarted = ledger.update(&record.name, &mut |current| {
+                current.pane_id = pane_id.clone();
+                current.session_id = session_id.clone().or(current.session_id.take());
+                current.socket = herdr.socket().or(current.socket.take());
+                Ok(())
+            });
+            match restarted {
+                Ok(_) => {
                     if let Err(e) = ledger.started(&record.name, SystemTime::now()) {
                         warnings.push(format!("no start entry in its mailbox: {e:#}"));
                     }

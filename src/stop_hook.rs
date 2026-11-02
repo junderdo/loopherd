@@ -17,19 +17,30 @@ pub struct Pane<'a> {
 }
 
 /// Records the stop `input` describes for the member in `pane`; returns the
-/// member's name, or `None` when the pane is no member's.
+/// member's name, or `None` when the pane is no member's or the stop came from
+/// a session other than the member's. Never writes the ledger.
 pub fn stop_hook(
     ledger: &dyn Ledger,
     dir: &Path,
     pane: &Pane,
     input: &[u8],
     now: SystemTime,
+    warn: &mut dyn FnMut(String),
 ) -> Result<Option<String>> {
     let entries = ledger.entries()?;
     let Some(member) = member_in(&entries, pane.id, pane.socket) else {
         return Ok(None);
     };
     let stop = parse(input);
+    if let (Some(ours), Some(theirs)) = (&member.session_id, &stop.session)
+        && ours != theirs
+    {
+        warn(format!(
+            "dropped a stop from session {theirs} in {}'s pane; its session is {ours}",
+            member.name
+        ));
+        return Ok(None);
+    }
     append(dir, &member.name, &Entry::new(now, Body::Stop(stop)))?;
     Ok(Some(member.name.clone()))
 }
@@ -59,10 +70,15 @@ fn parse(input: &[u8]) -> Stop {
         Some(Value::Null) | None => None,
         Some(other) => Some(other.to_string()),
     };
+    let session = input
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     Stop {
         background,
         crons,
         error,
+        session,
     }
 }
 
@@ -120,7 +136,7 @@ mod tests {
             id: pane,
             socket: socket.map(Path::new),
         };
-        stop_hook(ledger, dir, &pane, input.as_bytes(), at()).unwrap()
+        stop_hook(ledger, dir, &pane, input.as_bytes(), at(), &mut |_| {}).unwrap()
     }
 
     fn mailbox(dir: &Path, name: &str) -> String {
@@ -276,5 +292,96 @@ mod tests {
             run(&ledger, dir.path(), "w1:p3", Some("/run/other.sock"), "{}").as_deref(),
             Some("aaa-old")
         );
+    }
+
+    fn in_session(session: Option<&str>) -> MemLedger {
+        let mut m = member("lh-1", "w1:p1", Some(SOCKET));
+        m.session_id = session.map(str::to_string);
+        ledger(vec![m])
+    }
+
+    fn stop_from(session: &str) -> String {
+        format!(r#"{{"hook_event_name":"Stop","session_id":"{session}"}}"#)
+    }
+
+    #[test]
+    fn a_stop_from_the_members_own_session_records_it_with_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = in_session(Some("sess-a"));
+        let who = run(
+            &ledger,
+            dir.path(),
+            "w1:p1",
+            Some(SOCKET),
+            &stop_from("sess-a"),
+        );
+        assert_eq!(who.as_deref(), Some("lh-1"));
+        assert!(mailbox(dir.path(), "lh-1").contains(r#""session":"sess-a""#));
+    }
+
+    #[test]
+    fn a_stop_from_another_session_records_nothing_and_leaves_the_ledger_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = in_session(Some("sess-a"));
+        let before = ledger.0.clone();
+        let who = run(
+            &ledger,
+            dir.path(),
+            "w1:p1",
+            Some(SOCKET),
+            &stop_from("sess-b"),
+        );
+        assert_eq!(who, None);
+        assert_eq!(mailbox(dir.path(), "lh-1"), "");
+        assert_eq!(ledger.0, before);
+    }
+
+    #[test]
+    fn a_dropped_stop_says_which_member_and_both_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = in_session(Some("sess-a"));
+        let pane = Pane {
+            id: "w1:p1",
+            socket: Some(Path::new(SOCKET)),
+        };
+        let mut warnings = vec![];
+        stop_hook(
+            &ledger,
+            dir.path(),
+            &pane,
+            stop_from("sess-b").as_bytes(),
+            at(),
+            &mut |w| warnings.push(w),
+        )
+        .unwrap();
+        assert_eq!(
+            warnings,
+            ["dropped a stop from session sess-b in lh-1's pane; its session is sess-a"]
+        );
+    }
+
+    #[test]
+    fn an_entry_without_a_session_records_every_stop_and_stays_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = in_session(None);
+        let who = run(
+            &ledger,
+            dir.path(),
+            "w1:p1",
+            Some(SOCKET),
+            &stop_from("sess-b"),
+        );
+        assert_eq!(who.as_deref(), Some("lh-1"));
+        assert!(mailbox(dir.path(), "lh-1").contains(r#""session":"sess-b""#));
+        assert_eq!(ledger.0["lh-1"].session_id, None);
+    }
+
+    #[test]
+    fn a_stop_without_a_session_id_is_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = in_session(Some("sess-a"));
+        let who = run(&ledger, dir.path(), "w1:p1", Some(SOCKET), "{}");
+        assert_eq!(who.as_deref(), Some("lh-1"));
+        assert!(!mailbox(dir.path(), "lh-1").contains("session"));
     }
 }
