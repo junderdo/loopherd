@@ -50,7 +50,8 @@ enum Command {
     Herds,
     /// Retire members whose template's done check exits 0, then fill the herd's
     /// free slots with members, one per task its queue's source prints.
-    /// Exits 1 on any error and 3 when a member is blocked at startup.
+    /// Exits 3 when a member is blocked at startup, 4 when the only errors are
+    /// malformed source lines, and 1 on any other error.
     Feed {
         herd: String,
         /// Run the source and done checks and print what would happen; retire and spawn nothing.
