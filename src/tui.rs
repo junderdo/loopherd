@@ -481,6 +481,7 @@ mod tests {
             session_id: Some(format!("sess-{name}")),
             repo: "/nonexistent/repo".into(),
             worktree: Some(format!("/nonexistent/wt-{name}").into()),
+            branch: None,
             workspace: "w1".into(),
             workspace_label: Some("main".into()),
             claude_args: vec![],

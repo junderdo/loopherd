@@ -175,6 +175,7 @@ pub fn spawn(
         session_id: None,
         repo: req.repo.clone(),
         worktree: worktree.clone(),
+        branch: Some(req.branch().unwrap_or_default().to_string()),
         workspace: workspace.id,
         workspace_label: Some(workspace.label),
         claude_args: req.claude_args.clone(),
@@ -518,6 +519,7 @@ mod tests {
         run(&herdr, &mut ledger, &request("a")).unwrap();
         assert_eq!(herdr.tabs()[0].cwd, PathBuf::from("/src/repo"));
         assert_eq!(ledger.0["a"].worktree, None);
+        assert_eq!(ledger.0["a"].branch.as_deref(), Some(""));
     }
 
     #[test]
@@ -543,6 +545,7 @@ mod tests {
         assert_eq!(herdr.tabs()[0].cwd, wt);
         assert_eq!(current_branch(&wt), "feature/existing");
         assert_eq!(ledger.0["a"].worktree, Some(wt));
+        assert_eq!(ledger.0["a"].branch.as_deref(), Some("feature/existing"));
         assert_eq!(ledger.0["a"].repo, repo);
     }
 

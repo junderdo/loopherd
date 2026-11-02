@@ -321,6 +321,7 @@ mod tests {
             session_id: Some(format!("sess-{name}")),
             repo: cwd.into(),
             worktree: None,
+            branch: None,
             workspace: "w1".into(),
             workspace_label: Some("loopherd".into()),
             claude_args: vec!["--model".into(), "opus".into()],

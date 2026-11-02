@@ -15,6 +15,10 @@ pub struct AgentRecord {
     pub session_id: Option<String>,
     pub repo: PathBuf,
     pub worktree: Option<PathBuf>,
+    /// The worktree's branch at spawn, empty when detached or without a
+    /// worktree. Missing in ledgers written before spawn recorded it.
+    #[serde(default)]
+    pub branch: Option<String>,
     /// Workspace ID at spawn time; IDs can be reused after a restart.
     pub workspace: String,
     /// Missing in ledgers written before revive existed.
@@ -136,6 +140,7 @@ mod tests {
             session_id: Some("abc".into()),
             repo: "/src/repo".into(),
             worktree: None,
+            branch: None,
             workspace: "w1".into(),
             workspace_label: Some("loopherd".into()),
             claude_args: vec!["--model".into(), "opus".into()],
@@ -197,5 +202,6 @@ mod tests {
         assert_eq!(entry.herd, None);
         assert_eq!(entry.template, None);
         assert_eq!(entry.params, None);
+        assert_eq!(entry.branch, None);
     }
 }
