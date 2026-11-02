@@ -2,6 +2,7 @@ mod feed;
 mod herd;
 mod herd_view;
 mod herdr;
+mod install_hook;
 mod ledger;
 mod lock;
 mod matching;
@@ -12,11 +13,13 @@ mod revive;
 mod shell;
 mod spawn;
 mod status;
+mod stop_hook;
 mod template;
 mod tui;
 mod watch;
 mod worktree;
 
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
@@ -27,7 +30,7 @@ use clap::{Args, Parser, Subcommand};
 use crate::feed::{FeedRequest, feed};
 use crate::herd::{AddRequest, Paths, add, dry_run, herds};
 use crate::herd_view::Options;
-use crate::herdr::CliHerdr;
+use crate::herdr::{CliHerdr, socket_from_env};
 use crate::ledger::FileLedger;
 use crate::prompt::prompt;
 use crate::report::{Filter, Kind, Reporter, report, reports};
@@ -134,6 +137,20 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+    /// Claude's Stop and StopFailure hook: records the stop, read from the hook
+    /// input on stdin, in the mailbox of the member running in this pane.
+    /// Outside a member's pane it records nothing. Set up by install-hook.
+    StopHook,
+    /// Add loopherd's Stop and StopFailure hooks to Claude's user settings,
+    /// calling this binary; safe to re-run. Backs the file up before changing it.
+    InstallHook {
+        /// Take loopherd's hooks out instead.
+        #[arg(long)]
+        remove: bool,
+        /// Edit this file instead of $CLAUDE_CONFIG_DIR/settings.json or ~/.claude/settings.json.
+        #[arg(long)]
+        settings: Option<PathBuf>,
+    },
     /// Block until a member needs the shepherd, print what happened, and exit:
     /// an unread report (marked read), a member going blocked, or one going
     /// from working to done, idle or gone. Polls herdr every 2s, read-only.
@@ -210,6 +227,10 @@ fn main() -> ExitCode {
         } => ("report", run_report(kind, as_name, &text)),
         Command::Reports { names, herd, all } => ("reports", run_reports(names, herd, all)),
         Command::Watch { herds, timeout } => ("watch", run_watch(&herds, timeout)),
+        Command::StopHook => ("stop-hook", run_stop_hook()),
+        Command::InstallHook { remove, settings } => {
+            ("install-hook", run_install_hook(remove, settings))
+        }
     };
     match result {
         Ok(code) => ExitCode::from(code as u8),
@@ -289,16 +310,17 @@ fn run_prompt(name: &str, force: bool) -> Result<i32> {
 }
 
 fn run_report(kind: Kind, as_name: Option<String>, text: &str) -> Result<i32> {
-    let path = FileLedger::default_path().context("ledger")?;
-    let dir = reports_dir(&path)?;
-    let own_pane = std::env::var("HERDR_PANE_ID").ok();
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let own_pane = own_pane();
+    let own_socket = socket_from_env();
     let who = Reporter {
-        own_pane: own_pane.as_deref().filter(|p| !p.is_empty()),
+        own_pane: own_pane.as_deref(),
+        own_socket: own_socket.as_deref(),
         as_name: as_name.as_deref(),
     };
     report(
-        &FileLedger::new(path),
-        &dir,
+        &ledger,
+        &ledger.reports_dir()?,
         &who,
         kind,
         text,
@@ -308,14 +330,13 @@ fn run_report(kind: Kind, as_name: Option<String>, text: &str) -> Result<i32> {
 }
 
 fn run_reports(names: Vec<String>, herd: Option<String>, all: bool) -> Result<i32> {
-    let path = FileLedger::default_path().context("ledger")?;
-    let dir = reports_dir(&path)?;
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let filter = Filter {
         names: &names,
         herd: herd.as_deref(),
         all,
     };
-    let read = reports(&FileLedger::new(path), &dir, &filter)?;
+    let read = reports(&ledger, &ledger.reports_dir()?, &filter)?;
     for line in read.lines {
         println!("{line}");
     }
@@ -332,8 +353,7 @@ fn run_watch(herds: &[String], timeout: Option<u64>) -> Result<i32> {
             eprintln!("loopherd watch: warning: no herd file for {herd}");
         }
     }
-    let path = FileLedger::default_path().context("ledger")?;
-    let dir = reports_dir(&path)?;
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let req = watch::Request {
         herds,
         timeout: timeout.map(Duration::from_secs),
@@ -341,8 +361,8 @@ fn run_watch(herds: &[String], timeout: Option<u64>) -> Result<i32> {
     };
     let woke = watch::watch(
         &CliHerdr,
-        &FileLedger::new(path),
-        &dir,
+        &ledger,
+        &ledger.reports_dir()?,
         &req,
         &mut watch::RealClock::start(),
         &mut |warning| eprintln!("loopherd watch: {warning}"),
@@ -356,11 +376,63 @@ fn run_watch(herds: &[String], timeout: Option<u64>) -> Result<i32> {
     Ok(0)
 }
 
-fn reports_dir(ledger: &std::path::Path) -> Result<PathBuf> {
-    Ok(ledger
-        .parent()
-        .context("ledger path has no parent")?
-        .join("reports"))
+fn run_stop_hook() -> Result<i32> {
+    // Outside herdr there is no member to find; skip even the ledger read.
+    let Some(pane) = own_pane() else {
+        return Ok(0);
+    };
+    let mut input = vec![];
+    std::io::stdin()
+        .read_to_end(&mut input)
+        .context("read hook input")?;
+    let socket = socket_from_env();
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let pane = stop_hook::Pane {
+        id: &pane,
+        socket: socket.as_deref(),
+    };
+    stop_hook::stop_hook(
+        &ledger,
+        &ledger.reports_dir()?,
+        &pane,
+        &input,
+        SystemTime::now(),
+    )?;
+    Ok(0)
+}
+
+fn run_install_hook(remove: bool, settings: Option<PathBuf>) -> Result<i32> {
+    let settings = match settings {
+        Some(path) => path,
+        None => install_hook::default_settings()?,
+    };
+    let outcome = match remove {
+        true => install_hook::remove(&settings, SystemTime::now())?,
+        false => {
+            let exe = std::env::current_exe().context("find this binary")?;
+            install_hook::install(&settings, &exe, SystemTime::now())?
+        }
+    };
+    let done = match remove {
+        true => "removed loopherd's Stop and StopFailure hooks from",
+        false => "installed loopherd's Stop and StopFailure hooks in",
+    };
+    match outcome {
+        install_hook::Outcome::Unchanged => println!("{} already up to date", settings.display()),
+        install_hook::Outcome::Changed { backup } => {
+            println!("{done} {}", settings.display());
+            if let Some(backup) = backup {
+                println!("backup {}", backup.display());
+            }
+        }
+    }
+    Ok(0)
+}
+
+fn own_pane() -> Option<String> {
+    std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|p| !p.is_empty())
 }
 
 fn run_spawn(args: SpawnArgs) -> Result<i32> {

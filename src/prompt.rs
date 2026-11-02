@@ -59,11 +59,12 @@ mod tests {
             herd: None,
             template: None,
             params: None,
+            socket: None,
         }
     }
 
     fn ledger_with(record: AgentRecord) -> MemLedger {
-        MemLedger([(record.name.clone(), record)].into())
+        MemLedger([(record.name.clone(), record)].into(), vec![])
     }
 
     #[test]

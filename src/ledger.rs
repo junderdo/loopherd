@@ -4,9 +4,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+use crate::report::{self, Body, Entry};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRecord {
@@ -45,12 +48,17 @@ pub struct AgentRecord {
     /// Each param's value by name, for members of a herd.
     #[serde(default)]
     pub params: Option<BTreeMap<String, String>>,
+    /// `$HERDR_SOCKET_PATH` at spawn or revive: which herdr the pane is in.
+    #[serde(default)]
+    pub socket: Option<PathBuf>,
 }
 
 pub trait Ledger {
     fn entries(&self) -> Result<BTreeMap<String, AgentRecord>>;
     /// Inserts or replaces the entry for `record.name`.
     fn record(&mut self, record: AgentRecord) -> Result<()>;
+    /// Appends a `start` boundary to `name`'s mailbox.
+    fn started(&mut self, name: &str, at: SystemTime) -> Result<()>;
 }
 
 /// A JSON file of entries keyed by agent name.
@@ -71,6 +79,15 @@ impl FileLedger {
                 .join(".local/state"),
         };
         Ok(state.join("loopherd/ledger.json"))
+    }
+
+    /// The members' mailboxes, beside the ledger.
+    pub fn reports_dir(&self) -> Result<PathBuf> {
+        Ok(self
+            .path
+            .parent()
+            .context("ledger path has no parent")?
+            .join("reports"))
     }
 
     fn load(&self) -> Result<BTreeMap<String, AgentRecord>> {
@@ -111,11 +128,16 @@ impl Ledger for FileLedger {
         entries.insert(record.name.clone(), record);
         self.save(&entries)
     }
+
+    fn started(&mut self, name: &str, at: SystemTime) -> Result<()> {
+        report::append(&self.reports_dir()?, name, &Entry::new(at, Body::Start))
+    }
 }
 
+/// Entries, and the names `started` was called with, in order.
 #[cfg(test)]
 #[derive(Default)]
-pub struct MemLedger(pub BTreeMap<String, AgentRecord>);
+pub struct MemLedger(pub BTreeMap<String, AgentRecord>, pub Vec<String>);
 
 #[cfg(test)]
 impl Ledger for MemLedger {
@@ -126,6 +148,31 @@ impl Ledger for MemLedger {
     fn record(&mut self, record: AgentRecord) -> Result<()> {
         self.0.insert(record.name.clone(), record);
         Ok(())
+    }
+
+    fn started(&mut self, name: &str, _at: SystemTime) -> Result<()> {
+        self.1.push(name.into());
+        Ok(())
+    }
+}
+
+/// A [`MemLedger`] whose mailbox can't be written.
+#[cfg(test)]
+#[derive(Default)]
+pub struct NoMailbox(pub MemLedger);
+
+#[cfg(test)]
+impl Ledger for NoMailbox {
+    fn entries(&self) -> Result<BTreeMap<String, AgentRecord>> {
+        self.0.entries()
+    }
+
+    fn record(&mut self, record: AgentRecord) -> Result<()> {
+        self.0.record(record)
+    }
+
+    fn started(&mut self, _: &str, _: SystemTime) -> Result<()> {
+        anyhow::bail!("disk full")
     }
 }
 
@@ -152,6 +199,7 @@ mod tests {
             herd: None,
             template: None,
             params: None,
+            socket: None,
         }
     }
 
@@ -203,5 +251,22 @@ mod tests {
         assert_eq!(entry.template, None);
         assert_eq!(entry.params, None);
         assert_eq!(entry.branch, None);
+        assert_eq!(entry.socket, None);
+    }
+
+    #[test]
+    fn started_appends_a_start_entry_to_the_mailbox_beside_the_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = FileLedger::new(dir.path().join("loopherd/ledger.json"));
+        ledger
+            .started(
+                "lh-1",
+                humantime::parse_rfc3339("2026-11-02T09:00:00Z").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("loopherd/reports/lh-1.jsonl")).unwrap(),
+            "{\"at\":\"2026-11-02T09:00:00.000000000Z\",\"kind\":\"start\"}\n"
+        );
     }
 }

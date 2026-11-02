@@ -172,16 +172,21 @@ mod tests {
             herd: herd.map(Into::into),
             template: None,
             params: None,
+            socket: None,
         }
     }
 
     fn ledger(members: Vec<AgentRecord>) -> MemLedger {
-        MemLedger(members.into_iter().map(|m| (m.name.clone(), m)).collect())
+        MemLedger(
+            members.into_iter().map(|m| (m.name.clone(), m)).collect(),
+            vec![],
+        )
     }
 
     fn send(ledger: &MemLedger, dir: &Path, name: &str, kind: Kind, text: &str) {
         let who = Reporter {
             own_pane: None,
+            own_socket: None,
             as_name: Some(name),
         };
         let at = humantime::parse_rfc3339("2026-11-01T09:00:00Z").unwrap();

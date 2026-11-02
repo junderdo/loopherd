@@ -827,3 +827,112 @@ fn guard_rejects_a_dev_socket_symlinked_to_the_live_socket() {
     let err = check_inherited_socket(Some(&dev), &dev, &live).unwrap_err();
     assert!(err.contains("live socket"), "{err}");
 }
+
+fn mailbox_lines(state: &Path, name: &str) -> Vec<Value> {
+    std::fs::read_to_string(state.join(format!("loopherd/reports/{name}.jsonl")))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+fn stops(state: &Path, name: &str) -> Vec<Value> {
+    mailbox_lines(state, name)
+        .into_iter()
+        .filter(|e| e["kind"] == "stop")
+        .collect()
+}
+
+#[test]
+fn the_stop_hook_records_a_paused_stop_then_a_finished_one() {
+    if !live_enabled() {
+        return;
+    }
+    let workspace = assert_dev_session();
+    let state = tempfile::tempdir().unwrap();
+    // Stands in for the real installed hook: its ledger has the same pane, in the live herdr.
+    let live_state = tempfile::tempdir().unwrap();
+    let name = format!("lh-live-stop-{}", std::process::id());
+    let _cleanup = CloseTab(name.clone());
+    let hook = |state: &Path| {
+        format!(
+            "XDG_STATE_HOME='{}' '{}' stop-hook || true",
+            state.display(),
+            env!("CARGO_BIN_EXE_loopherd")
+        )
+    };
+    let settings = state.path().join("settings.json");
+    let hooks = serde_json::json!([{"hooks": [
+        {"type": "command", "command": hook(state.path()), "timeout": 10},
+        {"type": "command", "command": hook(live_state.path()), "timeout": 10},
+    ]}]);
+    std::fs::write(
+        &settings,
+        serde_json::json!({
+            "hooks": {"Stop": hooks, "StopFailure": hooks},
+            "permissions": {"allow": ["Bash(sleep:*)"]},
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let out = spawn(
+        state.path(),
+        &[
+            "--repo",
+            env!("CARGO_MANIFEST_DIR"),
+            "--name",
+            &name,
+            "--workspace",
+            &workspace,
+            "--prompt",
+            "Run `sleep 20` with the Bash tool and run_in_background set to true. \
+             Then end your turn at once: don't wait for it or check on it. \
+             When it finishes, reply with just the word done.",
+            "--",
+            "--settings",
+            settings.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let entry = ledger_entry(state.path(), &name);
+    assert_eq!(entry["socket"], dev_socket().to_str().unwrap());
+    assert_eq!(mailbox_lines(state.path(), &name)[0]["kind"], "start");
+
+    let mut live_entry = entry.clone();
+    live_entry["socket"] = live_socket().to_str().unwrap().into();
+    std::fs::create_dir_all(live_state.path().join("loopherd")).unwrap();
+    std::fs::write(
+        live_state.path().join("loopherd/ledger.json"),
+        serde_json::json!({ &name: live_entry }).to_string(),
+    )
+    .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    while stops(state.path(), &name).len() < 2 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    let stops = stops(state.path(), &name);
+    assert!(stops.len() >= 2, "{stops:?}");
+    assert!(
+        stops[0]["background"]["shells"].as_u64() >= Some(1),
+        "{stops:?}"
+    );
+    let last = stops.last().unwrap();
+    assert_eq!(
+        last["background"],
+        serde_json::json!({"shells": 0, "subagents": 0, "other": 0}),
+        "{stops:?}"
+    );
+    assert_eq!(last["crons"], 0, "{stops:?}");
+    assert!(
+        !live_state.path().join("loopherd/reports").exists(),
+        "the live-socket hook recorded a stop"
+    );
+}

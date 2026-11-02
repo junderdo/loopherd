@@ -14,5 +14,8 @@ together across sessions, built as a layer over herdr's CLI/socket API.
   untouched. Wrap manual commands in `scripts/herdr-dev` (`--start` boots the
   dev server); live tests run with
   `LOOPHERD_LIVE=1 scripts/herdr-dev cargo test --test live`.
+- **Installing** the `loopherd` on PATH and its Claude Stop hook is
+  `scripts/install`, run by the shepherd. Members never run it; tests and
+  manual runs of `install-hook` pass `--settings <temp file>`.
 - **Checks** before calling work done: `cargo fmt --check`,
   `cargo clippy -- -D warnings`, `cargo test`.

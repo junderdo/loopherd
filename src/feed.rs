@@ -406,6 +406,7 @@ mod tests {
             herd: herd.map(str::to_string),
             template: herd.map(|_| "pr".to_string()),
             params: None,
+            socket: None,
         }
     }
 
@@ -415,6 +416,7 @@ mod tests {
                 .iter()
                 .map(|m| (m.name.clone(), m.clone()))
                 .collect(),
+            vec![],
         )
     }
 
@@ -1045,6 +1047,10 @@ mod tests {
         }
 
         fn record(&mut self, _: AgentRecord) -> Result<()> {
+            anyhow::bail!("read-only")
+        }
+
+        fn started(&mut self, _: &str, _: std::time::SystemTime) -> Result<()> {
             anyhow::bail!("read-only")
         }
     }

@@ -12,13 +12,16 @@ session. Read `herdr --skill` before controlling herdr.
 ## A card's life
 
 1. **Feed.** From the main checkout, `git pull --ff-only`, then refresh the
-   `loopherd` on PATH, which members use for `loopherd report`:
+   `loopherd` on PATH, which members use for `loopherd report` and Claude
+   calls as their Stop hook:
    ```bash
-   cargo build -q && install -m 755 target/debug/loopherd ~/.local/bin/.loopherd.tmp \
-     && mv -f ~/.local/bin/.loopherd.tmp ~/.local/bin/loopherd
+   scripts/install
    ```
-   It's a copy, not a symlink, so a failed build keeps the last good one, and
-   the rename swaps it in one step. Then
+   It needs `jq`. It builds, copies the binary to `~/.local/bin/loopherd` through a temp
+   file and a rename, so a failed build keeps the last good one, and runs
+   `loopherd install-hook` to keep the Stop/StopFailure hooks in
+   `~/.claude/settings.json` (backed up first; re-running changes nothing).
+   Running Claude sessions pick up a newly added hook without a restart. Then
    `loopherd feed loopherd-cards --dry-run` and, if it reads right,
    `loopherd feed loopherd-cards`. The herd file
    (`~/.config/loopherd/herds/loopherd-cards.toml`) turns claimable Backlog

@@ -493,6 +493,7 @@ mod tests {
             herd: herd.map(str::to_string),
             template: None,
             params: None,
+            socket: None,
         }
     }
 
