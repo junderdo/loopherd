@@ -939,6 +939,7 @@ mod tests {
         let paths = Paths {
             herds: config.path().join("herds"),
             home: PathBuf::from("/home/me"),
+            feed_lock: config.path().join("feed.lock"),
         };
         let req = FeedRequest {
             herd: "prs".into(),
