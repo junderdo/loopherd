@@ -13,6 +13,8 @@ pub trait Procs {
     /// Clock ticks since boot at which `pid` started.
     fn start(&self, pid: u32) -> Option<u64>;
     fn cmdline(&self, pid: u32) -> Option<Vec<String>>;
+    /// `path` as `pid` would open it: relative to its cwd, symlinks followed.
+    fn resolve(&self, pid: u32, path: &str) -> Option<PathBuf>;
 }
 
 pub struct ProcFs;
@@ -37,6 +39,11 @@ impl Procs for ProcFs {
             args.map(|a| String::from_utf8_lossy(a).into_owned())
                 .collect(),
         )
+    }
+
+    fn resolve(&self, pid: u32, path: &str) -> Option<PathBuf> {
+        let cwd = PathBuf::from(format!("/proc/{pid}/cwd"));
+        std::fs::canonicalize(cwd.join(path)).ok()
     }
 }
 
@@ -156,8 +163,10 @@ fn is_herdr(exe: &Path) -> bool {
     name.is_some_and(|n| n.strip_suffix(" (deleted)").unwrap_or(n) == "herdr")
 }
 
+const CLAUDE_CODE_PACKAGE: &str = "@anthropic-ai/claude-code/";
+
 /// A native install runs from `…/claude/versions/`; an npm install is `node`
-/// running `…/@anthropic-ai/claude-code/cli.js`.
+/// running the package's `cli.js`, often through npm's `bin/claude` symlink.
 fn is_claude(procs: &dyn Procs, pid: u32, exe: &Path) -> bool {
     if exe.to_string_lossy().contains("/claude/versions/") {
         return true;
@@ -166,15 +175,24 @@ fn is_claude(procs: &dyn Procs, pid: u32, exe: &Path) -> bool {
         .file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.starts_with("node"));
-    is_node
-        && procs.cmdline(pid).is_some_and(|args| {
-            args.iter()
-                .any(|a| a.contains("@anthropic-ai/claude-code/"))
-        })
+    if !is_node {
+        return false;
+    }
+    let Some(args) = procs.cmdline(pid) else {
+        return false;
+    };
+    if args.iter().any(|a| a.contains(CLAUDE_CODE_PACKAGE)) {
+        return true;
+    }
+    // A shebang launch puts the invoked path, not the symlink's target, in argv.
+    let script = args.iter().skip(1).find(|a| !a.starts_with('-'));
+    script
+        .and_then(|s| procs.resolve(pid, s))
+        .is_some_and(|r| r.to_string_lossy().contains(CLAUDE_CODE_PACKAGE))
 }
 
 #[cfg(test)]
-pub use fake::{CLAUDE, FakeProcs, NODE};
+pub use fake::{CLAUDE, FakeProcs, NODE, NPM_CLI};
 
 #[cfg(test)]
 mod fake {
@@ -182,16 +200,17 @@ mod fake {
 
     use super::*;
 
-    /// pid → (exe, parent, start), and pid → cmdline.
+    /// pid → (exe, parent, start), pid → cmdline, and path → resolved path.
     #[derive(Default)]
     pub struct FakeProcs(
         pub BTreeMap<u32, (PathBuf, u32, u64)>,
         pub BTreeMap<u32, Vec<String>>,
+        pub BTreeMap<String, PathBuf>,
     );
 
     pub const CLAUDE: &str = "/home/u/.local/share/claude/versions/2.1.316";
     pub const NODE: &str = "/usr/bin/node";
-    const NPM_CLI: &str = "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js";
+    pub const NPM_CLI: &str = "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js";
 
     impl FakeProcs {
         pub fn add(&mut self, pid: u32, exe: &str, parent: u32, start: u64) {
@@ -201,6 +220,10 @@ mod fake {
         pub fn set_cmdline(&mut self, pid: u32, args: &[&str]) {
             self.1
                 .insert(pid, args.iter().map(|a| a.to_string()).collect());
+        }
+
+        pub fn link(&mut self, path: &str, target: &str) {
+            self.2.insert(path.into(), target.into());
         }
 
         pub fn add_npm_claude(&mut self, pid: u32, parent: u32, start: u64) {
@@ -231,6 +254,9 @@ mod fake {
         fn cmdline(&self, pid: u32) -> Option<Vec<String>> {
             self.1.get(&pid).cloned()
         }
+        fn resolve(&self, _pid: u32, path: &str) -> Option<PathBuf> {
+            self.2.get(path).cloned()
+        }
     }
 }
 
@@ -246,6 +272,9 @@ mod tests {
         assert_eq!(ProcFs.parent(me), Some(std::os::unix::process::parent_id()));
         assert!(ProcFs.exe(me).is_some());
         assert!(ProcFs.cmdline(me).is_some_and(|args| !args.is_empty()));
+        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        assert_eq!(ProcFs.resolve(me, "."), Some(cwd));
+        assert_eq!(ProcFs.resolve(me, "/no/such/path"), None);
     }
 
     #[test]
@@ -301,6 +330,43 @@ mod tests {
 
         p.0.remove(&25);
         p.add(25, "/usr/bin/nodejs", 20, 250);
+        assert!(is_top_level(&p, 30));
+    }
+
+    /// npm's `bin/claude` is a symlink to the package's `cli.js`; a shebang
+    /// launch puts the invoked path in argv.
+    fn with_npm_bin_claude(p: &mut FakeProcs, pid: u32, parent: u32) {
+        p.add(pid, NODE, parent, pid as u64 * 10);
+        p.set_cmdline(pid, &["node", "/usr/local/bin/claude", "--resume", "x"]);
+        p.link("/usr/local/bin/claude", NPM_CLI);
+    }
+
+    #[test]
+    fn an_npm_claude_launched_through_its_bin_link_is_recognised() {
+        let mut p = FakeProcs::pane();
+        with_npm_bin_claude(&mut p, 30, 20);
+        assert!(is_top_level(&p, 30));
+        p.add(40, "/bin/sh", 30, 400);
+        p.add(50, CLAUDE, 40, 500);
+        assert!(!is_top_level(&p, 50));
+    }
+
+    #[test]
+    fn a_node_script_resolving_outside_claude_code_is_not_claude() {
+        let mut p = FakeProcs::pane();
+        p.add(25, NODE, 20, 250);
+        p.set_cmdline(25, &[NODE, "--inspect", "/usr/local/bin/tool"]);
+        p.link("/usr/local/bin/tool", "/opt/tool/index.js");
+        p.add(30, CLAUDE, 25, 300);
+        assert!(is_top_level(&p, 30));
+    }
+
+    #[test]
+    fn a_node_script_that_does_not_resolve_is_not_claude() {
+        let mut p = FakeProcs::pane();
+        p.add(25, NODE, 20, 250);
+        p.set_cmdline(25, &[NODE, "/usr/local/bin/claude"]);
+        p.add(30, CLAUDE, 25, 300);
         assert!(is_top_level(&p, 30));
     }
 
