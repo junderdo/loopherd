@@ -7,20 +7,26 @@ use std::time::SystemTime;
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::ledger::Ledger;
+use crate::ledger::{AgentRecord, Ledger};
+use crate::process::{self, Procs};
 use crate::report::{Background, Body, Entry, Stop, Tally, Unknown, append, member_in};
 
-/// Where the hook runs: `$HERDR_PANE_ID` and `$HERDR_SOCKET_PATH`.
+/// Where the hook runs: `$HERDR_PANE_ID`, `$HERDR_SOCKET_PATH` and `$CLAUDE_PID`.
 pub struct Pane<'a> {
     pub id: &'a str,
     pub socket: Option<&'a Path>,
+    pub claude_pid: Option<u32>,
 }
 
 /// Records the stop `input` describes for the member in `pane`; returns the
 /// member's name, or `None` when the pane is no member's or the stop came from
-/// a session other than the member's. Never writes the ledger.
+/// another Claude than the member's. With the member's process known, that is
+/// the test, and a stop from it carries the member's current session into the
+/// ledger; otherwise the hook tries to claim the process, and failing that
+/// compares sessions.
 pub fn stop_hook(
-    ledger: &dyn Ledger,
+    ledger: &mut dyn Ledger,
+    procs: &dyn Procs,
     dir: &Path,
     pane: &Pane,
     input: &[u8],
@@ -32,6 +38,27 @@ pub fn stop_hook(
         return Ok(None);
     };
     let stop = parse(input);
+    if let Some(pid) = pane.claude_pid {
+        let exact = pane.socket.is_some() && member.socket.as_deref() == pane.socket;
+        match process::live(procs, member.process) {
+            Some(ours) if ours.pid == pid => {
+                follow_session(ledger, member, &stop)?;
+                return file(dir, member, stop, now);
+            }
+            Some(ours) => {
+                warn(format!(
+                    "dropped a stop from process {pid} in {}'s pane; its process is {}",
+                    member.name, ours.pid
+                ));
+                return Ok(None);
+            }
+            None => {
+                if process::claim(ledger, procs, member, exact, pid, stop.session.as_deref())? {
+                    return file(dir, member, stop, now);
+                }
+            }
+        }
+    }
     if let (Some(ours), Some(theirs)) = (&member.session_id, &stop.session)
         && ours != theirs
     {
@@ -41,6 +68,25 @@ pub fn stop_hook(
         ));
         return Ok(None);
     }
+    file(dir, member, stop, now)
+}
+
+fn follow_session(ledger: &mut dyn Ledger, member: &AgentRecord, stop: &Stop) -> Result<()> {
+    let Some(session) = stop
+        .session
+        .as_ref()
+        .filter(|s| member.session_id.as_ref() != Some(s))
+    else {
+        return Ok(());
+    };
+    ledger.update(&member.name, &mut |record| {
+        record.session_id = Some(session.clone());
+        Ok(())
+    })?;
+    Ok(())
+}
+
+fn file(dir: &Path, member: &AgentRecord, stop: Stop, now: SystemTime) -> Result<Option<String>> {
     append(dir, &member.name, &Entry::new(now, Body::Stop(stop)))?;
     Ok(Some(member.name.clone()))
 }
@@ -87,7 +133,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::ledger::{AgentRecord, MemLedger};
+    use crate::ledger::{AgentRecord, MemLedger, Process};
+    use crate::process::{CLAUDE, FakeProcs};
 
     const SOCKET: &str = "/run/herdr/herdr.sock";
 
@@ -111,6 +158,7 @@ mod tests {
             template: None,
             params: None,
             socket: socket.map(PathBuf::from),
+            process: None,
         }
     }
 
@@ -132,11 +180,36 @@ mod tests {
         socket: Option<&str>,
         input: &str,
     ) -> Option<String> {
+        let mut ledger = ledger.clone();
+        run_as(
+            &mut ledger,
+            &FakeProcs::default(),
+            None,
+            dir,
+            pane,
+            socket,
+            input,
+            &mut |_| {},
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_as(
+        ledger: &mut MemLedger,
+        procs: &FakeProcs,
+        claude_pid: Option<u32>,
+        dir: &Path,
+        pane: &str,
+        socket: Option<&str>,
+        input: &str,
+        warn: &mut dyn FnMut(String),
+    ) -> Option<String> {
         let pane = Pane {
             id: pane,
             socket: socket.map(Path::new),
+            claude_pid,
         };
-        stop_hook(ledger, dir, &pane, input.as_bytes(), at(), &mut |_| {}).unwrap()
+        stop_hook(ledger, procs, dir, &pane, input.as_bytes(), at(), warn).unwrap()
     }
 
     fn mailbox(dir: &Path, name: &str) -> String {
@@ -339,21 +412,18 @@ mod tests {
     #[test]
     fn a_dropped_stop_says_which_member_and_both_sessions() {
         let dir = tempfile::tempdir().unwrap();
-        let ledger = in_session(Some("sess-a"));
-        let pane = Pane {
-            id: "w1:p1",
-            socket: Some(Path::new(SOCKET)),
-        };
+        let mut ledger = in_session(Some("sess-a"));
         let mut warnings = vec![];
-        stop_hook(
-            &ledger,
+        run_as(
+            &mut ledger,
+            &FakeProcs::default(),
+            None,
             dir.path(),
-            &pane,
-            stop_from("sess-b").as_bytes(),
-            at(),
+            "w1:p1",
+            Some(SOCKET),
+            &stop_from("sess-b"),
             &mut |w| warnings.push(w),
-        )
-        .unwrap();
+        );
         assert_eq!(
             warnings,
             ["dropped a stop from session sess-b in lh-1's pane; its session is sess-a"]
@@ -383,5 +453,112 @@ mod tests {
         let who = run(&ledger, dir.path(), "w1:p1", Some(SOCKET), "{}");
         assert_eq!(who.as_deref(), Some("lh-1"));
         assert!(!mailbox(dir.path(), "lh-1").contains("session"));
+    }
+
+    fn two_claudes() -> FakeProcs {
+        let mut p = FakeProcs::pane();
+        p.add(40, "/bin/sh", 30, 400);
+        p.add(50, CLAUDE, 40, 500);
+        p
+    }
+
+    fn claimed(session: Option<&str>, pid: u32, start: u64) -> MemLedger {
+        let mut l = in_session(session);
+        l.0.get_mut("lh-1").unwrap().process = Some(Process { pid, start });
+        l
+    }
+
+    fn from_pid(
+        ledger: &mut MemLedger,
+        pid: Option<u32>,
+        input: &str,
+    ) -> (Option<String>, Vec<String>, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut warnings = vec![];
+        let who = run_as(
+            ledger,
+            &two_claudes(),
+            pid,
+            dir.path(),
+            "w1:p1",
+            Some(SOCKET),
+            input,
+            &mut |w| warnings.push(w),
+        );
+        (who, warnings, mailbox(dir.path(), "lh-1"))
+    }
+
+    #[test]
+    fn the_top_level_claude_claims_on_its_first_stop() {
+        let mut l = in_session(Some("sess-a"));
+        let (who, _, mailbox) = from_pid(&mut l, Some(30), &stop_from("sess-a"));
+        assert_eq!(who.as_deref(), Some("lh-1"));
+        assert!(mailbox.contains("sess-a"));
+        assert_eq!(
+            l.0["lh-1"].process,
+            Some(Process {
+                pid: 30,
+                start: 300
+            })
+        );
+    }
+
+    #[test]
+    fn a_nested_claude_does_not_claim_and_falls_back_to_the_session_check() {
+        let mut l = in_session(Some("sess-a"));
+        let (who, warnings, _) = from_pid(&mut l, Some(50), &stop_from("sess-b"));
+        assert_eq!(who, None);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(l.0["lh-1"].process, None);
+
+        let (who, _, _) = from_pid(&mut l, Some(50), &stop_from("sess-a"));
+        assert_eq!(who.as_deref(), Some("lh-1"));
+        assert_eq!(l.0["lh-1"].process, None);
+    }
+
+    #[test]
+    fn stops_from_the_members_process_are_filed_and_update_a_differing_session() {
+        let mut l = claimed(Some("old"), 30, 300);
+        let (who, warnings, mailbox) = from_pid(&mut l, Some(30), &stop_from("branched"));
+        assert_eq!(who.as_deref(), Some("lh-1"));
+        assert!(warnings.is_empty());
+        assert!(mailbox.contains(r#""session":"branched""#));
+        assert_eq!(l.0["lh-1"].session_id.as_deref(), Some("branched"));
+    }
+
+    #[test]
+    fn stops_from_another_process_are_dropped_with_a_line_even_in_the_same_session() {
+        let mut l = claimed(Some("sess-a"), 30, 300);
+        let (who, warnings, mailbox) = from_pid(&mut l, Some(50), &stop_from("sess-a"));
+        assert_eq!(who, None);
+        assert_eq!(mailbox, "");
+        assert_eq!(
+            warnings,
+            ["dropped a stop from process 50 in lh-1's pane; its process is 30"]
+        );
+        assert_eq!(l.0["lh-1"].session_id.as_deref(), Some("sess-a"));
+    }
+
+    #[test]
+    fn a_dead_recorded_process_is_reclaimed_by_the_next_stop() {
+        let mut l = claimed(Some("sess-a"), 30, 299);
+        let (who, _, _) = from_pid(&mut l, Some(30), &stop_from("sess-a"));
+        assert_eq!(who.as_deref(), Some("lh-1"));
+        assert_eq!(
+            l.0["lh-1"].process,
+            Some(Process {
+                pid: 30,
+                start: 300
+            })
+        );
+    }
+
+    #[test]
+    fn without_claude_pid_a_claimed_member_gets_the_session_check() {
+        let mut l = claimed(Some("sess-a"), 30, 300);
+        let (who, _, _) = from_pid(&mut l, None, &stop_from("sess-b"));
+        assert_eq!(who, None);
+        let (who, _, _) = from_pid(&mut l, None, &stop_from("sess-a"));
+        assert_eq!(who.as_deref(), Some("lh-1"));
     }
 }

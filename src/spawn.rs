@@ -196,6 +196,7 @@ pub fn spawn(
             .as_ref()
             .map(|m| m.params.iter().cloned().collect()),
         socket: herdr.socket(),
+        process: None,
     };
     let agent = match readiness {
         Readiness::Blocked => {

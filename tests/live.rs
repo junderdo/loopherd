@@ -865,12 +865,22 @@ fn spawn_hooked(tag: &str, prompt: &str) -> Hooked {
     let cleanup = CloseTab(name.clone());
     let hook = |state: &Path| {
         format!(
-            "XDG_STATE_HOME='{}' '{}' stop-hook || true",
+            " XDG_STATE_HOME='{}' '{}' stop-hook || true",
             state.display(),
             env!("CARGO_BIN_EXE_loopherd")
         )
     };
     let settings = state.path().join("settings.json");
+    let prompt = prompt.replace("{settings}", settings.to_str().unwrap());
+    let session_hooks = serde_json::json!([{"hooks": [{
+        "type": "command",
+        "command": format!(
+            "XDG_STATE_HOME='{}' '{}' session-hook || true",
+            state.path().display(),
+            env!("CARGO_BIN_EXE_loopherd")
+        ),
+        "timeout": 10,
+    }]}]);
     let hooks = serde_json::json!([{"hooks": [
         {"type": "command", "command": hook(state.path()), "timeout": 10},
         {"type": "command", "command": hook(live_state.path()), "timeout": 10},
@@ -878,8 +888,8 @@ fn spawn_hooked(tag: &str, prompt: &str) -> Hooked {
     std::fs::write(
         &settings,
         serde_json::json!({
-            "hooks": {"Stop": hooks, "StopFailure": hooks},
-            "permissions": {"allow": ["Bash(sleep:*)"]},
+            "hooks": {"Stop": hooks, "StopFailure": hooks, "SessionStart": session_hooks},
+            "permissions": {"allow": ["Bash(sleep:*)", "Bash(claude:*)"]},
         })
         .to_string(),
     )
@@ -895,8 +905,10 @@ fn spawn_hooked(tag: &str, prompt: &str) -> Hooked {
             "--workspace",
             &workspace,
             "--prompt",
-            prompt,
+            &prompt,
             "--",
+            "--model",
+            "haiku",
             "--settings",
             settings.to_str().unwrap(),
         ],
@@ -1003,5 +1015,63 @@ fn watch_wakes_paused_then_a_rearmed_watch_wakes_finished() {
 
     assert_eq!(watch(), format!("{} paused  1 shell\n", member.name));
     assert_eq!(watch(), format!("{} finished  no report\n", member.name));
+    member.assert_live_state_untouched();
+}
+
+fn wait_for_stops(state: &Path, name: &str, count: usize) -> Vec<Value> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+    while stops(state, name).len() < count && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    stops(state, name)
+}
+
+fn say(name: &str, text: &str) {
+    herdr_ok(&["agent", "prompt", name, text]);
+}
+
+#[test]
+fn only_the_members_own_stops_are_filed_across_a_nested_claude_and_a_branch() {
+    if !live_enabled() {
+        return;
+    }
+    let member = spawn_hooked("branch", "Reply with just the word zero.");
+    let state = member.state.path();
+    let settings = state.join("settings.json");
+
+    let first = wait_for_stops(state, &member.name, 1);
+    assert_eq!(first.len(), 1, "{first:?}");
+    let entry = ledger_entry(state, &member.name);
+    assert!(entry["process"]["pid"].is_u64(), "unclaimed: {entry}");
+    let session = entry["session_id"].clone();
+    assert!(session.is_string(), "{session}");
+
+    say(
+        &member.name,
+        &format!(
+            "Run `claude -p --model haiku --continue --settings {} 'Reply with just ok.'` \
+             with the Bash tool and wait for it. Then reply with just the word one.",
+            settings.display()
+        ),
+    );
+    let both = wait_for_stops(state, &member.name, 2);
+    std::thread::sleep(std::time::Duration::from_secs(10));
+    let all = stops(state, &member.name);
+    assert_eq!(
+        all.len(),
+        both.len().max(2),
+        "a nested stop was filed: {all:?}"
+    );
+    assert_eq!(all.len(), 2, "{all:?}");
+
+    say(&member.name, "/branch");
+    std::thread::sleep(std::time::Duration::from_secs(8));
+    say(&member.name, "Reply with just the word two.");
+
+    let all = wait_for_stops(state, &member.name, 3);
+    assert_eq!(all.len(), 3, "{all:?}");
+    let branched = ledger_entry(state, &member.name)["session_id"].clone();
+    assert_ne!(branched, session, "the ledger did not follow /branch");
+    assert_eq!(all[2]["session"], branched, "{all:?}");
     member.assert_live_state_untouched();
 }

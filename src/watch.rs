@@ -300,6 +300,7 @@ mod tests {
             template: None,
             params: None,
             socket: None,
+            process: None,
         }
     }
 

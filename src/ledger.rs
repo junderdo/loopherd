@@ -52,6 +52,16 @@ pub struct AgentRecord {
     /// `$HERDR_SOCKET_PATH` at spawn or revive: which herdr the pane is in.
     #[serde(default)]
     pub socket: Option<PathBuf>,
+    /// The member's own Claude process, claimed by a hook (LH-71).
+    #[serde(default)]
+    pub process: Option<Process>,
+}
+
+/// A process by PID and start time, so a reused PID isn't mistaken for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Process {
+    pub pid: u32,
+    pub start: u64,
 }
 
 pub trait Ledger {
@@ -267,7 +277,16 @@ mod tests {
             template: None,
             params: None,
             socket: None,
+            process: None,
         }
+    }
+
+    #[test]
+    fn a_ledger_without_the_process_field_parses() {
+        let mut json = serde_json::to_value(record("a", true)).unwrap();
+        json.as_object_mut().unwrap().remove("process");
+        let parsed: AgentRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.process, None);
     }
 
     #[test]
