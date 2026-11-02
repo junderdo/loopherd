@@ -33,7 +33,11 @@ session. Read `herdr --skill` before controlling herdr.
    ```bash
    loopherd watch --timeout 3600
    ```
-   (`loopherd watch loopherd-cards` narrows it to a herd.) It returns when a
+   Your watch reads herds' leads, every member of a herd without a lead
+   (a `gone` lead still holds its herd until retired), and members in no
+   herd; a led herd's workers are its lead's to watch. Naming herds
+   (`loopherd watch loopherd-cards`) narrows it, and naming a led herd
+   narrows it to that herd's lead. It returns when a
    member leaves a report or its Claude stops in a new state, printing a
    line per event, and marks them read only once printed. Stops come from
    the Stop hook's entries in the mailbox, so a stop that lands between
@@ -42,8 +46,9 @@ session. Read `herdr --skill` before controlling herdr.
    `loopherd status` before each re-arm. Exit 2 means the timeout passed
    with nothing to do. Start the next watch after handling every wake. It
    dies with the shepherd's session. It refuses to start while another
-   watch holds `watch.lock` (the error names its PID; an orphaned one can
-   hold it until its timeout), or when the hook isn't in
+   shepherd's watch holds `watch.lock` (the error names its PID; an
+   orphaned one can hold it until its timeout; leads' watches hold their
+   own locks and don't block yours), or when the hook isn't in
    `~/.claude/settings.json` (run `scripts/install`). Lines come in this
    order: reports, questions first then by time; then stop lines grouped
    by member in name order, oldest first within a member; then `blocked`
@@ -109,8 +114,11 @@ differs from the shepherd:
 
   `merge`, `install` and `rebase` are also blocked by a hook when off
   (LH-77). Grilling is always the human's.
-- **Heartbeat.** Keep `loopherd watch <herd> --timeout 600` as a background
-  task. Exit 2 is a heartbeat, not idleness: check each Review card's PR
+- **Heartbeat.** Keep `loopherd watch --timeout 600` as a background
+  task. Run from your pane, it's your watch: it reads your herd's workers
+  only, never you, and naming any other herd is an error. It holds
+  `watch-<your name>.lock`, so it runs beside the shepherd's watch, which
+  reads you. Exit 2 is a heartbeat, not idleness: check each Review card's PR
   (`gh pr view <n> --json state`) and run the after-merge steps for any the
   human merged. Re-arm after every exit.
 - **On each wake** re-read `loopherd status` and `loopherd reports --all`
@@ -119,10 +127,6 @@ differs from the shepherd:
 - **Your checkout** is detached; refresh it with `git fetch origin && git
   checkout --detach origin/main` rather than `git pull`, and never commit
   in it.
-- Until watch readers land (LH-78), only one watch runs at a time, so a
-  lead and a shepherd can't both watch, and a lead's own watch also reads
-  its own reports. Don't run a lead live before LH-78.
-
 [examples/loopherd-cards-lead.toml](../examples/loopherd-cards-lead.toml)
 is the `[lead]` table and prompt for `loopherd-cards`.
 
