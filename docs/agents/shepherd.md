@@ -39,10 +39,12 @@ session. Read `herdr --skill` before controlling herdr.
    do. Start the next watch after handling every wake. It dies with the
    shepherd's session.
 3. **On wake,** read the watch's lines and the card (`loopherd reports
-   --all` for report history). `(was working, no report)` means this watch
-   read no `done` or `question` from the member since it saw it go
-   `working`. A report the previous watch printed doesn't count, so check
-   the history before calling it a false stop. A member that left none: read
+   --all` for report history). `(was working, no report)` means the watch
+   read no `done` or `question` from that member in the poll where it
+   stopped. A report an earlier watch printed doesn't count, so check the
+   history before calling it a false stop. A plain `loopherd reports` while
+   a watch is armed consumes reports the watch would have used, so look with
+   `reports --all`. A member that left none: read
    its screen (`herdr agent read lh-<n> --source recent-unwrapped --lines 40`).
    `blocked` means a dialog only the human answers (D10): tell them.
    A card back in Backlog with `need-human` carries the question.

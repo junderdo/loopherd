@@ -1,6 +1,6 @@
 //! `loopherd watch`: block until a member needs the shepherd.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -55,12 +55,7 @@ pub fn watch(
 ) -> Result<Option<Vec<String>>> {
     // Each member's last known status; an unreadable poll keeps it.
     let mut last: HashMap<String, AgentStatus> = HashMap::new();
-    // Reports are consumed as read, so whether one came since a member went
-    // working is only known from what this run saw.
-    let mut went_working: HashMap<String, u64> = HashMap::new();
-    let mut reported: HashMap<String, u64> = HashMap::new();
     let mut code = 0;
-    let mut poll: u64 = 0;
     loop {
         let read = status::read_statuses(herdr, ledger, Options::default())?;
         if read.code != code {
@@ -87,17 +82,18 @@ pub fn watch(
         read.warnings
             .iter()
             .for_each(|w| warn(&format!("warning: {w}")));
-        for (name, kind) in read.senders {
-            if kind != Kind::Note {
-                reported.insert(name, poll);
-            }
-        }
+        // Any report read ends this run, so only this poll's can precede a stop.
+        let reported: HashSet<String> = read
+            .senders
+            .into_iter()
+            .filter(|(_, kind)| *kind != Kind::Note)
+            .map(|(name, _)| name)
+            .collect();
         let mut lines = read.lines;
         for member in &members {
             let was = last.get(&member.name).copied();
             let stopped = |now: &str| {
-                let since = went_working.get(&member.name);
-                let note = match reported.get(&member.name) >= since {
+                let note = match reported.contains(&member.name) {
                     true => "",
                     false => ", no report",
                 };
@@ -119,9 +115,6 @@ pub fn watch(
                 {
                     lines.push(stopped(now.as_str()))
                 }
-                AgentStatus::Working if was != Some(AgentStatus::Working) => {
-                    went_working.insert(member.name.clone(), poll);
-                }
                 _ => {}
             }
             if member.status != AgentStatus::Unknown {
@@ -136,7 +129,6 @@ pub fn watch(
             return Ok(None);
         }
         clock.sleep(left.map_or(req.poll, |left| left.min(req.poll)));
-        poll += 1;
     }
 }
 
@@ -473,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn a_report_filed_before_the_stop_keeps_the_plain_wake() {
+    fn a_report_read_in_the_poll_of_the_stop_keeps_the_plain_wake() {
         let dir = tempfile::tempdir().unwrap();
         let (ledger, herdr) = working_pair();
 
@@ -499,31 +491,15 @@ mod tests {
     }
 
     #[test]
-    fn a_report_filed_after_the_stop_still_counts_when_read_in_the_same_poll() {
+    fn a_report_consumed_by_an_earlier_watch_does_not_count() {
         let dir = tempfile::tempdir().unwrap();
         let (ledger, herdr) = working_pair();
+        send(&ledger, dir.path(), "lh-1", Kind::Done, "PR #9");
 
-        let mut clock = steps(|poll| match poll {
-            1 => {}
-            2 => {
-                herdr.set_status("lh-1", AgentStatus::Done);
-                send(&ledger, dir.path(), "lh-1", Kind::Done, "PR #9");
-            }
-            _ => panic!("slept past the wake"),
-        });
         assert_eq!(
-            run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
-            [
-                "lh-1 done 2026-11-01 09:00 PR #9",
-                "lh-1 done  (was working)"
-            ]
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut steps(|_| {})).unwrap(),
+            ["lh-1 done 2026-11-01 09:00 PR #9"]
         );
-    }
-
-    #[test]
-    fn a_report_filed_after_the_wake_is_left_for_the_next_watch() {
-        let dir = tempfile::tempdir().unwrap();
-        let (ledger, herdr) = working_pair();
 
         let mut clock = steps(|poll| match poll {
             1 => herdr.set_status("lh-1", AgentStatus::Idle),
@@ -532,12 +508,6 @@ mod tests {
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
             ["lh-1 idle  (was working, no report)"]
-        );
-
-        send(&ledger, dir.path(), "lh-1", Kind::Done, "PR #9");
-        assert_eq!(
-            run(&herdr, &ledger, dir.path(), &EVERY, &mut steps(|_| {})).unwrap(),
-            ["lh-1 done 2026-11-01 09:00 PR #9"]
         );
     }
 
