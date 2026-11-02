@@ -173,8 +173,8 @@ is the `[lead]` table and prompt for `loopherd-cards`.
   `git worktree repair`.
 - `scripts/trello` can't reorder, edit descriptions or delete; use curl with
   the OAuth header from `~/.config/loopherd/trello.env`.
-- A new wayfinding decision is a new `docs/decisions/D<n>.md` file plus an
-  index row in `docs/wayfinding.md`. Check the highest D file first; card
-  numbers are never reused.
+- A card that settles a decision, of any kind, adds a new
+  `docs/decisions/D<n>.md` file plus an index row in `docs/wayfinding.md`.
+  Check the highest D file first; card numbers are never reused.
 - Push as junderdo:
   `GH_TOKEN=$(gh auth token --user junderdo) git -c credential.helper= -c credential.helper='!gh auth git-credential' push …`.

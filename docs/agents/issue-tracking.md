@@ -71,7 +71,7 @@ A card is **claimable** when it sits in Backlog, has `ready-for-agent`, and has 
 
    Stopping like this beats guessing at a decision.
 
-A wayfinding card that settles a decision adds it as a new
+Any card that settles a decision, impl cards included, adds it as a new
 `docs/decisions/D<n>.md` (one past the highest D file) with `## Decision`
 and `## Why` sections, plus a one-line index row in `docs/wayfinding.md`.
 
