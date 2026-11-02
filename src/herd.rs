@@ -46,7 +46,8 @@ struct TemplateFile {
     prompt_file: Option<String>,
     #[serde(default)]
     args: Vec<String>,
-    /// A shell command that exits 0 once a member is finished, for `feed` to retire it.
+    /// A shell command that exits 0 once a member is finished, for `feed` to
+    /// retire it. Placeholder values are substituted already shell-quoted.
     done: Option<String>,
 }
 
@@ -184,7 +185,8 @@ impl DoneCheck {
         Ok(Some(DoneCheck { command, branch }))
     }
 
-    /// The command for `member`, whose `params` are its recorded values.
+    /// The command for `member`, whose `params` are its recorded values, each
+    /// value shell-quoted since params come from the source's output.
     pub fn render(
         &self,
         member: &AgentRecord,
@@ -209,7 +211,12 @@ impl DoneCheck {
         values.insert("branch", &branch);
         values.insert("worktree", &worktree);
         values.insert("pane", &member.pane_id);
-        self.command.render(&values)
+        let quoted: HashMap<&str, String> = values
+            .iter()
+            .map(|(&k, v)| (k, crate::shell::quote(v)))
+            .collect();
+        self.command
+            .render(&quoted.iter().map(|(&k, v)| (k, v.as_str())).collect())
     }
 }
 

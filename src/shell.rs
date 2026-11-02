@@ -9,33 +9,61 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 /// Runs `command` with no stdin in its own process group, capturing its
-/// output. Kills the whole group and returns `None` after `timeout`.
+/// output. Returns `None` if it, or anything holding its output open, outlives
+/// `timeout`. Whatever is left of the group is killed either way.
 pub fn run_within(command: &mut Command, timeout: Duration) -> Result<Option<Output>> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        // Its own group, so a timeout also kills whatever the command spawned.
+        // Its own group, so a kill also reaches whatever the command spawned.
         .process_group(0)
         .spawn()?;
     let stdout = read_in_background(child.stdout.take());
     let stderr = read_in_background(child.stderr.take());
     let deadline = Instant::now() + timeout;
-    let status = loop {
-        if let Some(status) = child.try_wait().context("wait")? {
-            break status;
-        }
+    while !exited(&child)? {
         if Instant::now() >= deadline {
-            kill_group(&mut child);
+            kill_group(&child);
+            let _ = child.wait();
             return Ok(None);
         }
-        std::thread::sleep(Duration::from_millis(20));
-    };
+        std::thread::sleep(POLL);
+    }
+    // Background children would otherwise hold the pipes open past the exit.
+    kill_group(&child);
+    let status = child.wait().context("wait")?;
+    while !(stdout.is_finished() && stderr.is_finished()) {
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(POLL);
+    }
     Ok(Some(Output {
         status,
         stdout: stdout.join().unwrap_or_default(),
         stderr: stderr.join().unwrap_or_default(),
     }))
+}
+
+/// `value` as one single-quoted shell word.
+pub fn quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+const POLL: Duration = Duration::from_millis(20);
+
+/// Whether `child` has exited, leaving it unreaped so its pid, which is also
+/// its group's id, can't be reused before the group is killed.
+fn exited(child: &Child) -> Result<bool> {
+    // SAFETY: waitid writes only into `info`; WNOWAIT leaves the child to be reaped by wait.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let flags = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
+    if unsafe { libc::waitid(libc::P_PID, child.id(), &mut info, flags) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("wait");
+    }
+    // SAFETY: si_pid is set (or left zeroed) for every waitid result.
+    Ok(unsafe { info.si_pid() } != 0)
 }
 
 fn read_in_background(pipe: Option<impl Read + Send + 'static>) -> JoinHandle<Vec<u8>> {
@@ -48,12 +76,11 @@ fn read_in_background(pipe: Option<impl Read + Send + 'static>) -> JoinHandle<Ve
     })
 }
 
-fn kill_group(child: &mut Child) {
+fn kill_group(child: &Child) {
     let group = child.id() as libc::pid_t;
-    // SAFETY: killpg only sends a signal; the group is the child's own, made by process_group(0).
+    // SAFETY: killpg only sends a signal; the group is the child's own, made by
+    // process_group(0), and the unreaped child keeps its id from being reused.
     unsafe { libc::killpg(group, libc::SIGKILL) };
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 #[cfg(test)]
@@ -70,6 +97,17 @@ mod tests {
         assert_eq!(out.status.code(), Some(3));
         assert_eq!(out.stdout, b"out\n");
         assert_eq!(out.stderr, b"err\n");
+    }
+
+    #[test]
+    fn a_child_left_running_after_the_command_exits_is_killed_and_does_not_hold_the_output() {
+        let started = Instant::now();
+
+        let out = sh("echo out; sleep 30 & exit 1", Duration::from_secs(20)).unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(out.status.code(), Some(1));
+        assert_eq!(out.stdout, b"out\n");
     }
 
     #[test]

@@ -674,6 +674,19 @@ mod tests {
     }
 
     #[test]
+    fn a_done_check_that_leaves_a_child_running_does_not_hang_feed() {
+        let setup = Setup::with_done("cat tasks", 1, "sleep 30 & exit 1");
+        let herdr = herdr();
+        let mut ledger = fed_one(&setup, &herdr);
+        let started = std::time::Instant::now();
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(fed.lines[0], "still open zpr-1");
+    }
+
+    #[test]
     fn members_without_params_or_a_done_check_are_skipped() {
         let setup = Setup::with_template(
             "cat tasks",
@@ -704,12 +717,70 @@ mod tests {
     }
 
     #[test]
+    fn members_of_other_herds_and_retired_members_are_never_checked_or_retired() {
+        let setup = Setup::with_done("cat tasks", 5, "touch ran-{name}; exit 0");
+        setup.tasks("");
+        let herdr = herdr();
+        let params = Some([("number".to_string(), "1".to_string())].into());
+        let mut other = member("other", Some("issues"), false);
+        other.params = params.clone();
+        let mut retired = member("zpr-1", Some("prs"), true);
+        retired.params = params;
+        let mut ledger = ledger(&[other, retired]);
+        let before = ledger.0.clone();
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(fed.lines, ["prs: 0 retired, 0 added, 0 skipped, 0 errors"]);
+        assert_eq!(ledger.0, before);
+        assert_eq!(herdr.mutations(), 0);
+        let ran: Vec<_> = fs::read_dir(setup.repo.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n.to_string_lossy().starts_with("ran-"))
+            .collect();
+        assert!(ran.is_empty(), "{ran:?}");
+    }
+
+    #[test]
+    fn a_done_check_that_cannot_render_for_a_member_warns_and_leaves_it_alone() {
+        let setup = Setup::with_done("cat tasks", 5, "exit 0");
+        fs::write(
+            setup.config.path().join("herds/prs.toml"),
+            format!(
+                "repo = {:?}\n[template.pr]\nparams = [\"number\", \"repo\"]\n\
+                 prompt = \"go\"\ndone = \"gh pr view {{number}} -R {{repo}}\"\n\
+                 [queue]\ntemplate = \"pr\"\nsource = \"true\"\nmax = 5\n",
+                setup.repo.path().display().to_string()
+            ),
+        )
+        .unwrap();
+        let herdr = herdr();
+        let mut zpr = member("zpr-1", Some("prs"), false);
+        zpr.params = Some([("number".to_string(), "1".to_string())].into());
+        let mut ledger = ledger(&[zpr]);
+        let before = ledger.0.clone();
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "warning: check failed zpr-1: unknown placeholder {repo}",
+                "prs: 0 retired, 0 added, 0 skipped, 0 errors",
+            ]
+        );
+        assert_eq!(ledger.0, before);
+        assert_eq!(herdr.mutations(), 0);
+    }
+
+    #[test]
     fn the_done_check_renders_params_and_built_ins_and_runs_in_the_repo() {
         let setup = Setup::with_template(
             "cat tasks",
             5,
             "branch = \"review/{number}-{name}\"\n\
-             done = \"echo '{number}|{name}|{herd}|{branch}|{worktree}|{pane}' > seen; exit 1\"\n",
+             done = \"printf '%s|' {number} {name} {herd} {branch} {worktree} {pane} > seen; exit 1\"\n",
         );
         setup.tasks("");
         let mut zpr = member("zpr-4", Some("prs"), false);
@@ -722,8 +793,31 @@ mod tests {
         assert_eq!(fed.lines[0], "still open zpr-4");
         assert_eq!(
             fs::read_to_string(setup.repo.path().join("seen")).unwrap(),
-            "4|zpr-4|prs|review/4-zpr-4|/src/wt/zpr-4|w1:p9\n"
+            "4|zpr-4|prs|review/4-zpr-4|/src/wt/zpr-4|w1:p9|"
         );
+    }
+
+    #[test]
+    fn values_rendered_into_the_done_check_are_shell_quoted() {
+        let setup = Setup::with_done("cat tasks", 5, "printf '%s\\n' {number} > seen; exit 1");
+        setup.tasks("");
+        for (i, value) in ["1;touch pwned", "$(touch pwned)", "`touch pwned`", "it's"]
+            .into_iter()
+            .enumerate()
+        {
+            let mut zpr = member(&format!("zpr-{i}"), Some("prs"), false);
+            zpr.params = Some([("number".to_string(), value.to_string())].into());
+            let mut ledger = ledger(&[zpr]);
+
+            let fed = setup.feed(&herdr(), &mut ledger, false).unwrap();
+
+            assert_eq!(fed.lines[0], format!("still open zpr-{i}"), "{value}");
+            assert_eq!(
+                fs::read_to_string(setup.repo.path().join("seen")).unwrap(),
+                format!("{value}\n")
+            );
+            assert!(!setup.repo.path().join("pwned").exists(), "{value}");
+        }
     }
 
     #[test]
@@ -822,6 +916,19 @@ mod tests {
             "source: \"sleep 30\" timed out after 1s"
         );
         assert!(ledger.0.is_empty());
+    }
+
+    #[test]
+    fn a_source_that_leaves_a_child_running_does_not_hang_feed() {
+        let setup = Setup::new("echo 1; sleep 30 &", 5);
+        let started = std::time::Instant::now();
+
+        let fed = setup
+            .feed(&herdr(), &mut MemLedger::default(), false)
+            .unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(fed.lines[0], "added zpr-1");
     }
 
     #[test]
