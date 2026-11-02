@@ -2,7 +2,8 @@
 //! Claude's user settings, or take them out with `--remove`.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -65,6 +66,7 @@ pub fn remove(settings: &Path, now: SystemTime) -> Result<Outcome> {
         let hooks = hooks
             .as_object_mut()
             .ok_or_else(|| anyhow!("hooks is not an object"))?;
+        let mut dropped = false;
         for event in EVENTS {
             let Some(groups) = hooks.get_mut(event) else {
                 continue;
@@ -72,11 +74,14 @@ pub fn remove(settings: &Path, now: SystemTime) -> Result<Outcome> {
             let groups = groups
                 .as_array_mut()
                 .ok_or_else(|| anyhow!("hooks.{event} is not an array"))?;
-            if drop_ours(groups) && groups.is_empty() {
-                hooks.remove(event);
+            if drop_ours(groups) {
+                dropped = true;
+                if groups.is_empty() {
+                    hooks.remove(event);
+                }
             }
         }
-        if hooks.is_empty() {
+        if dropped && hooks.is_empty() {
             root.remove("hooks");
         }
         Ok(())
@@ -90,9 +95,9 @@ fn edit(
     now: SystemTime,
     change: impl FnOnce(&mut Map<String, Value>) -> Result<()>,
 ) -> Result<Outcome> {
-    // Write through a symlink (e.g. dotfiles), not over it.
-    let settings = fs::canonicalize(settings).unwrap_or_else(|_| settings.to_path_buf());
-    let old = match fs::read(&settings) {
+    let settings = through_symlinks(settings)?;
+    let settings = settings.as_path();
+    let old = match fs::read(settings) {
         Ok(bytes) => Some(bytes),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e).with_context(|| format!("read {}", settings.display())),
@@ -110,16 +115,16 @@ fn edit(
     };
     change(&mut root).with_context(|| format!("{}; left it unchanged", settings.display()))?;
     let after = Value::Object(root);
-    if after == before && old.is_some() {
+    if after == before {
         return Ok(Outcome::Unchanged);
     }
     let backup = match &old {
-        Some(bytes) => Some(back_up(&settings, bytes, now)?),
+        Some(bytes) => Some(back_up(settings, bytes, now)?),
         None => None,
     };
     let mut bytes = serde_json::to_vec_pretty(&after)?;
     bytes.push(b'\n');
-    write_atomically(&settings, &bytes)?;
+    write_atomically(settings, &bytes)?;
     Ok(Outcome::Changed { backup })
 }
 
@@ -127,8 +132,35 @@ fn back_up(settings: &Path, bytes: &[u8], now: SystemTime) -> Result<PathBuf> {
     let mut name = settings.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".{}.bak", humantime::format_rfc3339_nanos(now)));
     let backup = settings.with_file_name(name);
-    fs::write(&backup, bytes).with_context(|| format!("back up to {}", backup.display()))?;
+    // Settings can hold API keys in `env`; the copy keeps the original's mode.
+    let mode = fs::metadata(settings)?.permissions().mode();
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&backup)
+        .with_context(|| format!("back up to {}", backup.display()))?;
+    fs::set_permissions(&backup, fs::Permissions::from_mode(mode))?;
+    file.write_all(bytes)
+        .with_context(|| format!("back up to {}", backup.display()))?;
     Ok(backup)
+}
+
+/// The file a settings path names, so a symlink (e.g. into dotfiles) is
+/// written through rather than replaced, even when its target doesn't exist yet.
+fn through_symlinks(path: &Path) -> Result<PathBuf> {
+    let mut path = path.to_path_buf();
+    for _ in 0..40 {
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let target = fs::read_link(&path)
+                    .with_context(|| format!("read link {}", path.display()))?;
+                path = path.parent().unwrap_or(Path::new("/")).join(target);
+            }
+            _ => return Ok(path),
+        }
+    }
+    bail!("{}: too many levels of symlinks", path.display())
 }
 
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -172,6 +204,7 @@ fn keep_first_of_ours(groups: &mut Vec<Value>, ours: &Value) -> bool {
         let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
             continue;
         };
+        let before = hooks.len();
         hooks.retain_mut(|hook| {
             if !is_ours(hook) {
                 return true;
@@ -183,8 +216,12 @@ fn keep_first_of_ours(groups: &mut Vec<Value>, ours: &Value) -> bool {
             *hook = ours.clone();
             true
         });
+        if hooks.is_empty() && before > 0 {
+            // Held only a duplicate of ours; drop it after the loop.
+            *group = Value::Null;
+        }
     }
-    groups.retain(|g| !is_emptied(g));
+    groups.retain(|g| !g.is_null());
     found
 }
 
@@ -195,20 +232,16 @@ fn drop_ours(groups: &mut Vec<Value>) -> bool {
         if let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) {
             let before = hooks.len();
             hooks.retain(|hook| !is_ours(hook));
-            dropped |= hooks.len() != before;
+            if hooks.len() != before {
+                dropped = true;
+                if hooks.is_empty() {
+                    *group = Value::Null;
+                }
+            }
         }
     }
-    if dropped {
-        groups.retain(|g| !is_emptied(g));
-    }
+    groups.retain(|g| !g.is_null());
     dropped
-}
-
-fn is_emptied(group: &Value) -> bool {
-    group
-        .get("hooks")
-        .and_then(Value::as_array)
-        .is_some_and(Vec::is_empty)
 }
 
 /// A command [`hook_command`] built, for a binary named `loopherd` anywhere.
@@ -503,5 +536,73 @@ mod tests {
             Some(0),
             "missing binary"
         );
+    }
+
+    #[test]
+    fn the_backup_keeps_a_private_files_mode() {
+        let (dir, path) = settings_with(r#"{"env": {"ANTHROPIC_API_KEY": "x"}}"#);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let Outcome::Changed {
+            backup: Some(backup),
+        } = install(&path, Path::new(EXE), now()).unwrap()
+        else {
+            panic!("no backup");
+        };
+
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&backup), 0o600);
+        assert_eq!(mode(&path), 0o600);
+        drop(dir);
+    }
+
+    #[test]
+    fn remove_leaves_a_missing_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        assert_eq!(remove(&path, now()).unwrap(), Outcome::Unchanged);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn the_users_empty_keys_and_groups_survive_install_and_remove() {
+        for original in [
+            r#"{"hooks": {}}"#,
+            r#"{"hooks": {"Stop": []}}"#,
+            r#"{"hooks": {"Stop": [{"matcher": "", "hooks": []}]}}"#,
+        ] {
+            let (_dir, path) = settings_with(original);
+            assert_eq!(
+                remove(&path, now()).unwrap(),
+                Outcome::Unchanged,
+                "{original}"
+            );
+        }
+        // An empty key loopherd's entry was later added to can't be told from
+        // one loopherd created, so only a non-empty user group round-trips.
+        let original = r#"{"hooks": {"Stop": [{"matcher": "", "hooks": []}]}}"#;
+        let (_dir, path) = settings_with(original);
+        install(&path, Path::new(EXE), now()).unwrap();
+        assert_eq!(read(&path)["hooks"]["Stop"].as_array().unwrap().len(), 2);
+        remove(&path, later()).unwrap();
+        assert_eq!(read(&path), read_str(original));
+    }
+
+    #[test]
+    fn writes_through_a_dangling_symlink_to_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("dotfiles")).unwrap();
+        let link = dir.path().join("settings.json");
+        std::os::unix::fs::symlink("dotfiles/settings.json", &link).unwrap();
+
+        install(&link, Path::new(EXE), now()).unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(read(&dir.path().join("dotfiles/settings.json"))["hooks"]["Stop"].is_array());
     }
 }

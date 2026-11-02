@@ -58,16 +58,18 @@ pub fn revive(herdr: &dyn Herdr, ledger: &mut dyn Ledger, req: &ReviveRequest) -
                 socket: herdr.socket(),
                 ..record.clone()
             };
-            let recorded = ledger
-                .record(updated)
-                .map_err(|e| ("ledger", e))
-                .and_then(|()| {
-                    ledger
-                        .started(&record.name, SystemTime::now())
-                        .map_err(|e| ("mailbox", e))
-                });
-            if let Err((step, error)) = recorded {
-                outcome = Outcome::Failed { step, error };
+            match ledger.record(updated) {
+                Ok(()) => {
+                    if let Err(e) = ledger.started(&record.name, SystemTime::now()) {
+                        warnings.push(format!("no start entry in its mailbox: {e:#}"));
+                    }
+                }
+                Err(error) => {
+                    outcome = Outcome::Failed {
+                        step: "ledger",
+                        error,
+                    };
+                }
             }
         }
         revived.lines.extend(
@@ -519,6 +521,22 @@ mod tests {
             Some(Path::new(crate::herdr::fake::FAKE_SOCKET))
         );
         assert_eq!(ledger.1, ["a"]);
+    }
+
+    #[test]
+    fn a_start_the_mailbox_cannot_take_is_a_warning_not_a_failure() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut ledger = crate::ledger::NoMailbox(ledger([record("a", cwd.path())]));
+        let (out, code) = revive(&herdr, &mut ledger, &request()).unwrap().report();
+        assert_eq!(
+            (out.as_str(), code),
+            (
+                "warning a: no start entry in its mailbox: disk full\nresumed a w1:p1",
+                0
+            )
+        );
+        assert_eq!(ledger.0.0["a"].pane_id, "w1:p1");
     }
 
     #[test]

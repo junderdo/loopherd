@@ -105,6 +105,8 @@ pub struct Spawned {
     pub session_id: Option<String>,
     /// Still at a dialog when the ready timeout ran out.
     pub blocked: bool,
+    /// Why the mailbox has no `start` entry for it, if it hasn't.
+    pub unmarked: Option<String>,
 }
 
 impl Spawned {
@@ -121,6 +123,9 @@ impl Spawned {
             "session {}",
             self.session_id.as_deref().unwrap_or("unknown")
         ));
+        if let Some(why) = &self.unmarked {
+            lines.push(format!("warning: no start entry in its mailbox: {why}"));
+        }
         if !self.blocked {
             return (lines.join("\n"), 0);
         }
@@ -194,13 +199,14 @@ pub fn spawn(
     };
     let agent = match readiness {
         Readiness::Blocked => {
-            record_started(ledger, record)?;
+            let unmarked = record_started(ledger, record)?;
             return Ok(Spawned {
                 tab_id: tab.tab_id,
                 pane_id: tab.pane_id,
                 worktree,
                 session_id: None,
                 blocked: true,
+                unmarked,
             });
         }
         Readiness::Ready(agent) => agent,
@@ -211,7 +217,7 @@ pub fn spawn(
         None => Ok(()),
     };
     record.prompt_sent = sent.is_ok() && prompt.is_some();
-    record_started(ledger, record)?;
+    let unmarked = record_started(ledger, record)?;
     sent?;
     Ok(Spawned {
         tab_id: tab.tab_id,
@@ -219,13 +225,19 @@ pub fn spawn(
         worktree,
         session_id: agent.session_id,
         blocked: false,
+        unmarked,
     })
 }
 
-fn record_started(ledger: &mut dyn Ledger, record: AgentRecord) -> Result<()> {
+/// Records the member, then marks its start; a failed mark is only a
+/// warning, since the member is already running.
+fn record_started(ledger: &mut dyn Ledger, record: AgentRecord) -> Result<Option<String>> {
     let name = record.name.clone();
     ledger.record(record).context("ledger")?;
-    ledger.started(&name, SystemTime::now()).context("mailbox")
+    Ok(ledger
+        .started(&name, SystemTime::now())
+        .err()
+        .map(|e| format!("{e:#}")))
 }
 
 impl SpawnRequest {
@@ -613,6 +625,23 @@ mod tests {
             "{}",
             rec.created
         );
+    }
+
+    #[test]
+    fn a_start_the_mailbox_cannot_take_is_a_warning_not_a_failure() {
+        let herdr = herdr();
+        let mut ledger = crate::ledger::NoMailbox::default();
+        let spawned = spawn(&herdr, &mut ledger, &request("a"), Some("w1")).unwrap();
+        assert_eq!(
+            spawned.report("a"),
+            (
+                "tab w1:t1\npane w1:p1\nsession session-a\n\
+                 warning: no start entry in its mailbox: disk full"
+                    .into(),
+                0
+            )
+        );
+        assert!(ledger.0.0["a"].prompt_sent);
     }
 
     #[test]

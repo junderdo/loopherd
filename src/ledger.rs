@@ -156,6 +156,26 @@ impl Ledger for MemLedger {
     }
 }
 
+/// A [`MemLedger`] whose mailbox can't be written.
+#[cfg(test)]
+#[derive(Default)]
+pub struct NoMailbox(pub MemLedger);
+
+#[cfg(test)]
+impl Ledger for NoMailbox {
+    fn entries(&self) -> Result<BTreeMap<String, AgentRecord>> {
+        self.0.entries()
+    }
+
+    fn record(&mut self, record: AgentRecord) -> Result<()> {
+        self.0.record(record)
+    }
+
+    fn started(&mut self, _: &str, _: SystemTime) -> Result<()> {
+        anyhow::bail!("disk full")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
