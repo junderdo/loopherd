@@ -124,6 +124,9 @@ differs from the shepherd:
   with an error and leaves your herd's events for the shepherd. Exit 2 is a heartbeat, not idleness: check each Review card's PR
   (`gh pr view <n> --json state`) and run the after-merge steps for any the
   human merged. Re-arm after every exit.
+  After a herdr restart the shepherd runs `loopherd revive`, which prompts
+  you to re-arm whenever nothing holds `watch-<your name>.lock`, whether
+  herdr resumed you or revive did.
 - **On each wake** re-read `loopherd status` and `loopherd reports --all`
   before acting: auto-compaction drops detail, and your state lives on the
   board, ledger and mailbox, not in your context.

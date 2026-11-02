@@ -74,6 +74,7 @@ pub struct FakeHerdr {
     pub startup: Startup,
     pub fail_create_tab: bool,
     pub fail_close_tab: bool,
+    pub fail_prompt: bool,
     /// A tab from `create_tab` reaches its shell prompt after this many
     /// `at_shell_prompt` polls; `None` is never.
     pub new_tab_prompt_after: Option<u32>,
@@ -103,6 +104,7 @@ impl FakeHerdr {
             startup: Startup::Ready,
             fail_create_tab: false,
             fail_close_tab: false,
+            fail_prompt: false,
             new_tab_prompt_after: Some(0),
             resume_settles_after: Some(0),
             unreachable: false,
@@ -482,6 +484,9 @@ impl Herdr for FakeHerdr {
         self.mutating();
         if self.agent(name)?.status == AgentStatus::Blocked {
             bail!("agent {name} is blocked");
+        }
+        if self.fail_prompt {
+            bail!("prompt refused");
         }
         self.state
             .borrow_mut()

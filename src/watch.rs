@@ -2,9 +2,9 @@
 //! from the Stop hook's mailbox entries; herdr adds `blocked` and `gone`.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::Path;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -239,14 +239,31 @@ fn shown(socket: Option<&Path>) -> String {
     socket.map_or("unset".into(), |s| s.display().to_string())
 }
 
+pub(crate) fn lead_lock_path(dir: &Path, lead: &str) -> PathBuf {
+    dir.join(format!("watch-{lead}.lock"))
+}
+
+/// Whether a watch holds `lead`'s lock in `dir`, probed with the same
+/// non-blocking take a watch uses. A missing lock file means none does.
+pub fn lead_watch_running(dir: &Path, lead: &str) -> Result<bool> {
+    let path = lead_lock_path(dir, lead);
+    let file = match File::open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e).with_context(|| format!("open {}", path.display())),
+    };
+    let free = Lock::try_take(file).with_context(|| format!("lock {}", path.display()))?;
+    Ok(free.is_none())
+}
+
 /// Holds the reader's lock in `dir`, with this process's PID in it, or
 /// fails naming the lock and its holder while another watch has it.
 fn only_watch(dir: &Path, reader: &Reader) -> Result<Lock> {
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    let path = dir.join(match reader {
-        Reader::Shepherd => "watch.lock".to_string(),
-        Reader::Lead { name, .. } => format!("watch-{name}.lock"),
-    });
+    let path = match reader {
+        Reader::Shepherd => dir.join("watch.lock"),
+        Reader::Lead { name, .. } => lead_lock_path(dir, name),
+    };
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)

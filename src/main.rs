@@ -310,6 +310,7 @@ fn run_revive(dry_run: bool, name: Option<String>) -> Result<i32> {
         settle_timeout: Duration::from_secs(30),
         poll_interval: Duration::from_millis(250),
         start_timeout: Duration::from_secs(60),
+        watch_dir: ledger.reports_dir()?,
     };
     let (message, code) = revive(&CliHerdr, &mut ledger, &req)?.report();
     if !message.is_empty() {
