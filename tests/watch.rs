@@ -172,3 +172,46 @@ fn a_watch_that_fails_after_reading_stops_leaves_them_for_the_next() {
         "lh-1 paused  1 shell\n"
     );
 }
+
+#[test]
+fn a_leads_watch_runs_beside_the_shepherds() {
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+    let state = sandbox.dir.path().join("state/loopherd");
+    fs::write(
+        state.join("ledger.json"),
+        r#"{"lead-cards": {"name": "lead-cards", "pane_id": "w1:p0", "session_id": null,
+            "repo": "/", "worktree": null, "workspace": "w1", "prompt": null,
+            "prompt_sent": true, "created": "2026-11-01T00:00:00Z",
+            "herd": "cards", "role": "lead", "socket": "/run/live.sock"}}"#,
+    )
+    .unwrap();
+    let mut shepherd = sandbox
+        .loopherd(&["watch", "--timeout", "30"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let lock = state.join("reports/watch.lock");
+    let pid = shepherd.id().to_string();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while fs::read_to_string(&lock).unwrap_or_default().trim() != pid {
+        assert!(
+            Instant::now() < deadline,
+            "the shepherd's watch never took the lock"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let lead = sandbox
+        .loopherd(&["watch", "--timeout", "0"])
+        .env("HERDR_PANE_ID", "w1:p0")
+        .env("HERDR_SOCKET_PATH", "/run/live.sock")
+        .output()
+        .unwrap();
+    shepherd.kill().unwrap();
+    shepherd.wait().unwrap();
+
+    assert_eq!(lead.status.code(), Some(2), "{lead:?}");
+    assert!(state.join("reports/watch-lead-cards.lock").is_file());
+}

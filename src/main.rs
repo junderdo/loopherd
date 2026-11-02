@@ -171,10 +171,12 @@ enum Command {
     /// Block until a member needs the shepherd, print what happened, and exit:
     /// an unread report (marked read), a stop from the Stop hook that leaves a
     /// member paused, finished or failed, or one going blocked or gone in
-    /// herdr. Polls every 2s, read-only toward herdr. One watch at a time, and
-    /// only with loopherd's Stop, StopFailure and SessionStart hooks installed.
+    /// herdr. Polls every 2s, read-only toward herdr. Run from a lead's pane it
+    /// reads that lead's herd's workers; otherwise it is the shepherd's and
+    /// reads leads and unled herds. One watch per reader at a time, and only
+    /// with loopherd's Stop, StopFailure and SessionStart hooks installed.
     Watch {
-        /// Only members of these herds.
+        /// Only members of these herds; a led herd narrows the shepherd to its lead.
         herds: Vec<String>,
         /// Give up after this many seconds, exiting 2 with no output.
         #[arg(long)]
@@ -315,6 +317,7 @@ fn run_revive(dry_run: bool, name: Option<String>) -> Result<i32> {
         settle_timeout: Duration::from_secs(30),
         poll_interval: Duration::from_millis(250),
         start_timeout: Duration::from_secs(60),
+        watch_dir: ledger.reports_dir()?,
     };
     let (message, code) = revive(&CliHerdr, &mut ledger, &req)?.report();
     if !message.is_empty() {
@@ -407,10 +410,14 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         }
     }
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let own_pane = own_pane();
+    let own_socket = socket_from_env();
     let req = watch::Request {
         herds,
         timeout: timeout.map(Duration::from_secs),
         poll: Duration::from_secs(2),
+        own_pane: own_pane.as_deref(),
+        own_socket: own_socket.as_deref(),
     };
     let woke = watch::watch(
         &CliHerdr,

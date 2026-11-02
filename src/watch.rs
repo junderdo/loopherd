@@ -2,18 +2,18 @@
 //! from the Stop hook's mailbox entries; herdr adds `blocked` and `gone`.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::Path;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
 use crate::herd_view::{Member, Options, View};
 use crate::herdr::{AgentStatus, Herdr};
-use crate::ledger::Ledger;
+use crate::ledger::{AgentRecord, Ledger};
 use crate::lock::Lock;
-use crate::report::{Body, Filter, Mailbox, Pending, Stop, peek_reports, unread_stops};
+use crate::report::{Body, Filter, Mailbox, Pending, Stop, member_in, peek_reports, unread_stops};
 use crate::status;
 
 pub trait Clock {
@@ -44,6 +44,10 @@ pub struct Request<'a> {
     pub herds: &'a [String],
     pub timeout: Option<Duration>,
     pub poll: Duration,
+    /// The caller's pane and herdr socket, which make it a lead's watch
+    /// when they match a lead as `loopherd report` matches.
+    pub own_pane: Option<&'a str>,
+    pub own_socket: Option<&'a Path>,
 }
 
 /// What woke the watch, one rendered line each. Nothing is marked read until
@@ -72,7 +76,8 @@ pub fn watch(
     clock: &mut dyn Clock,
     warn: &mut dyn FnMut(&str),
 ) -> Result<Option<Wake>> {
-    let _only = only_watch(dir)?;
+    let reader = reader(ledger, req)?;
+    let _only = only_watch(dir, &reader)?;
     // Each member's last known status; an unreadable poll keeps it.
     let mut last: HashMap<String, AgentStatus> = HashMap::new();
     let mut gone = Gone::default();
@@ -101,7 +106,7 @@ pub fn watch(
             .flatten()
             .map(|stray| stray.pane.clone())
             .collect();
-        let members = in_scope(read.view, req);
+        let members = in_scope(read.view, req, &reader)?;
         let names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
         let mut lines = vec![];
         let mut pending = vec![];
@@ -189,11 +194,76 @@ impl Gone {
     }
 }
 
-/// Holds `watch.lock` in `dir`, with this process's PID in it, or fails
-/// naming the lock and its holder while another watch has it.
-fn only_watch(dir: &Path) -> Result<Lock> {
+/// Whose watch this is. Each member's events have exactly one reader: a
+/// lead reads its herd's workers, the shepherd reads the rest.
+enum Reader {
+    Shepherd,
+    Lead { name: String, herd: String },
+}
+
+/// A lead's when the caller's pane holds one, else the shepherd's. A lead
+/// may only name its own herd.
+fn reader(ledger: &dyn Ledger, req: &Request) -> Result<Reader> {
+    let Some(pane) = req.own_pane else {
+        return Ok(Reader::Shepherd);
+    };
+    let entries = ledger.entries()?;
+    let lead = match member_in(&entries, pane, req.own_socket) {
+        Some(entry) if entry.is_lead() => entry,
+        Some(_) => return Ok(Reader::Shepherd),
+        None => {
+            let on_pane = |e: &&AgentRecord| !e.retired && e.is_lead() && e.pane_id == pane;
+            if let Some(lead) = entries.values().find(on_pane) {
+                bail!(
+                    "pane {pane} holds lead {} on socket {}, but this watch's socket is {}",
+                    lead.name,
+                    shown(lead.socket.as_deref()),
+                    shown(req.own_socket),
+                );
+            }
+            return Ok(Reader::Shepherd);
+        }
+    };
+    let name = lead.name.clone();
+    let herd = lead
+        .herd
+        .clone()
+        .with_context(|| format!("lead {name} has no herd"))?;
+    if let Some(other) = req.herds.iter().find(|h| **h != herd) {
+        bail!("{name} leads {herd}; its watch can't read {other}");
+    }
+    Ok(Reader::Lead { name, herd })
+}
+
+fn shown(socket: Option<&Path>) -> String {
+    socket.map_or("unset".into(), |s| s.display().to_string())
+}
+
+pub(crate) fn lead_lock_path(dir: &Path, lead: &str) -> PathBuf {
+    dir.join(format!("watch-{lead}.lock"))
+}
+
+/// Whether a watch holds `lead`'s lock in `dir`, probed with the same
+/// non-blocking take a watch uses. A missing lock file means none does.
+pub fn lead_watch_running(dir: &Path, lead: &str) -> Result<bool> {
+    let path = lead_lock_path(dir, lead);
+    let file = match File::open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e).with_context(|| format!("open {}", path.display())),
+    };
+    let free = Lock::try_take(file).with_context(|| format!("lock {}", path.display()))?;
+    Ok(free.is_none())
+}
+
+/// Holds the reader's lock in `dir`, with this process's PID in it, or
+/// fails naming the lock and its holder while another watch has it.
+fn only_watch(dir: &Path, reader: &Reader) -> Result<Lock> {
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    let path = dir.join("watch.lock");
+    let path = match reader {
+        Reader::Shepherd => dir.join("watch.lock"),
+        Reader::Lead { name, .. } => lead_lock_path(dir, name),
+    };
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -259,25 +329,36 @@ fn stop_wakes(mailbox: &Mailbox) -> Vec<String> {
     wakes
 }
 
-/// The view's non-retired members, narrowed to `req.herds`.
-fn in_scope(view: View, req: &Request) -> Vec<Member> {
+/// The view's non-retired members `reader` owns, narrowed to `req.herds`.
+/// A herd with a lead, even a gone one, is the lead's but for the lead itself.
+/// Fails once a lead reading is no longer its herd's lead.
+fn in_scope(view: View, req: &Request, reader: &Reader) -> Result<Vec<Member>> {
+    if let Reader::Lead { name, herd } = reader {
+        let own = view.herds.into_iter().find(|h| h.name == *herd);
+        let workers = own.map(|h| h.members).unwrap_or_default();
+        if !workers.iter().any(|m| m.lead && m.name == *name) {
+            bail!("{name} was retired, so its watch ends");
+        }
+        return Ok(workers.into_iter().filter(|m| !m.lead).collect());
+    }
     let mut members = vec![];
     for herd in view.herds {
         if req.herds.is_empty() || req.herds.contains(&herd.name) {
-            members.extend(herd.members);
+            let led = herd.members.iter().any(|m| m.lead);
+            members.extend(herd.members.into_iter().filter(|m| m.lead || !led));
         }
     }
     if req.herds.is_empty() {
         members.extend(view.ungrouped);
     }
-    members
+    Ok(members)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::herdr::fake::FakeHerdr;
-    use crate::ledger::{AgentRecord, MemLedger};
+    use crate::ledger::{FileLedger, MemLedger};
     use crate::report::{Background, Entry, Kind, Reporter, Tally, Unknown, append, report};
 
     fn member(name: &str, pane: &str, herd: Option<&str>) -> AgentRecord {
@@ -312,7 +393,7 @@ mod tests {
         )
     }
 
-    fn send(ledger: &MemLedger, dir: &Path, name: &str, kind: Kind, text: &str) {
+    fn send(ledger: &dyn Ledger, dir: &Path, name: &str, kind: Kind, text: &str) {
         let who = Reporter {
             own_pane: None,
             own_socket: None,
@@ -354,6 +435,8 @@ mod tests {
         herds: &[],
         timeout: None,
         poll: Duration::from_secs(2),
+        own_pane: None,
+        own_socket: None,
     };
 
     fn run(
@@ -585,6 +668,8 @@ mod tests {
         herds: &[],
         timeout: Some(Duration::ZERO),
         poll: Duration::from_secs(2),
+        own_pane: None,
+        own_socket: None,
     };
 
     /// One poll of a fresh watch.
@@ -797,7 +882,7 @@ mod tests {
     fn a_second_watch_on_the_same_mailboxes_is_refused_naming_the_lock() {
         let dir = tempfile::tempdir().unwrap();
         let (ledger, herdr) = working_pair();
-        let _first = only_watch(dir.path()).unwrap();
+        let _first = only_watch(dir.path(), &Reader::Shepherd).unwrap();
 
         let Err(err) = watch(
             &herdr,
@@ -915,5 +1000,340 @@ mod tests {
             _ => {}
         });
         assert_eq!(run(&herdr, &ledger, dir.path(), &req, &mut clock), None);
+    }
+
+    fn lead(name: &str, pane: &str, herd: &str) -> AgentRecord {
+        AgentRecord {
+            role: Some(crate::ledger::Role::Lead),
+            ..member(name, pane, Some(herd))
+        }
+    }
+
+    /// A lead of cards and a worker in cards, prs, and no herd, each with a
+    /// note waiting.
+    fn led_world(dir: &Path) -> (MemLedger, FakeHerdr) {
+        let ledger = ledger(vec![
+            lead("lead-cards", "w9:p0", "cards"),
+            member("lh-1", "w9:p1", Some("cards")),
+            member("zpr-2", "w9:p2", Some("prs")),
+            member("solo", "w9:p3", None),
+        ]);
+        let mut herdr = FakeHerdr::new(&[]);
+        for (name, pane) in [
+            ("lead-cards", "w9:p0"),
+            ("lh-1", "w9:p1"),
+            ("zpr-2", "w9:p2"),
+            ("solo", "w9:p3"),
+        ] {
+            herdr = herdr.with_live_agent(Some(name), None, pane);
+            herdr.set_status(name, AgentStatus::Working);
+            send(&ledger, dir, name, Kind::Note, "hi");
+        }
+        (ledger, herdr)
+    }
+
+    fn from_pane(pane: &str) -> Request<'_> {
+        Request {
+            own_pane: Some(pane),
+            ..ONCE
+        }
+    }
+
+    #[test]
+    fn a_leads_watch_reads_only_its_own_herds_workers() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ledger, herdr) = led_world(dir.path());
+        ledger
+            .0
+            .insert("lead-prs".into(), lead("lead-prs", "w9:p8", "prs"));
+
+        assert_eq!(
+            run(
+                &herdr,
+                &ledger,
+                dir.path(),
+                &from_pane("w9:p0"),
+                &mut steps(|_| {})
+            )
+            .unwrap(),
+            ["lh-1 note 2026-11-01 09:00 hi"]
+        );
+    }
+
+    #[test]
+    fn a_leads_watch_may_name_only_its_own_herd() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = led_world(dir.path());
+        let prs = ["prs".to_string()];
+        let req = Request {
+            herds: &prs,
+            ..from_pane("w9:p0")
+        };
+
+        let Err(err) = watch(
+            &herdr,
+            &ledger,
+            dir.path(),
+            &req,
+            &mut steps(|_| {}),
+            &mut |_| {},
+        ) else {
+            panic!("a lead watched another herd");
+        };
+        assert!(err.to_string().contains("lead-cards leads cards"), "{err}");
+        assert!(err.to_string().contains("prs"), "{err}");
+
+        let cards = ["cards".to_string()];
+        let own = Request {
+            herds: &cards,
+            ..from_pane("w9:p0")
+        };
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &own, &mut steps(|_| {})).unwrap(),
+            ["lh-1 note 2026-11-01 09:00 hi"]
+        );
+    }
+
+    #[test]
+    fn the_shepherds_watch_reads_leads_and_herds_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = led_world(dir.path());
+
+        // A worker's pane is not a lead's, so its watch is the shepherd's.
+        let mut woke = run(
+            &herdr,
+            &ledger,
+            dir.path(),
+            &from_pane("w9:p1"),
+            &mut steps(|_| {}),
+        )
+        .unwrap();
+        woke.sort();
+        assert_eq!(
+            woke,
+            [
+                "lead-cards note 2026-11-01 09:00 hi",
+                "solo note 2026-11-01 09:00 hi",
+                "zpr-2 note 2026-11-01 09:00 hi",
+            ]
+        );
+    }
+
+    #[test]
+    fn naming_a_led_herd_narrows_the_shepherd_to_its_lead() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = led_world(dir.path());
+        let cards = ["cards".to_string()];
+        let req = Request {
+            herds: &cards,
+            ..ONCE
+        };
+
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &req, &mut steps(|_| {})).unwrap(),
+            ["lead-cards note 2026-11-01 09:00 hi"]
+        );
+    }
+
+    #[test]
+    fn a_herd_gaining_a_lead_moves_its_workers_to_the_leads_watch_until_it_retires() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = ledger(vec![member("zpr-2", "w9:p2", Some("prs"))]);
+        let herdr = FakeHerdr::new(&[])
+            .with_live_agent(Some("zpr-2"), None, "w9:p2")
+            .with_live_agent(Some("lead-prs"), None, "w9:p9");
+        herdr.set_status("zpr-2", AgentStatus::Working);
+        let shepherd = |ledger: &MemLedger| {
+            send(ledger, dir.path(), "zpr-2", Kind::Note, "hi");
+            run(&herdr, ledger, dir.path(), &ONCE, &mut steps(|_| {}))
+        };
+        assert_eq!(
+            shepherd(&ledger).unwrap(),
+            ["zpr-2 note 2026-11-01 09:00 hi"]
+        );
+
+        ledger
+            .0
+            .insert("lead-prs".into(), lead("lead-prs", "w9:p9", "prs"));
+        assert_eq!(shepherd(&ledger), None);
+        assert_eq!(
+            run(
+                &herdr,
+                &ledger,
+                dir.path(),
+                &from_pane("w9:p9"),
+                &mut steps(|_| {})
+            )
+            .unwrap(),
+            ["zpr-2 note 2026-11-01 09:00 hi"]
+        );
+
+        // Gone, it still owns its herd; retired, it lets go.
+        herdr.remove_agent("lead-prs");
+        assert_eq!(shepherd(&ledger), None);
+        ledger.0.get_mut("lead-prs").unwrap().retired = true;
+        assert_eq!(
+            shepherd(&ledger).unwrap(),
+            [
+                "zpr-2 note 2026-11-01 09:00 hi",
+                "zpr-2 note 2026-11-01 09:00 hi",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_leads_watch_and_the_shepherds_hold_their_own_locks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = led_world(dir.path());
+        let _shepherd = only_watch(dir.path(), &Reader::Shepherd).unwrap();
+
+        assert!(
+            run(
+                &herdr,
+                &ledger,
+                dir.path(),
+                &from_pane("w9:p0"),
+                &mut steps(|_| {})
+            )
+            .is_some()
+        );
+
+        let lead = Reader::Lead {
+            name: "lead-cards".into(),
+            herd: "cards".into(),
+        };
+        let _lead = only_watch(dir.path(), &lead).unwrap();
+        let Err(err) = watch(
+            &herdr,
+            &ledger,
+            dir.path(),
+            &from_pane("w9:p0"),
+            &mut steps(|_| {}),
+            &mut |_| {},
+        ) else {
+            panic!("a second watch for the lead ran");
+        };
+        let lock = dir
+            .path()
+            .join("watch-lead-cards.lock")
+            .display()
+            .to_string();
+        assert!(err.to_string().contains(&lock), "{err}");
+    }
+
+    #[test]
+    fn a_leads_watch_ends_with_an_error_once_the_lead_is_retired() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mem, herdr) = led_world(dir.path());
+        let path = dir.path().join("state/ledger.json");
+        let mut ledger = FileLedger::new(path.clone());
+        mem.0.into_values().for_each(|e| ledger.record(e).unwrap());
+        assert_eq!(
+            run_dyn(&herdr, &ledger, dir.path(), &from_pane("w9:p0")).unwrap(),
+            ["lh-1 note 2026-11-01 09:00 hi"]
+        );
+        let req = Request {
+            own_pane: Some("w9:p0"),
+            ..EVERY
+        };
+
+        let mut clock = steps(|poll| match poll {
+            1 => {
+                let mut retire = FileLedger::new(path.clone());
+                retire
+                    .update("lead-cards", &mut |e| {
+                        e.retired = true;
+                        Ok(())
+                    })
+                    .unwrap();
+                send(&retire, dir.path(), "lh-1", Kind::Note, "after");
+            }
+            _ => panic!("polled after the lead retired"),
+        });
+        let Err(err) = watch(&herdr, &ledger, dir.path(), &req, &mut clock, &mut |_| {}) else {
+            panic!("the retired lead's watch kept running");
+        };
+        assert!(err.to_string().contains("lead-cards was retired"), "{err}");
+
+        // The shepherd now owns cards, and the lead's watch left it unread.
+        let woke = run_dyn(&herdr, &ledger, dir.path(), &ONCE).unwrap();
+        assert!(
+            woke.contains(&"lh-1 note 2026-11-01 09:00 after".to_string()),
+            "{woke:?}"
+        );
+    }
+
+    fn run_dyn(
+        herdr: &FakeHerdr,
+        ledger: &dyn Ledger,
+        dir: &Path,
+        req: &Request,
+    ) -> Option<Vec<String>> {
+        watch(herdr, ledger, dir, req, &mut steps(|_| {}), &mut |_| {})
+            .unwrap()
+            .map(printed)
+    }
+
+    /// `led_world` with the lead recorded on herdr socket `/run/live.sock`.
+    fn socketed_lead(dir: &Path) -> (MemLedger, FakeHerdr) {
+        let (mut ledger, herdr) = led_world(dir);
+        ledger.0.get_mut("lead-cards").unwrap().socket = Some("/run/live.sock".into());
+        (ledger, herdr)
+    }
+
+    #[test]
+    fn a_socketed_leads_pane_on_its_own_socket_is_the_leads_watch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = socketed_lead(dir.path());
+        let req = Request {
+            own_socket: Some(Path::new("/run/live.sock")),
+            ..from_pane("w9:p0")
+        };
+
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &req, &mut steps(|_| {})).unwrap(),
+            ["lh-1 note 2026-11-01 09:00 hi"]
+        );
+    }
+
+    #[test]
+    fn a_leads_pane_on_another_socket_or_none_is_an_error_naming_the_lead() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = socketed_lead(dir.path());
+        for socket in [Some(Path::new("/run/dev.sock")), None] {
+            let req = Request {
+                own_socket: socket,
+                ..from_pane("w9:p0")
+            };
+
+            let Err(err) = watch(
+                &herdr,
+                &ledger,
+                dir.path(),
+                &req,
+                &mut steps(|_| {}),
+                &mut |_| {},
+            ) else {
+                panic!("a mismatched socket watched as {socket:?}");
+            };
+            assert!(err.to_string().contains("lead-cards"), "{err}");
+            assert!(err.to_string().contains("/run/live.sock"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_pane_matching_no_entry_is_the_shepherds_watch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = socketed_lead(dir.path());
+        let req = Request {
+            own_socket: Some(Path::new("/run/live.sock")),
+            ..from_pane("w9:p7")
+        };
+
+        let woke = run(&herdr, &ledger, dir.path(), &req, &mut steps(|_| {})).unwrap();
+        assert!(
+            woke.contains(&"lead-cards note 2026-11-01 09:00 hi".to_string()),
+            "{woke:?}"
+        );
     }
 }
