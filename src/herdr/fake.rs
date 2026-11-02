@@ -227,6 +227,14 @@ impl FakeHerdr {
         tab
     }
 
+    /// The agent's pane closes outside loopherd.
+    pub fn remove_agent(&self, name: &str) {
+        self.state
+            .borrow_mut()
+            .agents
+            .retain(|a| a.name.as_deref() != Some(name));
+    }
+
     pub fn set_status(&self, name: &str, status: AgentStatus) {
         let mut state = self.state.borrow_mut();
         if let Some(a) = state

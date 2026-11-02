@@ -149,6 +149,7 @@ pub fn reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<Read>
     let mut cursor = Cursor::load(dir)?;
     let mut found = vec![];
     let mut warnings = vec![];
+    let mut moved = false;
     for name in names {
         let path = dir.join(format!("{name}.jsonl"));
         let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
@@ -169,12 +170,13 @@ pub fn reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<Read>
                 Err(e) => warnings.push(format!("skipped a bad line in {}: {e}", path.display())),
             }
         }
+        moved |= cursor.read_to(&name) != end;
         cursor.0.insert(name, end);
     }
     found.sort_by(|(_, a), (_, b)| {
         (a.kind != Kind::Question, &a.at).cmp(&(b.kind != Kind::Question, &b.at))
     });
-    if !filter.all {
+    if !filter.all && moved {
         cursor.save(dir)?;
     }
     Ok(Read {
@@ -766,5 +768,32 @@ mod tests {
         let rest = reports(&ledger, dir.path(), &UNREAD).unwrap().lines.len();
 
         assert_eq!(printed + rest, sent);
+    }
+
+    #[test]
+    fn a_read_with_nothing_new_leaves_the_cursor_file_alone() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![member("lh-1", "w1:p1", None, false)]);
+        send(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            Kind::Note,
+            "one",
+            "2026-11-01T09:00:00Z",
+        );
+        reports(&ledger, dir.path(), &UNREAD).unwrap();
+        let inode = || std::fs::metadata(dir.path().join(".cursor")).unwrap().ino();
+        let before = inode();
+
+        assert!(
+            reports(&ledger, dir.path(), &UNREAD)
+                .unwrap()
+                .lines
+                .is_empty()
+        );
+
+        assert_eq!(inode(), before);
     }
 }

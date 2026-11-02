@@ -143,3 +143,29 @@ fn watch_wakes_on_an_unread_report_and_times_out_silently_once_read() {
     assert_eq!(out.stdout, b"");
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn watch_warns_about_a_herd_with_no_herd_file() {
+    let state = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    fs::create_dir_all(config.path().join("herds")).unwrap();
+    fs::write(config.path().join("herds/cards.toml"), "").unwrap();
+
+    let out = loopherd(
+        state.path(),
+        None,
+        &["watch", "cards", "crads", "--timeout", "0"],
+    )
+    .env("LOOPHERD_CONFIG_DIR", config.path())
+    .output()
+    .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("loopherd watch: warning: no herd file for crads"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("for cards"), "{stderr}");
+    assert_eq!(out.status.code(), Some(2));
+}

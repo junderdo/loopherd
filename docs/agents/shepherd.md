@@ -23,11 +23,14 @@ session. Read `herdr --skill` before controlling herdr.
    loopherd watch --timeout 3600
    ```
    (`loopherd watch loopherd-cards` narrows it to a herd.) It returns when a
-   member leaves a report, is `blocked`, or goes from `working` to `done` or
-   `idle`, printing a line per event and marking the reports it prints read.
-   A member already `done` when the watch starts wakes it only by reporting.
-   Exit 2 means the timeout passed with nothing to do. Start the next watch
-   after handling every wake. It dies with the shepherd's session.
+   member leaves a report, goes `blocked`, or goes from `working` to `done`,
+   `idle` or `gone` (its pane disappeared), printing a line per event and
+   marking the reports it prints read. Only changes wake it: a member
+   already `blocked` or `done` when the watch starts wakes it only by a
+   report, so on starting a session run `loopherd status` first to catch
+   members already blocked. Exit 2 means the timeout passed with nothing to
+   do. Start the next watch after handling every wake. It dies with the
+   shepherd's session.
 3. **On wake,** read the watch's lines and the card (`loopherd reports
    --all` for report history). A member that left none: read its screen
    (`herdr agent read lh-<n> --source recent-unwrapped --lines 40`).

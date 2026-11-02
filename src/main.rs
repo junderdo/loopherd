@@ -134,8 +134,8 @@ enum Command {
         all: bool,
     },
     /// Block until a member needs the shepherd, print what happened, and exit:
-    /// an unread report (marked read), a blocked member, or one going from
-    /// working to done or idle. Polls herdr every 2s, read-only.
+    /// an unread report (marked read), a member going blocked, or one going
+    /// from working to done, idle or gone. Polls herdr every 2s, read-only.
     Watch {
         /// Only members of these herds.
         herds: Vec<String>,
@@ -325,6 +325,12 @@ fn run_reports(names: Vec<String>, herd: Option<String>, all: bool) -> Result<i3
 }
 
 fn run_watch(herds: &[String], timeout: Option<u64>) -> Result<i32> {
+    let herd_files = Paths::from_env().context("herd")?.herds;
+    for herd in herds {
+        if !herd_files.join(format!("{herd}.toml")).is_file() {
+            eprintln!("loopherd watch: warning: no herd file for {herd}");
+        }
+    }
     let path = FileLedger::default_path().context("ledger")?;
     let dir = reports_dir(&path)?;
     let req = watch::Request {

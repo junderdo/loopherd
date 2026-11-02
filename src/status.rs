@@ -38,6 +38,20 @@ pub struct Read {
 /// Reads herdr once and the ledger once; changes neither. When herdr's agents
 /// can't be read it still returns the ledger, every status unknown.
 pub fn read(herdr: &dyn Herdr, ledger: &dyn Ledger, options: Options) -> Result<Read> {
+    read_with(herdr, ledger, options, branch)
+}
+
+/// [`read`] without each member's branch, which costs a git call per member.
+pub fn read_statuses(herdr: &dyn Herdr, ledger: &dyn Ledger, options: Options) -> Result<Read> {
+    read_with(herdr, ledger, options, |_| None)
+}
+
+fn read_with(
+    herdr: &dyn Herdr,
+    ledger: &dyn Ledger,
+    options: Options,
+    branch: impl Fn(&AgentRecord) -> Option<String>,
+) -> Result<Read> {
     let entries = ledger.entries()?;
     let (agents, malformed, problem, code) = match herdr.agents() {
         Ok(agents) => (Some(agents), false, None, 0),
@@ -491,5 +505,27 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             (&member["branch"], &member["worktree"]),
             (&serde_json::Value::Null, &serde_json::Value::Null)
         );
+    }
+
+    #[test]
+    fn read_statuses_skips_the_branch_lookup() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ledger = MemLedger::default();
+        let mut e = entry("lh-1", None, "unused");
+        e.worktree = Some(crate::worktree::testing::repo_with_origin(root.path()));
+        ledger.0.insert(e.name.clone(), e);
+        let herdr = FakeHerdr::new(&[("w1", "main")]).with_raw_agent(agent(
+            Some("lh-1"),
+            "w1:plh-1",
+            AgentStatus::Working,
+        ));
+        let member = |read: Read| read.view.ungrouped[0].clone();
+
+        let full = member(read(&herdr, &ledger, Options::default()).unwrap());
+        let statuses = member(read_statuses(&herdr, &ledger, Options::default()).unwrap());
+
+        assert_eq!(full.branch.as_deref(), Some("main"));
+        assert_eq!(statuses.branch, None);
+        assert_eq!(statuses.status, AgentStatus::Working);
     }
 }

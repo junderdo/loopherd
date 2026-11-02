@@ -57,7 +57,7 @@ pub fn watch(
     let mut last: HashMap<String, AgentStatus> = HashMap::new();
     let mut code = 0;
     loop {
-        let read = status::read(herdr, ledger, Options::default())?;
+        let read = status::read_statuses(herdr, ledger, Options::default())?;
         if read.code != code {
             if let Some(problem) = &read.problem {
                 warn(problem);
@@ -88,8 +88,17 @@ pub fn watch(
         let mut lines = read.lines;
         for member in &members {
             let was = last.get(&member.name).copied();
+            if member.gone {
+                if was == Some(AgentStatus::Working) {
+                    lines.push(format!("{} gone  (was working)", member.name));
+                }
+                continue;
+            }
             match member.status {
-                AgentStatus::Blocked => lines.push(format!("{} blocked", member.name)),
+                // Only on change: one blocked at start would re-wake every re-armed watch.
+                AgentStatus::Blocked if was.is_some_and(|w| w != AgentStatus::Blocked) => {
+                    lines.push(format!("{} blocked", member.name))
+                }
                 now @ (AgentStatus::Done | AgentStatus::Idle)
                     if was == Some(AgentStatus::Working) =>
                 {
@@ -242,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn a_member_blocked_at_start_wakes_it_at_once() {
+    fn only_a_member_going_blocked_while_watched_wakes_it() {
         let dir = tempfile::tempdir().unwrap();
         let ledger = ledger(vec![
             member("lh-1", "w9:p1", None),
@@ -251,12 +260,17 @@ mod tests {
         let herdr = FakeHerdr::new(&[])
             .with_live_agent(Some("lh-1"), None, "w9:p1")
             .with_live_agent(Some("lh-2"), None, "w9:p2");
+        herdr.set_status("lh-1", AgentStatus::Working);
         herdr.set_status("lh-2", AgentStatus::Blocked);
 
-        let mut clock = steps(|_| panic!("slept"));
+        let mut clock = steps(|poll| match poll {
+            1 | 2 => {}
+            3 => herdr.set_status("lh-1", AgentStatus::Blocked),
+            _ => panic!("slept past the wake"),
+        });
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
-            ["lh-2 blocked"]
+            ["lh-1 blocked"]
         );
     }
 
@@ -327,8 +341,6 @@ mod tests {
             .with_live_agent(Some("solo"), None, "w9:p3")
             .with_live_agent(Some("old"), None, "w9:p4")
             .with_live_agent(Some("stray"), None, "w9:p5");
-        herdr.set_status("zpr-2", AgentStatus::Blocked);
-        herdr.set_status("stray", AgentStatus::Blocked);
         ledger.0.get_mut("old").unwrap().retired = false;
         send(&ledger, dir.path(), "old", Kind::Note, "bye");
         ledger.0.insert("old".into(), retired);
@@ -340,10 +352,11 @@ mod tests {
             ..EVERY
         };
 
-        assert_eq!(
-            run(&herdr, &ledger, dir.path(), &req, &mut steps(|_| {})),
-            None
-        );
+        let mut clock = steps(|_| {
+            herdr.set_status("zpr-2", AgentStatus::Blocked);
+            herdr.set_status("stray", AgentStatus::Blocked);
+        });
+        assert_eq!(run(&herdr, &ledger, dir.path(), &req, &mut clock), None);
 
         send(&ledger, dir.path(), "lh-1", Kind::Note, "PR #9");
         assert_eq!(
@@ -356,7 +369,7 @@ mod tests {
         };
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &every, &mut steps(|_| {})).unwrap(),
-            ["solo note 2026-11-01 09:00 hi", "zpr-2 blocked"]
+            ["solo note 2026-11-01 09:00 hi"]
         );
     }
 
@@ -398,5 +411,29 @@ mod tests {
             None
         );
         assert_eq!(clock.elapsed, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn a_working_member_whose_pane_disappears_wakes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![
+            member("lh-1", "w9:p1", None),
+            member("lh-2", "w9:p2", None),
+        ]);
+        let herdr = FakeHerdr::new(&[])
+            .with_live_agent(Some("lh-1"), None, "w9:p1")
+            .with_live_agent(Some("lh-2"), None, "w9:p2");
+        herdr.set_status("lh-1", AgentStatus::Working);
+
+        let mut clock = steps(|poll| match poll {
+            1 => herdr.remove_agent("lh-2"),
+            2 => {}
+            3 => herdr.remove_agent("lh-1"),
+            _ => panic!("slept past the wake"),
+        });
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
+            ["lh-1 gone  (was working)"]
+        );
     }
 }
