@@ -71,6 +71,10 @@ A card is **claimable** when it sits in Backlog, has `ready-for-agent`, and has 
 
    Stopping like this beats guessing at a decision.
 
+A wayfinding card that settles a decision adds it as a new
+`docs/decisions/D<n>.md` (one past the highest D file) with `## Decision`
+and `## Why` sections, plus a one-line index row in `docs/wayfinding.md`.
+
 Work you discover along the way becomes a new card in Backlog. Mention its
 key in a comment on the card you're working; your own branch stays scoped to
 the card you claimed.
@@ -84,7 +88,7 @@ Use this description template:
 One sentence: the observable outcome.
 
 ## Context
-Why now, links to docs/wayfinding.md decisions or other LH- cards.
+Why now, links to decisions (docs/decisions/D<n>.md) or other LH- cards.
 
 ## Acceptance criteria
 - [ ] Checkable statements, each verifiable by a test, command, or file.

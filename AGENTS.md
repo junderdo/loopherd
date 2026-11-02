@@ -8,7 +8,8 @@ together across sessions, built as a layer over herdr's CLI/socket API.
 - **Shepherding**: running the herd live with the human (feeding, watching,
   verifying and cleaning up members) → read `docs/agents/shepherd.md` first.
 - **Direction**: decisions, the herd model, and open questions →
-  `docs/wayfinding.md`. herdr's capabilities → `docs/research/herdr.md`.
+  `docs/wayfinding.md`, which indexes one `docs/decisions/D<n>.md` per
+  decision. herdr's capabilities → `docs/research/herdr.md`.
 - **herdr in tests** goes through the fake behind the herdr trait, and manual
   runs use `herdr --session loopherd-dev`, keeping the human's live session
   untouched. Wrap manual commands in `scripts/herdr-dev` (`--start` boots the
