@@ -60,6 +60,9 @@ pub fn watch(
     let _only = only_watch(dir)?;
     // Each member's last known status; an unreadable poll keeps it.
     let mut last: HashMap<String, AgentStatus> = HashMap::new();
+    // Members herdr showed live at the last poll; a herdr restart passes
+    // through unreachable, so resuming agents that briefly match no member
+    // don't read as gone.
     let mut alive: HashSet<String> = HashSet::new();
     let mut code = 0;
     loop {
@@ -70,11 +73,15 @@ pub fn watch(
             }
             code = read.code;
         }
+        let reachable = read.view.herdr_reachable;
         let members = in_scope(read.view, req);
         let names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
         let mut lines = vec![];
         // An empty filter means every mailbox.
         if !names.is_empty() {
+            // Stops first: a stop is appended after its report, so any stop
+            // read here has its report visible to the read after it.
+            let stops = unread_stops(dir, &names)?;
             let read = reports(
                 ledger,
                 dir,
@@ -84,22 +91,23 @@ pub fn watch(
                     all: false,
                 },
             )?;
-            let stops = unread_stops(dir, &names)?;
             read.warnings
                 .iter()
-                .chain(&stops.warnings)
                 .for_each(|w| warn(&format!("warning: {w}")));
             lines.extend(read.lines);
-            lines.extend(stops.mailboxes.iter().flat_map(stop_wakes));
+            lines.extend(stops.iter().flat_map(stop_wakes));
         }
+        let was_alive = std::mem::take(&mut alive);
         for member in &members {
             if member.gone {
-                if alive.contains(&member.name) {
+                if was_alive.contains(&member.name) {
                     lines.push(format!("{} gone", member.name));
                 }
                 continue;
             }
-            alive.insert(member.name.clone());
+            if reachable {
+                alive.insert(member.name.clone());
+            }
             let was = last.get(&member.name).copied();
             // Only on change: one blocked at start would re-wake every re-armed watch.
             if member.status == AgentStatus::Blocked
@@ -629,6 +637,63 @@ mod tests {
             _ => herdr.set_status("lh-2", AgentStatus::Idle),
         });
         assert_eq!(run(&herdr, &ledger, dir.path(), &req, &mut clock), None);
+    }
+
+    #[test]
+    fn a_herdr_restart_that_resumes_agents_unmatched_does_not_wake_it_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = working_pair();
+        let req = Request {
+            timeout: Some(Duration::from_secs(6)),
+            ..EVERY
+        };
+        let mut clock = steps(|poll| match poll {
+            1 => herdr.set_unreachable(true),
+            2 => {
+                herdr.remove_agent("lh-1");
+                herdr.set_unreachable(false);
+            }
+            _ => {}
+        });
+        assert_eq!(run(&herdr, &ledger, dir.path(), &req, &mut clock), None);
+    }
+
+    #[test]
+    fn a_member_gone_while_herdr_was_down_at_start_does_not_wake_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = working_pair();
+        herdr.remove_agent("lh-1");
+        herdr.set_unreachable(true);
+        let req = Request {
+            timeout: Some(Duration::from_secs(4)),
+            ..EVERY
+        };
+        let mut clock = steps(|_| herdr.set_unreachable(false));
+        assert_eq!(run(&herdr, &ledger, dir.path(), &req, &mut clock), None);
+    }
+
+    #[test]
+    fn a_bad_mailbox_line_warns_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = working_pair();
+        put(dir.path(), "lh-1", stop(0, 0));
+        let path = dir.path().join("lh-1.jsonl");
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend(b"not json\n");
+        std::fs::write(&path, bytes).unwrap();
+        let mut warnings = vec![];
+
+        watch(
+            &herdr,
+            &ledger,
+            dir.path(),
+            &ONCE,
+            &mut steps(|_| {}),
+            &mut |w| warnings.push(w.to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
     }
 
     #[test]

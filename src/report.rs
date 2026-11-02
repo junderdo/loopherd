@@ -270,15 +270,16 @@ pub fn reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<Read>
 /// Each of `names` with an unread `stop` entry, with its whole mailbox so a
 /// stop can be judged against what came before; marks everything read on
 /// the watch cursor, which `reports` never moves.
-pub fn unread_stops(dir: &Path, names: &[String]) -> Result<Stops> {
+pub fn unread_stops(dir: &Path, names: &[String]) -> Result<Vec<Mailbox>> {
     let names: Vec<String> = mailboxes(dir)?
         .into_iter()
         .filter(|n| names.contains(n))
         .collect();
-    let mut stops = Stops::default();
+    let mut stops = vec![];
     Cursor::Watch.advance(dir, &names, |name, read, unread| {
         let mut entries = vec![];
-        parse(dir, name, unread, &mut entries, &mut stops.warnings);
+        // `reports` warns about bad lines; its cursor reads the same bytes.
+        parse(dir, name, unread, &mut entries, &mut vec![]);
         if !entries.iter().any(|(_, e)| matches!(e.body, Body::Stop(_))) {
             return;
         }
@@ -287,19 +288,13 @@ pub fn unread_stops(dir: &Path, names: &[String]) -> Result<Stops> {
         parse(dir, name, read, &mut history, &mut vec![]);
         let unread = history.len();
         history.extend(entries);
-        stops.mailboxes.push(Mailbox {
+        stops.push(Mailbox {
             name: name.to_string(),
             entries: history.into_iter().map(|(_, e)| e).collect(),
             unread,
         });
     })?;
     Ok(stops)
-}
-
-#[derive(Debug, Default)]
-pub struct Stops {
-    pub mailboxes: Vec<Mailbox>,
-    pub warnings: Vec<String>,
 }
 
 /// A member's mailbox in file order; `entries[unread..]` are new.
@@ -1238,20 +1233,13 @@ mod tests {
             1
         );
         let read = unread_stops(dir.path(), &names).unwrap();
-        assert!(read.warnings.is_empty());
         let unread: Vec<(&str, usize, usize)> = read
-            .mailboxes
             .iter()
             .map(|m| (m.name.as_str(), m.entries.len(), m.unread))
             .collect();
         assert_eq!(unread, [("lh-1", 3, 0), ("lh-2", 1, 0)]);
 
-        assert!(
-            unread_stops(dir.path(), &names)
-                .unwrap()
-                .mailboxes
-                .is_empty()
-        );
+        assert!(unread_stops(dir.path(), &names).unwrap().is_empty());
         put(
             dir.path(),
             "lh-1",
@@ -1267,8 +1255,8 @@ mod tests {
             "2026-11-01T09:04:30Z",
         );
         let read = unread_stops(dir.path(), &names).unwrap();
-        assert_eq!(read.mailboxes.len(), 1);
-        let lh1 = &read.mailboxes[0];
+        assert_eq!(read.len(), 1);
+        let lh1 = &read[0];
         assert_eq!(
             (lh1.name.as_str(), lh1.entries.len(), lh1.unread),
             ("lh-1", 4, 3)

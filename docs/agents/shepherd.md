@@ -42,7 +42,9 @@ session. Read `herdr --skill` before controlling herdr.
    passed with nothing to do. Start the next watch after handling every
    wake. It dies with the shepherd's session. It refuses to start while
    another watch holds `watch.lock`, or when the hook isn't in
-   `~/.claude/settings.json` (run `scripts/install`).
+   `~/.claude/settings.json` (run `scripts/install`). The first watch after
+   an install, or over members a herd-scoped watch skipped, prints every
+   unread change since, oldest first; judge each against `reports --all`.
 3. **On wake,** read the watch's lines and the card (`loopherd reports
    --all` for the timeline, stops included). Members' reports print as
    `lh-65 done <time> <text>`; the rest read:
@@ -50,7 +52,7 @@ session. Read `herdr --skill` before controlling herdr.
    | Line | Means |
    |---|---|
    | `lh-65 paused  1 shell, 1 cron` | Turn ended with work in flight that can wake it again. Another paused stop is quiet. |
-   | `lh-65 paused  background unknown` | Turn ended and Claude didn't say what's in flight. |
+   | `lh-65 paused  background unknown` | Turn ended and Claude didn't say what's in flight (also `crons unknown`, or `1 shell; crons unknown`). |
    | `lh-65 finished` | Turn ended with nothing in flight, after a `done` or `question`. |
    | `lh-65 finished  no report` | The same, with no `done` or `question` since its last finish or start. |
    | `lh-65 failed  rate_limit` | Turn ended on an API error; it may need a nudge once that clears. |
