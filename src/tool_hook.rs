@@ -65,9 +65,10 @@ pub fn tool_hook(
     let Some(command) = bash_command(input) else {
         return Ok(None);
     };
-    let Some(needed) = needs(&command) else {
+    let needed = needs(&command);
+    if needed.is_empty() {
         return Ok(None);
-    };
+    }
     let entries = ledger.entries()?;
     let Some(lead) = entries.values().find(|e| {
         !e.retired && e.is_lead() && e.pane_id == pane.id && e.socket.as_deref() == Some(socket)
@@ -79,9 +80,9 @@ pub fn tool_hook(
         Some(Err(e)) => (Switches::default(), Some(format!("{e:#}"))),
         None => (Switches::default(), Some("no herd recorded".into())),
     };
-    if needed.on(&switches) {
+    let Some(needed) = needed.into_iter().find(|s| !s.on(&switches)) else {
         return Ok(None);
-    }
+    };
     let mut message = format!(
         "loopherd: blocked: {}'s `{}` switch is off, so {}; ask with `loopherd report --kind question` instead",
         lead.name,
@@ -104,13 +105,17 @@ fn bash_command(input: &[u8]) -> Option<String> {
     Some(input.pointer("/tool_input/command")?.as_str()?.to_string())
 }
 
-/// The first switch any simple command in `script` needs.
-pub fn needs(script: &str) -> Option<Switch> {
-    commands(script).iter().find_map(|words| needs_one(words))
+/// Every switch the simple commands in `script` need, in order.
+pub fn needs(script: &str) -> Vec<Switch> {
+    commands(script)
+        .iter()
+        .flat_map(|words| needs_one(words))
+        .collect()
 }
 
 /// The simple commands in `script`, each as its words with quotes removed.
-/// `;`, `&`, `|`, newlines, parentheses, backticks and `$(` end a command.
+/// `;`, `&`, `|`, newlines, parentheses, backticks and `$(` end a command;
+/// a `$(…)` or backtick inside double quotes is lexed as commands too.
 fn commands(script: &str) -> Vec<Vec<String>> {
     let mut commands = vec![];
     let mut words = vec![];
@@ -128,8 +133,23 @@ fn commands(script: &str) -> Vec<Vec<String>> {
                     match c {
                         '"' => break,
                         '\\' => w.extend(chars.next()),
+                        '$' if chars.peek() == Some(&'(') => {
+                            chars.next();
+                            commands.extend(self::commands(&substitution(&mut chars)));
+                        }
+                        '`' => {
+                            let inner: String = chars.by_ref().take_while(|&c| c != '`').collect();
+                            commands.extend(self::commands(&inner));
+                        }
                         _ => w.push(c),
                     }
+                }
+            }
+            '#' if word.is_none() => {
+                chars.by_ref().find(|&c| c == '\n');
+                words.extend(word.take());
+                if !words.is_empty() {
+                    commands.push(std::mem::take(&mut words));
                 }
             }
             '\\' => match chars.next() {
@@ -155,6 +175,26 @@ fn commands(script: &str) -> Vec<Vec<String>> {
     commands
 }
 
+/// The text of a `$(…)` whose `$(` was just read, through its matching `)`.
+fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
+    let mut depth = 1;
+    let mut inner = String::new();
+    for c in chars.by_ref() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        inner.push(c);
+    }
+    inner
+}
+
 /// Words that run the command after them, with their options that take a value.
 const WRAPPERS: [(&str, &[&str]); 12] = [
     ("env", &["-u", "-C", "-S"]),
@@ -175,10 +215,12 @@ const KEYWORDS: [&str; 10] = [
 ];
 const SHELLS: [&str; 5] = ["sh", "bash", "zsh", "dash", "ksh"];
 
-fn needs_one(words: &[String]) -> Option<Switch> {
+fn needs_one(words: &[String]) -> Vec<Switch> {
     let mut i = 0;
     loop {
-        let word = words.get(i)?;
+        let Some(word) = words.get(i) else {
+            return vec![];
+        };
         let program = file_name(word);
         if is_assignment(word) || KEYWORDS.contains(&word.as_str()) || word == "." {
             i += 1;
@@ -191,14 +233,16 @@ fn needs_one(words: &[String]) -> Option<Switch> {
             i += 1;
             while let Some(option) = words.get(i).filter(|w| w.starts_with(['-', '+'])) {
                 if !option.starts_with("--") && option.contains('c') {
-                    return needs(words.get(i + 1)?);
+                    return words.get(i + 1).map_or(vec![], |script| needs(script));
                 }
-                i += 1;
+                // `-o pipefail`, `-O extglob`: the next word is the option's value.
+                let has_value = ["-o", "+o", "-O", "+O"].contains(&option.as_str());
+                i += if has_value { 2 } else { 1 };
             }
         } else if program == "eval" {
             return needs(&words[i + 1..].join(" "));
         } else {
-            return needs_program(word, &words[i + 1..]);
+            return needs_program(word, &words[i + 1..]).into_iter().collect();
         }
     }
 }
@@ -341,6 +385,32 @@ mod tests {
         "curl -X PUT -H 'Authorization: token x' https://api.github.com/repos/o/r/pulls/12/merge",
         "wget --method=PUT https://api.github.com/repos/o/r/pulls/12/merge",
         "eval 'gh pr merge 12'",
+        "sudo gh pr merge 12",
+        "exec gh pr merge 12",
+        "command gh pr merge 12",
+        "builtin gh pr merge 12",
+        "nohup gh pr merge 12",
+        "time gh pr merge 12",
+        "nice -n 5 gh pr merge 12",
+        "stdbuf -o L gh pr merge 12",
+        "noglob gh pr merge 12",
+        "env -u GH_TOKEN gh pr merge 12",
+        "echo 12 | xargs -n 1 gh pr merge",
+        "if gh pr merge 12; then echo ok; fi",
+        "while true; do gh pr merge 12; done",
+        "until false; do :; done; gh pr merge 12",
+        "if false; then :; elif gh pr merge 12; then :; else :; fi",
+        "! gh pr merge 12",
+        "{ gh pr merge 12; }",
+        "zsh -c 'gh pr merge 12'",
+        "dash -c 'gh pr merge 12'",
+        "ksh -c 'gh pr merge 12'",
+        "bash -o pipefail -c 'gh pr merge 12'",
+        "echo start\ngh pr merge 12",
+        "echo `gh pr merge 12`",
+        "(gh pr merge 12)",
+        "out=\"$(gh pr merge 12 --squash 2>&1)\"; echo \"$out\"",
+        "echo \"merged: $(echo $(date) && gh pr merge 12)\"",
     ];
     const INSTALLS: &[&str] = &[
         "scripts/install",
@@ -353,6 +423,10 @@ mod tests {
         "loopherd install-hook",
         "/home/me/.local/bin/loopherd install-hook --remove",
         "env XDG_STATE_HOME=/tmp/s loopherd install-hook",
+        "source scripts/install",
+        ". scripts/install",
+        "bash -e -o pipefail scripts/install",
+        "x=\"$(scripts/install)\"",
     ];
     const REBASES: &[&str] = &[
         "git rebase origin/main",
@@ -370,6 +444,14 @@ mod tests {
         "GH_TOKEN=$(gh auth token --user junderdo) git -c credential.helper= -c credential.helper='!gh auth git-credential' push --force origin feat/x",
         "bash -c 'git push -f'",
         "cd /src/repo && git rebase main",
+        "git pull -r",
+        "git --git-dir /src/repo/.git rebase main",
+        "git --work-tree /src/repo rebase main",
+        "git --namespace ns rebase main",
+        "git --config-env core.editor=ED rebase main",
+        "git --super-prefix x/ rebase main",
+        "echo \"`git rebase main`\"",
+        "if ! out=\"$(git push --force-with-lease 2>&1)\"; then echo \"$out\"; fi",
     ];
     const ALLOWED: &[&str] = &[
         "gh pr view 12",
@@ -393,6 +475,9 @@ mod tests {
         "git push -u origin feat/x",
         "GH_TOKEN=$(gh auth token --user junderdo) git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin feat/x",
         "git merge origin/main",
+        "echo done # gh pr merge 12",
+        "# git rebase main",
+        "out=\"$(gh pr view 12)\"",
         "cargo test",
         "",
     ];
@@ -407,8 +492,25 @@ mod tests {
         ];
         for (commands, want) in tables {
             for command in commands {
-                assert_eq!(needs(command), want, "{command}");
+                assert_eq!(needs(command), Vec::from_iter(want), "{command}");
             }
+        }
+    }
+
+    #[test]
+    fn a_command_needing_two_switches_is_blocked_by_either_one_off() {
+        let leads = ledger(vec![lead()]);
+        for command in [
+            "gh pr merge 12 && git rebase origin/main",
+            "git push -f; gh pr merge 12",
+        ] {
+            assert_eq!(needs(command).len(), 2, "{command}");
+            for off in [Switch::Merge, Switch::Rebase] {
+                let message = run(&leads, only_off(off), command)
+                    .unwrap_or_else(|| panic!("{command} with {off:?} off was allowed"));
+                assert!(message.contains(&format!("`{}`", off.name())), "{message}");
+            }
+            assert_eq!(run(&leads, all_on(), command), None, "{command}");
         }
     }
 
