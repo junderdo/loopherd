@@ -11,7 +11,14 @@ session. Read `herdr --skill` before controlling herdr.
 
 ## A card's life
 
-1. **Feed.** From the main checkout, `git pull --ff-only`, build, then
+1. **Feed.** From the main checkout, `git pull --ff-only`, then refresh the
+   `loopherd` on PATH, which members use for `loopherd report`:
+   ```bash
+   cargo build -q && install -m 755 target/debug/loopherd ~/.local/bin/.loopherd.tmp \
+     && mv -f ~/.local/bin/.loopherd.tmp ~/.local/bin/loopherd
+   ```
+   It's a copy, not a symlink, so a failed build keeps the last good one, and
+   the rename swaps it in one step. Then
    `loopherd feed loopherd-cards --dry-run` and, if it reads right,
    `loopherd feed loopherd-cards`. The herd file
    (`~/.config/loopherd/herds/loopherd-cards.toml`) turns claimable Backlog
