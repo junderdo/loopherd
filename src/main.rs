@@ -10,6 +10,7 @@ mod prompt;
 mod report;
 mod retire;
 mod revive;
+mod session_hook;
 mod shell;
 mod spawn;
 mod status;
@@ -141,7 +142,11 @@ enum Command {
     /// input on stdin, in the mailbox of the member running in this pane.
     /// Outside a member's pane it records nothing. Set up by install-hook.
     StopHook,
-    /// Add loopherd's Stop and StopFailure hooks to Claude's user settings,
+    /// Claude's SessionStart hook: when a member's Claude is cleared or resumed,
+    /// points its ledger entry at the new session, read from the hook input on
+    /// stdin. Outside a member's pane it changes nothing. Set up by install-hook.
+    SessionHook,
+    /// Add loopherd's Stop, StopFailure and SessionStart hooks to Claude's user settings,
     /// calling this binary; safe to re-run. Backs the file up before changing it.
     InstallHook {
         /// Take loopherd's hooks out instead.
@@ -237,6 +242,7 @@ fn main() -> ExitCode {
             settings,
         } => ("watch", run_watch(&herds, timeout, settings)),
         Command::StopHook => ("stop-hook", run_stop_hook()),
+        Command::SessionHook => ("session-hook", run_session_hook()),
         Command::InstallHook { remove, settings } => {
             ("install-hook", run_install_hook(remove, settings))
         }
@@ -362,7 +368,7 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
     };
     if !install_hook::installed(&settings)? {
         bail!(
-            "loopherd's Stop hook is not in {}, so no stops would wake it; run scripts/install",
+            "loopherd's hooks are not all in {}, so stops could go unseen; run scripts/install",
             settings.display()
         );
     }
@@ -409,20 +415,31 @@ fn run_stop_hook() -> Result<i32> {
         .read_to_end(&mut input)
         .context("read hook input")?;
     let socket = socket_from_env();
-    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let pane = stop_hook::Pane {
         id: &pane,
         socket: socket.as_deref(),
     };
     let reports = ledger.reports_dir()?;
-    stop_hook::stop_hook(
-        &mut ledger,
-        &CliHerdr,
-        &reports,
-        &pane,
-        &input,
-        SystemTime::now(),
-    )?;
+    stop_hook::stop_hook(&ledger, &reports, &pane, &input, SystemTime::now())?;
+    Ok(0)
+}
+
+fn run_session_hook() -> Result<i32> {
+    let Some(pane) = own_pane() else {
+        return Ok(0);
+    };
+    let mut input = vec![];
+    std::io::stdin()
+        .read_to_end(&mut input)
+        .context("read hook input")?;
+    let socket = socket_from_env();
+    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let pane = session_hook::Pane {
+        id: &pane,
+        socket: socket.as_deref(),
+    };
+    session_hook::session_hook(&mut ledger, &pane, &input)?;
     Ok(0)
 }
 

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::SystemTime;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 
 use crate::herdr::{Agent, Herdr, Pane};
 use crate::ledger::{AgentRecord, Ledger};
@@ -14,17 +14,14 @@ use crate::worktree::{Gone, Removal, remove_if_gone, remove_if_merged, same_dir}
 
 /// Marks `name` retired at `now`. Touches only the ledger.
 pub fn retire(ledger: &mut dyn Ledger, name: &str, now: SystemTime) -> Result<AgentRecord> {
-    let mut entries = ledger.entries()?;
-    let record = entries
-        .get_mut(name)
-        .ok_or_else(|| anyhow!("{name} is not in the ledger"))?;
-    if record.retired {
-        bail!("{name} is {}", retired_since(record));
-    }
-    record.retired = true;
-    record.retired_at = Some(humantime::format_rfc3339_seconds(now).to_string());
-    ledger.record(record.clone())?;
-    Ok(record.clone())
+    ledger.update(name, &mut |record| {
+        if record.retired {
+            bail!("{name} is {}", retired_since(record));
+        }
+        record.retired = true;
+        record.retired_at = Some(humantime::format_rfc3339_seconds(now).to_string());
+        Ok(())
+    })
 }
 
 fn retired_since(record: &AgentRecord) -> String {

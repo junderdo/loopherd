@@ -1,5 +1,5 @@
-//! `loopherd install-hook`: merge loopherd's Stop and StopFailure hooks into
-//! Claude's user settings, or take them out with `--remove`.
+//! `loopherd install-hook`: merge loopherd's Stop, StopFailure and SessionStart
+//! hooks into Claude's user settings, or take them out with `--remove`.
 
 use std::fs;
 use std::io::Write;
@@ -10,8 +10,12 @@ use std::time::SystemTime;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Map, Value, json};
 
-const EVENTS: [&str; 2] = ["Stop", "StopFailure"];
-const SUFFIX: &str = " stop-hook || true";
+/// Each hook event with the loopherd subcommand it runs.
+const HOOKS: [(&str, &str); 3] = [
+    ("Stop", "stop-hook"),
+    ("StopFailure", "stop-hook"),
+    ("SessionStart", "session-hook"),
+];
 const TIMEOUT_SECS: u64 = 10;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -34,21 +38,28 @@ pub fn default_settings() -> Result<PathBuf> {
 
 /// The hook's shell command. `|| true` because a Stop hook exiting 2 keeps
 /// Claude from stopping, and a missing or old binary must never do that.
-pub fn hook_command(exe: &Path) -> Result<String> {
+pub fn hook_command(exe: &Path, subcommand: &str) -> Result<String> {
     let path = exe
         .to_str()
         .ok_or_else(|| anyhow!("{} is not UTF-8", exe.display()))?;
-    Ok(format!("'{}'{SUFFIX}", path.replace('\'', r"'\''")))
+    Ok(format!(
+        "'{}' {subcommand} || true",
+        path.replace('\'', r"'\''")
+    ))
 }
 
 /// Adds or updates loopherd's hooks, calling `exe` from each.
 pub fn install(settings: &Path, exe: &Path, now: SystemTime) -> Result<Outcome> {
-    let ours = json!({"type": "command", "command": hook_command(exe)?, "timeout": TIMEOUT_SECS});
     edit(settings, now, |root| {
         let hooks = object_at(root, "hooks", "settings")?;
-        for event in EVENTS {
+        for (event, subcommand) in HOOKS {
+            let ours = json!({
+                "type": "command",
+                "command": hook_command(exe, subcommand)?,
+                "timeout": TIMEOUT_SECS,
+            });
             let groups = array_at(hooks, event)?;
-            if !keep_first_of_ours(groups, &ours) {
+            if !keep_first_of_ours(groups, &ours, subcommand) {
                 groups.push(json!({"hooks": [ours.clone()]}));
             }
         }
@@ -67,14 +78,14 @@ pub fn remove(settings: &Path, now: SystemTime) -> Result<Outcome> {
             .as_object_mut()
             .ok_or_else(|| anyhow!("hooks is not an object"))?;
         let mut dropped = false;
-        for event in EVENTS {
+        for (event, subcommand) in HOOKS {
             let Some(groups) = hooks.get_mut(event) else {
                 continue;
             };
             let groups = groups
                 .as_array_mut()
                 .ok_or_else(|| anyhow!("hooks.{event} is not an array"))?;
-            if drop_ours(groups) {
+            if drop_ours(groups, subcommand) {
                 dropped = true;
                 if groups.is_empty() {
                     hooks.remove(event);
@@ -88,7 +99,7 @@ pub fn remove(settings: &Path, now: SystemTime) -> Result<Outcome> {
     })
 }
 
-/// Whether `settings` has loopherd's hook on both Stop and StopFailure.
+/// Whether `settings` has loopherd's hook on Stop, StopFailure and SessionStart.
 pub fn installed(settings: &Path) -> Result<bool> {
     let bytes = match fs::read(settings) {
         Ok(bytes) => bytes,
@@ -97,16 +108,16 @@ pub fn installed(settings: &Path) -> Result<bool> {
     };
     let root: Value =
         serde_json::from_slice(&bytes).with_context(|| format!("parse {}", settings.display()))?;
-    let has_ours = |event: &str| {
+    let has_ours = |event: &str, subcommand: &str| {
         root.pointer(&format!("/hooks/{event}"))
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .filter_map(|group| group.get("hooks").and_then(Value::as_array))
             .flatten()
-            .any(is_ours)
+            .any(|hook| is_ours(hook, subcommand))
     };
-    Ok(EVENTS.iter().all(|event| has_ours(event)))
+    Ok(HOOKS.iter().all(|(event, sub)| has_ours(event, sub)))
 }
 
 /// Applies `change` to the settings object and writes it back only if it
@@ -227,7 +238,7 @@ fn array_at<'a>(hooks: &'a mut Map<String, Value>, event: &str) -> Result<&'a mu
 
 /// Sets the first of loopherd's hooks in `groups` to `ours` and drops any
 /// others; false when there was none.
-fn keep_first_of_ours(groups: &mut Vec<Value>, ours: &Value) -> bool {
+fn keep_first_of_ours(groups: &mut Vec<Value>, ours: &Value, subcommand: &str) -> bool {
     let mut found = false;
     for group in groups.iter_mut() {
         let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
@@ -235,7 +246,7 @@ fn keep_first_of_ours(groups: &mut Vec<Value>, ours: &Value) -> bool {
         };
         let before = hooks.len();
         hooks.retain_mut(|hook| {
-            if !is_ours(hook) {
+            if !is_ours(hook, subcommand) {
                 return true;
             }
             if found {
@@ -255,12 +266,12 @@ fn keep_first_of_ours(groups: &mut Vec<Value>, ours: &Value) -> bool {
 }
 
 /// Drops loopherd's hooks, and groups left empty; true if any was dropped.
-fn drop_ours(groups: &mut Vec<Value>) -> bool {
+fn drop_ours(groups: &mut Vec<Value>, subcommand: &str) -> bool {
     let mut dropped = false;
     for group in groups.iter_mut() {
         if let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) {
             let before = hooks.len();
-            hooks.retain(|hook| !is_ours(hook));
+            hooks.retain(|hook| !is_ours(hook, subcommand));
             if hooks.len() != before {
                 dropped = true;
                 if hooks.is_empty() {
@@ -274,10 +285,10 @@ fn drop_ours(groups: &mut Vec<Value>) -> bool {
 }
 
 /// A command [`hook_command`] built, for a binary named `loopherd` anywhere.
-fn is_ours(hook: &Value) -> bool {
+fn is_ours(hook: &Value, subcommand: &str) -> bool {
     hook.get("command")
         .and_then(Value::as_str)
-        .and_then(|c| c.strip_suffix(SUFFIX))
+        .and_then(|c| c.strip_suffix(&format!(" {subcommand} || true")))
         .and_then(unquote)
         .is_some_and(|path| {
             Path::new(&path)
@@ -323,7 +334,11 @@ mod tests {
     }
 
     fn ours() -> Value {
-        json!({"type": "command", "command": format!("'{EXE}' stop-hook || true"), "timeout": 10})
+        ours_running("stop-hook")
+    }
+
+    fn ours_running(subcommand: &str) -> Value {
+        json!({"type": "command", "command": format!("'{EXE}' {subcommand} || true"), "timeout": 10})
     }
 
     fn settings_with(contents: &str) -> (tempfile::TempDir, PathBuf) {
@@ -370,10 +385,12 @@ mod tests {
             ])
         );
         assert_eq!(after["hooks"]["StopFailure"], json!([{"hooks": [ours()]}]));
-        assert_eq!(
-            after["hooks"]["SessionStart"],
-            read_str(USER_SETTINGS)["hooks"]["SessionStart"]
-        );
+        let mut session = read_str(USER_SETTINGS)["hooks"]["SessionStart"].clone();
+        session
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"hooks": [ours_running("session-hook")]}));
+        assert_eq!(after["hooks"]["SessionStart"], session);
     }
 
     fn read_str(s: &str) -> Value {
@@ -407,7 +424,24 @@ mod tests {
     }
 
     #[test]
-    fn installed_needs_ours_on_both_events() {
+    fn installs_a_session_start_hook_and_remove_takes_it_out() {
+        let (_dir, path) = settings_with(USER_SETTINGS);
+        install(&path, Path::new(EXE), now()).unwrap();
+        let groups = read(&path)["hooks"]["SessionStart"].clone();
+        assert_eq!(
+            groups.as_array().unwrap().last().unwrap(),
+            &json!({"hooks": [ours_running("session-hook")]})
+        );
+
+        remove(&path, later()).unwrap();
+        assert_eq!(
+            read(&path)["hooks"]["SessionStart"],
+            read_str(USER_SETTINGS)["hooks"]["SessionStart"]
+        );
+    }
+
+    #[test]
+    fn installed_needs_ours_on_all_three_events() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         assert!(!installed(&path).unwrap());
@@ -421,6 +455,14 @@ mod tests {
         let mut half = read(&path);
         half["hooks"].as_object_mut().unwrap().remove("StopFailure");
         fs::write(&path, half.to_string()).unwrap();
+        assert!(!installed(&path).unwrap());
+
+        let mut no_session = read(&path);
+        no_session["hooks"]
+            .as_object_mut()
+            .unwrap()
+            .remove("SessionStart");
+        fs::write(&path, no_session.to_string()).unwrap();
         assert!(!installed(&path).unwrap());
 
         fs::write(&path, "not json").unwrap();
@@ -479,7 +521,7 @@ mod tests {
         assert_eq!(outcome, Outcome::Changed { backup: None });
         assert_eq!(
             read(&path),
-            json!({"hooks": {"Stop": [{"hooks": [ours()]}], "StopFailure": [{"hooks": [ours()]}]}})
+            json!({"hooks": {"Stop": [{"hooks": [ours()]}], "StopFailure": [{"hooks": [ours()]}], "SessionStart": [{"hooks": [ours_running("session-hook")]}]}})
         );
         assert_eq!(files(dir.path()), ["settings.json"]);
     }
@@ -554,18 +596,27 @@ mod tests {
     #[test]
     fn the_command_round_trips_paths_with_spaces_and_quotes() {
         for exe in ["/a b/loopherd", "/it's/loopherd"] {
-            let command = hook_command(Path::new(exe)).unwrap();
-            assert!(is_ours(&json!({"command": command})), "{command}");
+            let command = hook_command(Path::new(exe), "stop-hook").unwrap();
+            assert!(
+                is_ours(&json!({"command": command}), "stop-hook"),
+                "{command}"
+            );
         }
         assert!(!is_ours(
-            &json!({"command": "'/bin/other' stop-hook || true"})
+            &json!({"command": "'/bin/other' stop-hook || true"}),
+            "stop-hook"
         ));
-        assert!(!is_ours(&json!({"command": "notify-send done"})));
+        assert!(!is_ours(
+            &json!({"command": "notify-send done"}),
+            "stop-hook"
+        ));
+        let session = hook_command(Path::new(EXE), "session-hook").unwrap();
+        assert!(!is_ours(&json!({"command": session}), "stop-hook"));
     }
 
     fn run_hook(exe: &Path) -> std::process::ExitStatus {
         Command::new("sh")
-            .args(["-c", &hook_command(exe).unwrap()])
+            .args(["-c", &hook_command(exe, "stop-hook").unwrap()])
             .stdin(std::process::Stdio::null())
             .status()
             .unwrap()

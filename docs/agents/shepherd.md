@@ -19,7 +19,7 @@ session. Read `herdr --skill` before controlling herdr.
    ```
    It needs `jq`. It builds, copies the binary to `~/.local/bin/loopherd` through a temp
    file and a rename, so a failed build keeps the last good one, and runs
-   `loopherd install-hook` to keep the Stop/StopFailure hooks in
+   `loopherd install-hook` to keep the Stop/StopFailure/SessionStart hooks in
    `~/.claude/settings.json` (backed up first; re-running changes nothing).
    Running Claude sessions pick up a newly added hook without a restart. Then
    `loopherd feed loopherd-cards --dry-run` and, if it reads right,

@@ -7,7 +7,7 @@ use crate::ledger::Ledger;
 
 /// Sends `name`'s stored prompt to its live agent and marks it sent.
 pub fn prompt(herdr: &dyn Herdr, ledger: &mut dyn Ledger, name: &str, force: bool) -> Result<()> {
-    let mut record = ledger
+    let record = ledger
         .entries()?
         .remove(name)
         .ok_or_else(|| anyhow!("{name} is not in the ledger"))?;
@@ -30,8 +30,12 @@ pub fn prompt(herdr: &dyn Herdr, ledger: &mut dyn Ledger, name: &str, force: boo
         );
     }
     herdr.prompt(name, &text)?;
-    record.prompt_sent = true;
-    ledger.record(record)
+    ledger
+        .update(name, &mut |record| {
+            record.prompt_sent = true;
+            Ok(())
+        })
+        .map(|_| ())
 }
 
 #[cfg(test)]
