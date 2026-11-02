@@ -1,6 +1,6 @@
 //! `loopherd watch`: block until a member needs the shepherd.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -9,7 +9,7 @@ use anyhow::Result;
 use crate::herd_view::{Member, Options, View};
 use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::Ledger;
-use crate::report::{Filter, Read, reports};
+use crate::report::{Filter, Kind, Read, reports};
 use crate::status;
 
 pub trait Clock {
@@ -68,10 +68,7 @@ pub fn watch(
         let names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
         let read = match names.is_empty() {
             // An empty filter means every mailbox.
-            true => Read {
-                lines: vec![],
-                warnings: vec![],
-            },
+            true => Read::default(),
             false => reports(
                 ledger,
                 dir,
@@ -85,12 +82,26 @@ pub fn watch(
         read.warnings
             .iter()
             .for_each(|w| warn(&format!("warning: {w}")));
+        // Any report read ends this run, so only this poll's can precede a stop.
+        let reported: HashSet<String> = read
+            .senders
+            .into_iter()
+            .filter(|(_, kind)| *kind != Kind::Note)
+            .map(|(name, _)| name)
+            .collect();
         let mut lines = read.lines;
         for member in &members {
             let was = last.get(&member.name).copied();
+            let stopped = |now: &str| {
+                let note = match reported.contains(&member.name) {
+                    true => "",
+                    false => ", no report",
+                };
+                format!("{} {now}  (was working{note})", member.name)
+            };
             if member.gone {
                 if was == Some(AgentStatus::Working) {
-                    lines.push(format!("{} gone  (was working)", member.name));
+                    lines.push(stopped("gone"));
                 }
                 continue;
             }
@@ -102,7 +113,7 @@ pub fn watch(
                 now @ (AgentStatus::Done | AgentStatus::Idle)
                     if was == Some(AgentStatus::Working) =>
                 {
-                    lines.push(format!("{} {}  (was working)", member.name, now.as_str()))
+                    lines.push(stopped(now.as_str()))
                 }
                 _ => {}
             }
@@ -140,7 +151,7 @@ mod tests {
     use super::*;
     use crate::herdr::fake::FakeHerdr;
     use crate::ledger::{AgentRecord, MemLedger};
-    use crate::report::{Kind, Reporter, report};
+    use crate::report::{Reporter, report};
 
     fn member(name: &str, pane: &str, herd: Option<&str>) -> AgentRecord {
         AgentRecord {
@@ -297,7 +308,10 @@ mod tests {
         });
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
-            ["lh-1 done  (was working)", "lh-2 idle  (was working)"]
+            [
+                "lh-1 done  (was working, no report)",
+                "lh-2 idle  (was working, no report)"
+            ]
         );
     }
 
@@ -433,7 +447,91 @@ mod tests {
         });
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
-            ["lh-1 gone  (was working)"]
+            ["lh-1 gone  (was working, no report)"]
+        );
+    }
+
+    fn working_pair() -> (MemLedger, FakeHerdr) {
+        let ledger = ledger(vec![
+            member("lh-1", "w9:p1", None),
+            member("lh-2", "w9:p2", None),
+        ]);
+        let herdr = FakeHerdr::new(&[])
+            .with_live_agent(Some("lh-1"), None, "w9:p1")
+            .with_live_agent(Some("lh-2"), None, "w9:p2");
+        herdr.set_status("lh-1", AgentStatus::Working);
+        herdr.set_status("lh-2", AgentStatus::Working);
+        (ledger, herdr)
+    }
+
+    #[test]
+    fn a_report_read_in_the_poll_of_the_stop_keeps_the_plain_wake() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = working_pair();
+
+        let mut clock = steps(|poll| match poll {
+            1 => {}
+            2 => {
+                send(&ledger, dir.path(), "lh-1", Kind::Done, "PR #9");
+                send(&ledger, dir.path(), "lh-2", Kind::Question, "which DB?");
+                herdr.set_status("lh-1", AgentStatus::Idle);
+                herdr.set_status("lh-2", AgentStatus::Idle);
+            }
+            _ => panic!("slept past the wake"),
+        });
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
+            [
+                "lh-2 question 2026-11-01 09:00 which DB?",
+                "lh-1 done 2026-11-01 09:00 PR #9",
+                "lh-1 idle  (was working)",
+                "lh-2 idle  (was working)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_report_consumed_by_an_earlier_watch_does_not_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = working_pair();
+        send(&ledger, dir.path(), "lh-1", Kind::Done, "PR #9");
+
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut steps(|_| {})).unwrap(),
+            ["lh-1 done 2026-11-01 09:00 PR #9"]
+        );
+
+        let mut clock = steps(|poll| match poll {
+            1 => herdr.set_status("lh-1", AgentStatus::Idle),
+            _ => panic!("slept past the wake"),
+        });
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
+            ["lh-1 idle  (was working, no report)"]
+        );
+    }
+
+    #[test]
+    fn notes_and_other_members_reports_do_not_count_as_a_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = working_pair();
+
+        let mut clock = steps(|poll| match poll {
+            1 => {}
+            2 => {
+                send(&ledger, dir.path(), "lh-1", Kind::Note, "pausing");
+                send(&ledger, dir.path(), "lh-2", Kind::Done, "PR #9");
+                herdr.set_status("lh-1", AgentStatus::Idle);
+            }
+            _ => panic!("slept past the wake"),
+        });
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
+            [
+                "lh-1 note 2026-11-01 09:00 pausing",
+                "lh-2 done 2026-11-01 09:00 PR #9",
+                "lh-1 idle  (was working, no report)",
+            ]
         );
     }
 }
