@@ -201,12 +201,22 @@ fn reap(
                         out.push(format!("error: {e:#}"));
                         lines.push(format!("error: retire {name}: {}", out.join("; ")));
                         reaped.errors += 1;
+                        if is_retired(ledger, name) {
+                            reaped.retired += 1;
+                        }
                     }
                 }
             }
         }
     }
     Ok(reaped)
+}
+
+/// Whether the ledger marks `name` retired; false if it can't be read.
+fn is_retired(ledger: &dyn Ledger, name: &str) -> bool {
+    ledger
+        .entries()
+        .is_ok_and(|e| e.get(name).is_some_and(|r| r.retired))
 }
 
 /// Whether `command` reports its member finished: exit 0 yes, exit 1 no,
@@ -509,7 +519,7 @@ mod tests {
 
         assert_eq!(
             fed.lines.last().unwrap(),
-            "prs: 0 retired, 0 added, 0 skipped, 2 errors"
+            "prs: 1 retired, 0 added, 0 skipped, 2 errors"
         );
         assert_eq!(fed.code, 1);
     }
@@ -979,8 +989,48 @@ mod tests {
         assert_eq!(herdr.tabs().len(), 1);
     }
 
+    /// A ledger that reads but refuses every write.
+    struct ReadOnly(MemLedger);
+
+    impl Ledger for ReadOnly {
+        fn entries(&self) -> Result<std::collections::BTreeMap<String, AgentRecord>> {
+            self.0.entries()
+        }
+
+        fn record(&mut self, _: AgentRecord) -> Result<()> {
+            anyhow::bail!("read-only")
+        }
+    }
+
     #[test]
-    fn a_retire_that_fails_is_an_error_and_the_run_continues() {
+    fn a_retire_that_fails_before_marking_counts_only_as_an_error() {
+        let setup = Setup::with_done("cat tasks", 1, "exit 0");
+        let herdr = herdr();
+        let mut ledger = ReadOnly(fed_one(&setup, &herdr));
+        let req = FeedRequest {
+            herd: "prs".into(),
+            dry_run: false,
+            ready_timeout: Duration::from_secs(60),
+            command_timeout: Duration::from_secs(1),
+            own_pane: None,
+        };
+
+        let fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "error: retire zpr-1: error: read-only",
+                "prs: 0 retired, 0 added, 0 skipped, 1 error",
+            ]
+        );
+        assert_eq!(fed.code, 1);
+        assert!(!ledger.0.0["zpr-1"].retired);
+        assert_eq!(herdr.tabs().len(), 1);
+    }
+
+    #[test]
+    fn a_retire_that_fails_after_marking_counts_as_retired_and_as_an_error() {
         let setup = Setup::with_done("cat tasks", 1, "exit 0");
         let mut herdr = herdr();
         let mut ledger = fed_one(&setup, &herdr);
@@ -995,7 +1045,7 @@ mod tests {
             fed.lines
         );
         assert_eq!(fed.lines[1], "added zpr-2");
-        assert_eq!(fed.lines[2], "prs: 0 retired, 1 added, 0 skipped, 1 error");
+        assert_eq!(fed.lines[2], "prs: 1 retired, 1 added, 0 skipped, 1 error");
         assert_eq!(fed.code, 1);
     }
 
