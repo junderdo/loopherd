@@ -294,20 +294,19 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
     match file_name(path) {
         "gh" => {
             let positional = positionals(args, &["-R", "--repo"]);
-            let help = args.iter().any(|a| a == "--help" || a == "-h");
-            let pr_merge = positional.starts_with(&["pr", "merge"]) && !help;
+            let pr_merge = positional.starts_with(&["pr", "merge"]);
             let api_merge = positional.first() == Some(&"api")
                 && args.iter().any(|a| merges(a))
                 && gh_api_writes(args);
             (pr_merge || api_merge).then_some(Switch::Merge)
         }
-        "curl" | "wget" => {
-            (args.iter().any(|a| merges(a)) && http_writes(args)).then_some(Switch::Merge)
-        }
+        "curl" | "wget" => args.iter().any(|a| merges(a)).then_some(Switch::Merge),
         "git" => git_needs(args),
         "loopherd" => (positional.first() == Some(&"install-hook")).then_some(Switch::Install),
-        // `cargo run -- install-hook` in a loopherd checkout.
-        "cargo" => (positional.first() == Some(&"run") && args.iter().any(|a| a == "install-hook"))
+        // `cargo run -- install-hook` in a loopherd checkout, in any spelling.
+        "cargo" => args
+            .iter()
+            .any(|a| a == "install-hook")
             .then_some(Switch::Install),
         _ => None,
     }
@@ -335,16 +334,8 @@ fn git_needs(args: &[String]) -> Option<Switch> {
             || a.starts_with('+')
             || a == "--mirror"
     };
-    const NOT_STARTING: [&str; 6] = [
-        "--abort",
-        "--continue",
-        "--quit",
-        "--skip",
-        "--show-current-patch",
-        "--help",
-    ];
     let needed = match subcommand.as_str() {
-        "rebase" => !rest.iter().any(|a| NOT_STARTING.contains(&a.as_str())),
+        "rebase" => true,
         "pull" => rest.iter().any(rebases),
         "push" => rest.iter().any(forces),
         _ => false,
@@ -352,59 +343,15 @@ fn git_needs(args: &[String]) -> Option<Switch> {
     needed.then_some(Switch::Rebase)
 }
 
-/// The value of the first of `names` in `args`, as `-X PUT`, `-XPUT` or
-/// `--method=PUT`.
-fn option_value<'a>(args: &'a [String], names: &[&str]) -> Option<&'a str> {
-    args.iter().enumerate().find_map(|(i, arg)| {
-        names.iter().find_map(|name| {
-            if arg == name {
-                return args.get(i + 1).map(String::as_str);
-            }
-            let rest = arg.strip_prefix(name)?;
-            match name.starts_with("--") {
-                true => rest.strip_prefix('='),
-                false => (!rest.is_empty()).then_some(rest),
-            }
-        })
-    })
-}
-
-fn not_get(method: Option<&str>) -> bool {
-    method.is_some_and(|m| !m.eq_ignore_ascii_case("GET") && !m.eq_ignore_ascii_case("HEAD"))
-}
-
-fn has_flag(args: &[String], flags: &[&str]) -> bool {
-    args.iter().any(|a| {
-        flags
-            .iter()
-            .any(|f| a == f || (f.starts_with("--") && a.starts_with(&format!("{f}="))))
-    })
-}
-
-/// `gh api` sends a GET unless given a method or fields.
+/// `gh api` sends a GET only with no method and no fields, in any form
+/// (`-X PUT`, `-XPUT`, `--method=PUT`, `-fkey=v`, `--field=…`).
 fn gh_api_writes(args: &[String]) -> bool {
-    not_get(option_value(args, &["-X", "--method"]))
-        || has_flag(args, &["-f", "-F", "--field", "--raw-field", "--input"])
-}
-
-/// curl and wget send a GET unless given a method or a body.
-fn http_writes(args: &[String]) -> bool {
-    not_get(option_value(args, &["-X", "--request", "--method"]))
-        || args
-            .iter()
-            .any(|a| a.starts_with("--data") || a.starts_with("-d"))
-        || has_flag(
-            args,
-            &[
-                "-T",
-                "--upload-file",
-                "--json",
-                "--post-data",
-                "--post-file",
-                "--body-data",
-                "--body-file",
-            ],
-        )
+    args.iter().any(|a| {
+        ["-X", "-f", "-F"].iter().any(|f| a.starts_with(f))
+            || ["--method", "--field", "--raw-field", "--input"]
+                .iter()
+                .any(|f| a == f || a.starts_with(&format!("{f}=")))
+    })
 }
 
 /// Whether `word` is a redirection, and if so whether it's bare (`>`, `2>`),
@@ -552,6 +499,21 @@ mod tests {
         "gh api -f merge_method=squash repos/o/r/pulls/12/merge",
         "gh api --input body.json repos/o/r/pulls/12/merge",
         "gh api --method=PUT repos/o/r/pulls/12/merge",
+        "gh pr merge --help",
+        "gh pr merge 12 -h",
+        "gh pr merge 3 --body --help",
+        "gh api -X GET repos/o/r/pulls/12/merge",
+        "gh api -X GET -X PUT repos/o/r/pulls/12/merge",
+        "gh api -XGET repos/o/r/pulls/12/merge",
+        "gh api --method=GET repos/o/r/pulls/12/merge",
+        "gh api -fmerge_method=squash repos/o/r/pulls/12/merge",
+        "gh api --raw-field=a=b repos/o/r/pulls/12/merge",
+        "curl https://api.github.com/repos/o/r/pulls/12/merge",
+        "curl -s -o /dev/null -w %{http_code} https://api.github.com/repos/o/r/pulls/12/merge",
+        "curl -X GET https://api.github.com/repos/o/r/pulls/12/merge",
+        "curl -sX PUT https://api.github.com/repos/o/r/pulls/12/merge",
+        "curl -X GET -X PUT https://api.github.com/repos/o/r/pulls/12/merge",
+        "wget -qO- https://api.github.com/repos/o/r/pulls/12/merge",
     ];
     const INSTALLS: &[&str] = &[
         "scripts/install",
@@ -571,6 +533,9 @@ mod tests {
         "cargo run -- install-hook",
         "cargo run --release -- install-hook",
         "cargo run -q --bin loopherd -- install-hook --remove",
+        "cargo r -- install-hook",
+        "cargo +nightly run -- install-hook",
+        "cargo test install-hook",
     ];
     const REBASES: &[&str] = &[
         "git rebase origin/main",
@@ -598,6 +563,12 @@ mod tests {
         "if ! out=\"$(git push --force-with-lease 2>&1)\"; then echo \"$out\"; fi",
         "</dev/null git push -f",
         "git push --mirror backup",
+        "git rebase --abort",
+        "git rebase --continue",
+        "git rebase --quit",
+        "git rebase --skip",
+        "git rebase --help",
+        "git rebase -x --abort main",
     ];
     const ALLOWED: &[&str] = &[
         "gh pr view 12",
@@ -627,23 +598,9 @@ mod tests {
         "cargo test",
         "",
         "gh api repos/o/r/pulls/12/merge",
-        "gh api -X GET repos/o/r/pulls/12/merge",
         "gh api --jq .merged repos/o/r/pulls/12/merge",
-        "curl https://api.github.com/repos/o/r/pulls/12/merge",
-        "curl -s -o /dev/null -w %{http_code} https://api.github.com/repos/o/r/pulls/12/merge",
-        "curl -X GET https://api.github.com/repos/o/r/pulls/12/merge",
-        "wget -qO- https://api.github.com/repos/o/r/pulls/12/merge",
-        "git rebase --abort",
-        "git rebase --continue",
-        "git rebase --quit",
-        "git rebase --skip",
-        "git rebase --show-current-patch",
-        "git rebase --help",
-        "gh pr merge --help",
-        "gh pr merge 12 -h",
         "cargo run -- status",
         "cargo build",
-        "cargo test install-hook",
     ];
 
     #[test]

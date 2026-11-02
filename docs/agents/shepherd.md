@@ -113,7 +113,10 @@ differs from the shepherd:
   commands that need it (`gh pr merge` or the merge API, `scripts/install`
   or `loopherd install-hook`, a rebase or force-push), in your pane and in
   any Claude nested in it, with a line naming the switch; ask instead. A
-  herd file it can't read blocks all three. Grilling is always the human's.
+  herd file it can't read blocks all three. It denies broadly: `gh pr merge
+  --help`, `git rebase --abort` and any `curl` to a PR's merge endpoint are
+  denied too, so ask the human to run a `rebase --abort`, and check merges
+  with `gh pr view <n> --json state`. Grilling is always the human's.
 - **Heartbeat.** Keep `loopherd watch <herd> --timeout 600` as a background
   task. Exit 2 is a heartbeat, not idleness: check each Review card's PR
   (`gh pr view <n> --json state`) and run the after-merge steps for any the

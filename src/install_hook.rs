@@ -94,6 +94,10 @@ pub fn install(settings: &Path, exe: &Path, now: SystemTime) -> Result<Outcome> 
                 "timeout": hook.timeout,
             });
             let groups = array_at(hooks, hook.event)?;
+            // Ours under another matcher, or none, moves to the one right group.
+            if let Some(matcher) = hook.matcher {
+                drop_ours(groups, hook.subcommand, |g| matcher_of(g) != Some(matcher));
+            }
             if !keep_first_of_ours(groups, &ours, hook.subcommand, hook.matcher) {
                 let mut group = Map::new();
                 if let Some(matcher) = hook.matcher {
@@ -125,7 +129,7 @@ pub fn remove(settings: &Path, now: SystemTime) -> Result<Outcome> {
             let groups = groups
                 .as_array_mut()
                 .ok_or_else(|| anyhow!("hooks.{} is not an array", hook.event))?;
-            if drop_ours(groups, hook.subcommand, hook.matcher) {
+            if drop_ours(groups, hook.subcommand, |_| true) {
                 dropped = true;
                 if groups.is_empty() {
                     hooks.remove(hook.event);
@@ -314,20 +318,27 @@ fn keep_first_of_ours(
     found
 }
 
-/// A group's hooks, unless loopherd's hook needs a `matcher` the group lacks;
-/// ours under any other matcher isn't ours.
+fn matcher_of(group: &Value) -> Option<&str> {
+    group.get("matcher").and_then(Value::as_str)
+}
+
+/// A group's hooks, unless the hook needs a `matcher` the group lacks.
 fn hooks_of<'a>(group: &'a mut Value, matcher: Option<&str>) -> Option<&'a mut Vec<Value>> {
-    if matcher.is_some_and(|m| group.get("matcher").and_then(Value::as_str) != Some(m)) {
+    if matcher.is_some_and(|m| matcher_of(group) != Some(m)) {
         return None;
     }
     group.get_mut("hooks").and_then(Value::as_array_mut)
 }
 
-/// Drops loopherd's hooks, and groups left empty; true if any was dropped.
-fn drop_ours(groups: &mut Vec<Value>, subcommand: &str, matcher: Option<&str>) -> bool {
+/// Drops loopherd's hooks from the groups `from` picks, and groups left
+/// empty; true if any was dropped.
+fn drop_ours(groups: &mut Vec<Value>, subcommand: &str, from: impl Fn(&Value) -> bool) -> bool {
     let mut dropped = false;
     for group in groups.iter_mut() {
-        if let Some(hooks) = hooks_of(group, matcher) {
+        if !from(group) {
+            continue;
+        }
+        if let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) {
             let before = hooks.len();
             hooks.retain(|hook| !is_ours(hook, subcommand));
             if hooks.len() != before {
@@ -430,21 +441,48 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_hook_under_another_matcher_is_left_and_the_bash_group_added() {
-        let moved = json!({"hooks": {"PreToolUse": [
-            {"matcher": "Edit", "hooks": [{"type": "command", "command": format!("'{EXE}' tool-hook || true")}]},
+    fn a_tool_hook_under_another_matcher_or_none_moves_to_the_bash_group() {
+        let theirs = json!({"type": "command", "command": "lint"});
+        let stray = json!({"type": "command", "command": "'/old/loopherd' tool-hook || true"});
+        let user = json!({"hooks": {"PreToolUse": [
+            {"matcher": "Edit", "hooks": [theirs.clone(), stray.clone()]},
+            {"hooks": [stray.clone()]},
+            {"matcher": "Bash|Edit", "hooks": [stray]},
         ]}});
-        let (_dir, path) = settings_with(&moved.to_string());
+        let (_dir, path) = settings_with(&user.to_string());
 
         install(&path, Path::new(EXE), now()).unwrap();
 
-        let mut want = moved["hooks"]["PreToolUse"].clone();
-        want.as_array_mut()
-            .unwrap()
-            .push(json!({"matcher": "Bash", "hooks": [tool_hook()]}));
-        assert_eq!(read(&path)["hooks"]["PreToolUse"], want);
-        remove(&path, later()).unwrap();
-        assert_eq!(read(&path), moved);
+        assert_eq!(
+            read(&path)["hooks"]["PreToolUse"],
+            json!([
+                {"matcher": "Edit", "hooks": [theirs.clone()]},
+                {"matcher": "Bash", "hooks": [tool_hook()]},
+            ])
+        );
+        assert_eq!(
+            install(&path, Path::new(EXE), later()).unwrap(),
+            Outcome::Unchanged
+        );
+    }
+
+    #[test]
+    fn remove_takes_out_a_tool_hook_under_any_matcher() {
+        let theirs = json!({"type": "command", "command": "lint"});
+        let stray = json!({"type": "command", "command": "'/old/loopherd' tool-hook || true"});
+        let user = json!({"hooks": {"PreToolUse": [
+            {"matcher": "Edit", "hooks": [theirs.clone(), stray.clone()]},
+            {"hooks": [stray.clone()]},
+            {"matcher": "Bash", "hooks": [stray]},
+        ]}});
+        let (_dir, path) = settings_with(&user.to_string());
+
+        remove(&path, now()).unwrap();
+
+        assert_eq!(
+            read(&path),
+            json!({"hooks": {"PreToolUse": [{"matcher": "Edit", "hooks": [theirs]}]}})
+        );
     }
 
     #[test]
