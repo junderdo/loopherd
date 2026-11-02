@@ -185,6 +185,10 @@ pub fn spawn(
         retired_at: None,
         herd: req.member_of.as_ref().map(|m| m.herd.clone()),
         template: req.member_of.as_ref().map(|m| m.template.clone()),
+        params: req
+            .member_of
+            .as_ref()
+            .map(|m| m.params.iter().cloned().collect()),
     };
     let agent = match readiness {
         Readiness::Blocked => {

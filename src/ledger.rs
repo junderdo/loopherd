@@ -38,6 +38,9 @@ pub struct AgentRecord {
     pub herd: Option<String>,
     #[serde(default)]
     pub template: Option<String>,
+    /// Each param's value by name, for members of a herd.
+    #[serde(default)]
+    pub params: Option<BTreeMap<String, String>>,
 }
 
 pub trait Ledger {
@@ -143,6 +146,7 @@ mod tests {
             retired_at: None,
             herd: None,
             template: None,
+            params: None,
         }
     }
 
@@ -192,5 +196,6 @@ mod tests {
         assert!(entry.claude_args.is_empty());
         assert_eq!(entry.herd, None);
         assert_eq!(entry.template, None);
+        assert_eq!(entry.params, None);
     }
 }

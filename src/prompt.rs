@@ -57,6 +57,7 @@ mod tests {
             retired_at: None,
             herd: None,
             template: None,
+            params: None,
         }
     }
 
