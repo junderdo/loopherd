@@ -11,9 +11,6 @@ Your switches (off means the human does it; ask with a question report):
 
 Grilling is always the human's.
 
-Until LH-78 lands your own watch also reads your own reports; this prompt
-isn't meant to run live before then.
-
 Start now:
 1. `loopherd status` and `loopherd reports --all`, to see where the herd is.
 2. `loopherd feed {herd} --dry-run`, then `loopherd feed {herd}` if it reads right.

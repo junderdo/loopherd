@@ -1,15 +1,15 @@
 //! `loopherd revive`: bring ledger agents back after a restart or closed tab.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::herdr::{Agent, Herdr, StartOutcome, Workspace, wait_for_shell_prompt};
+use crate::herdr::{Agent, AgentStatus, Herdr, StartOutcome, Workspace, wait_for_shell_prompt};
 use crate::ledger::{AgentRecord, Ledger};
 
-/// Sent to a lead revive started, since its watch died with its old Claude (D17).
+/// Sent to a lead whose watch isn't running: after a restart nothing else wakes it (D17).
 pub const REARM_PROMPT: &str = "You were revived after a restart, so your \
 `loopherd watch` is no longer running. Run `loopherd status` and \
 `loopherd reports --all`, then re-arm your watch per docs/agents/shepherd.md \
@@ -24,6 +24,8 @@ pub struct ReviveRequest {
     pub settle_timeout: Duration,
     pub poll_interval: Duration,
     pub start_timeout: Duration,
+    /// Where watches hold their locks, to tell whether a lead's is running.
+    pub watch_dir: PathBuf,
 }
 
 /// One line per entry, and whether any entry failed.
@@ -70,7 +72,6 @@ pub fn revive(herdr: &dyn Herdr, ledger: &mut dyn Ledger, req: &ReviveRequest) -
                     if let Err(e) = ledger.started(&record.name, SystemTime::now()) {
                         warnings.push(format!("no start entry in its mailbox: {e:#}"));
                     }
-                    rearm_lead(herdr, &record, &mut outcome);
                 }
                 Err(error) => {
                     outcome = Outcome::Failed {
@@ -80,37 +81,36 @@ pub fn revive(herdr: &dyn Herdr, ledger: &mut dyn Ledger, req: &ReviveRequest) -
                 }
             }
         }
+        rearm_lead(herdr, req, &record, &mut outcome);
         revived.lines.extend(
             warnings
                 .iter()
                 .map(|w| format!("warning {}: {w}", record.name)),
         );
-        revived.failed |= matches!(
-            outcome,
-            Outcome::Failed { .. }
-                | Outcome::Started {
-                    rearm: Rearm::Failed(_),
-                    ..
-                }
-        );
+        revived.failed |= matches!(outcome, Outcome::Failed { .. })
+            || matches!(outcome.rearm(), Some(Rearm::Failed(_)));
         revived.lines.push(outcome.line(&record));
     }
     Ok(revived)
 }
 
-fn rearm_lead(herdr: &dyn Herdr, record: &AgentRecord, outcome: &mut Outcome) {
-    if let Outcome::Started {
-        blocked: false,
-        rearm,
-        ..
-    } = outcome
-        && record.is_lead()
-    {
-        *rearm = match herdr.prompt(&record.name, REARM_PROMPT) {
+/// Prompts a lead that is alive or just started, unless its watch is running.
+fn rearm_lead(herdr: &dyn Herdr, req: &ReviveRequest, record: &AgentRecord, outcome: &mut Outcome) {
+    let Some(rearm) = outcome.rearm_mut() else {
+        return;
+    };
+    if !record.is_lead() {
+        return;
+    }
+    *rearm = match crate::watch::lead_watch_running(&req.watch_dir, &record.name) {
+        Ok(true) => Rearm::WatchRunning,
+        Ok(false) if req.dry_run => Rearm::WouldSend,
+        Ok(false) => match herdr.prompt(&record.name, REARM_PROMPT) {
             Ok(()) => Rearm::Sent,
             Err(error) => Rearm::Failed(error),
-        };
-    }
+        },
+        Err(error) => Rearm::Failed(error),
+    };
 }
 
 /// Polls until no agent is launch-pending, so revive never races herdr's resume.
@@ -134,14 +134,32 @@ fn settled_agents(herdr: &dyn Herdr, req: &ReviveRequest) -> Result<Vec<Agent>> 
 
 enum Rearm {
     NotSent,
+    WatchRunning,
+    WouldSend,
     Sent,
     Failed(anyhow::Error),
+}
+
+impl Rearm {
+    fn suffix(&self, name: &str) -> String {
+        match self {
+            Rearm::NotSent => String::new(),
+            Rearm::WatchRunning => " (watch running)".into(),
+            Rearm::WouldSend => format!(" (would prompt: {REARM_PROMPT})"),
+            Rearm::Sent => " (prompted to re-arm its watch)".into(),
+            Rearm::Failed(error) => {
+                format!(" (re-arm failed: {error:#}; send it with herdr agent prompt {name})")
+            }
+        }
+    }
 }
 
 enum Outcome {
     Skipped(String),
     Alive {
         pane_id: String,
+        blocked: bool,
+        rearm: Rearm,
     },
     Collision {
         pane_id: String,
@@ -150,7 +168,7 @@ enum Outcome {
     WouldResume {
         pane_id: Option<String>,
         workspace: String,
-        lead: bool,
+        rearm: Rearm,
     },
     Started {
         pane_id: String,
@@ -165,11 +183,49 @@ enum Outcome {
 }
 
 impl Outcome {
+    fn rearm(&self) -> Option<&Rearm> {
+        match self {
+            Outcome::Alive { rearm, .. }
+            | Outcome::WouldResume { rearm, .. }
+            | Outcome::Started { rearm, .. } => Some(rearm),
+            _ => None,
+        }
+    }
+
+    /// Where a lead's re-arm goes: alive, about to resume, or started and not blocked.
+    fn rearm_mut(&mut self) -> Option<&mut Rearm> {
+        match self {
+            Outcome::Alive {
+                blocked: false,
+                rearm,
+                ..
+            }
+            | Outcome::WouldResume { rearm, .. }
+            | Outcome::Started {
+                blocked: false,
+                rearm,
+                ..
+            } => Some(rearm),
+            _ => None,
+        }
+    }
+
     fn line(&self, record: &AgentRecord) -> String {
         let name = &record.name;
         let (line, placed) = match self {
             Outcome::Skipped(reason) => (format!("skipped {name}: {reason}"), false),
-            Outcome::Alive { pane_id } => (format!("alive {name} {pane_id}"), true),
+            Outcome::Alive {
+                pane_id,
+                blocked,
+                rearm,
+            } => {
+                let held = if *blocked && record.is_lead() {
+                    " (blocked, not prompted)".to_string()
+                } else {
+                    rearm.suffix(name)
+                };
+                (format!("alive {name} {pane_id}{held}"), true)
+            }
             Outcome::Collision { pane_id } => (
                 format!(
                     "collision {name}: the name is held by pane {pane_id} under another session"
@@ -179,18 +235,16 @@ impl Outcome {
             Outcome::WouldResume {
                 pane_id,
                 workspace,
-                lead,
+                rearm,
             } => {
                 let place = match pane_id {
                     Some(pane_id) => format!("pane {pane_id}"),
                     None => format!("a new tab in workspace {workspace}"),
                 };
-                let then = if *lead {
-                    format!(", then prompt: {REARM_PROMPT}")
-                } else {
-                    String::new()
-                };
-                (format!("would resume {name} in {place}{then}"), false)
+                (
+                    format!("would resume {name} in {place}{}", rearm.suffix(name)),
+                    false,
+                )
             }
             Outcome::Started {
                 pane_id,
@@ -199,14 +253,10 @@ impl Outcome {
                 ..
             } => {
                 let verb = if *blocked { "blocked" } else { "resumed" };
-                let rearm = match rearm {
-                    Rearm::NotSent => String::new(),
-                    Rearm::Sent => " (prompted to re-arm its watch)".into(),
-                    Rearm::Failed(error) => format!(
-                        " (re-arm prompt failed: {error:#}, send it with herdr agent prompt {name})"
-                    ),
-                };
-                (format!("{verb} {name} {pane_id}{rearm}"), true)
+                (
+                    format!("{verb} {name} {pane_id}{}", rearm.suffix(name)),
+                    true,
+                )
             }
             Outcome::Failed { step, error } => (format!("failed {name}: {step}: {error:#}"), false),
         };
@@ -238,6 +288,8 @@ fn revive_one(
     {
         return Outcome::Alive {
             pane_id: live.pane_id.clone(),
+            blocked: live.status == AgentStatus::Blocked,
+            rearm: Rearm::NotSent,
         };
     }
     if let Some(holder) = agents
@@ -287,7 +339,7 @@ fn revive_one(
         return Outcome::WouldResume {
             pane_id: reusable,
             workspace: workspace.label,
-            lead: record.is_lead(),
+            rearm: Rearm::NotSent,
         };
     }
     let (pane_id, new_tab) = match reusable {
@@ -368,7 +420,6 @@ fn shell_pane(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::herdr::AgentStatus;
     use crate::herdr::fake::{FakeHerdr, Startup};
     use crate::ledger::{AgentRecord, MemLedger};
 
@@ -379,6 +430,7 @@ mod tests {
             settle_timeout: Duration::from_secs(5),
             poll_interval: Duration::ZERO,
             start_timeout: Duration::from_secs(60),
+            watch_dir: "/nonexistent/loopherd-test/reports".into(),
         }
     }
 
@@ -845,8 +897,65 @@ mod tests {
         }
     }
 
+    /// Holds `lead`'s watch lock in `dir` as a running watch would.
+    fn hold_watch(dir: &Path, lead: &str) -> crate::lock::Lock {
+        let file = std::fs::File::create(crate::watch::lead_lock_path(dir, lead)).unwrap();
+        crate::lock::Lock::try_take(file).unwrap().unwrap()
+    }
+
+    fn rearmed(lead: &str) -> Vec<(String, String)> {
+        vec![(lead.into(), REARM_PROMPT.into())]
+    }
+
     #[test]
-    fn a_resumed_lead_is_prompted_to_re_arm_its_watch() {
+    fn an_alive_lead_with_no_watch_running_is_prompted_to_re_arm() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr().with_live_agent(Some("lead-h"), Some("sess-lead-h"), "w1:p4");
+        let mut ledger = ledger([lead("lead-h", cwd.path())]);
+        let (out, code) = run(&herdr, &mut ledger, &request());
+        assert_eq!(
+            (out.as_str(), code),
+            ("alive lead-h w1:p4 (prompted to re-arm its watch)", 0)
+        );
+        assert_eq!(herdr.prompts(), rearmed("lead-h"));
+    }
+
+    #[test]
+    fn a_lead_whose_watch_is_running_is_left_alone() {
+        let cwd = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let _watch = hold_watch(state.path(), "lead-h");
+        let herdr = herdr().with_live_agent(Some("lead-h"), Some("sess-lead-h"), "w1:p4");
+        let mut ledger = ledger([lead("lead-h", cwd.path())]);
+        let req = ReviveRequest {
+            watch_dir: state.path().into(),
+            ..request()
+        };
+        let (out, code) = run(&herdr, &mut ledger, &req);
+        assert_eq!(
+            (out.as_str(), code),
+            ("alive lead-h w1:p4 (watch running)", 0)
+        );
+        assert!(herdr.prompts().is_empty());
+    }
+
+    #[test]
+    fn a_free_lock_left_by_an_ended_watch_still_gets_a_prompt() {
+        let cwd = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        drop(hold_watch(state.path(), "lead-h"));
+        let herdr = herdr().with_live_agent(Some("lead-h"), Some("sess-lead-h"), "w1:p4");
+        let mut ledger = ledger([lead("lead-h", cwd.path())]);
+        let req = ReviveRequest {
+            watch_dir: state.path().into(),
+            ..request()
+        };
+        run(&herdr, &mut ledger, &req);
+        assert_eq!(herdr.prompts(), rearmed("lead-h"));
+    }
+
+    #[test]
+    fn a_lead_revive_starts_is_prompted_to_re_arm() {
         let cwd = tempfile::tempdir().unwrap();
         let herdr = herdr();
         let mut ledger = ledger([lead("lead-h", cwd.path())]);
@@ -855,29 +964,16 @@ mod tests {
             (out.as_str(), code),
             ("resumed lead-h w1:p1 (prompted to re-arm its watch)", 0)
         );
-        assert_eq!(
-            herdr.prompts(),
-            vec![("lead-h".into(), REARM_PROMPT.into())]
-        );
+        assert_eq!(herdr.prompts(), rearmed("lead-h"));
     }
 
     #[test]
-    fn a_resumed_worker_is_not_prompted() {
+    fn workers_are_never_prompted() {
         let cwd = tempfile::tempdir().unwrap();
-        let herdr = herdr();
-        let mut ledger = ledger([record("a", cwd.path())]);
+        let herdr = herdr().with_live_agent(Some("b"), Some("sess-b"), "w1:p4");
+        let mut ledger = ledger([record("a", cwd.path()), record("b", cwd.path())]);
         let (out, _) = run(&herdr, &mut ledger, &request());
-        assert_eq!(out, "resumed a w1:p1");
-        assert!(herdr.prompts().is_empty());
-    }
-
-    #[test]
-    fn a_lead_found_alive_is_not_prompted() {
-        let cwd = tempfile::tempdir().unwrap();
-        let herdr = herdr().with_live_agent(Some("lead-h"), Some("sess-lead-h"), "w1:p4");
-        let mut ledger = ledger([lead("lead-h", cwd.path())]);
-        let (out, _) = run(&herdr, &mut ledger, &request());
-        assert_eq!(out, "alive lead-h w1:p4");
+        assert_eq!(out, "resumed a w1:p1\nalive b w1:p4");
         assert!(herdr.prompts().is_empty());
     }
 
@@ -894,6 +990,33 @@ mod tests {
     }
 
     #[test]
+    fn an_alive_lead_at_a_dialog_is_not_prompted() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr().with_live_agent(Some("lead-h"), Some("sess-lead-h"), "w1:p4");
+        herdr.set_status("lead-h", AgentStatus::Blocked);
+        let mut ledger = ledger([lead("lead-h", cwd.path())]);
+        let (out, code) = run(&herdr, &mut ledger, &request());
+        assert_eq!(
+            (out.as_str(), code),
+            ("alive lead-h w1:p4 (blocked, not prompted)", 0)
+        );
+        assert!(herdr.prompts().is_empty());
+    }
+
+    #[test]
+    fn a_retired_lead_is_skipped_and_not_prompted() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr().with_live_agent(Some("lead-h"), Some("sess-lead-h"), "w1:p4");
+        let mut ledger = ledger([AgentRecord {
+            retired: true,
+            ..lead("lead-h", cwd.path())
+        }]);
+        let (out, _) = run(&herdr, &mut ledger, &request());
+        assert_eq!(out, "skipped lead-h: retired");
+        assert!(herdr.prompts().is_empty());
+    }
+
+    #[test]
     fn a_re_arm_prompt_herdr_refuses_is_a_failure_after_the_resume() {
         let cwd = tempfile::tempdir().unwrap();
         let mut herdr = herdr();
@@ -903,7 +1026,7 @@ mod tests {
         assert_eq!(
             (out.as_str(), code),
             (
-                "resumed lead-h w1:p1 (re-arm prompt failed: prompt refused, send it with herdr agent prompt lead-h)",
+                "resumed lead-h w1:p1 (re-arm failed: prompt refused; send it with herdr agent prompt lead-h)",
                 1
             )
         );
@@ -911,20 +1034,32 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_shows_the_prompt_a_lead_would_get() {
+    fn dry_run_shows_which_leads_would_be_prompted() {
         let cwd = tempfile::tempdir().unwrap();
-        let herdr = herdr();
-        let mut ledger = ledger([lead("lead-h", cwd.path()), record("a", cwd.path())]);
+        let state = tempfile::tempdir().unwrap();
+        let _watch = hold_watch(state.path(), "lead-w");
+        let herdr = herdr()
+            .with_live_agent(Some("lead-a"), Some("sess-lead-a"), "w1:p4")
+            .with_live_agent(Some("lead-w"), Some("sess-lead-w"), "w1:p5");
+        let mut ledger = ledger([
+            lead("lead-a", cwd.path()),
+            lead("lead-s", cwd.path()),
+            lead("lead-w", cwd.path()),
+            record("x", cwd.path()),
+        ]);
         let req = ReviveRequest {
             dry_run: true,
+            watch_dir: state.path().into(),
             ..request()
         };
         let (out, _) = run(&herdr, &mut ledger, &req);
         assert_eq!(
             out,
             format!(
-                "would resume a in a new tab in workspace loopherd\n\
-                 would resume lead-h in a new tab in workspace loopherd, then prompt: {REARM_PROMPT}"
+                "alive lead-a w1:p4 (would prompt: {REARM_PROMPT})\n\
+                 would resume lead-s in a new tab in workspace loopherd (would prompt: {REARM_PROMPT})\n\
+                 alive lead-w w1:p5 (watch running)\n\
+                 would resume x in a new tab in workspace loopherd"
             )
         );
         assert!(herdr.prompts().is_empty());
