@@ -1,4 +1,4 @@
-//! End-to-end runs of `loopherd spawn`, `add`, `revive`, `retire --close` and `feed` against the real `loopherd-dev` herdr
+//! End-to-end runs of `loopherd spawn`, `add`, `revive`, `retire --close`, `feed`, the Stop hook and `watch` against the real `loopherd-dev` herdr
 //! session. Skipped unless `LOOPHERD_LIVE=1`; start the session first with
 //! `scripts/herdr-dev --start`, then run through it:
 //! `LOOPHERD_LIVE=1 scripts/herdr-dev cargo test --test live`.
@@ -843,17 +843,26 @@ fn stops(state: &Path, name: &str) -> Vec<Value> {
         .collect()
 }
 
-#[test]
-fn the_stop_hook_records_a_paused_stop_then_a_finished_one() {
-    if !live_enabled() {
-        return;
-    }
+/// A member spawned into the dev session with Stop hooks from a `--settings`
+/// file, recording into `state`; `live_state` holds the same pane under the
+/// live herdr's socket, to show the hook keeps the two apart.
+struct Hooked {
+    state: tempfile::TempDir,
+    live_state: tempfile::TempDir,
+    name: String,
+    _cleanup: CloseTab,
+}
+
+const SLEEPER: &str = "Run `sleep 30` with the Bash tool and run_in_background set to true. \
+     Then end your turn at once: don't wait for it or check on it. \
+     When it finishes, reply with just the word done.";
+
+fn spawn_hooked(tag: &str, prompt: &str) -> Hooked {
     let workspace = assert_dev_session();
     let state = tempfile::tempdir().unwrap();
-    // Stands in for the real installed hook: its ledger has the same pane, in the live herdr.
     let live_state = tempfile::tempdir().unwrap();
-    let name = format!("lh-live-stop-{}", std::process::id());
-    let _cleanup = CloseTab(name.clone());
+    let name = format!("lh-live-{tag}-{}", std::process::id());
+    let cleanup = CloseTab(name.clone());
     let hook = |state: &Path| {
         format!(
             "XDG_STATE_HOME='{}' '{}' stop-hook || true",
@@ -886,9 +895,7 @@ fn the_stop_hook_records_a_paused_stop_then_a_finished_one() {
             "--workspace",
             &workspace,
             "--prompt",
-            "Run `sleep 20` with the Bash tool and run_in_background set to true. \
-             Then end your turn at once: don't wait for it or check on it. \
-             When it finishes, reply with just the word done.",
+            prompt,
             "--",
             "--settings",
             settings.to_str().unwrap(),
@@ -913,12 +920,36 @@ fn the_stop_hook_records_a_paused_stop_then_a_finished_one() {
         serde_json::json!({ &name: live_entry }).to_string(),
     )
     .unwrap();
+    Hooked {
+        state,
+        live_state,
+        name,
+        _cleanup: cleanup,
+    }
+}
+
+impl Hooked {
+    fn assert_live_state_untouched(&self) {
+        assert!(
+            !self.live_state.path().join("loopherd/reports").exists(),
+            "the live-socket hook recorded a stop"
+        );
+    }
+}
+
+#[test]
+fn the_stop_hook_records_a_paused_stop_then_a_finished_one() {
+    if !live_enabled() {
+        return;
+    }
+    let member = spawn_hooked("stop", SLEEPER);
+    let state = member.state.path();
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
-    while stops(state.path(), &name).len() < 2 && std::time::Instant::now() < deadline {
+    while stops(state, &member.name).len() < 2 && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
-    let stops = stops(state.path(), &name);
+    let stops = stops(state, &member.name);
     assert!(stops.len() >= 2, "{stops:?}");
     assert!(
         stops[0]["background"]["shells"].as_u64() >= Some(1),
@@ -931,8 +962,46 @@ fn the_stop_hook_records_a_paused_stop_then_a_finished_one() {
         "{stops:?}"
     );
     assert_eq!(last["crons"], 0, "{stops:?}");
-    assert!(
-        !live_state.path().join("loopherd/reports").exists(),
-        "the live-socket hook recorded a stop"
-    );
+    member.assert_live_state_untouched();
+}
+
+#[test]
+fn watch_wakes_paused_then_a_rearmed_watch_wakes_finished() {
+    if !live_enabled() {
+        return;
+    }
+    let member = spawn_hooked("watch", SLEEPER);
+    let state = member.state.path();
+    // The member's hooks carry an XDG_STATE_HOME prefix, so give watch's
+    // installed-hook check a plain one.
+    let check = state.join("installed.json");
+    let out = dev(env!("CARGO_BIN_EXE_loopherd"))
+        .args(["install-hook", "--settings", check.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let watch = || {
+        let out = dev(env!("CARGO_BIN_EXE_loopherd"))
+            .env("XDG_STATE_HOME", state)
+            .args([
+                "watch",
+                "--timeout",
+                "180",
+                "--settings",
+                check.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    assert_eq!(watch(), format!("{} paused  1 shell\n", member.name));
+    assert_eq!(watch(), format!("{} finished  no report\n", member.name));
+    member.assert_live_state_untouched();
 }

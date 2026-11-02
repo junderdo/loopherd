@@ -224,8 +224,6 @@ fn reporter(ledger: &dyn Ledger, who: &Reporter) -> Result<String> {
 pub struct Read {
     pub lines: Vec<String>,
     pub warnings: Vec<String>,
-    /// Who sent each report read, and its kind.
-    pub senders: Vec<(String, Kind)>,
 }
 
 pub struct Filter<'a> {
@@ -266,38 +264,50 @@ pub fn reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<Read>
             .flat_map(|(name, entry)| render(name, entry))
             .collect(),
         warnings,
-        senders: found
-            .iter()
-            .filter_map(|(name, entry)| entry.report().map(|(kind, _)| (name.clone(), kind)))
-            .collect(),
     })
 }
 
-/// Unread `stop` entries of `names`, each with its member, oldest first;
-/// marks them read on the watch cursor, which `reports` never moves.
-#[allow(dead_code)] // `watch` reads stops from LH-69.
+/// Each of `names` with an unread `stop` entry, with its whole mailbox so a
+/// stop can be judged against what came before; marks everything read on
+/// the watch cursor, which `reports` never moves.
 pub fn unread_stops(dir: &Path, names: &[String]) -> Result<Stops> {
     let names: Vec<String> = mailboxes(dir)?
         .into_iter()
         .filter(|n| names.contains(n))
         .collect();
-    let (found, warnings) = Cursor::Watch.read(dir, &names, |e| matches!(e.body, Body::Stop(_)))?;
-    let stops = found
-        .into_iter()
-        .filter_map(|(name, entry)| match entry.body {
-            Body::Stop(stop) => Some((name, stop)),
-            _ => None,
-        })
-        .collect();
-    Ok(Stops { stops, warnings })
+    let mut stops = Stops::default();
+    Cursor::Watch.advance(dir, &names, |name, read, unread| {
+        let mut entries = vec![];
+        parse(dir, name, unread, &mut entries, &mut stops.warnings);
+        if !entries.iter().any(|(_, e)| matches!(e.body, Body::Stop(_))) {
+            return;
+        }
+        // Already warned about when it was unread.
+        let mut history = vec![];
+        parse(dir, name, read, &mut history, &mut vec![]);
+        let unread = history.len();
+        history.extend(entries);
+        stops.mailboxes.push(Mailbox {
+            name: name.to_string(),
+            entries: history.into_iter().map(|(_, e)| e).collect(),
+            unread,
+        });
+    })?;
+    Ok(stops)
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct Stops {
-    /// Each with its member's name.
-    pub stops: Vec<(String, Stop)>,
+    pub mailboxes: Vec<Mailbox>,
     pub warnings: Vec<String>,
+}
+
+/// A member's mailbox in file order; `entries[unread..]` are new.
+#[derive(Debug)]
+pub struct Mailbox {
+    pub name: String,
+    pub entries: Vec<Entry>,
+    pub unread: usize,
 }
 
 type Found = (Vec<(String, Entry)>, Vec<String>);
@@ -380,34 +390,47 @@ fn render(name: &str, entry: &Entry) -> Vec<String> {
 
 /// `finished`, `paused: 1 shell, 2 crons`, or what's unknown, after any error.
 fn describe(stop: &Stop) -> String {
-    let mut pending = vec![];
-    let mut unknown = vec![];
-    match stop.background {
-        Tally::Known(b) => {
-            pending.extend(counted(b.shells, "shell"));
-            pending.extend(counted(b.subagents, "subagent"));
-            pending.extend(counted(b.other, "other task"));
+    let mut parts: Vec<String> = stop.error.iter().map(|e| format!("error {e}")).collect();
+    match stop.in_flight() {
+        (None, None) => parts.push("finished".into()),
+        (pending, unknown) => {
+            parts.extend(pending.map(|p| format!("paused: {p}")));
+            parts.extend(unknown);
         }
-        Tally::Unknown(_) => unknown.push("background"),
-    }
-    match stop.crons {
-        Tally::Known(n) => pending.extend(counted(n, "cron")),
-        Tally::Unknown(_) => unknown.push("crons"),
-    }
-    let mut parts = vec![];
-    if let Some(error) = &stop.error {
-        parts.push(format!("error {error}"));
-    }
-    if !pending.is_empty() {
-        parts.push(format!("paused: {}", pending.join(", ")));
-    }
-    if !unknown.is_empty() {
-        parts.push(format!("{} unknown", unknown.join(" and ")));
-    }
-    if pending.is_empty() && unknown.is_empty() {
-        parts.push("finished".into());
     }
     parts.join("; ")
+}
+
+impl Stop {
+    /// What may still wake Claude, `1 shell, 2 crons` or `background
+    /// unknown`; `None` when nothing is in flight.
+    pub fn pending(&self) -> Option<String> {
+        let (pending, unknown) = self.in_flight();
+        let parts: Vec<String> = pending.into_iter().chain(unknown).collect();
+        (!parts.is_empty()).then(|| parts.join("; "))
+    }
+
+    /// The counted work in flight, and what Claude didn't say.
+    fn in_flight(&self) -> (Option<String>, Option<String>) {
+        let mut pending = vec![];
+        let mut unknown = vec![];
+        match self.background {
+            Tally::Known(b) => {
+                pending.extend(counted(b.shells, "shell"));
+                pending.extend(counted(b.subagents, "subagent"));
+                pending.extend(counted(b.other, "other task"));
+            }
+            Tally::Unknown(_) => unknown.push("background"),
+        }
+        match self.crons {
+            Tally::Known(n) => pending.extend(counted(n, "cron")),
+            Tally::Unknown(_) => unknown.push("crons"),
+        }
+        (
+            (!pending.is_empty()).then(|| pending.join(", ")),
+            (!unknown.is_empty()).then(|| format!("{} unknown", unknown.join(" and "))),
+        )
+    }
 }
 
 fn counted(n: u32, what: &str) -> Option<String> {
@@ -440,13 +463,28 @@ impl Cursor {
     /// Entries of `names` past the cursor that `keep` selects, in file
     /// order; moves the cursor past every complete line, kept or not.
     fn read(self, dir: &Path, names: &[String], keep: impl Fn(&Entry) -> bool) -> Result<Found> {
+        let mut found = vec![];
+        let mut warnings = vec![];
+        self.advance(dir, names, |name, _, unread| {
+            parse(dir, name, unread, &mut found, &mut warnings)
+        })?;
+        found.retain(|(_, e)| keep(e));
+        Ok((found, warnings))
+    }
+
+    /// Calls `visit` with each of `names`' complete lines split at the
+    /// cursor, already read then unread; moves the cursor past them.
+    fn advance(
+        self,
+        dir: &Path,
+        names: &[String],
+        mut visit: impl FnMut(&str, &[u8], &[u8]),
+    ) -> Result<()> {
         if names.is_empty() {
-            return Ok((vec![], vec![]));
+            return Ok(());
         }
         let _lock = self.lock(dir)?;
         let mut offsets = self.load(dir)?;
-        let mut found = vec![];
-        let mut warnings = vec![];
         let mut moved = false;
         for name in names {
             let (bytes, end) = complete_lines(dir, name)?;
@@ -455,15 +493,14 @@ impl Cursor {
                 offset if offset > end => 0,
                 offset => offset,
             };
-            parse(dir, name, &bytes[start..end], &mut found, &mut warnings);
+            visit(name, &bytes[..start], &bytes[start..end]);
             moved |= offsets.read_to(name) != end;
             offsets.0.insert(name.clone(), end);
         }
-        found.retain(|(_, e)| keep(e));
         if moved {
             self.save(dir, &offsets)?;
         }
-        Ok((found, warnings))
+        Ok(())
     }
 
     /// Held across load and save, so concurrent readers never move it back.
@@ -1164,7 +1201,6 @@ mod tests {
         let read = reports(&ledger, dir.path(), &UNREAD).unwrap();
 
         assert!(read.lines.is_empty());
-        assert!(read.senders.is_empty());
     }
 
     #[test]
@@ -1203,21 +1239,41 @@ mod tests {
         );
         let read = unread_stops(dir.path(), &names).unwrap();
         assert!(read.warnings.is_empty());
-        let stopped: Vec<(&str, Option<&str>)> = read
-            .stops
+        let unread: Vec<(&str, usize, usize)> = read
+            .mailboxes
             .iter()
-            .map(|(name, stop)| (name.as_str(), stop.error.as_deref()))
+            .map(|m| (m.name.as_str(), m.entries.len(), m.unread))
             .collect();
-        assert_eq!(stopped, [("lh-1", None), ("lh-2", Some("rate_limit"))]);
+        assert_eq!(unread, [("lh-1", 3, 0), ("lh-2", 1, 0)]);
 
-        assert!(unread_stops(dir.path(), &names).unwrap().stops.is_empty());
+        assert!(
+            unread_stops(dir.path(), &names)
+                .unwrap()
+                .mailboxes
+                .is_empty()
+        );
         put(
             dir.path(),
             "lh-1",
             "2026-11-01T09:04:00Z",
             stop(0, Tally::Known(0), None),
         );
-        assert_eq!(unread_stops(dir.path(), &names).unwrap().stops.len(), 1);
+        send(
+            &ledger,
+            dir.path(),
+            "lh-2",
+            Kind::Note,
+            "no stop",
+            "2026-11-01T09:04:30Z",
+        );
+        let read = unread_stops(dir.path(), &names).unwrap();
+        assert_eq!(read.mailboxes.len(), 1);
+        let lh1 = &read.mailboxes[0];
+        assert_eq!(
+            (lh1.name.as_str(), lh1.entries.len(), lh1.unread),
+            ("lh-1", 4, 3)
+        );
+        assert_eq!(lh1.entries[0].body, Body::Start);
         send(
             &ledger,
             dir.path(),
@@ -1228,7 +1284,10 @@ mod tests {
         );
         assert_eq!(
             reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
-            ["lh-1 note 2026-11-01 09:05 more"]
+            [
+                "lh-2 note 2026-11-01 09:04 no stop",
+                "lh-1 note 2026-11-01 09:05 more"
+            ]
         );
     }
 
@@ -1254,6 +1313,31 @@ mod tests {
                 unreachable!()
             };
             assert_eq!(describe(&stop), want);
+        }
+    }
+
+    #[test]
+    fn pending_names_what_may_still_wake_claude() {
+        let unknown = Tally::Unknown(Unknown::Unknown);
+        let cases = [
+            (stop(0, Tally::Known(0), None), None),
+            (stop(0, Tally::Known(0), Some("rate_limit")), None),
+            (stop(1, Tally::Known(1), None), Some("1 shell, 1 cron")),
+            (stop(1, unknown, None), Some("1 shell; crons unknown")),
+            (
+                Body::Stop(Stop {
+                    background: Tally::Unknown(Unknown::Unknown),
+                    crons: Tally::Known(0),
+                    error: None,
+                }),
+                Some("background unknown"),
+            ),
+        ];
+        for (body, want) in cases {
+            let Body::Stop(stop) = body else {
+                unreachable!()
+            };
+            assert_eq!(stop.pending().as_deref(), want);
         }
     }
 
