@@ -1,3 +1,4 @@
+mod feed;
 mod herd;
 mod herd_view;
 mod herdr;
@@ -19,6 +20,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
+use crate::feed::{FeedRequest, feed, lock};
 use crate::herd::{AddRequest, Paths, add, dry_run, herds};
 use crate::herd_view::Options;
 use crate::herdr::CliHerdr;
@@ -45,6 +47,17 @@ enum Command {
     Add(AddArgs),
     /// List herd files with a usage line per template; exits 1 if any is invalid.
     Herds,
+    /// Fill a herd's free slots with members, one per task its queue's source prints.
+    /// Exits 1 on any error and 3 when a member is blocked at startup.
+    Feed {
+        herd: String,
+        /// Run the source and print what would happen; spawn nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Seconds to wait for each agent to become idle.
+        #[arg(long, default_value_t = 60)]
+        ready_timeout: u64,
+    },
     /// Mark a ledger entry finished so revive leaves it alone. Without --close, changes only the ledger.
     Retire {
         name: String,
@@ -142,6 +155,11 @@ fn main() -> ExitCode {
         Command::Spawn(args) => ("spawn", run_spawn(args)),
         Command::Add(args) => ("add", run_add(args)),
         Command::Herds => ("herds", run_herds()),
+        Command::Feed {
+            herd,
+            dry_run,
+            ready_timeout,
+        } => ("feed", run_feed(herd, dry_run, ready_timeout)),
         Command::Retire { name, close } => ("retire", run_retire(&name, close)),
         Command::Revive { dry_run, name } => ("revive", run_revive(dry_run, name)),
         Command::Prompt { name, force } => ("prompt", run_prompt(&name, force)),
@@ -284,6 +302,24 @@ fn run_add(args: AddArgs) -> Result<i32> {
     let (message, code) = spawned.report(&name);
     println!("{message}");
     Ok(code)
+}
+
+fn run_feed(herd: String, dry_run: bool, ready_timeout: u64) -> Result<i32> {
+    let ledger_path = FileLedger::default_path().context("ledger")?;
+    let _lock = lock(&ledger_path.with_file_name("feed.lock"))?;
+    let paths = Paths::from_env().context("herd")?;
+    let mut ledger = FileLedger::new(ledger_path);
+    let req = FeedRequest {
+        herd,
+        dry_run,
+        ready_timeout: Duration::from_secs(ready_timeout),
+    };
+    let inherited = inherited_workspace();
+    let fed = feed(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
+    for line in fed.lines {
+        println!("{line}");
+    }
+    Ok(fed.code)
 }
 
 fn run_herds() -> Result<i32> {

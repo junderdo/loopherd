@@ -21,6 +21,17 @@ struct HerdFile {
     args: Vec<String>,
     #[serde(default)]
     template: BTreeMap<String, TemplateFile>,
+    queue: Option<QueueFile>,
+}
+
+/// What `loopherd feed` spawns (D14).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueueFile {
+    template: String,
+    /// A shell command printing one task per line.
+    source: String,
+    max: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,8 +127,32 @@ fn quote(arg: &str) -> String {
     }
 }
 
+/// A herd's `[queue]`, with what `feed` needs from the herd around it.
+pub struct Queue {
+    pub template: String,
+    pub source: String,
+    pub max: usize,
+    pub repo: PathBuf,
+    /// The template's param names, in order.
+    pub params: Vec<String>,
+}
+
+pub fn queue(paths: &Paths, herd: &str) -> Result<Queue> {
+    let file = load(&paths.herds, herd).context("herd")?;
+    let queue = file
+        .queue
+        .with_context(|| format!("herd: {herd} has no [queue]"))?;
+    Ok(Queue {
+        params: file.template[&queue.template].params.clone(),
+        template: queue.template,
+        source: queue.source,
+        max: queue.max as usize,
+        repo: expand_home(&file.repo, &paths.home),
+    })
+}
+
 /// The spawn request for `req`, from the named herd file alone.
-fn resolve(paths: &Paths, req: &AddRequest) -> Result<SpawnRequest> {
+pub fn resolve(paths: &Paths, req: &AddRequest) -> Result<SpawnRequest> {
     let herd = load(&paths.herds, &req.herd).context("herd")?;
     let template = herd.template.get(&req.template).with_context(|| {
         let known: Vec<&str> = herd.template.keys().map(String::as_str).collect();
@@ -319,7 +354,13 @@ fn describe(herd: &str, parsed: &HerdFile) -> Vec<String> {
         let params: String = t.params.iter().map(|p| format!(" <{p}>")).collect();
         format!("  loopherd add {herd} {template}{params}")
     });
-    std::iter::once(header).chain(usages).collect()
+    let feed = parsed.queue.as_ref().map(|q| {
+        format!(
+            "  loopherd feed {herd}  (template {}, max {})",
+            q.template, q.max
+        )
+    });
+    std::iter::once(header).chain(usages).chain(feed).collect()
 }
 
 /// `text` parsed, failing on a placeholder that is neither a param nor in `built_ins`.
@@ -355,7 +396,25 @@ fn parse(text: &str) -> Result<HerdFile> {
     for (name, template) in &parsed.template {
         validate(template).with_context(|| format!("template {name}"))?;
     }
+    if let Some(queue) = &parsed.queue {
+        validate_queue(queue, &parsed.template).context("queue")?;
+    }
     Ok(parsed)
+}
+
+fn validate_queue(queue: &QueueFile, templates: &BTreeMap<String, TemplateFile>) -> Result<()> {
+    if !templates.contains_key(&queue.template) {
+        let known: Vec<&str> = templates.keys().map(String::as_str).collect();
+        bail!(
+            "no template {} (it has: {})",
+            queue.template,
+            known.join(", ")
+        );
+    }
+    if queue.max < 1 {
+        bail!("max must be at least 1, got {}", queue.max);
+    }
+    Ok(())
 }
 
 fn validate(template: &TemplateFile) -> Result<()> {
@@ -456,6 +515,10 @@ args = ["--model", "opus"]
 
         assert_eq!(name, "zpr-1050");
         assert_eq!(spawned.report(&name).1, 0);
+        assert_eq!(
+            ledger.0["zpr-1050"].params,
+            Some([("number".to_string(), "1050".to_string())].into())
+        );
         assert_eq!(herdr.tabs()[0].label, "zpr-1050");
         assert_eq!(herdr.tabs()[0].cwd, PathBuf::from("/src/repo"));
         assert_eq!(
@@ -1136,6 +1199,45 @@ args = ["--model", "opus"]
                 )
             );
             assert_eq!(code, 0);
+        }
+    }
+
+    #[test]
+    fn herds_lists_a_queue_with_its_feed_usage() {
+        let (report, code) = herds_line(
+            "prompt = \"go\"\n[queue]\ntemplate = \"t\"\nsource = \"echo 1\"\nmax = 3",
+            &[],
+        );
+        assert_eq!(
+            report,
+            "h  repo /r  workspace (current)\n\
+             \x20 loopherd add h t <n>\n\
+             \x20 loopherd feed h  (template t, max 3)"
+        );
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn herds_reports_an_invalid_queue() {
+        for (queue, message) in [
+            (
+                "template = \"nope\"\nsource = \"echo 1\"\nmax = 1",
+                "queue: no template nope (it has: t)",
+            ),
+            (
+                "template = \"t\"\nsource = \"echo 1\"\nmax = 0",
+                "queue: max must be at least 1, got 0",
+            ),
+            (
+                "template = \"t\"\nsource = \"echo 1\"\nmax = -2",
+                "queue: max must be at least 1, got -2",
+            ),
+            ("template = \"t\"\nmax = 1", "missing field `source`"),
+        ] {
+            let (report, code) = herds_line(&format!("prompt = \"go\"\n[queue]\n{queue}"), &[]);
+            assert!(report.starts_with("invalid h.toml: "), "{report}");
+            assert!(report.contains(message), "{queue}: {report}");
+            assert_eq!(code, 1);
         }
     }
 }

@@ -491,6 +491,7 @@ mod tests {
             retired_at: None,
             herd: herd.map(str::to_string),
             template: None,
+            params: None,
         }
     }
 
