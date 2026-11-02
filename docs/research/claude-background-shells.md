@@ -10,8 +10,7 @@ LH-62.
 array, documented as the way to "distinguish 'session is done' from 'session
 is paused waiting for background work to wake it back up'". A
 loopherd-installed Stop hook can record that array on every stop. Then `watch`
-can show `lh-60 done  (1 shell running)` instead of the bare `done`, or hold
-the wake back.
+can show `lh-60 done  (paused: 1 shell)` instead of the bare `done`.
 
 herdr shows nothing of this today. `pane process-info` can tell in principle,
 but only through Claude Code's undocumented process layout. The "no
@@ -19,6 +18,9 @@ but only through Claude Code's undocumented process layout. The "no
 catches agents that stop without reporting for other reasons.
 
 ## Live observation
+
+This covers background **shells** only. That the array also lists
+subagents, monitors, workflows and crons rests on the docs alone.
 
 Run in the `loopherd-dev` session. A claude agent `probe` was started with
 `--settings` adding a Stop hook (`cat >> stop.jsonl`) and allow rule
@@ -82,10 +84,12 @@ as a fallback.
   (`background_mcp_task_working`, `background_agents_working` in
   `~/.local/state/herdr/agent-detection/remote/claude.toml`). It has no rule
   for `· N shell still running`, so the probe read `done`/`idle`.
-- herdr's docs say the general principle outright: some agents "count as
-  idle once they return to their prompt, even if background tasks … are
-  still running. `agent wait` … observe[s] the agent's state, not completion
-  of those jobs" ([agents.mdx][agents]).
+- So for Claude, herdr's state follows the screen rules, and no rule
+  matches a pending shell. herdr's docs state the same limit for two other
+  agents: "Antigravity and Grok count as idle once they return to their
+  prompt, even if background tasks, monitors, or subagents are still
+  running" ([agents.mdx][agents]). That sentence doesn't name Claude. The
+  Claude conclusion rests on the manifest and the live run.
 - A `shell still running` rule upstream would make herdr itself report
   `working`. That would fix `agent wait` and every other herdr consumer.
   But it is herdr's call, and screen text is fragile.
@@ -111,9 +115,13 @@ on 2.1.316.
 Caveats:
 
 - A missing array means "unknown", not "none". Treat it that way.
-- loopherd must install the hook. A `--settings <file>` argument at spawn
-  merges with the user's settings, and the live probe used exactly that.
-  The hook runs with the member's env (`HERDR_PANE_ID`), so it can find its
+- loopherd must install the hook. `claude --help` says `--settings` loads
+  "additional settings", but no doc we found says how its `hooks` combine
+  with the user's. In the live probe, the user's own `SessionStart` hook
+  (herdr's `herdr-agent-state.sh`) still ran alongside the `--settings`
+  Stop hook: `agent get probe` showed `agent_session.source: herdr:claude`
+  with the probe's session id. That shows the two sets merging for one
+  event each, not for hooks on the same event. The hook runs with the member's env (`HERDR_PANE_ID`), so it can find its
   member the way `loopherd report` does.
 
 Other Claude-side signals we checked and rejected:
@@ -132,7 +140,10 @@ Other Claude-side signals we checked and rejected:
 `watch` (`src/watch.rs`) already labels the wake `lh-60 idle  (was
 working)`. It also reads each member's report mailbox (`src/report.rs`) in
 the same poll. Adding "no `done`/`question` report since it last started
-working" to the wake line costs nothing and needs no Claude cooperation. It
+working" to the wake line needs no Claude cooperation. It isn't free:
+reports are consumed when read, so `watch` has to remember, within one
+run, when it saw each member go `working` and whether a report arrived
+after that. It
 can't tell a background shell from a member that stopped without reporting
 for some other reason, so the shepherd still judges.
 
@@ -142,7 +153,10 @@ for some other reason, so the shepherd still judges.
    (via `--settings`). The hook records `{at, background_tasks,
    session_crons}` for the member under the loopherd state dir.
    `watch` reads the record. A stop with in-flight tasks or crons renders as
-   `lh-60 done  (paused: 1 shell)` and does not count as finished.
+   `lh-60 done  (paused: 1 shell)` and does not count as finished. The
+   real finish has to come from a later stop record with empty arrays,
+   because the resume shows as `working` for about a second and a poll
+   can miss it.
 2. **Always:** a wake for a member with no `done`/`question` report since it
    started working says so (`(was working, no report)`). That covers members
    spawned before the hook existed, and covers the hook failing.
