@@ -16,6 +16,9 @@ use crate::retire::retire_and_close;
 use crate::shell::run_within;
 use crate::spawn::{BLOCKED_EXIT, spawn};
 
+/// Feed's exit code when every error was a malformed source line.
+pub const LINE_ERRORS_EXIT: i32 = 4;
+
 pub struct FeedRequest {
     pub herd: String,
     /// Run the source and the done checks and report; retire and spawn nothing.
@@ -68,13 +71,22 @@ pub fn feed(
     let mut free = queue.max.saturating_sub(held);
     let mut taken: HashSet<String> = entries.into_keys().collect();
 
-    let (mut added, mut skipped) = (0, 0);
+    let (mut added, mut skipped, mut line_errors) = (0, 0, 0);
     let mut code = 0;
     for task in output.lines().map(str::trim) {
         if task.is_empty() || task.starts_with('#') {
             continue;
         }
-        let spawn_req = match task_request(paths, req, &queue, task) {
+        let params = match task_params(&queue, task) {
+            Ok(p) => p,
+            Err(e) => {
+                lines.push(format!("error: {task}: {e:#}"));
+                errors += 1;
+                line_errors += 1;
+                continue;
+            }
+        };
+        let spawn_req = match task_request(paths, req, &queue, params) {
             Ok(r) => r,
             Err(e) => {
                 lines.push(format!("error: {task}: {e:#}"));
@@ -131,7 +143,11 @@ pub fn feed(
         if errors == 1 { "" } else { "s" }
     ));
     if code == 0 && errors > 0 {
-        code = 1;
+        code = if errors == line_errors {
+            LINE_ERRORS_EXIT
+        } else {
+            1
+        };
     }
     Ok(Fed { lines, code })
 }
@@ -233,12 +249,8 @@ fn failure(output: &Output) -> String {
     }
 }
 
-fn task_request(
-    paths: &Paths,
-    req: &FeedRequest,
-    queue: &Queue,
-    task: &str,
-) -> Result<crate::spawn::SpawnRequest> {
+/// The task's params; a wrong count is a bad line, the only error that is.
+fn task_params(queue: &Queue, task: &str) -> Result<Vec<String>> {
     let params: Vec<String> = task.split_whitespace().map(String::from).collect();
     if params.len() != queue.params.len() {
         bail!(
@@ -250,6 +262,15 @@ fn task_request(
             params.len()
         );
     }
+    Ok(params)
+}
+
+fn task_request(
+    paths: &Paths,
+    req: &FeedRequest,
+    queue: &Queue,
+    params: Vec<String>,
+) -> Result<crate::spawn::SpawnRequest> {
     resolve(
         paths,
         &AddRequest {
@@ -475,6 +496,83 @@ mod tests {
                 "added zpr-3",
                 "prs: 0 retired, 1 added, 0 skipped, 1 error",
             ]
+        );
+        assert_eq!(fed.code, LINE_ERRORS_EXIT);
+    }
+
+    #[test]
+    fn a_malformed_line_with_another_error_exits_1() {
+        let setup = Setup::with_done("cat tasks", 1, "exit 0");
+        let mut herdr = herdr();
+        let mut ledger = fed_one(&setup, &herdr);
+        herdr.fail_close_tab = true;
+        setup.tasks("1 2\n");
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(
+            fed.lines.last().unwrap(),
+            "prs: 0 retired, 0 added, 0 skipped, 2 errors"
+        );
+        assert_eq!(fed.code, 1);
+    }
+
+    #[test]
+    fn a_broken_template_is_not_a_bad_line_and_exits_1() {
+        let setup = Setup::new("echo 1", 5);
+        let herd = setup.config.path().join("herds/prs.toml");
+        let toml = fs::read_to_string(&herd).unwrap();
+        fs::write(
+            &herd,
+            toml.replace(
+                "prompt = \"review {number}\"",
+                "prompt_file = \"missing.md\"",
+            ),
+        )
+        .unwrap();
+
+        let fed = setup
+            .feed(&herdr(), &mut MemLedger::default(), false)
+            .unwrap();
+
+        assert!(fed.lines[0].starts_with("error: 1: "), "{:?}", fed.lines);
+        assert!(fed.lines[0].contains("prompt_file"), "{:?}", fed.lines);
+        assert_eq!(fed.lines[1], "prs: 0 retired, 0 added, 0 skipped, 1 error");
+        assert_eq!(fed.code, 1);
+    }
+
+    #[test]
+    fn a_malformed_line_then_a_blocked_spawn_exits_blocked() {
+        use crate::herdr::fake::Startup;
+        let setup = Setup::new("printf '1 2\\n3\\n'", 5);
+        let mut herdr = herdr();
+        herdr.startup = Startup::BlockedForever;
+
+        let fed = setup
+            .feed(&herdr, &mut MemLedger::default(), false)
+            .unwrap();
+
+        assert_eq!(
+            fed.lines.last().unwrap(),
+            "prs: 0 retired, 1 added, 0 skipped, 1 error"
+        );
+        assert_eq!(fed.code, BLOCKED_EXIT);
+    }
+
+    #[test]
+    fn a_malformed_line_then_a_failed_spawn_exits_1() {
+        use crate::herdr::fake::Startup;
+        let setup = Setup::new("printf '1 2\\n3\\n'", 5);
+        let mut herdr = herdr();
+        herdr.startup = Startup::Fails;
+
+        let fed = setup
+            .feed(&herdr, &mut MemLedger::default(), false)
+            .unwrap();
+
+        assert_eq!(
+            fed.lines.last().unwrap(),
+            "prs: 0 retired, 0 added, 0 skipped, 2 errors"
         );
         assert_eq!(fed.code, 1);
     }
