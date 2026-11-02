@@ -219,3 +219,120 @@ fn the_installed_hook_records_a_members_stop_and_exits_0_even_when_loopherd_fail
     assert_eq!(out.status.code(), Some(0), "a broken ledger");
     assert!(!out.stderr.is_empty());
 }
+
+/// The PreToolUse command `install-hook` wrote for this test's binary.
+fn installed_tool_hook_command(dir: &Path) -> String {
+    let settings = dir.join("settings.json");
+    let out = Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .args(["install-hook", "--settings"])
+        .arg(&settings)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let settings: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+    let group = &settings["hooks"]["PreToolUse"][0];
+    assert_eq!(group["matcher"], "Bash");
+    group["hooks"][0]["command"].as_str().unwrap().to_string()
+}
+
+fn run_tool_hook(command: &str, dir: &Path, pane: Option<&str>, bash: &str) -> Output {
+    let input = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": bash}});
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", command])
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("LOOPHERD_CONFIG_DIR", dir.join("config"))
+        .env("HERDR_SOCKET_PATH", "/run/herdr/herdr.sock")
+        .env_remove("HERDR_PANE_ID")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(pane) = pane {
+        cmd.env("HERDR_PANE_ID", pane);
+    }
+    let mut child = cmd.spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(input.to_string().as_bytes()).unwrap();
+    drop(stdin);
+    child.wait_with_output().unwrap()
+}
+
+fn denial(out: &Output) -> Option<String> {
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    if out.stdout.is_empty() {
+        return None;
+    }
+    let decision: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let output = &decision["hookSpecificOutput"];
+    assert_eq!(output["hookEventName"], "PreToolUse");
+    assert_eq!(output["permissionDecision"], "deny");
+    Some(
+        output["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+    )
+}
+
+#[test]
+fn the_installed_tool_hook_denies_a_leads_merge_and_exits_0() {
+    let dir = tempfile::tempdir().unwrap();
+    let command = installed_tool_hook_command(dir.path());
+    assert!(command.ends_with(" tool-hook || true"), "{command}");
+    fs::create_dir_all(dir.path().join("state/loopherd")).unwrap();
+    fs::write(
+        dir.path().join("state/loopherd/ledger.json"),
+        r#"{"lead-h": {"name": "lead-h", "pane_id": "w1:p1", "session_id": null, "repo": "/",
+            "worktree": null, "workspace": "w1", "prompt": null, "prompt_sent": true,
+            "created": "2026-11-01T00:00:00Z", "socket": "/run/herdr/herdr.sock",
+            "herd": "h", "role": "lead"}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(dir.path().join("config/herds")).unwrap();
+    let herd = dir.path().join("config/herds/h.toml");
+    fs::write(
+        &herd,
+        "repo = \"/r\"\n[lead]\nprompt = \"go\"\nrebase = true\n",
+    )
+    .unwrap();
+
+    let out = run_tool_hook(&command, dir.path(), Some("w1:p1"), "gh pr merge 3");
+    let reason = denial(&out).expect("merge was allowed");
+    assert!(reason.contains("`merge` switch is off"), "{reason}");
+
+    let allowed = [
+        (Some("w1:p1"), "git push --force"),
+        (Some("w1:p1"), "cargo test"),
+        (Some("w1:p2"), "gh pr merge 3"),
+        (None, "gh pr merge 3"),
+    ];
+    for (pane, bash) in allowed {
+        let out = run_tool_hook(&command, dir.path(), pane, bash);
+        assert_eq!(denial(&out), None, "{pane:?} {bash}");
+    }
+
+    fs::remove_file(&herd).unwrap();
+    let out = run_tool_hook(&command, dir.path(), Some("w1:p1"), "git push --force");
+    let reason = denial(&out).expect("fails closed");
+    assert!(reason.contains("couldn't be read"), "{reason}");
+}
+
+#[test]
+fn an_installed_tool_hook_whose_binary_fails_with_exit_2_does_not_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = installed_tool_hook_command(dir.path());
+    let stale = dir.path().join("old bin/loopherd");
+    fs::create_dir_all(stale.parent().unwrap()).unwrap();
+    executable(
+        &stale,
+        "#!/bin/sh\necho \"error: unrecognized subcommand '$1'\" >&2\nexit 2\n",
+    );
+    let exe = env!("CARGO_BIN_EXE_loopherd");
+    let command = real.replacen(exe, stale.to_str().unwrap(), 1);
+    assert_ne!(command, real);
+
+    let out = run_tool_hook(&command, dir.path(), Some("w1:p1"), "cargo test");
+
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(out.stdout.is_empty());
+}

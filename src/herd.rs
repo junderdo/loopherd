@@ -484,16 +484,31 @@ pub fn lead_config(paths: &Paths, herd: &str) -> Result<LeadConfig> {
         repo: expand_home(&file.repo, &paths.home),
         workspace: file.workspace,
         prompt,
+        switches: lead.switches(),
         args: lead.args.unwrap_or(file.args),
-        switches: Switches {
-            merge: lead.merge,
-            install: lead.install,
-            rebase: lead.rebase,
-            new_cards: lead.new_cards,
-            design_escalation: lead.design_escalation,
-            blocked_dialogs: lead.blocked_dialogs,
-        },
     })
+}
+
+/// A herd's `[lead]` switches, without reading its prompt.
+pub fn lead_switches(paths: &Paths, herd: &str) -> Result<Switches> {
+    let file = load(&paths.herds, herd).context("herd")?;
+    let lead = file
+        .lead
+        .with_context(|| format!("herd: {herd} has no [lead]"))?;
+    Ok(lead.switches())
+}
+
+impl LeadFile {
+    fn switches(&self) -> Switches {
+        Switches {
+            merge: self.merge,
+            install: self.install,
+            rebase: self.rebase,
+            new_cards: self.new_cards,
+            design_escalation: self.design_escalation,
+            blocked_dialogs: self.blocked_dialogs,
+        }
+    }
 }
 
 fn check_lead_prompt(prompt: &Prompt) -> Result<()> {
@@ -1629,6 +1644,21 @@ args = ["--model", "opus"]
             "merge on\ninstall off\nrebase off\nnew_cards off\n\
              design_escalation off\nblocked_dialogs off"
         );
+    }
+
+    #[test]
+    fn lead_switches_reads_only_the_switches() {
+        let herd = format!(
+            "{LEAD_HERD}[lead]\nprompt_file = \"missing.md\"\nrebase = true\ninstall = true\n"
+        );
+        let config = Config::with(&[("h", &herd), ("no-lead", LEAD_HERD)]);
+        let switches = lead_switches(&config.paths(), "h").unwrap();
+        assert_eq!(
+            (switches.merge, switches.install, switches.rebase),
+            (false, true, true)
+        );
+        assert!(lead_switches(&config.paths(), "no-lead").is_err());
+        assert!(lead_switches(&config.paths(), "absent").is_err());
     }
 
     #[test]

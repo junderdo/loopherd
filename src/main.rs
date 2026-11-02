@@ -18,6 +18,7 @@ mod spawn;
 mod status;
 mod stop_hook;
 mod template;
+mod tool_hook;
 mod tui;
 mod watch;
 mod worktree;
@@ -152,8 +153,13 @@ enum Command {
     /// points its ledger entry at the new session, read from the hook input on
     /// stdin. Outside a member's pane it changes nothing. Set up by install-hook.
     SessionHook,
-    /// Add loopherd's Stop, StopFailure and SessionStart hooks to Claude's user settings,
-    /// calling this binary; safe to re-run. Backs the file up before changing it.
+    /// Claude's PreToolUse hook on Bash: in a lead's pane, denies a merge, install,
+    /// rebase or force-push its herd file's switch leaves to the human, read from the
+    /// hook input on stdin, by printing a deny decision. Elsewhere it prints nothing.
+    /// Always exits 0. Set up by install-hook.
+    ToolHook,
+    /// Add loopherd's Stop, StopFailure, SessionStart and PreToolUse hooks to Claude's
+    /// user settings, calling this binary; safe to re-run. Backs the file up before changing it.
     InstallHook {
         /// Take loopherd's hooks out instead.
         #[arg(long)]
@@ -266,6 +272,7 @@ fn main() -> ExitCode {
         } => ("watch", run_watch(&herds, timeout, settings)),
         Command::StopHook => ("stop-hook", run_stop_hook()),
         Command::SessionHook => ("session-hook", run_session_hook()),
+        Command::ToolHook => ("tool-hook", run_tool_hook()),
         Command::InstallHook { remove, settings } => {
             ("install-hook", run_install_hook(remove, settings))
         }
@@ -487,6 +494,29 @@ fn run_session_hook() -> Result<i32> {
     Ok(0)
 }
 
+fn run_tool_hook() -> Result<i32> {
+    let Some(pane) = own_pane() else {
+        return Ok(0);
+    };
+    let Some(socket) = socket_from_env() else {
+        return Ok(0);
+    };
+    let mut input = vec![];
+    std::io::stdin()
+        .read_to_end(&mut input)
+        .context("read hook input")?;
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let pane = tool_hook::Pane {
+        id: &pane,
+        socket: Some(&socket),
+    };
+    let switches = |herd: &str| herd::lead_switches(&Paths::from_env()?, herd);
+    if let Some(reason) = tool_hook::tool_hook(&ledger, &pane, &input, &switches)? {
+        println!("{}", tool_hook::deny(&reason));
+    }
+    Ok(0)
+}
+
 fn run_install_hook(remove: bool, settings: Option<PathBuf>) -> Result<i32> {
     let settings = match settings {
         Some(path) => path,
@@ -500,8 +530,8 @@ fn run_install_hook(remove: bool, settings: Option<PathBuf>) -> Result<i32> {
         }
     };
     let done = match remove {
-        true => "removed loopherd's Stop, StopFailure and SessionStart hooks from",
-        false => "installed loopherd's Stop, StopFailure and SessionStart hooks in",
+        true => "removed loopherd's Stop, StopFailure, SessionStart and PreToolUse hooks from",
+        false => "installed loopherd's Stop, StopFailure, SessionStart and PreToolUse hooks in",
     };
     match outcome {
         install_hook::Outcome::Unchanged => println!("{} already up to date", settings.display()),
