@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::ledger::AgentRecord;
+use crate::process::{self, Procs};
 
 pub const DEFAULT_LIMIT: u64 = 250_000;
 pub const DEFAULT_WINDOW: u64 = 200_000;
@@ -23,26 +24,53 @@ pub const MIN_TOKENS: u64 = 10_000;
 struct ConfigFile {
     default_context_limit: Option<u64>,
     context_window: Option<u64>,
+    shepherd: Option<ShepherdConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShepherdConfig {
+    context_limit: Option<u64>,
 }
 
 /// `own` (a template's or `[lead]`'s `context_limit`), else `config`'s
 /// `default_context_limit`, else [`DEFAULT_LIMIT`]; never over 80% of
 /// `config`'s `context_window`, else of [`DEFAULT_WINDOW`].
 pub fn effective_limit(own: Option<u64>, config: &Path) -> Result<u64> {
+    Ok(read_config(config)?.limit(own))
+}
+
+/// The shepherd's limit: `config`'s `[shepherd] context_limit` in place of a
+/// member's own, resolved as [`effective_limit`].
+pub fn shepherd_limit(config: &Path) -> Result<u64> {
+    let file = read_config(config)?;
+    let own = file.shepherd.as_ref().and_then(|s| s.context_limit);
+    Ok(file.limit(own))
+}
+
+fn read_config(config: &Path) -> Result<ConfigFile> {
     let file: ConfigFile = match fs::read_to_string(config) {
         Ok(text) => toml::from_str(&text).with_context(|| config.display().to_string())?,
         Err(e) if e.kind() == ErrorKind::NotFound => ConfigFile::default(),
         Err(e) => return Err(e).with_context(|| format!("read {}", config.display())),
     };
+    let shepherd = file.shepherd.as_ref().and_then(|s| s.context_limit);
     for (key, value) in [
         ("default_context_limit", file.default_context_limit),
         ("context_window", file.context_window),
+        ("shepherd.context_limit", shepherd),
     ] {
         check_tokens(key, value).with_context(|| config.display().to_string())?;
     }
-    let limit = own.or(file.default_context_limit).unwrap_or(DEFAULT_LIMIT);
-    let window = file.context_window.unwrap_or(DEFAULT_WINDOW);
-    Ok(limit.min(window / 5 * 4))
+    Ok(file)
+}
+
+impl ConfigFile {
+    fn limit(&self, own: Option<u64>) -> u64 {
+        let limit = own.or(self.default_context_limit).unwrap_or(DEFAULT_LIMIT);
+        let window = self.context_window.unwrap_or(DEFAULT_WINDOW);
+        limit.min(window / 5 * 4)
+    }
 }
 
 /// Fails when `value` is under [`MIN_TOKENS`], naming `key`.
@@ -83,7 +111,7 @@ pub fn handoff_block(
     let Some(tokens) = tokens_in(Path::new(transcript)).filter(|&t| t > limit) else {
         return Ok(None);
     };
-    if session.is_empty() || session.contains('/') || session.starts_with('.') {
+    if !is_plain_name(session) {
         return Ok(None);
     }
     let asked = state.join("handoff-asked");
@@ -132,6 +160,81 @@ fn reason(member: &AgentRecord, tokens: u64, limit: u64, handoff: &Path) -> Stri
          Whoever reads your reports restarts you fresh from that file; don't restart yourself.",
         handoff.display()
     )
+}
+
+fn is_plain_name(session: &str) -> bool {
+    !(session.is_empty() || session.contains('/') || session.starts_with('.'))
+}
+
+/// What the shepherd's watch needs to find its caller's Claude session.
+pub struct ShepherdCheck<'a> {
+    pub procs: &'a dyn Procs,
+    /// `$CLAUDE_PID`, counted only when it is an ancestor of `me`.
+    pub claude_pid: Option<&'a str>,
+    pub me: u32,
+    /// `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
+    pub claude_dir: &'a Path,
+    pub state: &'a Path,
+    pub limit: u64,
+}
+
+/// The line telling the shepherd to hand off, due until [`Self::mark`].
+pub struct ShepherdHandoff {
+    pub line: String,
+    marker: PathBuf,
+}
+
+impl ShepherdHandoff {
+    /// Remembers the session was told, so no later watch tells it again.
+    pub fn mark(self) -> Result<()> {
+        let dir = self.marker.parent().expect("a marker is in handoff-asked");
+        fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        fs::write(&self.marker, "").with_context(|| format!("create {}", self.marker.display()))
+    }
+}
+
+/// `shepherd handoff <n>k over <limit>k` when the caller's Claude session is
+/// past `limit` and hasn't been told yet; nothing when the session or its
+/// transcript can't be found.
+pub fn shepherd_handoff(check: &ShepherdCheck) -> Option<ShepherdHandoff> {
+    let pid = process::claude_pid(check.procs, check.claude_pid, check.me)?;
+    let session = session_of(check.procs, pid, check.claude_dir)?;
+    let marker = check.state.join("handoff-asked").join(&session);
+    if marker.exists() {
+        return None;
+    }
+    let tokens = tokens_in(&transcript_of(check.claude_dir, &session)?)?;
+    (tokens > check.limit).then(|| ShepherdHandoff {
+        line: format!(
+            "shepherd handoff {}k over {}k",
+            tokens / 1000,
+            check.limit / 1000
+        ),
+        marker,
+    })
+}
+
+/// The session in Claude's `sessions/<pid>.json`, which follows `/clear`; its
+/// `procStart` must be `pid`'s, so a reused PID's stale file doesn't count.
+fn session_of(procs: &dyn Procs, pid: u32, claude_dir: &Path) -> Option<String> {
+    let path = claude_dir.join("sessions").join(format!("{pid}.json"));
+    let file: Value = serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
+    let start = procs.start(pid)?.to_string();
+    if file["procStart"].as_str() != Some(start.as_str()) {
+        return None;
+    }
+    let session = file["sessionId"].as_str()?;
+    is_plain_name(session).then(|| session.to_string())
+}
+
+/// `projects/<project>/<session>.jsonl`, in whichever project holds it.
+fn transcript_of(claude_dir: &Path, session: &str) -> Option<PathBuf> {
+    let name = format!("{session}.jsonl");
+    fs::read_dir(claude_dir.join("projects"))
+        .ok()?
+        .flatten()
+        .map(|project| project.path().join(&name))
+        .find(|path| path.is_file())
 }
 
 /// Tokens in context as of the transcript's last main-thread assistant turn
@@ -205,6 +308,55 @@ mod tests {
                 "{text}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn the_shepherds_limit_is_its_own_else_the_default_capped_at_80_percent() {
+        let (_dir, path) = config(None);
+        assert_eq!(shepherd_limit(&path).unwrap(), 160_000);
+        let (_dir, path) = config(Some("[shepherd]\ncontext_limit = 120000\n"));
+        assert_eq!(shepherd_limit(&path).unwrap(), 120_000);
+        let (_dir, path) = config(Some(
+            "default_context_limit = 90000\ncontext_window = 1000000\n",
+        ));
+        assert_eq!(shepherd_limit(&path).unwrap(), 90_000);
+        let (_dir, path) = config(Some(
+            "default_context_limit = 90000\ncontext_window = 1000000\n[shepherd]\ncontext_limit = 900000\n",
+        ));
+        assert_eq!(shepherd_limit(&path).unwrap(), 800_000);
+    }
+
+    #[test]
+    fn a_members_limit_ignores_the_shepherds() {
+        let (_dir, path) = config(Some("[shepherd]\ncontext_limit = 120000\n"));
+        assert_eq!(effective_limit(None, &path).unwrap(), 160_000);
+    }
+
+    #[test]
+    fn an_invalid_shepherd_section_is_an_error_naming_the_file() {
+        for text in [
+            "[shepherd]\ncontext_limt = 120000\n",
+            "[shepherd]\ncontext_limit = 9999\n",
+            "shepherd = 1\n",
+        ] {
+            let (_dir, path) = config(Some(text));
+            for err in [
+                shepherd_limit(&path).unwrap_err(),
+                effective_limit(None, &path).unwrap_err(),
+            ] {
+                let err = format!("{err:#}");
+                assert!(
+                    err.starts_with(&path.display().to_string()),
+                    "{text}: {err}"
+                );
+            }
+        }
+        let (_dir, path) = config(Some("[shepherd]\ncontext_limit = 9999\n"));
+        let err = format!("{:#}", shepherd_limit(&path).unwrap_err());
+        assert!(
+            err.ends_with("shepherd.context_limit must be at least 10000, got 9999"),
+            "{err}"
+        );
     }
 
     fn member(name: &str, role: Option<Role>) -> AgentRecord {
@@ -450,5 +602,148 @@ mod tests {
             );
         }
         assert!(!w.state().join("x").exists());
+    }
+}
+
+#[cfg(test)]
+mod shepherd_tests {
+    use super::*;
+    use crate::process::FakeProcs;
+
+    const SESSION: &str = "d7acc609-7ff5-45ff-84c9-c4b088fb954e";
+
+    /// The shepherd's Claude (30, started at 300) in a herdr pane, running
+    /// `sh` (35) running the watch (36), with its session file and transcript.
+    struct Shepherd {
+        dir: tempfile::TempDir,
+        procs: FakeProcs,
+    }
+
+    impl Shepherd {
+        fn new(tokens: u64) -> Shepherd {
+            let mut procs = FakeProcs::pane();
+            procs.add(35, "/bin/sh", 30, 350);
+            procs.add(36, "/usr/bin/loopherd", 35, 360);
+            let s = Shepherd {
+                dir: tempfile::tempdir().unwrap(),
+                procs,
+            };
+            s.session_file(30, SESSION, "300");
+            s.transcript(SESSION, tokens);
+            s
+        }
+
+        fn claude(&self) -> PathBuf {
+            self.dir.path().join("claude")
+        }
+
+        fn state(&self) -> PathBuf {
+            self.dir.path().join("state")
+        }
+
+        fn session_file(&self, pid: u32, session: &str, start: &str) {
+            let sessions = self.claude().join("sessions");
+            fs::create_dir_all(&sessions).unwrap();
+            let body = serde_json::json!({"pid": pid, "sessionId": session, "procStart": start});
+            fs::write(sessions.join(format!("{pid}.json")), body.to_string()).unwrap();
+        }
+
+        fn transcript(&self, session: &str, tokens: u64) {
+            let project = self.claude().join("projects/-home-u-repo");
+            fs::create_dir_all(&project).unwrap();
+            let line = serde_json::json!({
+                "type": "assistant",
+                "message": {"usage": {"input_tokens": 5, "cache_read_input_tokens": tokens - 5}},
+            });
+            fs::write(
+                project.join(format!("{session}.jsonl")),
+                format!("{line}\n"),
+            )
+            .unwrap();
+        }
+
+        fn check_from(&self, env: Option<&str>, limit: u64) -> Option<String> {
+            let handoff = shepherd_handoff(&ShepherdCheck {
+                procs: &self.procs,
+                claude_pid: env,
+                me: 36,
+                claude_dir: &self.claude(),
+                state: &self.state(),
+                limit,
+            })?;
+            let line = handoff.line.clone();
+            handoff.mark().unwrap();
+            Some(line)
+        }
+
+        fn check(&self, limit: u64) -> Option<String> {
+            self.check_from(Some("30"), limit)
+        }
+    }
+
+    #[test]
+    fn over_the_limit_it_tells_the_shepherd_to_hand_off_once_per_session() {
+        let s = Shepherd::new(171_400);
+        assert_eq!(
+            s.check(160_000).as_deref(),
+            Some("shepherd handoff 171k over 160k")
+        );
+        assert_eq!(s.check(160_000), None);
+        s.session_file(30, "after-clear", "300");
+        s.transcript("after-clear", 171_400);
+        assert!(s.check(160_000).is_some());
+    }
+
+    #[test]
+    fn at_or_under_the_limit_it_says_nothing_and_remembers_nothing() {
+        let s = Shepherd::new(160_000);
+        assert_eq!(s.check(160_000), None);
+        assert!(s.check(159_999).is_some());
+    }
+
+    #[test]
+    fn an_unmarked_line_comes_back() {
+        let s = Shepherd::new(200_000);
+        let (claude, state) = (s.claude(), s.state());
+        let check = ShepherdCheck {
+            procs: &s.procs,
+            claude_pid: Some("30"),
+            me: 36,
+            claude_dir: &claude,
+            state: &state,
+            limit: 100_000,
+        };
+        assert!(shepherd_handoff(&check).is_some());
+        assert!(shepherd_handoff(&check).is_some());
+    }
+
+    #[test]
+    fn a_session_or_transcript_it_cant_find_says_nothing() {
+        let s = Shepherd::new(200_000);
+        assert_eq!(s.check_from(None, 100), None);
+        assert_eq!(s.check_from(Some("x"), 100), None);
+        // A Claude that isn't the watch's ancestor.
+        let mut other = Shepherd::new(200_000);
+        other.procs.add(99, crate::process::CLAUDE, 1, 990);
+        other.session_file(99, SESSION, "990");
+        assert_eq!(other.check_from(Some("99"), 100), None);
+
+        let reused_pid = Shepherd::new(200_000);
+        reused_pid.session_file(30, SESSION, "301");
+        assert_eq!(reused_pid.check(100), None);
+
+        let no_session_file = Shepherd::new(200_000);
+        fs::remove_file(no_session_file.claude().join("sessions/30.json")).unwrap();
+        assert_eq!(no_session_file.check(100), None);
+
+        let no_transcript = Shepherd::new(200_000);
+        no_transcript.session_file(30, "fresh", "300");
+        assert_eq!(no_transcript.check(100), None);
+
+        for session in ["", "../x", ".hidden"] {
+            let odd = Shepherd::new(200_000);
+            odd.session_file(30, session, "300");
+            assert_eq!(odd.check(100), None, "{session}");
+        }
     }
 }

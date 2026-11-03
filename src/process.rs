@@ -65,7 +65,7 @@ pub fn claude_pid_from_env(procs: &dyn Procs) -> Option<u32> {
     )
 }
 
-fn claude_pid(procs: &dyn Procs, env: Option<&str>, me: u32) -> Option<u32> {
+pub fn claude_pid(procs: &dyn Procs, env: Option<&str>, me: u32) -> Option<u32> {
     let pid: u32 = env?.parse().ok()?;
     let mut at = procs.parent(me);
     for _ in 0..64 {

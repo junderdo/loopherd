@@ -471,6 +471,15 @@ fn reader(ledger: &dyn Ledger, req: &Request) -> Result<Reader> {
     })
 }
 
+/// Whether the watch is the shepherd's own, run from no member's pane;
+/// members are told to hand off by their Stop hook instead.
+pub fn is_shepherd(ledger: &dyn Ledger, req: &Request) -> Result<bool> {
+    let Some(pane) = req.own_pane else {
+        return Ok(true);
+    };
+    Ok(member_in(&ledger.entries()?, pane, req.own_socket).is_none())
+}
+
 fn shown(socket: Option<&Path>) -> String {
     socket.map_or("unset".into(), |s| s.display().to_string())
 }
@@ -1350,6 +1359,20 @@ mod tests {
             run(&herdr, &ledger, dir.path(), &own, &mut steps(|_| {})).unwrap(),
             ["lh-1 note 2026-11-01 09:00 hi"]
         );
+    }
+
+    #[test]
+    fn only_a_watch_from_outside_every_members_pane_is_the_shepherd_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, _herdr) = led_world(dir.path());
+        let outside = Request {
+            own_pane: None,
+            ..ONCE
+        };
+        assert!(is_shepherd(&ledger, &outside).unwrap());
+        assert!(is_shepherd(&ledger, &from_pane("w9:p7")).unwrap());
+        assert!(!is_shepherd(&ledger, &from_pane("w9:p0")).unwrap());
+        assert!(!is_shepherd(&ledger, &from_pane("w9:p1")).unwrap());
     }
 
     #[test]

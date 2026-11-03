@@ -56,7 +56,7 @@ that pane. Read `herdr --skill` before controlling herdr.
    watches wakes the next one. herdr adds `blocked` and `gone`, seen only
    while a watch runs: a change between watches is never replayed, so run
    `loopherd status` before each re-arm. Exit 2 means the timeout passed
-   with nothing to do. Start the next watch after handling every wake. It
+   with nothing to do; a due `shepherd handoff` line still prints, exiting 0. Start the next watch after handling every wake. It
    dies with your session. It refuses to start while another shepherd's
    watch holds `watch.lock` (the error names its PID; an orphaned one can
    hold it until its timeout; leads' watches hold their own locks and don't
@@ -85,6 +85,7 @@ that pane. Read `herdr --skill` before controlling herdr.
    | `<name> claimable` | Lead's watch only: feed would spawn this member. Feed. |
    | `<member> blocked` | A dialog only the human answers: tell them. loopherd never answers it. |
    | `<member> gone` | No agent in its pane for two polls in a row; it was live earlier in this watch. |
+   | `shepherd handoff 171k over 160k` | Your own watch only, once per session: your context is past your limit. Hand off (see Your own handoff). |
 
    A report's text runs on in indented lines. A turn you prompt into a member
    still `paused` finishes silently, since the stop reads paused again;
@@ -158,6 +159,33 @@ restart refuse a member that handed off before it: check `loopherd reports
 human runs `loopherd restart <name> --force`. A member that was asked but
 crashed before writing its handoff isn't asked again in that session;
 prompt it to write one and report `--kind handoff`.
+
+### Your own handoff
+
+You aren't a member, so no Stop hook measures you; your watch does. Run
+from no member's pane, each watch checks your Claude's context as it exits
+and, once per session past your limit, adds `shepherd handoff <n>k over
+<limit>k`. Your limit is `[shepherd] context_limit` in
+`$LOOPHERD_CONFIG_DIR/config.toml`, else that file's
+`default_context_limit`, else 250000, never over 80% of its
+`context_window`. When the line comes:
+
+1. Handle the other lines it came with, but feed nothing new and don't
+   re-arm the watch. Members and leads keep working; what they report
+   waits in the mailbox for the next watch.
+2. Write your handoff to `$XDG_STATE_HOME/loopherd/handoffs/shepherd.md`
+   (`~/.local/state` when it's unset), in the outline above: what each
+   member is doing and what you owe it (verifications running, PRs to
+   check after merge), then next steps, then gotchas.
+3. Tell the human, with the path spelled out in full:
+   > I'm past my context limit and wrote my handoff. Run `/clear`, then paste:
+   > `continue as the loopherd shepherd from /home/<you>/.local/state/loopherd/handoffs/shepherd.md`
+
+   and end your turn. Never `/clear` yourself.
+
+Given that prompt in a fresh session, run `loopherd --skill`, read the
+handoff, `loopherd status` and `loopherd reports --all`, then re-arm your
+watch and carry on from its next steps.
 
 ### Commands
 
