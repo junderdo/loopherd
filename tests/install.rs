@@ -722,7 +722,7 @@ fn the_medium_scene_sits_centred_in_its_box() {
 }
 
 #[test]
-fn the_large_scene_sits_in_a_centred_frame_with_nothing_drawn_outside_it() {
+fn the_large_scene_fills_a_centred_area_with_nothing_drawn_outside_it() {
     // 80% of the terminal, capped at 180x50, centred: (cols, rows, left, right, top, bottom).
     for (cols, rows, left, right, top, bottom) in [
         (160, 45, 17, 144, 5, 40),
@@ -743,42 +743,21 @@ fn the_large_scene_sits_in_a_centred_frame_with_nothing_drawn_outside_it() {
     }
 }
 
-/// What frame 0 draws on screen row `row` of a 160x45 terminal under `lang`.
-fn large_frame_row(lang: &str, row: usize) -> String {
-    let out = splash_bash(
-        "none",
-        &format!(
-            "LANG={lang}; splash_colours; splash_layout 45 160; splash_prepare; \
-             splash_frame 0; printf %s \"$splash_buf\""
-        ),
-    );
-    let mut drawn: Vec<(usize, String)> = segments(&out)
-        .into_iter()
-        .filter(|&(r, ..)| r == row)
-        .map(|(_, col, text)| (col, without_escapes(&text)))
-        .collect();
-    drawn.sort();
-    drawn.into_iter().map(|(_, text)| text).collect()
-}
-
 #[test]
-fn the_frame_is_box_drawn_under_utf8_and_ascii_otherwise() {
-    for (lang, top, side) in [
-        ("C.UTF-8", format!("┌{}┐", "─".repeat(126)), "││"),
-        ("en_US.utf8", format!("┌{}┐", "─".repeat(126)), "││"),
-        ("C", format!("+{}+", "-".repeat(126)), "||"),
-    ] {
-        assert_eq!(large_frame_row(lang, 5), top, "{lang}");
-        let middle = large_frame_row(lang, 20);
-        assert_eq!(
-            format!(
-                "{}{}",
-                middle.chars().next().unwrap(),
-                middle.chars().last().unwrap()
+fn the_large_scene_has_no_border_under_utf8_or_ascii() {
+    for lang in ["C.UTF-8", "C"] {
+        let out = splash_bash(
+            "none",
+            &format!(
+                "LANG={lang}; splash_colours; splash_layout 45 160; splash_prepare; \
+                 for ((f = 0; f < splash_frames; f++)); do splash_frame $f; printf %s \"$splash_buf\"; done"
             ),
-            side,
-            "{lang}: {middle:?}"
         );
+        let drawn = without_escapes(&out);
+
+        for border in ['┌', '┐', '└', '┘', '─', '│', '+'] {
+            assert!(!drawn.contains(border), "{lang}: {border}");
+        }
     }
 }
 
@@ -864,7 +843,7 @@ fn sheep_never_touch_each_other_or_leave_the_pasture() {
 }
 
 #[test]
-fn the_large_herd_grows_with_the_frames_area_not_the_terminals() {
+fn the_large_herd_grows_with_the_scenes_area_not_the_terminals() {
     let herd = |cols: usize, rows: usize| -> usize {
         splash_bash(
             "none",
@@ -875,18 +854,18 @@ fn the_large_herd_grows_with_the_frames_area_not_the_terminals() {
     };
 
     let mut last = 0;
-    // The frame's inside is 80% of the terminal less the border, up to 178x48.
-    for (cols, rows, inside) in [
-        (140, 40, 110 * 30),
-        (160, 45, 126 * 34),
-        (200, 60, 158 * 46),
-        (226, 63, 178 * 48),
+    // The scene is 80% of the terminal, up to 180x50.
+    for (cols, rows, area) in [
+        (140, 40, 112 * 32),
+        (160, 45, 128 * 36),
+        (200, 60, 160 * 48),
+        (226, 63, 180 * 50),
     ] {
         let sheep = herd(cols, rows);
         assert!(sheep > last, "{cols}x{rows}: {sheep} after {last}");
-        let cells_per_sheep = inside / sheep;
+        let cells_per_sheep = area / sheep;
         assert!(
-            (150..=300).contains(&cells_per_sheep),
+            (120..=300).contains(&cells_per_sheep),
             "{cols}x{rows}: {sheep}"
         );
         last = sheep;

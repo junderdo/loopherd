@@ -29,14 +29,14 @@ splash_frame_us=50000
 # Three layouts, by terminal size (splash_layout):
 #   title   under 66 columns or 23 rows: the name typed out on one line.
 #   medium  the 62x21 scene, centred.
-#   large   140 columns and 40 rows or more: a bordered frame of 80% of the
+#   large   140 columns and 40 rows or more: the scene fills 80% of the
 #           terminal each way, centred and capped at 180x50, which keeps a frame
-#           under 50ms. The scene fills the frame, the tagline on its last row,
-#           and the herd grows with the frame's area.
+#           under 50ms. The tagline sits on its last row, and the herd grows
+#           with its area.
 splash_large_cols=140
 splash_large_rows=40
-splash_frame_max_cols=180
-splash_frame_max_rows=50
+splash_large_max_cols=180
+splash_large_max_rows=50
 
 # Scene rows, top to bottom; the ground and tagline rows are set by the layout.
 splash_wordmark_top=2 # sun rows 0..7 sit behind it
@@ -89,7 +89,7 @@ splash_buf=''
 splash_sgr=()
 
 splash_layout() { # <rows> <cols>
-  local rows=$1 cols=$2 outer_cols outer_rows locale=${LC_ALL:-${LC_CTYPE:-${LANG:-}}}
+  local rows=$1 cols=$2 locale=${LC_ALL:-${LC_CTYPE:-${LANG:-}}}
   splash_utf8=0
   [[ "$locale" == *[Uu][Tt][Ff]8* || "$locale" == *[Uu][Tt][Ff]-8* ]] && splash_utf8=1
   splash_sheep_sprites
@@ -103,11 +103,10 @@ splash_layout() { # <rows> <cols>
     splash_left=$(((cols - splash_width) / 2 + 1))
   else
     splash_layout=large
-    outer_cols=$((cols * 8 / 10 < splash_frame_max_cols ? cols * 8 / 10 : splash_frame_max_cols))
-    outer_rows=$((rows * 8 / 10 < splash_frame_max_rows ? rows * 8 / 10 : splash_frame_max_rows))
-    splash_width=$((outer_cols - 2)) splash_height=$((outer_rows - 2))
-    splash_left=$(((cols - outer_cols) / 2 + 2))
-    splash_top=$(((rows - outer_rows) / 2 + 2))
+    splash_width=$((cols * 8 / 10 < splash_large_max_cols ? cols * 8 / 10 : splash_large_max_cols))
+    splash_height=$((rows * 8 / 10 < splash_large_max_rows ? rows * 8 / 10 : splash_large_max_rows))
+    splash_left=$(((cols - splash_width) / 2 + 1))
+    splash_top=$(((rows - splash_height) / 2 + 1))
     splash_tagline_row=$((splash_height - 1))
     splash_ground_rows=$((splash_height - 1 - splash_ground_top))
   fi
@@ -226,7 +225,6 @@ splash_colours() {
   splash_set_sgr m '38;2;160;165;190' '38;5;146'
   splash_set_sgr n '38;2;205;205;220' '38;5;252'
   splash_set_sgr w '1;38;2;255;255;255' '1;38;5;231'
-  splash_set_sgr b '38;2;110;110;125' '38;5;243'
   splash_set_sgr t '2' '2'
 }
 
@@ -410,25 +408,6 @@ splash_sky() { # <frame> <letter> <rise>
   done
 }
 
-# Around the large scene, one cell outside it.
-splash_border() {
-  local tl=+ tr=+ bl=+ br=+ across=- down='|' sgr line row
-  if ((splash_utf8)); then tl=┌ tr=┐ bl=└ br=┘ across=─ down=│; fi
-  printf -v sgr '%d' "'b"
-  sgr=${splash_sgr[sgr]:-}
-  [[ -n "$sgr" ]] && splash_buf+=$'\e['"${sgr}m"
-  printf -v line '%*s' "$splash_width" ''
-  line=${line// /$across}
-  splash_buf+=$'\e['"$((splash_top - 1));$((splash_left - 1))H${tl}${line}${tr}"
-  for ((row = 0; row < splash_height; row++)); do
-    splash_buf+=$'\e['"$((splash_top + row));$((splash_left - 1))H${down}"
-    splash_buf+=$'\e['"$((splash_top + row));$((splash_left + splash_width))H${down}"
-  done
-  splash_buf+=$'\e['"$((splash_top + splash_height));$((splash_left - 1))H${bl}${line}${br}"
-  [[ -n "$sgr" ]] && splash_buf+=$'\e[0m'
-  return 0
-}
-
 splash_horizon_line() {
   local horizon
   splash_fill horizon '-'
@@ -558,7 +537,6 @@ splash_frame() { # <frame>
   ((letter < letters)) || { letter=$letters; rise=0; }
   splash_buf=''
   if ((frame == 0)); then
-    [[ "$splash_layout" == large ]] && splash_border
     splash_horizon_line
   fi
   splash_sky "$frame" "$letter" "$rise"
