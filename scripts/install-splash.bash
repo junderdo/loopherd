@@ -285,8 +285,8 @@ splash_full() {
   splash_draw_sun
   splash_draw_ground
   start=$(splash_now_us)
-  printf '\e[?1049h\e[2J'
   splash_alt_screen=1
+  printf '\e[?1049h\e[2J'
   for ((frame = 0; frame < splash_frames && !splash_interrupted; frame++)); do
     letter=$((frame / splash_drop))
     rise=$((splash_drop - 1 - frame % splash_drop))
