@@ -170,8 +170,8 @@ splash_draw_sun() {
   done
 }
 
-# Grass marks, evenly spread with a little jitter, more of them on every row
-# toward the front: sparse dots at the horizon, blades in the foreground.
+# Grass marks, jittered across each row; no row has fewer than the one behind it,
+# so they run from sparse dots at the horizon to blades in the foreground.
 splash_draw_ground() {
   local d k count step col h marks line
   splash_ground_text=()
@@ -307,11 +307,6 @@ splash_show_tagline() {
   splash_paint_row "$splash_tagline_row" "$text" "${kinds// /0}"
 }
 
-splash_now_us() {
-  local now=${EPOCHREALTIME:-}
-  printf '%s' "${now//[!0-9]/}"
-}
-
 # Sleeps until <frame> is due, or a plain frame's length where the clock is missing.
 splash_wait() { # <start_us> <frame>
   local now wait
@@ -332,9 +327,10 @@ splash_full() {
   splash_draw_sun
   splash_draw_ground
   splash_sky_key=
-  start=$(splash_now_us)
+  start=${EPOCHREALTIME:-}
+  start=${start//[!0-9]/}
   splash_alt_screen=1
-  printf '\e[?1049h\e[2J'
+  printf '\e[?1049h\e[2J' || :
   for ((frame = 0; frame < splash_frames && !splash_interrupted; frame++)); do
     letter=$((frame / splash_drop))
     rise=$((splash_drop - 1 - frame % splash_drop))
@@ -344,7 +340,7 @@ splash_full() {
     splash_sky "$frame" "$letter" "$rise"
     if ((frame == letters * splash_drop)); then splash_show_tagline; fi
     splash_pasture "$frame"
-    printf '%s' "$splash_buf"
+    printf '%s' "$splash_buf" || :
     splash_wait "$start" "$frame"
   done
 }
@@ -352,24 +348,24 @@ splash_full() {
 # Narrow or short terminals get the name typed out on one line instead.
 splash_title() {
   local word=loopherd i code sgr
-  printf '  '
+  printf '  ' || :
   for ((i = 0; i < ${#word} && !splash_interrupted; i++)); do
     printf -v code '%d' "'$((2 + i * 4 / 7))"
     sgr=${splash_sgr[code]:-}
     if [[ -n "$sgr" ]]; then
-      printf '\e[%sm%s\e[0m' "$sgr" "${word:i:1}"
+      printf '\e[%sm%s\e[0m' "$sgr" "${word:i:1}" || :
     else
-      printf '%s' "${word:i:1}"
+      printf '%s' "${word:i:1}" || :
     fi
     sleep 0.1 || :
   done
-  printf '\n\n'
+  printf '\n\n' || :
 }
 
 splash_restore() {
-  [[ -n "${NO_COLOR:-}" ]] || printf '\e[0m'
-  printf '\e[?25h'
-  if [[ -n "${splash_alt_screen:-}" ]]; then printf '\e[?1049l'; fi
+  if [[ -z "${NO_COLOR:-}" ]]; then printf '\e[0m' || :; fi
+  printf '\e[?25h' || :
+  if [[ -n "${splash_alt_screen:-}" ]]; then printf '\e[?1049l' || :; fi
   splash_alt_screen=
 }
 
@@ -388,7 +384,7 @@ splash_play() {
   callers_traps=$(trap -p INT EXIT)
   trap 'splash_interrupted=1' INT
   trap splash_restore EXIT
-  printf '\e[?25l'
+  printf '\e[?25l' || :
   if ((cols < splash_width + 4 || rows < splash_height + 2)); then
     splash_title
   else

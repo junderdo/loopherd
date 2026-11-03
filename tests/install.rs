@@ -553,7 +553,14 @@ fn ctrl_c_during_the_splash_returns_130_to_a_set_e_caller_whose_exit_trap_runs()
 
     let out = ctrl_c_after(&mut cmd, std::time::Duration::from_millis(700));
 
-    let out = without_escapes(&String::from_utf8_lossy(&out.stdout));
+    let raw = String::from_utf8_lossy(&out.stdout);
+    let entered = raw
+        .find("\x1b[?1049h")
+        .expect("never entered the alternate screen");
+    let restored = &raw[entered..];
+    assert!(restored.contains("\x1b[?1049l"), "{raw:?}");
+    assert!(restored.contains("\x1b[?25h"), "{raw:?}");
+    let out = without_escapes(&raw);
     assert!(out.contains("exit 130"), "{out}");
     assert!(!out.contains("after"), "{out}");
 }
