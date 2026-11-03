@@ -287,7 +287,7 @@ splash_full() {
   start=$(splash_now_us)
   printf '\e[?1049h\e[2J'
   splash_alt_screen=1
-  for ((frame = 0; frame < splash_frames; frame++)); do
+  for ((frame = 0; frame < splash_frames && !splash_interrupted; frame++)); do
     letter=$((frame / splash_drop))
     rise=$((splash_drop - 1 - frame % splash_drop))
     ((letter < letters)) || { letter=$letters; rise=0; }
@@ -305,7 +305,7 @@ splash_full() {
 splash_title() {
   local word=loopherd i code sgr
   printf '  '
-  for ((i = 0; i < ${#word}; i++)); do
+  for ((i = 0; i < ${#word} && !splash_interrupted; i++)); do
     printf -v code '%d' "'$((2 + i * 4 / 7))"
     sgr=${splash_sgr[code]:-}
     if [[ -n "$sgr" ]]; then
@@ -325,8 +325,9 @@ splash_restore() {
   splash_alt_screen=
 }
 
+# Returns 130 when interrupted, leaving the caller's own traps in place.
 splash_play() {
-  local size rows= cols= extglob
+  local size rows= cols= extglob callers_traps status=0
   # stty reads stdin, which may not be the terminal; fd 3 is stdout from outside the $(...).
   { size=$(stty size <&3 2>/dev/null); } 3>&1 || return 0
   read -r rows cols <<<"$size"
@@ -335,7 +336,9 @@ splash_play() {
   shopt -s extglob
   splash_colours
   splash_alt_screen=
-  trap 'trap - EXIT; splash_restore; exit 130' INT
+  splash_interrupted=0
+  callers_traps=$(trap -p INT EXIT)
+  trap 'splash_interrupted=1' INT
   trap splash_restore EXIT
   printf '\e[?25l'
   if ((cols < splash_width + 4 || rows < splash_height + 2)); then
@@ -347,5 +350,8 @@ splash_play() {
   fi
   splash_restore
   trap - INT EXIT
+  eval "$callers_traps"
   eval "$extglob"
+  ((splash_interrupted)) && status=130
+  return "$status"
 }

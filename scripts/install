@@ -31,7 +31,7 @@ command -v jq >/dev/null || { echo "install: needs jq (to read cargo's build out
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 splash_file="$root/scripts/install-splash.bash"
 if [[ -n "$splash" && -r "$splash_file" ]] && source "$splash_file" && splash_wants_to_play; then
-  splash_play
+  splash_play || exit
 fi
 bin_dir="$HOME/.local/bin"
 

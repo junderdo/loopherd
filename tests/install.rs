@@ -75,26 +75,12 @@ impl Sandbox {
     /// Runs install on a `cols`x`rows` pty with stdin not the tty, or None
     /// where util-linux `script` isn't available.
     fn install_in_pty(&self, cols: u16, rows: u16) -> Option<String> {
-        let util_linux = Command::new("script")
-            .arg("--version")
-            .output()
-            .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("util-linux"));
-        if !util_linux {
-            return None;
-        }
-        let shell = format!(
+        let mut cmd = pty(&format!(
             "stty cols {cols} rows {rows}; exec {INSTALL} --settings /tmp/s.json </dev/null"
-        );
-        let out = Command::new("script")
-            .args(["-qec", &shell, "/dev/null"])
+        ))?;
+        let out = cmd
             .env("HOME", &self.home)
             .env("PATH", &self.path)
-            .env("TERM", "xterm-256color")
-            .env_remove("NO_COLOR")
-            .env_remove("LOOPHERD_NO_SPLASH")
-            .env_remove("COLUMNS")
-            .env_remove("LINES")
-            .stdin(Stdio::null())
             .output()
             .unwrap();
         assert!(out.status.success(), "{out:?}");
@@ -442,6 +428,27 @@ fn help_documents_no_splash() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("--no-splash"));
 }
 
+/// `shell` run by `sh` on a pty with a colour TERM and no splash opt-outs, or
+/// None where util-linux `script` isn't available.
+fn pty(shell: &str) -> Option<Command> {
+    let util_linux = Command::new("script")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("util-linux"));
+    if !util_linux {
+        return None;
+    }
+    let mut cmd = Command::new("script");
+    cmd.args(["-qec", shell, "/dev/null"])
+        .env("TERM", "xterm-256color")
+        .env_remove("NO_COLOR")
+        .env_remove("LOOPHERD_NO_SPLASH")
+        .env_remove("COLUMNS")
+        .env_remove("LINES")
+        .stdin(Stdio::null());
+    Some(cmd)
+}
+
 fn without_escapes(text: &str) -> String {
     let mut plain = String::new();
     let mut chars = text.chars();
@@ -496,4 +503,24 @@ fn install_without_the_splash_file_still_installs() {
         fs::read_to_string(&sandbox.log).unwrap(),
         "new install-hook --settings /tmp/s.json\n"
     );
+}
+
+#[test]
+fn an_interrupted_splash_returns_130_and_keeps_the_callers_traps() {
+    let splash = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install-splash.bash");
+    let shell = format!(
+        "stty cols 40 rows 10; bash -c 'trap \"echo bye\" EXIT; trap \"echo int\" INT; \
+         source {splash}; (sleep 0.3; kill -INT $$) & splash_play; echo \"returned $?\"; trap -p'"
+    );
+    let Some(mut cmd) = pty(&shell) else {
+        eprintln!("skipped: needs util-linux script");
+        return;
+    };
+
+    let out = without_escapes(&String::from_utf8_lossy(&cmd.output().unwrap().stdout));
+
+    assert!(out.contains("returned 130"), "{out}");
+    assert!(out.contains("trap -- 'echo bye' EXIT"), "{out}");
+    assert!(out.contains("trap -- 'echo int' SIGINT"), "{out}");
+    assert!(out.trim_end().ends_with("bye"), "{out}");
 }
