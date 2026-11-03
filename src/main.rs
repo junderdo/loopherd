@@ -141,7 +141,8 @@ enum Command {
     Restart {
         name: String,
         /// Skip the checks that it handed off and is finished since. A /clear sent
-        /// mid-turn waits for that turn to end, so nothing is cut off.
+        /// mid-turn waits for that turn, then drops whatever the handoff doesn't
+        /// record: that turn's work, background tasks and crons.
         #[arg(long)]
         force: bool,
     },

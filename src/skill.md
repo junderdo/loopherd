@@ -135,16 +135,20 @@ workers of unled herds and members in no herd; a lead restarts its own
 workers. Wait for its `finished` line, then `loopherd restart <name>`. It
 sends `/clear`, waits for the ledger to follow the new session, and prompts
 the member to read its handoff, which it moves to `<name>.prev.md` so no
-later restart reuses it; same pane, worktree and branch. Without `--force`
+later restart reuses it; same pane, worktree and branch. A lead's prompt
+also tells it to re-read `loopherd status` and `loopherd reports --all` and
+re-arm its watch. Without `--force`
 it refuses unless the member reported a handoff since its last start, its
 last stop since is `finished` with nothing in flight, and herdr shows it
-idle or done. `--force` skips those checks; a `/clear` sent mid-turn still
-waits for that turn to end. It's the human's call (a lead's PreToolUse hook
+idle or done. `--force` skips those checks; a `/clear` sent mid-turn waits
+for that turn, then drops whatever the handoff doesn't record (that turn's
+work, background tasks, crons). It's the human's call (a lead's PreToolUse hook
 denies it). A member never restarts itself, and one recorded without a
-herdr socket can't be restarted. If restart times out waiting for the new
-session, its `/clear` may be queued behind a running turn: it sent no
-handoff prompt and prints the `herdr agent prompt` line to send once the
-pane shows a cleared session.
+herdr socket can't be restarted, nor is it ever asked for a handoff. If
+restart times out waiting for the new session, its `/clear` may be queued
+behind a running turn, or the SessionStart hook isn't installed: it sent no
+handoff prompt, left the handoff where it was, and prints the `herdr agent
+prompt` line to send once the pane shows a cleared session.
 
 A lead's `loopherd watch` is a background shell, so a lead stops its own
 watch before ending its handoff turn; otherwise its stop reads `paused`

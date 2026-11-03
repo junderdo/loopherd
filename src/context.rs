@@ -114,17 +114,19 @@ pub fn handoff_block(
 fn reason(member: &AgentRecord, tokens: u64, limit: u64, handoff: &Path) -> String {
     // A lead's watch is a background shell; left running, its stop reads
     // paused and restart refuses it.
-    let save = match member.is_lead() {
-        true => {
-            "stop your own `loopherd watch` (TaskStop it, or kill it) so your stop reads finished, then "
-        }
-        false => {
-            "commit and push your branch, comment your progress on your task in the project's tracker, then "
-        }
+    let (save, plan) = match member.is_lead() {
+        true => (
+            "stop your own `loopherd watch` (TaskStop it, or kill it) so your stop reads finished, then ",
+            "your plan as next steps, re-arming your watch first",
+        ),
+        false => (
+            "commit and push your branch, comment your progress on your task in the project's tracker, then ",
+            "your plan as next steps",
+        ),
     };
     format!(
         "loopherd: your context is at {tokens} tokens, past your limit of {limit}. \
-         Stop your current work: {save}write your handoff to {} (your state, your plan as next steps, \
+         Stop your current work: {save}write your handoff to {} (your state, {plan}, \
          gotchas; nothing already in the tracker or the ledger), run \
          `loopherd report --kind handoff \"<one line on where you are>\"`, and end your turn. \
          Whoever reads your reports restarts you fresh from that file; don't restart yourself.",
@@ -323,6 +325,10 @@ mod tests {
             "{reason}"
         );
         assert!(!reason.contains("branch"), "{reason}");
+        assert!(
+            reason.contains("your plan as next steps, re-arming your watch first"),
+            "{reason}"
+        );
     }
 
     #[test]

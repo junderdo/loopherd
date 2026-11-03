@@ -10,6 +10,7 @@ use crate::context::handoff_path;
 use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::Ledger;
 use crate::report::{SinceHandoff, since_handoff};
+use crate::shell::quote;
 
 pub struct RestartRequest<'a> {
     pub name: &'a str,
@@ -98,29 +99,49 @@ pub fn restart(
             )));
         }
     }
+    let lead = record.is_lead();
     let old = record.session_id;
     herdr.prompt(name, "/clear")?;
-    // Moved aside once /clear is out, so no later restart resumes from it.
+    let new = wait_for_new_session(ledger, name, old.as_deref(), req);
+    if let Err(e) = &new {
+        let resume = resume_prompt(lead, &handoff);
+        bail!(
+            "{e:#}: the /clear may be queued behind a running turn, or loopherd's SessionStart hook isn't installed. \
+             No handoff prompt was sent and the handoff is still at {}. Once {name}'s pane shows a cleared session, \
+             run: herdr agent prompt {} {}",
+            handoff.display(),
+            quote(name),
+            quote(&resume)
+        );
+    }
+    // Moved aside once the new session is confirmed, so no later restart resumes from it.
     let read = handoff.with_extension("prev.md");
     std::fs::rename(&handoff, &read)
         .with_context(|| format!("move {} to {}", handoff.display(), read.display()))?;
-    let resume = format!(
-        "Read your handoff at {}, then continue from it.",
-        read.display()
-    );
-    let new = match wait_for_new_session(ledger, name, old.as_deref(), req) {
-        Ok(new) => new,
-        Err(e) => bail!(
-            "{e:#}. No handoff prompt was sent; once {name}'s pane shows a cleared session, run: herdr agent prompt {name} '{resume}'"
-        ),
-    };
     ledger.started(name, now)?;
-    herdr.prompt(name, &resume)?;
+    herdr.prompt(name, &resume_prompt(lead, &read))?;
     Ok(format!(
-        "restarted {name} in session {new}; prompted it to read {}",
+        "restarted {name} in session {}; prompted it to read {}",
+        new?,
         read.display()
     ))
 }
+
+/// A lead stopped its watch to hand off, so it's told to re-arm it.
+fn resume_prompt(lead: bool, handoff: &Path) -> String {
+    let resume = format!(
+        "Read your handoff at {}, then continue from it.",
+        handoff.display()
+    );
+    match lead {
+        true => format!("{resume} {LEAD_REARM}"),
+        false => resume,
+    }
+}
+
+const LEAD_REARM: &str = "Your `loopherd watch` is no longer running: \
+    run `loopherd status` and `loopherd reports --all`, then re-arm your watch per the \
+    Lead section of `loopherd --skill`.";
 
 fn wait_for_new_session(
     ledger: &dyn Ledger,
@@ -136,7 +157,7 @@ fn wait_for_new_session(
         }
         if Instant::now() >= deadline {
             bail!(
-                "sent /clear, but {name}'s ledger session is still {} after {:?}; the /clear may be queued behind a running turn",
+                "sent /clear, but {name}'s ledger session is still {} after {:?}",
                 old.unwrap_or("unset"),
                 req.settle_timeout
             );
@@ -186,12 +207,19 @@ mod tests {
         ledger: MemLedger,
         herdr: &'a FakeHerdr,
         follows: bool,
+        clears_before: usize,
     }
 
     impl Ledger for Clearing<'_> {
         fn entries(&self) -> Result<BTreeMap<String, AgentRecord>> {
             let mut entries = self.ledger.entries()?;
-            let cleared = self.herdr.prompts().iter().any(|(_, t)| t == "/clear");
+            let clears = self
+                .herdr
+                .prompts()
+                .iter()
+                .filter(|(_, t)| t == "/clear")
+                .count();
+            let cleared = clears > self.clears_before;
             if self.follows && cleared {
                 for record in entries.values_mut() {
                     record.session_id = Some("new".into());
@@ -278,6 +306,12 @@ mod tests {
                 ledger: MemLedger([("lh-1".to_string(), member)].into(), vec![]),
                 herdr: &self.herdr,
                 follows,
+                clears_before: self
+                    .herdr
+                    .prompts()
+                    .iter()
+                    .filter(|(_, t)| t == "/clear")
+                    .count(),
             };
             let req = RestartRequest {
                 name: "lh-1",
@@ -443,22 +477,55 @@ mod tests {
     }
 
     #[test]
-    fn a_session_that_never_moves_fails_before_the_handoff_prompt() {
+    fn a_session_that_never_moves_fails_before_the_handoff_prompt_and_keeps_the_handoff() {
         let w = World::new();
         w.handed_off();
         let (result, ledger) = w.restart(false, false);
+        let md = w
+            .state
+            .path()
+            .join("handoffs/lh-1.md")
+            .display()
+            .to_string();
         assert_eq!(
             format!("{:#}", result.unwrap_err()),
             format!(
-                "sent /clear, but lh-1's ledger session is still old after 50ms; the /clear may be \
-                 queued behind a running turn. No handoff prompt was sent; once lh-1's pane shows a \
-                 cleared session, run: herdr agent prompt lh-1 'Read your handoff at {}, then \
-                 continue from it.'",
-                w.handoff()
+                "sent /clear, but lh-1's ledger session is still old after 50ms: the /clear may be \
+                 queued behind a running turn, or loopherd's SessionStart hook isn't installed. No \
+                 handoff prompt was sent and the handoff is still at {md}. Once lh-1's pane shows a \
+                 cleared session, run: herdr agent prompt 'lh-1' 'Read your handoff at {md}, then \
+                 continue from it.'"
             )
         );
         assert_eq!(w.herdr.prompts().len(), 1);
         assert!(ledger.1.is_empty());
+
+        let (retry, _) = w.restart(false, true);
+        assert!(retry.is_ok(), "{retry:?}");
+    }
+
+    #[test]
+    fn a_leads_resume_prompt_has_it_re_arm_its_watch_and_a_workers_doesnt() {
+        let rearm = "Your `loopherd watch` is no longer running: run `loopherd status` and \
+                     `loopherd reports --all`, then re-arm your watch per the Lead section of \
+                     `loopherd --skill`.";
+        for (lead, wants) in [(true, true), (false, false)] {
+            let w = World::new();
+            w.handed_off();
+            let (result, _) = w.restart_as(false, true, None, &|r| {
+                r.role = lead.then_some(crate::ledger::Role::Lead)
+            });
+            result.unwrap();
+            let resume = &w.herdr.prompts()[1].1;
+            assert!(
+                resume.starts_with(&format!(
+                    "Read your handoff at {}, then continue from it.",
+                    w.handoff()
+                )),
+                "{resume}"
+            );
+            assert_eq!(resume.contains(rearm), wants, "{resume}");
+        }
     }
 
     #[test]
