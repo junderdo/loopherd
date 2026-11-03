@@ -95,9 +95,9 @@ that pane. Read `herdr --skill` before controlling herdr.
 4. **Verify** a finished member's output with a read-only subagent against
    the task's acceptance criteria: no loopherd or mutating herdr commands,
    a temp `XDG_STATE_HOME` and `LOOPHERD_CONFIG_DIR`. Put everything it
-   builds under one directory per PR, `<scratch>/pr<n>/`: its detached
-   worktrees, its build target dirs and any copies (mutation runs), so one
-   removal cleans up.
+   builds under one directory per PR, `<scratch>/pr<n>/`, where `<scratch>`
+   is your session's own temp directory: its detached worktrees, its build
+   target dirs and any copies (mutation runs), so one removal cleans up.
    For anything that deletes or closes, have it hunt for safety gaps and
    name the test covering each rule. Report as soon as it lands; the human
    often merges fast. Gaps inside the task's scope go back to the member;
@@ -107,9 +107,11 @@ that pane. Read `herdr --skill` before controlling herdr.
    feed <herd>`. Its `done` check retires and closes the member and refills
    the slot. If the human merged before verification finished, point the
    verifier at the merge commit in a detached worktree under the PR's
-   directory, since reaping removes the member's. Once verification is done,
-   `git worktree remove --force` each verify worktree under `<scratch>/pr<n>/`,
-   then delete that directory. Do the same when a PR is closed unmerged.
+   directory, since reaping removes the member's. Last, on every merge,
+   once the tracker, dependents, feed and any post-merge verification are
+   done: `git worktree remove --force` each verify worktree under
+   `<scratch>/pr<n>/`, then delete that directory. Same for a PR closed
+   unmerged.
 
 ### Handoffs
 
@@ -125,7 +127,9 @@ file's `context_window` (default 200000).
 
 Before handing off, a member that verifies PRs removes the `<scratch>/pr<n>/`
 directories of PRs that already merged or closed (see After merge) and lists
-the ones still in use under State, so its successor cleans them up.
+each one still in use by absolute path under State. A restart gets a new
+`<scratch>`, so the successor removes those listed directories the same way
+once their PRs merge or close.
 
 The handoff file has a fixed outline, and leaves out what's already in the
 tracker, the ledger or the mailbox:
