@@ -556,8 +556,12 @@ fn run_stop_hook() -> Result<i32> {
     let reports = ledger.reports_dir()?;
     let state = ledger.dir()?;
     let handoff = |member: &ledger::AgentRecord| {
-        let limit = herd::context_limit(&Paths::from_env()?, member)?;
-        context::handoff_block(member, &input, limit, &state)
+        let limit = Paths::from_env().and_then(|paths| herd::context_limit(&paths, member));
+        let note = |text| {
+            let entry = report::Entry::new(SystemTime::now(), report::Body::Note { text });
+            report::append(&reports, &member.name, &entry)
+        };
+        context::handoff_block(member, &input, limit, &state, &note)
     };
     let stopped = stop_hook::stop_hook(
         &mut ledger,

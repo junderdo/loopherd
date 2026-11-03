@@ -384,3 +384,106 @@ fn past_its_limit_the_stop_hook_prints_one_block_decision_and_files_nothing() {
         "{all:?}"
     );
 }
+
+/// A Stop of session `session` at `tokens` tokens in context, from lh-2's
+/// pane, with `config` as `$LOOPHERD_CONFIG_DIR`.
+fn stop_at(state: &Path, config: &Path, session: &str, tokens: u64) -> Output {
+    use std::io::Write;
+    let transcript = state.join(format!("{session}.jsonl"));
+    fs::write(
+        &transcript,
+        format!(
+            r#"{{"type":"assistant","isSidechain":false,"message":{{"usage":{{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":{tokens}}}}}}}"#
+        ),
+    )
+    .unwrap();
+    let input = format!(
+        r#"{{"hook_event_name":"Stop","session_id":"{session}","transcript_path":"{}","background_tasks":[],"session_crons":[]}}"#,
+        transcript.display()
+    );
+    let mut child = loopherd_in(state, Some(("w1:p2", SOCKET)), &["stop-hook"])
+        .env("LOOPHERD_CONFIG_DIR", config)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+fn notes(state: &Path) -> Vec<String> {
+    let all = run(state, None, &["reports", "--all"]);
+    String::from_utf8_lossy(&all.stdout)
+        .lines()
+        .filter(|l| l.starts_with("lh-2 note "))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn an_invalid_config_toml_falls_back_to_the_built_in_limit_and_notes_it_once_per_session() {
+    let state = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    let file = config.path().join("config.toml");
+    fs::write(&file, "context_windw = 1000000\n").unwrap();
+
+    let under = stop_at(state.path(), config.path(), "s1", 160_000);
+    assert_eq!(under.stdout, b"", "{under:?}");
+    let notes_s1 = notes(state.path());
+    assert_eq!(notes_s1.len(), 1, "{notes_s1:?}");
+    assert!(
+        notes_s1[0].contains(&file.display().to_string()) && notes_s1[0].contains("context_windw"),
+        "{notes_s1:?}"
+    );
+    assert!(notes_s1[0].contains("160000"), "{notes_s1:?}");
+
+    let over = stop_at(state.path(), config.path(), "s1", 160_001);
+    let decision: serde_json::Value = serde_json::from_slice(&over.stdout).unwrap();
+    assert!(
+        decision["reason"]
+            .as_str()
+            .unwrap()
+            .contains("160001 tokens, past your limit of 160000"),
+        "{decision}"
+    );
+    assert_eq!(notes(state.path()).len(), 1);
+
+    stop_at(state.path(), config.path(), "s2", 100);
+    assert_eq!(notes(state.path()).len(), 2);
+}
+
+#[test]
+fn an_unparseable_herd_file_falls_back_to_the_built_in_limit_and_notes_it() {
+    let state = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    let ledger = state.path().join("loopherd/ledger.json");
+    let text = fs::read_to_string(&ledger).unwrap().replace(
+        r#""socket": "/run/herdr/herdr.sock""#,
+        r#""socket": "/run/herdr/herdr.sock", "herd": "cards", "template": "t""#,
+    );
+    fs::write(&ledger, text).unwrap();
+    let herd = config.path().join("herds/cards.toml");
+    fs::create_dir_all(herd.parent().unwrap()).unwrap();
+    fs::write(&herd, "repo = ").unwrap();
+
+    let over = stop_at(state.path(), config.path(), "s1", 160_001);
+    let decision: serde_json::Value = serde_json::from_slice(&over.stdout).unwrap();
+    assert_eq!(decision["decision"], "block", "{over:?}");
+    assert_eq!((over.status.code(), &over.stderr[..]), (Some(0), &b""[..]));
+    let notes = notes(state.path());
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].contains(
+            "cards.toml: TOML parse error at line 1, column 8 string values must be quoted"
+        ),
+        "{notes:?}"
+    );
+}
