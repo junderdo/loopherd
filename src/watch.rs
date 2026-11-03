@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
+use crate::context::ShepherdHandoff;
 use crate::feed::{claimable, run_check};
 use crate::herd::{MemberCheck, MemberChecks, Paths, lead_checks};
 use crate::herd_view::{Member, Options, View};
@@ -69,6 +70,9 @@ pub struct Request<'a> {
     /// How long each check's command may run; read only by a lead's watch,
     /// so a bad setting can't stop the shepherd's.
     pub check_timeout: fn() -> Result<Duration>,
+    /// Measures the caller's Claude for the shepherd's own handoff line; run
+    /// as the watch exits, only when it is the shepherd's.
+    pub shepherd_handoff: Option<&'a dyn Fn() -> Option<ShepherdHandoff>>,
 }
 
 /// How often a lead's watch runs its merged and claimable checks.
@@ -81,12 +85,16 @@ pub struct Wake {
     pub lines: Vec<String>,
     pending: Vec<Pending>,
     fired: Option<Fired>,
+    handoff: Option<ShepherdHandoff>,
+    /// Held until marked read, so an overlapping watch can't print it too.
+    _only: Lock,
 }
 
 impl Wake {
     pub fn mark_read(self) -> Result<()> {
         self.pending.into_iter().try_for_each(Pending::save)?;
-        self.fired.map_or(Ok(()), Fired::save)
+        self.fired.map_or(Ok(()), Fired::save)?;
+        self.handoff.map_or(Ok(()), ShepherdHandoff::mark)
     }
 }
 
@@ -103,7 +111,7 @@ pub fn watch(
     warn: &mut dyn FnMut(&str),
 ) -> Result<Option<Wake>> {
     let reader = reader(ledger, req)?;
-    let _only = only_watch(dir, &reader)?;
+    let only = only_watch(dir, &reader)?;
     let mut checks = match (&reader, req.herd_files) {
         (
             Reader::Lead {
@@ -206,16 +214,23 @@ pub fn watch(
                 last.insert(member.name.clone(), member.status);
             }
         }
+        let left = req.timeout.map(|t| t.saturating_sub(clock.elapsed()));
+        let exiting = !lines.is_empty() || left == Some(Duration::ZERO);
+        let handoff = exiting
+            .then(|| shepherd_handoff(ledger, req, &reader))
+            .flatten();
+        lines.extend(handoff.iter().map(|h| h.line.clone()));
         if !lines.is_empty() {
             return Ok(Some(Wake {
                 lines,
                 pending,
                 fired,
+                handoff,
+                _only: only,
             }));
         }
         // Nothing to print, so nothing to lose.
         pending.into_iter().try_for_each(Pending::save)?;
-        let left = req.timeout.map(|t| t.saturating_sub(clock.elapsed()));
         if left == Some(Duration::ZERO) {
             return Ok(None);
         }
@@ -471,13 +486,27 @@ fn reader(ledger: &dyn Ledger, req: &Request) -> Result<Reader> {
     })
 }
 
-/// Whether the watch is the shepherd's own, run from no member's pane;
-/// members are told to hand off by their Stop hook instead.
-pub fn is_shepherd(ledger: &dyn Ledger, req: &Request) -> Result<bool> {
-    let Some(pane) = req.own_pane else {
-        return Ok(true);
-    };
-    Ok(member_in(&ledger.entries()?, pane, req.own_socket).is_none())
+/// The shepherd's handoff line, from a shepherd's watch run from no member's
+/// pane, measuring no member's session: members are told by their Stop hook.
+fn shepherd_handoff(
+    ledger: &dyn Ledger,
+    req: &Request,
+    reader: &Reader,
+) -> Option<ShepherdHandoff> {
+    if !matches!(reader, Reader::Shepherd) {
+        return None;
+    }
+    let entries = ledger.entries().ok()?;
+    if req
+        .own_pane
+        .is_some_and(|pane| member_in(&entries, pane, req.own_socket).is_some())
+    {
+        return None;
+    }
+    let handoff = (req.shepherd_handoff?)()?;
+    let a_members =
+        |e: &AgentRecord| !e.retired && e.session_id.as_deref() == Some(handoff.session.as_str());
+    (!entries.values().any(a_members)).then_some(handoff)
 }
 
 fn shown(socket: Option<&Path>) -> String {
@@ -683,6 +712,7 @@ mod tests {
         own_socket: None,
         herd_files: None,
         check_timeout: || bail!("only a lead's watch reads the check timeout"),
+        shepherd_handoff: None,
     };
 
     fn run(
@@ -918,6 +948,7 @@ mod tests {
         own_socket: None,
         herd_files: None,
         check_timeout: || bail!("only a lead's watch reads the check timeout"),
+        shepherd_handoff: None,
     };
 
     /// One poll of a fresh watch.
@@ -1361,18 +1392,84 @@ mod tests {
         );
     }
 
-    #[test]
-    fn only_a_watch_from_outside_every_members_pane_is_the_shepherd_itself() {
-        let dir = tempfile::tempdir().unwrap();
-        let (ledger, _herdr) = led_world(dir.path());
-        let outside = Request {
-            own_pane: None,
-            ..ONCE
+    const TOLD: &str = "shepherd handoff 171k over 160k";
+
+    /// Runs `req` with a shepherd's check that finds `session` over its limit.
+    fn with_handoff(
+        dir: &Path,
+        ledger: &MemLedger,
+        herdr: &FakeHerdr,
+        req: &Request,
+        session: &str,
+    ) -> Option<Vec<String>> {
+        let marker = dir.join("told").join(session);
+        let check = || Some(ShepherdHandoff::new(TOLD, session, marker.clone()));
+        let req = Request {
+            shepherd_handoff: Some(&check),
+            ..*req
         };
-        assert!(is_shepherd(&ledger, &outside).unwrap());
-        assert!(is_shepherd(&ledger, &from_pane("w9:p7")).unwrap());
-        assert!(!is_shepherd(&ledger, &from_pane("w9:p0")).unwrap());
-        assert!(!is_shepherd(&ledger, &from_pane("w9:p1")).unwrap());
+        let woke = run(herdr, ledger, dir, &req, &mut steps(|_| {}));
+        assert_eq!(
+            marker.exists(),
+            woke.as_ref().is_some_and(|l| l.iter().any(|l| l == TOLD))
+        );
+        woke
+    }
+
+    #[test]
+    fn the_shepherds_own_watch_adds_its_handoff_line_last_and_marks_it_once_printed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = led_world(dir.path());
+        let woke = with_handoff(dir.path(), &ledger, &herdr, &ONCE, "s-shepherd").unwrap();
+        assert_eq!(woke.last().map(String::as_str), Some(TOLD));
+        assert_eq!(woke.len(), 4);
+        let woke = with_handoff(dir.path(), &ledger, &herdr, &from_pane("w9:p7"), "s2");
+        assert_eq!(woke, Some(vec![TOLD.to_string()]));
+    }
+
+    #[test]
+    fn a_due_handoff_line_wakes_a_watch_that_would_time_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = led_world(dir.path());
+        run(&herdr, &ledger, dir.path(), &ONCE, &mut steps(|_| {}));
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &ONCE, &mut steps(|_| {})),
+            None
+        );
+        assert_eq!(
+            with_handoff(dir.path(), &ledger, &herdr, &ONCE, "s1"),
+            Some(vec![TOLD.to_string()])
+        );
+    }
+
+    #[test]
+    fn a_watch_from_a_members_pane_never_adds_the_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = led_world(dir.path());
+        for pane in ["w9:p0", "w9:p1"] {
+            let woke = with_handoff(dir.path(), &ledger, &herdr, &from_pane(pane), "s1").unwrap();
+            assert!(!woke.iter().any(|l| l == TOLD), "{pane}: {woke:?}");
+        }
+    }
+
+    #[test]
+    fn a_session_a_member_holds_is_never_told_it_is_the_shepherd() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ledger, herdr) = led_world(dir.path());
+        // Its recorded socket doesn't match the watch's, so its pane reads as no member's.
+        let worker = ledger.0.get_mut("lh-1").unwrap();
+        worker.session_id = Some("s-worker".into());
+        worker.socket = Some("/run/other.sock".into());
+        let req = Request {
+            own_socket: Some(Path::new("/run/live.sock")),
+            ..from_pane("w9:p1")
+        };
+        let woke = with_handoff(dir.path(), &ledger, &herdr, &req, "s-worker").unwrap();
+        assert!(!woke.iter().any(|l| l == TOLD), "{woke:?}");
+
+        ledger.0.get_mut("lh-1").unwrap().retired = true;
+        let woke = with_handoff(dir.path(), &ledger, &herdr, &ONCE, "s-worker");
+        assert_eq!(woke, Some(vec![TOLD.to_string()]));
     }
 
     #[test]

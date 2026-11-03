@@ -490,6 +490,13 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         own_socket: own_socket.as_deref(),
         herd_files: Some(&herd_paths),
         check_timeout: remote_timeout,
+        shepherd_handoff: None,
+    };
+    let state = ledger.dir()?;
+    let handoff = || shepherd_handoff(&herd_paths, &state);
+    let req = watch::Request {
+        shepherd_handoff: Some(&handoff),
+        ..req
     };
     let woke = watch::watch(
         &CliHerdr,
@@ -499,22 +506,16 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         &mut watch::RealClock::start(),
         &mut |warning| eprintln!("loopherd watch: {warning}"),
     )?;
-    let handoff = match watch::is_shepherd(&ledger, &req) {
-        Ok(true) => shepherd_handoff(&herd_paths, &ledger.dir()?),
-        _ => None,
-    };
-    if woke.is_none() && handoff.is_none() {
+    let Some(wake) = woke else {
         return Ok(2);
-    }
-    let lines = woke.iter().flat_map(|wake| &wake.lines);
+    };
     let mut out = std::io::stdout().lock();
-    lines
-        .chain(handoff.iter().map(|h| &h.line))
+    wake.lines
+        .iter()
         .try_for_each(|line| writeln!(out, "{line}"))
         .and_then(|()| out.flush())
         .context("print the wake; left it unread")?;
-    woke.map_or(Ok(()), watch::Wake::mark_read)?;
-    handoff.map_or(Ok(()), context::ShepherdHandoff::mark)?;
+    wake.mark_read()?;
     Ok(0)
 }
 

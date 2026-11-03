@@ -183,10 +183,21 @@ pub struct ShepherdCheck<'a> {
 /// The line telling the shepherd to hand off, due until [`Self::mark`].
 pub struct ShepherdHandoff {
     pub line: String,
+    /// The Claude session measured.
+    pub session: String,
     marker: PathBuf,
 }
 
 impl ShepherdHandoff {
+    #[cfg(test)]
+    pub fn new(line: &str, session: &str, marker: PathBuf) -> ShepherdHandoff {
+        ShepherdHandoff {
+            line: line.into(),
+            session: session.into(),
+            marker,
+        }
+    }
+
     /// Remembers the session was told, so no later watch tells it again.
     pub fn mark(self) -> Result<()> {
         let dir = self.marker.parent().expect("a marker is in handoff-asked");
@@ -212,6 +223,7 @@ pub fn shepherd_handoff(check: &ShepherdCheck) -> Option<ShepherdHandoff> {
             tokens / 1000,
             check.limit / 1000
         ),
+        session,
         marker,
     })
 }
