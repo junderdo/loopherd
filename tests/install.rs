@@ -5,7 +5,7 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{ChildStdin, Command, Output, Stdio};
 
 const INSTALL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install");
 
@@ -211,6 +211,22 @@ fn installed_hook_command(dir: &Path) -> String {
         .to_string()
 }
 
+/// A hook may exit before reading stdin; its exit status is what the test checks.
+fn feed_stdin(mut stdin: ChildStdin, input: &[u8]) {
+    match stdin.write_all(input) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+        result => result.unwrap(),
+    }
+}
+
+#[test]
+fn feeding_a_hook_that_exited_without_reading_stdin_is_not_an_error() {
+    let mut child = Command::new("true").stdin(Stdio::piped()).spawn().unwrap();
+    let stdin = child.stdin.take().unwrap();
+    child.wait().unwrap();
+    feed_stdin(stdin, b"{}");
+}
+
 fn run_hook(command: &str, state: &Path, pane: Option<&str>, input: &str) -> Output {
     let mut cmd = Command::new("sh");
     cmd.args(["-c", command])
@@ -224,12 +240,7 @@ fn run_hook(command: &str, state: &Path, pane: Option<&str>, input: &str) -> Out
         cmd.env("HERDR_PANE_ID", pane);
     }
     let mut child = cmd.spawn().unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
+    feed_stdin(child.stdin.take().unwrap(), input.as_bytes());
     child.wait_with_output().unwrap()
 }
 
@@ -294,9 +305,7 @@ fn run_tool_hook(command: &str, dir: &Path, pane: Option<&str>, bash: &str) -> O
         cmd.env("HERDR_PANE_ID", pane);
     }
     let mut child = cmd.spawn().unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(input.to_string().as_bytes()).unwrap();
-    drop(stdin);
+    feed_stdin(child.stdin.take().unwrap(), input.to_string().as_bytes());
     child.wait_with_output().unwrap()
 }
 
