@@ -1871,6 +1871,8 @@ mod tests {
         assert!(cut.unwrap().unwrap_err().contains("timed out"));
         assert_eq!(after, Some(Err("out of time".into())));
         assert!(started.elapsed() < Duration::from_secs(2));
+        // Past the check's own `sleep 2`, so a check left running would have touched it.
+        std::thread::sleep(Duration::from_millis(2200).saturating_sub(started.elapsed()));
         assert!(!world.repo.path().join("ran-1").exists());
     }
 

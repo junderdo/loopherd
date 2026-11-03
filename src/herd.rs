@@ -181,7 +181,8 @@ pub struct Added {
 
 /// Spawns a member of `req.herd`.
 ///
-/// Into a herd with a `[queue]`, fails while `feed` runs, and adds past the
+/// Into a herd with a `[queue]`, fails while `feed` holds the feed lock
+/// past [`Paths::lock_feed`]'s 1s wait, and adds past the
 /// queue's `max` with a warning: `add` is the human's override.
 pub fn add(
     herdr: &dyn Herdr,
