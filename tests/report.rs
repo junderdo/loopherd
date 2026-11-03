@@ -1,5 +1,8 @@
 //! `loopherd report` and `loopherd reports` through the binary.
 
+mod common;
+
+use common::feed_stdin;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -254,19 +257,13 @@ fn a_pane_of_another_herdr_is_not_a_member_with_or_without_a_recorded_socket() {
 }
 
 fn stop_hook(state: &Path, pane: Option<(&str, &str)>, input: &str) -> Output {
-    use std::io::Write;
     let mut child = loopherd_in(state, pane, &["stop-hook"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
+    feed_stdin(child.stdin.take().unwrap(), input.as_bytes());
     child.wait_with_output().unwrap()
 }
 
@@ -352,13 +349,7 @@ fn past_its_limit_the_stop_hook_prints_one_block_decision_and_files_nothing() {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped());
         let mut child = cmd.spawn().unwrap();
-        use std::io::Write;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
+        feed_stdin(child.stdin.take().unwrap(), input.as_bytes());
         child.wait_with_output().unwrap()
     };
 
@@ -388,7 +379,6 @@ fn past_its_limit_the_stop_hook_prints_one_block_decision_and_files_nothing() {
 /// A Stop of session `session` at `tokens` tokens in context, from lh-2's
 /// pane, with `config` as `$LOOPHERD_CONFIG_DIR`.
 fn stop_at(state: &Path, config: &Path, session: &str, tokens: u64) -> Output {
-    use std::io::Write;
     let transcript = state.join(format!("{session}.jsonl"));
     fs::write(
         &transcript,
@@ -408,12 +398,7 @@ fn stop_at(state: &Path, config: &Path, session: &str, tokens: u64) -> Output {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
+    feed_stdin(child.stdin.take().unwrap(), input.as_bytes());
     child.wait_with_output().unwrap()
 }
 

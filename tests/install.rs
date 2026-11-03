@@ -1,11 +1,14 @@
 //! `scripts/install` with a fake cargo, and `install-hook`'s hook command run
 //! the way Claude runs it.
 
+mod common;
+
+use common::feed_stdin;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{ChildStdin, Command, Output, Stdio};
+use std::process::{Command, Output, Stdio};
 
 const INSTALL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install");
 
@@ -209,14 +212,6 @@ fn installed_hook_command(dir: &Path) -> String {
         .as_str()
         .unwrap()
         .to_string()
-}
-
-/// A hook may exit before reading stdin; its exit status is what the test checks.
-fn feed_stdin(mut stdin: ChildStdin, input: &[u8]) {
-    match stdin.write_all(input) {
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
-        result => result.unwrap(),
-    }
 }
 
 #[test]
