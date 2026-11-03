@@ -471,3 +471,29 @@ fn the_splash_fits_the_terminal_on_stdout_even_without_tput() {
         assert_eq!(title, !wordmark, "{cols}x{rows}: {out}");
     }
 }
+
+#[test]
+fn install_without_the_splash_file_still_installs() {
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = dir.path().join("scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::copy(INSTALL, scripts.join("install")).unwrap();
+    let sandbox = Sandbox::new(false);
+
+    let out = Command::new(scripts.join("install"))
+        .args(["--settings", "/tmp/s.json"])
+        .env("HOME", &sandbox.home)
+        .env("PATH", &sandbox.path)
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&sandbox.log).unwrap(),
+        "new install-hook --settings /tmp/s.json\n"
+    );
+}

@@ -29,8 +29,10 @@ done
 command -v jq >/dev/null || { echo "install: needs jq (to read cargo's build output); install it first" >&2; exit 1; }
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-source "$root/scripts/install-splash.bash"
-if [[ -n "$splash" ]] && splash_wants_to_play; then splash_play; fi
+splash_file="$root/scripts/install-splash.bash"
+if [[ -n "$splash" && -r "$splash_file" ]] && source "$splash_file" && splash_wants_to_play; then
+  splash_play
+fi
 bin_dir="$HOME/.local/bin"
 
 built=$(cargo build --release --manifest-path "$root/Cargo.toml" \
