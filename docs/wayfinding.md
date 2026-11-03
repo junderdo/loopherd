@@ -32,6 +32,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D15](decisions/D15.md) | Slice 6: the shepherd's tools first: a mailbox (`report`/`reports`) and `watch`. |
 | [D16](decisions/D16.md) | Stops land in the mailbox through user-level Claude hooks, matched to members by socket, pane and process. |
 | [D17](decisions/D17.md) | A lead is a loopherd-run member that runs one herd's loop unattended, within switches the human sets. |
+| [D18](decisions/D18.md) | A D-number collision between two PRs is fixed by the PR that merges second, renumbering on the add/add conflict. |
 | [D19](decisions/D19.md) | The shepherd's and lead's guide ships with the binary as `loopherd --skill`, installed as a Claude skill; repos keep only their runbook. |
 
 ## Emerging model

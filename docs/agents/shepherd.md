@@ -52,6 +52,8 @@ human to paste:
   the OAuth header from `~/.config/loopherd/trello.env`.
 - A card that settles a decision, of any kind, adds a new
   `docs/decisions/D<n>.md` file plus an index row in `docs/wayfinding.md`.
-  Check the highest D file first; card numbers are never reused.
+  Check the highest D file first; card numbers are never reused. Two PRs
+  colliding on a D number follow the renumber rule in
+  [issue-tracking.md](issue-tracking.md).
 - Push as junderdo:
   `GH_TOKEN=$(gh auth token --user junderdo) git -c credential.helper= -c credential.helper='!gh auth git-credential' push …`.
