@@ -75,10 +75,14 @@ Any card that settles a decision, impl cards included, adds it as a new
 `docs/decisions/D<n>.md` (one past the highest D file) with `## Decision`
 and `## Why` sections, plus a one-line index row in `docs/wayfinding.md`.
 
-Two open PRs can take the same number (D18). When merging `origin/main` gives
-an add/add conflict on a D file, your PR merged second, so renumber yours:
+Two open PRs can take the same number (D18). When merging or rebasing onto
+`origin/main` gives an add/add conflict on a D file, your PR merged second, so
+renumber yours:
 
-- Take the next free number: one past the highest D file on `origin/main`.
+- Take the next free number, D<new>: one past the highest D file on
+  `origin/main`. Move your text to `D<new>.md` with heading `# D<new>`, then
+  resolve `D<old>.md` to main's version: `git checkout --theirs` in a merge,
+  `--ours` in a rebase. Keeping your side overwrites main's decision.
 - Fix the index row in `docs/wayfinding.md`, keeping both rows.
 - Run `grep -rn '\bD<old>\b' src/ docs/ tests/ AGENTS.md` and fix every
   citation of your renumbered decision, leaving citations of main's D<old>.
