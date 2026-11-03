@@ -829,12 +829,13 @@ fn swept_cells(cols: usize, rows: usize) -> Vec<Swept> {
         .collect()
 }
 
-fn overlap(a: Swept, b: Swept) -> bool {
-    a.0 <= b.1 && b.0 <= a.1 && a.2 <= b.3 && b.2 <= a.3
+/// Whether `a` and `b` overlap or share an edge or corner.
+fn touch(a: Swept, b: Swept) -> bool {
+    a.0 <= b.1 + 1 && b.0 <= a.1 + 1 && a.2 <= b.3 + 1 && b.2 <= a.3 + 1
 }
 
 #[test]
-fn sheep_never_meet_each_other_or_leave_the_pasture() {
+fn sheep_never_touch_each_other_or_leave_the_pasture() {
     for (cols, rows) in [
         (100, 30),
         (140, 40),
@@ -852,7 +853,7 @@ fn sheep_never_meet_each_other_or_leave_the_pasture() {
 
         for (i, &a) in sheep.iter().enumerate() {
             for &b in &sheep[i + 1..] {
-                assert!(!overlap(a, b), "{cols}x{rows}: {a:?} meets {b:?}");
+                assert!(!touch(a, b), "{cols}x{rows}: {a:?} touches {b:?}");
             }
         }
     }
