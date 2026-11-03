@@ -327,9 +327,14 @@ fn an_installed_tool_hook_whose_binary_fails_with_exit_2_does_not_block() {
         &stale,
         "#!/bin/sh\necho \"error: unrecognized subcommand '$1'\" >&2\nexit 2\n",
     );
-    let exe = env!("CARGO_BIN_EXE_loopherd");
-    let command = real.replacen(exe, stale.to_str().unwrap(), 1);
-    assert_ne!(command, real);
+    // install-hook writes current_exe(), which is canonical; the env! path may hold `..`.
+    let exe = fs::canonicalize(env!("CARGO_BIN_EXE_loopherd")).unwrap();
+    let stale = stale.to_str().unwrap();
+    let command = real.replacen(exe.to_str().unwrap(), stale, 1);
+    assert!(
+        command.contains(stale),
+        "stale binary not substituted: {command}"
+    );
 
     let out = run_tool_hook(&command, dir.path(), Some("w1:p1"), "cargo test");
 
