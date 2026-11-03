@@ -33,9 +33,9 @@ splash_frame_us=50000
 #           last row, and the herd grows with the area.
 splash_large_cols=140
 splash_large_rows=40
-# Laying a sheep costs time in proportion to the width, so the herd is capped at
-# this many sheep-columns, which keeps a frame under 50ms at 400x100.
-splash_large_herd_budget=16000
+# Past this many sheep the herd stops growing, which keeps a frame under 50ms
+# at 600x150.
+splash_large_herd_max=180
 
 # Scene rows, top to bottom; the ground and tagline rows are set by the layout.
 splash_wordmark_top=2 # sun rows 0..7 sit behind it
@@ -94,26 +94,38 @@ splash_layout() { # <rows> <cols>
   fi
 }
 
-# A well-mixed hash of two numbers, 0 to 996.
+# A 32-bit hash of two numbers: xorshift-multiply rounds, masked because bash
+# arithmetic is 64-bit and never wraps at 32.
 splash_mix() { # <a> <b>
-  splash_hash=$(((($1 * 7919 + $2 * 104729) * 2654435761 >> 16) % 997))
+  local h=$((($1 * 0x9e3779b1 + $2 * 0x85ebca6b + 0x165667b1) & 0xffffffff))
+  h=$((((h ^ h >> 16) * 0x7feb352d) & 0xffffffff))
+  h=$((((h ^ h >> 15) * 0x846ca68b) & 0xffffffff))
+  splash_hash=$((h ^ h >> 16))
 }
 
 # A row of sheep every other ground row (every third for the 3-row front sheep),
-# about one per 25 columns within splash_large_herd_budget, banded by
-# depth like the medium herd. Like the medium herd, none ever reaches the shepherd.
+# about one per 25 columns, banded by depth like the medium herd, up to
+# splash_large_herd_max sheep spread over the rows. Each sheep gets a slot of its
+# row and stays inside it for the whole splash, so sheep never overlap, and on
+# the shepherd's rows the slots end left of him.
 splash_large_herd() {
-  local d k step size kind base period n j x motion max=$((splash_large_herd_budget / splash_width))
+  local d i k size kind base height period travel motion slot span free x
+  local n extra rows_left usable
   local -a moves=(r l gr gl) rows=()
   splash_herd=()
-  for ((d = 0; d <= splash_ground_rows - 3; d += step)); do
+  for ((d = 0; d <= splash_ground_rows - 3; d += k)); do
     rows+=("$d")
-    step=2
-    (((d * 9 / (splash_ground_rows - 1)) >= 6)) && step=3
+    k=2
+    (((d * 9 / (splash_ground_rows - 1)) >= 6)) && k=3
   done
   n=$((splash_width / 25))
-  ((n * ${#rows[@]} <= max)) || n=$((max / ${#rows[@]}))
-  ((n > 0)) || n=1
+  if ((n * ${#rows[@]} > splash_large_herd_max)); then
+    n=$((splash_large_herd_max / ${#rows[@]}))
+    extra=$((splash_large_herd_max % ${#rows[@]}))
+  else
+    extra=0
+  fi
+  rows_left=${#rows[@]}
   for d in "${rows[@]}"; do
     k=$((d * 9 / (splash_ground_rows - 1)))
     if ((k <= 1)); then
@@ -125,24 +137,30 @@ splash_large_herd() {
     else
       size=9 kind=w base=9
     fi
-    for ((j = 0; j < n; j++)); do
-      splash_mix "$j" "$d"
-      x=$((j * splash_width / n + splash_hash % (splash_width / n)))
-      motion=${moves[splash_hash % (size == 1 ? 2 : 4)]}
-      period=$((base + splash_hash % 6))
-      splash_clear_of_shepherd "$d" "$size" "$x" "$motion" $(((splash_frames - 1) / period)) || continue
+    height=1
+    ((size == 9)) && height=3
+    usable=$splash_width
+    if ((splash_ground_top + d + height > splash_shepherd_row)); then
+      usable=$((splash_shepherd_x - 1))
+    fi
+    # The extra sheep go to the rows nearest the front.
+    k=$((n + (rows_left <= extra ? 1 : 0)))
+    rows_left=$((rows_left - 1))
+    span=$((size + (splash_frames - 1) / base + 1))
+    ((k * span <= usable)) || k=$((usable / span))
+    for ((i = 0; i < k; i++)); do
+      splash_mix "$i" "$d"
+      slot=$((usable / k))
+      if ((size == 1)); then motion=${moves[splash_hash & 1]}; else motion=${moves[splash_hash & 3]}; fi
+      period=$((base + (splash_hash >> 2) % 6))
+      travel=0
+      [[ "$motion" == [rl] ]] && travel=$(((splash_frames - 1) / period))
+      free=$((slot - size - travel - 1))
+      x=$((i * usable / k + (splash_hash >> 8) % (free + 1)))
+      [[ "$motion" == l ]] && x=$((x + travel))
       splash_herd+=("$((splash_ground_top + d)) $kind $size $x $motion $period")
     done
   done
-}
-
-# Whether a sheep never shares a row with the shepherd, or stays left of his
-# columns for the whole splash.
-splash_clear_of_shepherd() { # <ground row> <size> <x> <motion> <travel>
-  local bottom=$1 right=$(($3 + $2 - 1))
-  if (($2 == 9)); then bottom=$(($1 + 2)); fi
-  if [[ "$4" == r ]]; then right=$((right + $5)); fi
-  ((bottom < splash_shepherd_row - splash_ground_top || right < splash_shepherd_x))
 }
 
 # The medium clouds once per 62 columns, up to four copies, each shifted down
@@ -309,7 +327,7 @@ splash_draw_ground() {
     for ((k = 0; k < count; k++)); do
       if [[ "$splash_layout" == large ]]; then
         splash_mix "$k" "$d"
-        h=$splash_hash
+        h=$((splash_hash % 997))
       else
         h=$(((k * 7919 + d * 104729) % 997)) # the medium scene's original jitter
       fi

@@ -751,8 +751,87 @@ fn no_sheep_reaches_the_shepherds_columns_on_his_rows() {
     }
 }
 
+/// Rows and columns a sprite covers over the whole splash: (top, bottom, left, right).
+type Swept = (i64, i64, i64, i64);
+
+/// The shepherd's cells, then every large-herd sheep's, for a `cols`x`rows` terminal,
+/// read from the herd entries so a sheep under the shepherd still counts.
+fn swept_cells(cols: usize, rows: usize) -> (Swept, Vec<Swept>) {
+    let out = splash_bash(
+        "none",
+        &format!(
+            "splash_layout {rows} {cols}; \
+             echo \"$splash_shepherd_row $splash_shepherd_x $splash_frames $splash_width\"; \
+             printf '%s\\n' \"${{splash_herd[@]}}\""
+        ),
+    );
+    let mut lines = out.lines();
+    let head: Vec<i64> = lines
+        .next()
+        .unwrap()
+        .split(' ')
+        .map(|n| n.parse().unwrap())
+        .collect();
+    let (row, x, frames, width) = (head[0], head[1], head[2], head[3]);
+    let shepherd = (row, row + 5, x, x + 6);
+    let sheep = lines
+        .map(|entry| {
+            let f: Vec<&str> = entry.split(' ').collect();
+            let (row, size, x): (i64, i64, i64) = (
+                f[0].parse().unwrap(),
+                f[2].parse().unwrap(),
+                f[3].parse().unwrap(),
+            );
+            let travel = (frames - 1) / f[5].parse::<i64>().unwrap();
+            let height = if size == 9 { 3 } else { 1 };
+            let (left, right) = match f[4] {
+                "r" => (x, x + size - 1 + travel),
+                "l" => (x - travel, x + size - 1),
+                _ => (x, x + size - 1),
+            };
+            assert!(left >= 0 && right < width, "{cols}x{rows}: {entry}");
+            (row, row + height - 1, left, right)
+        })
+        .collect();
+    (shepherd, sheep)
+}
+
+fn overlap(a: Swept, b: Swept) -> bool {
+    a.0 <= b.1 && b.0 <= a.1 && a.2 <= b.3 && b.2 <= a.3
+}
+
 #[test]
-fn the_large_herd_shrinks_as_the_width_grows_past_its_budget() {
+fn large_herd_sheep_never_meet_each_other_or_the_shepherd() {
+    // 140x60, 147x40 and the 151 widths put right walkers in the shepherd's rows.
+    for (cols, rows) in [
+        (140, 40),
+        (140, 60),
+        (141, 41),
+        (147, 40),
+        (151, 47),
+        (151, 53),
+        (151, 60),
+        (160, 45),
+        (203, 61),
+        (300, 80),
+        (400, 100),
+    ] {
+        let (shepherd, sheep) = swept_cells(cols, rows);
+
+        for (i, &a) in sheep.iter().enumerate() {
+            assert!(
+                !overlap(a, shepherd),
+                "{cols}x{rows}: {a:?} meets the shepherd"
+            );
+            for &b in &sheep[i + 1..] {
+                assert!(!overlap(a, b), "{cols}x{rows}: {a:?} meets {b:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_large_herd_grows_with_the_area_and_never_shrinks() {
     let herd = |cols: usize, rows: usize| -> usize {
         splash_bash(
             "none",
@@ -761,11 +840,32 @@ fn the_large_herd_shrinks_as_the_width_grows_past_its_budget() {
         .parse()
         .unwrap()
     };
+    let cap: usize = splash_bash("none", "printf %s $splash_large_herd_max")
+        .parse()
+        .unwrap();
 
-    for (cols, rows) in [(200, 60), (300, 80), (400, 100)] {
+    let mut last = 0;
+    for (cols, rows) in [
+        (140, 40),
+        (160, 45),
+        (200, 60),
+        (266, 70),
+        (300, 80),
+        (400, 100),
+        (600, 150),
+    ] {
         let sheep = herd(cols, rows);
-        assert!(sheep > 0 && sheep * cols <= 16000, "{cols}x{rows}: {sheep}");
+        assert!(sheep >= last, "{cols}x{rows}: {sheep} after {last}");
+        if sheep < cap {
+            let cells_per_sheep = cols * rows / sheep;
+            assert!(
+                (60..=100).contains(&cells_per_sheep),
+                "{cols}x{rows}: {sheep}"
+            );
+        }
+        last = sheep;
     }
+    assert_eq!(last, cap);
 }
 
 #[test]
