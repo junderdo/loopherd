@@ -633,9 +633,9 @@ fn segments(buf: &str) -> Vec<(usize, usize, String)> {
 fn a_cloud_over_the_sun_keeps_the_suns_colour_behind_it() {
     // Scene row 7 crosses the sun's rim at columns 22..26 and 36..40 and its core
     // at 27..35; this cloud spans 20..38, so it starts off the sun.
-    let sky = "splash_colours; splash_layout 30 100; splash_draw_sun; \
+    let sky = "splash_colours; splash_layout 30 100; \
                splash_clouds=('7|20|1|1000|&&&&&&&&&&&&&&&&&&&'); \
-               splash_sky 0 8 0; printf %s \"$splash_buf\"";
+               splash_prepare; splash_sky 0 8 0; printf %s \"$splash_buf\"";
     let row_7 = |out: &str| {
         segments(out)
             .into_iter()
@@ -716,16 +716,56 @@ fn the_medium_scene_sits_centred_in_its_box() {
 
 #[test]
 fn the_large_scene_fills_the_width_down_to_the_bottom_row() {
-    let painted = painted_rows(160, 45);
+    for (cols, rows) in [(160, 45), (141, 41)] {
+        let painted = painted_rows(cols, rows);
 
-    assert_eq!(
-        painted.keys().copied().collect::<Vec<_>>(),
-        (1..=45).collect::<Vec<_>>()
-    );
-    assert!(
-        painted.values().all(|&span| span == (1, 160)),
-        "{painted:?}"
-    );
+        assert_eq!(
+            painted.keys().copied().collect::<Vec<_>>(),
+            (1..=rows).collect::<Vec<_>>(),
+            "{cols}x{rows}"
+        );
+        assert!(
+            painted.values().all(|&span| span == (1, cols)),
+            "{cols}x{rows}: {painted:?}"
+        );
+    }
+}
+
+#[test]
+fn no_sheep_reaches_the_shepherds_columns_on_his_rows() {
+    for (cols, rows) in [(100, 30), (140, 40), (141, 41), (160, 45), (200, 60)] {
+        let out = splash_bash(
+            "none",
+            &format!(
+                "splash_colours; splash_layout {rows} {cols}; splash_prepare; \
+                 for ((f = 0; f < splash_frames; f++)); do splash_pasture $f; \
+                   for ((d = splash_shepherd_row - splash_ground_top; d < splash_ground_rows; d++)); do \
+                     cells=${{splash_rows_kinds[d]:splash_shepherd_x}}; \
+                     if [[ $cells == *[fmnw]* ]]; then echo \"frame $f row $d: $cells\"; fi; \
+                   done; \
+                 done"
+            ),
+        );
+
+        assert_eq!(out, "", "{cols}x{rows}");
+    }
+}
+
+#[test]
+fn the_large_herd_shrinks_as_the_width_grows_past_its_budget() {
+    let herd = |cols: usize, rows: usize| -> usize {
+        splash_bash(
+            "none",
+            &format!("splash_layout {rows} {cols}; printf %s ${{#splash_herd[@]}}"),
+        )
+        .parse()
+        .unwrap()
+    };
+
+    for (cols, rows) in [(200, 60), (300, 80), (400, 100)] {
+        let sheep = herd(cols, rows);
+        assert!(sheep > 0 && sheep * cols <= 16000, "{cols}x{rows}: {sheep}");
+    }
 }
 
 #[test]

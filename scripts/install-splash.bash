@@ -33,6 +33,9 @@ splash_frame_us=50000
 #           last row, and the herd grows with the area.
 splash_large_cols=140
 splash_large_rows=40
+# Laying a sheep costs time in proportion to the width, so the herd is capped at
+# this many sheep-columns, which keeps a frame under 50ms at 400x100.
+splash_large_herd_budget=16000
 
 # Scene rows, top to bottom; the ground and tagline rows are set by the layout.
 splash_wordmark_top=2 # sun rows 0..7 sit behind it
@@ -79,48 +82,73 @@ splash_layout() { # <rows> <cols>
     splash_width=$cols splash_height=$rows splash_top=1 splash_left=1
     splash_tagline_row=$((rows - 1))
     splash_ground_rows=$((rows - 1 - splash_ground_top))
-    splash_large_herd
-    splash_large_clouds
   fi
   splash_wordmark_x=$(((splash_width - 62) / 2))
   # The shepherd stands front-on at the right of the foreground, leaning on a
   # crook, feet on the front row.
   splash_shepherd_row=$((splash_ground_top + splash_ground_rows - 6))
   splash_shepherd_x=$((splash_width - 8))
+  if [[ "$splash_layout" == large ]]; then
+    splash_large_herd
+    splash_large_clouds
+  fi
+}
+
+# A well-mixed hash of two numbers, 0 to 996.
+splash_mix() { # <a> <b>
+  splash_hash=$(((($1 * 7919 + $2 * 104729) * 2654435761 >> 16) % 997))
 }
 
 # A row of sheep every other ground row (every third for the 3-row front sheep),
-# about one per 25 columns, banded by depth like the medium herd.
+# about one per 25 columns within splash_large_herd_budget, banded by
+# depth like the medium herd. Like the medium herd, none ever reaches the shepherd.
 splash_large_herd() {
-  local d k step size kind period n j h x motion
-  local -a moves=(r l gr gl)
+  local d k step size kind base period n j x motion max=$((splash_large_herd_budget / splash_width))
+  local -a moves=(r l gr gl) rows=()
   splash_herd=()
   for ((d = 0; d <= splash_ground_rows - 3; d += step)); do
-    k=$((d * 9 / (splash_ground_rows - 1)))
+    rows+=("$d")
     step=2
+    (((d * 9 / (splash_ground_rows - 1)) >= 6)) && step=3
+  done
+  n=$((splash_width / 25))
+  ((n * ${#rows[@]} <= max)) || n=$((max / ${#rows[@]}))
+  ((n > 0)) || n=1
+  for d in "${rows[@]}"; do
+    k=$((d * 9 / (splash_ground_rows - 1)))
     if ((k <= 1)); then
-      size=1 kind=f period=40
+      size=1 kind=f base=40
     elif ((k <= 3)); then
-      size=2 kind=m period=22
+      size=2 kind=m base=22
     elif ((k <= 5)); then
-      size=5 kind=n period=14
+      size=5 kind=n base=14
     else
-      size=9 kind=w period=9 step=3
+      size=9 kind=w base=9
     fi
-    n=$((splash_width / 25))
     for ((j = 0; j < n; j++)); do
-      h=$(((j * 7919 + d * 104729) % 997))
-      x=$((j * splash_width / n + h % (splash_width / n)))
-      motion=${moves[h % (size == 1 ? 2 : 4)]}
-      splash_herd+=("$((splash_ground_top + d)) $kind $size $x $motion $((period + h % 6))")
+      splash_mix "$j" "$d"
+      x=$((j * splash_width / n + splash_hash % (splash_width / n)))
+      motion=${moves[splash_hash % (size == 1 ? 2 : 4)]}
+      period=$((base + splash_hash % 6))
+      splash_clear_of_shepherd "$d" "$size" "$x" "$motion" $(((splash_frames - 1) / period)) || continue
+      splash_herd+=("$((splash_ground_top + d)) $kind $size $x $motion $period")
     done
   done
 }
 
-# The medium clouds once per 62 columns, each copy shifted down and the odd
-# ones drifting the other way.
+# Whether a sheep never shares a row with the shepherd, or stays left of his
+# columns for the whole splash.
+splash_clear_of_shepherd() { # <ground row> <size> <x> <motion> <travel>
+  local bottom=$1 right=$(($3 + $2 - 1))
+  if (($2 == 9)); then bottom=$(($1 + 2)); fi
+  if [[ "$4" == r ]]; then right=$((right + $5)); fi
+  ((bottom < splash_shepherd_row - splash_ground_top || right < splash_shepherd_x))
+}
+
+# The medium clouds once per 62 columns, up to four copies, each shifted down
+# and the odd ones drifting the other way.
 splash_large_clouds() {
-  local copies=$((splash_width / 62)) c entry IFS='|'
+  local copies=$((splash_width / 62 < 4 ? splash_width / 62 : 4)) c entry IFS='|'
   local -a cloud
   splash_clouds=()
   for ((c = 0; c < copies; c++)); do
@@ -279,7 +307,12 @@ splash_draw_ground() {
     printf -v line '%*s' "$splash_width" ''
     step=$((splash_width * 1000 / count))
     for ((k = 0; k < count; k++)); do
-      h=$(((k * 7919 + d * 104729) % 997))
+      if [[ "$splash_layout" == large ]]; then
+        splash_mix "$k" "$d"
+        h=$splash_hash
+      else
+        h=$(((k * 7919 + d * 104729) % 997)) # the medium scene's original jitter
+      fi
       col=$((((k * step + h * step / 997) / 1000 + d * 23) % splash_width))
       line="${line:0:col}${marks:h % ${#marks}:1}${line:col+1}"
     done
@@ -287,10 +320,31 @@ splash_draw_ground() {
   done
 }
 
+# Splits the glyph and cloud entries once, so frames don't.
+splash_parse() {
+  local i r IFS='|'
+  local -a fields
+  splash_glyph_rows=()
+  for i in "${!splash_glyphs[@]}"; do
+    read -ra fields <<<"${splash_glyphs[i]}"
+    for r in 0 1 2 3 4; do splash_glyph_rows[i * 5 + r]=${fields[r]}; done
+  done
+  splash_cloud_top=() splash_cloud_x=() splash_cloud_step=() splash_cloud_period=()
+  splash_cloud_rows=() splash_cloud_shape=()
+  for i in "${!splash_clouds[@]}"; do
+    read -ra fields <<<"${splash_clouds[i]}"
+    splash_cloud_top[i]=${fields[0]} splash_cloud_x[i]=${fields[1]}
+    splash_cloud_step[i]=${fields[2]} splash_cloud_period[i]=${fields[3]}
+    splash_cloud_rows[i]=$((${#fields[@]} - 4))
+    for ((r = 0; r < splash_cloud_rows[i]; r++)); do
+      splash_cloud_shape[i * splash_horizon + r]=${fields[4 + r]}
+    done
+  done
+}
+
 # Letters before <letter> landed and <letter> <rise> rows short, for wordmark row <row>.
 splash_wordmark_mask() { # <row> <letter> <rise>
   local row=$1 letter=$2 rise=$3 i glyph_row
-  local -a rows
   splash_mask=''
   for i in "${!splash_glyphs[@]}"; do
     ((i > 0)) && splash_mask+='  '
@@ -299,30 +353,28 @@ splash_wordmark_mask() { # <row> <letter> <rise>
     if ((i > letter || glyph_row > 4)); then
       splash_mask+='      '
     else
-      IFS='|' read -ra rows <<<"${splash_glyphs[i]}"
-      splash_mask+=${rows[glyph_row]}
+      splash_mask+=${splash_glyph_rows[i * 5 + glyph_row]}
     fi
   done
 }
 
 # Sun, then clouds, then letters; redrawn only when a cloud or letter has moved.
 splash_sky() { # <frame> <letter> <rise>
-  local frame=$1 letter=$2 rise=$3 entry row top shape key=''
-  local -a cloud
-  for entry in "${splash_clouds[@]}"; do
-    IFS='|' read -ra cloud <<<"$entry"
-    key+="$((cloud[1] + cloud[2] * (frame / cloud[3]))),"
+  local frame=$1 letter=$2 rise=$3 i row shape key=''
+  local -a at=()
+  for i in "${!splash_cloud_top[@]}"; do
+    at[i]=$((splash_cloud_x[i] + splash_cloud_step[i] * (frame / splash_cloud_period[i])))
+    key+="${at[i]},"
   done
   key+="$letter.$rise"
   [[ "$key" == "${splash_sky_key:-}" ]] && return
   splash_sky_key=$key
   for ((row = 0; row < splash_horizon; row++)); do
     splash_text=${splash_sun_text[row]} splash_kinds=${splash_sun_kinds[row]}
-    for entry in "${splash_clouds[@]}"; do
-      IFS='|' read -ra cloud <<<"$entry"
-      top=${cloud[0]} shape=$((4 + row - cloud[0]))
-      ((row >= top && shape < ${#cloud[@]})) || continue
-      splash_lay $((cloud[1] + cloud[2] * (frame / cloud[3]))) "${cloud[shape]}" c
+    for i in "${!splash_cloud_top[@]}"; do
+      shape=$((row - splash_cloud_top[i]))
+      ((shape >= 0 && shape < splash_cloud_rows[i])) || continue
+      splash_lay "${at[i]}" "${splash_cloud_shape[i * splash_horizon + shape]}" c
     done
     if ((row >= splash_wordmark_top && row < splash_wordmark_top + 5)); then
       splash_wordmark_mask $((row - splash_wordmark_top)) "$letter" "$rise"
@@ -419,6 +471,7 @@ splash_wait() { # <start_us> <frame>
 }
 
 splash_prepare() {
+  splash_parse
   splash_draw_sun
   splash_draw_ground
   splash_sky_key=
