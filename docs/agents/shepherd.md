@@ -132,7 +132,9 @@ differs from the shepherd:
   ```
 
   Leave out `--delete-branch`. If another PR must merge first, name it in
-  the question.
+  the question. Single-quote it, `loopherd report --kind question '<question
+  with the merge line>'`: double quotes run the `$(...)` and leak the token
+  into the report.
 - **Heartbeat.** Keep `loopherd watch --timeout 600` as a background
   task. Run from your pane, it's your watch: it reads your herd's workers
   only, never you, and naming any other herd is an error. It holds
