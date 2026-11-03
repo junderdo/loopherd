@@ -197,18 +197,17 @@ fn ends_in_newline(file: &mut fs::File) -> std::io::Result<bool> {
     Ok(last[0] == b'\n')
 }
 
-/// The non-retired member running in `pane` of the herdr at `socket`. An
-/// entry recorded without a socket matches on its pane alone, but only when
-/// no entry matches the socket exactly.
+/// The non-retired member running in `pane` of the herdr at `socket`. Pane
+/// ids repeat across herdr sessions, so an entry recorded without a socket
+/// matches only a caller that has none either.
 pub fn member_in<'a>(
     entries: &'a BTreeMap<String, AgentRecord>,
     pane: &str,
     socket: Option<&Path>,
 ) -> Option<&'a AgentRecord> {
-    let in_pane = || entries.values().filter(|e| !e.retired && e.pane_id == pane);
-    in_pane()
-        .find(|e| socket.is_some() && e.socket.as_deref() == socket)
-        .or_else(|| in_pane().find(|e| e.socket.is_none()))
+    entries
+        .values()
+        .find(|e| !e.retired && e.pane_id == pane && e.socket.as_deref() == socket)
 }
 
 fn reporter(ledger: &dyn Ledger, who: &Reporter) -> Result<String> {

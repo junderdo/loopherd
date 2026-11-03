@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/install [--settings <file>] [install-hook args...]
+Usage: scripts/install [--no-splash] [--settings <file>] [install-hook args...]
 
 Build loopherd, install it as ~/.local/bin/loopherd, and add its Claude
 Stop/StopFailure/SessionStart/PreToolUse hooks and the loopherd skill.
@@ -11,17 +11,28 @@ Other arguments go to `loopherd install-hook`.
 
   scripts/install                      hooks in ~/.claude/settings.json, skill in ~/.claude/skills
   scripts/install --settings <file>    hooks in <file>, skill in skills/ beside it
+  scripts/install --no-splash          skip the opening animation (or set LOOPHERD_NO_SPLASH=1)
   scripts/install -h, --help           print this and exit
 USAGE
 }
 
+splash=1
+args=()
 for arg in "$@"; do
-  case "$arg" in -h | --help) usage; exit 0 ;; esac
+  case "$arg" in
+    -h | --help) usage; exit 0 ;;
+    --no-splash) splash= ;;
+    *) args+=("$arg") ;;
+  esac
 done
 
 command -v jq >/dev/null || { echo "install: needs jq (to read cargo's build output); install it first" >&2; exit 1; }
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+splash_file="$root/scripts/install-splash.bash"
+if [[ -n "$splash" && -r "$splash_file" ]] && source "$splash_file" && splash_wants_to_play; then
+  splash_play || exit
+fi
 bin_dir="$HOME/.local/bin"
 
 built=$(cargo build --release --manifest-path "$root/Cargo.toml" \
@@ -38,4 +49,5 @@ chmod 755 "$tmp"
 mv -f "$tmp" "$bin_dir/loopherd"
 trap - EXIT
 
-"$bin_dir/loopherd" install-hook "$@"
+# The ${..+..} form: bash before 4.4 calls an empty array unbound under set -u.
+"$bin_dir/loopherd" install-hook ${args[@]+"${args[@]}"}

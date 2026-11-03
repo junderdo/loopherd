@@ -161,7 +161,7 @@ pub fn spawn(
     req: &SpawnRequest,
     inherited_workspace: Option<&str>,
 ) -> Result<Spawned> {
-    let (template, workspace) = check(herdr, req, inherited_workspace)?;
+    let (template, workspace, socket) = check(herdr, req, inherited_workspace)?;
     let worktree = match &req.worktree {
         Some(checkout) => Some(checkout.ensure(&req.repo).context("worktree")?),
         None => None,
@@ -205,7 +205,7 @@ pub fn spawn(
             .member_of
             .as_ref()
             .map(|m| m.params.iter().cloned().collect()),
-        socket: herdr.socket(),
+        socket: Some(socket),
         process: None,
         role: req.member_of.as_ref().and_then(|m| m.role),
     };
@@ -274,7 +274,7 @@ pub fn preview(
     req: &SpawnRequest,
     inherited_workspace: Option<&str>,
 ) -> Result<Preview> {
-    let (template, workspace) = check(herdr, req, inherited_workspace)?;
+    let (template, workspace, _) = check(herdr, req, inherited_workspace)?;
     let worktree = match &req.worktree {
         Some(checkout) => Some(checkout.planned(&req.repo).context("worktree")?),
         None => None,
@@ -300,13 +300,16 @@ fn check(
     herdr: &dyn Herdr,
     req: &SpawnRequest,
     inherited_workspace: Option<&str>,
-) -> Result<(Option<Template>, Workspace)> {
+) -> Result<(Option<Template>, Workspace, PathBuf)> {
     validate_name(&req.name).context("name")?;
     let template = parse_prompt(req).context("prompt")?;
     ensure_name_free(herdr, &req.name).context("name")?;
     let workspace = resolve_workspace(herdr, req.workspace.as_deref(), inherited_workspace)
         .context("workspace")?;
-    Ok((template, workspace))
+    let socket = herdr.socket().context(
+        "herdr didn't say which socket it serves; set HERDR_SOCKET_PATH, or the member's stops can't be matched to it",
+    )?;
+    Ok((template, workspace, socket))
 }
 
 fn parse_prompt(req: &SpawnRequest) -> Result<Option<Template>> {
