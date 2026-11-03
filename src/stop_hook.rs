@@ -130,7 +130,7 @@ fn follow_session(
 
 /// Blocks the stop if `handoff` says to; otherwise files it. A failing
 /// `handoff` files the stop with a warning. Only a member recorded in this
-/// pane's herdr is asked: a socketless entry may be another herdr's pane.
+/// pane's herdr is asked, never a socketless one.
 fn settle(
     dir: &Path,
     pane: &Pane,
@@ -416,17 +416,20 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_recorded_without_a_socket_matches_on_its_pane_alone() {
-        let dir = tempfile::tempdir().unwrap();
+    fn a_socketless_entry_matches_only_a_caller_without_a_socket() {
         let ledger = ledger(vec![member("lh-1", "w1:p1", None)]);
+        let dir = tempfile::tempdir().unwrap();
         assert_eq!(
-            run(&ledger, dir.path(), "w1:p1", Some(SOCKET), "{}").as_deref(),
+            run(&ledger, dir.path(), "w1:p1", None, "{}").as_deref(),
             Some("lh-1")
         );
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(run(&ledger, dir.path(), "w1:p1", Some(SOCKET), "{}"), None);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]
-    fn an_exact_socket_match_beats_an_older_socketless_entry_on_the_same_pane() {
+    fn a_socketed_caller_matches_its_exact_socket_and_never_a_socketless_entry() {
         let dir = tempfile::tempdir().unwrap();
         let ledger = ledger(vec![
             member("aaa-old", "w1:p3", None),
@@ -437,8 +440,8 @@ mod tests {
             Some("zzz-live")
         );
         assert_eq!(
-            run(&ledger, dir.path(), "w1:p3", Some("/run/other.sock"), "{}").as_deref(),
-            Some("aaa-old")
+            run(&ledger, dir.path(), "w1:p3", Some("/run/other.sock"), "{}"),
+            None
         );
     }
 
@@ -629,7 +632,17 @@ mod tests {
     fn a_socketless_entry_is_filed_by_the_session_check_but_never_claimed() {
         let mut l = ledger(vec![member("lh-1", "w1:p1", None)]);
         l.0.get_mut("lh-1").unwrap().session_id = Some("sess-a".into());
-        let (who, _, _) = from_pid(&mut l, Some(30), &stop_from("sess-a"));
+        let dir = tempfile::tempdir().unwrap();
+        let who = run_as(
+            &mut l,
+            &two_claudes(),
+            Some(30),
+            dir.path(),
+            "w1:p1",
+            None,
+            &stop_from("sess-a"),
+            &mut |_| {},
+        );
         assert_eq!(who.as_deref(), Some("lh-1"));
         assert_eq!(l.0["lh-1"].process, None);
     }
@@ -870,7 +883,7 @@ mod tests {
         let mut l = ledger(vec![member("lh-1", "w1:p1", None)]);
         let pane = Pane {
             id: "w1:p1",
-            socket: Some(Path::new("/run/other/herdr.sock")),
+            socket: None,
             claude_pid: None,
         };
         let stopped = stop_hook(

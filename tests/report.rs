@@ -247,9 +247,10 @@ fn a_pane_of_another_herdr_is_not_the_member_recorded_with_a_socket() {
     .unwrap();
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
-        "",
-        "lh-1 has no socket"
+        "loopherd report: pane w1:p1 of /run/other/herdr.sock is not a member\n",
+        "lh-1 has no socket, so a pane of any herdr is not it"
     );
+    assert!(!state.path().join("loopherd/reports").exists());
 }
 
 fn stop_hook(state: &Path, pane: Option<(&str, &str)>, input: &str) -> Output {
