@@ -22,6 +22,8 @@ pub enum Kind {
     Done,
     Question,
     Note,
+    /// The member wrote its handoff and waits for `loopherd restart`.
+    Handoff,
 }
 
 impl Kind {
@@ -30,6 +32,7 @@ impl Kind {
             Kind::Done => "done",
             Kind::Question => "question",
             Kind::Note => "note",
+            Kind::Handoff => "handoff",
         }
     }
 }
@@ -62,6 +65,7 @@ impl Entry {
             Body::Done { text } => Some((Kind::Done, text)),
             Body::Question { text } => Some((Kind::Question, text)),
             Body::Note { text } => Some((Kind::Note, text)),
+            Body::Handoff { text } => Some((Kind::Handoff, text)),
             Body::Stop(_) | Body::Start => None,
         }
     }
@@ -79,6 +83,9 @@ pub enum Body {
     Note {
         text: String,
     },
+    Handoff {
+        text: String,
+    },
     /// Claude ended a turn; written only by the Stop hook.
     Stop(Stop),
     /// spawn or revive started the member's Claude.
@@ -92,6 +99,7 @@ impl Body {
             Kind::Done => Body::Done { text },
             Kind::Question => Body::Question { text },
             Kind::Note => Body::Note { text },
+            Kind::Handoff => Body::Handoff { text },
         }
     }
 }
@@ -336,6 +344,25 @@ pub fn unread_stops(dir: &Path, names: &[String]) -> Result<(Vec<Mailbox>, Pendi
     Ok((stops, pending))
 }
 
+/// `name`'s last stop since its last start, if any.
+pub fn last_stop(dir: &Path, name: &str) -> Result<Option<Stop>> {
+    if !dir.join(format!("{name}.jsonl")).is_file() {
+        return Ok(None);
+    }
+    let (bytes, end) = complete_lines(dir, name)?;
+    let mut entries = vec![];
+    parse(dir, name, &bytes[..end], &mut entries, &mut vec![]);
+    Ok(entries
+        .into_iter()
+        .rev()
+        .find_map(|(_, e)| match e.body {
+            Body::Stop(stop) => Some(Some(stop)),
+            Body::Start => Some(None),
+            _ => None,
+        })
+        .flatten())
+}
+
 /// Cursor moves read but not yet saved.
 #[must_use = "the cursor moves only once saved"]
 pub struct Pending {
@@ -482,6 +509,11 @@ fn describe(stop: &Stop) -> String {
 }
 
 impl Stop {
+    /// `finished`, `paused: 1 shell`, or what's unknown, after any error.
+    pub fn describe(&self) -> String {
+        describe(self)
+    }
+
     /// What may still wake Claude, `1 shell, 2 crons` or `background
     /// unknown`; `None` when nothing is in flight.
     pub fn pending(&self) -> Option<String> {

@@ -169,6 +169,30 @@ fn watch_wakes_on_an_unread_report_and_times_out_silently_once_read() {
 }
 
 #[test]
+fn a_handoff_report_wakes_watch_with_a_handoff_line() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    install_hook(state.path());
+    run(
+        state.path(),
+        None,
+        &[
+            "report",
+            "--kind",
+            "handoff",
+            "--as",
+            "lh-2",
+            "mid-refactor",
+        ],
+    );
+
+    let out = run(state.path(), None, &["watch", "--timeout", "0"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.starts_with("lh-2 handoff 20"), "{stdout}");
+    assert!(stdout.ends_with(" mid-refactor\n"), "{stdout}");
+}
+
+#[test]
 fn watch_warns_about_a_herd_with_no_herd_file() {
     let state = tempfile::tempdir().unwrap();
     let config = tempfile::tempdir().unwrap();
@@ -299,4 +323,63 @@ fn the_stop_hook_records_nothing_outside_a_members_pane_and_exits_0() {
         assert_eq!(String::from_utf8_lossy(&out.stderr), "", "{pane:?}");
         assert!(!state.path().join("loopherd/reports").exists(), "{pane:?}");
     }
+}
+
+#[test]
+fn past_its_limit_the_stop_hook_prints_one_block_decision_and_files_nothing() {
+    let state = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    fs::write(
+        config.path().join("config.toml"),
+        "default_context_limit = 100\n",
+    )
+    .unwrap();
+    let transcript = state.path().join("t.jsonl");
+    fs::write(
+        &transcript,
+        r#"{"type":"assistant","isSidechain":false,"message":{"usage":{"input_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":200}}}"#,
+    )
+    .unwrap();
+    let input = format!(
+        r#"{{"hook_event_name":"Stop","session_id":"s1","transcript_path":"{}","background_tasks":[],"session_crons":[]}}"#,
+        transcript.display()
+    );
+    let hook = || {
+        let mut cmd = loopherd_in(state.path(), Some(("w1:p2", SOCKET)), &["stop-hook"]);
+        cmd.env("LOOPHERD_CONFIG_DIR", config.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+
+    let out = hook();
+    assert_eq!(out.status.code(), Some(0));
+    let decision: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(decision["decision"], "block");
+    let reason = decision["reason"].as_str().unwrap();
+    let handoff = state.path().join("loopherd/handoffs/lh-2.md");
+    assert!(
+        reason.contains("205 tokens, past your limit of 100"),
+        "{reason}"
+    );
+    assert!(reason.contains(&handoff.display().to_string()), "{reason}");
+    let all = run(state.path(), None, &["reports", "--all"]);
+    assert_eq!(all.stdout, b"");
+
+    let out = hook();
+    assert_eq!(out.stdout, b"");
+    let all = run(state.path(), None, &["reports", "--all"]);
+    assert!(
+        String::from_utf8_lossy(&all.stdout).contains("lh-2 stop "),
+        "{all:?}"
+    );
 }

@@ -536,7 +536,7 @@ fn stop_wakes(mailbox: &Mailbox) -> Vec<String> {
                 (paused, reported) = (false, false);
                 None
             }
-            Body::Done { .. } | Body::Question { .. } => {
+            Body::Done { .. } | Body::Question { .. } | Body::Handoff { .. } => {
                 reported = true;
                 None
             }
@@ -950,6 +950,25 @@ mod tests {
         assert_eq!(
             once(&herdr, &ledger, dir.path()).unwrap(),
             ["lh-1 finished  no report"]
+        );
+    }
+
+    #[test]
+    fn a_handoff_counts_as_the_report_before_a_finish() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = working_pair();
+        put(dir.path(), "lh-1", Body::Start);
+        put(
+            dir.path(),
+            "lh-1",
+            Body::Handoff {
+                text: "at step 3".into(),
+            },
+        );
+        put(dir.path(), "lh-1", stop(0, 0));
+        assert_eq!(
+            once(&herdr, &ledger, dir.path()).unwrap(),
+            ["lh-1 handoff 2026-11-01 09:00 at step 3", "lh-1 finished"]
         );
     }
 

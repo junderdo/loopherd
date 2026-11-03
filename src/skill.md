@@ -75,6 +75,7 @@ that pane. Read `herdr --skill` before controlling herdr.
    | `<member> done <time> <text>` | A finished member's report, usually with its output's link. Verify it. |
    | `<member> question <time> <text>` | It stopped on a question. Relay it to the human; a lead relays it with its own question report, unless it's a design question and `design_escalation` is on. |
    | `<member> note <time> <text>` | Information only; nothing waits on it. |
+   | `<member> handoff <time> <text>` | It passed its context limit and wrote its handoff. Restart it (see Handoffs) if you read it. |
    | `<member> paused  1 shell, 1 cron` | Turn ended with work in flight that can wake it again. Another paused stop is quiet. |
    | `<member> paused  background unknown` | Turn ended and Claude didn't say what's in flight (also `crons unknown`, or `1 shell; crons unknown`). |
    | `<member> finished` | Turn ended with nothing in flight, after a `done` or `question`. |
@@ -105,6 +106,39 @@ that pane. Read `herdr --skill` before controlling herdr.
    verifier at the merge commit in a detached temp worktree, since reaping
    removes the member's.
 
+### Handoffs
+
+A member's Stop hook measures its context after each turn. Past its limit,
+it blocks that stop once per session and tells the member to save its work
+(a worker commits and pushes its branch and comments its progress on its
+task), write its handoff to `$XDG_STATE_HOME/loopherd/handoffs/<name>.md`,
+report `--kind handoff`, and end its turn. The last handoff moves to
+`<name>.prev.md`. The limit is the template's or `[lead]`'s
+`context_limit`, else `default_context_limit` in
+`$LOOPHERD_CONFIG_DIR/config.toml`, else 250000, never over 80% of that
+file's `context_window` (default 200000).
+
+The handoff file has a fixed outline, and leaves out what's already in the
+tracker, the ledger or the mailbox:
+
+```markdown
+## State
+What's done, what's half-done, and where (branch, PR, files).
+## Next steps
+The plan, in order.
+## Gotchas
+What would bite whoever picks this up.
+```
+
+**Restart** whoever's `handoff` line you read: the shepherd restarts leads,
+workers of unled herds and members in no herd; a lead restarts its own
+workers. Wait for its `finished` line, then `loopherd restart <name>`. It
+sends `/clear`, waits for the ledger to follow the new session, and prompts
+the member to read its handoff; same pane, worktree and branch. It refuses
+a member whose last stop isn't `finished` with nothing in flight; `--force`
+overrides that, and is the human's call (a lead's PreToolUse hook denies
+it).
+
 ### Commands
 
 - `loopherd status` lists members by herd with herdr's live status;
@@ -118,6 +152,8 @@ that pane. Read `herdr --skill` before controlling herdr.
   they're clean and merged. Feed's `done` check does this for you.
 - `loopherd prompt <name>` sends a member its stored prompt, e.g. after a
   spawn exited 3 on a dialog.
+- `loopherd restart <name>` gives a member that handed off a fresh session
+  (see Handoffs).
 - `loopherd lead <herd>` starts the herd's lead from its herd file's
   `[lead]` table.
 - **After a herdr restart** run `loopherd revive` (`--dry-run` first). It
@@ -216,6 +252,10 @@ shepherd:
 - **On each wake** re-read `loopherd status` and `loopherd reports --all`
   before acting: auto-compaction drops detail, and your state lives in the
   tracker, ledger and mailbox, not in your context.
+- **Your own handoff.** Past your limit, your Stop hook asks you for a
+  handoff like any member's (see Handoffs): write it, report `--kind
+  handoff`, and end your turn. The shepherd restarts you. Restart your
+  workers when they hand off; never with `--force`.
 - **Your checkout** is detached; refresh it with `git fetch origin && git
   checkout --detach origin/<default branch>` rather than `git pull`, and
   never commit in it.

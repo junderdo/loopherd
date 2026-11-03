@@ -180,6 +180,22 @@ loopherd lead zagops-prs
 loopherd watch zagops-prs               # from your pane: wakes on the lead, not its workers
 ```
 
+### Handoff at a context limit
+
+Past its context limit, a member's Stop hook asks it, once per session, to
+write a handoff to `$XDG_STATE_HOME/loopherd/handoffs/<name>.md` and report
+`--kind handoff`. `loopherd restart <name>` then clears its session and has
+it resume from that file, in the same pane and worktree.
+
+```toml
+# in a [template.*] or [lead] table
+context_limit = 150000
+
+# $LOOPHERD_CONFIG_DIR/config.toml (optional)
+default_context_limit = 250000   # for members without their own
+context_window = 200000          # limits are capped at 80% of this
+```
+
 A complete lead setup is in [docs/examples/](docs/examples/). The playbook
 the shepherd and leads follow is
 [docs/agents/shepherd.md](docs/agents/shepherd.md).
