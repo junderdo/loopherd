@@ -327,7 +327,7 @@ fn an_installed_tool_hook_whose_binary_fails_with_exit_2_does_not_block() {
         &stale,
         "#!/bin/sh\necho \"error: unrecognized subcommand '$1'\" >&2\nexit 2\n",
     );
-    // install-hook writes current_exe(), which is canonical; the env! path may hold `..`.
+    // install-hook writes current_exe(), canonical on Linux; the env! path may hold `..`.
     let exe = fs::canonicalize(env!("CARGO_BIN_EXE_loopherd")).unwrap();
     let stale = stale.to_str().unwrap();
     let command = real.replacen(exe.to_str().unwrap(), stale, 1);
