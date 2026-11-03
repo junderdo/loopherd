@@ -1,5 +1,6 @@
 //! `loopherd stop-hook`: Claude's Stop and StopFailure hook. Each stop of a
-//! member lands as a `stop` entry in its mailbox; anything else is ignored.
+//! member lands as a `stop` entry in its mailbox, unless the hook blocks it
+//! to ask for a handoff; anything else is ignored.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -19,13 +20,25 @@ pub struct Pane<'a> {
     pub claude_pid: Option<u32>,
 }
 
-/// Records the stop `input` describes for the member in `pane`; returns the
-/// member's name, or `None` when the pane is no member's or the stop came from
-/// another Claude than the member's. With the member's process known, that is
+/// What the hook did with a member's stop.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Stopped {
+    Filed(String),
+    /// Not filed: Claude continues with `reason` as its next instruction.
+    Blocked {
+        name: String,
+        reason: String,
+    },
+}
+
+/// Records the stop `input` describes for the member in `pane`, or blocks it
+/// when `handoff` gives a reason; `None` when the pane is no member's or the
+/// stop came from another Claude than the member's. With the member's process known, that is
 /// the test, and a stop from it carries the member's current session into the
 /// ledger; otherwise the hook tries to claim the process. A Claude that isn't
 /// the pane's top-level one is dropped; if the claim fails for another reason,
 /// or there is no usable `$CLAUDE_PID`, sessions are compared.
+#[allow(clippy::too_many_arguments)]
 pub fn stop_hook(
     ledger: &mut dyn Ledger,
     procs: &dyn Procs,
@@ -33,8 +46,9 @@ pub fn stop_hook(
     pane: &Pane,
     input: &[u8],
     now: SystemTime,
+    handoff: &dyn Fn(&AgentRecord) -> Result<Option<String>>,
     warn: &mut dyn FnMut(String),
-) -> Result<Option<String>> {
+) -> Result<Option<Stopped>> {
     let entries = ledger.entries()?;
     let Some(member) = member_in(&entries, pane.id, pane.socket) else {
         return Ok(None);
@@ -44,11 +58,10 @@ pub fn stop_hook(
         let exact = pane.socket.is_some() && member.socket.as_deref() == pane.socket;
         match process::live(procs, member.process) {
             Some(ours) if ours.pid == pid => {
-                let filed = file(dir, member, stop.clone(), now)?;
                 if let Err(e) = follow_session(ledger, &entries, member, &stop) {
                     warn(format!("could not update {}'s session: {e:#}", member.name));
                 }
-                return Ok(filed);
+                return settle(dir, pane, member, stop, now, handoff, warn);
             }
             Some(ours) => {
                 warn(format!(
@@ -65,7 +78,7 @@ pub fn stop_hook(
                             Claim::Declined
                         });
                 match claim {
-                    Claim::Claimed => return file(dir, member, stop, now),
+                    Claim::Claimed => return settle(dir, pane, member, stop, now, handoff, warn),
                     Claim::Nested => {
                         warn(format!(
                             "dropped a stop from process {pid} in {}'s pane; it is not the pane's top-level Claude",
@@ -87,7 +100,7 @@ pub fn stop_hook(
         ));
         return Ok(None);
     }
-    file(dir, member, stop, now)
+    settle(dir, pane, member, stop, now, handoff, warn)
 }
 
 fn follow_session(
@@ -115,9 +128,27 @@ fn follow_session(
     Ok(())
 }
 
-fn file(dir: &Path, member: &AgentRecord, stop: Stop, now: SystemTime) -> Result<Option<String>> {
-    append(dir, &member.name, &Entry::new(now, Body::Stop(stop)))?;
-    Ok(Some(member.name.clone()))
+/// Blocks the stop if `handoff` says to; otherwise files it. A failing
+/// `handoff` files the stop with a warning. Only a member recorded in this
+/// pane's herdr is asked: a socketless entry may be another herdr's pane.
+fn settle(
+    dir: &Path,
+    pane: &Pane,
+    member: &AgentRecord,
+    stop: Stop,
+    now: SystemTime,
+    handoff: &dyn Fn(&AgentRecord) -> Result<Option<String>>,
+    warn: &mut dyn FnMut(String),
+) -> Result<Option<Stopped>> {
+    let name = member.name.clone();
+    let ours = pane.socket.is_some() && member.socket.as_deref() == pane.socket;
+    match if ours { handoff(member) } else { Ok(None) } {
+        Ok(Some(reason)) => return Ok(Some(Stopped::Blocked { name, reason })),
+        Ok(None) => {}
+        Err(e) => warn(format!("could not check {name}'s context: {e:#}")),
+    }
+    append(dir, &name, &Entry::new(now, Body::Stop(stop)))?;
+    Ok(Some(Stopped::Filed(name)))
 }
 
 /// Unparseable input still records the stop, with everything unknown.
@@ -239,7 +270,21 @@ mod tests {
             socket: socket.map(Path::new),
             claude_pid,
         };
-        stop_hook(ledger, procs, dir, &pane, input.as_bytes(), at(), warn).unwrap()
+        let filed = stop_hook(
+            ledger,
+            procs,
+            dir,
+            &pane,
+            input.as_bytes(),
+            at(),
+            &|_| Ok(None),
+            warn,
+        )
+        .unwrap();
+        filed.map(|s| match s {
+            Stopped::Filed(name) => name,
+            Stopped::Blocked { name, .. } => panic!("blocked {name}"),
+        })
     }
 
     fn mailbox(dir: &Path, name: &str) -> String {
@@ -637,10 +682,11 @@ mod tests {
             &pane,
             stop_from("branched").as_bytes(),
             at(),
+            &|_| Ok(None),
             &mut |w| warnings.push(w),
         )
         .unwrap();
-        assert_eq!(who.as_deref(), Some("lh-1"));
+        assert_eq!(who, Some(Stopped::Filed("lh-1".into())));
         assert!(mailbox(dir.path(), "lh-1").contains("branched"));
         assert!(warnings[0].contains("disk full"), "{warnings:?}");
     }
@@ -689,5 +735,176 @@ mod tests {
         assert_eq!(who, None);
         let (who, _, _) = from_pid(&mut l, None, &stop_from("sess-a"));
         assert_eq!(who.as_deref(), Some("lh-1"));
+    }
+
+    fn hook_with(
+        ledger: &mut MemLedger,
+        dir: &Path,
+        pane: &str,
+        pid: Option<u32>,
+        input: &str,
+        handoff: &dyn Fn(&AgentRecord) -> anyhow::Result<Option<String>>,
+        warnings: &mut Vec<String>,
+    ) -> Option<Stopped> {
+        let pane = Pane {
+            id: pane,
+            socket: Some(Path::new(SOCKET)),
+            claude_pid: pid,
+        };
+        stop_hook(
+            ledger,
+            &two_claudes(),
+            dir,
+            &pane,
+            input.as_bytes(),
+            at(),
+            handoff,
+            &mut |w| warnings.push(w),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_stop_over_the_context_limit_is_blocked_once_and_not_filed() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let transcript = dir.path().join("t.jsonl");
+        std::fs::write(
+            &transcript,
+            r#"{"type":"assistant","isSidechain":false,"message":{"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":150}}}"#,
+        )
+        .unwrap();
+        let input = format!(
+            r#"{{"hook_event_name":"Stop","session_id":"sess-a","transcript_path":"{}","background_tasks":[],"session_crons":[]}}"#,
+            transcript.display()
+        );
+        let handoff =
+            |m: &AgentRecord| crate::context::handoff_block(m, input.as_bytes(), 100, &state);
+        let mut l = claimed(Some("sess-a"), 30, 300);
+
+        let first = hook_with(
+            &mut l,
+            dir.path(),
+            "w1:p1",
+            Some(30),
+            &input,
+            &handoff,
+            &mut vec![],
+        );
+        let Some(Stopped::Blocked { name, reason }) = first else {
+            panic!("{first:?}");
+        };
+        assert_eq!(name, "lh-1");
+        assert!(
+            reason.contains("151 tokens, past your limit of 100"),
+            "{reason}"
+        );
+        assert!(reason.contains(&state.join("handoffs/lh-1.md").display().to_string()));
+        assert_eq!(mailbox(dir.path(), "lh-1"), "");
+
+        let second = hook_with(
+            &mut l,
+            dir.path(),
+            "w1:p1",
+            Some(30),
+            &input,
+            &handoff,
+            &mut vec![],
+        );
+        assert_eq!(second, Some(Stopped::Filed("lh-1".into())));
+        assert!(mailbox(dir.path(), "lh-1").contains(r#""kind":"stop""#));
+    }
+
+    #[test]
+    fn only_the_members_own_claude_is_asked_for_a_handoff() {
+        let asked = std::cell::RefCell::new(vec![]);
+        let handoff = |m: &AgentRecord| {
+            asked.borrow_mut().push(m.name.clone());
+            Ok(Some("hand off".into()))
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = claimed(Some("sess-a"), 30, 300);
+        let stop = stop_from("sess-a");
+        assert_eq!(
+            hook_with(
+                &mut l,
+                dir.path(),
+                "w1:p9",
+                Some(30),
+                &stop,
+                &handoff,
+                &mut vec![]
+            ),
+            None
+        );
+        assert_eq!(
+            hook_with(
+                &mut l,
+                dir.path(),
+                "w1:p1",
+                Some(50),
+                &stop,
+                &handoff,
+                &mut vec![]
+            ),
+            None
+        );
+        assert!(asked.borrow().is_empty());
+        assert!(matches!(
+            hook_with(
+                &mut l,
+                dir.path(),
+                "w1:p1",
+                Some(30),
+                &stop,
+                &handoff,
+                &mut vec![]
+            ),
+            Some(Stopped::Blocked { .. })
+        ));
+    }
+
+    #[test]
+    fn a_member_recorded_without_a_socket_is_never_asked_for_a_handoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = ledger(vec![member("lh-1", "w1:p1", None)]);
+        let pane = Pane {
+            id: "w1:p1",
+            socket: Some(Path::new("/run/other/herdr.sock")),
+            claude_pid: None,
+        };
+        let stopped = stop_hook(
+            &mut l,
+            &FakeProcs::default(),
+            dir.path(),
+            &pane,
+            b"{}",
+            at(),
+            &|_| panic!("asked a socketless member"),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(stopped, Some(Stopped::Filed("lh-1".into())));
+    }
+
+    #[test]
+    fn a_failing_context_check_files_the_stop_with_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = claimed(Some("sess-a"), 30, 300);
+        let mut warnings = vec![];
+        let stopped = hook_with(
+            &mut l,
+            dir.path(),
+            "w1:p1",
+            Some(30),
+            &stop_from("sess-a"),
+            &|_| anyhow::bail!("config.toml: bad"),
+            &mut warnings,
+        );
+        assert_eq!(stopped, Some(Stopped::Filed("lh-1".into())));
+        assert_eq!(
+            warnings,
+            ["could not check lh-1's context: config.toml: bad"]
+        );
     }
 }

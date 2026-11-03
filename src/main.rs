@@ -1,3 +1,4 @@
+mod context;
 mod feed;
 mod herd;
 mod herd_view;
@@ -10,6 +11,7 @@ mod matching;
 mod process;
 mod prompt;
 mod report;
+mod restart;
 mod retire;
 mod revive;
 mod session_hook;
@@ -133,6 +135,17 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Give a member that wrote its handoff a fresh session in the same pane:
+    /// sends it /clear, waits for the ledger to follow the new session, then
+    /// prompts it to read its handoff. Refuses unless its last stop is finished.
+    Restart {
+        name: String,
+        /// Skip the checks that it handed off and is finished since. A /clear sent
+        /// mid-turn waits for that turn, then drops whatever the handoff doesn't
+        /// record: that turn's work, background tasks and crons.
+        #[arg(long)]
+        force: bool,
+    },
     /// Leave a report for the shepherd from the member running in this pane.
     /// The one command members run against the real state dir.
     Report {
@@ -155,16 +168,18 @@ enum Command {
         all: bool,
     },
     /// Claude's Stop and StopFailure hook: records the stop, read from the hook
-    /// input on stdin, in the mailbox of the member running in this pane.
-    /// Outside a member's pane it records nothing. Set up by install-hook.
+    /// input on stdin, in the mailbox of the member running in this pane. Once per
+    /// session past the member's context limit, it blocks the stop instead and asks
+    /// for a handoff. Outside a member's pane it records nothing. Set up by install-hook.
     StopHook,
     /// Claude's SessionStart hook: when a member's Claude is cleared or resumed,
     /// points its ledger entry at the new session, read from the hook input on
     /// stdin. Outside a member's pane it changes nothing. Set up by install-hook.
     SessionHook,
     /// Claude's PreToolUse hook on Bash: in a lead's pane, denies a merge, install,
-    /// rebase or force-push its herd file's switch leaves to the human, read from the
-    /// hook input on stdin, by printing a deny decision. Elsewhere it prints nothing.
+    /// rebase or force-push its herd file's switch leaves to the human, and any
+    /// `loopherd restart --force`, read from the hook input on stdin, by printing a
+    /// deny decision. Elsewhere it prints nothing.
     /// Always exits 0. Set up by install-hook.
     ToolHook,
     /// Add loopherd's Stop, StopFailure, SessionStart and PreToolUse hooks to Claude's
@@ -284,6 +299,7 @@ fn main() -> ExitCode {
         Command::Retire { name, close } => ("retire", run_retire(&name, close)),
         Command::Revive { dry_run, name } => ("revive", run_revive(dry_run, name)),
         Command::Prompt { name, force } => ("prompt", run_prompt(&name, force)),
+        Command::Restart { name, force } => ("restart", run_restart(&name, force)),
         Command::Status { all, strays, json } => ("status", run_status(all, strays, json)),
         Command::View { all, strays } => ("view", run_view(all, strays)),
         Command::Report {
@@ -384,6 +400,25 @@ fn run_prompt(name: &str, force: bool) -> Result<i32> {
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     prompt(&CliHerdr, &mut ledger, name, force)?;
     println!("prompted {name}");
+    Ok(0)
+}
+
+fn run_restart(name: &str, force: bool) -> Result<i32> {
+    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let state = ledger.dir()?;
+    let own_pane = own_pane();
+    let req = restart::RestartRequest {
+        name,
+        force,
+        own_pane: own_pane.as_deref(),
+        state: &state,
+        settle_timeout: Duration::from_secs(30),
+        poll: Duration::from_millis(250),
+    };
+    println!(
+        "{}",
+        restart::restart(&CliHerdr, &mut ledger, &req, SystemTime::now())?
+    );
     Ok(0)
 }
 
@@ -491,15 +526,27 @@ fn run_stop_hook() -> Result<i32> {
         claude_pid: process::claude_pid_from_env(&process::ProcFs),
     };
     let reports = ledger.reports_dir()?;
-    stop_hook::stop_hook(
+    let state = ledger.dir()?;
+    let handoff = |member: &ledger::AgentRecord| {
+        let limit = herd::context_limit(&Paths::from_env()?, member)?;
+        context::handoff_block(member, &input, limit, &state)
+    };
+    let stopped = stop_hook::stop_hook(
         &mut ledger,
         &process::ProcFs,
         &reports,
         &pane,
         &input,
         SystemTime::now(),
+        &handoff,
         &mut |warning| eprintln!("loopherd stop-hook: {warning}"),
     )?;
+    if let Some(stop_hook::Stopped::Blocked { reason, .. }) = stopped {
+        println!(
+            "{}",
+            serde_json::json!({"decision": "block", "reason": reason})
+        );
+    }
     Ok(0)
 }
 

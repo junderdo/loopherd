@@ -47,6 +47,7 @@ struct LeadFile {
     design_escalation: bool,
     #[serde(default)]
     blocked_dialogs: bool,
+    context_limit: Option<u64>,
 }
 
 /// What a lead may do on its own; off means the human does it.
@@ -104,6 +105,7 @@ struct TemplateFile {
     /// Like `done`, exiting 0 once a member's work is merged; a lead's
     /// watch wakes on it.
     merged: Option<String>,
+    context_limit: Option<u64>,
 }
 
 /// How long [`Paths::lock_feed`] waits out another holder.
@@ -552,6 +554,23 @@ pub fn lead_config(paths: &Paths, herd: &str) -> Result<LeadConfig> {
     })
 }
 
+/// The context limit past which `member`'s Stop hook asks for a handoff:
+/// its template's or `[lead]`'s `context_limit`, else `config.toml`'s.
+pub fn context_limit(paths: &Paths, member: &AgentRecord) -> Result<u64> {
+    let own = match (&member.herd, &member.template) {
+        (Some(herd), _) if member.is_lead() => load(&paths.herds, herd)?
+            .lead
+            .and_then(|lead| lead.context_limit),
+        (Some(herd), Some(template)) => load(&paths.herds, herd)?
+            .template
+            .get(template)
+            .and_then(|t| t.context_limit),
+        _ => None,
+    };
+    let config = paths.herds.with_file_name("config.toml");
+    crate::context::effective_limit(own, &config)
+}
+
 /// A herd's `[lead]` switches, without reading its prompt.
 pub fn lead_switches(paths: &Paths, herd: &str) -> Result<Switches> {
     let file = load(&paths.herds, herd).context("herd")?;
@@ -736,6 +755,7 @@ fn parse(text: &str) -> Result<HerdFile> {
     }
     if let Some(lead) = &parsed.lead {
         one_prompt(&lead.prompt, &lead.prompt_file).context("lead")?;
+        crate::context::check_tokens("context_limit", lead.context_limit).context("lead")?;
     }
     Ok(parsed)
 }
@@ -765,6 +785,7 @@ fn one_prompt(prompt: &Option<String>, prompt_file: &Option<String>) -> Result<(
 
 fn validate(template: &TemplateFile) -> Result<()> {
     one_prompt(&template.prompt, &template.prompt_file)?;
+    crate::context::check_tokens("context_limit", template.context_limit)?;
     if template.branch.is_some() && template.worktree.is_some() {
         bail!("set one of branch and worktree, not both");
     }
@@ -1873,5 +1894,104 @@ args = ["--model", "opus"]
             let on: Vec<&str> = lines.lines().filter(|l| l.ends_with(" on")).collect();
             assert_eq!(on, [format!("{switch} on")], "{switch}");
         }
+    }
+
+    fn record(herd: Option<&str>, template: Option<&str>, lead: bool) -> AgentRecord {
+        AgentRecord {
+            name: "m".into(),
+            pane_id: "w1:p1".into(),
+            session_id: None,
+            repo: "/src/repo".into(),
+            worktree: None,
+            branch: None,
+            workspace: "w1".into(),
+            workspace_label: None,
+            claude_args: vec![],
+            prompt: None,
+            prompt_sent: true,
+            created: "2026-11-01T00:00:00Z".into(),
+            retired: false,
+            retired_at: None,
+            herd: herd.map(str::to_string),
+            template: template.map(str::to_string),
+            params: None,
+            socket: None,
+            process: None,
+            role: lead.then_some(crate::ledger::Role::Lead),
+        }
+    }
+
+    const LIMITED_HERD: &str = r#"
+repo = "/src/repo"
+
+[template.pr]
+params = ["number"]
+prompt = "hi"
+context_limit = 120000
+
+[template.plain]
+params = []
+prompt = "hi"
+
+[lead]
+prompt = "lead"
+context_limit = 90000
+"#;
+
+    #[test]
+    fn a_members_context_limit_is_its_templates_or_its_leads() {
+        let config = Config::with(&[("cards", LIMITED_HERD)]);
+        let paths = config.paths();
+        let limit = |herd, template, lead| context_limit(&paths, &record(herd, template, lead));
+        assert_eq!(limit(Some("cards"), Some("pr"), false).unwrap(), 120_000);
+        assert_eq!(limit(Some("cards"), None, true).unwrap(), 90_000);
+    }
+
+    #[test]
+    fn without_its_own_limit_a_member_gets_config_tomls_default() {
+        let config = Config::with(&[("cards", LIMITED_HERD)]);
+        let paths = config.paths();
+        let limit = |herd, template| context_limit(&paths, &record(herd, template, false));
+        assert_eq!(limit(Some("cards"), Some("plain")).unwrap(), 160_000);
+        assert_eq!(limit(None, None).unwrap(), 160_000);
+        fs::write(
+            config.path().join("config.toml"),
+            "default_context_limit = 70000\n",
+        )
+        .unwrap();
+        assert_eq!(limit(Some("cards"), Some("plain")).unwrap(), 70_000);
+        assert_eq!(limit(None, None).unwrap(), 70_000);
+        assert_eq!(limit(Some("cards"), Some("pr")).unwrap(), 120_000);
+    }
+
+    #[test]
+    fn a_context_limit_under_the_minimum_is_an_invalid_herd_file() {
+        for (herd, message) in [
+            (
+                "repo = \"/r\"\n[template.t]\nparams = []\nprompt = \"p\"\ncontext_limit = 0\n",
+                "template t: context_limit must be at least 10000, got 0",
+            ),
+            (
+                "repo = \"/r\"\n[lead]\nprompt = \"p\"\ncontext_limit = 500\n",
+                "lead: context_limit must be at least 10000, got 500",
+            ),
+        ] {
+            let config = Config::with(&[("cards", herd)]);
+            let err = context_limit(&config.paths(), &record(Some("cards"), Some("t"), false))
+                .unwrap_err();
+            let err = format!("{err:#}");
+            assert!(
+                err.contains("cards.toml") && err.ends_with(message),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_herd_file_fails_the_limit() {
+        let config = Config::with(&[]);
+        let err =
+            context_limit(&config.paths(), &record(Some("gone"), Some("pr"), false)).unwrap_err();
+        assert!(format!("{err:#}").contains("gone.toml"), "{err:#}");
     }
 }

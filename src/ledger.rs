@@ -121,13 +121,18 @@ impl FileLedger {
         &self.path
     }
 
-    /// The members' mailboxes, beside the ledger.
-    pub fn reports_dir(&self) -> Result<PathBuf> {
+    /// loopherd's state dir, which holds the ledger.
+    pub fn dir(&self) -> Result<PathBuf> {
         Ok(self
             .path
             .parent()
             .context("ledger path has no parent")?
-            .join("reports"))
+            .to_path_buf())
+    }
+
+    /// The members' mailboxes, beside the ledger.
+    pub fn reports_dir(&self) -> Result<PathBuf> {
+        Ok(self.dir()?.join("reports"))
     }
 
     /// Held by every writer for its read-modify-write; readers see whole
