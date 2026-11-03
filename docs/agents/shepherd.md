@@ -144,7 +144,9 @@ differs from the shepherd:
   with an error and leaves your herd's events for the shepherd. Every 60s it also runs your herd's checks
   and wakes you with `<member> merged` (the template's `merged` passes, its
   `done` doesn't): run the after-merge steps for it; or `<name> claimable`
-  (feed would spawn `<name>`): feed. Each wakes you once. Exit 2 is a
+  (feed would spawn `<name>`): feed. Each wakes you once, so a
+  claimable card you don't feed then shows up again only in the
+  heartbeat's dry run. Exit 2 is a
   heartbeat, not idleness: still check each Review card's PR (`gh pr view
   <n> --json state`), run the after-merge steps for any the human merged,
   and run `loopherd feed <herd> --dry-run`. Re-arm after every exit.

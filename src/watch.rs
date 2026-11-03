@@ -92,11 +92,18 @@ pub fn watch(
     let reader = reader(ledger, req)?;
     let _only = only_watch(dir, &reader)?;
     let mut checks = match (&reader, req.herd_files) {
-        (Reader::Lead { name, herd }, Some(paths)) => Some(Checks {
+        (
+            Reader::Lead {
+                name,
+                herd,
+                created,
+            },
+            Some(paths),
+        ) => Some(Checks {
             herd: herd.clone(),
             paths,
             timeout: (req.check_timeout)()?,
-            fired: Fired::load(dir, name)?,
+            fired: Fired::load(dir, name, created)?,
             next: Duration::ZERO,
             problem: None,
         }),
@@ -315,6 +322,7 @@ fn feeding(paths: &Paths) -> Result<bool> {
 
 /// The events a lead's watch has printed, one per line of
 /// `watch-<lead>.fired`, so a re-armed watch doesn't wake on them again.
+/// Its first line names the lead's spawn, so a re-created lead starts afresh.
 struct Fired {
     path: PathBuf,
     keys: HashSet<String>,
@@ -322,12 +330,22 @@ struct Fired {
 }
 
 impl Fired {
-    fn load(dir: &Path, lead: &str) -> Result<Fired> {
+    /// Called holding the lead's watch lock, so no other watch writes meanwhile.
+    fn load(dir: &Path, lead: &str, created: &str) -> Result<Fired> {
         let path = dir.join(format!("watch-{lead}.fired"));
-        let keys = match fs::read_to_string(&path) {
-            Ok(text) => text.lines().map(String::from).collect(),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => HashSet::new(),
+        let header = format!("lead {created}");
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+        };
+        let mut lines = text.lines();
+        let keys = if lines.next() == Some(header.as_str()) {
+            lines.map(String::from).collect()
+        } else {
+            fs::write(&path, format!("{header}\n"))
+                .with_context(|| format!("write {}", path.display()))?;
+            HashSet::new()
         };
         Ok(Fired {
             path,
@@ -389,7 +407,12 @@ impl Gone {
 /// lead reads its herd's workers, the shepherd reads the rest.
 enum Reader {
     Shepherd,
-    Lead { name: String, herd: String },
+    Lead {
+        name: String,
+        herd: String,
+        /// When this lead was spawned, telling it from an earlier one of the same name.
+        created: String,
+    },
 }
 
 /// A lead's when the caller's pane holds one, else the shepherd's. A lead
@@ -423,7 +446,12 @@ fn reader(ledger: &dyn Ledger, req: &Request) -> Result<Reader> {
     if let Some(other) = req.herds.iter().find(|h| **h != herd) {
         bail!("{name} leads {herd}; its watch can't read {other}");
     }
-    Ok(Reader::Lead { name, herd })
+    let created = lead.created.clone();
+    Ok(Reader::Lead {
+        name,
+        herd,
+        created,
+    })
 }
 
 fn shown(socket: Option<&Path>) -> String {
@@ -524,7 +552,7 @@ fn stop_wakes(mailbox: &Mailbox) -> Vec<String> {
 /// A herd with a lead, even a gone one, is the lead's but for the lead itself.
 /// Fails once a lead reading is no longer its herd's lead.
 fn in_scope(view: View, req: &Request, reader: &Reader) -> Result<Vec<Member>> {
-    if let Reader::Lead { name, herd } = reader {
+    if let Reader::Lead { name, herd, .. } = reader {
         let own = view.herds.into_iter().find(|h| h.name == *herd);
         let workers = own.map(|h| h.members).unwrap_or_default();
         if !workers.iter().any(|m| m.lead && m.name == *name) {
@@ -1394,6 +1422,7 @@ mod tests {
         );
 
         let lead = Reader::Lead {
+            created: "2026-11-01T00:00:00Z".into(),
             name: "lead-cards".into(),
             herd: "cards".into(),
         };
@@ -1814,14 +1843,46 @@ mod tests {
     #[test]
     fn fired_keys_saved_by_overlapping_watches_are_all_kept() {
         let dir = tempfile::tempdir().unwrap();
-        let first = Fired::load(dir.path(), "lead-cards").unwrap();
-        let second = Fired::load(dir.path(), "lead-cards").unwrap();
+        let first = Fired::load(dir.path(), "lead-cards", "t0").unwrap();
+        let second = Fired::load(dir.path(), "lead-cards", "t0").unwrap();
         first.with(vec!["lh-1 merged".into()]).save().unwrap();
         second.with(vec!["lh-2 claimable".into()]).save().unwrap();
-        let keys = Fired::load(dir.path(), "lead-cards").unwrap().keys;
+        let keys = Fired::load(dir.path(), "lead-cards", "t0").unwrap().keys;
         assert_eq!(
             keys,
             HashSet::from(["lh-1 merged".to_string(), "lh-2 claimable".to_string()])
         );
+    }
+
+    #[test]
+    fn a_round_of_checks_stops_running_commands_at_its_deadline() {
+        let world = Checked::with_template("done = \"sleep 2; touch ran-{n}\"\n");
+        let (checks, _) = lead_checks(&world.paths, "cards").unwrap();
+        let worker = &world.ledger.0["lh-1"];
+        let started = Instant::now();
+        let budget = Budget {
+            deadline: started + Duration::from_millis(300),
+            each: Duration::from_secs(5),
+        };
+
+        let cut = run_member_check(&checks.done, &checks, worker, &budget);
+        let after = run_member_check(&checks.done, &checks, worker, &budget);
+
+        assert!(cut.unwrap().unwrap_err().contains("timed out"));
+        assert_eq!(after, Some(Err("out of time".into())));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(!world.repo.path().join("ran-1").exists());
+    }
+
+    #[test]
+    fn a_re_created_lead_wakes_on_what_its_predecessor_was_told() {
+        let mut world = Checked::new();
+        world.touch("merged-1", "");
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-1 merged"]);
+
+        let lead = world.ledger.0.get_mut("lead-cards").unwrap();
+        lead.created = "2026-11-02T00:00:00Z".into();
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-1 merged"]);
+        assert_eq!(world.once("w9:p0"), None);
     }
 }

@@ -106,6 +106,9 @@ struct TemplateFile {
     merged: Option<String>,
 }
 
+/// How long [`Paths::lock_feed`] waits out another holder.
+const FEED_LOCK_GRACE: Duration = Duration::from_secs(1);
+
 /// Where herd files live, the home a leading `~` expands to, and the lock
 /// that keeps `feed` and `add` from filling a queue's slots at once.
 pub struct Paths {
@@ -132,7 +135,8 @@ impl Paths {
         })
     }
 
-    /// Takes the feed lock; fails at once if another run holds it.
+    /// Takes the feed lock; fails if another run holds it past
+    /// [`FEED_LOCK_GRACE`], which outlasts a lead's watch probing it.
     pub fn lock_feed(&self) -> Result<Lock> {
         let path = &self.feed_lock;
         if let Some(dir) = path.parent() {
@@ -140,9 +144,20 @@ impl Paths {
         }
         let file =
             std::fs::File::create(path).with_context(|| format!("open {}", path.display()))?;
-        match Lock::try_take(file).with_context(|| format!("lock {}", path.display()))? {
-            Some(lock) => Ok(lock),
-            None => bail!("feed already running"),
+        let given_up = std::time::Instant::now() + FEED_LOCK_GRACE;
+        loop {
+            let attempt = file
+                .try_clone()
+                .with_context(|| format!("open {}", path.display()))?;
+            if let Some(lock) =
+                Lock::try_take(attempt).with_context(|| format!("lock {}", path.display()))?
+            {
+                return Ok(lock);
+            }
+            if std::time::Instant::now() >= given_up {
+                bail!("feed already running");
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 }
@@ -873,6 +888,19 @@ args = ["--model", "opus"]
         assert_eq!(format!("{err:#}"), "feed already running");
         drop(first);
         paths.lock_feed().unwrap();
+    }
+
+    #[test]
+    fn a_feed_lock_held_briefly_is_waited_for() {
+        let config = Config::with(&[]);
+        let paths = config.paths();
+        let probe = paths.lock_feed().unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(probe);
+        });
+        paths.lock_feed().unwrap();
+        release.join().unwrap();
     }
 
     #[test]

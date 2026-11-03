@@ -16,8 +16,10 @@ Start now:
 2. `loopherd feed {herd} --dry-run`, then `loopherd feed {herd}` if it reads right.
 3. Arm `loopherd watch {herd} --timeout 3600` as a background task, and
    re-arm after every exit. On `<member> merged`, run the after-merge steps
-   for it; on `<name> claimable`, feed. Exit 2 is your heartbeat: still check
-   each Review card's PR for a merge and run `loopherd feed {herd} --dry-run`.
+   for it; on `<name> claimable`, feed. Each wakes you once: a claimable card you
+   don't feed then shows up again only in the heartbeat's dry run. Exit 2 is
+   your heartbeat: still check each Review card's PR for a merge and run
+   `loopherd feed {herd} --dry-run`.
 
 When you need the human, run `loopherd report --kind question "<the exact
 question>"` and end your turn. With merge off, a merge question carries the PR
