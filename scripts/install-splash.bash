@@ -48,11 +48,10 @@ splash_ground_kinds=ABCDEFGHIJ
 # (r or l walks that way; gr or gl grazes in place facing that way, from size 2
 # up), and frames per one-column step, or per head bob when grazing.
 splash_medium_herd=(
-  "9 f 1 14 r 40" "9 f 1 47 l 45"
-  "10 f 1 30 l 35"
-  "11 m 2 6 r 25" "11 m 2 40 gl 11"
-  "12 n 9 40 l 16" "12 n 9 8 gr 10"
-  "15 w 14 1 r 11" "15 w 14 25 gl 9" "15 w 14 47 l 12"
+  "9 f 1 14 r 40" "9 f 1 47 l 45" "9 f 1 30 l 35"
+  "10 m 2 22 l 25" "10 m 2 54 gl 11"
+  "11 n 9 40 l 16" "11 n 9 8 gr 10"
+  "15 w 14 1 r 11" "15 w 14 26 gl 9" "15 w 14 47 l 16"
 )
 
 # Right-facing sheep by size and pose, rows split on ';': a and b are the two
