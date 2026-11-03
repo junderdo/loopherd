@@ -419,7 +419,7 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         own_pane: own_pane.as_deref(),
         own_socket: own_socket.as_deref(),
         herd_files: Some(&herd_paths),
-        check_timeout: remote_timeout()?,
+        check_timeout: remote_timeout,
     };
     let woke = watch::watch(
         &CliHerdr,

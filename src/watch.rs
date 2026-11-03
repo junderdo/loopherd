@@ -1,7 +1,7 @@
 //! `loopherd watch`: block until a member needs the shepherd. Stops come
 //! from the Stop hook's mailbox entries; herdr adds `blocked` and `gone`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use crate::feed::{claimable, run_check};
-use crate::herd::{MemberCheck, Paths, Queue, queue};
+use crate::herd::{MemberCheck, MemberChecks, Paths, lead_checks};
 use crate::herd_view::{Member, Options, View};
 use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::{AgentRecord, Ledger};
@@ -53,8 +53,9 @@ pub struct Request<'a> {
     /// Where a lead's watch finds its herd file for its merged and
     /// claimable checks; `None` runs no checks.
     pub herd_files: Option<&'a Paths>,
-    /// How long each check's command may run.
-    pub check_timeout: Duration,
+    /// How long each check's command may run; read only by a lead's watch,
+    /// so a bad setting can't stop the shepherd's.
+    pub check_timeout: fn() -> Result<Duration>,
 }
 
 /// How often a lead's watch runs its merged and claimable checks.
@@ -94,9 +95,10 @@ pub fn watch(
         (Reader::Lead { name, herd }, Some(paths)) => Some(Checks {
             herd: herd.clone(),
             paths,
-            timeout: req.check_timeout,
+            timeout: (req.check_timeout)()?,
             fired: Fired::load(dir, name)?,
             next: Duration::ZERO,
+            problem: None,
         }),
         _ => None,
     };
@@ -155,7 +157,8 @@ pub fn watch(
         }
         let mut fired = None;
         if let Some(checks) = checks.as_mut().filter(|c| clock.elapsed() >= c.next) {
-            let events = checks.run(ledger, clock.elapsed())?;
+            let events = checks.run(ledger, warn)?;
+            checks.next = clock.elapsed() + CHECK_EVERY;
             if !events.is_empty() {
                 lines.extend(events.iter().cloned());
                 fired = Some(checks.fired.with(events));
@@ -208,27 +211,51 @@ struct Checks<'a> {
     fired: Fired,
     /// When the next run is due, as time since the watch started.
     next: Duration,
+    /// Why the herd file last failed to load, warned once.
+    problem: Option<String>,
 }
 
 impl Checks<'_> {
-    /// One line per event not fired before. A check or source that fails
-    /// is no event.
-    fn run(&mut self, ledger: &dyn Ledger, now: Duration) -> Result<Vec<String>> {
-        self.next = now + CHECK_EVERY;
-        let Ok(queue) = queue(self.paths, &self.herd) else {
-            return Ok(vec![]);
+    /// One line per event not fired before. A check or source that fails,
+    /// or runs out of the round's [`CHECK_EVERY`], is no event.
+    fn run(&mut self, ledger: &dyn Ledger, warn: &mut dyn FnMut(&str)) -> Result<Vec<String>> {
+        let (checks, queue) = match lead_checks(self.paths, &self.herd) {
+            Ok(loaded) => {
+                self.problem = None;
+                loaded
+            }
+            Err(e) => {
+                let problem = format!("{}'s checks: {e:#}", self.herd);
+                if self.problem.as_ref() != Some(&problem) {
+                    warn(&problem);
+                    self.problem = Some(problem);
+                }
+                return Ok(vec![]);
+            }
+        };
+        let budget = Budget {
+            deadline: Instant::now() + CHECK_EVERY,
+            each: self.timeout,
         };
         let workers = ledger.entries()?.into_values().filter(|e| {
             !e.retired && !e.is_lead() && e.herd.as_deref() == Some(self.herd.as_str())
         });
         let mut events = vec![];
+        let mut freed = 0;
         for worker in workers {
-            if merged(&queue, &worker, self.timeout) {
+            let done = run_member_check(&checks.done, &checks, &worker, &budget);
+            freed += usize::from(done == Some(Ok(true)));
+            let merged = run_member_check(&checks.merged, &checks, &worker, &budget);
+            if merged == Some(Ok(true)) && matches!(done, None | Some(Ok(false))) {
                 events.push(format!("{} merged", worker.name));
             }
         }
-        if let Ok(names) = claimable(ledger, self.paths, &self.herd, self.timeout) {
-            events.extend(names.into_iter().map(|name| format!("{name} claimable")));
+        if let (Some(queue), Some(timeout)) = (queue, budget.left()) {
+            let names = claimable(ledger, self.paths, &queue, &self.herd, freed, timeout);
+            // A running feed may be spawning these before it records them.
+            if let (Ok(names), false) = (names, feeding(self.paths)?) {
+                events.extend(names.into_iter().map(|name| format!("{name} claimable")));
+            }
         }
         Ok(events
             .into_iter()
@@ -237,31 +264,61 @@ impl Checks<'_> {
     }
 }
 
-/// Whether `worker`'s merged check exits 0 while its done check, if any,
-/// exits 1.
-fn merged(queue: &Queue, worker: &AgentRecord, timeout: Duration) -> bool {
-    let (Some(template), Some(params)) = (&worker.template, &worker.params) else {
-        return false;
+/// Bounds one round of checks: each command gets `each`, cut to what's left
+/// before `deadline`.
+struct Budget {
+    deadline: Instant,
+    each: Duration,
+}
+
+impl Budget {
+    fn left(&self) -> Option<Duration> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        (!left.is_zero()).then(|| left.min(self.each))
+    }
+}
+
+/// `worker`'s check from `checks` for its template: `None` without one,
+/// else whether it passed, or why it failed or wasn't run.
+fn run_member_check(
+    checks: &BTreeMap<String, MemberCheck>,
+    herd: &MemberChecks,
+    worker: &AgentRecord,
+    budget: &Budget,
+) -> Option<Result<bool, String>> {
+    let check = checks.get(worker.template.as_ref()?)?;
+    let Some(params) = &worker.params else {
+        return Some(Err("no recorded params".into()));
     };
-    let passes = |check: &MemberCheck| {
+    let Some(timeout) = budget.left() else {
+        return Some(Err("out of time".into()));
+    };
+    Some(
         check
             .render(worker, params)
             .map_err(|e| e.to_string())
-            .and_then(|command| run_check(&command, &queue.repo, timeout))
+            .and_then(|command| run_check(&command, &herd.repo, timeout)),
+    )
+}
+
+/// Whether a feed holds the feed lock, probed without waiting.
+fn feeding(paths: &Paths) -> Result<bool> {
+    let path = &paths.feed_lock;
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e).with_context(|| format!("open {}", path.display())),
     };
-    let Some(merged) = queue.merged.get(template) else {
-        return false;
-    };
-    let done = queue.done.get(template).map(passes).unwrap_or(Ok(false));
-    passes(merged) == Ok(true) && done == Ok(false)
+    let free = Lock::try_take(file).with_context(|| format!("lock {}", path.display()))?;
+    Ok(free.is_none())
 }
 
 /// The events a lead's watch has printed, one per line of
 /// `watch-<lead>.fired`, so a re-armed watch doesn't wake on them again.
-#[derive(Clone)]
 struct Fired {
     path: PathBuf,
     keys: HashSet<String>,
+    new: Vec<String>,
 }
 
 impl Fired {
@@ -272,20 +329,31 @@ impl Fired {
             Err(e) if e.kind() == io::ErrorKind::NotFound => HashSet::new(),
             Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
         };
-        Ok(Fired { path, keys })
+        Ok(Fired {
+            path,
+            keys,
+            new: vec![],
+        })
     }
 
+    /// The keys to append once `events` print.
     fn with(&self, events: Vec<String>) -> Fired {
-        let mut fired = self.clone();
-        fired.keys.extend(events);
-        fired
+        Fired {
+            path: self.path.clone(),
+            keys: HashSet::new(),
+            new: events,
+        }
     }
 
+    /// Appends, so keys another watch saved meanwhile survive.
     fn save(self) -> Result<()> {
-        let mut keys: Vec<String> = self.keys.into_iter().collect();
-        keys.sort();
-        let text: String = keys.iter().map(|k| format!("{k}\n")).collect();
-        fs::write(&self.path, text).with_context(|| format!("write {}", self.path.display()))
+        let text: String = self.new.iter().map(|k| format!("{k}\n")).collect();
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .and_then(|mut file| file.write_all(text.as_bytes()))
+            .with_context(|| format!("write {}", self.path.display()))
     }
 }
 
@@ -561,7 +629,7 @@ mod tests {
         own_pane: None,
         own_socket: None,
         herd_files: None,
-        check_timeout: Duration::ZERO,
+        check_timeout: || bail!("only a lead's watch reads the check timeout"),
     };
 
     fn run(
@@ -796,7 +864,7 @@ mod tests {
         own_pane: None,
         own_socket: None,
         herd_files: None,
-        check_timeout: Duration::ZERO,
+        check_timeout: || bail!("only a lead's watch reads the check timeout"),
     };
 
     /// One poll of a fresh watch.
@@ -1518,10 +1586,16 @@ mod tests {
             fs::write(self.repo.path().join(file), text).unwrap();
         }
 
+        /// Rewrites the herd file through `edit`.
+        fn edit_herd(&self, edit: impl Fn(String) -> String) {
+            let file = self.paths.herds.join("cards.toml");
+            fs::write(&file, edit(fs::read_to_string(&file).unwrap())).unwrap();
+        }
+
         fn request(&self, pane: &'static str) -> Request<'_> {
             Request {
                 herd_files: Some(&self.paths),
-                check_timeout: Duration::from_secs(5),
+                check_timeout: || Ok(Duration::from_secs(5)),
                 ..from_pane(pane)
             }
         }
@@ -1646,6 +1720,108 @@ mod tests {
                 .path()
                 .join("reports/watch-lead-cards.fired")
                 .exists()
+        );
+    }
+
+    #[test]
+    fn a_herd_with_no_queue_still_wakes_on_merged() {
+        let world = Checked::new();
+        world.edit_herd(|herd| herd[..herd.find("[queue]").unwrap()].to_string());
+        world.touch("merged-1", "");
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-1 merged"]);
+    }
+
+    #[test]
+    fn a_herd_file_the_checks_cannot_load_warns_once_and_wakes_nothing() {
+        let world = Checked::with_template("merged = \"test -f {nope}\"\n");
+        let dir = world.config.path().join("reports");
+        let req = Request {
+            timeout: Some(Duration::from_secs(150)),
+            ..world.request("w9:p0")
+        };
+        let mut warnings = vec![];
+        let woke = watch(
+            &world.herdr,
+            &world.ledger,
+            &dir,
+            &req,
+            &mut steps(|_| {}),
+            &mut |w| warnings.push(w.to_string()),
+        )
+        .unwrap();
+        assert!(woke.is_none());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("unknown placeholder {nope}"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn each_done_check_runs_once_per_round_of_checks() {
+        let world =
+            Checked::with_template("done = \"echo x >> ran-{n}; exit 1\"\nmerged = \"exit 1\"\n");
+        world.touch("tasks", "1\n2\n");
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-2 claimable"]);
+        let ran = fs::read_to_string(world.repo.path().join("ran-1")).unwrap();
+        assert_eq!(ran.lines().count(), 1);
+    }
+
+    #[test]
+    fn no_card_is_claimable_while_a_feed_holds_the_feed_lock() {
+        let world = Checked::new();
+        world.touch("tasks", "1\n2\n");
+        let feeding = world.paths.lock_feed().unwrap();
+        assert_eq!(world.once("w9:p0"), None);
+        drop(feeding);
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-2 claimable"]);
+    }
+
+    #[test]
+    fn only_a_leads_watch_reads_the_check_timeout() {
+        let world = Checked::new();
+        world.touch("merged-1", "");
+        let broken = |pane| Request {
+            check_timeout: || bail!("bad LOOPHERD_GIT_TIMEOUT"),
+            ..world.request(pane)
+        };
+        let dir = world.config.path().join("reports");
+        let shepherd = watch(
+            &world.herdr,
+            &world.ledger,
+            &dir,
+            &broken("w9:p1"),
+            &mut steps(|_| {}),
+            &mut |_| {},
+        );
+        assert!(shepherd.unwrap().is_none());
+        let Err(err) = watch(
+            &world.herdr,
+            &world.ledger,
+            &dir,
+            &broken("w9:p0"),
+            &mut steps(|_| {}),
+            &mut |_| {},
+        ) else {
+            panic!("a lead's watch ran with a bad check timeout");
+        };
+        assert!(
+            err.to_string().contains("bad LOOPHERD_GIT_TIMEOUT"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn fired_keys_saved_by_overlapping_watches_are_all_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = Fired::load(dir.path(), "lead-cards").unwrap();
+        let second = Fired::load(dir.path(), "lead-cards").unwrap();
+        first.with(vec!["lh-1 merged".into()]).save().unwrap();
+        second.with(vec!["lh-2 claimable".into()]).save().unwrap();
+        let keys = Fired::load(dir.path(), "lead-cards").unwrap().keys;
+        assert_eq!(
+            keys,
+            HashSet::from(["lh-1 merged".to_string(), "lh-2 claimable".to_string()])
         );
     }
 }

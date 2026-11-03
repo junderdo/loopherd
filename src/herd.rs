@@ -260,38 +260,67 @@ pub struct Queue {
     pub params: Vec<String>,
     /// Each template's done check, for those that have one.
     pub done: BTreeMap<String, MemberCheck>,
-    /// Each template's merged check, for those that have one.
-    pub merged: BTreeMap<String, MemberCheck>,
 }
 
 pub fn queue(paths: &Paths, herd: &str) -> Result<Queue> {
     let file = load(&paths.herds, herd).context("herd")?;
-    let queue = file
-        .queue
-        .with_context(|| format!("herd: {herd} has no [queue]"))?;
-    let (mut done, mut merged) = (BTreeMap::new(), BTreeMap::new());
-    for (name, template) in &file.template {
-        let context = || format!("template {name}");
-        if let Some(check) =
-            MemberCheck::of(template, "done", template.done.as_deref()).with_context(context)?
-        {
-            done.insert(name.clone(), check);
-        }
-        if let Some(check) =
-            MemberCheck::of(template, "merged", template.merged.as_deref()).with_context(context)?
-        {
-            merged.insert(name.clone(), check);
-        }
-    }
-    Ok(Queue {
-        params: file.template[&queue.template].params.clone(),
-        template: queue.template,
-        source: queue.source,
+    queue_in(&file, paths, herd)?.with_context(|| format!("herd: {herd} has no [queue]"))
+}
+
+/// What a lead's watch checks in `herd`: its members' checks, and its
+/// queue if it has one.
+pub fn lead_checks(paths: &Paths, herd: &str) -> Result<(MemberChecks, Option<Queue>)> {
+    let file = load(&paths.herds, herd).context("herd")?;
+    let checks = MemberChecks {
+        repo: expand_home(&file.repo, &paths.home),
+        done: checks_of(&file, "done", |t| t.done.as_deref())?,
+        merged: checks_of(&file, "merged", |t| t.merged.as_deref())?,
+    };
+    Ok((checks, queue_in(&file, paths, herd)?))
+}
+
+/// Each template's `done` and `merged` checks, and the repo they run in.
+pub struct MemberChecks {
+    pub repo: PathBuf,
+    pub done: BTreeMap<String, MemberCheck>,
+    pub merged: BTreeMap<String, MemberCheck>,
+}
+
+fn queue_in(file: &HerdFile, paths: &Paths, herd: &str) -> Result<Option<Queue>> {
+    let Some(queue) = &file.queue else {
+        return Ok(None);
+    };
+    let params = file
+        .template
+        .get(&queue.template)
+        .with_context(|| format!("queue: {herd} has no template {}", queue.template))?
+        .params
+        .clone();
+    Ok(Some(Queue {
+        done: checks_of(file, "done", |t| t.done.as_deref())?,
+        params,
+        template: queue.template.clone(),
+        source: queue.source.clone(),
         max: queue.max as usize,
         repo: expand_home(&file.repo, &paths.home),
-        done,
-        merged,
-    })
+    }))
+}
+
+/// Each template's check named `field`, for those that have one.
+fn checks_of(
+    file: &HerdFile,
+    field: &'static str,
+    command: fn(&TemplateFile) -> Option<&str>,
+) -> Result<BTreeMap<String, MemberCheck>> {
+    let mut checks = BTreeMap::new();
+    for (name, template) in &file.template {
+        if let Some(check) = MemberCheck::of(template, field, command(template))
+            .with_context(|| format!("template {name}"))?
+        {
+            checks.insert(name.clone(), check);
+        }
+    }
+    Ok(checks)
 }
 
 /// A template's `done` or `merged` command, rendered per member like its prompt.
@@ -1780,12 +1809,8 @@ args = ["--model", "opus"]
              [queue]\ntemplate = \"card\"\nsource = \"true\"\nmax = 1\n"
         );
         let config = Config::with(&[("cards", &herd)]);
-        assert!(
-            queue(&config.paths(), "cards")
-                .unwrap()
-                .merged
-                .contains_key("card")
-        );
+        let (checks, _) = lead_checks(&config.paths(), "cards").unwrap();
+        assert!(checks.merged.contains_key("card"));
     }
 
     #[test]
