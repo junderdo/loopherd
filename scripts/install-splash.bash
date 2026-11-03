@@ -520,7 +520,8 @@ splash_full() {
   printf '\e[?1049h\e[2J' || :
   for ((frame = 0; frame < splash_frames && !splash_interrupted; frame++)); do
     splash_frame "$frame"
-    printf '%s' "$splash_buf" || :
+    # An interrupt mid-write fails it with EINTR, which would land in logs.
+    printf '%s' "$splash_buf" 2>/dev/null || :
     splash_wait "$start" "$frame"
   done
 }

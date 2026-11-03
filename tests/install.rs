@@ -869,6 +869,25 @@ fn the_large_herd_grows_with_the_area_and_never_shrinks() {
 }
 
 #[test]
+fn ctrl_c_mid_frame_writes_nothing_to_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = dir.path().join("err");
+    for delay in [600, 900, 1200] {
+        let Some(mut cmd) = pty(&format!(
+            "stty cols 160 rows 45; bash -c 'source {SPLASH}; splash_play' 2>{}",
+            err.display()
+        )) else {
+            eprintln!("skipped: needs util-linux script");
+            return;
+        };
+
+        ctrl_c_after(&mut cmd, std::time::Duration::from_millis(delay));
+
+        assert_eq!(fs::read_to_string(&err).unwrap(), "", "after {delay}ms");
+    }
+}
+
+#[test]
 fn a_caller_with_a_strict_ifs_and_set_u_gets_the_whole_splash() {
     let dir = tempfile::tempdir().unwrap();
     let caller = dir.path().join("caller.bash");
