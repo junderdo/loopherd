@@ -16,6 +16,13 @@ pub const DEFAULT_WINDOW: u64 = 200_000;
 /// The smallest limit or window a config accepts; below it a member would
 /// hand off before doing any work.
 pub const MIN_TOKENS: u64 = 10_000;
+/// The limit when a member's own can't be read: [`DEFAULT_LIMIT`] capped at
+/// 80% of [`DEFAULT_WINDOW`].
+const FALLBACK_LIMIT: u64 = if DEFAULT_LIMIT < DEFAULT_WINDOW / 5 * 4 {
+    DEFAULT_LIMIT
+} else {
+    DEFAULT_WINDOW / 5 * 4
+};
 
 /// `$LOOPHERD_CONFIG_DIR/config.toml`; optional.
 #[derive(Debug, Default, Deserialize)]
@@ -61,12 +68,14 @@ pub fn handoff_path(state: &Path, name: &str) -> PathBuf {
 /// The reason to block the stop `input` describes, when `member`'s context
 /// is over `limit`: once per session, never on a stop a Stop hook already
 /// continued. Before asking, moves any handoff from last time to
-/// `<name>.prev.md`.
+/// `<name>.prev.md`. A failed `limit` falls back to the built-in one and is
+/// passed to `note` once per session.
 pub fn handoff_block(
     member: &AgentRecord,
     input: &[u8],
-    limit: u64,
+    limit: Result<u64>,
     state: &Path,
+    note: &dyn Fn(String) -> Result<()>,
 ) -> Result<Option<String>> {
     let Ok(input) = serde_json::from_slice::<Value>(input) else {
         return Ok(None);
@@ -74,18 +83,36 @@ pub fn handoff_block(
     if input["hook_event_name"] != "Stop" || input["stop_hook_active"] == true {
         return Ok(None);
     }
-    let (Some(session), Some(transcript)) = (
-        input["session_id"].as_str(),
-        input["transcript_path"].as_str(),
-    ) else {
+    let Some(session) = input["session_id"]
+        .as_str()
+        .filter(|s| !s.is_empty() && !s.contains('/') && !s.starts_with('.'))
+    else {
+        return Ok(None);
+    };
+    let (limit, noted) = match limit {
+        Ok(limit) => (limit, Ok(())),
+        Err(e) => (FALLBACK_LIMIT, note_once(state, session, &e, note)),
+    };
+    // A failed note must not skip the check; it surfaces only when nothing is asked.
+    match ask(member, &input, session, limit, state)? {
+        Some(reason) => Ok(Some(reason)),
+        None => noted.map(|()| None),
+    }
+}
+
+fn ask(
+    member: &AgentRecord,
+    input: &Value,
+    session: &str,
+    limit: u64,
+    state: &Path,
+) -> Result<Option<String>> {
+    let Some(transcript) = input["transcript_path"].as_str() else {
         return Ok(None);
     };
     let Some(tokens) = tokens_in(Path::new(transcript)).filter(|&t| t > limit) else {
         return Ok(None);
     };
-    if session.is_empty() || session.contains('/') || session.starts_with('.') {
-        return Ok(None);
-    }
     let asked = state.join("handoff-asked");
     let marker = asked.join(session);
     if marker.exists() {
@@ -109,6 +136,46 @@ pub fn handoff_block(
         Err(e) => return Err(e).with_context(|| format!("create {}", marker.display())),
     }
     Ok(Some(reason(member, tokens, limit, &handoff)))
+}
+
+fn note_once(
+    state: &Path,
+    session: &str,
+    error: &anyhow::Error,
+    note: &dyn Fn(String) -> Result<()>,
+) -> Result<()> {
+    let noted = state.join("limit-noted");
+    fs::create_dir_all(&noted).with_context(|| format!("create {}", noted.display()))?;
+    let marker = noted.join(session);
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+    {
+        Ok(_) => {}
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("create {}", marker.display())),
+    }
+    let error = format!("{error:#}");
+    let error: Vec<&str> = error
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !is_snippet(l))
+        .collect();
+    let text = format!(
+        "could not read my context limit, so it is {FALLBACK_LIMIT} until fixed: {}",
+        error.join(" ")
+    );
+    note(text).inspect_err(|_| {
+        // Unmarked, so the next stop tries the note again.
+        let _ = fs::remove_file(&marker);
+    })
+}
+
+/// A line of a TOML error's source excerpt: `|`, `1 | repo =`, `|   ^`.
+fn is_snippet(line: &str) -> bool {
+    let gutter = line.trim_start_matches(|c: char| c.is_ascii_digit());
+    gutter.starts_with('|') || gutter.starts_with(" |")
 }
 
 fn reason(member: &AgentRecord, tokens: u64, limit: u64, handoff: &Path) -> String {
@@ -276,7 +343,7 @@ mod tests {
         }
 
         fn block(&self, who: &AgentRecord, input: &[u8], limit: u64) -> Option<String> {
-            handoff_block(who, input, limit, &self.state()).unwrap()
+            handoff_block(who, input, Ok(limit), &self.state(), &|_| Ok(())).unwrap()
         }
     }
 
@@ -432,9 +499,68 @@ mod tests {
         let handoffs = w.state().join("handoffs");
         fs::create_dir_all(handoffs.join("lh-1.prev.md/x")).unwrap();
         fs::write(handoffs.join("lh-1.md"), "first").unwrap();
-        assert!(handoff_block(&who, &w.stop("s1", &t, ""), 100, &w.state()).is_err());
+        assert!(
+            handoff_block(
+                &who,
+                &w.stop("s1", &t, ""),
+                Ok(100),
+                &w.state(),
+                &|_| Ok(())
+            )
+            .is_err()
+        );
         fs::remove_dir_all(handoffs.join("lh-1.prev.md")).unwrap();
         assert!(w.block(&who, &w.stop("s1", &t, ""), 100).is_some());
+    }
+
+    #[test]
+    fn a_failed_limit_still_blocks_when_its_note_fails_and_the_next_stop_notes_again() {
+        let w = World::new();
+        let who = member("lh-1", None);
+        let t = w.transcript(&[assistant(0, 0, 160_001, false)]);
+        let broken = || Err(anyhow::anyhow!("config.toml: TOML parse error"));
+        let reason = handoff_block(&who, &w.stop("s1", &t, ""), broken(), &w.state(), &|_| {
+            anyhow::bail!("mailbox full")
+        })
+        .unwrap()
+        .unwrap();
+        assert!(reason.contains("past your limit of 160000"), "{reason}");
+
+        let notes = std::cell::RefCell::new(vec![]);
+        let note = |text: String| {
+            notes.borrow_mut().push(text);
+            Ok(())
+        };
+        let t = w.transcript(&[assistant(0, 0, 100, false)]);
+        for _ in 0..2 {
+            let stop = w.stop("s1", &t, "");
+            assert_eq!(
+                handoff_block(&who, &stop, broken(), &w.state(), &note).unwrap(),
+                None
+            );
+        }
+        assert_eq!(
+            *notes.borrow(),
+            [
+                "could not read my context limit, so it is 160000 until fixed: config.toml: TOML parse error"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failing_note_under_the_limit_is_the_checks_error() {
+        let w = World::new();
+        let who = member("lh-1", None);
+        let t = w.transcript(&[assistant(0, 0, 100, false)]);
+        let err = handoff_block(
+            &who,
+            &w.stop("s1", &t, ""),
+            Err(anyhow::anyhow!("bad")),
+            &w.state(),
+            &|_| anyhow::bail!("mailbox full"),
+        )
+        .unwrap_err();
+        assert_eq!(format!("{err:#}"), "mailbox full");
     }
 
     #[test]
