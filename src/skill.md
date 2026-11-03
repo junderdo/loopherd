@@ -174,7 +174,7 @@ and, once per session past your limit, adds `shepherd handoff <n>k over
    re-arm the watch. Members and leads keep working; what they report
    waits in the mailbox for the next watch.
 2. Write your handoff to `$XDG_STATE_HOME/loopherd/handoffs/shepherd.md`
-   (`~/.local/state` when it's unset), in the outline above: what each
+   (`~/.local/state` when it's unset; no member may be named `shepherd`), in the outline above: what each
    member is doing and what you owe it (verifications running, PRs to
    check after merge), then next steps, then gotchas.
 3. Tell the human, with the path spelled out in full:

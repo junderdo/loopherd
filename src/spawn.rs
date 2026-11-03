@@ -6,6 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 
+use crate::context::SHEPHERD;
 use crate::herdr::{
     Agent, AgentStatus, Herdr, NewTab, StartOutcome, WaitOutcome, Workspace, wait_for_shell_prompt,
 };
@@ -363,6 +364,9 @@ fn validate_name(name: &str) -> Result<()> {
     if !valid {
         bail!("{name:?} must match [a-z][a-z0-9_-]{{0,31}}");
     }
+    if name == SHEPHERD {
+        bail!("{name} is reserved: the shepherd's handoff is handoffs/{SHEPHERD}.md");
+    }
     Ok(())
 }
 
@@ -456,6 +460,18 @@ mod tests {
 
     fn run(herdr: &FakeHerdr, ledger: &mut MemLedger, req: &SpawnRequest) -> Result<Spawned> {
         spawn(herdr, ledger, req, Some("w1"))
+    }
+
+    #[test]
+    fn the_shepherds_name_is_reserved_for_its_handoff() {
+        let herdr = herdr();
+        let err = run(&herdr, &mut MemLedger::default(), &request("shepherd")).unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            "name: shepherd is reserved: the shepherd's handoff is handoffs/shepherd.md"
+        );
+        assert!(herdr.tabs().is_empty());
+        assert!(run(&herdr, &mut MemLedger::default(), &request("shepherd-2")).is_ok());
     }
 
     #[test]

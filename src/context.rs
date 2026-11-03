@@ -12,6 +12,8 @@ use serde_json::Value;
 use crate::ledger::AgentRecord;
 use crate::process::{self, Procs};
 
+/// The shepherd's handoff file's name; no member may take it.
+pub const SHEPHERD: &str = "shepherd";
 pub const DEFAULT_LIMIT: u64 = 250_000;
 pub const DEFAULT_WINDOW: u64 = 200_000;
 /// The smallest limit or window a config accepts; below it a member would
