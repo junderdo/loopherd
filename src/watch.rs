@@ -110,7 +110,7 @@ pub fn watch(
     clock: &mut dyn Clock,
     warn: &mut dyn FnMut(&str),
 ) -> Result<Option<Wake>> {
-    let reader = reader(ledger, req)?;
+    let reader = reader(ledger, req, warn)?;
     let only = only_watch(dir, &reader)?;
     let mut checks = match (&reader, req.herd_files) {
         (
@@ -449,7 +449,7 @@ enum Reader {
 
 /// A lead's when the caller's pane holds one, else the shepherd's. A lead
 /// may only name its own herd.
-fn reader(ledger: &dyn Ledger, req: &Request) -> Result<Reader> {
+fn reader(ledger: &dyn Ledger, req: &Request, warn: &mut dyn FnMut(&str)) -> Result<Reader> {
     let Some(pane) = req.own_pane else {
         return Ok(Reader::Shepherd);
     };
@@ -458,14 +458,16 @@ fn reader(ledger: &dyn Ledger, req: &Request) -> Result<Reader> {
         Some(entry) if entry.is_lead() => entry,
         Some(_) => return Ok(Reader::Shepherd),
         None => {
+            // Pane ids repeat across herdrs, but this may be a lead whose recorded socket is stale.
             let on_pane = |e: &&AgentRecord| !e.retired && e.is_lead() && e.pane_id == pane;
             if let Some(lead) = entries.values().find(on_pane) {
-                bail!(
-                    "pane {pane} holds lead {} on socket {}, but this watch's socket is {}",
+                warn(&format!(
+                    "warning: pane {pane} holds lead {} on socket {}, \
+                     but this watch's socket is {}; running the shepherd's watch",
                     lead.name,
                     shown(lead.socket.as_deref()),
                     shown(req.own_socket),
-                );
+                ));
             }
             return Ok(Reader::Shepherd);
         }
@@ -1676,28 +1678,108 @@ mod tests {
     }
 
     #[test]
-    fn a_leads_pane_on_another_socket_or_none_is_an_error_naming_the_lead() {
-        let dir = tempfile::tempdir().unwrap();
-        let (ledger, herdr) = socketed_lead(dir.path());
-        for socket in [Some(Path::new("/run/dev.sock")), None] {
+    fn a_leads_pane_id_on_another_socket_warns_once_that_this_is_the_shepherds_watch() {
+        let cases = [
+            (
+                socketed_lead as fn(&Path) -> (MemLedger, FakeHerdr),
+                Some(Path::new("/run/dev.sock")),
+                "warning: pane w9:p0 holds lead lead-cards on socket /run/live.sock, \
+                 but this watch's socket is /run/dev.sock; running the shepherd's watch",
+            ),
+            (
+                socketed_lead,
+                None,
+                "warning: pane w9:p0 holds lead lead-cards on socket /run/live.sock, \
+                 but this watch's socket is unset; running the shepherd's watch",
+            ),
+            (
+                led_world,
+                Some(Path::new("/run/live.sock")),
+                "warning: pane w9:p0 holds lead lead-cards on socket unset, \
+                 but this watch's socket is /run/live.sock; running the shepherd's watch",
+            ),
+        ];
+        for (world, socket, expected) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let (ledger, herdr) = world(dir.path());
             let req = Request {
                 own_socket: socket,
                 ..from_pane("w9:p0")
             };
+            let mut warnings = vec![];
 
-            let Err(err) = watch(
+            watch(
                 &herdr,
                 &ledger,
                 dir.path(),
                 &req,
                 &mut steps(|_| {}),
-                &mut |_| {},
-            ) else {
-                panic!("a mismatched socket watched as {socket:?}");
-            };
-            assert!(err.to_string().contains("lead-cards"), "{err}");
-            assert!(err.to_string().contains("/run/live.sock"), "{err}");
+                &mut |w| warnings.push(w.to_string()),
+            )
+            .unwrap();
+
+            assert_eq!(warnings, [expected]);
         }
+    }
+
+    #[test]
+    fn a_workers_pane_on_its_own_socket_warns_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = led_world(dir.path());
+        let mut warnings = vec![];
+
+        watch(
+            &herdr,
+            &ledger,
+            dir.path(),
+            &from_pane("w9:p1"),
+            &mut steps(|_| {}),
+            &mut |w| warnings.push(w.to_string()),
+        )
+        .unwrap();
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_leads_pane_id_on_another_socket_or_none_is_the_shepherds_watch() {
+        for socket in [Some(Path::new("/run/dev.sock")), None] {
+            let dir = tempfile::tempdir().unwrap();
+            let (ledger, herdr) = socketed_lead(dir.path());
+            let req = Request {
+                own_socket: socket,
+                ..from_pane("w9:p0")
+            };
+
+            let woke = run(&herdr, &ledger, dir.path(), &req, &mut steps(|_| {})).unwrap();
+            assert!(
+                woke.contains(&"lead-cards note 2026-11-01 09:00 hi".to_string()),
+                "{socket:?}: {woke:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_socketless_leads_pane_id_is_its_watch_only_from_a_caller_without_a_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = led_world(dir.path());
+        let socketless = from_pane("w9:p0");
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &socketless, &mut steps(|_| {})).unwrap(),
+            ["lh-1 note 2026-11-01 09:00 hi"]
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = led_world(dir.path());
+        let socketed = Request {
+            own_socket: Some(Path::new("/run/live.sock")),
+            ..from_pane("w9:p0")
+        };
+        let woke = run(&herdr, &ledger, dir.path(), &socketed, &mut steps(|_| {})).unwrap();
+        assert!(
+            woke.contains(&"lead-cards note 2026-11-01 09:00 hi".to_string()),
+            "{woke:?}"
+        );
     }
 
     #[test]

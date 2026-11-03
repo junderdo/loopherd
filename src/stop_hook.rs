@@ -791,8 +791,9 @@ mod tests {
             r#"{{"hook_event_name":"Stop","session_id":"sess-a","transcript_path":"{}","background_tasks":[],"session_crons":[]}}"#,
             transcript.display()
         );
-        let handoff =
-            |m: &AgentRecord| crate::context::handoff_block(m, input.as_bytes(), 100, &state);
+        let handoff = |m: &AgentRecord| {
+            crate::context::handoff_block(m, input.as_bytes(), Ok(100), &state, &|_| Ok(()))
+        };
         let mut l = claimed(Some("sess-a"), 30, 300);
 
         let first = hook_with(
