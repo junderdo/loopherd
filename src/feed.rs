@@ -146,6 +146,64 @@ pub fn feed(
     Ok(Fed { lines, code })
 }
 
+/// The names feed would spawn now, as `feed --dry-run` plans them: tasks
+/// with no member, while slots are free under `max`, counting members whose
+/// done check passes as freed. Fails if the source fails; a task feed would
+/// error on is skipped.
+pub fn claimable(
+    ledger: &dyn Ledger,
+    paths: &Paths,
+    herd: &str,
+    timeout: Duration,
+) -> Result<Vec<String>> {
+    let queue = queue(paths, herd)?;
+    let output = run_source(&queue, timeout)?;
+    let entries = ledger.entries().context("ledger")?;
+    let done = entries
+        .values()
+        .filter(|e| !e.retired && !e.is_lead() && e.herd.as_deref() == Some(herd))
+        .filter(|e| {
+            let check = e.template.as_ref().and_then(|t| queue.done.get(t));
+            match (check, &e.params) {
+                (Some(check), Some(params)) => check
+                    .render(e, params)
+                    .is_ok_and(|command| run_check(&command, &queue.repo, timeout) == Ok(true)),
+                _ => false,
+            }
+        })
+        .count();
+    let mut free = queue
+        .max
+        .saturating_sub(members(ledger, herd)?.saturating_sub(done));
+    let mut taken: HashSet<String> = entries.into_keys().collect();
+    let req = FeedRequest {
+        herd: herd.into(),
+        dry_run: true,
+        ready_timeout: Duration::ZERO,
+        command_timeout: timeout,
+        own_pane: None,
+    };
+    let mut names = vec![];
+    for task in output.lines().map(str::trim) {
+        if free == 0 {
+            break;
+        }
+        if task.is_empty() || task.starts_with('#') {
+            continue;
+        }
+        let Ok(spawn_req) =
+            task_params(&queue, task).and_then(|params| task_request(paths, &req, &queue, params))
+        else {
+            continue;
+        };
+        if taken.insert(spawn_req.name.clone()) {
+            names.push(spawn_req.name);
+            free -= 1;
+        }
+    }
+    Ok(names)
+}
+
 struct Reaped {
     retired: usize,
     errors: usize,
@@ -220,7 +278,7 @@ fn is_retired(ledger: &dyn Ledger, name: &str) -> bool {
 
 /// Whether `command` reports its member finished: exit 0 yes, exit 1 no,
 /// anything else an error describing what happened.
-fn run_check(command: &str, repo: &Path, timeout: Duration) -> Result<bool, String> {
+pub(crate) fn run_check(command: &str, repo: &Path, timeout: Duration) -> Result<bool, String> {
     let ran = run_within(
         Command::new("sh").arg("-c").arg(command).current_dir(repo),
         timeout,

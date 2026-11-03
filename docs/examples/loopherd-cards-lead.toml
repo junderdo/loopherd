@@ -1,6 +1,10 @@
 # Append to ~/.config/loopherd/herds/loopherd-cards.toml, and copy
 # loopherd-cards-lead.md beside it. Start the lead with
 # `loopherd lead loopherd-cards --dry-run`, then without --dry-run.
+#
+# Also add this line to the herd's existing [template.card], so the lead's
+# watch wakes when a worker's PR merges:
+# merged = "GH_TOKEN=$(gh auth token --user junderdo) gh pr list --head {branch} --state merged --json number --jq length | grep -qx 1"
 [lead]
 prompt_file = "loopherd-cards-lead.md"
 # args defaults to the herd's args. Every switch is off until the human turns it on.

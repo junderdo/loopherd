@@ -101,6 +101,9 @@ struct TemplateFile {
     /// A shell command that exits 0 once a member is finished, for `feed` to
     /// retire it. Placeholder values are substituted already shell-quoted.
     done: Option<String>,
+    /// Like `done`, exiting 0 once a member's work is merged; a lead's
+    /// watch wakes on it.
+    merged: Option<String>,
 }
 
 /// Where herd files live, the home a leading `~` expands to, and the lock
@@ -256,7 +259,9 @@ pub struct Queue {
     /// The template's param names, in order.
     pub params: Vec<String>,
     /// Each template's done check, for those that have one.
-    pub done: BTreeMap<String, DoneCheck>,
+    pub done: BTreeMap<String, MemberCheck>,
+    /// Each template's merged check, for those that have one.
+    pub merged: BTreeMap<String, MemberCheck>,
 }
 
 pub fn queue(paths: &Paths, herd: &str) -> Result<Queue> {
@@ -264,10 +269,18 @@ pub fn queue(paths: &Paths, herd: &str) -> Result<Queue> {
     let queue = file
         .queue
         .with_context(|| format!("herd: {herd} has no [queue]"))?;
-    let mut done = BTreeMap::new();
+    let (mut done, mut merged) = (BTreeMap::new(), BTreeMap::new());
     for (name, template) in &file.template {
-        if let Some(check) = DoneCheck::of(template).with_context(|| format!("template {name}"))? {
+        let context = || format!("template {name}");
+        if let Some(check) =
+            MemberCheck::of(template, "done", template.done.as_deref()).with_context(context)?
+        {
             done.insert(name.clone(), check);
+        }
+        if let Some(check) =
+            MemberCheck::of(template, "merged", template.merged.as_deref()).with_context(context)?
+        {
+            merged.insert(name.clone(), check);
         }
     }
     Ok(Queue {
@@ -277,20 +290,24 @@ pub fn queue(paths: &Paths, herd: &str) -> Result<Queue> {
         max: queue.max as usize,
         repo: expand_home(&file.repo, &paths.home),
         done,
+        merged,
     })
 }
 
-/// A template's `done` command, rendered per member like its prompt.
-pub struct DoneCheck {
+/// A template's `done` or `merged` command, rendered per member like its prompt.
+pub struct MemberCheck {
     command: Template,
     branch: Option<Template>,
 }
 
-impl DoneCheck {
-    fn of(template: &TemplateFile) -> Result<Option<DoneCheck>> {
-        let Some(command) =
-            pattern(template.done.as_deref(), &template.params, &BUILT_INS).context("done")?
-        else {
+impl MemberCheck {
+    /// `command` is `template`'s field named `field`.
+    fn of(
+        template: &TemplateFile,
+        field: &'static str,
+        command: Option<&str>,
+    ) -> Result<Option<MemberCheck>> {
+        let Some(command) = pattern(command, &template.params, &BUILT_INS).context(field)? else {
             return Ok(None);
         };
         let branch = pattern(
@@ -299,7 +316,7 @@ impl DoneCheck {
             &["herd", "name"],
         )
         .context("branch")?;
-        Ok(Some(DoneCheck { command, branch }))
+        Ok(Some(MemberCheck { command, branch }))
     }
 
     /// The command for `member`, whose `params` are its recorded values, each
@@ -451,6 +468,7 @@ fn check_fields(template: &TemplateFile, paths: &Paths) -> Result<CheckedTemplat
     }
     pattern(Some(&prompt.text), &template.params, &BUILT_INS).context(prompt.source.clone())?;
     pattern(template.done.as_deref(), &template.params, &BUILT_INS).context("done")?;
+    pattern(template.merged.as_deref(), &template.params, &BUILT_INS).context("merged")?;
     Ok(CheckedTemplate {
         name,
         branch,
@@ -1518,6 +1536,11 @@ args = ["--model", "opus"]
                 "done: unknown placeholder {nmber}",
             ),
             (
+                "prompt = \"go\"\nmerged = \"gh pr list --head {brnch}\"",
+                &[],
+                "merged: unknown placeholder {brnch}",
+            ),
+            (
                 "prompt_file = \"t.md\"",
                 &[("t.md", "\n")],
                 "prompt_file CONFIG/herds/t.md is empty",
@@ -1533,7 +1556,8 @@ args = ["--model", "opus"]
     fn herds_accepts_every_placeholder_add_accepts() {
         let template = "name = \"z-{herd}-{n}\"\nbranch = \"{herd}/{name}/{n}\"\n\
                         prompt_file = \"t.md\"\n\
-                        done = \"{name} {herd} {branch} {worktree} {pane} {n} {{x}}\"";
+                        done = \"{name} {herd} {branch} {worktree} {pane} {n} {{x}}\"\n\
+                        merged = \"{name} {branch} {worktree} {n}\"";
         let prompt = "{name} {herd} {branch} {worktree} {pane} {n} {{x}}";
         let (report, code) = herds_line(template, &[("t.md", prompt)]);
         assert_eq!(
@@ -1745,6 +1769,23 @@ args = ["--model", "opus"]
 
         assert_eq!(lead.switches, Switches::default());
         assert_eq!(lead.args, ["--model", "opus"]);
+
+        let merged = table
+            .lines()
+            .find_map(|line| line.strip_prefix("# merged = "))
+            .expect("the example's merged line");
+        let herd = format!(
+            "repo = \"/r\"\n[template.card]\nparams = [\"n\"]\nprompt = \"go\"\n\
+             branch = \"feat/{{n}}\"\nmerged = {merged}\n\
+             [queue]\ntemplate = \"card\"\nsource = \"true\"\nmax = 1\n"
+        );
+        let config = Config::with(&[("cards", &herd)]);
+        assert!(
+            queue(&config.paths(), "cards")
+                .unwrap()
+                .merged
+                .contains_key("card")
+        );
     }
 
     #[test]

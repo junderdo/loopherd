@@ -403,9 +403,9 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
             settings.display()
         );
     }
-    let herd_files = Paths::from_env().context("herd")?.herds;
+    let herd_paths = Paths::from_env().context("herd")?;
     for herd in herds {
-        if !herd_files.join(format!("{herd}.toml")).is_file() {
+        if !herd_paths.herds.join(format!("{herd}.toml")).is_file() {
             eprintln!("loopherd watch: warning: no herd file for {herd}");
         }
     }
@@ -418,6 +418,8 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         poll: Duration::from_secs(2),
         own_pane: own_pane.as_deref(),
         own_socket: own_socket.as_deref(),
+        herd_files: Some(&herd_paths),
+        check_timeout: remote_timeout()?,
     };
     let woke = watch::watch(
         &CliHerdr,
