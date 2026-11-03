@@ -6,7 +6,8 @@ together across sessions, built as a layer over herdr's CLI/socket API.
 - **Issues**: claiming, working, or creating a card on the Trello board →
   read `docs/agents/issue-tracking.md` first.
 - **Shepherding**: running the herd live with the human (feeding, watching,
-  verifying and cleaning up members) → read `docs/agents/shepherd.md` first.
+  verifying and cleaning up members) → read `loopherd --skill` first,
+  then `docs/agents/shepherd.md`, this repo's runbook.
 - **Direction**: decisions, the herd model, and open questions →
   `docs/wayfinding.md`, which indexes one `docs/decisions/D<n>.md` per
   decision. herdr's capabilities → `docs/research/herdr.md`.
