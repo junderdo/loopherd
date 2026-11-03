@@ -1,5 +1,6 @@
 //! `loopherd tool-hook`: Claude's PreToolUse hook on Bash. Blocks a command
-//! from a lead's pane that needs a switch its herd file leaves off (D17).
+//! from a lead's pane that needs a switch its herd file leaves off (D17), or
+//! a `loopherd restart --force`, which no switch allows (D20).
 //! A guardrail on the command text, not a sandbox.
 
 use std::path::Path;
@@ -21,6 +22,8 @@ pub enum Switch {
     Merge,
     Install,
     Rebase,
+    /// Not a switch: always the human's.
+    ForceRestart,
 }
 
 impl Switch {
@@ -29,6 +32,7 @@ impl Switch {
             Switch::Merge => "merge",
             Switch::Install => "install",
             Switch::Rebase => "rebase",
+            Switch::ForceRestart => "restart --force",
         }
     }
 
@@ -37,6 +41,7 @@ impl Switch {
             Switch::Merge => "the human merges PRs",
             Switch::Install => "the human runs scripts/install and install-hook",
             Switch::Rebase => "the human rebases and force-pushes",
+            Switch::ForceRestart => "the human forces a restart",
         }
     }
 
@@ -45,6 +50,7 @@ impl Switch {
             Switch::Merge => switches.merge,
             Switch::Install => switches.install,
             Switch::Rebase => switches.rebase,
+            Switch::ForceRestart => false,
         }
     }
 }
@@ -78,7 +84,14 @@ fn decide(
         return Ok(None);
     };
     let needed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| needs(&command)))
-        .unwrap_or_else(|_| vec![Switch::Merge, Switch::Install, Switch::Rebase]);
+        .unwrap_or_else(|_| {
+            vec![
+                Switch::Merge,
+                Switch::Install,
+                Switch::Rebase,
+                Switch::ForceRestart,
+            ]
+        });
     if needed.is_empty() {
         return Ok(None);
     }
@@ -96,6 +109,13 @@ fn decide(
     let Some(needed) = needed.into_iter().find(|s| !s.on(&switches)) else {
         return Ok(None);
     };
+    if needed == Switch::ForceRestart {
+        return Ok(Some(format!(
+            "loopherd: blocked: {} may not run `loopherd restart --force`, which skips the checks that the member is finished since its handoff, so {}; restart once its stop reads finished, or ask with `loopherd report --kind question`",
+            lead.name,
+            needed.humans_part()
+        )));
+    }
     let mut message = format!(
         "loopherd: blocked: {}'s `{}` switch is off, so {}; ask with `loopherd report --kind question` instead",
         lead.name,
@@ -302,14 +322,22 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
         }
         "curl" | "wget" => args.iter().any(|a| merges(a)).then_some(Switch::Merge),
         "git" => git_needs(args),
-        "loopherd" => (positional.first() == Some(&"install-hook")).then_some(Switch::Install),
+        "loopherd" => match positional.first() {
+            Some(&"install-hook") => Some(Switch::Install),
+            Some(&"restart") => forces_restart(args),
+            _ => None,
+        },
         // `cargo run -- install-hook` in a loopherd checkout, in any spelling.
-        "cargo" => args
-            .iter()
-            .any(|a| a == "install-hook")
-            .then_some(Switch::Install),
+        "cargo" if args.iter().any(|a| a == "install-hook") => Some(Switch::Install),
+        "cargo" if args.iter().any(|a| a == "restart") => forces_restart(args),
         _ => None,
     }
+}
+
+fn forces_restart(args: &[String]) -> Option<Switch> {
+    args.iter()
+        .any(|a| a == "--force")
+        .then_some(Switch::ForceRestart)
 }
 
 fn git_needs(args: &[String]) -> Option<Switch> {
@@ -646,10 +674,10 @@ mod tests {
         .expect("a lead was allowed after a panic");
         assert!(denied.contains("switch is off"), "{denied}");
         let on = |_: &str| Ok(all_on());
-        assert_eq!(
-            decide(&lead_ledger, &pane, input("ls").as_bytes(), &on, &panics).unwrap(),
-            None
-        );
+        let denied = decide(&lead_ledger, &pane, input("ls").as_bytes(), &on, &panics)
+            .unwrap()
+            .expect("no switch allows a forced restart");
+        assert!(denied.contains("restart --force"), "{denied}");
         let worker = ledger(vec![entry("lh-1", None)]);
         assert_eq!(
             decide(&worker, &pane, input("ls").as_bytes(), &all_off, &panics).unwrap(),
@@ -781,6 +809,7 @@ mod tests {
             Switch::Merge => s.merge = false,
             Switch::Install => s.install = false,
             Switch::Rebase => s.rebase = false,
+            Switch::ForceRestart => {}
         }
         s
     }
@@ -820,6 +849,7 @@ mod tests {
                 Switch::Merge => others_off.merge = true,
                 Switch::Install => others_off.install = true,
                 Switch::Rebase => others_off.rebase = true,
+                Switch::ForceRestart => {}
             }
             for command in commands {
                 assert_eq!(run(&leads, others_off, command), None, "{command}");
@@ -911,5 +941,43 @@ mod tests {
         let message = run(&file, Switches::default(), "gh pr merge 1");
 
         assert!(message.is_some());
+    }
+
+    #[test]
+    fn a_leads_forced_restart_is_denied_whatever_its_switches() {
+        let leads = ledger(vec![lead()]);
+        for command in [
+            "loopherd restart lh-1 --force",
+            "loopherd restart --force lh-1",
+            "cd /x && loopherd restart lh-1 --force",
+            "cargo run -- restart lh-1 --force",
+        ] {
+            assert_eq!(needs(command), [Switch::ForceRestart], "{command}");
+            let message =
+                run(&leads, all_on(), command).unwrap_or_else(|| panic!("{command} was allowed"));
+            assert!(
+                message.contains("lead-h may not run `loopherd restart --force`")
+                    && message.contains("the human forces a restart"),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plain_restart_or_a_workers_forced_one_is_allowed() {
+        let leads = ledger(vec![lead()]);
+        assert_eq!(
+            run(&leads, Switches::default(), "loopherd restart lh-1"),
+            None
+        );
+        let workers = ledger(vec![entry("lh-1", None)]);
+        assert_eq!(
+            run(
+                &workers,
+                Switches::default(),
+                "loopherd restart lh-1 --force"
+            ),
+            None
+        );
     }
 }
