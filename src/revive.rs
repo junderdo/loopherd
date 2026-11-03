@@ -68,7 +68,14 @@ pub fn revive(herdr: &dyn Herdr, ledger: &mut dyn Ledger, req: &ReviveRequest) -
                 Ok(())
             });
             match restarted {
-                Ok(_) => {
+                Ok(revived) => {
+                    if revived.socket.is_none() {
+                        warnings.push(
+                            "herdr didn't say which socket it serves and none is recorded; \
+                             set HERDR_SOCKET_PATH and revive it again, or its stops and reports can't be matched to it"
+                                .into(),
+                        );
+                    }
                     if let Err(e) = ledger.started(&record.name, SystemTime::now()) {
                         warnings.push(format!("no start entry in its mailbox: {e:#}"));
                     }
@@ -699,6 +706,24 @@ mod tests {
         assert_eq!(
             ledger.0["a"].socket.as_deref(),
             Some(Path::new("/run/live.sock"))
+        );
+    }
+
+    #[test]
+    fn a_revive_that_learns_no_socket_warns_its_stops_cannot_be_matched() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut herdr = herdr();
+        herdr.socket = None;
+        let mut ledger = ledger([AgentRecord {
+            socket: None,
+            ..record("a", cwd.path())
+        }]);
+        let (out, _) = run(&herdr, &mut ledger, &request());
+        assert_eq!(
+            out,
+            "warning a: herdr didn't say which socket it serves and none is recorded; \
+             set HERDR_SOCKET_PATH and revive it again, or its stops and reports can't be matched to it\n\
+             resumed a w1:p1"
         );
     }
 
