@@ -124,7 +124,7 @@ pub trait Herdr {
     fn prompt(&self, name: &str, text: &str) -> Result<()>;
     /// Brings the agent in `pane_id` to the front of the human's herdr client.
     fn focus(&self, pane_id: &str) -> Result<()>;
-    /// The socket of the herdr these calls reach, when known.
+    /// The socket of the herdr these calls reach; `None` when herdr can't say.
     fn socket(&self) -> Option<PathBuf>;
 }
 
@@ -444,7 +444,14 @@ impl Herdr for CliHerdr {
     }
 
     fn socket(&self) -> Option<PathBuf> {
-        socket_from_env()
+        socket_from_env().or_else(|| {
+            let out = self
+                .command(&["status", "server", "--json"])
+                .output()
+                .ok()?;
+            let status: Value = serde_json::from_slice(&out.stdout).ok()?;
+            status["socket"].as_str().map(PathBuf::from)
+        })
     }
 }
 
