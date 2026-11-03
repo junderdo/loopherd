@@ -362,3 +362,40 @@ fn an_installed_tool_hook_whose_binary_fails_with_exit_2_does_not_block() {
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     assert!(out.stdout.is_empty());
 }
+
+#[test]
+fn install_without_a_tty_writes_no_escape_codes() {
+    let sandbox = Sandbox::new(false);
+
+    let out = sandbox.install(&["--settings", "/tmp/s.json"]);
+
+    assert!(out.status.success());
+    assert!(!out.stdout.contains(&0x1b), "{:?}", out.stdout);
+    assert!(!out.stderr.contains(&0x1b), "{:?}", out.stderr);
+}
+
+#[test]
+fn no_splash_is_consumed_and_not_passed_to_install_hook() {
+    let sandbox = Sandbox::new(false);
+
+    let out = sandbox.install(&["--no-splash", "--settings", "/tmp/s.json"]);
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&sandbox.log).unwrap(),
+        "new install-hook --settings /tmp/s.json\n"
+    );
+}
+
+#[test]
+fn help_documents_no_splash() {
+    let sandbox = Sandbox::new(true);
+
+    let out = sandbox.install(&["--help"]);
+
+    assert!(String::from_utf8_lossy(&out.stdout).contains("--no-splash"));
+}

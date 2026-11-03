@@ -45,6 +45,7 @@ commands while its herd file's switch is off. `~/.local/bin` must be on
 scripts/install --settings <file>   # hooks in another settings file; pass the same
                                     # --settings <file> to install-hook --remove and watch
 git pull && scripts/install         # update; replaces the binary, edits settings only if out of date
+scripts/install --no-splash         # skip the opening animation (or LOOPHERD_NO_SPLASH=1)
 loopherd install-hook --remove      # remove the hooks ...
 rm ~/.local/bin/loopherd            # ... and the binary
 ```
