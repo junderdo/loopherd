@@ -6,7 +6,7 @@ splash_wants_to_play() {
 }
 
 # Rows are built as two parallel ASCII strings: the text, where '#' paints as
-# '█' and '%' as '░', and a kind per column that picks its colour.
+# '█', '%' as the sun and '&' as cloud, and a kind per column that picks its colour.
 
 # One glyph per letter of "loopherd", rows split on '|'.
 splash_glyphs=(
@@ -34,16 +34,28 @@ splash_tagline_row=20
 splash_height=21
 
 # The herd, far to near: row, colour kind, sprite size, start column, motion
-# (r or l walks that way; gr or gl grazes in place facing that way), and frames
-# per one-column step, or per head bob when grazing.
+# (r or l walks that way; gr or gl grazes in place facing that way, from size 2
+# up), and frames per one-column step, or per head bob when grazing.
 splash_herd=(
-  "9 f 1 14 r 40" "9 f 1 47 gr 12"
+  "9 f 1 14 r 40" "9 f 1 47 l 45"
   "10 f 1 30 l 35"
   "11 m 2 6 r 25" "11 m 2 40 gl 11"
   "12 m 2 54 l 22"
   "13 n 5 44 l 16" "13 n 5 12 gr 10"
   "14 n 5 22 r 14"
-  "15 w 9 2 r 8" "15 w 9 26 gl 9" "15 w 9 52 l 10"
+  "15 w 9 2 r 8" "15 w 9 26 gl 9" "15 w 9 46 l 10"
+)
+# The shepherd stands front-on at the right of the foreground, leaning on a crook.
+splash_shepherd_row=13
+splash_shepherd_x=54
+
+# Clouds, drawn over the sun and under the letters: top row, start column,
+# columns per step (+1 or -1), frames per step, then the shape's rows.
+splash_clouds=(
+  "0|18|1|14|   &&&&&     |&&&&&&&&&&&&&"
+  "1|48|-1|20|&&&&&&&"
+  "3|1|1|25| &&&&& |&&&&&&&"
+  "6|36|-1|16|  &&&&&&    |&&&&&&&&&&&&"
 )
 
 splash_buf=''
@@ -66,12 +78,15 @@ splash_ground_kind() { # <depth>
 
 splash_colours() {
   splash_sgr=()
+  # Without colour, letters over a solid sun would vanish.
+  splash_sun_glyph='░'
   [[ -n "${NO_COLOR:-}" ]] && return
+  splash_sun_glyph='█'
   local row d
-  local -a purple_to_orange=(93 134 169 203 208) greens=(22 22 28 28 34 34 70 70 76 82)
+  local -a purple_to_orange=(93 134 169 203 202) greens=(22 22 28 28 34 34 70 70 76 82)
   for row in 0 1 2 3 4; do
     splash_set_sgr "$((2 + row))" \
-      "1;38;2;$((150 + 105 * row / 4));$((50 + 90 * row / 4));$((230 - 230 * row / 4))" \
+      "1;38;2;$((150 + 105 * row / 4));$((50 + 30 * row / 4));$((230 - 230 * row / 4))" \
       "1;38;5;${purple_to_orange[row]}"
   done
   for ((d = 0; d < splash_ground_rows; d++)); do
@@ -80,12 +95,15 @@ splash_colours() {
       "38;2;$((35 + 45 * d / 9));$((70 + 150 * d / 9));$((45 + 40 * d / 9))" \
       "38;5;${greens[d]}"
   done
-  splash_set_sgr 1 '38;2;255;150;40' '38;5;214'
+  splash_set_sgr 1 '38;2;255;154;31' '38;5;208'
+  splash_set_sgr u '38;2;255;192;77' '38;5;214'
+  splash_set_sgr c '38;2;235;235;242' '38;5;254'
   splash_set_sgr h '38;2;120;110;140' '38;5;60'
   splash_set_sgr f '38;2;120;125;150' '38;5;103'
   splash_set_sgr m '38;2;160;165;190' '38;5;146'
   splash_set_sgr n '38;2;205;205;220' '38;5;252'
   splash_set_sgr w '1;38;2;255;255;255' '1;38;5;231'
+  splash_set_sgr s '38;2;190;140;90' '38;5;173'
   splash_set_sgr t '2' '2'
 }
 
@@ -100,7 +118,8 @@ splash_paint_row() { # <row> <text> <kinds>
     text=${text:${#kinds}-${#rest}}
     kinds=$rest
     run=${run//#/█}
-    run=${run//%/░}
+    run=${run//%/$splash_sun_glyph}
+    run=${run//&/▒}
     printf -v code '%d' "'$kind"
     sgr=${splash_sgr[code]:-}
     if [[ -n "$sgr" && "$kind" != 0 ]]; then
@@ -116,78 +135,109 @@ splash_fill() { # <var> <char>
   printf -v "$1" '%s' "${!1// /$2}"
 }
 
-# A sun setting into the horizon, centred behind the wordmark.
-splash_draw_sun() {
-  local row col dx dy line
-  splash_sun_rows=()
-  for ((row = 0; row < splash_horizon; row++)); do
-    line=''
-    for ((col = 0; col < splash_width; col++)); do
-      dx=$((col - splash_width / 2)) dy=$((row - 5))
-      if ((dx * dx + 4 * dy * dy <= 110)); then line+='%'; else line+=' '; fi
-    done
-    splash_sun_rows[row]=$line
+# Lays <sprite> over splash_text and splash_kinds from column <x>; spaces are
+# see-through, '~' a solid blank.
+splash_lay() { # <x> <sprite> <kind>
+  local x=$1 sprite=$2 kind=$3 i ch
+  for ((i = 0; i < ${#sprite}; i++)); do
+    ch=${sprite:i:1}
+    [[ "$ch" == ' ' ]] && continue
+    [[ "$ch" == '~' ]] && ch=' '
+    ((x + i >= 0 && x + i < splash_width)) || continue
+    splash_text="${splash_text:0:x+i}${ch}${splash_text:x+i+1}"
+    splash_kinds="${splash_kinds:0:x+i}${kind}${splash_kinds:x+i+1}"
   done
 }
 
-# Grass marks: sparse dots near the horizon, dense blades in the foreground.
+# A sun setting into the horizon, centred behind the wordmark, with a lighter core.
+splash_draw_sun() {
+  local row col dx dy text kinds reach
+  splash_sun_text=() splash_sun_kinds=()
+  for ((row = 0; row < splash_horizon; row++)); do
+    text='' kinds=''
+    for ((col = 0; col < splash_width; col++)); do
+      dx=$((col - splash_width / 2)) dy=$((row - 5))
+      reach=$((dx * dx + 4 * dy * dy))
+      if ((reach <= 40)); then
+        text+='%' kinds+=u
+      elif ((reach <= 110)); then
+        text+='%' kinds+=1
+      else
+        text+=' ' kinds+=0
+      fi
+    done
+    splash_sun_text[row]=$text splash_sun_kinds[row]=$kinds
+  done
+}
+
+# Grass marks, evenly spread with a little jitter, more of them on every row
+# toward the front: sparse dots at the horizon, blades in the foreground.
 splash_draw_ground() {
-  local d col h density marks line
+  local d k count step col h marks line
   splash_ground_text=()
   for ((d = 0; d < splash_ground_rows; d++)); do
-    density=$((4 + 32 * d * d / 81))
+    count=$(((4 + 32 * d * d / 81) * splash_width / 100))
     marks='.'
     ((d >= 3)) && marks=".,'"
     ((d >= 6)) && marks=",'\"\`;"
-    line=''
-    for ((col = 0; col < splash_width; col++)); do
-      h=$(((col * 7919 + d * 104729 + col * col * 31 + d * col * 17) % 997))
-      if ((h % 100 < density)); then line+=${marks:h % ${#marks}:1}; else line+=' '; fi
+    printf -v line '%*s' "$splash_width" ''
+    step=$((splash_width * 1000 / count))
+    for ((k = 0; k < count; k++)); do
+      h=$(((k * 7919 + d * 104729) % 997))
+      col=$((((k * step + h * step / 997) / 1000 + d * 23) % splash_width))
+      line="${line:0:col}${marks:h % ${#marks}:1}${line:col+1}"
     done
     splash_ground_text[d]=$line
   done
 }
 
-# Wordmark row <row> with letters before <letter> landed, <letter> <rise> rows short.
-splash_wordmark_row() { # <row> <letter> <rise>
-  local row=$1 letter=$2 rise=$3 i glyph_row mask='' col sun text='' kinds=''
+# Letters before <letter> landed and <letter> <rise> rows short, for wordmark row <row>.
+splash_wordmark_mask() { # <row> <letter> <rise>
+  local row=$1 letter=$2 rise=$3 i glyph_row
   local -a rows
+  splash_mask=''
   for i in "${!splash_glyphs[@]}"; do
-    ((i > 0)) && mask+='  '
+    ((i > 0)) && splash_mask+='  '
     glyph_row=$row
     ((i == letter)) && glyph_row=$((row + rise))
     if ((i > letter || glyph_row > 4)); then
-      mask+='      '
+      splash_mask+='      '
     else
       IFS='|' read -ra rows <<<"${splash_glyphs[i]}"
-      mask+=${rows[glyph_row]}
+      splash_mask+=${rows[glyph_row]}
     fi
   done
-  sun=${splash_sun_rows[splash_wordmark_top + row]}
-  for ((col = 0; col < splash_width; col++)); do
-    if [[ "${mask:col:1}" == '#' ]]; then
-      text+='#' kinds+=$((2 + row))
-    elif [[ "${sun:col:1}" == '%' ]]; then
-      text+='%' kinds+=1
-    else
-      text+=' ' kinds+=0
+}
+
+# Sun, then clouds, then letters; redrawn only when a cloud or letter has moved.
+splash_sky() { # <frame> <letter> <rise>
+  local frame=$1 letter=$2 rise=$3 entry row top shape key=''
+  local -a cloud
+  for entry in "${splash_clouds[@]}"; do
+    IFS='|' read -ra cloud <<<"$entry"
+    key+="$((cloud[1] + cloud[2] * (frame / cloud[3]))),"
+  done
+  key+="$letter.$rise"
+  [[ "$key" == "${splash_sky_key:-}" ]] && return
+  splash_sky_key=$key
+  for ((row = 0; row < splash_horizon; row++)); do
+    splash_text=${splash_sun_text[row]} splash_kinds=${splash_sun_kinds[row]}
+    for entry in "${splash_clouds[@]}"; do
+      IFS='|' read -ra cloud <<<"$entry"
+      top=${cloud[0]} shape=$((4 + row - cloud[0]))
+      ((row >= top && shape < ${#cloud[@]})) || continue
+      splash_lay $((cloud[1] + cloud[2] * (frame / cloud[3]))) "${cloud[shape]}" c
+    done
+    if ((row >= splash_wordmark_top && row < splash_wordmark_top + 5)); then
+      splash_wordmark_mask $((row - splash_wordmark_top)) "$letter" "$rise"
+      splash_lay 0 "$splash_mask" $((2 + row - splash_wordmark_top))
     fi
+    splash_paint_row "$row" "$splash_text" "$splash_kinds"
   done
-  splash_paint_row "$((splash_wordmark_top + row))" "$text" "$kinds"
 }
 
-splash_wordmark() { # <letter> <rise>
-  local row
-  for row in 0 1 2 3 4; do splash_wordmark_row "$row" "$1" "$2"; done
-}
-
-splash_sky() {
-  local row text kinds horizon
-  for row in 0 1 7; do
-    text=${splash_sun_rows[row]}
-    kinds=${text//%/1}
-    splash_paint_row "$row" "$text" "${kinds// /0}"
-  done
+splash_horizon_line() {
+  local horizon
   splash_fill horizon '-'
   splash_paint_row "$splash_horizon" "$horizon" "${horizon//-/h}"
 }
@@ -211,21 +261,14 @@ splash_sheep_sprite() { # <size> <facing r|l> <head down 0|1>
   esac
 }
 
-# Lays splash_sprite over the ground rows from <row>, spaces see-through.
+# Lays splash_sprite over the ground rows from <row>.
 splash_overlay() { # <row> <x> <kind>
-  local row=$1 x=$2 kind=$3 r i ch text kinds
+  local row=$1 x=$2 kind=$3 r d
   for r in "${!splash_sprite[@]}"; do
-    text=${splash_rows_text[row + r - splash_ground_top]}
-    kinds=${splash_rows_kinds[row + r - splash_ground_top]}
-    for ((i = 0; i < ${#splash_sprite[r]}; i++)); do
-      ch=${splash_sprite[r]:i:1}
-      [[ "$ch" == ' ' ]] && continue
-      ((x + i >= 0 && x + i < splash_width)) || continue
-      text="${text:0:x+i}${ch}${text:x+i+1}"
-      kinds="${kinds:0:x+i}${kind}${kinds:x+i+1}"
-    done
-    splash_rows_text[row + r - splash_ground_top]=$text
-    splash_rows_kinds[row + r - splash_ground_top]=$kinds
+    d=$((row + r - splash_ground_top))
+    splash_text=${splash_rows_text[d]} splash_kinds=${splash_rows_kinds[d]}
+    splash_lay "$x" "${splash_sprite[r]}" "$kind"
+    splash_rows_text[d]=$splash_text splash_rows_kinds[d]=$splash_kinds
   done
 }
 
@@ -248,6 +291,10 @@ splash_pasture() { # <frame>
     esac
     splash_overlay "$row" "$x" "$kind"
   done
+  local face='(o)'
+  ((frame % 40 >= 37)) && face='(-)'
+  splash_sprite=(' .-.~~?' " $face~~|" '/|=|\_|' ' |=|~~|' ' |~|~~|' ' ^~^~~|')
+  splash_overlay "$splash_shepherd_row" "$splash_shepherd_x" s
   for ((d = 0; d < splash_ground_rows; d++)); do
     splash_paint_row $((splash_ground_top + d)) "${splash_rows_text[d]}" "${splash_rows_kinds[d]}"
   done
@@ -284,6 +331,7 @@ splash_full() {
   local frame letter rise letters=${#splash_glyphs[@]} start
   splash_draw_sun
   splash_draw_ground
+  splash_sky_key=
   start=$(splash_now_us)
   splash_alt_screen=1
   printf '\e[?1049h\e[2J'
@@ -292,8 +340,8 @@ splash_full() {
     rise=$((splash_drop - 1 - frame % splash_drop))
     ((letter < letters)) || { letter=$letters; rise=0; }
     splash_buf=''
-    if ((frame == 0)); then splash_sky; fi
-    if ((frame <= letters * splash_drop)); then splash_wordmark "$letter" "$rise"; fi
+    if ((frame == 0)); then splash_horizon_line; fi
+    splash_sky "$frame" "$letter" "$rise"
     if ((frame == letters * splash_drop)); then splash_show_tagline; fi
     splash_pasture "$frame"
     printf '%s' "$splash_buf"
