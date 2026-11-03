@@ -449,6 +449,20 @@ fn pty(shell: &str) -> Option<Command> {
     Some(cmd)
 }
 
+/// Runs `cmd` and types Ctrl+C into its pty after `delay`, so the whole
+/// foreground process group gets SIGINT, as from a keyboard.
+fn ctrl_c_after(cmd: &mut Command, delay: std::time::Duration) -> Output {
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(delay);
+    child.stdin.as_mut().unwrap().write_all(b"\x03").unwrap();
+    child.wait_with_output().unwrap()
+}
+
 fn without_escapes(text: &str) -> String {
     let mut plain = String::new();
     let mut chars = text.chars();
@@ -523,4 +537,42 @@ fn an_interrupted_splash_returns_130_and_keeps_the_callers_traps() {
     assert!(out.contains("trap -- 'echo bye' EXIT"), "{out}");
     assert!(out.contains("trap -- 'echo int' SIGINT"), "{out}");
     assert!(out.trim_end().ends_with("bye"), "{out}");
+}
+
+#[test]
+fn ctrl_c_during_the_splash_returns_130_to_a_set_e_caller_whose_exit_trap_runs() {
+    let splash = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install-splash.bash");
+    let shell = format!(
+        "stty cols 100 rows 30; exec bash -c 'set -e; trap \"echo exit \\$?\" EXIT; \
+         source {splash}; splash_play; echo after'"
+    );
+    let Some(mut cmd) = pty(&shell) else {
+        eprintln!("skipped: needs util-linux script");
+        return;
+    };
+
+    let out = ctrl_c_after(&mut cmd, std::time::Duration::from_millis(700));
+
+    let out = without_escapes(&String::from_utf8_lossy(&out.stdout));
+    assert!(out.contains("exit 130"), "{out}");
+    assert!(!out.contains("after"), "{out}");
+}
+
+#[test]
+fn ctrl_c_during_the_splash_stops_install_with_130_before_building() {
+    let sandbox = Sandbox::new(false);
+    let Some(mut cmd) = pty(&format!(
+        "stty cols 100 rows 30; {INSTALL} --settings /tmp/s.json; echo \"install exited $?\""
+    )) else {
+        eprintln!("skipped: needs util-linux script");
+        return;
+    };
+    cmd.env("HOME", &sandbox.home).env("PATH", &sandbox.path);
+
+    let out = ctrl_c_after(&mut cmd, std::time::Duration::from_millis(700));
+
+    let out = String::from_utf8_lossy(&out.stdout);
+    assert!(out.contains("install exited 130"), "{out}");
+    assert!(!sandbox.installed().exists());
+    assert!(!sandbox.log.exists());
 }

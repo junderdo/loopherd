@@ -271,13 +271,13 @@ splash_wait() { # <start_us> <frame>
   now=${EPOCHREALTIME:-}
   now=${now//[!0-9]/}
   if [[ -z "$1" || -z "$now" ]]; then
-    sleep 0.05
+    sleep 0.05 || :
     return
   fi
   wait=$(($1 + ($2 + 1) * splash_frame_us - now))
   ((wait > 0)) || return 0
   printf -v wait '%d.%06d' $((wait / 1000000)) $((wait % 1000000))
-  sleep "$wait"
+  sleep "$wait" || :
 }
 
 splash_full() {
@@ -313,7 +313,7 @@ splash_title() {
     else
       printf '%s' "${word:i:1}"
     fi
-    sleep 0.1
+    sleep 0.1 || :
   done
   printf '\n\n'
 }
