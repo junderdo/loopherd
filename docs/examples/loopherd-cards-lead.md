@@ -18,4 +18,7 @@ Start now:
    your heartbeat: check each Review card's PR for a merge, then re-arm.
 
 When you need the human, run `loopherd report --kind question "<the exact
-question>"` and end your turn.
+question>"` and end your turn. With merge off, a merge question carries the PR
+link, any PR that must merge first, and the line
+`! GH_TOKEN=$(gh auth token --user junderdo) gh pr merge <n> --merge --match-head-commit <full sha>`
+for the head your reviewer verified, without `--delete-branch`.
