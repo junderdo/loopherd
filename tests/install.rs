@@ -727,3 +727,28 @@ fn the_large_scene_fills_the_width_down_to_the_bottom_row() {
         "{painted:?}"
     );
 }
+
+#[test]
+fn a_caller_with_a_strict_ifs_and_set_u_gets_the_whole_splash() {
+    let dir = tempfile::tempdir().unwrap();
+    let caller = dir.path().join("caller.bash");
+    fs::write(
+        &caller,
+        format!(
+            "set -euo pipefail\nIFS=$'\\n\\t'\ntrap 'echo exit $?' EXIT\n\
+             source {SPLASH}\nsplash_play\necho after\n"
+        ),
+    )
+    .unwrap();
+    let Some(mut cmd) = pty(&format!("stty cols 160 rows 45; bash {}", caller.display())) else {
+        eprintln!("skipped: needs util-linux script");
+        return;
+    };
+
+    let raw = String::from_utf8_lossy(&cmd.output().unwrap().stdout).into_owned();
+
+    assert!(raw.contains('█'), "the splash never played: {raw:?}");
+    let out = without_escapes(&raw);
+    assert!(out.contains("after"), "{out}");
+    assert!(out.contains("exit 0"), "{out}");
+}

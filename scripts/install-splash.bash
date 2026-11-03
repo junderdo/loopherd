@@ -371,7 +371,7 @@ splash_overlay() { # <row> <x> <kind>
 # Further back is smaller, higher, slower and dimmer. Walkers drift left or
 # right; grazers stay put and bob their heads.
 splash_pasture() { # <frame>
-  local frame=$1 entry d row kind size x motion period
+  local frame=$1 entry d row kind size x motion period IFS=' '
   splash_rows_text=("${splash_ground_text[@]}")
   splash_rows_kinds=("${splash_ground_kinds_row[@]}")
   for entry in "${splash_herd[@]}"; do
@@ -481,7 +481,7 @@ splash_play() {
   local size rows= cols= callers_traps status=0
   # stty reads stdin, which may not be the terminal; fd 3 is stdout from outside the $(...).
   { size=$(stty size <&3 2>/dev/null); } 3>&1 || return 0
-  read -r rows cols <<<"$size"
+  IFS=' ' read -r rows cols <<<"$size"
   [[ "$rows" =~ ^[1-9][0-9]*$ && "$cols" =~ ^[1-9][0-9]*$ ]] || return 0
   splash_colours
   splash_alt_screen=
