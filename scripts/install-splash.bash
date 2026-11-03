@@ -21,23 +21,29 @@ splash_glyphs=(
   "##### |##  ##|##  ##|##  ##|##### "
 )
 splash_tagline='keeps your coding agents working together'
-splash_width=62
 splash_drop=4
 splash_frames=100
 splash_frame_us=50000
 
-# Scene rows, top to bottom.
+# Three layouts, by terminal size (splash_layout):
+#   title   under 66 columns or 23 rows: the name typed out on one line.
+#   medium  the 62x21 scene, centred.
+#   large   140 columns and 40 rows or more: full-bleed. Sky, horizon and pasture
+#           span the width, the pasture runs to the row above the tagline on the
+#           last row, and the herd grows with the area.
+splash_large_cols=140
+splash_large_rows=40
+
+# Scene rows, top to bottom; the ground and tagline rows are set by the layout.
 splash_wordmark_top=2 # sun rows 0..7 sit behind it
 splash_horizon=8
 splash_ground_top=9
-splash_ground_rows=10
-splash_tagline_row=20
-splash_height=21
+splash_ground_kinds=ABCDEFGHIJ
 
 # The herd, far to near: row, colour kind, sprite size, start column, motion
 # (r or l walks that way; gr or gl grazes in place facing that way, from size 2
 # up), and frames per one-column step, or per head bob when grazing.
-splash_herd=(
+splash_medium_herd=(
   "9 f 1 14 r 40" "9 f 1 47 l 45"
   "10 f 1 30 l 35"
   "11 m 2 6 r 25" "11 m 2 40 gl 11"
@@ -46,13 +52,9 @@ splash_herd=(
   "14 n 5 22 r 14"
   "15 w 9 2 r 8" "15 w 9 26 gl 9" "15 w 9 46 l 10"
 )
-# The shepherd stands front-on at the right of the foreground, leaning on a crook.
-splash_shepherd_row=13
-splash_shepherd_x=54
-
 # Clouds, drawn over the sun and under the letters: top row, start column,
 # columns per step (+1 or -1), frames per step, then the shape's rows.
-splash_clouds=(
+splash_medium_clouds=(
   "0|18|1|14|   &&&&&     |&&&&&&&&&&&&&"
   "1|48|-1|20|&&&&&&&"
   "3|1|1|25| &&&&& |&&&&&&&"
@@ -61,6 +63,76 @@ splash_clouds=(
 
 splash_buf=''
 splash_sgr=()
+
+splash_layout() { # <rows> <cols>
+  local rows=$1 cols=$2
+  splash_width=62 splash_height=21 splash_ground_rows=10 splash_tagline_row=20
+  splash_herd=("${splash_medium_herd[@]}") splash_clouds=("${splash_medium_clouds[@]}")
+  if ((cols < splash_width + 4 || rows < splash_height + 2)); then
+    splash_layout=title
+  elif ((cols < splash_large_cols || rows < splash_large_rows)); then
+    splash_layout=medium
+    splash_top=$(((rows - splash_height) / 2 + 1))
+    splash_left=$(((cols - splash_width) / 2 + 1))
+  else
+    splash_layout=large
+    splash_width=$cols splash_height=$rows splash_top=1 splash_left=1
+    splash_tagline_row=$((rows - 1))
+    splash_ground_rows=$((rows - 1 - splash_ground_top))
+    splash_large_herd
+    splash_large_clouds
+  fi
+  splash_wordmark_x=$(((splash_width - 62) / 2))
+  # The shepherd stands front-on at the right of the foreground, leaning on a
+  # crook, feet on the front row.
+  splash_shepherd_row=$((splash_ground_top + splash_ground_rows - 6))
+  splash_shepherd_x=$((splash_width - 8))
+}
+
+# A row of sheep every other ground row (every third for the 3-row front sheep),
+# about one per 25 columns, banded by depth like the medium herd.
+splash_large_herd() {
+  local d k step size kind period n j h x motion
+  local -a moves=(r l gr gl)
+  splash_herd=()
+  for ((d = 0; d <= splash_ground_rows - 3; d += step)); do
+    k=$((d * 9 / (splash_ground_rows - 1)))
+    step=2
+    if ((k <= 1)); then
+      size=1 kind=f period=40
+    elif ((k <= 3)); then
+      size=2 kind=m period=22
+    elif ((k <= 5)); then
+      size=5 kind=n period=14
+    else
+      size=9 kind=w period=9 step=3
+    fi
+    n=$((splash_width / 25))
+    for ((j = 0; j < n; j++)); do
+      h=$(((j * 7919 + d * 104729) % 997))
+      x=$((j * splash_width / n + h % (splash_width / n)))
+      motion=${moves[h % (size == 1 ? 2 : 4)]}
+      splash_herd+=("$((splash_ground_top + d)) $kind $size $x $motion $((period + h % 6))")
+    done
+  done
+}
+
+# The medium clouds once per 62 columns, each copy shifted down and the odd
+# ones drifting the other way.
+splash_large_clouds() {
+  local copies=$((splash_width / 62)) c entry IFS='|'
+  local -a cloud
+  splash_clouds=()
+  for ((c = 0; c < copies; c++)); do
+    for entry in "${splash_medium_clouds[@]}"; do
+      read -ra cloud <<<"$entry"
+      cloud[0]=$(((cloud[0] + 2 * c) % 7))
+      cloud[1]=$((cloud[1] + c * splash_width / copies))
+      ((c % 2)) && cloud[2]=$((-cloud[2]))
+      splash_clouds+=("${cloud[*]}")
+    done
+  done
+}
 
 splash_set_sgr() { # <kind> <24-bit sgr> <256-colour sgr>
   local code
@@ -72,9 +144,9 @@ splash_set_sgr() { # <kind> <24-bit sgr> <256-colour sgr>
   fi
 }
 
-splash_ground_kind() { # <depth>
-  local kinds=ABCDEFGHIJ
-  splash_kind=${kinds:$1:1}
+# The colour band, 0 to 9, of ground row <d>.
+splash_ground_depth() { # <d>
+  splash_depth=$(($1 * 9 / (splash_ground_rows - 1)))
 }
 
 splash_colours() {
@@ -90,9 +162,8 @@ splash_colours() {
       "1;38;2;$((150 + 105 * row / 4));$((50 + 30 * row / 4));$((230 - 230 * row / 4))" \
       "1;38;5;${purple_to_orange[row]}"
   done
-  for ((d = 0; d < splash_ground_rows; d++)); do
-    splash_ground_kind "$d"
-    splash_set_sgr "$splash_kind" \
+  for ((d = 0; d < 10; d++)); do
+    splash_set_sgr "${splash_ground_kinds:d:1}" \
       "38;2;$((35 + 45 * d / 9));$((70 + 150 * d / 9));$((45 + 40 * d / 9))" \
       "38;5;${greens[d]}"
   done
@@ -112,14 +183,14 @@ splash_colours() {
 
 # Appends <text> at screen row <row> of the scene, one colour per run of <kinds>.
 splash_paint_row() { # <row> <text> <kinds>
-  local text=$2 kinds=$3 kind rest run code sgr
+  local text=$2 kinds=$3 kind run code sgr
   splash_buf+=$'\e['"$((splash_top + $1));${splash_left}H"
   while [[ -n "$kinds" ]]; do
     kind=${kinds:0:1}
-    rest=${kinds##+("$kind")}
-    run=${text:0:${#kinds}-${#rest}}
-    text=${text:${#kinds}-${#rest}}
-    kinds=$rest
+    run=${kinds%%[!"$kind"]*}
+    kinds=${kinds:${#run}}
+    run=${text:0:${#run}}
+    text=${text:${#run}}
     run=${run//#/█}
     run=${run//%/$splash_sun_glyph}
     run=${run//&/▒}
@@ -141,7 +212,19 @@ splash_fill() { # <var> <char>
 # Lays <sprite> over splash_text and splash_kinds from column <x>; spaces are
 # see-through, '~' a solid blank. Cloud keeps the sun's colour behind it.
 splash_lay() { # <x> <sprite> <kind>
-  local x=$1 sprite=$2 kind=$3 i ch cell
+  local x=$1 sprite=$2 kind=$3 i ch cell trimmed
+  trimmed=${sprite#"${sprite%%[! ]*}"}
+  x=$((x + ${#sprite} - ${#trimmed}))
+  sprite=${trimmed%"${trimmed##*[! ]}"}
+  if [[ "$sprite" != *' '* ]] && ((x >= 0 && x + ${#sprite} <= splash_width)); then
+    cell=${splash_kinds:x:${#sprite}}
+    if [[ "$kind" != c || "$cell" != *[u1xy]* ]]; then
+      printf -v cell '%*s' "${#sprite}" ''
+      splash_text="${splash_text:0:x}${sprite//\~/ }${splash_text:x+${#sprite}}"
+      splash_kinds="${splash_kinds:0:x}${cell// /$kind}${splash_kinds:x+${#sprite}}"
+      return
+    fi
+  fi
   for ((i = 0; i < ${#sprite}; i++)); do
     ch=${sprite:i:1}
     [[ "$ch" == ' ' ]] && continue
@@ -183,13 +266,16 @@ splash_draw_sun() {
 # Grass marks, jittered across each row; no row has fewer than the one behind it,
 # so they run from sparse dots at the horizon to blades in the foreground.
 splash_draw_ground() {
-  local d k count step col h marks line
-  splash_ground_text=()
+  local d k count step col h marks line far=$((splash_ground_rows - 1))
+  splash_ground_text=() splash_ground_kinds_row=()
   for ((d = 0; d < splash_ground_rows; d++)); do
-    count=$(((4 + 32 * d * d / 81) * splash_width / 100))
+    splash_ground_depth "$d"
+    count=$(((4 + 32 * d * d / (far * far)) * splash_width / 100))
     marks='.'
-    ((d >= 3)) && marks=".,'"
-    ((d >= 6)) && marks=",'\"\`;"
+    ((splash_depth >= 3)) && marks=".,'"
+    ((splash_depth >= 6)) && marks=",'\"\`;"
+    splash_fill line "${splash_ground_kinds:splash_depth:1}"
+    splash_ground_kinds_row[d]=$line
     printf -v line '%*s' "$splash_width" ''
     step=$((splash_width * 1000 / count))
     for ((k = 0; k < count; k++)); do
@@ -240,7 +326,7 @@ splash_sky() { # <frame> <letter> <rise>
     done
     if ((row >= splash_wordmark_top && row < splash_wordmark_top + 5)); then
       splash_wordmark_mask $((row - splash_wordmark_top)) "$letter" "$rise"
-      splash_lay 0 "$splash_mask" $((2 + row - splash_wordmark_top))
+      splash_lay "$splash_wordmark_x" "$splash_mask" $((2 + row - splash_wordmark_top))
     fi
     splash_paint_row "$row" "$splash_text" "$splash_kinds"
   done
@@ -285,15 +371,13 @@ splash_overlay() { # <row> <x> <kind>
 # Further back is smaller, higher, slower and dimmer. Walkers drift left or
 # right; grazers stay put and bob their heads.
 splash_pasture() { # <frame>
-  local frame=$1 entry d row kind size x motion period kinds
-  for ((d = 0; d < splash_ground_rows; d++)); do
-    splash_ground_kind "$d"
-    splash_fill kinds "$splash_kind"
-    splash_rows_text[d]=${splash_ground_text[d]}
-    splash_rows_kinds[d]=$kinds
-  done
+  local frame=$1 entry d row kind size x motion period
+  splash_rows_text=("${splash_ground_text[@]}")
+  splash_rows_kinds=("${splash_ground_kinds_row[@]}")
   for entry in "${splash_herd[@]}"; do
-    read -r row kind size x motion period <<<"$entry"
+    # Unquoted to split the entry's six fields.
+    set -- $entry
+    row=$1 kind=$2 size=$3 x=$4 motion=$5 period=$6
     case $motion in
       r) splash_sheep_sprite "$size" r 0; x=$((x + frame / period)) ;;
       l) splash_sheep_sprite "$size" l 0; x=$((x - frame / period)) ;;
@@ -306,6 +390,8 @@ splash_pasture() { # <frame>
   splash_sprite=(' .-.~~?' " $face~~|" '/|=|\_|' ' |=|~~|' ' |~|~~|' ' ^~^~~|')
   splash_overlay "$splash_shepherd_row" "$splash_shepherd_x" s
   for ((d = 0; d < splash_ground_rows; d++)); do
+    [[ "${splash_rows_text[d]}${splash_rows_kinds[d]}" == "${splash_painted[d]:-}" ]] && continue
+    splash_painted[d]=${splash_rows_text[d]}${splash_rows_kinds[d]}
     splash_paint_row $((splash_ground_top + d)) "${splash_rows_text[d]}" "${splash_rows_kinds[d]}"
   done
 }
@@ -332,24 +418,35 @@ splash_wait() { # <start_us> <frame>
   sleep "$wait" || :
 }
 
-splash_full() {
-  local frame letter rise letters=${#splash_glyphs[@]} start
+splash_prepare() {
   splash_draw_sun
   splash_draw_ground
   splash_sky_key=
+  splash_painted=()
+}
+
+# Sets splash_buf to what changed on screen for <frame>.
+splash_frame() { # <frame>
+  local frame=$1 letters=${#splash_glyphs[@]} letter rise
+  letter=$((frame / splash_drop))
+  rise=$((splash_drop - 1 - frame % splash_drop))
+  ((letter < letters)) || { letter=$letters; rise=0; }
+  splash_buf=''
+  if ((frame == 0)); then splash_horizon_line; fi
+  splash_sky "$frame" "$letter" "$rise"
+  if ((frame == letters * splash_drop)); then splash_show_tagline; fi
+  splash_pasture "$frame"
+}
+
+splash_full() {
+  local frame start
+  splash_prepare
   start=${EPOCHREALTIME:-}
   start=${start//[!0-9]/}
   splash_alt_screen=1
   printf '\e[?1049h\e[2J' || :
   for ((frame = 0; frame < splash_frames && !splash_interrupted; frame++)); do
-    letter=$((frame / splash_drop))
-    rise=$((splash_drop - 1 - frame % splash_drop))
-    ((letter < letters)) || { letter=$letters; rise=0; }
-    splash_buf=''
-    if ((frame == 0)); then splash_horizon_line; fi
-    splash_sky "$frame" "$letter" "$rise"
-    if ((frame == letters * splash_drop)); then splash_show_tagline; fi
-    splash_pasture "$frame"
+    splash_frame "$frame"
     printf '%s' "$splash_buf" || :
     splash_wait "$start" "$frame"
   done
@@ -381,13 +478,11 @@ splash_restore() {
 
 # Returns 130 when interrupted, leaving the caller's own traps in place.
 splash_play() {
-  local size rows= cols= extglob callers_traps status=0
+  local size rows= cols= callers_traps status=0
   # stty reads stdin, which may not be the terminal; fd 3 is stdout from outside the $(...).
   { size=$(stty size <&3 2>/dev/null); } 3>&1 || return 0
   read -r rows cols <<<"$size"
   [[ "$rows" =~ ^[1-9][0-9]*$ && "$cols" =~ ^[1-9][0-9]*$ ]] || return 0
-  extglob=$(shopt -p extglob) || true
-  shopt -s extglob
   splash_colours
   splash_alt_screen=
   splash_interrupted=0
@@ -395,17 +490,15 @@ splash_play() {
   trap 'splash_interrupted=1' INT
   trap splash_restore EXIT
   printf '\e[?25l' || :
-  if ((cols < splash_width + 4 || rows < splash_height + 2)); then
+  splash_layout "$rows" "$cols"
+  if [[ "$splash_layout" == title ]]; then
     splash_title
   else
-    splash_top=$(((rows - splash_height) / 2 + 1))
-    splash_left=$(((cols - splash_width) / 2 + 1))
     splash_full
   fi
   splash_restore
   trap - INT EXIT
   eval "$callers_traps"
-  eval "$extglob"
   ((splash_interrupted)) && status=130
   return "$status"
 }

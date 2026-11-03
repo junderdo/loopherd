@@ -481,7 +481,12 @@ fn the_splash_fits_the_terminal_on_stdout_even_without_tput() {
     let sandbox = Sandbox::new(false);
     executable(&sandbox.fake_bin.join("tput"), "#!/bin/sh\nexit 1\n");
 
-    for (cols, rows, wordmark) in [(100, 30, true), (50, 30, false), (100, 8, false)] {
+    for (cols, rows, wordmark) in [
+        (160, 45, true),
+        (100, 30, true),
+        (50, 30, false),
+        (100, 8, false),
+    ] {
         let Some(out) = sandbox.install_in_pty(cols, rows) else {
             eprintln!("skipped: needs util-linux script");
             return;
@@ -628,7 +633,7 @@ fn segments(buf: &str) -> Vec<(usize, usize, String)> {
 fn a_cloud_over_the_sun_keeps_the_suns_colour_behind_it() {
     // Scene row 7 crosses the sun's rim at columns 22..26 and 36..40 and its core
     // at 27..35; this cloud spans 20..38, so it starts off the sun.
-    let sky = "shopt -s extglob; splash_colours; splash_top=5 splash_left=20; splash_draw_sun; \
+    let sky = "splash_colours; splash_layout 30 100; splash_draw_sun; \
                splash_clouds=('7|20|1|1000|&&&&&&&&&&&&&&&&&&&'); \
                splash_sky 0 8 0; printf %s \"$splash_buf\"";
     let row_7 = |out: &str| {
@@ -658,4 +663,67 @@ fn a_cloud_over_the_sun_keeps_the_suns_colour_behind_it() {
     let row = row_7(&splash_bash("none", sky));
     assert!(!row.contains('\x1b'), "{row:?}");
     assert!(row.contains(&"▒".repeat(19)), "{row:?}");
+}
+#[test]
+fn the_layout_is_chosen_by_terminal_size() {
+    for (cols, rows, layout) in [
+        (65, 30, "title"),
+        (100, 22, "title"),
+        (66, 23, "medium"),
+        (139, 60, "medium"),
+        (200, 39, "medium"),
+        (140, 40, "large"),
+    ] {
+        let out = splash_bash(
+            "none",
+            &format!("splash_layout {rows} {cols}; printf %s \"$splash_layout\""),
+        );
+
+        assert_eq!(out, layout, "{cols}x{rows}");
+    }
+}
+
+/// The first and last column each screen row of every frame is painted at,
+/// 1-based, for a `cols`x`rows` terminal without colour.
+fn painted_rows(cols: usize, rows: usize) -> std::collections::BTreeMap<usize, (usize, usize)> {
+    let out = splash_bash(
+        "none",
+        &format!(
+            "splash_colours; splash_layout {rows} {cols}; splash_prepare; \
+             for ((f = 0; f < splash_frames; f++)); do splash_frame $f; printf %s \"$splash_buf\"; done"
+        ),
+    );
+    let mut painted = std::collections::BTreeMap::new();
+    for (row, col, text) in segments(&out) {
+        let last = col + without_escapes(&text).chars().count() - 1;
+        let span = painted.entry(row).or_insert((col, last));
+        *span = (span.0.min(col), span.1.max(last));
+    }
+    painted
+}
+
+#[test]
+fn the_medium_scene_sits_centred_in_its_box() {
+    let painted = painted_rows(100, 30);
+
+    assert_eq!(painted.keys().next(), Some(&5));
+    assert_eq!(painted.keys().last(), Some(&25));
+    assert!(
+        painted.values().all(|&span| span == (20, 81)),
+        "{painted:?}"
+    );
+}
+
+#[test]
+fn the_large_scene_fills_the_width_down_to_the_bottom_row() {
+    let painted = painted_rows(160, 45);
+
+    assert_eq!(
+        painted.keys().copied().collect::<Vec<_>>(),
+        (1..=45).collect::<Vec<_>>()
+    );
+    assert!(
+        painted.values().all(|&span| span == (1, 160)),
+        "{painted:?}"
+    );
 }
