@@ -134,12 +134,26 @@ What would bite whoever picks this up.
 workers of unled herds and members in no herd; a lead restarts its own
 workers. Wait for its `finished` line, then `loopherd restart <name>`. It
 sends `/clear`, waits for the ledger to follow the new session, and prompts
-the member to read its handoff; same pane, worktree and branch. Without
-`--force` it refuses unless the member reported a handoff since its last
-start, its last stop since is `finished` with nothing in flight, and herdr
-shows it idle or done. `--force` drops work in flight and is the human's
-call (a lead's PreToolUse hook denies it). A member never restarts itself,
-and one recorded without a herdr socket can't be restarted.
+the member to read its handoff, which it moves to `<name>.prev.md` so no
+later restart reuses it; same pane, worktree and branch. Without `--force`
+it refuses unless the member reported a handoff since its last start, its
+last stop since is `finished` with nothing in flight, and herdr shows it
+idle or done. `--force` skips those checks; a `/clear` sent mid-turn still
+waits for that turn to end. It's the human's call (a lead's PreToolUse hook
+denies it). A member never restarts itself, and one recorded without a
+herdr socket can't be restarted. If restart times out waiting for the new
+session, its `/clear` may be queued behind a running turn: it sent no
+handoff prompt and prints the `herdr agent prompt` line to send once the
+pane shows a cleared session.
+
+A lead's `loopherd watch` is a background shell, so a lead stops its own
+watch before ending its handoff turn; otherwise its stop reads `paused`
+and restart refuses it. After a herdr restart, `revive`'s start makes
+restart refuse a member that handed off before it: check `loopherd reports
+--all <name>` for its `handoff`, and with the handoff file still there, the
+human runs `loopherd restart <name> --force`. A member that was asked but
+crashed before writing its handoff isn't asked again in that session;
+prompt it to write one and report `--kind handoff`.
 
 ### Commands
 
@@ -255,8 +269,8 @@ shepherd:
   before acting: auto-compaction drops detail, and your state lives in the
   tracker, ledger and mailbox, not in your context.
 - **Your own handoff.** Past your limit, your Stop hook asks you for a
-  handoff like any member's (see Handoffs): write it, report `--kind
-  handoff`, and end your turn. The shepherd restarts you. Restart your
+  handoff like any member's (see Handoffs): stop your own watch (TaskStop
+  it, or kill it), write it, report `--kind handoff`, and end your turn. The shepherd restarts you. Restart your
   workers when they hand off; never with `--force`.
 - **Your checkout** is detached; refresh it with `git fetch origin && git
   checkout --detach origin/<default branch>` rather than `git pull`, and

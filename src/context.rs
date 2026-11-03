@@ -13,6 +13,9 @@ use crate::ledger::AgentRecord;
 
 pub const DEFAULT_LIMIT: u64 = 250_000;
 pub const DEFAULT_WINDOW: u64 = 200_000;
+/// The smallest limit or window a config accepts; below it a member would
+/// hand off before doing any work.
+pub const MIN_TOKENS: u64 = 10_000;
 
 /// `$LOOPHERD_CONFIG_DIR/config.toml`; optional.
 #[derive(Debug, Default, Deserialize)]
@@ -31,9 +34,23 @@ pub fn effective_limit(own: Option<u64>, config: &Path) -> Result<u64> {
         Err(e) if e.kind() == ErrorKind::NotFound => ConfigFile::default(),
         Err(e) => return Err(e).with_context(|| format!("read {}", config.display())),
     };
+    for (key, value) in [
+        ("default_context_limit", file.default_context_limit),
+        ("context_window", file.context_window),
+    ] {
+        check_tokens(key, value).with_context(|| config.display().to_string())?;
+    }
     let limit = own.or(file.default_context_limit).unwrap_or(DEFAULT_LIMIT);
     let window = file.context_window.unwrap_or(DEFAULT_WINDOW);
     Ok(limit.min(window / 5 * 4))
+}
+
+/// Fails when `value` is under [`MIN_TOKENS`], naming `key`.
+pub fn check_tokens(key: &str, value: Option<u64>) -> Result<()> {
+    match value {
+        Some(v) if v < MIN_TOKENS => anyhow::bail!("{key} must be at least {MIN_TOKENS}, got {v}"),
+        _ => Ok(()),
+    }
 }
 
 /// Where `name` writes its handoff, in loopherd's state dir `state`.
@@ -95,8 +112,12 @@ pub fn handoff_block(
 }
 
 fn reason(member: &AgentRecord, tokens: u64, limit: u64, handoff: &Path) -> String {
+    // A lead's watch is a background shell; left running, its stop reads
+    // paused and restart refuses it.
     let save = match member.is_lead() {
-        true => "",
+        true => {
+            "stop your own `loopherd watch` (TaskStop it, or kill it) so your stop reads finished, then "
+        }
         false => {
             "commit and push your branch, comment your progress on your task in the project's tracker, then "
         }
@@ -168,7 +189,13 @@ mod tests {
 
     #[test]
     fn an_invalid_config_file_is_an_error_naming_it() {
-        for text in ["context_windw = 1", "context_window = \"big\"", "= ="] {
+        for text in [
+            "context_windw = 1",
+            "context_window = \"big\"",
+            "= =",
+            "context_window = 0",
+            "default_context_limit = 9999",
+        ] {
             let (_dir, path) = config(Some(text));
             let err = format!("{:#}", effective_limit(None, &path).unwrap_err());
             assert!(
@@ -278,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn a_leads_reason_leaves_out_the_branch_and_tracker() {
+    fn a_leads_reason_has_it_stop_its_watch_not_push_a_branch() {
         let w = World::new();
         let t = w.transcript(&[assistant(0, 0, 200, false)]);
         let reason = w
@@ -288,7 +315,14 @@ mod tests {
                 100,
             )
             .unwrap();
-        assert!(reason.contains("Stop your current work: write your handoff to"));
+        assert!(
+            reason.contains(
+                "Stop your current work: stop your own `loopherd watch` (TaskStop it, or kill it) \
+                 so your stop reads finished, then write your handoff to"
+            ),
+            "{reason}"
+        );
+        assert!(!reason.contains("branch"), "{reason}");
     }
 
     #[test]

@@ -84,7 +84,14 @@ fn decide(
         return Ok(None);
     };
     let needed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| needs(&command)))
-        .unwrap_or_else(|_| vec![Switch::Merge, Switch::Install, Switch::Rebase]);
+        .unwrap_or_else(|_| {
+            vec![
+                Switch::Merge,
+                Switch::Install,
+                Switch::Rebase,
+                Switch::ForceRestart,
+            ]
+        });
     if needed.is_empty() {
         return Ok(None);
     }
@@ -104,7 +111,7 @@ fn decide(
     };
     if needed == Switch::ForceRestart {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run `loopherd restart --force`, which drops a member's work in flight, so {}; restart once its stop reads finished, or ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run `loopherd restart --force`, which skips the checks that the member is finished since its handoff, so {}; restart once its stop reads finished, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -667,10 +674,10 @@ mod tests {
         .expect("a lead was allowed after a panic");
         assert!(denied.contains("switch is off"), "{denied}");
         let on = |_: &str| Ok(all_on());
-        assert_eq!(
-            decide(&lead_ledger, &pane, input("ls").as_bytes(), &on, &panics).unwrap(),
-            None
-        );
+        let denied = decide(&lead_ledger, &pane, input("ls").as_bytes(), &on, &panics)
+            .unwrap()
+            .expect("no switch allows a forced restart");
+        assert!(denied.contains("restart --force"), "{denied}");
         let worker = ledger(vec![entry("lh-1", None)]);
         assert_eq!(
             decide(&worker, &pane, input("ls").as_bytes(), &all_off, &panics).unwrap(),

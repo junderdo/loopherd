@@ -755,6 +755,7 @@ fn parse(text: &str) -> Result<HerdFile> {
     }
     if let Some(lead) = &parsed.lead {
         one_prompt(&lead.prompt, &lead.prompt_file).context("lead")?;
+        crate::context::check_tokens("context_limit", lead.context_limit).context("lead")?;
     }
     Ok(parsed)
 }
@@ -784,6 +785,7 @@ fn one_prompt(prompt: &Option<String>, prompt_file: &Option<String>) -> Result<(
 
 fn validate(template: &TemplateFile) -> Result<()> {
     one_prompt(&template.prompt, &template.prompt_file)?;
+    crate::context::check_tokens("context_limit", template.context_limit)?;
     if template.branch.is_some() && template.worktree.is_some() {
         bail!("set one of branch and worktree, not both");
     }
@@ -1960,6 +1962,29 @@ context_limit = 90000
         assert_eq!(limit(Some("cards"), Some("plain")).unwrap(), 70_000);
         assert_eq!(limit(None, None).unwrap(), 70_000);
         assert_eq!(limit(Some("cards"), Some("pr")).unwrap(), 120_000);
+    }
+
+    #[test]
+    fn a_context_limit_under_the_minimum_is_an_invalid_herd_file() {
+        for (herd, message) in [
+            (
+                "repo = \"/r\"\n[template.t]\nparams = []\nprompt = \"p\"\ncontext_limit = 0\n",
+                "template t: context_limit must be at least 10000, got 0",
+            ),
+            (
+                "repo = \"/r\"\n[lead]\nprompt = \"p\"\ncontext_limit = 500\n",
+                "lead: context_limit must be at least 10000, got 500",
+            ),
+        ] {
+            let config = Config::with(&[("cards", herd)]);
+            let err = context_limit(&config.paths(), &record(Some("cards"), Some("t"), false))
+                .unwrap_err();
+            let err = format!("{err:#}");
+            assert!(
+                err.contains("cards.toml") && err.ends_with(message),
+                "{err}"
+            );
+        }
     }
 
     #[test]

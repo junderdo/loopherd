@@ -332,13 +332,13 @@ fn past_its_limit_the_stop_hook_prints_one_block_decision_and_files_nothing() {
     write_ledger(state.path());
     fs::write(
         config.path().join("config.toml"),
-        "default_context_limit = 100\n",
+        "default_context_limit = 10000\n",
     )
     .unwrap();
     let transcript = state.path().join("t.jsonl");
     fs::write(
         &transcript,
-        r#"{"type":"assistant","isSidechain":false,"message":{"usage":{"input_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":200}}}"#,
+        r#"{"type":"assistant","isSidechain":false,"message":{"usage":{"input_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":20000}}}"#,
     )
     .unwrap();
     let input = format!(
@@ -368,7 +368,7 @@ fn past_its_limit_the_stop_hook_prints_one_block_decision_and_files_nothing() {
     let reason = decision["reason"].as_str().unwrap();
     let handoff = state.path().join("loopherd/handoffs/lh-2.md");
     assert!(
-        reason.contains("205 tokens, past your limit of 100"),
+        reason.contains("20005 tokens, past your limit of 10000"),
         "{reason}"
     );
     assert!(reason.contains(&handoff.display().to_string()), "{reason}");

@@ -61,7 +61,7 @@ pub fn stop_hook(
                 if let Err(e) = follow_session(ledger, &entries, member, &stop) {
                     warn(format!("could not update {}'s session: {e:#}", member.name));
                 }
-                return settle(dir, member, stop, now, handoff, warn);
+                return settle(dir, pane, member, stop, now, handoff, warn);
             }
             Some(ours) => {
                 warn(format!(
@@ -78,7 +78,7 @@ pub fn stop_hook(
                             Claim::Declined
                         });
                 match claim {
-                    Claim::Claimed => return settle(dir, member, stop, now, handoff, warn),
+                    Claim::Claimed => return settle(dir, pane, member, stop, now, handoff, warn),
                     Claim::Nested => {
                         warn(format!(
                             "dropped a stop from process {pid} in {}'s pane; it is not the pane's top-level Claude",
@@ -100,7 +100,7 @@ pub fn stop_hook(
         ));
         return Ok(None);
     }
-    settle(dir, member, stop, now, handoff, warn)
+    settle(dir, pane, member, stop, now, handoff, warn)
 }
 
 fn follow_session(
@@ -129,9 +129,11 @@ fn follow_session(
 }
 
 /// Blocks the stop if `handoff` says to; otherwise files it. A failing
-/// `handoff` files the stop with a warning.
+/// `handoff` files the stop with a warning. Only a member recorded in this
+/// pane's herdr is asked: a socketless entry may be another herdr's pane.
 fn settle(
     dir: &Path,
+    pane: &Pane,
     member: &AgentRecord,
     stop: Stop,
     now: SystemTime,
@@ -139,7 +141,8 @@ fn settle(
     warn: &mut dyn FnMut(String),
 ) -> Result<Option<Stopped>> {
     let name = member.name.clone();
-    match handoff(member) {
+    let ours = pane.socket.is_some() && member.socket.as_deref() == pane.socket;
+    match if ours { handoff(member) } else { Ok(None) } {
         Ok(Some(reason)) => return Ok(Some(Stopped::Blocked { name, reason })),
         Ok(None) => {}
         Err(e) => warn(format!("could not check {name}'s context: {e:#}")),
@@ -859,6 +862,29 @@ mod tests {
             ),
             Some(Stopped::Blocked { .. })
         ));
+    }
+
+    #[test]
+    fn a_member_recorded_without_a_socket_is_never_asked_for_a_handoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut l = ledger(vec![member("lh-1", "w1:p1", None)]);
+        let pane = Pane {
+            id: "w1:p1",
+            socket: Some(Path::new("/run/other/herdr.sock")),
+            claude_pid: None,
+        };
+        let stopped = stop_hook(
+            &mut l,
+            &FakeProcs::default(),
+            dir.path(),
+            &pane,
+            b"{}",
+            at(),
+            &|_| panic!("asked a socketless member"),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(stopped, Some(Stopped::Filed("lh-1".into())));
     }
 
     #[test]

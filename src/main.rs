@@ -140,7 +140,8 @@ enum Command {
     /// prompts it to read its handoff. Refuses unless its last stop is finished.
     Restart {
         name: String,
-        /// Restart even if its last stop isn't finished, dropping work in flight.
+        /// Skip the checks that it handed off and is finished since. A /clear sent
+        /// mid-turn waits for that turn to end, so nothing is cut off.
         #[arg(long)]
         force: bool,
     },

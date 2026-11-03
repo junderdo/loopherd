@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::context::handoff_path;
 use crate::herdr::{AgentStatus, Herdr};
@@ -76,7 +76,9 @@ pub fn restart(
         let refuse = |why: String| anyhow!("{why}; pass --force to restart it anyway");
         match since_handoff(&req.state.join("reports"), name)? {
             SinceHandoff::None => {
-                return Err(refuse(format!("{name} hasn't handed off since it started")));
+                return Err(refuse(format!(
+                    "{name} hasn't handed off since it started (after a revive, check `loopherd reports --all {name}` for its handoff)"
+                )));
             }
             SinceHandoff::NotStopped => {
                 return Err(refuse(format!("{name} hasn't stopped since its handoff")));
@@ -98,18 +100,25 @@ pub fn restart(
     }
     let old = record.session_id;
     herdr.prompt(name, "/clear")?;
-    let new = wait_for_new_session(ledger, name, old.as_deref(), req)?;
-    ledger.started(name, now)?;
-    herdr.prompt(
-        name,
-        &format!(
-            "Read your handoff at {}, then continue from it.",
-            handoff.display()
+    // Moved aside once /clear is out, so no later restart resumes from it.
+    let read = handoff.with_extension("prev.md");
+    std::fs::rename(&handoff, &read)
+        .with_context(|| format!("move {} to {}", handoff.display(), read.display()))?;
+    let resume = format!(
+        "Read your handoff at {}, then continue from it.",
+        read.display()
+    );
+    let new = match wait_for_new_session(ledger, name, old.as_deref(), req) {
+        Ok(new) => new,
+        Err(e) => bail!(
+            "{e:#}. No handoff prompt was sent; once {name}'s pane shows a cleared session, run: herdr agent prompt {name} '{resume}'"
         ),
-    )?;
+    };
+    ledger.started(name, now)?;
+    herdr.prompt(name, &resume)?;
     Ok(format!(
         "restarted {name} in session {new}; prompted it to read {}",
-        handoff.display()
+        read.display()
     ))
 }
 
@@ -127,7 +136,7 @@ fn wait_for_new_session(
         }
         if Instant::now() >= deadline {
             bail!(
-                "sent /clear, but {name}'s ledger session is still {} after {:?}; check its pane and that loopherd's SessionStart hook is installed",
+                "sent /clear, but {name}'s ledger session is still {} after {:?}; the /clear may be queued behind a running turn",
                 old.unwrap_or("unset"),
                 req.settle_timeout
             );
@@ -287,7 +296,7 @@ mod tests {
         fn handoff(&self) -> String {
             self.state
                 .path()
-                .join("handoffs/lh-1.md")
+                .join("handoffs/lh-1.prev.md")
                 .display()
                 .to_string()
         }
@@ -354,13 +363,16 @@ mod tests {
                     w.put(Body::Start);
                     w.stop(0, None);
                 },
-                "lh-1 hasn't handed off since it started",
+                "lh-1 hasn't handed off since it started (after a revive, check `loopherd reports --all lh-1` for its handoff)",
             ),
             (
                 &|w| w.stop(0, None),
-                "lh-1 hasn't handed off since it started",
+                "lh-1 hasn't handed off since it started (after a revive, check `loopherd reports --all lh-1` for its handoff)",
             ),
-            (&|_| {}, "lh-1 hasn't handed off since it started"),
+            (
+                &|_| {},
+                "lh-1 hasn't handed off since it started (after a revive, check `loopherd reports --all lh-1` for its handoff)",
+            ),
             (
                 &|w| {
                     w.handed_off();
@@ -411,6 +423,16 @@ mod tests {
     }
 
     #[test]
+    fn a_handoff_is_used_once_even_by_a_forced_restart() {
+        let w = World::new();
+        w.handed_off();
+        assert!(w.restart(false, true).0.is_ok());
+        let (again, _) = w.restart(true, true);
+        assert!(format!("{:#}", again.unwrap_err()).starts_with("lh-1 has no handoff at "),);
+        assert_eq!(w.herdr.prompts().len(), 2);
+    }
+
+    #[test]
     fn without_a_handoff_file_nothing_is_sent() {
         let w = World::new();
         w.stop(0, None);
@@ -427,7 +449,13 @@ mod tests {
         let (result, ledger) = w.restart(false, false);
         assert_eq!(
             format!("{:#}", result.unwrap_err()),
-            "sent /clear, but lh-1's ledger session is still old after 50ms; check its pane and that loopherd's SessionStart hook is installed"
+            format!(
+                "sent /clear, but lh-1's ledger session is still old after 50ms; the /clear may be \
+                 queued behind a running turn. No handoff prompt was sent; once lh-1's pane shows a \
+                 cleared session, run: herdr agent prompt lh-1 'Read your handoff at {}, then \
+                 continue from it.'",
+                w.handoff()
+            )
         );
         assert_eq!(w.herdr.prompts().len(), 1);
         assert!(ledger.1.is_empty());
