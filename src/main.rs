@@ -404,9 +404,11 @@ fn run_prompt(name: &str, force: bool) -> Result<i32> {
 fn run_restart(name: &str, force: bool) -> Result<i32> {
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let state = ledger.dir()?;
+    let own_pane = own_pane();
     let req = restart::RestartRequest {
         name,
         force,
+        own_pane: own_pane.as_deref(),
         state: &state,
         settle_timeout: Duration::from_secs(30),
         poll: Duration::from_millis(250),

@@ -66,9 +66,22 @@ pub fn handoff_block(
     let Some(tokens) = tokens_in(Path::new(transcript)).filter(|&t| t > limit) else {
         return Ok(None);
     };
+    if session.is_empty() || session.contains('/') || session.starts_with('.') {
+        return Ok(None);
+    }
     let asked = state.join("handoff-asked");
-    fs::create_dir_all(&asked).with_context(|| format!("create {}", asked.display()))?;
     let marker = asked.join(session);
+    if marker.exists() {
+        return Ok(None);
+    }
+    // Rotate before marking, so a failed rotation leaves the ask for the next stop.
+    let handoff = handoff_path(state, &member.name);
+    if handoff.exists() {
+        let prev = handoff.with_extension("prev.md");
+        fs::rename(&handoff, &prev)
+            .with_context(|| format!("move {} to {}", handoff.display(), prev.display()))?;
+    }
+    fs::create_dir_all(&asked).with_context(|| format!("create {}", asked.display()))?;
     match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -77,12 +90,6 @@ pub fn handoff_block(
         Ok(_) => {}
         Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("create {}", marker.display())),
-    }
-    let handoff = handoff_path(state, &member.name);
-    if handoff.exists() {
-        let prev = handoff.with_extension("prev.md");
-        fs::rename(&handoff, &prev)
-            .with_context(|| format!("move {} to {}", handoff.display(), prev.display()))?;
     }
     Ok(Some(reason(member, tokens, limit, &handoff)))
 }
@@ -99,14 +106,13 @@ fn reason(member: &AgentRecord, tokens: u64, limit: u64, handoff: &Path) -> Stri
          Stop your current work: {save}write your handoff to {} (your state, your plan as next steps, \
          gotchas; nothing already in the tracker or the ledger), run \
          `loopherd report --kind handoff \"<one line on where you are>\"`, and end your turn. \
-         `loopherd restart {}` will start you fresh from that file.",
-        handoff.display(),
-        member.name
+         Whoever reads your reports restarts you fresh from that file; don't restart yourself.",
+        handoff.display()
     )
 }
 
-/// Tokens in context as of the transcript's last main-thread assistant turn:
-/// its input, cache-creation and cache-read tokens.
+/// Tokens in context as of the transcript's last main-thread assistant turn
+/// with any usage: its input, cache-creation and cache-read tokens.
 fn tokens_in(transcript: &Path) -> Option<u64> {
     let text = fs::read_to_string(transcript).ok()?;
     text.lines()
@@ -116,11 +122,11 @@ fn tokens_in(transcript: &Path) -> Option<u64> {
         .find_map(|r| {
             let usage = r.pointer("/message/usage")?;
             let count = |key: &str| usage[key].as_u64().unwrap_or(0);
-            Some(
-                count("input_tokens")
-                    + count("cache_creation_input_tokens")
-                    + count("cache_read_input_tokens"),
-            )
+            let tokens = count("input_tokens")
+                + count("cache_creation_input_tokens")
+                + count("cache_read_input_tokens");
+            // A zero is a placeholder record, not a turn the API answered.
+            (tokens > 0).then_some(tokens)
         })
 }
 
@@ -264,7 +270,8 @@ mod tests {
                  your task in the project's tracker, then write your handoff to {} (your state, \
                  your plan as next steps, gotchas; nothing already in the tracker or the ledger), \
                  run `loopherd report --kind handoff \"<one line on where you are>\"`, and end \
-                 your turn. `loopherd restart lh-1` will start you fresh from that file.",
+                 your turn. Whoever reads your reports restarts you fresh from that file; don't \
+                 restart yourself.",
                 handoff.display()
             )
         );
@@ -282,7 +289,6 @@ mod tests {
             )
             .unwrap();
         assert!(reason.contains("Stop your current work: write your handoff to"));
-        assert!(reason.contains("loopherd restart lead-cards"));
     }
 
     #[test]
@@ -326,6 +332,8 @@ mod tests {
         assert_eq!(w.block(&who, &w.stop("s1", &t, ""), 100), None);
         let t = w.transcript(&[assistant(0, 0, 50, false), assistant(0, 0, 500, false)]);
         assert!(w.block(&who, &w.stop("s2", &t, ""), 100).is_some());
+        let t = w.transcript(&[assistant(0, 0, 500, false), assistant(0, 0, 0, false)]);
+        assert!(w.block(&who, &w.stop("s3", &t, ""), 100).is_some());
     }
 
     #[test]
@@ -374,5 +382,33 @@ mod tests {
             fs::read_to_string(handoffs.join("lh-1.prev.md")).unwrap(),
             "first"
         );
+    }
+
+    #[test]
+    fn a_failed_rotation_leaves_the_ask_for_the_next_stop() {
+        let w = World::new();
+        let who = member("lh-1", None);
+        let t = w.transcript(&[assistant(0, 0, 200, false)]);
+        let handoffs = w.state().join("handoffs");
+        fs::create_dir_all(handoffs.join("lh-1.prev.md/x")).unwrap();
+        fs::write(handoffs.join("lh-1.md"), "first").unwrap();
+        assert!(handoff_block(&who, &w.stop("s1", &t, ""), 100, &w.state()).is_err());
+        fs::remove_dir_all(handoffs.join("lh-1.prev.md")).unwrap();
+        assert!(w.block(&who, &w.stop("s1", &t, ""), 100).is_some());
+    }
+
+    #[test]
+    fn a_session_id_that_isnt_a_plain_file_name_blocks_nothing() {
+        let w = World::new();
+        let who = member("lh-1", None);
+        let t = w.transcript(&[assistant(0, 0, 200, false)]);
+        for session in ["", "../x", "/tmp/x", ".hidden"] {
+            assert_eq!(
+                w.block(&who, &w.stop(session, &t, ""), 100),
+                None,
+                "{session}"
+            );
+        }
+        assert!(!w.state().join("x").exists());
     }
 }

@@ -134,10 +134,12 @@ What would bite whoever picks this up.
 workers of unled herds and members in no herd; a lead restarts its own
 workers. Wait for its `finished` line, then `loopherd restart <name>`. It
 sends `/clear`, waits for the ledger to follow the new session, and prompts
-the member to read its handoff; same pane, worktree and branch. It refuses
-a member whose last stop isn't `finished` with nothing in flight; `--force`
-overrides that, and is the human's call (a lead's PreToolUse hook denies
-it).
+the member to read its handoff; same pane, worktree and branch. Without
+`--force` it refuses unless the member reported a handoff since its last
+start, its last stop since is `finished` with nothing in flight, and herdr
+shows it idle or done. `--force` drops work in flight and is the human's
+call (a lead's PreToolUse hook denies it). A member never restarts itself,
+and one recorded without a herdr socket can't be restarted.
 
 ### Commands
 

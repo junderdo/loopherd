@@ -156,7 +156,8 @@ detached worktree of the herd's repo. Its prompt file tells it to run the
 feed/watch loop for that herd's workers and to ask you, with a question
 report, before anything a switch leaves off. Every switch is off until you
 turn it on. The PreToolUse hook enforces `merge`, `install` and `rebase`
-(merges, installs, rebases and force-pushes) by denying the Bash command;
+(merges, installs, rebases and force-pushes) by denying the Bash command,
+and denies a lead's `loopherd restart --force` outright;
 `new_cards`, `design_escalation` and `blocked_dialogs` rely on the prompt.
 
 ```toml
@@ -180,6 +181,10 @@ loopherd lead zagops-prs
 loopherd watch zagops-prs               # from your pane: wakes on the lead, not its workers
 ```
 
+A complete lead setup is in [docs/examples/](docs/examples/). The playbook
+the shepherd and leads follow is
+[docs/agents/shepherd.md](docs/agents/shepherd.md).
+
 ### Handoff at a context limit
 
 Past its context limit, a member's Stop hook asks it, once per session, to
@@ -192,13 +197,9 @@ it resume from that file, in the same pane and worktree.
 context_limit = 150000
 
 # $LOOPHERD_CONFIG_DIR/config.toml (optional)
-default_context_limit = 250000   # for members without their own
+default_context_limit = 150000   # for members without their own
 context_window = 200000          # limits are capped at 80% of this
 ```
-
-A complete lead setup is in [docs/examples/](docs/examples/). The playbook
-the shepherd and leads follow is
-[docs/agents/shepherd.md](docs/agents/shepherd.md).
 
 ## Status
 

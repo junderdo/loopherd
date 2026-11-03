@@ -344,23 +344,37 @@ pub fn unread_stops(dir: &Path, names: &[String]) -> Result<(Vec<Mailbox>, Pendi
     Ok((stops, pending))
 }
 
-/// `name`'s last stop since its last start, if any.
-pub fn last_stop(dir: &Path, name: &str) -> Result<Option<Stop>> {
+/// Where a member stands relative to its last handoff report.
+#[derive(Debug, PartialEq)]
+pub enum SinceHandoff {
+    /// No handoff since its last start.
+    None,
+    /// Handed off, and hasn't stopped since.
+    NotStopped,
+    /// Its last stop after the handoff.
+    Stopped(Stop),
+}
+
+/// Reads `name`'s mailbox back to its last handoff or start.
+pub fn since_handoff(dir: &Path, name: &str) -> Result<SinceHandoff> {
     if !dir.join(format!("{name}.jsonl")).is_file() {
-        return Ok(None);
+        return Ok(SinceHandoff::None);
     }
     let (bytes, end) = complete_lines(dir, name)?;
     let mut entries = vec![];
     parse(dir, name, &bytes[..end], &mut entries, &mut vec![]);
-    Ok(entries
-        .into_iter()
-        .rev()
-        .find_map(|(_, e)| match e.body {
-            Body::Stop(stop) => Some(Some(stop)),
-            Body::Start => Some(None),
-            _ => None,
-        })
-        .flatten())
+    let mut last = None;
+    for (_, entry) in entries.into_iter().rev() {
+        match entry.body {
+            Body::Stop(stop) if last.is_none() => last = Some(stop),
+            Body::Handoff { .. } => {
+                return Ok(last.map_or(SinceHandoff::NotStopped, SinceHandoff::Stopped));
+            }
+            Body::Start => break,
+            _ => {}
+        }
+    }
+    Ok(SinceHandoff::None)
 }
 
 /// Cursor moves read but not yet saved.

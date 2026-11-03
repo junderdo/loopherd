@@ -9,12 +9,14 @@ use anyhow::{Result, anyhow, bail};
 use crate::context::handoff_path;
 use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::Ledger;
-use crate::report::last_stop;
+use crate::report::{SinceHandoff, since_handoff};
 
 pub struct RestartRequest<'a> {
     pub name: &'a str,
-    /// Restart even if the member's last stop isn't `finished`.
+    /// Restart even if the member isn't finished since its handoff.
     pub force: bool,
+    /// `$HERDR_PANE_ID` of the caller; a member can't restart itself.
+    pub own_pane: Option<&'a str>,
     /// loopherd's state dir, holding `reports/` and `handoffs/`.
     pub state: &'a Path,
     /// How long to wait for the SessionStart hook to record the new session.
@@ -24,8 +26,9 @@ pub struct RestartRequest<'a> {
 
 /// Sends `/clear` to the member, waits for its ledger entry to move to the
 /// new session, marks a start in its mailbox, then prompts it to read its
-/// handoff. Refuses, without `force`, unless its last stop since its last
-/// start is `finished` with nothing in flight.
+/// handoff. Refuses, without `force`, unless it reported a handoff since its
+/// last start, its last stop since is `finished` with nothing in flight, and
+/// herdr shows it idle or done.
 pub fn restart(
     herdr: &dyn Herdr,
     ledger: &mut dyn Ledger,
@@ -40,21 +43,23 @@ pub fn restart(
     if record.retired {
         bail!("{name} is retired");
     }
+    let socket = herdr.socket();
+    match &record.socket {
+        None => bail!(
+            "{name} was recorded without a herdr socket, so loopherd can't follow its /clear; retire it and add it again"
+        ),
+        Some(theirs) if socket.as_ref().is_some_and(|ours| ours != theirs) => bail!(
+            "{name} is in the herdr at {}, not this one",
+            theirs.display()
+        ),
+        Some(_) => {}
+    }
+    if req.own_pane == Some(record.pane_id.as_str()) {
+        bail!("{name} can't restart itself; whoever reads its handoff line restarts it");
+    }
     let handoff = handoff_path(req.state, name);
     if !handoff.is_file() {
         bail!("{name} has no handoff at {}", handoff.display());
-    }
-    if !req.force {
-        match last_stop(&req.state.join("reports"), name)? {
-            None => {
-                bail!("{name} hasn't stopped since it started; pass --force to restart it anyway")
-            }
-            Some(stop) if stop.error.is_some() || stop.pending().is_some() => bail!(
-                "{name} isn't finished: its last stop reads `{}`; pass --force to restart it anyway",
-                stop.describe()
-            ),
-            Some(_) => {}
-        }
     }
     let agent = herdr
         .agents()?
@@ -66,6 +71,30 @@ pub fn restart(
             "{name} is blocked: answer it in pane {} first",
             agent.pane_id
         );
+    }
+    if !req.force {
+        let refuse = |why: String| anyhow!("{why}; pass --force to restart it anyway");
+        match since_handoff(&req.state.join("reports"), name)? {
+            SinceHandoff::None => {
+                return Err(refuse(format!("{name} hasn't handed off since it started")));
+            }
+            SinceHandoff::NotStopped => {
+                return Err(refuse(format!("{name} hasn't stopped since its handoff")));
+            }
+            SinceHandoff::Stopped(stop) if stop.error.is_some() || stop.pending().is_some() => {
+                return Err(refuse(format!(
+                    "{name} isn't finished: its last stop reads `{}`",
+                    stop.describe()
+                )));
+            }
+            SinceHandoff::Stopped(_) => {}
+        }
+        if !matches!(agent.status, AgentStatus::Idle | AgentStatus::Done) {
+            return Err(refuse(format!(
+                "{name} is {} in herdr",
+                agent.status.as_str()
+            )));
+        }
     }
     let old = record.session_id;
     herdr.prompt(name, "/clear")?;
@@ -113,7 +142,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::herdr::fake::FakeHerdr;
+    use crate::herdr::fake::{FAKE_SOCKET, FakeHerdr};
     use crate::ledger::{AgentRecord, MemLedger};
     use crate::report::{Background, Body, Entry, Stop, Tally, append};
 
@@ -136,7 +165,7 @@ mod tests {
             herd: None,
             template: None,
             params: None,
-            socket: None,
+            socket: Some(FAKE_SOCKET.into()),
             process: None,
             role: None,
         }
@@ -215,15 +244,36 @@ mod tests {
             .unwrap();
         }
 
+        /// A finished stop after a handoff report.
+        fn handed_off(&self) {
+            self.put(Body::Handoff {
+                text: "at step 3".into(),
+            });
+            self.stop(0, None);
+        }
+
         fn restart(&self, force: bool, follows: bool) -> (Result<String>, MemLedger) {
+            self.restart_as(force, follows, None, &|_| {})
+        }
+
+        fn restart_as(
+            &self,
+            force: bool,
+            follows: bool,
+            own_pane: Option<&str>,
+            edit: &dyn Fn(&mut AgentRecord),
+        ) -> (Result<String>, MemLedger) {
+            let mut member = record("lh-1");
+            edit(&mut member);
             let mut ledger = Clearing {
-                ledger: MemLedger([("lh-1".to_string(), record("lh-1"))].into(), vec![]),
+                ledger: MemLedger([("lh-1".to_string(), member)].into(), vec![]),
                 herdr: &self.herdr,
                 follows,
             };
             let req = RestartRequest {
                 name: "lh-1",
                 force,
+                own_pane,
                 state: self.state.path(),
                 settle_timeout: Duration::from_millis(50),
                 poll: Duration::from_millis(1),
@@ -246,7 +296,7 @@ mod tests {
     #[test]
     fn a_finished_member_is_cleared_then_prompted_to_read_its_handoff() {
         let w = World::new();
-        w.stop(0, None);
+        w.handed_off();
         let (result, ledger) = w.restart(false, true);
         assert_eq!(
             result.unwrap(),
@@ -273,36 +323,90 @@ mod tests {
     }
 
     #[test]
-    fn a_member_not_finished_is_refused_without_force_and_sent_nothing() {
-        for (setup, message) in [
+    fn a_member_not_finished_since_its_handoff_is_refused_without_force_and_sent_nothing() {
+        let handoff = || Body::Handoff { text: "x".into() };
+        type Setup<'a> = &'a dyn Fn(&World);
+        let cases: [(Setup, &str); 7] = [
             (
-                &(|w: &World| w.stop(1, None)) as &dyn Fn(&World),
-                "lh-1 isn't finished: its last stop reads `paused: 1 shell`; pass --force to restart it anyway",
-            ),
-            (
-                &|w: &World| w.stop(0, Some("rate_limit")),
-                "lh-1 isn't finished: its last stop reads `error rate_limit; finished`; pass --force to restart it anyway",
-            ),
-            (
-                &|w: &World| {
-                    w.stop(0, None);
-                    w.put(Body::Start);
+                &|w| {
+                    w.put(handoff());
+                    w.stop(1, None);
                 },
-                "lh-1 hasn't stopped since it started; pass --force to restart it anyway",
+                "lh-1 isn't finished: its last stop reads `paused: 1 shell`",
             ),
             (
-                &|_: &World| {},
-                "lh-1 hasn't stopped since it started; pass --force to restart it anyway",
+                &|w| {
+                    w.put(handoff());
+                    w.stop(0, Some("rate_limit"));
+                },
+                "lh-1 isn't finished: its last stop reads `error rate_limit; finished`",
             ),
-        ] {
+            (
+                &|w| {
+                    w.stop(0, None);
+                    w.put(handoff());
+                },
+                "lh-1 hasn't stopped since its handoff",
+            ),
+            (
+                &|w| {
+                    w.handed_off();
+                    w.put(Body::Start);
+                    w.stop(0, None);
+                },
+                "lh-1 hasn't handed off since it started",
+            ),
+            (
+                &|w| w.stop(0, None),
+                "lh-1 hasn't handed off since it started",
+            ),
+            (&|_| {}, "lh-1 hasn't handed off since it started"),
+            (
+                &|w| {
+                    w.handed_off();
+                    w.herdr.set_status("lh-1", AgentStatus::Working);
+                },
+                "lh-1 is working in herdr",
+            ),
+        ];
+        for (setup, message) in cases {
             let w = World::new();
             setup(&w);
             let (result, _) = w.restart(false, true);
-            assert_eq!(format!("{:#}", result.unwrap_err()), message);
+            assert_eq!(
+                format!("{:#}", result.unwrap_err()),
+                format!("{message}; pass --force to restart it anyway")
+            );
             assert!(w.herdr.prompts().is_empty());
 
             let (result, _) = w.restart(true, true);
             assert!(result.is_ok(), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_member_it_cant_follow_or_its_own_pane_is_refused_even_with_force() {
+        type Edit<'a> = &'a dyn Fn(&mut AgentRecord);
+        let cases: [(Option<&str>, Edit, &str); 3] = [
+            (
+                None,
+                &|r| r.socket = None,
+                "lh-1 was recorded without a herdr socket",
+            ),
+            (
+                None,
+                &|r| r.socket = Some("/run/other.sock".into()),
+                "lh-1 is in the herdr at /run/other.sock, not this one",
+            ),
+            (Some("w1:p1"), &|_| {}, "lh-1 can't restart itself"),
+        ];
+        for (own_pane, edit, message) in cases {
+            let w = World::new();
+            w.handed_off();
+            let (result, _) = w.restart_as(true, true, own_pane, edit);
+            let err = format!("{:#}", result.unwrap_err());
+            assert!(err.starts_with(message), "{err}");
+            assert!(w.herdr.prompts().is_empty());
         }
     }
 
@@ -319,7 +423,7 @@ mod tests {
     #[test]
     fn a_session_that_never_moves_fails_before_the_handoff_prompt() {
         let w = World::new();
-        w.stop(0, None);
+        w.handed_off();
         let (result, ledger) = w.restart(false, false);
         assert_eq!(
             format!("{:#}", result.unwrap_err()),
@@ -332,7 +436,7 @@ mod tests {
     #[test]
     fn a_blocked_or_missing_agent_is_refused() {
         let w = World::new();
-        w.stop(0, None);
+        w.handed_off();
         w.herdr.set_status("lh-1", AgentStatus::Blocked);
         let (result, _) = w.restart(false, true);
         assert!(format!("{:#}", result.unwrap_err()).starts_with("lh-1 is blocked"));
