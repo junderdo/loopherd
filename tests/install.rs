@@ -583,3 +583,79 @@ fn ctrl_c_during_the_splash_stops_install_with_130_before_building() {
     assert!(!sandbox.installed().exists());
     assert!(!sandbox.log.exists());
 }
+
+const SPLASH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install-splash.bash");
+
+/// Stdout of `script` run by bash with the splash sourced, in colour mode
+/// `colour`: "truecolor", "256" or "none".
+fn splash_bash(colour: &str, script: &str) -> String {
+    let mut cmd = Command::new("bash");
+    cmd.args(["-euo", "pipefail", "-c"])
+        .arg(format!("source {SPLASH}; {script}"))
+        .env_remove("NO_COLOR")
+        .env_remove("COLORTERM");
+    match colour {
+        "truecolor" => cmd.env("COLORTERM", "truecolor"),
+        "none" => cmd.env("NO_COLOR", "1"),
+        _ => &mut cmd,
+    };
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// `buf` split at each cursor move into (row, column, what is drawn there).
+fn segments(buf: &str) -> Vec<(usize, usize, String)> {
+    let mut segments: Vec<(usize, usize, String)> = Vec::new();
+    for piece in buf.split("\x1b[").skip(1) {
+        let at = piece
+            .split_once('H')
+            .and_then(|(at, text)| Some((at.split_once(';')?, text)))
+            .and_then(|((row, col), text)| Some((row.parse().ok()?, col.parse().ok()?, text)));
+        match at {
+            Some((row, col, text)) => segments.push((row, col, text.to_string())),
+            None => segments.last_mut().unwrap().2 += &format!("\x1b[{piece}"),
+        }
+    }
+    segments
+}
+
+#[test]
+fn a_cloud_over_the_sun_keeps_the_suns_colour_behind_it() {
+    // Scene row 7 crosses the sun's rim at columns 22..26 and 36..40 and its core
+    // at 27..35; this cloud spans 20..38, so it starts off the sun.
+    let sky = "shopt -s extglob; splash_colours; splash_top=5 splash_left=20; splash_draw_sun; \
+               splash_clouds=('7|20|1|1000|&&&&&&&&&&&&&&&&&&&'); \
+               splash_sky 0 8 0; printf %s \"$splash_buf\"";
+    let row_7 = |out: &str| {
+        segments(out)
+            .into_iter()
+            .find(|&(row, ..)| row == 12)
+            .unwrap()
+            .2
+    };
+    for (colour, cloud, core, rim) in [
+        (
+            "truecolor",
+            "38;2;235;235;242",
+            "48;2;255;192;77",
+            "48;2;255;154;31",
+        ),
+        ("256", "38;5;254", "48;5;214", "48;5;208"),
+    ] {
+        let row = row_7(&splash_bash(colour, sky));
+
+        let expected = format!(
+            "\x1b[{cloud}m▒▒\x1b[0m\x1b[{cloud};{rim}m▒▒▒▒▒\x1b[0m\
+             \x1b[{cloud};{core}m▒▒▒▒▒▒▒▒▒\x1b[0m\x1b[{cloud};{rim}m▒▒▒\x1b[0m"
+        );
+        assert!(row.contains(&expected), "{colour}: {row:?}");
+    }
+    let row = row_7(&splash_bash("none", sky));
+    assert!(!row.contains('\x1b'), "{row:?}");
+    assert!(row.contains(&"▒".repeat(19)), "{row:?}");
+}

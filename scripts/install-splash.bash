@@ -7,6 +7,7 @@ splash_wants_to_play() {
 
 # Rows are built as two parallel ASCII strings: the text, where '#' paints as
 # '█', '%' as the sun and '&' as cloud, and a kind per column that picks its colour.
+# Cloud is kind c, or x over the sun's core and y over its rim, on the sun's colour.
 
 # One glyph per letter of "loopherd", rows split on '|'.
 splash_glyphs=(
@@ -98,6 +99,8 @@ splash_colours() {
   splash_set_sgr 1 '38;2;255;154;31' '38;5;208'
   splash_set_sgr u '38;2;255;192;77' '38;5;214'
   splash_set_sgr c '38;2;235;235;242' '38;5;254'
+  splash_set_sgr x '38;2;235;235;242;48;2;255;192;77' '38;5;254;48;5;214'
+  splash_set_sgr y '38;2;235;235;242;48;2;255;154;31' '38;5;254;48;5;208'
   splash_set_sgr h '38;2;120;110;140' '38;5;60'
   splash_set_sgr f '38;2;120;125;150' '38;5;103'
   splash_set_sgr m '38;2;160;165;190' '38;5;146'
@@ -136,16 +139,23 @@ splash_fill() { # <var> <char>
 }
 
 # Lays <sprite> over splash_text and splash_kinds from column <x>; spaces are
-# see-through, '~' a solid blank.
+# see-through, '~' a solid blank. Cloud keeps the sun's colour behind it.
 splash_lay() { # <x> <sprite> <kind>
-  local x=$1 sprite=$2 kind=$3 i ch
+  local x=$1 sprite=$2 kind=$3 i ch cell
   for ((i = 0; i < ${#sprite}; i++)); do
     ch=${sprite:i:1}
     [[ "$ch" == ' ' ]] && continue
     [[ "$ch" == '~' ]] && ch=' '
     ((x + i >= 0 && x + i < splash_width)) || continue
+    cell=$kind
+    if [[ "$kind" == c ]]; then
+      case ${splash_kinds:x+i:1} in
+        u | x) cell=x ;;
+        1 | y) cell=y ;;
+      esac
+    fi
     splash_text="${splash_text:0:x+i}${ch}${splash_text:x+i+1}"
-    splash_kinds="${splash_kinds:0:x+i}${kind}${splash_kinds:x+i+1}"
+    splash_kinds="${splash_kinds:0:x+i}${cell}${splash_kinds:x+i+1}"
   done
 }
 
