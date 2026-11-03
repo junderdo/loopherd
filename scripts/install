@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build loopherd, install it as ~/.local/bin/loopherd, and add its Claude
-# Stop/StopFailure/SessionStart/PreToolUse hooks. Arguments go to `loopherd install-hook`:
+# Stop/StopFailure/SessionStart/PreToolUse hooks and the loopherd skill. Arguments go to `loopherd install-hook`:
 #
 #   scripts/install                      # hooks in ~/.claude/settings.json
 #   scripts/install --settings <file>    # hooks in another settings file

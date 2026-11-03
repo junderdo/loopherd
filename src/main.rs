@@ -14,6 +14,7 @@ mod retire;
 mod revive;
 mod session_hook;
 mod shell;
+mod skill;
 mod spawn;
 mod status;
 mod stop_hook;
@@ -29,7 +30,8 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand};
+use clap::error::ErrorKind;
+use clap::{Args, CommandFactory, Parser, Subcommand};
 
 use crate::feed::{FeedRequest, feed};
 use crate::herd::{AddRequest, Paths, add, dry_run, herds};
@@ -48,8 +50,11 @@ use crate::worktree::{remote_timeout, repo_root};
 #[derive(Parser)]
 #[command(version, about = "Herd coding agents across herdr sessions")]
 struct Cli {
+    /// Print the shepherd's and lead's guide as a Claude SKILL.md.
+    #[arg(long, exclusive = true)]
+    skill: bool,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -159,14 +164,19 @@ enum Command {
     /// Always exits 0. Set up by install-hook.
     ToolHook,
     /// Add loopherd's Stop, StopFailure, SessionStart and PreToolUse hooks to Claude's
-    /// user settings, calling this binary; safe to re-run. Backs the file up before changing it.
+    /// user settings, calling this binary, and write the `--skill` guide as the loopherd
+    /// skill; safe to re-run. Backs the settings file up before changing it.
     InstallHook {
-        /// Take loopherd's hooks out instead.
+        /// Take loopherd's hooks and skill out instead.
         #[arg(long)]
         remove: bool,
         /// Edit this file instead of $CLAUDE_CONFIG_DIR/settings.json or ~/.claude/settings.json.
         #[arg(long)]
         settings: Option<PathBuf>,
+        /// Write the skill to <dir>/loopherd/SKILL.md; defaults to the skills directory
+        /// beside the settings file.
+        #[arg(long, value_name = "dir")]
+        skills_dir: Option<PathBuf>,
     },
     /// Block until a member needs the shepherd, print what happened, and exit:
     /// an unread report (marked read), a stop from the Stop hook that leaves a
@@ -244,7 +254,20 @@ struct AddArgs {
 }
 
 fn main() -> ExitCode {
-    let (command, result) = match Cli::parse().command {
+    let cli = Cli::parse();
+    if cli.skill {
+        print!("{}", skill::SKILL);
+        return ExitCode::SUCCESS;
+    }
+    let Some(command) = cli.command else {
+        Cli::command()
+            .error(
+                ErrorKind::MissingSubcommand,
+                "a subcommand or --skill is required",
+            )
+            .exit();
+    };
+    let (command, result) = match command {
         Command::Spawn(args) => ("spawn", run_spawn(args)),
         Command::Add(args) => ("add", run_add(args)),
         Command::Herds => ("herds", run_herds()),
@@ -273,9 +296,14 @@ fn main() -> ExitCode {
         Command::StopHook => ("stop-hook", run_stop_hook()),
         Command::SessionHook => ("session-hook", run_session_hook()),
         Command::ToolHook => ("tool-hook", run_tool_hook()),
-        Command::InstallHook { remove, settings } => {
-            ("install-hook", run_install_hook(remove, settings))
-        }
+        Command::InstallHook {
+            remove,
+            settings,
+            skills_dir,
+        } => (
+            "install-hook",
+            run_install_hook(remove, settings, skills_dir),
+        ),
     };
     match result {
         Ok(code) => ExitCode::from(code as u8),
@@ -519,10 +547,18 @@ fn run_tool_hook() -> Result<i32> {
     Ok(0)
 }
 
-fn run_install_hook(remove: bool, settings: Option<PathBuf>) -> Result<i32> {
+fn run_install_hook(
+    remove: bool,
+    settings: Option<PathBuf>,
+    skills_dir: Option<PathBuf>,
+) -> Result<i32> {
     let settings = match settings {
         Some(path) => path,
         None => install_hook::default_settings()?,
+    };
+    let skills_dir = match skills_dir {
+        Some(dir) => dir,
+        None => settings.with_file_name("skills"),
     };
     let outcome = match remove {
         true => install_hook::remove(&settings, SystemTime::now())?,
@@ -543,6 +579,13 @@ fn run_install_hook(remove: bool, settings: Option<PathBuf>) -> Result<i32> {
                 println!("backup {}", backup.display());
             }
         }
+    }
+    let skill = skill::path(&skills_dir);
+    match remove {
+        true if skill::remove(&skills_dir)? => println!("removed {}", skill.display()),
+        true => println!("no skill at {}", skill.display()),
+        false if skill::install(&skills_dir)? => println!("installed {}", skill.display()),
+        false => println!("{} already up to date", skill.display()),
     }
     Ok(0)
 }

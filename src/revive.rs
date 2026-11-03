@@ -12,8 +12,8 @@ use crate::ledger::{AgentRecord, Ledger};
 /// Sent to a lead whose watch isn't running: after a restart nothing else wakes it (D17).
 pub const REARM_PROMPT: &str = "You were revived after a restart, so your \
 `loopherd watch` is no longer running. Run `loopherd status` and \
-`loopherd reports --all`, then re-arm your watch per docs/agents/shepherd.md \
-(\"As a lead\").";
+`loopherd reports --all`, then re-arm your watch per the Lead section of \
+`loopherd --skill`.";
 
 #[derive(Debug, Clone)]
 pub struct ReviveRequest {
@@ -1094,5 +1094,12 @@ mod tests {
             ("skipped a: no session ID recorded", 0)
         );
         assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
+    fn the_rearm_prompt_points_to_the_skills_lead_section() {
+        assert!(REARM_PROMPT.contains("Lead section of `loopherd --skill`"));
+        assert!(crate::skill::SKILL.contains("\n## Lead\n"));
+        assert!(!REARM_PROMPT.contains("docs/"), "{REARM_PROMPT}");
     }
 }

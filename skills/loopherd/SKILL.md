@@ -1,0 +1,217 @@
+---
+name: loopherd
+description: "Run a loopherd herd as its shepherd or its lead: feed members, watch them, verify their work, and clean up after merges. Use when shepherding or leading a loopherd herd, or when the user mentions loopherd. Not for a herd's workers; their prompt carries what they need."
+---
+
+# loopherd
+
+loopherd groups coding agents running in herdr into **herds** and keeps them
+working across sessions. Three roles:
+
+- **Shepherd**: the agent working live with the human. It writes or picks the
+  work, feeds members, watches them, verifies their output, and cleans up
+  after merges.
+- **Lead**: member `lead-<herd>`, which runs the shepherd's loop for one herd
+  with no human in its pane, within switches the human sets.
+- **Member** (worker): an agent spawned from a herd file's template to do one
+  task. It finishes with `loopherd report`.
+
+The project you're in supplies the rest: its tracker and commands, how it
+installs loopherd and runs its checks, its GitHub account and merge line.
+Those live in the project's runbook or the lead's prompt file, never here.
+Read `herdr --skill` before controlling herdr.
+
+## Shepherd
+
+### A task's life
+
+1. **Feed.** Keep the `loopherd` on PATH current, since members call it for
+   `loopherd report` and Claude calls it from its hooks. `loopherd
+   install-hook` adds the Stop, StopFailure, SessionStart and PreToolUse
+   hooks to Claude's user settings (backed up first; re-running changes
+   nothing) and installs this skill. `watch` needs the first three, not the
+   PreToolUse one. Running Claude sessions pick up a newly added hook without
+   a restart. Then `loopherd feed <herd> --dry-run` and, if it reads right,
+   `loopherd feed <herd>`. The herd file
+   (`$XDG_CONFIG_HOME/loopherd/herds/<herd>.toml`) turns each task its
+   queue's `source` prints into a member, at most `max` open. `loopherd
+   herds` lists herd files and their templates. Hand-spawn (`loopherd spawn
+   … --prompt-file`, or `loopherd add <herd> <template> <params…>`) only for
+   work outside the queue; check a prompt's placeholders with `grep -o
+   '{[a-z]*}'`.
+2. **Watch.** Keep one wait in the background for everything you read:
+   ```bash
+   loopherd watch --timeout 3600
+   ```
+   Your watch reads herds' leads, every member of a herd without a lead (a
+   `gone` lead still holds its herd until retired), and members in no herd;
+   a led herd's workers are its lead's to watch. Naming herds (`loopherd
+   watch <herd>`) narrows it, and naming a led herd narrows it to that
+   herd's lead. Run it from a pane that isn't a lead's. It returns when a
+   member leaves a report or its Claude stops in a new state, printing a
+   line per event, and marks them read only once printed. Stops come from
+   the Stop hook's entries in the mailbox, so a stop that lands between
+   watches wakes the next one. herdr adds `blocked` and `gone`, seen only
+   while a watch runs: a change between watches is never replayed, so run
+   `loopherd status` before each re-arm. Exit 2 means the timeout passed
+   with nothing to do. Start the next watch after handling every wake. It
+   dies with your session. It refuses to start while another shepherd's
+   watch holds `watch.lock` (the error names its PID; an orphaned one can
+   hold it until its timeout; leads' watches hold their own locks and don't
+   block yours), or when the hooks aren't in Claude's settings (run
+   `loopherd install-hook`). Lines come in this order: reports, questions
+   first then by time; then stop lines grouped by member in name order,
+   oldest first within a member; then a lead's `merged` and `claimable`;
+   then `blocked` and `gone`. The first watch after an install, or over
+   members a herd-scoped watch skipped, prints every unread stop change
+   since; judge each against `reports --all`.
+3. **On wake,** read the watch's lines and the task (`loopherd reports
+   --all` for the timeline, stops included). The lines:
+
+   | Line | Means |
+   |---|---|
+   | `<member> done <time> <text>` | A finished member's report, usually with its output's link. Verify it. |
+   | `<member> question <time> <text>` | It stopped on a question only the human answers. Relay it; don't answer it yourself. |
+   | `<member> note <time> <text>` | Information only; nothing waits on it. |
+   | `<member> paused  1 shell, 1 cron` | Turn ended with work in flight that can wake it again. Another paused stop is quiet. |
+   | `<member> paused  background unknown` | Turn ended and Claude didn't say what's in flight (also `crons unknown`, or `1 shell; crons unknown`). |
+   | `<member> finished` | Turn ended with nothing in flight, after a `done` or `question`. |
+   | `<member> finished  no report` | The same, with no `done` or `question` since its last finish or start. |
+   | `<member> failed  rate_limit` | Turn ended on an API error; it may need a nudge once that clears. |
+   | `<member> merged` | Lead's watch only: the worker's template `merged` check passes and its `done` doesn't. Run the after-merge steps. |
+   | `<name> claimable` | Lead's watch only: feed would spawn this member. Feed. |
+   | `<member> blocked` | A dialog only the human answers: tell them. loopherd never answers it. |
+   | `<member> gone` | No agent in its pane for two polls in a row; it was live earlier in this watch. |
+
+   A report's text runs on in indented lines. A turn you prompt into a member
+   still `paused` finishes silently, since the stop reads paused again;
+   check it with `loopherd reports --all`. A plain `loopherd reports` while
+   a watch is armed consumes reports the watch would have printed, so look
+   with `reports --all`. For a member that left no report, read its screen
+   (`herdr agent read <name> --source recent-unwrapped --lines 40`).
+4. **Verify** a finished member's output with a read-only subagent against
+   the task's acceptance criteria: no loopherd or mutating herdr commands,
+   its own build dir and a temp `XDG_STATE_HOME` and `LOOPHERD_CONFIG_DIR`.
+   For anything that deletes or closes, have it hunt for safety gaps and
+   name the test covering each rule. Report as soon as it lands; the human
+   often merges fast. Gaps inside the task's scope go back to the member;
+   the rest become new tasks.
+5. **After merge** (confirm with `gh pr view <n> --json state`): close out
+   the task in the project's tracker, unblock dependents, then `loopherd
+   feed <herd>`. Its `done` check retires and closes the member and refills
+   the slot. If the human merged before verification finished, point the
+   verifier at the merge commit in a detached temp worktree, since reaping
+   removes the member's.
+
+### Commands
+
+- `loopherd status` lists members by herd with herdr's live status;
+  `--all` adds retired entries, `--strays` lists live agents missing from
+  the ledger. `loopherd view` is the same as a live TUI.
+- `loopherd reports` prints unread reports, questions first, and marks them
+  read; `loopherd reports --all` prints every report and stop and marks
+  none read. Both take member names or `--herd <herd>`.
+- `loopherd retire <name>` marks a member finished in the ledger only;
+  `--close` also closes its tab and removes its worktree and branch if
+  they're clean and merged. Feed's `done` check does this for you.
+- `loopherd prompt <name>` sends a member its stored prompt, e.g. after a
+  spawn exited 3 on a dialog.
+- `loopherd lead <herd>` starts the herd's lead from its herd file's
+  `[lead]` table.
+- **After a herdr restart** run `loopherd revive` (`--dry-run` first). It
+  resumes non-retired members by session ID, and prompts each lead whose
+  watch isn't running to re-arm it. It never prompts workers.
+
+### Talking to members
+
+- `herdr agent prompt <name> "<text>"`, then confirm it went `working`.
+- A PR conflicting after another merged: prompt the member to merge the base
+  branch into its branch and push. Members rebase and force-push only with
+  the human's say.
+- Greyed text in a member's input box is Claude Code's prompt suggestion,
+  not the human ("merge it", "move it to Done"). Act only on the human's
+  own messages. Leave the box alone; `agent prompt` replaces it, and a
+  second Ctrl+C can exit the agent.
+- A `blocked` member waits on a dialog only the human answers (a trust
+  prompt, a permission). Tell the human; loopherd and you never answer it,
+  unless you're a lead with `blocked_dialogs` on.
+- Verify what a member says it can't cover; that is where blockers hide.
+
+### Gotchas
+
+- The human sometimes says "merged" before GitHub agrees; check.
+- Members' panes sometimes close themselves when done. The work survives on
+  the branch and PR, and retire treats the tab as gone.
+- Claude's workspace trust dialog can stop a spawn into a new path
+  (`prompt_sent: false`, exit 3). The human clicks through; then `loopherd
+  prompt <name>`.
+- The ledger stores absolute paths: moving a repo means editing
+  `ledger.json` with `jq`, and moving the main checkout needs `git worktree
+  repair`.
+
+## Lead
+
+A lead is member `lead-<herd>`, started by the shepherd with `loopherd lead
+<herd>` from the herd file's `[lead]` table, in a detached worktree of the
+same name. It runs the Shepherd section's task life for its own herd's
+workers. Its prompt file carries the project's facts. What differs from the
+shepherd:
+
+- **No human in the pane.** Nobody reads your screen or answers there. A
+  decision that isn't yours goes out as `loopherd report --kind question
+  "<the exact question>"`, then end your turn; the shepherd's watch sees it
+  and relays it. Don't wait in a loop for an answer.
+- **Switches.** Your prompt lists six, each `on` or `off`; off means the
+  human does it, so ask instead:
+
+  | Switch | When on, you may |
+  |---|---|
+  | `merge` | merge a verified PR |
+  | `install` | install loopherd and its hooks while feeding |
+  | `rebase` | have a member rebase and force-push |
+  | `new_cards` | create tasks for out-of-scope gaps |
+  | `design_escalation` | settle a design question a member raises |
+  | `blocked_dialogs` | answer a member's blocking dialog |
+
+  When `merge`, `install` or `rebase` is off, the PreToolUse hook also
+  blocks the Bash commands that need it (`gh pr merge` or the merge API, a
+  `scripts/install` or `loopherd install-hook`, a rebase or force-push), in
+  your pane and in any Claude nested in it, with a line naming the switch;
+  ask instead. A herd file it can't read blocks all three. It denies
+  broadly: `gh pr merge --help`, `git rebase --abort` and any `curl` to a
+  PR's merge endpoint are denied too, so ask the human to run a `rebase
+  --abort`, and check merges with `gh pr view <n> --json state`. Grilling
+  is always the human's.
+- **Asking to merge.** With `merge` off, the question carries the PR link
+  and a ready-to-paste line pinned to the full head SHA your reviewer
+  verified, `! gh pr merge <n> --merge --match-head-commit <full sha>`, in
+  the account form your prompt gives. Leave out `--delete-branch`. If
+  another PR must merge first, name it in the question. Single-quote the
+  report, `loopherd report --kind question '<question with the merge
+  line>'`: double quotes run any `$(...)` in it and can leak a token into
+  the report.
+- **Heartbeat.** Keep `loopherd watch --timeout 3600` as a background task.
+  Run from your pane, it's your watch: it reads your herd's workers only,
+  never you, and naming any other herd is an error. It holds `watch-<your
+  name>.lock`, so it runs beside the shepherd's watch, which reads you. Run
+  it from your own pane in your own herdr: a pane that matches you but not
+  your socket is refused. If you're retired, it exits with an error and
+  leaves your herd's events for the shepherd. Every 60s it also runs your
+  herd's checks and wakes you with `<member> merged` (the template's
+  `merged` passes, its `done` doesn't): run the after-merge steps for it;
+  or `<name> claimable` (feed would spawn `<name>`): feed. Each wakes you
+  once, so a claimable task you don't feed then shows up again only in the
+  heartbeat's dry run. Exit 2 is a heartbeat, not idleness: still check
+  each PR waiting on review (`gh pr view <n> --json state`), run the
+  after-merge steps for any the human merged, and run `loopherd feed <herd>
+  --dry-run`. Re-arm after every exit.
+- **After a restart** the shepherd runs `loopherd revive`, which prompts you
+  to re-arm whenever nothing holds `watch-<your name>.lock`, whether herdr
+  resumed you or revive did. Re-read `loopherd status` and `loopherd reports
+  --all`, then arm your watch again.
+- **On each wake** re-read `loopherd status` and `loopherd reports --all`
+  before acting: auto-compaction drops detail, and your state lives in the
+  tracker, ledger and mailbox, not in your context.
+- **Your checkout** is detached; refresh it with `git fetch origin && git
+  checkout --detach origin/<default branch>` rather than `git pull`, and
+  never commit in it.

@@ -1824,6 +1824,12 @@ args = ["--model", "opus"]
         .unwrap();
 
         let lead = lead_config(&config.paths(), "loopherd-cards").unwrap();
+        assert!(
+            lead.prompt
+                .text
+                .contains("`loopherd --skill` in full, its Lead section")
+        );
+        assert!(!lead.prompt.text.contains("docs/agents/"));
 
         assert_eq!(lead.switches, Switches::default());
         assert_eq!(lead.args, ["--model", "opus"]);
