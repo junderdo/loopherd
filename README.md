@@ -33,15 +33,18 @@ scripts/install
 
 Builds a release binary, installs it as `~/.local/bin/loopherd`, and adds
 loopherd's Stop, StopFailure, SessionStart and PreToolUse hooks to
-`~/.claude/settings.json`, writing a timestamped `settings.json.<time>.bak`
-beside it first. The hooks act only in a herd member's pane: they record
-each stop in the member's mailbox, keep its session current across `/clear`
-and resume, and deny a lead's Bash commands that its herd file's switches
-leave to the human. `~/.local/bin` must be on `PATH`.
+`$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`. When
+that file exists and changes, a timestamped `settings.json.<time>.bak` is
+written beside it first. The hooks act only in a herd member's pane: they
+record each stop in the member's mailbox, keep its session current across
+`/clear` and resume, and deny a lead's merge, install, rebase and force-push
+commands while its herd file's switch is off. `~/.local/bin` must be on
+`PATH`.
 
 ```bash
-scripts/install --settings <file>   # hooks in another settings file
-git pull && scripts/install         # update; changes only what's out of date
+scripts/install --settings <file>   # hooks in another settings file; pass the same
+                                    # --settings <file> to install-hook --remove and watch
+git pull && scripts/install         # update; replaces the binary, edits settings only if out of date
 loopherd install-hook --remove      # remove the hooks ...
 rm ~/.local/bin/loopherd            # ... and the binary
 ```
@@ -73,8 +76,10 @@ prompt = "You're {name}. Run `gh pr checkout --detach {number}`, read the review
 ```
 
 Patterns take `{param}` placeholders plus `{herd}`; `branch` and `worktree`
-also take `{name}`, and `prompt` also `{name}`, `{branch}`, `{worktree}` and
-`{pane}`. `prompt_file = "<file>"` beside the herd file replaces `prompt`.
+also take `{name}`; `prompt`, `done` and `merged` also take `{name}`,
+`{branch}`, `{worktree}` and `{pane}`. `{{` and `}}` are literal braces (jq
+filters in a `done` check need them). `prompt_file = "<file>"`, read beside
+the herd file, is used instead of `prompt`; setting both is an error.
 Unknown keys are rejected.
 
 ```bash
@@ -134,25 +139,29 @@ loopherd reports --all [<name>...]              # everything, marks nothing read
 ### Watch: block until a member needs you
 
 ```bash
-loopherd watch                              # any herd
+loopherd watch                              # leads and unled herds
 loopherd watch zagops-prs --timeout 3600    # exits 2 with no output on timeout
 ```
 
-Prints one line and exits on an unread report, a stop that leaves a member
-paused, finished or failed, or a member going blocked or gone in herdr.
-Needs the hooks from `scripts/install`. One watch per reader at a time.
+Wakes on an unread report, a stop that leaves a member paused, finished or
+failed, or a member going blocked or gone in herdr; prints one line per event
+gathered in that wake, then exits. From your pane it covers leads and unled
+herds; a led herd's workers are its lead's to watch. Needs the hooks from
+`scripts/install`. One watch per reader at a time.
 
 ### Lead: a herd that runs itself
 
 A `[lead]` table lets `loopherd lead <herd>` start `lead-<herd>` in a
-detached worktree of the herd's repo, where it runs the feed/watch loop for
-that herd's workers. Every switch is off until you turn it on; off means the
-lead asks you with a question report, and the PreToolUse hook denies the
-matching Bash commands.
+detached worktree of the herd's repo. Its prompt file tells it to run the
+feed/watch loop for that herd's workers and to ask you, with a question
+report, before anything a switch leaves off. Every switch is off until you
+turn it on. The PreToolUse hook enforces `merge`, `install` and `rebase`
+(merges, installs, rebases and force-pushes) by denying the Bash command;
+`new_cards`, `design_escalation` and `blocked_dialogs` rely on the prompt.
 
 ```toml
 [lead]
-prompt_file = "zagops-prs-lead.md"
+prompt_file = "zagops-prs-lead.md"     # beside the herd file; must exist
 merge = false
 install = false
 rebase = false
@@ -160,6 +169,10 @@ new_cards = false
 design_escalation = false
 blocked_dialogs = false
 ```
+
+The prompt file takes `{name}`, `{herd}`, `{worktree}` and `{switches}` (one
+`<switch> on|off` line each); start from
+[docs/examples/loopherd-cards-lead.md](docs/examples/loopherd-cards-lead.md).
 
 ```bash
 loopherd lead zagops-prs --dry-run
