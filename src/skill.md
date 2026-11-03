@@ -124,7 +124,9 @@ report `--kind handoff`, and end its turn. The last handoff moves to
 `<name>.prev.md`. The limit is the template's or `[lead]`'s
 `context_limit`, else `default_context_limit` in
 `$LOOPHERD_CONFIG_DIR/config.toml`, else 250000, never over 80% of that
-file's `context_window` (default 200000).
+file's `context_window` (default 200000). A broken `config.toml` or herd
+file falls back to 160000, and the hook leaves a `note` from the member once
+per session naming the file; fix it (`loopherd herds` validates both).
 
 Before handing off, a member that verifies PRs removes the `<scratch>/pr<n>/`
 directories of PRs that already merged or closed (see After merge) and lists

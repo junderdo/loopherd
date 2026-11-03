@@ -567,8 +567,11 @@ pub fn context_limit(paths: &Paths, member: &AgentRecord) -> Result<u64> {
             .and_then(|t| t.context_limit),
         _ => None,
     };
-    let config = paths.herds.with_file_name("config.toml");
-    crate::context::effective_limit(own, &config)
+    crate::context::effective_limit(own, &config_file(paths))
+}
+
+fn config_file(paths: &Paths) -> PathBuf {
+    paths.herds.with_file_name("config.toml")
 }
 
 /// A herd's `[lead]` switches, without reading its prompt.
@@ -633,18 +636,22 @@ fn expand_home(path: &str, home: &Path) -> PathBuf {
 }
 
 /// Every herd file in `paths.herds`, sorted by herd name, with a usage line
-/// per template. Exits 1 if any file is invalid.
+/// per template. Exits 1 if `config.toml` or any herd file is invalid.
 pub fn herds(paths: &Paths) -> Result<(String, i32)> {
-    let files = herd_files(&paths.herds)?;
-    if files.is_empty() {
-        let hint = format!(
-            "no herds: add a herd file at {}/<herd>.toml",
-            paths.herds.display()
-        );
-        return Ok((hint, 0));
-    }
     let mut lines = Vec::new();
     let mut code = 0;
+    if let Err(e) = crate::context::effective_limit(None, &config_file(paths)) {
+        lines.push(format!("invalid {}", format!("{e:#}").trim_end()));
+        code = 1;
+    }
+    let files = herd_files(&paths.herds)?;
+    if files.is_empty() {
+        lines.push(format!(
+            "no herds: add a herd file at {}/<herd>.toml",
+            paths.herds.display()
+        ));
+        return Ok((lines.join("\n"), code));
+    }
     for file in &files {
         let herd = file.file_stem().unwrap_or_default().to_string_lossy();
         match std::fs::read_to_string(file)
@@ -1689,6 +1696,29 @@ args = ["--model", "opus"]
             );
             assert_eq!(code, 0);
         }
+    }
+
+    #[test]
+    fn herds_reports_an_invalid_config_toml_and_exits_1() {
+        for herds_files in [&[("prs", PR_HERD)][..], &[]] {
+            let config = Config::with(herds_files);
+            let file = config.path().join("config.toml");
+            fs::write(&file, "context_windw = 1000000\n").unwrap();
+
+            let (report, code) = herds(&config.paths()).unwrap();
+
+            let first = report.lines().next().unwrap();
+            assert!(
+                first.starts_with(&format!("invalid {}: ", file.display())),
+                "{report}"
+            );
+            assert!(report.contains("context_windw"), "{report}");
+            assert_eq!(code, 1, "{report}");
+        }
+        let config = Config::with(&[("prs", PR_HERD)]);
+        let (report, code) = herds(&config.paths()).unwrap();
+        assert!(!report.contains("invalid"), "{report}");
+        assert_eq!(code, 0);
     }
 
     #[test]
