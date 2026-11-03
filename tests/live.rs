@@ -32,10 +32,15 @@ fn dev_socket() -> PathBuf {
         .join(".config/herdr/sessions/loopherd-dev/herdr.sock")
 }
 
-/// A command whose herdr calls reach only the dev session.
+/// A command whose herdr calls reach only the dev session, and which never
+/// reads the human's loopherd config or measures the calling Claude.
 fn dev(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    static CONFIG: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let config = CONFIG.get_or_init(|| tempfile::tempdir().unwrap());
     let mut cmd = Command::new(program);
-    cmd.env("HERDR_SOCKET_PATH", dev_socket());
+    cmd.env("HERDR_SOCKET_PATH", dev_socket())
+        .env("LOOPHERD_CONFIG_DIR", config.path())
+        .env_remove("CLAUDE_PID");
     for var in HERDR_IDS {
         cmd.env_remove(var);
     }
