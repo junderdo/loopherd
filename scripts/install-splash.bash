@@ -471,6 +471,7 @@ splash_wait() { # <start_us> <frame>
 }
 
 splash_prepare() {
+  local LC_ALL=C
   splash_parse
   splash_draw_sun
   splash_draw_ground
@@ -479,8 +480,9 @@ splash_prepare() {
 }
 
 # Sets splash_buf to what changed on screen for <frame>.
+# The scene is ASCII until painted; the C locale makes slicing it about twice as fast.
 splash_frame() { # <frame>
-  local frame=$1 letters=${#splash_glyphs[@]} letter rise
+  local frame=$1 letters=${#splash_glyphs[@]} letter rise LC_ALL=C
   letter=$((frame / splash_drop))
   rise=$((splash_drop - 1 - frame % splash_drop))
   ((letter < letters)) || { letter=$letters; rise=0; }
