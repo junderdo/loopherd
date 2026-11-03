@@ -9,6 +9,7 @@ use anyhow::{Result, bail};
 use crate::herdr::{Agent, Herdr, Pane};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::matching::{by_name, same_session, session_conflict};
+use crate::report::member_in;
 use crate::revive::find_workspace;
 use crate::worktree::{Gone, Removal, remove_if_gone, remove_if_merged, same_dir};
 
@@ -242,7 +243,7 @@ fn reused_by(
     agents: &[Agent],
     others: &BTreeMap<String, AgentRecord>,
 ) -> Result<Option<String>> {
-    if let Some(other) = others.values().find(|r| !r.retired && r.pane_id == pane_id) {
+    if let Some(other) = member_in(others, pane_id, herdr.socket().as_deref()) {
         return Ok(Some(format!("pane belongs to {}", other.name)));
     }
     if let Some(agent) = agents.iter().find(|a| a.pane_id == pane_id) {
@@ -265,7 +266,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::herdr::fake::FakeHerdr;
+    use crate::herdr::fake::{FAKE_SOCKET, FakeHerdr};
     use crate::ledger::MemLedger;
     use crate::spawn::{SpawnRequest, spawn};
     use crate::worktree::testing::{
@@ -1449,6 +1450,7 @@ mod tests {
         let pane = reused_after_restart(&herdr, &mut ledger, &wt, false);
         let mut b = record("b");
         b.pane_id = pane;
+        b.socket = Some(FAKE_SOCKET.into());
         ledger.0.insert("b".into(), b);
 
         let out = close(&herdr, &mut ledger);
@@ -1463,6 +1465,40 @@ mod tests {
         );
         assert_eq!(herdr.tabs().len(), 1);
         assert!(wt.is_dir());
+    }
+
+    #[test]
+    fn close_ignores_an_entry_recording_the_same_pane_id_in_another_herdr() {
+        for socket in [Some("/run/other/herdr.sock"), None] {
+            let root = tempfile::tempdir().unwrap();
+            let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+            let wt = root.path().join("proj/worktrees/feat-new");
+            let pane = reused_after_restart(&herdr, &mut ledger, &wt, true);
+            let mut b = record("b");
+            b.pane_id = pane;
+            b.socket = socket.map(PathBuf::from);
+            ledger.0.insert("b".into(), b);
+
+            let out = close(&herdr, &mut ledger);
+
+            assert_eq!(out[1], "closed tab w1:t2", "{socket:?}");
+        }
+    }
+
+    #[test]
+    fn close_keeps_a_pane_a_socketless_entry_recorded_when_herdr_names_no_socket() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        herdr.socket = None;
+        let wt = root.path().join("proj/worktrees/feat-new");
+        let pane = reused_after_restart(&herdr, &mut ledger, &wt, true);
+        let mut b = record("b");
+        b.pane_id = pane;
+        ledger.0.insert("b".into(), b);
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(out[1], "kept tab w1:t2: pane belongs to b");
     }
 
     #[test]
