@@ -2,8 +2,8 @@
 # Build loopherd, install it as ~/.local/bin/loopherd, and add its Claude
 # Stop/StopFailure/SessionStart/PreToolUse hooks and the loopherd skill. Arguments go to `loopherd install-hook`:
 #
-#   scripts/install                      # hooks in ~/.claude/settings.json
-#   scripts/install --settings <file>    # hooks in another settings file
+#   scripts/install                      # hooks in ~/.claude/settings.json, skill in ~/.claude/skills
+#   scripts/install --settings <file>    # hooks in <file>, skill in skills/ beside it
 set -euo pipefail
 
 command -v jq >/dev/null || { echo "install: needs jq (to read cargo's build output); install it first" >&2; exit 1; }

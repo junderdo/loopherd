@@ -147,6 +147,8 @@ that pane. Read `herdr --skill` before controlling herdr.
 - Claude's workspace trust dialog can stop a spawn into a new path
   (`prompt_sent: false`, exit 3). The human clicks through; then `loopherd
   prompt <name>`.
+- Claude Code's auto-mode classifier blocks `retire --close` unless the
+  repo's `.claude/settings.local.json` allows it.
 - The ledger stores absolute paths: moving a repo means editing
   `ledger.json` with `jq`, and moving the main checkout needs `git worktree
   repair`.

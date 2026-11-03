@@ -51,7 +51,8 @@ fn install_hook_writes_the_skill_to_skills_dir_and_remove_deletes_it() {
     let again = loopherd(home.path(), &args(&[]));
     assert_eq!(fs::read(&installed).unwrap(), skill(home.path()));
     assert!(
-        String::from_utf8_lossy(&again.stdout).contains("already up to date"),
+        String::from_utf8_lossy(&again.stdout)
+            .contains(&format!("{} already up to date", installed.display())),
         "{again:?}"
     );
 

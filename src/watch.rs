@@ -18,6 +18,19 @@ use crate::lock::Lock;
 use crate::report::{Body, Filter, Mailbox, Pending, Stop, member_in, peek_reports, unread_stops};
 use crate::status;
 
+/// The kinds of line a watch prints after a member's name, besides report kinds.
+pub mod line {
+    pub const PAUSED: &str = "paused";
+    pub const FINISHED: &str = "finished";
+    pub const FAILED: &str = "failed";
+    pub const MERGED: &str = "merged";
+    pub const CLAIMABLE: &str = "claimable";
+    pub const BLOCKED: &str = "blocked";
+    pub const GONE: &str = "gone";
+    #[cfg(test)]
+    pub const ALL: [&str; 7] = [PAUSED, FINISHED, FAILED, MERGED, CLAIMABLE, BLOCKED, GONE];
+}
+
 pub trait Clock {
     /// Time since the watch started.
     fn elapsed(&self) -> Duration;
@@ -177,7 +190,7 @@ pub fn watch(
         for member in &members {
             if member.gone {
                 if gone.confirm(member, &occupied) {
-                    lines.push(format!("{} gone", member.name));
+                    lines.push(format!("{} {}", member.name, line::GONE));
                 }
                 continue;
             }
@@ -187,7 +200,7 @@ pub fn watch(
             if member.status == AgentStatus::Blocked
                 && was.is_some_and(|w| w != AgentStatus::Blocked)
             {
-                lines.push(format!("{} blocked", member.name));
+                lines.push(format!("{} {}", member.name, line::BLOCKED));
             }
             if member.status != AgentStatus::Unknown {
                 last.insert(member.name.clone(), member.status);
@@ -254,14 +267,18 @@ impl Checks<'_> {
             freed += usize::from(done == Some(Ok(true)));
             let merged = run_member_check(&checks.merged, &checks, &worker, &budget);
             if merged == Some(Ok(true)) && matches!(done, None | Some(Ok(false))) {
-                events.push(format!("{} merged", worker.name));
+                events.push(format!("{} {}", worker.name, line::MERGED));
             }
         }
         if let (Some(queue), Some(timeout)) = (queue, budget.left()) {
             let names = claimable(ledger, self.paths, &queue, &self.herd, freed, timeout);
             // A running feed may be spawning these before it records them.
             if let (Ok(names), false) = (names, feeding(self.paths)?) {
-                events.extend(names.into_iter().map(|name| format!("{name} claimable")));
+                events.extend(
+                    names
+                        .into_iter()
+                        .map(|name| format!("{name} {}", line::CLAIMABLE)),
+                );
             }
         }
         Ok(events
@@ -528,16 +545,15 @@ fn stop_wakes(mailbox: &Mailbox) -> Vec<String> {
                 error: Some(error), ..
             }) => {
                 paused = false;
-                Some(format!("failed  {error}"))
+                Some(format!("{}  {error}", line::FAILED))
             }
             Body::Stop(stop) => match stop.pending() {
-                Some(pending) => {
-                    (!std::mem::replace(&mut paused, true)).then(|| format!("paused  {pending}"))
-                }
+                Some(pending) => (!std::mem::replace(&mut paused, true))
+                    .then(|| format!("{}  {pending}", line::PAUSED)),
                 None => {
                     let note = if reported { "" } else { "  no report" };
                     (paused, reported) = (false, false);
-                    Some(format!("finished{note}"))
+                    Some(format!("{}{note}", line::FINISHED))
                 }
             },
         };

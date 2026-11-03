@@ -564,6 +564,14 @@ fn run_install_hook(
         Some(dir) => dir,
         None => settings.with_file_name("skills"),
     };
+    // First, so a skill that can't be written leaves the settings untouched.
+    let skill = skill::path(&skills_dir);
+    match remove {
+        true if skill::remove(&skills_dir)? => println!("removed {}", skill.display()),
+        true => println!("no skill at {}", skill.display()),
+        false if skill::install(&skills_dir)? => println!("installed {}", skill.display()),
+        false => println!("{} already up to date", skill.display()),
+    }
     let outcome = match remove {
         true => install_hook::remove(&settings, SystemTime::now())?,
         false => {
@@ -583,13 +591,6 @@ fn run_install_hook(
                 println!("backup {}", backup.display());
             }
         }
-    }
-    let skill = skill::path(&skills_dir);
-    match remove {
-        true if skill::remove(&skills_dir)? => println!("removed {}", skill.display()),
-        true => println!("no skill at {}", skill.display()),
-        false if skill::install(&skills_dir)? => println!("installed {}", skill.display()),
-        false => println!("{} already up to date", skill.display()),
     }
     Ok(0)
 }

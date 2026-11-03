@@ -25,7 +25,10 @@ pub fn install(skills_dir: &Path) -> Result<bool> {
     }
     let dir = path.parent().expect("the skill sits in a directory");
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    fs::write(&path, SKILL).with_context(|| format!("write {}", path.display()))?;
+    // A rename replaces a symlinked SKILL.md rather than writing through to its target.
+    let tmp = dir.join(".SKILL.md.tmp");
+    fs::write(&tmp, SKILL).with_context(|| format!("write {}", tmp.display()))?;
+    fs::rename(&tmp, &path).with_context(|| format!("rename into {}", path.display()))?;
     Ok(true)
 }
 
@@ -104,16 +107,7 @@ mod tests {
         let reports = Kind::value_variants()
             .iter()
             .map(|k| k.to_possible_value().unwrap().get_name().to_owned());
-        let others = [
-            "paused",
-            "finished",
-            "failed",
-            "blocked",
-            "gone",
-            "merged",
-            "claimable",
-        ]
-        .map(String::from);
+        let others = crate::watch::line::ALL.map(String::from);
         let table = table_kinds();
         for kind in reports.chain(others) {
             assert!(table.contains(&kind.as_str()), "no {kind} row in {table:?}");
@@ -136,6 +130,21 @@ mod tests {
         fs::write(path(dir.path()), "old").unwrap();
         assert!(install(dir.path()).unwrap());
         assert_eq!(fs::read(path(dir.path())).unwrap(), SKILL.as_bytes());
+    }
+
+    #[test]
+    fn install_replaces_a_symlinked_skill_and_leaves_its_target_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("dotfiles-skill.md");
+        fs::write(&target, "mine").unwrap();
+        fs::create_dir_all(dir.path().join("loopherd")).unwrap();
+        std::os::unix::fs::symlink(&target, path(dir.path())).unwrap();
+
+        assert!(install(dir.path()).unwrap());
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "mine");
+        assert_eq!(fs::read(path(dir.path())).unwrap(), SKILL.as_bytes());
+        assert!(!fs::symlink_metadata(path(dir.path())).unwrap().is_symlink());
     }
 
     #[test]

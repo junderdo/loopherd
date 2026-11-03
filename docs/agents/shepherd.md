@@ -48,8 +48,6 @@ human to paste:
 ## Gotchas
 
 - Run the live suite after changing retire or feed output.
-- The auto-mode classifier blocks `retire --close` unless
-  `.claude/settings.local.json` (gitignored) allows it.
 - `scripts/trello` can't reorder, edit descriptions or delete; use curl with
   the OAuth header from `~/.config/loopherd/trello.env`.
 - A card that settles a decision, of any kind, adds a new
