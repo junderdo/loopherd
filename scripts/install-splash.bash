@@ -128,12 +128,15 @@ splash_title() {
 }
 
 splash_play() {
-  local cols
-  cols=$(tput cols 2>/dev/null) || cols=${COLUMNS:-80}
+  local size rows= cols=
+  # stty reads stdin, which may not be the terminal; fd 3 is stdout from outside the $(...).
+  { size=$(stty size <&3 2>/dev/null); } 3>&1 || return 0
+  read -r rows cols <<<"$size"
+  [[ "$rows" =~ ^[1-9][0-9]*$ && "$cols" =~ ^[1-9][0-9]*$ ]] || return 0
   trap 'trap - EXIT; splash_restore; printf "\n"; exit 130' INT
   trap splash_restore EXIT
   printf '\e[?25l'
-  if ((cols < splash_width + 4)); then
+  if ((cols < splash_width + 4 || rows <= splash_height)); then
     splash_title
   else
     splash_full

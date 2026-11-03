@@ -7,6 +7,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+const INSTALL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install");
+
 fn executable(path: &Path, script: &str) {
     fs::write(path, script).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -17,6 +19,7 @@ fn executable(path: &Path, script: &str) {
 struct Sandbox {
     _dir: tempfile::TempDir,
     home: PathBuf,
+    fake_bin: PathBuf,
     path: String,
     log: PathBuf,
 }
@@ -47,6 +50,7 @@ impl Sandbox {
         Sandbox {
             _dir: dir,
             home,
+            fake_bin,
             path,
             log,
         }
@@ -56,13 +60,45 @@ impl Sandbox {
         self.home.join(".local/bin/loopherd")
     }
 
+    fn command(&self, args: &[&str]) -> Command {
+        let mut cmd = Command::new(INSTALL);
+        cmd.args(args)
+            .env("HOME", &self.home)
+            .env("PATH", &self.path);
+        cmd
+    }
+
     fn install(&self, args: &[&str]) -> Output {
-        Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install"))
-            .args(args)
+        self.command(args).output().unwrap()
+    }
+
+    /// Runs install on a `cols`x`rows` pty with stdin not the tty, or None
+    /// where util-linux `script` isn't available.
+    fn install_in_pty(&self, cols: u16, rows: u16) -> Option<String> {
+        let util_linux = Command::new("script")
+            .arg("--version")
+            .output()
+            .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("util-linux"));
+        if !util_linux {
+            return None;
+        }
+        let shell = format!(
+            "stty cols {cols} rows {rows}; exec {INSTALL} --settings /tmp/s.json </dev/null"
+        );
+        let out = Command::new("script")
+            .args(["-qec", &shell, "/dev/null"])
             .env("HOME", &self.home)
             .env("PATH", &self.path)
+            .env("TERM", "xterm-256color")
+            .env_remove("NO_COLOR")
+            .env_remove("LOOPHERD_NO_SPLASH")
+            .env_remove("COLUMNS")
+            .env_remove("LINES")
+            .stdin(Stdio::null())
             .output()
-            .unwrap()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
     fn bin_dir_entries(&self) -> Vec<String> {
@@ -153,7 +189,7 @@ fn install_without_jq_stops_before_building() {
         std::os::unix::fs::symlink(found.trim(), no_jq.path().join(tool)).unwrap();
     }
 
-    let out = Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install"))
+    let out = Command::new(INSTALL)
         .env("HOME", &sandbox.home)
         .env("PATH", no_jq.path())
         .output()
@@ -367,7 +403,13 @@ fn an_installed_tool_hook_whose_binary_fails_with_exit_2_does_not_block() {
 fn install_without_a_tty_writes_no_escape_codes() {
     let sandbox = Sandbox::new(false);
 
-    let out = sandbox.install(&["--settings", "/tmp/s.json"]);
+    let out = sandbox
+        .command(&["--settings", "/tmp/s.json"])
+        .env("TERM", "xterm-256color")
+        .env_remove("NO_COLOR")
+        .env_remove("LOOPHERD_NO_SPLASH")
+        .output()
+        .unwrap();
 
     assert!(out.status.success());
     assert!(!out.stdout.contains(&0x1b), "{:?}", out.stdout);
@@ -398,4 +440,34 @@ fn help_documents_no_splash() {
     let out = sandbox.install(&["--help"]);
 
     assert!(String::from_utf8_lossy(&out.stdout).contains("--no-splash"));
+}
+
+fn without_escapes(text: &str) -> String {
+    let mut plain = String::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            chars.by_ref().find(|c| c.is_ascii_alphabetic());
+        } else {
+            plain.push(c);
+        }
+    }
+    plain
+}
+
+#[test]
+fn the_splash_fits_the_terminal_on_stdout_even_without_tput() {
+    let sandbox = Sandbox::new(false);
+    executable(&sandbox.fake_bin.join("tput"), "#!/bin/sh\nexit 1\n");
+
+    for (cols, rows, wordmark) in [(100, 30, true), (50, 30, false), (100, 8, false)] {
+        let Some(out) = sandbox.install_in_pty(cols, rows) else {
+            eprintln!("skipped: needs util-linux script");
+            return;
+        };
+
+        assert_eq!(out.contains('█'), wordmark, "{cols}x{rows}: {out}");
+        let title = without_escapes(&out).contains("  loopherd\r\n");
+        assert_eq!(title, !wordmark, "{cols}x{rows}: {out}");
+    }
 }
