@@ -781,8 +781,8 @@ fn the_frame_is_box_drawn_under_utf8_and_ascii_otherwise() {
 /// Rows and columns a sprite covers over the whole splash: (top, bottom, left, right).
 type Swept = (i64, i64, i64, i64);
 
-/// Every sheep's cells over the whole splash for a `cols`x`rows` terminal, each
-/// checked to stay on the scene's ground rows and columns.
+/// Every sheep's cells over the whole splash for a `cols`x`rows` terminal, as wide
+/// as its widest sprite, each checked to stay on the scene's ground rows and columns.
 fn swept_cells(cols: usize, rows: usize) -> Vec<Swept> {
     let out = splash_bash(
         "none",
@@ -790,8 +790,12 @@ fn swept_cells(cols: usize, rows: usize) -> Vec<Swept> {
             "splash_layout {rows} {cols}; splash_prepare; \
              echo \"$splash_frames $splash_width $splash_ground_top $splash_ground_rows\"; \
              for entry in \"${{splash_herd[@]}}\"; do \
-               set -- $entry; splash_sheep_sprite $3 r a; \
-               echo \"$entry ${{#splash_sprite[@]}}\"; \
+               set -- $entry; width=0; \
+               for pose in ra rb rg la lb lg; do \
+                 splash_sheep_sprite $3 ${{pose:0:1}} ${{pose:1}}; \
+                 for row in \"${{splash_sprite[@]}}\"; do ((${{#row}} > width)) && width=${{#row}}; done; \
+               done; \
+               echo \"$entry ${{#splash_sprite[@]}} $width\"; \
              done"
         ),
     );
@@ -807,7 +811,7 @@ fn swept_cells(cols: usize, rows: usize) -> Vec<Swept> {
         .map(|entry| {
             let f: Vec<&str> = entry.split(' ').collect();
             let num = |i: usize| f[i].parse::<i64>().unwrap();
-            let (row, size, x, height) = (num(0), num(2), num(3), num(6));
+            let (row, x, height, size) = (num(0), num(3), num(6), num(7));
             let travel = (frames - 1) / num(5);
             let (left, right) = match f[4] {
                 "r" => (x, x + size - 1 + travel),
@@ -932,6 +936,20 @@ fn a_grazing_sheep_lowers_its_head_to_the_grass() {
 
     assert_eq!(eye_row(0), Some(7));
     assert_eq!(eye_row(4), Some(9));
+}
+
+#[test]
+fn a_sheep_facing_left_has_its_head_on_the_left() {
+    let face = |motion: &str| {
+        let rows = lone_sheep(&format!("15 w 14 30 {motion} 1000"), 0);
+        let eye_row = &rows[7];
+        (eye_row.find('o').unwrap(), eye_row.find('#').unwrap())
+    };
+
+    let (eye, body) = face("gl");
+    assert!(eye < body, "eye {eye}, body {body}");
+    let (eye, body) = face("gr");
+    assert!(eye > body, "eye {eye}, body {body}");
 }
 
 #[test]
