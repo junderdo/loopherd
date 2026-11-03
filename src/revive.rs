@@ -968,6 +968,21 @@ mod tests {
     }
 
     #[test]
+    fn a_revived_lead_keeps_its_created_time() {
+        let cwd = tempfile::tempdir().unwrap();
+        let alive = herdr().with_live_agent(Some("lead-a"), Some("sess-lead-a"), "w1:p4");
+        let mut ledger = ledger([lead("lead-a", cwd.path()), lead("lead-b", cwd.path())]);
+
+        let (out, _) = run(&alive, &mut ledger, &request());
+
+        assert!(out.contains("alive lead-a"), "{out}");
+        assert!(out.contains("resumed lead-b"), "{out}");
+        for name in ["lead-a", "lead-b"] {
+            assert_eq!(ledger.0[name].created, "2026-10-31T00:00:00Z", "{name}");
+        }
+    }
+
+    #[test]
     fn workers_are_never_prompted() {
         let cwd = tempfile::tempdir().unwrap();
         let herdr = herdr().with_live_agent(Some("b"), Some("sess-b"), "w1:p4");

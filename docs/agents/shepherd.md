@@ -135,15 +135,21 @@ differs from the shepherd:
   the question. Single-quote it, `loopherd report --kind question '<question
   with the merge line>'`: double quotes run the `$(...)` and leak the token
   into the report.
-- **Heartbeat.** Keep `loopherd watch --timeout 600` as a background
+- **Heartbeat.** Keep `loopherd watch --timeout 3600` as a background
   task. Run from your pane, it's your watch: it reads your herd's workers
   only, never you, and naming any other herd is an error. It holds
   `watch-<your name>.lock`, so it runs beside the shepherd's watch, which
   reads you. Run it from your own pane in your own herdr: a pane that
   matches you but not your socket is refused. If you're retired, it exits
-  with an error and leaves your herd's events for the shepherd. Exit 2 is a heartbeat, not idleness: check each Review card's PR
-  (`gh pr view <n> --json state`) and run the after-merge steps for any the
-  human merged. Re-arm after every exit.
+  with an error and leaves your herd's events for the shepherd. Every 60s it also runs your herd's checks
+  and wakes you with `<member> merged` (the template's `merged` passes, its
+  `done` doesn't): run the after-merge steps for it; or `<name> claimable`
+  (feed would spawn `<name>`): feed. Each wakes you once, so a
+  claimable card you don't feed then shows up again only in the
+  heartbeat's dry run. Exit 2 is a
+  heartbeat, not idleness: still check each Review card's PR (`gh pr view
+  <n> --json state`), run the after-merge steps for any the human merged,
+  and run `loopherd feed <herd> --dry-run`. Re-arm after every exit.
   After a herdr restart the shepherd runs `loopherd revive`, which prompts
   you to re-arm whenever nothing holds `watch-<your name>.lock`, whether
   herdr resumed you or revive did.
