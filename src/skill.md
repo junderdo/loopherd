@@ -297,8 +297,12 @@ shepherd:
   Run from your pane, it's your watch: it reads your herd's workers only,
   never you, and naming any other herd is an error. It holds `watch-<your
   name>.lock`, so it runs beside the shepherd's watch, which reads you. Run
-  it from your own pane in your own herdr: a pane that matches you but not
-  your socket is refused. If you're retired, it exits with an error and
+  it from your own pane in your own herdr, or it runs as the shepherd's
+  watch instead: a pane that matches you but not your socket prints
+  `warning: pane <pane> holds lead <you> on socket <recorded>, but this
+  watch's socket is <this>; running the shepherd's watch` on start. Stop it
+  if you see that: it holds the shepherd's lock and wakes you with other
+  herds' events. If you're retired, it exits with an error and
   leaves your herd's events for the shepherd. Every 60s it also runs your
   herd's checks and wakes you with `<member> merged` (the template's
   `merged` passes, its `done` doesn't): run the after-merge steps for it;
