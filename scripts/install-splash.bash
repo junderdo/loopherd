@@ -6,7 +6,8 @@ splash_wants_to_play() {
 }
 
 # Rows are built as two parallel ASCII strings: the text, where '#' paints as
-# '█', '%' as the sun and '&' as cloud, and a kind per column that picks its colour.
+# '█', '%' as the sun, '&' as cloud and the sheep's capitals as blocks, and a
+# kind per column that picks its colour.
 # Cloud is kind c, or x over the sun's core and y over its rim, on the sun's colour.
 
 # One glyph per letter of "loopherd", rows split on '|'.
@@ -28,14 +29,14 @@ splash_frame_us=50000
 # Three layouts, by terminal size (splash_layout):
 #   title   under 66 columns or 23 rows: the name typed out on one line.
 #   medium  the 62x21 scene, centred.
-#   large   140 columns and 40 rows or more: full-bleed. Sky, horizon and pasture
-#           span the width, the pasture runs to the row above the tagline on the
-#           last row, and the herd grows with the area.
+#   large   140 columns and 40 rows or more: the scene fills 80% of the
+#           terminal each way, centred and capped at 180x50, which keeps a frame
+#           under 50ms. The tagline sits on its last row, and the herd grows
+#           with its area.
 splash_large_cols=140
 splash_large_rows=40
-# Past this many sheep the herd stops growing, which keeps a frame under 50ms
-# at 600x150.
-splash_large_herd_max=180
+splash_large_max_cols=180
+splash_large_max_rows=50
 
 # Scene rows, top to bottom; the ground and tagline rows are set by the layout.
 splash_wordmark_top=2 # sun rows 0..7 sit behind it
@@ -47,14 +48,34 @@ splash_ground_kinds=ABCDEFGHIJ
 # (r or l walks that way; gr or gl grazes in place facing that way, from size 2
 # up), and frames per one-column step, or per head bob when grazing.
 splash_medium_herd=(
-  "9 f 1 14 r 40" "9 f 1 47 l 45"
-  "10 f 1 30 l 35"
-  "11 m 2 6 r 25" "11 m 2 40 gl 11"
-  "12 m 2 54 l 22"
-  "13 n 5 44 l 16" "13 n 5 12 gr 10"
-  "14 n 5 22 r 14"
-  "15 w 9 2 r 8" "15 w 9 26 gl 9" "15 w 9 46 l 10"
+  "9 f 1 14 r 40" "9 f 1 47 l 45" "9 f 1 30 l 35"
+  "10 m 2 22 l 25" "10 m 2 54 gl 11"
+  "11 n 9 40 l 16" "11 n 9 8 gr 10"
+  "15 w 14 1 r 11" "15 w 14 26 gl 9" "15 w 14 47 l 16"
 )
+
+# Right-facing sheep by size and pose, rows split on ';': a and b are the two
+# steps of a walk, g grazes head-down. Left-facing ones are mirror images. Each
+# row is as wide as the size; spaces are see-through.
+splash_sheep_tiny=("1a;@" "1b;@" "1g;@" "2a;@o" "2b;@o" "2g;@.")
+# U, L, #, H, E and R paint as ▀ ▄ █ ▓ ▌ ▐.
+splash_sheep_blocks=(
+  "9a; L#L#L LL;R#####EoE; ER  ER  "
+  "9b; L#L#L LL;R#####EoE;  ER ER  "
+  "9g; L#L#L   ;R#####ELL; ER  ERoE"
+  "14a; L#L#L#L#L LL ;R#########EHoE; U#########UU ;  ER    ER    "
+  "14b; L#L#L#L#L LL ;R#########EHoE; U#########UU ;   ER  ER     "
+  "14g; L#L#L#L#L    ;R#########E   ; U#########LL ;  ER    ERHoE "
+)
+splash_sheep_ascii=(
+  "9a; .---. _ ;(@@@@@)o>; /\  /\  "
+  "9b; .---. _ ;(@@@@@)o>; ||  ||  "
+  "9g; .---.   ;(@@@@@)  ; ||  ||o>"
+  "14a;  .-------. _ ; (@@@@@@@@@)o>;  (@@@@@@@@)  ;   /\    /\   "
+  "14b;  .-------. _ ; (@@@@@@@@@)o>;  (@@@@@@@@)  ;   ||    ||   "
+  "14g;  .-------.   ; (@@@@@@@@@)  ;  (@@@@@@@@)_ ;   ||    ||o> "
+)
+
 # Clouds, drawn over the sun and under the letters: top row, start column,
 # columns per step (+1 or -1), frames per step, then the shape's rows.
 splash_medium_clouds=(
@@ -68,7 +89,10 @@ splash_buf=''
 splash_sgr=()
 
 splash_layout() { # <rows> <cols>
-  local rows=$1 cols=$2
+  local rows=$1 cols=$2 locale=${LC_ALL:-${LC_CTYPE:-${LANG:-}}}
+  splash_utf8=0
+  [[ "$locale" == *[Uu][Tt][Ff]8* || "$locale" == *[Uu][Tt][Ff]-8* ]] && splash_utf8=1
+  splash_sheep_sprites
   splash_width=62 splash_height=21 splash_ground_rows=10 splash_tagline_row=20
   splash_herd=("${splash_medium_herd[@]}") splash_clouds=("${splash_medium_clouds[@]}")
   if ((cols < splash_width + 4 || rows < splash_height + 2)); then
@@ -79,15 +103,14 @@ splash_layout() { # <rows> <cols>
     splash_left=$(((cols - splash_width) / 2 + 1))
   else
     splash_layout=large
-    splash_width=$cols splash_height=$rows splash_top=1 splash_left=1
-    splash_tagline_row=$((rows - 1))
-    splash_ground_rows=$((rows - 1 - splash_ground_top))
+    splash_width=$((cols * 8 / 10 < splash_large_max_cols ? cols * 8 / 10 : splash_large_max_cols))
+    splash_height=$((rows * 8 / 10 < splash_large_max_rows ? rows * 8 / 10 : splash_large_max_rows))
+    splash_left=$(((cols - splash_width) / 2 + 1))
+    splash_top=$(((rows - splash_height) / 2 + 1))
+    splash_tagline_row=$((splash_height - 1))
+    splash_ground_rows=$((splash_height - 1 - splash_ground_top))
   fi
   splash_wordmark_x=$(((splash_width - 62) / 2))
-  # The shepherd stands front-on at the right of the foreground, leaning on a
-  # crook, feet on the front row.
-  splash_shepherd_row=$((splash_ground_top + splash_ground_rows - 6))
-  splash_shepherd_x=$((splash_width - 8))
   if [[ "$splash_layout" == large ]]; then
     splash_large_herd
     splash_large_clouds
@@ -103,60 +126,39 @@ splash_mix() { # <a> <b>
   splash_hash=$((h ^ h >> 16))
 }
 
-# A row of sheep every other ground row (every third for the 3-row front sheep),
-# about one per 25 columns, banded by depth like the medium herd, up to
-# splash_large_herd_max sheep spread over the rows. Each sheep gets a slot of its
-# row and stays inside it for the whole splash, so sheep never overlap, and on
-# the shepherd's rows the slots end left of him.
+# Rows of sheep, banded by depth like the medium herd, one blank row under
+# each row of sprites, and about one sheep per <room> columns of a row. Each
+# sheep gets a slot of its row and stays inside it for the whole splash, so
+# sheep never overlap.
 splash_large_herd() {
-  local d i k size kind base height period travel motion slot span free x
-  local n extra rows_left usable
-  local -a moves=(r l gr gl) rows=()
+  local d i n band size kind base room height period travel motion slot span free x
+  local -a moves=(r l gr gl)
   splash_herd=()
-  for ((d = 0; d <= splash_ground_rows - 3; d += k)); do
-    rows+=("$d")
-    k=2
-    (((d * 9 / (splash_ground_rows - 1)) >= 6)) && k=3
-  done
-  n=$((splash_width / 25))
-  if ((n * ${#rows[@]} > splash_large_herd_max)); then
-    n=$((splash_large_herd_max / ${#rows[@]}))
-    extra=$((splash_large_herd_max % ${#rows[@]}))
-  else
-    extra=0
-  fi
-  rows_left=${#rows[@]}
-  for d in "${rows[@]}"; do
-    k=$((d * 9 / (splash_ground_rows - 1)))
-    if ((k <= 1)); then
-      size=1 kind=f base=40
-    elif ((k <= 3)); then
-      size=2 kind=m base=22
-    elif ((k <= 5)); then
-      size=5 kind=n base=14
+  for ((d = 0; ; d += height + 1)); do
+    band=$((d * 9 / (splash_ground_rows - 1)))
+    if ((band <= 1)); then
+      size=1 kind=f base=40 room=36
+    elif ((band <= 3)); then
+      size=2 kind=m base=22 room=36
+    elif ((band <= 5)); then
+      size=9 kind=n base=14 room=40
     else
-      size=9 kind=w base=9
+      size=14 kind=w base=9 room=50
     fi
-    height=1
-    ((size == 9)) && height=3
-    usable=$splash_width
-    if ((splash_ground_top + d + height > splash_shepherd_row)); then
-      usable=$((splash_shepherd_x - 1))
-    fi
-    # The extra sheep go to the rows nearest the front.
-    k=$((n + (rows_left <= extra ? 1 : 0)))
-    rows_left=$((rows_left - 1))
+    height=${splash_sheep_height[size]}
+    ((d + height <= splash_ground_rows)) || break
+    n=$((splash_width / room))
     span=$((size + (splash_frames - 1) / base + 1))
-    ((k * span <= usable)) || k=$((usable / span))
-    for ((i = 0; i < k; i++)); do
+    ((n * span <= splash_width)) || n=$((splash_width / span))
+    slot=$((splash_width / n))
+    for ((i = 0; i < n; i++)); do
       splash_mix "$i" "$d"
-      slot=$((usable / k))
       if ((size == 1)); then motion=${moves[splash_hash & 1]}; else motion=${moves[splash_hash & 3]}; fi
       period=$((base + (splash_hash >> 2) % 6))
       travel=0
       [[ "$motion" == [rl] ]] && travel=$(((splash_frames - 1) / period))
       free=$((slot - size - travel - 1))
-      x=$((i * usable / k + (splash_hash >> 8) % (free + 1)))
+      x=$((i * splash_width / n + (splash_hash >> 8) % (free + 1)))
       [[ "$motion" == l ]] && x=$((x + travel))
       splash_herd+=("$((splash_ground_top + d)) $kind $size $x $motion $period")
     done
@@ -223,7 +225,6 @@ splash_colours() {
   splash_set_sgr m '38;2;160;165;190' '38;5;146'
   splash_set_sgr n '38;2;205;205;220' '38;5;252'
   splash_set_sgr w '1;38;2;255;255;255' '1;38;5;231'
-  splash_set_sgr s '38;2;190;140;90' '38;5;173'
   splash_set_sgr t '2' '2'
 }
 
@@ -240,6 +241,11 @@ splash_paint_row() { # <row> <text> <kinds>
     run=${run//#/█}
     run=${run//%/$splash_sun_glyph}
     run=${run//&/▒}
+    run=${run//U/▀}
+    run=${run//L/▄}
+    run=${run//H/▓}
+    run=${run//E/▌}
+    run=${run//R/▐}
     printf -v code '%d' "'$kind"
     sgr=${splash_sgr[code]:-}
     if [[ -n "$sgr" && "$kind" != 0 ]]; then
@@ -408,23 +414,52 @@ splash_horizon_line() {
   splash_paint_row "$splash_horizon" "$horizon" "${horizon//-/h}"
 }
 
-# Sets splash_sprite to the rows of a sheep of <size> facing <facing>.
-splash_sheep_sprite() { # <size> <facing r|l> <head down 0|1>
-  case "$1$2$3" in
-    1*) splash_sprite=('@') ;;
-    2r0) splash_sprite=('@o') ;;
-    2r1) splash_sprite=('@.') ;;
-    2l0) splash_sprite=('o@') ;;
-    2l1) splash_sprite=('.@') ;;
-    5r0) splash_sprite=('(@@)o') ;;
-    5r1) splash_sprite=('(@@).') ;;
-    5l0) splash_sprite=('o(@@)') ;;
-    5l1) splash_sprite=('.(@@)') ;;
-    9r0) splash_sprite=('  .--.   ' ' (@@@@)o ' '  "  "   ') ;;
-    9r1) splash_sprite=('  .--.   ' ' (@@@@)  ' '  "  "o  ') ;;
-    9l0) splash_sprite=('   .--.  ' ' o(@@@@) ' '   "  "  ') ;;
-    9l1) splash_sprite=('   .--.  ' '  (@@@@) ' '  o"  "  ') ;;
-  esac
+# <text> reversed and its sided characters swapped, as splash_mirrored.
+splash_mirror() { # <text>
+  local i ch
+  splash_mirrored=''
+  for ((i = ${#1} - 1; i >= 0; i--)); do
+    ch=${1:i:1}
+    case $ch in
+      '(') ch=')' ;;
+      ')') ch='(' ;;
+      '/') ch='\' ;;
+      '\') ch='/' ;;
+      '<') ch='>' ;;
+      '>') ch='<' ;;
+      E) ch=R ;;
+      R) ch=E ;;
+    esac
+    splash_mirrored+=$ch
+  done
+}
+
+# Stores every sprite row as splash_sheep_<size><facing><pose>_<row>, in block
+# characters under UTF-8 and ASCII otherwise.
+splash_sheep_sprites() {
+  local entry r IFS=';' LC_ALL=C
+  local -a rows sheep=("${splash_sheep_tiny[@]}")
+  if ((splash_utf8)); then sheep+=("${splash_sheep_blocks[@]}"); else sheep+=("${splash_sheep_ascii[@]}"); fi
+  splash_sheep_height=()
+  for entry in "${sheep[@]}"; do
+    read -ra rows <<<"$entry"
+    splash_sheep_height[${rows[0]%?}]=$((${#rows[@]} - 1))
+    for ((r = 1; r < ${#rows[@]}; r++)); do
+      splash_mirror "${rows[r]}"
+      printf -v "splash_sheep_${rows[0]%?}r${rows[0]: -1}_$((r - 1))" '%s' "${rows[r]}"
+      printf -v "splash_sheep_${rows[0]%?}l${rows[0]: -1}_$((r - 1))" '%s' "$splash_mirrored"
+    done
+  done
+}
+
+# Sets splash_sprite to the rows of a sheep of <size> facing <facing> in <pose>.
+splash_sheep_sprite() { # <size> <facing r|l> <pose a|b|g>
+  local r name
+  splash_sprite=()
+  for ((r = 0; r < splash_sheep_height[$1]; r++)); do
+    name=splash_sheep_$1$2$3_$r
+    splash_sprite[r]=${!name}
+  done
 }
 
 # Lays splash_sprite over the ground rows from <row>.
@@ -441,7 +476,7 @@ splash_overlay() { # <row> <x> <kind>
 # Further back is smaller, higher, slower and dimmer. Walkers drift left or
 # right; grazers stay put and bob their heads.
 splash_pasture() { # <frame>
-  local frame=$1 entry d row kind size x motion period IFS=' '
+  local frame=$1 entry d row kind size x motion period IFS=' ' steps=ab bobs=ag
   splash_rows_text=("${splash_ground_text[@]}")
   splash_rows_kinds=("${splash_ground_kinds_row[@]}")
   for entry in "${splash_herd[@]}"; do
@@ -449,16 +484,12 @@ splash_pasture() { # <frame>
     set -- $entry
     row=$1 kind=$2 size=$3 x=$4 motion=$5 period=$6
     case $motion in
-      r) splash_sheep_sprite "$size" r 0; x=$((x + frame / period)) ;;
-      l) splash_sheep_sprite "$size" l 0; x=$((x - frame / period)) ;;
-      g?) splash_sheep_sprite "$size" "${motion:1}" $(((frame / period + x) % 2)) ;;
+      r) splash_sheep_sprite "$size" r "${steps:frame / period % 2:1}"; x=$((x + frame / period)) ;;
+      l) splash_sheep_sprite "$size" l "${steps:frame / period % 2:1}"; x=$((x - frame / period)) ;;
+      g?) splash_sheep_sprite "$size" "${motion:1}" "${bobs:(frame / period + x) % 2:1}" ;;
     esac
     splash_overlay "$row" "$x" "$kind"
   done
-  local face='(o)'
-  ((frame % 40 >= 37)) && face='(-)'
-  splash_sprite=(' .-.~~?' " $face~~|" '/|=|\_|' ' |=|~~|' ' |~|~~|' ' ^~^~~|')
-  splash_overlay "$splash_shepherd_row" "$splash_shepherd_x" s
   for ((d = 0; d < splash_ground_rows; d++)); do
     [[ "${splash_rows_text[d]}${splash_rows_kinds[d]}" == "${splash_painted[d]:-}" ]] && continue
     splash_painted[d]=${splash_rows_text[d]}${splash_rows_kinds[d]}
@@ -505,7 +536,9 @@ splash_frame() { # <frame>
   rise=$((splash_drop - 1 - frame % splash_drop))
   ((letter < letters)) || { letter=$letters; rise=0; }
   splash_buf=''
-  if ((frame == 0)); then splash_horizon_line; fi
+  if ((frame == 0)); then
+    splash_horizon_line
+  fi
   splash_sky "$frame" "$letter" "$rise"
   if ((frame == letters * splash_drop)); then splash_show_tagline; fi
   splash_pasture "$frame"

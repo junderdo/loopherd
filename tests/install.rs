@@ -601,6 +601,9 @@ fn splash_bash(colour: &str, script: &str) -> String {
     let mut cmd = Command::new("bash");
     cmd.args(["-euo", "pipefail", "-c"])
         .arg(format!("source {SPLASH}; {script}"))
+        .env("LANG", "C.UTF-8")
+        .env_remove("LC_ALL")
+        .env_remove("LC_CTYPE")
         .env_remove("NO_COLOR")
         .env_remove("COLORTERM");
     match colour {
@@ -719,54 +722,64 @@ fn the_medium_scene_sits_centred_in_its_box() {
 }
 
 #[test]
-fn the_large_scene_fills_the_width_down_to_the_bottom_row() {
-    for (cols, rows) in [(160, 45), (141, 41)] {
+fn the_large_scene_fills_a_centred_area_with_nothing_drawn_outside_it() {
+    // 80% of the terminal, capped at 180x50, centred: (cols, rows, left, right, top, bottom).
+    for (cols, rows, left, right, top, bottom) in [
+        (160, 45, 17, 144, 5, 40),
+        (141, 41, 15, 126, 5, 36),
+        (300, 80, 61, 240, 16, 65),
+    ] {
         let painted = painted_rows(cols, rows);
 
         assert_eq!(
             painted.keys().copied().collect::<Vec<_>>(),
-            (1..=rows).collect::<Vec<_>>(),
+            (top..=bottom).collect::<Vec<_>>(),
             "{cols}x{rows}"
         );
         assert!(
-            painted.values().all(|&span| span == (1, cols)),
+            painted.values().all(|&span| span == (left, right)),
             "{cols}x{rows}: {painted:?}"
         );
     }
 }
 
 #[test]
-fn no_sheep_reaches_the_shepherds_columns_on_his_rows() {
-    for (cols, rows) in [(100, 30), (140, 40), (141, 41), (160, 45), (200, 60)] {
+fn the_large_scene_has_no_border_under_utf8_or_ascii() {
+    for lang in ["C.UTF-8", "C"] {
         let out = splash_bash(
             "none",
             &format!(
-                "splash_colours; splash_layout {rows} {cols}; splash_prepare; \
-                 for ((f = 0; f < splash_frames; f++)); do splash_pasture $f; \
-                   for ((d = splash_shepherd_row - splash_ground_top; d < splash_ground_rows; d++)); do \
-                     cells=${{splash_rows_kinds[d]:splash_shepherd_x}}; \
-                     if [[ $cells == *[fmnw]* ]]; then echo \"frame $f row $d: $cells\"; fi; \
-                   done; \
-                 done"
+                "LANG={lang}; splash_colours; splash_layout 45 160; splash_prepare; \
+                 for ((f = 0; f < splash_frames; f++)); do splash_frame $f; printf %s \"$splash_buf\"; done"
             ),
         );
+        let drawn = without_escapes(&out);
 
-        assert_eq!(out, "", "{cols}x{rows}");
+        for border in ['┌', '┐', '└', '┘', '─', '│', '+'] {
+            assert!(!drawn.contains(border), "{lang}: {border}");
+        }
     }
 }
 
 /// Rows and columns a sprite covers over the whole splash: (top, bottom, left, right).
 type Swept = (i64, i64, i64, i64);
 
-/// The shepherd's cells, then every large-herd sheep's, for a `cols`x`rows` terminal,
-/// read from the herd entries so a sheep under the shepherd still counts.
-fn swept_cells(cols: usize, rows: usize) -> (Swept, Vec<Swept>) {
+/// Every sheep's cells over the whole splash for a `cols`x`rows` terminal, as wide
+/// as its widest sprite, each checked to stay on the scene's ground rows and columns.
+fn swept_cells(cols: usize, rows: usize) -> Vec<Swept> {
     let out = splash_bash(
         "none",
         &format!(
-            "splash_layout {rows} {cols}; \
-             echo \"$splash_shepherd_row $splash_shepherd_x $splash_frames $splash_width\"; \
-             printf '%s\\n' \"${{splash_herd[@]}}\""
+            "splash_layout {rows} {cols}; splash_prepare; \
+             echo \"$splash_frames $splash_width $splash_ground_top $splash_ground_rows\"; \
+             for entry in \"${{splash_herd[@]}}\"; do \
+               set -- $entry; width=0; \
+               for pose in ra rb rg la lb lg; do \
+                 splash_sheep_sprite $3 ${{pose:0:1}} ${{pose:1}}; \
+                 for row in \"${{splash_sprite[@]}}\"; do ((${{#row}} > width)) && width=${{#row}}; done; \
+               done; \
+               echo \"$entry ${{#splash_sprite[@]}} $width\"; \
+             done"
         ),
     );
     let mut lines = out.lines();
@@ -776,66 +789,61 @@ fn swept_cells(cols: usize, rows: usize) -> (Swept, Vec<Swept>) {
         .split(' ')
         .map(|n| n.parse().unwrap())
         .collect();
-    let (row, x, frames, width) = (head[0], head[1], head[2], head[3]);
-    let shepherd = (row, row + 5, x, x + 6);
-    let sheep = lines
+    let (frames, width, ground_top, ground_rows) = (head[0], head[1], head[2], head[3]);
+    lines
         .map(|entry| {
             let f: Vec<&str> = entry.split(' ').collect();
-            let (row, size, x): (i64, i64, i64) = (
-                f[0].parse().unwrap(),
-                f[2].parse().unwrap(),
-                f[3].parse().unwrap(),
-            );
-            let travel = (frames - 1) / f[5].parse::<i64>().unwrap();
-            let height = if size == 9 { 3 } else { 1 };
+            let num = |i: usize| f[i].parse::<i64>().unwrap();
+            let (row, x, height, size) = (num(0), num(3), num(6), num(7));
+            let travel = (frames - 1) / num(5);
             let (left, right) = match f[4] {
                 "r" => (x, x + size - 1 + travel),
                 "l" => (x - travel, x + size - 1),
                 _ => (x, x + size - 1),
             };
+            let bottom = row + height - 1;
             assert!(left >= 0 && right < width, "{cols}x{rows}: {entry}");
-            (row, row + height - 1, left, right)
+            assert!(
+                row >= ground_top && bottom < ground_top + ground_rows,
+                "{cols}x{rows}: {entry}"
+            );
+            (row, bottom, left, right)
         })
-        .collect();
-    (shepherd, sheep)
+        .collect()
 }
 
-fn overlap(a: Swept, b: Swept) -> bool {
-    a.0 <= b.1 && b.0 <= a.1 && a.2 <= b.3 && b.2 <= a.3
+/// Whether `a` and `b` overlap or share an edge or corner.
+fn touch(a: Swept, b: Swept) -> bool {
+    a.0 <= b.1 + 1 && b.0 <= a.1 + 1 && a.2 <= b.3 + 1 && b.2 <= a.3 + 1
 }
 
 #[test]
-fn large_herd_sheep_never_meet_each_other_or_the_shepherd() {
-    // 140x60, 147x40 and the 151 widths put right walkers in the shepherd's rows.
+fn sheep_never_touch_each_other_or_leave_the_pasture() {
     for (cols, rows) in [
+        (100, 30),
         (140, 40),
         (140, 60),
         (141, 41),
         (147, 40),
         (151, 47),
         (151, 53),
-        (151, 60),
         (160, 45),
         (203, 61),
-        (300, 80),
+        (226, 63),
         (400, 100),
     ] {
-        let (shepherd, sheep) = swept_cells(cols, rows);
+        let sheep = swept_cells(cols, rows);
 
         for (i, &a) in sheep.iter().enumerate() {
-            assert!(
-                !overlap(a, shepherd),
-                "{cols}x{rows}: {a:?} meets the shepherd"
-            );
             for &b in &sheep[i + 1..] {
-                assert!(!overlap(a, b), "{cols}x{rows}: {a:?} meets {b:?}");
+                assert!(!touch(a, b), "{cols}x{rows}: {a:?} touches {b:?}");
             }
         }
     }
 }
 
 #[test]
-fn the_large_herd_grows_with_the_area_and_never_shrinks() {
+fn the_large_herd_grows_with_the_scenes_area_not_the_terminals() {
     let herd = |cols: usize, rows: usize| -> usize {
         splash_bash(
             "none",
@@ -844,32 +852,110 @@ fn the_large_herd_grows_with_the_area_and_never_shrinks() {
         .parse()
         .unwrap()
     };
-    let cap: usize = splash_bash("none", "printf %s $splash_large_herd_max")
-        .parse()
-        .unwrap();
 
     let mut last = 0;
-    for (cols, rows) in [
-        (140, 40),
-        (160, 45),
-        (200, 60),
-        (266, 70),
-        (300, 80),
-        (400, 100),
-        (600, 150),
+    // The scene is 80% of the terminal, up to 180x50.
+    for (cols, rows, area) in [
+        (140, 40, 112 * 32),
+        (160, 45, 128 * 36),
+        (200, 60, 160 * 48),
+        (226, 63, 180 * 50),
     ] {
         let sheep = herd(cols, rows);
-        assert!(sheep >= last, "{cols}x{rows}: {sheep} after {last}");
-        if sheep < cap {
-            let cells_per_sheep = cols * rows / sheep;
-            assert!(
-                (60..=100).contains(&cells_per_sheep),
-                "{cols}x{rows}: {sheep}"
-            );
-        }
+        assert!(sheep > last, "{cols}x{rows}: {sheep} after {last}");
+        let cells_per_sheep = area / sheep;
+        assert!(
+            (120..=300).contains(&cells_per_sheep),
+            "{cols}x{rows}: {sheep}"
+        );
         last = sheep;
     }
-    assert_eq!(last, cap);
+    assert_eq!(herd(400, 100), last);
+    assert_eq!(herd(600, 150), last);
+}
+
+/// The ground rows of the 100x30 medium scene after `frame` with only `sheep`
+/// in the herd, blank except for the sheep's own cells.
+fn lone_sheep(sheep: &str, frame: usize) -> Vec<String> {
+    splash_bash(
+        "none",
+        &format!(
+            "splash_colours; splash_layout 30 100; splash_herd=('{sheep}'); splash_prepare; splash_pasture {frame}; \
+             for ((d = 0; d < splash_ground_rows; d++)); do \
+               text=${{splash_rows_text[d]}} kinds=${{splash_rows_kinds[d]}} line=; \
+               for ((i = 0; i < ${{#text}}; i++)); do \
+                 if [[ ${{kinds:i:1}} == w ]]; then line+=${{text:i:1}}; else line+=' '; fi; \
+               done; \
+               echo \"$line\"; \
+             done"
+        ),
+    )
+    .lines()
+    .map(str::to_string)
+    .collect()
+}
+
+#[test]
+fn a_front_sheep_is_four_rows_tall_and_moves_its_legs_as_it_walks() {
+    let before = lone_sheep("15 w 14 10 r 4", 0);
+    let after = lone_sheep("15 w 14 10 r 4", 4);
+
+    let drawn: Vec<usize> = (0..before.len())
+        .filter(|&d| !before[d].trim().is_empty())
+        .collect();
+    assert_eq!(drawn, vec![6, 7, 8, 9], "{before:#?}");
+    for d in 6..=8 {
+        assert_eq!(format!(" {}", &before[d][..61]), after[d], "row {d}");
+    }
+    assert_ne!(format!(" {}", &before[9][..61]), after[9], "{after:#?}");
+}
+
+#[test]
+fn a_grazing_sheep_lowers_its_head_to_the_grass() {
+    let eye_row = |frame: usize| {
+        lone_sheep("15 w 14 10 gr 4", frame)
+            .iter()
+            .position(|row| row.contains('o'))
+    };
+
+    assert_eq!(eye_row(0), Some(7));
+    assert_eq!(eye_row(4), Some(9));
+}
+
+#[test]
+fn a_sheep_facing_left_has_its_head_on_the_left() {
+    let face = |motion: &str| {
+        let rows = lone_sheep(&format!("15 w 14 30 {motion} 1000"), 0);
+        let eye_row = &rows[7];
+        (eye_row.find('o').unwrap(), eye_row.find('#').unwrap())
+    };
+
+    let (eye, body) = face("gl");
+    assert!(eye < body, "eye {eye}, body {body}");
+    let (eye, body) = face("gr");
+    assert!(eye > body, "eye {eye}, body {body}");
+}
+
+#[test]
+fn sheep_are_drawn_in_block_characters_under_utf8_and_ascii_otherwise() {
+    let pasture = |lang: &str| -> String {
+        let out = splash_bash(
+            "none",
+            &format!(
+                "LANG={lang}; splash_colours; splash_layout 30 100; splash_prepare; \
+                 splash_frame 0; printf %s \"$splash_buf\""
+            ),
+        );
+        // The 100x30 scene's ground runs from screen row 14 to 23.
+        segments(&out)
+            .into_iter()
+            .filter(|&(row, ..)| (14..=23).contains(&row))
+            .map(|(.., text)| text)
+            .collect()
+    };
+
+    assert!(pasture("C.UTF-8").contains('█'));
+    assert!(pasture("C").is_ascii(), "{}", pasture("C"));
 }
 
 #[test]
