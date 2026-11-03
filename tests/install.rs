@@ -116,6 +116,27 @@ fn a_failed_build_leaves_the_old_binary() {
 }
 
 #[test]
+fn help_prints_usage_without_building_or_installing() {
+    for flag in ["-h", "--help"] {
+        let sandbox = Sandbox::new(true);
+
+        let out = sandbox.install(&[flag]);
+
+        assert!(
+            out.status.success(),
+            "{flag}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let usage = String::from_utf8_lossy(&out.stdout);
+        assert!(usage.contains("--settings <file>"), "{flag}: {usage}");
+        assert!(usage.contains("loopherd install-hook"), "{flag}: {usage}");
+        assert!(!sandbox.home.join(".local").exists(), "{flag}");
+        assert!(!sandbox.home.join(".claude").exists(), "{flag}");
+        assert!(!sandbox.log.exists(), "{flag}");
+    }
+}
+
+#[test]
 fn install_without_jq_stops_before_building() {
     let sandbox = Sandbox::new(false);
     let no_jq = tempfile::tempdir().unwrap();
