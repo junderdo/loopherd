@@ -94,7 +94,10 @@ that pane. Read `herdr --skill` before controlling herdr.
    (`herdr agent read <name> --source recent-unwrapped --lines 40`).
 4. **Verify** a finished member's output with a read-only subagent against
    the task's acceptance criteria: no loopherd or mutating herdr commands,
-   its own build dir and a temp `XDG_STATE_HOME` and `LOOPHERD_CONFIG_DIR`.
+   a temp `XDG_STATE_HOME` and `LOOPHERD_CONFIG_DIR`. Put everything it
+   builds under one directory per PR, `<scratch>/pr<n>/`: its detached
+   worktrees, its build target dirs and any copies (mutation runs), so one
+   removal cleans up.
    For anything that deletes or closes, have it hunt for safety gaps and
    name the test covering each rule. Report as soon as it lands; the human
    often merges fast. Gaps inside the task's scope go back to the member;
@@ -103,8 +106,10 @@ that pane. Read `herdr --skill` before controlling herdr.
    the task in the project's tracker, unblock dependents, then `loopherd
    feed <herd>`. Its `done` check retires and closes the member and refills
    the slot. If the human merged before verification finished, point the
-   verifier at the merge commit in a detached temp worktree, since reaping
-   removes the member's.
+   verifier at the merge commit in a detached worktree under the PR's
+   directory, since reaping removes the member's. Once verification is done,
+   `git worktree remove --force` each verify worktree under `<scratch>/pr<n>/`,
+   then delete that directory. Do the same when a PR is closed unmerged.
 
 ### Handoffs
 
@@ -117,6 +122,10 @@ report `--kind handoff`, and end its turn. The last handoff moves to
 `context_limit`, else `default_context_limit` in
 `$LOOPHERD_CONFIG_DIR/config.toml`, else 250000, never over 80% of that
 file's `context_window` (default 200000).
+
+Before handing off, a member that verifies PRs removes the `<scratch>/pr<n>/`
+directories of PRs that already merged or closed (see After merge) and lists
+the ones still in use under State, so its successor cleans them up.
 
 The handoff file has a fixed outline, and leaves out what's already in the
 tracker, the ledger or the mailbox:
