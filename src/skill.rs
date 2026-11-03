@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-pub const SKILL: &str = include_str!("../skills/loopherd/SKILL.md");
+pub const SKILL: &str = include_str!("skill.md");
 
 /// Where the skill goes under a Claude skills directory.
 pub fn path(skills_dir: &Path) -> PathBuf {

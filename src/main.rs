@@ -48,7 +48,11 @@ use crate::status::{Format, status};
 use crate::worktree::{remote_timeout, repo_root};
 
 #[derive(Parser)]
-#[command(version, about = "Herd coding agents across herdr sessions")]
+#[command(
+    version,
+    about = "Herd coding agents across herdr sessions",
+    args_conflicts_with_subcommands = true
+)]
 struct Cli {
     /// Print the shepherd's and lead's guide as a Claude SKILL.md.
     #[arg(long, exclusive = true)]

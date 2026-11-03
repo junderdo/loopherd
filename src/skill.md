@@ -19,7 +19,9 @@ working across sessions. Three roles:
 The project you're in supplies the rest: its tracker and commands, how it
 installs loopherd and runs its checks, its GitHub account and merge line.
 Those live in the project's runbook or the lead's prompt file, never here.
-Read `herdr --skill` before controlling herdr.
+The shepherd runs in a herdr pane (`$HERDR_PANE_ID`) of the human's live
+session; `report` and `watch` tell members, leads and the shepherd apart by
+that pane. Read `herdr --skill` before controlling herdr.
 
 ## Shepherd
 
@@ -32,8 +34,8 @@ Read `herdr --skill` before controlling herdr.
    nothing) and installs this skill. `watch` needs the first three, not the
    PreToolUse one. Running Claude sessions pick up a newly added hook without
    a restart. Then `loopherd feed <herd> --dry-run` and, if it reads right,
-   `loopherd feed <herd>`. The herd file
-   (`$XDG_CONFIG_HOME/loopherd/herds/<herd>.toml`) turns each task its
+   `loopherd feed <herd>`. The herd file (`<herd>.toml` in
+   `$LOOPHERD_CONFIG_DIR/herds`, else `${XDG_CONFIG_HOME:-~/.config}/loopherd/herds`) turns each task its
    queue's `source` prints into a member, at most `max` open. `loopherd
    herds` lists herd files and their templates. Hand-spawn (`loopherd spawn
    … --prompt-file`, or `loopherd add <herd> <template> <params…>`) only for
@@ -71,7 +73,7 @@ Read `herdr --skill` before controlling herdr.
    | Line | Means |
    |---|---|
    | `<member> done <time> <text>` | A finished member's report, usually with its output's link. Verify it. |
-   | `<member> question <time> <text>` | It stopped on a question only the human answers. Relay it; don't answer it yourself. |
+   | `<member> question <time> <text>` | It stopped on a question. Relay it to the human; a lead relays it with its own question report, unless it's a design question and `design_escalation` is on. |
    | `<member> note <time> <text>` | Information only; nothing waits on it. |
    | `<member> paused  1 shell, 1 cron` | Turn ended with work in flight that can wake it again. Another paused stop is quiet. |
    | `<member> paused  background unknown` | Turn ended and Claude didn't say what's in flight (also `crons unknown`, or `1 shell; crons unknown`). |

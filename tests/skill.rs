@@ -80,3 +80,15 @@ fn install_hook_writes_to_claudes_home_skills_dir_by_default() {
     loopherd(home.path(), &["install-hook", "--remove"]);
     assert!(!installed.exists());
 }
+
+#[test]
+fn skill_refuses_a_subcommand_beside_it() {
+    let home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .args(["--skill", "status"])
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+}
