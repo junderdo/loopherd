@@ -123,6 +123,18 @@ differs from the shepherd:
   --help`, `git rebase --abort` and any `curl` to a PR's merge endpoint are
   denied too, so ask the human to run a `rebase --abort`, and check merges
   with `gh pr view <n> --json state`. Grilling is always the human's.
+- **Asking to merge.** With `merge` off, the question carries the PR link
+  and a ready-to-paste line pinned to the full head SHA your reviewer
+  verified:
+
+  ```
+  ! GH_TOKEN=$(gh auth token --user junderdo) gh pr merge <n> --merge --match-head-commit <full sha>
+  ```
+
+  Leave out `--delete-branch`. If another PR must merge first, name it in
+  the question. Single-quote it, `loopherd report --kind question '<question
+  with the merge line>'`: double quotes run the `$(...)` and leak the token
+  into the report.
 - **Heartbeat.** Keep `loopherd watch --timeout 600` as a background
   task. Run from your pane, it's your watch: it reads your herd's workers
   only, never you, and naming any other herd is an error. It holds
