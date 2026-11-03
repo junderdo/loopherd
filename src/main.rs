@@ -27,7 +27,7 @@ mod watch;
 mod worktree;
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
@@ -203,11 +203,14 @@ enum Command {
     /// herdr. Polls every 2s, read-only toward herdr. Run from a lead's pane it
     /// reads that lead's herd's workers; otherwise it is the shepherd's and
     /// reads leads and unled herds. One watch per reader at a time, and only
-    /// with loopherd's Stop, StopFailure and SessionStart hooks installed.
+    /// with loopherd's Stop, StopFailure and SessionStart hooks installed. Run
+    /// from no member's pane, it adds `shepherd handoff <n>k over <limit>k`
+    /// once per session when its caller's Claude is past the shepherd's limit.
     Watch {
         /// Only members of these herds; a led herd narrows the shepherd to its lead.
         herds: Vec<String>,
-        /// Give up after this many seconds, exiting 2 with no output.
+        /// Give up after this many seconds, exiting 2 with no output unless a
+        /// shepherd handoff line is due.
         #[arg(long)]
         timeout: Option<u64>,
         /// Check for the hook in this file instead of $CLAUDE_CONFIG_DIR/settings.json or ~/.claude/settings.json.
@@ -487,6 +490,13 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         own_socket: own_socket.as_deref(),
         herd_files: Some(&herd_paths),
         check_timeout: remote_timeout,
+        shepherd_handoff: None,
+    };
+    let state = ledger.dir()?;
+    let handoff = || shepherd_handoff(&herd_paths, &state);
+    let req = watch::Request {
+        shepherd_handoff: Some(&handoff),
+        ..req
     };
     let woke = watch::watch(
         &CliHerdr,
@@ -507,6 +517,24 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         .context("print the wake; left it unread")?;
     wake.mark_read()?;
     Ok(0)
+}
+
+/// The shepherd's handoff line when its Claude is past its limit; a failing
+/// check warns and adds no line.
+fn shepherd_handoff(paths: &Paths, state: &Path) -> Option<context::ShepherdHandoff> {
+    let limit = context::shepherd_limit(&paths.herds.with_file_name("config.toml"));
+    let limit = limit
+        .inspect_err(|e| eprintln!("loopherd watch: warning: {e:#}"))
+        .ok()?;
+    let claude_dir = install_hook::claude_dir().ok()?;
+    context::shepherd_handoff(&context::ShepherdCheck {
+        procs: &process::ProcFs,
+        claude_pid: std::env::var("CLAUDE_PID").ok().as_deref(),
+        me: std::process::id(),
+        claude_dir: &claude_dir,
+        state,
+        limit,
+    })
 }
 
 fn run_stop_hook() -> Result<i32> {

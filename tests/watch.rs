@@ -52,6 +52,8 @@ impl Sandbox {
         cmd.args(args)
             .env("XDG_STATE_HOME", self.dir.path().join("state"))
             .env("CLAUDE_CONFIG_DIR", self.dir.path())
+            .env("LOOPHERD_CONFIG_DIR", self.dir.path().join("config"))
+            .env_remove("CLAUDE_PID")
             .env("PATH", "")
             .env_remove("HERDR_PANE_ID")
             .env_remove("HERDR_SOCKET_PATH");
@@ -214,4 +216,178 @@ fn a_leads_watch_runs_beside_the_shepherds() {
 
     assert_eq!(lead.status.code(), Some(2), "{lead:?}");
     assert!(state.join("reports/watch-lead-cards.lock").is_file());
+}
+
+/// This test process stands in for the shepherd's Claude: the watch's parent,
+/// with a session file and a transcript at `tokens` in context.
+fn as_shepherds_claude(sandbox: &Sandbox, session: &str, tokens: u64) -> String {
+    let me = std::process::id();
+    let stat = fs::read_to_string("/proc/self/stat").unwrap();
+    let start = stat[stat.rfind(')').unwrap() + 1..]
+        .split_whitespace()
+        .nth(19)
+        .unwrap()
+        .to_string();
+    let sessions = sandbox.dir.path().join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::write(
+        sessions.join(format!("{me}.json")),
+        format!(r#"{{"pid":{me},"sessionId":"{session}","procStart":"{start}"}}"#),
+    )
+    .unwrap();
+    let project = sandbox.dir.path().join("projects/-repo");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join(format!("{session}.jsonl")),
+        format!(r#"{{"type":"assistant","message":{{"usage":{{"input_tokens":{tokens}}}}}}}"#)
+            + "\n",
+    )
+    .unwrap();
+    me.to_string()
+}
+
+fn with_shepherd_limit(sandbox: &Sandbox, limit: u64) {
+    let config = sandbox.dir.path().join("config");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(
+        config.join("config.toml"),
+        format!("[shepherd]\ncontext_limit = {limit}\n"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn the_shepherds_watch_tells_it_to_hand_off_once_per_session_over_its_limit() {
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+    with_shepherd_limit(&sandbox, 50_000);
+    let pid = as_shepherds_claude(&sandbox, "s1", 64_200);
+
+    let out = sandbox
+        .loopherd(&["watch", "--timeout", "0"])
+        .env("CLAUDE_PID", &pid)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "lh-1 paused  1 shell\nshepherd handoff 64k over 50k\n"
+    );
+
+    let again = sandbox
+        .loopherd(&["watch", "--timeout", "0"])
+        .env("CLAUDE_PID", &pid)
+        .output()
+        .unwrap();
+    assert_eq!(again.status.code(), Some(2), "{again:?}");
+    assert!(again.stdout.is_empty());
+}
+
+#[test]
+fn a_timed_out_watch_still_tells_the_shepherd() {
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+    let reports = sandbox.dir.path().join("state/loopherd/reports");
+    fs::write(reports.join("lh-1.jsonl"), "").unwrap();
+    let pid = as_shepherds_claude(&sandbox, "s1", 170_000);
+
+    let out = sandbox
+        .loopherd(&["watch", "--timeout", "0"])
+        .env("CLAUDE_PID", &pid)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "shepherd handoff 170k over 160k\n"
+    );
+}
+
+#[test]
+fn under_its_limit_or_from_a_members_pane_the_watch_says_nothing_more() {
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+    let pid = as_shepherds_claude(&sandbox, "s1", 160_000);
+    let out = sandbox
+        .loopherd(&["watch", "--timeout", "0"])
+        .env("CLAUDE_PID", &pid)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "lh-1 paused  1 shell\n"
+    );
+
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+    let pid = as_shepherds_claude(&sandbox, "s1", 170_000);
+    let out = sandbox
+        .loopherd(&["watch", "--timeout", "0"])
+        .env("CLAUDE_PID", &pid)
+        .env("HERDR_PANE_ID", "w1:p1")
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "lh-1 paused  1 shell\n"
+    );
+}
+
+#[test]
+fn a_bad_shepherd_limit_warns_and_says_nothing_more() {
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+    with_shepherd_limit(&sandbox, 5);
+    let pid = as_shepherds_claude(&sandbox, "s1", 170_000);
+
+    let out = sandbox
+        .loopherd(&["watch", "--timeout", "0"])
+        .env("CLAUDE_PID", &pid)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "lh-1 paused  1 shell\n"
+    );
+    assert!(
+        stderr(&out).contains("shepherd.context_limit must be at least 10000"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn a_leads_watch_over_the_shepherds_limit_says_nothing_more() {
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+    let state = sandbox.dir.path().join("state/loopherd");
+    fs::write(
+        state.join("ledger.json"),
+        r#"{"lead-cards": {"name": "lead-cards", "pane_id": "w1:p0", "session_id": null,
+            "repo": "/", "worktree": null, "workspace": "w1", "prompt": null,
+            "prompt_sent": true, "created": "2026-11-01T00:00:00Z",
+            "herd": "cards", "role": "lead", "socket": "/run/live.sock"},
+           "lh-1": {"name": "lh-1", "pane_id": "w1:p1", "session_id": null,
+            "repo": "/", "worktree": null, "workspace": "w1", "prompt": null,
+            "prompt_sent": true, "created": "2026-11-01T00:00:00Z",
+            "herd": "cards", "socket": "/run/live.sock"}}"#,
+    )
+    .unwrap();
+    let pid = as_shepherds_claude(&sandbox, "s-lead", 170_000);
+
+    let out = sandbox
+        .loopherd(&["watch", "--timeout", "0"])
+        .env("CLAUDE_PID", &pid)
+        .env("HERDR_PANE_ID", "w1:p0")
+        .env("HERDR_SOCKET_PATH", "/run/live.sock")
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "lh-1 paused  1 shell\n"
+    );
+    assert!(!state.join("handoff-asked/s-lead").exists());
 }

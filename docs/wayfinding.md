@@ -34,7 +34,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D17](decisions/D17.md) | A lead is a loopherd-run member that runs one herd's loop unattended, within switches the human sets. |
 | [D18](decisions/D18.md) | A D-number collision between two PRs is fixed by the PR that merges second, renumbering on the add/add conflict. |
 | [D19](decisions/D19.md) | The shepherd's and lead's guide ships with the binary as `loopherd --skill`, installed as a Claude skill; repos keep only their runbook. |
-| [D20](decisions/D20.md) | A member past its context limit writes a handoff when its Stop hook asks; `loopherd restart` clears its session and has it resume from the handoff. |
+| [D20](decisions/D20.md) | A member past its context limit writes a handoff when its Stop hook asks; `loopherd restart` clears its session and has it resume from the handoff; the shepherd's own watch tells it when to hand off. |
 | [D21](decisions/D21.md) | A ledger entry matches a caller only on pane and the same herdr socket; a socketless entry matches only a caller without one. |
 
 ## Emerging model

@@ -63,11 +63,19 @@ pub enum Outcome {
 
 /// `$CLAUDE_CONFIG_DIR/settings.json`, defaulting to `~/.claude/settings.json`.
 pub fn default_settings() -> Result<PathBuf> {
-    let dir = match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
-        Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".claude"),
-    };
-    Ok(dir.join("settings.json"))
+    Ok(claude_dir()?.join("settings.json"))
+}
+
+/// `$CLAUDE_CONFIG_DIR`, defaulting to `~/.claude`.
+pub fn claude_dir() -> Result<PathBuf> {
+    Ok(
+        match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
+            Some(dir) => PathBuf::from(dir),
+            None => {
+                PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".claude")
+            }
+        },
+    )
 }
 
 /// The hook's shell command. `|| true` because exit 2 blocks: a Stop hook

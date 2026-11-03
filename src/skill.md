@@ -56,7 +56,7 @@ that pane. Read `herdr --skill` before controlling herdr.
    watches wakes the next one. herdr adds `blocked` and `gone`, seen only
    while a watch runs: a change between watches is never replayed, so run
    `loopherd status` before each re-arm. Exit 2 means the timeout passed
-   with nothing to do. Start the next watch after handling every wake. It
+   with nothing to do; a due `shepherd handoff` line still prints, exiting 0. Start the next watch after handling every wake. It
    dies with your session. It refuses to start while another shepherd's
    watch holds `watch.lock` (the error names its PID; an orphaned one can
    hold it until its timeout; leads' watches hold their own locks and don't
@@ -85,6 +85,7 @@ that pane. Read `herdr --skill` before controlling herdr.
    | `<name> claimable` | Lead's watch only: feed would spawn this member. Feed. |
    | `<member> blocked` | A dialog only the human answers: tell them. loopherd never answers it. |
    | `<member> gone` | No agent in its pane for two polls in a row; it was live earlier in this watch. |
+   | `shepherd handoff 171k over 160k` | Your own watch only, once per session: your context is past your limit. Hand off (see Your own handoff). |
 
    A report's text runs on in indented lines. A turn you prompt into a member
    still `paused` finishes silently, since the stop reads paused again;
@@ -94,7 +95,10 @@ that pane. Read `herdr --skill` before controlling herdr.
    (`herdr agent read <name> --source recent-unwrapped --lines 40`).
 4. **Verify** a finished member's output with a read-only subagent against
    the task's acceptance criteria: no loopherd or mutating herdr commands,
-   its own build dir and a temp `XDG_STATE_HOME` and `LOOPHERD_CONFIG_DIR`.
+   a temp `XDG_STATE_HOME` and `LOOPHERD_CONFIG_DIR`. Put everything it
+   builds under one directory per PR, `<scratch>/pr<n>/`, where `<scratch>`
+   is your session's own temp directory: its detached worktrees, its build
+   target dirs and any copies (mutation runs), so one removal cleans up.
    For anything that deletes or closes, have it hunt for safety gaps and
    name the test covering each rule. Report as soon as it lands; the human
    often merges fast. Gaps inside the task's scope go back to the member;
@@ -103,8 +107,12 @@ that pane. Read `herdr --skill` before controlling herdr.
    the task in the project's tracker, unblock dependents, then `loopherd
    feed <herd>`. Its `done` check retires and closes the member and refills
    the slot. If the human merged before verification finished, point the
-   verifier at the merge commit in a detached temp worktree, since reaping
-   removes the member's.
+   verifier at the merge commit in a detached worktree under the PR's
+   directory, since reaping removes the member's. Last, on every merge,
+   once the tracker, dependents, feed and any post-merge verification are
+   done: `git worktree remove --force` each verify worktree under
+   `<scratch>/pr<n>/`, then delete that directory. Same for a PR closed
+   unmerged.
 
 ### Handoffs
 
@@ -119,6 +127,12 @@ report `--kind handoff`, and end its turn. The last handoff moves to
 file's `context_window` (default 200000). A broken `config.toml` or herd
 file falls back to 160000, and the hook leaves a `note` from the member once
 per session naming the file; fix it (`loopherd herds` validates both).
+
+Before handing off, a member that verifies PRs removes the `<scratch>/pr<n>/`
+directories of PRs that already merged or closed (see After merge) and lists
+each one still in use by absolute path under State. A restart gets a new
+`<scratch>`, so the successor removes those listed directories the same way
+once their PRs merge or close.
 
 The handoff file has a fixed outline, and leaves out what's already in the
 tracker, the ledger or the mailbox:
@@ -160,6 +174,33 @@ restart refuse a member that handed off before it: check `loopherd reports
 human runs `loopherd restart <name> --force`. A member that was asked but
 crashed before writing its handoff isn't asked again in that session;
 prompt it to write one and report `--kind handoff`.
+
+### Your own handoff
+
+You aren't a member, so no Stop hook measures you; your watch does. Run
+from no member's pane, each watch checks your Claude's context as it exits
+and, once per session past your limit, adds `shepherd handoff <n>k over
+<limit>k`. Your limit is `[shepherd] context_limit` in
+`$LOOPHERD_CONFIG_DIR/config.toml`, else that file's
+`default_context_limit`, else 250000, never over 80% of its
+`context_window`. When the line comes:
+
+1. Handle the other lines it came with, but feed nothing new and don't
+   re-arm the watch. Members and leads keep working; what they report
+   waits in the mailbox for the next watch.
+2. Write your handoff to `$XDG_STATE_HOME/loopherd/handoffs/shepherd.md`
+   (`~/.local/state` when it's unset; no member may be named `shepherd`), in the outline above: what each
+   member is doing and what you owe it (verifications running, PRs to
+   check after merge), then next steps, then gotchas.
+3. Tell the human, with the path spelled out in full:
+   > I'm past my context limit and wrote my handoff. Run `/clear`, then paste:
+   > `continue as the loopherd shepherd from /home/<you>/.local/state/loopherd/handoffs/shepherd.md`
+
+   and end your turn. Never `/clear` yourself.
+
+Given that prompt in a fresh session, run `loopherd --skill`, read the
+handoff, `loopherd status` and `loopherd reports --all`, then re-arm your
+watch and carry on from its next steps.
 
 ### Commands
 
