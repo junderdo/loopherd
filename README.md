@@ -1,6 +1,6 @@
 # loopherd
 
-https://github.com/user-attachments/assets/a85338a9-5d5d-4998-89f6-876f5be486cc
+<img width="666" height="374" alt="Adobe Express - Adobe Express - loopherd-splash" src="https://github.com/user-attachments/assets/bc27723b-1ee9-4b1f-afea-e8bc408d9022" />
 
 Herd your coding agents. loopherd is a Rust CLI and TUI for Linux that groups
 coding agents into **herds** and keeps them working together across sessions
