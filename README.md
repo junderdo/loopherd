@@ -66,7 +66,7 @@ A herd is one TOML file; the filename is the herd's name. Herd files live in
 by default; `LOOPHERD_CONFIG_DIR` replaces the `loopherd` directory).
 
 ```toml
-# ~/.config/loopherd/herds/zagops-prs.toml
+# ~/.config/loopherd/herds/my-project.toml
 repo = "~/work/projects/zagops/zagops"      # the main checkout
 workspace = "zagops"                        # herdr workspace label (optional)
 args = ["--permission-mode", "auto"]        # passed to claude (optional)
@@ -87,8 +87,8 @@ Unknown keys are rejected.
 
 ```bash
 loopherd herds                          # list herd files; exits 1 if any is invalid
-loopherd add zagops-prs pr 1050 --dry-run
-loopherd add zagops-prs pr 1050         # worktree + herdr tab + named agent + prompt
+loopherd add my-project pr 1050 --dry-run
+loopherd add my-project pr 1050         # worktree + herdr tab + named agent + prompt
 loopherd status                         # members by herd, blocked/done first
 loopherd view                           # live TUI; Enter focuses the pane, a/s toggle retired/strays
 loopherd revive --dry-run               # after a herdr restart or a closed tab
@@ -120,8 +120,8 @@ done = "gh pr view {number} --json state --jq .state | grep -qx MERGED"
 ```
 
 ```bash
-loopherd feed zagops-prs --dry-run      # run source and done checks; change nothing
-loopherd feed zagops-prs                # retire finished members, fill free slots
+loopherd feed my-project --dry-run      # run source and done checks; change nothing
+loopherd feed my-project                # retire finished members, fill free slots
 ```
 
 Exits 3 when a member is blocked at startup, 4 when the only errors were
@@ -135,7 +135,7 @@ Members leave reports from their own pane; the shepherd reads them.
 loopherd report "<text>"                        # from a member's pane; --kind done|question|note
 loopherd report --kind question "<question>"
 loopherd reports                                # unread, questions first; marks them read
-loopherd reports --herd zagops-prs
+loopherd reports --herd my-project
 loopherd reports --all [<name>...]              # everything, marks nothing read
 ```
 
@@ -143,7 +143,7 @@ loopherd reports --all [<name>...]              # everything, marks nothing read
 
 ```bash
 loopherd watch                              # leads and unled herds
-loopherd watch zagops-prs --timeout 3600    # exits 2 with no output on timeout
+loopherd watch my-project --timeout 3600    # exits 2 with no output on timeout
 ```
 
 Wakes on an unread report, a stop that leaves a member paused, finished or
@@ -165,7 +165,7 @@ and denies a lead's `loopherd restart --force` outright;
 
 ```toml
 [lead]
-prompt_file = "zagops-prs-lead.md"     # beside the herd file; must exist
+prompt_file = "my-project-lead.md"     # beside the herd file; must exist
 merge = false
 install = false
 rebase = false
@@ -179,9 +179,9 @@ The prompt file takes `{name}`, `{herd}`, `{worktree}` and `{switches}` (one
 [docs/examples/loopherd-cards-lead.md](docs/examples/loopherd-cards-lead.md).
 
 ```bash
-loopherd lead zagops-prs --dry-run
-loopherd lead zagops-prs
-loopherd watch zagops-prs               # from your pane: wakes on the lead, not its workers
+loopherd lead my-project --dry-run
+loopherd lead my-project
+loopherd watch my-project               # from your pane: wakes on the lead, not its workers
 ```
 
 A complete lead setup is in [docs/examples/](docs/examples/). The playbook
