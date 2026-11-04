@@ -1,5 +1,7 @@
 # loopherd
 
+https://github.com/user-attachments/assets/a85338a9-5d5d-4998-89f6-876f5be486cc
+
 Herd your coding agents. loopherd is a Rust CLI and TUI for Linux that groups
 coding agents into **herds** and keeps them working together across sessions
 and restarts. It layers on [herdr](https://herdr.dev/), which runs the
