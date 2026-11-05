@@ -156,7 +156,7 @@ fn a_reason_with_a_newline_is_refused() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
-        "loopherd pause: a reason can't hold control characters such as a newline\n"
+        "loopherd pause: a reason can't hold control or format characters such as a newline\n"
     );
     assert!(!s.pause_file("prs").exists());
 }

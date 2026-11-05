@@ -108,6 +108,20 @@ struct TemplateFile {
     context_limit: Option<u64>,
 }
 
+/// [`Paths::from_env`]'s herds dir; `None` when it needs `$HOME` and that is unset.
+pub fn herds_dir() -> Option<PathBuf> {
+    let config = match (env_var("LOOPHERD_CONFIG_DIR"), env_var("XDG_CONFIG_HOME")) {
+        (Some(dir), _) => PathBuf::from(dir),
+        (None, Some(xdg)) => PathBuf::from(xdg).join("loopherd"),
+        (None, None) => PathBuf::from(env_var("HOME")?).join(".config/loopherd"),
+    };
+    Some(config.join("herds"))
+}
+
+fn env_var(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(name).filter(|v| !v.is_empty())
+}
+
 /// How long [`Paths::lock_feed`] waits out another holder.
 const FEED_LOCK_GRACE: Duration = Duration::from_secs(1);
 
@@ -125,15 +139,9 @@ impl Paths {
     /// `$LOOPHERD_CONFIG_DIR/herds`, else `$XDG_CONFIG_HOME/loopherd/herds`,
     /// defaulting to `~/.config/loopherd/herds`.
     pub fn from_env() -> Result<Paths> {
-        let var = |name| std::env::var_os(name).filter(|v| !v.is_empty());
-        let home = PathBuf::from(var("HOME").context("HOME is not set")?);
-        let config = match (var("LOOPHERD_CONFIG_DIR"), var("XDG_CONFIG_HOME")) {
-            (Some(dir), _) => PathBuf::from(dir),
-            (None, Some(xdg)) => PathBuf::from(xdg).join("loopherd"),
-            (None, None) => home.join(".config/loopherd"),
-        };
+        let home = PathBuf::from(env_var("HOME").context("HOME is not set")?);
         Ok(Paths {
-            herds: config.join("herds"),
+            herds: herds_dir().context("HOME is not set")?,
             home,
             feed_lock: FileLedger::default_path()?.with_file_name("feed.lock"),
             paused: crate::pause::dir()?,
@@ -779,8 +787,8 @@ pub fn require(paths: &Paths, herd: &str) -> Result<()> {
 }
 
 /// The name of every herd with a herd file, sorted.
-pub fn names(paths: &Paths) -> Result<Vec<String>> {
-    let files = herd_files(&paths.herds)?;
+pub fn names(dir: &Path) -> Result<Vec<String>> {
+    let files = herd_files(dir)?;
     let stems = files.iter().filter_map(|f| f.file_stem());
     Ok(stems.map(|s| s.to_string_lossy().into_owned()).collect())
 }

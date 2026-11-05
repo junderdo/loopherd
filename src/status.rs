@@ -5,7 +5,6 @@ use std::process::Command;
 
 use anyhow::Result;
 
-use crate::herd::{self, Paths};
 use crate::herd_view::{Herd, Member, Options, View, view};
 use crate::herdr::{Herdr, MalformedReply};
 use crate::ledger::{AgentRecord, Ledger};
@@ -39,14 +38,13 @@ pub struct Read {
 
 /// Reads herdr once and the ledger once; changes neither. When herdr's agents
 /// can't be read it still returns the ledger, every status unknown.
-/// `paths` gives the herds' pauses.
 pub fn read(
     herdr: &dyn Herdr,
     ledger: &dyn Ledger,
-    paths: &Paths,
+    pauses: &pause::Pauses,
     options: Options,
 ) -> Result<Read> {
-    read_with(herdr, ledger, Some(paths), options, branch)
+    read_with(herdr, ledger, Some(pauses), options, branch)
 }
 
 /// [`read`] without each member's branch, which costs a git call per member,
@@ -58,7 +56,7 @@ pub fn read_statuses(herdr: &dyn Herdr, ledger: &dyn Ledger, options: Options) -
 fn read_with(
     herdr: &dyn Herdr,
     ledger: &dyn Ledger,
-    paths: Option<&Paths>,
+    pauses: Option<&pause::Pauses>,
     options: Options,
     branch: impl Fn(&AgentRecord) -> Option<String>,
 ) -> Result<Read> {
@@ -85,12 +83,9 @@ fn read_with(
     let mut view = view(&entries, agents.as_deref(), options, branch);
     view.herdr_reachable = agents.is_some() || malformed;
     let mut problems: Vec<String> = problem.into_iter().collect();
-    if let Some(paths) = paths {
-        let known = |herd: &str| {
-            herd::require(paths, herd).is_ok()
-                || entries.values().any(|e| e.herd.as_deref() == Some(herd))
-        };
-        problems.extend(add_pauses(&mut view.herds, &paths.paused, known));
+    if let Some(pauses) = pauses {
+        let in_ledger = entries.values().filter_map(|e| e.herd.clone());
+        problems.extend(add_pauses(&mut view.herds, pauses.of(in_ledger)));
     }
     Ok(Read {
         view,
@@ -99,16 +94,12 @@ fn read_with(
     })
 }
 
-/// Marks each paused herd that is `known`, adding one the view left out for
-/// having no active members; returns a warning per pause it couldn't read.
-fn add_pauses(herds: &mut Vec<Herd>, dir: &Path, known: impl Fn(&str) -> bool) -> Vec<String> {
-    let pauses = match pause::all(dir) {
-        Ok(pauses) => pauses,
-        Err(e) => return vec![format!("warning: pauses unreadable, shown unpaused: {e:#}")],
-    };
+/// Marks each paused herd, adding one the view left out for having no
+/// active members; returns a warning per pause it couldn't read.
+fn add_pauses(herds: &mut Vec<Herd>, pauses: Vec<(String, pause::Reading)>) -> Vec<String> {
     let mut warnings = vec![];
     for (name, reading) in pauses {
-        let Some(pause) = reading.pause().filter(|_| known(&name)) else {
+        let Some(pause) = reading.pause() else {
             continue;
         };
         warnings.extend(reading.warning(&name));
@@ -132,7 +123,7 @@ fn add_pauses(herds: &mut Vec<Herd>, dir: &Path, known: impl Fn(&str) -> bool) -
 pub fn status(
     herdr: &dyn Herdr,
     ledger: &dyn Ledger,
-    paths: &Paths,
+    pauses: &pause::Pauses,
     options: Options,
     format: Format,
 ) -> Result<Output> {
@@ -140,7 +131,7 @@ pub fn status(
         view,
         problem,
         code,
-    } = read(herdr, ledger, paths, options)?;
+    } = read(herdr, ledger, pauses, options)?;
     let stdout = match format {
         Format::Text { color } => text(&view, color),
         Format::Json => serde_json::to_string_pretty(&view)? + "\n",
@@ -309,6 +300,7 @@ mod tests {
     use crate::herdr::fake::FakeHerdr;
     use crate::herdr::{Agent, AgentStatus};
     use crate::ledger::{AgentRecord, MemLedger};
+    use crate::pause::Pauses;
 
     fn entry(name: &str, herd: Option<&str>, worktree: &str) -> AgentRecord {
         AgentRecord {
@@ -370,8 +362,8 @@ mod tests {
     }
 
     const PLAIN: Format = Format::Text { color: false };
-    fn not_paused() -> Paths {
-        Paths::under(Path::new("/nonexistent"))
+    fn not_paused() -> Pauses {
+        Pauses::under(Path::new("/nonexistent"))
     }
 
     /// A config root with a `paused` dir and an empty `herds` dir.
@@ -405,7 +397,7 @@ mod tests {
             let out = status(
                 &herdr,
                 &ledger,
-                &Paths::under(paused.path()),
+                &Pauses::under(paused.path()),
                 Options::default(),
                 PLAIN,
             )
@@ -425,7 +417,7 @@ mod tests {
         let docs = r#"{"since": "2026-11-05T10:00:00Z", "reason": null}"#;
         std::fs::write(root.path().join("paused/docs"), docs).unwrap();
         std::fs::write(root.path().join("herds/docs.toml"), "repo = \"/r\"\n").unwrap();
-        let paths = Paths::under(root.path());
+        let paths = Pauses::under(root.path());
 
         let out = status(&herdr(), &ledger, &paths, Options::default(), PLAIN).unwrap();
 
@@ -454,7 +446,7 @@ mod tests {
         let out = status(
             &herdr(),
             &ledger(),
-            &Paths::under(root.path()),
+            &Pauses::under(root.path()),
             Options::default(),
             PLAIN,
         )
@@ -468,7 +460,7 @@ mod tests {
     fn an_unreadable_pause_warns_and_shows_the_herd_paused_with_its_time_unknown() {
         let root = root();
         std::fs::write(root.path().join("paused/prs"), "").unwrap();
-        let paths = Paths::under(root.path());
+        let paths = Pauses::under(root.path());
 
         let out = status(&herdr(), &ledger(), &paths, Options::default(), PLAIN).unwrap();
 
@@ -498,17 +490,99 @@ mod tests {
         );
     }
 
+    /// `status`'s text for a config root, after `prepare` mangles its paused dir.
+    fn status_with_paused_dir(prepare: impl Fn(&Path)) -> Output {
+        use std::os::unix::fs::PermissionsExt;
+        let root = paused_prs(None);
+        let paused = root.path().join("paused");
+        prepare(&paused);
+        let out = status(
+            &herdr(),
+            &ledger(),
+            &Pauses::under(root.path()),
+            Options::default(),
+            PLAIN,
+        );
+        std::fs::set_permissions(&paused, std::fs::Permissions::from_mode(0o755)).ok();
+        out.unwrap()
+    }
+
+    #[test]
+    fn a_paused_dir_that_cannot_be_read_fails_closed_for_each_known_herd() {
+        use std::os::unix::fs::PermissionsExt;
+        let file_in_its_place = |dir: &Path| {
+            std::fs::remove_dir_all(dir).unwrap();
+            std::fs::write(dir, "").unwrap();
+        };
+        let mode_000 = |dir: &Path| {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap()
+        };
+        for prepare in [&file_in_its_place as &dyn Fn(&Path), &mode_000] {
+            let out = status_with_paused_dir(prepare);
+            assert!(
+                out.stdout.starts_with("prs  paused (time unknown)\n"),
+                "{}",
+                out.stdout
+            );
+            assert!(
+                out.stderr
+                    .starts_with("warning: prs's pause is unreadable, counted as paused: "),
+                "{}",
+                out.stderr
+            );
+        }
+    }
+
+    #[test]
+    fn a_paused_dir_that_cannot_be_listed_still_shows_each_known_herds_pause() {
+        use std::os::unix::fs::PermissionsExt;
+        let out = status_with_paused_dir(|dir| {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o300)).unwrap()
+        });
+        assert!(
+            out.stdout
+                .starts_with("prs  paused since 2026-11-05T09:00:00Z\n"),
+            "{}",
+            out.stdout
+        );
+        assert_eq!(out.stderr, "");
+    }
+
+    #[test]
+    fn a_hand_edited_reason_cannot_split_the_header() {
+        let root = root();
+        let pause = r#"{"since": "2026-11-05T09:00:00Z", "reason": "a\nungrouped\u001b[2J"}"#;
+        std::fs::write(root.path().join("paused/prs"), pause).unwrap();
+
+        let out = status(
+            &herdr(),
+            &ledger(),
+            &Pauses::under(root.path()),
+            Options::default(),
+            PLAIN,
+        )
+        .unwrap();
+
+        assert!(
+            out.stdout.starts_with(
+                "prs  paused since 2026-11-05T09:00:00Z — a\\u{a}ungrouped\\u{1b}[2J\n"
+            ),
+            "{}",
+            out.stdout
+        );
+    }
+
     #[test]
     fn json_gives_each_herd_its_pause_or_null() {
         let ledger = ledger();
         let paused = paused_prs(Some("freeze"));
-        let json = |paths: &Paths| {
+        let json = |paths: &Pauses| {
             let out = status(&herdr(), &ledger, paths, Options::default(), Format::Json).unwrap();
             serde_json::from_str::<serde_json::Value>(&out.stdout).unwrap()["herds"][0]["paused"]
                 .clone()
         };
         assert_eq!(
-            json(&Paths::under(paused.path())),
+            json(&Pauses::under(paused.path())),
             serde_json::json!({"since": "2026-11-05T09:00:00Z", "reason": "freeze"})
         );
         assert_eq!(json(&not_paused()), serde_json::Value::Null);

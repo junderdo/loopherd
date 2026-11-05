@@ -435,8 +435,8 @@ fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
             color: std::io::stdout().is_terminal(),
         },
     };
-    let paths = Paths::from_env().context("herd")?;
-    let out = status(&CliHerdr, &ledger, &paths, Options { all, strays }, format)?;
+    let pauses = pause::Pauses::from_env()?;
+    let out = status(&CliHerdr, &ledger, &pauses, Options { all, strays }, format)?;
     print!("{}", out.stdout);
     for line in out.stderr.lines() {
         eprintln!("loopherd status: {line}");
@@ -449,7 +449,7 @@ fn run_view(all: bool, strays: bool) -> Result<i32> {
     tui::run(
         CliHerdr,
         ledger,
-        Paths::from_env().context("herd")?,
+        pause::Pauses::from_env()?,
         Options { all, strays },
     )
 }

@@ -15,10 +15,10 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::{Frame, Terminal};
 
-use crate::herd::Paths;
 use crate::herd_view::{Member, Options, Stray};
 use crate::herdr::Herdr;
 use crate::ledger::Ledger;
+use crate::pause::Pauses;
 use crate::status::{Read, aligned, read, row, sections, stray_lines, widths};
 use since::Since;
 
@@ -41,9 +41,14 @@ pub enum Response {
     Focus(String, Result<()>),
 }
 
-pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger, paths: &Paths) -> Response {
+pub fn serve(
+    request: Request,
+    herdr: &dyn Herdr,
+    ledger: &dyn Ledger,
+    pauses: &Pauses,
+) -> Response {
     match request {
-        Request::Read(options) => Response::Read(options, read(herdr, ledger, paths, options)),
+        Request::Read(options) => Response::Read(options, read(herdr, ledger, pauses, options)),
         Request::Focus(pane) => {
             let result = herdr.focus(&pane);
             Response::Focus(pane, result)
@@ -52,7 +57,7 @@ pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger, paths: &P
 }
 
 /// Serves requests in order on its own thread until the sender drops.
-fn spawn_reader<H, L>(herdr: H, ledger: L, paths: Paths) -> (Sender<Request>, Receiver<Response>)
+fn spawn_reader<H, L>(herdr: H, ledger: L, pauses: Pauses) -> (Sender<Request>, Receiver<Response>)
 where
     H: Herdr + Send + 'static,
     L: Ledger + Send + 'static,
@@ -62,7 +67,7 @@ where
     std::thread::spawn(move || {
         for request in inbox {
             if outbox
-                .send(serve(request, &herdr, &ledger, &paths))
+                .send(serve(request, &herdr, &ledger, &pauses))
                 .is_err()
             {
                 break;
@@ -388,13 +393,13 @@ fn catch_stop_signals() -> Result<()> {
 
 /// Runs the TUI until `q`, Ctrl+C, SIGTERM or SIGHUP, polling herdr every two
 /// seconds. Exits 128 + the signal's number when a signal stopped it.
-pub fn run<H, L>(herdr: H, ledger: L, paths: Paths, options: Options) -> Result<i32>
+pub fn run<H, L>(herdr: H, ledger: L, pauses: Pauses, options: Options) -> Result<i32>
 where
     H: Herdr + Send + 'static,
     L: Ledger + Send + 'static,
 {
     catch_stop_signals()?;
-    let (requests, responses) = spawn_reader(herdr, ledger, paths);
+    let (requests, responses) = spawn_reader(herdr, ledger, pauses);
     let mut terminal = ratatui::try_init()?;
     let result = run_loop(
         &mut terminal,
@@ -551,7 +556,7 @@ mod tests {
                 request,
                 herdr,
                 ledger,
-                &Paths::under(std::path::Path::new("/nonexistent")),
+                &Pauses::under(std::path::Path::new("/nonexistent")),
             ),
             now,
         )
@@ -569,7 +574,7 @@ mod tests {
         let mut app = App::new(Options::default());
         let request = app.tick(now).unwrap();
         app.apply(
-            serve(request, &herdr(), &ledger(), &Paths::under(root.path())),
+            serve(request, &herdr(), &ledger(), &Pauses::under(root.path())),
             now,
         )
         .unwrap();
@@ -589,7 +594,7 @@ mod tests {
             Request::Read(app.options),
             herdr,
             ledger,
-            &Paths::under(std::path::Path::new("/nonexistent")),
+            &Pauses::under(std::path::Path::new("/nonexistent")),
         );
         app.apply(response, now).unwrap();
     }
@@ -662,7 +667,7 @@ mod tests {
                         request,
                         herdr,
                         ledger,
-                        &Paths::under(std::path::Path::new("/nonexistent")),
+                        &Pauses::under(std::path::Path::new("/nonexistent")),
                     ),
                     Instant::now(),
                 )
@@ -879,7 +884,7 @@ mod tests {
             let (requests, responses) = spawn_reader(
                 herdr,
                 ledger(),
-                Paths::under(std::path::Path::new("/nonexistent")),
+                Pauses::under(std::path::Path::new("/nonexistent")),
             );
             let mut terminal = Terminal::new(TestBackend::new(72, 14)).unwrap();
             let mut keys = keys.into_iter();
@@ -969,7 +974,7 @@ mod tests {
             Request::Read(app.options),
             &herdr,
             &ledger,
-            &Paths::under(std::path::Path::new("/nonexistent")),
+            &Pauses::under(std::path::Path::new("/nonexistent")),
         );
         let toggled = app.press(KeyCode::Char('s'), now).unwrap();
         app.apply(stale, now).unwrap();
@@ -982,7 +987,7 @@ mod tests {
                 toggled,
                 &herdr,
                 &ledger,
-                &Paths::under(std::path::Path::new("/nonexistent")),
+                &Pauses::under(std::path::Path::new("/nonexistent")),
             ),
             now,
         )
