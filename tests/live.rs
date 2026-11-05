@@ -1,4 +1,4 @@
-//! End-to-end runs of `loopherd spawn`, `add`, `revive`, `retire --close`, `feed`, the Stop hook and `watch` against the real `loopherd-dev` herdr
+//! End-to-end runs of `loopherd spawn`, `add`, `revive`, `retire --close`, `feed`, the Stop hook, `watch` and the herd view's event subscriber against the real `loopherd-dev` herdr
 //! session. Skipped unless `LOOPHERD_LIVE=1`; start the session first with
 //! `scripts/herdr-dev --start`, then run through it:
 //! `LOOPHERD_LIVE=1 scripts/herdr-dev cargo test --test live`.
@@ -7,6 +7,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use serde_json::Value;
+
+// The binary crate has no library target, so the subscriber is included whole.
+#[allow(dead_code)]
+#[path = "../src/herdr/events.rs"]
+mod events;
 
 const HERDR_IDS: [&str; 4] = [
     "HERDR_ENV",
@@ -792,6 +797,101 @@ fn feed_reaps_a_member_but_keeps_its_dirty_worktree_and_says_why() {
     assert_eq!(ledger_entry(m.state.path(), &m.name)["retired"], true);
     assert!(m.wt.join("scratch.txt").is_file());
     assert!(branch_exists(&m.repo, &m.branch));
+}
+
+/// Closes a tab by id when dropped.
+struct CloseTabId(String);
+
+impl Drop for CloseTabId {
+    fn drop(&mut self) {
+        dev("herdr")
+            .args(["tab", "close", &self.0])
+            .output()
+            .unwrap();
+    }
+}
+
+#[test]
+fn a_status_change_and_a_split_on_a_dev_pane_reach_the_event_subscriber() {
+    if !live_enabled() {
+        return;
+    }
+    let label = assert_dev_session();
+    let workspaces = herdr_ok(&["workspace", "list"]);
+    let workspace = workspaces["result"]["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["label"] == label.as_str())
+        .unwrap()["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let cwd = tempfile::tempdir().unwrap();
+    let created = herdr_ok(&[
+        "tab",
+        "create",
+        "--workspace",
+        &workspace,
+        "--cwd",
+        cwd.path().to_str().unwrap(),
+        "--label",
+        &format!("lh-live-events-{}", std::process::id()),
+        "--no-focus",
+    ]);
+    let _cleanup = CloseTabId(created["result"]["tab"]["tab_id"].as_str().unwrap().into());
+    let pane = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    use events::{Pushed, SocketSubscriber, Subscriber, Subscription};
+    let _connection = SocketSubscriber::new(Some(dev_socket()))
+        .subscribe(
+            &[
+                Subscription::PaneCreated,
+                Subscription::PaneClosed,
+                Subscription::AgentDetected,
+                Subscription::AgentStatusChanged(pane.clone()),
+            ],
+            Box::new(move |pushed| {
+                let _ = tx.send(pushed);
+            }),
+        )
+        .unwrap();
+    let out = dev("herdr")
+        .args([
+            "pane",
+            "report-agent",
+            "--source",
+            "loopherd-live",
+            "--agent",
+            "claude",
+            "--state",
+            "working",
+            &pane,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let within = |secs| rx.recv_timeout(std::time::Duration::from_secs(secs));
+    assert_eq!(within(5), Ok(Pushed::Event), "no status event");
+    while within(1).is_ok() {}
+    herdr_ok(&[
+        "pane",
+        "split",
+        "--pane",
+        &pane,
+        "--direction",
+        "right",
+        "--no-focus",
+    ]);
+    assert_eq!(within(5), Ok(Pushed::Event), "no pane.created event");
 }
 
 const LIVE: &str = "/home/u/.config/herdr/herdr.sock";

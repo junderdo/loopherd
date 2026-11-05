@@ -39,7 +39,8 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use crate::feed::{FeedRequest, feed};
 use crate::herd::{AddRequest, Paths, add, dry_run, herds};
 use crate::herd_view::Options;
-use crate::herdr::{CliHerdr, socket_from_env};
+use crate::herdr::events::SocketSubscriber;
+use crate::herdr::{CliHerdr, Herdr, socket_from_env};
 use crate::lead::LeadRequest;
 use crate::ledger::FileLedger;
 use crate::prompt::prompt;
@@ -446,8 +447,10 @@ fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
 
 fn run_view(all: bool, strays: bool) -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let subscriber = SocketSubscriber::new(CliHerdr.socket());
     tui::run(
         CliHerdr,
+        subscriber,
         ledger,
         pause::Pauses::from_env()?,
         Options { all, strays },

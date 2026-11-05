@@ -38,6 +38,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D21](decisions/D21.md) | A ledger entry matches a caller only on pane and the same herdr socket; a socketless entry matches only a caller without one. |
 | [D22](decisions/D22.md) | `watch`'s lead lookup and `retire --close`'s reuse check match on pane and herdr socket like D21; a pane id in another herdr blocks neither. |
 | [D23](decisions/D23.md) | `loopherd pause`/`resume` mark a herd paused in a state file: `feed` reaps but spawns nothing, a lead's watch prints no `claimable`, and in-flight work drains. |
+| [D24](decisions/D24.md) | `loopherd view` reads again on any herdr event (lifecycle plus per-pane status subscriptions), polling every 10s while subscribed and every 2s as the fallback. |
 
 ## Emerging model
 

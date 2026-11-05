@@ -1,12 +1,16 @@
 //! In-memory herdr for tests.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 
+use super::events::{Connection, OnPush, PaneNotFound, Pushed, Subscriber, Subscription};
 use super::{
     Agent, AgentStatus, Herdr, MalformedReply, NewTab, Pane, StartOutcome, Tab, WaitOutcome,
     Workspace,
@@ -514,5 +518,122 @@ impl Herdr for FakeHerdr {
 
     fn socket(&self) -> Option<PathBuf> {
         self.socket.clone()
+    }
+}
+
+/// How [`FakeSubscriber`] refuses its next subscribe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    PaneNotFound,
+    Failed,
+}
+
+/// Which of the herd view's connections a [`FakeSubscriber`] call means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Which {
+    Lifecycle,
+    Status,
+}
+
+struct FakeConnection {
+    subscriptions: Vec<Subscription>,
+    on_push: Arc<OnPush>,
+    closed: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct Subscriptions {
+    refusals: VecDeque<Refusal>,
+    connections: Vec<FakeConnection>,
+    attempts: usize,
+}
+
+/// In-memory `events.subscribe`. Like the socket, a connection pushes
+/// [`Pushed::Ended`] once, when it ends or is dropped.
+#[derive(Clone, Default)]
+pub struct FakeSubscriber(Arc<Mutex<Subscriptions>>);
+
+impl FakeSubscriber {
+    pub fn refuse_next(&self, refusal: Refusal) {
+        self.0.lock().unwrap().refusals.push_back(refusal);
+    }
+
+    /// Every subscribe so far, refused or not.
+    pub fn attempts(&self) -> usize {
+        self.0.lock().unwrap().attempts
+    }
+
+    /// The subscriptions of each open connection, oldest first.
+    pub fn open(&self) -> Vec<Vec<Subscription>> {
+        let state = self.0.lock().unwrap();
+        state
+            .connections
+            .iter()
+            .filter(|c| !c.closed.load(Ordering::SeqCst))
+            .map(|c| c.subscriptions.clone())
+            .collect()
+    }
+
+    /// Pushes an event on the open `which` connection.
+    pub fn push(&self, which: Which) {
+        (self.find(which).on_push)(Pushed::Event);
+    }
+
+    /// Ends the open `which` connection, as `events_lost` or a hang-up does.
+    pub fn end(&self, which: Which) {
+        let connection = self.find(which);
+        connection.closed.store(true, Ordering::SeqCst);
+        (connection.on_push)(Pushed::Ended);
+    }
+
+    fn find(&self, which: Which) -> FakeHandle {
+        let state = self.0.lock().unwrap();
+        let connection = state
+            .connections
+            .iter()
+            .rev()
+            .filter(|c| !c.closed.load(Ordering::SeqCst))
+            .find(|c| {
+                let status = c
+                    .subscriptions
+                    .iter()
+                    .any(|s| matches!(s, Subscription::AgentStatusChanged(_)));
+                status == (which == Which::Status)
+            })
+            .unwrap_or_else(|| panic!("no open {which:?} connection"));
+        FakeHandle {
+            on_push: connection.on_push.clone(),
+            closed: connection.closed.clone(),
+        }
+    }
+}
+
+/// Lets a push run without holding the lock, as the subscriber's callback may.
+struct FakeHandle {
+    on_push: Arc<OnPush>,
+    closed: Arc<AtomicBool>,
+}
+
+impl Subscriber for FakeSubscriber {
+    fn subscribe(&self, subscriptions: &[Subscription], on_push: OnPush) -> Result<Connection> {
+        let mut state = self.0.lock().unwrap();
+        state.attempts += 1;
+        match state.refusals.pop_front() {
+            Some(Refusal::PaneNotFound) => bail!(PaneNotFound),
+            Some(Refusal::Failed) => bail!("fake refusal"),
+            None => {}
+        }
+        let on_push = Arc::new(on_push);
+        let closed = Arc::new(AtomicBool::new(false));
+        state.connections.push(FakeConnection {
+            subscriptions: subscriptions.to_vec(),
+            on_push: on_push.clone(),
+            closed: closed.clone(),
+        });
+        Ok(Connection::new(move || {
+            if !closed.swap(true, Ordering::SeqCst) {
+                on_push(Pushed::Ended);
+            }
+        }))
     }
 }
