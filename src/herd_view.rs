@@ -9,6 +9,7 @@ use serde::Serialize;
 use crate::herdr::{Agent, AgentStatus};
 use crate::ledger::AgentRecord;
 use crate::matching::live_agent;
+use crate::pause::Pause;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Options {
@@ -36,6 +37,8 @@ pub struct Member {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Herd {
     pub name: String,
+    /// Filled by the caller, since reading it is I/O.
+    pub paused: Option<Pause>,
     pub members: Vec<Member>,
 }
 
@@ -97,6 +100,7 @@ pub fn view(
             .filter(|(_, members)| options.all || !members.is_empty())
             .map(|(name, members)| Herd {
                 name: name.to_string(),
+                paused: None,
                 members: sorted(members),
             })
             .collect(),

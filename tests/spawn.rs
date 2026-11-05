@@ -64,3 +64,25 @@ fn a_spawn_into_a_herdr_that_names_no_socket_is_refused_before_any_tab() {
     assert!(!stderr.contains("unexpected herdr tab"), "{stderr}");
     assert!(!state.path().join("loopherd/ledger.json").exists());
 }
+
+#[test]
+fn a_spawn_goes_ahead_whatever_herds_are_paused() {
+    let state = tempfile::tempdir().unwrap();
+    let paused = state.path().join("loopherd/paused");
+    fs::create_dir_all(&paused).unwrap();
+    for herd in ["a", "prs"] {
+        let pause = r#"{"since": "2026-11-05T09:00:00Z", "reason": null}"#;
+        fs::write(paused.join(herd), pause).unwrap();
+    }
+
+    let out = spawn_outside_herdr(
+        state.path(),
+        r#"{"status": "running", "socket": "/run/shim/herdr.sock"}"#,
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let ledger = fs::read(state.path().join("loopherd/ledger.json")).unwrap();
+    let ledger: serde_json::Value = serde_json::from_slice(&ledger).unwrap();
+    assert!(ledger["a"].is_object(), "{ledger}");
+}

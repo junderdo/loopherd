@@ -196,3 +196,37 @@ fn status_with_a_malformed_agent_list_names_herdrs_output_and_exits_3() {
         );
     }
 }
+
+#[test]
+fn status_needs_no_home_when_xdg_state_home_is_set() {
+    let state = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    fs::create_dir_all(state.path().join("loopherd/paused")).unwrap();
+    fs::write(
+        state.path().join("loopherd/paused/prs"),
+        r#"{"since": "2026-11-05T09:00:00Z", "reason": null}"#,
+    )
+    .unwrap();
+    stub_herdr(bin.path(), Some(r#"{"result": {"agents": []}}"#));
+
+    let out = Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .arg("status")
+        .env_clear()
+        .env("XDG_STATE_HOME", state.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.path().display()))
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "loopherd status: warning: no config dir (set HOME or XDG_CONFIG_HOME), \
+         so a paused herd with no members isn't shown\n"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.starts_with("prs  paused since 2026-11-05T09:00:00Z\n"),
+        "{stdout}"
+    );
+    assert_eq!(out.status.code(), Some(0));
+}

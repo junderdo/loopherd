@@ -9,6 +9,7 @@ fn run_herds(config: &Path, bin: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_loopherd"))
         .arg("herds")
         .env("LOOPHERD_CONFIG_DIR", config)
+        .env("XDG_STATE_HOME", config.join("state"))
         .env("PATH", bin)
         .output()
         .unwrap()
@@ -42,7 +43,7 @@ fn herds_lists_herd_files_flags_invalid_ones_and_never_calls_herdr() {
     let ok = run_herds(config.path(), bin.path());
     assert_eq!(
         String::from_utf8_lossy(&ok.stdout),
-        "prs  repo /r  workspace (current)\n  loopherd add prs pr <number>\n"
+        "prs  repo /r  workspace (current)  paused no\n  loopherd add prs pr <number>\n"
     );
     assert_eq!(ok.status.code(), Some(0));
 
@@ -81,6 +82,33 @@ fn herds_without_a_herds_directory_hints_and_exits_0() {
             "no herds: add a herd file at {}/<herd>.toml\n",
             config.path().join("herds").display()
         )
+    );
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn herds_shows_when_a_herd_was_paused() {
+    let config = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let herds = config.path().join("herds");
+    fs::create_dir(&herds).unwrap();
+    for herd in ["docs", "prs"] {
+        fs::write(herds.join(format!("{herd}.toml")), "repo = \"/r\"\n").unwrap();
+    }
+    let paused = config.path().join("state/loopherd/paused");
+    fs::create_dir_all(&paused).unwrap();
+    fs::write(
+        paused.join("prs"),
+        r#"{"since": "2026-11-05T09:00:00Z", "reason": "freeze"}"#,
+    )
+    .unwrap();
+
+    let out = run_herds(config.path(), bin.path());
+
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "docs  repo /r  workspace (current)  paused no\n\
+         prs  repo /r  workspace (current)  paused since 2026-11-05T09:00:00Z\n"
     );
     assert_eq!(out.status.code(), Some(0));
 }

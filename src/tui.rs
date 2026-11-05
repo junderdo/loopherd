@@ -18,6 +18,7 @@ use ratatui::{Frame, Terminal};
 use crate::herd_view::{Member, Options, Stray};
 use crate::herdr::Herdr;
 use crate::ledger::Ledger;
+use crate::pause::Pauses;
 use crate::status::{Read, aligned, read, row, sections, stray_lines, widths};
 use since::Since;
 
@@ -40,9 +41,14 @@ pub enum Response {
     Focus(String, Result<()>),
 }
 
-pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger) -> Response {
+pub fn serve(
+    request: Request,
+    herdr: &dyn Herdr,
+    ledger: &dyn Ledger,
+    pauses: &Pauses,
+) -> Response {
     match request {
-        Request::Read(options) => Response::Read(options, read(herdr, ledger, options)),
+        Request::Read(options) => Response::Read(options, read(herdr, ledger, pauses, options)),
         Request::Focus(pane) => {
             let result = herdr.focus(&pane);
             Response::Focus(pane, result)
@@ -51,7 +57,7 @@ pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger) -> Respon
 }
 
 /// Serves requests in order on its own thread until the sender drops.
-fn spawn_reader<H, L>(herdr: H, ledger: L) -> (Sender<Request>, Receiver<Response>)
+fn spawn_reader<H, L>(herdr: H, ledger: L, pauses: Pauses) -> (Sender<Request>, Receiver<Response>)
 where
     H: Herdr + Send + 'static,
     L: Ledger + Send + 'static,
@@ -60,7 +66,10 @@ where
     let (outbox, responses) = mpsc::channel();
     std::thread::spawn(move || {
         for request in inbox {
-            if outbox.send(serve(request, &herdr, &ledger)).is_err() {
+            if outbox
+                .send(serve(request, &herdr, &ledger, &pauses))
+                .is_err()
+            {
                 break;
             }
         }
@@ -341,7 +350,8 @@ impl App {
                 "gone: no live agent matches it; `loopherd revive` can bring it back".into(),
             ));
         }
-        rows.extend(read.problem.clone().map(plain));
+        let problems = read.problem.iter().flat_map(|p| p.lines());
+        rows.extend(problems.map(|line| plain(line.into())));
         rows
     }
 }
@@ -383,13 +393,13 @@ fn catch_stop_signals() -> Result<()> {
 
 /// Runs the TUI until `q`, Ctrl+C, SIGTERM or SIGHUP, polling herdr every two
 /// seconds. Exits 128 + the signal's number when a signal stopped it.
-pub fn run<H, L>(herdr: H, ledger: L, options: Options) -> Result<i32>
+pub fn run<H, L>(herdr: H, ledger: L, pauses: Pauses, options: Options) -> Result<i32>
 where
     H: Herdr + Send + 'static,
     L: Ledger + Send + 'static,
 {
     catch_stop_signals()?;
-    let (requests, responses) = spawn_reader(herdr, ledger);
+    let (requests, responses) = spawn_reader(herdr, ledger, pauses);
     let mut terminal = ratatui::try_init()?;
     let result = run_loop(
         &mut terminal,
@@ -541,12 +551,51 @@ mod tests {
     fn app(herdr: &FakeHerdr, ledger: &MemLedger, now: Instant) -> App {
         let mut app = App::new(Options::default());
         let request = app.tick(now).expect("first read is due");
-        app.apply(serve(request, herdr, ledger), now).unwrap();
+        app.apply(
+            serve(
+                request,
+                herdr,
+                ledger,
+                &Pauses::under(std::path::Path::new("/nonexistent")),
+            ),
+            now,
+        )
+        .unwrap();
         app
     }
 
+    #[test]
+    fn a_paused_herds_header_says_since_when_and_why() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("paused")).unwrap();
+        let pause = r#"{"since": "2026-11-05T09:00:00Z", "reason": "freeze"}"#;
+        std::fs::write(root.path().join("paused/prs"), pause).unwrap();
+        let now = Instant::now();
+        let mut app = App::new(Options::default());
+        let request = app.tick(now).unwrap();
+        app.apply(
+            serve(request, &herdr(), &ledger(), &Pauses::under(root.path())),
+            now,
+        )
+        .unwrap();
+
+        let shown = lines(&render(&app, now));
+
+        assert!(
+            shown
+                .iter()
+                .any(|l| l.trim() == "prs  paused since 2026-11-05T09:00:00Z — freeze"),
+            "{shown:#?}"
+        );
+    }
+
     fn refresh(app: &mut App, herdr: &FakeHerdr, ledger: &MemLedger, now: Instant) {
-        let response = serve(Request::Read(app.options), herdr, ledger);
+        let response = serve(
+            Request::Read(app.options),
+            herdr,
+            ledger,
+            &Pauses::under(std::path::Path::new("/nonexistent")),
+        );
         app.apply(response, now).unwrap();
     }
 
@@ -613,8 +662,16 @@ mod tests {
     fn press(app: &mut App, keys: &[KeyCode], herdr: &FakeHerdr, ledger: &MemLedger) {
         for key in keys {
             if let Some(request) = app.press(*key, Instant::now()) {
-                app.apply(serve(request, herdr, ledger), Instant::now())
-                    .unwrap();
+                app.apply(
+                    serve(
+                        request,
+                        herdr,
+                        ledger,
+                        &Pauses::under(std::path::Path::new("/nonexistent")),
+                    ),
+                    Instant::now(),
+                )
+                .unwrap();
             }
         }
     }
@@ -824,7 +881,11 @@ mod tests {
     fn run_scripted(herdr: FakeHerdr, keys: Vec<Option<KeyEvent>>, stop: i32) -> Option<i32> {
         let (done, finished) = mpsc::channel();
         std::thread::spawn(move || {
-            let (requests, responses) = spawn_reader(herdr, ledger());
+            let (requests, responses) = spawn_reader(
+                herdr,
+                ledger(),
+                Pauses::under(std::path::Path::new("/nonexistent")),
+            );
             let mut terminal = Terminal::new(TestBackend::new(72, 14)).unwrap();
             let mut keys = keys.into_iter();
             let stop = AtomicI32::new(stop);
@@ -909,14 +970,28 @@ mod tests {
     fn a_read_for_options_since_toggled_is_ignored() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let mut app = app(&herdr, &ledger, now);
-        let stale = serve(Request::Read(app.options), &herdr, &ledger);
+        let stale = serve(
+            Request::Read(app.options),
+            &herdr,
+            &ledger,
+            &Pauses::under(std::path::Path::new("/nonexistent")),
+        );
         let toggled = app.press(KeyCode::Char('s'), now).unwrap();
         app.apply(stale, now).unwrap();
         assert!(
             !lines(&render(&app, now))
                 .contains(&"  w2:p7  /src/elsewhere  poking around".to_string())
         );
-        app.apply(serve(toggled, &herdr, &ledger), now).unwrap();
+        app.apply(
+            serve(
+                toggled,
+                &herdr,
+                &ledger,
+                &Pauses::under(std::path::Path::new("/nonexistent")),
+            ),
+            now,
+        )
+        .unwrap();
         assert!(
             lines(&render(&app, now))
                 .contains(&"  w2:p7  /src/elsewhere  poking around".to_string())
