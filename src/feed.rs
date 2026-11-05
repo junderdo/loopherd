@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use crate::herd::{AddRequest, Paths, Queue, members, queue, resolve};
 use crate::herdr::Herdr;
 use crate::ledger::Ledger;
+use crate::pause;
 use crate::retire::retire_and_close;
 use crate::shell::run_within;
 use crate::spawn::{BLOCKED_EXIT, spawn};
@@ -36,7 +37,8 @@ pub struct Fed {
 }
 
 /// Retires members whose done check passes, then spawns a member per task
-/// until the herd's slots are full.
+/// until the herd's slots are full. A paused herd only retires; its source
+/// isn't run.
 ///
 /// Fails, changing nothing, if the source fails or herdr is unreachable.
 /// A dry run never calls herdr.
@@ -51,8 +53,20 @@ pub fn feed(
     if !req.dry_run {
         herdr.workspaces().context("herdr")?;
     }
-    let output = run_source(&queue, req.command_timeout).context("source")?;
     let mut lines = vec![];
+    let reading = pause::read(&paths.paused, &req.herd);
+    if let Some(pause) = reading.pause() {
+        lines.extend(reading.warning(&req.herd));
+        let reaped = reap(herdr, ledger, &queue, req, &mut lines)?;
+        lines.push(format!(
+            "{} paused {}: spawned nothing",
+            req.herd,
+            pause.when()
+        ));
+        let code = if reaped.errors > 0 { 1 } else { 0 };
+        return Ok(Fed { lines, code });
+    }
+    let output = run_source(&queue, req.command_timeout).context("source")?;
     let reaped = reap(herdr, ledger, &queue, req, &mut lines)?;
     let mut errors = reaped.errors;
 
@@ -415,6 +429,7 @@ mod tests {
                 herds: self.config.path().join("herds"),
                 home: PathBuf::from("/home/me"),
                 feed_lock: self.config.path().join("feed.lock"),
+                paused: self.config.path().join("paused"),
             }
         }
 
@@ -981,6 +996,7 @@ mod tests {
             herds: config.path().join("herds"),
             home: PathBuf::from("/home/me"),
             feed_lock: config.path().join("feed.lock"),
+            paused: config.path().join("paused"),
         };
         let req = FeedRequest {
             herd: "prs".into(),
@@ -1181,6 +1197,135 @@ mod tests {
         assert!(setup.repo.path().join("checked").exists());
         assert_eq!(ledger.0, before);
         assert_eq!(herdr.mutations(), mutations);
+    }
+
+    fn pause_herd(setup: &Setup) {
+        let at = humantime::parse_rfc3339("2026-11-05T09:00:00Z").unwrap();
+        let herds = crate::pause::Herds::One("prs");
+        crate::pause::pause(&setup.paths(), herds, Some("freeze"), at).unwrap();
+    }
+
+    #[test]
+    fn a_paused_herd_retires_finished_members_and_spawns_nothing() {
+        let setup = Setup::with_done("cat tasks; touch source-ran", 2, "test -f done-{number}");
+        let herdr = herdr();
+        let mut ledger = fed_one(&setup, &herdr);
+        let tab = herdr.tabs()[0].id.clone();
+        fs::remove_file(setup.repo.path().join("source-ran")).unwrap();
+        setup.tasks("2\n3\n");
+        setup.touch("done-1");
+        pause_herd(&setup);
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                format!("retired zpr-1; closed tab {tab}"),
+                "prs paused since 2026-11-05T09:00:00Z: spawned nothing".into(),
+            ]
+        );
+        assert_eq!(fed.code, 0);
+        assert!(ledger.0["zpr-1"].retired);
+        assert_eq!(ledger.0.len(), 1);
+        assert!(herdr.tabs().is_empty());
+        assert!(!setup.repo.path().join("source-ran").exists());
+    }
+
+    #[test]
+    fn a_paused_herds_dry_run_reports_what_it_would_retire_and_spawns_nothing() {
+        let setup = Setup::with_done("cat tasks", 2, "test -f done-{number}");
+        let herdr = herdr();
+        let mut ledger = fed_one(&setup, &herdr);
+        setup.tasks("2\n");
+        setup.touch("done-1");
+        pause_herd(&setup);
+        let mutations = herdr.mutations();
+
+        let fed = setup.feed(&herdr, &mut ledger, true).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "would retire zpr-1",
+                "prs paused since 2026-11-05T09:00:00Z: spawned nothing",
+            ]
+        );
+        assert!(!ledger.0["zpr-1"].retired);
+        assert_eq!(herdr.mutations(), mutations);
+    }
+
+    #[test]
+    fn a_paused_herd_whose_retire_fails_exits_1() {
+        let setup = Setup::with_done("cat tasks", 1, "exit 0");
+        let herdr = herdr();
+        let mut ledger = ReadOnly(fed_one(&setup, &herdr));
+        pause_herd(&setup);
+        let req = FeedRequest {
+            herd: "prs".into(),
+            dry_run: false,
+            ready_timeout: Duration::from_secs(60),
+            command_timeout: Duration::from_secs(1),
+            own_pane: None,
+        };
+
+        let fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "error: retire zpr-1: error: read-only",
+                "prs paused since 2026-11-05T09:00:00Z: spawned nothing",
+            ]
+        );
+        assert_eq!(fed.code, 1);
+    }
+
+    #[test]
+    fn an_unreadable_pause_retires_warns_and_spawns_nothing() {
+        for dry_run in [false, true] {
+            let setup = Setup::with_done("cat tasks; touch source-ran", 2, "test -f done-{number}");
+            let herdr = herdr();
+            let mut ledger = fed_one(&setup, &herdr);
+            fs::remove_file(setup.repo.path().join("source-ran")).unwrap();
+            setup.tasks("2\n");
+            setup.touch("done-1");
+            let paused = setup.paths().paused;
+            fs::create_dir_all(&paused).unwrap();
+            fs::write(paused.join("prs"), "").unwrap();
+
+            let fed = setup.feed(&herdr, &mut ledger, dry_run).unwrap();
+
+            assert_eq!(fed.lines.len(), 3, "{:?}", fed.lines);
+            let warning = "warning: prs's pause is unreadable, counted as paused: parse ";
+            assert!(fed.lines[0].starts_with(warning), "{:?}", fed.lines);
+            let retired = if dry_run {
+                "would retire zpr-1"
+            } else {
+                "retired zpr-1"
+            };
+            assert!(fed.lines[1].starts_with(retired), "{:?}", fed.lines);
+            assert_eq!(fed.lines[2], "prs paused (time unknown): spawned nothing");
+            assert_eq!(fed.code, 0);
+            assert_eq!(ledger.0["zpr-1"].retired, !dry_run);
+            assert_eq!(ledger.0.len(), 1);
+            assert!(!setup.repo.path().join("source-ran").exists());
+        }
+    }
+
+    #[test]
+    fn a_resumed_herd_spawns_again() {
+        let setup = Setup::new("cat tasks", 1);
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        setup.tasks("1\n");
+        pause_herd(&setup);
+        let herds = crate::pause::Herds::One("prs");
+        crate::pause::resume(&setup.paths(), &ledger, herds).unwrap();
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(fed.lines[0], "added zpr-1");
     }
 
     #[test]
