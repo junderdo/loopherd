@@ -167,6 +167,19 @@ impl Paths {
     }
 }
 
+#[cfg(test)]
+impl Paths {
+    /// Herd files, the feed lock and pauses under `root`; home is `/home/me`.
+    pub fn under(root: &Path) -> Paths {
+        Paths {
+            herds: root.join("herds"),
+            home: PathBuf::from("/home/me"),
+            feed_lock: root.join("feed.lock"),
+            paused: root.join("paused"),
+        }
+    }
+}
+
 pub struct AddRequest {
     pub herd: String,
     pub template: String,
@@ -671,12 +684,13 @@ pub fn herds(paths: &Paths) -> Result<(String, i32)> {
                 Ok(parsed)
             }) {
             Ok(parsed) => {
-                let paused = match crate::pause::paused(&paths.paused, &herd) {
-                    Ok(Some(pause)) => format!("paused since {}", pause.since),
-                    Ok(None) => "paused no".into(),
-                    Err(_) => "paused unknown".into(),
+                let reading = crate::pause::read(&paths.paused, &herd);
+                let paused = match reading.pause() {
+                    Some(pause) => format!("paused {}", pause.when()),
+                    None => "paused no".into(),
                 };
-                lines.extend(describe(&herd, &parsed, &paused))
+                lines.extend(describe(&herd, &parsed, &paused));
+                lines.extend(reading.warning(&herd).map(|w| format!("  {w}")));
             }
             Err(e) => {
                 let name = file.file_name().unwrap_or_default().to_string_lossy();
@@ -1566,6 +1580,25 @@ args = ["--model", "opus"]
              \x20 loopherd add zissues chat\n\
              \x20 loopherd add zissues issue <key> <slug>"
         );
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn herds_shows_an_unreadable_pause_as_paused_with_its_time_unknown() {
+        let config = Config::with(&[("prs", "repo = \"/r\"\n")]);
+        fs::create_dir(config.path().join("paused")).unwrap();
+        fs::write(config.path().join("paused/prs"), "").unwrap();
+
+        let (report, code) = herds(&config.paths()).unwrap();
+
+        let lines: Vec<&str> = report.lines().collect();
+        assert_eq!(
+            lines[0],
+            "prs  repo /r  workspace (current)  paused (time unknown)"
+        );
+        let warning = "  warning: prs's pause is unreadable, counted as paused: parse ";
+        assert!(lines[1].starts_with(warning), "{report}");
+        assert_eq!(lines.len(), 2, "{report}");
         assert_eq!(code, 0);
     }
 

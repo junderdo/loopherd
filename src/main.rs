@@ -373,17 +373,17 @@ fn main() -> ExitCode {
 
 fn run_pause(herds: &HerdsArg, reason: Option<&str>) -> Result<i32> {
     let paths = Paths::from_env().context("herd")?;
-    let lines = pause::pause(&paths, herds.herds(), reason, SystemTime::now())?;
-    lines.iter().for_each(|line| println!("{line}"));
-    Ok(0)
+    let done = pause::pause(&paths, herds.herds(), reason, SystemTime::now())?;
+    done.lines.iter().for_each(|line| println!("{line}"));
+    Ok(done.code)
 }
 
 fn run_resume(herds: &HerdsArg) -> Result<i32> {
     let paths = Paths::from_env().context("herd")?;
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    let lines = pause::resume(&paths, &ledger, herds.herds())?;
-    lines.iter().for_each(|line| println!("{line}"));
-    Ok(0)
+    let done = pause::resume(&paths, &ledger, herds.herds())?;
+    done.lines.iter().for_each(|line| println!("{line}"));
+    Ok(done.code)
 }
 
 fn run_retire(name: &str, close: bool) -> Result<i32> {
@@ -435,8 +435,8 @@ fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
             color: std::io::stdout().is_terminal(),
         },
     };
-    let paused = pause::dir()?;
-    let out = status(&CliHerdr, &ledger, &paused, Options { all, strays }, format)?;
+    let paths = Paths::from_env().context("herd")?;
+    let out = status(&CliHerdr, &ledger, &paths, Options { all, strays }, format)?;
     print!("{}", out.stdout);
     for line in out.stderr.lines() {
         eprintln!("loopherd status: {line}");
@@ -446,7 +446,12 @@ fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
 
 fn run_view(all: bool, strays: bool) -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    tui::run(CliHerdr, ledger, pause::dir()?, Options { all, strays })
+    tui::run(
+        CliHerdr,
+        ledger,
+        Paths::from_env().context("herd")?,
+        Options { all, strays },
+    )
 }
 
 fn run_prompt(name: &str, force: bool) -> Result<i32> {

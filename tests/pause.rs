@@ -116,3 +116,47 @@ fn a_herd_and_all_are_exclusive_and_one_is_required() {
         assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
     }
 }
+
+#[test]
+fn all_prints_every_herd_and_exits_1_when_one_fails() {
+    let s = Setup::new(&["docs", "mid", "prs"]);
+    fs::create_dir_all(s.pause_file("mid").join("blocker")).unwrap();
+
+    for verb in ["pause", "resume"] {
+        let out = s.run(&[verb, "--all"]);
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        let stdout = stdout(&out);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 3, "{stdout}");
+        assert!(lines[0].contains("docs"), "{stdout}");
+        assert!(lines[1].starts_with("error: mid: "), "{stdout}");
+        assert!(lines[2].contains("prs"), "{stdout}");
+    }
+    assert!(!s.pause_file("docs").exists() && !s.pause_file("prs").exists());
+}
+
+#[test]
+fn resume_lifts_the_pause_of_a_herd_whose_herd_file_was_deleted() {
+    let s = Setup::new(&["prs"]);
+    s.run(&["pause", "prs"]);
+    fs::remove_file(s.dir.path().join("config/herds/prs.toml")).unwrap();
+
+    let out = s.run(&["resume", "prs"]);
+
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(!s.pause_file("prs").exists());
+}
+
+#[test]
+fn a_reason_with_a_newline_is_refused() {
+    let s = Setup::new(&["prs"]);
+
+    let out = s.run(&["pause", "prs", "--reason", "freeze\nprs"]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "loopherd pause: a reason can't hold control characters such as a newline\n"
+    );
+    assert!(!s.pause_file("prs").exists());
+}

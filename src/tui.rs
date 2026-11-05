@@ -2,7 +2,6 @@
 
 mod since;
 
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -16,6 +15,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::{Frame, Terminal};
 
+use crate::herd::Paths;
 use crate::herd_view::{Member, Options, Stray};
 use crate::herdr::Herdr;
 use crate::ledger::Ledger;
@@ -41,10 +41,9 @@ pub enum Response {
     Focus(String, Result<()>),
 }
 
-/// `paused` is the paused herds' dir.
-pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger, paused: &Path) -> Response {
+pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger, paths: &Paths) -> Response {
     match request {
-        Request::Read(options) => Response::Read(options, read(herdr, ledger, paused, options)),
+        Request::Read(options) => Response::Read(options, read(herdr, ledger, paths, options)),
         Request::Focus(pane) => {
             let result = herdr.focus(&pane);
             Response::Focus(pane, result)
@@ -53,7 +52,7 @@ pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger, paused: &
 }
 
 /// Serves requests in order on its own thread until the sender drops.
-fn spawn_reader<H, L>(herdr: H, ledger: L, paused: PathBuf) -> (Sender<Request>, Receiver<Response>)
+fn spawn_reader<H, L>(herdr: H, ledger: L, paths: Paths) -> (Sender<Request>, Receiver<Response>)
 where
     H: Herdr + Send + 'static,
     L: Ledger + Send + 'static,
@@ -63,7 +62,7 @@ where
     std::thread::spawn(move || {
         for request in inbox {
             if outbox
-                .send(serve(request, &herdr, &ledger, &paused))
+                .send(serve(request, &herdr, &ledger, &paths))
                 .is_err()
             {
                 break;
@@ -389,13 +388,13 @@ fn catch_stop_signals() -> Result<()> {
 
 /// Runs the TUI until `q`, Ctrl+C, SIGTERM or SIGHUP, polling herdr every two
 /// seconds. Exits 128 + the signal's number when a signal stopped it.
-pub fn run<H, L>(herdr: H, ledger: L, paused: PathBuf, options: Options) -> Result<i32>
+pub fn run<H, L>(herdr: H, ledger: L, paths: Paths, options: Options) -> Result<i32>
 where
     H: Herdr + Send + 'static,
     L: Ledger + Send + 'static,
 {
     catch_stop_signals()?;
-    let (requests, responses) = spawn_reader(herdr, ledger, paused);
+    let (requests, responses) = spawn_reader(herdr, ledger, paths);
     let mut terminal = ratatui::try_init()?;
     let result = run_loop(
         &mut terminal,
@@ -548,7 +547,12 @@ mod tests {
         let mut app = App::new(Options::default());
         let request = app.tick(now).expect("first read is due");
         app.apply(
-            serve(request, herdr, ledger, Path::new("/nonexistent/paused")),
+            serve(
+                request,
+                herdr,
+                ledger,
+                &Paths::under(std::path::Path::new("/nonexistent")),
+            ),
             now,
         )
         .unwrap();
@@ -557,14 +561,18 @@ mod tests {
 
     #[test]
     fn a_paused_herds_header_says_since_when_and_why() {
-        let paused = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("paused")).unwrap();
         let pause = r#"{"since": "2026-11-05T09:00:00Z", "reason": "freeze"}"#;
-        std::fs::write(paused.path().join("prs"), pause).unwrap();
+        std::fs::write(root.path().join("paused/prs"), pause).unwrap();
         let now = Instant::now();
         let mut app = App::new(Options::default());
         let request = app.tick(now).unwrap();
-        app.apply(serve(request, &herdr(), &ledger(), paused.path()), now)
-            .unwrap();
+        app.apply(
+            serve(request, &herdr(), &ledger(), &Paths::under(root.path())),
+            now,
+        )
+        .unwrap();
 
         let shown = lines(&render(&app, now));
 
@@ -581,7 +589,7 @@ mod tests {
             Request::Read(app.options),
             herdr,
             ledger,
-            Path::new("/nonexistent/paused"),
+            &Paths::under(std::path::Path::new("/nonexistent")),
         );
         app.apply(response, now).unwrap();
     }
@@ -650,7 +658,12 @@ mod tests {
         for key in keys {
             if let Some(request) = app.press(*key, Instant::now()) {
                 app.apply(
-                    serve(request, herdr, ledger, Path::new("/nonexistent/paused")),
+                    serve(
+                        request,
+                        herdr,
+                        ledger,
+                        &Paths::under(std::path::Path::new("/nonexistent")),
+                    ),
                     Instant::now(),
                 )
                 .unwrap();
@@ -863,7 +876,11 @@ mod tests {
     fn run_scripted(herdr: FakeHerdr, keys: Vec<Option<KeyEvent>>, stop: i32) -> Option<i32> {
         let (done, finished) = mpsc::channel();
         std::thread::spawn(move || {
-            let (requests, responses) = spawn_reader(herdr, ledger(), "/nonexistent/paused".into());
+            let (requests, responses) = spawn_reader(
+                herdr,
+                ledger(),
+                Paths::under(std::path::Path::new("/nonexistent")),
+            );
             let mut terminal = Terminal::new(TestBackend::new(72, 14)).unwrap();
             let mut keys = keys.into_iter();
             let stop = AtomicI32::new(stop);
@@ -952,7 +969,7 @@ mod tests {
             Request::Read(app.options),
             &herdr,
             &ledger,
-            Path::new("/nonexistent/paused"),
+            &Paths::under(std::path::Path::new("/nonexistent")),
         );
         let toggled = app.press(KeyCode::Char('s'), now).unwrap();
         app.apply(stale, now).unwrap();
@@ -961,7 +978,12 @@ mod tests {
                 .contains(&"  w2:p7  /src/elsewhere  poking around".to_string())
         );
         app.apply(
-            serve(toggled, &herdr, &ledger, Path::new("/nonexistent/paused")),
+            serve(
+                toggled,
+                &herdr,
+                &ledger,
+                &Paths::under(std::path::Path::new("/nonexistent")),
+            ),
             now,
         )
         .unwrap();
