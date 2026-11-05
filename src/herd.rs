@@ -771,8 +771,13 @@ pub fn names(paths: &Paths) -> Result<Vec<String>> {
     Ok(stems.map(|s| s.to_string_lossy().into_owned()).collect())
 }
 
+/// Whether `herd` can name a herd file.
+pub fn is_name(herd: &str) -> bool {
+    !(herd.is_empty() || herd.starts_with('.') || herd.contains('/'))
+}
+
 fn file_of(dir: &Path, herd: &str) -> Result<PathBuf> {
-    if herd.is_empty() || herd.starts_with('.') || herd.contains('/') {
+    if !is_name(herd) {
         bail!("{herd:?} is not a herd name");
     }
     Ok(dir.join(format!("{herd}.toml")))
@@ -989,6 +994,16 @@ args = ["--model", "opus"]
     fn add_into_a_herd_without_a_queue_ignores_a_running_feed() {
         let config = Config::with(&[("prs", PR_HERD)]);
         let _feed = config.paths().lock_feed().unwrap();
+        let (herdr, _, name) = add_ok(&config, &request("prs", "pr", &["1"]));
+        assert_eq!(name, "zpr-1");
+        assert_eq!(herdr.tabs().len(), 1);
+    }
+
+    #[test]
+    fn add_into_a_paused_herd_still_adds() {
+        let config = Config::with(&[("prs", &queue_herd(5))]);
+        let herds = crate::pause::Herds::One("prs");
+        crate::pause::pause(&config.paths(), herds, None, std::time::SystemTime::now()).unwrap();
         let (herdr, _, name) = add_ok(&config, &request("prs", "pr", &["1"]));
         assert_eq!(name, "zpr-1");
         assert_eq!(herdr.tabs().len(), 1);

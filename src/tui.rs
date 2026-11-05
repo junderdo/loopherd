@@ -346,7 +346,8 @@ impl App {
                 "gone: no live agent matches it; `loopherd revive` can bring it back".into(),
             ));
         }
-        rows.extend(read.problem.clone().map(plain));
+        let problems = read.problem.iter().flat_map(|p| p.lines());
+        rows.extend(problems.map(|line| plain(line.into())));
         rows
     }
 }

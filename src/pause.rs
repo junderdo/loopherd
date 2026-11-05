@@ -43,6 +43,9 @@ pub fn dir() -> Result<PathBuf> {
 
 /// `herd`'s pause, or `None` when it isn't paused.
 pub fn paused(dir: &Path, herd: &str) -> Result<Option<Pause>> {
+    if !herd::is_name(herd) {
+        return Ok(None);
+    }
     let file = dir.join(herd);
     let text = match std::fs::read_to_string(&file) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -52,20 +55,43 @@ pub fn paused(dir: &Path, herd: &str) -> Result<Option<Pause>> {
     Ok(Some(pause))
 }
 
+/// Every paused herd by name; a file that can't be read is an `Err` beside its name.
+pub fn all(dir: &Path) -> Result<Vec<(String, Result<Pause>)>> {
+    let entries = match std::fs::read_dir(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        entries => entries.with_context(|| format!("read {}", dir.display()))?,
+    };
+    let mut names = vec![];
+    for entry in entries {
+        let entry = entry.with_context(|| format!("read {}", dir.display()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if herd::is_name(&name) {
+            names.push(name);
+        }
+    }
+    names.sort();
+    let read = |herd: String| {
+        let pause = paused(dir, &herd).and_then(|p| p.context("removed while listing"));
+        (herd, pause)
+    };
+    Ok(names.into_iter().map(read).collect())
+}
+
 /// Pauses each herd, keeping an existing pause's time and replacing its
-/// reason only when `reason` is given. One line per herd.
+/// reason only when `reason` is given; an empty one clears it. One line per herd.
 pub fn pause(
     paths: &Paths,
     herds: Herds,
     reason: Option<&str>,
     now: SystemTime,
 ) -> Result<Vec<String>> {
+    let given = reason.map(|r| Some(r).filter(|r| !r.is_empty()).map(String::from));
     let mut lines = vec![];
-    for herd in resolve(paths, herds)? {
+    for herd in resolve(paths, herds, &mut lines)? {
         let line = match paused(&paths.paused, &herd)? {
             Some(old) => {
                 let pause = Pause {
-                    reason: reason.map(String::from).or(old.reason),
+                    reason: given.clone().unwrap_or(old.reason),
                     ..old
                 };
                 write(&paths.paused, &herd, &pause)?;
@@ -74,7 +100,7 @@ pub fn pause(
             None => {
                 let pause = Pause {
                     since: humantime::format_rfc3339_seconds(now).to_string(),
-                    reason: reason.map(String::from),
+                    reason: given.clone().flatten(),
                 };
                 write(&paths.paused, &herd, &pause)?;
                 format!("{herd} now {pause}")
@@ -90,7 +116,7 @@ pub fn pause(
 pub fn resume(paths: &Paths, ledger: &dyn Ledger, herds: Herds) -> Result<Vec<String>> {
     let entries = ledger.entries().context("ledger")?;
     let mut lines = vec![];
-    for herd in resolve(paths, herds)? {
+    for herd in resolve(paths, herds, &mut lines)? {
         let file = paths.paused.join(&herd);
         match std::fs::remove_file(&file) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -113,14 +139,24 @@ pub fn resume(paths: &Paths, ledger: &dyn Ledger, herds: Herds) -> Result<Vec<St
     Ok(lines)
 }
 
-/// The herds named, each checked to have a herd file.
-fn resolve(paths: &Paths, herds: Herds) -> Result<Vec<String>> {
+/// The herds named, each checked to have a herd file; with none for `--all`,
+/// a hint in `lines`.
+fn resolve(paths: &Paths, herds: Herds, lines: &mut Vec<String>) -> Result<Vec<String>> {
     match herds {
         Herds::One(herd) => {
             herd::require(paths, herd)?;
             Ok(vec![herd.into()])
         }
-        Herds::All => herd::names(paths),
+        Herds::All => {
+            let names = herd::names(paths)?;
+            if names.is_empty() {
+                lines.push(format!(
+                    "no herds: add a herd file at {}/<herd>.toml",
+                    paths.herds.display()
+                ));
+            }
+            Ok(names)
+        }
     }
 }
 
@@ -128,7 +164,7 @@ fn resolve(paths: &Paths, herds: Herds) -> Result<Vec<String>> {
 fn write(dir: &Path, herd: &str, pause: &Pause) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let file = dir.join(herd);
-    let temp = dir.join(format!(".{herd}.tmp"));
+    let temp = dir.join(format!(".{herd}.{}.tmp", std::process::id()));
     std::fs::write(&temp, serde_json::to_string(pause)? + "\n")
         .with_context(|| format!("write {}", temp.display()))?;
     std::fs::rename(&temp, &file).with_context(|| format!("write {}", file.display()))
@@ -279,6 +315,10 @@ mod tests {
         assert!(s.paused("docs").is_some() && s.paused("prs").is_some());
 
         fs::write(s.dir.path().join("herds/later.toml"), "repo = \"/r\"\n").unwrap();
+        let files = fs::read_dir(s.dir.path().join("paused")).unwrap();
+        let mut files: Vec<_> = files.map(|f| f.unwrap().file_name()).collect();
+        files.sort();
+        assert_eq!(files, ["docs", "prs"]);
         assert_eq!(s.paused("later"), None);
 
         resume(&s.paths(), &ledger(&[]), Herds::All).unwrap();
@@ -313,6 +353,61 @@ mod tests {
             lines,
             ["resumed prs; lead-prs's watch sees claimable tasks within 60s"]
         );
+    }
+
+    #[test]
+    fn an_empty_reason_clears_the_reason() {
+        let s = Setup::new(&["prs"]);
+        let now = at("2026-11-05T09:00:00Z");
+        pause(&s.paths(), Herds::One("prs"), Some("freeze"), now).unwrap();
+        let lines = pause(&s.paths(), Herds::One("prs"), Some(""), now).unwrap();
+        assert_eq!(lines, ["prs already paused since 2026-11-05T09:00:00Z"]);
+        assert_eq!(s.paused("prs").unwrap().reason, None);
+
+        let s = Setup::new(&["prs"]);
+        pause(&s.paths(), Herds::One("prs"), Some(""), now).unwrap();
+        assert_eq!(s.paused("prs").unwrap().reason, None);
+    }
+
+    #[test]
+    fn all_with_no_herd_files_says_so() {
+        let s = Setup::new(&[]);
+        let now = SystemTime::now();
+        let hint = format!(
+            "no herds: add a herd file at {}/<herd>.toml",
+            s.paths().herds.display()
+        );
+        assert_eq!(
+            pause(&s.paths(), Herds::All, None, now).unwrap(),
+            std::slice::from_ref(&hint)
+        );
+        assert_eq!(
+            resume(&s.paths(), &ledger(&[]), Herds::All).unwrap(),
+            [hint]
+        );
+    }
+
+    #[test]
+    fn all_lists_every_pause_by_name_with_unreadable_ones_as_errors() {
+        let s = Setup::new(&["docs", "prs"]);
+        let now = at("2026-11-05T09:00:00Z");
+        pause(&s.paths(), Herds::One("prs"), None, now).unwrap();
+        fs::write(s.dir.path().join("paused/docs"), "").unwrap();
+        fs::write(s.dir.path().join("paused/.prs.1.tmp"), "").unwrap();
+
+        let listed = all(&s.paths().paused).unwrap();
+
+        let names: Vec<&str> = listed.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["docs", "prs"]);
+        assert!(listed[0].1.is_err());
+        assert_eq!(listed[1].1.as_ref().unwrap().since, "2026-11-05T09:00:00Z");
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_herd_name_is_never_paused() {
+        let s = Setup::new(&["prs"]);
+        assert_eq!(s.paused(".."), None);
+        assert_eq!(s.paused(""), None);
     }
 
     #[test]

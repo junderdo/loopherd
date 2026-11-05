@@ -5,7 +5,7 @@ use std::process::Command;
 
 use anyhow::Result;
 
-use crate::herd_view::{Member, Options, View, view};
+use crate::herd_view::{Herd, Member, Options, View, view};
 use crate::herdr::{Herdr, MalformedReply};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::pause;
@@ -30,7 +30,7 @@ pub struct Output {
 #[derive(Debug)]
 pub struct Read {
     pub view: View,
-    /// Why every status is unknown, when it is.
+    /// Why every status is unknown, when it is, and pauses that couldn't be read; one per line.
     pub problem: Option<String>,
     /// 2 when herdr is unreachable, 3 when its `agent list` reply is malformed.
     pub code: i32,
@@ -83,16 +83,48 @@ fn read_with(
     };
     let mut view = view(&entries, agents.as_deref(), options, branch);
     view.herdr_reachable = agents.is_some() || malformed;
+    let mut problems: Vec<String> = problem.into_iter().collect();
     if let Some(dir) = paused {
-        for herd in &mut view.herds {
-            herd.paused = pause::paused(dir, &herd.name)?;
-        }
+        problems.extend(add_pauses(&mut view.herds, dir));
     }
     Ok(Read {
         view,
-        problem,
+        problem: (!problems.is_empty()).then(|| problems.join("\n")),
         code,
     })
+}
+
+/// Marks each paused herd, adding one the view left out for having no
+/// active members; returns a warning per pause it couldn't read.
+fn add_pauses(herds: &mut Vec<Herd>, dir: &Path) -> Vec<String> {
+    let pauses = match pause::all(dir) {
+        Ok(pauses) => pauses,
+        Err(e) => return vec![format!("warning: pauses unreadable, shown unpaused: {e:#}")],
+    };
+    let mut warnings = vec![];
+    for (name, pause) in pauses {
+        let pause = match pause {
+            Ok(pause) => pause,
+            Err(e) => {
+                warnings.push(format!(
+                    "warning: {name}'s pause is unreadable, shown unpaused: {e:#}"
+                ));
+                continue;
+            }
+        };
+        match herds.binary_search_by(|h| h.name.as_str().cmp(&name)) {
+            Ok(i) => herds[i].paused = Some(pause),
+            Err(i) => herds.insert(
+                i,
+                Herd {
+                    name,
+                    paused: Some(pause),
+                    members: vec![],
+                },
+            ),
+        }
+    }
+    warnings
 }
 
 /// Prints [`read`]'s view, exiting 2 if herdr is unreachable and 3 if its
@@ -156,7 +188,7 @@ pub fn sections(view: &View) -> Vec<(String, &[Member])> {
         .iter()
         .map(|h| {
             let mut header = h.name.clone();
-            if h.members.is_empty() {
+            if h.members.is_empty() && h.paused.is_none() {
                 header += " (retired only)";
             }
             if let Some(pause) = &h.paused {
@@ -366,6 +398,64 @@ mod tests {
             assert!(out.stdout.starts_with(header), "{}", out.stdout);
             assert!(out.stdout.contains("\nungrouped\n"), "{}", out.stdout);
         }
+    }
+
+    #[test]
+    fn a_paused_herd_shows_with_no_active_members_or_none_at_all() {
+        let mut ledger = ledger();
+        for name in ["zpr-1", "zpr-2"] {
+            ledger.0.get_mut(name).unwrap().retired = true;
+        }
+        let paused = paused_prs(None);
+        let docs = r#"{"since": "2026-11-05T10:00:00Z", "reason": null}"#;
+        std::fs::write(paused.path().join("docs"), docs).unwrap();
+
+        let out = status(&herdr(), &ledger, paused.path(), Options::default(), PLAIN).unwrap();
+
+        assert!(
+            out.stdout.starts_with(
+                "docs  paused since 2026-11-05T10:00:00Z\n\
+                 prs  paused since 2026-11-05T09:00:00Z\n\
+                 ungrouped\n"
+            ),
+            "{}",
+            out.stdout
+        );
+        let json = status(
+            &herdr(),
+            &ledger,
+            paused.path(),
+            Options::default(),
+            Format::Json,
+        );
+        let json: serde_json::Value = serde_json::from_str(&json.unwrap().stdout).unwrap();
+        assert_eq!(json["herds"][1]["name"], "prs");
+        assert_eq!(json["herds"][1]["paused"]["since"], "2026-11-05T09:00:00Z");
+        assert_eq!(json["herds"][1]["members"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn an_unreadable_pause_warns_and_shows_the_herd_unpaused() {
+        let paused = tempfile::tempdir().unwrap();
+        std::fs::write(paused.path().join("prs"), "").unwrap();
+
+        let out = status(
+            &herdr(),
+            &ledger(),
+            paused.path(),
+            Options::default(),
+            PLAIN,
+        )
+        .unwrap();
+
+        assert!(out.stdout.starts_with("prs\n"), "{}", out.stdout);
+        assert!(
+            out.stderr
+                .starts_with("warning: prs's pause is unreadable, shown unpaused: "),
+            "{}",
+            out.stderr
+        );
+        assert_eq!(out.code, 0);
     }
 
     #[test]
