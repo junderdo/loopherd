@@ -8,6 +8,7 @@ mod lead;
 mod ledger;
 mod lock;
 mod matching;
+mod pause;
 mod process;
 mod prompt;
 mod report;
@@ -86,6 +87,19 @@ enum Command {
         /// Seconds to wait for each agent to become idle.
         #[arg(long, default_value_t = 60)]
         ready_timeout: u64,
+    },
+    /// Pause a herd: its `feed` retires finished members but spawns none. Prompts nobody.
+    Pause {
+        #[command(flatten)]
+        herds: HerdsArg,
+        /// Why, shown by status and view; replaces an existing pause's reason.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Lift a herd's pause and print the step that gets it workers again. Prompts nobody.
+    Resume {
+        #[command(flatten)]
+        herds: HerdsArg,
     },
     /// Mark a ledger entry finished so revive leaves it alone. Without --close, changes only the ledger.
     Retire {
@@ -220,6 +234,24 @@ enum Command {
 }
 
 #[derive(Args)]
+#[group(required = true, multiple = false)]
+struct HerdsArg {
+    herd: Option<String>,
+    /// Every herd with a herd file now; a herd added later starts unpaused.
+    #[arg(long)]
+    all: bool,
+}
+
+impl HerdsArg {
+    fn herds(&self) -> pause::Herds<'_> {
+        match &self.herd {
+            Some(herd) => pause::Herds::One(herd),
+            None => pause::Herds::All,
+        }
+    }
+}
+
+#[derive(Args)]
 struct SpawnArgs {
     /// Defaults to the main checkout of the repo containing the current directory.
     #[arg(long)]
@@ -299,6 +331,8 @@ fn main() -> ExitCode {
             dry_run,
             ready_timeout,
         } => ("feed", run_feed(herd, dry_run, ready_timeout)),
+        Command::Pause { herds, reason } => ("pause", run_pause(&herds, reason.as_deref())),
+        Command::Resume { herds } => ("resume", run_resume(&herds)),
         Command::Retire { name, close } => ("retire", run_retire(&name, close)),
         Command::Revive { dry_run, name } => ("revive", run_revive(dry_run, name)),
         Command::Prompt { name, force } => ("prompt", run_prompt(&name, force)),
@@ -335,6 +369,21 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn run_pause(herds: &HerdsArg, reason: Option<&str>) -> Result<i32> {
+    let paths = Paths::from_env().context("herd")?;
+    let lines = pause::pause(&paths, herds.herds(), reason, SystemTime::now())?;
+    lines.iter().for_each(|line| println!("{line}"));
+    Ok(0)
+}
+
+fn run_resume(herds: &HerdsArg) -> Result<i32> {
+    let paths = Paths::from_env().context("herd")?;
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let lines = pause::resume(&paths, &ledger, herds.herds())?;
+    lines.iter().for_each(|line| println!("{line}"));
+    Ok(0)
 }
 
 fn run_retire(name: &str, close: bool) -> Result<i32> {
@@ -386,7 +435,8 @@ fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
             color: std::io::stdout().is_terminal(),
         },
     };
-    let out = status(&CliHerdr, &ledger, Options { all, strays }, format)?;
+    let paused = pause::dir()?;
+    let out = status(&CliHerdr, &ledger, &paused, Options { all, strays }, format)?;
     print!("{}", out.stdout);
     for line in out.stderr.lines() {
         eprintln!("loopherd status: {line}");
@@ -396,7 +446,7 @@ fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
 
 fn run_view(all: bool, strays: bool) -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    tui::run(CliHerdr, ledger, Options { all, strays })
+    tui::run(CliHerdr, ledger, pause::dir()?, Options { all, strays })
 }
 
 fn run_prompt(name: &str, force: bool) -> Result<i32> {

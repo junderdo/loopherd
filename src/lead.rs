@@ -158,6 +158,7 @@ mod tests {
                 herds: self.root.join("herds"),
                 home: PathBuf::from("/home/me"),
                 feed_lock: self.root.join("feed.lock"),
+                paused: self.root.join("paused"),
             }
         }
 

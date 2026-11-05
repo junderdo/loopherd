@@ -219,6 +219,11 @@ watch and carry on from its next steps.
   (see Handoffs).
 - `loopherd lead <herd>` starts the herd's lead from its herd file's
   `[lead]` table.
+- **When the human asks to pause or resume a herd**, run `loopherd pause
+  <herd> [--reason <text>]` or `loopherd resume <herd>` (`--all` for every
+  herd), not a prose prompt to its lead. A paused herd's `feed` retires
+  finished members and spawns none; in-flight workers carry on, so it
+  drains by itself. `resume` prints the next step. Neither prompts anyone.
 - **After a herdr restart** run `loopherd revive` (`--dry-run` first). It
   resumes non-retired members by session ID, and prompts each lead whose
   watch isn't running to re-arm it. It never prompts workers.

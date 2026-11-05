@@ -182,6 +182,7 @@ mod tests {
         let view = |status| View {
             herds: vec![crate::herd_view::Herd {
                 name: "prs".into(),
+                paused: None,
                 members: vec![member("h", status, false)],
             }],
             retired: Some(vec![member("r", status, false)]),

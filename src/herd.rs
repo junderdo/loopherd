@@ -111,12 +111,14 @@ struct TemplateFile {
 /// How long [`Paths::lock_feed`] waits out another holder.
 const FEED_LOCK_GRACE: Duration = Duration::from_secs(1);
 
-/// Where herd files live, the home a leading `~` expands to, and the lock
-/// that keeps `feed` and `add` from filling a queue's slots at once.
+/// Where herd files live, the home a leading `~` expands to, the lock
+/// that keeps `feed` and `add` from filling a queue's slots at once, and
+/// the paused herds' files.
 pub struct Paths {
     pub herds: PathBuf,
     pub home: PathBuf,
     pub feed_lock: PathBuf,
+    pub paused: PathBuf,
 }
 
 impl Paths {
@@ -134,6 +136,7 @@ impl Paths {
             herds: config.join("herds"),
             home,
             feed_lock: FileLedger::default_path()?.with_file_name("feed.lock"),
+            paused: crate::pause::dir()?,
         })
     }
 
@@ -667,7 +670,14 @@ pub fn herds(paths: &Paths) -> Result<(String, i32)> {
                 }
                 Ok(parsed)
             }) {
-            Ok(parsed) => lines.extend(describe(&herd, &parsed)),
+            Ok(parsed) => {
+                let paused = match crate::pause::paused(&paths.paused, &herd) {
+                    Ok(Some(pause)) => format!("paused since {}", pause.since),
+                    Ok(None) => "paused no".into(),
+                    Err(_) => "paused unknown".into(),
+                };
+                lines.extend(describe(&herd, &parsed, &paused))
+            }
             Err(e) => {
                 let name = file.file_name().unwrap_or_default().to_string_lossy();
                 lines.push(format!("invalid {name}: {}", format!("{e:#}").trim_end()));
@@ -700,9 +710,12 @@ fn herd_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn describe(herd: &str, parsed: &HerdFile) -> Vec<String> {
+fn describe(herd: &str, parsed: &HerdFile, paused: &str) -> Vec<String> {
     let workspace = parsed.workspace.as_deref().unwrap_or("(current)");
-    let header = format!("{herd}  repo {}  workspace {workspace}", parsed.repo);
+    let header = format!(
+        "{herd}  repo {}  workspace {workspace}  {paused}",
+        parsed.repo
+    );
     let usages = parsed.template.iter().map(|(template, t)| {
         let params: String = t.params.iter().map(|p| format!(" <{p}>")).collect();
         format!("  loopherd add {herd} {template}{params}")
@@ -742,11 +755,31 @@ fn pattern(text: Option<&str>, params: &[String], built_ins: &[&str]) -> Result<
 /// Placeholders every template gets, so no param may take their names.
 const BUILT_INS: [&str; 5] = ["name", "herd", "branch", "worktree", "pane"];
 
-fn load(dir: &Path, herd: &str) -> Result<HerdFile> {
+/// Fails as `feed` does when `herd` has no herd file.
+pub fn require(paths: &Paths, herd: &str) -> Result<()> {
+    let file = file_of(&paths.herds, herd).context("herd")?;
+    std::fs::metadata(&file)
+        .with_context(|| format!("read {}", file.display()))
+        .context("herd")?;
+    Ok(())
+}
+
+/// The name of every herd with a herd file, sorted.
+pub fn names(paths: &Paths) -> Result<Vec<String>> {
+    let files = herd_files(&paths.herds)?;
+    let stems = files.iter().filter_map(|f| f.file_stem());
+    Ok(stems.map(|s| s.to_string_lossy().into_owned()).collect())
+}
+
+fn file_of(dir: &Path, herd: &str) -> Result<PathBuf> {
     if herd.is_empty() || herd.starts_with('.') || herd.contains('/') {
         bail!("{herd:?} is not a herd name");
     }
-    let file = dir.join(format!("{herd}.toml"));
+    Ok(dir.join(format!("{herd}.toml")))
+}
+
+fn load(dir: &Path, herd: &str) -> Result<HerdFile> {
+    let file = file_of(dir, herd)?;
     let text =
         std::fs::read_to_string(&file).with_context(|| format!("read {}", file.display()))?;
     parse(&text).with_context(|| file.display().to_string())
@@ -847,6 +880,7 @@ args = ["--model", "opus"]
                 herds: self.dir.path().join("herds"),
                 home: PathBuf::from("/home/me"),
                 feed_lock: self.dir.path().join("feed.lock"),
+                paused: self.dir.path().join("paused"),
             }
         }
 
@@ -1511,9 +1545,9 @@ args = ["--model", "opus"]
 
         assert_eq!(
             report,
-            "prs  repo /src/repo  workspace (current)\n\
+            "prs  repo /src/repo  workspace (current)  paused no\n\
              \x20 loopherd add prs pr <number>\n\
-             zissues  repo ~/src/z  workspace zagops\n\
+             zissues  repo ~/src/z  workspace zagops  paused no\n\
              \x20 loopherd add zissues chat\n\
              \x20 loopherd add zissues issue <key> <slug>"
         );
@@ -1525,7 +1559,10 @@ args = ["--model", "opus"]
         let config = Config::with(&[("prs-old", PR_HERD), ("prs", PR_HERD)]);
         let (report, _) = herds(&config.paths()).unwrap();
         let headers: Vec<&str> = report.lines().filter(|l| !l.starts_with(' ')).collect();
-        assert_eq!(headers[0], "prs  repo /src/repo  workspace (current)");
+        assert_eq!(
+            headers[0],
+            "prs  repo /src/repo  workspace (current)  paused no"
+        );
         assert!(headers[1].starts_with("prs-old  "), "{report}");
     }
 
@@ -1548,7 +1585,7 @@ args = ["--model", "opus"]
         assert_eq!(
             lines[lines.len() - 3..],
             [
-                "prs  repo /src/repo  workspace (current)",
+                "prs  repo /src/repo  workspace (current)  paused no",
                 "  loopherd add prs pr <number>",
                 "invalid z-bad.toml: template t: set one of prompt and prompt_file",
             ]
@@ -1648,7 +1685,7 @@ args = ["--model", "opus"]
         let (report, code) = herds_line(template, &[("t.md", prompt)]);
         assert_eq!(
             report,
-            "h  repo /r  workspace (current)\n  loopherd add h t <n>"
+            "h  repo /r  workspace (current)  paused no\n  loopherd add h t <n>"
         );
         assert_eq!(code, 0);
     }
@@ -1660,7 +1697,7 @@ args = ["--model", "opus"]
         let (report, code) = herds_line(template, &[]);
         assert_eq!(
             report,
-            "h  repo /r  workspace (current)\n  loopherd add h t <n>"
+            "h  repo /r  workspace (current)  paused no\n  loopherd add h t <n>"
         );
         assert_eq!(code, 0);
     }
@@ -1729,7 +1766,7 @@ args = ["--model", "opus"]
         );
         assert_eq!(
             report,
-            "h  repo /r  workspace (current)\n\
+            "h  repo /r  workspace (current)  paused no\n\
              \x20 loopherd add h t <n>\n\
              \x20 loopherd feed h  (template t, max 3)"
         );
@@ -1856,7 +1893,7 @@ args = ["--model", "opus"]
 
         assert_eq!(
             report,
-            "a  repo /r  workspace (current)\n\
+            "a  repo /r  workspace (current)  paused no\n\
              \x20 loopherd add a t\n\
              \x20 loopherd lead a\n\
              invalid b.toml: lead: prompt: unknown placeholder {pane}"

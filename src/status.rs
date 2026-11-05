@@ -8,6 +8,7 @@ use anyhow::Result;
 use crate::herd_view::{Member, Options, View, view};
 use crate::herdr::{Herdr, MalformedReply};
 use crate::ledger::{AgentRecord, Ledger};
+use crate::pause;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -37,18 +38,26 @@ pub struct Read {
 
 /// Reads herdr once and the ledger once; changes neither. When herdr's agents
 /// can't be read it still returns the ledger, every status unknown.
-pub fn read(herdr: &dyn Herdr, ledger: &dyn Ledger, options: Options) -> Result<Read> {
-    read_with(herdr, ledger, options, branch)
+/// `paused` is the paused herds' dir.
+pub fn read(
+    herdr: &dyn Herdr,
+    ledger: &dyn Ledger,
+    paused: &Path,
+    options: Options,
+) -> Result<Read> {
+    read_with(herdr, ledger, Some(paused), options, branch)
 }
 
-/// [`read`] without each member's branch, which costs a git call per member.
+/// [`read`] without each member's branch, which costs a git call per member,
+/// or the herds' pauses.
 pub fn read_statuses(herdr: &dyn Herdr, ledger: &dyn Ledger, options: Options) -> Result<Read> {
-    read_with(herdr, ledger, options, |_| None)
+    read_with(herdr, ledger, None, options, |_| None)
 }
 
 fn read_with(
     herdr: &dyn Herdr,
     ledger: &dyn Ledger,
+    paused: Option<&Path>,
     options: Options,
     branch: impl Fn(&AgentRecord) -> Option<String>,
 ) -> Result<Read> {
@@ -74,6 +83,11 @@ fn read_with(
     };
     let mut view = view(&entries, agents.as_deref(), options, branch);
     view.herdr_reachable = agents.is_some() || malformed;
+    if let Some(dir) = paused {
+        for herd in &mut view.herds {
+            herd.paused = pause::paused(dir, &herd.name)?;
+        }
+    }
     Ok(Read {
         view,
         problem,
@@ -86,6 +100,7 @@ fn read_with(
 pub fn status(
     herdr: &dyn Herdr,
     ledger: &dyn Ledger,
+    paused: &Path,
     options: Options,
     format: Format,
 ) -> Result<Output> {
@@ -93,7 +108,7 @@ pub fn status(
         view,
         problem,
         code,
-    } = read(herdr, ledger, options)?;
+    } = read(herdr, ledger, paused, options)?;
     let stdout = match format {
         Format::Text { color } => text(&view, color),
         Format::Json => serde_json::to_string_pretty(&view)? + "\n",
@@ -139,9 +154,15 @@ pub fn sections(view: &View) -> Vec<(String, &[Member])> {
     let mut sections: Vec<(String, &[Member])> = view
         .herds
         .iter()
-        .map(|h| match h.members.is_empty() {
-            true => (format!("{} (retired only)", h.name), h.members.as_slice()),
-            false => (h.name.clone(), h.members.as_slice()),
+        .map(|h| {
+            let mut header = h.name.clone();
+            if h.members.is_empty() {
+                header += " (retired only)";
+            }
+            if let Some(pause) = &h.paused {
+                header += &format!("  {pause}");
+            }
+            (header, h.members.as_slice())
         })
         .collect();
     if !view.ungrouped.is_empty() {
@@ -317,13 +338,58 @@ mod tests {
     }
 
     const PLAIN: Format = Format::Text { color: false };
+    fn not_paused() -> &'static Path {
+        Path::new("/nonexistent/paused")
+    }
+
+    /// A paused-herds dir pausing `prs` since 09:00, with `reason`.
+    fn paused_prs(reason: Option<&str>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let pause = serde_json::json!({"since": "2026-11-05T09:00:00Z", "reason": reason});
+        std::fs::write(dir.path().join("prs"), pause.to_string()).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_paused_herds_header_says_since_when_and_why() {
+        let herdr = herdr();
+        let ledger = ledger();
+        for (reason, header) in [
+            (
+                Some("freeze"),
+                "prs  paused since 2026-11-05T09:00:00Z — freeze\n",
+            ),
+            (None, "prs  paused since 2026-11-05T09:00:00Z\n"),
+        ] {
+            let paused = paused_prs(reason);
+            let out = status(&herdr, &ledger, paused.path(), Options::default(), PLAIN).unwrap();
+            assert!(out.stdout.starts_with(header), "{}", out.stdout);
+            assert!(out.stdout.contains("\nungrouped\n"), "{}", out.stdout);
+        }
+    }
+
+    #[test]
+    fn json_gives_each_herd_its_pause_or_null() {
+        let ledger = ledger();
+        let paused = paused_prs(Some("freeze"));
+        let json = |dir: &Path| {
+            let out = status(&herdr(), &ledger, dir, Options::default(), Format::Json).unwrap();
+            serde_json::from_str::<serde_json::Value>(&out.stdout).unwrap()["herds"][0]["paused"]
+                .clone()
+        };
+        assert_eq!(
+            json(paused.path()),
+            serde_json::json!({"since": "2026-11-05T09:00:00Z", "reason": "freeze"})
+        );
+        assert_eq!(json(not_paused()), serde_json::Value::Null);
+    }
 
     #[test]
     fn prints_members_by_herd_then_ungrouped_with_gone_hinted_and_strays_counted() {
         let herdr = herdr();
         let ledger = ledger();
         let before = ledger.0.clone();
-        let out = status(&herdr, &ledger, Options::default(), PLAIN).unwrap();
+        let out = status(&herdr, &ledger, not_paused(), Options::default(), PLAIN).unwrap();
         assert_eq!(
             out.stdout,
             "\
@@ -355,7 +421,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         lead.role = Some(crate::ledger::Role::Lead);
         ledger.0.insert(lead.name.clone(), lead);
 
-        let out = status(&herdr, &ledger, Options::default(), PLAIN).unwrap();
+        let out = status(&herdr, &ledger, not_paused(), Options::default(), PLAIN).unwrap();
 
         assert!(
             out.stdout.starts_with(
@@ -374,7 +440,7 @@ prs
     fn with_herdr_unreachable_prints_the_ledger_as_unknown_warns_and_exits_2() {
         let mut herdr = herdr();
         herdr.unreachable = true;
-        let out = status(&herdr, &ledger(), Options::default(), PLAIN).unwrap();
+        let out = status(&herdr, &ledger(), not_paused(), Options::default(), PLAIN).unwrap();
         assert_eq!(
             out.stdout,
             "\
@@ -401,6 +467,7 @@ strays unknown (herdr unreachable)
         let out = status(
             &herdr(),
             &ledger,
+            not_paused(),
             Options {
                 all: true,
                 strays: true,
@@ -435,7 +502,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             all: true,
             strays: false,
         };
-        let out = status(&herdr(), &ledger, all, PLAIN).unwrap();
+        let out = status(&herdr(), &ledger, not_paused(), all, PLAIN).unwrap();
         assert!(
             out.stdout.starts_with("prs (retired only)\nungrouped\n"),
             "{}",
@@ -450,6 +517,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         let out = status(
             &herdr(),
             &ledger,
+            not_paused(),
             Options {
                 all: true,
                 strays: true,
@@ -466,7 +534,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             json,
             serde_json::json!({
                 "herdr_reachable": true,
-                "herds": [{"name": "prs", "members": [
+                "herds": [{"name": "prs", "paused": null, "members": [
                     member("zpr-2", "blocked", false, "pr-2", "w1:pzpr-2", Some("w1:tzpr-2")),
                     member("zpr-1", "working", false, "pr-1", "w1:pzpr-1", Some("w1:tzpr-1")),
                 ]}],
@@ -477,7 +545,14 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             })
         );
 
-        let default = status(&herdr(), &ledger, Options::default(), Format::Json).unwrap();
+        let default = status(
+            &herdr(),
+            &ledger,
+            not_paused(),
+            Options::default(),
+            Format::Json,
+        )
+        .unwrap();
         let json: serde_json::Value = serde_json::from_str(&default.stdout).unwrap();
         assert_eq!(json.get("retired"), None);
         assert_eq!(json["strays"], serde_json::json!({"count": 1}));
@@ -492,7 +567,14 @@ gone: no live agent matches it; `loopherd revive` can bring it back
                     herdr.unreachable = unreachable;
                     let ledger = ledger();
                     let before = ledger.0.clone();
-                    status(&herdr, &ledger, Options { all, strays }, format).unwrap();
+                    status(
+                        &herdr,
+                        &ledger,
+                        not_paused(),
+                        Options { all, strays },
+                        format,
+                    )
+                    .unwrap();
                     assert_eq!(herdr.mutations(), 0);
                     assert_eq!(ledger.0, before);
                 }
@@ -527,12 +609,19 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             "w1:plh-1",
             AgentStatus::Idle,
         ));
-        let out = status(&herdr, &ledger, Options::default(), PLAIN).unwrap();
+        let out = status(&herdr, &ledger, not_paused(), Options::default(), PLAIN).unwrap();
         assert_eq!(
             out.stdout.lines().nth(1),
             Some("  lh-1  idle  -  -  w1:tlh-1/w1:plh-1")
         );
-        let json = status(&herdr, &ledger, Options::default(), Format::Json).unwrap();
+        let json = status(
+            &herdr,
+            &ledger,
+            not_paused(),
+            Options::default(),
+            Format::Json,
+        )
+        .unwrap();
         let json: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
         let member = &json["ungrouped"][0];
         assert_eq!(
@@ -555,7 +644,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         ));
         let member = |read: Read| read.view.ungrouped[0].clone();
 
-        let full = member(read(&herdr, &ledger, Options::default()).unwrap());
+        let full = member(read(&herdr, &ledger, not_paused(), Options::default()).unwrap());
         let statuses = member(read_statuses(&herdr, &ledger, Options::default()).unwrap());
 
         assert_eq!(full.branch.as_deref(), Some("main"));

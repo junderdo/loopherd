@@ -1827,6 +1827,7 @@ mod tests {
                 herds: config.path().join("herds"),
                 home: PathBuf::from("/home/me"),
                 feed_lock: config.path().join("feed.lock"),
+                paused: config.path().join("paused"),
             };
             let worker = AgentRecord {
                 template: Some("card".into()),
