@@ -812,7 +812,7 @@ impl Drop for CloseTabId {
 }
 
 #[test]
-fn a_status_change_on_a_dev_pane_reaches_the_event_subscriber() {
+fn a_status_change_and_a_split_on_a_dev_pane_reach_the_event_subscriber() {
     if !live_enabled() {
         return;
     }
@@ -849,7 +849,12 @@ fn a_status_change_on_a_dev_pane_reaches_the_event_subscriber() {
     use events::{Pushed, SocketSubscriber, Subscriber, Subscription};
     let _connection = SocketSubscriber::new(Some(dev_socket()))
         .subscribe(
-            &[Subscription::AgentStatusChanged(pane.clone())],
+            &[
+                Subscription::PaneCreated,
+                Subscription::PaneClosed,
+                Subscription::AgentDetected,
+                Subscription::AgentStatusChanged(pane.clone()),
+            ],
             Box::new(move |pushed| {
                 let _ = tx.send(pushed);
             }),
@@ -874,10 +879,19 @@ fn a_status_change_on_a_dev_pane_reaches_the_event_subscriber() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(
-        rx.recv_timeout(std::time::Duration::from_secs(5)),
-        Ok(Pushed::Event)
-    );
+    let within = |secs| rx.recv_timeout(std::time::Duration::from_secs(secs));
+    assert_eq!(within(5), Ok(Pushed::Event), "no status event");
+    while within(1).is_ok() {}
+    herdr_ok(&[
+        "pane",
+        "split",
+        "--pane",
+        &pane,
+        "--direction",
+        "right",
+        "--no-focus",
+    ]);
+    assert_eq!(within(5), Ok(Pushed::Event), "no pane.created event");
 }
 
 const LIVE: &str = "/home/u/.config/herdr/herdr.sock";

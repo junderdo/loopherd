@@ -154,9 +154,10 @@ impl App {
     }
 
     /// Events cover agent status only when subscribed and the last read could
-    /// see herdr's panes to subscribe to.
+    /// see herdr's panes to subscribe to. A warning that isn't about herdr
+    /// leaves the code at 0.
     fn poll(&self) -> Duration {
-        let herdr_read = self.read.as_ref().is_some_and(|r| r.problem.is_none());
+        let herdr_read = self.read.as_ref().is_some_and(|r| r.code == 0);
         if self.live && herdr_read {
             SUBSCRIBED_POLL
         } else {
@@ -1055,6 +1056,19 @@ mod tests {
     }
 
     #[test]
+    fn a_warning_not_about_herdr_still_polls_every_10s_while_subscribed() {
+        let (herdr, ledger, t0) = (herdr(), ledger(), Instant::now());
+        let mut app = app(&herdr, &ledger, t0);
+        app.set_live(true);
+        let mut warned = read(&herdr, &ledger, app.options).unwrap();
+        warned.problem = Some("warning: a pause file is unreadable".into());
+        app.apply(Response::Read(app.options, Ok(warned)), t0)
+            .unwrap();
+        assert_eq!(app.tick(t0 + POLL), None);
+        assert!(app.tick(t0 + SUBSCRIBED_POLL).is_some());
+    }
+
+    #[test]
     fn a_herdr_event_reaches_the_loop_as_a_read_well_before_the_poll() {
         // A rendezvous gate: a send goes through only while a read waits on it.
         let (release, gate) = mpsc::sync_channel(0);
@@ -1092,7 +1106,10 @@ mod tests {
                 }
             }
         };
-        while read_within(Duration::from_millis(300)) {}
+        let settled_by = Instant::now() + Duration::from_secs(3);
+        while read_within(Duration::from_millis(300)) {
+            assert!(Instant::now() < settled_by, "reads kept coming unprompted");
+        }
         assert!(
             !read_within(POLL + Duration::from_millis(500)),
             "subscribed, the poll slows past 2s"

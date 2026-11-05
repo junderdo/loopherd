@@ -1,7 +1,7 @@
 //! herdr's `events.subscribe`, over the socket [`super::Herdr::socket`] names.
 //! Uses only std, serde_json and anyhow, so the live tests can include it.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,8 @@ use serde_json::{Value, json};
 
 /// How long herdr gets to acknowledge a subscription.
 const ACK_TIMEOUT: Duration = Duration::from_secs(5);
+/// Longer lines end the stream rather than grow without bound.
+const MAX_LINE: usize = 1 << 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Subscription {
@@ -98,12 +100,13 @@ impl Subscriber for SocketSubscriber {
         let socket = self.socket.as_ref().context("herdr named no socket")?;
         let (stream, reader) = start(socket, subscriptions)?;
         std::thread::spawn(move || {
+            let mut reader = reader;
             // Every line after the acknowledgment is an event, except the
             // error (`events_lost`) herdr sends before closing.
-            for line in reader.lines() {
-                match line.map(|l| parse(&l)) {
-                    Ok(Line::Error(_)) | Err(_) => break,
-                    Ok(_) => on_push(Pushed::Event),
+            while let Some(line) = read_line(&mut reader) {
+                match parse(&line) {
+                    Line::Error(_) => break,
+                    _ => on_push(Pushed::Event),
                 }
             }
             on_push(Pushed::Ended);
@@ -129,10 +132,7 @@ fn start(
         .and_then(|()| stream.set_read_timeout(Some(ACK_TIMEOUT)))
         .context("send events.subscribe")?;
     let mut reader = BufReader::new(stream.try_clone().context("clone socket")?);
-    let mut ack = String::new();
-    reader
-        .read_line(&mut ack)
-        .context("read the events.subscribe reply")?;
+    let ack = read_line(&mut reader).context("read the events.subscribe reply")?;
     match parse(&ack) {
         Line::Started => {}
         Line::Error(code) if code == "pane_not_found" => bail!(PaneNotFound),
@@ -143,6 +143,21 @@ fn start(
         .set_read_timeout(None)
         .context("clear the read timeout")?;
     Ok((stream, reader))
+}
+
+/// The next line, or `None` once the stream ends, fails, or sends a line
+/// over [`MAX_LINE`] bytes.
+fn read_line(reader: &mut BufReader<UnixStream>) -> Option<String> {
+    let mut line = Vec::new();
+    let read = reader
+        .take(MAX_LINE as u64 + 1)
+        .read_until(b'\n', &mut line)
+        .ok()?;
+    let ended = line.last() == Some(&b'\n');
+    if read == 0 || (!ended && line.len() > MAX_LINE) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&line).into_owned())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -298,6 +313,31 @@ mod tests {
         drop(connection);
         assert_eq!(saw.recv_timeout(Duration::from_secs(5)).unwrap(), "closed");
         assert_eq!(next(&rx), Pushed::Ended);
+    }
+
+    #[test]
+    fn a_line_over_1_mib_ends_the_pushes() {
+        let long: &'static str = "x".repeat(MAX_LINE + 1).leak();
+        let lines = vec![STARTED, long, r#"{"data":{},"event":"pane.closed"}"#];
+        let (_dir, socket, _saw) = server(lines.leak());
+        let (on_push, rx) = pushes();
+        let _connection = SocketSubscriber::new(Some(socket))
+            .subscribe(&[Subscription::PaneCreated], on_push)
+            .unwrap();
+        assert_eq!(next(&rx), Pushed::Ended);
+    }
+
+    #[test]
+    fn a_line_of_exactly_1_mib_is_an_event() {
+        let (head, tail) = (r#"{"event":"pane.closed","data":""#, r#""}"#);
+        let padding = "x".repeat(MAX_LINE - head.len() - tail.len());
+        let full: &'static str = format!("{head}{padding}{tail}").leak();
+        let (_dir, socket, _saw) = server(vec![STARTED, full].leak());
+        let (on_push, rx) = pushes();
+        let _connection = SocketSubscriber::new(Some(socket))
+            .subscribe(&[Subscription::PaneCreated], on_push)
+            .unwrap();
+        assert_eq!(next(&rx), Pushed::Event);
     }
 
     #[test]
