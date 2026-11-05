@@ -110,15 +110,29 @@ impl Pauses {
         })
     }
 
-    /// Each herd's pause, for the herds in `known` and those with a herd file.
-    /// When the pause dir can't be listed, each of those herds' files is read
-    /// by name, so a pause fails closed as it does for `feed`.
-    pub fn of(&self, known: impl IntoIterator<Item = String>) -> Vec<(String, Reading)> {
+    /// Each herd's pause, for the herds in `known` and those with a herd file,
+    /// and a warning when the herd files can't be listed. When the pause dir
+    /// can't be listed, each of those herds' files is read by name, so a pause
+    /// fails closed as it does for `feed`.
+    pub fn of(
+        &self,
+        known: impl IntoIterator<Item = String>,
+    ) -> (Vec<(String, Reading)>, Option<String>) {
         let mut herds: BTreeSet<String> = known.into_iter().collect();
-        if let Some(dir) = &self.herds {
-            herds.extend(herd::names(dir).unwrap_or_default());
-        }
-        match all(&self.dir) {
+        let hidden = "so a paused herd with no members isn't shown";
+        let warning = match &self.herds {
+            None => Some(format!(
+                "warning: no config dir (set HOME or XDG_CONFIG_HOME), {hidden}"
+            )),
+            Some(dir) => match herd::names(dir) {
+                Ok(names) => {
+                    herds.extend(names);
+                    None
+                }
+                Err(e) => Some(format!("warning: can't list herd files, {hidden}: {e:#}")),
+            },
+        };
+        let readings = match all(&self.dir) {
             Ok(pauses) => pauses
                 .into_iter()
                 .filter(|(h, _)| herds.contains(h))
@@ -127,7 +141,8 @@ impl Pauses {
                 .into_iter()
                 .map(|h| (h.clone(), read(&self.dir, &h)))
                 .collect(),
-        }
+        };
+        (readings, warning)
     }
 }
 
@@ -155,14 +170,19 @@ pub fn read(dir: &Path, herd: &str) -> Reading {
     let file = dir.join(herd);
     let text = match std::fs::read_to_string(&file) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Reading::Unpaused,
-        text => text.with_context(|| format!("read {}", file.display())),
+        Err(e) => {
+            let e = anyhow::Error::new(e).context(format!("read {}", file.display()));
+            return Reading::Unreadable(e);
+        }
+        Ok(text) => text,
     };
-    let record = text.and_then(|text| {
-        let record: Record = serde_json::from_str(&text)?;
-        humantime::parse_rfc3339(&record.since)
-            .with_context(|| format!("since {:?} is not RFC 3339", record.since))?;
-        Ok(record)
-    });
+    let record = serde_json::from_str::<Record>(&text)
+        .map_err(anyhow::Error::from)
+        .and_then(|record| {
+            humantime::parse_rfc3339(&record.since)
+                .with_context(|| format!("since {:?} is not RFC 3339", record.since))?;
+            Ok(record)
+        });
     match record.with_context(|| format!("parse {}", file.display())) {
         Ok(Record { since, reason }) => Reading::Paused(Pause {
             since: Some(since),
@@ -314,12 +334,14 @@ fn write(dir: &Path, herd: &str, record: &Record) -> Result<()> {
 }
 
 /// `text` with each control, format or line/paragraph separator as `\u{..}`,
-/// so a hand-edited pause file can't move the terminal or split a line.
+/// so a hand-edited pause file can't move the terminal or split a line, and
+/// `\` doubled so a literal `\u{a}` reads apart from an escaped newline.
 fn escaped(text: &str) -> String {
     text.chars()
-        .map(|c| match unprintable(c) {
-            true => c.escape_unicode().to_string(),
-            false => c.to_string(),
+        .map(|c| match c {
+            '\\' => r"\\".to_string(),
+            c if unprintable(c) => c.escape_unicode().to_string(),
+            c => c.to_string(),
         })
         .collect()
 }
@@ -765,6 +787,42 @@ mod tests {
         assert_eq!(done.lines, ["prs now paused since 2026-11-05T09:00:00Z"]);
         let file = fs::read_to_string(s.dir.path().join("paused/prs")).unwrap();
         assert!(file.contains(r#""since":"2026-11-05T09:00:00Z""#), "{file}");
+    }
+
+    #[test]
+    fn a_pause_file_that_cannot_be_read_warns_of_the_read_not_a_parse() {
+        use std::os::unix::fs::PermissionsExt;
+        let s = Setup::new(&["prs"]);
+        fs::create_dir(s.dir.path().join("paused")).unwrap();
+        let file = s.dir.path().join("paused/prs");
+        fs::write(
+            &file,
+            r#"{"since": "2026-11-05T09:00:00Z", "reason": null}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let warning = read(&s.paths().paused, "prs").warning("prs").unwrap();
+
+        let expected = format!(
+            "warning: prs's pause is unreadable, counted as paused: read {}: ",
+            file.display()
+        );
+        assert!(warning.starts_with(&expected), "{warning}");
+        assert!(!warning.contains("parse "), "{warning}");
+    }
+
+    #[test]
+    fn a_backslash_in_a_reason_prints_doubled_so_it_reads_apart_from_an_escape() {
+        let pause = |reason: &str| Pause {
+            since: Some("2026-11-05T09:00:00Z".into()),
+            reason: Some(reason.into()),
+        };
+        assert_eq!(
+            pause(r"a\u{a}b").to_string(),
+            r"paused since 2026-11-05T09:00:00Z — a\\u{a}b"
+        );
+        assert_ne!(pause(r"a\u{a}b").to_string(), pause("a\nb").to_string());
     }
 
     #[test]

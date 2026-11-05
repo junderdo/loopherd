@@ -85,7 +85,9 @@ fn read_with(
     let mut problems: Vec<String> = problem.into_iter().collect();
     if let Some(pauses) = pauses {
         let in_ledger = entries.values().filter_map(|e| e.herd.clone());
-        problems.extend(add_pauses(&mut view.herds, pauses.of(in_ledger)));
+        let (readings, warning) = pauses.of(in_ledger);
+        problems.extend(warning);
+        problems.extend(add_pauses(&mut view.herds, readings));
     }
     Ok(Read {
         view,
@@ -546,6 +548,60 @@ mod tests {
             out.stdout
         );
         assert_eq!(out.stderr, "");
+    }
+
+    /// A config root pausing `docs`, which has a herd file and no ledger members.
+    fn paused_docs() -> tempfile::TempDir {
+        let root = root();
+        let docs = r#"{"since": "2026-11-05T10:00:00Z", "reason": null}"#;
+        std::fs::write(root.path().join("paused/docs"), docs).unwrap();
+        std::fs::write(root.path().join("herds/docs.toml"), "repo = \"/r\"\n").unwrap();
+        root
+    }
+
+    #[test]
+    fn herd_files_that_cannot_be_listed_warn_that_memberless_pauses_are_hidden() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = paused_docs();
+        let herds = root.path().join("herds");
+        std::fs::set_permissions(&herds, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let out = status(
+            &herdr(),
+            &ledger(),
+            &Pauses::under(root.path()),
+            Options::default(),
+            PLAIN,
+        );
+        std::fs::set_permissions(&herds, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let out = out.unwrap();
+        assert!(!out.stdout.contains("docs  paused"), "{}", out.stdout);
+        assert!(
+            out.stderr.starts_with(
+                "warning: can't list herd files, so a paused herd with no members isn't shown: read "
+            ),
+            "{}",
+            out.stderr
+        );
+    }
+
+    #[test]
+    fn no_config_dir_warns_that_memberless_pauses_are_hidden() {
+        let root = paused_docs();
+        let pauses = Pauses {
+            dir: root.path().join("paused"),
+            herds: None,
+        };
+
+        let out = status(&herdr(), &ledger(), &pauses, Options::default(), PLAIN).unwrap();
+
+        assert!(!out.stdout.contains("docs  paused"), "{}", out.stdout);
+        assert_eq!(
+            out.stderr,
+            "warning: no config dir (set HOME or XDG_CONFIG_HOME), \
+             so a paused herd with no members isn't shown\n"
+        );
     }
 
     #[test]

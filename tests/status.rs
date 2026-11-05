@@ -218,7 +218,11 @@ fn status_needs_no_home_when_xdg_state_home_is_set() {
         .output()
         .unwrap();
 
-    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "loopherd status: warning: no config dir (set HOME or XDG_CONFIG_HOME), \
+         so a paused herd with no members isn't shown\n"
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.starts_with("prs  paused since 2026-11-05T09:00:00Z\n"),
