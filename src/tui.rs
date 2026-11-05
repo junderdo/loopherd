@@ -1,6 +1,7 @@
 //! `loopherd view`: the herd view, live.
 
 mod since;
+mod watcher;
 
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -17,11 +18,16 @@ use ratatui::{Frame, Terminal};
 
 use crate::herd_view::{Member, Options, Stray};
 use crate::herdr::Herdr;
+use crate::herdr::events::Subscriber;
 use crate::ledger::Ledger;
 use crate::status::{Read, aligned, read, row, sections, stray_lines, widths};
 use since::Since;
+use watcher::{Signal, Watch, watch};
 
 const POLL: Duration = Duration::from_secs(2);
+/// The ledger and mailbox push no events, so a read still comes this often
+/// while herdr's events cover agent status.
+const SUBSCRIBED_POLL: Duration = Duration::from_secs(10);
 /// How long the loop waits for a key before checking replies and signals.
 const TICK: Duration = Duration::from_millis(100);
 /// Wide enough for `for 59m`, so the columns don't jump when a time appears.
@@ -78,8 +84,12 @@ pub struct App {
     message: Option<String>,
     /// When the read in flight was requested.
     reading: Option<Instant>,
-    /// `None` until the first read is requested.
-    next_poll: Option<Instant>,
+    /// When the last read was requested or arrived; `None` before the first.
+    polled: Option<Instant>,
+    /// An event arrived since the last read was requested.
+    invalidated: bool,
+    /// herdr's events are subscribed, so the poll slows.
+    live: bool,
     quit: bool,
 }
 
@@ -120,20 +130,44 @@ impl App {
             selected_key: None,
             message: None,
             reading: None,
-            next_poll: None,
+            polled: None,
+            invalidated: false,
+            live: false,
             quit: false,
         }
     }
 
     /// A read, when one is due and none is in flight.
     pub fn tick(&mut self, now: Instant) -> Option<Request> {
-        let due = self.next_poll.is_none_or(|at| now >= at);
+        let due = self.invalidated || self.polled.is_none_or(|at| now >= at + self.poll());
         (due && self.reading.is_none()).then(|| self.request_read(now))
+    }
+
+    /// Something herdr shows may have changed: read again as soon as no read
+    /// is in flight.
+    pub fn invalidate(&mut self) {
+        self.invalidated = true;
+    }
+
+    pub fn set_live(&mut self, live: bool) {
+        self.live = live;
+    }
+
+    /// Events cover agent status only when subscribed and the last read could
+    /// see herdr's panes to subscribe to.
+    fn poll(&self) -> Duration {
+        let herdr_read = self.read.as_ref().is_some_and(|r| r.problem.is_none());
+        if self.live && herdr_read {
+            SUBSCRIBED_POLL
+        } else {
+            POLL
+        }
     }
 
     fn request_read(&mut self, now: Instant) -> Request {
         self.reading = Some(now);
-        self.next_poll = Some(now + POLL);
+        self.invalidated = false;
+        self.polled = Some(now);
         Request::Read(self.options)
     }
 
@@ -143,7 +177,7 @@ impl App {
             Response::Read(options, _) if options != self.options => {}
             Response::Read(_, result) => {
                 self.reading = None;
-                self.next_poll = Some(now + POLL);
+                self.polled = Some(now);
                 let read = result?;
                 self.since = self.since.observe(&read.view, now);
                 self.read = Some(read);
@@ -248,6 +282,17 @@ impl App {
         };
         self.message = Some(refusal);
         None
+    }
+
+    /// The live panes the view shows, whose status changes it must see.
+    pub fn panes(&self) -> Vec<String> {
+        self.targets()
+            .into_iter()
+            .filter_map(|t| match t {
+                Target::Member(m) => m.tab.as_ref().map(|_| m.pane.clone()),
+                Target::Stray(s) => Some(s.pane.clone()),
+            })
+            .collect()
     }
 
     /// Members in display order, then listed strays.
@@ -381,21 +426,25 @@ fn catch_stop_signals() -> Result<()> {
     Ok(())
 }
 
-/// Runs the TUI until `q`, Ctrl+C, SIGTERM or SIGHUP, polling herdr every two
-/// seconds. Exits 128 + the signal's number when a signal stopped it.
-pub fn run<H, L>(herdr: H, ledger: L, options: Options) -> Result<i32>
+/// Runs the TUI until `q`, Ctrl+C, SIGTERM or SIGHUP, reading again on each
+/// herdr event and polling as a fallback. Exits 128 + the signal's number when
+/// a signal stopped it.
+pub fn run<H, S, L>(herdr: H, subscriber: S, ledger: L, options: Options) -> Result<i32>
 where
     H: Herdr + Send + 'static,
+    S: Subscriber + 'static,
     L: Ledger + Send + 'static,
 {
     catch_stop_signals()?;
     let (requests, responses) = spawn_reader(herdr, ledger);
+    let watch = watch(subscriber);
     let mut terminal = ratatui::try_init()?;
     let result = run_loop(
         &mut terminal,
         App::new(options),
         &requests,
         &responses,
+        &watch,
         terminal_key,
         &STOP_SIGNAL,
     );
@@ -421,6 +470,7 @@ fn run_loop<B>(
     mut app: App,
     requests: &Sender<Request>,
     responses: &Receiver<Response>,
+    watch: &Watch,
     mut next_key: impl FnMut(Duration) -> Result<Option<KeyEvent>>,
     stop: &AtomicI32,
 ) -> Result<i32>
@@ -433,6 +483,7 @@ where
             .send(request)
             .map_err(|_| anyhow!("herdr reader thread stopped"))
     };
+    let mut shown = vec![];
     loop {
         let signal = stop.load(Ordering::Relaxed);
         if signal != 0 {
@@ -444,6 +495,17 @@ where
         let now = Instant::now();
         while let Ok(response) = responses.try_recv() {
             app.apply(response, now)?;
+        }
+        for signal in watch.signals.try_iter() {
+            match signal {
+                Signal::Invalidated => app.invalidate(),
+                Signal::Live(live) => app.set_live(live),
+            }
+        }
+        let panes = app.panes();
+        if panes != shown {
+            watch.show(panes.clone());
+            shown = panes;
         }
         if let Some(request) = app.tick(now) {
             send(request)?;
@@ -470,7 +532,7 @@ mod tests {
     use ratatui::style::Modifier;
 
     use super::*;
-    use crate::herdr::fake::FakeHerdr;
+    use crate::herdr::fake::{FakeHerdr, FakeSubscriber, Which};
     use crate::herdr::{Agent, AgentStatus};
     use crate::ledger::{AgentRecord, MemLedger};
 
@@ -825,6 +887,7 @@ mod tests {
         let (done, finished) = mpsc::channel();
         std::thread::spawn(move || {
             let (requests, responses) = spawn_reader(herdr, ledger());
+            let watch = watch(FakeSubscriber::default());
             let mut terminal = Terminal::new(TestBackend::new(72, 14)).unwrap();
             let mut keys = keys.into_iter();
             let stop = AtomicI32::new(stop);
@@ -833,6 +896,7 @@ mod tests {
                 App::new(Options::default()),
                 &requests,
                 &responses,
+                &watch,
                 |_| Ok(keys.next().flatten()),
                 &stop,
             );
@@ -928,5 +992,117 @@ mod tests {
         let now = Instant::now();
         let shown = lines(&render(&App::new(Options::default()), now));
         assert_eq!(shown[0], "reading herdr and the ledger…");
+    }
+
+    #[test]
+    fn an_event_requests_a_read_before_the_poll_would() {
+        let (herdr, ledger, t0) = (herdr(), ledger(), Instant::now());
+        let mut app = app(&herdr, &ledger, t0);
+        let soon = t0 + Duration::from_millis(100);
+        assert_eq!(app.tick(soon), None);
+        app.invalidate();
+        assert_eq!(app.tick(soon), Some(Request::Read(Options::default())));
+    }
+
+    #[test]
+    fn events_during_a_read_queue_one_more_read_not_one_each() {
+        let (herdr, ledger, t0) = (herdr(), ledger(), Instant::now());
+        let mut app = app(&herdr, &ledger, t0);
+        let soon = t0 + Duration::from_millis(100);
+        app.invalidate();
+        let in_flight = app.tick(soon).unwrap();
+        app.invalidate();
+        app.invalidate();
+        assert_eq!(app.tick(soon), None, "one read in flight at a time");
+        app.apply(serve(in_flight, &herdr, &ledger), soon).unwrap();
+        let follow_up = app.tick(soon).expect("one read follows the events");
+        app.apply(serve(follow_up, &herdr, &ledger), soon).unwrap();
+        assert_eq!(app.tick(soon), None);
+    }
+
+    #[test]
+    fn polls_every_10s_while_subscribed_and_every_2s_otherwise() {
+        let (herdr, ledger, t0) = (herdr(), ledger(), Instant::now());
+        let mut app = app(&herdr, &ledger, t0);
+        app.set_live(true);
+        assert_eq!(app.tick(t0 + Duration::from_secs(9)), None);
+        let request = app.tick(t0 + Duration::from_secs(10)).unwrap();
+        let t1 = t0 + Duration::from_secs(10);
+        app.apply(serve(request, &herdr, &ledger), t1).unwrap();
+        app.set_live(false);
+        assert_eq!(app.tick(t1 + Duration::from_secs(1)), None);
+        assert!(app.tick(t1 + Duration::from_secs(2)).is_some());
+    }
+
+    #[test]
+    fn watches_the_panes_of_live_members_and_listed_strays() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mut app = app(&herdr, &ledger, now);
+        assert_eq!(app.panes(), ["w1:pb", "w1:pa", "w1:pc"]);
+        press(&mut app, &[KeyCode::Char('s')], &herdr, &ledger);
+        assert_eq!(app.panes(), ["w1:pb", "w1:pa", "w1:pc", "w2:p7"]);
+    }
+
+    #[test]
+    fn a_read_with_herdr_trouble_polls_every_2s_even_while_subscribed() {
+        let ledger = ledger();
+        let mut herdr = herdr();
+        herdr.malformed_agents = true;
+        let t0 = Instant::now();
+        let mut app = app(&herdr, &ledger, t0);
+        app.set_live(true);
+        assert!(app.tick(t0 + POLL).is_some());
+    }
+
+    #[test]
+    fn a_herdr_event_reaches_the_loop_as_a_read_well_before_the_poll() {
+        // A rendezvous gate: a send goes through only while a read waits on it.
+        let (release, gate) = mpsc::sync_channel(0);
+        let mut herdr = herdr();
+        herdr.agents_gate = Some(gate);
+        let fake = FakeSubscriber::default();
+        let subscriber = fake.clone();
+        let (quit, quitting) = mpsc::channel::<()>();
+        let looping = std::thread::spawn(move || {
+            let (requests, responses) = spawn_reader(herdr, ledger());
+            let watch = watch(subscriber);
+            let mut terminal = Terminal::new(TestBackend::new(72, 14)).unwrap();
+            run_loop(
+                &mut terminal,
+                App::new(Options::default()),
+                &requests,
+                &responses,
+                &watch,
+                |timeout| {
+                    std::thread::sleep(timeout.min(Duration::from_millis(5)));
+                    Ok(quitting.try_recv().ok().map(|()| key(KeyCode::Char('q'))))
+                },
+                &AtomicI32::new(0),
+            )
+        });
+        let read_within = |wait: Duration| {
+            let deadline = Instant::now() + wait;
+            loop {
+                match release.try_send(()) {
+                    Ok(()) => return true,
+                    Err(mpsc::TrySendError::Full(())) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(_) => return false,
+                }
+            }
+        };
+        while read_within(Duration::from_millis(300)) {}
+        assert!(
+            !read_within(POLL + Duration::from_millis(500)),
+            "subscribed, the poll slows past 2s"
+        );
+        fake.push(Which::Lifecycle);
+        assert!(
+            read_within(Duration::from_secs(1)),
+            "the event brought no read"
+        );
+        quit.send(()).unwrap();
+        assert_eq!(looping.join().unwrap().unwrap(), 0);
     }
 }

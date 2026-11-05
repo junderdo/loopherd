@@ -8,6 +8,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::Value;
 
+pub mod events;
 #[cfg(test)]
 pub mod fake;
 
