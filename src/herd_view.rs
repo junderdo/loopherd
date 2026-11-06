@@ -32,6 +32,8 @@ pub struct Member {
     pub tab: Option<String>,
     /// Its herd's lead, not a worker.
     pub lead: bool,
+    /// The template it was spawned from, if recorded.
+    pub template: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -181,6 +183,7 @@ fn member(
         pane: live.map_or(&record.pane_id, |a| &a.pane_id).clone(),
         tab: live.map(|a| a.tab_id.clone()),
         lead: record.is_lead(),
+        template: record.template.clone(),
     }
 }
 

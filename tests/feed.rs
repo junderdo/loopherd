@@ -39,7 +39,7 @@ fn dry_run_needs_no_herdr_and_leaves_state_untouched() {
     assert_eq!(String::from_utf8_lossy(&out.stderr), "");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "would add zpr-1\nprs: 0 would retire, 1 would add, 0 skipped, 0 errors\n"
+        "would add zpr-1 (template pr)\nprs: 0 would retire, 1 would add, 0 skipped, 0 errors\n"
     );
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(fs::read_dir(state.path()).unwrap().count(), 0);
@@ -133,7 +133,7 @@ fn feed_exits_4_when_malformed_source_lines_are_its_only_errors() {
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         "error: 1 2: template pr takes 1 param (n), got 2\n\
-         would add pr-3\n\
+         would add pr-3 (template pr)\n\
          prs: 0 would retire, 1 would add, 0 skipped, 1 error\n",
         "{}",
         String::from_utf8_lossy(&out.stderr)

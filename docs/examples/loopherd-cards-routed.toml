@@ -1,0 +1,24 @@
+# A queue that routes each card to one of two templates: `card` for impl
+# cards, `wayfinding` (on sonnet, its own prompt) for research, domain and
+# prototype cards. Replace the herd's `[queue]` with this one, and add
+# `[template.wayfinding]` beside its existing `[template.card]`.
+#
+# With `templates`, the first word of each line `source` prints names the
+# task's template (one of the list) and the rest are its params, so this
+# source prints `card 107` or `wayfinding 101`. A line whose first word isn't
+# in the list is a bad line. One `max` covers members of every template.
+[template.wayfinding]
+params = ["card"]
+name = "research-{card}"
+branch = "docs/LH-{card}"
+args = ["--model", "sonnet"]
+prompt = "You're {name}. Work Trello card LH-{card} per AGENTS.md and docs/agents/issue-tracking.md."
+
+[queue]
+templates = ["card", "wayfinding"]
+source = """scripts/trello cards --list Backlog --label ready-for-agent \
+  | awk -F'\\t' '$3 !~ /need-human|blocked|wayfinding:grilling/ {
+      sub(/^LH-/, "", $1)
+      print ($3 ~ /wayfinding:/ ? "wayfinding" : "card"), $1
+    }'"""
+max = 3

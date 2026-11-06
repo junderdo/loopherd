@@ -85,7 +85,7 @@ pub fn feed(
         if task.is_empty() || task.starts_with('#') {
             continue;
         }
-        let params = match task_params(&queue, task) {
+        let (template, params) = match task_params(&queue, task) {
             Ok(p) => p,
             Err(e) => {
                 lines.push(format!("error: {task}: {e:#}"));
@@ -94,7 +94,7 @@ pub fn feed(
                 continue;
             }
         };
-        let spawn_req = match task_request(paths, req, &queue, params) {
+        let spawn_req = match task_request(paths, req, template, params) {
             Ok(r) => r,
             Err(e) => {
                 lines.push(format!("error: {task}: {e:#}"));
@@ -115,7 +115,7 @@ pub fn feed(
         }
         free -= 1;
         if req.dry_run {
-            lines.push(format!("would add {name}"));
+            lines.push(format!("would add {name} (template {template})"));
             added += 1;
             continue;
         }
@@ -193,8 +193,8 @@ pub fn claimable(
         if task.is_empty() || task.starts_with('#') {
             continue;
         }
-        let Ok(spawn_req) =
-            task_params(queue, task).and_then(|params| task_request(paths, &req, queue, params))
+        let Ok(spawn_req) = task_params(queue, task)
+            .and_then(|(template, params)| task_request(paths, &req, template, params))
         else {
             continue;
         };
@@ -314,33 +314,49 @@ fn failure(output: &Output) -> String {
     }
 }
 
-/// The task's params; a wrong count is a bad line, the only error that is.
-fn task_params(queue: &Queue, task: &str) -> Result<Vec<String>> {
-    let params: Vec<String> = task.split_whitespace().map(String::from).collect();
-    if params.len() != queue.params.len() {
+/// The task's template and params. A template word naming none of the
+/// queue's templates, or a wrong param count, is a bad line; nothing else is.
+fn task_params<'q>(queue: &'q Queue, task: &str) -> Result<(&'q str, Vec<String>)> {
+    let mut words = task.split_whitespace();
+    let (template, names) = if queue.routed {
+        let word = words.next().unwrap_or_default();
+        queue.templates.get_key_value(word).with_context(|| {
+            let known: Vec<&str> = queue.templates.keys().map(String::as_str).collect();
+            format!(
+                "the queue has no template {word} (it has: {})",
+                known.join(", ")
+            )
+        })?
+    } else {
+        queue
+            .templates
+            .first_key_value()
+            .context("the queue has no template")?
+    };
+    let params: Vec<String> = words.map(String::from).collect();
+    if params.len() != names.len() {
         bail!(
-            "template {} takes {} param{} ({}), got {}",
-            queue.template,
-            queue.params.len(),
-            if queue.params.len() == 1 { "" } else { "s" },
-            queue.params.join(", "),
+            "template {template} takes {} param{} ({}), got {}",
+            names.len(),
+            if names.len() == 1 { "" } else { "s" },
+            names.join(", "),
             params.len()
         );
     }
-    Ok(params)
+    Ok((template, params))
 }
 
 fn task_request(
     paths: &Paths,
     req: &FeedRequest,
-    queue: &Queue,
+    template: &str,
     params: Vec<String>,
 ) -> Result<crate::spawn::SpawnRequest> {
     resolve(
         paths,
         &AddRequest {
             herd: req.herd.clone(),
-            template: queue.template.clone(),
+            template: template.into(),
             params,
             claude_args: vec![],
             ready_timeout: req.ready_timeout,
@@ -414,6 +430,24 @@ mod tests {
             );
             fs::write(config.path().join("herds/prs.toml"), herd).unwrap();
             Setup { config, repo }
+        }
+
+        /// A herd `prs` whose queue routes each task to template `card` or
+        /// `research`, by its first word.
+        fn routed(source: &str, max: i64) -> Setup {
+            let setup = Setup::new(source, max);
+            let herd = format!(
+                "repo = {:?}\n\
+                 [template.card]\nparams = [\"card\"]\nname = \"lh-{{card}}\"\n\
+                 prompt = \"build {{card}}\"\ndone = \"test -f done-{{card}}\"\n\
+                 [template.research]\nparams = [\"card\"]\nname = \"research-{{card}}\"\n\
+                 prompt = \"research {{card}}\"\ndone = \"test -f researched-{{card}}\"\n\
+                 [queue]\ntemplates = [\"card\", \"research\"]\nsource = {:?}\nmax = {max}\n",
+                setup.repo.path().display().to_string(),
+                source
+            );
+            fs::write(setup.config.path().join("herds/prs.toml"), herd).unwrap();
+            setup
         }
 
         fn tasks(&self, tasks: &str) {
@@ -728,7 +762,7 @@ mod tests {
             fed.lines,
             [
                 "skipped: exists zpr-1",
-                "would add zpr-2",
+                "would add zpr-2 (template pr)",
                 "skipped: no slot zpr-3",
                 "prs: 0 would retire, 1 would add, 2 skipped, 0 errors",
             ]
@@ -756,7 +790,7 @@ mod tests {
             [
                 "would retire zpr-1",
                 "skipped: exists zpr-1",
-                "would add zpr-2",
+                "would add zpr-2 (template pr)",
                 "prs: 1 would retire, 1 would add, 1 skipped, 0 errors",
             ]
         );
@@ -1190,7 +1224,7 @@ mod tests {
             fed.lines,
             [
                 "would retire zpr-1",
-                "would add zpr-2",
+                "would add zpr-2 (template pr)",
                 "prs: 1 would retire, 1 would add, 0 skipped, 0 errors",
             ]
         );
@@ -1393,5 +1427,171 @@ mod tests {
             .feed(&herdr(), &mut MemLedger::default(), false)
             .unwrap_err();
         assert_eq!(format!("{err:#}"), "herd: prs has no [queue]");
+    }
+
+    #[test]
+    fn a_routed_queue_spawns_each_task_from_the_template_its_first_word_names() {
+        let setup = Setup::routed("printf 'card 1\\nresearch 2\\ncard 3\\n'", 2);
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "added lh-1",
+                "added research-2",
+                "skipped: no slot lh-3",
+                "prs: 0 retired, 2 added, 1 skipped, 0 errors",
+            ]
+        );
+        assert_eq!(fed.code, 0);
+        assert_eq!(
+            herdr.prompts(),
+            [
+                ("lh-1".into(), "build 1".into()),
+                ("research-2".into(), "research 2".into())
+            ]
+        );
+        assert_eq!(ledger.0["research-2"].template.as_deref(), Some("research"));
+        assert_eq!(
+            ledger.0["research-2"].params,
+            Some([("card".to_string(), "2".to_string())].into())
+        );
+    }
+
+    #[test]
+    fn a_routed_task_naming_no_listed_template_is_a_bad_line() {
+        let setup = Setup::routed("printf 'pr 1\\nresearch\\n7\\ncard 2\\n'", 5);
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "error: pr 1: the queue has no template pr (it has: card, research)",
+                "error: research: template research takes 1 param (card), got 0",
+                "error: 7: the queue has no template 7 (it has: card, research)",
+                "added lh-2",
+                "prs: 0 retired, 1 added, 0 skipped, 3 errors",
+            ]
+        );
+        assert_eq!(fed.code, LINE_ERRORS_EXIT);
+    }
+
+    #[test]
+    fn a_routed_queue_counts_every_templates_members_under_one_max_and_reaps_each_by_its_own_done()
+    {
+        let setup = Setup::routed("printf 'card 3\\n'", 2);
+        setup.touch("researched-2");
+        let herdr = herdr().with_agent("lh-1").with_agent("research-2");
+        let mut card = member("lh-1", Some("prs"), false);
+        card.template = Some("card".into());
+        card.params = Some([("card".to_string(), "1".to_string())].into());
+        let mut research = member("research-2", Some("prs"), false);
+        research.template = Some("research".into());
+        research.params = Some([("card".to_string(), "2".to_string())].into());
+        let mut ledger = ledger(&[card, research]);
+
+        let fed = setup.feed(&herdr, &mut ledger, true).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "still open lh-1",
+                "would retire research-2",
+                "would add lh-3 (template card)",
+                "prs: 1 would retire, 1 would add, 0 skipped, 0 errors",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_queue_setting_both_template_and_templates_or_neither_is_an_error() {
+        let setup = Setup::new("echo 1", 1);
+        for (queue, message) in [
+            (
+                "template = \"pr\"\ntemplates = [\"pr\"]",
+                "queue: set one of template and templates, not both",
+            ),
+            ("", "queue: set one of template and templates"),
+        ] {
+            fs::write(
+                setup.config.path().join("herds/prs.toml"),
+                format!(
+                    "repo = \"/r\"\n[template.pr]\nparams = []\nprompt = \"go\"\n\
+                     [queue]\n{queue}\nsource = \"echo 1\"\nmax = 1\n"
+                ),
+            )
+            .unwrap();
+
+            let err = setup
+                .feed(&herdr(), &mut MemLedger::default(), false)
+                .unwrap_err();
+
+            assert!(format!("{err:#}").ends_with(message), "{err:#}");
+        }
+    }
+
+    #[test]
+    fn a_routed_queues_claimable_names_each_tasks_member_whatever_its_template() {
+        let setup = Setup::routed("printf 'research 1\\nnope 2\\ncard 2\\ncard 3\\n'", 2);
+        let paths = setup.paths();
+        let queue = crate::herd::queue(&paths, "prs").unwrap();
+
+        let names = claimable(
+            &MemLedger::default(),
+            &paths,
+            &queue,
+            "prs",
+            0,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert_eq!(names, ["research-1", "lh-2"]);
+    }
+
+    #[test]
+    fn the_documented_routed_queue_sends_wayfinding_cards_to_their_own_template() {
+        let setup = Setup::new("true", 1);
+        let scripts = setup.repo.path().join("scripts");
+        fs::create_dir(&scripts).unwrap();
+        fs::write(
+            scripts.join("trello"),
+            "#!/bin/sh\nprintf 'LH-7\\tBacklog\\tready-for-agent,impl:feat\\tA feature\\n\
+             LH-8\\tBacklog\\tready-for-agent,wayfinding:research\\tA question\\n\
+             LH-9\\tBacklog\\tready-for-agent,wayfinding:grilling\\tA grilling\\n\
+             LH-10\\tBacklog\\tready-for-agent,impl:fix,need-human\\tStuck\\n'\n",
+        )
+        .unwrap();
+        let executable = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+        fs::set_permissions(scripts.join("trello"), executable).unwrap();
+        fs::write(
+            setup.config.path().join("herds/prs.toml"),
+            format!(
+                "repo = {:?}\n[template.card]\nparams = [\"card\"]\nname = \"lh-{{card}}\"\n\
+                 prompt = \"build {{card}}\"\n{}",
+                setup.repo.path().display().to_string(),
+                include_str!("../docs/examples/loopherd-cards-routed.toml")
+            ),
+        )
+        .unwrap();
+
+        let fed = setup
+            .feed(&herdr(), &mut MemLedger::default(), true)
+            .unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "would add lh-7 (template card)",
+                "would add research-8 (template wayfinding)",
+                "prs: 0 would retire, 2 would add, 0 skipped, 0 errors",
+            ]
+        );
     }
 }

@@ -36,8 +36,13 @@ that pane. Read `herdr --skill` before controlling herdr.
    a restart. Then `loopherd feed <herd> --dry-run` and, if it reads right,
    `loopherd feed <herd>`. The herd file (`<herd>.toml` in
    `$LOOPHERD_CONFIG_DIR/herds`, else `${XDG_CONFIG_HOME:-~/.config}/loopherd/herds`) turns each task its
-   queue's `source` prints into a member, at most `max` open. `loopherd
-   herds` lists herd files and their templates. Hand-spawn (`loopherd spawn
+   queue's `source` prints into a member, at most `max` open. A `[queue]`
+   with `templates = ["card", "wayfinding"]` in place of `template` routes
+   each task: the line's first word names its template (one of the list),
+   the rest are its params, and one `max` covers them all
+   (D25). `--dry-run` names each
+   member's template, and `status --json` gives each member's `template`.
+   `loopherd herds` lists herd files and their templates. Hand-spawn (`loopherd spawn
    … --prompt-file`, or `loopherd add <herd> <template> <params…>`) only for
    work outside the queue; check a prompt's placeholders with `grep -o
    '{[a-z]*}'`.

@@ -81,7 +81,9 @@ impl Switches {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QueueFile {
-    template: String,
+    template: Option<String>,
+    /// Each task's first word names one of these; set this or `template`.
+    templates: Option<Vec<String>>,
     /// A shell command printing one task per line.
     source: String,
     max: i64,
@@ -294,12 +296,14 @@ fn quote(arg: &str) -> String {
 
 /// A herd's `[queue]`, with what `feed` needs from the herd around it.
 pub struct Queue {
-    pub template: String,
+    /// Each template the queue spawns from, with its param names in order.
+    pub templates: BTreeMap<String, Vec<String>>,
+    /// Whether each task's first word names its template, rather than the
+    /// queue having one.
+    pub routed: bool,
     pub source: String,
     pub max: usize,
     pub repo: PathBuf,
-    /// The template's param names, in order.
-    pub params: Vec<String>,
     /// Each template's done check, for those that have one.
     pub done: BTreeMap<String, MemberCheck>,
 }
@@ -332,16 +336,18 @@ fn queue_in(file: &HerdFile, paths: &Paths, herd: &str) -> Result<Option<Queue>>
     let Some(queue) = &file.queue else {
         return Ok(None);
     };
-    let params = file
-        .template
-        .get(&queue.template)
-        .with_context(|| format!("queue: {herd} has no template {}", queue.template))?
-        .params
-        .clone();
+    let mut templates = BTreeMap::new();
+    for name in queue.names() {
+        let template = file
+            .template
+            .get(name)
+            .with_context(|| format!("queue: {herd} has no template {name}"))?;
+        templates.insert(name.clone(), template.params.clone());
+    }
     Ok(Some(Queue {
         done: checks_of(file, "done", |t| t.done.as_deref())?,
-        params,
-        template: queue.template.clone(),
+        templates,
+        routed: queue.templates.is_some(),
         source: queue.source.clone(),
         max: queue.max as usize,
         repo: expand_home(&file.repo, &paths.home),
@@ -743,10 +749,11 @@ fn describe(herd: &str, parsed: &HerdFile, paused: &str) -> Vec<String> {
         format!("  loopherd add {herd} {template}{params}")
     });
     let feed = parsed.queue.as_ref().map(|q| {
-        format!(
-            "  loopherd feed {herd}  (template {}, max {})",
-            q.template, q.max
-        )
+        let template = match &q.templates {
+            Some(names) => format!("templates {}", names.join(", ")),
+            None => format!("template {}", q.names().join(", ")),
+        };
+        format!("  loopherd feed {herd}  ({template}, max {})", q.max)
     });
     let lead = parsed
         .lead
@@ -827,14 +834,28 @@ fn parse(text: &str) -> Result<HerdFile> {
     Ok(parsed)
 }
 
+impl QueueFile {
+    fn names(&self) -> &[String] {
+        match (&self.template, &self.templates) {
+            (Some(one), _) => std::slice::from_ref(one),
+            (None, Some(names)) => names,
+            (None, None) => &[],
+        }
+    }
+}
+
 fn validate_queue(queue: &QueueFile, templates: &BTreeMap<String, TemplateFile>) -> Result<()> {
-    if !templates.contains_key(&queue.template) {
-        let known: Vec<&str> = templates.keys().map(String::as_str).collect();
-        bail!(
-            "no template {} (it has: {})",
-            queue.template,
-            known.join(", ")
-        );
+    match (&queue.template, &queue.templates) {
+        (Some(_), Some(_)) => bail!("set one of template and templates, not both"),
+        (None, None) => bail!("set one of template and templates"),
+        (None, Some(names)) if names.is_empty() => bail!("templates is empty"),
+        _ => {}
+    }
+    for name in queue.names() {
+        if !templates.contains_key(name) {
+            let known: Vec<&str> = templates.keys().map(String::as_str).collect();
+            bail!("no template {name} (it has: {})", known.join(", "));
+        }
     }
     if queue.max < 1 {
         bail!("max must be at least 1, got {}", queue.max);
@@ -1830,6 +1851,37 @@ args = ["--model", "opus"]
     }
 
     #[test]
+    fn herds_lists_a_routed_queue_with_its_templates() {
+        let (report, code) = herds_line(
+            "prompt = \"go\"\n[template.u]\nparams = []\nprompt = \"go\"\n\
+             [queue]\ntemplates = [\"u\", \"t\"]\nsource = \"echo 1\"\nmax = 3",
+            &[],
+        );
+        assert_eq!(
+            report,
+            "h  repo /r  workspace (current)  paused no\n\
+             \x20 loopherd add h t <n>\n\
+             \x20 loopherd add h u\n\
+             \x20 loopherd feed h  (templates u, t, max 3)"
+        );
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn a_leads_checks_fail_on_a_queue_setting_both_template_and_templates() {
+        let herd = "repo = \"/r\"\n[template.t]\nparams = []\nprompt = \"go\"\n\
+                    [queue]\ntemplate = \"t\"\ntemplates = [\"t\"]\nsource = \"true\"\nmax = 1\n";
+        let config = Config::with(&[("h", herd)]);
+
+        let err = lead_checks(&config.paths(), "h").err().unwrap();
+
+        assert!(
+            format!("{err:#}").ends_with("queue: set one of template and templates, not both"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
     fn herds_reports_an_invalid_queue() {
         for (queue, message) in [
             (
@@ -1845,6 +1897,22 @@ args = ["--model", "opus"]
                 "queue: max must be at least 1, got -2",
             ),
             ("template = \"t\"\nmax = 1", "missing field `source`"),
+            (
+                "template = \"t\"\ntemplates = [\"t\"]\nsource = \"echo 1\"\nmax = 1",
+                "queue: set one of template and templates, not both",
+            ),
+            (
+                "source = \"echo 1\"\nmax = 1",
+                "queue: set one of template and templates",
+            ),
+            (
+                "templates = []\nsource = \"echo 1\"\nmax = 1",
+                "queue: templates is empty",
+            ),
+            (
+                "templates = [\"t\", \"nope\"]\nsource = \"echo 1\"\nmax = 1",
+                "queue: no template nope (it has: t)",
+            ),
         ] {
             let (report, code) = herds_line(&format!("prompt = \"go\"\n[queue]\n{queue}"), &[]);
             assert!(report.starts_with("invalid h.toml: "), "{report}");
