@@ -16,6 +16,7 @@ use crate::herd_view::{Member, Options, View};
 use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::lock::Lock;
+use crate::pause;
 use crate::report::{Body, Filter, Mailbox, Pending, Stop, member_in, peek_reports, unread_stops};
 use crate::status;
 
@@ -127,6 +128,7 @@ pub fn watch(
             fired: Fired::load(dir, name, created)?,
             next: Duration::ZERO,
             problem: None,
+            unreadable_pause: None,
         }),
         _ => None,
     };
@@ -248,26 +250,34 @@ struct Checks<'a> {
     next: Duration,
     /// Why the herd file last failed to load, warned once.
     problem: Option<String>,
+    /// Why the herd's pause file was last unreadable, warned once.
+    unreadable_pause: Option<String>,
 }
 
 impl Checks<'_> {
     /// One line per event not fired before. A check or source that fails,
-    /// or runs out of the round's [`CHECK_EVERY`], is no event.
+    /// or runs out of the round's [`CHECK_EVERY`], is no event. A paused
+    /// herd has no claimable events (D23).
     fn run(&mut self, ledger: &dyn Ledger, warn: &mut dyn FnMut(&str)) -> Result<Vec<String>> {
-        let (checks, queue) = match lead_checks(self.paths, &self.herd) {
-            Ok(loaded) => {
-                self.problem = None;
-                loaded
-            }
-            Err(e) => {
-                let problem = format!("{}'s checks: {e:#}", self.herd);
-                if self.problem.as_ref() != Some(&problem) {
-                    warn(&problem);
-                    self.problem = Some(problem);
-                }
-                return Ok(vec![]);
-            }
+        let loaded = lead_checks(self.paths, &self.herd);
+        let problem = loaded
+            .as_ref()
+            .err()
+            .map(|e| format!("{}'s checks: {e:#}", self.herd));
+        warn_once(&mut self.problem, problem, warn);
+        let Ok((checks, queue)) = loaded else {
+            return Ok(vec![]);
         };
+        let reading = pause::read(&self.paths.paused, &self.herd);
+        warn_once(
+            &mut self.unreadable_pause,
+            reading.warning(&self.herd),
+            warn,
+        );
+        let paused = reading.pause().is_some();
+        if paused {
+            self.fired.forget_claimable()?;
+        }
         let budget = Budget {
             deadline: Instant::now() + CHECK_EVERY,
             each: self.timeout,
@@ -285,7 +295,7 @@ impl Checks<'_> {
                 events.push(format!("{} {}", worker.name, line::MERGED));
             }
         }
-        if let (Some(queue), Some(timeout)) = (queue, budget.left()) {
+        if let (false, Some(queue), Some(timeout)) = (paused, queue, budget.left()) {
             let names = claimable(ledger, self.paths, &queue, &self.herd, freed, timeout);
             // A running feed may be spawning these before it records them.
             if let (Ok(names), false) = (names, feeding(self.paths)?) {
@@ -301,6 +311,14 @@ impl Checks<'_> {
             .filter(|e| !self.fired.keys.contains(e))
             .collect())
     }
+}
+
+/// Calls `warn` with `now` unless it was `last` too, and keeps it as `last`.
+fn warn_once(last: &mut Option<String>, now: Option<String>, warn: &mut dyn FnMut(&str)) {
+    if let Some(now) = now.as_deref().filter(|now| last.as_deref() != Some(now)) {
+        warn(now);
+    }
+    *last = now;
 }
 
 /// Bounds one round of checks: each command gets `each`, cut to what's left
@@ -355,6 +373,8 @@ fn feeding(paths: &Paths) -> Result<bool> {
 /// The events a lead's watch has printed, one per line of
 /// `watch-<lead>.fired`, so a re-armed watch doesn't wake on them again.
 /// Its first line names the lead's spawn, so a re-created lead starts afresh.
+/// A [`PAUSED`] line forgets the claimable keys above it, so a card announced
+/// before a pause is announced again after resume.
 struct Fired {
     path: PathBuf,
     keys: HashSet<String>,
@@ -373,7 +393,15 @@ impl Fired {
         };
         let mut lines = text.lines();
         let keys = if lines.next() == Some(header.as_str()) {
-            lines.map(String::from).collect()
+            let mut keys = HashSet::<String>::new();
+            for line in lines {
+                if line == PAUSED {
+                    keys.retain(|k| !is_claimable(k));
+                } else {
+                    keys.insert(line.to_string());
+                }
+            }
+            keys
         } else {
             fs::write(&path, format!("{header}\n"))
                 .with_context(|| format!("write {}", path.display()))?;
@@ -384,6 +412,15 @@ impl Fired {
             keys,
             new: vec![],
         })
+    }
+
+    /// Forgets the claimable keys, at once, as a pause was seen.
+    fn forget_claimable(&mut self) -> Result<()> {
+        if !self.keys.iter().any(|k| is_claimable(k)) {
+            return Ok(());
+        }
+        self.keys.retain(|k| !is_claimable(k));
+        append(&self.path, &format!("{PAUSED}\n"))
     }
 
     /// The keys to append once `events` print.
@@ -398,13 +435,26 @@ impl Fired {
     /// Appends, so keys another watch saved meanwhile survive.
     fn save(self) -> Result<()> {
         let text: String = self.new.iter().map(|k| format!("{k}\n")).collect();
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .and_then(|mut file| file.write_all(text.as_bytes()))
-            .with_context(|| format!("write {}", self.path.display()))
+        append(&self.path, &text)
     }
+}
+
+/// The line in `watch-<lead>.fired` marking a pause seen. Every key has a
+/// space in it, so no key reads as this.
+const PAUSED: &str = "paused";
+
+fn is_claimable(key: &str) -> bool {
+    key.strip_suffix(line::CLAIMABLE)
+        .is_some_and(|name| name.ends_with(' '))
+}
+
+fn append(path: &Path, text: &str) -> Result<()> {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(text.as_bytes()))
+        .with_context(|| format!("write {}", path.display()))
 }
 
 /// When a member herdr no longer matches counts as gone. herdr resumes
@@ -2124,5 +2174,96 @@ mod tests {
         lead.created = "2026-11-02T00:00:00Z".into();
         assert_eq!(world.once("w9:p0").unwrap(), ["lh-1 merged"]);
         assert_eq!(world.once("w9:p0"), None);
+    }
+
+    impl Checked {
+        fn pause(&self) {
+            let herds = crate::pause::Herds::One("cards");
+            crate::pause::pause(&self.paths, herds, None, std::time::SystemTime::now()).unwrap();
+        }
+
+        fn resume(&self) {
+            let herds = crate::pause::Herds::One("cards");
+            crate::pause::resume(&self.paths, &self.ledger, herds).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_paused_herd_wakes_its_lead_on_merged_but_not_claimable() {
+        let world = Checked::new();
+        world.touch("tasks", "1\n2\n");
+        world.touch("merged-1", "");
+        world.pause();
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-1 merged"]);
+        assert_eq!(world.once("w9:p0"), None, "woke on a paused herd's card");
+    }
+
+    #[test]
+    fn the_first_check_after_resume_wakes_it_on_claimable() {
+        let world = Checked::new();
+        world.touch("tasks", "1\n2\n");
+        world.pause();
+        let dir = world.config.path().join("reports");
+        let mut clock = steps(|poll| {
+            if poll == 3 {
+                world.resume();
+            }
+        });
+        let req = Request {
+            timeout: Some(Duration::from_secs(150)),
+            ..world.request("w9:p0")
+        };
+        let woke = run(&world.herdr, &world.ledger, &dir, &req, &mut clock);
+        assert_eq!(woke.unwrap(), ["lh-2 claimable"]);
+        assert_eq!(
+            clock.elapsed, CHECK_EVERY,
+            "woke after the first check past resume"
+        );
+    }
+
+    #[test]
+    fn a_card_announced_before_a_pause_is_announced_again_after_resume() {
+        let world = Checked::new();
+        world.touch("tasks", "1\n2\n");
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-2 claimable"]);
+        world.pause();
+        assert_eq!(world.once("w9:p0"), None);
+        assert_eq!(world.once("w9:p0"), None);
+        world.resume();
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-2 claimable"]);
+        assert_eq!(
+            world.once("w9:p0"),
+            None,
+            "announced twice after one resume"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_pause_counts_as_paused_and_warns_once() {
+        let world = Checked::new();
+        world.touch("tasks", "1\n2\n");
+        fs::create_dir_all(&world.paths.paused).unwrap();
+        fs::write(world.paths.paused.join("cards"), "not json").unwrap();
+        let dir = world.config.path().join("reports");
+        let req = Request {
+            timeout: Some(Duration::from_secs(150)),
+            ..world.request("w9:p0")
+        };
+        let mut warnings = vec![];
+        let woke = watch(
+            &world.herdr,
+            &world.ledger,
+            &dir,
+            &req,
+            &mut steps(|_| {}),
+            &mut |w| warnings.push(w.to_string()),
+        )
+        .unwrap();
+        assert!(woke.is_none());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("cards's pause is unreadable"),
+            "{warnings:?}"
+        );
     }
 }

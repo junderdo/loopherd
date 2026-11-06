@@ -1,6 +1,7 @@
 //! `loopherd tool-hook`: Claude's PreToolUse hook on Bash. Blocks a command
 //! from a lead's pane that needs a switch its herd file leaves off (D17), or
-//! a `loopherd restart --force`, which no switch allows (D20).
+//! a `loopherd restart --force` (D20) or a `loopherd pause` or `resume`
+//! (D23), which no switch allows.
 //! A guardrail on the command text, not a sandbox.
 
 use std::path::Path;
@@ -24,6 +25,8 @@ pub enum Switch {
     Rebase,
     /// Not a switch: always the human's.
     ForceRestart,
+    /// `loopherd pause` or `resume`. Not a switch: always the human's.
+    Pause,
 }
 
 impl Switch {
@@ -33,6 +36,7 @@ impl Switch {
             Switch::Install => "install",
             Switch::Rebase => "rebase",
             Switch::ForceRestart => "restart --force",
+            Switch::Pause => "pause",
         }
     }
 
@@ -42,6 +46,7 @@ impl Switch {
             Switch::Install => "the human runs scripts/install and install-hook",
             Switch::Rebase => "the human rebases and force-pushes",
             Switch::ForceRestart => "the human forces a restart",
+            Switch::Pause => "the human pauses and resumes herds",
         }
     }
 
@@ -50,7 +55,7 @@ impl Switch {
             Switch::Merge => switches.merge,
             Switch::Install => switches.install,
             Switch::Rebase => switches.rebase,
-            Switch::ForceRestart => false,
+            Switch::ForceRestart | Switch::Pause => false,
         }
     }
 }
@@ -90,6 +95,7 @@ fn decide(
                 Switch::Install,
                 Switch::Rebase,
                 Switch::ForceRestart,
+                Switch::Pause,
             ]
         });
     if needed.is_empty() {
@@ -109,6 +115,13 @@ fn decide(
     let Some(needed) = needed.into_iter().find(|s| !s.on(&switches)) else {
         return Ok(None);
     };
+    if needed == Switch::Pause {
+        return Ok(Some(format!(
+            "loopherd: blocked: {} may not run `loopherd pause` or `loopherd resume`: {}; ask with `loopherd report --kind question`",
+            lead.name,
+            needed.humans_part()
+        )));
+    }
     if needed == Switch::ForceRestart {
         return Ok(Some(format!(
             "loopherd: blocked: {} may not run `loopherd restart --force`, which skips the checks that the member is finished since its handoff, so {}; restart once its stop reads finished, or ask with `loopherd report --kind question`",
@@ -325,13 +338,25 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
         "loopherd" => match positional.first() {
             Some(&"install-hook") => Some(Switch::Install),
             Some(&"restart") => forces_restart(args),
+            Some(&"pause" | &"resume") => Some(Switch::Pause),
             _ => None,
         },
         // `cargo run -- install-hook` in a loopherd checkout, in any spelling.
         "cargo" if args.iter().any(|a| a == "install-hook") => Some(Switch::Install),
         "cargo" if args.iter().any(|a| a == "restart") => forces_restart(args),
+        // Only after `--`: `cargo test pause` is a test filter.
+        "cargo" if cargo_run_args(args).is_some_and(|a| ["pause", "resume"].contains(&a)) => {
+            Some(Switch::Pause)
+        }
         _ => None,
     }
+}
+
+/// The first word `cargo run` passes to the binary, after its `--`.
+fn cargo_run_args(args: &[String]) -> Option<&str> {
+    let run = positionals(args, &[]).first() == Some(&"run");
+    let after = args.iter().position(|a| a == "--")? + 1;
+    run.then(|| args.get(after).map(String::as_str)).flatten()
 }
 
 fn forces_restart(args: &[String]) -> Option<Switch> {
@@ -809,7 +834,7 @@ mod tests {
             Switch::Merge => s.merge = false,
             Switch::Install => s.install = false,
             Switch::Rebase => s.rebase = false,
-            Switch::ForceRestart => {}
+            Switch::ForceRestart | Switch::Pause => {}
         }
         s
     }
@@ -849,7 +874,7 @@ mod tests {
                 Switch::Merge => others_off.merge = true,
                 Switch::Install => others_off.install = true,
                 Switch::Rebase => others_off.rebase = true,
-                Switch::ForceRestart => {}
+                Switch::ForceRestart | Switch::Pause => {}
             }
             for command in commands {
                 assert_eq!(run(&leads, others_off, command), None, "{command}");
@@ -979,5 +1004,70 @@ mod tests {
             ),
             None
         );
+    }
+
+    const PAUSES: &[&str] = &[
+        "loopherd pause h",
+        "loopherd pause --all --reason 'lunch'",
+        "loopherd resume h",
+        "loopherd resume --all",
+        "loopherd pause --help",
+        "loopherd resume",
+        "/usr/local/bin/loopherd resume h",
+        "cd /x && loopherd pause h",
+        "bash -c 'loopherd resume h'",
+        "env -u X loopherd pause h",
+        "echo h | xargs loopherd resume",
+        "out=$(loopherd pause h)",
+        "cargo run -- pause h",
+        "cargo run --release -- resume --all",
+    ];
+
+    #[test]
+    fn a_leads_pause_or_resume_is_denied_whatever_its_switches() {
+        let leads = ledger(vec![lead()]);
+        for command in PAUSES {
+            assert_eq!(needs(command), [Switch::Pause], "{command}");
+            let message =
+                run(&leads, all_on(), command).unwrap_or_else(|| panic!("{command} was allowed"));
+            assert!(
+                message.contains("lead-h may not run `loopherd pause` or `loopherd resume`")
+                    && message.contains("the human pauses and resumes herds"),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn pause_and_resume_pass_outside_a_leads_pane() {
+        let workers = ledger(vec![entry("lh-1", None)]);
+        for command in PAUSES {
+            assert_eq!(
+                run(&workers, Switches::default(), command),
+                None,
+                "{command}"
+            );
+        }
+        let leads = ledger(vec![lead()]);
+        let merge = input("loopherd pause h");
+        let off = |_: &str| Ok(Switches::default());
+        assert_eq!(run_with(&leads, None, &merge, &off), None);
+        assert_eq!(
+            run_with(&leads, Some("/run/other.sock"), &merge, &off),
+            None
+        );
+    }
+
+    #[test]
+    fn words_that_only_mention_pause_need_nothing() {
+        for command in [
+            "loopherd status",
+            "echo loopherd pause h",
+            "cargo test pause",
+            "cargo test resume -- --nocapture",
+            "grep -n 'loopherd pause' src/skill.md",
+        ] {
+            assert_eq!(needs(command), [], "{command}");
+        }
     }
 }
