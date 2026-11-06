@@ -51,10 +51,20 @@ still as loopherd left them, and asks before touching one you edited or own:
 keep it, overwrite it after a `.bak`, or install loopherd's as
 `loopherd-<name>`.
 
+It then offers the `mattpocock-skills@claude-plugins-official` plugin, also
+default no, first listing any skills in `skills/` beside the settings file
+that share a name with the plugin's (both load; the plugin's are prefixed
+`mattpocock-skills:`). It adds the `anthropics/claude-plugins-official`
+marketplace if missing, leaves an installed plugin alone, and skips the
+offer when there is no `claude` CLI. With `--settings <file>`, `claude`
+runs with `CLAUDE_CONFIG_DIR` set to that file's directory, so the plugin
+goes there too, and the installer names that dir when it asks and reports.
+
 ```bash
-scripts/install --with-agents       # install or update the agent types without the question;
+scripts/install --with-agents       # install or update the agent types and ask nothing else;
                                     # with no terminal, keeps any file of yours and says so
-scripts/install --no-extras         # no agent types, no question
+scripts/install --with-skills       # install the mattpocock-skills plugin and ask nothing else
+scripts/install --no-extras         # neither extra, no questions
 scripts/install --settings <file>   # hooks in another settings file; pass the same
                                     # --settings <file> to install-hook --remove and watch
 git pull && scripts/install         # update; replaces the binary, edits settings only if out of date

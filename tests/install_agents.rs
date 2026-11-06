@@ -38,6 +38,11 @@ impl Sandbox {
         )
         .unwrap();
         fs::copy(
+            format!("{REPO}/scripts/install-skills.bash"),
+            root.join("scripts/install-skills.bash"),
+        )
+        .unwrap();
+        fs::copy(
             format!("{REPO}/scripts/install"),
             root.join("scripts/install"),
         )
@@ -62,6 +67,11 @@ impl Sandbox {
                 "#!/bin/sh\necho '{{\"reason\":\"compiler-artifact\",\"target\":{{\"name\":\"loopherd\"}},\"executable\":\"{}\"}}'\n",
                 built.display()
             ),
+        );
+        // Reports the plugin installed, so a run never reaches a real claude or the network.
+        executable(
+            &fake_bin.join("claude"),
+            "#!/bin/sh\n[ \"$*\" != 'plugin list --json' ] || echo '[{\"id\":\"mattpocock-skills@claude-plugins-official\",\"scope\":\"user\"}]'\n",
         );
         let path = format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap());
         Sandbox {
