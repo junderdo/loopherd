@@ -67,6 +67,10 @@ struct State {
     started: Vec<Started>,
     prompts: Vec<(String, String)>,
     focused: Vec<String>,
+    /// Visible text by pane; a pane without one reads as empty.
+    screens: Vec<(String, String)>,
+    /// Replaces a pane's screen when its agent is next prompted.
+    screen_on_prompt: Option<(String, String)>,
     agent_polls: u32,
     mutations: u32,
 }
@@ -241,6 +245,18 @@ impl FakeHerdr {
         tab
     }
 
+    pub fn set_screen(&self, pane_id: &str, text: &str) {
+        let mut state = self.state.borrow_mut();
+        state.screens.retain(|(p, _)| p != pane_id);
+        state.screens.push((pane_id.to_string(), text.to_string()));
+    }
+
+    /// The pane shows `text` once its agent is next prompted, as a dialog
+    /// that a prompt opens does.
+    pub fn set_screen_on_prompt(&self, pane_id: &str, text: &str) {
+        self.state.borrow_mut().screen_on_prompt = Some((pane_id.to_string(), text.to_string()));
+    }
+
     /// The agent's pane closes outside loopherd.
     pub fn remove_agent(&self, name: &str) {
         self.state
@@ -387,6 +403,20 @@ impl Herdr for FakeHerdr {
         Ok(pane.at_prompt && pane.polls_until_prompt == Some(0))
     }
 
+    fn visible_text(&self, pane_id: &str) -> Result<String> {
+        if self.is_down() {
+            bail!("herdr server not running");
+        }
+        Ok(self
+            .state
+            .borrow()
+            .screens
+            .iter()
+            .find(|(p, _)| p == pane_id)
+            .map(|(_, text)| text.clone())
+            .unwrap_or_default())
+    }
+
     fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<NewTab> {
         self.mutating();
         if self.fail_create_tab {
@@ -496,6 +526,10 @@ impl Herdr for FakeHerdr {
             .borrow_mut()
             .prompts
             .push((name.to_string(), text.to_string()));
+        let next = self.state.borrow_mut().screen_on_prompt.take();
+        if let Some((pane, screen)) = next {
+            self.set_screen(&pane, &screen);
+        }
         Ok(())
     }
 
