@@ -67,6 +67,8 @@ impl Sandbox {
         let mut cmd = Command::new(INSTALL);
         cmd.args(args)
             .env("HOME", &self.home)
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("XDG_STATE_HOME")
             .env("PATH", &self.path);
         cmd
     }
@@ -180,6 +182,8 @@ fn install_without_jq_stops_before_building() {
 
     let out = Command::new(INSTALL)
         .env("HOME", &sandbox.home)
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("XDG_STATE_HOME")
         .env("PATH", no_jq.path())
         .output()
         .unwrap();
@@ -398,6 +402,8 @@ fn install_without_a_tty_writes_no_escape_codes() {
         .env("TERM", "xterm-256color")
         .env_remove("NO_COLOR")
         .env_remove("LOOPHERD_NO_SPLASH")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("XDG_STATE_HOME")
         .output()
         .unwrap();
 
@@ -508,9 +514,16 @@ fn install_without_the_splash_file_still_installs() {
     let scripts = dir.path().join("scripts");
     fs::create_dir_all(&scripts).unwrap();
     fs::copy(INSTALL, scripts.join("install")).unwrap();
+    fs::copy(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install-agents.bash"),
+        scripts.join("install-agents.bash"),
+    )
+    .unwrap();
     let sandbox = Sandbox::new(false);
 
     let out = Command::new(scripts.join("install"))
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("XDG_STATE_HOME")
         .args(["--settings", "/tmp/s.json"])
         .env("HOME", &sandbox.home)
         .env("PATH", &sandbox.path)

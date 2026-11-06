@@ -22,5 +22,8 @@ together across sessions, built as a layer over herdr's CLI/socket API.
   `scripts/install`, run by the shepherd, or by a herd's lead whose `[lead]`
   sets `install = true` (D17). Other members never run it; tests and manual
   runs of `install-hook` pass `--settings <temp file>`.
+- **Agent types**: `agents/` holds loopherd's own subagent definitions,
+  which `scripts/install --with-agents` offers and hash-tracks (D26). Write
+  them fresh; never copy from the human's `~/.claude/agents/` or `~/leaven`.
 - **Checks** before calling work done: `cargo fmt --check`,
   `cargo clippy -- -D warnings`, `cargo test`.

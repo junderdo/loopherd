@@ -93,3 +93,16 @@ fn skill_refuses_a_subcommand_beside_it() {
     assert!(!out.status.success(), "{out:?}");
     assert!(out.stdout.is_empty(), "{out:?}");
 }
+
+#[test]
+fn the_skill_asks_for_a_reviewer_by_role() {
+    let home = tempfile::tempdir().unwrap();
+    let printed = String::from_utf8(skill(home.path())).unwrap();
+    let flat = printed.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains(
+            "the `reviewer` agent type, else `loopherd-reviewer`, else a general-purpose subagent"
+        ),
+        "{flat}"
+    );
+}
