@@ -40,6 +40,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D23](decisions/D23.md) | `loopherd pause`/`resume` mark a herd paused in a state file: `feed` reaps but spawns nothing, a lead's watch prints no `claimable`, and in-flight work drains. |
 | [D24](decisions/D24.md) | `loopherd view` reads again on any herdr event (lifecycle plus per-pane status subscriptions), polling every 10s while subscribed and every 2s as the fallback. |
 | [D25](decisions/D25.md) | A queue can route each task to one of several templates: with `[queue] templates`, the first word of each `source` line names the template; one `max` covers them all. |
+| [D26](decisions/D26.md) | `scripts/install` optionally copies loopherd's own agent types into `~/.claude/agents/` (hash-tracked, never overwriting unasked) and installs the mattpocock-skills plugin; both default to no. |
 
 ## Emerging model
 
