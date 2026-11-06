@@ -113,7 +113,21 @@ impl Sandbox {
         cmd.env("HOME", &self.home)
             .env("XDG_STATE_HOME", &self.state)
             .env("PATH", &self.path)
-            .env("LOOPHERD_NO_SPLASH", "1");
+            .env("LOOPHERD_NO_SPLASH", "1")
+            .env_remove("CLAUDE_CONFIG_DIR");
+    }
+
+    /// Runs the installer with stdin not a terminal, from `cwd`, with `vars` set.
+    fn install_with(&self, args: &[&str], cwd: &Path, vars: &[(&str, &Path)]) -> Output {
+        let mut cmd = Command::new(self.root.join("scripts/install"));
+        cmd.args(args).current_dir(cwd).stdin(Stdio::null());
+        self.env(&mut cmd);
+        for (key, value) in vars {
+            cmd.env(key, value);
+        }
+        let out = cmd.output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        out
     }
 
     /// Runs the installer with stdin not a terminal.
@@ -576,4 +590,137 @@ fn remove_offers_no_agents() {
 
     assert!(!out.contains("Install loopherd's agent types"), "{out}");
     assert_eq!(sandbox.agent_files(), Vec::<String>::new());
+}
+
+#[test]
+fn a_file_installed_under_one_spelling_of_the_dir_is_updated_under_another() {
+    let sandbox = Sandbox::new();
+    let config = sandbox.home.join("config");
+    fs::create_dir_all(&config).unwrap();
+    let link = sandbox.home.join("linked-config");
+    std::os::unix::fs::symlink(&config, &link).unwrap();
+    let trailing = PathBuf::from(format!("{}/", link.display()));
+    sandbox.install_with(
+        &["--with-agents"],
+        &sandbox.home,
+        &[("CLAUDE_CONFIG_DIR", &trailing)],
+    );
+    sandbox.set_ours("builder", "---\nname: builder\n---\nnewer\n");
+
+    let out = sandbox.install_with(
+        &["--with-agents", "--settings", "./config/settings.json"],
+        &sandbox.home,
+        &[],
+    );
+
+    assert_eq!(
+        fs::read_to_string(config.join("agents/builder.md")).unwrap(),
+        "---\nname: builder\n---\nnewer\n"
+    );
+    assert!(stdout(&out).contains("updated "), "{}", stdout(&out));
+}
+
+#[test]
+fn the_ledger_goes_under_home_when_xdg_state_home_is_unset() {
+    let sandbox = Sandbox::new();
+    let mut cmd = Command::new(sandbox.root.join("scripts/install"));
+    cmd.arg("--with-agents").stdin(Stdio::null());
+    sandbox.env(&mut cmd);
+    cmd.env_remove("XDG_STATE_HOME");
+
+    assert!(cmd.output().unwrap().status.success());
+
+    let ledger =
+        fs::read_to_string(sandbox.home.join(".local/state/loopherd/agents.sha256")).unwrap();
+    assert!(
+        ledger.contains(&format!(" {}\n", sandbox.installed("scout.md").display())),
+        "{ledger}"
+    );
+}
+
+#[test]
+fn a_target_that_is_not_a_readable_file_is_not_offered_overwrite_and_the_rest_install() {
+    let sandbox = Sandbox::new();
+    fs::create_dir_all(sandbox.installed("reviewer.md")).unwrap();
+
+    let Some(out) = sandbox.install_on_terminal(&["--with-agents"], "o\n") else {
+        return;
+    };
+
+    assert!(!out.contains("[o]verwrite"), "{out}");
+    assert!(sandbox.installed("reviewer.md").is_dir());
+    assert_eq!(sandbox.read("scout.md"), sandbox.ours("scout"));
+}
+
+#[test]
+fn typing_an_action_word_cannot_pick_an_option_not_offered() {
+    let sandbox = Sandbox::new();
+    sandbox.put("strict.md", "---\nname: reviewer\n---\nmine\n");
+
+    for typed in ["overwrite\n", "alias\n"] {
+        let Some(out) = sandbox.install_on_terminal(&["--with-agents"], typed) else {
+            return;
+        };
+
+        assert!(!sandbox.installed("reviewer.md").exists(), "{typed}: {out}");
+        assert!(
+            !sandbox.installed("loopherd-reviewer.md").exists(),
+            "{typed}: {out}"
+        );
+    }
+}
+
+#[test]
+fn loopherds_own_file_is_left_as_is_when_another_file_declares_its_name() {
+    let sandbox = Sandbox::new();
+    sandbox.install(&["--with-agents"]);
+    sandbox.put("strict.md", "---\nname: reviewer\n---\nmine\n");
+
+    let out = sandbox.install(&["--with-agents"]);
+
+    let said = format!(
+        "left loopherd's {} as is: {} already declares name: reviewer",
+        sandbox.installed("reviewer.md").display(),
+        sandbox.installed("strict.md").display()
+    );
+    assert!(stdout(&out).contains(&said), "{}", stdout(&out));
+    assert!(!stdout(&out).contains("kept "), "{}", stdout(&out));
+}
+
+#[test]
+fn a_file_edited_since_install_answered_overwrite_is_backed_up_and_replaced() {
+    let sandbox = Sandbox::new();
+    sandbox.install(&["--with-agents"]);
+    sandbox.put("builder.md", "my edit\n");
+
+    let Some(out) = sandbox.install_on_terminal(&["--with-agents"], "o\n") else {
+        return;
+    };
+
+    assert!(out.contains("edited since loopherd installed it"), "{out}");
+    assert_eq!(sandbox.read("builder.md"), sandbox.ours("builder"));
+    let backup = sandbox
+        .agent_files()
+        .into_iter()
+        .find(|f| f.starts_with("builder.md.") && f.ends_with(".bak"))
+        .unwrap();
+    assert_eq!(sandbox.read(&backup), "my edit\n");
+}
+
+#[test]
+fn a_file_edited_since_install_answered_loopherd_name_keeps_the_edit() {
+    let sandbox = Sandbox::new();
+    sandbox.install(&["--with-agents"]);
+    sandbox.put("builder.md", "my edit\n");
+
+    let Some(_) = sandbox.install_on_terminal(&["--with-agents"], "l\n") else {
+        return;
+    };
+
+    assert_eq!(sandbox.read("builder.md"), "my edit\n");
+    assert!(
+        sandbox
+            .read("loopherd-builder.md")
+            .contains("\nname: loopherd-builder\n")
+    );
 }

@@ -56,13 +56,17 @@ agents_declaring() {
 # Sets conflict to why $2 needs a question, empty when it is absent, already
 # loopherd's text, or unchanged since loopherd installed it. Sets
 # conflict_elsewhere when the clash is another file, so overwriting $2 can't
-# settle it. Anything it can't read or hash counts as the human's.
+# settle it, and conflict_ours when $2 is then still as loopherd installed it. Anything it can't read or hash counts as the human's.
 agents_check() {
   local want=$1 target=$2 agent=$3 sha recorded others
-  conflict= conflict_elsewhere=
+  conflict= conflict_elsewhere= conflict_ours=
   others=$(agents_declaring "$agent" "$target")
   if [[ -n "$others" ]]; then
     conflict="${others//$'\n'/, } already declares name: $agent" conflict_elsewhere=1
+    if [[ -f "$target" && -r "$target" && ! -L "$target" ]]; then
+      sha=$(agents_sha "$target")
+      [[ "$sha" != "$(agents_recorded "$target")" ]] || conflict_ours=1
+    fi
     return
   fi
   [[ -e "$target" || -L "$target" ]] || return 0
@@ -103,28 +107,43 @@ agents_place() {
     fi
     return
   fi
+  if [[ -n "$conflict_ours" ]]; then
+    echo "left loopherd's $target as is: $conflict"
+    return
+  fi
   if [[ ! -t 0 ]]; then
     echo "kept $target ($conflict); run scripts/install on a terminal to choose"
     return
   fi
+  local can_overwrite=
+  [[ -n "$conflict_elsewhere" || ! -f "$target" || ! -r "$target" ]] || can_overwrite=1
   local options="[k]eep yours" keys=K
-  [[ -n "$conflict_elsewhere" ]] || options+=", [o]verwrite after a backup" keys+=/o
+  [[ -z "$can_overwrite" ]] || options+=", [o]verwrite after a backup" keys+=/o
   [[ -z "$can_alias" ]] || options+=", or install loopherd's as loopherd-$name.md [l]" keys+=/l
   read -r -p "$target: $conflict. $options? [$keys] " choice || choice=
+  local action=keep
   case "$choice" in
-    o | O) [[ -n "$conflict_elsewhere" ]] || choice=overwrite ;;
-    l | L) [[ -z "$can_alias" ]] || choice=alias ;;
+    o | O) [[ -z "$can_overwrite" ]] || action=overwrite ;;
+    l | L) [[ -z "$can_alias" ]] || action=alias ;;
   esac
-  case "$choice" in
+  case "$action" in
     overwrite)
       backup="$target.$(date -u +%Y%m%dT%H%M%SZ).bak"
-      cp -P "$target" "$backup"
+      if ! cp -P "$target" "$backup"; then
+        echo "kept $target: could not back it up to $backup"
+        return
+      fi
       agents_copy "$want" "$target"
       echo "overwrote $target; backup $backup"
       ;;
     alias) agents_place "$name" "$(agents_aliased "$name")" "$agents_dir/loopherd-$name.md" "loopherd-$name" "" ;;
-    *) echo "kept $target" ;;
+    keep) echo "kept $target" ;;
   esac
+}
+
+# The ledger keys on paths, so every spelling of the dir must name it the same way.
+agents_resolve_dir() {
+  [[ ! -d "$agents_dir" ]] || agents_dir=$(cd "$agents_dir" && pwd -P)
 }
 
 # Sets pick_want, pick_target, pick_agent and pick_can_alias for agent $1. One installed
@@ -147,6 +166,7 @@ offer_agents() {
     echo "skipped loopherd's agent types (no terminal); add --with-agents to install them"
     return 0
   fi
+  agents_resolve_dir
   agents_tmp=$(mktemp -d)
   trap 'rm -rf "$agents_tmp"' EXIT
   local overlaps=()
@@ -163,6 +183,8 @@ offer_agents() {
     read -r -p "Install loopherd's agent types (${agent_names[*]}) into $agents_dir? [y/N] " answer || answer=
     [[ "$answer" == [yY]* ]] || { echo "skipped loopherd's agent types"; rm -rf "$agents_tmp"; return 0; }
   fi
+  mkdir -p "$agents_dir"
+  agents_resolve_dir
   for name in "${agent_names[@]}"; do
     agents_pick "$name"
     agents_place "$name" "$pick_want" "$pick_target" "$pick_agent" "$pick_can_alias"
