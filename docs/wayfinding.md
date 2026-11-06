@@ -39,6 +39,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D22](decisions/D22.md) | `watch`'s lead lookup and `retire --close`'s reuse check match on pane and herdr socket like D21; a pane id in another herdr blocks neither. |
 | [D23](decisions/D23.md) | `loopherd pause`/`resume` mark a herd paused in a state file: `feed` reaps but spawns nothing, a lead's watch prints no `claimable`, and in-flight work drains. |
 | [D24](decisions/D24.md) | `loopherd view` reads again on any herdr event (lifecycle plus per-pane status subscriptions), polling every 10s while subscribed and every 2s as the fallback. |
+| [D25](decisions/D25.md) | A queue can route each task to one of several templates: with `[queue] templates`, the first word of each `source` line names the template; one `max` covers them all. |
 
 ## Emerging model
 
