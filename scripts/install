@@ -3,25 +3,29 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/install [--no-splash] [--with-agents | --no-extras]
+Usage: scripts/install [--no-splash] [--with-agents] [--with-skills] [--no-extras]
                        [--settings <file>] [install-hook args...]
 
 Build loopherd, install it as ~/.local/bin/loopherd, and add its Claude
 Stop/StopFailure/SessionStart/PreToolUse hooks and the loopherd skill.
 On a terminal it then offers loopherd's agent types (builder, reviewer,
-researcher, scout), default no. Other arguments go to `loopherd install-hook`.
+researcher, scout) and the mattpocock-skills plugin, each default no. Other
+arguments go to `loopherd install-hook`.
 
   scripts/install                      hooks in ~/.claude/settings.json, skill in ~/.claude/skills
   scripts/install --settings <file>    hooks in <file>, skill in skills/ beside it
   scripts/install --no-splash          skip the opening animation (or set LOOPHERD_NO_SPLASH=1)
-  scripts/install --with-agents        also install the agent types, without the question
-  scripts/install --no-extras          install no agent types, without the question
+  scripts/install --with-agents        also install the agent types, asking nothing else
+  scripts/install --with-skills        also install the mattpocock-skills plugin, asking nothing else
+  scripts/install --no-extras          install neither, without the questions
   scripts/install -h, --help           print this and exit
 USAGE
 }
 
 splash=1
-extras=ask
+agents=ask
+skills=ask
+no_extras=
 settings=
 removing=
 args=()
@@ -31,9 +35,9 @@ for arg in "$@"; do
   case "$arg" in
     -h | --help) usage; exit 0 ;;
     --no-splash) splash= ;;
-    --with-agents | --no-extras)
-      [[ "$extras" == ask ]] || { echo "install: give one of --with-agents and --no-extras" >&2; exit 2; }
-      extras=$arg ;;
+    --with-agents) agents=yes ;;
+    --with-skills) skills=yes ;;
+    --no-extras) no_extras=1 ;;
     --settings) want_settings=1; args+=("$arg") ;;
     --remove) removing=1; args+=("$arg") ;;
     --settings=*) settings=${arg#--settings=}; args+=("$arg") ;;
@@ -41,9 +45,21 @@ for arg in "$@"; do
   esac
 done
 
+if [[ -n "$no_extras" ]]; then
+  [[ "$agents$skills" == askask ]] || { echo "install: --no-extras can't go with --with-agents or --with-skills" >&2; exit 2; }
+  agents=no skills=no
+elif [[ "$agents$skills" != askask ]]; then
+  # Naming one extra means just those, with no questions.
+  [[ "$agents" == yes ]] || agents=no
+  [[ "$skills" == yes ]] || skills=no
+fi
+[[ -z "$removing" ]] || agents=no skills=no
+
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=install-agents.bash
 source "$root/scripts/install-agents.bash"
+# shellcheck source=install-skills.bash
+source "$root/scripts/install-skills.bash"
 
 command -v jq >/dev/null || { echo "install: needs jq (to read cargo's build output); install it first" >&2; exit 1; }
 
@@ -70,7 +86,13 @@ trap - EXIT
 # The ${..+..} form: bash before 4.4 calls an empty array unbound under set -u.
 "$bin_dir/loopherd" install-hook ${args[@]+"${args[@]}"}
 
-agents_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/agents"
-[[ -z "$settings" ]] || agents_dir="$(dirname "$settings")/agents"
-[[ -z "$removing" ]] || extras=--no-extras
-offer_agents "$extras" "$root/agents" "$agents_dir" "${XDG_STATE_HOME:-$HOME/.local/state}/loopherd/agents.sha256"
+claude_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+[[ -z "$settings" ]] || claude_dir=$(dirname "$settings")
+case "$agents" in yes) agents=--with-agents ;; no) agents=--no-extras ;; esac
+offer_agents "$agents" "$root/agents" "$claude_dir/agents" "${XDG_STATE_HOME:-$HOME/.local/state}/loopherd/agents.sha256"
+# The plugin goes into the config dir beside --settings, like the hooks and agents.
+if [[ -n "$settings" ]]; then
+  CLAUDE_CONFIG_DIR=$claude_dir offer_skills "$skills" "$claude_dir"
+else
+  offer_skills "$skills" "$claude_dir"
+fi

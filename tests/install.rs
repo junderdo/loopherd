@@ -49,6 +49,11 @@ impl Sandbox {
             ),
         };
         executable(&fake_bin.join("cargo"), &cargo);
+        // Reports the plugin installed, so a run never reaches a real claude or the network.
+        executable(
+            &fake_bin.join("claude"),
+            "#!/bin/sh\n[ \"$*\" != 'plugin list --json' ] || echo '[{\"id\":\"mattpocock-skills@claude-plugins-official\"}]'\n",
+        );
         let path = format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap());
         Sandbox {
             _dir: dir,
@@ -517,6 +522,11 @@ fn install_without_the_splash_file_still_installs() {
     fs::copy(
         concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install-agents.bash"),
         scripts.join("install-agents.bash"),
+    )
+    .unwrap();
+    fs::copy(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install-skills.bash"),
+        scripts.join("install-skills.bash"),
     )
     .unwrap();
     let sandbox = Sandbox::new(false);
