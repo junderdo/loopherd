@@ -341,22 +341,29 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
             Some(&"pause" | &"resume") => Some(Switch::Pause),
             _ => None,
         },
+        // `cargo run -- pause` in a loopherd checkout, in any spelling;
+        // first, since its reason may hold any word.
+        "cargo" if cargo_runs_pause(args) => Some(Switch::Pause),
         // `cargo run -- install-hook` in a loopherd checkout, in any spelling.
         "cargo" if args.iter().any(|a| a == "install-hook") => Some(Switch::Install),
         "cargo" if args.iter().any(|a| a == "restart") => forces_restart(args),
-        // Only after `--`: `cargo test pause` is a test filter.
-        "cargo" if cargo_run_args(args).is_some_and(|a| ["pause", "resume"].contains(&a)) => {
-            Some(Switch::Pause)
-        }
         _ => None,
     }
 }
 
-/// The first word `cargo run` passes to the binary, after its `--`.
-fn cargo_run_args(args: &[String]) -> Option<&str> {
-    let run = positionals(args, &[]).first() == Some(&"run");
-    let after = args.iter().position(|a| a == "--")? + 1;
-    run.then(|| args.get(after).map(String::as_str)).flatten()
+/// Whether the word after cargo's `--` is `pause` or `resume`, unless that
+/// `--` passes it to tests: `cargo test -- pause` is a test filter.
+fn cargo_runs_pause(args: &[String]) -> bool {
+    let Some(split) = args.iter().position(|a| a == "--") else {
+        return false;
+    };
+    let tests = args[..split]
+        .iter()
+        .any(|a| ["test", "t", "bench"].contains(&a.as_str()));
+    !tests
+        && args
+            .get(split + 1)
+            .is_some_and(|a| a == "pause" || a == "resume")
 }
 
 fn forces_restart(args: &[String]) -> Option<Switch> {
@@ -1021,6 +1028,13 @@ mod tests {
         "out=$(loopherd pause h)",
         "cargo run -- pause h",
         "cargo run --release -- resume --all",
+        "cargo run -- pause h --reason restart",
+        "cargo run -- resume restart",
+        "cargo run -- pause h --reason install-hook",
+        "cargo +nightly run -- pause h",
+        "cargo r -- pause h",
+        "cargo --color always run -- pause h",
+        "cargo run -q --bin loopherd -- resume --all",
     ];
 
     #[test]
@@ -1065,6 +1079,8 @@ mod tests {
             "echo loopherd pause h",
             "cargo test pause",
             "cargo test resume -- --nocapture",
+            "cargo test -- pause",
+            "cargo bench -- resume",
             "grep -n 'loopherd pause' src/skill.md",
         ] {
             assert_eq!(needs(command), [], "{command}");

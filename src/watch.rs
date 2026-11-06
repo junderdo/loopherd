@@ -268,16 +268,7 @@ impl Checks<'_> {
         let Ok((checks, queue)) = loaded else {
             return Ok(vec![]);
         };
-        let reading = pause::read(&self.paths.paused, &self.herd);
-        warn_once(
-            &mut self.unreadable_pause,
-            reading.warning(&self.herd),
-            warn,
-        );
-        let paused = reading.pause().is_some();
-        if paused {
-            self.fired.forget_claimable()?;
-        }
+        self.fired.reload()?;
         let budget = Budget {
             deadline: Instant::now() + CHECK_EVERY,
             each: self.timeout,
@@ -295,6 +286,11 @@ impl Checks<'_> {
                 events.push(format!("{} {}", worker.name, line::MERGED));
             }
         }
+        // Read last, so a pause during the member checks counts.
+        let reading = pause::read(&self.paths.paused, &self.herd);
+        let warning = reading.warning(&self.herd);
+        warn_once(&mut self.unreadable_pause, warning, warn);
+        let paused = reading.pause().is_some();
         if let (false, Some(queue), Some(timeout)) = (paused, queue, budget.left()) {
             let names = claimable(ledger, self.paths, &queue, &self.herd, freed, timeout);
             // A running feed may be spawning these before it records them.
@@ -373,10 +369,11 @@ fn feeding(paths: &Paths) -> Result<bool> {
 /// The events a lead's watch has printed, one per line of
 /// `watch-<lead>.fired`, so a re-armed watch doesn't wake on them again.
 /// Its first line names the lead's spawn, so a re-created lead starts afresh.
-/// A [`PAUSED`] line forgets the claimable keys above it, so a card announced
+/// A [`RESUMED`] line forgets the claimable keys above it, so a card announced
 /// before a pause is announced again after resume.
 struct Fired {
     path: PathBuf,
+    header: String,
     keys: HashSet<String>,
     new: Vec<String>,
 }
@@ -384,49 +381,45 @@ struct Fired {
 impl Fired {
     /// Called holding the lead's watch lock, so no other watch writes meanwhile.
     fn load(dir: &Path, lead: &str, created: &str) -> Result<Fired> {
-        let path = dir.join(format!("watch-{lead}.fired"));
-        let header = format!("lead {created}");
-        let text = match fs::read_to_string(&path) {
+        let mut fired = Fired {
+            path: fired_path(dir, lead),
+            header: format!("lead {created}"),
+            keys: HashSet::new(),
+            new: vec![],
+        };
+        fired.reload()?;
+        Ok(fired)
+    }
+
+    /// Re-reads the keys, so a resume since the last read counts.
+    fn reload(&mut self) -> Result<()> {
+        let path = &self.path;
+        let text = match fs::read_to_string(path) {
             Ok(text) => text,
             Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
         };
         let mut lines = text.lines();
-        let keys = if lines.next() == Some(header.as_str()) {
-            let mut keys = HashSet::<String>::new();
-            for line in lines {
-                if line == PAUSED {
-                    keys.retain(|k| !is_claimable(k));
-                } else {
-                    keys.insert(line.to_string());
-                }
-            }
-            keys
-        } else {
-            fs::write(&path, format!("{header}\n"))
-                .with_context(|| format!("write {}", path.display()))?;
-            HashSet::new()
-        };
-        Ok(Fired {
-            path,
-            keys,
-            new: vec![],
-        })
-    }
-
-    /// Forgets the claimable keys, at once, as a pause was seen.
-    fn forget_claimable(&mut self) -> Result<()> {
-        if !self.keys.iter().any(|k| is_claimable(k)) {
-            return Ok(());
+        self.keys.clear();
+        if lines.next() != Some(self.header.as_str()) {
+            return fs::write(path, format!("{}\n", self.header))
+                .with_context(|| format!("write {}", path.display()));
         }
-        self.keys.retain(|k| !is_claimable(k));
-        append(&self.path, &format!("{PAUSED}\n"))
+        for line in lines {
+            if line == RESUMED {
+                self.keys.retain(|k| !is_claimable(k));
+            } else {
+                self.keys.insert(line.to_string());
+            }
+        }
+        Ok(())
     }
 
     /// The keys to append once `events` print.
     fn with(&self, events: Vec<String>) -> Fired {
         Fired {
             path: self.path.clone(),
+            header: self.header.clone(),
             keys: HashSet::new(),
             new: events,
         }
@@ -439,9 +432,25 @@ impl Fired {
     }
 }
 
-/// The line in `watch-<lead>.fired` marking a pause seen. Every key has a
-/// space in it, so no key reads as this.
-const PAUSED: &str = "paused";
+/// The line `resume` appends to `watch-<lead>.fired`. Every key has a space
+/// in it, so no key reads as this.
+const RESUMED: &str = "resumed";
+
+fn fired_path(dir: &Path, lead: &str) -> PathBuf {
+    dir.join(format!("watch-{lead}.fired"))
+}
+
+/// Makes `lead`'s watch announce its herd's claimable tasks again, as the
+/// herd was resumed. A lead whose watch never fired has nothing to forget.
+pub fn forget_claimable(dir: &Path, lead: &str) -> Result<()> {
+    let path = fired_path(dir, lead);
+    match OpenOptions::new().append(true).open(&path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        file => file
+            .and_then(|mut file| file.write_all(format!("{RESUMED}\n").as_bytes()))
+            .with_context(|| format!("write {}", path.display())),
+    }
+}
 
 fn is_claimable(key: &str) -> bool {
     key.strip_suffix(line::CLAIMABLE)
@@ -2184,7 +2193,8 @@ mod tests {
 
         fn resume(&self) {
             let herds = crate::pause::Herds::One("cards");
-            crate::pause::resume(&self.paths, &self.ledger, herds).unwrap();
+            let reports = self.config.path().join("reports");
+            crate::pause::resume(&self.paths, &self.ledger, &reports, herds).unwrap();
         }
     }
 
@@ -2265,5 +2275,42 @@ mod tests {
             warnings[0].contains("cards's pause is unreadable"),
             "{warnings:?}"
         );
+    }
+
+    #[test]
+    fn a_pause_no_watch_saw_still_re_announces_on_resume() {
+        let world = Checked::new();
+        world.touch("tasks", "1\n2\n");
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-2 claimable"]);
+        world.pause();
+        world.resume();
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-2 claimable"]);
+    }
+
+    #[test]
+    fn a_running_watch_re_announces_at_its_first_check_after_resume() {
+        let world = Checked::new();
+        world.touch("tasks", "1\n2\n");
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-2 claimable"]);
+        let dir = world.config.path().join("reports");
+        let mut clock = steps(|poll| match poll {
+            3 => world.pause(),
+            5 => world.resume(),
+            _ => {}
+        });
+        let req = Request {
+            timeout: Some(Duration::from_secs(150)),
+            ..world.request("w9:p0")
+        };
+        let woke = run(&world.herdr, &world.ledger, &dir, &req, &mut clock);
+        assert_eq!(woke.unwrap(), ["lh-2 claimable"]);
+        assert_eq!(clock.elapsed, CHECK_EVERY);
+    }
+
+    #[test]
+    fn resume_leaves_a_lead_with_no_fired_file_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        forget_claimable(dir.path(), "lead-cards").unwrap();
+        assert!(!fired_path(dir.path(), "lead-cards").exists());
     }
 }

@@ -1321,7 +1321,8 @@ mod tests {
         setup.tasks("1\n");
         pause_herd(&setup);
         let herds = crate::pause::Herds::One("prs");
-        crate::pause::resume(&setup.paths(), &ledger, herds).unwrap();
+        let reports = setup.config.path().join("reports");
+        crate::pause::resume(&setup.paths(), &ledger, &reports, herds).unwrap();
 
         let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
 

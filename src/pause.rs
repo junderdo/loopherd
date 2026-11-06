@@ -251,7 +251,9 @@ pub fn pause(paths: &Paths, herds: Herds, reason: Option<&str>, now: SystemTime)
 /// Resumes each herd, with the next step that gets it workers again; prompts
 /// nobody. A named herd's pause file goes even when its herd file is gone.
 /// A herd that fails doesn't stop the rest.
-pub fn resume(paths: &Paths, ledger: &dyn Ledger, herds: Herds) -> Result<Done> {
+/// Each led herd resumed has its lead's watch announce its claimable tasks
+/// again, `reports` holding the watch's fired keys.
+pub fn resume(paths: &Paths, ledger: &dyn Ledger, reports: &Path, herds: Herds) -> Result<Done> {
     let entries = ledger.entries().context("ledger")?;
     let mut lines = vec![];
     let herds = match herds {
@@ -272,10 +274,16 @@ pub fn resume(paths: &Paths, ledger: &dyn Ledger, herds: Herds) -> Result<Done> 
             .values()
             .find(|e| e.is_lead() && !e.retired && e.herd.as_deref() == Some(herd));
         Ok(match lead {
-            Some(lead) => format!(
-                "resumed {herd}; {}'s watch sees claimable tasks within 60s",
-                lead.name
-            ),
+            Some(lead) => match crate::watch::forget_claimable(reports, &lead.name) {
+                Ok(()) => format!(
+                    "resumed {herd}; {}'s watch sees claimable tasks within 60s",
+                    lead.name
+                ),
+                Err(e) => format!(
+                    "resumed {herd}; warning: {}'s watch won't announce tasks it announced before the pause: {e:#}",
+                    lead.name
+                ),
+            },
             None if herd::require(paths, herd).is_err() => {
                 format!("resumed {herd}; it has no herd file, so nothing feeds it")
             }
@@ -388,6 +396,10 @@ mod tests {
     }
 
     impl Setup {
+        fn reports(&self) -> PathBuf {
+            self.dir.path().join("reports")
+        }
+
         /// Herd files for each of `herds`.
         fn new(herds: &[&str]) -> Setup {
             let dir = tempfile::tempdir().unwrap();
@@ -501,7 +513,7 @@ mod tests {
         assert!(err.contains("nope.toml"), "{err}");
         assert!(!s.dir.path().join("paused").exists());
 
-        let err = resume(&s.paths(), &ledger(&[]), Herds::One("nope")).unwrap_err();
+        let err = resume(&s.paths(), &ledger(&[]), &s.reports(), Herds::One("nope")).unwrap_err();
         assert!(format!("{err:#}").starts_with("herd: read "), "{err:#}");
     }
 
@@ -526,7 +538,7 @@ mod tests {
         assert_eq!(files, ["docs", "prs"]);
         assert_eq!(s.paused("later"), None);
 
-        resume(&s.paths(), &ledger(&[]), Herds::All).unwrap();
+        resume(&s.paths(), &ledger(&[]), &s.reports(), Herds::All).unwrap();
         assert_eq!((s.paused("docs"), s.paused("prs")), (None, None));
     }
 
@@ -535,9 +547,14 @@ mod tests {
         let s = Setup::new(&["prs"]);
         pause(&s.paths(), Herds::One("prs"), None, SystemTime::now()).unwrap();
         let retired_lead = member("lead-prs", "prs", true, true);
-        let lines = resume(&s.paths(), &ledger(&[retired_lead]), Herds::One("prs"))
-            .unwrap()
-            .lines;
+        let lines = resume(
+            &s.paths(),
+            &ledger(&[retired_lead]),
+            &s.reports(),
+            Herds::One("prs"),
+        )
+        .unwrap()
+        .lines;
         assert_eq!(
             lines,
             ["resumed prs; run `loopherd feed prs` to spawn workers"]
@@ -555,9 +572,14 @@ mod tests {
             member("lead-prs", "prs", true, false),
             member("pr-1", "prs", false, false),
         ];
-        let lines = resume(&s.paths(), &ledger(&members), Herds::One("prs"))
-            .unwrap()
-            .lines;
+        let lines = resume(
+            &s.paths(),
+            &ledger(&members),
+            &s.reports(),
+            Herds::One("prs"),
+        )
+        .unwrap()
+        .lines;
         assert_eq!(
             lines,
             ["resumed prs; lead-prs's watch sees claimable tasks within 60s"]
@@ -593,7 +615,9 @@ mod tests {
             std::slice::from_ref(&hint)
         );
         assert_eq!(
-            resume(&s.paths(), &ledger(&[]), Herds::All).unwrap().lines,
+            resume(&s.paths(), &ledger(&[]), &s.reports(), Herds::All)
+                .unwrap()
+                .lines,
             [hint]
         );
     }
@@ -626,7 +650,7 @@ mod tests {
     #[test]
     fn resuming_an_unpaused_herd_says_so() {
         let s = Setup::new(&["prs"]);
-        let lines = resume(&s.paths(), &ledger(&[]), Herds::One("prs"))
+        let lines = resume(&s.paths(), &ledger(&[]), &s.reports(), Herds::One("prs"))
             .unwrap()
             .lines;
         assert_eq!(lines, ["prs is not paused"]);
@@ -689,7 +713,7 @@ mod tests {
         );
         assert_eq!(paused.lines[2], "prs now paused since 2026-11-05T09:00:00Z");
 
-        let resumed = resume(&s.paths(), &ledger(&[]), Herds::All).unwrap();
+        let resumed = resume(&s.paths(), &ledger(&[]), &s.reports(), Herds::All).unwrap();
 
         assert_eq!(resumed.code, 1);
         assert_eq!(resumed.lines.len(), 3, "{:?}", resumed.lines);
@@ -714,7 +738,7 @@ mod tests {
         pause(&s.paths(), Herds::One("prs"), None, SystemTime::now()).unwrap();
         fs::remove_file(s.dir.path().join("herds/prs.toml")).unwrap();
 
-        let done = resume(&s.paths(), &ledger(&[]), Herds::One("prs")).unwrap();
+        let done = resume(&s.paths(), &ledger(&[]), &s.reports(), Herds::One("prs")).unwrap();
 
         assert_eq!(
             done.lines,
@@ -728,7 +752,7 @@ mod tests {
         let s = Setup::new(&["prs"]);
         fs::create_dir(s.dir.path().join("paused")).unwrap();
 
-        let err = resume(&s.paths(), &ledger(&[]), Herds::One("..")).unwrap_err();
+        let err = resume(&s.paths(), &ledger(&[]), &s.reports(), Herds::One("..")).unwrap_err();
 
         assert!(format!("{err:#}").contains("is not a herd name"), "{err:#}");
         assert!(s.dir.path().join("paused").exists());
