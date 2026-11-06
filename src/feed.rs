@@ -401,6 +401,7 @@ mod tests {
     use crate::herd::Paths;
     use crate::herdr::fake::FakeHerdr;
     use crate::ledger::{AgentRecord, MemLedger};
+    use crate::spawn::Checkout;
 
     struct Setup {
         config: tempfile::TempDir,
@@ -1556,7 +1557,8 @@ mod tests {
     }
 
     #[test]
-    fn the_documented_routed_queue_sends_wayfinding_cards_to_their_own_template() {
+    fn the_documented_routed_queue_sends_wayfinding_cards_to_their_own_template_on_the_herds_branches()
+     {
         let setup = Setup::new("true", 1);
         let scripts = setup.repo.path().join("scripts");
         fs::create_dir(&scripts).unwrap();
@@ -1573,7 +1575,8 @@ mod tests {
         fs::write(
             setup.config.path().join("herds/prs.toml"),
             format!(
-                "repo = {:?}\n[template.card]\nparams = [\"card\"]\nname = \"lh-{{card}}\"\n\
+                "repo = {:?}\n[template.card]\nparams = [\"card\", \"type\", \"slug\"]\n\
+                 name = \"lh-{{card}}\"\nbranch = \"{{type}}/LH-{{card}}-{{slug}}\"\n\
                  prompt = \"build {{card}}\"\n{}",
                 setup.repo.path().display().to_string(),
                 include_str!("../docs/examples/loopherd-cards-routed.toml")
@@ -1591,6 +1594,31 @@ mod tests {
                 "would add lh-7 (template card)",
                 "would add research-8 (template wayfinding)",
                 "prs: 0 would retire, 2 would add, 0 skipped, 0 errors",
+            ]
+        );
+        let queue = crate::herd::queue(&setup.paths(), "prs").unwrap();
+        let output = run_source(&queue, Duration::from_secs(1)).unwrap();
+        let checkouts: Vec<_> = output
+            .lines()
+            .map(|task| {
+                let (template, params) = task_params(&queue, task).unwrap();
+                let req = FeedRequest {
+                    herd: "prs".into(),
+                    dry_run: true,
+                    ready_timeout: Duration::ZERO,
+                    command_timeout: Duration::from_secs(1),
+                    own_pane: None,
+                };
+                task_request(&setup.paths(), &req, template, params)
+                    .unwrap()
+                    .worktree
+            })
+            .collect();
+        assert_eq!(
+            checkouts,
+            [
+                Some(Checkout::Branch("feat/LH-7-a-feature".into())),
+                Some(Checkout::Branch("docs/LH-8-a-question".into())),
             ]
         );
     }

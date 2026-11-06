@@ -40,8 +40,9 @@ that pane. Read `herdr --skill` before controlling herdr.
    with `templates = ["card", "wayfinding"]` in place of `template` routes
    each task: the line's first word names its template (one of the list),
    the rest are its params, and one `max` covers them all
-   (D25). `--dry-run` names each
-   member's template, and `status --json` gives each member's `template`.
+   (D25). A member is known by its rendered name, so a task re-routed to
+   another template while its first member is open gets a second member.
+   `--dry-run` names each member's template, and `status --json` gives each member's `template`.
    `loopherd herds` lists herd files and their templates. Hand-spawn (`loopherd spawn
    … --prompt-file`, or `loopherd add <herd> <template> <params…>`) only for
    work outside the queue; check a prompt's placeholders with `grep -o

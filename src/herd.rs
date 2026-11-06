@@ -1868,17 +1868,24 @@ args = ["--model", "opus"]
     }
 
     #[test]
-    fn a_leads_checks_fail_on_a_queue_setting_both_template_and_templates() {
-        let herd = "repo = \"/r\"\n[template.t]\nparams = []\nprompt = \"go\"\n\
-                    [queue]\ntemplate = \"t\"\ntemplates = [\"t\"]\nsource = \"true\"\nmax = 1\n";
-        let config = Config::with(&[("h", herd)]);
+    fn a_leads_checks_fail_on_a_queue_setting_both_template_and_templates_or_neither() {
+        for (queue, message) in [
+            (
+                "template = \"t\"\ntemplates = [\"t\"]\n",
+                "queue: set one of template and templates, not both",
+            ),
+            ("", "queue: set one of template and templates"),
+        ] {
+            let herd = format!(
+                "repo = \"/r\"\n[template.t]\nparams = []\nprompt = \"go\"\n\
+                 [queue]\n{queue}source = \"true\"\nmax = 1\n"
+            );
+            let config = Config::with(&[("h", &herd)]);
 
-        let err = lead_checks(&config.paths(), "h").err().unwrap();
+            let err = lead_checks(&config.paths(), "h").err().unwrap();
 
-        assert!(
-            format!("{err:#}").ends_with("queue: set one of template and templates, not both"),
-            "{err:#}"
-        );
+            assert!(format!("{err:#}").ends_with(message), "{err:#}");
+        }
     }
 
     #[test]

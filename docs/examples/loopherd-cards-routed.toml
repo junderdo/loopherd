@@ -1,24 +1,53 @@
-# A queue that routes each card to one of two templates: `card` for impl
-# cards, `wayfinding` (on sonnet, its own prompt) for research, domain and
-# prototype cards. Replace the herd's `[queue]` with this one, and add
-# `[template.wayfinding]` beside its existing `[template.card]`.
+# A queue that routes each card to one of two templates: the herd's existing
+# `card` for impl cards, `wayfinding` (on sonnet, its own prompt) for
+# research, domain and prototype cards. Replace the herd's `[queue]` with this
+# one, and add `[template.wayfinding]` beside its `[template.card]`, whose
+# params must stay ["card", "type", "slug"].
 #
 # With `templates`, the first word of each line `source` prints names the
-# task's template (one of the list) and the rest are its params, so this
-# source prints `card 107` or `wayfinding 101`. A line whose first word isn't
-# in the list is a bad line. One `max` covers members of every template.
-[template.wayfinding]
-params = ["card"]
-name = "research-{card}"
-branch = "docs/LH-{card}"
-args = ["--model", "sonnet"]
-prompt = "You're {name}. Work Trello card LH-{card} per AGENTS.md and docs/agents/issue-tracking.md."
-
+# task's template (one of the list) and the rest are its params. A line whose
+# first word isn't in the list is a bad line. One `max` covers every template.
+# A member's identity is its rendered name, so a task re-routed to another
+# template while its first member is open gets a second member.
 [queue]
 templates = ["card", "wayfinding"]
-source = """scripts/trello cards --list Backlog --label ready-for-agent \
-  | awk -F'\\t' '$3 !~ /need-human|blocked|wayfinding:grilling/ {
-      sub(/^LH-/, "", $1)
-      print ($3 ~ /wayfinding:/ ? "wayfinding" : "card"), $1
-    }'"""
+# Prints "card <n> <type> <slug>" or "wayfinding <n> docs <slug>" per
+# claimable card, in board order. impl:<type> cards get <type>; wayfinding
+# cards get docs; grilling needs the human.
+source = '''
+scripts/trello cards --list Backlog --label ready-for-agent | awk -F'\t' '
+  $3 ~ /(^|,)(need-human|blocked)(,|$)/ { next }
+  $3 ~ /wayfinding:grilling/ { next }
+  match($3, /impl:[a-z]+/) || $3 ~ /wayfinding:/ {
+    type = RSTART ? substr($3, RSTART + 5, RLENGTH - 5) : "docs"
+    template = RSTART ? "card" : "wayfinding"
+    slug = tolower($4); gsub(/[^a-z0-9]+/, "-", slug); gsub(/^-|-$/, "", slug)
+    n = split(slug, w, "-"); slug = w[1]
+    for (i = 2; i <= n && i <= 5; i++) slug = slug "-" w[i]
+    sub(/^LH-/, "", $1); print template, $1, type, slug
+  }'
+'''
 max = 3
+
+[template.wayfinding]
+params = ["card", "type", "slug"]
+name = "research-{card}"
+branch = "{type}/LH-{card}-{slug}"
+args = ["--model", "sonnet"]
+done = "scripts/trello show LH-{card} | grep -qx 'list: Done'"
+merged = "GH_TOKEN=$(gh auth token --user junderdo) gh pr list --head {branch} --state merged --json number --jq length | grep -qx 1"
+prompt = """
+You're {name}, working on branch {branch} in {worktree}.
+
+Work Trello card LH-{card} per AGENTS.md and docs/agents/issue-tracking.md: read the card and every
+comment with `scripts/trello show LH-{card}`, claim it (move to In Progress, comment "claimed by {name}"),
+and resolve it with the skill its kind label names. Wayfinding output goes on this branch.
+
+Push as junderdo: `GH_TOKEN=$(gh auth token --user junderdo) git -c credential.helper= -c credential.helper='!gh auth git-credential' push ...`.
+Open the PR with --assignee @me, title `docs(LH-{card}): ...`, card URL as the first line. Comment the PR
+link and a three-line summary on the card and move it to Review. Never rebase or force-push.
+
+If you hit a question only the human can answer, stop cleanly as the card workflow describes.
+Finish every stop with one report: `loopherd report --kind done "<PR link and summary>"`, or
+`--kind question "<the exact question>"`.
+"""
