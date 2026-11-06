@@ -382,7 +382,8 @@ fn run_pause(herds: &HerdsArg, reason: Option<&str>) -> Result<i32> {
 fn run_resume(herds: &HerdsArg) -> Result<i32> {
     let paths = Paths::from_env().context("herd")?;
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    let done = pause::resume(&paths, &ledger, herds.herds())?;
+    let reports = ledger.reports_dir()?;
+    let done = pause::resume(&paths, &ledger, &reports, herds.herds())?;
     done.lines.iter().for_each(|line| println!("{line}"));
     Ok(done.code)
 }
