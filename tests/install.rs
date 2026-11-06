@@ -508,6 +508,11 @@ fn install_without_the_splash_file_still_installs() {
     let scripts = dir.path().join("scripts");
     fs::create_dir_all(&scripts).unwrap();
     fs::copy(INSTALL, scripts.join("install")).unwrap();
+    fs::copy(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install-agents.bash"),
+        scripts.join("install-agents.bash"),
+    )
+    .unwrap();
     let sandbox = Sandbox::new(false);
 
     let out = Command::new(scripts.join("install"))

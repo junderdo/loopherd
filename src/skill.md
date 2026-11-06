@@ -93,9 +93,12 @@ that pane. Read `herdr --skill` before controlling herdr.
    a watch is armed consumes reports the watch would have printed, so look
    with `reports --all`. For a member that left no report, read its screen
    (`herdr agent read <name> --source recent-unwrapped --lines 40`).
-4. **Verify** a finished member's output with a read-only subagent against
-   the task's acceptance criteria: no loopherd or mutating herdr commands,
-   a temp `XDG_STATE_HOME` and `LOOPHERD_CONFIG_DIR`. Put everything it
+4. **Verify** a finished member's output with a read-only reviewer
+   subagent against the task's acceptance criteria. Ask for it by role:
+   the `reviewer` agent type, else `loopherd-reviewer`, else a
+   general-purpose subagent told to stay read-only. Give it no loopherd
+   or mutating herdr commands, and a temp `XDG_STATE_HOME` and
+   `LOOPHERD_CONFIG_DIR`. Put everything it
    builds under one directory per PR, `<scratch>/pr<n>/`, where `<scratch>`
    is your session's own temp directory: its detached worktrees, its build
    target dirs and any copies (mutation runs), so one removal cleans up.

@@ -3,32 +3,48 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/install [--no-splash] [--settings <file>] [install-hook args...]
+Usage: scripts/install [--no-splash] [--with-agents | --no-extras]
+                       [--settings <file>] [install-hook args...]
 
 Build loopherd, install it as ~/.local/bin/loopherd, and add its Claude
 Stop/StopFailure/SessionStart/PreToolUse hooks and the loopherd skill.
-Other arguments go to `loopherd install-hook`.
+On a terminal it then offers loopherd's agent types (builder, reviewer,
+researcher, scout), default no. Other arguments go to `loopherd install-hook`.
 
   scripts/install                      hooks in ~/.claude/settings.json, skill in ~/.claude/skills
   scripts/install --settings <file>    hooks in <file>, skill in skills/ beside it
   scripts/install --no-splash          skip the opening animation (or set LOOPHERD_NO_SPLASH=1)
+  scripts/install --with-agents        also install the agent types, without the question
+  scripts/install --no-extras          install no agent types, without the question
   scripts/install -h, --help           print this and exit
 USAGE
 }
 
 splash=1
+extras=ask
+settings=
 args=()
+want_settings=
 for arg in "$@"; do
+  if [[ -n "$want_settings" ]]; then settings=$arg; want_settings=; fi
   case "$arg" in
     -h | --help) usage; exit 0 ;;
     --no-splash) splash= ;;
+    --with-agents | --no-extras)
+      [[ "$extras" == ask ]] || { echo "install: give one of --with-agents and --no-extras" >&2; exit 2; }
+      extras=$arg ;;
+    --settings) want_settings=1; args+=("$arg") ;;
+    --settings=*) settings=${arg#--settings=}; args+=("$arg") ;;
     *) args+=("$arg") ;;
   esac
 done
 
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# shellcheck source=install-agents.bash
+source "$root/scripts/install-agents.bash"
+
 command -v jq >/dev/null || { echo "install: needs jq (to read cargo's build output); install it first" >&2; exit 1; }
 
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 splash_file="$root/scripts/install-splash.bash"
 if [[ -n "$splash" && -r "$splash_file" ]] && source "$splash_file" && splash_wants_to_play; then
   splash_play || exit
@@ -51,3 +67,7 @@ trap - EXIT
 
 # The ${..+..} form: bash before 4.4 calls an empty array unbound under set -u.
 "$bin_dir/loopherd" install-hook ${args[@]+"${args[@]}"}
+
+agents_dir="$HOME/.claude/agents"
+[[ -z "$settings" ]] || agents_dir="$(dirname "$settings")/agents"
+offer_agents "$extras" "$root/agents" "$agents_dir" "${XDG_STATE_HOME:-$HOME/.local/state}/loopherd/agents.sha256"
