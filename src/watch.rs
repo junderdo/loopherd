@@ -268,7 +268,6 @@ impl Checks<'_> {
         let Ok((checks, queue)) = loaded else {
             return Ok(vec![]);
         };
-        self.fired.reload()?;
         let budget = Budget {
             deadline: Instant::now() + CHECK_EVERY,
             each: self.timeout,
@@ -291,6 +290,8 @@ impl Checks<'_> {
         let warning = reading.warning(&self.herd);
         warn_once(&mut self.unreadable_pause, warning, warn);
         let paused = reading.pause().is_some();
+        // After the pause, so a resume during the member checks counts now.
+        self.fired.reload()?;
         if let (false, Some(queue), Some(timeout)) = (paused, queue, budget.left()) {
             let names = claimable(ledger, self.paths, &queue, &self.herd, freed, timeout);
             // A running feed may be spawning these before it records them.
@@ -2235,7 +2236,11 @@ mod tests {
     fn a_card_announced_before_a_pause_is_announced_again_after_resume() {
         let world = Checked::new();
         world.touch("tasks", "1\n2\n");
-        assert_eq!(world.once("w9:p0").unwrap(), ["lh-2 claimable"]);
+        world.touch("merged-1", "");
+        assert_eq!(
+            world.once("w9:p0").unwrap(),
+            ["lh-1 merged", "lh-2 claimable"]
+        );
         world.pause();
         assert_eq!(world.once("w9:p0"), None);
         assert_eq!(world.once("w9:p0"), None);
@@ -2312,5 +2317,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         forget_claimable(dir.path(), "lead-cards").unwrap();
         assert!(!fired_path(dir.path(), "lead-cards").exists());
+    }
+
+    #[test]
+    fn a_resume_during_the_member_checks_counts_in_the_same_round() {
+        let world = Checked::with_template("done = \"sh resume.sh; exit 1\"\n");
+        let fired = world.config.path().join("reports/watch-lead-cards.fired");
+        let resume = format!(
+            "rm -f {:?}; echo resumed >> {:?}\n",
+            world.paths.paused.join("cards"),
+            fired
+        );
+        world.touch("resume.sh", "");
+        world.touch("tasks", "1\n2\n");
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-2 claimable"]);
+        world.pause();
+        world.touch("resume.sh", &resume);
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-2 claimable"]);
     }
 }

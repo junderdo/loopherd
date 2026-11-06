@@ -257,7 +257,7 @@ fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
 }
 
 /// Words that run the command after them, with their options that take a value.
-const WRAPPERS: [(&str, &[&str]); 12] = [
+const WRAPPERS: [(&str, &[&str]); 13] = [
     ("env", &["-u", "-C", "-S"]),
     ("sudo", &["-u", "-g", "-C", "-D"]),
     ("exec", &["-a"]),
@@ -270,6 +270,8 @@ const WRAPPERS: [(&str, &[&str]); 12] = [
     ("noglob", &[]),
     ("xargs", &["-I", "-n", "-P", "-L", "-d", "-s", "-E", "-a"]),
     ("timeout", &["-s", "-k"]),
+    // This repo's `scripts/herdr-dev`.
+    ("herdr-dev", &[]),
 ];
 const KEYWORDS: [&str; 10] = [
     "if", "then", "else", "elif", "do", "while", "until", "!", "{", "source",
@@ -351,19 +353,14 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
     }
 }
 
-/// Whether the word after cargo's `--` is `pause` or `resume`, unless that
-/// `--` passes it to tests: `cargo test -- pause` is a test filter.
+/// Whether `cargo run` (or `r`) has `pause` or `resume` among its args, with
+/// or without `--`. Other subcommands pass: `cargo test pause` is a filter.
 fn cargo_runs_pause(args: &[String]) -> bool {
-    let Some(split) = args.iter().position(|a| a == "--") else {
-        return false;
-    };
-    let tests = args[..split]
-        .iter()
-        .any(|a| ["test", "t", "bench"].contains(&a.as_str()));
-    !tests
-        && args
-            .get(split + 1)
-            .is_some_and(|a| a == "pause" || a == "resume")
+    const GLOBAL_WITH_VALUE: [&str; 4] = ["--color", "--config", "-Z", "-C"];
+    let toolchain = usize::from(args.first().is_some_and(|a| a.starts_with('+')));
+    let at = skip_options(args, toolchain, &GLOBAL_WITH_VALUE);
+    let runs = args.get(at).is_some_and(|a| a == "run" || a == "r");
+    runs && args[at + 1..].iter().any(|a| a == "pause" || a == "resume")
 }
 
 fn forces_restart(args: &[String]) -> Option<Switch> {
@@ -577,6 +574,8 @@ mod tests {
     ];
     const INSTALLS: &[&str] = &[
         "scripts/install",
+        "scripts/herdr-dev cargo run -- install-hook",
+        "herdr-dev loopherd install-hook --settings /tmp/s.json",
         "./scripts/install",
         "/home/me/src/loopherd/scripts/install",
         "sh scripts/install",
@@ -1035,6 +1034,14 @@ mod tests {
         "cargo r -- pause h",
         "cargo --color always run -- pause h",
         "cargo run -q --bin loopherd -- resume --all",
+        "cargo run pause h",
+        "cargo run --release resume --all",
+        "cargo r -q resume h",
+        "cargo +nightly --color always r pause h",
+        "cargo run --profile bench -- pause h",
+        "cargo run --profile test -- resume h",
+        "scripts/herdr-dev loopherd pause h",
+        "scripts/herdr-dev cargo run -- resume h",
     ];
 
     #[test]
@@ -1080,6 +1087,8 @@ mod tests {
             "cargo test pause",
             "cargo test resume -- --nocapture",
             "cargo test -- pause",
+            "cargo nextest run -- pause",
+            "cargo --color always test resume",
             "cargo bench -- resume",
             "grep -n 'loopherd pause' src/skill.md",
         ] {
