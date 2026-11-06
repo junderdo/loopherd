@@ -166,6 +166,14 @@ behind a running turn, or the SessionStart hook isn't installed: it sent no
 handoff prompt, left the handoff where it was, and prints the `herdr agent
 prompt` line to send once the pane shows a cleared session.
 
+Restart also refuses, even with `--force`, a member whose pane shows a
+subagent's view (prompt line `❯ Message @…`, or a picker whose selected
+`●` entry isn't `main`), since `/clear` there opens Claude's "/clear acts on the main
+conversation" dialog instead. It sends nothing and keeps the handoff: switch
+the pane back to the main conversation, then run restart again. If that
+dialog shows up anyway when restart times out, restart says so: pick
+Cancel, switch back to main, and rerun it.
+
 A lead's `loopherd watch` is a background shell, so a lead stops its own
 watch before ending its handoff turn; otherwise its stop reads `paused`
 and restart refuses it. After a herdr restart, `revive`'s start makes

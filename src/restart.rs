@@ -27,7 +27,8 @@ pub struct RestartRequest<'a> {
 
 /// Sends `/clear` to the member, waits for its ledger entry to move to the
 /// new session, marks a start in its mailbox, then prompts it to read its
-/// handoff. Refuses, without `force`, unless it reported a handoff since its
+/// handoff. Refuses a pane showing a subagent's view, where `/clear` opens a
+/// dialog instead. Refuses, without `force`, unless it reported a handoff since its
 /// last start, its last stop since is `finished` with nothing in flight, and
 /// herdr shows it idle or done.
 pub fn restart(
@@ -99,11 +100,37 @@ pub fn restart(
             )));
         }
     }
+    let pane = &agent.pane_id;
+    let screen = herdr
+        .visible_text(pane)
+        .with_context(|| format!("read {name}'s pane {pane} to check for a subagent view"))?;
+    if shows_subagent_view(&screen) {
+        bail!(
+            "{name}'s pane {pane} is showing a subagent's view, and /clear there doesn't reach the main \
+             conversation: switch the pane back to the main conversation, then run loopherd restart {name} again"
+        );
+    }
     let lead = record.is_lead();
     let old = record.session_id;
     herdr.prompt(name, "/clear")?;
     let new = wait_for_new_session(ledger, name, old.as_deref(), req);
     if let Err(e) = &new {
+        // A narrow pane wraps the dialog's text inside its box.
+        let shows_dialog = herdr.visible_text(pane).is_ok_and(|t| {
+            t.replace('│', " ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains(CLEAR_DIALOG)
+        });
+        if shows_dialog {
+            bail!(
+                "{e:#}: {name}'s pane {pane} shows Claude's \"{CLEAR_DIALOG}\" dialog, so it was in a subagent's view. \
+                 No handoff prompt was sent and the handoff is still at {}. Pick Cancel, switch the pane back to the \
+                 main conversation, then run loopherd restart {name} again.",
+                handoff.display()
+            );
+        }
         let resume = resume_prompt(lead, &handoff);
         bail!(
             "{e:#}: the /clear may be queued behind a running turn, or loopherd's SessionStart hook isn't installed. \
@@ -125,6 +152,51 @@ pub fn restart(
         new?,
         read.display()
     ))
+}
+
+const CLEAR_DIALOG: &str = "/clear acts on the main conversation";
+
+/// Looks only at Claude's live prompt box (between the last two rules) and the
+/// footer below it, since transcript output above can quote either. Without
+/// that box, the prompt is the lowest `❯` line and the footer is what follows.
+/// A subagent view addresses the subagent there, or its picker has an entry
+/// other than `main` selected.
+fn shows_subagent_view(screen: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().map(unboxed).collect();
+    let is_rule = |line: &&str| !line.is_empty() && line.chars().all(|c| c == '─');
+    let rules = lines.iter().rposition(is_rule).and_then(|bottom| {
+        let top = lines[..bottom].iter().rposition(is_rule)?;
+        Some((top, bottom))
+    });
+    let (prompt, footer) = match rules {
+        Some((top, bottom)) => (&lines[top + 1..bottom], &lines[bottom + 1..]),
+        None => match lines.iter().rposition(|l| l.starts_with('❯')) {
+            Some(at) => (&lines[at..=at], &lines[at..]),
+            None => return false,
+        },
+    };
+    prompt.iter().any(|line| line.starts_with("❯ Message @"))
+        || footer
+            .split(|line| picker_entry(line).is_none())
+            .any(|run| {
+                let entries = || run.iter().filter_map(|line| picker_entry(line));
+                entries().any(|(_, entry)| entry == "main")
+                    && entries().any(|(selected, entry)| selected && entry != "main")
+            })
+}
+
+/// `(selected, entry)` for an agent picker line, `◯ entry` or `● entry`.
+fn picker_entry(line: &str) -> Option<(bool, &str)> {
+    let (selected, entry) = match line.strip_prefix("● ") {
+        Some(entry) => (true, entry),
+        None => (false, line.strip_prefix("◯ ")?),
+    };
+    Some((selected, entry.trim()))
+}
+
+/// A screen line without its indent or a box's `│` borders.
+fn unboxed(line: &str) -> &str {
+    line.trim_matches(|c: char| c.is_whitespace() || c == '│')
 }
 
 /// A lead stopped its watch to hand off, so it's told to re-arm it.
@@ -526,6 +598,196 @@ mod tests {
             );
             assert_eq!(resume.contains(rearm), wants, "{resume}");
         }
+    }
+
+    const PANE: &str = "w9:p9";
+
+    const SUBAGENT_PROMPT: &str = "\
+● Reviewing PR #97 against the card.
+
+────────────────────────────────────────
+❯ Message @reviewer…
+────────────────────────────────────────
+  ← 1 agent
+";
+
+    const SUBAGENT_PICKER: &str = "\
+● Reviewing PR #97 against the card.
+
+────────────────────────────────────────
+❯ 
+────────────────────────────────────────
+  ◯ main
+  ● local_agent · Review PR #97 …
+";
+
+    const MAIN_VIEW_QUOTING_A_SUBAGENT_VIEW: &str = "\
+● Bash(cat src/restart.rs)
+  ⎿  ────────────────────────────────────────
+     ❯ Message @reviewer…
+     ────────────────────────────────────────
+       ◯ main
+       ● local_agent · Review PR #97 …
+● Next up:
+  ◯ main loop rewrite
+  ● local_agent cleanup
+
+────────────────────────────────────────
+❯ 
+────────────────────────────────────────
+  ? for shortcuts
+";
+
+    const SUBAGENT_ROUNDED_BOX: &str = "\
+● Reviewing PR #97 against the card.
+
+╭──────────────────────────────────────╮
+│ ❯ Message @reviewer…                 │
+╰──────────────────────────────────────╯
+  ← 1 agent
+";
+
+    const SUBAGENT_LABELLED_RULE: &str = "\
+● Reviewing PR #97 against the card.
+
+──────────────── reviewer ──────────────
+❯ Message @reviewer…
+────────────────────────────────────────
+  ← 1 agent
+";
+
+    const SUBAGENT_PICKER_NO_RULES: &str = "\
+● Reviewing PR #97 against the card.
+
+❯ 
+  ◯ main
+  ● local_agent · Review PR #97 …
+";
+
+    const MAIN_VIEW_WITH_A_STATUS_BULLET: &str = "\
+● Handoff written; finished.
+
+────────────────────────────────────────
+❯ 
+────────────────────────────────────────
+  ● 1 background task
+  ⏵⏵ auto mode on · ← 1 agent
+  ◯ local_agent · Review PR #97 …
+  ● main
+";
+
+    const BOXED_WRAPPED_CLEAR_DIALOG: &str = "\
+╭──────────────────────────╮
+│ /clear acts on the main  │
+│ conversation, not this   │
+│ agent                    │
+│                          │
+│ ❯ Cancel                 │
+╰──────────────────────────╯
+";
+
+    const WRAPPED_CLEAR_DIALOG: &str = "\
+ /clear acts on the main
+ conversation, not this agent
+
+ ❯ Cancel
+   Run /clear on the main
+   conversation
+";
+
+    const MAIN_VIEW: &str = "\
+● Handoff written; finished.
+
+────────────────────────────────────────
+❯ 
+────────────────────────────────────────
+  ◯ local_agent · Review PR #97 …
+  ● main
+";
+
+    const CLEAR_DIALOG: &str = "\
+ /clear acts on the main conversation, not this agent
+
+ ❯ Cancel
+   Run /clear on the main conversation
+";
+
+    #[test]
+    fn a_pane_showing_a_subagent_view_is_refused_even_with_force_and_sent_nothing() {
+        for screen in [
+            SUBAGENT_PROMPT,
+            SUBAGENT_PICKER,
+            SUBAGENT_ROUNDED_BOX,
+            SUBAGENT_LABELLED_RULE,
+            SUBAGENT_PICKER_NO_RULES,
+        ] {
+            for force in [false, true] {
+                let w = World::new();
+                w.handed_off();
+                w.herdr.set_screen(PANE, screen);
+                let (result, ledger) = w.restart(force, true);
+                assert_eq!(
+                    format!("{:#}", result.unwrap_err()),
+                    "lh-1's pane w9:p9 is showing a subagent's view, and /clear there doesn't reach \
+                     the main conversation: switch the pane back to the main conversation, then run \
+                     loopherd restart lh-1 again"
+                );
+                assert!(w.herdr.prompts().is_empty());
+                assert!(w.state.path().join("handoffs/lh-1.md").is_file());
+                assert!(ledger.1.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn a_pane_showing_the_main_conversation_restarts() {
+        for screen in [
+            MAIN_VIEW,
+            MAIN_VIEW_QUOTING_A_SUBAGENT_VIEW,
+            MAIN_VIEW_WITH_A_STATUS_BULLET,
+        ] {
+            let w = World::new();
+            w.handed_off();
+            w.herdr.set_screen(PANE, screen);
+            let (result, _) = w.restart(false, true);
+            assert!(result.is_ok(), "{screen}: {result:?}");
+            assert_eq!(w.herdr.prompts().len(), 2);
+        }
+    }
+
+    #[test]
+    fn a_clear_dialog_in_the_pane_after_a_timeout_is_named() {
+        for dialog in [
+            CLEAR_DIALOG,
+            WRAPPED_CLEAR_DIALOG,
+            BOXED_WRAPPED_CLEAR_DIALOG,
+        ] {
+            a_clear_dialog_after_a_timeout_is_named(dialog);
+        }
+    }
+
+    fn a_clear_dialog_after_a_timeout_is_named(dialog: &str) {
+        let w = World::new();
+        w.handed_off();
+        w.herdr.set_screen_on_prompt(PANE, dialog);
+        let (result, _) = w.restart(false, false);
+        let md = w
+            .state
+            .path()
+            .join("handoffs/lh-1.md")
+            .display()
+            .to_string();
+        assert_eq!(
+            format!("{:#}", result.unwrap_err()),
+            format!(
+                "sent /clear, but lh-1's ledger session is still old after 50ms: lh-1's pane w9:p9 \
+                 shows Claude's \"/clear acts on the main conversation\" dialog, so it was in a \
+                 subagent's view. No handoff prompt was sent and the handoff is still at {md}. Pick \
+                 Cancel, switch the pane back to the main conversation, then run loopherd restart \
+                 lh-1 again."
+            )
+        );
+        assert_eq!(w.herdr.prompts().len(), 1);
     }
 
     #[test]

@@ -109,6 +109,8 @@ pub trait Herdr {
     /// The shell is alone in the foreground and has drawn its prompt: no
     /// command, editor, agent, or rc file running.
     fn at_shell_prompt(&self, pane_id: &str) -> Result<bool>;
+    /// The pane's visible screen as plain text. Read-only.
+    fn visible_text(&self, pane_id: &str) -> Result<String>;
     /// Creates a tab without focusing it.
     fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<NewTab>;
     fn close_tab(&self, tab_id: &str) -> Result<()>;
@@ -184,24 +186,6 @@ impl CliHerdr {
                 String::from_utf8_lossy(&out.stderr).trim()
             ),
         }
-    }
-
-    /// `pane read` prints plain text, not a JSON envelope.
-    fn visible_text(&self, pane_id: &str) -> Result<String> {
-        let args = [
-            "pane", "read", pane_id, "--source", "visible", "--format", "text",
-        ];
-        let out = self
-            .command(&args)
-            .output()
-            .with_context(|| format!("run herdr {}", args.join(" ")))?;
-        if !out.status.success() {
-            bail!(
-                "herdr pane read failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
     fn call_ok(&self, args: &[&str]) -> Result<Value> {
@@ -366,6 +350,24 @@ impl Herdr for CliHerdr {
         // A shell still running its rc files is in the foreground too; only the
         // drawn prompt says it's done, and `agent start` refuses it until then.
         Ok(shell_alone && !self.visible_text(pane_id)?.trim().is_empty())
+    }
+
+    // `pane read` prints plain text, not a JSON envelope.
+    fn visible_text(&self, pane_id: &str) -> Result<String> {
+        let args = [
+            "pane", "read", pane_id, "--source", "visible", "--format", "text",
+        ];
+        let out = self
+            .command(&args)
+            .output()
+            .with_context(|| format!("run herdr {}", args.join(" ")))?;
+        if !out.status.success() {
+            bail!(
+                "herdr pane read failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
     fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<NewTab> {
