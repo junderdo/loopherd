@@ -101,7 +101,10 @@ pub fn restart(
         }
     }
     let pane = &agent.pane_id;
-    if shows_subagent_view(&herdr.visible_text(pane)?) {
+    let screen = herdr
+        .visible_text(pane)
+        .with_context(|| format!("read {name}'s pane {pane} to check for a subagent view"))?;
+    if shows_subagent_view(&screen) {
         bail!(
             "{name}'s pane {pane} is showing a subagent's view, and /clear there doesn't reach the main \
              conversation: switch the pane back to the main conversation, then run loopherd restart {name} again"
@@ -112,10 +115,14 @@ pub fn restart(
     herdr.prompt(name, "/clear")?;
     let new = wait_for_new_session(ledger, name, old.as_deref(), req);
     if let Err(e) = &new {
-        if herdr
-            .visible_text(pane)
-            .is_ok_and(|t| t.contains(CLEAR_DIALOG))
-        {
+        // A narrow pane wraps the dialog's text.
+        let shows_dialog = herdr.visible_text(pane).is_ok_and(|t| {
+            t.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains(CLEAR_DIALOG)
+        });
+        if shows_dialog {
             bail!(
                 "{e:#}: {name}'s pane {pane} shows Claude's \"{CLEAR_DIALOG}\" dialog, so it was in a subagent's view. \
                  No handoff prompt was sent and the handoff is still at {}. Pick Cancel, switch the pane back to the \
@@ -148,15 +155,31 @@ pub fn restart(
 
 const CLEAR_DIALOG: &str = "/clear acts on the main conversation";
 
-/// Claude's prompt line addresses the subagent, or its agent picker has
-/// something other than `main` selected (so `main` shows unselected).
+/// Looks only at Claude's live prompt box (between the last two rules) and the
+/// footer below it, since transcript output above can quote either. A subagent
+/// view addresses the subagent there, or its picker has an entry other than
+/// `main` selected.
 fn shows_subagent_view(screen: &str) -> bool {
-    screen.lines().map(str::trim).any(|line| {
-        line.starts_with("❯ Message @")
-            || line
-                .strip_prefix("◯ ")
-                .is_some_and(|entry| entry.split_whitespace().next() == Some("main"))
-    })
+    let lines: Vec<&str> = screen.lines().map(str::trim).collect();
+    let is_rule = |line: &&str| !line.is_empty() && line.chars().all(|c| c == '─');
+    let Some(bottom) = lines.iter().rposition(is_rule) else {
+        return false;
+    };
+    let Some(top) = lines[..bottom].iter().rposition(is_rule) else {
+        return false;
+    };
+    let prompt = &lines[top + 1..bottom];
+    let footer = &lines[bottom + 1..];
+    let entries = |marker: &'static str| {
+        footer
+            .iter()
+            .filter_map(move |line| line.strip_prefix(marker))
+            .map(str::trim)
+    };
+    let picker = entries("◯ ").chain(entries("● ")).any(|e| e == "main");
+    let selected = entries("● ").next();
+    prompt.iter().any(|line| line.starts_with("❯ Message @"))
+        || (picker && selected.is_some_and(|e| e != "main"))
 }
 
 /// A lead stopped its watch to hand off, so it's told to re-arm it.
@@ -574,8 +597,37 @@ mod tests {
     const SUBAGENT_PICKER: &str = "\
 ● Reviewing PR #97 against the card.
 
+────────────────────────────────────────
+❯ 
+────────────────────────────────────────
   ◯ main
   ● local_agent · Review PR #97 …
+";
+
+    const MAIN_VIEW_QUOTING_A_SUBAGENT_VIEW: &str = "\
+● Bash(cat src/restart.rs)
+  ⎿  ────────────────────────────────────────
+     ❯ Message @reviewer…
+     ────────────────────────────────────────
+       ◯ main
+       ● local_agent · Review PR #97 …
+● Next up:
+  ◯ main loop rewrite
+  ● local_agent cleanup
+
+────────────────────────────────────────
+❯ 
+────────────────────────────────────────
+  ? for shortcuts
+";
+
+    const WRAPPED_CLEAR_DIALOG: &str = "\
+ /clear acts on the main
+ conversation, not this agent
+
+ ❯ Cancel
+   Run /clear on the main
+   conversation
 ";
 
     const MAIN_VIEW: &str = "\
@@ -618,19 +670,27 @@ mod tests {
 
     #[test]
     fn a_pane_showing_the_main_conversation_restarts() {
-        let w = World::new();
-        w.handed_off();
-        w.herdr.set_screen(PANE, MAIN_VIEW);
-        let (result, _) = w.restart(false, true);
-        assert!(result.is_ok(), "{result:?}");
-        assert_eq!(w.herdr.prompts().len(), 2);
+        for screen in [MAIN_VIEW, MAIN_VIEW_QUOTING_A_SUBAGENT_VIEW] {
+            let w = World::new();
+            w.handed_off();
+            w.herdr.set_screen(PANE, screen);
+            let (result, _) = w.restart(false, true);
+            assert!(result.is_ok(), "{screen}: {result:?}");
+            assert_eq!(w.herdr.prompts().len(), 2);
+        }
     }
 
     #[test]
     fn a_clear_dialog_in_the_pane_after_a_timeout_is_named() {
+        for dialog in [CLEAR_DIALOG, WRAPPED_CLEAR_DIALOG] {
+            a_clear_dialog_after_a_timeout_is_named(dialog);
+        }
+    }
+
+    fn a_clear_dialog_after_a_timeout_is_named(dialog: &str) {
         let w = World::new();
         w.handed_off();
-        w.herdr.set_screen_on_prompt(PANE, CLEAR_DIALOG);
+        w.herdr.set_screen_on_prompt(PANE, dialog);
         let (result, _) = w.restart(false, false);
         let md = w
             .state

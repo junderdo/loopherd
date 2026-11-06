@@ -167,8 +167,8 @@ handoff prompt, left the handoff where it was, and prints the `herdr agent
 prompt` line to send once the pane shows a cleared session.
 
 Restart also refuses, even with `--force`, a member whose pane shows a
-subagent's view (prompt line `❯ Message @…`, or a picker with `main`
-unselected), since `/clear` there opens Claude's "/clear acts on the main
+subagent's view (prompt line `❯ Message @…`, or a picker whose selected
+`●` entry isn't `main`), since `/clear` there opens Claude's "/clear acts on the main
 conversation" dialog instead. It sends nothing and keeps the handoff: switch
 the pane back to the main conversation, then run restart again. If that
 dialog shows up anyway when restart times out, restart says so: pick
