@@ -90,7 +90,7 @@ impl Sandbox {
     }
 
     fn put(&self, file: &str, text: &str) {
-        fs::create_dir_all(self.agents_dir()).unwrap();
+        fs::create_dir_all(self.installed(file).parent().unwrap()).unwrap();
         fs::write(self.installed(file), text).unwrap();
     }
 
@@ -463,4 +463,117 @@ fn a_conflict_answered_loopherd_name_installs_beside_it_and_stays_there() {
             .read("loopherd-reviewer.md")
             .contains("model: sonnet")
     );
+}
+
+#[test]
+fn an_unreadable_file_is_kept_not_taken_as_loopherds() {
+    let sandbox = Sandbox::new();
+    sandbox.put("reviewer.md", "my reviewer\n");
+    let path = sandbox.installed("reviewer.md");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&path).is_ok() {
+        eprintln!("skipped: running as a user who reads mode-000 files");
+        return;
+    }
+
+    let out = sandbox.install(&["--with-agents"]);
+
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(sandbox.read("reviewer.md"), "my reviewer\n");
+    assert!(stdout(&out).contains("kept "), "{}", stdout(&out));
+}
+
+#[test]
+fn a_dangling_symlink_is_kept() {
+    let sandbox = Sandbox::new();
+    fs::create_dir_all(sandbox.agents_dir()).unwrap();
+    let link = sandbox.installed("scout.md");
+    std::os::unix::fs::symlink(sandbox.home.join("not-mounted/scout.md"), &link).unwrap();
+
+    let out = sandbox.install(&["--with-agents"]);
+
+    assert!(link.is_symlink());
+    assert!(stdout(&out).contains("kept "), "{}", stdout(&out));
+}
+
+#[test]
+fn a_symlink_to_a_copy_of_what_loopherd_installed_is_not_replaced() {
+    let sandbox = Sandbox::new();
+    sandbox.install(&["--with-agents"]);
+    let dotfiles = sandbox.home.join("dotfiles-reviewer.md");
+    fs::rename(sandbox.installed("reviewer.md"), &dotfiles).unwrap();
+    std::os::unix::fs::symlink(&dotfiles, sandbox.installed("reviewer.md")).unwrap();
+    let before = sandbox.ours("reviewer");
+    sandbox.set_ours("reviewer", "---\nname: reviewer\n---\nnewer\n");
+
+    sandbox.install(&["--with-agents"]);
+
+    assert!(sandbox.installed("reviewer.md").is_symlink());
+    assert_eq!(fs::read_to_string(&dotfiles).unwrap(), before);
+}
+
+#[test]
+fn another_file_declaring_the_same_agent_name_is_an_overlap_and_kept() {
+    let sandbox = Sandbox::new();
+    let mine = "---\nname: reviewer\ndescription: mine\n---\nmy reviewer\n";
+    sandbox.put("review/strict.md", mine);
+
+    let out = sandbox.install(&["--with-agents"]);
+
+    let listed = format!(
+        "{}: {} already declares name: reviewer",
+        sandbox.installed("reviewer.md").display(),
+        sandbox.installed("review/strict.md").display()
+    );
+    assert!(stdout(&out).contains(&listed), "{}", stdout(&out));
+    assert!(!sandbox.installed("reviewer.md").exists());
+    assert_eq!(sandbox.read("review/strict.md"), mine);
+    assert_eq!(sandbox.read("scout.md"), sandbox.ours("scout"));
+}
+
+#[test]
+fn a_same_name_overlap_answered_loopherd_name_installs_beside_it() {
+    let sandbox = Sandbox::new();
+    sandbox.put("strict.md", "---\nname: reviewer\n---\nmine\n");
+
+    let Some(out) = sandbox.install_on_terminal(&["--with-agents"], "l\n") else {
+        return;
+    };
+
+    assert!(!out.contains("[o]verwrite"), "{out}");
+    assert!(!sandbox.installed("reviewer.md").exists());
+    assert!(
+        sandbox
+            .read("loopherd-reviewer.md")
+            .contains("\nname: loopherd-reviewer\n")
+    );
+}
+
+#[test]
+fn agents_go_under_claude_config_dir_when_it_is_set() {
+    let sandbox = Sandbox::new();
+    let config = sandbox.home.join("config/claude");
+    let mut cmd = Command::new(sandbox.root.join("scripts/install"));
+    cmd.arg("--with-agents").stdin(Stdio::null());
+    sandbox.env(&mut cmd);
+    cmd.env("CLAUDE_CONFIG_DIR", &config);
+
+    assert!(cmd.output().unwrap().status.success());
+
+    assert_eq!(
+        fs::read_to_string(config.join("agents/builder.md")).unwrap(),
+        sandbox.ours("builder")
+    );
+}
+
+#[test]
+fn remove_offers_no_agents() {
+    let sandbox = Sandbox::new();
+
+    let Some(out) = sandbox.install_on_terminal(&["--remove"], "y\n") else {
+        return;
+    };
+
+    assert!(!out.contains("Install loopherd's agent types"), "{out}");
+    assert_eq!(sandbox.agent_files(), Vec::<String>::new());
 }

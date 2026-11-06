@@ -23,6 +23,7 @@ USAGE
 splash=1
 extras=ask
 settings=
+removing=
 args=()
 want_settings=
 for arg in "$@"; do
@@ -34,6 +35,7 @@ for arg in "$@"; do
       [[ "$extras" == ask ]] || { echo "install: give one of --with-agents and --no-extras" >&2; exit 2; }
       extras=$arg ;;
     --settings) want_settings=1; args+=("$arg") ;;
+    --remove) removing=1; args+=("$arg") ;;
     --settings=*) settings=${arg#--settings=}; args+=("$arg") ;;
     *) args+=("$arg") ;;
   esac
@@ -68,6 +70,8 @@ trap - EXIT
 # The ${..+..} form: bash before 4.4 calls an empty array unbound under set -u.
 "$bin_dir/loopherd" install-hook ${args[@]+"${args[@]}"}
 
-agents_dir="$HOME/.claude/agents"
+agents_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/agents"
 [[ -z "$settings" ]] || agents_dir="$(dirname "$settings")/agents"
+[[ "$agents_dir" == /* ]] || agents_dir="$PWD/$agents_dir"
+[[ -z "$removing" ]] || extras=--no-extras
 offer_agents "$extras" "$root/agents" "$agents_dir" "${XDG_STATE_HOME:-$HOME/.local/state}/loopherd/agents.sha256"

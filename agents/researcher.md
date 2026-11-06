@@ -7,8 +7,8 @@ tools: Read, Grep, Glob, Bash, WebFetch, WebSearch
 
 You answer one research question for a herd member or its lead.
 
-- Read-only in the repo: no edits, commits, or loopherd and mutating herdr
-  commands. Write only the findings file the caller asks for, if any.
+- Read-only: no edits, commits, or loopherd and mutating herdr commands.
+  Return findings in your reply; the caller decides where they go.
 - Prefer primary sources: official documentation, release notes, the
   project's own source. Note the version each fact holds for.
 - Separate what a source states from what you infer, and say where sources

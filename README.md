@@ -43,7 +43,18 @@ record each stop in the member's mailbox, keep its session current across
 commands while its herd file's switch is off. `~/.local/bin` must be on
 `PATH`.
 
+On a terminal it then offers loopherd's own agent types (`builder`,
+`reviewer`, `researcher`, `scout`) for `agents/` beside the settings file,
+default no. Each installed file's hash goes in
+`$XDG_STATE_HOME/loopherd/agents.sha256`; a later run updates only files
+still as loopherd left them, and asks before touching one you edited or own:
+keep it, overwrite it after a `.bak`, or install loopherd's as
+`loopherd-<name>`.
+
 ```bash
+scripts/install --with-agents       # install or update the agent types without the question;
+                                    # with no terminal, keeps any file of yours and says so
+scripts/install --no-extras         # no agent types, no question
 scripts/install --settings <file>   # hooks in another settings file; pass the same
                                     # --settings <file> to install-hook --remove and watch
 git pull && scripts/install         # update; replaces the binary, edits settings only if out of date
@@ -51,6 +62,9 @@ scripts/install --no-splash         # skip the opening animation (or LOOPHERD_NO
 loopherd install-hook --remove      # remove the hooks ...
 rm ~/.local/bin/loopherd            # ... and the binary
 ```
+
+Installed agent types are yours to remove: the files listed in
+`$XDG_STATE_HOME/loopherd/agents.sha256`, then that file.
 
 Claude Code asks whether to trust a repo the first time it starts there, and
 `loopherd spawn`/`add` stop at that dialog (exit 3). Trust each repo once

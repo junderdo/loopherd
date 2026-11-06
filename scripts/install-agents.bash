@@ -37,16 +37,48 @@ agents_copy() {
   agents_record "$target" "$(agents_sha "$want")"
 }
 
-# Prints nothing when $target needs no question: absent, already loopherd's
-# content, or unchanged since loopherd installed it.
-agents_conflict() {
-  local want=$1 target=$2 sha recorded
-  [[ -e "$target" ]] || return 0
+# Prints each other file under the agents dir whose frontmatter declares
+# name: $1, since Claude knows an agent by that name, not by its filename.
+agents_declaring() {
+  [[ -d "$agents_dir" ]] || return 0
+  local file
+  while IFS= read -r -d '' file; do
+    [[ "$file" != "$2" ]] || continue
+    awk -v n="$1" '
+      NR == 1 && $0 != "---" { exit }
+      NR > 1 && $0 == "---" { exit }
+      NR > 1 && sub(/^name:[ \t]*/, "") { sub(/[ \t]+$/, ""); gsub(/^["'\'']|["'\'']$/, ""); found = ($0 == n); exit }
+      END { exit !found }' "$file" 2>/dev/null && echo "$file"
+  done < <(find "$agents_dir" \( -type f -o -type l \) -name '*.md' -print0)
+  return 0
+}
+
+# Sets conflict to why $2 needs a question, empty when it is absent, already
+# loopherd's text, or unchanged since loopherd installed it. Sets
+# conflict_elsewhere when the clash is another file, so overwriting $2 can't
+# settle it. Anything it can't read or hash counts as the human's.
+agents_check() {
+  local want=$1 target=$2 agent=$3 sha recorded others
+  conflict= conflict_elsewhere=
+  others=$(agents_declaring "$agent" "$target")
+  if [[ -n "$others" ]]; then
+    conflict="${others//$'\n'/, } already declares name: $agent" conflict_elsewhere=1
+    return
+  fi
+  [[ -e "$target" || -L "$target" ]] || return 0
+  if [[ ! -f "$target" || ! -r "$target" ]]; then
+    conflict="yours and unreadable"
+    return
+  fi
   sha=$(agents_sha "$target")
-  [[ "$sha" != "$(agents_sha "$want")" ]] || return 0
+  [[ -n "$sha" && "$sha" != "$(agents_sha "$want")" ]] || return 0
+  if [[ -L "$target" ]]; then
+    conflict="a symlink you own"
+    return
+  fi
   recorded=$(agents_recorded "$target")
-  [[ "$sha" != "$recorded" ]] || return 0
-  if [[ -n "$recorded" ]]; then echo "edited since loopherd installed it"; else echo "yours, not loopherd's"; fi
+  [[ -z "$recorded" || "$sha" != "$recorded" ]] || return 0
+  if [[ -n "$recorded" ]]; then conflict="edited since loopherd installed it"; else conflict="yours, not loopherd's"; fi
 }
 
 # Loopherd's text for $1 installed as loopherd-$1, which Claude knows by that name.
@@ -56,62 +88,59 @@ agents_aliased() {
 }
 
 agents_place() {
-  local name=$1 want=$2 target=$3 can_alias=$4 conflict choice backup
-  if [[ ! -e "$target" ]]; then
-    agents_copy "$want" "$target"
-    echo "installed $target"
-    return
-  fi
-  if [[ "$(agents_sha "$target")" == "$(agents_sha "$want")" ]]; then
-    agents_record "$target" "$(agents_sha "$want")"
-    echo "$target already up to date"
-    return
-  fi
-  conflict=$(agents_conflict "$want" "$target")
+  local name=$1 want=$2 target=$3 agent=$4 can_alias=$5 choice backup
+  agents_check "$want" "$target" "$agent"
   if [[ -z "$conflict" ]]; then
-    agents_copy "$want" "$target"
-    echo "updated $target"
+    if [[ ! -e "$target" && ! -L "$target" ]]; then
+      agents_copy "$want" "$target"
+      echo "installed $target"
+    elif [[ "$(agents_sha "$target")" == "$(agents_sha "$want")" ]]; then
+      [[ -L "$target" ]] || agents_record "$target" "$(agents_sha "$want")"
+      echo "$target already up to date"
+    else
+      agents_copy "$want" "$target"
+      echo "updated $target"
+    fi
     return
   fi
   if [[ ! -t 0 ]]; then
     echo "kept $target ($conflict); run scripts/install on a terminal to choose"
     return
   fi
-  local options="[k]eep yours, [o]verwrite after a backup"
-  [[ -z "$can_alias" ]] || options+=", or install loopherd's as loopherd-$name.md [l]"
-  read -r -p "$target is $conflict. $options? [K/o${can_alias:+/l}] " choice || choice=
+  local options="[k]eep yours" keys=K
+  [[ -n "$conflict_elsewhere" ]] || options+=", [o]verwrite after a backup" keys+=/o
+  [[ -z "$can_alias" ]] || options+=", or install loopherd's as loopherd-$name.md [l]" keys+=/l
+  read -r -p "$target: $conflict. $options? [$keys] " choice || choice=
   case "$choice" in
-    o | O)
+    o | O) [[ -n "$conflict_elsewhere" ]] || choice=overwrite ;;
+    l | L) [[ -z "$can_alias" ]] || choice=alias ;;
+  esac
+  case "$choice" in
+    overwrite)
       backup="$target.$(date -u +%Y%m%dT%H%M%SZ).bak"
-      cp "$target" "$backup"
+      cp -P "$target" "$backup"
       agents_copy "$want" "$target"
       echo "overwrote $target; backup $backup"
       ;;
-    l | L)
-      if [[ -n "$can_alias" ]]; then
-        agents_place "$name" "$(agents_aliased "$name")" "$agents_dir/loopherd-$name.md" ""
-      else
-        echo "kept $target"
-      fi
-      ;;
+    alias) agents_place "$name" "$(agents_aliased "$name")" "$agents_dir/loopherd-$name.md" "loopherd-$name" "" ;;
     *) echo "kept $target" ;;
   esac
 }
 
-# Sets pick_want, pick_target and pick_can_alias for agent $1. One installed
+# Sets pick_want, pick_target, pick_agent and pick_can_alias for agent $1. One installed
 # as loopherd-<name> before stays there.
 agents_pick() {
   local alias="$agents_dir/loopherd-$1.md"
   if [[ -e "$alias" && -n "$(agents_recorded "$alias")" ]]; then
-    pick_want=$(agents_aliased "$1") pick_target=$alias pick_can_alias=
+    pick_want=$(agents_aliased "$1") pick_target=$alias pick_agent="loopherd-$1" pick_can_alias=
   else
-    pick_want="$agents_src/$1.md" pick_target="$agents_dir/$1.md" pick_can_alias=1
+    pick_want="$agents_src/$1.md" pick_target="$agents_dir/$1.md" pick_agent=$1 pick_can_alias=1
   fi
 }
 
 # Usage: offer_agents <ask|--with-agents|--no-extras> <source dir> <agents dir> <ledger>
 offer_agents() {
-  local extras=$1 name conflict answer
+  local extras=$1 name answer
   agents_src=$2 agents_dir=$3 agents_ledger=$4
   [[ "$extras" != --no-extras ]] || return 0
   if [[ "$extras" == ask && ! -t 0 ]]; then
@@ -119,10 +148,11 @@ offer_agents() {
     return 0
   fi
   agents_tmp=$(mktemp -d)
+  trap 'rm -rf "$agents_tmp"' EXIT
   local overlaps=()
   for name in "${agent_names[@]}"; do
     agents_pick "$name"
-    conflict=$(agents_conflict "$pick_want" "$pick_target")
+    agents_check "$pick_want" "$pick_target" "$pick_agent"
     [[ -z "$conflict" ]] || overlaps+=("  $pick_target: $conflict")
   done
   if ((${#overlaps[@]})); then
@@ -135,7 +165,7 @@ offer_agents() {
   fi
   for name in "${agent_names[@]}"; do
     agents_pick "$name"
-    agents_place "$name" "$pick_want" "$pick_target" "$pick_can_alias"
+    agents_place "$name" "$pick_want" "$pick_target" "$pick_agent" "$pick_can_alias"
   done
   rm -rf "$agents_tmp"
 }
