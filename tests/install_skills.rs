@@ -128,9 +128,23 @@ esac
         .unwrap();
     }
 
+    /// Makes the stub `curl` serve `json` as the plugin's manifest.
+    fn serve_manifest(&self, json: &str) {
+        fs::write(self.stub.join("plugin.json"), json).unwrap();
+    }
+
+    fn report_installed(&self, json: &str) {
+        fs::write(self.stub.join("installed.json"), json).unwrap();
+    }
+
     /// Makes the stub report the marketplace as added, with a catalog pinning
     /// the plugin at `sha`.
     fn add_marketplace(&self, sha: &str) {
+        self.add_marketplace_from("https://github.com/mattpocock/skills.git", sha);
+    }
+
+    /// Like `add_marketplace`, with the catalog naming the plugin's repo by `url`.
+    fn add_marketplace_from(&self, url: &str, sha: &str) {
         let location = self
             .home
             .join(".claude/plugins/marketplaces/claude-plugins-official");
@@ -138,7 +152,7 @@ esac
         fs::write(
             location.join(".claude-plugin/marketplace.json"),
             format!(
-                "{{\"plugins\":[{{\"name\":\"other\",\"source\":{{\"sha\":\"nope\"}}}},{{\"name\":\"mattpocock-skills\",\"source\":{{\"source\":\"url\",\"url\":\"https://github.com/mattpocock/skills.git\",\"sha\":\"{sha}\"}}}}]}}"
+                "{{\"plugins\":[{{\"name\":\"other\",\"source\":{{\"sha\":\"nope\"}}}},{{\"name\":\"mattpocock-skills\",\"source\":{{\"source\":\"url\",\"url\":\"{url}\",\"sha\":\"{sha}\"}}}}]}}"
             ),
         )
         .unwrap();
@@ -347,7 +361,7 @@ fn an_installed_plugin_is_reported_and_left_alone() {
     let sandbox = Sandbox::new();
     fs::write(
         sandbox.stub.join("installed.json"),
-        format!("[{{\"id\":\"other@x\"}},{{\"id\":\"{PLUGIN}\",\"version\":\"1.3.1\"}}]"),
+        format!("[{{\"id\":\"other@x\"}},{{\"id\":\"{PLUGIN}\",\"version\":\"1.3.1\",\"scope\":\"user\"}}]"),
     )
     .unwrap();
 
@@ -589,4 +603,212 @@ fn remove_offers_no_skills() {
     sandbox.install(&["--remove", "--with-skills"]);
 
     assert_eq!(sandbox.claude_calls(), Vec::<String>::new());
+}
+
+#[test]
+fn an_install_at_project_or_local_scope_does_not_count_as_installed() {
+    let sandbox = Sandbox::new();
+    sandbox.report_installed(&format!(
+        "[{{\"id\":\"{PLUGIN}\",\"scope\":\"project\"}},{{\"id\":\"{PLUGIN}\",\"scope\":\"local\"}}]"
+    ));
+
+    let out = sandbox.install(&["--with-skills"]);
+
+    assert!(!out.contains("already installed"), "{out}");
+    assert_eq!(
+        sandbox.claude_calls().last().unwrap(),
+        &format!("claude plugin install {PLUGIN}")
+    );
+}
+
+#[test]
+fn a_managed_install_counts_as_installed() {
+    let sandbox = Sandbox::new();
+    sandbox.report_installed(&format!("[{{\"id\":\"{PLUGIN}\",\"scope\":\"managed\"}}]"));
+
+    let out = sandbox.install(&["--with-skills"]);
+
+    assert!(out.contains("already installed"), "{out}");
+    assert_eq!(sandbox.claude_calls(), ["claude plugin list --json"]);
+}
+
+#[test]
+fn with_agents_alone_on_a_terminal_never_asks_about_the_plugin() {
+    let sandbox = Sandbox::new();
+
+    let Some(out) = sandbox.install_on_terminal(&["--with-agents"], "y\ny\n") else {
+        return;
+    };
+
+    assert!(!out.contains("mattpocock-skills"), "{out}");
+    assert_eq!(sandbox.claude_calls(), Vec::<String>::new());
+}
+
+#[test]
+fn a_manifest_whose_skills_is_one_path_names_that_skill() {
+    let sandbox = Sandbox::new();
+    sandbox.serve_manifest(r#"{"skills":"./skills/engineering/tdd/"}"#);
+    sandbox.skill("tdd");
+
+    let out = sandbox.install(&["--with-skills"]);
+
+    let tdd = sandbox.home.join(".claude/skills/tdd");
+    assert!(out.contains(&format!("  {}\n", tdd.display())), "{out}");
+}
+
+#[test]
+fn a_manifest_without_skills_is_said_to_be_unreadable() {
+    let sandbox = Sandbox::new();
+    sandbox.serve_manifest(r#"{"name":"mattpocock-skills"}"#);
+    sandbox.skill("tdd");
+
+    let out = sandbox.install(&["--with-skills"]);
+
+    assert!(
+        out.contains("could not read the mattpocock-skills plugin's skill names"),
+        "{out}"
+    );
+    assert!(!out.contains("both will load"), "{out}");
+}
+
+#[test]
+fn a_skills_path_of_dot_slash_is_not_a_skill_named_dot() {
+    let sandbox = Sandbox::new();
+    sandbox.serve_manifest(r#"{"skills":["./", "./skills/engineering/pr"]}"#);
+    sandbox.skill("mine");
+
+    let out = sandbox.install(&["--with-skills"]);
+
+    assert!(!out.contains("both will load"), "{out}");
+}
+
+#[test]
+fn the_skill_names_are_read_from_the_repo_the_catalog_names() {
+    let sandbox = Sandbox::new();
+    sandbox.add_marketplace_from("https://github.com/someone/fork.git", "f00d");
+
+    sandbox.install(&["--with-skills"]);
+
+    assert!(
+        sandbox.log().contains(
+            &"curl https://raw.githubusercontent.com/someone/fork/f00d/.claude-plugin/plugin.json"
+                .to_string()
+        ),
+        "{:?}",
+        sandbox.log()
+    );
+}
+
+#[test]
+fn a_catalog_naming_no_github_repo_is_said_to_be_unreadable() {
+    let sandbox = Sandbox::new();
+    sandbox.add_marketplace_from("https://example.com/skills.git", "f00d");
+
+    let out = sandbox.install(&["--with-skills"]);
+
+    assert!(
+        out.contains("could not read the mattpocock-skills plugin's skill names"),
+        "{out}"
+    );
+    assert!(
+        !sandbox.log().iter().any(|l| l.starts_with("curl ")),
+        "{:?}",
+        sandbox.log()
+    );
+}
+
+#[test]
+fn with_settings_the_config_dir_is_named_in_what_it_prints() {
+    let sandbox = Sandbox::new();
+    let dir = sandbox.home.join("proj/.claude");
+    sandbox.serve_manifest(r#"{"skills":["./skills/engineering/tdd"]}"#);
+
+    let Some(out) = sandbox.install_on_terminal(
+        &[
+            "--settings",
+            dir.join("settings.local.json").to_str().unwrap(),
+        ],
+        "\ny\n",
+    ) else {
+        return;
+    };
+
+    let named = format!(" in {}", dir.display());
+    assert!(
+        out.contains(&format!(
+            "mattpocock-skills@claude-plugins-official){named}? [y/N]"
+        )),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("installed the mattpocock-skills plugin{named}\n")),
+        "{out}"
+    );
+}
+
+#[test]
+fn with_settings_an_installed_plugin_names_the_config_dir() {
+    let sandbox = Sandbox::new();
+    let dir = sandbox.home.join("proj/.claude");
+    sandbox.report_installed(&format!("[{{\"id\":\"{PLUGIN}\",\"scope\":\"user\"}}]"));
+
+    let out = sandbox.install(&[
+        "--with-skills",
+        "--settings",
+        dir.join("s.json").to_str().unwrap(),
+    ]);
+
+    assert!(
+        out.contains(&format!(
+            "already installed in {}; left as is",
+            dir.display()
+        )),
+        "{out}"
+    );
+}
+
+#[test]
+fn without_settings_the_default_config_dir_goes_unnamed() {
+    let sandbox = Sandbox::new();
+
+    let out = sandbox.install(&["--with-skills"]);
+
+    assert!(
+        out.contains("installed the mattpocock-skills plugin\n"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_relative_settings_path_gives_claude_an_absolute_config_dir() {
+    let sandbox = Sandbox::new();
+    fs::create_dir_all(sandbox.home.join("proj")).unwrap();
+    let mut cmd = sandbox.command(&sandbox.root.join("scripts/install"), &sandbox.path());
+
+    let out = cmd
+        .args(["--with-skills", "--settings", "./.claude/settings.json"])
+        .current_dir(sandbox.home.join("proj"))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "{out:?}");
+    let want = format!("config {}", sandbox.home.join("proj/.claude").display());
+    let dirs: Vec<String> = sandbox
+        .log()
+        .into_iter()
+        .filter(|l| l.starts_with("config "))
+        .collect();
+    assert!(
+        !dirs.is_empty() && dirs.iter().all(|d| *d == want),
+        "{dirs:?}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!(
+            "installed the mattpocock-skills plugin in {}",
+            sandbox.home.join("proj/.claude").display()
+        )),
+        "{stdout}"
+    );
 }

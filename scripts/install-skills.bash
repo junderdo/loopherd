@@ -11,17 +11,28 @@ skills_marketplace_dir() {
     jq -r --arg m "$skills_marketplace" '.[] | select(.name == $m) | .installLocation' 2>/dev/null
 }
 
-# Prints the plugin's skill names from its manifest, at the commit the added
-# marketplace pins, else at the repo's HEAD; fails when it can't read them.
+# Prints the plugin's skill names from its manifest: in the repo and at the
+# commit the added marketplace's catalog names, else at mattpocock/skills HEAD.
+# Fails when it can't read them.
 skills_plugin_names() {
-  local catalog ref=
+  local catalog repo=mattpocock/skills ref=HEAD source
   catalog="$(skills_marketplace_dir)/.claude-plugin/marketplace.json"
   if [[ -r "$catalog" ]]; then
-    ref=$(jq -r --arg p "$skills_plugin" '.plugins[] | select(.name == $p) | .source.sha // empty' "$catalog" 2>/dev/null) || ref=
+    source=$(jq -r --arg p "$skills_plugin" '
+      first(.plugins[] | select(.name == $p) | .source) |
+      ((.repo // (.url // "" | capture("github\\.com[/:](?<r>[^/]+/[^/]+?)(\\.git)?/*$").r)) + " " + (.sha // "HEAD"))
+    ' "$catalog" 2>/dev/null) || return 1
+    read -r repo ref <<<"$source"
+    [[ -n "$repo" && -n "$ref" ]] || return 1
   fi
   command -v curl >/dev/null || return 1
-  curl -fsSL --max-time 10 "https://raw.githubusercontent.com/mattpocock/skills/${ref:-HEAD}/.claude-plugin/plugin.json" 2>/dev/null |
-    jq -er '.skills[] | sub("/+$"; "") | split("/") | last' 2>/dev/null
+  # A manifest's skills is a path or a list of them; without one Claude scans
+  # skills/, which a single fetch can't list, so that counts as unreadable.
+  curl -fsSL --max-time 10 "https://raw.githubusercontent.com/$repo/$ref/.claude-plugin/plugin.json" 2>/dev/null |
+    jq -er '
+      .skills | if type == "string" then [.] elif type == "array" then . else error("no skills") end |
+      .[] | sub("/+$"; "") | split("/") | last | select(. != "" and . != "." and . != "..")
+    ' 2>/dev/null
 }
 
 skills_list_overlaps() {
@@ -40,9 +51,11 @@ skills_list_overlaps() {
   printf '%s\n' "${overlaps[@]}"
 }
 
-# Usage: offer_skills <ask|yes|no> <claude config dir>
+# Usage: offer_skills <ask|yes|no> <claude config dir> [--name-dir]
+# --name-dir names the config dir in what it prints, for a dir that isn't the human's default.
 offer_skills() {
-  local want=$1 skills_dir=$2/skills answer
+  local want=$1 skills_dir=$2/skills answer where=
+  [[ "${3:-}" != --name-dir ]] || where=" in $2"
   [[ "$want" != no ]] || return 0
   if [[ "$want" == ask && ! -t 0 ]]; then
     echo "skipped the $skills_plugin plugin (no terminal); add --with-skills to install it"
@@ -52,13 +65,14 @@ offer_skills() {
     echo "skipped the $skills_plugin plugin: no claude CLI on PATH"
     return 0
   fi
-  if claude plugin list --json 2>/dev/null | jq -e --arg id "$skills_id" 'any(.[]; .id == $id)' >/dev/null 2>&1; then
-    echo "the $skills_plugin plugin is already installed; left as is"
+  if claude plugin list --json 2>/dev/null | jq -e --arg id "$skills_id" \
+    'any(.[]; .id == $id and (.scope == "user" or .scope == "managed"))' >/dev/null 2>&1; then
+    echo "the $skills_plugin plugin is already installed$where; left as is"
     return 0
   fi
   skills_list_overlaps "$skills_dir"
   if [[ "$want" == ask ]]; then
-    read -r -p "Install the $skills_plugin plugin ($skills_id)? [y/N] " answer || answer=
+    read -r -p "Install the $skills_plugin plugin ($skills_id)$where? [y/N] " answer || answer=
     [[ "$answer" == [yY]* ]] || { echo "skipped the $skills_plugin plugin"; return 0; }
   fi
   if [[ -z "$(skills_marketplace_dir)" ]]; then
@@ -71,5 +85,5 @@ offer_skills() {
     echo "install: claude plugin install $skills_id failed" >&2
     return 1
   }
-  echo "installed the $skills_plugin plugin"
+  echo "installed the $skills_plugin plugin$where"
 }

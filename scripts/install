@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/install [--no-splash] [--with-agents] [--with-skills] [--no-extras]
+Usage: scripts/install [--no-splash] [[--with-agents] [--with-skills] | --no-extras]
                        [--settings <file>] [install-hook args...]
 
 Build loopherd, install it as ~/.local/bin/loopherd, and add its Claude
@@ -87,12 +87,20 @@ trap - EXIT
 "$bin_dir/loopherd" install-hook ${args[@]+"${args[@]}"}
 
 claude_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-[[ -z "$settings" ]] || claude_dir=$(dirname "$settings")
+if [[ -n "$settings" ]]; then
+  claude_dir=$(dirname "$settings")
+  # Absolute, so CLAUDE_CONFIG_DIR and what the installer prints don't hang on cwd.
+  if [[ -d "$claude_dir" ]]; then
+    claude_dir=$(cd "$claude_dir" && pwd)
+  elif [[ "$claude_dir" != /* ]]; then
+    claude_dir="$PWD/${claude_dir#./}"
+  fi
+fi
 case "$agents" in yes) agents=--with-agents ;; no) agents=--no-extras ;; esac
 offer_agents "$agents" "$root/agents" "$claude_dir/agents" "${XDG_STATE_HOME:-$HOME/.local/state}/loopherd/agents.sha256"
-# The plugin goes into the config dir beside --settings, like the hooks and agents.
+# The plugin goes into the config dir beside --settings, like the hooks and agents (D27).
 if [[ -n "$settings" ]]; then
-  CLAUDE_CONFIG_DIR=$claude_dir offer_skills "$skills" "$claude_dir"
+  CLAUDE_CONFIG_DIR=$claude_dir offer_skills "$skills" "$claude_dir" --name-dir
 else
   offer_skills "$skills" "$claude_dir"
 fi

@@ -71,7 +71,7 @@ impl Sandbox {
         // Reports the plugin installed, so a run never reaches a real claude or the network.
         executable(
             &fake_bin.join("claude"),
-            "#!/bin/sh\n[ \"$*\" != 'plugin list --json' ] || echo '[{\"id\":\"mattpocock-skills@claude-plugins-official\"}]'\n",
+            "#!/bin/sh\n[ \"$*\" != 'plugin list --json' ] || echo '[{\"id\":\"mattpocock-skills@claude-plugins-official\",\"scope\":\"user\"}]'\n",
         );
         let path = format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap());
         Sandbox {

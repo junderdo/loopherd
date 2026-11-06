@@ -58,7 +58,7 @@ that share a name with the plugin's (both load; the plugin's are prefixed
 marketplace if missing, leaves an installed plugin alone, and skips the
 offer when there is no `claude` CLI. With `--settings <file>`, `claude`
 runs with `CLAUDE_CONFIG_DIR` set to that file's directory, so the plugin
-goes there too.
+goes there too, and the installer names that dir when it asks and reports.
 
 ```bash
 scripts/install --with-agents       # install or update the agent types and ask nothing else;
