@@ -298,6 +298,12 @@ shepherd:
   PR's merge endpoint are denied too, so ask the human to run a `rebase
   --abort`, and check merges with `gh pr view <n> --json state`. Grilling
   is always the human's.
+- **Pausing is the human's.** The hook always denies `loopherd pause` and
+  `loopherd resume` in your pane, whatever your switches. While your herd
+  is paused your watch prints no `claimable` and `feed` spawns nothing;
+  `merged`, reports, stops, `blocked` and `gone` wake you as before, so
+  keep verifying and running after-merge steps. On resume your watch
+  announces the claimable tasks again within 60s.
 - **Asking to merge.** With `merge` off, the question carries the PR link
   and a ready-to-paste line pinned to the full head SHA your reviewer
   verified, `! gh pr merge <n> --merge --match-head-commit <full sha>`, in
