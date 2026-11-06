@@ -1989,6 +1989,31 @@ mod tests {
     }
 
     #[test]
+    fn a_routed_queues_lead_wakes_on_a_member_merged_by_its_own_template_and_a_routed_claimable() {
+        let mut world = Checked::new();
+        world.edit_herd(|herd| {
+            herd.replace(
+                "[queue]\ntemplate = \"card\"",
+                "[template.research]\nparams = [\"n\"]\nname = \"research-{n}\"\nprompt = \"go\"\n\
+                 merged = \"test -f researched-{n}\"\n[queue]\ntemplates = [\"card\", \"research\"]",
+            )
+            .replace("max = 2", "max = 3")
+        });
+        let research = AgentRecord {
+            template: Some("research".into()),
+            params: Some([("n".to_string(), "2".to_string())].into()),
+            ..member("research-2", "w9:p2", Some("cards"))
+        };
+        world.ledger.0.insert(research.name.clone(), research);
+        world.touch("tasks", "research 2\nnope 5\ncard 3\nresearch 4\n");
+        world.touch("merged-2", "");
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-3 claimable"]);
+
+        world.touch("researched-2", "");
+        assert_eq!(world.once("w9:p0").unwrap(), ["research-2 merged"]);
+    }
+
+    #[test]
     fn a_failing_source_is_no_claimable_event() {
         let world = Checked::new();
         world.touch("tasks", "1\n2\n");

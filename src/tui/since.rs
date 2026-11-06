@@ -71,6 +71,7 @@ mod tests {
             pane: format!("w1:p{name}"),
             tab: None,
             lead: false,
+            template: None,
         }
     }
 

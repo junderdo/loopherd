@@ -774,6 +774,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
     fn json_has_the_documented_shape() {
         let mut ledger = ledger();
         ledger.0.get_mut("old").unwrap().retired = true;
+        ledger.0.get_mut("zpr-1").unwrap().template = Some("pr".into());
         let out = status(
             &herdr(),
             &ledger,
@@ -788,15 +789,24 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         let json: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
         let member = |name: &str, status: &str, gone: bool, wt: &str, pane: &str, tab| {
             serde_json::json!({"name": name, "status": status, "gone": gone, "branch": null,
-                "worktree": wt, "pane": pane, "tab": tab, "lead": false})
+                "worktree": wt, "pane": pane, "tab": tab, "lead": false, "template": null})
         };
+        let mut zpr_1 = member(
+            "zpr-1",
+            "working",
+            false,
+            "pr-1",
+            "w1:pzpr-1",
+            Some("w1:tzpr-1"),
+        );
+        zpr_1["template"] = "pr".into();
         assert_eq!(
             json,
             serde_json::json!({
                 "herdr_reachable": true,
                 "herds": [{"name": "prs", "paused": null, "members": [
                     member("zpr-2", "blocked", false, "pr-2", "w1:pzpr-2", Some("w1:tzpr-2")),
-                    member("zpr-1", "working", false, "pr-1", "w1:pzpr-1", Some("w1:tzpr-1")),
+                    zpr_1,
                 ]}],
                 "ungrouped": [member("lh-42", "idle", false, "feat-x", "w1:plh-42", Some("w1:tlh-42"))],
                 "retired": [member("old", "unknown", false, "old-wt", "w1:pold", None)],
