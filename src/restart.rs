@@ -115,9 +115,10 @@ pub fn restart(
     herdr.prompt(name, "/clear")?;
     let new = wait_for_new_session(ledger, name, old.as_deref(), req);
     if let Err(e) = &new {
-        // A narrow pane wraps the dialog's text.
+        // A narrow pane wraps the dialog's text inside its box.
         let shows_dialog = herdr.visible_text(pane).is_ok_and(|t| {
-            t.split_whitespace()
+            t.replace('│', " ")
+                .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ")
                 .contains(CLEAR_DIALOG)
@@ -156,30 +157,46 @@ pub fn restart(
 const CLEAR_DIALOG: &str = "/clear acts on the main conversation";
 
 /// Looks only at Claude's live prompt box (between the last two rules) and the
-/// footer below it, since transcript output above can quote either. A subagent
-/// view addresses the subagent there, or its picker has an entry other than
-/// `main` selected.
+/// footer below it, since transcript output above can quote either. Without
+/// that box, the prompt is the lowest `❯` line and the footer is what follows.
+/// A subagent view addresses the subagent there, or its picker has an entry
+/// other than `main` selected.
 fn shows_subagent_view(screen: &str) -> bool {
-    let lines: Vec<&str> = screen.lines().map(str::trim).collect();
+    let lines: Vec<&str> = screen.lines().map(unboxed).collect();
     let is_rule = |line: &&str| !line.is_empty() && line.chars().all(|c| c == '─');
-    let Some(bottom) = lines.iter().rposition(is_rule) else {
-        return false;
+    let rules = lines.iter().rposition(is_rule).and_then(|bottom| {
+        let top = lines[..bottom].iter().rposition(is_rule)?;
+        Some((top, bottom))
+    });
+    let (prompt, footer) = match rules {
+        Some((top, bottom)) => (&lines[top + 1..bottom], &lines[bottom + 1..]),
+        None => match lines.iter().rposition(|l| l.starts_with('❯')) {
+            Some(at) => (&lines[at..=at], &lines[at..]),
+            None => return false,
+        },
     };
-    let Some(top) = lines[..bottom].iter().rposition(is_rule) else {
-        return false;
-    };
-    let prompt = &lines[top + 1..bottom];
-    let footer = &lines[bottom + 1..];
-    let entries = |marker: &'static str| {
-        footer
-            .iter()
-            .filter_map(move |line| line.strip_prefix(marker))
-            .map(str::trim)
-    };
-    let picker = entries("◯ ").chain(entries("● ")).any(|e| e == "main");
-    let selected = entries("● ").next();
     prompt.iter().any(|line| line.starts_with("❯ Message @"))
-        || (picker && selected.is_some_and(|e| e != "main"))
+        || footer
+            .split(|line| picker_entry(line).is_none())
+            .any(|run| {
+                let entries = || run.iter().filter_map(|line| picker_entry(line));
+                entries().any(|(_, entry)| entry == "main")
+                    && entries().any(|(selected, entry)| selected && entry != "main")
+            })
+}
+
+/// `(selected, entry)` for an agent picker line, `◯ entry` or `● entry`.
+fn picker_entry(line: &str) -> Option<(bool, &str)> {
+    let (selected, entry) = match line.strip_prefix("● ") {
+        Some(entry) => (true, entry),
+        None => (false, line.strip_prefix("◯ ")?),
+    };
+    Some((selected, entry.trim()))
+}
+
+/// A screen line without its indent or a box's `│` borders.
+fn unboxed(line: &str) -> &str {
+    line.trim_matches(|c: char| c.is_whitespace() || c == '│')
 }
 
 /// A lead stopped its watch to hand off, so it's told to re-arm it.
@@ -621,6 +638,54 @@ mod tests {
   ? for shortcuts
 ";
 
+    const SUBAGENT_ROUNDED_BOX: &str = "\
+● Reviewing PR #97 against the card.
+
+╭──────────────────────────────────────╮
+│ ❯ Message @reviewer…                 │
+╰──────────────────────────────────────╯
+  ← 1 agent
+";
+
+    const SUBAGENT_LABELLED_RULE: &str = "\
+● Reviewing PR #97 against the card.
+
+──────────────── reviewer ──────────────
+❯ Message @reviewer…
+────────────────────────────────────────
+  ← 1 agent
+";
+
+    const SUBAGENT_PICKER_NO_RULES: &str = "\
+● Reviewing PR #97 against the card.
+
+❯ 
+  ◯ main
+  ● local_agent · Review PR #97 …
+";
+
+    const MAIN_VIEW_WITH_A_STATUS_BULLET: &str = "\
+● Handoff written; finished.
+
+────────────────────────────────────────
+❯ 
+────────────────────────────────────────
+  ● 1 background task
+  ⏵⏵ auto mode on · ← 1 agent
+  ◯ local_agent · Review PR #97 …
+  ● main
+";
+
+    const BOXED_WRAPPED_CLEAR_DIALOG: &str = "\
+╭──────────────────────────╮
+│ /clear acts on the main  │
+│ conversation, not this   │
+│ agent                    │
+│                          │
+│ ❯ Cancel                 │
+╰──────────────────────────╯
+";
+
     const WRAPPED_CLEAR_DIALOG: &str = "\
  /clear acts on the main
  conversation, not this agent
@@ -649,7 +714,13 @@ mod tests {
 
     #[test]
     fn a_pane_showing_a_subagent_view_is_refused_even_with_force_and_sent_nothing() {
-        for screen in [SUBAGENT_PROMPT, SUBAGENT_PICKER] {
+        for screen in [
+            SUBAGENT_PROMPT,
+            SUBAGENT_PICKER,
+            SUBAGENT_ROUNDED_BOX,
+            SUBAGENT_LABELLED_RULE,
+            SUBAGENT_PICKER_NO_RULES,
+        ] {
             for force in [false, true] {
                 let w = World::new();
                 w.handed_off();
@@ -670,7 +741,11 @@ mod tests {
 
     #[test]
     fn a_pane_showing_the_main_conversation_restarts() {
-        for screen in [MAIN_VIEW, MAIN_VIEW_QUOTING_A_SUBAGENT_VIEW] {
+        for screen in [
+            MAIN_VIEW,
+            MAIN_VIEW_QUOTING_A_SUBAGENT_VIEW,
+            MAIN_VIEW_WITH_A_STATUS_BULLET,
+        ] {
             let w = World::new();
             w.handed_off();
             w.herdr.set_screen(PANE, screen);
@@ -682,7 +757,11 @@ mod tests {
 
     #[test]
     fn a_clear_dialog_in_the_pane_after_a_timeout_is_named() {
-        for dialog in [CLEAR_DIALOG, WRAPPED_CLEAR_DIALOG] {
+        for dialog in [
+            CLEAR_DIALOG,
+            WRAPPED_CLEAR_DIALOG,
+            BOXED_WRAPPED_CLEAR_DIALOG,
+        ] {
             a_clear_dialog_after_a_timeout_is_named(dialog);
         }
     }
