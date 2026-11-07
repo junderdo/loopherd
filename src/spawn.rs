@@ -17,6 +17,7 @@ use crate::worktree::{ensure_detached_worktree, ensure_worktree, planned_worktre
 pub const BLOCKED_EXIT: i32 = 3;
 
 const SHELL_POLL: Duration = Duration::from_millis(50);
+const SESSION_POLL: Duration = Duration::from_millis(200);
 
 /// How long a new tab's shell gets to run its rc files, apart from `ready_timeout`.
 pub const SHELL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -410,12 +411,21 @@ fn start_until_ready(herdr: &dyn Herdr, req: &SpawnRequest, tab: &NewTab) -> Res
     wait_for_shell_prompt(herdr, &tab.pane_id, req.shell_timeout, SHELL_POLL)?;
     let deadline = Instant::now() + req.ready_timeout;
     match herdr.start_claude(&req.name, &tab.pane_id, req.ready_timeout, &req.claude_args)? {
-        StartOutcome::Ready(agent) => return Ok(Readiness::Ready(agent)),
+        StartOutcome::Ready(agent) => {
+            return Ok(Readiness::Ready(with_session(
+                herdr, &req.name, agent, deadline,
+            )?));
+        }
         StartOutcome::Blocked => {}
     }
     let remaining = deadline.saturating_duration_since(Instant::now());
     match herdr.wait(&req.name, &[AgentStatus::Idle], remaining)? {
-        WaitOutcome::Reached => Ok(Readiness::Ready(herdr.agent(&req.name)?)),
+        WaitOutcome::Reached => Ok(Readiness::Ready(with_session(
+            herdr,
+            &req.name,
+            herdr.agent(&req.name)?,
+            deadline,
+        )?)),
         WaitOutcome::TimedOut => match herdr.agent(&req.name)?.status {
             AgentStatus::Blocked => Ok(Readiness::Blocked),
             status => bail!(
@@ -424,6 +434,21 @@ fn start_until_ready(herdr: &dyn Herdr, req: &SpawnRequest, tab: &NewTab) -> Res
             ),
         },
     }
+}
+
+/// herdr can call an agent ready a moment before it has read the agent's
+/// session id, so poll for it until `deadline`, keeping `agent` without one.
+fn with_session(
+    herdr: &dyn Herdr,
+    name: &str,
+    mut agent: Agent,
+    deadline: Instant,
+) -> Result<Agent> {
+    while agent.session_id.is_none() && Instant::now() < deadline {
+        std::thread::sleep(SESSION_POLL);
+        agent = herdr.agent(name)?;
+    }
+    Ok(agent)
 }
 
 fn close_after_failure(herdr: &dyn Herdr, tab: &NewTab, err: anyhow::Error) -> anyhow::Error {
@@ -658,6 +683,35 @@ mod tests {
             "{}",
             rec.created
         );
+    }
+
+    #[test]
+    fn waits_for_the_session_of_an_agent_herdr_reports_ready_before_knowing_it() {
+        let mut herdr = herdr();
+        herdr.startup = Startup::ReadyBeforeSession(3);
+        let mut ledger = MemLedger::default();
+        let spawned = run(&herdr, &mut ledger, &request("a")).unwrap();
+        assert_eq!(spawned.session_id.as_deref(), Some("session-a"));
+        assert_eq!(ledger.0["a"].session_id.as_deref(), Some("session-a"));
+        assert!(ledger.0["a"].prompt_sent);
+    }
+
+    #[test]
+    fn a_session_still_unknown_at_the_ready_timeout_is_recorded_unknown() {
+        let mut herdr = herdr();
+        herdr.startup = Startup::ReadyBeforeSession(u32::MAX - 1);
+        let mut ledger = MemLedger::default();
+        let req = SpawnRequest {
+            ready_timeout: Duration::ZERO,
+            ..request("a")
+        };
+        let spawned = run(&herdr, &mut ledger, &req).unwrap();
+        assert_eq!(
+            spawned.report("a"),
+            ("tab w1:t1\npane w1:p1\nsession unknown".into(), 0)
+        );
+        assert_eq!(ledger.0["a"].session_id, None);
+        assert!(ledger.0["a"].prompt_sent);
     }
 
     #[test]

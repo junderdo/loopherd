@@ -12,6 +12,7 @@ case "$1 $2" in
   "pane process-info") echo '{"result": {"process_info": {"shell_pid": 7, "foreground_process_group_id": 7, "foreground_processes": [{"pid": 7}]}}}' ;;
   "pane read") echo '$' ;;
   "agent start") echo '{"result": {"agent": {"name": "a", "pane_id": "w1:p1", "tab_id": "w1:t1", "agent_status": "idle", "agent_session": null}}}' ;;
+  "agent get") echo '{"result": {"agent": {"name": "a", "pane_id": "w1:p1", "tab_id": "w1:t1", "agent_status": "idle", "agent_session": {"value": "s1"}}}}' ;;
   *) echo "unexpected herdr $*" >&2; exit 1 ;;
 esac
 "#;

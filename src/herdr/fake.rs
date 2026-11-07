@@ -20,6 +20,8 @@ use super::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Startup {
     Ready,
+    /// Ready, but herdr learns its session only after this many `agent` calls.
+    ReadyBeforeSession(u32),
     /// Blocked at startup, then idle once waited on.
     BlockedThenIdle,
     BlockedForever,
@@ -72,6 +74,8 @@ struct State {
     /// Replaces a pane's screen when its agent is next prompted.
     screen_on_prompt: Option<(String, String)>,
     agent_polls: u32,
+    /// `agent` calls left that answer without the session.
+    sessionless_gets: u32,
     mutations: u32,
 }
 
@@ -350,13 +354,18 @@ impl Herdr for FakeHerdr {
     }
 
     fn agent(&self, name: &str) -> Result<Agent> {
-        self.state
-            .borrow()
+        let mut state = self.state.borrow_mut();
+        let mut agent = state
             .agents
             .iter()
             .find(|a| a.name.as_deref() == Some(name))
             .cloned()
-            .ok_or_else(|| anyhow!("agent {name} not found"))
+            .ok_or_else(|| anyhow!("agent {name} not found"))?;
+        if state.sessionless_gets > 0 {
+            state.sessionless_gets -= 1;
+            agent.session_id = None;
+        }
+        Ok(agent)
     }
 
     fn tabs_in(&self, workspace_id: &str) -> Result<Vec<Tab>> {
@@ -491,6 +500,11 @@ impl Herdr for FakeHerdr {
         match self.startup {
             Startup::Ready => {
                 self.set_status(name, AgentStatus::Idle);
+                Ok(StartOutcome::Ready(self.agent(name)?))
+            }
+            Startup::ReadyBeforeSession(gets) => {
+                self.set_status(name, AgentStatus::Idle);
+                self.state.borrow_mut().sessionless_gets = gets + 1;
                 Ok(StartOutcome::Ready(self.agent(name)?))
             }
             Startup::BlockedThenIdle | Startup::BlockedForever => {
