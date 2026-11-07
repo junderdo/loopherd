@@ -17,6 +17,7 @@ use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::{AfterMerge, AgentRecord, Ledger};
 use crate::lock::Lock;
 use crate::pause;
+use crate::process::{Procs, live};
 use crate::report::{Body, Filter, Mailbox, Pending, Stop, member_in, peek_reports, unread_stops};
 use crate::status;
 
@@ -27,10 +28,20 @@ pub mod line {
     pub const FAILED: &str = "failed";
     pub const MERGED: &str = "merged";
     pub const CLAIMABLE: &str = "claimable";
+    pub const INTERRUPTED: &str = "interrupted";
     pub const BLOCKED: &str = "blocked";
     pub const GONE: &str = "gone";
     #[cfg(test)]
-    pub const ALL: [&str; 7] = [PAUSED, FINISHED, FAILED, MERGED, CLAIMABLE, BLOCKED, GONE];
+    pub const ALL: [&str; 8] = [
+        PAUSED,
+        FINISHED,
+        FAILED,
+        MERGED,
+        CLAIMABLE,
+        INTERRUPTED,
+        BLOCKED,
+        GONE,
+    ];
 }
 
 pub trait Clock {
@@ -74,6 +85,9 @@ pub struct Request<'a> {
     /// Measures the caller's Claude for the shepherd's own handoff line; run
     /// as the watch exits, only when it is the shepherd's.
     pub shepherd_handoff: Option<&'a dyn Fn() -> Option<ShepherdHandoff>>,
+    /// Tells a lead's watch whether the feed running a worker's after_merge
+    /// still runs.
+    pub procs: &'a dyn Procs,
 }
 
 /// How often a lead's watch runs its merged and claimable checks.
@@ -124,6 +138,7 @@ pub fn watch(
         ) => Some(Checks {
             herd: herd.clone(),
             paths,
+            procs: req.procs,
             timeout: (req.check_timeout)()?,
             fired: Fired::load(dir, name, created)?,
             next: Duration::ZERO,
@@ -244,6 +259,7 @@ pub fn watch(
 struct Checks<'a> {
     herd: String,
     paths: &'a Paths,
+    procs: &'a dyn Procs,
     timeout: Duration,
     fired: Fired,
     /// When the next run is due, as time since the watch started.
@@ -275,14 +291,24 @@ impl Checks<'_> {
         let workers = ledger.entries()?.into_values().filter(|e| {
             !e.retired && !e.is_lead() && e.herd.as_deref() == Some(self.herd.as_str())
         });
+        let after_merge = queue.as_ref().is_some_and(|q| !q.after_merge.is_empty());
         let mut events = vec![];
         let mut freed = 0;
         for worker in workers {
             let done = run_member_check(&checks.done, &checks, &worker, &budget);
-            // Feed keeps a member whose after_merge is pending, done or not.
-            let pending = matches!(worker.after_merge, Some(AfterMerge::Pending { .. }));
-            freed += usize::from(done == Some(Ok(true)) && !pending);
             let merged = run_member_check(&checks.merged, &checks, &worker, &budget);
+            // Feed keeps, done or not, a member whose after_merge is due or unnoted.
+            let kept = match worker.after_merge {
+                Some(AfterMerge::Pending { owner }) => {
+                    if live(self.procs, Some(owner)).is_none() {
+                        events.push(format!("{} {}", worker.name, line::INTERRUPTED));
+                    }
+                    true
+                }
+                Some(AfterMerge::Noted) => false,
+                None => after_merge && matches!(merged, Some(Ok(true) | Err(_))),
+            };
+            freed += usize::from(done == Some(Ok(true)) && !kept);
             if merged == Some(Ok(true)) && matches!(done, None | Some(Ok(false))) {
                 events.push(format!("{} {}", worker.name, line::MERGED));
             }
@@ -770,6 +796,7 @@ mod tests {
     }
 
     const EVERY: Request = Request {
+        procs: &crate::process::ProcFs,
         herds: &[],
         timeout: None,
         poll: Duration::from_secs(2),
@@ -1006,6 +1033,7 @@ mod tests {
     }
 
     const ONCE: Request = Request {
+        procs: &crate::process::ProcFs,
         herds: &[],
         timeout: Some(Duration::ZERO),
         poll: Duration::from_secs(2),
@@ -1993,12 +2021,38 @@ mod tests {
     }
 
     #[test]
-    fn a_done_worker_whose_after_merge_is_pending_frees_no_slot() {
+    fn a_done_worker_whose_after_merge_is_pending_frees_no_slot_and_wakes_the_lead_once_its_feed_is_gone()
+     {
         let mut world = Checked::new();
         world.touch("tasks", "1\n2\n3\n");
         world.touch("done-1", "");
         let owner = crate::ledger::Process { pid: 7, start: 70 };
-        world.ledger.0.get_mut("lh-1").unwrap().after_merge = Some(AfterMerge::Pending { owner });
+        let pending = Some(AfterMerge::Pending { owner });
+        world.ledger.0.get_mut("lh-1").unwrap().after_merge = pending;
+        let mut live = crate::process::FakeProcs::default();
+        live.add(owner.pid, "/usr/bin/loopherd", 1, owner.start);
+        let dir = world.config.path().join("reports");
+        let once = |procs: &dyn Procs| {
+            let req = Request {
+                procs,
+                ..world.request("w9:p0")
+            };
+            run(&world.herdr, &world.ledger, &dir, &req, &mut steps(|_| {}))
+        };
+
+        assert_eq!(once(&live).unwrap(), ["lh-2 claimable"]);
+        let gone = crate::process::FakeProcs::default();
+        assert_eq!(once(&gone).unwrap(), ["lh-1 interrupted"]);
+        assert_eq!(once(&gone), None, "woke twice on one interrupted run");
+    }
+
+    #[test]
+    fn a_merged_and_done_worker_whose_after_merge_is_due_frees_no_slot() {
+        let world = Checked::new();
+        world.edit_herd(|herd| format!("after_merge = [\"true\"]\n{herd}"));
+        world.touch("tasks", "1\n2\n3\n");
+        world.touch("merged-1", "");
+        world.touch("done-1", "");
         assert_eq!(world.once("w9:p0").unwrap(), ["lh-2 claimable"]);
     }
 

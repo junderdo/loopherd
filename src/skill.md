@@ -77,7 +77,8 @@ that pane. Read `herdr --skill` before controlling herdr.
    block yours), or when the hooks aren't in Claude's settings (run
    `loopherd install-hook`). Lines come in this order: reports, questions
    first then by time; then stop lines grouped by member in name order,
-   oldest first within a member; then a lead's `merged` and `claimable`;
+   oldest first within a member; then a lead's `merged`, `interrupted` and
+   `claimable`;
    then `blocked` and `gone`. The first watch after an install, or over
    members a herd-scoped watch skipped, prints every unread stop change
    since; judge each against `reports --all`.
@@ -97,6 +98,7 @@ that pane. Read `herdr --skill` before controlling herdr.
    | `<member> failed  rate_limit` | Turn ended on an API error; it may need a nudge once that clears. |
    | `<member> merged` | Lead's watch only: the worker's template `merged` check passes and its `done` doesn't. Run the after-merge steps. |
    | `<name> claimable` | Lead's watch only: feed would spawn this member. Feed. |
+   | `<member> interrupted` | Lead's watch only: the feed running the worker's `after_merge` died before noting it. Feed, which notes it, then read the note. |
    | `<member> blocked` | A dialog only the human answers: tell them. loopherd never answers it. |
    | `<member> gone` | No agent in its pane for two polls in a row; it was live earlier in this watch. |
    | `shepherd handoff 171k over 160k` | Your own watch only, once per session: your context is past your limit. Hand off (see Your own handoff). |
@@ -346,7 +348,9 @@ shepherd:
   leaves your herd's events for the shepherd. Every 60s it also runs your
   herd's checks and wakes you with `<member> merged` (the template's
   `merged` passes, its `done` doesn't): run the after-merge steps for it;
-  or `<name> claimable` (feed would spawn `<name>`): feed. Each wakes you
+  or `<name> claimable` (feed would spawn `<name>`): feed; or `<member>
+  interrupted` (a dead feed left its after_merge unnoted): feed, then do by
+  hand what its note says. Each wakes you
   once, so a claimable task you don't feed then shows up again only in the
   heartbeat's dry run. Exit 2 is a heartbeat, not idleness: still check
   each PR waiting on review (`gh pr view <n> --json state`), run the

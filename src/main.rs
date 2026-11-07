@@ -551,6 +551,7 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         herd_files: Some(&herd_paths),
         check_timeout: remote_timeout,
         shepherd_handoff: None,
+        procs: &process::ProcFs,
     };
     let state = ledger.dir()?;
     let handoff = || shepherd_handoff(&herd_paths, &state);
@@ -881,4 +882,16 @@ fn inherited_workspace() -> Option<String> {
     std::env::var("HERDR_WORKSPACE_ID")
         .ok()
         .filter(|v| !v.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_feeds_own_process_is_live_by_its_pid_and_start_time() {
+        let owner = own_process().unwrap();
+        assert_eq!(owner.pid, std::process::id());
+        assert_eq!(process::live(&process::ProcFs, Some(owner)), Some(owner));
+    }
 }
