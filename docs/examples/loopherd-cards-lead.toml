@@ -9,7 +9,7 @@
 # And this line at the top of the herd file, above its first table, so feed
 # runs the routine after-merge steps once per merged member (D28). Feed run
 # from the lead's pane runs none of it while `install` below is off:
-# after_merge = ["git pull --ff-only", "scripts/install --no-extras"]
+# after_merge = ["git pull --ff-only", "scripts/install --no-extras", "scripts/trello unblock"]
 [lead]
 prompt_file = "loopherd-cards-lead.md"
 # args defaults to the herd's args. Every switch is off until the human turns it on.
