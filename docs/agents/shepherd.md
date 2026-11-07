@@ -32,8 +32,8 @@ Backlog cards into members `lh-<n>` on `<type>/LH-<n>-<slug>`.
   back in Backlog with `need-human` carries the question.
 - **Verify** with a read-only subagent: no `LOOPHERD_LIVE=1`, its worktrees
   and `CARGO_TARGET_DIR` under one `<scratch>/pr<n>/` (see the skill's Verify).
-- **After merge:** move the card to Done, unblock dependents (drop `blocked`,
-  add `ready-for-agent`, comment), then `loopherd feed loopherd-cards`.
+- **After merge:** move the card to Done, run `scripts/trello unblock`, then
+  `loopherd feed loopherd-cards`.
 
 ## Lead
 
