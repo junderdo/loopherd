@@ -390,9 +390,10 @@ fn cargo_run_args(args: &[String]) -> &[String] {
     }
 }
 
-/// Whether `run_args` run loopherd's `herd get`.
+/// Whether `run_args` run loopherd's `herd get`: every option before `herd`
+/// is one cargo knows, and no `herd set` or `unset` hides among the words.
 fn runs_herd_get(run_args: &[String]) -> bool {
-    const WITH_VALUE: [&str; 13] = [
+    const WITH_VALUE: [&str; 16] = [
         "--bin",
         "-p",
         "--package",
@@ -406,8 +407,37 @@ fn runs_herd_get(run_args: &[String]) -> bool {
         "--jobs",
         "--example",
         "--color",
+        "--config",
+        "-Z",
+        "-C",
     ];
-    positionals(run_args, &WITH_VALUE).starts_with(&["herd", "get"])
+    const FLAGS: [&str; 10] = [
+        "-q",
+        "--quiet",
+        "-v",
+        "--verbose",
+        "-r",
+        "--release",
+        "--offline",
+        "--locked",
+        "--frozen",
+        "--all-features",
+    ];
+    let mut i = 0;
+    while let Some(arg) = run_args.get(i) {
+        match arg.as_str() {
+            "--" => {
+                i += 1;
+                break;
+            }
+            a if WITH_VALUE.contains(&a) => i += 2,
+            a if FLAGS.contains(&a) => i += 1,
+            a if a.starts_with('-') => return false,
+            _ => break,
+        }
+    }
+    let rest = run_args.get(i..).unwrap_or_default();
+    rest.starts_with(&["herd".to_string(), "get".to_string()]) && !edits_herd(rest)
 }
 
 /// Whether `herd` then `set` or `unset` appear in `args`, side by side.
@@ -1193,6 +1223,47 @@ mod tests {
             "cargo run -- install-hook herd get",
         ] {
             assert_eq!(needs(command), [Switch::Install], "{command}");
+        }
+    }
+
+    #[test]
+    fn cargo_options_cant_hide_a_command_behind_herd_get() {
+        for (command, want) in [
+            (
+                "cargo run --config herd --config get pause h",
+                Switch::Pause,
+            ),
+            ("cargo run -Z herd -Z get resume h", Switch::Pause),
+            ("cargo run -C herd -C get install-hook", Switch::Install),
+            (
+                "cargo run --config herd --config get restart x --force",
+                Switch::ForceRestart,
+            ),
+            ("cargo run --unknown herd get pause h", Switch::Pause),
+        ] {
+            assert_eq!(needs(command), [want], "{command}");
+        }
+    }
+
+    #[test]
+    fn runs_herd_get_never_covers_a_herd_set_or_unset() {
+        for words in [
+            "-- herd get h herd set h lead.merge true",
+            "herd get h herd unset h lead.merge",
+        ] {
+            let args: Vec<String> = words.split(' ').map(String::from).collect();
+            assert!(!runs_herd_get(&args), "{words}");
+        }
+    }
+
+    #[test]
+    fn set_or_unset_without_herd_before_it_is_no_herd_edit() {
+        for command in [
+            "cargo run -- report set",
+            "cargo run -- report unset x",
+            "loopherd report set",
+        ] {
+            assert_eq!(needs(command), [], "{command}");
         }
     }
 
