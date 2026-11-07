@@ -42,7 +42,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D25](decisions/D25.md) | A queue can route each task to one of several templates: with `[queue] templates`, the first word of each `source` line names the template; one `max` covers them all. |
 | [D26](decisions/D26.md) | `scripts/install` optionally copies loopherd's own agent types into `~/.claude/agents/` (hash-tracked, never overwriting unasked) and installs the mattpocock-skills plugin; both default to no. |
 | [D27](decisions/D27.md) | `scripts/install` reads the mattpocock-skills plugin's skill names from its GitHub manifest at the catalog's pinned commit; naming one extra installs just it, asking nothing else. |
-| [D28](decisions/D28.md) | A herd file's top-level `after_merge` commands run from `loopherd feed` once per member, the first time its `merged` check passes, noted in its mailbox; from a lead's pane, a command needing an off switch holds back all of them. |
+| [D28](decisions/D28.md) | A herd file's top-level `after_merge` runs from `loopherd feed` once per member when its `merged` check first passes, after feed releases its lock, noted in its mailbox; from a lead's pane, any command the hook would deny holds back all of them. |
 
 ## Emerging model
 

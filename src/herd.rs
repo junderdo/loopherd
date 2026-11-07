@@ -769,11 +769,19 @@ fn describe(herd: &str, parsed: &HerdFile, paused: &str) -> Vec<String> {
         .map(|_| format!("  loopherd lead {herd}"));
     let after_merge = (!parsed.after_merge.is_empty())
         .then(|| format!("  after_merge: {}", parsed.after_merge.join("; ")));
+    let unmerged = parsed
+        .template
+        .iter()
+        .filter(|(_, t)| !parsed.after_merge.is_empty() && t.merged.is_none())
+        .map(|(name, _)| {
+            format!("  warning: template {name} has no merged check, so after_merge never runs for its members")
+        });
     std::iter::once(header)
         .chain(usages)
         .chain(lead)
         .chain(feed)
         .chain(after_merge)
+        .chain(unmerged)
         .collect()
 }
 
@@ -1624,16 +1632,23 @@ args = ["--model", "opus"]
     }
 
     #[test]
-    fn herds_lists_a_herds_after_merge_commands() {
-        let herd = "repo = \"/r\"\nafter_merge = [\"git pull --ff-only\", \"scripts/install\"]\n";
+    fn herds_lists_a_herds_after_merge_and_warns_of_templates_with_no_merged_check() {
+        let herd = "repo = \"/r\"\nafter_merge = [\"git pull --ff-only\", \"scripts/install\"]\n\
+                    [template.card]\nparams = []\nprompt = \"go\"\nmerged = \"exit 0\"\n\
+                    [template.chat]\nparams = []\nprompt = \"go\"\n";
         let config = Config::with(&[("prs", herd)]);
 
-        let (report, _) = herds(&config.paths()).unwrap();
+        let (report, code) = herds(&config.paths()).unwrap();
 
+        let lines: Vec<&str> = report.lines().skip(3).collect();
         assert_eq!(
-            report.lines().nth(1),
-            Some("  after_merge: git pull --ff-only; scripts/install")
+            lines,
+            [
+                "  after_merge: git pull --ff-only; scripts/install",
+                "  warning: template chat has no merged check, so after_merge never runs for its members",
+            ]
         );
+        assert_eq!(code, 0);
     }
 
     #[test]

@@ -45,9 +45,11 @@ that pane. Read `herdr --skill` before controlling herdr.
    `--dry-run` names each member's template, and `status --json` gives each member's `template`.
    A top-level `after_merge = ["<cmd>", …]` is run by feed in `repo`, in
    order and stopping at the first failure, once per member the first time
-   its template's `merged` check passes; the member's mailbox gets a `note`
-   (`after_merge ok`, or the failing command, its exit and last 20 lines),
-   and its `done` check waits for the next feed (D28).
+   its template's `merged` check passes, paused or not. The member's mailbox
+   gets a `note` (`after_merge ok`, or the failing command, its exit and last
+   20 lines), and its `done` check waits for the next feed (D28). It runs
+   after feed releases its lock, but a feed killed meanwhile leaves no note,
+   so run feed in the background when a herd has after_merge.
    `loopherd herds` lists herd files, their templates and `after_merge`. Hand-spawn (`loopherd spawn
    … --prompt-file`, or `loopherd add <herd> <template> <params…>`) only for
    work outside the queue; check a prompt's placeholders with `grep -o
@@ -309,8 +311,9 @@ shepherd:
   `scripts/install` or `loopherd install-hook`, a rebase or force-push), in
   your pane and in any Claude nested in it, with a line naming the switch;
   ask instead. A herd file it can't read blocks all three. A `feed` from
-  your pane runs none of `after_merge` when any command in it needs a
-  switch that's off, leaving a `note` naming it. It denies
+  your pane runs none of `after_merge` when the hook would deny any command
+  in it, leaving a `note` naming why; that run counts as done, so run the
+  commands it held back by hand or ask the human to. It denies
   broadly: `gh pr merge --help`, `git rebase --abort` and any `curl` to a
   PR's merge endpoint are denied too, so ask the human to run a `rebase
   --abort`, and check merges with `gh pr view <n> --json state`. Grilling

@@ -36,7 +36,7 @@ use anyhow::{Context, Result, bail};
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
-use crate::feed::{FeedRequest, feed};
+use crate::feed::{FeedRequest, feed, run_after_merge};
 use crate::herd::{AddRequest, Paths, add, dry_run, herds};
 use crate::herd_view::Options;
 use crate::herdr::events::SocketSubscriber;
@@ -828,7 +828,7 @@ fn run_lead(args: LeadArgs) -> Result<i32> {
 fn run_feed(herd: String, dry_run: bool, ready_timeout: u64) -> Result<i32> {
     let paths = Paths::from_env().context("herd")?;
     // A dry run changes nothing, so it must not block a real one.
-    let _lock = match dry_run {
+    let lock = match dry_run {
         true => None,
         false => Some(paths.lock_feed()?),
     };
@@ -844,8 +844,14 @@ fn run_feed(herd: String, dry_run: bool, ready_timeout: u64) -> Result<i32> {
         after_merge_timeout: AFTER_MERGE_TIMEOUT,
     };
     let inherited = inherited_workspace();
-    let fed = feed(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
-    for line in fed.lines {
+    let mut fed = feed(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
+    drop(lock);
+    for line in &fed.lines {
+        println!("{line}");
+    }
+    let printed = fed.lines.len();
+    run_after_merge(&paths, &req, &mut fed)?;
+    for line in &fed.lines[printed..] {
         println!("{line}");
     }
     Ok(fed.code)
