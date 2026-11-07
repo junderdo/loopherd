@@ -362,6 +362,8 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
         // `cargo run -- herd set` and `pause` in a loopherd checkout, in any
         // spelling; first, since a value or reason may hold any word.
         "cargo" if edits_herd(cargo_run_args(args)) => Some(Switch::HerdEdit),
+        // A key or value read by `herd get` may be any word.
+        "cargo" if runs_herd_get(cargo_run_args(args)) => None,
         "cargo"
             if cargo_run_args(args)
                 .iter()
@@ -386,6 +388,26 @@ fn cargo_run_args(args: &[String]) -> &[String] {
         Some(run) if run == "run" || run == "r" => &args[at + 1..],
         _ => &[],
     }
+}
+
+/// Whether `run_args` run loopherd's `herd get`.
+fn runs_herd_get(run_args: &[String]) -> bool {
+    const WITH_VALUE: [&str; 13] = [
+        "--bin",
+        "-p",
+        "--package",
+        "--profile",
+        "--features",
+        "-F",
+        "--target",
+        "--target-dir",
+        "--manifest-path",
+        "-j",
+        "--jobs",
+        "--example",
+        "--color",
+    ];
+    positionals(run_args, &WITH_VALUE).starts_with(&["herd", "get"])
 }
 
 /// Whether `herd` then `set` or `unset` appear in `args`, side by side.
@@ -1153,6 +1175,24 @@ mod tests {
                     && message.contains("the human edits herd files"),
                 "{message}"
             );
+        }
+    }
+
+    #[test]
+    fn a_cargo_run_herd_get_needs_nothing_whatever_its_key_or_value_words() {
+        for command in [
+            "cargo run -- herd get h install-hook",
+            "cargo run -- herd get h restart --force",
+            "cargo run -q --bin loopherd -- herd get h pause",
+            "cargo r herd get h resume",
+        ] {
+            assert_eq!(needs(command), [], "{command}");
+        }
+        for command in [
+            "cargo run -- herd get h x; cargo run -- install-hook",
+            "cargo run -- install-hook herd get",
+        ] {
+            assert_eq!(needs(command), [Switch::Install], "{command}");
         }
     }
 
