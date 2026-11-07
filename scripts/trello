@@ -201,31 +201,39 @@ cmd_unblock() {
     | .[]
     | select((.closed | not) and ([.labels[].name] | index("blocked")))
     | . as $card
-    | [.desc | split("\n")[] | capture("^\\s*blocked-by:(?<keys>.*)$") | .keys | scan("LH-([0-9]+)") | .[0]] as $blockers
-    | select($blockers | length > 0)
+    | "LH-\(.idShort)" as $key
+    | [.desc | split("\n")[] | rtrimstr("\r") | select(test("^\\s*blocked-by:"; "i"))] as $lines
+    | [$lines[] | select(test("^blocked-by:\\s*LH-[0-9]+(\\s*,\\s*LH-[0-9]+)*\\s*$") | not)] as $malformed
+    | [$lines[] | scan("LH-([0-9]+)") | .[0]] as $blockers
     | [$blockers[] | select($by_number[.] == null)] as $missing
-    | if ($missing | length) > 0 then
-        "warn\t\($card.id)\tLH-\($card.idShort)\t\($missing | map("LH-\(.)") | join(", "))"
+    | if ($malformed | length) > 0 then
+        "warn\t\($key) has a malformed blocked-by line: \($malformed[0])"
+      elif ($blockers | length) == 0 then empty
+      elif ($missing | length) > 0 then
+        "warn\t\($key) is blocked by \($missing | map("LH-\(.)") | join(", ")), which doesn'"'"'t exist"
       elif all($blockers[]; $by_number[.].idList as $list | $done | index($list)) then
-        "unblock\t\($card.id)\tLH-\($card.idShort)\t\($blockers | map("LH-\(.)") | join(", "))"
+        [ "unblock", $key, ($blockers | map("LH-\(.)") | join(", ")), $card.id,
+          ($card.labels | map(select(.name == "blocked")) | first | .id),
+          ([$card.labels[].name] | index("ready-for-agent") != null) ] | @tsv
       else empty end
   ' <<<"$cards")
   [[ -n $plan ]] || return 0
-  local blocked_label="" ready_label=""
-  if ! $dry_run && grep -q '^unblock' <<<"$plan"; then
-    blocked_label=$(label_id blocked)
+  local ready_label=""
+  if ! $dry_run && grep -q $'^unblock\t.*\tfalse$' <<<"$plan"; then
     ready_label=$(label_id ready-for-agent)
   fi
-  local action id key blockers
-  while IFS=$'\t' read -r action id key blockers; do
+  # Writes run ready, comment, then unblock, so a failure leaves the card blocked for a rerun.
+  local action key blockers id blocked_label ready
+  while IFS=$'\t' read -r action key blockers id blocked_label ready; do
     if [[ $action == warn ]]; then
-      echo "trello: warning: $key is blocked by $blockers, which doesn't exist" >&2
+      echo "trello: warning: $key" >&2
     elif $dry_run; then
       echo "would unblock $key ($blockers Done)"
     else
-      api DELETE "/cards/$id/idLabels/$blocked_label" >/dev/null
-      api POST "/cards/$id/idLabels" --data-urlencode "value=$ready_label" >/dev/null
+      [[ $ready == true ]] ||
+        api POST "/cards/$id/idLabels" --data-urlencode "value=$ready_label" >/dev/null
       api POST "/cards/$id/actions/comments" --data-urlencode "text=Unblocked: $blockers Done" >/dev/null
+      api DELETE "/cards/$id/idLabels/$blocked_label" >/dev/null
       echo "unblocked $key ($blockers Done)"
     fi
   done <<<"$plan"

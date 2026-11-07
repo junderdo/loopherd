@@ -47,10 +47,15 @@ A `blocked` card's description holds one line naming its blockers:
 blocked-by: LH-<n>[, LH-<m>…]
 ```
 
+The line starts with lowercase `blocked-by:` at the very start of a line and
+holds only comma-separated `LH-<n>` keys. Any other spelling (`Blocked-by:`,
+`lh-2`, a bare `2`, prose) is warned about and the card is skipped.
+
 `scripts/trello unblock` (`--dry-run` to preview) finds every open `blocked`
-card whose named cards are all in Done, drops `blocked`, adds
-`ready-for-agent`, and comments `Unblocked: LH-<n> … Done`. A card without the
-line is left for a human; one naming a missing card is left and warned about.
+card whose named cards are all in Done, adds `ready-for-agent`, comments
+`Unblocked: LH-<n> … Done`, and drops `blocked` last, so a failed run leaves
+the card blocked for a rerun. A card without the line is left for a human; one
+naming a missing card is left and warned about.
 
 ## Working a card
 
