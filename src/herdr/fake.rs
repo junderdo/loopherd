@@ -20,8 +20,6 @@ use super::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Startup {
     Ready,
-    /// Ready, but herdr learns its session only after this many `agent` calls.
-    ReadyBeforeSession(u32),
     /// Blocked at startup, then idle once waited on.
     BlockedThenIdle,
     BlockedForever,
@@ -76,6 +74,8 @@ struct State {
     agent_polls: u32,
     /// `agent` calls left that answer without the session.
     sessionless_gets: u32,
+    /// `agent` fails, as when herdr stops answering after a start.
+    agent_unreadable: bool,
     mutations: u32,
 }
 
@@ -87,6 +87,11 @@ pub struct FakeHerdr {
     pub fail_create_tab: bool,
     pub fail_close_tab: bool,
     pub fail_prompt: bool,
+    /// After `start_claude`, this many `agent` calls answer without the
+    /// session, as herdr does before it has read it; a ready start's reply too.
+    pub session_after_gets: u32,
+    /// After `start_claude`, every `agent` call fails.
+    pub agent_get_fails_after_start: bool,
     /// A tab from `create_tab` reaches its shell prompt after this many
     /// `at_shell_prompt` polls; `None` is never.
     pub new_tab_prompt_after: Option<u32>,
@@ -117,6 +122,8 @@ impl FakeHerdr {
             fail_create_tab: false,
             fail_close_tab: false,
             fail_prompt: false,
+            session_after_gets: 0,
+            agent_get_fails_after_start: false,
             new_tab_prompt_after: Some(0),
             resume_settles_after: Some(0),
             unreachable: false,
@@ -295,6 +302,16 @@ impl FakeHerdr {
         self.unreachable || self.state.borrow().down
     }
 
+    fn find(&self, name: &str) -> Result<Agent> {
+        self.state
+            .borrow()
+            .agents
+            .iter()
+            .find(|a| a.name.as_deref() == Some(name))
+            .cloned()
+            .ok_or_else(|| anyhow!("agent {name} not found"))
+    }
+
     pub fn set_status(&self, name: &str, status: AgentStatus) {
         let mut state = self.state.borrow_mut();
         if let Some(a) = state
@@ -354,13 +371,11 @@ impl Herdr for FakeHerdr {
     }
 
     fn agent(&self, name: &str) -> Result<Agent> {
+        if self.state.borrow().agent_unreadable {
+            bail!("herdr agent get {name} failed");
+        }
+        let mut agent = self.find(name)?;
         let mut state = self.state.borrow_mut();
-        let mut agent = state
-            .agents
-            .iter()
-            .find(|a| a.name.as_deref() == Some(name))
-            .cloned()
-            .ok_or_else(|| anyhow!("agent {name} not found"))?;
         if state.sessionless_gets > 0 {
             state.sessionless_gets -= 1;
             agent.session_id = None;
@@ -497,16 +512,21 @@ impl Herdr for FakeHerdr {
                 title: None,
             });
         }
+        {
+            let mut state = self.state.borrow_mut();
+            state.sessionless_gets = self.session_after_gets;
+            state.agent_unreadable = self.agent_get_fails_after_start;
+        }
         match self.startup {
             Startup::Ready => {
                 self.set_status(name, AgentStatus::Idle);
-                Ok(StartOutcome::Ready(self.agent(name)?))
+                let mut agent = self.find(name)?;
+                if self.session_after_gets > 0 {
+                    agent.session_id = None;
+                }
+                Ok(StartOutcome::Ready(agent))
             }
-            Startup::ReadyBeforeSession(gets) => {
-                self.set_status(name, AgentStatus::Idle);
-                self.state.borrow_mut().sessionless_gets = gets + 1;
-                Ok(StartOutcome::Ready(self.agent(name)?))
-            }
+
             Startup::BlockedThenIdle | Startup::BlockedForever => {
                 self.set_status(name, AgentStatus::Blocked);
                 Ok(StartOutcome::Blocked)
@@ -520,7 +540,7 @@ impl Herdr for FakeHerdr {
         if self.startup == Startup::BlockedThenIdle {
             self.set_status(name, AgentStatus::Idle);
         }
-        let status = self.agent(name)?.status;
+        let status = self.find(name)?.status;
         Ok(if until.contains(&status) {
             WaitOutcome::Reached
         } else {
@@ -530,7 +550,7 @@ impl Herdr for FakeHerdr {
 
     fn prompt(&self, name: &str, text: &str) -> Result<()> {
         self.mutating();
-        if self.agent(name)?.status == AgentStatus::Blocked {
+        if self.find(name)?.status == AgentStatus::Blocked {
             bail!("agent {name} is blocked");
         }
         if self.fail_prompt {
