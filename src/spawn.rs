@@ -17,6 +17,10 @@ use crate::worktree::{ensure_detached_worktree, ensure_worktree, planned_worktre
 pub const BLOCKED_EXIT: i32 = 3;
 
 const SHELL_POLL: Duration = Duration::from_millis(50);
+const SESSION_POLL: Duration = Duration::from_millis(200);
+/// How long a ready agent's session gets to show in herdr, within `ready_timeout`.
+const SESSION_TIMEOUT: Duration = Duration::from_secs(10);
+const SESSION_LATER: &str = "the Stop hook records it at the member's first stop";
 
 /// How long a new tab's shell gets to run its rc files, apart from `ready_timeout`.
 pub const SHELL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -113,6 +117,8 @@ pub struct Spawned {
     pub pane_id: String,
     pub worktree: Option<PathBuf>,
     pub session_id: Option<String>,
+    /// Why herdr gave no session for a ready agent.
+    pub no_session: Option<String>,
     /// Still at a dialog when the ready timeout ran out.
     pub blocked: bool,
     /// Why the mailbox has no `start` entry for it, if it hasn't.
@@ -120,6 +126,19 @@ pub struct Spawned {
 }
 
 impl Spawned {
+    /// What went wrong around a spawn that still went ahead.
+    pub fn warnings(&self) -> Vec<String> {
+        let unmarked = self
+            .unmarked
+            .iter()
+            .map(|why| format!("no start entry in its mailbox: {why}"));
+        let no_session = self
+            .no_session
+            .iter()
+            .map(|why| format!("{why}; {SESSION_LATER}"));
+        no_session.chain(unmarked).collect()
+    }
+
     /// One `key value` line per fact, then the blocked message if any.
     pub fn report(&self, name: &str) -> (String, i32) {
         let mut lines = vec![
@@ -133,9 +152,7 @@ impl Spawned {
             "session {}",
             self.session_id.as_deref().unwrap_or("unknown")
         ));
-        if let Some(why) = &self.unmarked {
-            lines.push(format!("warning: no start entry in its mailbox: {why}"));
-        }
+        lines.extend(self.warnings().iter().map(|w| format!("warning: {w}")));
         if !self.blocked {
             return (lines.join("\n"), 0);
         }
@@ -148,7 +165,8 @@ impl Spawned {
 }
 
 enum Readiness {
-    Ready(Agent),
+    /// With why herdr gave no session, if it didn't.
+    Ready(Agent, Option<String>),
     Blocked,
 }
 
@@ -209,7 +227,7 @@ pub fn spawn(
         process: None,
         role: req.member_of.as_ref().and_then(|m| m.role),
     };
-    let agent = match readiness {
+    let (agent, no_session) = match readiness {
         Readiness::Blocked => {
             let unmarked = record_started(ledger, record)?;
             return Ok(Spawned {
@@ -217,11 +235,12 @@ pub fn spawn(
                 pane_id: tab.pane_id,
                 worktree,
                 session_id: None,
+                no_session: None,
                 blocked: true,
                 unmarked,
             });
         }
-        Readiness::Ready(agent) => agent,
+        Readiness::Ready(agent, no_session) => (agent, no_session),
     };
     record.session_id = agent.session_id.clone();
     let sent = match &prompt {
@@ -236,6 +255,7 @@ pub fn spawn(
         pane_id: tab.pane_id,
         worktree,
         session_id: agent.session_id,
+        no_session,
         blocked: false,
         unmarked,
     })
@@ -410,12 +430,17 @@ fn start_until_ready(herdr: &dyn Herdr, req: &SpawnRequest, tab: &NewTab) -> Res
     wait_for_shell_prompt(herdr, &tab.pane_id, req.shell_timeout, SHELL_POLL)?;
     let deadline = Instant::now() + req.ready_timeout;
     match herdr.start_claude(&req.name, &tab.pane_id, req.ready_timeout, &req.claude_args)? {
-        StartOutcome::Ready(agent) => return Ok(Readiness::Ready(agent)),
+        StartOutcome::Ready(agent) => return Ok(with_session(herdr, &req.name, agent, deadline)),
         StartOutcome::Blocked => {}
     }
     let remaining = deadline.saturating_duration_since(Instant::now());
     match herdr.wait(&req.name, &[AgentStatus::Idle], remaining)? {
-        WaitOutcome::Reached => Ok(Readiness::Ready(herdr.agent(&req.name)?)),
+        WaitOutcome::Reached => Ok(with_session(
+            herdr,
+            &req.name,
+            herdr.agent(&req.name)?,
+            deadline,
+        )),
         WaitOutcome::TimedOut => match herdr.agent(&req.name)?.status {
             AgentStatus::Blocked => Ok(Readiness::Blocked),
             status => bail!(
@@ -424,6 +449,34 @@ fn start_until_ready(herdr: &dyn Herdr, req: &SpawnRequest, tab: &NewTab) -> Res
             ),
         },
     }
+}
+
+/// herdr can call an agent ready a moment before it has read the agent's
+/// session id, so poll for it a while. Without herdr's Claude integration it
+/// never comes, and a failed read must not fail a spawn whose agent is ready.
+fn with_session(herdr: &dyn Herdr, name: &str, mut agent: Agent, deadline: Instant) -> Readiness {
+    let limit = deadline
+        .saturating_duration_since(Instant::now())
+        .min(SESSION_TIMEOUT);
+    let until = Instant::now() + limit;
+    while agent.session_id.is_none() {
+        if Instant::now() >= until {
+            let why = format!(
+                "herdr reported no session within {}s",
+                limit.as_millis().div_ceil(1000)
+            );
+            return Readiness::Ready(agent, Some(why));
+        }
+        std::thread::sleep(SESSION_POLL);
+        match herdr.agent(name) {
+            Ok(read) => agent = read,
+            Err(e) => {
+                let why = format!("could not read its session from herdr: {e:#}");
+                return Readiness::Ready(agent, Some(why));
+            }
+        }
+    }
+    Readiness::Ready(agent, None)
 }
 
 fn close_after_failure(herdr: &dyn Herdr, tab: &NewTab, err: anyhow::Error) -> anyhow::Error {
@@ -658,6 +711,100 @@ mod tests {
             "{}",
             rec.created
         );
+    }
+
+    #[test]
+    fn waits_for_the_session_of_an_agent_herdr_reports_ready_before_knowing_it() {
+        let mut herdr = herdr();
+        herdr.session_after_gets = 3;
+        let mut ledger = MemLedger::default();
+        let spawned = run(&herdr, &mut ledger, &request("a")).unwrap();
+        assert_eq!(
+            spawned.report("a"),
+            ("tab w1:t1\npane w1:p1\nsession session-a".into(), 0)
+        );
+        assert_eq!(ledger.0["a"].session_id.as_deref(), Some("session-a"));
+        assert!(ledger.0["a"].prompt_sent);
+    }
+
+    #[test]
+    fn waits_for_the_session_of_an_agent_idle_after_a_startup_dialog() {
+        let mut herdr = herdr();
+        herdr.startup = Startup::BlockedThenIdle;
+        herdr.session_after_gets = 3;
+        let mut ledger = MemLedger::default();
+        let spawned = run(&herdr, &mut ledger, &request("a")).unwrap();
+        assert_eq!(spawned.session_id.as_deref(), Some("session-a"));
+        assert_eq!(ledger.0["a"].session_id.as_deref(), Some("session-a"));
+    }
+
+    #[test]
+    fn a_session_still_unknown_at_the_ready_timeout_is_recorded_unknown() {
+        let mut herdr = herdr();
+        // Arrives after about 5s of polls, well past the 1s ready timeout.
+        herdr.session_after_gets = 25;
+        let mut ledger = MemLedger::default();
+        let req = SpawnRequest {
+            ready_timeout: Duration::from_secs(1),
+            ..request("a")
+        };
+        let spawned = run(&herdr, &mut ledger, &req).unwrap();
+        assert_eq!(
+            spawned.report("a"),
+            (
+                "tab w1:t1\npane w1:p1\nsession unknown\n\
+                 warning: herdr reported no session within 1s; \
+                 the Stop hook records it at the member's first stop"
+                    .into(),
+                0
+            )
+        );
+        assert_eq!(ledger.0["a"].session_id, None);
+        assert!(ledger.0["a"].prompt_sent);
+    }
+
+    #[test]
+    fn a_session_herdr_never_reports_stops_the_wait_short_of_the_ready_timeout() {
+        let mut herdr = herdr();
+        herdr.session_after_gets = u32::MAX;
+        let mut ledger = MemLedger::default();
+        let started = Instant::now();
+        let spawned = run(&herdr, &mut ledger, &request("a")).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(spawned.session_id, None);
+        assert!(
+            spawned
+                .report("a")
+                .0
+                .contains("warning: herdr reported no session within 10s")
+        );
+        assert!(ledger.0["a"].prompt_sent);
+    }
+
+    #[test]
+    fn a_failed_session_read_keeps_the_ready_agent_with_a_warning() {
+        let mut herdr = herdr();
+        herdr.session_after_gets = u32::MAX;
+        herdr.agent_get_fails_after_start = true;
+        let mut ledger = MemLedger::default();
+        let spawned = run(&herdr, &mut ledger, &request("a")).unwrap();
+        assert_eq!(
+            spawned.report("a"),
+            (
+                "tab w1:t1\npane w1:p1\nsession unknown\n\
+                 warning: could not read its session from herdr: herdr agent get a failed; \
+                 the Stop hook records it at the member's first stop"
+                    .into(),
+                0
+            )
+        );
+        assert_eq!(herdr.tabs().len(), 1);
+        assert_eq!(ledger.0["a"].session_id, None);
+        assert!(ledger.0["a"].prompt_sent);
     }
 
     #[test]

@@ -122,6 +122,12 @@ pub fn feed(
         match spawn(herdr, ledger, &spawn_req, inherited_workspace) {
             Ok(spawned) => {
                 lines.push(format!("added {name}"));
+                lines.extend(
+                    spawned
+                        .warnings()
+                        .iter()
+                        .map(|w| format!("warning: {name}: {w}")),
+                );
                 added += 1;
                 if spawned.blocked {
                     lines.push(format!(
@@ -664,6 +670,29 @@ mod tests {
             "prs: 0 retired, 0 added, 0 skipped, 2 errors"
         );
         assert_eq!(fed.code, 1);
+    }
+
+    #[test]
+    fn a_spawn_warning_is_passed_on_under_its_member() {
+        let setup = Setup::new("printf '1\\n'", 1);
+        let mut herdr = herdr();
+        herdr.session_after_gets = u32::MAX;
+        herdr.agent_get_fails_after_start = true;
+
+        let fed = setup
+            .feed(&herdr, &mut MemLedger::default(), false)
+            .unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "added zpr-1",
+                "warning: zpr-1: could not read its session from herdr: herdr agent get zpr-1 failed; \
+                 the Stop hook records it at the member's first stop",
+                "prs: 0 retired, 1 added, 0 skipped, 0 errors",
+            ]
+        );
+        assert_eq!(fed.code, 0);
     }
 
     #[test]
