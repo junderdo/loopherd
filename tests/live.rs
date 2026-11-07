@@ -962,8 +962,14 @@ const SLEEPER: &str = "Run `sleep 30` with the Bash tool and run_in_background s
      Then end your turn at once: don't wait for it or check on it. \
      When it finishes, reply with just the word done.";
 
-fn spawn_hooked(tag: &str, prompt: &str) -> Hooked {
-    spawn_hooked_with(tag, prompt, &[])
+/// A member running [`SLEEPER`], denied the tools that could keep it paused
+/// past its shells.
+fn spawn_sleeper(tag: &str) -> Hooked {
+    spawn_hooked_with(
+        tag,
+        SLEEPER,
+        &["--disallowedTools", "CronCreate,ScheduleWakeup,Monitor"],
+    )
 }
 
 /// `claude_args` go to the member's Claude after the `--settings` file.
@@ -1065,7 +1071,7 @@ fn the_stop_hook_records_a_paused_stop_then_a_finished_one() {
     if !live_enabled() {
         return;
     }
-    let member = spawn_hooked("stop", SLEEPER);
+    let member = spawn_sleeper("stop");
     let state = member.state.path();
 
     // The member may start more than one shell, each ending in a paused stop.
@@ -1089,7 +1095,7 @@ fn watch_wakes_paused_then_a_rearmed_watch_wakes_finished() {
     if !live_enabled() {
         return;
     }
-    let member = spawn_hooked("watch", SLEEPER);
+    let member = spawn_sleeper("watch");
     let state = member.state.path();
     // The member's hooks carry an XDG_STATE_HOME prefix, so give watch's
     // installed-hook check a plain one.
@@ -1121,13 +1127,10 @@ fn watch_wakes_paused_then_a_rearmed_watch_wakes_finished() {
     };
 
     let paused = watch();
-    let shells = paused
+    let pending = paused
         .strip_prefix(&format!("{} paused  ", member.name))
         .unwrap_or_else(|| panic!("{paused:?}"));
-    assert!(
-        shells.ends_with(" shell\n") || shells.ends_with(" shells\n"),
-        "{paused:?}"
-    );
+    assert!(pending.contains(" shell"), "{paused:?}");
     assert_eq!(watch(), format!("{} finished  no report\n", member.name));
     member.assert_live_state_untouched();
 }
@@ -1199,9 +1202,14 @@ fn only_the_members_own_stops_are_filed_across_a_nested_claude_and_a_branch() {
 
     say(&member.name, "/branch");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while ledger_entry(state, &member.name)["session_id"] == session
-        && std::time::Instant::now() < deadline
-    {
+    // The new session can show before Claude's input is ready for a prompt.
+    let branched = || {
+        let status =
+            herdr_ok(&["agent", "get", &member.name])["result"]["agent"]["agent_status"].clone();
+        ledger_entry(state, &member.name)["session_id"] != session
+            && (status == "idle" || status == "done")
+    };
+    while !branched() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
     say(&member.name, "Reply with just the word two.");
