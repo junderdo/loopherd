@@ -247,6 +247,13 @@ watch and carry on from its next steps.
   (see Handoffs).
 - `loopherd lead <herd>` starts the herd's lead from its herd file's
   `[lead]` table.
+- **Change a herd file's values** with `loopherd herd set <herd> <key>
+  <value>`, `loopherd herd get <herd> <key>` and `loopherd herd unset <herd>
+  <key>`, not by hand-editing TOML. Keys are dotted (`queue.max`,
+  `lead.merge`, `template.card.args`); the value is TOML, so quote strings
+  (`'"x"'`). It keeps the file's comments and layout, creates missing
+  tables, and refuses, changing nothing, any edit `loopherd herds` would
+  call invalid. Turn a lead's switches on only when the human says so.
 - **When the human asks to pause or resume a herd**, run `loopherd pause
   <herd> [--reason <text>]` or `loopherd resume <herd>` (`--all` for every
   herd), not a prose prompt to its lead. A paused herd's `feed` retires
@@ -321,6 +328,10 @@ shepherd:
   PR's merge endpoint are denied too, so ask the human to run a `rebase
   --abort`, and check merges with `gh pr view <n> --json state`. Grilling
   is always the human's.
+- **Herd files are the human's.** The hook always denies `loopherd herd
+  set` and `unset` in your pane, whatever your switches, so you can't turn
+  your own switches on; `loopherd herd get` is fine. Ask for a change
+  instead.
 - **Pausing is the human's.** The hook always denies `loopherd pause` and
   `loopherd resume` in your pane, whatever your switches. While your herd
   is paused your watch prints no `claimable` and `feed` spawns nothing;

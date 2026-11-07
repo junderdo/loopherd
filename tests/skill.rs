@@ -106,3 +106,18 @@ fn the_skill_asks_for_a_reviewer_by_role() {
         "{flat}"
     );
 }
+
+#[test]
+fn the_skill_tells_the_shepherd_to_edit_herd_files_with_herd_set() {
+    let home = tempfile::tempdir().unwrap();
+    let printed = String::from_utf8(skill(home.path())).unwrap();
+    let flat = printed.split_whitespace().collect::<Vec<_>>().join(" ");
+    for usage in [
+        "`loopherd herd get <herd> <key>`",
+        "`loopherd herd set <herd> <key> <value>`",
+        "`loopherd herd unset <herd> <key>`",
+        "The hook always denies `loopherd herd set` and `unset` in your pane",
+    ] {
+        assert!(flat.contains(usage), "{usage}");
+    }
+}

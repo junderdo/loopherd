@@ -74,6 +74,13 @@ enum Command {
     Add(AddArgs),
     /// List herd files with a usage line per template; exits 1 if any is invalid.
     Herds,
+    /// Read or edit one value in a herd file, keeping its comments and layout.
+    /// Keys are dotted paths such as `queue.max`, `lead.merge` or
+    /// `template.card.args`.
+    Herd {
+        #[command(subcommand)]
+        action: HerdAction,
+    },
     /// Start the herd's lead member, lead-<herd>, from its herd file's [lead] table,
     /// in a detached worktree of the same name.
     Lead(LeadArgs),
@@ -194,7 +201,8 @@ enum Command {
     SessionHook,
     /// Claude's PreToolUse hook on Bash: in a lead's pane, denies a merge, install,
     /// rebase or force-push its herd file's switch leaves to the human, and any
-    /// `loopherd restart --force`, read from the hook input on stdin, by printing a
+    /// `loopherd restart --force`, `pause`, `resume`, `herd set` or `herd unset`,
+    /// read from the hook input on stdin, by printing a
     /// deny decision. Elsewhere it prints nothing.
     /// Always exits 0. Set up by install-hook.
     ToolHook,
@@ -233,6 +241,23 @@ enum Command {
         #[arg(long)]
         settings: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand)]
+enum HerdAction {
+    /// Print the key's value as TOML; exits 1 if it isn't set.
+    Get { herd: String, key: String },
+    /// Set the key to a TOML value (`true`, `3`, `"x"`, `["a", "b"]`), creating
+    /// missing tables. Refuses, changing nothing, a file `loopherd herds` would
+    /// call invalid.
+    Set {
+        herd: String,
+        key: String,
+        value: String,
+    },
+    /// Remove the key; succeeds if it isn't set. Refuses, changing nothing, a
+    /// file `loopherd herds` would call invalid.
+    Unset { herd: String, key: String },
 }
 
 #[derive(Args)]
@@ -327,6 +352,7 @@ fn main() -> ExitCode {
         Command::Spawn(args) => ("spawn", run_spawn(args)),
         Command::Add(args) => ("add", run_add(args)),
         Command::Herds => ("herds", run_herds()),
+        Command::Herd { action } => ("herd", run_herd(action)),
         Command::Lead(args) => ("lead", run_lead(args)),
         Command::Feed {
             herd,
@@ -371,6 +397,22 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn run_herd(action: HerdAction) -> Result<i32> {
+    let paths = Paths::from_env()?;
+    match action {
+        HerdAction::Get { herd, key } => println!("{}", herd::get(&paths, &herd, &key)?),
+        HerdAction::Set { herd, key, value } => {
+            herd::set(&paths, &herd, &key, &value)?;
+            println!("set {key} = {value} in {herd}");
+        }
+        HerdAction::Unset { herd, key } => match herd::unset(&paths, &herd, &key)? {
+            true => println!("unset {key} in {herd}"),
+            false => println!("{key} was not set in {herd}"),
+        },
+    }
+    Ok(0)
 }
 
 fn run_pause(herds: &HerdsArg, reason: Option<&str>) -> Result<i32> {

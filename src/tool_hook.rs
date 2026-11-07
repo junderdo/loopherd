@@ -1,7 +1,7 @@
 //! `loopherd tool-hook`: Claude's PreToolUse hook on Bash. Blocks a command
 //! from a lead's pane that needs a switch its herd file leaves off (D17), or
-//! a `loopherd restart --force` (D20) or a `loopherd pause` or `resume`
-//! (D23), which no switch allows.
+//! a `loopherd restart --force` (D20), a `loopherd pause` or `resume`
+//! (D23), or a `loopherd herd set` or `unset` (D29), which no switch allows.
 //! A guardrail on the command text, not a sandbox.
 
 use std::path::Path;
@@ -27,6 +27,9 @@ pub enum Switch {
     ForceRestart,
     /// `loopherd pause` or `resume`. Not a switch: always the human's.
     Pause,
+    /// `loopherd herd set` or `unset`, which could turn a lead's own switches
+    /// on. Not a switch: always the human's.
+    HerdEdit,
 }
 
 impl Switch {
@@ -37,6 +40,7 @@ impl Switch {
             Switch::Rebase => "rebase",
             Switch::ForceRestart => "restart --force",
             Switch::Pause => "pause",
+            Switch::HerdEdit => "herd set",
         }
     }
 
@@ -47,6 +51,7 @@ impl Switch {
             Switch::Rebase => "the human rebases and force-pushes",
             Switch::ForceRestart => "the human forces a restart",
             Switch::Pause => "the human pauses and resumes herds",
+            Switch::HerdEdit => "the human edits herd files",
         }
     }
 
@@ -55,7 +60,7 @@ impl Switch {
             Switch::Merge => switches.merge,
             Switch::Install => switches.install,
             Switch::Rebase => switches.rebase,
-            Switch::ForceRestart | Switch::Pause => false,
+            Switch::ForceRestart | Switch::Pause | Switch::HerdEdit => false,
         }
     }
 }
@@ -96,6 +101,7 @@ fn decide(
                 Switch::Rebase,
                 Switch::ForceRestart,
                 Switch::Pause,
+                Switch::HerdEdit,
             ]
         });
     if needed.is_empty() {
@@ -112,6 +118,13 @@ fn decide(
     let Some(needed) = needed.into_iter().find(|s| !s.on(&switches)) else {
         return Ok(None);
     };
+    if needed == Switch::HerdEdit {
+        return Ok(Some(format!(
+            "loopherd: blocked: {} may not run `loopherd herd set` or `loopherd herd unset`, which could turn its own switches on: {}; ask with `loopherd report --kind question`",
+            lead.name,
+            needed.humans_part()
+        )));
+    }
     if needed == Switch::Pause {
         return Ok(Some(format!(
             "loopherd: blocked: {} may not run `loopherd pause` or `loopherd resume`: {}; ask with `loopherd report --kind question`",
@@ -348,11 +361,23 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
             Some(&"install-hook") => Some(Switch::Install),
             Some(&"restart") => forces_restart(args),
             Some(&"pause" | &"resume") => Some(Switch::Pause),
+            Some(&"herd") => {
+                matches!(positional.get(1), Some(&"set" | &"unset")).then_some(Switch::HerdEdit)
+            }
             _ => None,
         },
-        // `cargo run -- pause` in a loopherd checkout, in any spelling;
-        // first, since its reason may hold any word.
-        "cargo" if cargo_runs_pause(args) => Some(Switch::Pause),
+        // `cargo run -- herd set` and `pause` in a loopherd checkout, in any
+        // spelling; first, since a value or reason may hold any word.
+        "cargo" if edits_herd(cargo_run_args(args)) => Some(Switch::HerdEdit),
+        // A key or value read by `herd get` may be any word.
+        "cargo" if runs_herd_get(cargo_run_args(args)) => None,
+        "cargo"
+            if cargo_run_args(args)
+                .iter()
+                .any(|a| a == "pause" || a == "resume") =>
+        {
+            Some(Switch::Pause)
+        }
         // `cargo run -- install-hook` in a loopherd checkout, in any spelling.
         "cargo" if args.iter().any(|a| a == "install-hook") => Some(Switch::Install),
         "cargo" if args.iter().any(|a| a == "restart") => forces_restart(args),
@@ -360,14 +385,72 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
     }
 }
 
-/// Whether `cargo run` (or `r`) has `pause` or `resume` among its args, with
-/// or without `--`. Other subcommands pass: `cargo test pause` is a filter.
-fn cargo_runs_pause(args: &[String]) -> bool {
+/// The args after `cargo run` (or `r`), options and `--` included; none for
+/// other subcommands, since `cargo test pause` is a filter.
+fn cargo_run_args(args: &[String]) -> &[String] {
     const GLOBAL_WITH_VALUE: [&str; 4] = ["--color", "--config", "-Z", "-C"];
     let toolchain = usize::from(args.first().is_some_and(|a| a.starts_with('+')));
     let at = skip_options(args, toolchain, &GLOBAL_WITH_VALUE);
-    let runs = args.get(at).is_some_and(|a| a == "run" || a == "r");
-    runs && args[at + 1..].iter().any(|a| a == "pause" || a == "resume")
+    match args.get(at) {
+        Some(run) if run == "run" || run == "r" => &args[at + 1..],
+        _ => &[],
+    }
+}
+
+/// Whether `run_args` run loopherd's `herd get`: every option before `herd`
+/// is one cargo knows, and no `herd set` or `unset` hides among the words.
+fn runs_herd_get(run_args: &[String]) -> bool {
+    const WITH_VALUE: [&str; 16] = [
+        "--bin",
+        "-p",
+        "--package",
+        "--profile",
+        "--features",
+        "-F",
+        "--target",
+        "--target-dir",
+        "--manifest-path",
+        "-j",
+        "--jobs",
+        "--example",
+        "--color",
+        "--config",
+        "-Z",
+        "-C",
+    ];
+    const FLAGS: [&str; 10] = [
+        "-q",
+        "--quiet",
+        "-v",
+        "--verbose",
+        "-r",
+        "--release",
+        "--offline",
+        "--locked",
+        "--frozen",
+        "--all-features",
+    ];
+    let mut i = 0;
+    while let Some(arg) = run_args.get(i) {
+        match arg.as_str() {
+            "--" => {
+                i += 1;
+                break;
+            }
+            a if WITH_VALUE.contains(&a) => i += 2,
+            a if FLAGS.contains(&a) => i += 1,
+            a if a.starts_with('-') => return false,
+            _ => break,
+        }
+    }
+    let rest = run_args.get(i..).unwrap_or_default();
+    rest.starts_with(&["herd".to_string(), "get".to_string()]) && !edits_herd(rest)
+}
+
+/// Whether `herd` then `set` or `unset` appear in `args`, side by side.
+fn edits_herd<S: AsRef<str>>(args: &[S]) -> bool {
+    args.windows(2)
+        .any(|w| w[0].as_ref() == "herd" && matches!(w[1].as_ref(), "set" | "unset"))
 }
 
 fn forces_restart(args: &[String]) -> Option<Switch> {
@@ -848,7 +931,7 @@ mod tests {
             Switch::Merge => s.merge = false,
             Switch::Install => s.install = false,
             Switch::Rebase => s.rebase = false,
-            Switch::ForceRestart | Switch::Pause => {}
+            Switch::ForceRestart | Switch::Pause | Switch::HerdEdit => {}
         }
         s
     }
@@ -888,7 +971,7 @@ mod tests {
                 Switch::Merge => others_off.merge = true,
                 Switch::Install => others_off.install = true,
                 Switch::Rebase => others_off.rebase = true,
-                Switch::ForceRestart | Switch::Pause => {}
+                Switch::ForceRestart | Switch::Pause | Switch::HerdEdit => {}
             }
             for command in commands {
                 assert_eq!(run(&leads, others_off, command), None, "{command}");
@@ -1099,6 +1182,115 @@ mod tests {
             "cargo --color always test resume",
             "cargo bench -- resume",
             "grep -n 'loopherd pause' src/skill.md",
+        ] {
+            assert_eq!(needs(command), [], "{command}");
+        }
+    }
+
+    const HERD_EDITS: &[&str] = &[
+        "loopherd herd set h lead.merge true",
+        "loopherd herd unset h lead.merge",
+        "/home/me/.local/bin/loopherd herd set h lead.install true",
+        "bash -c 'loopherd herd set h lead.rebase true'",
+        "cd /x && loopherd herd unset h queue.max",
+        "scripts/herdr-dev loopherd herd set h lead.merge true",
+        "cargo run -- herd set h lead.merge true",
+        "cargo r -q -- herd unset h lead.merge",
+        "cargo +nightly run --release herd set h lead.merge true",
+        "cargo run -- herd set h template.t.prompt '\"install-hook\"'",
+        "cargo run -- herd set h template.t.prompt '\"pause\"'",
+    ];
+
+    #[test]
+    fn a_leads_herd_set_or_unset_is_denied_whatever_its_switches() {
+        let leads = ledger(vec![lead()]);
+        for command in HERD_EDITS {
+            assert_eq!(needs(command), [Switch::HerdEdit], "{command}");
+            let message =
+                run(&leads, all_on(), command).unwrap_or_else(|| panic!("{command} was allowed"));
+            assert!(
+                message.contains("lead-h may not run `loopherd herd set` or `loopherd herd unset`")
+                    && message.contains("the human edits herd files"),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cargo_run_herd_get_needs_nothing_whatever_its_key_or_value_words() {
+        for command in [
+            "cargo run -- herd get h install-hook",
+            "cargo run -- herd get h restart --force",
+            "cargo run -q --bin loopherd -- herd get h pause",
+            "cargo r herd get h resume",
+        ] {
+            assert_eq!(needs(command), [], "{command}");
+        }
+        for command in [
+            "cargo run -- herd get h x; cargo run -- install-hook",
+            "cargo run -- install-hook herd get",
+        ] {
+            assert_eq!(needs(command), [Switch::Install], "{command}");
+        }
+    }
+
+    #[test]
+    fn cargo_options_cant_hide_a_command_behind_herd_get() {
+        for (command, want) in [
+            (
+                "cargo run --config herd --config get pause h",
+                Switch::Pause,
+            ),
+            ("cargo run -Z herd -Z get resume h", Switch::Pause),
+            ("cargo run -C herd -C get install-hook", Switch::Install),
+            (
+                "cargo run --config herd --config get restart x --force",
+                Switch::ForceRestart,
+            ),
+            ("cargo run --unknown herd get pause h", Switch::Pause),
+        ] {
+            assert_eq!(needs(command), [want], "{command}");
+        }
+    }
+
+    #[test]
+    fn runs_herd_get_never_covers_a_herd_set_or_unset() {
+        for words in [
+            "-- herd get h herd set h lead.merge true",
+            "herd get h herd unset h lead.merge",
+        ] {
+            let args: Vec<String> = words.split(' ').map(String::from).collect();
+            assert!(!runs_herd_get(&args), "{words}");
+        }
+    }
+
+    #[test]
+    fn set_or_unset_without_herd_before_it_is_no_herd_edit() {
+        for command in [
+            "cargo run -- report set",
+            "cargo run -- report unset x",
+            "loopherd report set",
+        ] {
+            assert_eq!(needs(command), [], "{command}");
+        }
+    }
+
+    #[test]
+    fn herd_set_passes_outside_a_leads_pane_and_herd_get_passes_everywhere() {
+        let workers = ledger(vec![entry("lh-1", None)]);
+        for command in HERD_EDITS {
+            assert_eq!(
+                run(&workers, Switches::default(), command),
+                None,
+                "{command}"
+            );
+        }
+        for command in [
+            "loopherd herd get h lead.merge",
+            "cargo run -- herd get h lead.merge",
+            "loopherd herds",
+            "echo loopherd herd set h lead.merge true",
+            "cargo test herd set",
         ] {
             assert_eq!(needs(command), [], "{command}");
         }
