@@ -330,12 +330,12 @@ merge = false
         use std::os::unix::fs::PermissionsExt;
         let (_dir, paths) = herds(HERD);
         let file = paths.herds.join("h.toml");
-        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
 
         set(&paths, "h", "queue.max", "3").unwrap();
 
         let mode = fs::metadata(&file).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(mode & 0o777, 0o640);
     }
 
     #[test]
