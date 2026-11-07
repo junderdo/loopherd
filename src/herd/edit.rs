@@ -1,16 +1,19 @@
 //! `loopherd herd get|set|unset`: read and edit one value in a herd file,
 //! keeping its comments and layout.
 
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::io::Write;
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use toml_edit::{DocumentMut, Item, Key, Table, TableLike, Value};
 
 use super::{Paths, check, file_of};
+use crate::lock::Lock;
 
 /// The value at dotted `key` in `herd`'s file, as TOML; an error when unset.
 pub fn get(paths: &Paths, herd: &str, key: &str) -> Result<String> {
-    let (_, doc) = read(paths, herd)?;
+    let doc = read(&file_of(&paths.herds, herd)?)?;
     let keys = parse_key(key)?;
     let mut item = doc.as_item();
     for k in &keys {
@@ -30,75 +33,101 @@ pub fn get(paths: &Paths, herd: &str, key: &str) -> Result<String> {
 /// Sets dotted `key` in `herd`'s file to `value`, parsed as a TOML value,
 /// creating missing tables.
 pub fn set(paths: &Paths, herd: &str, key: &str, value: &str) -> Result<()> {
-    let (file, mut doc) = read(paths, herd)?;
     let keys = parse_key(key)?;
+    let (last, parents) = keys.split_last().context("empty key")?;
     let mut value: Value = value
         .parse()
         .with_context(|| format!("{value} is not a TOML value; quote a string"))?;
-    let (last, parents) = keys.split_last().context("empty key")?;
-    let mut table = doc.as_table_mut() as &mut dyn TableLike;
-    for k in parents {
-        let item = table.entry_format(k).or_insert_with(|| {
-            let mut new = Table::new();
-            new.set_implicit(true);
-            Item::Table(new)
-        });
-        table = match item.as_table_like_mut() {
-            Some(t) => t,
-            None => bail!("{} is not a table", k.get()),
-        };
-    }
-    match table.get_mut(last.get()).and_then(Item::as_value_mut) {
-        Some(old) => {
-            *value.decor_mut() = old.decor().clone();
-            *old = value;
+    edit(paths, herd, |doc| {
+        let mut table = doc.as_table_mut() as &mut dyn TableLike;
+        for k in parents {
+            let item = table.entry_format(k).or_insert_with(|| {
+                let mut new = Table::new();
+                new.set_implicit(true);
+                Item::Table(new)
+            });
+            table = match item.as_table_like_mut() {
+                Some(t) => t,
+                None => bail!("{} is not a table", k.get()),
+            };
         }
-        None => {
-            table.insert(last.get(), Item::Value(value));
+        match table.get_mut(last.get()).and_then(Item::as_value_mut) {
+            Some(old) => {
+                *value.decor_mut() = old.decor().clone();
+                *old = value;
+            }
+            None => {
+                table.insert(last.get(), Item::Value(value));
+            }
         }
-    }
-    write(paths, &file, &doc.to_string())
+        Ok(true)
+    })?;
+    Ok(())
 }
 
 /// Removes dotted `key` from `herd`'s file; false, writing nothing, when it
 /// isn't set.
 pub fn unset(paths: &Paths, herd: &str, key: &str) -> Result<bool> {
-    let (file, mut doc) = read(paths, herd)?;
     let keys = parse_key(key)?;
     let (last, parents) = keys.split_last().context("empty key")?;
-    let mut table = Some(doc.as_table_mut() as &mut dyn TableLike);
-    for k in parents {
-        table = table
-            .and_then(|t| t.get_mut(k.get()))
-            .and_then(Item::as_table_like_mut);
-    }
-    if table.and_then(|t| t.remove(last.get())).is_none() {
+    edit(paths, herd, |doc| {
+        let mut table = Some(doc.as_table_mut() as &mut dyn TableLike);
+        for k in parents {
+            table = table
+                .and_then(|t| t.get_mut(k.get()))
+                .and_then(Item::as_table_like_mut);
+        }
+        Ok(table.and_then(|t| t.remove(last.get())).is_some())
+    })
+}
+
+/// Applies `change` to `herd`'s file under the file's lock and, when it
+/// returns true, replaces the file with the result through a temp file and a
+/// rename, once that passes the checks `loopherd herds` makes.
+fn edit(
+    paths: &Paths,
+    herd: &str,
+    change: impl FnOnce(&mut DocumentMut) -> Result<bool>,
+) -> Result<bool> {
+    let file = file_of(&paths.herds, herd)?;
+    // Renaming over a symlink would replace it, so edit its target.
+    let file = fs::canonicalize(&file).with_context(|| format!("read {}", file.display()))?;
+    let _lock = lock(&file)?;
+    let mut doc = read(&file)?;
+    if !change(&mut doc)? {
         return Ok(false);
     }
-    write(paths, &file, &doc.to_string())?;
+    let text = doc.to_string();
+    check(&text, paths).with_context(|| format!("refused, {} is unchanged", file.display()))?;
+    let written = || format!("write {}", file.display());
+    let dir = file.parent().context("herd file has no directory")?;
+    let mut temp = tempfile::NamedTempFile::new_in(dir).with_context(written)?;
+    temp.write_all(text.as_bytes()).with_context(written)?;
+    let permissions = fs::metadata(&file).with_context(written)?.permissions();
+    temp.as_file()
+        .set_permissions(permissions)
+        .with_context(written)?;
+    temp.persist(&file).with_context(written)?;
     Ok(true)
 }
 
-/// Writes `text` over `file` through a temp file and a rename, once it
-/// passes the checks `loopherd herds` makes.
-fn write(paths: &Paths, file: &Path, text: &str) -> Result<()> {
-    check(text, paths).with_context(|| format!("refused, {} is unchanged", file.display()))?;
-    // Renaming over a symlink would replace it, so write to its target.
-    let file = &std::fs::canonicalize(file).with_context(|| format!("read {}", file.display()))?;
+/// Waits for the lock on `file`'s hidden `.<name>.lock` beside it.
+fn lock(file: &Path) -> Result<Lock> {
     let name = file.file_name().context("herd file has no name")?;
-    let temp = file.with_file_name(format!(".{}.tmp", name.to_string_lossy()));
-    std::fs::write(&temp, text).with_context(|| format!("write {}", temp.display()))?;
-    std::fs::rename(&temp, file).with_context(|| format!("write {}", file.display()))
+    let path = file.with_file_name(format!(".{}.lock", name.to_string_lossy()));
+    let opened = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    Lock::wait(opened).with_context(|| format!("lock {}", path.display()))
 }
 
-fn read(paths: &Paths, herd: &str) -> Result<(PathBuf, DocumentMut)> {
-    let file = file_of(&paths.herds, herd)?;
-    let text =
-        std::fs::read_to_string(&file).with_context(|| format!("read {}", file.display()))?;
-    let doc = text
-        .parse::<DocumentMut>()
-        .with_context(|| file.display().to_string())?;
-    Ok((file, doc))
+fn read(file: &Path) -> Result<DocumentMut> {
+    let text = fs::read_to_string(file).with_context(|| format!("read {}", file.display()))?;
+    text.parse::<DocumentMut>()
+        .with_context(|| file.display().to_string())
 }
 
 fn parse_key(key: &str) -> Result<Vec<Key>> {
@@ -107,8 +136,6 @@ fn parse_key(key: &str) -> Result<Vec<Key>> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use super::*;
     use crate::herd::Paths;
 
@@ -271,5 +298,78 @@ merge = false
             fs::read_to_string(&target).unwrap(),
             "repo = \"/r\"\nworkspace = \"w\"\n"
         );
+    }
+
+    #[test]
+    fn unset_of_a_required_queue_key_is_refused() {
+        let (_dir, paths) = herds(HERD);
+        let err = format!("{:#}", unset(&paths, "h", "queue.source").unwrap_err());
+        assert!(err.contains("missing field `source`"), "{err}");
+        assert_eq!(text(&paths), HERD);
+    }
+
+    #[test]
+    fn set_replaces_the_file_rather_than_rewriting_it_in_place() {
+        use std::os::unix::fs::MetadataExt;
+        let (_dir, paths) = herds(HERD);
+        let file = paths.herds.join("h.toml");
+        let before = fs::metadata(&file).unwrap().ino();
+
+        set(&paths, "h", "queue.max", "3").unwrap();
+
+        assert_ne!(fs::metadata(&file).unwrap().ino(), before);
+        assert_eq!(
+            fs::read_dir(&paths.herds).unwrap().count(),
+            2,
+            "h.toml and its lock"
+        );
+    }
+
+    #[test]
+    fn set_keeps_the_files_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, paths) = herds(HERD);
+        let file = paths.herds.join("h.toml");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+
+        set(&paths, "h", "queue.max", "3").unwrap();
+
+        let mode = fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn concurrent_sets_all_land_and_leave_a_valid_file() {
+        let (_dir, paths) = herds(HERD);
+        let herds_dir = paths.herds.clone();
+        for round in 0..20 {
+            let writers: Vec<_> = [
+                ("queue.max", format!("{}", round + 3)),
+                ("template.card.prompt", format!("\"work {{key}} {round}\"")),
+                ("lead.prompt", format!("\"lead {{herd}} {round}\"")),
+            ]
+            .into_iter()
+            .map(|(key, value)| {
+                let paths = Paths::under(herds_dir.parent().unwrap());
+                std::thread::spawn(move || set(&paths, "h", key, &value))
+            })
+            .collect();
+            for writer in writers {
+                writer.join().unwrap().unwrap();
+            }
+            assert_eq!(
+                get(&paths, "h", "queue.max").unwrap(),
+                format!("{}", round + 3)
+            );
+            assert_eq!(
+                get(&paths, "h", "template.card.prompt").unwrap(),
+                format!("\"work {{key}} {round}\"")
+            );
+            assert_eq!(
+                get(&paths, "h", "lead.prompt").unwrap(),
+                format!("\"lead {{herd}} {round}\"")
+            );
+        }
+        crate::herd::check(&text(&paths), &paths).unwrap();
     }
 }

@@ -71,9 +71,10 @@ fn herd_gets_sets_and_unsets_one_value() {
         fs::read_to_string(&file).unwrap(),
         "repo = \"/r\" # where\n\n[lead]\nprompt = \"go\"\n"
     );
-    assert_eq!(
-        fs::read_dir(&herds).unwrap().count(),
-        1,
-        "a temp file was left"
-    );
+    let mut left: Vec<_> = fs::read_dir(&herds)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(left, [".h.toml.lock", "h.toml"], "a temp file was left");
 }
