@@ -42,6 +42,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D25](decisions/D25.md) | A queue can route each task to one of several templates: with `[queue] templates`, the first word of each `source` line names the template; one `max` covers them all. |
 | [D26](decisions/D26.md) | `scripts/install` optionally copies loopherd's own agent types into `~/.claude/agents/` (hash-tracked, never overwriting unasked) and installs the mattpocock-skills plugin; both default to no. |
 | [D27](decisions/D27.md) | `scripts/install` reads the mattpocock-skills plugin's skill names from its GitHub manifest at the catalog's pinned commit; naming one extra installs just it, asking nothing else. |
+| [D29](decisions/D29.md) | `loopherd herd get\|set\|unset` edits herd files format-preservingly, refusing any result `loopherd herds` calls invalid; the tool hook denies `set`/`unset` in a lead's pane. |
 
 ## Emerging model
 

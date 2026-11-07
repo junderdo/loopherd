@@ -15,6 +15,10 @@ use crate::spawn::{
 };
 use crate::template::Template;
 
+mod edit;
+
+pub use edit::{get, set, unset};
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HerdFile {
@@ -686,17 +690,8 @@ pub fn herds(paths: &Paths) -> Result<(String, i32)> {
         let herd = file.file_stem().unwrap_or_default().to_string_lossy();
         match std::fs::read_to_string(file)
             .map_err(anyhow::Error::from)
-            .and_then(|text| parse(&text))
-            .and_then(|parsed| {
-                for (name, template) in &parsed.template {
-                    check_template(name, template, paths)?;
-                }
-                if let Some(lead) = &parsed.lead {
-                    let prompt = read_prompt(&lead.prompt, &lead.prompt_file, paths);
-                    prompt.and_then(|p| check_lead_prompt(&p)).context("lead")?;
-                }
-                Ok(parsed)
-            }) {
+            .and_then(|text| check(&text, paths))
+        {
             Ok(parsed) => {
                 let reading = crate::pause::read(&paths.paused, &herd);
                 let paused = match reading.pause() {
@@ -714,6 +709,20 @@ pub fn herds(paths: &Paths) -> Result<(String, i32)> {
         }
     }
     Ok((lines.join("\n"), code))
+}
+
+/// `text` parsed as a herd file and checked as far as `add` and `lead` would
+/// before knowing any params.
+fn check(text: &str, paths: &Paths) -> Result<HerdFile> {
+    let parsed = parse(text)?;
+    for (name, template) in &parsed.template {
+        check_template(name, template, paths)?;
+    }
+    if let Some(lead) = &parsed.lead {
+        let prompt = read_prompt(&lead.prompt, &lead.prompt_file, paths);
+        prompt.and_then(|p| check_lead_prompt(&p)).context("lead")?;
+    }
+    Ok(parsed)
 }
 
 /// The `*.toml` files in `dir` by herd name, skipping hidden ones; none if `dir` is missing.
