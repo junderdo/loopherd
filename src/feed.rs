@@ -1,19 +1,21 @@
 //! `loopherd feed`: fill a herd's free slots from its queue's source (D14).
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 
-use crate::herd::{AddRequest, Paths, Queue, members, queue, resolve};
+use crate::herd::{AddRequest, MemberCheck, Paths, Queue, lead_switches, members, queue, resolve};
 use crate::herdr::Herdr;
-use crate::ledger::Ledger;
+use crate::ledger::{AgentRecord, Ledger};
 use crate::pause;
+use crate::report::{Body, Entry, append};
 use crate::retire::retire_and_close;
 use crate::shell::run_within;
 use crate::spawn::{BLOCKED_EXIT, spawn};
+use crate::tool_hook::{Pane, lead_in, needs};
 
 /// Feed's exit code when every error was a malformed source line.
 pub const LINE_ERRORS_EXIT: i32 = 4;
@@ -27,6 +29,12 @@ pub struct FeedRequest {
     pub command_timeout: Duration,
     /// The pane running loopherd, whose tab retire never closes.
     pub own_pane: Option<String>,
+    /// `$HERDR_SOCKET_PATH`: which herdr `own_pane` is in.
+    pub own_socket: Option<PathBuf>,
+    /// Where members' mailboxes live, for after_merge's notes.
+    pub mailboxes: PathBuf,
+    /// How long each after_merge command may run.
+    pub after_merge_timeout: Duration,
 }
 
 /// One line per task, then a summary, and the exit code.
@@ -57,7 +65,7 @@ pub fn feed(
     let reading = pause::read(&paths.paused, &req.herd);
     if let Some(pause) = reading.pause() {
         lines.extend(reading.warning(&req.herd));
-        let reaped = reap(herdr, ledger, &queue, req, &mut lines)?;
+        let reaped = reap(herdr, ledger, paths, &queue, req, &mut lines)?;
         lines.push(format!(
             "{} paused {}: spawned nothing",
             req.herd,
@@ -67,7 +75,7 @@ pub fn feed(
         return Ok(Fed { lines, code });
     }
     let output = run_source(&queue, req.command_timeout).context("source")?;
-    let reaped = reap(herdr, ledger, &queue, req, &mut lines)?;
+    let reaped = reap(herdr, ledger, paths, &queue, req, &mut lines)?;
     let mut errors = reaped.errors;
 
     let held = members(ledger, &req.herd)?;
@@ -184,6 +192,9 @@ pub fn claimable(
         ready_timeout: Duration::ZERO,
         command_timeout: timeout,
         own_pane: None,
+        own_socket: None,
+        mailboxes: PathBuf::new(),
+        after_merge_timeout: Duration::ZERO,
     };
     let mut names = vec![];
     for task in output.lines().map(str::trim) {
@@ -211,11 +222,15 @@ struct Reaped {
     errors: usize,
 }
 
-/// Runs the done check of each active member that has one, retiring and
-/// closing those it passes, one line per member to `lines`.
+/// Runs the herd's after_merge for each active member whose merged check
+/// first passes, then the done check of each other member that has one,
+/// retiring and closing those it passes, one line per member to `lines`.
+/// A member whose after_merge just ran keeps its slot until the next feed,
+/// so a watch sees its note before it retires.
 fn reap(
     herdr: &dyn Herdr,
     ledger: &mut dyn Ledger,
+    paths: &Paths,
     queue: &Queue,
     req: &FeedRequest,
     lines: &mut Vec<String>,
@@ -224,17 +239,41 @@ fn reap(
         retired: 0,
         errors: 0,
     };
+    let mut held_back = None;
+    if !queue.after_merge.is_empty() {
+        held_back = gate(ledger, paths, req, &queue.after_merge)?;
+    }
     let members = ledger.entries().context("ledger")?.into_values();
     let workers = members.filter(|e| !e.retired && !e.is_lead());
     for member in workers.filter(|e| e.herd.as_deref() == Some(&req.herd)) {
         let name = &member.name;
-        let Some(check) = member.template.as_ref().and_then(|t| queue.done.get(t)) else {
+        let template = member.template.as_deref();
+        let merged = template
+            .and_then(|t| queue.merged.get(t))
+            .filter(|_| !queue.after_merge.is_empty() && !member.after_merge_ran);
+        let done = template.and_then(|t| queue.done.get(t));
+        if merged.is_none() && done.is_none() {
             continue;
-        };
+        }
         let Some(params) = &member.params else {
             lines.push(format!(
                 "warning: {name} has no recorded params; skipping its done check"
             ));
+            continue;
+        };
+        if let Some(check) = merged {
+            let ran = after_merge(
+                ledger, queue, req, &member, check, params, &held_back, lines,
+            )?;
+            match ran {
+                AfterMerge::NotMerged => {}
+                AfterMerge::Ran { failed } => {
+                    reaped.errors += usize::from(failed);
+                    continue;
+                }
+            }
+        }
+        let Some(check) = done else {
             continue;
         };
         let finished = match check.render(&member, params) {
@@ -269,6 +308,174 @@ fn reap(
         }
     }
     Ok(reaped)
+}
+
+/// A command of after_merge that needs a switch the lead running feed has off.
+struct HeldBack {
+    command: String,
+    switch: &'static str,
+    herd: String,
+}
+
+impl HeldBack {
+    fn why(&self) -> String {
+        format!(
+            "`{}` needs the {} switch, off in {}'s [lead]",
+            self.command, self.switch, self.herd
+        )
+    }
+}
+
+/// Which of `commands` may not run: feed runs in a lead's pane, and it needs
+/// a switch that lead's herd file leaves off, as the tool hook would judge it.
+fn gate(
+    ledger: &dyn Ledger,
+    paths: &Paths,
+    req: &FeedRequest,
+    commands: &[String],
+) -> Result<Option<HeldBack>> {
+    let pane = req.own_pane.as_deref().map(|id| Pane {
+        id,
+        socket: req.own_socket.as_deref(),
+    });
+    let Some(lead) = pane.map(|p| lead_in(ledger, &p)).transpose()?.flatten() else {
+        return Ok(None);
+    };
+    let herd = lead.herd.unwrap_or_default();
+    // An unreadable herd file counts every switch off, as in the tool hook.
+    let switches = lead_switches(paths, &herd).unwrap_or_default();
+    Ok(commands.iter().find_map(|command| {
+        let off = needs(command).into_iter().find(|s| !s.on(&switches))?;
+        Some(HeldBack {
+            command: command.clone(),
+            switch: off.name(),
+            herd: herd.clone(),
+        })
+    }))
+}
+
+enum AfterMerge {
+    NotMerged,
+    /// Ran, or would have in a dry run, or was held back by a switch.
+    Ran {
+        failed: bool,
+    },
+}
+
+/// Runs `queue.after_merge` for `member` if its merged `check` passes,
+/// recording in the ledger first so a crash can't run it twice, and notes
+/// the outcome in its mailbox. `held_back` runs none of it, noting why.
+#[allow(clippy::too_many_arguments)]
+fn after_merge(
+    ledger: &mut dyn Ledger,
+    queue: &Queue,
+    req: &FeedRequest,
+    member: &AgentRecord,
+    check: &MemberCheck,
+    params: &std::collections::BTreeMap<String, String>,
+    held_back: &Option<HeldBack>,
+    lines: &mut Vec<String>,
+) -> Result<AfterMerge> {
+    let name = &member.name;
+    let merged = match check.render(member, params) {
+        Ok(command) => run_check(&command, &queue.repo, req.command_timeout),
+        Err(e) => Err(format!("{e:#}")),
+    };
+    match merged {
+        Ok(true) => {}
+        Ok(false) => return Ok(AfterMerge::NotMerged),
+        Err(why) => {
+            lines.push(format!("warning: merged check failed {name}: {why}"));
+            return Ok(AfterMerge::NotMerged);
+        }
+    }
+    if req.dry_run {
+        lines.push(match held_back {
+            Some(held) => format!("would not run after_merge for {name}: {}", held.why()),
+            None => format!(
+                "would run after_merge for {name}: {}",
+                queue.after_merge.join("; ")
+            ),
+        });
+        return Ok(AfterMerge::Ran { failed: false });
+    }
+    ledger
+        .update(name, &mut |r| {
+            r.after_merge_ran = true;
+            Ok(())
+        })
+        .context("ledger")?;
+    let (line, note, failed) = match held_back {
+        Some(held) => (
+            format!("not run: {}", held.why()),
+            format!(
+                "after_merge not run: {}; run its commands by hand, or turn {} on",
+                held.why(),
+                held.switch
+            ),
+            false,
+        ),
+        None => match run_commands(&queue.after_merge, &queue.repo, req.after_merge_timeout) {
+            None => ("ok".into(), "after_merge ok".into(), false),
+            Some((why, tail)) => (
+                format!("failed: {why}"),
+                format!("after_merge failed: {why}{tail}"),
+                true,
+            ),
+        },
+    };
+    lines.push(format!("after_merge {name}: {line}"));
+    let entry = Entry::new(SystemTime::now(), Body::Note { text: note });
+    if let Err(e) = append(&req.mailboxes, name, &entry) {
+        lines.push(format!("warning: note to {name}'s mailbox: {e:#}"));
+    }
+    Ok(AfterMerge::Ran { failed })
+}
+
+/// Lines of a failed command's output a note keeps.
+const TAIL_LINES: usize = 20;
+
+/// Runs `commands` in order in `repo`, stopping at the first failure, which
+/// it returns as the command and its exit, and its output's last lines.
+fn run_commands(commands: &[String], repo: &Path, timeout: Duration) -> Option<(String, String)> {
+    for command in commands {
+        let ran = run_within(
+            Command::new("sh")
+                .arg("-c")
+                // One stream, so the tail interleaves stdout and stderr as written.
+                .arg(format!("exec 2>&1\n{command}"))
+                .current_dir(repo),
+            timeout,
+        );
+        let (why, output) = match ran {
+            Ok(Some(output)) if output.status.success() => continue,
+            Ok(Some(output)) => {
+                let status = match output.status.code() {
+                    Some(code) => format!("exit {code}"),
+                    None => output.status.to_string(),
+                };
+                (status, output.stdout)
+            }
+            Ok(None) => (
+                format!("timed out after {}", humantime::format_duration(timeout)),
+                vec![],
+            ),
+            Err(e) => (
+                format!("could not run in {}: {e:#}", repo.display()),
+                vec![],
+            ),
+        };
+        let output = String::from_utf8_lossy(&output);
+        let lines: Vec<&str> = output.lines().collect();
+        let tail = lines[lines.len().saturating_sub(TAIL_LINES)..].join("\n");
+        let tail = if tail.is_empty() {
+            tail
+        } else {
+            format!("\n{tail}")
+        };
+        return Some((format!("`{command}` {why}"), tail));
+    }
+    None
 }
 
 /// Whether the ledger marks `name` retired; false if it can't be read.
@@ -469,14 +676,66 @@ mod tests {
         }
 
         fn feed(&self, herdr: &FakeHerdr, ledger: &mut MemLedger, dry_run: bool) -> Result<Fed> {
+            self.feed_from(herdr, ledger, dry_run, None)
+        }
+
+        /// Like `feed`, run in `pane` of the herdr at socket `/s`.
+        fn feed_from(
+            &self,
+            herdr: &FakeHerdr,
+            ledger: &mut MemLedger,
+            dry_run: bool,
+            pane: Option<&str>,
+        ) -> Result<Fed> {
             let req = FeedRequest {
                 herd: "prs".into(),
                 dry_run,
                 ready_timeout: Duration::from_secs(60),
                 command_timeout: Duration::from_secs(1),
-                own_pane: None,
+                own_pane: pane.map(str::to_string),
+                own_socket: pane.map(|_| PathBuf::from("/s")),
+                mailboxes: self.config.path().join("reports"),
+                after_merge_timeout: Duration::from_secs(5),
             };
             feed(herdr, ledger, &self.paths(), &req, Some("w1"))
+        }
+
+        /// A herd `prs` whose template `pr` has done and merged checks
+        /// testing for `done-<n>` and `merged-<n>`, with `after_merge` set
+        /// to the TOML array `commands`, and `lead` appended.
+        fn after_merge(commands: &str, lead: &str) -> Setup {
+            let setup = Setup::new("cat tasks", 5);
+            let herd = format!(
+                "repo = {:?}\nafter_merge = {commands}\n\
+                 [template.pr]\nparams = [\"number\"]\nname = \"zpr-{{number}}\"\n\
+                 prompt = \"review {{number}}\"\ndone = \"test -f done-{{number}}\"\n\
+                 merged = \"test -f merged-{{number}}\"\n\
+                 [queue]\ntemplate = \"pr\"\nsource = \"cat tasks\"\nmax = 5\n{lead}",
+                setup.repo.path().display().to_string(),
+            );
+            fs::write(setup.config.path().join("herds/prs.toml"), herd).unwrap();
+            setup
+        }
+
+        fn read(&self, file: &str) -> Option<String> {
+            fs::read_to_string(self.repo.path().join(file)).ok()
+        }
+
+        /// The text of each note in `name`'s mailbox.
+        fn notes(&self, name: &str) -> Vec<String> {
+            let mailbox = self.config.path().join(format!("reports/{name}.jsonl"));
+            let Ok(text) = fs::read_to_string(mailbox) else {
+                return vec![];
+            };
+            text.lines()
+                .filter_map(|line| match serde_json::from_str(line).unwrap() {
+                    Entry {
+                        body: Body::Note { text },
+                        ..
+                    } => Some(text),
+                    _ => None,
+                })
+                .collect()
         }
     }
 
@@ -506,6 +765,7 @@ mod tests {
             socket: None,
             process: None,
             role: None,
+            after_merge_ran: false,
         }
     }
 
@@ -1039,6 +1299,9 @@ mod tests {
             ready_timeout: Duration::from_secs(60),
             command_timeout: Duration::from_secs(1),
             own_pane: None,
+            own_socket: None,
+            mailboxes: config.path().join("reports"),
+            after_merge_timeout: Duration::from_secs(5),
         };
         let herdr = herdr();
         let mut ledger = MemLedger::default();
@@ -1127,6 +1390,9 @@ mod tests {
             ready_timeout: Duration::from_secs(60),
             command_timeout: Duration::from_secs(1),
             own_pane: Some(ledger.0["zpr-1"].pane_id.clone()),
+            own_socket: None,
+            mailboxes: PathBuf::from("/nonexistent/reports"),
+            after_merge_timeout: Duration::from_secs(5),
         };
 
         let fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
@@ -1174,6 +1440,9 @@ mod tests {
             ready_timeout: Duration::from_secs(60),
             command_timeout: Duration::from_secs(1),
             own_pane: None,
+            own_socket: None,
+            mailboxes: PathBuf::from("/nonexistent/reports"),
+            after_merge_timeout: Duration::from_secs(5),
         };
 
         let fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
@@ -1302,6 +1571,9 @@ mod tests {
             ready_timeout: Duration::from_secs(60),
             command_timeout: Duration::from_secs(1),
             own_pane: None,
+            own_socket: None,
+            mailboxes: PathBuf::from("/nonexistent/reports"),
+            after_merge_timeout: Duration::from_secs(5),
         };
 
         let fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
@@ -1608,6 +1880,9 @@ mod tests {
                     ready_timeout: Duration::ZERO,
                     command_timeout: Duration::from_secs(1),
                     own_pane: None,
+                    own_socket: None,
+                    mailboxes: PathBuf::from("/nonexistent/reports"),
+                    after_merge_timeout: Duration::from_secs(5),
                 };
                 task_request(&setup.paths(), &req, template, params)
                     .unwrap()
@@ -1621,5 +1896,180 @@ mod tests {
                 Some(Checkout::Branch("docs/LH-8-a-question".into())),
             ]
         );
+    }
+
+    #[test]
+    fn after_merge_runs_once_in_order_in_the_repo_the_first_time_merged_passes() {
+        let setup = Setup::after_merge(r#"["echo one >> log", "echo two >> log"]"#, "");
+        let herdr = herdr();
+        let mut ledger = fed_one(&setup, &herdr);
+
+        let unmerged = setup.feed(&herdr, &mut ledger, false).unwrap();
+        setup.touch("merged-1");
+        let merged = setup.feed(&herdr, &mut ledger, false).unwrap();
+        let again = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(unmerged.lines[0], "still open zpr-1");
+        assert_eq!(
+            merged.lines,
+            [
+                "after_merge zpr-1: ok",
+                "prs: 0 retired, 0 added, 0 skipped, 0 errors"
+            ]
+        );
+        assert_eq!(again.lines[0], "still open zpr-1");
+        assert_eq!(setup.read("log").unwrap(), "one\ntwo\n");
+        assert!(ledger.0["zpr-1"].after_merge_ran);
+        assert_eq!(setup.notes("zpr-1"), ["after_merge ok"]);
+    }
+
+    #[test]
+    fn after_merge_runs_before_the_done_check_reaps_the_member_and_never_again() {
+        let setup = Setup::after_merge(r#"["echo ran >> log"]"#, "");
+        let herdr = herdr();
+        let mut ledger = fed_one(&setup, &herdr);
+        setup.touch("merged-1");
+        setup.touch("done-1");
+
+        let first = setup.feed(&herdr, &mut ledger, false).unwrap();
+        let second = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(
+            first.lines,
+            [
+                "after_merge zpr-1: ok",
+                "prs: 0 retired, 0 added, 0 skipped, 0 errors"
+            ]
+        );
+        assert!(
+            second.lines[0].starts_with("retired zpr-1"),
+            "{:?}",
+            second.lines
+        );
+        assert!(ledger.0["zpr-1"].retired);
+        assert_eq!(setup.read("log").unwrap(), "ran\n");
+    }
+
+    #[test]
+    fn dry_run_prints_the_after_merge_commands_and_runs_none() {
+        let setup = Setup::after_merge(r#"["echo one >> log", "echo two >> log"]"#, "");
+        let herdr = herdr();
+        let mut ledger = fed_one(&setup, &herdr);
+        setup.touch("merged-1");
+        let before = ledger.0.clone();
+
+        let fed = setup.feed(&herdr, &mut ledger, true).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "would run after_merge for zpr-1: echo one >> log; echo two >> log",
+                "prs: 0 would retire, 0 would add, 0 skipped, 0 errors",
+            ]
+        );
+        assert_eq!(setup.read("log"), None);
+        assert_eq!(ledger.0, before);
+        assert!(setup.notes("zpr-1").is_empty());
+    }
+
+    #[test]
+    fn a_failing_after_merge_command_stops_the_rest_and_notes_its_exit_and_last_20_lines() {
+        let failing = "seq 1 25; echo oops >&2; exit 3";
+        let setup = Setup::after_merge(
+            &format!(r#"["echo one >> log", "{failing}", "echo three >> log"]"#),
+            "",
+        );
+        let herdr = herdr();
+        let mut ledger = fed_one(&setup, &herdr);
+        setup.touch("merged-1");
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                format!("after_merge zpr-1: failed: `{failing}` exit 3"),
+                "prs: 0 retired, 0 added, 0 skipped, 1 error".into(),
+            ]
+        );
+        assert_eq!(fed.code, 1);
+        assert_eq!(setup.read("log").unwrap(), "one\n");
+        let tail: Vec<String> = (7..=25).map(|n| n.to_string()).collect();
+        assert_eq!(
+            setup.notes("zpr-1"),
+            [format!(
+                "after_merge failed: `{failing}` exit 3\n{}\noops",
+                tail.join("\n")
+            )]
+        );
+        assert!(ledger.0["zpr-1"].after_merge_ran);
+    }
+
+    /// `ledger` with `lead-prs`, the lead of `prs`, in pane `w1:p0` at `/s`.
+    fn with_lead(mut ledger: MemLedger) -> MemLedger {
+        let mut lead = member("lead-prs", Some("prs"), false);
+        lead.pane_id = "w1:p0".into();
+        lead.socket = Some("/s".into());
+        lead.template = None;
+        lead.role = Some(crate::ledger::Role::Lead);
+        ledger.0.insert(lead.name.clone(), lead);
+        ledger
+    }
+
+    #[test]
+    fn from_a_leads_pane_after_merge_needing_a_switch_that_is_off_runs_none_and_notes_it() {
+        for (command, switch) in [
+            ("scripts/install --no-extras", "install"),
+            ("git pull --rebase", "rebase"),
+        ] {
+            let commands = format!(r#"["echo one >> log", "{command}"]"#);
+            let setup = Setup::after_merge(&commands, "[lead]\nprompt = \"go\"\n");
+            let herdr = herdr();
+            let mut ledger = with_lead(fed_one(&setup, &herdr));
+            setup.touch("merged-1");
+
+            let fed = setup
+                .feed_from(&herdr, &mut ledger, false, Some("w1:p0"))
+                .unwrap();
+
+            let why = format!("`{command}` needs the {switch} switch, off in prs's [lead]");
+            assert_eq!(fed.lines[0], format!("after_merge zpr-1: not run: {why}"));
+            assert_eq!(setup.read("log"), None, "{command}");
+            assert_eq!(
+                setup.notes("zpr-1"),
+                [format!(
+                    "after_merge not run: {why}; run its commands by hand, or turn {switch} on"
+                )]
+            );
+            assert!(ledger.0["zpr-1"].after_merge_ran);
+        }
+    }
+
+    #[test]
+    fn after_merge_runs_from_a_lead_whose_switch_is_on_or_from_any_other_pane() {
+        let commands = r#"["echo one >> log", "scripts/install --no-extras"]"#;
+        for (lead, pane) in [
+            ("[lead]\nprompt = \"go\"\ninstall = true\n", Some("w1:p0")),
+            ("[lead]\nprompt = \"go\"\n", Some("w1:p7")),
+            ("[lead]\nprompt = \"go\"\n", None),
+        ] {
+            let setup = Setup::after_merge(commands, lead);
+            let install = setup.repo.path().join("scripts/install");
+            fs::create_dir(install.parent().unwrap()).unwrap();
+            fs::write(&install, "#!/bin/sh\necho installed \"$@\" >> log\n").unwrap();
+            fs::set_permissions(
+                &install,
+                std::os::unix::fs::PermissionsExt::from_mode(0o755),
+            )
+            .unwrap();
+            let herdr = herdr();
+            let mut ledger = with_lead(fed_one(&setup, &herdr));
+            setup.touch("merged-1");
+
+            let fed = setup.feed_from(&herdr, &mut ledger, false, pane).unwrap();
+
+            assert_eq!(fed.lines[0], "after_merge zpr-1: ok", "{lead} {pane:?}");
+            assert_eq!(setup.read("log").unwrap(), "one\ninstalled --no-extras\n");
+        }
     }
 }

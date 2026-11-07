@@ -839,6 +839,9 @@ fn run_feed(herd: String, dry_run: bool, ready_timeout: u64) -> Result<i32> {
         ready_timeout: Duration::from_secs(ready_timeout),
         command_timeout: remote_timeout()?,
         own_pane: std::env::var("HERDR_PANE_ID").ok(),
+        own_socket: socket_from_env(),
+        mailboxes: ledger.reports_dir()?,
+        after_merge_timeout: AFTER_MERGE_TIMEOUT,
     };
     let inherited = inherited_workspace();
     let fed = feed(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
@@ -847,6 +850,9 @@ fn run_feed(herd: String, dry_run: bool, ready_timeout: u64) -> Result<i32> {
     }
     Ok(fed.code)
 }
+
+/// Long enough for `scripts/install` to build a release binary.
+const AFTER_MERGE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 fn run_herds() -> Result<i32> {
     let (report, code) = herds(&Paths::from_env().context("herd")?)?;

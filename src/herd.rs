@@ -26,6 +26,9 @@ struct HerdFile {
     template: BTreeMap<String, TemplateFile>,
     queue: Option<QueueFile>,
     lead: Option<LeadFile>,
+    /// Commands `feed` runs in `repo` once per member, after it merges.
+    #[serde(default)]
+    after_merge: Vec<String>,
 }
 
 /// A herd's lead member (D17).
@@ -306,6 +309,9 @@ pub struct Queue {
     pub repo: PathBuf,
     /// Each template's done check, for those that have one.
     pub done: BTreeMap<String, MemberCheck>,
+    /// Each template's merged check, for those that have one.
+    pub merged: BTreeMap<String, MemberCheck>,
+    pub after_merge: Vec<String>,
 }
 
 pub fn queue(paths: &Paths, herd: &str) -> Result<Queue> {
@@ -346,6 +352,8 @@ fn queue_in(file: &HerdFile, paths: &Paths, herd: &str) -> Result<Option<Queue>>
     }
     Ok(Some(Queue {
         done: checks_of(file, "done", |t| t.done.as_deref())?,
+        merged: checks_of(file, "merged", |t| t.merged.as_deref())?,
+        after_merge: file.after_merge.clone(),
         templates,
         routed: queue.templates.is_some(),
         source: queue.source.clone(),
@@ -759,10 +767,13 @@ fn describe(herd: &str, parsed: &HerdFile, paused: &str) -> Vec<String> {
         .lead
         .as_ref()
         .map(|_| format!("  loopherd lead {herd}"));
+    let after_merge = (!parsed.after_merge.is_empty())
+        .then(|| format!("  after_merge: {}", parsed.after_merge.join("; ")));
     std::iter::once(header)
         .chain(usages)
         .chain(lead)
         .chain(feed)
+        .chain(after_merge)
         .collect()
 }
 
@@ -1613,6 +1624,19 @@ args = ["--model", "opus"]
     }
 
     #[test]
+    fn herds_lists_a_herds_after_merge_commands() {
+        let herd = "repo = \"/r\"\nafter_merge = [\"git pull --ff-only\", \"scripts/install\"]\n";
+        let config = Config::with(&[("prs", herd)]);
+
+        let (report, _) = herds(&config.paths()).unwrap();
+
+        assert_eq!(
+            report.lines().nth(1),
+            Some("  after_merge: git pull --ff-only; scripts/install")
+        );
+    }
+
+    #[test]
     fn herds_shows_an_unreadable_pause_as_paused_with_its_time_unknown() {
         let config = Config::with(&[("prs", "repo = \"/r\"\n")]);
         fs::create_dir(config.path().join("paused")).unwrap();
@@ -2116,6 +2140,7 @@ args = ["--model", "opus"]
             socket: None,
             process: None,
             role: lead.then_some(crate::ledger::Role::Lead),
+            after_merge_ran: false,
         }
     }
 

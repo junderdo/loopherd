@@ -208,6 +208,7 @@ pub fn spawn(
         socket: Some(socket),
         process: None,
         role: req.member_of.as_ref().and_then(|m| m.role),
+        after_merge_ran: false,
     };
     let agent = match readiness {
         Readiness::Blocked => {

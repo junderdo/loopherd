@@ -58,6 +58,9 @@ pub struct AgentRecord {
     /// `None` is a worker.
     #[serde(default)]
     pub role: Option<Role>,
+    /// `feed` ran its herd's `after_merge` for this member.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub after_merge_ran: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,6 +303,7 @@ mod tests {
             socket: None,
             process: None,
             role: None,
+            after_merge_ran: false,
         }
     }
 
@@ -431,6 +435,7 @@ mod tests {
         let path = dir.path().join("ledger.json");
         let lead = AgentRecord {
             role: Some(Role::Lead),
+            after_merge_ran: false,
             ..record("lead-h", true)
         };
         FileLedger::new(path.clone()).record(lead).unwrap();

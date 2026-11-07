@@ -43,7 +43,12 @@ that pane. Read `herdr --skill` before controlling herdr.
    (D25). A member is known by its rendered name, so a task re-routed to
    another template while its first member is open gets a second member.
    `--dry-run` names each member's template, and `status --json` gives each member's `template`.
-   `loopherd herds` lists herd files and their templates. Hand-spawn (`loopherd spawn
+   A top-level `after_merge = ["<cmd>", …]` is run by feed in `repo`, in
+   order and stopping at the first failure, once per member the first time
+   its template's `merged` check passes; the member's mailbox gets a `note`
+   (`after_merge ok`, or the failing command, its exit and last 20 lines),
+   and its `done` check waits for the next feed (D28).
+   `loopherd herds` lists herd files, their templates and `after_merge`. Hand-spawn (`loopherd spawn
    … --prompt-file`, or `loopherd add <herd> <template> <params…>`) only for
    work outside the queue; check a prompt's placeholders with `grep -o
    '{[a-z]*}'`.
@@ -114,7 +119,8 @@ that pane. Read `herdr --skill` before controlling herdr.
    the rest become new tasks.
 5. **After merge** (confirm with `gh pr view <n> --json state`): close out
    the task in the project's tracker, unblock dependents, then `loopherd
-   feed <herd>`. Its `done` check retires and closes the member and refills
+   feed <herd>`, which first runs the herd file's `after_merge` (read its
+   note, and do by hand whatever the note says didn't run). Its `done` check retires and closes the member and refills
    the slot. If the human merged before verification finished, point the
    verifier at the merge commit in a detached worktree under the PR's
    directory, since reaping removes the member's. Last, on every merge,
@@ -302,7 +308,9 @@ shepherd:
   blocks the Bash commands that need it (`gh pr merge` or the merge API, a
   `scripts/install` or `loopherd install-hook`, a rebase or force-push), in
   your pane and in any Claude nested in it, with a line naming the switch;
-  ask instead. A herd file it can't read blocks all three. It denies
+  ask instead. A herd file it can't read blocks all three. A `feed` from
+  your pane runs none of `after_merge` when any command in it needs a
+  switch that's off, leaving a `note` naming it. It denies
   broadly: `gh pr merge --help`, `git rebase --abort` and any `curl` to a
   PR's merge endpoint are denied too, so ask the human to run a `rebase
   --abort`, and check merges with `gh pr view <n> --json state`. Grilling
