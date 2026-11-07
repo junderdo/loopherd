@@ -33,6 +33,7 @@ Usage: scripts/trello <command> [args]
   move CARD LIST
   label CARD +NAME|-NAME...          Add (+) or remove (-) labels
   comment CARD TEXT|-                Add a comment (- reads stdin)
+  unblock [--dry-run]                Unblock blocked cards whose blocked-by: cards are all Done
   setup-labels                       Create/recolor the standard labels (idempotent)
 
 CARD is the card number, e.g. 12 or LH-12.
@@ -182,6 +183,54 @@ cmd_comment() {
   echo "commented on LH-$(card_number "$1")"
 }
 
+# Plans from every card, archived ones included, since a Done blocker may be archived.
+cmd_unblock() {
+  local dry_run=false
+  while (($#)); do
+    case $1 in
+      --dry-run) dry_run=true; shift ;;
+      *) die "unknown option $1" ;;
+    esac
+  done
+  local lists cards plan
+  lists=$(api GET "/boards/$BOARD/lists" --data-urlencode "fields=name")
+  cards=$(api GET "/boards/$BOARD/cards/all" --data-urlencode "fields=idShort,idList,labels,desc,closed")
+  plan=$(jq -r --argjson lists "$lists" '
+    ($lists | map(select(.name | ascii_downcase == "done") | .id)) as $done
+    | (map({key: (.idShort | tostring), value: .}) | from_entries) as $by_number
+    | .[]
+    | select((.closed | not) and ([.labels[].name] | index("blocked")))
+    | . as $card
+    | [.desc | split("\n")[] | capture("^\\s*blocked-by:(?<keys>.*)$") | .keys | scan("LH-([0-9]+)") | .[0]] as $blockers
+    | select($blockers | length > 0)
+    | [$blockers[] | select($by_number[.] == null)] as $missing
+    | if ($missing | length) > 0 then
+        "warn\t\($card.id)\tLH-\($card.idShort)\t\($missing | map("LH-\(.)") | join(", "))"
+      elif all($blockers[]; $by_number[.].idList as $list | $done | index($list)) then
+        "unblock\t\($card.id)\tLH-\($card.idShort)\t\($blockers | map("LH-\(.)") | join(", "))"
+      else empty end
+  ' <<<"$cards")
+  [[ -n $plan ]] || return 0
+  local blocked_label="" ready_label=""
+  if ! $dry_run && grep -q '^unblock' <<<"$plan"; then
+    blocked_label=$(label_id blocked)
+    ready_label=$(label_id ready-for-agent)
+  fi
+  local action id key blockers
+  while IFS=$'\t' read -r action id key blockers; do
+    if [[ $action == warn ]]; then
+      echo "trello: warning: $key is blocked by $blockers, which doesn't exist" >&2
+    elif $dry_run; then
+      echo "would unblock $key ($blockers Done)"
+    else
+      api DELETE "/cards/$id/idLabels/$blocked_label" >/dev/null
+      api POST "/cards/$id/idLabels" --data-urlencode "value=$ready_label" >/dev/null
+      api POST "/cards/$id/actions/comments" --data-urlencode "text=Unblocked: $blockers Done" >/dev/null
+      echo "unblocked $key ($blockers Done)"
+    fi
+  done <<<"$plan"
+}
+
 cmd_setup_labels() {
   local existing
   existing=$(api GET "/boards/$BOARD/labels" --data-urlencode "fields=name,color" --data-urlencode "limit=1000")
@@ -215,6 +264,7 @@ main() {
     move) cmd_move "$@" ;;
     label) cmd_label "$@" ;;
     comment) cmd_comment "$@" ;;
+    unblock) cmd_unblock "$@" ;;
     setup-labels) cmd_setup_labels ;;
     *) usage >&2; exit 2 ;;
   esac

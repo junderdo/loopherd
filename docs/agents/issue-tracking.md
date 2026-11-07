@@ -37,9 +37,20 @@ Routing: add these as needed.
 |---|---|
 | `ready-for-agent` | Fully specified. Any agent may claim it unattended. |
 | `need-human` | Stopped on a question, decision, or credential only the human can supply. The latest comment states exactly what is needed. |
-| `blocked` | Waiting on another card. A comment names its `LH-` key. |
+| `blocked` | Waiting on other cards, named by a `blocked-by:` line in the description. |
 
 A card is **claimable** when it sits in Backlog, has `ready-for-agent`, and has neither `need-human` nor `blocked`.
+
+A `blocked` card's description holds one line naming its blockers:
+
+```text
+blocked-by: LH-<n>[, LH-<m>…]
+```
+
+`scripts/trello unblock` (`--dry-run` to preview) finds every open `blocked`
+card whose named cards are all in Done, drops `blocked`, adds
+`ready-for-agent`, and comments `Unblocked: LH-<n> … Done`. A card without the
+line is left for a human; one naming a missing card is left and warned about.
 
 ## Working a card
 
