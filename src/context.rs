@@ -459,6 +459,7 @@ mod tests {
             socket: None,
             process: None,
             role,
+            after_merge: None,
         }
     }
 

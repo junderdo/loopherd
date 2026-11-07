@@ -66,6 +66,7 @@ mod tests {
             socket: None,
             process: None,
             role: None,
+            after_merge: None,
         }
     }
 
