@@ -270,7 +270,7 @@ mod tests {
             socket: Some(FAKE_SOCKET.into()),
             process: None,
             role: None,
-            after_merge_ran: false,
+            after_merge: None,
         }
     }
 

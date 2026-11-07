@@ -47,9 +47,10 @@ that pane. Read `herdr --skill` before controlling herdr.
    order and stopping at the first failure, once per member the first time
    its template's `merged` check passes, paused or not. The member's mailbox
    gets a `note` (`after_merge ok`, or the failing command, its exit and last
-   20 lines), and its `done` check waits for the next feed (D28). It runs
-   after feed releases its lock, but a feed killed meanwhile leaves no note,
-   so run feed in the background when a herd has after_merge.
+   20 lines), and its `done` check waits for a feed after that note (D28).
+   It runs after feed releases its lock. If that feed dies first, the next
+   feed notes it interrupted with no outcome, so run feed in the background
+   when a herd has after_merge.
    `loopherd herds` lists herd files, their templates and `after_merge`. Hand-spawn (`loopherd spawn
    … --prompt-file`, or `loopherd add <herd> <template> <params…>`) only for
    work outside the queue; check a prompt's placeholders with `grep -o

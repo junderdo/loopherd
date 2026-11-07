@@ -382,7 +382,7 @@ mod tests {
             name: "b-worker".into(),
             herd: Some("b".into()),
             role: None,
-            after_merge_ran: false,
+            after_merge: None,
             ..ledger.0["lead-a"].clone()
         };
         ledger.0.insert(worker.name.clone(), worker);
@@ -412,7 +412,7 @@ mod tests {
         let squatter = AgentRecord {
             herd: None,
             role: None,
-            after_merge_ran: false,
+            after_merge: None,
             prompt: Some("a plain spawn".into()),
             ..ledger.0["lead-h"].clone()
         };

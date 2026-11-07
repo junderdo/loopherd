@@ -14,7 +14,7 @@ use crate::feed::{claimable, run_check};
 use crate::herd::{MemberCheck, MemberChecks, Paths, lead_checks};
 use crate::herd_view::{Member, Options, View};
 use crate::herdr::{AgentStatus, Herdr};
-use crate::ledger::{AgentRecord, Ledger};
+use crate::ledger::{AfterMerge, AgentRecord, Ledger};
 use crate::lock::Lock;
 use crate::pause;
 use crate::report::{Body, Filter, Mailbox, Pending, Stop, member_in, peek_reports, unread_stops};
@@ -279,7 +279,9 @@ impl Checks<'_> {
         let mut freed = 0;
         for worker in workers {
             let done = run_member_check(&checks.done, &checks, &worker, &budget);
-            freed += usize::from(done == Some(Ok(true)));
+            // Feed keeps a member whose after_merge is pending, done or not.
+            let pending = matches!(worker.after_merge, Some(AfterMerge::Pending { .. }));
+            freed += usize::from(done == Some(Ok(true)) && !pending);
             let merged = run_member_check(&checks.merged, &checks, &worker, &budget);
             if merged == Some(Ok(true)) && matches!(done, None | Some(Ok(false))) {
                 events.push(format!("{} {}", worker.name, line::MERGED));
@@ -718,7 +720,7 @@ mod tests {
             socket: None,
             process: None,
             role: None,
-            after_merge_ran: false,
+            after_merge: None,
         }
     }
 
@@ -1366,7 +1368,7 @@ mod tests {
     fn lead(name: &str, pane: &str, herd: &str) -> AgentRecord {
         AgentRecord {
             role: Some(crate::ledger::Role::Lead),
-            after_merge_ran: false,
+            after_merge: None,
             ..member(name, pane, Some(herd))
         }
     }
@@ -1988,6 +1990,16 @@ mod tests {
 
         world.touch("done-1", "");
         assert_eq!(world.once("w9:p0").unwrap(), ["lh-3 claimable"]);
+    }
+
+    #[test]
+    fn a_done_worker_whose_after_merge_is_pending_frees_no_slot() {
+        let mut world = Checked::new();
+        world.touch("tasks", "1\n2\n3\n");
+        world.touch("done-1", "");
+        let owner = crate::ledger::Process { pid: 7, start: 70 };
+        world.ledger.0.get_mut("lh-1").unwrap().after_merge = Some(AfterMerge::Pending { owner });
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-2 claimable"]);
     }
 
     #[test]

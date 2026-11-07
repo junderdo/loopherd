@@ -42,7 +42,8 @@ use crate::herd_view::Options;
 use crate::herdr::events::SocketSubscriber;
 use crate::herdr::{CliHerdr, Herdr, socket_from_env};
 use crate::lead::LeadRequest;
-use crate::ledger::FileLedger;
+use crate::ledger::{FileLedger, Process};
+use crate::process::Procs;
 use crate::prompt::prompt;
 use crate::report::{Filter, Kind, Reporter, report, reports};
 use crate::retire::{retire, retire_and_close};
@@ -842,6 +843,8 @@ fn run_feed(herd: String, dry_run: bool, ready_timeout: u64) -> Result<i32> {
         own_socket: socket_from_env(),
         mailboxes: ledger.reports_dir()?,
         after_merge_timeout: AFTER_MERGE_TIMEOUT,
+        owner: own_process()?,
+        procs: &process::ProcFs,
     };
     let inherited = inherited_workspace();
     let mut fed = feed(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
@@ -850,11 +853,19 @@ fn run_feed(herd: String, dry_run: bool, ready_timeout: u64) -> Result<i32> {
         println!("{line}");
     }
     let printed = fed.lines.len();
-    run_after_merge(&paths, &req, &mut fed)?;
+    run_after_merge(&mut ledger, &paths, &req, &mut fed)?;
     for line in &fed.lines[printed..] {
         println!("{line}");
     }
     Ok(fed.code)
+}
+
+fn own_process() -> Result<Process> {
+    let pid = std::process::id();
+    let start = process::ProcFs
+        .start(pid)
+        .context("read this process's start time")?;
+    Ok(Process { pid, start })
 }
 
 /// Long enough for `scripts/install` to build a release binary.

@@ -463,7 +463,7 @@ mod tests {
             socket: None,
             process: None,
             role: None,
-            after_merge_ran: false,
+            after_merge: None,
         }
     }
 
@@ -918,7 +918,7 @@ mod tests {
     fn lead(name: &str, cwd: &Path) -> AgentRecord {
         AgentRecord {
             role: Some(crate::ledger::Role::Lead),
-            after_merge_ran: false,
+            after_merge: None,
             herd: Some("h".into()),
             ..record(name, cwd)
         }

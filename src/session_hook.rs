@@ -119,7 +119,7 @@ mod tests {
             socket: socket.map(PathBuf::from),
             process: None,
             role: None,
-            after_merge_ran: false,
+            after_merge: None,
         }
     }
 

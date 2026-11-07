@@ -40,8 +40,9 @@ Backlog cards into members `lh-<n>` on `<type>/LH-<n>-<slug>`.
   its `install` switch off that run is held back and counted as done for
   good, so your later feed runs nothing: read the member's note and run the
   steps by hand. Run feed in the background when after_merge is set, since
-  `scripts/install` can take minutes, and a feed killed partway leaves the
-  member marked as run with no outcome note.
+  `scripts/install` can take minutes. If a feed dies partway, the next feed
+  notes the after_merge as interrupted, with no outcome; check what ran and
+  finish the steps by hand.
 
 ## Lead
 

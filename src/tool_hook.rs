@@ -789,7 +789,7 @@ mod tests {
             socket: Some(PathBuf::from(SOCKET)),
             process: None,
             role,
-            after_merge_ran: false,
+            after_merge: None,
         }
     }
 
