@@ -77,11 +77,11 @@ that pane. Read `herdr --skill` before controlling herdr.
    block yours), or when the hooks aren't in Claude's settings (run
    `loopherd install-hook`). Lines come in this order: reports, questions
    first then by time; then stop lines grouped by member in name order,
-   oldest first within a member; then a lead's `merged`, `interrupted` and
-   `claimable`;
-   then `blocked` and `gone`. The first watch after an install, or over
-   members a herd-scoped watch skipped, prints every unread stop change
-   since; judge each against `reports --all`.
+   oldest first within a member; then a lead's `interrupted` and `merged`,
+   by member in name order, then its `claimable`; then `blocked` and
+   `gone`. The first watch after an install, or over members a herd-scoped
+   watch skipped, prints every unread stop change since; judge each against
+   `reports --all`.
 3. **On wake,** read the watch's lines and the task (`loopherd reports
    --all` for the timeline, stops included). The lines:
 
@@ -96,7 +96,7 @@ that pane. Read `herdr --skill` before controlling herdr.
    | `<member> finished` | Turn ended with nothing in flight, after a `done` or `question`. |
    | `<member> finished  no report` | The same, with no `done` or `question` since its last finish or start. |
    | `<member> failed  rate_limit` | Turn ended on an API error; it may need a nudge once that clears. |
-   | `<member> merged` | Lead's watch only: the worker's template `merged` check passes and its `done` doesn't. Run the after-merge steps. |
+   | `<member> merged` | Lead's watch only: the worker's template `merged` check passes and its `done` doesn't, or its herd's after_merge is still due. Run the after-merge steps. |
    | `<name> claimable` | Lead's watch only: feed would spawn this member. Feed. |
    | `<member> interrupted` | Lead's watch only: the feed running the worker's `after_merge` died before noting it. Feed, which notes it, then read the note. |
    | `<member> blocked` | A dialog only the human answers: tell them. loopherd never answers it. |
@@ -347,7 +347,8 @@ shepherd:
   herds' events. If you're retired, it exits with an error and
   leaves your herd's events for the shepherd. Every 60s it also runs your
   herd's checks and wakes you with `<member> merged` (the template's
-  `merged` passes, its `done` doesn't): run the after-merge steps for it;
+  `merged` passes, and its `done` doesn't or its after_merge is still due):
+  run the after-merge steps for it;
   or `<name> claimable` (feed would spawn `<name>`): feed; or `<member>
   interrupted` (a dead feed left its after_merge unnoted): feed, then do by
   hand what its note says. Each wakes you

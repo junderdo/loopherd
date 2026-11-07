@@ -14,7 +14,7 @@ use crate::feed::{claimable, run_check};
 use crate::herd::{MemberCheck, MemberChecks, Paths, lead_checks};
 use crate::herd_view::{Member, Options, View};
 use crate::herdr::{AgentStatus, Herdr};
-use crate::ledger::{AfterMerge, AgentRecord, Ledger};
+use crate::ledger::{AfterMerge, AgentRecord, Ledger, Process};
 use crate::lock::Lock;
 use crate::pause;
 use crate::process::{Procs, live};
@@ -297,19 +297,22 @@ impl Checks<'_> {
         for worker in workers {
             let done = run_member_check(&checks.done, &checks, &worker, &budget);
             let merged = run_member_check(&checks.merged, &checks, &worker, &budget);
+            let due = after_merge && worker.after_merge.is_none();
             // Feed keeps, done or not, a member whose after_merge is due or unnoted.
             let kept = match worker.after_merge {
                 Some(AfterMerge::Pending { owner }) => {
-                    if live(self.procs, Some(owner)).is_none() {
+                    if live(self.procs, Some(owner)).is_none()
+                        && still_pending(ledger, &worker.name, owner)?
+                    {
                         events.push(format!("{} {}", worker.name, line::INTERRUPTED));
                     }
                     true
                 }
                 Some(AfterMerge::Noted) => false,
-                None => after_merge && matches!(merged, Some(Ok(true) | Err(_))),
+                None => due && matches!(merged, Some(Ok(true) | Err(_))),
             };
             freed += usize::from(done == Some(Ok(true)) && !kept);
-            if merged == Some(Ok(true)) && matches!(done, None | Some(Ok(false))) {
+            if merged == Some(Ok(true)) && (due || matches!(done, None | Some(Ok(false)))) {
                 events.push(format!("{} {}", worker.name, line::MERGED));
             }
         }
@@ -336,6 +339,12 @@ impl Checks<'_> {
             .filter(|e| !self.fired.keys.contains(e))
             .collect())
     }
+}
+
+/// Read fresh: the owning feed may have noted it during the member checks.
+fn still_pending(ledger: &dyn Ledger, name: &str, owner: Process) -> Result<bool> {
+    let entry = ledger.entries()?.remove(name);
+    Ok(entry.and_then(|e| e.after_merge) == Some(AfterMerge::Pending { owner }))
 }
 
 /// Calls `warn` with `now` unless it was `last` too, and keeps it as `last`.
@@ -809,7 +818,7 @@ mod tests {
 
     fn run(
         herdr: &FakeHerdr,
-        ledger: &MemLedger,
+        ledger: &dyn Ledger,
         dir: &Path,
         req: &Request,
         clock: &mut dyn Clock,
@@ -2047,13 +2056,123 @@ mod tests {
     }
 
     #[test]
-    fn a_merged_and_done_worker_whose_after_merge_is_due_frees_no_slot() {
-        let world = Checked::new();
-        world.edit_herd(|herd| format!("after_merge = [\"true\"]\n{herd}"));
-        world.touch("tasks", "1\n2\n3\n");
-        world.touch("merged-1", "");
+    fn a_merged_and_done_worker_whose_after_merge_is_due_frees_no_slot_and_wakes_the_lead() {
+        for (max, woke) in [
+            ("2", vec!["lh-1 merged", "lh-2 claimable"]),
+            ("1", vec!["lh-1 merged"]),
+        ] {
+            let world = Checked::new();
+            world.edit_herd(|herd| {
+                format!("after_merge = [\"true\"]\n{herd}")
+                    .replace("max = 2", &format!("max = {max}"))
+            });
+            world.touch("tasks", "1\n2\n3\n");
+            world.touch("merged-1", "");
+            world.touch("done-1", "");
+            assert_eq!(world.once("w9:p0").unwrap(), woke, "max {max}");
+        }
+    }
+
+    #[test]
+    fn a_done_worker_frees_its_slot_unless_its_after_merge_is_due_or_its_merged_check_errors() {
+        let none = None;
+        let noted = Some(AfterMerge::Noted);
+        // (case, herd's after_merge, merged check, ledger's after_merge, frees its slot)
+        let cases = [
+            ("no after_merge, merged", "", "exit 0", none, true),
+            ("after_merge, unmerged", "[\"true\"]", "exit 1", none, true),
+            (
+                "after_merge, merged check errors",
+                "[\"true\"]",
+                "exit 3",
+                none,
+                false,
+            ),
+            (
+                "after_merge noted, merged",
+                "[\"true\"]",
+                "exit 0",
+                noted,
+                true,
+            ),
+        ];
+        for (case, after_merge, merged, recorded, frees) in cases {
+            let mut world =
+                Checked::with_template(&format!("done = \"exit 0\"\nmerged = \"{merged}\"\n"));
+            world.edit_herd(|herd| {
+                let herd = herd.replace("max = 2", "max = 1");
+                match after_merge {
+                    "" => herd,
+                    commands => format!("after_merge = {commands}\n{herd}"),
+                }
+            });
+            world.ledger.0.get_mut("lh-1").unwrap().after_merge = recorded;
+            world.touch("tasks", "1\n2\n3\n");
+            let woke = frees.then(|| vec!["lh-2 claimable".to_string()]);
+            assert_eq!(world.once("w9:p0"), woke, "{case}");
+        }
+    }
+
+    /// The ledger of a watch whose procs' `start` stands in for a feed that
+    /// notes lh-1's after_merge and exits while the watch runs its checks.
+    struct NotedMeanwhile(std::cell::RefCell<MemLedger>);
+
+    impl Ledger for &NotedMeanwhile {
+        fn entries(&self) -> Result<BTreeMap<String, AgentRecord>> {
+            self.0.borrow().entries()
+        }
+        fn record(&mut self, record: AgentRecord) -> Result<()> {
+            self.0.borrow_mut().record(record)
+        }
+        fn update(
+            &mut self,
+            name: &str,
+            change: &mut dyn FnMut(&mut AgentRecord) -> Result<()>,
+        ) -> Result<AgentRecord> {
+            self.0.borrow_mut().update(name, change)
+        }
+        fn started(&mut self, name: &str, at: std::time::SystemTime) -> Result<()> {
+            self.0.borrow_mut().started(name, at)
+        }
+    }
+
+    impl Procs for &NotedMeanwhile {
+        fn exe(&self, _: u32) -> Option<PathBuf> {
+            None
+        }
+        fn parent(&self, _: u32) -> Option<u32> {
+            None
+        }
+        fn start(&self, _: u32) -> Option<u64> {
+            let mut ledger = self.0.borrow_mut();
+            ledger.0.get_mut("lh-1").unwrap().after_merge = Some(AfterMerge::Noted);
+            None
+        }
+        fn cmdline(&self, _: u32) -> Option<Vec<String>> {
+            None
+        }
+        fn resolve(&self, _: u32, _: &str) -> Option<PathBuf> {
+            None
+        }
+    }
+
+    #[test]
+    fn a_pending_after_merge_its_feed_noted_during_the_checks_is_not_interrupted() {
+        let mut world = Checked::new();
         world.touch("done-1", "");
-        assert_eq!(world.once("w9:p0").unwrap(), ["lh-2 claimable"]);
+        let owner = Process { pid: 7, start: 70 };
+        world.ledger.0.get_mut("lh-1").unwrap().after_merge = Some(AfterMerge::Pending { owner });
+        let shared = NotedMeanwhile(std::cell::RefCell::new(MemLedger(
+            world.ledger.0.clone(),
+            vec![],
+        )));
+        let req = Request {
+            procs: &&shared,
+            ..world.request("w9:p0")
+        };
+        let dir = world.config.path().join("reports");
+        let woke = run(&world.herdr, &&shared, &dir, &req, &mut steps(|_| {}));
+        assert_eq!(woke, None);
     }
 
     #[test]
