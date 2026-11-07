@@ -36,13 +36,14 @@ use anyhow::{Context, Result, bail};
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
-use crate::feed::{FeedRequest, feed};
+use crate::feed::{FeedRequest, feed, run_after_merge};
 use crate::herd::{AddRequest, Paths, add, dry_run, herds};
 use crate::herd_view::Options;
 use crate::herdr::events::SocketSubscriber;
 use crate::herdr::{CliHerdr, Herdr, socket_from_env};
 use crate::lead::LeadRequest;
-use crate::ledger::FileLedger;
+use crate::ledger::{FileLedger, Process};
+use crate::process::Procs;
 use crate::prompt::prompt;
 use crate::report::{Filter, Kind, Reporter, report, reports};
 use crate::retire::{retire, retire_and_close};
@@ -592,6 +593,7 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         herd_files: Some(&herd_paths),
         check_timeout: remote_timeout,
         shepherd_handoff: None,
+        procs: &process::ProcFs,
     };
     let state = ledger.dir()?;
     let handoff = || shepherd_handoff(&herd_paths, &state);
@@ -870,7 +872,7 @@ fn run_lead(args: LeadArgs) -> Result<i32> {
 fn run_feed(herd: String, dry_run: bool, ready_timeout: u64) -> Result<i32> {
     let paths = Paths::from_env().context("herd")?;
     // A dry run changes nothing, so it must not block a real one.
-    let _lock = match dry_run {
+    let lock = match dry_run {
         true => None,
         false => Some(paths.lock_feed()?),
     };
@@ -881,14 +883,36 @@ fn run_feed(herd: String, dry_run: bool, ready_timeout: u64) -> Result<i32> {
         ready_timeout: Duration::from_secs(ready_timeout),
         command_timeout: remote_timeout()?,
         own_pane: std::env::var("HERDR_PANE_ID").ok(),
+        own_socket: socket_from_env(),
+        mailboxes: ledger.reports_dir()?,
+        after_merge_timeout: AFTER_MERGE_TIMEOUT,
+        owner: own_process()?,
+        procs: &process::ProcFs,
     };
     let inherited = inherited_workspace();
-    let fed = feed(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
-    for line in fed.lines {
+    let mut fed = feed(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
+    drop(lock);
+    for line in &fed.lines {
+        println!("{line}");
+    }
+    let printed = fed.lines.len();
+    run_after_merge(&mut ledger, &paths, &req, &mut fed)?;
+    for line in &fed.lines[printed..] {
         println!("{line}");
     }
     Ok(fed.code)
 }
+
+fn own_process() -> Result<Process> {
+    let pid = std::process::id();
+    let start = process::ProcFs
+        .start(pid)
+        .context("read this process's start time")?;
+    Ok(Process { pid, start })
+}
+
+/// Long enough for `scripts/install` to build a release binary.
+const AFTER_MERGE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 fn run_herds() -> Result<i32> {
     let (report, code) = herds(&Paths::from_env().context("herd")?)?;
@@ -900,4 +924,16 @@ fn inherited_workspace() -> Option<String> {
     std::env::var("HERDR_WORKSPACE_ID")
         .ok()
         .filter(|v| !v.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_feeds_own_process_is_live_by_its_pid_and_start_time() {
+        let owner = own_process().unwrap();
+        assert_eq!(owner.pid, std::process::id());
+        assert_eq!(process::live(&process::ProcFs, Some(owner)), Some(owner));
+    }
 }

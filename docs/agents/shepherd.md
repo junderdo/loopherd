@@ -33,7 +33,16 @@ Backlog cards into members `lh-<n>` on `<type>/LH-<n>-<slug>`.
 - **Verify** with a read-only subagent: no `LOOPHERD_LIVE=1`, its worktrees
   and `CARGO_TARGET_DIR` under one `<scratch>/pr<n>/` (see the skill's Verify).
 - **After merge:** move the card to Done, run `scripts/trello unblock`, then
-  `loopherd feed loopherd-cards`.
+  `loopherd feed loopherd-cards`. With the herd file's `after_merge` set (see
+  the lead example), feed itself runs the pull, install and unblock once per
+  merged member, after releasing the feed lock, and notes the result in the
+  member's mailbox. In a led herd the lead's watch usually feeds first; with
+  its `install` switch off that run is held back and counted as done for
+  good, so your later feed runs nothing: read the member's note and run the
+  steps by hand. Run feed in the background when after_merge is set, since
+  `scripts/install` can take minutes. If a feed dies partway, the next feed
+  notes the after_merge as interrupted, with no outcome; check what ran and
+  finish the steps by hand.
 
 ## Lead
 

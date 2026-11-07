@@ -43,7 +43,15 @@ that pane. Read `herdr --skill` before controlling herdr.
    (D25). A member is known by its rendered name, so a task re-routed to
    another template while its first member is open gets a second member.
    `--dry-run` names each member's template, and `status --json` gives each member's `template`.
-   `loopherd herds` lists herd files and their templates. Hand-spawn (`loopherd spawn
+   A top-level `after_merge = ["<cmd>", …]` is run by feed in `repo`, in
+   order and stopping at the first failure, once per member the first time
+   its template's `merged` check passes, paused or not. The member's mailbox
+   gets a `note` (`after_merge ok`, or the failing command, its exit and last
+   20 lines), and its `done` check waits for a feed after that note (D28).
+   It runs after feed releases its lock. If that feed dies first, the next
+   feed notes it interrupted with no outcome, so run feed in the background
+   when a herd has after_merge.
+   `loopherd herds` lists herd files, their templates and `after_merge`. Hand-spawn (`loopherd spawn
    … --prompt-file`, or `loopherd add <herd> <template> <params…>`) only for
    work outside the queue; check a prompt's placeholders with `grep -o
    '{[a-z]*}'`.
@@ -69,10 +77,11 @@ that pane. Read `herdr --skill` before controlling herdr.
    block yours), or when the hooks aren't in Claude's settings (run
    `loopherd install-hook`). Lines come in this order: reports, questions
    first then by time; then stop lines grouped by member in name order,
-   oldest first within a member; then a lead's `merged` and `claimable`;
-   then `blocked` and `gone`. The first watch after an install, or over
-   members a herd-scoped watch skipped, prints every unread stop change
-   since; judge each against `reports --all`.
+   oldest first within a member; then a lead's `interrupted` and `merged`,
+   by member in name order, then its `claimable`; then `blocked` and
+   `gone`. The first watch after an install, or over members a herd-scoped
+   watch skipped, prints every unread stop change since; judge each against
+   `reports --all`.
 3. **On wake,** read the watch's lines and the task (`loopherd reports
    --all` for the timeline, stops included). The lines:
 
@@ -87,8 +96,9 @@ that pane. Read `herdr --skill` before controlling herdr.
    | `<member> finished` | Turn ended with nothing in flight, after a `done` or `question`. |
    | `<member> finished  no report` | The same, with no `done` or `question` since its last finish or start. |
    | `<member> failed  rate_limit` | Turn ended on an API error; it may need a nudge once that clears. |
-   | `<member> merged` | Lead's watch only: the worker's template `merged` check passes and its `done` doesn't. Run the after-merge steps. |
+   | `<member> merged` | Lead's watch only: the worker's template `merged` check passes and its `done` doesn't, or its herd's after_merge is still due. Run the after-merge steps. |
    | `<name> claimable` | Lead's watch only: feed would spawn this member. Feed. |
+   | `<member> interrupted` | Lead's watch only: the feed running the worker's `after_merge` died before noting it. Feed, which notes it, then read the note. |
    | `<member> blocked` | A dialog only the human answers: tell them. loopherd never answers it. |
    | `<member> gone` | No agent in its pane for two polls in a row; it was live earlier in this watch. |
    | `shepherd handoff 171k over 160k` | Your own watch only, once per session: your context is past your limit. Hand off (see Your own handoff). |
@@ -114,7 +124,8 @@ that pane. Read `herdr --skill` before controlling herdr.
    the rest become new tasks.
 5. **After merge** (confirm with `gh pr view <n> --json state`): close out
    the task in the project's tracker, unblock dependents, then `loopherd
-   feed <herd>`. Its `done` check retires and closes the member and refills
+   feed <herd>`, which first runs the herd file's `after_merge` (read its
+   note, and do by hand whatever the note says didn't run). Its `done` check retires and closes the member and refills
    the slot. If the human merged before verification finished, point the
    verifier at the merge commit in a detached worktree under the PR's
    directory, since reaping removes the member's. Last, on every merge,
@@ -309,7 +320,10 @@ shepherd:
   blocks the Bash commands that need it (`gh pr merge` or the merge API, a
   `scripts/install` or `loopherd install-hook`, a rebase or force-push), in
   your pane and in any Claude nested in it, with a line naming the switch;
-  ask instead. A herd file it can't read blocks all three. It denies
+  ask instead. A herd file it can't read blocks all three. A `feed` from
+  your pane runs none of `after_merge` when the hook would deny any command
+  in it, leaving a `note` naming why; that run counts as done, so run the
+  commands it held back by hand or ask the human to. It denies
   broadly: `gh pr merge --help`, `git rebase --abort` and any `curl` to a
   PR's merge endpoint are denied too, so ask the human to run a `rebase
   --abort`, and check merges with `gh pr view <n> --json state`. Grilling
@@ -344,8 +358,11 @@ shepherd:
   herds' events. If you're retired, it exits with an error and
   leaves your herd's events for the shepherd. Every 60s it also runs your
   herd's checks and wakes you with `<member> merged` (the template's
-  `merged` passes, its `done` doesn't): run the after-merge steps for it;
-  or `<name> claimable` (feed would spawn `<name>`): feed. Each wakes you
+  `merged` passes, and its `done` doesn't or its after_merge is still due):
+  run the after-merge steps for it;
+  or `<name> claimable` (feed would spawn `<name>`): feed; or `<member>
+  interrupted` (a dead feed left its after_merge unnoted): feed, then do by
+  hand what its note says. Each wakes you
   once, so a claimable task you don't feed then shows up again only in the
   heartbeat's dry run. Exit 2 is a heartbeat, not idleness: still check
   each PR waiting on review (`gh pr view <n> --json state`), run the

@@ -58,6 +58,19 @@ pub struct AgentRecord {
     /// `None` is a worker.
     #[serde(default)]
     pub role: Option<Role>,
+    /// How far `feed` has got with its herd's `after_merge` for this member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_merge: Option<AfterMerge>,
+}
+
+/// A member's `after_merge`, once a feed has taken it on; it never runs twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AfterMerge {
+    /// Taken on by the feed `owner`, which hasn't noted its outcome yet.
+    Pending { owner: Process },
+    /// Its outcome is in the member's mailbox.
+    Noted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,6 +313,7 @@ mod tests {
             socket: None,
             process: None,
             role: None,
+            after_merge: None,
         }
     }
 
@@ -431,6 +445,7 @@ mod tests {
         let path = dir.path().join("ledger.json");
         let lead = AgentRecord {
             role: Some(Role::Lead),
+            after_merge: None,
             ..record("lead-h", true)
         };
         FileLedger::new(path.clone()).record(lead).unwrap();

@@ -10,7 +10,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::herd::Switches;
-use crate::ledger::Ledger;
+use crate::ledger::{AgentRecord, Ledger};
 
 /// Where the hook runs: `$HERDR_PANE_ID` and `$HERDR_SOCKET_PATH`.
 pub struct Pane<'a> {
@@ -33,7 +33,7 @@ pub enum Switch {
 }
 
 impl Switch {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Switch::Merge => "merge",
             Switch::Install => "install",
@@ -55,7 +55,7 @@ impl Switch {
         }
     }
 
-    fn on(self, switches: &Switches) -> bool {
+    pub(crate) fn on(self, switches: &Switches) -> bool {
         match self {
             Switch::Merge => switches.merge,
             Switch::Install => switches.install,
@@ -87,9 +87,9 @@ fn decide(
     switches: &dyn Fn(&str) -> Result<Switches>,
     needs: &dyn Fn(&str) -> Vec<Switch>,
 ) -> Result<Option<String>> {
-    let Some(socket) = pane.socket else {
+    if pane.socket.is_none() {
         return Ok(None);
-    };
+    }
     let Some(command) = bash_command(input) else {
         return Ok(None);
     };
@@ -107,10 +107,7 @@ fn decide(
     if needed.is_empty() {
         return Ok(None);
     }
-    let entries = ledger.entries()?;
-    let Some(lead) = entries.values().find(|e| {
-        !e.retired && e.is_lead() && e.pane_id == pane.id && e.socket.as_deref() == Some(socket)
-    }) else {
+    let Some(lead) = lead_in(ledger, pane)? else {
         return Ok(None);
     };
     let (switches, unread) = match lead.herd.as_deref().map(switches) {
@@ -154,6 +151,16 @@ fn decide(
         ));
     }
     Ok(Some(message))
+}
+
+/// The unretired lead running in `pane`, if any.
+pub fn lead_in(ledger: &dyn Ledger, pane: &Pane) -> Result<Option<AgentRecord>> {
+    let Some(socket) = pane.socket else {
+        return Ok(None);
+    };
+    Ok(ledger.entries()?.into_values().find(|e| {
+        !e.retired && e.is_lead() && e.pane_id == pane.id && e.socket.as_deref() == Some(socket)
+    }))
 }
 
 /// The PreToolUse output that denies the Bash call, telling Claude `reason`.
@@ -865,6 +872,7 @@ mod tests {
             socket: Some(PathBuf::from(SOCKET)),
             process: None,
             role,
+            after_merge: None,
         }
     }
 

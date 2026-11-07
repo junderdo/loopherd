@@ -5,6 +5,11 @@
 # Also add this line to the herd's existing [template.card], so the lead's
 # watch wakes when a worker's PR merges:
 # merged = "GH_TOKEN=$(gh auth token --user junderdo) gh pr list --head {branch} --state merged --json number --jq length | grep -qx 1"
+#
+# And this line at the top of the herd file, above its first table, so feed
+# runs the routine after-merge steps once per merged member (D28). Feed run
+# from the lead's pane runs none of it while `install` below is off:
+# after_merge = ["git pull --ff-only", "scripts/install --no-extras", "scripts/trello unblock"]
 [lead]
 prompt_file = "loopherd-cards-lead.md"
 # args defaults to the herd's args. Every switch is off until the human turns it on.
