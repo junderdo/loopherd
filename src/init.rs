@@ -304,16 +304,24 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
                 repo.display()
             ),
         },
-        branch => ask.value(
-            "Default branch",
-            None,
-            Some(branch),
-            "",
-            |branch| match branch.contains(char::is_whitespace) {
-                true => bail!("{branch:?} can't name a branch"),
-                false => prompt_text(branch).map(|_| branch.to_string()),
-            },
-        )?,
+        branch => ask.value("Default branch", None, Some(branch), "", |branch| {
+            if branch.contains(char::is_whitespace) {
+                bail!("{branch:?} can't name a branch");
+            }
+            prompt_text(branch)?;
+            // The herd's shell commands hold it unquoted.
+            if branch.starts_with('-')
+                || !branch
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+            {
+                bail!(
+                    "init takes a branch of letters, digits and - _ . / only, \
+                         not starting with -; got {branch:?}"
+                );
+            }
+            Ok(branch.to_string())
+        })?,
     };
     let mut docs: Vec<agents::Doc> = tracker
         .writes

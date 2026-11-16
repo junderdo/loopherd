@@ -3505,3 +3505,19 @@ fn on_a_terminal_a_local_tracker_without_github_takes_enter_as_none() {
     );
     assert_eq!(fixture.gh_calls(), "");
 }
+
+#[test]
+fn a_default_branch_the_herds_shell_commands_cant_hold_is_refused() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.gh_json("repo.json", r#"{"defaultBranchRef": {"name": "a{b}"}}"#);
+
+    let out = fixture.init(&[]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("init takes a branch of letters, digits and - _ . / only"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!fixture.herds().join("widgets.toml").exists());
+}
