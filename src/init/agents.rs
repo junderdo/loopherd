@@ -175,6 +175,8 @@ fn lands_inside(repo: &Path, rel: &str) -> Result<bool> {
 fn has_loopherd_section(text: &str) -> bool {
     let mut fence: Option<(char, usize)> = None;
     let mut paragraph = String::new();
+    // In a list item or blockquote, where an underline can't make a heading.
+    let mut container = false;
     let names = |title: &str| title.to_ascii_lowercase().contains("loopherd");
     for line in text.trim_start_matches('\u{feff}').lines() {
         let indent = line.len() - line.trim_start_matches(' ').len();
@@ -188,15 +190,19 @@ fn has_loopherd_section(text: &str) -> bool {
             continue;
         }
         if code {
-            if !paragraph.is_empty() {
+            if !paragraph.is_empty() && !container {
                 paragraph.push_str(line);
                 paragraph.push('\n');
             }
             continue;
         }
-        if let Some(c) = ['`', '~'].into_iter().find(|&c| run(c) >= 3) {
+        let opener = ['`', '~']
+            .into_iter()
+            .find(|&c| run(c) >= 3 && (c == '~' || !line.trim_start_matches(c).contains('`')));
+        if let Some(c) = opener {
             fence = Some((c, run(c)));
             paragraph.clear();
+            container = false;
             continue;
         }
         let underline = ['=', '-']
@@ -217,15 +223,53 @@ fn has_loopherd_section(text: &str) -> bool {
                 return true;
             }
             paragraph.clear();
+            container = false;
             continue;
         }
-        match line.is_empty() {
-            true => paragraph.clear(),
-            false => {
-                paragraph.push_str(line);
-                paragraph.push('\n');
-            }
+        if line.is_empty() {
+            paragraph.clear();
+            container = false;
+        } else if container || opens_container(line) {
+            paragraph.clear();
+            container = true;
+        } else {
+            paragraph.push_str(line);
+            paragraph.push('\n');
         }
     }
     false
+}
+
+/// Whether `line` starts a blockquote or a list item.
+fn opens_container(line: &str) -> bool {
+    let marker_then_space = |rest: &str| rest.is_empty() || rest.starts_with([' ', '\t']);
+    if line.starts_with('>') {
+        return true;
+    }
+    if let Some(rest) = line.strip_prefix(['-', '*', '+']) {
+        return marker_then_space(rest);
+    }
+    let digits = line.len() - line.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    (1..=9).contains(&digits)
+        && line[digits..]
+            .strip_prefix(['.', ')'])
+            .is_some_and(marker_then_space)
+}
+
+/// Refuses a new doc whose nearest existing directory init can't write in.
+pub fn check_writable(repo: &Path, docs: &[Doc]) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    for doc in docs.iter().filter(|doc| !doc.append) {
+        let path = repo.join(doc.path);
+        let Some(dir) = path.ancestors().skip(1).find(|dir| dir.exists()) else {
+            continue;
+        };
+        let c_dir = std::ffi::CString::new(dir.as_os_str().as_bytes())?;
+        // SAFETY: c_dir is a valid NUL-terminated path for the call's duration.
+        if unsafe { libc::access(c_dir.as_ptr(), libc::W_OK) } != 0 {
+            let e = std::io::Error::last_os_error();
+            return Err(e).with_context(|| format!("write {}", path.display()));
+        }
+    }
+    Ok(())
 }

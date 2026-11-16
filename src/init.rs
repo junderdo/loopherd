@@ -261,6 +261,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
         },
     )?;
     docs.extend(plan.docs);
+    agents::check_writable(&repo, &docs)?;
     Ok(Herd {
         repo,
         name,
@@ -491,8 +492,6 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
     };
     values.push(("SOURCE", source));
     values.push(("LEAD_TABLE", &lead_table));
-    fs::create_dir_all(&paths.herds)
-        .with_context(|| format!("create {}", paths.herds.display()))?;
     let mut lines = match tracker.github {
         true => create_labels(token, slug, labels)?,
         false => vec![],
