@@ -229,18 +229,18 @@ struct Aliases {
 
 impl Aliases {
     fn assign(&mut self, word: &Word) {
-        let Some((name, value)) = word
-            .text
-            .strip_prefix("CARGO_ALIAS_")
-            .and_then(|rest| rest.split_once('='))
-        else {
+        let Some(rest) = word.text.strip_prefix("CARGO_ALIAS_") else {
             return;
         };
         // A substitution may have been in the name, so it counts as unreadable.
-        if word.substituted
-            || name.is_empty()
-            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
+        if word.substituted {
+            self.unreadable_name = true;
+            return;
+        }
+        let Some((name, value)) = rest.split_once('=') else {
+            return;
+        };
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             self.unreadable_name = true;
             return;
         }
@@ -268,8 +268,8 @@ struct Word {
 }
 
 /// The simple commands in `script`, each as its words.
-/// `;`, `&`, `|`, newlines, parentheses, backticks and `$(` end a command;
-/// a `$(…)` or backtick inside double quotes is lexed as commands too.
+/// `;`, `&`, `|`, newlines and parentheses end a command; the contents of a
+/// `$(…)` or backtick substitution are lexed as commands of their own.
 fn commands(script: &str) -> Vec<Vec<Word>> {
     let mut commands = vec![];
     let mut words = vec![];
@@ -318,12 +318,17 @@ fn commands(script: &str) -> Vec<Vec<Word>> {
             {
                 word.get_or_insert_default().text.push(c);
             }
-            ';' | '&' | '|' | '\n' | '(' | ')' | '`' | '$'
-                if c != '$' || chars.peek() == Some(&'(') =>
-            {
-                if let Some(w) = word.as_mut().filter(|_| c == '$' || c == '`') {
-                    w.substituted = true;
-                }
+            '$' if chars.peek() == Some(&'(') => {
+                chars.next();
+                word.get_or_insert_default().substituted = true;
+                commands.extend(self::commands(&substitution(&mut chars)));
+            }
+            '`' => {
+                let inner: String = chars.by_ref().take_while(|&c| c != '`').collect();
+                word.get_or_insert_default().substituted = true;
+                commands.extend(self::commands(&inner));
+            }
+            ';' | '&' | '|' | '\n' | '(' | ')' => {
                 words.extend(word.take());
                 if !words.is_empty() {
                     commands.push(std::mem::take(&mut words));
@@ -383,7 +388,7 @@ const KEYWORDS: [&str; 10] = [
 ];
 const SHELLS: [&str; 5] = ["sh", "bash", "zsh", "dash", "ksh"];
 /// Builtins whose arguments may assign variables.
-const DECLARERS: [&str; 3] = ["export", "declare", "typeset"];
+const DECLARERS: [&str; 5] = ["export", "declare", "typeset", "local", "readonly"];
 
 fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
     let words: Vec<String> = command.iter().map(|w| w.text.clone()).collect();
@@ -396,7 +401,10 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
         let program = file_name(word);
         if let Some(bare) = redirection(word) {
             i += if bare { 2 } else { 1 };
-        } else if is_assignment(word) || word.starts_with("CARGO_ALIAS_") && word.contains('=') {
+        } else if word.is_empty() && command[i].substituted {
+            // An unquoted substitution that prints nothing leaves no word.
+            i += 1;
+        } else if is_assignment(word) {
             aliases.assign(&command[i]);
             i += 1;
         } else if KEYWORDS.contains(&word.as_str()) || word == "." {
@@ -410,7 +418,7 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
                 i += 1;
             }
         } else if program == "rustup" {
-            // `rustup [-q] [+toolchain] run [--install] <toolchain> <command>`
+            // `rustup [-q] [+toolchain] run [--install] <toolchain> [--install] [--] <command>`
             i += 1;
             while words.get(i).is_some_and(|w| w.starts_with(['-', '+'])) {
                 i += 1;
@@ -418,10 +426,8 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             if words.get(i).is_none_or(|w| w != "run") {
                 return vec![];
             }
-            i = skip_options(words, i + 1, &[]) + 1;
-            if words.get(i).is_some_and(|w| w == "--") {
-                i += 1;
-            }
+            let toolchain = skip_options(words, i + 1, &[]);
+            i = skip_options(words, toolchain + 1, &[]);
         } else if SHELLS.contains(&program) {
             i += 1;
             // `-o pipefail`, `-O extglob`: the next word is the option's value.
@@ -785,6 +791,7 @@ fn file_name(word: &str) -> &str {
 
 fn is_assignment(word: &str) -> bool {
     word.split_once('=').is_some_and(|(name, _)| {
+        let name = name.strip_suffix('+').unwrap_or(name);
         !name.is_empty()
             && !name.starts_with(|c: char| c.is_ascii_digit())
             && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -883,6 +890,15 @@ mod tests {
         "rustup --quiet run --install nightly-2026-01-01 gh pr merge 12",
         "rustup +stable run stable gh pr merge 12",
         "rustup run stable -- gh pr merge 12",
+        "rustup run stable --install gh pr merge 12",
+        "rustup run stable --install -- gh pr merge 12",
+        "GH_TOKEN=$(echo t)x gh pr merge 12",
+        "GH_TOKEN=`echo t`x gh pr merge 12",
+        "$(true) gh pr merge 12",
+        "`true` gh pr merge 12",
+        "echo $(gh pr merge 1)",
+        "echo x$(gh pr merge 1)y",
+        "X+=1 gh pr merge 12",
     ];
     const INSTALLS: &[&str] = &[
         "scripts/install",
@@ -975,6 +991,7 @@ mod tests {
         "rustup update",
         "rustup run stable cargo test",
         "setsid cargo build",
+        "out=$(gh pr view 12)x; echo \"$out\"",
         "grep -rn CARGO_ALIAS_TEST= src; cargo test",
         "rg 'CARGO_ALIAS_B=' . && cargo b",
         "echo CARGO_ALIAS_$N=x; cargo x",
@@ -1447,6 +1464,7 @@ mod tests {
         "rustup run stable loopherd herd set h lead.merge true",
         "rustup run --install stable cargo run -- herd unset h lead.merge",
         "rustup run stable -- loopherd herd set h lead.merge true",
+        "rustup run stable --install loopherd herd set h lead.merge true",
     ];
 
     #[test]
@@ -1621,6 +1639,14 @@ mod tests {
                 Switch::Pause,
             ),
             (
+                "local CARGO_ALIAS_X='run -- pause h'; cargo x",
+                Switch::Pause,
+            ),
+            (
+                "readonly CARGO_ALIAS_X='run -- pause h'; export CARGO_ALIAS_X; cargo x",
+                Switch::Pause,
+            ),
+            (
                 "CARGO_ALIAS_A=b CARGO_ALIAS_B='run -- install-hook' cargo a",
                 Switch::Install,
             ),
@@ -1672,6 +1698,14 @@ mod tests {
             "export CARGO_ALIAS_X\"$EMPTY\"='run -- herd set h lead.merge true'; cargo x",
             "export CARGO_ALIAS_${N}='run -- pause h'; cargo clippy",
             "CARGO_ALIAS_\"$(echo X)\"='run -- pause h' cargo x",
+            "CARGO_ALIAS_X=$(echo run)' -- herd set h lead.merge true' cargo x",
+            "CARGO_ALIAS_X=`echo run`' -- herd set h lead.merge true' cargo x",
+            "CARGO_ALIAS_X=$(echo run)x cargo x",
+            "export CARGO_ALIAS_$(echo X)='run -- herd set h lead.merge true'; cargo x",
+            "export CARGO_ALIAS_`echo X`='run -- herd set h lead.merge true'; cargo x",
+            "CARGO_ALIAS_X='run -- pause h'; export CARGO_ALIAS_$(echo Y); cargo y",
+            "CARGO_ALIAS_X=\"run -- `echo pause` h\" cargo x",
+            "CARGO_ALIAS_X=run CARGO_ALIAS_X+=' -- herd set h lead.merge true' cargo x",
         ] {
             assert_eq!(needs(command), [Switch::OpaqueCargoAlias], "{command}");
             let message =
