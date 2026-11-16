@@ -825,6 +825,34 @@ mod tests {
     }
 
     #[test]
+    fn a_mark_made_again_since_the_read_outlives_unblocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = enabled("herdr = false\ncommand = ['n']\n");
+        let mark = dir.path().join("lh-4.blocked");
+        sent(&config, dir.path(), &[blocked("lh-4")]);
+        let before = BlockMarks::read(dir.path()).unwrap();
+
+        // Made again on top, so it has another inode.
+        let again = dir.path().join("lh-4.blocked.new");
+        fs::write(&again, "").unwrap();
+        fs::rename(&again, &mark).unwrap();
+        before.unblocked(dir.path(), "lh-4").unwrap();
+        assert!(mark.exists());
+
+        // An inode reused by a mark made again reads as new by its mtime.
+        let before = BlockMarks::read(dir.path()).unwrap();
+        let later = fs::metadata(&mark).unwrap().modified().unwrap() + Duration::from_secs(5);
+        fs::File::options()
+            .write(true)
+            .open(&mark)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        before.unblocked(dir.path(), "lh-4").unwrap();
+        assert!(mark.exists());
+    }
+
+    #[test]
     fn a_question_is_sent_once_however_many_watches_read_it() {
         let dir = tempfile::tempdir().unwrap();
         let config = enabled("");

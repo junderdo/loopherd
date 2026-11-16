@@ -1798,6 +1798,32 @@ mod tests {
     }
 
     #[test]
+    fn a_block_marked_by_another_watch_during_the_status_read_is_not_sent_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, mut herdr) = quiet_led_world();
+        let notifier = Notifier::new(dir.path());
+        let mark = dir.path().join("lead-cards.blocked");
+        let marked = std::cell::Cell::new(false);
+        // Another watch sees the lead blocked and marks it while this one reads it as working.
+        let other_watch = mark.clone();
+        herdr.on_agents = Some(Box::new(move || {
+            if !marked.replace(true) {
+                fs::write(&other_watch, "").unwrap();
+            }
+        }));
+
+        let printed = notifier.shepherd(
+            &herdr,
+            &ledger,
+            &mut steps(|_| herdr.set_status("lead-cards", AgentStatus::Blocked)),
+        );
+
+        assert_eq!(printed, ["lead-cards blocked"]);
+        assert!(mark.exists());
+        assert!(notifier.sent().is_empty());
+    }
+
+    #[test]
     fn a_leads_watch_reads_only_its_own_herds_workers() {
         let dir = tempfile::tempdir().unwrap();
         let (mut ledger, herdr) = led_world(dir.path());
