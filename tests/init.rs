@@ -4267,3 +4267,44 @@ fn diff_shows_drift_in_each_file_a_local_init_wrote() {
     );
     assert_eq!(fixture.gh_calls(), "");
 }
+
+#[test]
+fn a_ready_for_agent_label_the_queue_reads_as_a_type_or_skill_is_refused_before_any_gh_call() {
+    for (label, clash) in [
+        ("bug", "the queue reads bug as the branch type fix"),
+        (
+            "Documentation",
+            "the queue reads documentation as the branch type docs",
+        ),
+        (
+            "skill:tdd",
+            "the queue reads a skill: label as the worker's skill",
+        ),
+    ] {
+        for tracker in [None, Some("# Issue tracker: Local Markdown\n")] {
+            let fixture = Fixture::new(&["acme"]);
+            write_docs(
+                &fixture,
+                tracker,
+                &format!("| `ready-for-agent` | `{label}` | x |\n"),
+            );
+
+            let before = fs::read_dir(fixture.repo().join("docs/agents"))
+                .unwrap()
+                .count();
+            assert_refused(
+                &fixture,
+                &fixture.init(&[]),
+                &format!(
+                    "loopherd init: docs/agents/triage-labels.md maps ready-for-agent to \
+                     {label}, but {clash}; pick another label\n"
+                ),
+            );
+            assert_eq!(fixture.gh_calls(), "");
+            let after = fs::read_dir(fixture.repo().join("docs/agents"))
+                .unwrap()
+                .count();
+            assert_eq!(before, after);
+        }
+    }
+}
