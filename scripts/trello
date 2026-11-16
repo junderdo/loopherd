@@ -6,7 +6,7 @@ BOARD="${TRELLO_BOARD:-MtiTIrp1}"
 API="https://api.trello.com/1"
 ENV_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/loopherd/trello.env"
 
-# name, color — meanings live in docs/agents/issue-tracking.md
+# name, color — meanings live in docs/agents/issue-tracker.md
 LABELS=(
   "wayfinding:research sky"
   "wayfinding:grilling purple"

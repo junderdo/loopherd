@@ -39,7 +39,7 @@ merged = "GH_TOKEN=$(gh auth token --user junderdo) gh pr list --head {branch} -
 prompt = """
 You're {name}, working on branch {branch} in {worktree}.
 
-Work Trello card LH-{card} per AGENTS.md and docs/agents/issue-tracking.md: read the card and every
+Work Trello card LH-{card} per AGENTS.md and docs/agents/issue-tracker.md: read the card and every
 comment with `scripts/trello show LH-{card}`, claim it (move to In Progress, comment "claimed by {name}"),
 and resolve it with the skill its kind label names. Wayfinding output goes on this branch.
 
