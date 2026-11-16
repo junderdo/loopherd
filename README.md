@@ -125,8 +125,9 @@ heading outside a code block (`#` or setext) names loopherd. A symlinked
 `AGENTS.md`, live or dangling, is left alone, and so is a `loopherd.md`
 whose directory links outside the repo; init prints a step to write each by
 hand. A repo file init can't write (a read-only `AGENTS.md` to append to,
-or a read-only directory for a new doc) stops init before any change. Nothing is committed; the printed steps list the
-repo files to review and commit.
+or a read-only directory for a new doc) stops init before any change, and
+so does a herds dir or config dir it can't write in. Nothing is committed;
+the printed steps list the repo files to review and commit.
 
 It writes `<herd>.toml` (named after the repo dir) and, unless
 `--no-lead`, `<herd>-lead.md` in the herds dir, and for GitHub creates the labels `ready-for-agent`, `needs-info`,

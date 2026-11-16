@@ -208,11 +208,20 @@ fn has_loopherd_section(text: &str) -> bool {
         let underline = ['=', '-']
             .into_iter()
             .any(|c| run(c) > 0 && line.trim_start_matches(c).is_empty());
-        if underline {
-            if names(&paragraph) {
+        let marks: String = line.chars().filter(|c| !matches!(c, ' ' | '\t')).collect();
+        let thematic_break = marks.len() >= 3
+            && ['-', '*', '_']
+                .into_iter()
+                .any(|c| marks.chars().all(|m| m == c));
+        if underline || thematic_break {
+            if underline && names(&paragraph) {
                 return true;
             }
             paragraph.clear();
+            // An `=` run after a list item or blockquote is lazy text, not a break.
+            if thematic_break {
+                container = false;
+            }
             continue;
         }
         let title = line.trim_start_matches('#');
@@ -229,7 +238,7 @@ fn has_loopherd_section(text: &str) -> bool {
         if line.is_empty() {
             paragraph.clear();
             container = false;
-        } else if container || opens_container(line) {
+        } else if container || opens_container(line, !paragraph.is_empty()) {
             paragraph.clear();
             container = true;
         } else {
@@ -240,36 +249,20 @@ fn has_loopherd_section(text: &str) -> bool {
     false
 }
 
-/// Whether `line` starts a blockquote or a list item.
-fn opens_container(line: &str) -> bool {
-    let marker_then_space = |rest: &str| rest.is_empty() || rest.starts_with([' ', '\t']);
-    if line.starts_with('>') {
-        return true;
+/// Whether `line` starts a blockquote or a list item that holds text. Only a
+/// `1.` or `1)` ordered item can interrupt a paragraph.
+fn opens_container(line: &str, interrupts_paragraph: bool) -> bool {
+    let holds_text = |rest: &str| rest.starts_with([' ', '\t']) && !rest.trim().is_empty();
+    if let Some(rest) = line.strip_prefix('>') {
+        return !rest.trim().is_empty();
     }
     if let Some(rest) = line.strip_prefix(['-', '*', '+']) {
-        return marker_then_space(rest);
+        return holds_text(rest);
     }
     let digits = line.len() - line.trim_start_matches(|c: char| c.is_ascii_digit()).len();
     (1..=9).contains(&digits)
+        && (!interrupts_paragraph || &line[..digits] == "1")
         && line[digits..]
             .strip_prefix(['.', ')'])
-            .is_some_and(marker_then_space)
-}
-
-/// Refuses a new doc whose nearest existing directory init can't write in.
-pub fn check_writable(repo: &Path, docs: &[Doc]) -> Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    for doc in docs.iter().filter(|doc| !doc.append) {
-        let path = repo.join(doc.path);
-        let Some(dir) = path.ancestors().skip(1).find(|dir| dir.exists()) else {
-            continue;
-        };
-        let c_dir = std::ffi::CString::new(dir.as_os_str().as_bytes())?;
-        // SAFETY: c_dir is a valid NUL-terminated path for the call's duration.
-        if unsafe { libc::access(c_dir.as_ptr(), libc::W_OK) } != 0 {
-            let e = std::io::Error::last_os_error();
-            return Err(e).with_context(|| format!("write {}", path.display()));
-        }
-    }
-    Ok(())
+            .is_some_and(holds_text)
 }

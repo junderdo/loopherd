@@ -261,7 +261,13 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
         },
     )?;
     docs.extend(plan.docs);
-    agents::check_writable(&repo, &docs)?;
+    let new_docs = docs.iter().filter(|doc| !doc.append);
+    refuse_unwritable(
+        [paths.herds.join(format!("{name}.toml"))]
+            .into_iter()
+            .chain(lead.then(|| lead_file.clone()))
+            .chain(new_docs.map(|doc| repo.join(doc.path))),
+    )?;
     Ok(Herd {
         repo,
         name,
@@ -560,6 +566,23 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
         lines.push(format!("  {}. {step}", n + 1));
     }
     Ok(lines)
+}
+
+/// Refuses a new file whose nearest existing directory init can't write in.
+fn refuse_unwritable(new_files: impl IntoIterator<Item = PathBuf>) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    for path in new_files {
+        let Some(dir) = path.ancestors().skip(1).find(|dir| dir.exists()) else {
+            continue;
+        };
+        let c_dir = std::ffi::CString::new(dir.as_os_str().as_bytes())?;
+        // SAFETY: c_dir is a valid NUL-terminated path for the call's duration.
+        if unsafe { libc::access(c_dir.as_ptr(), libc::W_OK) } != 0 {
+            let e = std::io::Error::last_os_error();
+            return Err(e).with_context(|| format!("write {}", path.display()));
+        }
+    }
+    Ok(())
 }
 
 /// The files and directories init created, to undo when a later write fails.
