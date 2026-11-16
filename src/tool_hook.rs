@@ -2,8 +2,9 @@
 //! from a lead's pane that needs a switch its herd file leaves off (D17), or
 //! a `loopherd restart --force` (D20), a `loopherd pause` or `resume`
 //! (D23), a `loopherd herd set` or `unset` (D29), a write of the lead
-//! defaults (D31), cargo run through an alias it can't read, or a `$(…)`
-//! whose end it can't find, which no switch allows.
+//! defaults (D31), a `loopherd config set`, `unset` or `setup` (D39), cargo
+//! run through an alias it can't read, or a `$(…)` whose end it can't find,
+//! which no switch allows.
 //! A guardrail on the command text, not a sandbox.
 
 use std::path::Path;
@@ -35,6 +36,10 @@ pub enum Switch {
     /// `loopherd lead-defaults --set` or `scripts/install --lead-defaults`,
     /// which could turn a lead's own switches on. Not a switch: always the human's.
     LeadDefaults,
+    /// `loopherd config set` or `unset`, `loopherd setup`, or `scripts/install
+    /// --context`, which could raise a lead's own handoff limit or switches.
+    /// Not a switch: always the human's.
+    Config,
     /// `cargo` run through a `CARGO_ALIAS_*` whose value the hook can't read.
     /// Not a switch: always the human's.
     OpaqueCargoAlias,
@@ -54,6 +59,7 @@ impl Switch {
             Switch::Pause => "pause",
             Switch::HerdEdit => "herd set",
             Switch::LeadDefaults => "lead-defaults",
+            Switch::Config => "config",
             Switch::OpaqueCargoAlias => "cargo alias",
             Switch::Unreadable => "unreadable command",
         }
@@ -68,6 +74,7 @@ impl Switch {
             Switch::Pause => "the human pauses and resumes herds",
             Switch::HerdEdit => "the human edits herd files",
             Switch::LeadDefaults => "the human sets lead defaults",
+            Switch::Config => "the human sets loopherd's config",
             Switch::OpaqueCargoAlias => "the human runs cargo through such aliases",
             Switch::Unreadable => "the human runs commands the hook can't read",
         }
@@ -82,6 +89,7 @@ impl Switch {
             | Switch::Pause
             | Switch::HerdEdit
             | Switch::LeadDefaults
+            | Switch::Config
             | Switch::OpaqueCargoAlias
             | Switch::Unreadable => false,
         }
@@ -126,6 +134,7 @@ fn decide(
                 Switch::Pause,
                 Switch::HerdEdit,
                 Switch::LeadDefaults,
+                Switch::Config,
                 Switch::OpaqueCargoAlias,
                 Switch::Unreadable,
             ]
@@ -154,6 +163,13 @@ fn decide(
     if needed == Switch::LeadDefaults {
         return Ok(Some(format!(
             "loopherd: blocked: {} may not set lead defaults with `loopherd lead-defaults --set` or `scripts/install --lead-defaults`, which could turn its own switches on: {}; ask with `loopherd report --kind question`",
+            lead.name,
+            needed.humans_part()
+        )));
+    }
+    if needed == Switch::Config {
+        return Ok(Some(format!(
+            "loopherd: blocked: {} may not change loopherd's config with `loopherd config set`, `config unset`, `loopherd setup` or `scripts/install --context`, which could raise its own handoff limit or switches: {}; ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -749,9 +765,13 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
 
 fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
     if Path::new(path).ends_with("scripts/install") {
-        return Some(match args.iter().any(|a| is_flag(a, "--lead-defaults")) {
-            true => Switch::LeadDefaults,
-            false => Switch::Install,
+        let flag = |name| args.iter().any(|a| is_flag(a, name));
+        return Some(if flag("--lead-defaults") {
+            Switch::LeadDefaults
+        } else if flag("--context") {
+            Switch::Config
+        } else {
+            Switch::Install
         });
     }
     let positional = positionals(args, &[]);
@@ -769,6 +789,10 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
         "loopherd" => match positional.first() {
             Some(&"install-hook") => Some(Switch::Install),
             Some(&"lead-defaults") => sets_lead_defaults(args),
+            Some(&"config") => {
+                matches!(positional.get(1), Some(&"set" | &"unset")).then_some(Switch::Config)
+            }
+            Some(&"setup") => runs_setup(args).then_some(Switch::Config),
             Some(&"restart") => forces_restart(args),
             Some(&"pause" | &"resume") => Some(Switch::Pause),
             Some(&"herd") => {
@@ -787,6 +811,7 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
         }
         // A key or value read by `herd get` may be any word.
         "cargo" if runs_herd_get(cargo_run_args(args)) => None,
+        "cargo" if edits_config(cargo_run_args(args)) => Some(Switch::Config),
         "cargo"
             if cargo_run_args(args)
                 .iter()
@@ -895,9 +920,17 @@ fn cargo_run_args(args: &[String]) -> &[String] {
     }
 }
 
-/// Whether `run_args` run loopherd's `herd get`: every option before `herd`
-/// is one cargo knows, and no `herd set` or `unset` hides among the words.
+/// Whether `run_args` run loopherd's `herd get`, with no `herd set` or
+/// `unset` hidden among the words.
 fn runs_herd_get(run_args: &[String]) -> bool {
+    loopherd_args(run_args).is_some_and(|rest| {
+        rest.starts_with(&["herd".to_string(), "get".to_string()]) && !edits_herd(rest)
+    })
+}
+
+/// The args `cargo run` hands loopherd, past cargo's options and `--`;
+/// `None` when an option cargo might take a value for comes first.
+fn loopherd_args(run_args: &[String]) -> Option<&[String]> {
     const WITH_VALUE: [&str; 16] = [
         "--bin",
         "-p",
@@ -937,18 +970,39 @@ fn runs_herd_get(run_args: &[String]) -> bool {
             }
             a if WITH_VALUE.contains(&a) => i += 2,
             a if FLAGS.contains(&a) => i += 1,
-            a if a.starts_with('-') => return false,
+            a if a.starts_with('-') => return None,
             _ => break,
         }
     }
-    let rest = run_args.get(i..).unwrap_or_default();
-    rest.starts_with(&["herd".to_string(), "get".to_string()]) && !edits_herd(rest)
+    Some(run_args.get(i..).unwrap_or_default())
 }
 
 /// Whether `herd` then `set` or `unset` appear in `args`, side by side.
 fn edits_herd<S: AsRef<str>>(args: &[S]) -> bool {
     args.windows(2)
         .any(|w| w[0].as_ref() == "herd" && matches!(w[1].as_ref(), "set" | "unset"))
+}
+
+/// Whether `cargo run` with `run_args` runs `config set` or `unset`, or a
+/// `setup` that isn't just its help. Past an option it can't read, any such
+/// words count.
+fn edits_config(run_args: &[String]) -> bool {
+    let (args, anywhere) = match loopherd_args(run_args) {
+        Some(args) => (args, false),
+        None => (run_args, true),
+    };
+    let starts = |at: usize| anywhere || at == 0;
+    args.windows(2)
+        .enumerate()
+        .any(|(at, w)| starts(at) && w[0] == "config" && matches!(w[1].as_str(), "set" | "unset"))
+        || args
+            .iter()
+            .enumerate()
+            .any(|(at, a)| starts(at) && a == "setup" && runs_setup(&args[at + 1..]))
+}
+
+fn runs_setup(args: &[String]) -> bool {
+    !args.iter().any(|a| a == "--help" || a == "-h")
 }
 
 fn sets_lead_defaults(args: &[String]) -> Option<Switch> {
@@ -1501,6 +1555,7 @@ mod tests {
             | Switch::Pause
             | Switch::HerdEdit
             | Switch::LeadDefaults
+            | Switch::Config
             | Switch::OpaqueCargoAlias
             | Switch::Unreadable => {}
         }
@@ -1546,6 +1601,7 @@ mod tests {
                 | Switch::Pause
                 | Switch::HerdEdit
                 | Switch::LeadDefaults
+                | Switch::Config
                 | Switch::OpaqueCargoAlias
                 | Switch::Unreadable => {}
             }
@@ -1836,6 +1892,55 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn a_leads_config_write_or_setup_is_denied_whatever_its_switches() {
+        let leads = ledger(vec![lead()]);
+        for command in [
+            "loopherd config set context_window 1000000",
+            "loopherd config unset shepherd.context_limit",
+            "loopherd setup",
+            "loopherd setup --again",
+            "loopherd setup --context limit=500000",
+            "bash -c 'loopherd config set default_context_limit 500000'",
+            "cargo run -- config set context_window 1000000",
+            "cargo r -q config unset context_window",
+            "cargo run -- setup --lead-defaults merge",
+            "cargo run --some-new-option x -- setup",
+            "scripts/install --context limit=500000",
+            "./scripts/install --no-splash --context=window=1000000",
+            "bash scripts/install --context limit=500000",
+            "env FOO=1 loopherd setup",
+            "command loopherd config unset default_context_limit",
+            "/home/u/.local/bin/loopherd setup --again",
+            "./target/debug/loopherd config set context_window 1000000",
+            "timeout 5 target/release/loopherd setup",
+            "sh -c 'loopherd config unset context_window'",
+        ] {
+            assert_eq!(needs(command), [Switch::Config], "{command}");
+            let message =
+                run(&leads, all_on(), command).unwrap_or_else(|| panic!("{command} was allowed"));
+            assert!(
+                message.contains("lead-h may not change loopherd's config")
+                    && message.contains("the human sets loopherd's config"),
+                "{message}"
+            );
+        }
+        for command in [
+            "loopherd config get context_window",
+            "cargo run -- config get default_context_limit",
+            "loopherd setup --help",
+            "env loopherd config get context_window",
+            "./target/debug/loopherd config get context_window",
+            "cargo run -- feed h setup",
+            "cargo run -- report --body setup",
+            "cargo run -- feed h config set context_window 1",
+        ] {
+            assert_eq!(needs(command), [], "{command}");
+        }
+        let workers = ledger(vec![entry("lh-1", None)]);
+        assert_eq!(run(&workers, Switches::default(), "loopherd setup"), None);
     }
 
     #[test]

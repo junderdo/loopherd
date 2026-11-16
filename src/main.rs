@@ -20,6 +20,7 @@ mod restart;
 mod retire;
 mod revive;
 mod session_hook;
+mod setup;
 mod shell;
 mod skill;
 mod spawn;
@@ -110,6 +111,20 @@ enum Command {
         #[arg(long, value_name = "SWITCHES")]
         set: Option<String>,
     },
+    /// Read or edit one of config.toml's handoff settings, keeping its comments
+    /// and layout: `context_window`, `default_context_limit` or
+    /// `shepherd.context_limit`, each a number of tokens.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+    /// Set config.toml's machine-wide settings: the lead defaults, then the
+    /// context window and the handoff limits. On a terminal (/dev/tty, so it
+    /// works under `curl … | sh`) it asks each group while config.toml leaves
+    /// it unset, current values as defaults, Enter keeping a value. Without
+    /// one it asks nothing and names the flags for whatever is unset. Naming
+    /// a group's flag handles just that group: set with a value, asked without.
+    Setup(SetupArgs),
     /// Start the herd's lead member, lead-<herd>, from its herd file's [lead] table,
     /// in a detached worktree of the same name.
     Lead(LeadArgs),
@@ -247,7 +262,8 @@ enum Command {
     /// Claude's PreToolUse hook on Bash: in a lead's pane, denies a merge, install,
     /// rebase or force-push its switches leave to the human, and any
     /// `loopherd restart --force`, `pause`, `resume`, `herd set`, `herd unset` or
-    /// `lead-defaults --set`, or `scripts/install --lead-defaults`,
+    /// `lead-defaults --set`, `config set`, `config unset` or `setup`, or
+    /// `scripts/install --lead-defaults` or `--context`,
     /// read from the hook input on stdin, by printing a
     /// deny decision. Elsewhere it prints nothing.
     /// Always exits 0. Set up by install-hook.
@@ -315,6 +331,32 @@ enum HerdAction {
     /// Remove the key; succeeds if it isn't set. Refuses, changing nothing, a
     /// file `loopherd herds` would call invalid.
     Unset { herd: String, key: String },
+}
+
+#[derive(Args)]
+struct SetupArgs {
+    /// Ask every group again, current values as defaults.
+    #[arg(long, conflicts_with_all = ["lead_defaults", "context"])]
+    again: bool,
+    /// Turn these lead switches on and the rest off: a comma list such as
+    /// `merge,install`, or `none`. Alone, ask about them again.
+    #[arg(long, value_name = "SWITCHES", num_args = 0..=1)]
+    lead_defaults: Option<Option<String>>,
+    /// Set any of the context window, the default handoff limit and the
+    /// shepherd's, in tokens: `window=1000000,limit=500000,shepherd=400000`.
+    /// A limit over 80% of the window is refused. Alone, ask about them again.
+    #[arg(long, value_name = "window=N,limit=N,shepherd=N", num_args = 0..=1)]
+    context: Option<Option<String>>,
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Print the key's value; exits 1 if it isn't set.
+    Get { key: String },
+    /// Set the key, refusing, changing nothing, a value under 10000.
+    Set { key: String, value: String },
+    /// Remove the key; succeeds if it isn't set.
+    Unset { key: String },
 }
 
 #[derive(Args)]
@@ -457,6 +499,8 @@ fn main() -> ExitCode {
         Command::Herds => ("herds", run_herds()),
         Command::Herd { action } => ("herd", run_herd(action)),
         Command::LeadDefaults { set } => ("lead-defaults", run_lead_defaults(set)),
+        Command::Config { action } => ("config", run_config(action)),
+        Command::Setup(args) => ("setup", run_setup(args)),
         Command::Lead(args) => ("lead", run_lead(args)),
         Command::Feed {
             herd,
@@ -525,8 +569,59 @@ fn run_herd(action: HerdAction) -> Result<i32> {
     Ok(0)
 }
 
+fn config_path() -> Result<PathBuf> {
+    Ok(Paths::from_env()?.herds.with_file_name("config.toml"))
+}
+
+fn run_config(action: ConfigAction) -> Result<i32> {
+    let config = config_path()?;
+    match action {
+        ConfigAction::Get { key } => match config::get(&config, &key)? {
+            Some(value) => println!("{value}"),
+            None => bail!("{key} is not set"),
+        },
+        ConfigAction::Set { key, value } => {
+            config::set(&config, &key, &value)?;
+            println!(
+                "set {key} = {}",
+                config::get(&config, &key)?.unwrap_or_default()
+            );
+        }
+        ConfigAction::Unset { key } => match config::unset(&config, &key)? {
+            true => println!("unset {key}"),
+            false => println!("{key} was not set"),
+        },
+    }
+    Ok(0)
+}
+
+fn run_setup(args: SetupArgs) -> Result<i32> {
+    let config = config_path()?;
+    let tty = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok();
+    let mut terminal = tty
+        .map(|tty| -> Result<_> { Ok((std::io::BufReader::new(tty.try_clone()?), tty)) })
+        .transpose()?;
+    let lines = setup::setup(
+        setup::Request {
+            config: &config,
+            again: args.again,
+            lead_defaults: args.lead_defaults,
+            context: args.context,
+        },
+        terminal
+            .as_mut()
+            .map(|(input, output)| setup::Tty { input, output }),
+    )?;
+    lines.iter().for_each(|line| println!("{line}"));
+    Ok(0)
+}
+
 fn run_lead_defaults(set: Option<String>) -> Result<i32> {
-    let config = Paths::from_env()?.herds.with_file_name("config.toml");
+    let config = config_path()?;
     if let Some(list) = set {
         config::set_lead_defaults(&config, &list)?;
     }
