@@ -2504,13 +2504,9 @@ fn an_agents_md_init_cant_append_to_is_left_as_it_was_with_no_other_file() {
         text(&out.stderr)
     );
     assert_eq!(repo_file(&fixture, "AGENTS.md"), "# Widgets\n");
-    for doc in ["issue-tracker.md", "triage-labels.md", "loopherd.md"] {
-        assert!(
-            !fixture.repo().join("docs/agents").join(doc).exists(),
-            "{doc}"
-        );
-    }
-    assert_eq!(fs::read_dir(fixture.herds()).unwrap().count(), 0);
+    assert!(!fixture.repo().join("docs").exists());
+    assert!(!fixture.herds().exists());
+    assert!(!fixture.gh_calls().contains("label create"));
 }
 
 #[test]
@@ -2579,4 +2575,174 @@ fn an_unreadable_loopherd_doc_is_left_as_it_was() {
     fs::set_permissions(&doc, fs::Permissions::from_mode(0o644)).unwrap();
     assert_ok(&out);
     assert_eq!(fs::read_to_string(&doc).unwrap(), "ours\n");
+}
+
+#[test]
+fn a_failed_append_truncates_agents_md_back_and_removes_the_files_and_dirs_init_created() {
+    let fixture = Fixture::new(&["acme"]);
+    // Past the limit below by less than the section, and bigger than every other file.
+    let blocks = 64;
+    let agents = format!("# Widgets\n\n{}\n", "x".repeat(blocks * 512 - 30));
+    fs::write(fixture.repo().join("AGENTS.md"), &agents).unwrap();
+
+    let out = fixture.run(
+        Command::new("sh")
+            .args([
+                "-c",
+                r#"ulimit -S -f "$1"; trap '' XFSZ; shift; exec "$@""#,
+                "sh",
+                &blocks.to_string(),
+                env!("CARGO_BIN_EXE_loopherd"),
+                "init",
+            ])
+            .args(Fixture::CHECKS),
+    );
+
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert_eq!(repo_file(&fixture, "AGENTS.md"), agents);
+    assert!(!fixture.repo().join("docs").exists());
+    assert_eq!(fs::read_dir(fixture.herds()).unwrap().count(), 0);
+}
+
+#[test]
+fn a_loopherd_doc_that_would_land_outside_the_repo_is_left_to_a_step() {
+    for (link, target) in [("docs", "outside_docs"), ("docs/agents", "outside_agents")] {
+        let fixture = Fixture::new(&["acme"]);
+        let outside = fixture.root.path().join(target);
+        fs::create_dir_all(&outside).unwrap();
+        // The tracker doc is already there, so only loopherd.md would go through the link.
+        let agents_dir = match link {
+            "docs" => outside.join("agents"),
+            _ => outside.clone(),
+        };
+        let link_path = fixture.repo().join(link);
+        fs::create_dir_all(link_path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &link_path).unwrap();
+        fs::create_dir_all(&agents_dir).unwrap();
+        fs::write(
+            agents_dir.join("issue-tracker.md"),
+            "# Issue tracker: GitHub\n",
+        )
+        .unwrap();
+
+        let out = fixture.init(&[]);
+
+        assert_ok(&out);
+        assert!(!agents_dir.join("loopherd.md").exists(), "{link}");
+        let stdout = text(&out.stdout);
+        assert!(
+            stdout.contains(
+                "docs/agents/loopherd.md would land outside the repo through a symlink, so \
+                 init didn't write it; write it in the repo by hand."
+            ),
+            "{link}: {stdout}"
+        );
+        assert!(
+            !stdout.contains("wrote docs/agents/loopherd.md"),
+            "{link}: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn a_setext_heading_naming_loopherd_is_a_loopherd_section() {
+    for agents in [
+        "# Widgets\n\nLoopherd\n========\n\nOurs.\n",
+        "# Widgets\n\nWorking with\nloopherd\n---\n",
+    ] {
+        let fixture = Fixture::new(&["acme"]);
+        fs::write(fixture.repo().join("AGENTS.md"), agents).unwrap();
+
+        assert_ok(&fixture.init(&[]));
+
+        assert_eq!(repo_file(&fixture, "AGENTS.md"), agents);
+    }
+}
+
+#[test]
+fn a_fence_closes_only_on_a_run_of_its_character_as_long_as_the_opener() {
+    let agents = "# Widgets\n\n````md\n```\n## loopherd\n```\n~~~~\n````\n";
+    let fixture = Fixture::new(&["acme"]);
+    fs::write(fixture.repo().join("AGENTS.md"), agents).unwrap();
+
+    assert_ok(&fixture.init(&[]));
+
+    let written = repo_file(&fixture, "AGENTS.md");
+    assert!(
+        written.starts_with(agents) && written.len() > agents.len(),
+        "{written}"
+    );
+}
+
+#[test]
+fn a_crlf_agents_md_gets_a_crlf_section() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::write(fixture.repo().join("AGENTS.md"), "# Widgets\r\n").unwrap();
+
+    assert_ok(&fixture.init(&[]));
+
+    let written = repo_file(&fixture, "AGENTS.md");
+    assert!(
+        written.starts_with("# Widgets\r\n\r\n## loopherd\r\n"),
+        "{written:?}"
+    );
+    assert!(!written.replace("\r\n", "").contains('\n'), "{written:?}");
+}
+
+#[test]
+fn a_dangling_agents_md_symlink_is_left_alone_with_a_step() {
+    let fixture = Fixture::new(&["acme"]);
+    let gone = fixture.root.path().join("gone.md");
+    std::os::unix::fs::symlink(&gone, fixture.repo().join("AGENTS.md")).unwrap();
+
+    let out = fixture.init(&[]);
+
+    assert_ok(&out);
+    assert!(!gone.exists());
+    assert!(
+        text(&out.stdout).contains("AGENTS.md is a symlink, so init left it alone"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn a_symlinked_agents_md_with_a_loopherd_section_gets_no_step() {
+    let fixture = Fixture::new(&["acme"]);
+    let outside = fixture.root.path().join("global.md");
+    fs::write(&outside, "## loopherd\n").unwrap();
+    std::os::unix::fs::symlink(&outside, fixture.repo().join("AGENTS.md")).unwrap();
+
+    let out = fixture.init(&[]);
+
+    assert_ok(&out);
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "## loopherd\n");
+    assert!(
+        !text(&out.stdout).contains("AGENTS.md"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn a_loopherd_heading_on_the_first_line_after_a_bom_is_a_loopherd_section() {
+    let fixture = Fixture::new(&["acme"]);
+    let agents = "\u{feff}# loopherd\n\nOurs.\n";
+    fs::write(fixture.repo().join("AGENTS.md"), agents).unwrap();
+
+    assert_ok(&fixture.init(&[]));
+
+    assert_eq!(repo_file(&fixture, "AGENTS.md"), agents);
+}
+
+#[test]
+fn on_a_terminal_declining_the_summary_leaves_an_existing_agents_md_as_it_was() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::write(fixture.repo().join("AGENTS.md"), "# Widgets\n").unwrap();
+
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\nn\n");
+
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert!(text(&out.stdout).contains("nothing written"));
+    assert_eq!(repo_file(&fixture, "AGENTS.md"), "# Widgets\n");
 }

@@ -56,8 +56,8 @@ struct Herd {
     /// The limit that applies when `context_limit` is unset.
     config_limit: String,
     docs: Vec<agents::Doc>,
-    /// What the human adds to `AGENTS.md` that init couldn't.
-    agents_step: Option<String>,
+    /// What the human writes in the repo that init wouldn't.
+    agents_steps: Vec<String>,
 }
 
 /// Writes the herd file and its lead prompt and creates missing labels,
@@ -276,7 +276,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
         context_limit,
         config_limit,
         docs,
-        agents_step: plan.step,
+        agents_steps: plan.steps,
     })
 }
 
@@ -497,25 +497,25 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
         true => create_labels(token, slug, labels)?,
         false => vec![],
     };
-    let mut written: Vec<PathBuf> = vec![];
+    let mut written = Written::default();
     let lead = herd.lead.then(|| (lead_file.clone(), fill(LEAD, &values)));
     let herd_files = lead
         .into_iter()
         .chain([(herd_file.clone(), fill(HERD, &values))]);
     for (path, text) in herd_files {
-        if let Err(e) = write_new(&path, &text) {
-            remove(&written);
+        if let Err(e) = written.new_file(&path, &text) {
+            written.undo();
             return Err(e);
         }
-        written.push(path);
     }
     for doc in &herd.docs {
-        if let Err(e) = doc.write(repo) {
-            remove(&written);
+        let done = match doc.append {
+            true => doc.append_to(repo),
+            false => written.new_file(&repo.join(doc.path), &doc.text),
+        };
+        if let Err(e) = done {
+            written.undo();
             return Err(e);
-        }
-        if !doc.append {
-            written.push(repo.join(doc.path));
         }
     }
     lines.push(format!("wrote {}", herd_file.display()));
@@ -541,7 +541,7 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
             tracker::TRACKER_DOC
         ));
     }
-    steps.extend(herd.agents_step.clone());
+    steps.extend(herd.agents_steps.iter().cloned());
     if !herd.docs.is_empty() {
         let paths: Vec<String> = herd.docs.iter().map(|doc| doc.path.to_string()).collect();
         steps.push(format!(
@@ -563,9 +563,36 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
     Ok(lines)
 }
 
-fn remove(paths: &[PathBuf]) {
-    for path in paths {
-        let _ = fs::remove_file(path);
+/// The files and directories init created, to undo when a later write fails.
+#[derive(Default)]
+struct Written {
+    files: Vec<PathBuf>,
+    dirs: Vec<PathBuf>,
+}
+
+impl Written {
+    fn new_file(&mut self, path: &Path, text: &str) -> Result<()> {
+        if let Some(dir) = path.parent() {
+            let missing: Vec<&Path> = dir
+                .ancestors()
+                .take_while(|dir| fs::symlink_metadata(dir).is_err())
+                .collect();
+            fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+            self.dirs
+                .extend(missing.into_iter().rev().map(Path::to_path_buf));
+        }
+        write_new(path, text)?;
+        self.files.push(path.to_path_buf());
+        Ok(())
+    }
+
+    fn undo(&self) {
+        for file in &self.files {
+            let _ = fs::remove_file(file);
+        }
+        for dir in self.dirs.iter().rev() {
+            let _ = fs::remove_dir(dir);
+        }
     }
 }
 
@@ -835,9 +862,6 @@ fn toml_string(value: &str) -> String {
 
 /// Writes `text` to a new file at `path`, leaving no file behind on failure.
 fn write_new(path: &Path, text: &str) -> Result<()> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    }
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)

@@ -46,12 +46,9 @@ impl Doc {
         }
     }
 
-    /// Writes the doc under `repo`. An append that fails leaves the file as it was.
-    pub fn write(&self, repo: &Path) -> Result<()> {
+    /// Appends the doc to its file under `repo`, leaving the file as it was on failure.
+    pub fn append_to(&self, repo: &Path) -> Result<()> {
         let path = repo.join(self.path);
-        if !self.append {
-            return super::write_new(&path, &self.text);
-        }
         let mut file = fs::OpenOptions::new()
             .append(true)
             .open(&path)
@@ -73,18 +70,19 @@ pub struct Herd<'a> {
     pub needs_info: &'a str,
 }
 
-/// What init writes into the repo and, for a linked `AGENTS.md`, the step
-/// left to the human.
+/// What init writes into the repo, and the steps left to the human where
+/// writing could reach outside it.
 pub struct Plan {
     /// `AGENTS.md`'s last, so a failed append is the only write left to undo.
     pub docs: Vec<Doc>,
-    pub step: Option<String>,
+    pub steps: Vec<String>,
 }
 
-/// The docs the repo lacks.
+/// The docs the repo lacks. Refuses an `AGENTS.md` init would append to but
+/// can't write, so that fails before any change.
 pub fn missing(repo: &Path, herd: Herd) -> Result<Plan> {
     let mut docs = vec![];
-    let mut step = None;
+    let mut steps = vec![];
     if fs::symlink_metadata(repo.join(LOOPHERD_DOC)).is_err() {
         let checks: Vec<String> = herd.checks.iter().map(|c| format!("- `{c}`")).collect();
         let text = super::fill(
@@ -96,68 +94,137 @@ pub fn missing(repo: &Path, herd: Herd) -> Result<Plan> {
                 ("NEEDS_INFO", herd.needs_info),
             ],
         );
-        docs.push(Doc::new(LOOPHERD_DOC, text));
+        match lands_inside(repo, LOOPHERD_DOC)? {
+            true => docs.push(Doc::new(LOOPHERD_DOC, text)),
+            false => steps.push(format!(
+                "{LOOPHERD_DOC} would land outside the repo through a symlink, so init \
+                 didn't write it; write it in the repo by hand."
+            )),
+        }
     }
     let agents_md = repo.join(AGENTS_MD);
     let linked = fs::symlink_metadata(&agents_md).is_ok_and(|m| m.file_type().is_symlink());
-    match read(&agents_md)? {
+    if linked {
         // Appending through a link could change a file outside the repo.
-        Some(agents) if linked && !has_loopherd_section(&agents) => {
-            step = Some(format!(
+        let has_section = fs::read(&agents_md)
+            .is_ok_and(|bytes| has_loopherd_section(&String::from_utf8_lossy(&bytes)));
+        if !has_section {
+            steps.push(format!(
                 "{AGENTS_MD} is a symlink, so init left it alone; add a loopherd section \
                  pointing at {LOOPHERD_DOC} and docs/agents/issue-tracker.md to it by hand."
             ));
         }
+        return Ok(Plan { docs, steps });
+    }
+    match read(&agents_md)? {
         None => docs.push(Doc::new(
             AGENTS_MD,
             format!("# Agent instructions\n\n{SECTION}"),
         )),
         Some(agents) if has_loopherd_section(&agents) => {}
         Some(agents) => {
-            let gap = match agents.as_str() {
-                "" => "",
-                text if text.ends_with("\n\n") => "",
-                text if text.ends_with('\n') => "\n",
-                _ => "\n\n",
-            };
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&agents_md)
+                .with_context(|| format!("write {}", agents_md.display()))?;
             docs.push(Doc {
                 path: AGENTS_MD,
-                text: format!("{gap}{SECTION}"),
+                text: appended(&agents),
                 append: true,
             });
         }
     }
-    Ok(Plan { docs, step })
+    Ok(Plan { docs, steps })
 }
 
-/// Whether any ATX heading outside a fenced or indented code block names
-/// loopherd, in any case.
+/// The section to append to `existing`, a blank line apart and in its line endings.
+fn appended(existing: &str) -> String {
+    let nl = match existing.contains("\r\n") {
+        true => "\r\n",
+        false => "\n",
+    };
+    let gap = match existing {
+        "" => "",
+        text if text.ends_with("\n\n") || text.ends_with("\n\r\n") => "",
+        text if text.ends_with('\n') => nl,
+        _ => &format!("{nl}{nl}"),
+    };
+    format!("{gap}{}", SECTION.replace('\n', nl))
+}
+
+/// Whether `rel`'s directory, or its nearest existing ancestor, resolves
+/// inside the repo.
+fn lands_inside(repo: &Path, rel: &str) -> Result<bool> {
+    let root = repo
+        .canonicalize()
+        .with_context(|| format!("read {}", repo.display()))?;
+    let mut dir = repo.join(rel);
+    while dir.pop() {
+        match dir.canonicalize() {
+            Ok(dir) => return Ok(dir.starts_with(&root)),
+            // A dangling link may yet be created outside.
+            Err(_) if fs::symlink_metadata(&dir).is_ok() => return Ok(false),
+            Err(_) => {}
+        }
+    }
+    Ok(false)
+}
+
+/// Whether any heading outside a code block names loopherd, in any case:
+/// an ATX `#` heading or a setext one underlined with `=` or `-`.
 fn has_loopherd_section(text: &str) -> bool {
-    let mut fence: Option<&str> = None;
-    for line in text.lines() {
-        let line = line.trim_start_matches('\u{feff}');
+    let mut fence: Option<(char, usize)> = None;
+    let mut paragraph = String::new();
+    let names = |title: &str| title.to_ascii_lowercase().contains("loopherd");
+    for line in text.trim_start_matches('\u{feff}').lines() {
         let indent = line.len() - line.trim_start_matches(' ').len();
-        let line = line.trim_start();
-        if let Some(open) = fence {
-            if line.starts_with(open) {
+        let code = indent >= 4 || line.starts_with('\t');
+        let line = line.trim();
+        let run = |c: char| line.len() - line.trim_start_matches(c).len();
+        if let Some((c, len)) = fence {
+            if !code && run(c) >= len && line.trim_start_matches(c).is_empty() {
                 fence = None;
             }
             continue;
         }
-        if indent >= 4 || line.starts_with('\t') {
+        if code {
+            if !paragraph.is_empty() {
+                paragraph.push_str(line);
+                paragraph.push('\n');
+            }
             continue;
         }
-        if line.starts_with("```") || line.starts_with("~~~") {
-            fence = Some(&line[..3]);
+        if let Some(c) = ['`', '~'].into_iter().find(|&c| run(c) >= 3) {
+            fence = Some((c, run(c)));
+            paragraph.clear();
+            continue;
+        }
+        let underline = ['=', '-']
+            .into_iter()
+            .any(|c| run(c) > 0 && line.trim_start_matches(c).is_empty());
+        if underline {
+            if names(&paragraph) {
+                return true;
+            }
+            paragraph.clear();
             continue;
         }
         let title = line.trim_start_matches('#');
         let level = line.len() - title.len();
-        if (1..=6).contains(&level)
-            && (title.is_empty() || title.starts_with(char::is_whitespace))
-            && title.to_ascii_lowercase().contains("loopherd")
+        if (1..=6).contains(&level) && (title.is_empty() || title.starts_with(char::is_whitespace))
         {
-            return true;
+            if names(title) {
+                return true;
+            }
+            paragraph.clear();
+            continue;
+        }
+        match line.is_empty() {
+            true => paragraph.clear(),
+            false => {
+                paragraph.push_str(line);
+                paragraph.push('\n');
+            }
         }
     }
     false
