@@ -238,6 +238,10 @@ watch and carry on from its next steps.
 - `loopherd reports` prints unread reports, questions first, and marks them
   read; `loopherd reports --all` prints every report and stop and marks
   none read. Both take member names or `--herd <herd>`.
+- `loopherd stats` shows how each herd's work flowed: per retired worker,
+  time to its first `done`, review rounds, merge wait and total, with
+  medians per herd and open workers apart. `--herd`, `--since <date>`,
+  `--json`; it marks nothing read.
 - `loopherd retire <name>` marks a member finished in the ledger only;
   `--close` also closes its tab and removes its worktree and branch if
   they're clean and merged. Feed's `done` check does this for you.

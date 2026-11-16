@@ -161,6 +161,7 @@ loopherd report --kind question "<question>"
 loopherd reports                                # unread, questions first; marks them read
 loopherd reports --herd my-project
 loopherd reports --all [<name>...]              # everything, marks nothing read
+loopherd stats [--herd <herd>] [--since 2026-11-01] [--json]   # how each herd's work flowed
 ```
 
 ### Watch: block until a member needs you
