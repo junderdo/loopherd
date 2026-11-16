@@ -249,7 +249,8 @@ command = "notify-send {herd}/{member} {text}"
 of arguments for spaces), each placeholder (`{herd}`, `{member}`, `{kind}`,
 `{text}`) filled within its own argument, never through a shell. `{text}`
 is the question's first line, cut to 200 characters with token-like words
-`[redacted]`, or `blocked`. Each send runs detached within 30s; a failing
+and URL passwords `[redacted]` (best-effort: a secret in an unknown shape
+gets through), or `blocked`. Each send runs detached within 30s; a failing
 one leaves a `note` in the member's mailbox, once until it next succeeds.
 `loopherd herds` reports a broken table, which sends nothing. Notifying
 doesn't replace relaying: still tell the human in your pane. Not sent: a

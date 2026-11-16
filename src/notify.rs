@@ -295,16 +295,27 @@ const MAX_TEXT: usize = 200;
 
 /// The question's first line, cut to [`MAX_TEXT`] characters, with each word
 /// that looks like a token, carries one or follows a key such as
-/// `password:` replaced by `[redacted]`.
+/// `password:` replaced by `[redacted]`, and a URL's userinfo hidden.
+/// Best-effort: a secret in a shape it doesn't know gets through.
 fn summary(question: &str) -> String {
     let line = question.lines().next().unwrap_or_default();
     let mut after_key = false;
-    let words: Vec<&str> = line
+    let words: Vec<String> = line
         .split_whitespace()
         .map(|word| {
+            let norm = normalized(word);
+            if after_key && FILLERS.contains(&norm.as_str()) {
+                return word.to_string();
+            }
             let hidden = after_key || secret(word);
-            after_key = names_a_secret(word);
-            if hidden { "[redacted]" } else { word }
+            after_key = match after_key {
+                true => AUTH_SCHEMES.contains(&norm.as_str()),
+                false => names_a_secret(word),
+            };
+            match hidden {
+                true => "[redacted]".to_string(),
+                false => without_userinfo(word),
+            }
         })
         .collect();
     let line = words.join(" ");
@@ -314,20 +325,28 @@ fn summary(question: &str) -> String {
     }
 }
 
-const SECRET_KEYS: [&str; 12] = [
+const SECRET_KEYS: [&str; 14] = [
     "token",
     "secret",
     "password",
     "passwd",
+    "pwd",
     "api_key",
     "apikey",
     "access_key",
     "auth",
+    "authorization",
     "bearer",
     "credential",
     "credentials",
-    "pwd",
+    "key",
 ];
+/// Keys too common in plain speech to hide the bare word after them.
+const PROSE_KEYS: [&str; 1] = ["key"];
+/// Kept between a key and its value: `the password is hunter2`.
+const FILLERS: [&str; 5] = ["is", "was", "to", ":", "="];
+/// After `Authorization:`, the scheme and the credential both go.
+const AUTH_SCHEMES: [&str; 3] = ["bearer", "basic", "digest"];
 const TOKEN_PREFIXES: [&str; 11] = [
     "ghp_",
     "gho_",
@@ -342,22 +361,42 @@ const TOKEN_PREFIXES: [&str; 11] = [
     "AKIA",
 ];
 
-/// `password:`, `token=`, `--password` or `Bearer`: the next word is the secret.
+/// Lowercase, with `-` spelled `_`, so `X-Api-Key` reads as `x_api_key`.
+fn normalized(word: &str) -> String {
+    word.to_ascii_lowercase().replace('-', "_")
+}
+
+/// `password:`, `token=`, `--password`, `PASSWORD` or `Bearer`: the next
+/// word is the secret.
 fn names_a_secret(word: &str) -> bool {
-    let lower = word.to_ascii_lowercase();
+    let flag = word.trim_start_matches('-');
+    let lower = normalized(flag);
     let key = match lower.strip_suffix([':', '=']) {
         Some(key) => key,
-        None if lower == "bearer" => return true,
-        None => match lower.strip_prefix('-') {
-            Some(flag) => flag.trim_start_matches('-'),
-            None => return false,
-        },
+        None if flag.len() < word.len() => &lower,
+        None => {
+            return SECRET_KEYS
+                .iter()
+                .any(|k| *k == lower && !PROSE_KEYS.contains(k));
+        }
     };
     SECRET_KEYS.iter().any(|k| key.ends_with(k))
 }
 
+/// `word` with the `user:password@` of a URL in it replaced.
+fn without_userinfo(word: &str) -> String {
+    let Some((scheme, rest)) = word.split_once("://") else {
+        return word.to_string();
+    };
+    let authority = rest.split('/').next().unwrap_or_default();
+    match authority.rsplit_once('@') {
+        Some((_, host)) => format!("{scheme}://[redacted]@{host}{}", &rest[authority.len()..]),
+        None => word.to_string(),
+    }
+}
+
 fn secret(word: &str) -> bool {
-    let lower = word.to_ascii_lowercase();
+    let lower = normalized(word);
     let carries_value = |sep| {
         SECRET_KEYS.iter().any(|key| {
             lower
@@ -666,20 +705,58 @@ mod tests {
         assert_eq!(launched[0].args[4], "--body=-- merge it?");
     }
 
-    #[test]
-    fn secrets_given_as_key_colon_flags_or_bearer_are_redacted() {
+    fn text_sent(question_text: &str) -> String {
         let dir = tempfile::tempdir().unwrap();
         let config = enabled("herdr = false\ncommand = ['n', '{text}']\n");
-        let text = "password: hunter2 token:abc --password pw2 \
-                    Authorization: Bearer xyz auth=q credential: c1 then which way?";
-
-        let launched = sent(&config, dir.path(), &[question("lh-3", text, "t1")]);
-
-        assert_eq!(
-            launched[0].args[1],
-            "password: [redacted] [redacted] --password [redacted] \
-             Authorization: Bearer [redacted] [redacted] credential: [redacted] then which way?"
+        let launched = sent(
+            &config,
+            dir.path(),
+            &[question("lh-3", question_text, "t1")],
         );
+        launched[0].args[1].clone()
+    }
+
+    #[test]
+    fn secrets_after_a_key_in_a_url_or_in_an_authorization_header_are_redacted() {
+        for (question, text) in [
+            ("password: hunter2 ok?", "password: [redacted] ok?"),
+            ("token:abc ok?", "[redacted] ok?"),
+            ("--password pw2 ok?", "--password [redacted] ok?"),
+            ("auth=q ok?", "[redacted] ok?"),
+            ("credential: c1 ok?", "credential: [redacted] ok?"),
+            ("Bearer xyz ok?", "Bearer [redacted] ok?"),
+            (
+                "Authorization: Bearer xyz ok?",
+                "Authorization: [redacted] [redacted] ok?",
+            ),
+            (
+                "Authorization: Basic dXNlcjpwYXNz ok?",
+                "Authorization: [redacted] [redacted] ok?",
+            ),
+            (
+                "clone https://ci:hunter2pass@git.example.com/r.git ok?",
+                "clone https://[redacted]@git.example.com/r.git ok?",
+            ),
+            (
+                "use postgres://admin:s3cretpw@db/x ok?",
+                "use postgres://[redacted]@db/x ok?",
+            ),
+            ("x-api-key: abc123def ok?", "x-api-key: [redacted] ok?"),
+            ("api-key=abc ok?", "[redacted] ok?"),
+            (
+                "the password is hunter2 ok?",
+                "the password is [redacted] ok?",
+            ),
+            ("PASSWORD hunter2 ok?", "PASSWORD [redacted] ok?"),
+            ("key=AIzaSyA1 ok?", "[redacted] ok?"),
+            ("press any key to go on?", "press any key to go on?"),
+            (
+                "see https://github.com/o/r/pull/107 ok?",
+                "see https://github.com/o/r/pull/107 ok?",
+            ),
+        ] {
+            assert_eq!(text_sent(question), text, "{question}");
+        }
     }
 
     #[test]
