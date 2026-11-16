@@ -3648,7 +3648,7 @@ fn the_local_done_check_says_not_done_for_a_missing_file_and_reads_crlf() {
 }
 
 #[test]
-fn blocked_by_blocks_on_every_number_it_names_and_on_a_list_below_it() {
+fn blocked_by_blocks_on_every_number_it_names_and_on_a_list_below_it_unless_none() {
     let fixture = Fixture::new(&["acme"]);
     let blocked_by = |n: &str, line: &str| {
         (
@@ -3671,6 +3671,7 @@ fn blocked_by_blocks_on_every_number_it_names_and_on_a_list_below_it() {
         blocked_by("06", "**Blocked by:**\n\n- 01\n- 02\n"),
         blocked_by("07", "Blocked by: 01: Login form; #01"),
         blocked_by("08", "**Blocked by:**\n- 01\n"),
+        blocked_by("09", "Blocked by:\n- None\n"),
     ];
     let issues: Vec<(&str, &str)> = issues
         .iter()
@@ -3682,7 +3683,8 @@ fn blocked_by_blocks_on_every_number_it_names_and_on_a_list_below_it() {
     assert_eq!(
         tasks,
         "f-07 feat tdd x .scratch/f/issues/07-x.md\n\
-         f-08 feat tdd x .scratch/f/issues/08-x.md\n"
+         f-08 feat tdd x .scratch/f/issues/08-x.md\n\
+         f-09 feat tdd x .scratch/f/issues/09-x.md\n"
     );
 }
 

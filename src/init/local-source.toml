@@ -23,7 +23,7 @@ done | awk -v room=@ID_ROOM@ '
   function closed(f) { return has(f, "resolved") || has(f, "closed") || has(f, "done") }
   function value(line) { sub(/^[^:]*:/, "", line); gsub(/[*`]/, " ", line); return line }
   function unblocked(f,    items, k, i, rest, found, b) {
-    if (!(f in blockers) || blockers[f] ~ /^[ \t]*(none|$)/) return 1
+    if (!(f in blockers) || blockers[f] ~ /^[ \t,]*(none|$)/) return 1
     k = split(blockers[f], items, /[,;]/)
     for (i = 1; i <= k; i++) {
       if (items[i] ~ /^[ \t]*$/) continue
