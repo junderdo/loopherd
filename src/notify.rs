@@ -401,6 +401,10 @@ fn summary(question: &str) -> String {
             },
             Next::ClauseStart => clause_start(word),
             Next::Closing(closer) => (Shown::redacted(), Next::closed_by(word, closer)),
+            Next::Value if is_separator(word) => (Shown::Word(word.to_string()), Next::ClauseStart),
+            Next::Value if FILLERS.contains(&normalized(word).as_str()) => {
+                (Shown::Word(word.to_string()), next)
+            }
             Next::Value => (Shown::redacted(), Next::after_value(word)),
             Next::Key(key) if is_separator(word) => (Shown::Word(word.to_string()), key.value()),
             Next::Key(_) if FILLERS.contains(&normalized(word).as_str()) => {
@@ -1372,6 +1376,36 @@ mod tests {
                 "Docs say «token: abc» ok?",
                 "Docs say «token: [redacted]» ok?",
             ),
+        ] {
+            assert_eq!(text_sent(question), text, "{question}");
+        }
+    }
+
+    #[test]
+    fn a_separator_or_filler_after_a_capitalised_key_is_kept_and_its_value_hidden() {
+        for (question, text) in [
+            (
+                "Set ”TOKEN” = hunter22 then merge?",
+                "Set ”TOKEN” = [redacted]?",
+            ),
+            (
+                "Set „PASSWORD“ is hunter22 then merge?",
+                "Set „PASSWORD“ is [redacted] then merge?",
+            ),
+            (
+                "Set «TOKEN» = hunter22 then merge?",
+                "Set «TOKEN» = [redacted]?",
+            ),
+            (
+                "The PASSWORD is hunter22, merge #107?",
+                "The PASSWORD is [redacted] merge #107?",
+            ),
+            (
+                "PGPASSWORD = hunter22 then merge #107?",
+                "PGPASSWORD = [redacted]?",
+            ),
+            ("Is SECRET = abc123def456 right?", "Is SECRET = [redacted]?"),
+            ("TOKEN abc123 ok?", "TOKEN [redacted] ok?"),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
         }
