@@ -3,21 +3,27 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/install [--no-splash] [[--with-agents] [--with-skills] | --no-extras]
+Usage: scripts/install [--no-splash]
+                       [[--with-agents] [--with-skills] [--lead-defaults [<switches>]] | --no-extras]
                        [--settings <file>] [install-hook args...]
 
 Build loopherd, install it as ~/.local/bin/loopherd, and add its Claude
 Stop/StopFailure/SessionStart/PreToolUse hooks and the loopherd skill.
 On a terminal it then offers loopherd's agent types (builder, reviewer,
-researcher, scout) and the mattpocock-skills plugin, each default no. Other
-arguments go to `loopherd install-hook`.
+researcher, scout) and the mattpocock-skills plugin, each default no, and,
+until config.toml has a [lead_defaults], asks which lead switches are on
+wherever a herd file's [lead] doesn't set them. Other arguments go to
+`loopherd install-hook`.
 
   scripts/install                      hooks in ~/.claude/settings.json, skill in ~/.claude/skills
   scripts/install --settings <file>    hooks in <file>, skill in skills/ beside it
   scripts/install --no-splash          skip the opening animation (or set LOOPHERD_NO_SPLASH=1)
   scripts/install --with-agents        also install the agent types, asking nothing else
   scripts/install --with-skills        also install the mattpocock-skills plugin, asking nothing else
-  scripts/install --no-extras          install neither, without the questions
+  scripts/install --lead-defaults      ask about the lead switches again, current values as defaults
+  scripts/install --lead-defaults merge,install
+                                       turn those lead switches on and the rest off (or: none), asking nothing else
+  scripts/install --no-extras          install no extras and leave the lead defaults, without the questions
   scripts/install -h, --help           print this and exit
 USAGE
 }
@@ -25,19 +31,27 @@ USAGE
 splash=1
 agents=ask
 skills=ask
+lead_defaults=ask
 no_extras=
 settings=
 removing=
 args=()
 want_settings=
+want_lead_list=
 for arg in "$@"; do
   if [[ -n "$want_settings" ]]; then settings=$arg; want_settings=; fi
+  if [[ -n "$want_lead_list" ]]; then
+    want_lead_list=
+    [[ "$arg" == -* ]] || { lead_defaults=$arg; continue; }
+  fi
   case "$arg" in
     -h | --help) usage; exit 0 ;;
     --no-splash) splash= ;;
     --with-agents) agents=yes ;;
     --with-skills) skills=yes ;;
     --no-extras) no_extras=1 ;;
+    --lead-defaults) lead_defaults=reask want_lead_list=1 ;;
+    --lead-defaults=*) lead_defaults=${arg#--lead-defaults=} ;;
     --settings) want_settings=1; args+=("$arg") ;;
     --remove) removing=1; args+=("$arg") ;;
     --settings=*) settings=${arg#--settings=}; args+=("$arg") ;;
@@ -46,14 +60,68 @@ for arg in "$@"; do
 done
 
 if [[ -n "$no_extras" ]]; then
-  [[ "$agents$skills" == askask ]] || { echo "install: --no-extras can't go with --with-agents or --with-skills" >&2; exit 2; }
-  agents=no skills=no
-elif [[ "$agents$skills" != askask ]]; then
+  [[ "$agents$skills$lead_defaults" == askaskask ]] || { echo "install: --no-extras can't go with --with-agents, --with-skills or --lead-defaults" >&2; exit 2; }
+  agents=no skills=no lead_defaults=no
+elif [[ "$agents$skills$lead_defaults" != askaskask ]]; then
   # Naming one extra means just those, with no questions.
   [[ "$agents" == yes ]] || agents=no
   [[ "$skills" == yes ]] || skills=no
+  [[ "$lead_defaults" != ask ]] || lead_defaults=no
 fi
-[[ -z "$removing" ]] || agents=no skills=no
+[[ -z "$removing" ]] || agents=no skills=no lead_defaults=no
+
+lead_switches=(merge install rebase new_cards design_escalation blocked_dialogs)
+lead_switch_help=(
+  "merge a PR its reviewer verified"
+  "run scripts/install and loopherd install-hook"
+  "have a member rebase and force-push"
+  "create cards for out-of-scope gaps"
+  "settle a design question a member raises"
+  "answer a member's blocking dialog"
+)
+
+# Usage: offer_lead_defaults <ask|reask|no|<switches>> <loopherd>
+# ask: only while config.toml has no [lead_defaults]; reask: always.
+offer_lead_defaults() {
+  local want=$1 loopherd=$2 current answer default i on=()
+  case "$want" in
+    no) return 0 ;;
+    ask | reask) ;;
+    *)
+      "$loopherd" lead-defaults --set "$want" >/dev/null
+      echo "set the lead defaults: $want"
+      return 0
+      ;;
+  esac
+  if [[ ! -t 0 ]]; then
+    echo "skipped the lead defaults (no terminal); add --lead-defaults <switches|none> to set them"
+    return 0
+  fi
+  current=$("$loopherd" lead-defaults) || {
+    echo "skipped the lead defaults: loopherd couldn't read them" >&2
+    return 0
+  }
+  [[ "$want" == reask || -z "$current" ]] || return 0
+  echo "Lead defaults: what a herd's lead may do on its own wherever its herd file's [lead] doesn't say. Off means the human does it."
+  for i in "${!lead_switches[@]}"; do
+    default=n
+    grep -qx "${lead_switches[i]} on" <<<"$current" && default=y
+    if [[ "$default" == y ]]; then
+      read -r -p "  ${lead_switches[i]}: ${lead_switch_help[i]}? [Y/n] " answer || answer=
+    else
+      read -r -p "  ${lead_switches[i]}: ${lead_switch_help[i]}? [y/N] " answer || answer=
+    fi
+    case "$answer" in
+      [yY]*) on+=("${lead_switches[i]}") ;;
+      [nN]*) ;;
+      *) [[ "$default" == n ]] || on+=("${lead_switches[i]}") ;;
+    esac
+  done
+  local list
+  list=$(IFS=,; echo "${on[*]}")
+  "$loopherd" lead-defaults --set "${list:-none}" >/dev/null
+  echo "set the lead defaults: ${list:-none}"
+}
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=install-agents.bash
@@ -104,3 +172,4 @@ if [[ -n "$settings" ]]; then
 else
   offer_skills "$skills" "$claude_dir"
 fi
+offer_lead_defaults "$lead_defaults" "$bin_dir/loopherd"
