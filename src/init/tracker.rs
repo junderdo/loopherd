@@ -105,25 +105,30 @@ pub fn resolve(repo: &Path, choice: Option<Choice>) -> Result<Tracker> {
 
 fn other_doc(desc: Option<String>) -> Result<String> {
     let desc = match desc {
+        Some(desc) if desc.trim().is_empty() => bail!("the tracker description is empty"),
         Some(desc) => desc,
-        None if interactive() => {
-            prompt("Describe how this repo tracks issues, in one paragraph: ")?
-        }
+        None if interactive() => loop {
+            let answer = prompt("Describe how this repo tracks issues, in one paragraph: ")?;
+            if !answer.trim().is_empty() {
+                break answer;
+            }
+        },
         None => bail!("--tracker other needs --tracker-desc <text>"),
     };
-    let desc = desc.trim();
-    if desc.is_empty() {
-        bail!("the tracker description is empty");
-    }
-    Ok(format!("# Issue tracker\n\n{desc}\n"))
+    Ok(format!("# Issue tracker\n\n{}\n", desc.trim()))
 }
 
-/// Whether the doc's title is mattpocock-skills' GitHub one.
+/// Whether the doc's title is mattpocock-skills' GitHub one, in any case.
 fn names_github(doc: &str) -> bool {
-    doc.lines()
+    doc.trim_start_matches('\u{feff}')
+        .lines()
         .find_map(|line| line.trim().strip_prefix("# "))
-        .and_then(|title| title.trim().strip_prefix("Issue tracker:"))
-        .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("github"))
+        .map(|title| title.trim().to_ascii_lowercase())
+        .is_some_and(|title| {
+            title
+                .strip_prefix("issue tracker:")
+                .is_some_and(|kind| kind.trim() == "github")
+        })
 }
 
 fn read_labels(repo: &Path) -> Result<Labels> {

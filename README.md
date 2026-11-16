@@ -93,17 +93,18 @@ loopherd init --check "cargo fmt --check" --check "cargo test"   # [--herd <name
 ```
 
 init reads the tracker from `docs/agents/issue-tracker.md`, in
-mattpocock-skills' format. With none, it asks on a terminal, else takes
-`--tracker` (default `github`), and writes that doc plus
-`docs/agents/triage-labels.md` with the default labels, uncommitted. A doc
-titled `# Issue tracker: GitHub` gets the GitHub snippets below; any other
-tracker gets an empty queue `source` that `loopherd herds` reports invalid
-until you fill it from the doc. When `triage-labels.md` exists, its labels for
+mattpocock-skills' format. With none, it takes `--tracker` (`other` with
+`--tracker-desc`), else asks on a terminal, else uses `github`, and writes
+that doc plus `docs/agents/triage-labels.md` with the default labels,
+uncommitted. A doc titled `# Issue tracker: GitHub` (any case) gets the
+GitHub snippets below; any other tracker gets an empty queue `source` that
+`loopherd herds` reports invalid until you fill it from the doc, and no
+labels. When `triage-labels.md` exists, its labels for
 `ready-for-agent`, `needs-info` and `ready-for-human` replace those names
 below; `blocked` is always loopherd's.
 
 It writes `<herd>.toml` (named after the repo dir) and `<herd>-lead.md` in
-the herds dir, and creates the labels `ready-for-agent`, `needs-info`,
+the herds dir, and for GitHub creates the labels `ready-for-agent`, `needs-info`,
 `ready-for-human` and `blocked` where missing. The herd feeds one worker per
 open issue labelled `ready-for-agent` and none of the other three, on branch
 `<type>/<n>-<slug>`; a `skill:<name>` label picks the skill it builds with
@@ -111,7 +112,8 @@ open issue labelled `ready-for-agent` and none of the other three, on branch
 remote's owner, else `--gh-account`; `--repo` names the GitHub repo when
 origin is an ssh host alias. init infers the rest, commits nothing,
 and refuses to replace either file; the files are yours to edit. Then follow
-the steps it prints: trust the repo in Claude once, `loopherd herds`,
+the steps it prints: trust the repo in Claude once, fill the queue `source`
+for a tracker other than GitHub, `loopherd herds`,
 `loopherd feed <herd> --dry-run`, `loopherd lead <herd>`.
 
 ## Quickstart
