@@ -741,7 +741,7 @@ fn run_view(all: bool, strays: bool) -> Result<i32> {
         Options { all, strays },
         tui::theme::Theme::from_env(
             std::env::var("COLORTERM").ok().as_deref(),
-            std::env::var("NO_COLOR").ok().as_deref(),
+            std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
         ),
     )
 }

@@ -15,7 +15,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Widget};
+use ratatui::widgets::{Block, BorderType, Paragraph, Widget};
 use ratatui::{Frame, Terminal};
 
 use crate::herd_view::{Member, Options, Stray};
@@ -136,17 +136,15 @@ struct Row {
     target: Option<usize>,
 }
 
-enum Piece {
-    Boxed(String, Vec<Row>),
-    Note(String),
+/// A titled box of rows: a herd, `ungrouped`, `retired` or the strays.
+struct Panel {
+    title: String,
+    rows: Vec<Row>,
 }
 
-impl Piece {
+impl Panel {
     fn height(&self) -> u16 {
-        match self {
-            Piece::Boxed(_, rows) => (rows.len() + 2).min(u16::MAX as usize) as u16,
-            Piece::Note(_) => 1,
-        }
+        (self.rows.len() + 2).min(u16::MAX as usize) as u16
     }
 }
 
@@ -257,17 +255,23 @@ impl App {
             .title(Span::styled(" loopherd ", self.theme.title()));
         let inner = window.inner(frame.area());
         frame.render_widget(window, frame.area());
-        let [body, footer] =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
-        let (page, selected_line) = self.page(now, body.width);
-        let scroll = (selected_line + 1).saturating_sub(body.height);
-        let shown = page.area.height.saturating_sub(scroll).min(body.height);
-        let out = frame.buffer_mut();
-        for y in 0..shown {
-            for x in 0..body.width {
-                out[(body.x + x, body.y + y)] = page[(x, scroll + y)].clone();
-            }
-        }
+        let notes: Vec<Line> = self
+            .notes(now)
+            .iter()
+            .flat_map(|n| wrapped(n, inner.width.saturating_sub(1)))
+            .collect();
+        // Notes keep half the space at most, and the newest when cut.
+        let room = inner.height.saturating_sub(1) / 2;
+        let notes_height = notes.len().min(room as usize);
+        let [body, notes_area, footer] = Layout::vertical([
+            Constraint::Min(0),
+            Constraint::Length(notes_height as u16),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+        self.draw_panels(frame.buffer_mut(), body, now);
+        let newest = notes[notes.len() - notes_height..].to_vec();
+        frame.render_widget(Paragraph::new(newest), notes_area);
         frame.render_widget(self.keys(), footer);
     }
 
@@ -277,35 +281,47 @@ impl App {
             .border_style(self.theme.border())
     }
 
-    /// Every piece laid out top to bottom, and the selected row's line.
-    fn page(&self, now: Instant, width: u16) -> (Buffer, u16) {
-        let pieces = self.pieces(now);
-        let height = pieces
-            .iter()
-            .fold(0u16, |h, p| h.saturating_add(p.height()));
-        let mut page = Buffer::empty(Rect::new(0, 0, width, height));
-        let (mut y, mut selected_line) = (0, 0);
-        for piece in pieces {
-            let area = Rect::new(0, y, width, piece.height()).intersection(page.area);
-            y = y.saturating_add(piece.height());
-            let (title, rows) = match piece {
-                Piece::Note(text) => {
-                    Line::raw(format!(" {text}")).render(area, &mut page);
-                    continue;
-                }
-                Piece::Boxed(title, rows) => (title, rows),
-            };
+    /// The panels stacked top to bottom and scrolled to keep the selected row
+    /// in view. Panels below the view aren't drawn.
+    fn draw_panels(&self, out: &mut Buffer, body: Rect, now: Instant) {
+        let panels = self.panels(now);
+        let mut top = 0u16;
+        let mut selected_line = 0;
+        for panel in &panels {
+            if let Some(i) = panel
+                .rows
+                .iter()
+                .position(|r| r.target == Some(self.selected))
+            {
+                selected_line = top.saturating_add(1 + i as u16);
+            }
+            top = top.saturating_add(panel.height());
+        }
+        let scroll = (selected_line + 1).saturating_sub(body.height);
+        let bottom = scroll.saturating_add(body.height);
+        let shown: Vec<Panel> = panels
+            .into_iter()
+            .scan(0u16, |top, panel| {
+                let starts = *top;
+                *top = top.saturating_add(panel.height());
+                (starts < bottom).then_some(panel)
+            })
+            .collect();
+        let height = shown.iter().fold(0u16, |h, p| h.saturating_add(p.height()));
+        // Drawn whole off-screen, so a panel cut by the view keeps its borders.
+        let mut page = Buffer::empty(Rect::new(0, 0, body.width, height));
+        let mut y = 0;
+        for panel in shown {
+            let area = Rect::new(0, y, body.width, panel.height()).intersection(page.area);
+            y = y.saturating_add(panel.height());
             let block = self
                 .block()
-                .title(Span::styled(format!(" {title} "), Modifier::BOLD));
+                .title(Span::styled(format!(" {} ", panel.title), Modifier::BOLD));
             let inner = block.inner(area);
             block.render(area, &mut page);
-            for (row, y) in rows.into_iter().zip(inner.y..inner.bottom()) {
+            for (row, y) in panel.rows.into_iter().zip(inner.y..inner.bottom()) {
                 let line = match row.target == Some(self.selected) {
-                    true => {
-                        selected_line = y;
-                        highlighted(row.line, inner.width, self.theme.selected())
-                    }
+                    true => highlighted(row.line, inner.width, self.theme.selected()),
                     false => row.line,
                 };
                 line.render(
@@ -318,7 +334,11 @@ impl App {
                 );
             }
         }
-        (page, selected_line)
+        for y in 0..height.saturating_sub(scroll).min(body.height) {
+            for x in 0..body.width {
+                out[(body.x + x, body.y + y)] = page[(x, scroll + y)].clone();
+            }
+        }
     }
 
     fn keys(&self) -> Line<'static> {
@@ -395,23 +415,40 @@ impl App {
         members.chain(strays).collect()
     }
 
-    fn pieces(&self, now: Instant) -> Vec<Piece> {
-        let mut pieces = self.view_pieces(now);
+    /// Lines under the panels: the legend, problems, and what the last key did.
+    fn notes(&self, now: Instant) -> Vec<String> {
+        let mut notes = vec![];
+        if let Some(read) = &self.read {
+            if sections(&read.view)
+                .iter()
+                .any(|(_, m)| m.iter().any(|m| m.gone))
+            {
+                notes.push(
+                    "gone: no live agent matches it; `loopherd revive` can bring it back".into(),
+                );
+            }
+            notes.extend(
+                read.problem
+                    .iter()
+                    .flat_map(|p| p.lines())
+                    .map(String::from),
+            );
+        }
         match (&self.read, self.reading) {
-            (None, _) => pieces.push(Piece::Note("reading herdr and the ledger…".into())),
+            (None, _) => notes.push("reading herdr and the ledger…".into()),
             (Some(_), Some(since)) if now.saturating_duration_since(since) >= POLL => {
                 let waited = now.saturating_duration_since(since).as_secs();
-                pieces.push(Piece::Note(format!(
+                notes.push(format!(
                     "herdr hasn't answered for {waited}s; showing the last read"
-                )));
+                ));
             }
             _ => {}
         }
-        pieces.extend(self.message.clone().map(Piece::Note));
-        pieces
+        notes.extend(self.message.clone());
+        notes
     }
 
-    fn view_pieces(&self, now: Instant) -> Vec<Piece> {
+    fn panels(&self, now: Instant) -> Vec<Panel> {
         let Some(read) = &self.read else {
             return vec![];
         };
@@ -442,7 +479,7 @@ impl App {
         let spinner = self.opened.map_or(0, |at| {
             now.saturating_duration_since(at).as_millis() / TICK.as_millis()
         }) as usize;
-        let mut pieces = vec![];
+        let mut panels = vec![];
         let mut target = 0;
         for ((name, members), cells) in sections.iter().zip(&cells) {
             let mut rows = vec![];
@@ -469,7 +506,10 @@ impl App {
                 });
                 target += 1;
             }
-            pieces.push(Piece::Boxed(name.clone(), rows));
+            panels.push(Panel {
+                title: name.clone(),
+                rows,
+            });
         }
         let strays = stray_lines(view);
         let mut strays = strays.lines();
@@ -481,17 +521,31 @@ impl App {
                     target: Some(target),
                 })
                 .collect();
-            pieces.push(Piece::Boxed(title.into(), rows));
+            panels.push(Panel {
+                title: title.into(),
+                rows,
+            });
         }
-        if sections.iter().any(|(_, m)| m.iter().any(|m| m.gone)) {
-            pieces.push(Piece::Note(
-                "gone: no live agent matches it; `loopherd revive` can bring it back".into(),
-            ));
-        }
-        let problems = read.problem.iter().flat_map(|p| p.lines());
-        pieces.extend(problems.map(|line| Piece::Note(line.into())));
-        pieces
+        panels
     }
+}
+
+/// `note` indented one column and broken into lines of `width` columns.
+fn wrapped(note: &str, width: u16) -> Vec<Line<'static>> {
+    let width = (width as usize).max(1);
+    let mut lines = vec![];
+    let (mut line, mut used) = (String::new(), 0);
+    for c in note.chars() {
+        let w = Span::raw(c.to_string()).width();
+        if used + w > width && !line.is_empty() {
+            lines.push(Line::raw(format!(" {}", std::mem::take(&mut line))));
+            used = 0;
+        }
+        line.push(c);
+        used += w;
+    }
+    lines.push(Line::raw(format!(" {line}")));
+    lines
 }
 
 /// `line` in the selection's style, padded to fill `width`.
@@ -780,11 +834,20 @@ mod tests {
     }
 
     fn truecolor() -> Theme {
-        Theme::from_env(Some("truecolor"), None)
+        Theme::from_env(Some("truecolor"), false)
     }
 
     fn render(app: &App, now: Instant) -> Terminal<TestBackend> {
-        let mut terminal = Terminal::new(TestBackend::new(72, 30)).unwrap();
+        render_at(app, now, 72, 14)
+    }
+
+    /// Tall enough to show every panel the fixtures make.
+    fn render_tall(app: &App, now: Instant) -> Terminal<TestBackend> {
+        render_at(app, now, 72, 30)
+    }
+
+    fn render_at(app: &App, now: Instant, width: u16, height: u16) -> Terminal<TestBackend> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|f| app.draw(f, now)).unwrap();
         terminal
     }
@@ -837,6 +900,32 @@ mod tests {
         cell(terminal, pos(terminal, needle))
     }
 
+    /// Whether every cell of the row from `text` to the box's border is dimmed.
+    fn dimmed(terminal: &Terminal<TestBackend>, text: &str) -> bool {
+        let (x, y) = pos(terminal, text);
+        (x..terminal.backend().buffer().area.width)
+            .map(|x| cell(terminal, (x, y)))
+            .take_while(|c| c.symbol() != "│")
+            .filter(|c| c.symbol() != " ")
+            .all(|c| c.modifier.contains(Modifier::DIM))
+    }
+
+    /// The notes from the one starting `start` down to the footer, with
+    /// wrapped lines joined back up.
+    fn notes_from(terminal: &Terminal<TestBackend>, start: &str) -> String {
+        let lines = lines(terminal);
+        let first = lines
+            .iter()
+            .position(|l| l.starts_with(&format!("│ {start}")))
+            .unwrap_or_else(|| panic!("no note {start:?} in {lines:#?}"));
+        let width = terminal.backend().buffer().area.width as usize - 3;
+        let footer = lines.len() - 2;
+        lines[first..footer]
+            .iter()
+            .map(|l| l.chars().skip(2).take(width).collect::<String>())
+            .collect()
+    }
+
     /// The glyph leading member `name`'s row.
     fn glyph(terminal: &Terminal<TestBackend>, name: &str) -> Cell {
         let (x, y) = pos(terminal, &format!(" {name} "));
@@ -855,9 +944,9 @@ mod tests {
     #[test]
     fn renders_the_status_core_with_gone_greyed_the_strays_count_and_the_keys() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
-        let terminal = render(&app(&herdr, &ledger, now), now);
+        let terminal = render_tall(&app(&herdr, &ledger, now), now);
         assert_eq!(
-            lines(&terminal)[..13],
+            lines(&terminal),
             [
                 "╭ loopherd ────────────────────────────────────────────────────────────╮",
                 "│╭ prs ───────────────────────────────────────────────────────────────╮│",
@@ -872,32 +961,38 @@ mod tests {
                 "│╰────────────────────────────────────────────────────────────────────╯│",
                 "│╭ +1 stray (live in herdr, not in loopherd's ledger) ────────────────╮│",
                 "│╰────────────────────────────────────────────────────────────────────╯│",
-            ]
-        );
-        assert_eq!(
-            text(&terminal)[13],
-            "gone: no live agent matches it; `loopherd revive` can bring it back"
-        );
-        assert_eq!(
-            lines(&terminal)[28..],
-            [
+                "│                                                                      │",
+                "│                                                                      │",
+                "│                                                                      │",
+                "│                                                                      │",
+                "│                                                                      │",
+                "│                                                                      │",
+                "│                                                                      │",
+                "│                                                                      │",
+                "│                                                                      │",
+                "│                                                                      │",
+                "│                                                                      │",
+                "│                                                                      │",
+                "│                                                                      │",
+                "│                                                                      │",
+                "│ gone: no live agent matches it; `loopherd revive` can bring it back  │",
                 "│ q quit  ↑↓/jk select  enter focus  s strays: off  a all: off         │",
                 "╰──────────────────────────────────────────────────────────────────────╯",
             ]
         );
-        assert!(at(&terminal, "old   gone").modifier.contains(Modifier::DIM));
-        assert!(!at(&terminal, "c     idle").modifier.contains(Modifier::DIM));
+        assert!(dimmed(&terminal, "old   gone"));
+        assert!(!dimmed(&terminal, "c     idle"));
     }
 
     #[test]
     fn the_window_has_a_rounded_purple_border_titled_loopherd_in_bold_orange() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let terminal = render(&app(&herdr, &ledger, now), now);
-        for corner in [(0, 0), (71, 0), (0, 29), (71, 29)] {
+        for corner in [(0, 0), (71, 0), (0, 13), (71, 13)] {
             assert_eq!(cell(&terminal, corner).fg, PURPLE, "{corner:?}");
         }
         assert_eq!(cell(&terminal, (0, 0)).symbol(), "╭");
-        assert_eq!(cell(&terminal, (71, 29)).symbol(), "╯");
+        assert_eq!(cell(&terminal, (71, 13)).symbol(), "╯");
         assert_eq!(pos(&terminal, " loopherd "), (1, 0));
         let title = at(&terminal, "loopherd");
         assert_eq!(title.fg, ORANGE);
@@ -917,7 +1012,7 @@ mod tests {
         );
         // Off the members, so no glyph takes the selection's colors.
         press(&mut app, &[KeyCode::Down; 10], &herdr, &ledger);
-        let terminal = render(&app, now);
+        let terminal = render_tall(&app, now);
         assert!(selected(&terminal).starts_with("w2:p7"));
         let shown = |name| {
             let c = glyph(&terminal, name);
@@ -934,7 +1029,7 @@ mod tests {
         assert_eq!(shown("done-1"), ("?".into(), Color::Reset, true));
         herdr.set_status("c", AgentStatus::Idle);
         refresh(&mut app, &herdr, &ledger, now);
-        let terminal = render(&app, now);
+        let terminal = render_tall(&app, now);
         assert_eq!(glyph(&terminal, "c").symbol(), "○");
         assert_eq!(glyph(&terminal, "c").fg, SOFT_VIOLET);
     }
@@ -1015,11 +1110,11 @@ mod tests {
     fn colorterm_picks_truecolor_or_256_colors_and_no_color_drops_color() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let cases = [
-            (Some("truecolor"), None, PURPLE, ORANGE),
-            (Some("24bit"), Some(""), PURPLE, ORANGE),
-            (None, None, Color::Indexed(93), Color::Indexed(208)),
-            (Some("256"), None, Color::Indexed(93), Color::Indexed(208)),
-            (Some("truecolor"), Some("1"), Color::Reset, Color::Reset),
+            (Some("truecolor"), false, PURPLE, ORANGE),
+            (Some("24bit"), false, PURPLE, ORANGE),
+            (None, false, Color::Indexed(93), Color::Indexed(208)),
+            (Some("256"), false, Color::Indexed(93), Color::Indexed(208)),
+            (Some("truecolor"), true, Color::Reset, Color::Reset),
         ];
         for (colorterm, no_color, border, selection) in cases {
             let theme = Theme::from_env(colorterm, no_color);
@@ -1031,7 +1126,7 @@ mod tests {
             assert_eq!(glyph(&terminal, "c").symbol(), "○", "{case}");
         }
         let plain = render(
-            &themed(Theme::from_env(None, Some("1")), &herdr, &ledger, now),
+            &themed(Theme::from_env(None, true), &herdr, &ledger, now),
             now,
         );
         let buffer = plain.backend().buffer();
@@ -1076,9 +1171,9 @@ mod tests {
             &herdr,
             &ledger,
         );
-        let terminal = render(&app, now);
+        let terminal = render_tall(&app, now);
         assert_eq!(
-            lines(&terminal)[1..23],
+            lines(&terminal)[1..20],
             [
                 "│╭ old-herd (retired only) ───────────────────────────────────────────╮│",
                 "│╰────────────────────────────────────────────────────────────────────╯│",
@@ -1099,10 +1194,11 @@ mod tests {
                 "│╭ +1 stray (live in herdr, not in loopherd's ledger) ────────────────╮│",
                 "││ w2:p7  /src/elsewhere  poking around                               ││",
                 "│╰────────────────────────────────────────────────────────────────────╯│",
-                "│ gone: no live agent matches it; `loopherd revive` can bring it back  │",
-                "│                                                                      │",
-                "│                                                                      │",
             ]
+        );
+        assert_eq!(
+            text(&terminal)[27],
+            "gone: no live agent matches it; `loopherd revive` can bring it back"
         );
         assert_eq!(
             text(&terminal)[28],
@@ -1209,7 +1305,7 @@ mod tests {
             "{shown:?}"
         );
         assert!(
-            shown
+            text(&render_tall(&app, now))
                 .iter()
                 .any(|l| l.starts_with("╭ strays unknown (herdr unreachable) ─"))
         );
@@ -1231,11 +1327,15 @@ mod tests {
         terminal.draw(|f| app.draw(f, now)).unwrap();
         let shown = text(&terminal);
         assert_eq!(
-            shown[5], "w2:p7  /src/elsewhere  poking around",
+            selected(&terminal),
+            "w2:p7  /src/elsewhere  poking around",
             "{shown:#?}"
         );
-        assert_eq!(selected(&terminal), shown[5]);
         assert!(shown[0].starts_with("╭ loopherd "));
+        assert_eq!(
+            shown[5],
+            "gone: no live agent matches it; `loopherd revive` can bring it back"
+        );
         assert!(shown[6].starts_with("q quit"));
     }
 
@@ -1293,14 +1393,14 @@ mod tests {
             "{shown:?}"
         );
         assert!(
-            shown
+            text(&render_tall(&app, now))
                 .iter()
                 .any(|l| l.starts_with("╭ strays unknown (herdr's agent list unreadable) ─"))
         );
         assert!(
-            shown
-                .iter()
-                .any(|l| l.starts_with("error: herdr's `agent list` output is malformed")),
+            notes_from(&terminal, "error:").starts_with(
+                "error: herdr's `agent list` output is malformed, every status is unknown: "
+            ),
             "{shown:?}"
         );
         assert!(shown.contains(&"a has no live pane to focus".to_string()));
@@ -1417,7 +1517,8 @@ mod tests {
         let toggled = app.press(KeyCode::Char('s'), now).unwrap();
         app.apply(stale, now).unwrap();
         assert!(
-            !text(&render(&app, now)).contains(&"w2:p7  /src/elsewhere  poking around".to_string())
+            !text(&render_tall(&app, now))
+                .contains(&"w2:p7  /src/elsewhere  poking around".to_string())
         );
         app.apply(
             serve(
@@ -1430,7 +1531,8 @@ mod tests {
         )
         .unwrap();
         assert!(
-            text(&render(&app, now)).contains(&"w2:p7  /src/elsewhere  poking around".to_string())
+            text(&render_tall(&app, now))
+                .contains(&"w2:p7  /src/elsewhere  poking around".to_string())
         );
     }
 
@@ -1438,7 +1540,7 @@ mod tests {
     fn says_it_is_reading_before_the_first_read_arrives() {
         let now = Instant::now();
         let shown = text(&render(&App::new(Options::default(), truecolor()), now));
-        assert_eq!(shown[1], "reading herdr and the ledger…");
+        assert_eq!(shown[11], "reading herdr and the ledger…");
     }
 
     #[test]

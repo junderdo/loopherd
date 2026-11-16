@@ -29,11 +29,11 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// The splash's check: truecolor when `COLORTERM` says so, no color when
-    /// `NO_COLOR` is set and non-empty, 256 colors otherwise.
-    pub fn from_env(colorterm: Option<&str>, no_color: Option<&str>) -> Theme {
+    /// The splash's check: truecolor when `COLORTERM` says so, 256 colors
+    /// otherwise, and none when `no_color` (`NO_COLOR` set and non-empty).
+    pub fn from_env(colorterm: Option<&str>, no_color: bool) -> Theme {
         let depth = match (colorterm, no_color) {
-            (_, Some(n)) if !n.is_empty() => Depth::None,
+            (_, true) => Depth::None,
             (Some("truecolor" | "24bit"), _) => Depth::Truecolor,
             _ => Depth::Indexed,
         };
