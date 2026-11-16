@@ -97,7 +97,7 @@ pub fn init(paths: &Paths, req: Request) -> Result<Vec<String>> {
     let ask = ask::Asker {
         terminal: ask::interactive(),
     };
-    let herd = settle(paths, req, &ask)?;
+    let herd = settle(paths, req, &ask, Mode::Write)?;
     if ask.terminal {
         eprint!("{}", summary(&herd));
         if !ask.yes("Write this herd?", None, true)? {
@@ -107,7 +107,51 @@ pub fn init(paths: &Paths, req: Request) -> Result<Vec<String>> {
     write(paths, herd)
 }
 
-fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
+/// A unified diff from each file init wrote to what it would write now, `None`
+/// when they match. Asks nothing and changes nothing; an absent file diffs
+/// from empty.
+pub fn diff(paths: &Paths, req: Request) -> Result<Option<String>> {
+    let herd = settle(paths, req, &ask::Asker { terminal: false }, Mode::Diff)?;
+    let mut files = rendered(paths, &herd)?;
+    for doc in &herd.docs {
+        let path = herd.repo.join(doc.path);
+        let text = match doc.append {
+            true => tracker::read(&path)?.unwrap_or_default() + &doc.text,
+            false => doc.text.clone(),
+        };
+        files.push((path, text));
+    }
+    let mut out = String::new();
+    for (path, now) in files {
+        let was = tracker::read(&path)?;
+        let shown = path.display().to_string();
+        let old_name = match was {
+            Some(_) => shown.as_str(),
+            None => "/dev/null",
+        };
+        let was = was.unwrap_or_default();
+        if was == now {
+            continue;
+        }
+        let text = similar::TextDiff::from_lines(&was, &now);
+        out.push_str(
+            &text
+                .unified_diff()
+                .header(old_name, &format!("{shown} (init now)"))
+                .to_string(),
+        );
+    }
+    Ok((!out.is_empty()).then_some(out))
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Write,
+    /// Renders over the herd's existing files rather than refusing them.
+    Diff,
+}
+
+fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<Herd> {
     let here = checkout_root(req.dir).with_context(|| {
         format!(
             "can't read a git repo at {}; run init inside one",
@@ -122,7 +166,11 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
     if ask.terminal {
         refuse_second_herd(paths, &repo)?;
     }
-    let inferred = repo.file_name().map(|n| n.to_string_lossy().into_owned());
+    let inferred = match mode {
+        Mode::Diff => herd_running(paths, &repo)?,
+        Mode::Write => None,
+    }
+    .or_else(|| repo.file_name().map(|n| n.to_string_lossy().into_owned()));
     let name = ask.value(
         "Herd name",
         req.herd,
@@ -130,14 +178,30 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
         "the repo has no directory name; pass --herd",
         |name| {
             let name = herd_name(name)?;
-            refuse_taken_name(paths, &name, &repo)?;
+            match mode {
+                Mode::Write => refuse_taken_name(paths, &name, &repo)?,
+                Mode::Diff => refuse_other_repo(paths, &name, &repo)?,
+            }
             Ok(name)
         },
     )?;
-    if !ask.terminal {
+    if !ask.terminal && mode == Mode::Write {
         refuse_second_herd(paths, &repo)?;
     }
-    let mut tracker = tracker::resolve(&repo, req.tracker)?;
+    let herd_file = paths.herds.join(format!("{name}.toml"));
+    let recorded = match mode {
+        Mode::Diff => Recorded::read(&herd_file),
+        Mode::Write => None,
+    };
+    let choice = match req.tracker {
+        None if mode == Mode::Diff
+            && tracker::read(&repo.join(tracker::TRACKER_DOC))?.is_none() =>
+        {
+            Some(Tracker::GitHub)
+        }
+        choice => choice,
+    };
+    let mut tracker = tracker::resolve(&repo, choice)?;
     if tracker.kind == tracker::Kind::Local && !has_origin(&repo) {
         bail!(
             "{} has no origin remote; a herd's members branch from origin and push to it, \
@@ -192,10 +256,18 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
         .map(|(name, on)| format!("{name} = {on}"))
         .join("\n");
 
-    let checks = checks(&repo, req.checks, ask)?;
+    let recorded_checks = recorded.as_ref().map(|r| r.checks.as_slice());
+    let given = match req.checks {
+        [] => recorded_checks.unwrap_or_default(),
+        given => given,
+    };
+    let checks = checks(&repo, given, ask)?;
     let max = ask.value(
         "max, how many workers run at once",
-        req.max.map(|m| m.to_string()).as_deref(),
+        req.max
+            .or(recorded.as_ref().and_then(|r| r.max))
+            .map(|m| m.to_string())
+            .as_deref(),
         Some("3"),
         "",
         |max| match max.parse::<i64>() {
@@ -211,9 +283,9 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
         let lead = ask.yes(
             "Give the herd a lead, a member that feeds, watches and verifies its workers?",
             req.lead,
-            true,
+            recorded.as_ref().is_none_or(|r| r.lead),
         )?;
-        if !lead || fs::symlink_metadata(&lead_file).is_err() {
+        if !lead || mode == Mode::Diff || fs::symlink_metadata(&lead_file).is_err() {
             break lead;
         }
         let refusal = format!(
@@ -250,7 +322,10 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
             "Workers' handoff limit in tokens (context_limit); Enter leaves it unset, \
              so {config_limit} applies"
         ),
-        req.context_limit.map(|l| l.to_string()).as_deref(),
+        req.context_limit
+            .or(recorded.as_ref().and_then(|r| r.context_limit))
+            .map(|l| l.to_string())
+            .as_deref(),
         Some(""),
         "",
         |limit| {
@@ -338,24 +413,33 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
         .drain(..)
         .map(|(path, text)| agents::Doc::new(path, text))
         .collect();
-    let plan = agents::missing(
-        &repo,
-        agents::Herd {
-            account: github.as_ref().map(|g| g.account.as_str()),
-            branch: &branch,
-            checks: &checks,
-            needs_info: &tracker.labels.needs_info,
-            local: tracker.kind == tracker::Kind::Local,
-        },
-    )?;
+    let agents_herd = agents::Herd {
+        account: github.as_ref().map(|g| g.account.as_str()),
+        branch: &branch,
+        checks: &checks,
+        needs_info: &tracker.labels.needs_info,
+        local: tracker.kind == tracker::Kind::Local,
+    };
+    let plan = agents::missing(&repo, &agents_herd)?;
     docs.extend(plan.docs);
-    let new_docs = docs.iter().filter(|doc| !doc.append);
-    refuse_unwritable(
-        [paths.herds.join(format!("{name}.toml"))]
-            .into_iter()
-            .chain(lead.then(|| lead_file.clone()))
-            .chain(new_docs.map(|doc| repo.join(doc.path))),
-    )?;
+    match mode {
+        Mode::Write => {
+            for doc in docs.iter().filter(|doc| doc.append) {
+                doc.refuse_unappendable(&repo)?;
+            }
+            let new_docs = docs.iter().filter(|doc| !doc.append);
+            refuse_unwritable(
+                [herd_file]
+                    .into_iter()
+                    .chain(lead.then(|| lead_file.clone()))
+                    .chain(new_docs.map(|doc| repo.join(doc.path))),
+            )?;
+        }
+        Mode::Diff => {
+            docs.extend(tracker::built_in(&repo)?);
+            docs.extend(agents::present(&repo, &agents_herd)?);
+        }
+    }
     Ok(Herd {
         repo,
         name,
@@ -525,7 +609,8 @@ fn summary(herd: &Herd) -> String {
     )
 }
 
-fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
+/// The lead prompt, when the herd has a lead, then the herd file, each with its text.
+fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
     let Herd {
         repo,
         name,
@@ -533,7 +618,7 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
         tracker,
         branch,
         ..
-    } = &herd;
+    } = herd;
     let herd_file = paths.herds.join(format!("{name}.toml"));
     let lead_file = paths.herds.join(format!("{name}-lead.md"));
     let checks = herd
@@ -656,17 +741,31 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
     values.push(("TEMPLATE", template.trim_end()));
     values.push(("LEAD_TABLE", &lead_table));
     values.push(("LEAD_TASKS", &lead_tasks));
+    let lead = herd.lead.then(|| (lead_file, fill(LEAD, &values)));
+    Ok(lead
+        .into_iter()
+        .chain([(herd_file, fill(HERD, &values))])
+        .collect())
+}
+
+fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
+    let Herd {
+        repo,
+        name,
+        github,
+        tracker,
+        ..
+    } = &herd;
+    let herd_file = paths.herds.join(format!("{name}.toml"));
+    let lead_file = paths.herds.join(format!("{name}-lead.md"));
+    let herd_files = rendered(paths, &herd)?;
     let mut lines = match github {
         Some(github) if tracker.kind == tracker::Kind::GitHub => {
-            create_labels(&github.token, &github.slug, labels)?
+            create_labels(&github.token, &github.slug, &tracker.labels)?
         }
         _ => vec![],
     };
     let mut written = Written::default();
-    let lead = herd.lead.then(|| (lead_file.clone(), fill(LEAD, &values)));
-    let herd_files = lead
-        .into_iter()
-        .chain([(herd_file.clone(), fill(HERD, &values))]);
     for (path, text) in herd_files {
         if let Err(e) = written.new_file(&path, &text) {
             written.undo();
@@ -802,14 +901,7 @@ fn and_list(items: &[String]) -> String {
 fn refuse_taken_name(paths: &Paths, herd: &str, repo: &Path) -> Result<()> {
     let herd_file = &paths.herds.join(format!("{herd}.toml"));
     if fs::symlink_metadata(herd_file).is_ok() {
-        if let Ok(other) = herd::repo(paths, herd)
-            && !same_dir(&other, repo)
-        {
-            bail!(
-                "herd {herd} already points at {}; pass --herd <name> to name this repo's herd",
-                other.display()
-            );
-        }
+        refuse_other_repo(paths, herd, repo)?;
         bail!(
             "{} already exists; init never replaces a herd file",
             herd_file.display()
@@ -818,8 +910,31 @@ fn refuse_taken_name(paths: &Paths, herd: &str, repo: &Path) -> Result<()> {
     Ok(())
 }
 
+fn refuse_other_repo(paths: &Paths, herd: &str, repo: &Path) -> Result<()> {
+    if let Ok(other) = herd::repo(paths, herd)
+        && !same_dir(&other, repo)
+    {
+        bail!(
+            "herd {herd} already points at {}; pass --herd <name> to name this repo's herd",
+            other.display()
+        );
+    }
+    Ok(())
+}
+
 /// Refuses a repo another herd runs, or one a herd file init can't read might run.
 fn refuse_second_herd(paths: &Paths, repo: &Path) -> Result<()> {
+    match herd_running(paths, repo)? {
+        Some(other) => bail!(
+            "herd {other} already runs {}; init writes one herd per repo",
+            repo.display()
+        ),
+        None => Ok(()),
+    }
+}
+
+/// The herd that runs `repo`; an error for a herd file init can't read.
+fn herd_running(paths: &Paths, repo: &Path) -> Result<Option<String>> {
     for other in herd::names(&paths.herds)? {
         let file = paths.herds.join(format!("{other}.toml"));
         if !fs::metadata(&file).is_ok_and(|m| m.is_file()) {
@@ -832,13 +947,52 @@ fn refuse_second_herd(paths: &Paths, repo: &Path) -> Result<()> {
             )
         })?;
         if same_dir(&other_repo, repo) {
-            bail!(
-                "herd {other} already runs {}; init writes one herd per repo",
-                repo.display()
-            );
+            return Ok(Some(other));
         }
     }
-    Ok(())
+    Ok(None)
+}
+
+/// The answers an earlier init left in its herd file, for `--diff` to render with.
+struct Recorded {
+    lead: bool,
+    max: Option<u64>,
+    context_limit: Option<u64>,
+    /// The worker prompt's checklist items that are a bare `check`; a reworded one is skipped.
+    checks: Vec<String>,
+}
+
+impl Recorded {
+    fn read(herd_file: &Path) -> Option<Recorded> {
+        let herd: toml::Table = fs::read_to_string(herd_file).ok()?.parse().ok()?;
+        let issue = herd
+            .get("template")
+            .and_then(|t| t.get("issue"))
+            .and_then(toml::Value::as_table);
+        let number = |value: Option<&toml::Value>| {
+            value
+                .and_then(toml::Value::as_integer)
+                .and_then(|n| u64::try_from(n).ok())
+        };
+        let prompt = issue
+            .and_then(|t| t.get("prompt"))
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default();
+        let checks = prompt
+            .lines()
+            .skip_while(|line| !line.starts_with("4. Before calling it done"))
+            .skip(1)
+            .map_while(|line| line.strip_prefix("   - "))
+            .filter_map(|item| item.strip_prefix('`')?.strip_suffix('`'))
+            .map(|check| check.replace("{{", "{").replace("}}", "}"))
+            .collect();
+        Some(Recorded {
+            lead: herd.contains_key("lead"),
+            max: number(herd.get("queue").and_then(|q| q.get("max"))),
+            context_limit: number(issue.and_then(|t| t.get("context_limit"))),
+            checks,
+        })
+    }
 }
 
 fn has_origin(repo: &Path) -> bool {
