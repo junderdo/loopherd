@@ -2,7 +2,7 @@
 //! from a lead's pane that needs a switch its herd file leaves off (D17), or
 //! a `loopherd restart --force` (D20), a `loopherd pause` or `resume`
 //! (D23), a `loopherd herd set` or `unset` (D29), or a write of the lead
-//! defaults (D30), which no switch allows.
+//! defaults (D31), which no switch allows.
 //! A guardrail on the command text, not a sandbox.
 
 use std::path::Path;
