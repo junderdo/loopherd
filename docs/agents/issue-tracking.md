@@ -51,7 +51,7 @@ The line starts with lowercase `blocked-by:` at the very start of a line and
 holds only comma-separated `LH-<n>` keys. Any other spelling (`Blocked-by:`,
 `lh-2`, a bare `2`, prose) is warned about and the card is skipped.
 
-Readiness and waiting are independent labels (D32). Block a fully specified
+Readiness and waiting are independent labels (D34). Block a fully specified
 card with both `ready-for-agent` and `blocked`; an under-specified one gets
 only `blocked`.
 

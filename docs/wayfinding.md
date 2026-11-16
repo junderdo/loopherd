@@ -46,7 +46,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D29](decisions/D29.md) | `loopherd herd get\|set\|unset` edits herd files format-preservingly, refusing any result `loopherd herds` calls invalid; the tool hook denies `set`/`unset` in a lead's pane. |
 | [D30](decisions/D30.md) | `loopherd stats` measures a worker from its ledger `created` to its `retired_at`, counting `done` reports in between; leads and herdless entries are left out, and `--since` filters by start. |
 | [D31](decisions/D31.md) | A lead's switches resolve from its herd file's `[lead]`, else `config.toml`'s `[lead_defaults]` (set by `scripts/install`), else off; no project-level layer. |
-| [D32](decisions/D32.md) | `ready-for-agent` and `blocked` are independent: a fully specified card is written with both, and `scripts/trello unblock` only removes `blocked`, never adding `ready-for-agent`. |
+| [D34](decisions/D34.md) | `ready-for-agent` and `blocked` are independent: a fully specified card is written with both, and `scripts/trello unblock` only removes `blocked`, never adding `ready-for-agent`. |
 
 ## Emerging model
 
