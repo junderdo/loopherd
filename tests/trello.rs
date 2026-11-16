@@ -138,7 +138,7 @@ fn stderr(output: &Output) -> String {
 }
 
 #[test]
-fn unblocks_a_card_whose_blockers_are_all_done() {
+fn unblocking_a_card_without_ready_for_agent_adds_no_label() {
     let board = Board::new(&[
         Card(1, "Done", &[], ""),
         Card(2, "Done", &[], ""),
@@ -156,7 +156,6 @@ fn unblocks_a_card_whose_blockers_are_all_done() {
     assert_eq!(
         board.writes(),
         [
-            "POST /cards/card3/idLabels value=label-ready-for-agent",
             "POST /cards/card3/actions/comments text=Unblocked: LH-1, LH-2 Done",
             "DELETE /cards/card3/idLabels/label-blocked ",
         ]
@@ -210,7 +209,7 @@ fn dry_run_prints_what_it_would_change_and_writes_nothing() {
 }
 
 #[test]
-fn a_card_already_ready_for_agent_only_loses_blocked() {
+fn a_card_with_ready_for_agent_keeps_it_and_loses_blocked() {
     let board = Board::new(&[
         Card(1, "Done", &[], ""),
         Card(
@@ -243,10 +242,7 @@ fn a_failed_write_leaves_the_card_blocked() {
     let out = board.run(&["unblock"]);
 
     assert!(!out.status.success());
-    assert_eq!(
-        board.writes(),
-        ["POST /cards/card3/idLabels value=label-ready-for-agent"]
-    );
+    assert!(board.writes().is_empty(), "wrote: {:?}", board.writes());
 }
 
 #[test]
