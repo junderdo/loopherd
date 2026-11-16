@@ -79,9 +79,12 @@ enum Command {
     /// Write a herd for the GitHub repo around the current directory: its herd
     /// file and lead prompt, plus any missing issue labels. Infers the repo, its
     /// default branch, the gh account matching origin's owner and checks from
-    /// Cargo.toml or package.json; on a terminal, asks for each with that as
-    /// the default and confirms before writing. Refuses, changing nothing,
-    /// when the herd file exists, or the lead prompt does without --no-lead.
+    /// Cargo.toml and package.json. On a terminal (stdin and stderr, a herdr
+    /// pane included) it asks for each with that as the default, asking again
+    /// for a taken herd name or an existing lead prompt, and confirms before
+    /// writing; the repo, default branch and confirm questions have no flag.
+    /// Without one it refuses, changing nothing, when the herd file exists,
+    /// or the lead prompt does without --no-lead.
     Init(InitArgs),
     /// List herd files with a usage line per template; exits 1 if any is invalid.
     Herds,

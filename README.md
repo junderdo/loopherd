@@ -97,9 +97,11 @@ many workers run at once (`max`, default 3), whether the herd gets a lead,
 the workers' handoff limit (`context_limit`; Enter leaves it unset so
 `config.toml`'s default applies), the gh account and the default branch,
 each with what it inferred as the default, then shows a summary to confirm
-before writing. A flag answers its question. Checks are suggested from
-`Cargo.toml` (`cargo fmt --check`, `cargo clippy -- -D warnings`,
-`cargo test`) or `package.json` (`npm run lint`, `npm test`). Without a
+before writing. A flag answers its question; the repo, default branch and
+confirm questions have none, so a script on a pty (a herdr pane) answers
+them or runs init with `</dev/null`. Checks are suggested from `Cargo.toml`
+(`cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`) and
+`package.json` (`npm run lint`, `npm test`), both when both exist. Without a
 terminal it uses flags and inferred values, and names the flag for any it
 can't infer.
 

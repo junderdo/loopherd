@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::herd::{self, Paths};
 use crate::worktree::{repo_root, same_dir};
@@ -53,7 +53,7 @@ struct Herd {
     switches: String,
     context_limit: Option<u64>,
     /// The limit that applies when `context_limit` is unset.
-    config_limit: u64,
+    config_limit: String,
 }
 
 /// Writes the herd file and its lead prompt and creates missing labels,
@@ -75,10 +75,19 @@ pub fn init(paths: &Paths, req: Request) -> Result<Vec<String>> {
 }
 
 fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
-    let here = repo_root(req.dir)?;
-    let repo = ask.value("Repo", None, Some(&here.to_string_lossy()), "", |answer| {
-        repo_root(Path::new(answer))
+    let here = repo_root(req.dir).map_err(|_| {
+        anyhow!(
+            "{} is not in a git repo; run init inside one",
+            req.dir.display()
+        )
     })?;
+    let repo = ask.value("Repo", None, Some(&here.to_string_lossy()), "", |answer| {
+        repo_root(Path::new(answer)).map_err(|_| anyhow!("{answer} is not in a git repo"))
+    })?;
+    // No herd name can get past these, so on a terminal they end init before it asks for one.
+    if ask.terminal {
+        refuse_second_herd(paths, &repo)?;
+    }
     let inferred = repo.file_name().map(|n| n.to_string_lossy().into_owned());
     let name = ask.value(
         "Herd name",
@@ -87,10 +96,13 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
         "the repo has no directory name; pass --herd",
         |name| {
             let name = herd_name(name)?;
-            refuse_existing(paths, &name, &repo)?;
+            refuse_taken_name(paths, &name, &repo)?;
             Ok(name)
         },
     )?;
+    if !ask.terminal {
+        refuse_second_herd(paths, &repo)?;
+    }
     let origin = github_repo(&repo).map(|(owner, name)| format!("{owner}/{name}"));
     let (owner, repo_name) = ask.value(
         "GitHub repo (owner/name)",
@@ -129,6 +141,9 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
         "",
         |max| match max.parse::<i64>() {
             Ok(max) if max > 0 => Ok(max as u64),
+            Err(e) if *e.kind() == std::num::IntErrorKind::PosOverflow => {
+                bail!("max {max} is too big; at most {}", i64::MAX)
+            }
             _ => bail!("max must be a positive integer, got {max:?}"),
         },
     )?;
@@ -152,11 +167,19 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
         }
     };
     let config_limit = crate::context::effective_limit(None, &config)?;
+    let config_file = crate::config::read(&config)?;
+    let config_limit = match config_file
+        .default_context_limit
+        .or(config_file.context_window)
+    {
+        Some(_) => format!("config.toml's {config_limit}"),
+        None => format!("the default {config_limit}"),
+    };
     let cap = crate::context::limit_cap(&config)?;
     let context_limit = ask.value(
         &format!(
             "Workers' handoff limit in tokens (context_limit); Enter leaves it unset, \
-             so config.toml's {config_limit} applies"
+             so {config_limit} applies"
         ),
         req.context_limit.map(|l| l.to_string()).as_deref(),
         Some(""),
@@ -300,20 +323,30 @@ fn suggested_checks(repo: &Path) -> Vec<String> {
             .map(String::from),
         );
     }
-    let package = fs::read_to_string(repo.join("package.json")).ok();
-    let scripts = package
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|json| json.get("scripts").cloned());
-    if let Some(scripts) = scripts {
-        if scripts.get("lint").is_some() {
+    let package = repo.join("package.json");
+    let json = match fs::read_to_string(&package) {
+        Ok(text) => serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}'))
+            .map_err(anyhow::Error::from),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return checks,
+        Err(e) => Err(e.into()),
+    };
+    let json = match json {
+        Ok(json) => json,
+        Err(e) => {
+            eprintln!(
+                "warning: can't read {}, so it suggests no checks: {e}",
+                package.display()
+            );
+            return checks;
+        }
+    };
+    if let Some(scripts) = json.get("scripts") {
+        let script = |name| scripts.get(name).and_then(serde_json::Value::as_str);
+        if script("lint").is_some() {
             checks.push("npm run lint".into());
         }
         // npm init's placeholder test script always fails.
-        let placeholder = |test: &serde_json::Value| {
-            test.as_str()
-                .is_some_and(|t| t.contains("no test specified"))
-        };
-        if scripts.get("test").is_some_and(|test| !placeholder(test)) {
+        if script("test").is_some_and(|test| !test.contains("no test specified")) {
             checks.push("npm test".into());
         }
     }
@@ -321,13 +354,33 @@ fn suggested_checks(repo: &Path) -> Vec<String> {
 }
 
 fn summary(herd: &Herd) -> String {
+    let mut also = vec![];
+    if herd.tracker.github {
+        let labels = &herd.tracker.labels;
+        also.push(format!(
+            "creates the labels {}, {}, {} and blocked in {} where missing",
+            labels.ready_for_agent, labels.needs_info, labels.ready_for_human, herd.slug
+        ));
+    }
+    if !herd.tracker.writes.is_empty() {
+        let docs: Vec<&str> = herd.tracker.writes.iter().map(|(path, _)| *path).collect();
+        also.push(format!(
+            "writes {} in the repo, uncommitted",
+            docs.join(" and ")
+        ));
+    }
+    let also = match also.is_empty() {
+        true => String::new(),
+        false => format!("Writing it also {}.\n", also.join(", and ")),
+    };
     let limit = match herd.context_limit {
         Some(limit) => limit.to_string(),
-        None => format!("unset, config.toml's {} applies", herd.config_limit),
+        None => format!("unset, {} applies", herd.config_limit),
     };
     format!(
         "\nHerd {name}:\n  repo    {repo}\n  GitHub  {slug} as {account}, branch {branch}\n  \
-         max     {max} workers at once\n  lead    {lead}\n  limit   {limit}\n  checks  {checks}\n",
+         max     {max} workers at once\n  lead    {lead}\n  limit   {limit}\n  checks  {checks}\n\
+         {also}",
         name = herd.name,
         repo = herd.repo.display(),
         slug = herd.slug,
@@ -469,7 +522,7 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
     Ok(lines)
 }
 
-fn refuse_existing(paths: &Paths, herd: &str, repo: &Path) -> Result<()> {
+fn refuse_taken_name(paths: &Paths, herd: &str, repo: &Path) -> Result<()> {
     let herd_file = &paths.herds.join(format!("{herd}.toml"));
     if fs::symlink_metadata(herd_file).is_ok() {
         if let Ok(other) = herd::repo(paths, herd)
@@ -485,6 +538,11 @@ fn refuse_existing(paths: &Paths, herd: &str, repo: &Path) -> Result<()> {
             herd_file.display()
         );
     }
+    Ok(())
+}
+
+/// Refuses a repo another herd runs, or one a herd file init can't read might run.
+fn refuse_second_herd(paths: &Paths, repo: &Path) -> Result<()> {
     for other in herd::names(&paths.herds)? {
         let file = paths.herds.join(format!("{other}.toml"));
         if !fs::metadata(&file).is_ok_and(|m| m.is_file()) {
