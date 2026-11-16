@@ -116,6 +116,19 @@ labels. When `triage-labels.md` exists, its labels for
 `ready-for-agent`, `needs-info` and `ready-for-human` replace those names
 below; `blocked` is always loopherd's.
 
+In the repo it also writes `docs/agents/loopherd.md`, how a worker claims,
+branches, checks, opens its `Closes #<n>` PR, stops on a question and
+reports, and adds a `## loopherd` section pointing at it and the tracker doc
+to `AGENTS.md`, creating that file if missing. Each is skipped when already
+there: the doc when the file exists, the section when any `AGENTS.md`
+heading outside a code block (`#` or setext) names loopherd. A symlinked
+`AGENTS.md`, live or dangling, is left alone, and so is a `loopherd.md`
+whose directory links outside the repo; init prints a step to write each by
+hand. A repo file init can't write (a read-only `AGENTS.md` to append to,
+or a read-only directory for a new doc) stops init before any change, and
+so does a herds dir or config dir it can't write in. Nothing is committed;
+the printed steps list the repo files to review and commit.
+
 It writes `<herd>.toml` (named after the repo dir) and, unless
 `--no-lead`, `<herd>-lead.md` in the herds dir, and for GitHub creates the labels `ready-for-agent`, `needs-info`,
 `ready-for-human` and `blocked` where missing. The herd feeds one worker per
@@ -127,7 +140,8 @@ origin is an ssh host alias. init infers the rest, commits nothing,
 and refuses to replace either file (`--no-lead` leaves an existing lead
 prompt alone); the files are yours to edit. Then follow
 the steps it prints: trust the repo in Claude once, fill the queue `source`
-for a tracker other than GitHub, `loopherd herds`,
+for a tracker other than GitHub, review and commit the repo files,
+`loopherd herds`,
 `loopherd feed <herd> --dry-run`, `loopherd lead <herd>`.
 
 ## Quickstart

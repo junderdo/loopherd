@@ -77,7 +77,9 @@ enum Command {
     /// Spawn a herd member from a template in the herd's file.
     Add(AddArgs),
     /// Write a herd for the GitHub repo around the current directory: its herd
-    /// file and lead prompt, plus any missing issue labels. Infers the repo, its
+    /// file and lead prompt, plus any missing issue labels, and, uncommitted, any
+    /// missing tracker doc, docs/agents/loopherd.md and AGENTS.md loopherd
+    /// section. Infers the repo, its
     /// default branch, the gh account matching origin's owner and checks from
     /// Cargo.toml and package.json. On a terminal (stdin and stderr, a herdr
     /// pane included) it asks for each with that as the default, asking again

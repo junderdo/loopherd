@@ -3,7 +3,7 @@
 //! written when not.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
@@ -180,7 +180,7 @@ fn is_label(label: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/'))
 }
 
-fn read(path: &PathBuf) -> Result<Option<String>> {
+pub(super) fn read(path: &Path) -> Result<Option<String>> {
     match fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
         Err(e)

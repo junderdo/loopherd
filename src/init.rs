@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use crate::herd::{self, Paths};
 use crate::worktree::{checkout_root, same_dir};
 
+mod agents;
 mod ask;
 mod tracker;
 
@@ -54,6 +55,9 @@ struct Herd {
     context_limit: Option<u64>,
     /// The limit that applies when `context_limit` is unset.
     config_limit: String,
+    docs: Vec<agents::Doc>,
+    /// What the human writes in the repo that init wouldn't.
+    agents_steps: Vec<String>,
 }
 
 /// Writes the herd file and its lead prompt and creates missing labels,
@@ -122,7 +126,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
         },
     )?;
     let slug = format!("{owner}/{repo_name}");
-    let tracker = tracker::resolve(&repo, req.tracker)?;
+    let mut tracker = tracker::resolve(&repo, req.tracker)?;
     for check in req.checks {
         prompt_text(check)?;
     }
@@ -242,6 +246,28 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
             },
         )?,
     };
+    let mut docs: Vec<agents::Doc> = tracker
+        .writes
+        .drain(..)
+        .map(|(path, text)| agents::Doc::new(path, text))
+        .collect();
+    let plan = agents::missing(
+        &repo,
+        agents::Herd {
+            account: &account,
+            branch: &branch,
+            checks: &checks,
+            needs_info: &tracker.labels.needs_info,
+        },
+    )?;
+    docs.extend(plan.docs);
+    let new_docs = docs.iter().filter(|doc| !doc.append);
+    refuse_unwritable(
+        [paths.herds.join(format!("{name}.toml"))]
+            .into_iter()
+            .chain(lead.then(|| lead_file.clone()))
+            .chain(new_docs.map(|doc| repo.join(doc.path))),
+    )?;
     Ok(Herd {
         repo,
         name,
@@ -256,6 +282,8 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
         switches,
         context_limit,
         config_limit,
+        docs,
+        agents_steps: plan.steps,
     })
 }
 
@@ -375,11 +403,11 @@ fn summary(herd: &Herd) -> String {
             herd.slug
         ));
     }
-    if !herd.tracker.writes.is_empty() {
-        let docs: Vec<&str> = herd.tracker.writes.iter().map(|(path, _)| *path).collect();
+    if !herd.docs.is_empty() {
+        let docs: Vec<String> = herd.docs.iter().map(agents::Doc::planned).collect();
         also.push(format!(
             "writes {} in the repo, uncommitted",
-            docs.join(" and ")
+            and_list(&docs)
         ));
     }
     let also = match also.is_empty() {
@@ -470,39 +498,36 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
     };
     values.push(("SOURCE", source));
     values.push(("LEAD_TABLE", &lead_table));
-    fs::create_dir_all(&paths.herds)
-        .with_context(|| format!("create {}", paths.herds.display()))?;
     let mut lines = match tracker.github {
         true => create_labels(token, slug, labels)?,
         false => vec![],
     };
-    let mut written: Vec<PathBuf> = vec![];
+    let mut written = Written::default();
     let lead = herd.lead.then(|| (lead_file.clone(), fill(LEAD, &values)));
-    let files = lead
+    let herd_files = lead
         .into_iter()
-        .chain([(herd_file.clone(), fill(HERD, &values))])
-        .chain(
-            tracker
-                .writes
-                .iter()
-                .map(|(path, text)| (repo.join(path), text.clone())),
-        );
-    for (path, text) in files {
-        if let Err(e) = write_new(&path, &text) {
-            for path in &written {
-                let _ = fs::remove_file(path);
-            }
+        .chain([(herd_file.clone(), fill(HERD, &values))]);
+    for (path, text) in herd_files {
+        if let Err(e) = written.new_file(&path, &text) {
+            written.undo();
             return Err(e);
         }
-        written.push(path);
+    }
+    for doc in &herd.docs {
+        let done = match doc.append {
+            true => doc.append_to(repo),
+            false => written.new_file(&repo.join(doc.path), &doc.text),
+        };
+        if let Err(e) = done {
+            written.undo();
+            return Err(e);
+        }
     }
     lines.push(format!("wrote {}", herd_file.display()));
     if herd.lead {
         lines.push(format!("wrote {}", lead_file.display()));
     }
-    for (path, _) in &tracker.writes {
-        lines.push(format!("wrote {path} (uncommitted)"));
-    }
+    lines.extend(herd.docs.iter().map(agents::Doc::done));
     let mut steps = vec![format!(
         "Open Claude in {} once and accept its trust dialog; members can't start past \
          it, and init never accepts it for you.",
@@ -515,10 +540,18 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
                 .into(),
         );
         steps.push(format!(
-            "Fill [queue] source in {} from {}, and adapt its issue template to the same \
-             tracker.",
+            "Fill [queue] source in {} from {}, and adapt its issue template and \
+             docs/agents/loopherd.md to the same tracker.",
             herd_file.display(),
             tracker::TRACKER_DOC
+        ));
+    }
+    steps.extend(herd.agents_steps.iter().cloned());
+    if !herd.docs.is_empty() {
+        let paths: Vec<String> = herd.docs.iter().map(|doc| doc.path.to_string()).collect();
+        steps.push(format!(
+            "Review and commit what init wrote in the repo: {}.",
+            and_list(&paths)
         ));
     }
     steps.extend([
@@ -533,6 +566,74 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
         lines.push(format!("  {}. {step}", n + 1));
     }
     Ok(lines)
+}
+
+/// Refuses a new file whose nearest existing directory init can't write in.
+fn refuse_unwritable(new_files: impl IntoIterator<Item = PathBuf>) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    for path in new_files {
+        // A relative path's walk ends at "", the cwd.
+        let cwd_for_empty = |dir: &Path| match dir.as_os_str().is_empty() {
+            true => Path::new(".").to_path_buf(),
+            false => dir.to_path_buf(),
+        };
+        let Some(dir) = path
+            .ancestors()
+            .skip(1)
+            .map(cwd_for_empty)
+            .find(|dir| dir.exists())
+        else {
+            continue;
+        };
+        let c_dir = std::ffi::CString::new(dir.as_os_str().as_bytes())?;
+        // SAFETY: c_dir is a valid NUL-terminated path for the call's duration.
+        if unsafe { libc::access(c_dir.as_ptr(), libc::W_OK) } != 0 {
+            let e = std::io::Error::last_os_error();
+            return Err(e).with_context(|| format!("write {}", path.display()));
+        }
+    }
+    Ok(())
+}
+
+/// The files and directories init created, to undo when a later write fails.
+#[derive(Default)]
+struct Written {
+    files: Vec<PathBuf>,
+    dirs: Vec<PathBuf>,
+}
+
+impl Written {
+    fn new_file(&mut self, path: &Path, text: &str) -> Result<()> {
+        if let Some(dir) = path.parent() {
+            let missing: Vec<&Path> = dir
+                .ancestors()
+                .take_while(|dir| fs::symlink_metadata(dir).is_err())
+                .collect();
+            fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+            self.dirs
+                .extend(missing.into_iter().rev().map(Path::to_path_buf));
+        }
+        write_new(path, text)?;
+        self.files.push(path.to_path_buf());
+        Ok(())
+    }
+
+    fn undo(&self) {
+        for file in &self.files {
+            let _ = fs::remove_file(file);
+        }
+        for dir in self.dirs.iter().rev() {
+            let _ = fs::remove_dir(dir);
+        }
+    }
+}
+
+/// `a`, `a and b`, `a, b and c`.
+fn and_list(items: &[String]) -> String {
+    match items.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => items.join(""),
+    }
 }
 
 fn refuse_taken_name(paths: &Paths, herd: &str, repo: &Path) -> Result<()> {
@@ -793,9 +894,6 @@ fn toml_string(value: &str) -> String {
 
 /// Writes `text` to a new file at `path`, leaving no file behind on failure.
 fn write_new(path: &Path, text: &str) -> Result<()> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    }
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
