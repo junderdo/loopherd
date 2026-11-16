@@ -22,18 +22,31 @@ done | awk -v room=@ID_ROOM@ '
   function has(f, label) { return index(labels[f], " " label " ") > 0 }
   function closed(f) { return has(f, "resolved") || has(f, "closed") || has(f, "done") }
   function value(line) { sub(/^[^:]*:/, "", line); gsub(/[*`]/, " ", line); return line }
-  function unblocked(f,    items, k, i, rest, found, b) {
+  function unblocked(f,    items, k, i, item, words, w, j, n, b, found) {
     if (!(f in blockers) || blockers[f] ~ /^[ \t,]*(none|$)/) return 1
     k = split(blockers[f], items, /[,;]/)
     for (i = 1; i <= k; i++) {
-      if (items[i] ~ /^[ \t]*$/) continue
-      rest = " " items[i] " "
+      item = items[i]
+      if (item ~ /^[ \t]*$/) continue
+      # Only a word that starts with a number names an issue: not a title
+      # in parentheses or after a colon, nor a later number in a slug.
+      gsub(/\([^)]*\)/, " ", item)
+      sub(/:.*/, "", item)
+      gsub(/[^ \t]*issues\//, "", item)
+      w = split(item, words, /[ \t\/]+/)
       found = 0
-      while (match(rest, /[^0-9a-z][0-9]+[^0-9a-z]/)) {
-        b = issue[feature[f] "/" (substr(rest, RSTART + 1, RLENGTH - 2) + 0)]
-        if (b == "" || !closed(b)) return 0
+      for (j = 1; j <= w; j++) {
+        if (words[j] !~ /^#?[0-9]/) continue
+        n = words[j]
+        sub(/^#/, "", n)
+        sub(/[^0-9].*/, "", n)
+        b = issue[feature[f] "/" (n + 0)]
+        if (b == "") {
+          print "skipped " f ": its Blocked by names " n ", which is no issue of its feature" > "/dev/stderr"
+          return 0
+        }
+        if (!closed(b)) return 0
         found = 1
-        rest = substr(rest, RSTART + RLENGTH - 1)
       }
       if (!found) return 0
     }

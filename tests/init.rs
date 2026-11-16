@@ -3590,15 +3590,20 @@ fn a_default_branch_the_herds_shell_commands_cant_hold_is_refused() {
 impl Fixture {
     /// The tasks the herd's queue source prints for `issues` pushed to origin.
     fn local_tasks(&self, issues: &[(&str, &str)]) -> String {
+        let tasks = self.local_source(issues);
+        assert_ok(&tasks);
+        text(&tasks.stdout)
+    }
+
+    /// Runs the herd's queue source over `issues` pushed to origin.
+    fn local_source(&self, issues: &[(&str, &str)]) -> Output {
         let env = self.push_local_issues(issues);
         assert_ok(&self.init(&["--tracker", "local"]));
-        let tasks = self.run(
+        self.run(
             Command::new("sh")
                 .args(["-c", &self.herd_get("queue.source")])
                 .envs(env.iter().map(|(k, v)| (k, v))),
-        );
-        assert_ok(&tasks);
-        text(&tasks.stdout)
+        )
     }
 }
 
@@ -3686,6 +3691,46 @@ fn blocked_by_blocks_on_every_number_it_names_and_on_a_list_below_it_unless_none
         "f-07 feat tdd x .scratch/f/issues/07-x.md\n\
          f-08 feat tdd x .scratch/f/issues/08-x.md\n\
          f-09 feat tdd x .scratch/f/issues/09-x.md\n"
+    );
+}
+
+#[test]
+fn only_a_word_starting_with_a_number_names_a_blocker_and_a_missing_one_is_noted() {
+    let fixture = Fixture::new(&["acme"]);
+    let blocked_by = |n: &str, line: &str| {
+        (
+            format!(".scratch/f/issues/{n}-x.md"),
+            format!("{line}\nStatus: ready-for-agent\n"),
+        )
+    };
+    let issues = [
+        (
+            ".scratch/f/issues/01-step-2-of-3.md".to_string(),
+            "Status: resolved\n".to_string(),
+        ),
+        blocked_by("04", "**Blocked by:** 01 (Node 20 upgrade)"),
+        blocked_by("05", "Blocked by: .scratch/f/issues/01-step-2-of-3.md"),
+        blocked_by("06", "Blocked by: 01: Upgrade to Node 20"),
+        blocked_by("07", "Blocked by: 01, 20"),
+    ];
+    let issues: Vec<(&str, &str)> = issues
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+
+    let out = fixture.local_source(&issues);
+
+    assert_ok(&out);
+    assert_eq!(
+        text(&out.stdout),
+        "f-04 feat tdd x .scratch/f/issues/04-x.md\n\
+         f-05 feat tdd x .scratch/f/issues/05-x.md\n\
+         f-06 feat tdd x .scratch/f/issues/06-x.md\n"
+    );
+    assert_eq!(
+        text(&out.stderr),
+        "skipped .scratch/f/issues/07-x.md: its Blocked by names 20, which is no issue \
+         of its feature\n"
     );
 }
 
