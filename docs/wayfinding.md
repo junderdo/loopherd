@@ -45,7 +45,8 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D28](decisions/D28.md) | A herd file's top-level `after_merge` runs from `loopherd feed` once per member when its `merged` check first passes, after feed releases its lock, noted in its mailbox; from a lead's pane, any command the hook would deny holds back all of them. |
 | [D29](decisions/D29.md) | `loopherd herd get\|set\|unset` edits herd files format-preservingly, refusing any result `loopherd herds` calls invalid; the tool hook denies `set`/`unset` in a lead's pane. |
 | [D30](decisions/D30.md) | `loopherd stats` measures a worker from its ledger `created` to its `retired_at`, counting `done` reports in between; leads and herdless entries are left out, and `--since` filters by start. |
-| [D31](decisions/D31.md) | A member's ledger session follows Claude's `continued-in` transcript records to the live session, in the Stop and SessionStart hooks, the handoff check, `revive` and `restart`. |
+| [D31](decisions/D31.md) | A lead's switches resolve from its herd file's `[lead]`, else `config.toml`'s `[lead_defaults]` (set by `scripts/install`), else off; no project-level layer. |
+| [D32](decisions/D32.md) | A member's ledger session follows Claude's `continued-in` transcript records to the live session, in the Stop and SessionStart hooks, the handoff check, `revive` and `restart`. |
 
 ## Emerging model
 

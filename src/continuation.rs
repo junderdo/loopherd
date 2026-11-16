@@ -1,6 +1,6 @@
 //! Claude Code can move a conversation to a new session without running a
 //! SessionStart hook; the old transcript then holds a `continued-in` record
-//! naming the new session (D31).
+//! naming the new session (D32).
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
