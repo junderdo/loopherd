@@ -340,8 +340,8 @@ enum HerdAction {
     /// `prompt_file` when that lies in the herds dir and no other herd file
     /// names it, and its members' ledger entries, mailboxes and handoffs.
     /// Refuses, changing nothing, while any member (lead included) is not
-    /// retired or herdr still shows its agent or tab, or herdr can't be
-    /// reached. Never touches worktrees, branches or tabs; `retire --close`
+    /// retired, ran on another herdr session, or herdr may still show its
+    /// agent or pane, or herdr can't be reached. Never touches worktrees, branches or tabs; `retire --close`
     /// does that.
     Remove {
         herd: String,

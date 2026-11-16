@@ -68,7 +68,11 @@ pub fn retire_and_close(
             out.push(format!("kept tab {tab_id}: {reason}"));
             Some("its tab was kept")
         }
-        TabFate::Unmatched(line) => {
+        TabFate::Busy(tab_id) => {
+            out.push(format!("kept tab {tab_id}: {BUSY}"));
+            Some("its tab was kept")
+        }
+        TabFate::Unmatched(line) | TabFate::NoWorkspace(line) => {
             out.push(line);
             Some("tab not confirmed closed")
         }
@@ -113,20 +117,31 @@ pub fn retire_and_close(
     Ok(())
 }
 
-/// Why `record`'s tab is still open, found as `retire_and_close` finds it,
-/// or `None` once herdr shows neither its agent nor its tab. `others` are
-/// the other ledger entries.
+/// Why `record`'s tab may still be open, found as `retire_and_close` finds
+/// it, or `None` once herdr shows neither its agent nor its pane, or shows
+/// its pane held by another entry or agent. `others` are the other ledger
+/// entries.
 pub fn open_tab(
     herdr: &dyn Herdr,
     record: &AgentRecord,
     others: &BTreeMap<String, AgentRecord>,
 ) -> Result<Option<String>> {
     Ok(match agent_tab(herdr, record, others, None)? {
+        TabFate::Gone | TabFate::Taken { .. } => None,
         TabFate::Ours(tab_id) => Some(format!("tab {tab_id} is open")),
         TabFate::Kept { tab_id, reason } => Some(format!("tab {tab_id} is open: {reason}")),
-        TabFate::Gone | TabFate::Taken { .. } | TabFate::Unmatched(_) => None,
+        TabFate::Busy(tab_id) => Some(format!("tab {tab_id} is open: {BUSY}")),
+        TabFate::Unmatched(line) => Some(format!("not confirmed closed: {line}")),
+        TabFate::NoWorkspace(line) => workspace_holding(herdr, &record.pane_id)?.map(|label| {
+            format!(
+                "not confirmed closed: {line}, but pane {} is in workspace {label}",
+                record.pane_id
+            )
+        }),
     })
 }
+
+const BUSY: &str = "pane is running a command";
 
 /// An active entry other than `name` whose worktree is `path`.
 fn other_user(ledger: &dyn Ledger, name: &str, path: &Path) -> Result<Option<String>> {
@@ -146,13 +161,17 @@ enum TabFate {
         tab_id: String,
         reason: String,
     },
-    /// The recorded pane is open but someone else's now.
+    /// The recorded pane is open but another entry's or agent's now.
     Taken {
         tab_id: String,
         reason: String,
     },
+    /// The recorded pane is open with no agent, running a command.
+    Busy(String),
     /// No tab matched, but it may still be open; holds the line to print.
     Unmatched(String),
+    /// The entry's workspace isn't found; holds the line to print.
+    NoWorkspace(String),
 }
 
 /// Finds the entry's tab through its live agent, else its recorded pane, and
@@ -187,7 +206,7 @@ fn agent_tab(
         (Some(ws), _) => herdr.panes_in(&ws.id)?,
         (None, Some(_)) => vec![],
         (None, None) => {
-            return Ok(TabFate::Unmatched(format!(
+            return Ok(TabFate::NoWorkspace(format!(
                 "no matching tab: workspace {shown} not found"
             )));
         }
@@ -202,12 +221,13 @@ fn agent_tab(
     }
     if live.is_none()
         && let Some(pane) = &pane
-        && let Some(reason) = reused_by(herdr, record, &pane.id, &agents, others)?
     {
-        return Ok(TabFate::Taken {
-            tab_id: pane.tab_id.clone(),
-            reason,
-        });
+        let tab_id = pane.tab_id.clone();
+        match pane_use(herdr, record, &pane.id, &agents, others)? {
+            PaneUse::Free => {}
+            PaneUse::Held(reason) => return Ok(TabFate::Taken { tab_id, reason }),
+            PaneUse::Busy => return Ok(TabFate::Busy(tab_id)),
+        }
     }
     let cwd = record.worktree.as_ref().unwrap_or(&record.repo);
     match (pane, live) {
@@ -256,30 +276,38 @@ fn shown_cwd(pane: &Pane) -> String {
         .map_or("unknown".into(), |c| c.display().to_string())
 }
 
-/// Why the recorded pane may be someone else's after a restart reused its id:
-/// another entry recorded it, it runs an agent from another session, or its
-/// shell is busy. `None` means it is safe to treat as the entry's.
-fn reused_by(
+/// Whether the recorded pane may be someone else's after a restart reused
+/// its id.
+enum PaneUse {
+    /// Safe to treat as the entry's.
+    Free,
+    /// Another entry recorded it, or it runs an agent from another session.
+    Held(String),
+    /// Its shell is running a command.
+    Busy,
+}
+
+fn pane_use(
     herdr: &dyn Herdr,
     record: &AgentRecord,
     pane_id: &str,
     agents: &[Agent],
     others: &BTreeMap<String, AgentRecord>,
-) -> Result<Option<String>> {
+) -> Result<PaneUse> {
     if let Some(other) = member_in(others, pane_id, herdr.socket().as_deref()) {
-        return Ok(Some(format!("pane belongs to {}", other.name)));
+        return Ok(PaneUse::Held(format!("pane belongs to {}", other.name)));
     }
     if let Some(agent) = agents.iter().find(|a| a.pane_id == pane_id) {
         let ours = same_session(agent, record);
         return Ok(match (ours, &agent.name) {
-            (true, _) => None,
-            (false, Some(name)) => Some(format!("pane hosts agent {name}")),
-            (false, None) => Some("pane hosts another agent".into()),
+            (true, _) => PaneUse::Free,
+            (false, Some(name)) => PaneUse::Held(format!("pane hosts agent {name}")),
+            (false, None) => PaneUse::Held("pane hosts another agent".into()),
         });
     }
     Ok(match herdr.at_shell_prompt(pane_id)? {
-        true => None,
-        false => Some("pane is running a command".into()),
+        true => PaneUse::Free,
+        false => PaneUse::Busy,
     })
 }
 

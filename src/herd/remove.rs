@@ -22,8 +22,9 @@ pub struct Removal {
 /// Removes `herd`'s file, lead prompt and pause, and its members' ledger
 /// entries, mailboxes and handoffs in loopherd's `state` dir, pushing a line
 /// per thing removed or kept to `out`, including before an error. Refuses,
-/// changing nothing, while any member is not retired or herdr shows its
-/// agent or tab open, or herdr can't say. Never touches worktrees, branches
+/// changing nothing, while any member is not retired, ran on another herdr
+/// session, or herdr may still show its agent or pane, or herdr can't say.
+/// Stats every file before deleting any. Never touches worktrees, branches
 /// or tabs.
 pub fn remove(
     paths: &Paths,
@@ -54,27 +55,6 @@ pub fn remove(
         }
     }
 
-    let verb = if how.dry_run {
-        "would remove"
-    } else {
-        "removed"
-    };
-    let names: Vec<String> = members.iter().map(|r| r.name.clone()).collect();
-    let mailboxes = !how.keep_history;
-    if how.keep_history || how.dry_run || names.is_empty() {
-        delete_all(&member_files(state, &names, mailboxes), verb, how, out)?;
-        if mailboxes {
-            out.extend(names.iter().map(|n| format!("{verb} ledger entry {n}")));
-        }
-    } else {
-        let removed = ledger
-            .remove_herd(herd, &mut |names| {
-                delete_all(&member_files(state, names, true), verb, how, out)
-            })
-            .context("ledger")?;
-        out.extend(removed.iter().map(|n| format!("{verb} ledger entry {n}")));
-    }
-
     let mut own = vec![paths.paused.join(herd)];
     if has_file {
         match lead_prompt(paths, herd, &file) {
@@ -83,6 +63,42 @@ pub fn remove(
             Err(kept) => out.push(format!("kept {kept}")),
         }
         own.push(file);
+    }
+    let names: Vec<String> = members.iter().map(|r| r.name.clone()).collect();
+    let mailboxes = !how.keep_history;
+    for path in member_files(state, &names, mailboxes).iter().chain(&own) {
+        present(path)?;
+    }
+
+    let verb = if how.dry_run {
+        "would remove"
+    } else {
+        "removed"
+    };
+    if how.dry_run || names.is_empty() {
+        delete_all(&member_files(state, &names, mailboxes), verb, how, out)?;
+        if mailboxes {
+            out.extend(names.iter().map(|n| format!("{verb} ledger entry {n}")));
+        }
+    } else if how.keep_history {
+        for name in &names {
+            ledger
+                .update(name, &mut |record| {
+                    if record.herd.as_deref() != Some(herd) || !record.retired {
+                        return Ok(());
+                    }
+                    let files = member_files(state, std::slice::from_ref(name), false);
+                    delete_all(&files, verb, how, out)
+                })
+                .context("ledger")?;
+        }
+    } else {
+        let removed = ledger
+            .remove_herd(herd, &mut |names| {
+                delete_all(&member_files(state, names, true), verb, how, out)
+            })
+            .context("ledger")?;
+        out.extend(removed.iter().map(|n| format!("{verb} ledger entry {n}")));
     }
     delete_all(&own, verb, how, out)
 }
@@ -96,10 +112,19 @@ fn refuse_open(
     members: &[&AgentRecord],
 ) -> Result<()> {
     let mut open = Vec::new();
+    let mut here = None;
     for member in members {
-        let why = match member.retired {
-            false => Some("not retired".to_string()),
-            true => {
+        let why = match (member.retired, &member.socket) {
+            (false, _) => Some("not retired".to_string()),
+            (true, Some(socket))
+                if here.get_or_insert_with(|| herdr.socket()).as_ref() != Some(socket) =>
+            {
+                Some(format!(
+                    "on herdr session {}, not this one; run it there",
+                    socket.display()
+                ))
+            }
+            (true, _) => {
                 let mut others = entries.clone();
                 others.remove(&member.name);
                 open_tab(herdr, member, &others).with_context(|| {
@@ -140,11 +165,15 @@ fn member_files(state: &Path, names: &[String], mailboxes: bool) -> Vec<PathBuf>
     files
 }
 
+/// Stats every path before deleting any.
 fn delete_all(paths: &[PathBuf], verb: &str, how: Removal, out: &mut Vec<String>) -> Result<()> {
+    let mut found = vec![];
     for path in paths {
-        if !present(path)? {
-            continue;
+        if present(path)? {
+            found.push(path);
         }
+    }
+    for path in found {
         if !how.dry_run {
             std::fs::remove_file(path).with_context(|| format!("remove {}", path.display()))?;
         }
@@ -715,6 +744,37 @@ mod tests {
     }
 
     #[test]
+    fn keep_history_keeps_the_handoffs_of_a_name_reused_before_the_ledger_lock() {
+        let mut s = Setup::new();
+        s.write("herds/old.toml", "repo = \"/r\"\n");
+        s.member("a", "old", true, false);
+        s.write("state/handoffs/a.md", "the new a's\n");
+        let mut ledger = Reusing {
+            inner: std::mem::take(&mut s.ledger),
+        };
+        let paths = Paths::under(s.dir.path());
+        let mut out = vec![];
+        let how = Removal {
+            keep_history: true,
+            ..Removal::default()
+        };
+
+        remove(
+            &paths,
+            &s.herdr,
+            &mut ledger,
+            &s.path("state"),
+            "old",
+            how,
+            &mut out,
+        )
+        .unwrap();
+
+        assert!(s.path("state/handoffs/a.md").exists(), "{out:?}");
+        assert!(!s.path("herds/old.toml").exists());
+    }
+
+    #[test]
     fn keeps_the_files_of_a_name_reused_before_the_ledger_lock() {
         let mut s = Setup::new();
         s.write("herds/old.toml", "repo = \"/r\"\n");
@@ -742,10 +802,182 @@ mod tests {
         assert!(!s.path("herds/old.toml").exists());
     }
 
+    /// A retired member `a` of herd `old` in workspace `w1`, recorded at
+    /// `pane` with its repo at `work/`.
+    fn retired_in(s: &mut Setup, pane: &str) {
+        s.write("herds/old.toml", "repo = \"/r\"\n");
+        fs::create_dir_all(s.path("work")).unwrap();
+        s.member("a", "old", true, false);
+        let work = s.path("work");
+        let a = s.ledger.0.get_mut("a").unwrap();
+        a.pane_id = pane.into();
+        a.repo = work;
+    }
+
+    fn refusal(s: &mut Setup) -> String {
+        let err = s.remove("old", Removal::default()).unwrap_err();
+        assert_eq!(s.names(), ["a"]);
+        assert!(s.path("herds/old.toml").exists());
+        format!("{err:#}")
+    }
+
+    #[test]
+    fn refuses_a_member_recorded_on_another_herdr_session() {
+        let mut s = Setup::new();
+        retired_in(&mut s, "w1:p1");
+        s.ledger.0.get_mut("a").unwrap().socket = Some("/run/other/herdr.sock".into());
+
+        assert_eq!(
+            refusal(&mut s),
+            "refused: old has members still open; close each first:\n  \
+             loopherd retire --close a  # on herdr session /run/other/herdr.sock, \
+             not this one; run it there"
+        );
+    }
+
+    #[test]
+    fn removes_a_member_recorded_on_this_herdr_session_whose_tab_is_gone() {
+        let mut s = Setup::new();
+        retired_in(&mut s, "w1:p1");
+        s.ledger.0.get_mut("a").unwrap().socket = s.herdr.socket();
+
+        s.remove("old", Removal::default()).unwrap();
+
+        assert!(s.names().is_empty());
+    }
+
+    #[test]
+    fn refuses_a_pane_at_its_prompt_whose_cwd_moved() {
+        let mut s = Setup::new();
+        let moved = s.path("moved");
+        fs::create_dir(&moved).unwrap();
+        let pane = s.herdr.add_tab("w1", "a", &moved, true);
+        retired_in(&mut s, &pane);
+
+        let msg = refusal(&mut s);
+
+        assert!(
+            msg.ends_with(&format!(
+                "loopherd retire --close a  # not confirmed closed: \
+                 no matching tab (pane {pane} is in {})",
+                moved.display()
+            )),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn refuses_a_pane_running_a_command() {
+        let mut s = Setup::new();
+        let pane = s.herdr.add_tab("w1", "a", &s.path("work"), false);
+        retired_in(&mut s, &pane);
+
+        let msg = refusal(&mut s);
+
+        assert!(
+            msg.ends_with(
+                "loopherd retire --close a  # tab w1:t1 is open: pane is running a command"
+            ),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn refuses_a_pane_still_open_in_a_relabeled_workspace() {
+        let mut s = Setup::new();
+        let pane = s.herdr.add_tab("w1", "a", &s.path("work"), true);
+        retired_in(&mut s, &pane);
+        s.ledger.0.get_mut("a").unwrap().workspace_label = Some("before".into());
+
+        let msg = refusal(&mut s);
+
+        assert!(
+            msg.ends_with(&format!(
+                "loopherd retire --close a  # not confirmed closed: no matching tab: \
+                 workspace before not found, but pane {pane} is in workspace loopherd"
+            )),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn removes_a_member_whose_workspace_and_pane_are_gone() {
+        let mut s = Setup::new();
+        retired_in(&mut s, "w9:p1");
+        s.ledger.0.get_mut("a").unwrap().workspace_label = Some("before".into());
+
+        s.remove("old", Removal::default()).unwrap();
+
+        assert!(s.names().is_empty());
+    }
+
+    #[test]
+    fn removes_a_member_whose_recorded_pane_another_entry_now_holds() {
+        let mut s = Setup::new();
+        let pane = s.herdr.add_tab("w1", "b", &s.path("work"), true);
+        retired_in(&mut s, &pane);
+        s.member("b", "live", false, false);
+        let b = s.ledger.0.get_mut("b").unwrap();
+        b.pane_id = pane;
+        b.socket = s.herdr.socket();
+
+        s.remove("old", Removal::default()).unwrap();
+
+        assert_eq!(s.names(), ["b"]);
+    }
+
+    #[test]
+    fn stats_every_file_before_deleting_any() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut s = Setup::new();
+        s.write("herds/old.toml", "repo = \"/r\"\n");
+        s.member("a", "old", true, false);
+        s.write("state/reports/a.jsonl", "{}\n");
+        s.write("state/handoffs/a.md", "now\n");
+        let handoffs = s.path("state/handoffs");
+        fs::set_permissions(&handoffs, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let (out, result) = s.remove_partly("old", Removal::default());
+
+        fs::set_permissions(&handoffs, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(format!("{:#}", result.unwrap_err()).contains("stat "));
+        assert_eq!(out, "");
+        assert!(s.path("state/reports/a.jsonl").exists());
+        assert_eq!(s.names(), ["a"]);
+    }
+
+    #[test]
+    fn a_pause_it_cant_stat_keeps_the_members_files_and_entries() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut s = Setup::new();
+        s.write("herds/old.toml", "repo = \"/r\"\n");
+        s.write("paused/old", "{}");
+        s.member("a", "old", true, false);
+        s.write("state/reports/a.jsonl", "{}\n");
+        let paused = s.path("paused");
+        fs::set_permissions(&paused, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let (out, result) = s.remove_partly("old", Removal::default());
+
+        fs::set_permissions(&paused, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(format!("{:#}", result.unwrap_err()).contains("stat "));
+        assert_eq!(out, "");
+        assert!(s.path("state/reports/a.jsonl").exists());
+        assert_eq!(s.names(), ["a"]);
+    }
+
     /// Between the caller's read and the lock, `a` is respawned into
     /// another herd, as a concurrent `add` could.
     struct Reusing {
         inner: MemLedger,
+    }
+
+    impl Reusing {
+        fn respawn_a(&mut self) {
+            let a = self.inner.0.get_mut("a").unwrap();
+            a.herd = Some("new".into());
+            a.retired = false;
+        }
     }
 
     impl Ledger for Reusing {
@@ -760,6 +992,7 @@ mod tests {
             name: &str,
             change: &mut dyn FnMut(&mut AgentRecord) -> Result<()>,
         ) -> Result<AgentRecord> {
+            self.respawn_a();
             self.inner.update(name, change)
         }
         fn remove_herd(
@@ -767,9 +1000,7 @@ mod tests {
             herd: &str,
             before: &mut dyn FnMut(&[String]) -> Result<()>,
         ) -> Result<Vec<String>> {
-            let a = self.inner.0.get_mut("a").unwrap();
-            a.herd = Some("new".into());
-            a.retired = false;
+            self.respawn_a();
             self.inner.remove_herd(herd, before)
         }
         fn started(&mut self, name: &str, at: std::time::SystemTime) -> Result<()> {
