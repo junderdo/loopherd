@@ -214,50 +214,90 @@ fn bash_command(input: &[u8]) -> Option<String> {
 
 /// Every switch the simple commands in `script` need, in order.
 pub fn needs(script: &str) -> Vec<Switch> {
-    needs_with(script, Aliases::new())
+    needs_with(script, Aliases::default())
 }
 
-/// `CARGO_ALIAS_*` values by the alias's upper-case name.
-type Aliases = std::collections::HashMap<String, String>;
+/// The `CARGO_ALIAS_*` variables assigned so far in a script.
+#[derive(Clone, Default)]
+struct Aliases {
+    /// Values by the alias's upper-case name; `None` when it can't be read.
+    values: std::collections::HashMap<String, Option<String>>,
+    /// Whether one was assigned under a name that can't be read, so any
+    /// alias may be set.
+    unreadable_name: bool,
+}
+
+impl Aliases {
+    fn assign(&mut self, word: &Word) {
+        let Some((name, value)) = word
+            .text
+            .strip_prefix("CARGO_ALIAS_")
+            .and_then(|rest| rest.split_once('='))
+        else {
+            return;
+        };
+        // A substitution may have been in the name, so it counts as unreadable.
+        if word.substituted
+            || name.is_empty()
+            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            self.unreadable_name = true;
+            return;
+        }
+        let readable = !value.trim().is_empty() && !value.contains('$');
+        self.values
+            .insert(name.to_uppercase(), readable.then(|| value.to_string()));
+    }
+}
 
 /// [`needs`] with the cargo aliases assigned before `script`. An assignment
-/// anywhere, inline, exported or not, counts for the rest of the script.
+/// counts for the rest of the script, exported or not.
 fn needs_with(script: &str, mut aliases: Aliases) -> Vec<Switch> {
     commands(script)
         .iter()
-        .flat_map(|words| needs_one(words, &mut aliases))
+        .flat_map(|command| needs_one(command, &mut aliases))
         .collect()
 }
 
-/// The simple commands in `script`, each as its words with quotes removed.
+/// A word with quotes removed, and whether a `$(…)` or backtick
+/// substitution was part of it.
+#[derive(Default)]
+struct Word {
+    text: String,
+    substituted: bool,
+}
+
+/// The simple commands in `script`, each as its words.
 /// `;`, `&`, `|`, newlines, parentheses, backticks and `$(` end a command;
 /// a `$(…)` or backtick inside double quotes is lexed as commands too.
-fn commands(script: &str) -> Vec<Vec<String>> {
+fn commands(script: &str) -> Vec<Vec<Word>> {
     let mut commands = vec![];
     let mut words = vec![];
-    let mut word: Option<String> = None;
+    let mut word: Option<Word> = None;
     let mut chars = script.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             '\'' => {
                 let w = word.get_or_insert_default();
-                w.extend(chars.by_ref().take_while(|&c| c != '\''));
+                w.text.extend(chars.by_ref().take_while(|&c| c != '\''));
             }
             '"' => {
                 let w = word.get_or_insert_default();
                 while let Some(c) = chars.next() {
                     match c {
                         '"' => break,
-                        '\\' => w.extend(chars.next()),
+                        '\\' => w.text.extend(chars.next()),
                         '$' if chars.peek() == Some(&'(') => {
                             chars.next();
+                            w.substituted = true;
                             commands.extend(self::commands(&substitution(&mut chars)));
                         }
                         '`' => {
                             let inner: String = chars.by_ref().take_while(|&c| c != '`').collect();
+                            w.substituted = true;
                             commands.extend(self::commands(&inner));
                         }
-                        _ => w.push(c),
+                        _ => w.text.push(c),
                     }
                 }
             }
@@ -270,24 +310,27 @@ fn commands(script: &str) -> Vec<Vec<String>> {
             }
             '\\' => match chars.next() {
                 Some('\n') | None => {}
-                Some(c) => word.get_or_insert_default().push(c),
+                Some(c) => word.get_or_insert_default().text.push(c),
             },
             // `2>&1`, `<&3` and `&>file` are redirections, not `&`.
-            '&' if word.as_deref().is_some_and(|w| w.ends_with(['>', '<']))
+            '&' if word.as_ref().is_some_and(|w| w.text.ends_with(['>', '<']))
                 || chars.peek() == Some(&'>') =>
             {
-                word.get_or_insert_default().push(c);
+                word.get_or_insert_default().text.push(c);
             }
             ';' | '&' | '|' | '\n' | '(' | ')' | '`' | '$'
                 if c != '$' || chars.peek() == Some(&'(') =>
             {
+                if let Some(w) = word.as_mut().filter(|_| c == '$' || c == '`') {
+                    w.substituted = true;
+                }
                 words.extend(word.take());
                 if !words.is_empty() {
                     commands.push(std::mem::take(&mut words));
                 }
             }
             c if c.is_whitespace() => words.extend(word.take()),
-            _ => word.get_or_insert_default().push(c),
+            _ => word.get_or_insert_default().text.push(c),
         }
     }
     words.extend(word.take());
@@ -339,13 +382,12 @@ const KEYWORDS: [&str; 10] = [
     "if", "then", "else", "elif", "do", "while", "until", "!", "{", "source",
 ];
 const SHELLS: [&str; 5] = ["sh", "bash", "zsh", "dash", "ksh"];
+/// Builtins whose arguments may assign variables.
+const DECLARERS: [&str; 3] = ["export", "declare", "typeset"];
 
-fn needs_one(words: &[String], aliases: &mut Aliases) -> Vec<Switch> {
-    for (name, value) in words.iter().filter_map(|w| w.split_once('=')) {
-        if let Some(alias) = name.strip_prefix("CARGO_ALIAS_") {
-            aliases.insert(alias.to_uppercase(), value.to_string());
-        }
-    }
+fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
+    let words: Vec<String> = command.iter().map(|w| w.text.clone()).collect();
+    let words = words.as_slice();
     let mut i = 0;
     loop {
         let Some(word) = words.get(i) else {
@@ -354,8 +396,14 @@ fn needs_one(words: &[String], aliases: &mut Aliases) -> Vec<Switch> {
         let program = file_name(word);
         if let Some(bare) = redirection(word) {
             i += if bare { 2 } else { 1 };
-        } else if is_assignment(word) || KEYWORDS.contains(&word.as_str()) || word == "." {
+        } else if is_assignment(word) || word.starts_with("CARGO_ALIAS_") && word.contains('=') {
+            aliases.assign(&command[i]);
             i += 1;
+        } else if KEYWORDS.contains(&word.as_str()) || word == "." {
+            i += 1;
+        } else if DECLARERS.contains(&program) {
+            command[i + 1..].iter().for_each(|w| aliases.assign(w));
+            return vec![];
         } else if let Some((_, with_value)) = WRAPPERS.iter().find(|(w, _)| *w == program) {
             i = skip_options(words, i + 1, with_value);
             if program == "timeout" {
@@ -371,6 +419,9 @@ fn needs_one(words: &[String], aliases: &mut Aliases) -> Vec<Switch> {
                 return vec![];
             }
             i = skip_options(words, i + 1, &[]) + 1;
+            if words.get(i).is_some_and(|w| w == "--") {
+                i += 1;
+            }
         } else if SHELLS.contains(&program) {
             i += 1;
             // `-o pipefail`, `-O extglob`: the next word is the option's value.
@@ -456,8 +507,52 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
     }
 }
 
+/// Cargo's built-in subcommands, which ignore an alias of the same name.
+/// Its short forms (`b`, `r`, `t`…) are not here: an alias overrides them.
+const CARGO_BUILTINS: [&str; 39] = [
+    "add",
+    "bench",
+    "build",
+    "check",
+    "clean",
+    "config",
+    "doc",
+    "fetch",
+    "fix",
+    "generate-lockfile",
+    "git-checkout",
+    "help",
+    "info",
+    "init",
+    "install",
+    "locate-project",
+    "login",
+    "logout",
+    "metadata",
+    "new",
+    "owner",
+    "package",
+    "pkgid",
+    "publish",
+    "read-manifest",
+    "remove",
+    "report",
+    "run",
+    "rustc",
+    "rustdoc",
+    "search",
+    "test",
+    "tree",
+    "uninstall",
+    "update",
+    "vendor",
+    "verify-project",
+    "version",
+    "yank",
+];
+
 /// What `cargo args` needs as written and after each step of expanding its
-/// subcommand through `aliases`, since a built-in subcommand ignores its alias.
+/// subcommand through `aliases`.
 fn cargo_needs(path: &str, args: &[String], aliases: &Aliases) -> Vec<Switch> {
     // Past this many expansions the alias is circular, which cargo refuses too.
     const MAX_EXPANSIONS: usize = 16;
@@ -465,16 +560,24 @@ fn cargo_needs(path: &str, args: &[String], aliases: &Aliases) -> Vec<Switch> {
     let mut args = args.to_vec();
     for _ in 0..MAX_EXPANSIONS {
         let at = cargo_subcommand(&args);
-        let Some(value) = args
+        let Some(subcommand) = args
             .get(at)
-            .and_then(|sub| aliases.get(&sub.to_uppercase().replace('-', "_")))
+            .filter(|sub| !CARGO_BUILTINS.contains(&sub.as_str()))
         else {
             return needed;
         };
-        // Command substitutions are lexed out of the word, leaving it empty.
-        if value.trim().is_empty() || value.contains(['$', '`']) {
+        if aliases.unreadable_name {
             return vec![Switch::OpaqueCargoAlias];
         }
+        let Some(value) = aliases
+            .values
+            .get(&subcommand.to_uppercase().replace(['-', '.'], "_"))
+        else {
+            return needed;
+        };
+        let Some(value) = value else {
+            return vec![Switch::OpaqueCargoAlias];
+        };
         args.splice(at..=at, value.split_whitespace().map(String::from));
         needed.extend(needs_program(path, &args).filter(|s| !needed.contains(s)));
     }
@@ -779,6 +882,7 @@ mod tests {
         "rustup run stable gh pr merge 12",
         "rustup --quiet run --install nightly-2026-01-01 gh pr merge 12",
         "rustup +stable run stable gh pr merge 12",
+        "rustup run stable -- gh pr merge 12",
     ];
     const INSTALLS: &[&str] = &[
         "scripts/install",
@@ -871,6 +975,16 @@ mod tests {
         "rustup update",
         "rustup run stable cargo test",
         "setsid cargo build",
+        "grep -rn CARGO_ALIAS_TEST= src; cargo test",
+        "rg 'CARGO_ALIAS_B=' . && cargo b",
+        "echo CARGO_ALIAS_$N=x; cargo x",
+        "CARGO_ALIAS_BUILD=$X cargo build",
+        "CARGO_ALIAS_BUILD='run -- herd set h lead.merge true' cargo build",
+        "CARGO_ALIAS_TEST=\"$(cat alias)\" cargo test",
+        "export CARGO_ALIAS_$N=x; cargo build",
+        "CARGO_ALIAS_X='build --release' cargo x",
+        "CARGO_ALIAS_X='run -- herd set' cargo build",
+        "CARGO_ALIAS_X=$CMD cargo test",
     ];
 
     #[test]
@@ -1332,6 +1446,7 @@ mod tests {
         "setsid -f cargo run -- herd set h lead.merge true",
         "rustup run stable loopherd herd set h lead.merge true",
         "rustup run --install stable cargo run -- herd unset h lead.merge",
+        "rustup run stable -- loopherd herd set h lead.merge true",
     ];
 
     #[test]
@@ -1470,7 +1585,16 @@ mod tests {
     }
 
     #[test]
+    fn allowed_commands_pass_a_lead_with_every_switch_off() {
+        let leads = ledger(vec![lead()]);
+        for command in ALLOWED {
+            assert_eq!(run(&leads, Switches::default(), command), None, "{command}");
+        }
+    }
+
+    #[test]
     fn a_cargo_alias_assigned_in_the_script_is_judged_by_its_expansion() {
+        let leads = ledger(vec![lead()]);
         for (command, want) in [
             (
                 "CARGO_ALIAS_X='run -- herd set h lead.merge true' cargo x",
@@ -1489,6 +1613,14 @@ mod tests {
                 Switch::Pause,
             ),
             (
+                "declare -x CARGO_ALIAS_X='run -- pause h'; cargo x",
+                Switch::Pause,
+            ),
+            (
+                "typeset -x CARGO_ALIAS_X='run -- pause h'; cargo x",
+                Switch::Pause,
+            ),
+            (
                 "CARGO_ALIAS_A=b CARGO_ALIAS_B='run -- install-hook' cargo a",
                 Switch::Install,
             ),
@@ -1497,23 +1629,29 @@ mod tests {
                 Switch::Install,
             ),
             (
+                "CARGO_ALIAS_MY_HOOK='run -- install-hook' cargo my.hook",
+                Switch::Install,
+            ),
+            (
                 "CARGO_ALIAS_X='run -- herd set' bash -c 'cargo x h lead.merge true'",
+                Switch::HerdEdit,
+            ),
+            (
+                "CARGO_ALIAS_X='run -- herd set h lead.merge true' eval cargo x",
                 Switch::HerdEdit,
             ),
             (
                 "CARGO_ALIAS_X='r -- restart --force' rustup run stable cargo +nightly x lh-1",
                 Switch::ForceRestart,
             ),
+            ("CARGO_ALIAS_R='run -- pause h' cargo r", Switch::Pause),
             ("CARGO_ALIAS_RUN=build cargo run -- pause h", Switch::Pause),
         ] {
             assert_eq!(needs(command), [want], "{command}");
-        }
-        for command in [
-            "CARGO_ALIAS_X='build --release' cargo x",
-            "CARGO_ALIAS_X='run -- herd set' cargo build",
-            "CARGO_ALIAS_X=$CMD cargo test",
-        ] {
-            assert_eq!(needs(command), [], "{command}");
+            assert!(
+                run(&leads, only_off(want), command).is_some(),
+                "{command} was allowed"
+            );
         }
     }
 
@@ -1525,8 +1663,15 @@ mod tests {
             "CARGO_ALIAS_X=\"$(cat alias)\" cargo x h lead.merge true",
             "CARGO_ALIAS_X=$(cat alias) cargo x",
             "CARGO_ALIAS_X=`cat alias` cargo x",
+            "CARGO_ALIAS_X=\"run -- herd $(echo set) h lead.merge true\" cargo x",
+            "CARGO_ALIAS_X=run$(echo ' -- herd set h lead.merge true') cargo x",
+            "CARGO_ALIAS_X=run`echo ' -- herd set h lead.merge true'` cargo x",
             "CARGO_ALIAS_X=x cargo x",
             "env CARGO_ALIAS_X= cargo x",
+            "N=X; export CARGO_ALIAS_$N='run -- herd set h lead.merge true'; cargo x",
+            "export CARGO_ALIAS_X\"$EMPTY\"='run -- herd set h lead.merge true'; cargo x",
+            "export CARGO_ALIAS_${N}='run -- pause h'; cargo clippy",
+            "CARGO_ALIAS_\"$(echo X)\"='run -- pause h' cargo x",
         ] {
             assert_eq!(needs(command), [Switch::OpaqueCargoAlias], "{command}");
             let message =
