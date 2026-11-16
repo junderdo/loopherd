@@ -22,12 +22,29 @@ terminals and knows whether each agent is working, blocked, or done.
 
 | Need | Why | Install |
 |---|---|---|
-| Rust toolchain (`cargo`) | builds loopherd | [rustup.rs](https://rustup.rs/) |
+| Rust toolchain (`cargo`) | builds loopherd (`scripts/install` only) | [rustup.rs](https://rustup.rs/) |
 | `jq` | `scripts/install` reads cargo's build output | [jqlang.github.io/jq](https://jqlang.github.io/jq/download/) |
 | herdr | the terminal multiplexer loopherd drives | [herdr.dev](https://herdr.dev/) |
 | Claude Code (`claude`) | the agent each member runs | [code.claude.com](https://code.claude.com/docs/en/overview) |
 
 ## Install
+
+```bash
+curl -fsSL https://github.com/junderdo/loopherd/releases/latest/download/install.sh | sh
+```
+
+Downloads the latest release for your OS and arch (Linux or macOS, x86_64
+or aarch64), checks it against the release's `SHA256SUMS`, installs it as
+`~/.local/bin/loopherd`, adds loopherd's Claude hooks and skill
+(`loopherd install-hook`), and runs `loopherd setup`. It needs only `curl`
+or `wget`, `tar`, and `sha256sum` or `shasum`, and is safe to run again to
+upgrade. `LOOPHERD_VERSION=v0.1.0` before `sh` pins a release. Releases are
+cut as in [docs/releasing.md](docs/releasing.md).
+
+### From a clone
+
+Contributors build from the checkout instead, which also offers loopherd's
+agent types and the skills plugin:
 
 ```bash
 scripts/install

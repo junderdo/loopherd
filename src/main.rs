@@ -30,6 +30,9 @@ mod stop_hook;
 mod template;
 mod tool_hook;
 mod tui;
+// build.rs includes it; here only for its tests.
+#[cfg(test)]
+mod version;
 mod watch;
 mod worktree;
 
@@ -61,7 +64,7 @@ use crate::worktree::{remote_timeout, repo_root};
 
 #[derive(Parser)]
 #[command(
-    version,
+    version = env!("LOOPHERD_VERSION"),
     about = "Herd coding agents across herdr sessions",
     args_conflicts_with_subcommands = true
 )]
