@@ -26,16 +26,16 @@ fn version_prints_the_version_and_the_commit_it_was_built_from() {
         assert_eq!(printed.trim(), bare);
         return;
     };
+    let dirty = git(&["status", "--porcelain", "--untracked-files=no"])
+        .is_some_and(|status| !status.is_empty());
     let tagged = git(&["tag", "--points-at", "HEAD"]).is_some_and(|tags| {
         tags.lines()
             .any(|tag| tag == format!("v{}", env!("CARGO_PKG_VERSION")))
     });
-    let expected = [
-        format!("{bare} ({commit})"),
-        format!("{bare} ({commit}-dirty)"),
-    ];
-    assert!(
-        expected.contains(&printed.trim().to_string()) || (tagged && printed.trim() == bare),
-        "{printed:?} should be one of {expected:?}"
-    );
+    let expected = match (dirty, tagged) {
+        (true, _) => format!("{bare} ({commit}-dirty)"),
+        (false, true) => bare,
+        (false, false) => format!("{bare} ({commit})"),
+    };
+    assert_eq!(printed.trim(), expected);
 }
