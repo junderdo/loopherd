@@ -1,8 +1,9 @@
 //! `loopherd tool-hook`: Claude's PreToolUse hook on Bash. Blocks a command
 //! from a lead's pane that needs a switch its herd file leaves off (D17), or
 //! a `loopherd restart --force` (D20), a `loopherd pause` or `resume`
-//! (D23), a `loopherd herd set` or `unset` (D29), or a write of the lead
-//! defaults (D31), which no switch allows.
+//! (D23), a `loopherd herd set` or `unset` (D29), a write of the lead
+//! defaults (D31), or cargo run through an alias it can't read, which no
+//! switch allows.
 //! A guardrail on the command text, not a sandbox.
 
 use std::path::Path;
@@ -34,6 +35,9 @@ pub enum Switch {
     /// `loopherd lead-defaults --set` or `scripts/install --lead-defaults`,
     /// which could turn a lead's own switches on. Not a switch: always the human's.
     LeadDefaults,
+    /// `cargo` run through a `CARGO_ALIAS_*` whose value the hook can't read.
+    /// Not a switch: always the human's.
+    OpaqueCargoAlias,
 }
 
 impl Switch {
@@ -46,6 +50,7 @@ impl Switch {
             Switch::Pause => "pause",
             Switch::HerdEdit => "herd set",
             Switch::LeadDefaults => "lead-defaults",
+            Switch::OpaqueCargoAlias => "cargo alias",
         }
     }
 
@@ -58,6 +63,7 @@ impl Switch {
             Switch::Pause => "the human pauses and resumes herds",
             Switch::HerdEdit => "the human edits herd files",
             Switch::LeadDefaults => "the human sets lead defaults",
+            Switch::OpaqueCargoAlias => "the human runs cargo through such aliases",
         }
     }
 
@@ -66,7 +72,11 @@ impl Switch {
             Switch::Merge => switches.merge,
             Switch::Install => switches.install,
             Switch::Rebase => switches.rebase,
-            Switch::ForceRestart | Switch::Pause | Switch::HerdEdit | Switch::LeadDefaults => false,
+            Switch::ForceRestart
+            | Switch::Pause
+            | Switch::HerdEdit
+            | Switch::LeadDefaults
+            | Switch::OpaqueCargoAlias => false,
         }
     }
 }
@@ -109,6 +119,7 @@ fn decide(
                 Switch::Pause,
                 Switch::HerdEdit,
                 Switch::LeadDefaults,
+                Switch::OpaqueCargoAlias,
             ]
         });
     if needed.is_empty() {
@@ -135,6 +146,13 @@ fn decide(
     if needed == Switch::LeadDefaults {
         return Ok(Some(format!(
             "loopherd: blocked: {} may not set lead defaults with `loopherd lead-defaults --set` or `scripts/install --lead-defaults`, which could turn its own switches on: {}; ask with `loopherd report --kind question`",
+            lead.name,
+            needed.humans_part()
+        )));
+    }
+    if needed == Switch::OpaqueCargoAlias {
+        return Ok(Some(format!(
+            "loopherd: blocked: {} may not run cargo through a `CARGO_ALIAS_*` whose value can't be read from the command: {}; spell the cargo command out, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -196,9 +214,18 @@ fn bash_command(input: &[u8]) -> Option<String> {
 
 /// Every switch the simple commands in `script` need, in order.
 pub fn needs(script: &str) -> Vec<Switch> {
+    needs_with(script, Aliases::new())
+}
+
+/// `CARGO_ALIAS_*` values by the alias's upper-case name.
+type Aliases = std::collections::HashMap<String, String>;
+
+/// [`needs`] with the cargo aliases assigned before `script`. An assignment
+/// anywhere, inline, exported or not, counts for the rest of the script.
+fn needs_with(script: &str, mut aliases: Aliases) -> Vec<Switch> {
     commands(script)
         .iter()
-        .flat_map(|words| needs_one(words))
+        .flat_map(|words| needs_one(words, &mut aliases))
         .collect()
 }
 
@@ -291,7 +318,7 @@ fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
 }
 
 /// Words that run the command after them, with their options that take a value.
-const WRAPPERS: [(&str, &[&str]); 13] = [
+const WRAPPERS: [(&str, &[&str]); 14] = [
     ("env", &["-u", "-C", "-S"]),
     ("sudo", &["-u", "-g", "-C", "-D"]),
     ("exec", &["-a"]),
@@ -304,6 +331,7 @@ const WRAPPERS: [(&str, &[&str]); 13] = [
     ("noglob", &[]),
     ("xargs", &["-I", "-n", "-P", "-L", "-d", "-s", "-E", "-a"]),
     ("timeout", &["-s", "-k"]),
+    ("setsid", &[]),
     // This repo's `scripts/herdr-dev`.
     ("herdr-dev", &[]),
 ];
@@ -312,7 +340,12 @@ const KEYWORDS: [&str; 10] = [
 ];
 const SHELLS: [&str; 5] = ["sh", "bash", "zsh", "dash", "ksh"];
 
-fn needs_one(words: &[String]) -> Vec<Switch> {
+fn needs_one(words: &[String], aliases: &mut Aliases) -> Vec<Switch> {
+    for (name, value) in words.iter().filter_map(|w| w.split_once('=')) {
+        if let Some(alias) = name.strip_prefix("CARGO_ALIAS_") {
+            aliases.insert(alias.to_uppercase(), value.to_string());
+        }
+    }
     let mut i = 0;
     loop {
         let Some(word) = words.get(i) else {
@@ -328,6 +361,16 @@ fn needs_one(words: &[String]) -> Vec<Switch> {
             if program == "timeout" {
                 i += 1;
             }
+        } else if program == "rustup" {
+            // `rustup [-q] [+toolchain] run [--install] <toolchain> <command>`
+            i += 1;
+            while words.get(i).is_some_and(|w| w.starts_with(['-', '+'])) {
+                i += 1;
+            }
+            if words.get(i).is_none_or(|w| w != "run") {
+                return vec![];
+            }
+            i = skip_options(words, i + 1, &[]) + 1;
         } else if SHELLS.contains(&program) {
             i += 1;
             // `-o pipefail`, `-O extglob`: the next word is the option's value.
@@ -339,7 +382,9 @@ fn needs_one(words: &[String]) -> Vec<Switch> {
                 }
                 if !option.starts_with("--") && option.contains('c') {
                     let script = skip_options(words, i + 1, &WITH_VALUE);
-                    return words.get(script).map_or(vec![], |script| needs(script));
+                    return words
+                        .get(script)
+                        .map_or(vec![], |script| needs_with(script, aliases.clone()));
                 }
                 i += if WITH_VALUE.contains(&option.as_str()) {
                     2
@@ -348,7 +393,9 @@ fn needs_one(words: &[String]) -> Vec<Switch> {
                 };
             }
         } else if program == "eval" {
-            return needs(&words[i + 1..].join(" "));
+            return needs_with(&words[i + 1..].join(" "), aliases.clone());
+        } else if program == "cargo" {
+            return cargo_needs(word, &words[i + 1..], aliases);
         } else {
             return needs_program(word, &words[i + 1..]).into_iter().collect();
         }
@@ -409,12 +456,42 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
     }
 }
 
+/// What `cargo args` needs as written and after each step of expanding its
+/// subcommand through `aliases`, since a built-in subcommand ignores its alias.
+fn cargo_needs(path: &str, args: &[String], aliases: &Aliases) -> Vec<Switch> {
+    // Past this many expansions the alias is circular, which cargo refuses too.
+    const MAX_EXPANSIONS: usize = 16;
+    let mut needed: Vec<Switch> = needs_program(path, args).into_iter().collect();
+    let mut args = args.to_vec();
+    for _ in 0..MAX_EXPANSIONS {
+        let at = cargo_subcommand(&args);
+        let Some(value) = args
+            .get(at)
+            .and_then(|sub| aliases.get(&sub.to_uppercase().replace('-', "_")))
+        else {
+            return needed;
+        };
+        // Command substitutions are lexed out of the word, leaving it empty.
+        if value.trim().is_empty() || value.contains(['$', '`']) {
+            return vec![Switch::OpaqueCargoAlias];
+        }
+        args.splice(at..=at, value.split_whitespace().map(String::from));
+        needed.extend(needs_program(path, &args).filter(|s| !needed.contains(s)));
+    }
+    vec![Switch::OpaqueCargoAlias]
+}
+
+/// The index of cargo's subcommand in `args`, past a `+toolchain` and global options.
+fn cargo_subcommand(args: &[String]) -> usize {
+    const GLOBAL_WITH_VALUE: [&str; 4] = ["--color", "--config", "-Z", "-C"];
+    let toolchain = usize::from(args.first().is_some_and(|a| a.starts_with('+')));
+    skip_options(args, toolchain, &GLOBAL_WITH_VALUE)
+}
+
 /// The args after `cargo run` (or `r`), options and `--` included; none for
 /// other subcommands, since `cargo test pause` is a filter.
 fn cargo_run_args(args: &[String]) -> &[String] {
-    const GLOBAL_WITH_VALUE: [&str; 4] = ["--color", "--config", "-Z", "-C"];
-    let toolchain = usize::from(args.first().is_some_and(|a| a.starts_with('+')));
-    let at = skip_options(args, toolchain, &GLOBAL_WITH_VALUE);
+    let at = cargo_subcommand(args);
     match args.get(at) {
         Some(run) if run == "run" || run == "r" => &args[at + 1..],
         _ => &[],
@@ -697,6 +774,11 @@ mod tests {
         "curl -sX PUT https://api.github.com/repos/o/r/pulls/12/merge",
         "curl -X GET -X PUT https://api.github.com/repos/o/r/pulls/12/merge",
         "wget -qO- https://api.github.com/repos/o/r/pulls/12/merge",
+        "setsid gh pr merge 12",
+        "setsid -f -w gh pr merge 12",
+        "rustup run stable gh pr merge 12",
+        "rustup --quiet run --install nightly-2026-01-01 gh pr merge 12",
+        "rustup +stable run stable gh pr merge 12",
     ];
     const INSTALLS: &[&str] = &[
         "scripts/install",
@@ -786,6 +868,9 @@ mod tests {
         "gh api --jq .merged repos/o/r/pulls/12/merge",
         "cargo run -- status",
         "cargo build",
+        "rustup update",
+        "rustup run stable cargo test",
+        "setsid cargo build",
     ];
 
     #[test]
@@ -967,7 +1052,11 @@ mod tests {
             Switch::Merge => s.merge = false,
             Switch::Install => s.install = false,
             Switch::Rebase => s.rebase = false,
-            Switch::ForceRestart | Switch::Pause | Switch::HerdEdit | Switch::LeadDefaults => {}
+            Switch::ForceRestart
+            | Switch::Pause
+            | Switch::HerdEdit
+            | Switch::LeadDefaults
+            | Switch::OpaqueCargoAlias => {}
         }
         s
     }
@@ -1007,7 +1096,11 @@ mod tests {
                 Switch::Merge => others_off.merge = true,
                 Switch::Install => others_off.install = true,
                 Switch::Rebase => others_off.rebase = true,
-                Switch::ForceRestart | Switch::Pause | Switch::HerdEdit | Switch::LeadDefaults => {}
+                Switch::ForceRestart
+                | Switch::Pause
+                | Switch::HerdEdit
+                | Switch::LeadDefaults
+                | Switch::OpaqueCargoAlias => {}
             }
             for command in commands {
                 assert_eq!(run(&leads, others_off, command), None, "{command}");
@@ -1235,6 +1328,10 @@ mod tests {
         "cargo +nightly run --release herd set h lead.merge true",
         "cargo run -- herd set h template.t.prompt '\"install-hook\"'",
         "cargo run -- herd set h template.t.prompt '\"pause\"'",
+        "setsid loopherd herd set h lead.merge true",
+        "setsid -f cargo run -- herd set h lead.merge true",
+        "rustup run stable loopherd herd set h lead.merge true",
+        "rustup run --install stable cargo run -- herd unset h lead.merge",
     ];
 
     #[test]
@@ -1370,5 +1467,79 @@ mod tests {
         ] {
             assert_eq!(needs(command), [], "{command}");
         }
+    }
+
+    #[test]
+    fn a_cargo_alias_assigned_in_the_script_is_judged_by_its_expansion() {
+        for (command, want) in [
+            (
+                "CARGO_ALIAS_X='run -- herd set h lead.merge true' cargo x",
+                Switch::HerdEdit,
+            ),
+            (
+                "env CARGO_ALIAS_X='run -- herd set h lead.merge true' cargo x",
+                Switch::HerdEdit,
+            ),
+            (
+                "env -u FOO CARGO_ALIAS_HS='run -- herd set' cargo -q hs h lead.merge true",
+                Switch::HerdEdit,
+            ),
+            (
+                "export CARGO_ALIAS_X='run -- pause h'; cargo x",
+                Switch::Pause,
+            ),
+            (
+                "CARGO_ALIAS_A=b CARGO_ALIAS_B='run -- install-hook' cargo a",
+                Switch::Install,
+            ),
+            (
+                "CARGO_ALIAS_MY_HOOK='run -- install-hook' cargo my-hook",
+                Switch::Install,
+            ),
+            (
+                "CARGO_ALIAS_X='run -- herd set' bash -c 'cargo x h lead.merge true'",
+                Switch::HerdEdit,
+            ),
+            (
+                "CARGO_ALIAS_X='r -- restart --force' rustup run stable cargo +nightly x lh-1",
+                Switch::ForceRestart,
+            ),
+            ("CARGO_ALIAS_RUN=build cargo run -- pause h", Switch::Pause),
+        ] {
+            assert_eq!(needs(command), [want], "{command}");
+        }
+        for command in [
+            "CARGO_ALIAS_X='build --release' cargo x",
+            "CARGO_ALIAS_X='run -- herd set' cargo build",
+            "CARGO_ALIAS_X=$CMD cargo test",
+        ] {
+            assert_eq!(needs(command), [], "{command}");
+        }
+    }
+
+    #[test]
+    fn a_cargo_alias_that_cant_be_read_is_denied_whatever_its_switches() {
+        let leads = ledger(vec![lead()]);
+        for command in [
+            "CARGO_ALIAS_X=$CMD cargo x",
+            "CARGO_ALIAS_X=\"$(cat alias)\" cargo x h lead.merge true",
+            "CARGO_ALIAS_X=$(cat alias) cargo x",
+            "CARGO_ALIAS_X=`cat alias` cargo x",
+            "CARGO_ALIAS_X=x cargo x",
+            "env CARGO_ALIAS_X= cargo x",
+        ] {
+            assert_eq!(needs(command), [Switch::OpaqueCargoAlias], "{command}");
+            let message =
+                run(&leads, all_on(), command).unwrap_or_else(|| panic!("{command} was allowed"));
+            assert!(
+                message.contains("lead-h may not run cargo through a `CARGO_ALIAS_*`"),
+                "{message}"
+            );
+        }
+        let workers = ledger(vec![entry("lh-1", None)]);
+        assert_eq!(
+            run(&workers, Switches::default(), "CARGO_ALIAS_X=$CMD cargo x"),
+            None
+        );
     }
 }
