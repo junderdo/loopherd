@@ -398,6 +398,11 @@ impl Sandbox {
     /// fails anything else, as an unreachable herdr does), and `question`
     /// added to lh-1's mailbox.
     fn notifying(&self, table: &str, at: &str, question: &str) {
+        self.notify_config(table);
+        self.ask(at, question);
+    }
+
+    fn notify_config(&self, table: &str) {
         let config = self.dir.path().join("config");
         fs::create_dir_all(&config).unwrap();
         fs::write(
@@ -414,6 +419,9 @@ impl Sandbox {
                 out.display()
             ),
         );
+    }
+
+    fn ask(&self, at: &str, question: &str) {
         let entry = serde_json::json!({"at": at, "kind": "question", "text": question});
         let mut mailbox = fs::OpenOptions::new()
             .append(true)
@@ -431,11 +439,11 @@ impl Sandbox {
     }
 
     fn script(&self, name: &str, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
+        let source = self.path(&format!("{name}.source"));
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, format!("#!/bin/sh\n{body}\n")).unwrap();
         let path = self.path(name);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        executable_copy(&source, &path);
         path
     }
 
@@ -446,6 +454,21 @@ impl Sandbox {
             .output()
             .unwrap()
     }
+}
+
+/// Copies `from` to an executable `to` in a child process: a file this
+/// process held open for writing could leak into a sibling test's fork and
+/// make running `to` fail with ETXTBSY.
+fn executable_copy(from: &std::path::Path, to: &std::path::Path) {
+    fs::create_dir_all(to.parent().unwrap()).unwrap();
+    let copied = Command::new("/bin/cp").arg(from).arg(to).status().unwrap();
+    assert!(copied.success());
+    let chmod = Command::new("/bin/chmod")
+        .arg("755")
+        .arg(to)
+        .status()
+        .unwrap();
+    assert!(chmod.success());
 }
 
 /// `path`'s text once something writes it, failing after 10s.
@@ -555,11 +578,10 @@ impl Sandbox {
     /// does, before `question` arrives.
     fn notify_watch_from_a_replaced_binary(&self, question: &str) -> Output {
         self.install_hook();
-        let read = self.loopherd(&["reports"]).output().unwrap();
-        assert!(read.status.success(), "{}", stderr(&read));
+        self.notify_config("");
+        fs::write(self.mailbox(), "").unwrap();
         let old = self.path("old/loopherd");
-        fs::create_dir_all(old.parent().unwrap()).unwrap();
-        fs::copy(env!("CARGO_BIN_EXE_loopherd"), &old).unwrap();
+        executable_copy(env!("CARGO_BIN_EXE_loopherd").as_ref(), &old);
         let watch = self.loopherd(&["watch", "--timeout", "10"]);
         let watch = Command::new(&old)
             .args(watch.get_args())
@@ -572,7 +594,7 @@ impl Sandbox {
             .unwrap();
         fs::write(self.path("new"), b"").unwrap();
         fs::rename(self.path("new"), &old).unwrap();
-        self.notifying("", "2026-11-02T09:01:00Z", question);
+        self.ask("2026-11-02T09:01:00Z", question);
         watch.wait_with_output().unwrap()
     }
 }
@@ -580,8 +602,10 @@ impl Sandbox {
 #[test]
 fn a_watch_whose_binary_was_replaced_sends_through_loopherd_on_path() {
     let sandbox = Sandbox::new();
-    fs::create_dir_all(sandbox.path("bin")).unwrap();
-    fs::copy(env!("CARGO_BIN_EXE_loopherd"), sandbox.path("bin/loopherd")).unwrap();
+    executable_copy(
+        env!("CARGO_BIN_EXE_loopherd").as_ref(),
+        &sandbox.path("bin/loopherd"),
+    );
 
     let watched = sandbox.notify_watch_from_a_replaced_binary("Which way?");
 
