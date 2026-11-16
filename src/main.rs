@@ -83,8 +83,8 @@ enum Command {
     /// and lead prompt, plus any missing GitHub issue labels, and, uncommitted,
     /// any missing tracker doc, docs/agents/loopherd.md and AGENTS.md loopherd
     /// section. Infers the repo, its default branch, the gh account matching
-    /// origin's owner when the herd has a GitHub repo (a local-markdown tracker
-    /// can go without one) and checks from Cargo.toml and package.json. On a terminal (stdin and stderr, a herdr
+    /// origin's owner when the herd has a GitHub repo (only a GitHub tracker
+    /// needs one) and checks from Cargo.toml and package.json. On a terminal (stdin and stderr, a herdr
     /// pane included) it asks for each with that as the default, asking again
     /// for a taken herd name or an existing lead prompt, and confirms before
     /// writing; the repo, default branch and confirm questions have no flag.

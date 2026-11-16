@@ -193,6 +193,7 @@ fn read_labels(repo: &Path) -> Result<Labels> {
         }
         *slot = label.to_string();
     }
+    refuse_queue_vocabulary(&labels.ready_for_agent)?;
     let roles = labels.roles();
     for (i, (role, label)) in roles.iter().enumerate() {
         if let Some((other, _)) = roles[i + 1..]
@@ -203,6 +204,23 @@ fn read_labels(repo: &Path) -> Result<Labels> {
         }
     }
     Ok(labels)
+}
+
+/// The labels the built-in sources read as a branch type, as in their type maps.
+const TYPE_LABELS: [(&str, &str); 2] = [("bug", "fix"), ("documentation", "docs")];
+
+/// Refuses a ready-for-agent label the queue also reads as a type or skill,
+/// which would give every claimable issue that type or skill.
+fn refuse_queue_vocabulary(label: &str) -> Result<()> {
+    let lower = label.to_ascii_lowercase();
+    let clash = match TYPE_LABELS.iter().find(|(name, _)| *name == lower) {
+        Some((name, ty)) => format!("the queue reads {name} as the branch type {ty}"),
+        None if lower.starts_with("skill:") => {
+            "the queue reads a skill: label as the worker's skill".to_string()
+        }
+        None => return Ok(()),
+    };
+    bail!("{LABELS_DOC} maps ready-for-agent to {label}, but {clash}; pick another label")
 }
 
 /// Safe unquoted in the herd's shell commands and inside its jq strings.
