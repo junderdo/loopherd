@@ -386,6 +386,14 @@ mod tests {
     }
 
     #[test]
+    fn a_notify_value_of_any_shape_leaves_the_limits_readable() {
+        for notify in ["notify = true", "[notify]\nkinds = [\"done\"]"] {
+            let (_dir, path) = config(Some(&format!("context_window = 1000000\n{notify}\n")));
+            assert_eq!(effective_limit(None, &path).unwrap(), 250_000, "{notify}");
+        }
+    }
+
+    #[test]
     fn a_members_limit_ignores_the_shepherds() {
         let (_dir, path) = config(Some("[shepherd]\ncontext_limit = 120000\n"));
         assert_eq!(effective_limit(None, &path).unwrap(), 160_000);

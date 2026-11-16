@@ -391,3 +391,311 @@ fn a_leads_watch_over_the_shepherds_limit_says_nothing_more() {
     );
     assert!(!state.join("handoff-asked/s-lead").exists());
 }
+
+impl Sandbox {
+    /// `[notify]` enabled with `table`'s extra lines, a `herdr` on PATH that
+    /// records a notification's socket and arguments in `herdr.out` (and
+    /// fails anything else, as an unreachable herdr does), and `question`
+    /// added to lh-1's mailbox.
+    fn notifying(&self, table: &str, at: &str, question: &str) {
+        self.notify_config(table);
+        self.ask(at, question);
+    }
+
+    fn notify_config(&self, table: &str) {
+        let config = self.dir.path().join("config");
+        fs::create_dir_all(&config).unwrap();
+        fs::write(
+            config.join("config.toml"),
+            format!("[notify]\nenabled = true\n{table}"),
+        )
+        .unwrap();
+        let out = self.path("herdr.out");
+        self.script(
+            "bin/herdr",
+            &format!(
+                "[ \"$1\" = notification ] || exit 1\n\
+                 printf '%s\\n' \"$HERDR_SOCKET_PATH\" \"$@\" > {}.tmp && /bin/mv {0}.tmp {0}",
+                out.display()
+            ),
+        );
+    }
+
+    fn ask(&self, at: &str, question: &str) {
+        let entry = serde_json::json!({"at": at, "kind": "question", "text": question});
+        let mut mailbox = fs::OpenOptions::new()
+            .append(true)
+            .open(self.mailbox())
+            .unwrap();
+        std::io::Write::write_all(&mut mailbox, format!("{entry}\n").as_bytes()).unwrap();
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.dir.path().join(name)
+    }
+
+    fn mailbox(&self) -> PathBuf {
+        self.path("state/loopherd/reports/lh-1.jsonl")
+    }
+
+    fn script(&self, name: &str, body: &str) -> PathBuf {
+        let source = self.path(&format!("{name}.source"));
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let path = self.path(name);
+        executable_copy(&source, &path);
+        path
+    }
+
+    fn notify_watch(&self) -> Output {
+        self.loopherd(&["watch", "--timeout", "0"])
+            .env("PATH", self.path("bin"))
+            .env("HERDR_SOCKET_PATH", "/run/watched.sock")
+            .output()
+            .unwrap()
+    }
+}
+
+/// Copies `from` to an executable `to` in a child process: a file this
+/// process held open for writing could leak into a sibling test's fork and
+/// make running `to` fail with ETXTBSY.
+fn executable_copy(from: &std::path::Path, to: &std::path::Path) {
+    fs::create_dir_all(to.parent().unwrap()).unwrap();
+    let copied = Command::new("/bin/cp").arg(from).arg(to).status().unwrap();
+    assert!(copied.success());
+    let chmod = Command::new("/bin/chmod")
+        .arg("755")
+        .arg(to)
+        .status()
+        .unwrap();
+    assert!(chmod.success());
+}
+
+/// `path`'s text once something writes it, failing after 10s.
+fn eventually(path: &std::path::Path, ready: impl Fn(&str) -> bool) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let text = fs::read_to_string(path).unwrap_or_default();
+        if ready(&text) {
+            return text;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} stayed {text:?}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_question_is_sent_to_herdrs_toast_on_the_watched_socket_and_to_the_command() {
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+    let out = sandbox.path("command.out");
+    let command = sandbox.script(
+        "notify-stub",
+        &format!(
+            "printf '%s|' \"$@\" > {}.tmp && /bin/mv {0}.tmp {0}",
+            out.display()
+        ),
+    );
+    sandbox.notifying(
+        &format!(
+            "command = '{} {{herd}} {{member}} {{kind}} {{text}}'\n",
+            command.display()
+        ),
+        "2026-11-02T09:01:00Z",
+        "Merge PR #107?\nIt adds notify.",
+    );
+
+    let watched = sandbox.notify_watch();
+
+    assert_eq!(watched.status.code(), Some(0), "{}", stderr(&watched));
+    assert_eq!(
+        eventually(&sandbox.path("herdr.out"), |t| !t.is_empty()),
+        "/run/watched.sock\nnotification\nshow\nlh-1\n--body=Merge PR #107?\n--sound\nrequest\n"
+    );
+    assert_eq!(
+        eventually(&out, |t| !t.is_empty()),
+        "|lh-1|question|Merge PR #107?|"
+    );
+}
+
+#[test]
+fn a_slow_command_does_not_hold_up_the_watch_and_a_failing_one_is_noted() {
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+    let slow = sandbox.script("slow", "/bin/sleep 5");
+    sandbox.notifying(
+        &format!("herdr = false\ncommand = '{}'\n", slow.display()),
+        "2026-11-02T09:01:00Z",
+        "Which way?",
+    );
+    let started = Instant::now();
+
+    let watched = sandbox.notify_watch();
+
+    assert_eq!(watched.status.code(), Some(0), "{}", stderr(&watched));
+    assert!(started.elapsed() < Duration::from_secs(4));
+
+    let failing = sandbox.script("failing", "echo refused >&2; exit 7");
+    sandbox.notifying(
+        &format!("herdr = false\ncommand = '{}'\n", failing.display()),
+        "2026-11-02T09:02:00Z",
+        "Which way now?",
+    );
+    let watched = sandbox.notify_watch();
+
+    assert_eq!(watched.status.code(), Some(0), "{}", stderr(&watched));
+    let mailbox = eventually(&sandbox.mailbox(), |t| t.contains("\"note\""));
+    assert!(
+        mailbox.contains("notify command failed (exit 7: refused)"),
+        "{mailbox}"
+    );
+}
+
+#[test]
+fn a_broken_notify_table_sends_nothing_and_warns() {
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+    sandbox.notifying("kinds = ['done']\n", "2026-11-02T09:01:00Z", "Which way?");
+
+    let watched = sandbox.notify_watch();
+
+    assert_eq!(watched.status.code(), Some(0), "{}", stderr(&watched));
+    assert!(
+        stderr(&watched).contains("sent no notification"),
+        "{}",
+        stderr(&watched)
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!sandbox.path("herdr.out").exists());
+}
+
+impl Sandbox {
+    /// A watch run from a copy of loopherd that is replaced, as a reinstall
+    /// does, before `question` arrives.
+    fn notify_watch_from_a_replaced_binary(&self, question: &str) -> Output {
+        self.install_hook();
+        self.notify_config("");
+        fs::write(self.mailbox(), "").unwrap();
+        let old = self.path("old/loopherd");
+        executable_copy(env!("CARGO_BIN_EXE_loopherd").as_ref(), &old);
+        let watch = self.loopherd(&["watch", "--timeout", "10"]);
+        let watch = Command::new(&old)
+            .args(watch.get_args())
+            .envs(watch.get_envs().filter_map(|(k, v)| Some((k, v?))))
+            .env("PATH", self.path("bin"))
+            .env("HERDR_SOCKET_PATH", "/run/watched.sock")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        fs::write(self.path("new"), b"").unwrap();
+        fs::rename(self.path("new"), &old).unwrap();
+        self.ask("2026-11-02T09:01:00Z", question);
+        watch.wait_with_output().unwrap()
+    }
+}
+
+#[test]
+fn a_watch_whose_binary_was_replaced_sends_through_loopherd_on_path() {
+    let sandbox = Sandbox::new();
+    executable_copy(
+        env!("CARGO_BIN_EXE_loopherd").as_ref(),
+        &sandbox.path("bin/loopherd"),
+    );
+
+    let watched = sandbox.notify_watch_from_a_replaced_binary("Which way?");
+
+    assert_eq!(watched.status.code(), Some(0), "{}", stderr(&watched));
+    assert!(
+        eventually(&sandbox.path("herdr.out"), |t| !t.is_empty()).contains("--body=Which way?")
+    );
+}
+
+#[test]
+fn a_notification_that_cannot_start_is_noted_in_the_mailbox() {
+    let sandbox = Sandbox::new();
+
+    let watched = sandbox.notify_watch_from_a_replaced_binary("Which way?");
+
+    assert_eq!(watched.status.code(), Some(0), "{}", stderr(&watched));
+    let mailbox = fs::read_to_string(sandbox.mailbox()).unwrap();
+    assert!(
+        mailbox.contains("herdr's toast failed (could not start loopherd"),
+        "{mailbox}"
+    );
+}
+
+#[test]
+fn notify_run_leads_its_own_process_group_so_the_watch_ending_leaves_it_running() {
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+    let out = sandbox.path("group.out");
+    let command = sandbox.script(
+        "group-stub",
+        &format!(
+            "read -r pid comm state ppid pgid rest < /proc/$PPID/stat\n\
+             echo \"$PPID $pgid\" > {}.tmp && /bin/mv {0}.tmp {0}",
+            out.display()
+        ),
+    );
+    sandbox.notifying(
+        &format!("herdr = false\ncommand = '{}'\n", command.display()),
+        "2026-11-02T09:01:00Z",
+        "Which way?",
+    );
+
+    let watched = sandbox.notify_watch();
+
+    assert_eq!(watched.status.code(), Some(0), "{}", stderr(&watched));
+    let ids = eventually(&out, |t| !t.is_empty());
+    let (notify_run, group) = ids.trim().split_once(' ').unwrap();
+    assert_eq!(notify_run, group, "{ids}");
+}
+
+#[test]
+fn a_leads_watch_with_no_shepherds_watch_sends_the_leads_own_question_once() {
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+    let state = sandbox.path("state/loopherd");
+    fs::write(
+        state.join("ledger.json"),
+        r#"{"lead-cards": {"name": "lead-cards", "pane_id": "w1:p0", "session_id": null,
+            "repo": "/", "worktree": null, "workspace": "w1", "prompt": null,
+            "prompt_sent": true, "created": "2026-11-01T00:00:00Z",
+            "herd": "cards", "role": "lead", "socket": "/run/watched.sock"}}"#,
+    )
+    .unwrap();
+    let out = sandbox.path("command.out");
+    let command = sandbox.script(
+        "notify-stub",
+        &format!("printf '%s|' \"$@\" >> {}; echo >> {0}", out.display()),
+    );
+    sandbox.notify_config(&format!(
+        "herdr = false\ncommand = '{} {{herd}} {{member}} {{kind}} {{text}}'\n",
+        command.display()
+    ));
+    fs::write(
+        state.join("reports/lead-cards.jsonl"),
+        r#"{"at":"2026-11-02T09:01:00Z","kind":"question","text":"Merge #107?"}
+"#,
+    )
+    .unwrap();
+
+    let watched = sandbox
+        .loopherd(&["watch", "--timeout", "0"])
+        .env("PATH", sandbox.path("bin"))
+        .env("HERDR_PANE_ID", "w1:p0")
+        .env("HERDR_SOCKET_PATH", "/run/watched.sock")
+        .output()
+        .unwrap();
+
+    assert_eq!(watched.status.code(), Some(2), "{}", stderr(&watched));
+    let sent = "cards|lead-cards|question|Merge #107?|\n";
+    assert_eq!(eventually(&out, |t| !t.is_empty()), sent);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(fs::read_to_string(&out).unwrap(), sent);
+}

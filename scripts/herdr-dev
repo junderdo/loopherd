@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Run a command against the loopherd-dev herdr session, never the inherited one.
+# Run a command against the loopherd-dev herdr session, never the inherited one,
+# with loopherd's config (herd files, config.toml and its [notify]) read from
+# $XDG_RUNTIME_DIR/loopherd-dev/config, else a fresh mktemp dir, unless
+# LOOPHERD_CONFIG_DIR is already set.
 #
 #   scripts/herdr-dev cargo run -- spawn --workspace <label> ...
 #   scripts/herdr-dev herdr agent list
@@ -14,6 +17,17 @@ live_labels=$(herdr workspace list 2>/dev/null | jq -r '.result.workspaces[].lab
 
 unset HERDR_ENV HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID
 export HERDR_SOCKET_PATH="$dev_socket"
+# Never a fixed path in shared /tmp: another user could plant a [notify] command there.
+if [[ -z "${LOOPHERD_CONFIG_DIR:-}" ]]; then
+  if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+    LOOPHERD_CONFIG_DIR="$XDG_RUNTIME_DIR/loopherd-dev/config"
+  else
+    LOOPHERD_CONFIG_DIR=$(mktemp -d)
+    # --start's server hands it on to every pane it opens, so only a one-off run removes it.
+    [[ "${1:-}" == --start ]] || trap 'rm -rf -- "$LOOPHERD_CONFIG_DIR"' EXIT
+  fi
+fi
+export LOOPHERD_CONFIG_DIR
 
 if [[ "${1:-}" == --start ]]; then
   nohup herdr --session loopherd-dev server >/dev/null 2>&1 &
@@ -38,4 +52,5 @@ if [[ -n "$live_labels" ]]; then
   done <<<"$dev_labels"
 fi
 
-exec "$@"
+# Not exec: the EXIT trap removing a mktemp config dir has to outlive the command.
+"$@"

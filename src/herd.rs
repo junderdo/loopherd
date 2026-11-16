@@ -735,6 +735,11 @@ fn read_prompt(
     })
 }
 
+/// Whether `config` reads as TOML; a missing or unreadable file doesn't.
+fn parses_as_toml(config: &Path) -> bool {
+    std::fs::read_to_string(config).is_ok_and(|text| text.parse::<toml::Table>().is_ok())
+}
+
 fn expand_home(path: &str, home: &Path) -> PathBuf {
     match path.strip_prefix('~') {
         Some("") => home.to_path_buf(),
@@ -756,6 +761,20 @@ pub fn herds(paths: &Paths) -> Result<(String, i32)> {
             None
         }
     };
+    let config = config_file(paths);
+    if parses_as_toml(&config) {
+        match crate::notify::load(&config) {
+            Err(e) => {
+                lines.push(format!("invalid {}", format!("{e:#}").trim_end()));
+                code = 1;
+            }
+            Ok(Some(notify)) if notify.sends_nothing() => lines.push(format!(
+                "warning: {}: [notify] is enabled with herdr = false and no command, so nothing is sent",
+                config.display()
+            )),
+            Ok(_) => {}
+        }
+    }
     let files = herd_files(&paths.herds)?;
     if files.is_empty() {
         lines.push(format!(
@@ -1982,6 +2001,63 @@ args = ["--model", "opus"]
         let (report, code) = herds(&config.paths()).unwrap();
         assert!(!report.contains("invalid"), "{report}");
         assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn herds_warns_of_an_enabled_notify_table_that_sends_nothing() {
+        let config = Config::with(&[("prs", PR_HERD)]);
+        let file = config.path().join("config.toml");
+        fs::write(&file, "[notify]\nenabled = true\nherdr = false\n").unwrap();
+
+        let (report, code) = herds(&config.paths()).unwrap();
+
+        assert!(
+            report.starts_with(&format!(
+                "warning: {}: [notify] is enabled with herdr = false and no command",
+                file.display()
+            )),
+            "{report}"
+        );
+        assert_eq!(code, 0, "{report}");
+    }
+
+    #[test]
+    fn herds_reports_a_broken_notify_table_beside_a_context_error() {
+        let config = Config::with(&[("prs", PR_HERD)]);
+        let file = config.path().join("config.toml");
+        fs::write(&file, "context_window = 0\n[notify]\nkinds = [\"done\"]\n").unwrap();
+
+        let (report, code) = herds(&config.paths()).unwrap();
+
+        assert_eq!(report.matches("invalid").count(), 2, "{report}");
+        assert!(report.contains("[notify]"), "{report}");
+        assert_eq!(code, 1, "{report}");
+    }
+
+    #[test]
+    fn herds_reports_a_broken_notify_table_and_exits_1_while_context_limits_still_read() {
+        let config = Config::with(&[("prs", PR_HERD)]);
+        let file = config.path().join("config.toml");
+        fs::write(
+            &file,
+            "context_window = 300000\n[notify]\nkinds = [\"done\"]\n",
+        )
+        .unwrap();
+
+        let (report, code) = herds(&config.paths()).unwrap();
+
+        let first = report.lines().next().unwrap();
+        assert!(
+            first.starts_with(&format!("invalid {}: [notify]", file.display())),
+            "{report}"
+        );
+        assert!(first.contains("done"), "{report}");
+        assert_eq!(report.matches("invalid").count(), 1, "{report}");
+        assert_eq!(code, 1, "{report}");
+        assert_eq!(
+            crate::context::effective_limit(None, &file).unwrap(),
+            240_000
+        );
     }
 
     #[test]
