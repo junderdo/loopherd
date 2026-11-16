@@ -16,8 +16,10 @@ use crate::spawn::{
 use crate::template::Template;
 
 mod edit;
+mod remove;
 
 pub use edit::{get, set, unset};
+pub use remove::{Removal, remove};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
