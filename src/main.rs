@@ -20,6 +20,7 @@ mod session_hook;
 mod shell;
 mod skill;
 mod spawn;
+mod stats;
 mod status;
 mod stop_hook;
 mod template;
@@ -149,6 +150,22 @@ enum Command {
         #[arg(long)]
         strays: bool,
         /// Print JSON. Its shape is unstable.
+        #[arg(long)]
+        json: bool,
+    },
+    /// How each herd's work flowed: per retired member, time to its first
+    /// `done` report, review rounds, time waiting on merge and in total, with a
+    /// summary per herd and open members listed apart. Leads are left out.
+    /// Read-only, and marks no report read.
+    Stats {
+        /// Only this herd.
+        #[arg(long)]
+        herd: Option<String>,
+        /// Only members started on or after this date (2026-11-01, midnight UTC) or RFC 3339
+        /// time with `Z` or an offset.
+        #[arg(long, value_parser = stats::parse_since)]
+        since: Option<SystemTime>,
+        /// Print JSON.
         #[arg(long)]
         json: bool,
     },
@@ -379,6 +396,7 @@ fn main() -> ExitCode {
         Command::Prompt { name, force } => ("prompt", run_prompt(&name, force)),
         Command::Restart { name, force } => ("restart", run_restart(&name, force)),
         Command::Status { all, strays, json } => ("status", run_status(all, strays, json)),
+        Command::Stats { herd, since, json } => ("stats", run_stats(herd, since, json)),
         Command::View { all, strays } => ("view", run_view(all, strays)),
         Command::Report {
             kind,
@@ -511,6 +529,27 @@ fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
         eprintln!("loopherd status: {line}");
     }
     Ok(out.code)
+}
+
+fn run_stats(herd: Option<String>, since: Option<SystemTime>, json: bool) -> Result<i32> {
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let query = stats::Query {
+        herd: herd.as_deref(),
+        since,
+        now: SystemTime::now(),
+    };
+    let (herds, warnings) = stats::stats(&ledger, &ledger.reports_dir()?, &query)?;
+    match json {
+        true => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "herds": herds }))?
+        ),
+        false => print!("{}", stats::render(&herds)),
+    }
+    for warning in warnings {
+        eprintln!("loopherd stats: warning: {warning}");
+    }
+    Ok(0)
 }
 
 fn run_view(all: bool, strays: bool) -> Result<i32> {
