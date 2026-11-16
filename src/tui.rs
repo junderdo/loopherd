@@ -1,6 +1,7 @@
 //! `loopherd view`: the herd view, live.
 
 mod since;
+pub mod theme;
 mod watcher;
 
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -9,11 +10,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use ratatui::backend::Backend;
+use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
-use ratatui::widgets::Paragraph;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Widget};
 use ratatui::{Frame, Terminal};
 
 use crate::herd_view::{Member, Options, Stray};
@@ -23,6 +25,7 @@ use crate::ledger::Ledger;
 use crate::pause::Pauses;
 use crate::status::{Read, aligned, read, row, sections, stray_lines, widths};
 use since::Since;
+use theme::Theme;
 use watcher::{Signal, Watch, watch};
 
 const POLL: Duration = Duration::from_secs(2);
@@ -33,6 +36,8 @@ const SUBSCRIBED_POLL: Duration = Duration::from_secs(10);
 const TICK: Duration = Duration::from_millis(100);
 /// Wide enough for `for 59m`, so the columns don't jump when a time appears.
 const TIME_WIDTH: usize = 7;
+/// Over a member's cells, the time's column left blank.
+const HEADINGS: [&str; 6] = ["NAME", "STATUS", "", "BRANCH", "WORKTREE", "PANE"];
 
 /// Work for the reader thread: anything that touches herdr or the ledger,
 /// which can hang, so the input loop never does.
@@ -85,6 +90,9 @@ where
 
 pub struct App {
     options: Options,
+    theme: Theme,
+    /// The first tick, from which the spinner's frame counts.
+    opened: Option<Instant>,
     read: Option<Read>,
     since: Since,
     selected: usize,
@@ -123,16 +131,31 @@ impl Target<'_> {
 }
 
 struct Row {
-    text: String,
-    dim: bool,
+    line: Line<'static>,
     /// Index among the selectable rows.
     target: Option<usize>,
 }
 
+enum Piece {
+    Boxed(String, Vec<Row>),
+    Note(String),
+}
+
+impl Piece {
+    fn height(&self) -> u16 {
+        match self {
+            Piece::Boxed(_, rows) => (rows.len() + 2).min(u16::MAX as usize) as u16,
+            Piece::Note(_) => 1,
+        }
+    }
+}
+
 impl App {
-    pub fn new(options: Options) -> App {
+    pub fn new(options: Options, theme: Theme) -> App {
         App {
             options,
+            theme,
+            opened: None,
             read: None,
             since: Since::default(),
             selected: 0,
@@ -148,6 +171,7 @@ impl App {
 
     /// A read, when one is due and none is in flight.
     pub fn tick(&mut self, now: Instant) -> Option<Request> {
+        self.opened.get_or_insert(now);
         let due = self.invalidated || self.polled.is_none_or(|at| now >= at + self.poll());
         (due && self.reading.is_none()).then(|| self.request_read(now))
     }
@@ -228,42 +252,95 @@ impl App {
     }
 
     pub fn draw(&self, frame: &mut Frame, now: Instant) {
+        let window = self
+            .block()
+            .title(Span::styled(" loopherd ", self.theme.title()));
+        let inner = window.inner(frame.area());
+        frame.render_widget(window, frame.area());
         let [body, footer] =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
-        let rows = self.rows(now);
-        let selected_line = rows
-            .iter()
-            .position(|r| r.target == Some(self.selected))
-            .unwrap_or(0);
-        let scroll = (selected_line + 1).saturating_sub(body.height as usize);
-        let lines: Vec<Line> = rows
-            .into_iter()
-            .map(|r| {
-                let text = match r.target {
-                    Some(i) if i == self.selected => format!("› {}", r.text),
-                    Some(_) => format!("  {}", r.text),
-                    None => r.text,
-                };
-                match r.dim {
-                    true => Line::styled(text, Style::new().add_modifier(Modifier::DIM)),
-                    false => Line::raw(text),
-                }
-            })
-            .collect();
-        frame.render_widget(
-            Paragraph::new(lines).scroll((scroll.min(u16::MAX as usize) as u16, 0)),
-            body,
-        );
-        frame.render_widget(Line::raw(self.keys()), footer);
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+        let (page, selected_line) = self.page(now, body.width);
+        let scroll = (selected_line + 1).saturating_sub(body.height);
+        let shown = page.area.height.saturating_sub(scroll).min(body.height);
+        let out = frame.buffer_mut();
+        for y in 0..shown {
+            for x in 0..body.width {
+                out[(body.x + x, body.y + y)] = page[(x, scroll + y)].clone();
+            }
+        }
+        frame.render_widget(self.keys(), footer);
     }
 
-    fn keys(&self) -> String {
-        let on = |b: bool| if b { "on" } else { "off" };
-        format!(
-            "q quit  ↑↓/jk select  enter focus  s strays: {}  a all: {}",
-            on(self.options.strays),
-            on(self.options.all)
-        )
+    fn block(&self) -> Block<'static> {
+        Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(self.theme.border())
+    }
+
+    /// Every piece laid out top to bottom, and the selected row's line.
+    fn page(&self, now: Instant, width: u16) -> (Buffer, u16) {
+        let pieces = self.pieces(now);
+        let height = pieces
+            .iter()
+            .fold(0u16, |h, p| h.saturating_add(p.height()));
+        let mut page = Buffer::empty(Rect::new(0, 0, width, height));
+        let (mut y, mut selected_line) = (0, 0);
+        for piece in pieces {
+            let area = Rect::new(0, y, width, piece.height()).intersection(page.area);
+            y = y.saturating_add(piece.height());
+            let (title, rows) = match piece {
+                Piece::Note(text) => {
+                    Line::raw(format!(" {text}")).render(area, &mut page);
+                    continue;
+                }
+                Piece::Boxed(title, rows) => (title, rows),
+            };
+            let block = self
+                .block()
+                .title(Span::styled(format!(" {title} "), Modifier::BOLD));
+            let inner = block.inner(area);
+            block.render(area, &mut page);
+            for (row, y) in rows.into_iter().zip(inner.y..inner.bottom()) {
+                let line = match row.target == Some(self.selected) {
+                    true => {
+                        selected_line = y;
+                        highlighted(row.line, inner.width, self.theme.selected())
+                    }
+                    false => row.line,
+                };
+                line.render(
+                    Rect {
+                        y,
+                        height: 1,
+                        ..inner
+                    },
+                    &mut page,
+                );
+            }
+        }
+        (page, selected_line)
+    }
+
+    fn keys(&self) -> Line<'static> {
+        let t = self.theme;
+        let mut spans = vec![];
+        let key = |spans: &mut Vec<Span<'static>>, key: &'static str, label: &'static str| {
+            spans.push(Span::raw(if spans.is_empty() { " " } else { "  " }));
+            spans.push(Span::styled(key, t.key()));
+            spans.push(Span::styled(format!(" {label}"), t.label()));
+        };
+        key(&mut spans, "q", "quit");
+        key(&mut spans, "↑↓/jk", "select");
+        key(&mut spans, "enter", "focus");
+        for (k, label, on) in [
+            ("s", "strays:", self.options.strays),
+            ("a", "all:", self.options.all),
+        ] {
+            key(&mut spans, k, label);
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(if on { "on" } else { "off" }, t.toggle(on)));
+        }
+        Line::from(spans)
     }
 
     fn select(&mut self, index: usize) {
@@ -318,28 +395,23 @@ impl App {
         members.chain(strays).collect()
     }
 
-    fn rows(&self, now: Instant) -> Vec<Row> {
-        let mut rows = self.view_rows(now);
-        let plain = |text: String| Row {
-            text,
-            dim: false,
-            target: None,
-        };
+    fn pieces(&self, now: Instant) -> Vec<Piece> {
+        let mut pieces = self.view_pieces(now);
         match (&self.read, self.reading) {
-            (None, _) => rows.push(plain("reading herdr and the ledger…".into())),
+            (None, _) => pieces.push(Piece::Note("reading herdr and the ledger…".into())),
             (Some(_), Some(since)) if now.saturating_duration_since(since) >= POLL => {
                 let waited = now.saturating_duration_since(since).as_secs();
-                rows.push(plain(format!(
+                pieces.push(Piece::Note(format!(
                     "herdr hasn't answered for {waited}s; showing the last read"
                 )));
             }
             _ => {}
         }
-        rows.extend(self.message.clone().map(plain));
-        rows
+        pieces.extend(self.message.clone().map(Piece::Note));
+        pieces
     }
 
-    fn view_rows(&self, now: Instant) -> Vec<Row> {
+    fn view_pieces(&self, now: Instant) -> Vec<Piece> {
         let Some(read) = &self.read else {
             return vec![];
         };
@@ -358,48 +430,80 @@ impl App {
                     .collect()
             })
             .collect();
-        let mut widths = widths(cells.iter().flatten());
+        let headings: Vec<String> = HEADINGS.map(String::from).to_vec();
+        let mut widths = widths(cells.iter().flatten().chain([&headings]));
         if let Some(w) = widths.get_mut(2) {
             *w = (*w).max(TIME_WIDTH);
         }
-        let plain = |text: String| Row {
-            text,
-            dim: false,
-            target: None,
-        };
-        let mut rows = vec![];
+        let heading = Line::from(vec![
+            Span::raw("   "),
+            Span::styled(aligned(&headings, &widths), self.theme.heading()),
+        ]);
+        let spinner = self.opened.map_or(0, |at| {
+            now.saturating_duration_since(at).as_millis() / TICK.as_millis()
+        }) as usize;
+        let mut pieces = vec![];
         let mut target = 0;
         for ((name, members), cells) in sections.iter().zip(&cells) {
-            rows.push(plain(name.clone()));
-            for (member, cells) in members.iter().zip(cells) {
+            let mut rows = vec![];
+            if !members.is_empty() {
                 rows.push(Row {
-                    text: aligned(cells, &widths),
-                    dim: member.gone,
+                    line: heading.clone(),
+                    target: None,
+                });
+            }
+            for (member, cells) in members.iter().zip(cells) {
+                let (glyph, style) = self.theme.glyph(member.status, member.gone, spinner);
+                let text = match member.gone {
+                    true => Span::styled(aligned(cells, &widths), Modifier::DIM),
+                    false => Span::raw(aligned(cells, &widths)),
+                };
+                rows.push(Row {
+                    line: Line::from(vec![
+                        Span::raw(" "),
+                        Span::styled(glyph, style),
+                        Span::raw(" "),
+                        text,
+                    ]),
                     target: Some(target),
                 });
                 target += 1;
             }
+            pieces.push(Piece::Boxed(name.clone(), rows));
         }
         let strays = stray_lines(view);
         let mut strays = strays.lines();
-        rows.extend(strays.next().map(|l| plain(l.into())));
-        for line in strays {
-            rows.push(Row {
-                text: line.trim_start().into(),
-                dim: false,
-                target: Some(target),
-            });
-            target += 1;
+        if let Some(title) = strays.next() {
+            let rows = strays
+                .zip(target..)
+                .map(|(line, target)| Row {
+                    line: Line::raw(format!(" {}", line.trim_start())),
+                    target: Some(target),
+                })
+                .collect();
+            pieces.push(Piece::Boxed(title.into(), rows));
         }
         if sections.iter().any(|(_, m)| m.iter().any(|m| m.gone)) {
-            rows.push(plain(
+            pieces.push(Piece::Note(
                 "gone: no live agent matches it; `loopherd revive` can bring it back".into(),
             ));
         }
         let problems = read.problem.iter().flat_map(|p| p.lines());
-        rows.extend(problems.map(|line| plain(line.into())));
-        rows
+        pieces.extend(problems.map(|line| Piece::Note(line.into())));
+        pieces
     }
+}
+
+/// `line` in the selection's style, padded to fill `width`.
+fn highlighted(line: Line<'static>, width: u16, style: Style) -> Line<'static> {
+    let pad = (width as usize).saturating_sub(line.width());
+    let mut spans: Vec<Span> = line
+        .spans
+        .into_iter()
+        .map(|s| s.patch_style(style))
+        .collect();
+    spans.push(Span::styled(" ".repeat(pad), style));
+    Line::from(spans)
 }
 
 /// `for 3m`, in the largest whole unit; blank when no change was seen.
@@ -446,6 +550,7 @@ pub fn run<H, S, L>(
     ledger: L,
     pauses: Pauses,
     options: Options,
+    theme: Theme,
 ) -> Result<i32>
 where
     H: Herdr + Send + 'static,
@@ -458,7 +563,7 @@ where
     let mut terminal = ratatui::try_init()?;
     let result = run_loop(
         &mut terminal,
-        App::new(options),
+        App::new(options, theme),
         &requests,
         &responses,
         &watch,
@@ -546,7 +651,8 @@ mod tests {
 
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::style::Modifier;
+    use ratatui::buffer::Cell;
+    use ratatui::style::{Color, Modifier};
 
     use super::*;
     use crate::herdr::fake::{FakeHerdr, FakeSubscriber, Which};
@@ -619,7 +725,11 @@ mod tests {
     }
 
     fn app(herdr: &FakeHerdr, ledger: &MemLedger, now: Instant) -> App {
-        let mut app = App::new(Options::default());
+        themed(truecolor(), herdr, ledger, now)
+    }
+
+    fn themed(theme: Theme, herdr: &FakeHerdr, ledger: &MemLedger, now: Instant) -> App {
+        let mut app = App::new(Options::default(), theme);
         let request = app.tick(now).expect("first read is due");
         app.apply(
             serve(
@@ -641,7 +751,7 @@ mod tests {
         let pause = r#"{"since": "2026-11-05T09:00:00Z", "reason": "freeze"}"#;
         std::fs::write(root.path().join("paused/prs"), pause).unwrap();
         let now = Instant::now();
-        let mut app = App::new(Options::default());
+        let mut app = App::new(Options::default(), truecolor());
         let request = app.tick(now).unwrap();
         app.apply(
             serve(request, &herdr(), &ledger(), &Pauses::under(root.path())),
@@ -654,7 +764,7 @@ mod tests {
         assert!(
             shown
                 .iter()
-                .any(|l| l.trim() == "prs  paused since 2026-11-05T09:00:00Z — freeze"),
+                .any(|l| l.contains("╭ prs  paused since 2026-11-05T09:00:00Z — freeze ─")),
             "{shown:#?}"
         );
     }
@@ -669,8 +779,12 @@ mod tests {
         app.apply(response, now).unwrap();
     }
 
+    fn truecolor() -> Theme {
+        Theme::from_env(Some("truecolor"), None)
+    }
+
     fn render(app: &App, now: Instant) -> Terminal<TestBackend> {
-        let mut terminal = Terminal::new(TestBackend::new(72, 14)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(72, 30)).unwrap();
         terminal.draw(|f| app.draw(f, now)).unwrap();
         terminal
     }
@@ -688,17 +802,54 @@ mod tests {
             .collect()
     }
 
-    /// Whether every cell of the row starting with `text` is dimmed.
-    fn dimmed(terminal: &Terminal<TestBackend>, text: &str) -> bool {
-        let buffer = terminal.backend().buffer();
-        let y = lines(terminal)
+    const PURPLE: Color = Color::Rgb(150, 50, 230);
+    const ORANGE: Color = Color::Rgb(255, 154, 31);
+    const LIGHT_ORANGE: Color = Color::Rgb(255, 192, 77);
+    const GREY_VIOLET: Color = Color::Rgb(120, 110, 140);
+    const SOFT_VIOLET: Color = Color::Rgb(160, 165, 190);
+    const LIGHT: Color = Color::Rgb(235, 235, 242);
+
+    /// Each row with the window's and boxes' side borders trimmed off.
+    fn text(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        lines(terminal)
+            .into_iter()
+            .map(|l| l.trim_matches(['│', ' ']).to_string())
+            .collect()
+    }
+
+    /// Where `needle` first appears on screen.
+    fn pos(terminal: &Terminal<TestBackend>, needle: &str) -> (u16, u16) {
+        let lines = lines(terminal);
+        let (y, line) = lines
             .iter()
-            .position(|l| l.trim_start_matches(['›', ' ']).starts_with(text))
-            .unwrap_or_else(|| panic!("no row {text:?}"));
-        let row = &buffer.content[y * buffer.area.width as usize..][..buffer.area.width as usize];
-        row.iter()
-            .filter(|c| c.symbol() != " ")
-            .all(|c| c.modifier.contains(Modifier::DIM))
+            .enumerate()
+            .find(|(_, l)| l.contains(needle))
+            .unwrap_or_else(|| panic!("no {needle:?} in {lines:#?}"));
+        let x = line[..line.find(needle).unwrap()].chars().count();
+        (x as u16, y as u16)
+    }
+
+    fn cell(terminal: &Terminal<TestBackend>, (x, y): (u16, u16)) -> Cell {
+        terminal.backend().buffer()[(x, y)].clone()
+    }
+
+    fn at(terminal: &Terminal<TestBackend>, needle: &str) -> Cell {
+        cell(terminal, pos(terminal, needle))
+    }
+
+    /// The glyph leading member `name`'s row.
+    fn glyph(terminal: &Terminal<TestBackend>, name: &str) -> Cell {
+        let (x, y) = pos(terminal, &format!(" {name} "));
+        cell(terminal, (x - 1, y))
+    }
+
+    /// The text of the row on the selection's orange.
+    fn selected(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let y = (0..buffer.area.height)
+            .find(|&y| (0..buffer.area.width).any(|x| buffer[(x, y)].bg == ORANGE))
+            .expect("a selected row");
+        text(terminal).swap_remove(y as usize)
     }
 
     #[test]
@@ -706,26 +857,195 @@ mod tests {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let terminal = render(&app(&herdr, &ledger, now), now);
         assert_eq!(
-            lines(&terminal),
+            lines(&terminal)[..13],
             [
-                "prs",
-                "› b    blocked           -  wt-b    w1:tb/w1:pb",
-                "  a    working           -  wt-a    w1:ta/w1:pa",
-                "ungrouped",
-                "  c    idle              -  wt-c    w1:tc/w1:pc",
-                "  old  gone              -  wt-old  w1:pold",
-                "+1 stray (live in herdr, not in loopherd's ledger)",
-                "gone: no live agent matches it; `loopherd revive` can bring it back",
-                "",
-                "",
-                "",
-                "",
-                "",
-                "q quit  ↑↓/jk select  enter focus  s strays: off  a all: off",
+                "╭ loopherd ────────────────────────────────────────────────────────────╮",
+                "│╭ prs ───────────────────────────────────────────────────────────────╮│",
+                "││   NAME  STATUS            BRANCH  WORKTREE  PANE                   ││",
+                "││ ⚠ b     blocked           -       wt-b      w1:tb/w1:pb            ││",
+                "││ ⠋ a     working           -       wt-a      w1:ta/w1:pa            ││",
+                "│╰────────────────────────────────────────────────────────────────────╯│",
+                "│╭ ungrouped ─────────────────────────────────────────────────────────╮│",
+                "││   NAME  STATUS            BRANCH  WORKTREE  PANE                   ││",
+                "││ ○ c     idle              -       wt-c      w1:tc/w1:pc            ││",
+                "││ ✕ old   gone              -       wt-old    w1:pold                ││",
+                "│╰────────────────────────────────────────────────────────────────────╯│",
+                "│╭ +1 stray (live in herdr, not in loopherd's ledger) ────────────────╮│",
+                "│╰────────────────────────────────────────────────────────────────────╯│",
             ]
         );
-        assert!(dimmed(&terminal, "old"));
-        assert!(!dimmed(&terminal, "c "));
+        assert_eq!(
+            text(&terminal)[13],
+            "gone: no live agent matches it; `loopherd revive` can bring it back"
+        );
+        assert_eq!(
+            lines(&terminal)[28..],
+            [
+                "│ q quit  ↑↓/jk select  enter focus  s strays: off  a all: off         │",
+                "╰──────────────────────────────────────────────────────────────────────╯",
+            ]
+        );
+        assert!(at(&terminal, "old   gone").modifier.contains(Modifier::DIM));
+        assert!(!at(&terminal, "c     idle").modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn the_window_has_a_rounded_purple_border_titled_loopherd_in_bold_orange() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let terminal = render(&app(&herdr, &ledger, now), now);
+        for corner in [(0, 0), (71, 0), (0, 29), (71, 29)] {
+            assert_eq!(cell(&terminal, corner).fg, PURPLE, "{corner:?}");
+        }
+        assert_eq!(cell(&terminal, (0, 0)).symbol(), "╭");
+        assert_eq!(cell(&terminal, (71, 29)).symbol(), "╯");
+        assert_eq!(pos(&terminal, " loopherd "), (1, 0));
+        let title = at(&terminal, "loopherd");
+        assert_eq!(title.fg, ORANGE);
+        assert!(title.modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn each_member_row_leads_with_a_glyph_colored_by_its_status() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        herdr.set_status("c", AgentStatus::Done);
+        let mut app = app(&herdr, &ledger, now);
+        press(
+            &mut app,
+            &[KeyCode::Char('s'), KeyCode::Char('a')],
+            &herdr,
+            &ledger,
+        );
+        // Off the members, so no glyph takes the selection's colors.
+        press(&mut app, &[KeyCode::Down; 10], &herdr, &ledger);
+        let terminal = render(&app, now);
+        assert!(selected(&terminal).starts_with("w2:p7"));
+        let shown = |name| {
+            let c = glyph(&terminal, name);
+            (
+                c.symbol().to_string(),
+                c.fg,
+                c.modifier.contains(Modifier::DIM),
+            )
+        };
+        assert_eq!(shown("a"), ("⠋".into(), ORANGE, false));
+        assert_eq!(shown("b"), ("⚠".into(), Color::Yellow, false));
+        assert_eq!(shown("c"), ("✓".into(), SOFT_VIOLET, false));
+        assert_eq!(shown("old"), ("✕".into(), Color::Red, false));
+        assert_eq!(shown("done-1"), ("?".into(), Color::Reset, true));
+        herdr.set_status("c", AgentStatus::Idle);
+        refresh(&mut app, &herdr, &ledger, now);
+        let terminal = render(&app, now);
+        assert_eq!(glyph(&terminal, "c").symbol(), "○");
+        assert_eq!(glyph(&terminal, "c").fg, SOFT_VIOLET);
+    }
+
+    #[test]
+    fn the_working_spinner_advances_each_tick() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let app = app(&herdr, &ledger, now);
+        let frames: Vec<String> = (0..3)
+            .map(|i| {
+                let c = glyph(&render(&app, now + TICK * i), "a");
+                assert_eq!(c.fg, ORANGE);
+                c.symbol().to_string()
+            })
+            .collect();
+        assert_eq!(frames, ["⠋", "⠙", "⠹"]);
+    }
+
+    #[test]
+    fn column_headings_are_bold_grey_violet_aligned_and_never_selected() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mut app = app(&herdr, &ledger, now);
+        let terminal = render(&app, now);
+        let heading = at(&terminal, "NAME");
+        assert_eq!(heading.fg, GREY_VIOLET);
+        assert!(heading.modifier.contains(Modifier::BOLD));
+        for (heading, cell) in [
+            ("NAME", "b     blocked"),
+            ("STATUS", "blocked"),
+            ("BRANCH", "-       wt-b"),
+            ("WORKTREE", "wt-b"),
+            ("PANE", "w1:tb"),
+        ] {
+            assert_eq!(
+                pos(&terminal, heading).0,
+                pos(&terminal, cell).0,
+                "{heading}"
+            );
+        }
+        press(&mut app, &[KeyCode::Up], &herdr, &ledger);
+        assert!(selected(&render(&app, now)).starts_with("⚠ b "));
+        press(&mut app, &[KeyCode::Down; 2], &herdr, &ledger);
+        assert!(selected(&render(&app, now)).starts_with("○ c "));
+    }
+
+    #[test]
+    fn the_selected_row_is_light_on_orange_across_its_box_without_a_marker() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let terminal = render(&app(&herdr, &ledger, now), now);
+        let (_, y) = pos(&terminal, "b     blocked");
+        for x in 2..70 {
+            assert_eq!(cell(&terminal, (x, y)).bg, ORANGE, "x {x}");
+        }
+        assert_eq!(at(&terminal, "b     blocked").fg, LIGHT);
+        assert_eq!(cell(&terminal, (70, y)).bg, Color::Reset);
+        assert!(!lines(&terminal).concat().contains('›'));
+    }
+
+    #[test]
+    fn the_footer_shows_keys_in_light_orange_labels_in_grey_violet_and_on_off() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mut app = app(&herdr, &ledger, now);
+        press(&mut app, &[KeyCode::Char('s')], &herdr, &ledger);
+        let terminal = render(&app, now);
+        for key in ["q quit", "↑↓/jk select", "enter focus", "s strays", "a all"] {
+            assert_eq!(at(&terminal, key).fg, LIGHT_ORANGE, "{key}");
+        }
+        for label in ["quit", "select", "focus", "strays:", "all:"] {
+            assert_eq!(at(&terminal, label).fg, GREY_VIOLET, "{label}");
+        }
+        let (x, y) = pos(&terminal, "strays: on");
+        assert_eq!(cell(&terminal, (x + 8, y)).fg, ORANGE);
+        let (x, y) = pos(&terminal, "all: off");
+        assert!(cell(&terminal, (x + 5, y)).modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn colorterm_picks_truecolor_or_256_colors_and_no_color_drops_color() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let cases = [
+            (Some("truecolor"), None, PURPLE, ORANGE),
+            (Some("24bit"), Some(""), PURPLE, ORANGE),
+            (None, None, Color::Indexed(93), Color::Indexed(208)),
+            (Some("256"), None, Color::Indexed(93), Color::Indexed(208)),
+            (Some("truecolor"), Some("1"), Color::Reset, Color::Reset),
+        ];
+        for (colorterm, no_color, border, selection) in cases {
+            let theme = Theme::from_env(colorterm, no_color);
+            let terminal = render(&themed(theme, &herdr, &ledger, now), now);
+            let case = format!("{colorterm:?} {no_color:?}");
+            assert_eq!(cell(&terminal, (0, 0)).symbol(), "╭", "{case}");
+            assert_eq!(cell(&terminal, (0, 0)).fg, border, "{case}");
+            assert_eq!(at(&terminal, "b     blocked").bg, selection, "{case}");
+            assert_eq!(glyph(&terminal, "c").symbol(), "○", "{case}");
+        }
+        let plain = render(
+            &themed(Theme::from_env(None, Some("1")), &herdr, &ledger, now),
+            now,
+        );
+        let buffer = plain.backend().buffer();
+        assert!(
+            buffer
+                .content
+                .iter()
+                .all(|c| c.fg == Color::Reset && c.bg == Color::Reset)
+        );
+        assert!(
+            at(&plain, "b     blocked")
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
     }
 
     /// Presses each key, serving its request synchronously as the reader would.
@@ -756,26 +1076,36 @@ mod tests {
             &herdr,
             &ledger,
         );
-        let shown = lines(&render(&app, now));
+        let terminal = render(&app, now);
         assert_eq!(
-            shown[..12],
+            lines(&terminal)[1..23],
             [
-                "old-herd (retired only)",
-                "prs",
-                "› b       blocked           -  wt-b       w1:tb/w1:pb",
-                "  a       working           -  wt-a       w1:ta/w1:pa",
-                "ungrouped",
-                "  c       idle              -  wt-c       w1:tc/w1:pc",
-                "  old     gone              -  wt-old     w1:pold",
-                "retired",
-                "  done-1  unknown           -  wt-done-1  w1:pdone-1",
-                "+1 stray (live in herdr, not in loopherd's ledger)",
-                "  w2:p7  /src/elsewhere  poking around",
-                "gone: no live agent matches it; `loopherd revive` can bring it back",
+                "│╭ old-herd (retired only) ───────────────────────────────────────────╮│",
+                "│╰────────────────────────────────────────────────────────────────────╯│",
+                "│╭ prs ───────────────────────────────────────────────────────────────╮│",
+                "││   NAME    STATUS            BRANCH  WORKTREE   PANE                ││",
+                "││ ⚠ b       blocked           -       wt-b       w1:tb/w1:pb         ││",
+                "││ ⠋ a       working           -       wt-a       w1:ta/w1:pa         ││",
+                "│╰────────────────────────────────────────────────────────────────────╯│",
+                "│╭ ungrouped ─────────────────────────────────────────────────────────╮│",
+                "││   NAME    STATUS            BRANCH  WORKTREE   PANE                ││",
+                "││ ○ c       idle              -       wt-c       w1:tc/w1:pc         ││",
+                "││ ✕ old     gone              -       wt-old     w1:pold             ││",
+                "│╰────────────────────────────────────────────────────────────────────╯│",
+                "│╭ retired ───────────────────────────────────────────────────────────╮│",
+                "││   NAME    STATUS            BRANCH  WORKTREE   PANE                ││",
+                "││ ? done-1  unknown           -       wt-done-1  w1:pdone-1          ││",
+                "│╰────────────────────────────────────────────────────────────────────╯│",
+                "│╭ +1 stray (live in herdr, not in loopherd's ledger) ────────────────╮│",
+                "││ w2:p7  /src/elsewhere  poking around                               ││",
+                "│╰────────────────────────────────────────────────────────────────────╯│",
+                "│ gone: no live agent matches it; `loopherd revive` can bring it back  │",
+                "│                                                                      │",
+                "│                                                                      │",
             ]
         );
         assert_eq!(
-            shown[13],
+            text(&terminal)[28],
             "q quit  ↑↓/jk select  enter focus  s strays: on  a all: on"
         );
         press(
@@ -796,9 +1126,15 @@ mod tests {
         let mut app = app(&herdr, &ledger, t0);
         herdr.set_status("a", AgentStatus::Done);
         refresh(&mut app, &herdr, &ledger, t0 + Duration::from_secs(2));
-        let shown = lines(&render(&app, t0 + Duration::from_secs(182)));
-        assert_eq!(shown[2], "  a    done     for 3m   -  wt-a    w1:ta/w1:pa");
-        assert_eq!(shown[1], "› b    blocked           -  wt-b    w1:tb/w1:pb");
+        let terminal = render(&app, t0 + Duration::from_secs(182));
+        assert_eq!(
+            text(&terminal)[4],
+            "✓ a     done     for 3m   -       wt-a      w1:ta/w1:pa"
+        );
+        assert_eq!(
+            selected(&terminal),
+            "⚠ b     blocked           -       wt-b      w1:tb/w1:pb"
+        );
     }
 
     #[test]
@@ -809,35 +1145,30 @@ mod tests {
         herdr.set_status("a", AgentStatus::Blocked);
         herdr.set_status("b", AgentStatus::Working);
         refresh(&mut app, &herdr, &ledger, now);
-        assert!(lines(&render(&app, now))[1].starts_with("› a "));
+        assert!(selected(&render(&app, now)).starts_with("⚠ a "));
     }
 
     #[test]
     fn j_k_and_arrows_move_the_selection_within_bounds() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let mut app = app(&herdr, &ledger, now);
-        let selected = |app: &App| {
-            lines(&render(app, now))
-                .into_iter()
-                .find(|l| l.starts_with('›'))
-                .unwrap()
-        };
+        let selected = |app: &App| selected(&render(app, now));
         press(
             &mut app,
             &[KeyCode::Up, KeyCode::Char('k')],
             &herdr,
             &ledger,
         );
-        assert!(selected(&app).starts_with("› b "));
+        assert!(selected(&app).starts_with("⚠ b "));
         press(
             &mut app,
             &[KeyCode::Char('j'), KeyCode::Down],
             &herdr,
             &ledger,
         );
-        assert!(selected(&app).starts_with("› c "));
+        assert!(selected(&app).starts_with("○ c "));
         press(&mut app, &[KeyCode::Down; 5], &herdr, &ledger);
-        assert!(selected(&app).starts_with("› old "));
+        assert!(selected(&app).starts_with("✕ old "));
     }
 
     #[test]
@@ -856,7 +1187,7 @@ mod tests {
         press(&mut app, &[KeyCode::Enter], &herdr, &ledger);
         assert!(herdr.focused().is_empty());
         assert!(
-            lines(&render(&app, now))
+            text(&render(&app, now))
                 .contains(&"old is gone; `loopherd revive` can bring it back".to_string())
         );
     }
@@ -871,15 +1202,41 @@ mod tests {
         press(&mut app, &[KeyCode::Enter], &herdr, &ledger);
         assert!(herdr.focused().is_empty());
         assert!(!app.quit());
-        let shown = lines(&render(&app, now));
-        assert!(shown[1].starts_with("› a    unknown"), "{shown:?}");
-        assert!(shown.contains(&"strays unknown (herdr unreachable)".to_string()));
+        let terminal = render(&app, now);
+        let shown = text(&terminal);
+        assert!(
+            selected(&terminal).starts_with("? a     unknown"),
+            "{shown:?}"
+        );
+        assert!(
+            shown
+                .iter()
+                .any(|l| l.starts_with("╭ strays unknown (herdr unreachable) ─"))
+        );
         assert!(
             shown
                 .iter()
                 .any(|l| l.starts_with("warning: herdr unreachable"))
         );
         assert!(shown.contains(&"a has no live pane to focus".to_string()));
+    }
+
+    #[test]
+    fn a_short_window_scrolls_to_keep_the_selection_in_view() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mut app = app(&herdr, &ledger, now);
+        press(&mut app, &[KeyCode::Char('s')], &herdr, &ledger);
+        press(&mut app, &[KeyCode::Down; 9], &herdr, &ledger);
+        let mut terminal = Terminal::new(TestBackend::new(72, 8)).unwrap();
+        terminal.draw(|f| app.draw(f, now)).unwrap();
+        let shown = text(&terminal);
+        assert_eq!(
+            shown[5], "w2:p7  /src/elsewhere  poking around",
+            "{shown:#?}"
+        );
+        assert_eq!(selected(&terminal), shown[5]);
+        assert!(shown[0].starts_with("╭ loopherd "));
+        assert!(shown[6].starts_with("q quit"));
     }
 
     #[test]
@@ -929,13 +1286,21 @@ mod tests {
         press(&mut app, &[KeyCode::Enter], &herdr, &ledger);
         assert!(herdr.focused().is_empty());
         assert!(!app.quit());
-        let shown = lines(&render(&app, now));
-        assert!(shown[1].starts_with("› a    unknown"), "{shown:?}");
-        assert!(shown.contains(&"strays unknown (herdr's agent list unreadable)".to_string()));
+        let terminal = render(&app, now);
+        let shown = text(&terminal);
         assert!(
-            shown.iter().any(|l| l.starts_with(
-                "error: herdr's `agent list` output is malformed, every status is unknown"
-            )),
+            selected(&terminal).starts_with("? a     unknown"),
+            "{shown:?}"
+        );
+        assert!(
+            shown
+                .iter()
+                .any(|l| l.starts_with("╭ strays unknown (herdr's agent list unreadable) ─"))
+        );
+        assert!(
+            shown
+                .iter()
+                .any(|l| l.starts_with("error: herdr's `agent list` output is malformed")),
             "{shown:?}"
         );
         assert!(shown.contains(&"a has no live pane to focus".to_string()));
@@ -962,7 +1327,7 @@ mod tests {
             let stop = AtomicI32::new(stop);
             let code = run_loop(
                 &mut terminal,
-                App::new(Options::default()),
+                App::new(Options::default(), truecolor()),
                 &requests,
                 &responses,
                 &watch,
@@ -1033,8 +1398,9 @@ mod tests {
             None,
             "one read in flight at a time"
         );
-        let shown = lines(&render(&app, t0 + POLL + Duration::from_secs(6)));
-        assert!(shown[1].starts_with("› b    blocked"));
+        let terminal = render(&app, t0 + POLL + Duration::from_secs(6));
+        let shown = text(&terminal);
+        assert!(selected(&terminal).starts_with("⚠ b     blocked"));
         assert!(shown.contains(&"herdr hasn't answered for 6s; showing the last read".to_string()));
     }
 
@@ -1051,8 +1417,7 @@ mod tests {
         let toggled = app.press(KeyCode::Char('s'), now).unwrap();
         app.apply(stale, now).unwrap();
         assert!(
-            !lines(&render(&app, now))
-                .contains(&"  w2:p7  /src/elsewhere  poking around".to_string())
+            !text(&render(&app, now)).contains(&"w2:p7  /src/elsewhere  poking around".to_string())
         );
         app.apply(
             serve(
@@ -1065,16 +1430,15 @@ mod tests {
         )
         .unwrap();
         assert!(
-            lines(&render(&app, now))
-                .contains(&"  w2:p7  /src/elsewhere  poking around".to_string())
+            text(&render(&app, now)).contains(&"w2:p7  /src/elsewhere  poking around".to_string())
         );
     }
 
     #[test]
     fn says_it_is_reading_before_the_first_read_arrives() {
         let now = Instant::now();
-        let shown = lines(&render(&App::new(Options::default()), now));
-        assert_eq!(shown[0], "reading herdr and the ledger…");
+        let shown = text(&render(&App::new(Options::default(), truecolor()), now));
+        assert_eq!(shown[1], "reading herdr and the ledger…");
     }
 
     #[test]
@@ -1170,13 +1534,13 @@ mod tests {
         std::fs::create_dir(root.path().join("paused")).unwrap();
         std::fs::write(root.path().join("paused/prs"), "not json").unwrap();
         let (herdr, ledger, t0) = (herdr(), ledger(), Instant::now());
-        let mut app = App::new(Options::default());
+        let mut app = App::new(Options::default(), truecolor());
         app.set_live(true);
         let request = app.tick(t0).unwrap();
         let response = serve(request, &herdr, &ledger, &Pauses::under(root.path()));
         app.apply(response, t0).unwrap();
         assert!(
-            lines(&render(&app, t0))
+            text(&render(&app, t0))
                 .iter()
                 .any(|l| l.starts_with("warning: prs's pause is unreadable")),
             "the pause warning shows"
@@ -1204,7 +1568,7 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(72, 14)).unwrap();
             run_loop(
                 &mut terminal,
-                App::new(Options::default()),
+                App::new(Options::default(), truecolor()),
                 &requests,
                 &responses,
                 &watch,
