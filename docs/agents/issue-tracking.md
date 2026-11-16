@@ -51,11 +51,16 @@ The line starts with lowercase `blocked-by:` at the very start of a line and
 holds only comma-separated `LH-<n>` keys. Any other spelling (`Blocked-by:`,
 `lh-2`, a bare `2`, prose) is warned about and the card is skipped.
 
+Readiness and waiting are independent labels (D34). Block a fully specified
+card with both `ready-for-agent` and `blocked`; an under-specified one gets
+only `blocked`.
+
 `scripts/trello unblock` (`--dry-run` to preview) finds every open `blocked`
-card whose named cards are all in Done, adds `ready-for-agent`, comments
-`Unblocked: LH-<n> … Done`, and drops `blocked` last, so a failed run leaves
-the card blocked for a rerun. A card without the line is left for a human; one
-naming a missing card is left and warned about.
+card whose named cards are all in Done, comments `Unblocked: LH-<n> … Done`,
+and drops `blocked` last, so a failed run leaves the card blocked for a rerun.
+It never adds `ready-for-agent`: a card unblocks into whatever readiness it
+was written with. A card without the line is left for a human; one naming a
+missing card is left and warned about.
 
 ## Working a card
 

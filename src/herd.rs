@@ -42,18 +42,12 @@ struct LeadFile {
     prompt: Option<String>,
     prompt_file: Option<String>,
     args: Option<Vec<String>>,
-    #[serde(default)]
-    merge: bool,
-    #[serde(default)]
-    install: bool,
-    #[serde(default)]
-    rebase: bool,
-    #[serde(default)]
-    new_cards: bool,
-    #[serde(default)]
-    design_escalation: bool,
-    #[serde(default)]
-    blocked_dialogs: bool,
+    merge: Option<bool>,
+    install: Option<bool>,
+    rebase: Option<bool>,
+    new_cards: Option<bool>,
+    design_escalation: Option<bool>,
+    blocked_dialogs: Option<bool>,
     context_limit: Option<u64>,
 }
 
@@ -79,8 +73,60 @@ impl Switches {
             ("design_escalation", self.design_escalation),
             ("blocked_dialogs", self.blocked_dialogs),
         ]
-        .map(|(name, on)| format!("{name} {}", if on { "on" } else { "off" }))
+        .map(|(name, on)| format!("{name} {}", on_off(on)))
         .join("\n")
+    }
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
+}
+
+/// The switches one layer sets: a herd file's `[lead]`, or `config.toml`'s
+/// `[lead_defaults]`. A switch neither sets is off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchValues {
+    pub merge: Option<bool>,
+    pub install: Option<bool>,
+    pub rebase: Option<bool>,
+    pub new_cards: Option<bool>,
+    pub design_escalation: Option<bool>,
+    pub blocked_dialogs: Option<bool>,
+}
+
+impl SwitchValues {
+    pub const NAMES: [&str; 6] = [
+        "merge",
+        "install",
+        "rebase",
+        "new_cards",
+        "design_escalation",
+        "blocked_dialogs",
+    ];
+
+    fn values(&self) -> [Option<bool>; 6] {
+        [
+            self.merge,
+            self.install,
+            self.rebase,
+            self.new_cards,
+            self.design_escalation,
+            self.blocked_dialogs,
+        ]
+    }
+
+    /// Each switch from `self`, else from `defaults`, else off.
+    pub fn over(&self, defaults: &SwitchValues) -> Switches {
+        let on = |own: Option<bool>, default: Option<bool>| own.or(default).unwrap_or(false);
+        Switches {
+            merge: on(self.merge, defaults.merge),
+            install: on(self.install, defaults.install),
+            rebase: on(self.rebase, defaults.rebase),
+            new_cards: on(self.new_cards, defaults.new_cards),
+            design_escalation: on(self.design_escalation, defaults.design_escalation),
+            blocked_dialogs: on(self.blocked_dialogs, defaults.blocked_dialogs),
+        }
     }
 }
 
@@ -591,7 +637,7 @@ pub fn lead_config(paths: &Paths, herd: &str) -> Result<LeadConfig> {
         repo: expand_home(&file.repo, &paths.home),
         workspace: file.workspace,
         prompt,
-        switches: lead.switches(),
+        switches: lead.switches().over(&lead_defaults(paths)?),
         args: lead.args.unwrap_or(file.args),
     })
 }
@@ -616,18 +662,23 @@ fn config_file(paths: &Paths) -> PathBuf {
     paths.herds.with_file_name("config.toml")
 }
 
-/// A herd's `[lead]` switches, without reading its prompt.
+/// A herd's lead's switches, without reading its prompt.
 pub fn lead_switches(paths: &Paths, herd: &str) -> Result<Switches> {
     let file = load(&paths.herds, herd).context("herd")?;
     let lead = file
         .lead
         .with_context(|| format!("herd: {herd} has no [lead]"))?;
-    Ok(lead.switches())
+    Ok(lead.switches().over(&lead_defaults(paths)?))
+}
+
+fn lead_defaults(paths: &Paths) -> Result<SwitchValues> {
+    let file = crate::config::read(&config_file(paths))?;
+    Ok(file.lead_defaults.unwrap_or_default())
 }
 
 impl LeadFile {
-    fn switches(&self) -> Switches {
-        Switches {
+    fn switches(&self) -> SwitchValues {
+        SwitchValues {
             merge: self.merge,
             install: self.install,
             rebase: self.rebase,
@@ -669,6 +720,11 @@ fn read_prompt(
     })
 }
 
+/// Whether `config` reads as TOML; a missing or unreadable file doesn't.
+fn parses_as_toml(config: &Path) -> bool {
+    std::fs::read_to_string(config).is_ok_and(|text| text.parse::<toml::Table>().is_ok())
+}
+
 fn expand_home(path: &str, home: &Path) -> PathBuf {
     match path.strip_prefix('~') {
         Some("") => home.to_path_buf(),
@@ -682,12 +738,17 @@ fn expand_home(path: &str, home: &Path) -> PathBuf {
 pub fn herds(paths: &Paths) -> Result<(String, i32)> {
     let mut lines = Vec::new();
     let mut code = 0;
-    if let Err(e) = crate::context::effective_limit(None, &config_file(paths)) {
-        lines.push(format!("invalid {}", format!("{e:#}").trim_end()));
-        code = 1;
-    }
-    // After a context error, which also covers a file that isn't TOML.
-    if let (0, Err(e)) = (code, crate::notify::load(&config_file(paths))) {
+    let defaults = match crate::config::read(&config_file(paths)) {
+        Ok(file) => Some(file.lead_defaults.unwrap_or_default()),
+        Err(e) => {
+            lines.push(format!("invalid {}", format!("{e:#}").trim_end()));
+            code = 1;
+            None
+        }
+    };
+    if parses_as_toml(&config_file(paths))
+        && let Err(e) = crate::notify::load(&config_file(paths))
+    {
         lines.push(format!("invalid {}", format!("{e:#}").trim_end()));
         code = 1;
     }
@@ -711,7 +772,7 @@ pub fn herds(paths: &Paths) -> Result<(String, i32)> {
                     Some(pause) => format!("paused {}", pause.when()),
                     None => "paused no".into(),
                 };
-                lines.extend(describe(&herd, &parsed, &paused));
+                lines.extend(describe(&herd, &parsed, &paused, defaults.as_ref()));
                 lines.extend(reading.warning(&herd).map(|w| format!("  {w}")));
             }
             Err(e) => {
@@ -760,7 +821,13 @@ fn herd_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn describe(herd: &str, parsed: &HerdFile, paused: &str) -> Vec<String> {
+/// `defaults` is `None` while `config.toml` is invalid.
+fn describe(
+    herd: &str,
+    parsed: &HerdFile,
+    paused: &str,
+    defaults: Option<&SwitchValues>,
+) -> Vec<String> {
     let workspace = parsed.workspace.as_deref().unwrap_or("(current)");
     let header = format!(
         "{herd}  repo {}  workspace {workspace}  {paused}",
@@ -777,10 +844,12 @@ fn describe(herd: &str, parsed: &HerdFile, paused: &str) -> Vec<String> {
         };
         format!("  loopherd feed {herd}  ({template}, max {})", q.max)
     });
-    let lead = parsed
-        .lead
-        .as_ref()
-        .map(|_| format!("  loopherd lead {herd}"));
+    let lead = parsed.lead.as_ref().into_iter().flat_map(|lead| {
+        [
+            format!("  loopherd lead {herd}"),
+            format!("  switches: {}", switch_sources(&lead.switches(), defaults)),
+        ]
+    });
     let after_merge = (!parsed.after_merge.is_empty())
         .then(|| format!("  after_merge: {}", parsed.after_merge.join("; ")));
     let unmerged = parsed
@@ -797,6 +866,26 @@ fn describe(herd: &str, parsed: &HerdFile, paused: &str) -> Vec<String> {
         .chain(after_merge)
         .chain(unmerged)
         .collect()
+}
+
+fn switch_sources(own: &SwitchValues, defaults: Option<&SwitchValues>) -> String {
+    let Some(defaults) = defaults else {
+        return "every switch off until config.toml is fixed".into();
+    };
+    let sources = own.values().into_iter().zip(defaults.values());
+    SwitchValues::NAMES
+        .iter()
+        .zip(sources)
+        .map(|(name, sources)| {
+            let (on, source) = match sources {
+                (Some(on), _) => (on, "herd file"),
+                (None, Some(on)) => (on, "lead_defaults"),
+                (None, None) => (false, "built-in"),
+            };
+            format!("{name} {} ({source})", on_off(on))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// `text` parsed, failing on a placeholder that is neither a param nor in `built_ins`.
@@ -1889,6 +1978,19 @@ args = ["--model", "opus"]
     }
 
     #[test]
+    fn herds_reports_a_broken_notify_table_beside_a_context_error() {
+        let config = Config::with(&[("prs", PR_HERD)]);
+        let file = config.path().join("config.toml");
+        fs::write(&file, "context_window = 0\n[notify]\nkinds = [\"done\"]\n").unwrap();
+
+        let (report, code) = herds(&config.paths()).unwrap();
+
+        assert_eq!(report.matches("invalid").count(), 2, "{report}");
+        assert!(report.contains("[notify]"), "{report}");
+        assert_eq!(code, 1, "{report}");
+    }
+
+    #[test]
     fn herds_reports_a_broken_notify_table_and_exits_1_while_context_limits_still_read() {
         let config = Config::with(&[("prs", PR_HERD)]);
         let file = config.path().join("config.toml");
@@ -2042,6 +2144,92 @@ args = ["--model", "opus"]
     }
 
     #[test]
+    fn a_switch_the_herd_file_leaves_unset_comes_from_lead_defaults() {
+        let herd = format!("{LEAD_HERD}[lead]\nprompt = \"go\"\nmerge = false\n");
+        let config = Config::with(&[("h", &herd)]);
+        fs::write(
+            config.path().join("config.toml"),
+            "[lead_defaults]\nmerge = true\ninstall = true\n",
+        )
+        .unwrap();
+
+        let switches = lead_switches(&config.paths(), "h").unwrap();
+
+        assert_eq!(
+            (switches.merge, switches.install, switches.rebase),
+            (false, true, false)
+        );
+        assert_eq!(
+            lead_config(&config.paths(), "h").unwrap().switches,
+            switches
+        );
+    }
+
+    #[test]
+    fn herds_shows_each_leads_switches_and_where_each_came_from() {
+        let herd = format!("{LEAD_HERD}[lead]\nprompt = \"go\"\nmerge = false\nrebase = true\n");
+        let config = Config::with(&[("h", &herd), ("unled", LEAD_HERD)]);
+        fs::write(
+            config.path().join("config.toml"),
+            "[lead_defaults]\nmerge = true\ninstall = true\n",
+        )
+        .unwrap();
+
+        let (report, code) = herds(&config.paths()).unwrap();
+
+        assert_eq!(code, 0, "{report}");
+        assert!(
+            report.contains(
+                "  loopherd lead h\n  switches: merge off (herd file), install on (lead_defaults), \
+                 rebase on (herd file), new_cards off (built-in), design_escalation off (built-in), \
+                 blocked_dialogs off (built-in)\n"
+            ),
+            "{report}"
+        );
+        assert_eq!(report.matches("switches:").count(), 1, "{report}");
+    }
+
+    #[test]
+    fn herds_shows_every_switch_off_while_config_toml_is_broken() {
+        let herd = format!("{LEAD_HERD}[lead]\nprompt = \"go\"\nmerge = true\n");
+        let config = Config::with(&[("h", &herd)]);
+        fs::write(
+            config.path().join("config.toml"),
+            "[lead_defaults]\nmerj = true\n",
+        )
+        .unwrap();
+
+        let (report, code) = herds(&config.paths()).unwrap();
+
+        assert_eq!(code, 1, "{report}");
+        assert!(report.starts_with("invalid "), "{report}");
+        assert!(report.contains("merj"), "{report}");
+        assert!(
+            report.contains(
+                "  loopherd lead h\n  switches: every switch off until config.toml is fixed"
+            ),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn a_broken_config_toml_or_unknown_lead_default_fails_the_switches() {
+        let herd = format!("{LEAD_HERD}[lead]\nprompt = \"go\"\nmerge = true\n");
+        let config = Config::with(&[("h", &herd)]);
+        for (text, expected) in [
+            ("[lead_defaults]\nmerj = true\n", "merj"),
+            ("[lead_defaults]\nmerge = \"yes\"\n", "merge"),
+            ("[lead_defaults", "config.toml"),
+        ] {
+            fs::write(config.path().join("config.toml"), text).unwrap();
+
+            let err = format!("{:#}", lead_switches(&config.paths(), "h").unwrap_err());
+
+            assert!(err.contains(expected), "{text}: {err}");
+        }
+    }
+
+    #[test]
     fn a_lead_tables_args_replace_the_herds() {
         let herd = format!("{LEAD_HERD}[lead]\nprompt = \"go\"\nargs = [\"--effort\", \"max\"]\n");
         let config = Config::with(&[("h", &herd)]);
@@ -2106,6 +2294,8 @@ args = ["--model", "opus"]
             "a  repo /r  workspace (current)  paused no\n\
              \x20 loopherd add a t\n\
              \x20 loopherd lead a\n\
+             \x20 switches: merge off (built-in), install off (built-in), rebase off (built-in), \
+             new_cards off (built-in), design_escalation off (built-in), blocked_dialogs off (built-in)\n\
              invalid b.toml: lead: prompt: unknown placeholder {pane}"
         );
         assert_eq!(code, 1);

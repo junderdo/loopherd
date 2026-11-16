@@ -73,7 +73,11 @@ impl Sandbox {
             fs::create_dir_all(d).unwrap();
         }
         let built = dir.path().join("built-loopherd");
-        executable(&built, "#!/bin/sh\n");
+        // Reports lead defaults already set, so a run on a terminal asks nothing about them.
+        executable(
+            &built,
+            "#!/bin/sh\n[ \"$1\" != lead-defaults ] || echo 'merge off'\n",
+        );
         executable(
             &fake_bin.join("cargo"),
             &format!(

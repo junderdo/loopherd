@@ -379,6 +379,19 @@ pub fn since_handoff(dir: &Path, name: &str) -> Result<SinceHandoff> {
     Ok(SinceHandoff::None)
 }
 
+/// Every entry in `name`'s mailbox in file order, and a warning per bad line.
+/// Reads no cursor and takes no lock.
+pub fn history(dir: &Path, name: &str) -> Result<(Vec<Entry>, Vec<String>)> {
+    if !dir.join(format!("{name}.jsonl")).is_file() {
+        return Ok((vec![], vec![]));
+    }
+    let (bytes, end) = complete_lines(dir, name)?;
+    let mut found = vec![];
+    let mut warnings = vec![];
+    parse(dir, name, &bytes[..end], &mut found, &mut warnings);
+    Ok((found.into_iter().map(|(_, e)| e).collect(), warnings))
+}
+
 /// Cursor moves read but not yet saved.
 #[must_use = "the cursor moves only once saved"]
 pub struct Pending {

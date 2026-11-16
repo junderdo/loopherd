@@ -213,25 +213,18 @@ cmd_unblock() {
         "warn\t\($key) is blocked by \($missing | map("LH-\(.)") | join(", ")), which doesn'"'"'t exist"
       elif all($blockers[]; $by_number[.].idList as $list | $done | index($list)) then
         [ "unblock", $key, ($blockers | map("LH-\(.)") | join(", ")), $card.id,
-          ($card.labels | map(select(.name == "blocked")) | first | .id),
-          ([$card.labels[].name] | index("ready-for-agent") != null) ] | @tsv
+          ($card.labels | map(select(.name == "blocked")) | first | .id) ] | @tsv
       else empty end
   ' <<<"$cards")
   [[ -n $plan ]] || return 0
-  local ready_label=""
-  if ! $dry_run && grep -q $'^unblock\t.*\tfalse$' <<<"$plan"; then
-    ready_label=$(label_id ready-for-agent)
-  fi
-  # Writes run ready, comment, then unblock, so a failure leaves the card blocked for a rerun.
-  local action key blockers id blocked_label ready
-  while IFS=$'\t' read -r action key blockers id blocked_label ready; do
+  # The comment goes first, so a failure leaves the card blocked for a rerun.
+  local action key blockers id blocked_label
+  while IFS=$'\t' read -r action key blockers id blocked_label; do
     if [[ $action == warn ]]; then
       echo "trello: warning: $key" >&2
     elif $dry_run; then
       echo "would unblock $key ($blockers Done)"
     else
-      [[ $ready == true ]] ||
-        api POST "/cards/$id/idLabels" --data-urlencode "value=$ready_label" >/dev/null
       api POST "/cards/$id/actions/comments" --data-urlencode "text=Unblocked: $blockers Done" >/dev/null
       api DELETE "/cards/$id/idLabels/$blocked_label" >/dev/null
       echo "unblocked $key ($blockers Done)"
