@@ -3452,6 +3452,28 @@ fn a_local_tracker_without_github_hands_in_a_pushed_branch_and_never_mentions_gh
 }
 
 #[test]
+fn a_local_tracker_without_github_takes_origins_default_branch_not_the_checked_out_one() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.push_local_issues(LOCAL_ISSUES);
+    let origin = fixture.root.path().join("origin.git");
+    git(
+        &fixture.repo(),
+        &["remote", "set-url", "origin", origin.to_str().unwrap()],
+    );
+    git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    git(&fixture.repo(), &["checkout", "-q", "-b", "feat/x"]);
+    git(&fixture.repo(), &["push", "-q", "origin", "HEAD"]);
+    git(&fixture.repo(), &["fetch", "-q", "origin"]);
+    fixture.fail_gh();
+
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+
+    let source = fixture.herd_get("queue.source");
+    assert!(source.contains("git fetch -q origin main"), "{source}");
+    assert!(!source.contains("feat/x"), "{source}");
+}
+
+#[test]
 fn a_local_tracker_without_an_origin_remote_is_refused_before_any_change() {
     let fixture = Fixture::new(&["acme"]);
     fixture.push_local_issues(LOCAL_ISSUES);

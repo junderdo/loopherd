@@ -298,7 +298,13 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
                 ".defaultBranchRef.name // \"\"",
             ],
         )?,
-        None => git_branch(&repo),
+        None => {
+            let branch = crate::worktree::default_branch(&repo)?;
+            branch
+                .strip_prefix("origin/")
+                .unwrap_or(&branch)
+                .to_string()
+        }
     };
     let branch = match branch.trim() {
         "" => match &github {
@@ -306,10 +312,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
                 "{} has no default branch yet; push a first commit",
                 github.slug
             ),
-            None => bail!(
-                "can't tell {}'s default branch; check it out or set origin/HEAD",
-                repo.display()
-            ),
+            None => bail!("can't tell {}'s default branch from origin", repo.display()),
         },
         branch => ask.value("Default branch", None, Some(branch), "", |branch| {
             if branch.contains(char::is_whitespace) {
@@ -368,23 +371,6 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
         docs,
         agents_steps: plan.steps,
     })
-}
-
-/// origin/HEAD's branch, else the checked-out one, else empty.
-fn git_branch(repo: &Path) -> String {
-    let symref = |name: &str| {
-        Command::new("git")
-            .args(["symbolic-ref", "-q", "--short", name])
-            .current_dir(repo)
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-    };
-    symref("refs/remotes/origin/HEAD")
-        .and_then(|head| head.strip_prefix("origin/").map(str::to_string))
-        .or_else(|| symref("HEAD"))
-        .unwrap_or_default()
 }
 
 /// The lead and members are lead-<herd> and <herd>-<n>, both [a-z][a-z0-9_-]{0,31}.

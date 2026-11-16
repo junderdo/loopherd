@@ -393,9 +393,9 @@ fn find_worktree(repo: &Path, branch: &str) -> Result<Option<PathBuf>> {
     Ok(None)
 }
 
-/// Origin's default branch, warning once per run when it falls back or the
-/// local origin/HEAD is stale.
-fn default_branch(repo: &Path) -> Result<String> {
+/// Origin's default branch as `origin/<branch>`, warning once per run when it
+/// falls back or the local origin/HEAD is stale.
+pub fn default_branch(repo: &Path) -> Result<String> {
     let (branch, warning) = default_branch_and_warning(repo)?;
     if let Some(warning) = warning {
         warn_once(warning);

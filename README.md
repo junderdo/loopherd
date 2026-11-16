@@ -151,8 +151,8 @@ which is what `done` checks; `merged` is the GitHub PR check.
 
 A local-markdown repo needs no GitHub. When `origin` isn't on GitHub and
 `--repo` isn't given, init makes no gh call (and refuses `--gh-account`),
-takes the default branch from `origin/HEAD`, else the checked-out branch,
-and leaves out `merged`, warning that `after_merge` then never runs. Workers
+asks origin for its default branch, as the members' worktrees do, and
+leaves out `merged`, warning that `after_merge` then never runs. Workers
 push their branch with no PR, for the human to merge. It still needs an
 `origin` remote to branch from and push to. On a terminal, Enter at the
 GitHub question means none.
