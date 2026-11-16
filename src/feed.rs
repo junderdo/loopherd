@@ -1135,7 +1135,7 @@ mod tests {
     fn a_spawn_warning_is_passed_on_under_its_member() {
         let setup = Setup::new("printf '1\\n'", 1);
         let mut herdr = herdr();
-        herdr.session_after_gets = u32::MAX;
+        herdr.session_after_gets = 1;
         herdr.agent_get_fails_after_start = true;
 
         let fed = setup
