@@ -5,10 +5,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::herd::{self, Paths};
-use crate::worktree::{repo_root, same_dir};
+use crate::worktree::{checkout_root, same_dir};
 
 mod ask;
 mod tracker;
@@ -75,14 +75,15 @@ pub fn init(paths: &Paths, req: Request) -> Result<Vec<String>> {
 }
 
 fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
-    let here = repo_root(req.dir).map_err(|_| {
-        anyhow!(
-            "{} is not in a git repo; run init inside one",
+    let here = checkout_root(req.dir).with_context(|| {
+        format!(
+            "can't read a git repo at {}; run init inside one",
             req.dir.display()
         )
     })?;
     let repo = ask.value("Repo", None, Some(&here.to_string_lossy()), "", |answer| {
-        repo_root(Path::new(answer)).map_err(|_| anyhow!("{answer} is not in a git repo"))
+        checkout_root(Path::new(answer))
+            .with_context(|| format!("can't read a git repo at {answer}"))
     })?;
     // No herd name can get past these, so on a terminal they end init before it asks for one.
     if ask.terminal {
@@ -166,16 +167,26 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
             false => bail!("{refusal}; pass --no-lead to write the herd without a lead"),
         }
     };
-    let config_limit = crate::context::effective_limit(None, &config)?;
     let config_file = crate::config::read(&config)?;
-    let config_limit = match config_file
-        .default_context_limit
-        .or(config_file.context_window)
-    {
-        Some(_) => format!("config.toml's {config_limit}"),
-        None => format!("the default {config_limit}"),
-    };
     let cap = crate::context::limit_cap(&config)?;
+    let unset = config_file
+        .default_context_limit
+        .unwrap_or(crate::context::DEFAULT_LIMIT);
+    let window = match config_file.context_window {
+        Some(_) => "config.toml's",
+        None => "the default",
+    };
+    let config_limit = match config_file.default_context_limit {
+        None if config_file.context_window.is_none() => {
+            format!("the default {}", cap.limit.min(unset))
+        }
+        _ if unset > cap.limit => format!(
+            "the cap of {} (80% of {window} {}-token context window)",
+            cap.limit, cap.window
+        ),
+        Some(limit) => format!("config.toml's {limit}"),
+        None => format!("the default {unset}"),
+    };
     let context_limit = ask.value(
         &format!(
             "Workers' handoff limit in tokens (context_limit); Enter leaves it unset, \
@@ -356,10 +367,12 @@ fn suggested_checks(repo: &Path) -> Vec<String> {
 fn summary(herd: &Herd) -> String {
     let mut also = vec![];
     if herd.tracker.github {
-        let labels = &herd.tracker.labels;
+        let names = wanted_labels(&herd.tracker.labels).map(|(name, ..)| name);
+        let (last, rest) = names.split_last().expect("four labels");
         also.push(format!(
-            "creates the labels {}, {}, {} and blocked in {} where missing",
-            labels.ready_for_agent, labels.needs_info, labels.ready_for_human, herd.slug
+            "creates the labels {} and {last} in {} where missing",
+            rest.join(", "),
+            herd.slug
         ));
     }
     if !herd.tracker.writes.is_empty() {
@@ -654,10 +667,9 @@ fn account(owner: &str, wanted: Option<&str>, ask: &ask::Asker) -> Result<String
     )
 }
 
-/// Creates each label the herd's queue and workers use that the repo lacks,
-/// one line per label created.
-fn create_labels(token: &str, slug: &str, labels: &tracker::Labels) -> Result<Vec<String>> {
-    let wanted = [
+/// The labels the herd's queue and workers use: name, description and color.
+fn wanted_labels(labels: &tracker::Labels) -> [(&str, &str, &str); 4] {
+    [
         (
             labels.ready_for_agent.as_str(),
             "Fully specified; an agent may claim it",
@@ -674,7 +686,13 @@ fn create_labels(token: &str, slug: &str, labels: &tracker::Labels) -> Result<Ve
             "FBCA04",
         ),
         ("blocked", "Waiting on other issues", "B60205"),
-    ];
+    ]
+}
+
+/// Creates each label the herd's queue and workers use that the repo lacks,
+/// one line per label created.
+fn create_labels(token: &str, slug: &str, labels: &tracker::Labels) -> Result<Vec<String>> {
+    let wanted = wanted_labels(labels);
     let existing = gh(
         Some(token),
         &[

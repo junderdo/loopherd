@@ -84,7 +84,8 @@ enum Command {
     /// for a taken herd name or an existing lead prompt, and confirms before
     /// writing; the repo, default branch and confirm questions have no flag.
     /// Without one it refuses, changing nothing, when the herd file exists,
-    /// or the lead prompt does without --no-lead.
+    /// or the lead prompt does without --no-lead. Either way it refuses a
+    /// repo another herd runs.
     Init(InitArgs),
     /// List herd files with a usage line per template; exits 1 if any is invalid.
     Herds,
@@ -350,7 +351,7 @@ struct InitArgs {
     #[arg(long)]
     herd: Option<String>,
     /// A command workers run before calling their work done; repeatable.
-    /// Suggested from Cargo.toml or package.json when not given.
+    /// Suggested from Cargo.toml and package.json when not given.
     #[arg(long = "check", value_name = "CMD", num_args = 1..)]
     checks: Vec<String>,
     /// The gh account every gh call runs as; needed when no logged-in account

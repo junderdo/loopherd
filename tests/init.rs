@@ -1465,6 +1465,11 @@ impl Fixture {
 
     /// `loopherd init <args>` with stdin and stderr on a terminal, typing `input`.
     fn on_terminal(&self, args: &[&str], input: &str) -> Output {
+        self.on_terminal_with(&[], args, input)
+    }
+
+    /// As [`Fixture::on_terminal`], with `envs` set.
+    fn on_terminal_with(&self, envs: &[(&str, &str)], args: &[&str], input: &str) -> Output {
         let typed = self.root.path().join("typed");
         fs::write(&typed, input).unwrap();
         let mut line = format!("'{}' init", env!("CARGO_BIN_EXE_loopherd"));
@@ -1475,6 +1480,7 @@ impl Fixture {
         command
             .args(["-qec", &line, "/dev/null"])
             .env("SHELL", "/bin/sh")
+            .envs(envs.iter().copied())
             .stdin(fs::File::open(typed).unwrap());
         self.run(&mut command)
     }
@@ -2105,7 +2111,10 @@ fn on_a_terminal_a_repo_answer_outside_git_is_asked_again_naming_no_flag() {
     assert_ok(&out);
     let shown = text(&out.stdout);
     assert!(
-        shown.contains(&format!("{} is not in a git repo\r\n", outside.display())),
+        shown.contains(&format!(
+            "can't read a git repo at {}: git ",
+            outside.display()
+        )),
         "{shown}"
     );
     assert!(!shown.contains("--repo"), "{shown}");
@@ -2212,6 +2221,149 @@ fn on_a_terminal_the_summary_names_the_labels_and_docs_writing_creates() {
              and blocked in acme/widgets where missing, and writes \
              docs/agents/issue-tracker.md and docs/agents/triage-labels.md in the repo, \
              uncommitted.\r\n"
+        ),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn a_repo_git_refuses_to_read_is_refused_with_gits_reason() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.run(
+        Command::new(env!("CARGO_BIN_EXE_loopherd"))
+            .args(["init", "--check", "cargo test"])
+            .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1"),
+    );
+
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "can't read a git repo at {}; run init inside one",
+            fixture.repo().display()
+        )),
+        "{stderr}"
+    );
+    assert!(stderr.contains("safe.directory"), "{stderr}");
+}
+
+#[test]
+fn on_a_terminal_a_repo_answer_git_refuses_to_read_shows_gits_reason() {
+    let fixture = Fixture::new(&["acme"]);
+    let other = fixture.root.path().join("other");
+    fs::create_dir_all(&other).unwrap();
+    git(&other, &["init", "-q"]);
+    let repo = fixture.repo().to_string_lossy().into_owned();
+
+    let out = fixture.on_terminal_with(
+        &[
+            ("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1"),
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "safe.directory"),
+            ("GIT_CONFIG_VALUE_0", &repo),
+        ],
+        &["--check", "cargo test"],
+        &format!("{}\n\n\n\n\n\n\n\n\n\n\n", other.display()),
+    );
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains(&format!("can't read a git repo at {}: ", other.display())),
+        "{shown}"
+    );
+    assert!(shown.contains("safe.directory"), "{shown}");
+}
+
+#[test]
+fn a_cargo_only_repo_warns_about_nothing() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::write(
+        fixture.repo().join("Cargo.toml"),
+        "[package]\nname = \"w\"\n",
+    )
+    .unwrap();
+
+    let out = fixture.loopherd(&["init"]);
+
+    assert_ok(&out);
+    assert!(
+        !text(&out.stderr).contains("warning:"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+#[test]
+fn a_repo_with_no_build_file_warns_about_none() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.loopherd(&["init"]);
+
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("pass --check <cmd>"), "{stderr}");
+    assert!(!stderr.contains("warning:"), "{stderr}");
+}
+
+#[test]
+fn on_a_terminal_a_configured_window_alone_leaves_the_default_limit() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::write(
+        fixture.config().join("config.toml"),
+        "context_window = 1000000\n",
+    )
+    .unwrap();
+
+    let out = fixture.init_on_terminal(&[], "\n");
+
+    assert_ok(&out);
+    assert!(
+        text(&out.stdout).contains("  limit   unset, the default 250000 applies"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn on_a_terminal_a_configured_limit_over_the_cap_names_the_cap() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::write(
+        fixture.config().join("config.toml"),
+        "default_context_limit = 500000\n",
+    )
+    .unwrap();
+
+    let out = fixture.init_on_terminal(&[], "\n");
+
+    assert_ok(&out);
+    assert!(
+        text(&out.stdout).contains(
+            "  limit   unset, the cap of 160000 (80% of the default 200000-token context \
+             window) applies"
+        ),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn on_a_terminal_a_default_limit_over_a_configured_windows_cap_names_that_window() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::write(
+        fixture.config().join("config.toml"),
+        "context_window = 100000\n",
+    )
+    .unwrap();
+
+    let out = fixture.init_on_terminal(&[], "\n");
+
+    assert_ok(&out);
+    assert!(
+        text(&out.stdout).contains(
+            "so the cap of 80000 (80% of config.toml's 100000-token context window) applies: "
         ),
         "{}",
         text(&out.stdout)
