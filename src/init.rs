@@ -138,6 +138,13 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
         refuse_second_herd(paths, &repo)?;
     }
     let mut tracker = tracker::resolve(&repo, req.tracker)?;
+    if tracker.kind == tracker::Kind::Local && !has_origin(&repo) {
+        bail!(
+            "{} has no origin remote; a herd's members branch from origin and push to it, \
+             so add one",
+            repo.display()
+        );
+    }
     let origin = github_repo(&repo).map(|(owner, name)| format!("{owner}/{name}"));
     let parse_slug = |slug: &str| match slug.split_once('/') {
         Some((owner, name)) if is_github_name(owner) && is_github_name(name) => {
@@ -564,13 +571,8 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
         labels.needs_info.to_ascii_lowercase(),
         labels.ready_for_human.to_ascii_lowercase(),
     );
-    let (fetch, git_ref) = match has_origin(repo) {
-        true => (
-            format!("git fetch -q origin {branch} || exit\n"),
-            format!("origin/{branch}"),
-        ),
-        false => (String::new(), branch.clone()),
-    };
+    let fetch = format!("git fetch -q origin {branch} || exit\n");
+    let git_ref = format!("origin/{branch}");
     // Leaves room for "<herd>-" in a member name of at most 32 characters.
     let id_room = (32 - name.len() - 1).to_string();
     let local = tracker.kind == tracker::Kind::Local;

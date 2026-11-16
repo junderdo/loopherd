@@ -3452,27 +3452,20 @@ fn a_local_tracker_without_github_hands_in_a_pushed_branch_and_never_mentions_gh
 }
 
 #[test]
-fn a_local_tracker_without_any_origin_reads_the_current_branch_without_fetching() {
+fn a_local_tracker_without_an_origin_remote_is_refused_before_any_change() {
     let fixture = Fixture::new(&["acme"]);
     fixture.push_local_issues(LOCAL_ISSUES);
     git(&fixture.repo(), &["remote", "remove", "origin"]);
     fixture.fail_gh();
 
-    assert_ok(&fixture.init(&["--tracker", "local"]));
-
-    let source = fixture.herd_get("queue.source");
-    assert!(!source.contains("fetch"), "{source}");
-    let tasks = fixture.run(Command::new("sh").args(["-c", &source]));
-    assert_ok(&tasks);
-    assert!(
-        text(&tasks.stdout).starts_with("auth-01 feat tdd login-form "),
-        "{}",
-        text(&tasks.stdout)
-    );
-    let done = fixture.herd_get("template.issue.done");
-    assert!(
-        !done.contains("fetch") && done.contains("git show trunk:{path}"),
-        "{done}"
+    assert_refused(
+        &fixture,
+        &fixture.init(&["--tracker", "local"]),
+        &format!(
+            "loopherd init: {} has no origin remote; a herd's members branch from origin \
+             and push to it, so add one\n",
+            fixture.repo().display()
+        ),
     );
     assert_eq!(fixture.gh_calls(), "");
 }
@@ -3480,7 +3473,7 @@ fn a_local_tracker_without_any_origin_reads_the_current_branch_without_fetching(
 #[test]
 fn gh_account_without_a_github_repo_is_refused_before_any_change() {
     let fixture = Fixture::new(&["acme"]);
-    git(&fixture.repo(), &["remote", "remove", "origin"]);
+    fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
     fixture.fail_gh();
 
     assert_refused(
@@ -3494,7 +3487,7 @@ fn gh_account_without_a_github_repo_is_refused_before_any_change() {
 #[test]
 fn a_local_tracker_without_github_still_takes_repo() {
     let fixture = Fixture::new(&["acme"]);
-    git(&fixture.repo(), &["remote", "remove", "origin"]);
+    fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
 
     assert_ok(&fixture.init(&["--tracker", "local", "--repo", "acme/widgets"]));
 
@@ -3508,7 +3501,7 @@ fn a_local_tracker_without_github_still_takes_repo() {
 #[test]
 fn on_a_terminal_a_local_tracker_without_github_takes_enter_as_none() {
     let fixture = Fixture::new(&["acme"]);
-    git(&fixture.repo(), &["remote", "remove", "origin"]);
+    fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
     fixture.fail_gh();
 
     let out = fixture.init_on_terminal(&[], "local\n");
@@ -3519,8 +3512,8 @@ fn on_a_terminal_a_local_tracker_without_github_takes_enter_as_none() {
         shown.contains("GitHub repo (owner/name); Enter for none: "),
         "{shown}"
     );
-    assert!(shown.contains("Default branch (trunk): "), "{shown}");
-    assert!(shown.contains("\n  branch  trunk\r\n"), "{shown}");
+    assert!(shown.contains("Default branch (main): "), "{shown}");
+    assert!(shown.contains("\n  branch  main\r\n"), "{shown}");
     assert!(
         !shown.contains("gh account") && !shown.contains("GitHub  "),
         "{shown}"
