@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use serde::Serialize;
 
 use crate::ledger::{AgentRecord, Ledger};
@@ -179,19 +179,51 @@ fn parse_time(at: &str) -> Option<SystemTime> {
 }
 
 /// `--since`: a date, `2026-11-01`, meaning midnight UTC, or an RFC 3339 time
-/// with `Z` or a numeric offset.
+/// with `Z` or a `±HH:MM` offset.
 pub fn parse_since(value: &str) -> Result<SystemTime> {
-    let invalid = || anyhow!("{value:?} is not a date (2026-11-01) or RFC 3339 time");
+    let invalid =
+        || anyhow!("{value:?} is not a date (2026-11-01) or RFC 3339 time (2026-11-01T12:00:00Z)");
     if value.len() == 10 {
         return humantime::parse_rfc3339(&format!("{value}T00:00:00Z")).map_err(|_| invalid());
     }
+    if is_zoneless_time(value) {
+        bail!("{value:?} has no zone; add Z or an offset such as +05:00");
+    }
     let (local, offset) = split_offset(value).ok_or_else(invalid)?;
-    // parse_rfc3339_weak would ignore an offset it was given.
+    // The weak parser would also take, and ignore, a zone left on `local`.
+    if !is_zoneless_time(local) {
+        return Err(invalid());
+    }
     let at = humantime::parse_rfc3339_weak(local).map_err(|_| invalid())?;
     match offset < 0 {
         true => Ok(at + Duration::from_secs(offset.unsigned_abs())),
         false => Ok(at - Duration::from_secs(offset as u64)),
     }
+}
+
+/// `YYYY-MM-DD[T ]hh:mm:ss`, with an optional `.d+` fraction.
+fn is_zoneless_time(value: &str) -> bool {
+    let b = value.as_bytes();
+    let digits = |from: usize, to: usize| b[from..to].iter().all(u8::is_ascii_digit);
+    b.len() >= 19
+        && digits(0, 4)
+        && b[4] == b'-'
+        && digits(5, 7)
+        && b[7] == b'-'
+        && digits(8, 10)
+        && matches!(b[10], b'T' | b' ')
+        && digits(11, 13)
+        && b[13] == b':'
+        && digits(14, 16)
+        && b[16] == b':'
+        && digits(17, 19)
+        && match &b[19..] {
+            [] => true,
+            [b'.', fraction @ ..] => {
+                !fraction.is_empty() && fraction.iter().all(u8::is_ascii_digit)
+            }
+            _ => false,
+        }
 }
 
 /// The time without its `Z` or `±HH:MM`, and the offset east of UTC in seconds.
@@ -200,15 +232,20 @@ fn split_offset(value: &str) -> Option<(&str, i64)> {
         return Some((local, 0));
     }
     let split = value.len().checked_sub(6)?;
-    let (local, offset) = (value.get(..split)?, value.get(split..)?);
-    let sign = match offset.as_bytes()[0] {
+    let (local, offset) = (value.get(..split)?, value.get(split..)?.as_bytes());
+    let sign = match offset[0] {
         b'+' => 1,
         b'-' => -1,
         _ => return None,
     };
-    let hours: i64 = offset.get(1..3)?.parse().ok()?;
-    let minutes: i64 = offset.get(4..6)?.parse().ok()?;
-    if offset.as_bytes()[3] != b':' || hours > 23 || minutes > 59 {
+    let two_digits = |at: usize| {
+        let pair = &offset[at..at + 2];
+        pair.iter()
+            .all(u8::is_ascii_digit)
+            .then(|| i64::from((pair[0] - b'0') * 10 + pair[1] - b'0'))
+    };
+    let (hours, minutes) = (two_digits(1)?, two_digits(4)?);
+    if offset[3] != b':' || hours > 23 || minutes > 59 {
         return None;
     }
     Some((local, sign * (hours * 3600 + minutes * 60)))

@@ -273,7 +273,18 @@ fn a_bad_since_is_refused() {
     for since in [
         "last week",
         "2026-11-01T12:00:00+0500",
+        "2026-11-01T12:00:00+05x00",
         "2026-11-01T12:00:00+25:00",
+        "2026-11-01T12:00:00+24:00",
+        "2026-11-01T12:00:00+05:60",
+        "2026-11-01T12:00:00+-5:00",
+        "2026-11-01T12:00:00++5:00",
+        "2026-11-01T12:00:00+05:-1",
+        "2026-11-01T12:00:00Z+05:00",
+        "2026-11-01T12:00:00+00:00+05:00",
+        "2026-11-01T12:00:00ZZ",
+        "2026-11-01T12:00:00.+05:00",
+        "2026-11-01T12:00:00",
     ] {
         let out = run(state.path(), &["--since", since]);
         assert_eq!(out.status.code(), Some(2), "--since {since}");
@@ -474,6 +485,9 @@ fn since_is_on_or_after_and_honors_an_offset() {
         "2026-11-01T12:00:00+00:00",
         "2026-11-01T05:00:00-07:00",
         "2026-11-01T17:00:00.0+05:00",
+        "2026-11-01T17:30:00+05:30",
+        "2026-11-01T02:30:00-09:30",
+        "2026-11-01T12:00:00z",
     ] {
         let json = json(state.path(), &["--since", since]);
         assert_eq!(names(&json, "open"), ["at"], "--since {since}");
@@ -514,4 +528,14 @@ fn an_unparsable_mailbox_line_is_warned_about() {
         "{stderr}"
     );
     assert!(String::from_utf8_lossy(&out.stdout).contains("lh-1"));
+}
+
+#[test]
+fn a_since_without_a_zone_says_so() {
+    let state = tempfile::tempdir().unwrap();
+    let out = run(state.path(), &["--since", "2026-11-01T12:00:00"]);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no zone"),
+        "{out:?}"
+    );
 }
