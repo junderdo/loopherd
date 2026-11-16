@@ -19,6 +19,9 @@ pub struct ConfigFile {
     pub shepherd: Option<ShepherdConfig>,
     /// Each lead's switches where its herd file's `[lead]` leaves one unset.
     pub lead_defaults: Option<SwitchValues>,
+    /// Read and checked by `notify`, so a broken table can't cost the rest.
+    #[serde(rename = "notify")]
+    _notify: Option<toml::Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -184,6 +187,16 @@ mod tests {
             "{text}"
         );
         assert_eq!(lead_defaults(&path).unwrap(), Some(only_on(true, true)));
+    }
+
+    #[test]
+    fn lead_defaults_set_and_read_beside_a_notify_table() {
+        let (_dir, path) = config_with(Some("[notify]\nenabled = true\ncommand = 'n {text}'\n"));
+
+        set_lead_defaults(&path, "merge").unwrap();
+
+        assert_eq!(lead_defaults(&path).unwrap(), Some(only_on(true, false)));
+        assert!(fs::read_to_string(&path).unwrap().starts_with("[notify]\n"));
     }
 
     #[test]

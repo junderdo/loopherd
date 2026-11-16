@@ -58,6 +58,18 @@ A switch its `[lead]` leaves unset comes from `[lead_defaults]` in
 `~/.config/loopherd/config.toml` (`scripts/install --lead-defaults` to change
 them), else is off; `loopherd herds` shows each switch's value and source.
 
+## Notify
+
+The human's `[notify]` table in `~/.config/loopherd/config.toml` decides
+whether questions and blocked dialogs also reach them outside herdr (see
+"Notifying the human" in `loopherd --skill`). Each lead's watch sends its
+workers' and its own; yours sends the rest and, deduplicated by per-event
+marks in the reports directory, the leads' too. Tests and manual runs set a
+temp `LOOPHERD_CONFIG_DIR` (`scripts/herdr-dev` exports
+`$XDG_RUNTIME_DIR/loopherd-dev/config`, else a fresh `mktemp -d`, unless one
+is set), so they never send to the human; give such a run its own
+`[notify]` with a stub `command` to see a send.
+
 ## Gotchas
 
 - Run the live suite after changing retire or feed output.

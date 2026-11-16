@@ -234,6 +234,8 @@ fn reporter(ledger: &dyn Ledger, who: &Reporter) -> Result<String> {
 pub struct Read {
     pub lines: Vec<String>,
     pub warnings: Vec<String>,
+    /// The entries behind `lines`, each with its member's name.
+    pub entries: Vec<(String, Entry)>,
 }
 
 pub struct Filter<'a> {
@@ -309,6 +311,7 @@ fn reports_with(
             .flat_map(|(name, entry)| render(name, entry))
             .collect(),
         warnings,
+        entries: found,
     };
     Ok((read, pending))
 }

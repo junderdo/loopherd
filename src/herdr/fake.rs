@@ -104,6 +104,8 @@ pub struct FakeHerdr {
     pub malformed_agents: bool,
     /// `agents()` blocks until a value arrives or the sender drops, like a hung herdr.
     pub agents_gate: Option<Receiver<()>>,
+    /// Runs inside every `agents()` call, before it answers.
+    pub on_agents: Option<Box<dyn Fn() + Send>>,
     pub socket: Option<PathBuf>,
     state: RefCell<State>,
 }
@@ -129,6 +131,7 @@ impl FakeHerdr {
             unreachable: false,
             malformed_agents: false,
             agents_gate: None,
+            on_agents: None,
             socket: Some(FAKE_SOCKET.into()),
             state: RefCell::default(),
         }
@@ -338,6 +341,9 @@ impl Herdr for FakeHerdr {
     fn agents(&self) -> Result<Vec<Agent>> {
         if let Some(gate) = &self.agents_gate {
             let _ = gate.recv();
+        }
+        if let Some(on_agents) = &self.on_agents {
+            on_agents();
         }
         if self.is_down() {
             bail!("herdr server not running");
