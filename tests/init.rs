@@ -1081,7 +1081,7 @@ fn an_existing_doc_naming_another_tracker_gets_a_placeholder_source_herds_report
     assert_ok(&out);
     assert!(
         text(&out.stdout).contains(&format!(
-            "fill [queue] source in {} from docs/agents/issue-tracker.md",
+            "Fill [queue] source in {} from docs/agents/issue-tracker.md",
             fixture.herds().join("widgets.toml").display()
         )),
         "{}",
@@ -1325,4 +1325,100 @@ fn a_tracker_doc_init_cant_write_leaves_no_herd_files_and_a_rerun_succeeds() {
     assert_eq!(fs::read_dir(fixture.herds()).unwrap().count(), 0);
     fs::set_permissions(&agents, fs::Permissions::from_mode(0o755)).unwrap();
     assert_ok(&fixture.init(&[]));
+}
+
+#[test]
+fn a_placeholder_herd_for_one_repo_doesnt_stop_init_in_another() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+    let other = fixture.root.path().join("gadgets");
+    fs::create_dir_all(&other).unwrap();
+    git(&other, &["init", "-q"]);
+    git(
+        &other,
+        &["remote", "add", "origin", "git@github.com:acme/gadgets.git"],
+    );
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_loopherd"));
+    command
+        .args(["init", "--check", "cargo test"])
+        .current_dir(&other);
+
+    assert_ok(&fixture.run(&mut command));
+}
+
+fn write_docs(fixture: &Fixture, tracker: Option<&str>, labels: &str) {
+    let dir = fixture.repo().join("docs/agents");
+    fs::create_dir_all(&dir).unwrap();
+    if let Some(tracker) = tracker {
+        fs::write(dir.join("issue-tracker.md"), tracker).unwrap();
+    }
+    fs::write(dir.join("triage-labels.md"), labels).unwrap();
+}
+
+#[test]
+fn a_tracker_other_than_github_takes_labels_no_shell_command_runs() {
+    let fixture = Fixture::new(&["acme"]);
+    write_docs(
+        &fixture,
+        Some("# Issue tracker: Local Markdown\n"),
+        "| `needs-info` | `Needs {more} info` | x |\n",
+    );
+
+    assert_ok(&fixture.init(&[]));
+
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(herd.contains("--add-label Needs {{more}} info"), "{herd}");
+}
+
+#[test]
+fn triage_label_roles_match_whatever_their_case() {
+    let fixture = Fixture::new(&["acme"]);
+    write_docs(&fixture, None, "| `Needs-Info` | `asked` | x |\n");
+
+    assert_ok(&fixture.init(&[]));
+
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(herd.contains("--add-label asked"), "{herd}");
+}
+
+#[test]
+fn two_roles_mapped_to_one_label_are_refused_before_any_gh_call() {
+    let fixture = Fixture::new(&["acme"]);
+    write_docs(
+        &fixture,
+        None,
+        "| `ready-for-agent` | `todo` | x |\n| `needs-info` | `TODO` | x |\n",
+    );
+
+    let out = fixture.init(&[]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains(
+            "docs/agents/triage-labels.md maps ready-for-agent and needs-info to one label, todo"
+        ),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn with_a_placeholder_source_the_next_steps_fill_it_before_feeding() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init(&["--tracker", "local"]);
+
+    assert_ok(&out);
+    let stdout = text(&out.stdout);
+    let next = &stdout[stdout.find("Next:").unwrap()..];
+    assert!(
+        next.contains(&format!(
+            "  2. Fill [queue] source in {} from docs/agents/issue-tracker.md",
+            fixture.herds().join("widgets.toml").display()
+        )),
+        "{next}"
+    );
+    assert!(next.contains("  5. loopherd lead widgets"), "{next}");
 }

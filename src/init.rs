@@ -103,6 +103,7 @@ pub fn init(paths: &Paths, req: Request) -> Result<Vec<String>> {
     let repo_path = toml_string(&repo.to_string_lossy());
     let lead_prompt = toml_string(&format!("{herd}-lead.md"));
     let labels = &tracker.labels;
+    let needs_info = prompt_text(&labels.needs_info)?;
     let (needs_info_lc, ready_for_human_lc) = (
         labels.needs_info.to_ascii_lowercase(),
         labels.ready_for_human.to_ascii_lowercase(),
@@ -117,7 +118,7 @@ pub fn init(paths: &Paths, req: Request) -> Result<Vec<String>> {
         ("LEAD_PROMPT", &lead_prompt),
         ("SWITCHES", &switches),
         ("READY_FOR_AGENT", &labels.ready_for_agent),
-        ("NEEDS_INFO", &labels.needs_info),
+        ("NEEDS_INFO", &needs_info),
         ("READY_FOR_HUMAN", &labels.ready_for_human),
         ("NEEDS_INFO_LC", &needs_info_lc),
         ("READY_FOR_HUMAN_LC", &ready_for_human_lc),
@@ -164,26 +165,33 @@ pub fn init(paths: &Paths, req: Request) -> Result<Vec<String>> {
     for (path, _) in &tracker.writes {
         lines.push(format!("wrote {path} (uncommitted)"));
     }
+    let mut steps = vec![format!(
+        "Open Claude in {} once and accept its trust dialog; members can't start past \
+         it, and init never accepts it for you.",
+        repo.display()
+    )];
     if !tracker.github {
-        lines.push(format!(
-            "The tracker isn't GitHub, so the herd's queue source is a placeholder and \
-             `loopherd herds` reports it invalid: fill [queue] source in {} from \
-             {}, and adapt its issue template to the same tracker.",
+        lines.push(
+            "The tracker isn't GitHub, so the herd's queue source is a placeholder that \
+             `loopherd herds` reports invalid until it's filled."
+                .into(),
+        );
+        steps.push(format!(
+            "Fill [queue] source in {} from {}, and adapt its issue template to the same \
+             tracker.",
             herd_file.display(),
             tracker::TRACKER_DOC
         ));
     }
-    lines.extend([
-        "Next:".into(),
-        format!(
-            "  1. Open Claude in {} once and accept its trust dialog; members can't \
-             start past it, and init never accepts it for you.",
-            repo.display()
-        ),
-        "  2. loopherd herds".into(),
-        format!("  3. loopherd feed {herd} --dry-run"),
-        format!("  4. loopherd lead {herd}"),
+    steps.extend([
+        "loopherd herds".into(),
+        format!("loopherd feed {herd} --dry-run"),
+        format!("loopherd lead {herd}"),
     ]);
+    lines.push("Next:".into());
+    for (n, step) in steps.iter().enumerate() {
+        lines.push(format!("  {}. {step}", n + 1));
+    }
     Ok(lines)
 }
 

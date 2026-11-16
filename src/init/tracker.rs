@@ -38,6 +38,16 @@ pub struct Labels {
     pub ready_for_human: String,
 }
 
+impl Labels {
+    fn roles(&self) -> [(&'static str, &str); 3] {
+        [
+            ("ready-for-agent", &self.ready_for_agent),
+            ("needs-info", &self.needs_info),
+            ("ready-for-human", &self.ready_for_human),
+        ]
+    }
+}
+
 impl Default for Labels {
     fn default() -> Labels {
         Labels {
@@ -52,29 +62,39 @@ impl Default for Labels {
 /// else asked on a terminal, else GitHub.
 pub fn resolve(repo: &Path, choice: Option<Choice>) -> Result<Tracker> {
     let labels = read_labels(repo)?;
-    if let Some(doc) = read(&repo.join(TRACKER_DOC))? {
-        if choice.is_some() {
-            bail!("{TRACKER_DOC} already names the tracker; drop --tracker");
+    let (github, writes) = match read(&repo.join(TRACKER_DOC))? {
+        Some(_) if choice.is_some() => {
+            bail!("{TRACKER_DOC} already names the tracker; drop --tracker")
         }
-        return Ok(Tracker {
-            github: names_github(&doc),
-            labels,
-            writes: vec![],
-        });
-    }
-    let choice = match choice {
-        Some(choice) => choice,
-        None if interactive() => ask()?,
-        None => Choice::GitHub,
+        Some(doc) => (names_github(&doc), vec![]),
+        None => {
+            let choice = match choice {
+                Some(choice) => choice,
+                None if interactive() => ask()?,
+                None => Choice::GitHub,
+            };
+            let (github, doc) = match choice {
+                Choice::GitHub => (true, GITHUB.to_string()),
+                Choice::Local => (false, LOCAL.to_string()),
+                Choice::Other(desc) => (false, other_doc(desc)?),
+            };
+            let mut writes = vec![(TRACKER_DOC, doc)];
+            if fs::symlink_metadata(repo.join(LABELS_DOC)).is_err() {
+                writes.push((LABELS_DOC, TRIAGE_LABELS.to_string()));
+            }
+            (github, writes)
+        }
     };
-    let (github, doc) = match choice {
-        Choice::GitHub => (true, GITHUB.to_string()),
-        Choice::Local => (false, LOCAL.to_string()),
-        Choice::Other(desc) => (false, other_doc(desc)?),
-    };
-    let mut writes = vec![(TRACKER_DOC, doc)];
-    if fs::symlink_metadata(repo.join(LABELS_DOC)).is_err() {
-        writes.push((LABELS_DOC, TRIAGE_LABELS.to_string()));
+    // Only GitHub's snippets put the labels in shell commands.
+    if github {
+        for (role, label) in labels.roles() {
+            if !is_label(label) {
+                bail!(
+                    "{LABELS_DOC} maps {role} to {label:?}; init takes GitHub labels of \
+                     letters, digits and - _ . : / only, not starting with -"
+                );
+            }
+        }
     }
     Ok(Tracker {
         github,
@@ -121,22 +141,26 @@ fn read_labels(repo: &Path) -> Result<Labels> {
         let [role, label, ..] = cells[..] else {
             continue;
         };
-        let slot = match role {
+        let role = role.to_ascii_lowercase();
+        let slot = match role.as_str() {
             "ready-for-agent" => &mut labels.ready_for_agent,
             "needs-info" => &mut labels.needs_info,
             "ready-for-human" => &mut labels.ready_for_human,
             _ => continue,
         };
-        if !is_label(label) {
-            bail!(
-                "{LABELS_DOC} maps {role} to {label:?}; init takes labels of letters, digits \
-                 and - _ . : / only, not starting with -"
-            );
-        }
         if label.eq_ignore_ascii_case("blocked") {
             bail!("{LABELS_DOC} maps {role} to blocked, which is loopherd's own label");
         }
         *slot = label.to_string();
+    }
+    let roles = labels.roles();
+    for (i, (role, label)) in roles.iter().enumerate() {
+        if let Some((other, _)) = roles[i + 1..]
+            .iter()
+            .find(|(_, other)| other.eq_ignore_ascii_case(label))
+        {
+            bail!("{LABELS_DOC} maps {role} and {other} to one label, {label}");
+        }
     }
     Ok(labels)
 }
@@ -153,7 +177,11 @@ fn is_label(label: &str) -> bool {
 fn read(path: &PathBuf) -> Result<Option<String>> {
     match fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound && fs::symlink_metadata(path).is_err() =>
+        {
+            Ok(None)
+        }
         Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
     }
 }

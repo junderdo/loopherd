@@ -666,10 +666,15 @@ fn config_file(paths: &Paths) -> PathBuf {
     paths.herds.with_file_name("config.toml")
 }
 
-/// The repo a herd's file names, with a leading `~` expanded.
+/// The repo a herd's file names, with a leading `~` expanded, even while a
+/// value in it is invalid (an unfilled queue source); a file that doesn't
+/// parse is still an error.
 pub fn repo(paths: &Paths, herd: &str) -> Result<PathBuf> {
-    let file = load(&paths.herds, herd)?;
-    Ok(expand_home(&file.repo, &paths.home))
+    let file = file_of(&paths.herds, herd)?;
+    let text =
+        std::fs::read_to_string(&file).with_context(|| format!("read {}", file.display()))?;
+    let parsed: HerdFile = toml::from_str(&text).with_context(|| file.display().to_string())?;
+    Ok(expand_home(&parsed.repo, &paths.home))
 }
 
 /// A herd's lead's switches, without reading its prompt.
