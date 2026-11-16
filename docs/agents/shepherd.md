@@ -3,7 +3,7 @@
 Read `loopherd --skill` first: it is the shepherd's and lead's guide for any
 herd (D19). This file adds only what's specific to this repo's herd,
 `loopherd-cards`, whose members work Trello cards per
-[issue-tracking.md](issue-tracking.md).
+[issue-tracker.md](issue-tracker.md).
 
 ## Feed
 
@@ -77,6 +77,6 @@ own `[notify]` with a stub `command` to see a send.
   `docs/decisions/D<n>.md` file plus an index row in `docs/wayfinding.md`.
   Check the highest D file first; card numbers are never reused. Two PRs
   colliding on a D number follow the renumber rule in
-  [issue-tracking.md](issue-tracking.md).
+  [issue-tracker.md](issue-tracker.md).
 - Push as junderdo:
   `GH_TOKEN=$(gh auth token --user junderdo) git -c credential.helper= -c credential.helper='!gh auth git-credential' push …`.

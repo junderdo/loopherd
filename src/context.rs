@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::config::{self, ConfigFile};
+use crate::continuation::{is_plain_name, live_transcript, session_in, transcript_of};
 use crate::ledger::AgentRecord;
 use crate::process::{self, Procs};
 
@@ -84,12 +85,24 @@ pub fn handoff_block(
     let Some(session) = input["session_id"].as_str().filter(|s| is_plain_name(s)) else {
         return Ok(None);
     };
+    let live = input["transcript_path"]
+        .as_str()
+        .map(|t| live_transcript(Path::new(t)));
+    let session = match &live {
+        Some(live) if input["transcript_path"].as_str() != live.to_str() => session_in(live),
+        _ => session.to_string(),
+    };
+    let session = session.as_str();
     let (limit, noted) = match limit {
         Ok(limit) => (limit, Ok(())),
         Err(e) => (FALLBACK_LIMIT, note_once(state, session, &e, note)),
     };
     // A failed note must not skip the check; it surfaces only when nothing is asked.
-    match ask(member, &input, session, limit, state)? {
+    let asked = match &live {
+        Some(transcript) => ask(member, transcript, session, limit, state)?,
+        None => None,
+    };
+    match asked {
         Some(reason) => Ok(Some(reason)),
         None => noted.map(|()| None),
     }
@@ -97,15 +110,12 @@ pub fn handoff_block(
 
 fn ask(
     member: &AgentRecord,
-    input: &Value,
+    transcript: &Path,
     session: &str,
     limit: u64,
     state: &Path,
 ) -> Result<Option<String>> {
-    let Some(transcript) = input["transcript_path"].as_str() else {
-        return Ok(None);
-    };
-    let Some(tokens) = tokens_in(Path::new(transcript)).filter(|&t| t > limit) else {
+    let Some(tokens) = tokens_in(transcript).filter(|&t| t > limit) else {
         return Ok(None);
     };
     let asked = state.join("handoff-asked");
@@ -196,10 +206,6 @@ fn reason(member: &AgentRecord, tokens: u64, limit: u64, handoff: &Path) -> Stri
     )
 }
 
-fn is_plain_name(session: &str) -> bool {
-    !(session.is_empty() || session.contains('/') || session.starts_with('.'))
-}
-
 /// What the shepherd's watch needs to find its caller's Claude session.
 pub struct ShepherdCheck<'a> {
     pub procs: &'a dyn Procs,
@@ -271,16 +277,6 @@ fn session_of(procs: &dyn Procs, pid: u32, claude_dir: &Path) -> Option<String> 
     }
     let session = file["sessionId"].as_str()?;
     is_plain_name(session).then(|| session.to_string())
-}
-
-/// `projects/<project>/<session>.jsonl`, in whichever project holds it.
-fn transcript_of(claude_dir: &Path, session: &str) -> Option<PathBuf> {
-    let name = format!("{session}.jsonl");
-    fs::read_dir(claude_dir.join("projects"))
-        .ok()?
-        .flatten()
-        .map(|project| project.path().join(&name))
-        .find(|path| path.is_file())
 }
 
 /// Tokens in context as of the transcript's last main-thread assistant turn
@@ -514,6 +510,29 @@ mod tests {
     }
 
     #[test]
+    fn a_continued_session_is_measured_and_asked_once_in_the_session_it_continued_in() {
+        let w = World::new();
+        let stub = w.dir.path().join("stub.jsonl");
+        fs::write(
+            &stub,
+            r#"{"type":"continued-in","sessionId":"stub","continuedInSessionId":"live"}"#,
+        )
+        .unwrap();
+        fs::write(
+            w.dir.path().join("live.jsonl"),
+            assistant(0, 0, 195_000, false),
+        )
+        .unwrap();
+        let lead = member("lh-1", None);
+        assert!(
+            w.block(&lead, &w.stop("stub", &stub, ""), 150_000)
+                .is_some()
+        );
+        assert!(w.state().join("handoff-asked/live").exists());
+        assert_eq!(w.block(&lead, &w.stop("live", &stub, ""), 150_000), None);
+    }
+
+    #[test]
     fn a_leads_reason_has_it_stop_its_watch_not_push_a_branch() {
         let w = World::new();
         let t = w.transcript(&[assistant(0, 0, 200, false)]);
@@ -701,6 +720,26 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(format!("{err:#}"), "mailbox full");
+    }
+
+    #[test]
+    fn a_failed_limit_is_noted_even_without_a_transcript() {
+        let w = World::new();
+        let noted = std::cell::RefCell::new(vec![]);
+        let input = br#"{"hook_event_name":"Stop","session_id":"s1"}"#;
+        let blocked = handoff_block(
+            &member("lh-1", None),
+            input,
+            Err(anyhow::anyhow!("bad")),
+            &w.state(),
+            &|text| {
+                noted.borrow_mut().push(text);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(blocked, None);
+        assert_eq!(noted.borrow().len(), 1);
     }
 
     #[test]

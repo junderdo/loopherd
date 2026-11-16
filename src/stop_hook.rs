@@ -9,6 +9,7 @@ use std::time::SystemTime;
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::continuation::{follow_recorded, live_for};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::process::{self, Claim, Procs};
 use crate::report::{Background, Body, Entry, Stop, Tally, Unknown, append, member_in};
@@ -37,7 +38,9 @@ pub enum Stopped {
 /// the test, and a stop from it carries the member's current session into the
 /// ledger; otherwise the hook tries to claim the process. A Claude that isn't
 /// the pane's top-level one is dropped; if the claim fails for another reason,
-/// or there is no usable `$CLAUDE_PID`, sessions are compared.
+/// or there is no usable `$CLAUDE_PID`, sessions are compared. Sessions are
+/// taken as `live` resolves them, and a recorded one that resolves elsewhere
+/// is moved there first.
 #[allow(clippy::too_many_arguments)]
 pub fn stop_hook(
     ledger: &mut dyn Ledger,
@@ -46,6 +49,7 @@ pub fn stop_hook(
     pane: &Pane,
     input: &[u8],
     now: SystemTime,
+    live: &dyn Fn(&str) -> String,
     handoff: &dyn Fn(&AgentRecord) -> Result<Option<String>>,
     warn: &mut dyn FnMut(String),
 ) -> Result<Option<Stopped>> {
@@ -53,7 +57,23 @@ pub fn stop_hook(
     let Some(member) = member_in(&entries, pane.id, pane.socket) else {
         return Ok(None);
     };
-    let stop = parse(input);
+    let member = match follow_recorded(ledger, &entries, member, live) {
+        Ok(followed) => followed.unwrap_or_else(|| member.clone()),
+        Err(e) => {
+            warn(format!("could not update {}'s session: {e:#}", member.name));
+            // Compared as if moved, so the stop isn't dropped against a stale session.
+            AgentRecord {
+                session_id: member
+                    .session_id
+                    .as_deref()
+                    .map(|s| live_for(&entries, member, s, live)),
+                ..member.clone()
+            }
+        }
+    };
+    let member = &member;
+    let mut stop = parse(input);
+    stop.session = stop.session.map(|s| live_for(&entries, member, &s, live));
     if let Some(pid) = pane.claude_pid {
         let exact = pane.socket.is_some() && member.socket.as_deref() == pane.socket;
         match process::live(procs, member.process) {
@@ -193,7 +213,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::ledger::{AgentRecord, MemLedger, Process};
+    use crate::ledger::{AgentRecord, MemLedger, NoUpdate, Process};
     use crate::process::{CLAUDE, FakeProcs};
 
     const SOCKET: &str = "/run/herdr/herdr.sock";
@@ -278,6 +298,7 @@ mod tests {
             &pane,
             input.as_bytes(),
             at(),
+            &|s| s.to_string(),
             &|_| Ok(None),
             warn,
         )
@@ -648,6 +669,135 @@ mod tests {
         assert_eq!(l.0["lh-1"].process, None);
     }
 
+    fn continued(session: &str) -> String {
+        match session {
+            "stub" => "live".into(),
+            other => other.into(),
+        }
+    }
+
+    fn stop_continued(ledger: &mut dyn Ledger, input: &str) -> (Option<Stopped>, String) {
+        stop_warned(ledger, input, &mut |_| {})
+    }
+
+    fn stop_warned(
+        ledger: &mut dyn Ledger,
+        input: &str,
+        warn: &mut dyn FnMut(String),
+    ) -> (Option<Stopped>, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let pane = Pane {
+            id: "w1:p1",
+            socket: Some(Path::new(SOCKET)),
+            claude_pid: None,
+        };
+        let stopped = stop_hook(
+            ledger,
+            &FakeProcs::default(),
+            dir.path(),
+            &pane,
+            input.as_bytes(),
+            at(),
+            &continued,
+            &|_| Ok(None),
+            warn,
+        )
+        .unwrap();
+        (stopped, mailbox(dir.path(), "lh-1"))
+    }
+
+    #[test]
+    fn a_member_whose_session_continued_is_moved_to_the_live_one_and_its_stop_filed() {
+        for stop in ["stub", "live"] {
+            let mut l = in_session(Some("stub"));
+            let (stopped, mailbox) = stop_continued(&mut l, &stop_from(stop));
+            assert_eq!(stopped, Some(Stopped::Filed("lh-1".into())), "{stop}");
+            assert!(mailbox.contains(r#""session":"live""#), "{stop}: {mailbox}");
+            assert_eq!(l.0["lh-1"].session_id.as_deref(), Some("live"), "{stop}");
+        }
+    }
+
+    #[test]
+    fn a_member_already_moved_to_its_live_session_files_a_stop_its_hook_still_reports_as_the_stub()
+    {
+        let mut l = in_session(Some("live"));
+        let (stopped, mailbox) = stop_continued(&mut l, &stop_from("stub"));
+        assert_eq!(stopped, Some(Stopped::Filed("lh-1".into())));
+        assert!(mailbox.contains(r#""session":"live""#), "{mailbox}");
+        assert_eq!(l.0["lh-1"].session_id.as_deref(), Some("live"));
+    }
+
+    #[test]
+    fn a_failed_move_to_the_live_session_still_files_the_stop() {
+        for stop in ["stub", "live"] {
+            let mut l = NoUpdate(in_session(Some("stub")));
+            let (stopped, mailbox) = stop_continued(&mut l, &stop_from(stop));
+            assert_eq!(stopped, Some(Stopped::Filed("lh-1".into())), "{stop}");
+            assert!(mailbox.contains(r#""session":"live""#), "{stop}: {mailbox}");
+            assert_eq!(l.0.0["lh-1"].session_id.as_deref(), Some("stub"), "{stop}");
+        }
+    }
+
+    #[test]
+    fn a_member_on_its_live_session_is_not_written() {
+        let mut l = NoUpdate(in_session(Some("live")));
+        let mut warnings = vec![];
+        let (stopped, _) = stop_warned(&mut l, &stop_from("live"), &mut |w| warnings.push(w));
+        assert_eq!(stopped, Some(Stopped::Filed("lh-1".into())));
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_session_recorded_since_the_ledger_was_read_is_not_overwritten() {
+        /// Reads the stub; updates see the session a SessionStart wrote since.
+        struct Raced(MemLedger, MemLedger);
+        impl Ledger for Raced {
+            fn entries(&self) -> anyhow::Result<std::collections::BTreeMap<String, AgentRecord>> {
+                self.0.entries()
+            }
+            fn record(&mut self, r: AgentRecord) -> anyhow::Result<()> {
+                self.1.record(r)
+            }
+            fn update(
+                &mut self,
+                name: &str,
+                change: &mut dyn FnMut(&mut AgentRecord) -> anyhow::Result<()>,
+            ) -> anyhow::Result<AgentRecord> {
+                self.1.update(name, change)
+            }
+            fn started(&mut self, n: &str, at: SystemTime) -> anyhow::Result<()> {
+                self.1.started(n, at)
+            }
+        }
+        let mut l = Raced(in_session(Some("stub")), in_session(Some("fresh")));
+        stop_continued(&mut l, &stop_from("fresh"));
+        assert_eq!(l.1.0["lh-1"].session_id.as_deref(), Some("fresh"));
+    }
+
+    #[test]
+    fn a_retired_member_recording_the_live_session_does_not_hold_it() {
+        let mut l = in_session(Some("stub"));
+        let mut other = member("lh-2", "w1:p2", Some(SOCKET));
+        other.session_id = Some("live".into());
+        other.retired = true;
+        l.0.insert("lh-2".into(), other);
+        let (stopped, _) = stop_continued(&mut l, &stop_from("stub"));
+        assert_eq!(stopped, Some(Stopped::Filed("lh-1".into())));
+        assert_eq!(l.0["lh-1"].session_id.as_deref(), Some("live"));
+    }
+
+    #[test]
+    fn a_continued_session_another_live_member_owns_is_not_followed() {
+        let mut l = in_session(Some("stub"));
+        let mut other = member("lh-2", "w1:p2", Some(SOCKET));
+        other.session_id = Some("live".into());
+        l.0.insert("lh-2".into(), other);
+        let (stopped, mailbox) = stop_continued(&mut l, &stop_from("stub"));
+        assert_eq!(l.0["lh-1"].session_id.as_deref(), Some("stub"));
+        assert_eq!(stopped, Some(Stopped::Filed("lh-1".into())));
+        assert!(mailbox.contains(r#""session":"stub""#), "{mailbox}");
+    }
+
     #[test]
     fn a_session_another_member_owns_is_not_followed() {
         let mut l = claimed(Some("old"), 30, 300);
@@ -662,27 +812,8 @@ mod tests {
 
     #[test]
     fn a_ledger_error_after_the_stop_is_filed_does_not_lose_it() {
-        struct Failing(MemLedger);
-        impl Ledger for Failing {
-            fn entries(&self) -> anyhow::Result<std::collections::BTreeMap<String, AgentRecord>> {
-                self.0.entries()
-            }
-            fn record(&mut self, r: AgentRecord) -> anyhow::Result<()> {
-                self.0.record(r)
-            }
-            fn update(
-                &mut self,
-                _: &str,
-                _: &mut dyn FnMut(&mut AgentRecord) -> anyhow::Result<()>,
-            ) -> anyhow::Result<AgentRecord> {
-                anyhow::bail!("disk full")
-            }
-            fn started(&mut self, n: &str, at: SystemTime) -> anyhow::Result<()> {
-                self.0.started(n, at)
-            }
-        }
         let dir = tempfile::tempdir().unwrap();
-        let mut l = Failing(claimed(Some("old"), 30, 300));
+        let mut l = NoUpdate(claimed(Some("old"), 30, 300));
         let mut warnings = vec![];
         let pane = Pane {
             id: "w1:p1",
@@ -696,6 +827,7 @@ mod tests {
             &pane,
             stop_from("branched").as_bytes(),
             at(),
+            &|s| s.to_string(),
             &|_| Ok(None),
             &mut |w| warnings.push(w),
         )
@@ -772,6 +904,7 @@ mod tests {
             &pane,
             input.as_bytes(),
             at(),
+            &|s| s.to_string(),
             handoff,
             &mut |w| warnings.push(w),
         )
@@ -895,6 +1028,7 @@ mod tests {
             &pane,
             b"{}",
             at(),
+            &|s| s.to_string(),
             &|_| panic!("asked a socketless member"),
             &mut |_| {},
         )
