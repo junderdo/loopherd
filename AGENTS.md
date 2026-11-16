@@ -6,7 +6,7 @@ together across sessions, built as a layer over herdr's CLI/socket API.
 - **Terms**: herd, shepherd, lead, member, mailbox and the rest →
   `CONTEXT.md`.
 - **Issues**: claiming, working, or creating a card on the Trello board →
-  read `docs/agents/issue-tracking.md` first.
+  read `docs/agents/issue-tracker.md` first.
 - **Shepherding**: running the herd live with the human (feeding, watching,
   verifying and cleaning up members) → read `loopherd --skill` first,
   then `docs/agents/shepherd.md`, this repo's runbook.
