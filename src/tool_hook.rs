@@ -183,7 +183,7 @@ fn decide(
     }
     if needed == Switch::Unreadable {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator or fed to a shell with a quote left open, a `<<` in `((…))`, a `case` in `$(…)`, or a glob or brace in the program's name: {}; rewrite it, or ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like, a `<<` in `((…))`, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -307,30 +307,31 @@ fn needs_with(script: &str, aliases: &mut Aliases, in_shell: bool) -> Vec<Switch
 }
 
 /// Whether the script may run a heredoc's body, as its input or a file it
-/// wrote: it names a shell, `eval`, `source`, `ssh` or `sudo` anywhere, sets
-/// `PATH`, runs a program a `$` names, or holds a path outside a redirection.
+/// wrote: unless every command is a [`SINKS`] program, it may.
 fn runs_code(commands: &[Vec<Word>]) -> bool {
-    commands.iter().any(|command| {
-        let mut target = false;
-        let mut program = true;
-        command.iter().any(|w| {
-            let text = w.text.as_str();
-            let redirects = redirection(text);
-            let is_target = std::mem::replace(&mut target, redirects == Some(true));
-            let at_program = program && redirects.is_none() && !is_target && !is_assignment(text);
-            if at_program {
-                program = KEYWORDS.contains(&text) || WRAPPERS.iter().any(|(n, _)| *n == text);
+    !commands.iter().all(|command| runs_nothing(command))
+}
+
+/// Whether a command runs only a [`SINKS`] program, or none, and sets only
+/// lower-case variables, which no program reads from the environment.
+fn runs_nothing(command: &[Word]) -> bool {
+    let mut words = command.iter();
+    while let Some(word) = words.next() {
+        let text = word.text.as_str();
+        if let Some(bare) = redirection(text) {
+            if bare {
+                words.next();
             }
-            CODE_RUNNERS.contains(&file_name(text))
-                || text.starts_with("PATH=")
-                || text.starts_with("PATH+=")
-                || (at_program && (text == "." || text.starts_with('$')))
-                || (text.contains('/')
-                    && redirects.is_none()
-                    && !is_target
-                    && (at_program || text.starts_with(['.', '/', '~'])))
-        })
-    })
+        } else if is_assignment(text) {
+            let name = text.split_once('=').map_or(text, |(n, _)| n);
+            if word.name_expands() || name.contains(|c: char| c.is_ascii_uppercase()) {
+                return false;
+            }
+        } else if !COMPOUND.contains(&text) {
+            return word.substituted_at.is_none() && SINKS.contains(&text);
+        }
+    }
+    true
 }
 
 /// A script's simple commands, and its heredoc bodies lexed as commands of
@@ -365,7 +366,7 @@ impl Lexed {
 struct Word {
     text: String,
     substituted_at: Option<usize>,
-    /// Its unquoted `*?[]{},$` characters, in order.
+    /// Its unquoted `*?[]{},.$` characters, in order.
     globs: String,
 }
 
@@ -400,6 +401,27 @@ impl Word {
                 '}' if braces.pop() == Some(true) => return true,
                 '[' => bracket = true,
                 ']' if bracket => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Whether bash expands the word's braces: a `{…}` holding a `,` or `..`.
+    fn braced(&self) -> bool {
+        // For each open brace, whether it expands; `None` for a `${`.
+        let mut braces: Vec<Option<bool>> = vec![];
+        let mut globs = self.globs.chars().peekable();
+        while let Some(c) = globs.next() {
+            match c {
+                '$' if globs.next_if_eq(&'{').is_some() => braces.push(None),
+                '{' => braces.push(Some(false)),
+                '}' if braces.pop() == Some(Some(true)) => return true,
+                ',' | '.' if c == ',' || globs.next_if_eq(&'.').is_some() => {
+                    if let Some(Some(expands)) = braces.last_mut() {
+                        *expands = true;
+                    }
+                }
                 _ => {}
             }
         }
@@ -451,7 +473,8 @@ fn commands(script: &str) -> Option<Lexed> {
     let mut words = vec![];
     let mut word: Option<Word> = None;
     let mut heredocs: Vec<Heredoc> = vec![];
-    let mut in_arithmetic = false;
+    // While in `((…))`, how many parentheses were open before it.
+    let mut arithmetic_from: Option<usize> = None;
     // Whether each open `(` starts an array or arithmetic rather than a subshell.
     let mut parens: Vec<bool> = vec![];
     // After `case … in` or `;;`, a `)` ends a pattern.
@@ -481,7 +504,7 @@ fn commands(script: &str) -> Option<Lexed> {
                         }
                         '`' => {
                             w.mark_substituted();
-                            lexed.extend(self::commands(&backticked(&mut chars)?)?);
+                            lexed.extend(self::commands(&backticked(&mut chars, true)?)?);
                         }
                         c => w.text.push(c),
                     }
@@ -499,7 +522,9 @@ fn commands(script: &str) -> Option<Lexed> {
                 chars.next();
                 let w = word.get_or_insert_default();
                 // Bash reads `<<` in `((…))` or a `name[…]` subscript as a shift.
-                if in_arithmetic || w.text.matches('[').count() > w.text.matches(']').count() {
+                if arithmetic_from.is_some()
+                    || w.text.matches('[').count() > w.text.matches(']').count()
+                {
                     return None;
                 }
                 w.text.push_str("<<");
@@ -521,38 +546,53 @@ fn commands(script: &str) -> Option<Lexed> {
                 let decoded = ansi_c(&mut chars)?;
                 word.get_or_insert_default().text.push_str(&decoded);
             }
-            // `$"…"` is a double-quoted string.
-            '$' if chars.peek() == Some(&'"') => {}
+            // Bash translates `$"…"` through a message catalog the hook can't read.
+            '$' if chars.peek() == Some(&'"') => return None,
             '`' => {
                 word.get_or_insert_default().mark_substituted();
-                lexed.extend(self::commands(&backticked(&mut chars)?)?);
+                lexed.extend(self::commands(&backticked(&mut chars, false)?)?);
             }
             ';' | '&' | '|' | '\n' | '(' | ')' => {
                 let doubled = chars.peek() == Some(&c) && matches!(c, '(' | ')');
+                let in_arithmetic = arithmetic_from.is_some();
                 if c == '(' {
-                    let array = word.as_ref().is_some_and(|w| w.text.ends_with('='));
-                    parens.push(array || doubled || in_arithmetic);
+                    let text = word.as_ref().map_or("", |w| w.text.as_str());
+                    // `@(…)`, `+(…)` and `!(…)` are extglob patterns.
+                    if !in_arithmetic && text.ends_with(['@', '+', '!']) {
+                        return None;
+                    }
+                    if doubled && !in_arithmetic {
+                        arithmetic_from = Some(parens.len());
+                    }
+                    parens.push(text.ends_with('=') || doubled || in_arithmetic);
                 }
                 words.extend(word.take());
                 let first = |n: usize| words.get(n).map(|w: &Word| w.text.as_str());
-                let opens_case = first(0) == Some("case") && first(2) == Some("in");
+                let closes_case = words.last().is_some_and(|w| w.text == "esac");
+                let opens_case = first(0) == Some("case") && first(2) == Some("in") && !closes_case;
                 if c == ')' {
                     let closes_data = parens.pop().unwrap_or(false);
                     if in_patterns || opens_case || in_arithmetic || closes_data {
                         words.iter_mut().for_each(|w| w.globs.clear());
                     }
                     in_patterns = false;
+                    if let Some(from) = arithmetic_from {
+                        // `((…)` then anything but `)` may be nested subshells, not arithmetic.
+                        if parens.len() == from + 1 && chars.peek() != Some(&')') {
+                            return None;
+                        }
+                        if parens.len() <= from {
+                            arithmetic_from = None;
+                        }
+                    }
                 } else if opens_case {
                     in_patterns = true;
-                } else if first(0) == Some("esac") {
+                } else if closes_case {
                     in_patterns = false;
                 }
                 if c == ';' && chars.next_if(|&c| c == ';' || c == '&').is_some() {
                     chars.next_if_eq(&'&');
                     in_patterns = true;
-                }
-                if doubled {
-                    in_arithmetic = c == '(';
                 }
                 if !words.is_empty() {
                     lexed.commands.push(std::mem::take(&mut words));
@@ -572,7 +612,7 @@ fn commands(script: &str) -> Option<Lexed> {
             _ => {
                 let w = word.get_or_insert_default();
                 w.text.push(c);
-                if "*?[]{},$".contains(c) {
+                if "*?[]{},.$".contains(c) {
                     w.globs.push(c);
                 }
             }
@@ -608,7 +648,7 @@ fn expansions(body: &str) -> Option<Lexed> {
             '$' if chars.next_if_eq(&'(').is_some() => {
                 lexed.extend(substituted(&substitution(&mut chars)?)?);
             }
-            '`' => lexed.extend(commands(&backticked(&mut chars)?)?),
+            '`' => lexed.extend(commands(&backticked(&mut chars, false)?)?),
             _ => {}
         }
     }
@@ -696,16 +736,20 @@ fn digits(
 }
 
 /// The text of a backtick substitution whose opening backtick was just read,
-/// with `\\` and `\$` undone as bash does. `None` when it isn't closed, or
+/// with `\\` and `\$` undone as bash does, and `\"` too in double quotes. `None` when it isn't closed, or
 /// holds a `` \` ``, as in ``echo `a \`b\`` ``, where bash nests a
 /// substitution the hook doesn't.
-fn backticked(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<String> {
+fn backticked(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    in_double_quotes: bool,
+) -> Option<String> {
     let mut inner = String::new();
     loop {
         match chars.next()? {
             '\\' => match chars.next()? {
                 '`' => return None,
                 c @ ('\\' | '$') => inner.push(c),
+                '"' if in_double_quotes => inner.push('"'),
                 c => {
                     inner.push('\\');
                     inner.push(c);
@@ -867,7 +911,8 @@ struct Heredoc {
 }
 
 /// Copies the rest of a heredoc operator whose `<<` was just read onto
-/// `text`. `None` when the delimiter holds a `$` or a backtick.
+/// `text`. `None` when the delimiter holds a `$` or a backtick, or a
+/// backslash in double quotes, which bash may remove.
 fn heredoc_operator(
     chars: &mut std::iter::Peekable<std::str::Chars>,
     text: &mut String,
@@ -891,6 +936,9 @@ fn heredoc_operator(
                     text.push(q);
                     if q == c {
                         break;
+                    }
+                    if c == '"' && q == '\\' {
+                        return None;
                     }
                     delimiter.push(q);
                 }
@@ -964,12 +1012,20 @@ const WRAPPERS: [(&str, &[&str]); 14] = [
 const KEYWORDS: [&str; 10] = [
     "if", "then", "else", "elif", "do", "while", "until", "!", "{", "source",
 ];
-const SHELLS: [&str; 5] = ["sh", "bash", "zsh", "dash", "ksh"];
-/// Programs that may run text they're fed or a file they're named.
-const CODE_RUNNERS: [&str; 16] = [
-    "sh", "bash", "zsh", "dash", "ksh", "rbash", "mksh", "fish", "csh", "tcsh", "busybox", "eval",
-    "source", "ssh", "sudo", "su",
+/// Programs a brace expansion in the arguments could turn into a gated command.
+const GATED: [&str; 7] = ["gh", "git", "loopherd", "cargo", "curl", "wget", "install"];
+/// Programs that neither run their input nor run a file, so a heredoc body
+/// fed to them, or written by them, is data.
+const SINKS: [&str; 25] = [
+    "cat", "tee", "echo", "printf", "gh", "git", "loopherd", "mkdir", "ls", "rm", "mv", "cp",
+    "touch", "wc", "head", "tail", "grep", "rg", "diff", "sort", "jq", "true", "false", "test",
+    "cd",
 ];
+/// Words that open or close a compound command and run nothing themselves.
+const COMPOUND: [&str; 12] = [
+    "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!", "{", "}",
+];
+const SHELLS: [&str; 5] = ["sh", "bash", "zsh", "dash", "ksh"];
 /// Builtins whose arguments may assign variables.
 const DECLARERS: [&str; 5] = ["export", "declare", "typeset", "local", "readonly"];
 
@@ -1048,6 +1104,8 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             }
         } else if program == "eval" {
             return needs_with(&words[i + 1..].join(" "), aliases, true);
+        } else if GATED.contains(&program) && command[i + 1..].iter().any(Word::braced) {
+            return vec![Switch::Unreadable];
         } else if program == "cargo" {
             return cargo_needs(word, &words[i + 1..], aliases);
         } else {
@@ -2513,7 +2571,7 @@ mod tests {
             "cat <<'EOF'\nsay \"hi\nEOF",
             "cat <<'EOF'\nuse ` here\nEOF",
             "cat <<'EOF'\nuse $(here\nEOF",
-            "cat <<\\'\n'\n'; gh pr merge 1 #'",
+            "cat <<\\'\n'\necho '; gh pr merge 1 #'",
         ] {
             assert_passes(command);
         }
@@ -2883,7 +2941,6 @@ mod tests {
     fn ansi_c_and_locale_quoting_are_decoded() {
         for command in [
             "$'gh' pr merge 12",
-            "$\"gh\" pr merge 12",
             "echo $'it\\'s'; gh pr merge 12",
             "$'\\x67h' pr merge 12",
             "$'\\147h' pr merge 12",
@@ -2895,12 +2952,11 @@ mod tests {
         ] {
             assert_judged(command, Switch::Merge);
         }
-        for command in ["$'g\\ch' pr merge 12", "echo $'it"] {
+        for command in ["$'g\\ch' pr merge 12", "echo $'it", "$\"gh\" pr merge 12"] {
             assert_unreadable(command);
         }
         for command in [
             "printf '%s' $'\\n'",
-            "echo $\"hi\"",
             "echo \"it costs $'5'\"",
             "git log --format=$'%h\\t%s'",
         ] {
@@ -3017,6 +3073,100 @@ mod tests {
             "(case x in a) echo;; esac; g? pr merge 1)",
         ] {
             assert_unreadable(command);
+        }
+    }
+
+    #[test]
+    fn a_heredoc_body_is_read_as_commands_unless_every_command_is_a_known_sink() {
+        let body = "<<'EOF'\ngh pr merge 1\nEOF";
+        let written = "cat > s.sh <<'EOF'\ngh pr merge 1\nEOF\n";
+        for command in [
+            format!("$(cat {body}\n)"),
+            format!("`cat {body}\n`"),
+            format!("{written}$(<s.sh)"),
+            format!("timeout 30 $SHELL {body}"),
+            format!("time -p $SHELL {body}"),
+            format!("stdbuf -oL $SHELL {body}"),
+            format!("nice -n 5 $x {body}"),
+            format!("unshare {body}"),
+            format!("{written}timeout 30 d/s"),
+            format!("{written}hash -p s.sh xq; xq"),
+            format!("{written}find s.sh -exec {{}} \\;"),
+            format!("{written}alias xq=s.sh"),
+            format!("{written}PAGER=s.sh; git log"),
+        ] {
+            assert_judged(&command, Switch::Merge);
+        }
+        for command in [
+            "cat > notes.md <<'EOF'\nIt's green.\nEOF\ngit add notes.md && git commit -F notes.md",
+            "body=$(cat <<'EOF'\nIt's done; gh pr merge 1 is the human's.\nEOF\n)\ngh pr comment 1 --body \"$body\"",
+            "mkdir -p d && cat > d/notes.md <<'EOF'\nIt's green.\nEOF",
+        ] {
+            assert_passes(command);
+        }
+    }
+
+    #[test]
+    fn a_backslash_in_a_double_quoted_heredoc_delimiter_is_denied() {
+        for command in [
+            "cat <<\"X\\$\"\nX$\ngh pr merge 1\nX\\$",
+            "cat <<\"X\\`\"\nX`\ngh pr merge 1\nX\\`",
+        ] {
+            assert_unreadable(command);
+        }
+        assert_passes("cat <<'X\\'\nit's\nX\\");
+    }
+
+    #[test]
+    fn locale_quoting_is_denied() {
+        for command in ["$\"gh\" pr merge 12", "echo $\"hi\"", "x=$(echo $\"hi\")"] {
+            assert_unreadable(command);
+        }
+        assert_passes("echo \"it costs $5\"");
+    }
+
+    #[test]
+    fn nested_subshells_or_an_empty_case_dont_hide_a_glob() {
+        for command in [
+            "((echo a) ); ( {gh,} pr merge 1 )",
+            "case x in esac; ( {gh,} pr merge 1 )",
+            "shopt -s extglob; bin/@(g)h pr merge 1",
+            "bin/+(g)h pr merge 1",
+            "bin/!(x)h pr merge 1",
+        ] {
+            assert_unreadable(command);
+        }
+        for command in ["((x = a + (1) ))", "(( (1+2) * 3 ))", "a+=(x y)"] {
+            assert_passes(command);
+        }
+    }
+
+    #[test]
+    fn an_escaped_double_quote_in_a_double_quoted_backtick_is_undone() {
+        assert_judged(
+            "echo \"`echo \\\"'\\\"; gh pr merge 1; echo \\\"'\\\"`\"",
+            Switch::Merge,
+        );
+    }
+
+    #[test]
+    fn a_brace_expansion_in_a_gated_programs_arguments_is_denied() {
+        for command in [
+            "gh pr {merge,} 1",
+            "git {rebase,} origin/main",
+            "loopherd herd {set,} h lead.merge true",
+            "gh pr merg{e..e} 1",
+        ] {
+            assert_unreadable(command);
+        }
+        for command in [
+            "ls {a,b}.md",
+            "git add src/*.rs",
+            "echo {a,b}",
+            "gh api repos/{owner}/{repo}/pulls/1",
+            "gh pr view 1 --json title --jq '{a,b}'",
+        ] {
+            assert_passes(command);
         }
     }
 }
