@@ -65,6 +65,13 @@ pub struct Config {
     command: Vec<String>,
 }
 
+impl Config {
+    /// Enabled with herdr's toast off and no command.
+    pub fn sends_nothing(&self) -> bool {
+        !self.herdr && self.command.is_empty()
+    }
+}
+
 /// `config`'s `[notify]` table; `None` when it is missing or not enabled.
 /// A table with an unknown key, kind or placeholder is an error, enabled or not.
 pub fn load(config: &Path) -> Result<Option<Config>> {

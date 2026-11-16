@@ -746,11 +746,19 @@ pub fn herds(paths: &Paths) -> Result<(String, i32)> {
             None
         }
     };
-    if parses_as_toml(&config_file(paths))
-        && let Err(e) = crate::notify::load(&config_file(paths))
-    {
-        lines.push(format!("invalid {}", format!("{e:#}").trim_end()));
-        code = 1;
+    let config = config_file(paths);
+    if parses_as_toml(&config) {
+        match crate::notify::load(&config) {
+            Err(e) => {
+                lines.push(format!("invalid {}", format!("{e:#}").trim_end()));
+                code = 1;
+            }
+            Ok(Some(notify)) if notify.sends_nothing() => lines.push(format!(
+                "warning: {}: [notify] is enabled with herdr = false and no command, so nothing is sent",
+                config.display()
+            )),
+            Ok(_) => {}
+        }
     }
     let files = herd_files(&paths.herds)?;
     if files.is_empty() {
@@ -1975,6 +1983,24 @@ args = ["--model", "opus"]
         let (report, code) = herds(&config.paths()).unwrap();
         assert!(!report.contains("invalid"), "{report}");
         assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn herds_warns_of_an_enabled_notify_table_that_sends_nothing() {
+        let config = Config::with(&[("prs", PR_HERD)]);
+        let file = config.path().join("config.toml");
+        fs::write(&file, "[notify]\nenabled = true\nherdr = false\n").unwrap();
+
+        let (report, code) = herds(&config.paths()).unwrap();
+
+        assert!(
+            report.starts_with(&format!(
+                "warning: {}: [notify] is enabled with herdr = false and no command",
+                file.display()
+            )),
+            "{report}"
+        );
+        assert_eq!(code, 0, "{report}");
     }
 
     #[test]

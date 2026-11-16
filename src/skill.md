@@ -254,8 +254,9 @@ is the question's first non-blank line, cut to 200 characters with token-like wo
 and URL passwords `[redacted]` (best-effort: a secret in an unknown shape
 gets through), or `blocked`. Each send runs detached within 30s; a failing
 one leaves a `note` in the member's mailbox, once until it next succeeds.
-`loopherd herds` reports a broken table, which sends nothing. Notifying
-doesn't replace relaying: still tell the human in your pane. Not sent: a
+`loopherd herds` reports a broken table, which sends nothing, and warns of
+an enabled one with `herdr = false` and no `command`. Notifying doesn't
+replace relaying: still tell the human in your pane. Not sent: a
 question you read with `loopherd reports` before a watch saw it, and a
 member already blocked when every watch started. A lead relaying a worker's
 question as its own sends a second notification.
