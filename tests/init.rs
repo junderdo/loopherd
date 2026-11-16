@@ -2992,3 +2992,191 @@ fn a_relative_config_dir_in_a_cwd_init_cant_write_is_refused_before_any_change()
     assert!(!fixture.gh_calls().contains("label create"));
     assert!(!agents_dir.join("loopherd.md").exists());
 }
+
+/// The herd's files and the repo's, so `--diff` can be shown to write nothing.
+fn everything(fixture: &Fixture) -> Vec<(PathBuf, String)> {
+    let mut out = fixture.config_listing();
+    let mut dirs = vec![fixture.repo()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            match path.is_dir() {
+                true if path.ends_with(".git") => {}
+                true => dirs.push(path),
+                false => out.push((path.clone(), fs::read_to_string(&path).unwrap())),
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn diff_right_after_init_prints_nothing_writes_nothing_and_exits_0() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    let before = everything(&fixture);
+    fs::remove_file(fixture.gh_dir().join("calls")).unwrap();
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_ok(&out);
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(everything(&fixture), before);
+    assert!(
+        !fixture.gh_calls().contains("label create"),
+        "{}",
+        fixture.gh_calls()
+    );
+}
+
+#[test]
+fn diff_shows_an_edited_herd_file_against_todays_built_in_and_exits_1() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    let herd_file = fixture.herds().join("widgets.toml");
+    let edited = fs::read_to_string(&herd_file)
+        .unwrap()
+        .replace("max = 3\n", "max = 5\n");
+    fs::write(&herd_file, &edited).unwrap();
+    let before = everything(&fixture);
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let shown = herd_file.display();
+    assert!(
+        text(&out.stdout).starts_with(&format!("--- {shown}\n+++ {shown} (init now)\n@@ ")),
+        "{}",
+        text(&out.stdout)
+    );
+    assert!(
+        text(&out.stdout).contains("\n-max = 5\n+max = 3\n"),
+        "{}",
+        text(&out.stdout)
+    );
+    assert_eq!(text(&out.stdout).matches("\n--- ").count(), 0);
+    assert_eq!(everything(&fixture), before);
+}
+
+#[test]
+fn diff_shows_a_missing_lead_prompt_and_repo_doc_as_whole_new_files() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    let lead_file = fixture.herds().join("widgets-lead.md");
+    let lead = fs::read_to_string(&lead_file).unwrap();
+    fs::remove_file(&lead_file).unwrap();
+    let loopherd_doc = fixture.repo().join("docs/agents/loopherd.md");
+    fs::remove_file(&loopherd_doc).unwrap();
+    let before = everything(&fixture);
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    let added: String = lead.lines().map(|line| format!("+{line}\n")).collect();
+    assert!(
+        stdout.contains(&format!(
+            "--- /dev/null\n+++ {} (init now)\n@@ -0,0 +1,{} @@\n{added}",
+            lead_file.display(),
+            lead.lines().count()
+        )),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "--- /dev/null\n+++ {} (init now)\n",
+            loopherd_doc.display()
+        )),
+        "{stdout}"
+    );
+    assert_eq!(everything(&fixture), before);
+}
+
+#[test]
+fn diff_shows_drift_in_a_repo_doc_init_wrote() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    let tracker = fixture.repo().join("docs/agents/issue-tracker.md");
+    let mine = format!("{}Ours too.\n", fs::read_to_string(&tracker).unwrap());
+    fs::write(&tracker, mine).unwrap();
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.starts_with(&format!(
+            "--- {shown}\n+++ {shown} (init now)\n",
+            shown = tracker.display()
+        )),
+        "{stdout}"
+    );
+    assert!(stdout.ends_with("-Ours too.\n"), "{stdout}");
+}
+
+#[test]
+fn diff_shows_a_missing_herd_file_as_init_would_write_it_now() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    let herd_file = fixture.herds().join("widgets.toml");
+    let herd = fs::read_to_string(&herd_file).unwrap();
+    fs::remove_file(&herd_file).unwrap();
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let added: String = herd.lines().map(|line| format!("+{line}\n")).collect();
+    assert_eq!(
+        text(&out.stdout),
+        format!(
+            "--- /dev/null\n+++ {} (init now)\n@@ -0,0 +1,{} @@\n{added}",
+            herd_file.display(),
+            herd.lines().count()
+        )
+    );
+    assert!(!herd_file.exists());
+}
+
+#[test]
+fn diff_infers_no_lead_from_a_herd_file_without_one() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&["--no-lead"]));
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_ok(&out);
+    assert_eq!(text(&out.stdout), "");
+}
+
+#[test]
+fn diff_names_the_herd_running_the_repo_whatever_its_name() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&["--herd", "gadgets"]));
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_ok(&out);
+    assert_eq!(text(&out.stdout), "");
+}
+
+#[test]
+fn diff_refuses_a_herd_name_that_points_at_another_repo() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::create_dir_all(fixture.herds()).unwrap();
+    fs::write(
+        fixture.herds().join("widgets.toml"),
+        "repo = \"/elsewhere/widgets\"\n",
+    )
+    .unwrap();
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        "loopherd init: herd widgets already points at /elsewhere/widgets; \
+         pass --herd <name> to name this repo's herd\n"
+    );
+    assert_eq!(text(&out.stdout), "");
+}

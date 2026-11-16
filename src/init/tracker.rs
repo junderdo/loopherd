@@ -7,6 +7,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
+use super::agents::Doc;
 use super::ask::{interactive, line};
 
 const GITHUB: &str = include_str!("tracker/github.md");
@@ -104,6 +105,24 @@ pub fn resolve(repo: &Path, choice: Option<Choice>) -> Result<Tracker> {
     })
 }
 
+/// Today's built-in for each tracker doc the repo has, for `--diff`: the
+/// tracker doc when its title names a built-in tracker, and the labels doc.
+pub fn built_in(repo: &Path) -> Result<Vec<Doc>> {
+    let mut docs = vec![];
+    if let Some(doc) = read(&repo.join(TRACKER_DOC))? {
+        let built_in = match title_kind(&doc).as_deref() {
+            Some("github") => Some(GITHUB),
+            Some("local markdown") => Some(LOCAL),
+            _ => None,
+        };
+        docs.extend(built_in.map(|text| Doc::new(TRACKER_DOC, text.to_string())));
+    }
+    if read(&repo.join(LABELS_DOC))?.is_some() {
+        docs.push(Doc::new(LABELS_DOC, TRIAGE_LABELS.to_string()));
+    }
+    Ok(docs)
+}
+
 fn other_doc(desc: Option<String>) -> Result<String> {
     let desc = match desc {
         Some(desc) if desc.trim().is_empty() => bail!("the tracker description is empty"),
@@ -121,15 +140,18 @@ fn other_doc(desc: Option<String>) -> Result<String> {
 
 /// Whether the doc's title is mattpocock-skills' GitHub one, in any case.
 fn names_github(doc: &str) -> bool {
-    doc.trim_start_matches('\u{feff}')
+    title_kind(doc).as_deref() == Some("github")
+}
+
+/// The lowercased tracker a `# Issue tracker: <kind>` title names.
+fn title_kind(doc: &str) -> Option<String> {
+    let title = doc
+        .trim_start_matches('\u{feff}')
         .lines()
-        .find_map(|line| line.trim().strip_prefix("# "))
-        .map(|title| title.trim().to_ascii_lowercase())
-        .is_some_and(|title| {
-            title
-                .strip_prefix("issue tracker:")
-                .is_some_and(|kind| kind.trim() == "github")
-        })
+        .find_map(|line| line.trim().strip_prefix("# "))?
+        .trim()
+        .to_ascii_lowercase();
+    Some(title.strip_prefix("issue tracker:")?.trim().to_string())
 }
 
 fn read_labels(repo: &Path) -> Result<Labels> {
