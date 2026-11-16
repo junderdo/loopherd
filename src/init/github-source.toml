@@ -1,0 +1,16 @@
+# Prints "<number> <type> <skill> <slug>" per open issue labelled
+# @READY_FOR_AGENT@ and none of blocked, @NEEDS_INFO@, @READY_FOR_HUMAN@, oldest
+# first, matching labels whatever their case.
+# $types maps a label to the branch type (else feat); a skill:<name> label
+# names the skill the worker builds with (else tdd).
+source = '''
+GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue list --repo @OWNER_REPO@ --state open --label @READY_FOR_AGENT@ --limit 1000 --json number,title,labels --jq '
+  {"bug": "fix", "documentation": "docs"} as $types
+  | sort_by(.number)[]
+  | [.labels[].name | ascii_downcase] as $labels
+  | select(any($labels[]; . == "blocked" or . == "@NEEDS_INFO_LC@" or . == "@READY_FOR_HUMAN_LC@") | not)
+  | ([$labels[] | $types[.] | values][0] // "feat") as $type
+  | ([$labels[] | select(startswith("skill:")) | ltrimstr("skill:") | select(test("^[a-z0-9._:-]+$"))][0] // "tdd") as $skill
+  | ([.title | ascii_downcase | scan("[a-z0-9]+")][:5] | join("-")) as $slug
+  | "\(.number) \($type) \($skill) \(if $slug == "" then "issue" else $slug end)"'
+'''

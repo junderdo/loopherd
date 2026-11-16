@@ -1022,3 +1022,534 @@ fn a_toml_directory_or_dangling_symlink_among_the_herds_doesnt_stop_init() {
 
     assert_ok(&fixture.init(&[]));
 }
+
+fn repo_file(fixture: &Fixture, path: &str) -> String {
+    fs::read_to_string(fixture.repo().join(path)).unwrap()
+}
+
+#[test]
+fn without_a_tracker_doc_init_writes_githubs_and_the_default_labels_uncommitted() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init(&[]);
+
+    assert_ok(&out);
+
+    let tracker = repo_file(&fixture, "docs/agents/issue-tracker.md");
+    assert!(
+        tracker.starts_with("# Issue tracker: GitHub\n"),
+        "{tracker}"
+    );
+    assert!(tracker.contains("`gh` CLI"), "{tracker}");
+    let labels = repo_file(&fixture, "docs/agents/triage-labels.md");
+    for role in [
+        "needs-triage",
+        "needs-info",
+        "ready-for-agent",
+        "ready-for-human",
+        "wontfix",
+    ] {
+        assert!(
+            labels.contains(&format!("| `{role}` | `{role}` |")),
+            "missing {role} in\n{labels}"
+        );
+    }
+    let log = Command::new("git")
+        .args(["rev-list", "--all", "--count"])
+        .current_dir(fixture.repo())
+        .output()
+        .unwrap();
+    assert_eq!(text(&log.stdout), "0\n");
+    let status = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(fixture.repo())
+        .output()
+        .unwrap();
+    assert_eq!(
+        text(&status.stdout),
+        "?? docs/agents/issue-tracker.md\n?? docs/agents/triage-labels.md\n"
+    );
+    assert!(
+        text(&out.stdout).contains(
+            "wrote docs/agents/issue-tracker.md (uncommitted)\n\
+             wrote docs/agents/triage-labels.md (uncommitted)\n"
+        ),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn an_existing_doc_naming_another_tracker_gets_a_placeholder_source_herds_reports_invalid() {
+    let fixture = Fixture::new(&["acme"]);
+    let doc = "# Issue tracker: Jira\n\nIssues live in the WID project.\n";
+    fs::create_dir_all(fixture.repo().join("docs/agents")).unwrap();
+    fs::write(fixture.repo().join("docs/agents/issue-tracker.md"), doc).unwrap();
+
+    let out = fixture.init(&[]);
+
+    assert_ok(&out);
+    assert!(
+        text(&out.stdout).contains(&format!(
+            "Fill [queue] source in {} from docs/agents/issue-tracker.md",
+            fixture.herds().join("widgets.toml").display()
+        )),
+        "{}",
+        text(&out.stdout)
+    );
+    assert_eq!(repo_file(&fixture, "docs/agents/issue-tracker.md"), doc);
+    assert!(!fixture.repo().join("docs/agents/triage-labels.md").exists());
+    assert!(
+        !fixture.gh_calls().contains("label "),
+        "{}",
+        fixture.gh_calls()
+    );
+    let herds = fixture.loopherd(&["herds"]);
+    assert_eq!(herds.status.code(), Some(1));
+    assert!(
+        text(&herds.stdout).contains("invalid widgets.toml: queue: source is empty"),
+        "{}",
+        text(&herds.stdout)
+    );
+    let feed = fixture.loopherd(&["feed", "widgets", "--dry-run"]);
+    assert_ne!(feed.status.code(), Some(0));
+}
+
+#[test]
+fn an_existing_github_doc_gets_the_github_snippets_and_is_left_as_it_was() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.gh_json("issues.json", ISSUES);
+    let doc = "# Issue tracker: GitHub\n\nOur own words.\n";
+    fs::create_dir_all(fixture.repo().join("docs/agents")).unwrap();
+    fs::write(fixture.repo().join("docs/agents/issue-tracker.md"), doc).unwrap();
+
+    assert_ok(&fixture.init(&[]));
+
+    assert_eq!(repo_file(&fixture, "docs/agents/issue-tracker.md"), doc);
+    assert!(!fixture.repo().join("docs/agents/triage-labels.md").exists());
+    let feed = fixture.loopherd(&["feed", "widgets", "--dry-run"]);
+    assert_ok(&feed);
+    assert!(
+        text(&feed.stdout).ends_with("widgets: 0 would retire, 3 would add, 0 skipped, 0 errors\n"),
+        "{}",
+        text(&feed.stdout)
+    );
+}
+
+#[test]
+fn triage_labels_name_the_claimable_filter_the_question_label_and_the_created_labels() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.gh_json(
+        "issues.json",
+        r#"[
+  {"number": 1, "title": "Go", "labels": [{"name": "AFK"}]},
+  {"number": 2, "title": "Asked", "labels": [{"name": "AFK"}, {"name": "Q:Info"}]},
+  {"number": 3, "title": "Mine", "labels": [{"name": "AFK"}, {"name": "hfk"}]},
+  {"number": 4, "title": "Waits", "labels": [{"name": "AFK"}, {"name": "blocked"}]},
+  {"number": 5, "title": "Default name means nothing here", "labels": [{"name": "AFK"}, {"name": "needs-info"}]}
+]"#,
+    );
+    fs::create_dir_all(fixture.repo().join("docs/agents")).unwrap();
+    fs::write(
+        fixture.repo().join("docs/agents/triage-labels.md"),
+        "# Triage Labels\n\n\
+         | Label in mattpocock/skills | Label in our tracker | Meaning |\n\
+         | --- | --- | --- |\n\
+         | `needs-triage` | `triage` | x |\n\
+         | `needs-info` | `Q:Info` | x |\n\
+         | `ready-for-agent` | `AFK` | x |\n\
+         | `ready-for-human` | `HFK` | x |\n",
+    )
+    .unwrap();
+
+    assert_ok(&fixture.init(&[]));
+
+    let calls = fixture.gh_calls();
+    for label in ["AFK", "Q:Info", "HFK", "blocked"] {
+        assert!(
+            calls.contains(&format!("label create {label} --repo acme/widgets")),
+            "{calls}"
+        );
+    }
+    assert!(!calls.contains("label create ready-for-agent"), "{calls}");
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(herd.contains("--add-label Q:Info"), "{herd}");
+    assert!(herd.contains("--label AFK"), "{herd}");
+    let feed = fixture.loopherd(&["feed", "widgets", "--dry-run"]);
+    assert_ok(&feed);
+    assert_eq!(
+        text(&feed.stdout),
+        "would add widgets-1 (template issue)\n\
+         would add widgets-5 (template issue)\n\
+         widgets: 0 would retire, 2 would add, 0 skipped, 0 errors\n"
+    );
+}
+
+#[test]
+fn a_triage_label_init_cant_put_in_a_shell_command_or_blocked_is_refused_before_any_gh_call() {
+    for (role, label, message) in [
+        (
+            "needs-info",
+            "needs info",
+            "maps needs-info to \"needs info\"",
+        ),
+        ("needs-info", "-x", "maps needs-info to \"-x\""),
+        (
+            "ready-for-agent",
+            "AFK ready",
+            "maps ready-for-agent to \"AFK ready\"",
+        ),
+        (
+            "ready-for-human",
+            "$(x)",
+            "maps ready-for-human to \"$(x)\"",
+        ),
+        (
+            "needs-info",
+            "Blocked",
+            "maps needs-info to blocked, which is loopherd's own label",
+        ),
+    ] {
+        let fixture = Fixture::new(&["acme"]);
+        fs::create_dir_all(fixture.repo().join("docs/agents")).unwrap();
+        fs::write(
+            fixture.repo().join("docs/agents/triage-labels.md"),
+            format!("| `{role}` | `{label}` | x |\n"),
+        )
+        .unwrap();
+
+        let out = fixture.init(&[]);
+
+        assert_eq!(out.status.code(), Some(1), "{role} {label}");
+        assert!(text(&out.stderr).contains(message), "{}", text(&out.stderr));
+        assert_eq!(fixture.gh_calls(), "");
+        assert!(!fixture.herds().join("widgets.toml").exists());
+    }
+}
+
+#[test]
+fn tracker_names_the_doc_init_writes_when_there_is_none() {
+    for (args, title, github) in [
+        (
+            &["--tracker", "github"][..],
+            "# Issue tracker: GitHub\n",
+            true,
+        ),
+        (
+            &["--tracker", "local"][..],
+            "# Issue tracker: Local Markdown\n",
+            false,
+        ),
+        (
+            &[
+                "--tracker",
+                "other",
+                "--tracker-desc",
+                "Issues live in Linear, team WID.",
+            ][..],
+            "# Issue tracker\n\nIssues live in Linear, team WID.\n",
+            false,
+        ),
+    ] {
+        let fixture = Fixture::new(&["acme"]);
+
+        assert_ok(&fixture.init(args));
+
+        let doc = repo_file(&fixture, "docs/agents/issue-tracker.md");
+        assert!(doc.starts_with(title), "{args:?}: {doc}");
+        assert!(
+            repo_file(&fixture, "docs/agents/triage-labels.md")
+                .contains("| `ready-for-agent` | `ready-for-agent` |")
+        );
+        let herds = fixture.loopherd(&["herds"]);
+        assert_eq!(
+            herds.status.code(),
+            Some(if github { 0 } else { 1 }),
+            "{args:?}"
+        );
+        assert_eq!(
+            fixture.gh_calls().contains("label create"),
+            github,
+            "{args:?}: {}",
+            fixture.gh_calls()
+        );
+    }
+}
+
+#[test]
+fn an_existing_triage_labels_doc_is_kept_when_init_writes_the_tracker_doc() {
+    let fixture = Fixture::new(&["acme"]);
+    let labels = "| `ready-for-agent` | `AFK` | x |\n";
+    fs::create_dir_all(fixture.repo().join("docs/agents")).unwrap();
+    fs::write(fixture.repo().join("docs/agents/triage-labels.md"), labels).unwrap();
+
+    assert_ok(&fixture.init(&[]));
+
+    assert_eq!(repo_file(&fixture, "docs/agents/triage-labels.md"), labels);
+    assert!(fixture.repo().join("docs/agents/issue-tracker.md").exists());
+}
+
+#[test]
+fn tracker_flags_that_cant_apply_are_refused_before_any_change() {
+    for (args, stderr) in [
+        (
+            &["--tracker", "other"][..],
+            "loopherd init: --tracker other needs --tracker-desc <text>\n",
+        ),
+        (
+            &["--tracker", "other", "--tracker-desc", "  "][..],
+            "loopherd init: the tracker description is empty\n",
+        ),
+        (
+            &["--tracker-desc", "Linear"][..],
+            "loopherd init: --tracker-desc goes with --tracker other\n",
+        ),
+    ] {
+        let fixture = Fixture::new(&["acme"]);
+
+        assert_refused(&fixture, &fixture.init(args), stderr);
+        assert!(!fixture.repo().join("docs").exists(), "{args:?}");
+    }
+}
+
+#[test]
+fn tracker_is_refused_when_the_repo_already_has_a_tracker_doc() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::create_dir_all(fixture.repo().join("docs/agents")).unwrap();
+    fs::write(
+        fixture.repo().join("docs/agents/issue-tracker.md"),
+        "# Issue tracker: GitHub\n",
+    )
+    .unwrap();
+
+    assert_refused(
+        &fixture,
+        &fixture.init(&["--tracker", "local"]),
+        "loopherd init: docs/agents/issue-tracker.md already names the tracker; drop --tracker\n",
+    );
+}
+
+#[test]
+fn a_tracker_doc_init_cant_write_leaves_no_herd_files_and_a_rerun_succeeds() {
+    let fixture = Fixture::new(&["acme"]);
+    let agents = fixture.repo().join("docs/agents");
+    fs::create_dir_all(&agents).unwrap();
+    fs::set_permissions(&agents, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let out = fixture.init(&[]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains(&format!(
+            "write {}",
+            agents.join("issue-tracker.md").display()
+        )),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(fs::read_dir(fixture.herds()).unwrap().count(), 0);
+    fs::set_permissions(&agents, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_ok(&fixture.init(&[]));
+}
+
+#[test]
+fn a_placeholder_herd_for_one_repo_doesnt_stop_init_in_another() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+    let other = fixture.root.path().join("gadgets");
+    fs::create_dir_all(&other).unwrap();
+    git(&other, &["init", "-q"]);
+    git(
+        &other,
+        &["remote", "add", "origin", "git@github.com:acme/gadgets.git"],
+    );
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_loopherd"));
+    command
+        .args(["init", "--check", "cargo test"])
+        .current_dir(&other);
+
+    assert_ok(&fixture.run(&mut command));
+}
+
+fn write_docs(fixture: &Fixture, tracker: Option<&str>, labels: &str) {
+    let dir = fixture.repo().join("docs/agents");
+    fs::create_dir_all(&dir).unwrap();
+    if let Some(tracker) = tracker {
+        fs::write(dir.join("issue-tracker.md"), tracker).unwrap();
+    }
+    fs::write(dir.join("triage-labels.md"), labels).unwrap();
+}
+
+#[test]
+fn a_tracker_other_than_github_takes_labels_no_shell_command_runs() {
+    let fixture = Fixture::new(&["acme"]);
+    write_docs(
+        &fixture,
+        Some("# Issue tracker: Local Markdown\n"),
+        "| `needs-info` | `Needs {more} info` | x |\n",
+    );
+
+    assert_ok(&fixture.init(&[]));
+
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(herd.contains("--add-label Needs {{more}} info"), "{herd}");
+}
+
+#[test]
+fn triage_label_roles_match_whatever_their_case() {
+    let fixture = Fixture::new(&["acme"]);
+    write_docs(&fixture, None, "| `Needs-Info` | `asked` | x |\n");
+
+    assert_ok(&fixture.init(&[]));
+
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(herd.contains("--add-label asked"), "{herd}");
+}
+
+#[test]
+fn two_roles_mapped_to_one_label_are_refused_before_any_gh_call() {
+    let fixture = Fixture::new(&["acme"]);
+    write_docs(
+        &fixture,
+        None,
+        "| `ready-for-agent` | `todo` | x |\n| `needs-info` | `TODO` | x |\n",
+    );
+
+    let out = fixture.init(&[]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains(
+            "docs/agents/triage-labels.md maps ready-for-agent and needs-info to one label, todo"
+        ),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn with_a_placeholder_source_the_next_steps_fill_it_before_feeding() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init(&["--tracker", "local"]);
+
+    assert_ok(&out);
+    let stdout = text(&out.stdout);
+    let next = &stdout[stdout.find("Next:").unwrap()..];
+    assert!(
+        next.contains(&format!(
+            "  2. Fill [queue] source in {} from docs/agents/issue-tracker.md",
+            fixture.herds().join("widgets.toml").display()
+        )),
+        "{next}"
+    );
+    assert!(next.contains("  5. loopherd lead widgets"), "{next}");
+}
+
+#[test]
+fn a_github_title_in_any_case_after_other_text_or_a_bom_gets_the_github_snippets() {
+    for doc in [
+        "# Issue Tracker: GitHub\n",
+        "# issue tracker: github\n",
+        "\u{feff}# Issue tracker: GitHub\n",
+        "<!-- set up by hand -->\n\n# Issue tracker: GitHub\n",
+    ] {
+        let fixture = Fixture::new(&["acme"]);
+        fs::create_dir_all(fixture.repo().join("docs/agents")).unwrap();
+        fs::write(fixture.repo().join("docs/agents/issue-tracker.md"), doc).unwrap();
+
+        assert_ok(&fixture.init(&[]));
+
+        assert_ok(&fixture.loopherd(&["herds"]));
+        assert!(fixture.gh_calls().contains("label create"), "{doc:?}");
+    }
+}
+
+impl Fixture {
+    /// `loopherd init` with stdin and stderr on a terminal, typing `input`.
+    fn init_on_terminal(&self, extra: &[&str], input: &str) -> Output {
+        let typed = self.root.path().join("typed");
+        fs::write(&typed, input).unwrap();
+        let mut line = format!(
+            "'{}' init --check 'cargo test'",
+            env!("CARGO_BIN_EXE_loopherd")
+        );
+        for arg in extra {
+            line.push_str(&format!(" '{arg}'"));
+        }
+        let mut command = Command::new("script");
+        command
+            .args(["-qec", &line, "/dev/null"])
+            .env("SHELL", "/bin/sh")
+            .stdin(fs::File::open(typed).unwrap());
+        self.run(&mut command)
+    }
+}
+
+#[test]
+fn on_a_terminal_init_asks_for_the_tracker_until_answered_then_for_an_others_description() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init_on_terminal(&[], "bogus\nother\n\nIssues live in Linear.\n");
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    assert_eq!(
+        shown
+            .matches("Where does this repo track issues? [github/local/other] (github): ")
+            .count(),
+        2,
+        "{shown}"
+    );
+    assert!(shown.contains("answer github, local or other"), "{shown}");
+    assert_eq!(
+        shown
+            .matches("Describe how this repo tracks issues, in one paragraph: ")
+            .count(),
+        2,
+        "{shown}"
+    );
+    assert_eq!(
+        repo_file(&fixture, "docs/agents/issue-tracker.md"),
+        "# Issue tracker\n\nIssues live in Linear.\n"
+    );
+    assert_eq!(fixture.loopherd(&["herds"]).status.code(), Some(1));
+}
+
+#[test]
+fn on_a_terminal_an_empty_answer_takes_github() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init_on_terminal(&[], "\n");
+
+    assert_ok(&out);
+    assert!(
+        text(&out.stdout).contains("(github): "),
+        "{}",
+        text(&out.stdout)
+    );
+    assert!(
+        repo_file(&fixture, "docs/agents/issue-tracker.md")
+            .starts_with("# Issue tracker: GitHub\n")
+    );
+}
+
+#[test]
+fn on_a_terminal_tracker_answers_the_question() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init_on_terminal(&["--tracker", "local"], "");
+
+    assert_ok(&out);
+    assert!(
+        !text(&out.stdout).contains("Where does"),
+        "{}",
+        text(&out.stdout)
+    );
+    assert!(
+        repo_file(&fixture, "docs/agents/issue-tracker.md")
+            .starts_with("# Issue tracker: Local Markdown\n")
+    );
+}
