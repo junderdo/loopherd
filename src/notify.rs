@@ -446,9 +446,10 @@ impl Shown<'_> {
 }
 
 /// Trimmed from after a key: `"password":`, `‘token’=`.
-const QUOTES: [char; 6] = ['"', '\'', '“', '”', '‘', '’'];
-/// Open a quoted or bracketed value, and are trimmed from before a key.
-const OPENERS: [char; 7] = ['"', '\'', '“', '‘', '[', '(', '{'];
+const QUOTES: [char; 7] = ['"', '\'', '“', '”', '‘', '’', '»'];
+/// Open a quoted or bracketed value, and are trimmed from before a key. `”` and `’`
+/// open as well as close, as some languages quote.
+const OPENERS: [char; 12] = ['"', '\'', '“', '‘', '”', '’', '„', '‚', '«', '[', '(', '{'];
 
 /// The first word of a separated strong key's value, hidden with the rest of its
 /// clause unless it opens a quote or bracket.
@@ -465,7 +466,7 @@ fn clause_start(value: &str) -> (Shown<'_>, Next) {
 /// The punctuation ending `word`'s clause (`,` `;` `?` `!` `.` or a closing quote
 /// or bracket), if it ends one. A cookie's `a=b;` doesn't, so its next pair is hidden.
 fn clause_end(word: &str) -> Option<&str> {
-    let value = word.trim_end_matches(|c: char| ",;?!.)]}\"'”’".contains(c));
+    let value = word.trim_end_matches(|c: char| ",;?!.)]}\"'“”‘’»".contains(c));
     let end = &word[value.len()..];
     let cookie_pair = end.starts_with(';') && value.contains('=');
     (!end.is_empty() && !cookie_pair).then_some(end)
@@ -516,7 +517,11 @@ impl Next {
             '"' => Some('"'),
             '\'' => Some('\''),
             '“' => Some('”'),
-            '‘' => Some('’'),
+            '‘' | '’' => Some('’'),
+            '”' => Some('”'),
+            '„' => Some('“'),
+            '‚' => Some('‘'),
+            '«' => Some('»'),
             '[' => Some(']'),
             '(' => Some(')'),
             '{' => Some('}'),
@@ -1309,6 +1314,64 @@ mod tests {
             ),
             ("Set “pwd”: hunter2 then merge?", "Set “pwd”: [redacted]?"),
             ("“--password” correct horse ok?", "“--password” [redacted]?"),
+        ] {
+            assert_eq!(text_sent(question), text, "{question}");
+        }
+    }
+
+    #[test]
+    fn any_quote_before_a_key_or_a_value_is_read_like_a_straight_one() {
+        for (question, text) in [
+            ("Set ”token”:Bearer abc123def456 ok?", "Set [redacted]?"),
+            (
+                "Set „Authorization“:Bearer abc123def456 ok?",
+                "Set [redacted]?",
+            ),
+            (
+                "Set ”password”:correct horse battery staple ok?",
+                "Set [redacted]?",
+            ),
+            ("Set ”pwd”: hunter2 then merge?", "Set ”pwd”: [redacted]?"),
+            ("Set ’pwd’: hunter2 then merge?", "Set ’pwd’: [redacted]?"),
+            ("Set ‚pwd‘: hunter2 then merge?", "Set ‚pwd‘: [redacted]?"),
+            ("Set «pwd»: hunter2 then merge?", "Set «pwd»: [redacted]?"),
+            ("Set ”key”: abc123 then?", "Set ”key”: [redacted] then?"),
+            (
+                "Set «password»: hunter2 then merge?",
+                "Set «password»: [redacted]?",
+            ),
+            (
+                "session: ”abc123 def456” ok?",
+                "session: [redacted] [redacted] ok?",
+            ),
+            (
+                "auth=”abc123 def456 ghi789” ok?",
+                "[redacted] [redacted] [redacted] ok?",
+            ),
+            (
+                "session: „abc123 def456“ ok?",
+                "session: [redacted] [redacted] ok?",
+            ),
+            (
+                "session: «abc123 def456» ok?",
+                "session: [redacted] [redacted] ok?",
+            ),
+            (
+                "session: ’abc123 def456’ ok?",
+                "session: [redacted] [redacted] ok?",
+            ),
+            (
+                "session: ‚abc123 def456‘ ok?",
+                "session: [redacted] [redacted] ok?",
+            ),
+            (
+                "Docs say „token: abc“ ok?",
+                "Docs say „token: [redacted]“ ok?",
+            ),
+            (
+                "Docs say «token: abc» ok?",
+                "Docs say «token: [redacted]» ok?",
+            ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
         }
