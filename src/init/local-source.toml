@@ -9,7 +9,10 @@
 # type (else feat), and skill:<name> names the worker's skill (else tdd).
 source = '''
 @FETCH@files=$(git ls-tree -r --name-only @REF@ -- .scratch) || exit
-printf '%s\n' "$files" | grep -E '^\.scratch/[A-Za-z0-9._-]+/issues/[0-9]+-[A-Za-z0-9._-]*\.md$' | while read -r f; do
+issue='^\.scratch/[A-Za-z0-9._-]+/issues/[0-9]+-[A-Za-z0-9._-]*\.md$'
+printf '%s\n' "$files" | grep -E '^"?\.scratch/.+/issues/[^/]+\.md"?$' | grep -vE "$issue" \
+  | sed 's|.*|skipped &: an issue path is .scratch/<feature>/issues/<NN>-<slug>.md of letters, digits and . _ -|' >&2
+printf '%s\n' "$files" | grep -E "$issue" | while read -r f; do
   printf '\n\036%s\n' "$f"
   git show "@REF@:$f"
 done | awk -v room=@ID_ROOM@ '

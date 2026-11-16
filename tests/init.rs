@@ -3751,6 +3751,34 @@ fn only_a_word_starting_with_a_number_names_a_blocker_and_a_missing_one_is_noted
 }
 
 #[test]
+fn an_issue_file_whose_path_the_queue_cant_read_is_noted_on_stderr() {
+    let fixture = Fixture::new(&["acme"]);
+    let ready = "Status: ready-for-agent\n";
+
+    let out = fixture.local_source(&[
+        (".scratch/auth/issues/01-login.md", ready),
+        (".scratch/My Feature/issues/01-x.md", ready),
+        (".scratch/auth/issues/02_logout.md", ready),
+        (".scratch/auth/spec.md", ready),
+    ]);
+
+    assert_ok(&out);
+    assert_eq!(
+        text(&out.stdout),
+        "auth-01 feat tdd login .scratch/auth/issues/01-login.md\n"
+    );
+    let rule = "an issue path is .scratch/<feature>/issues/<NN>-<slug>.md of letters, \
+                digits and . _ -";
+    assert_eq!(
+        text(&out.stderr),
+        format!(
+            "skipped .scratch/My Feature/issues/01-x.md: {rule}\n\
+             skipped .scratch/auth/issues/02_logout.md: {rule}\n"
+        )
+    );
+}
+
+#[test]
 fn features_that_cut_or_reshape_to_the_same_id_get_distinct_ids() {
     let fixture = Fixture::new(&["acme"]);
 
