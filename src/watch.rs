@@ -161,6 +161,7 @@ pub fn watch(
     let mut code = 0;
     let mut own_questions_seen = HashSet::new();
     loop {
+        let marks = notify::BlockMarks::read(dir)?;
         let read = status::read_statuses(
             herdr,
             ledger,
@@ -285,7 +286,7 @@ pub fn watch(
         }
         for member in members.iter().chain(&own) {
             if !matches!(member.status, AgentStatus::Blocked | AgentStatus::Unknown) {
-                notify::unblocked(dir, &member.name)?;
+                marks.unblocked(dir, &member.name)?;
             }
         }
         let left = req.timeout.map(|t| t.saturating_sub(clock.elapsed()));

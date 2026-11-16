@@ -294,15 +294,61 @@ fn first_to_notify_blocked(mailboxes: &Path, member: &str) -> Result<bool> {
     }
 }
 
-/// Clears `member`'s blocked mark, as a watch saw it not blocked, so its next
-/// block is sent.
-pub fn unblocked(mailboxes: &Path, member: &str) -> Result<()> {
-    let path = mailboxes.join(format!("{member}.blocked"));
-    match fs::remove_file(&path) {
-        Err(e) if e.kind() != ErrorKind::NotFound => {
-            Err(e).with_context(|| format!("remove {}", path.display()))
+/// The `<member>.blocked` marks in a mailboxes directory as they stood
+/// before a watch read statuses.
+pub struct BlockMarks(HashMap<String, (u64, SystemTime)>);
+
+impl BlockMarks {
+    pub fn read(mailboxes: &Path) -> Result<BlockMarks> {
+        let mut marks = HashMap::new();
+        let entries = match fs::read_dir(mailboxes) {
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(BlockMarks(marks)),
+            entries => entries.with_context(|| format!("read {}", mailboxes.display()))?,
+        };
+        for entry in entries {
+            let entry = entry.with_context(|| format!("read {}", mailboxes.display()))?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(member) = name.strip_suffix(".blocked") else {
+                continue;
+            };
+            if let Some(id) = mark_id(&entry.path())? {
+                marks.insert(member.to_string(), id);
+            }
         }
-        _ => Ok(()),
+        Ok(BlockMarks(marks))
+    }
+
+    /// Clears `member`'s blocked mark, as a watch saw it not blocked, so its
+    /// next block is sent. A mark made since [`BlockMarks::read`] stays: it
+    /// is for a block that status read predates.
+    pub fn unblocked(&self, mailboxes: &Path, member: &str) -> Result<()> {
+        let path = mailboxes.join(format!("{member}.blocked"));
+        let Some(seen) = self.0.get(member) else {
+            return Ok(());
+        };
+        if mark_id(&path)?.as_ref() != Some(seen) {
+            return Ok(());
+        }
+        match fs::remove_file(&path) {
+            Err(e) if e.kind() != ErrorKind::NotFound => {
+                Err(e).with_context(|| format!("remove {}", path.display()))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// A mark's inode and mtime, so a mark removed and made again reads as new.
+fn mark_id(path: &Path) -> Result<Option<(u64, SystemTime)>> {
+    use std::os::unix::fs::MetadataExt;
+    match fs::metadata(path) {
+        Ok(meta) => Ok(Some((
+            meta.ino(),
+            meta.modified()
+                .with_context(|| format!("read {}'s mtime", path.display()))?,
+        ))),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("stat {}", path.display())),
     }
 }
 
@@ -711,6 +757,21 @@ mod tests {
 
         assert_eq!(launched.len(), 1);
         assert_eq!(launched[0].args, args(&["say", "lh-4 is blocked"]));
+    }
+
+    #[test]
+    fn a_block_marked_after_a_watchs_status_read_outlives_that_watch_seeing_it_unblocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = enabled("herdr = false\ncommand = ['n']\n");
+        let stale = BlockMarks::read(dir.path()).unwrap();
+        assert_eq!(sent(&config, dir.path(), &[blocked("lh-4")]).len(), 1);
+
+        stale.unblocked(dir.path(), "lh-4").unwrap();
+        assert!(sent(&config, dir.path(), &[blocked("lh-4")]).is_empty());
+
+        let fresh = BlockMarks::read(dir.path()).unwrap();
+        fresh.unblocked(dir.path(), "lh-4").unwrap();
+        assert_eq!(sent(&config, dir.path(), &[blocked("lh-4")]).len(), 1);
     }
 
     #[test]
