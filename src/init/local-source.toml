@@ -2,7 +2,7 @@
 # .scratch/<feature>/issues/<NN>-<slug>.md whose Status: line has
 # @READY_FOR_AGENT@ and none of blocked, @NEEDS_INFO@, @READY_FOR_HUMAN@,
 # resolved, closed or done, and whose Blocked by: line names only resolved
-# issues of its feature. The id is <feature>-<NN>; a feature that isn't
+# issues of its feature, or of the feature an issue path names. The id is <feature>-<NN>; a feature that isn't
 # lowercase letters, digits and - or doesn't fit the member name is cut and
 # takes a 3-character hash, as <cut>_<hash>-<NN>, rehashed when another
 # feature holds it. The Status: words act as labels: types maps one to the branch
@@ -25,7 +25,7 @@ done | awk -v room=@ID_ROOM@ '
   function has(f, label) { return index(labels[f], " " label " ") > 0 }
   function closed(f) { return has(f, "resolved") || has(f, "closed") || has(f, "done") }
   function value(line) { sub(/^[^:]*:/, "", line); gsub(/[*`]/, " ", line); return line }
-  function unblocked(f,    items, k, i, item, said, words, w, j, n, b, found) {
+  function unblocked(f,    items, k, i, item, said, words, w, j, n, of, b, found) {
     if (!(f in blockers) || blockers[f] ~ /^[ \t,]*(none|$)/) return 1
     k = split(blockers[f], items, /[,;]/)
     for (i = 1; i <= k; i++) {
@@ -38,6 +38,8 @@ done | awk -v room=@ID_ROOM@ '
       # the run, nor a slug past the leading number.
       gsub(/\([^)]*\)/, " ", item)
       sub(/:.*/, "", item)
+      of = feature[f]
+      if (match(item, /[^ \t\/]+\/issues\//)) of = features[substr(item, RSTART, RLENGTH - 8)]
       gsub(/[^ \t]*issues\//, "", item)
       w = split(item, words, /[ \t\/]+/)
       found = 0
@@ -49,9 +51,10 @@ done | awk -v room=@ID_ROOM@ '
         n = words[j]
         sub(/^#/, "", n)
         sub(/[^0-9].*/, "", n)
-        b = issue[feature[f] "/" (n + 0)]
+        b = issue[of "/" (n + 0)]
         if (b == "") {
-          print "skipped " f ": its Blocked by names " n ", which is no issue of its feature" > "/dev/stderr"
+          if (of == feature[f]) print "skipped " f ": its Blocked by names " n ", which is no issue of its feature" > "/dev/stderr"
+          else print "skipped " f ": its Blocked by names " said ", which is no issue" > "/dev/stderr"
           return 0
         }
         if (!closed(b)) return 0
@@ -88,6 +91,7 @@ done | awk -v room=@ID_ROOM@ '
     files[++n] = f
     split(f, part, "/")
     feature[f] = part[2]
+    features[tolower(part[2])] = part[2]
     name[f] = part[4]
     num[f] = name[f]
     sub(/-.*/, "", num[f])

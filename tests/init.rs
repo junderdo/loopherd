@@ -3753,7 +3753,7 @@ fn only_a_word_starting_with_a_number_names_a_blocker_and_a_missing_one_is_noted
 }
 
 #[test]
-fn a_blocker_names_its_first_numbers_and_an_item_with_none_is_noted() {
+fn a_blocker_names_its_first_numbers_and_a_path_names_its_own_feature() {
     let fixture = Fixture::new(&["acme"]);
     let blocked_by = |n: &str, line: &str| {
         (
@@ -3770,10 +3770,16 @@ fn a_blocker_names_its_first_numbers_and_an_item_with_none_is_noted() {
             ".scratch/f/issues/02-b.md".to_string(),
             "Status: needs-info\n".to_string(),
         ),
+        (
+            ".scratch/g/issues/02-c.md".to_string(),
+            "Status: resolved\n".to_string(),
+        ),
         blocked_by("10", "Blocked by: 01 - Node 20 upgrade"),
         blocked_by("11", "Blocked by: #01 Node 20 upgrade"),
         blocked_by("12", "Blocked by: see 01"),
+        blocked_by("13", "Blocked by: .scratch/g/issues/02-c.md"),
         blocked_by("14", "Blocked by: Node upgrade (#01)"),
+        blocked_by("15", "Blocked by: .scratch/h/issues/01-d.md"),
     ];
     let issues: Vec<(&str, &str)> = issues
         .iter()
@@ -3787,12 +3793,15 @@ fn a_blocker_names_its_first_numbers_and_an_item_with_none_is_noted() {
         text(&out.stdout),
         "f-10 feat tdd x .scratch/f/issues/10-x.md\n\
          f-11 feat tdd x .scratch/f/issues/11-x.md\n\
-         f-12 feat tdd x .scratch/f/issues/12-x.md\n"
+         f-12 feat tdd x .scratch/f/issues/12-x.md\n\
+         f-13 feat tdd x .scratch/f/issues/13-x.md\n"
     );
     assert_eq!(
         text(&out.stderr),
         "skipped .scratch/f/issues/14-x.md: its Blocked by item \"node upgrade (#01)\" \
-         names no issue number\n"
+         names no issue number\n\
+         skipped .scratch/f/issues/15-x.md: its Blocked by names \
+         .scratch/h/issues/01-d.md, which is no issue\n"
     );
 }
 
