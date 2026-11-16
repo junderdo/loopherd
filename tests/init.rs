@@ -3203,7 +3203,9 @@ fn a_local_tracker_herd_feeds_the_ready_unblocked_issues_pushed_to_the_default_b
     assert_ok(&feed);
     assert_eq!(
         text(&feed.stdout),
-        "would add widgets-auth-01 (template issue)\n\
+        "source: skipped .scratch/auth/issues/09-audit-log.md: its Blocked by item \
+         \"the login form\" names no issue number\n\
+         would add widgets-auth-01 (template issue)\n\
          would add widgets-auth-05 (template issue)\n\
          would add widgets-auth-07 (template issue)\n\
          would add widgets-billing-01 (template issue)\n\
@@ -3747,6 +3749,50 @@ fn only_a_word_starting_with_a_number_names_a_blocker_and_a_missing_one_is_noted
         text(&out.stderr),
         "skipped .scratch/f/issues/07-x.md: its Blocked by names 20, which is no issue \
          of its feature\n"
+    );
+}
+
+#[test]
+fn a_blocker_names_its_first_numbers_and_an_item_with_none_is_noted() {
+    let fixture = Fixture::new(&["acme"]);
+    let blocked_by = |n: &str, line: &str| {
+        (
+            format!(".scratch/f/issues/{n}-x.md"),
+            format!("{line}\nStatus: ready-for-agent\n"),
+        )
+    };
+    let issues = [
+        (
+            ".scratch/f/issues/01-a.md".to_string(),
+            "Status: resolved\n".to_string(),
+        ),
+        (
+            ".scratch/f/issues/02-b.md".to_string(),
+            "Status: needs-info\n".to_string(),
+        ),
+        blocked_by("10", "Blocked by: 01 - Node 20 upgrade"),
+        blocked_by("11", "Blocked by: #01 Node 20 upgrade"),
+        blocked_by("12", "Blocked by: see 01"),
+        blocked_by("14", "Blocked by: Node upgrade (#01)"),
+    ];
+    let issues: Vec<(&str, &str)> = issues
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+
+    let out = fixture.local_source(&issues);
+
+    assert_ok(&out);
+    assert_eq!(
+        text(&out.stdout),
+        "f-10 feat tdd x .scratch/f/issues/10-x.md\n\
+         f-11 feat tdd x .scratch/f/issues/11-x.md\n\
+         f-12 feat tdd x .scratch/f/issues/12-x.md\n"
+    );
+    assert_eq!(
+        text(&out.stderr),
+        "skipped .scratch/f/issues/14-x.md: its Blocked by item \"node upgrade (#01)\" \
+         names no issue number\n"
     );
 }
 
