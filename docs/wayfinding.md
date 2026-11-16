@@ -48,6 +48,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D31](decisions/D31.md) | A lead's switches resolve from its herd file's `[lead]`, else `config.toml`'s `[lead_defaults]` (set by `scripts/install`), else off; no project-level layer. |
 | [D33](decisions/D33.md) | A member's ledger session follows Claude's `continued-in` transcript records to the live session, in the Stop and SessionStart hooks, the handoff check, `revive` and `restart`. |
 | [D34](decisions/D34.md) | `ready-for-agent` and `blocked` are independent: a fully specified card is written with both, and `scripts/trello unblock` only removes `blocked`, never adding `ready-for-agent`. |
+| [D35](decisions/D35.md) | `loopherd init` writes a herd file, lead prompt and tracker labels the human then owns; GitHub Issues first (`ready-for-agent` minus `blocked`/`needs-info`/`ready-for-human`, `Closes #<n>` PRs), refusing to replace existing files. |
 
 ## Emerging model
 
