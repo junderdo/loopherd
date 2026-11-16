@@ -228,12 +228,13 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         }
         _ => bail!("--repo {slug:?} is not <owner>/<name>"),
     };
+    let recorded_github = recorded.as_ref().and_then(|r| r.github.as_deref());
     // A local tracker needs GitHub only for its PRs, so it can go without.
     let github = match (&origin, tracker.kind) {
         (Err(_), tracker::Kind::Local) => ask.value(
             "GitHub repo (owner/name); Enter for none",
             req.github,
-            Some(""),
+            Some(recorded_github.unwrap_or("")),
             "",
             |slug| match slug {
                 "" => Ok(None),
@@ -244,7 +245,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
             ask.value(
                 "GitHub repo (owner/name)",
                 req.github,
-                origin.as_ref().ok().map(String::as_str),
+                recorded_github.or(origin.as_ref().ok().map(String::as_str)),
                 &origin
                     .as_ref()
                     .err()
@@ -977,6 +978,8 @@ struct Recorded {
     context_limit: Option<u64>,
     /// The worker prompt's checklist items that are a bare `check`; a reworded one is skipped.
     checks: Vec<String>,
+    /// The `owner/name` that `merged` checks PRs on.
+    github: Option<String>,
 }
 
 impl Recorded {
@@ -1008,6 +1011,12 @@ impl Recorded {
             max: number(herd.get("queue").and_then(|q| q.get("max"))),
             context_limit: number(issue.and_then(|t| t.get("context_limit"))),
             checks,
+            github: issue
+                .and_then(|t| t.get("merged"))
+                .and_then(toml::Value::as_str)
+                .and_then(|merged| merged.split_once("--repo "))
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+                .map(String::from),
         })
     }
 }

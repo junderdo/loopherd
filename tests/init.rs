@@ -4284,6 +4284,28 @@ fn diff_right_after_a_local_init_without_github_prints_nothing_and_makes_no_gh_c
 }
 
 #[test]
+fn diff_reads_back_the_repo_passed_to_init_over_an_origin_that_isnt_github() {
+    for tracker in ["local", "github"] {
+        let fixture = Fixture::new(&["acme"]);
+        fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
+        let init = fixture.init(&["--tracker", tracker, "--repo", "acme/widgets"]);
+        assert_ok(&init);
+        let before = everything(&fixture);
+
+        let out = fixture.init(&["--diff"]);
+
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{tracker}: {}",
+            text(&out.stderr)
+        );
+        assert_eq!(text(&out.stdout), "", "{tracker}");
+        assert_eq!(everything(&fixture), before, "{tracker}");
+    }
+}
+
+#[test]
 fn diff_shows_drift_in_each_file_a_local_init_wrote() {
     let fixture = Fixture::new(&["acme"]);
     fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
