@@ -171,9 +171,17 @@ fn refuse_existing(
         );
     }
     for other in herd::names(&paths.herds)? {
-        if let Ok(other_repo) = herd::repo(paths, &other)
-            && same_dir(&other_repo, repo)
-        {
+        let file = paths.herds.join(format!("{other}.toml"));
+        if !fs::metadata(&file).is_ok_and(|m| m.is_file()) {
+            continue;
+        }
+        let other_repo = herd::repo(paths, &other).with_context(|| {
+            format!(
+                "can't tell which repo {} runs; fix or remove it",
+                file.display()
+            )
+        })?;
+        if same_dir(&other_repo, repo) {
             bail!(
                 "herd {other} already runs {}; init writes one herd per repo",
                 repo.display()
@@ -210,8 +218,9 @@ fn github_repo(repo: &Path) -> Result<(String, String)> {
     }
 }
 
-/// The path of a `github.com` remote URL, whatever the host's case,, scp-like (`git@github.com:o/r`)
-/// or with a scheme, a user and a port (`ssh://git@ssh.github.com:443/o/r`).
+/// The path of a `github.com` remote URL, whatever the host's case, scp-like
+/// (`git@github.com:o/r`) or with a scheme, a user and a port
+/// (`ssh://git@ssh.github.com:443/o/r`).
 fn github_path(url: &str) -> Option<&str> {
     let (authority, path) = match url.split_once("://") {
         Some((_, rest)) => rest.split_once('/')?,
@@ -226,9 +235,12 @@ fn github_path(url: &str) -> Option<&str> {
     .then_some(path)
 }
 
-/// Safe to put unquoted in the herd's shell commands and prompts.
+/// Safe to put unquoted in the herd's shell commands and prompts, and not
+/// an option, a path step or a `.git` suffix.
 fn is_github_name(name: &str) -> bool {
     !name.is_empty()
+        && !name.starts_with(['-', '.'])
+        && !name.ends_with(".git")
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
@@ -247,10 +259,10 @@ fn account(owner: &str, wanted: Option<&str>) -> Result<String> {
             r#".hosts["github.com"][]?.login"#,
         ],
     )?;
-    if logins.trim().is_empty() {
+    let logins: Vec<&str> = logins.lines().filter(|l| is_github_name(l)).collect();
+    if logins.is_empty() {
         bail!("gh has no logged-in account; run `gh auth login`");
     }
-    let logins: Vec<&str> = logins.lines().filter(|l| is_github_name(l)).collect();
     let found = logins.join(", ");
     let login = logins
         .iter()

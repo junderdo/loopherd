@@ -109,16 +109,34 @@ impl Fixture {
         self.run(Command::new(env!("CARGO_BIN_EXE_loopherd")).args(args))
     }
 
-    /// `loopherd init` with the usual checks, unable to write files over
-    /// `blocks` of 512 bytes.
-    fn init_with_file_size_limit(&self, blocks: u32) -> Output {
-        self.run(Command::new("sh").args([
-            "-c",
-            r#"ulimit -S -f "$1"; trap '' XFSZ; exec "$2" init --check "cargo test""#,
-            "sh",
-            &blocks.to_string(),
-            env!("CARGO_BIN_EXE_loopherd"),
-        ]))
+    /// `loopherd init` under a file-size limit that `file`, the lead prompt or
+    /// the herd file, outgrows; the limit comes from what init writes here.
+    fn init_failing_to_write(&self, file: &str) -> Output {
+        assert_ok(&self.init(&[]));
+        let size = |name: &str| fs::metadata(self.herds().join(name)).unwrap().len();
+        let (lead, herd) = (size("widgets-lead.md"), size("widgets.toml"));
+        fs::remove_dir_all(self.herds()).unwrap();
+        // ulimit -f counts 512-byte blocks.
+        let blocks = match file {
+            "widgets-lead.md" => (lead - 1) / 512,
+            _ => lead.div_ceil(512),
+        };
+        assert!(
+            file == "widgets-lead.md" || herd > blocks * 512,
+            "the herd file ({herd} bytes) fits in the lead prompt's {blocks} blocks"
+        );
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                r#"ulimit -S -f "$1"; trap '' XFSZ; shift; exec "$@""#,
+                "sh",
+                &blocks.to_string(),
+                env!("CARGO_BIN_EXE_loopherd"),
+                "init",
+            ])
+            .args(Fixture::CHECKS);
+        self.run(&mut command)
     }
 
     /// Runs `command` in the repo unless it names its own directory.
@@ -142,14 +160,11 @@ impl Fixture {
             .unwrap()
     }
 
+    const CHECKS: [&str; 4] = ["--check", "cargo test", "--check", "cargo fmt --check"];
+
     fn init(&self, extra: &[&str]) -> Output {
-        let mut args = vec![
-            "init",
-            "--check",
-            "cargo test",
-            "--check",
-            "cargo fmt --check",
-        ];
+        let mut args = vec!["init"];
+        args.extend(Fixture::CHECKS);
         args.extend(extra);
         self.loopherd(&args)
     }
@@ -279,7 +294,8 @@ fn the_worker_prompt_claims_builds_checks_opens_a_closing_pr_and_reports() {
 
     for expected in [
         r#"branch = "{type}/{number}-{slug}""#,
-        "GH_TOKEN=$(gh auth token --user acme) gh issue view {number} --repo acme/widgets",
+        "GH_TOKEN=$(gh auth token --user acme) gh issue view {number} --repo acme/widgets \
+         --comments",
         "GH_TOKEN=$(gh auth token --user acme) gh issue comment {number} --repo acme/widgets \
          --body \"claimed by {name}\"",
         "GH_TOKEN=$(gh auth token --user acme) gh issue edit {number} --repo acme/widgets \
@@ -804,7 +820,7 @@ fn an_owner_repo_or_login_outside_githubs_characters_is_refused() {
     assert_refused(
         &fixture,
         &fixture.init(&["--gh-account", "ac me"]),
-        "loopherd init: gh has no logged-in account ac me (found: )\n",
+        "loopherd init: gh has no logged-in account; run `gh auth login`\n",
     );
 }
 
@@ -854,7 +870,7 @@ fn init_refuses_a_second_herd_for_the_same_repo() {
 fn a_failed_herd_file_write_leaves_neither_file_and_a_rerun_succeeds() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init_with_file_size_limit(4);
+    let out = fixture.init_failing_to_write("widgets.toml");
 
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     assert!(
@@ -873,7 +889,7 @@ fn a_failed_herd_file_write_leaves_neither_file_and_a_rerun_succeeds() {
 fn a_failed_lead_prompt_write_leaves_no_file() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init_with_file_size_limit(2);
+    let out = fixture.init_failing_to_write("widgets-lead.md");
 
     assert_eq!(out.status.code(), Some(1));
     assert!(
@@ -931,4 +947,78 @@ fn init_from_a_subdirectory_points_the_herd_at_the_repo_root() {
         herd_repo(&fixture, "widgets"),
         fixture.repo().to_string_lossy()
     );
+}
+
+#[test]
+fn a_herd_name_with_an_uppercase_letter_or_a_space_after_the_first_is_refused() {
+    for herd in ["mYApp", "x y"] {
+        let fixture = Fixture::new(&["acme"]);
+
+        assert_refused(
+            &fixture,
+            &fixture.init(&["--herd", herd]),
+            &format!(
+                "loopherd init: {herd:?} can't name a herd: it needs a lowercase letter then at \
+                 most 26 of a-z, 0-9, _ and -, to name its lead and members; pass --herd <name>\n"
+            ),
+        );
+    }
+}
+
+#[test]
+fn repo_refuses_a_name_that_is_a_path_step_an_option_or_has_a_git_suffix() {
+    for slug in [
+        "acme/.",
+        "acme/..",
+        "acme/-widgets",
+        "-acme/widgets",
+        ".acme/widgets",
+        "acme/widgets.git",
+    ] {
+        let fixture = Fixture::new(&["acme"]);
+
+        assert_refused(
+            &fixture,
+            &fixture.init(&[&format!("--repo={slug}")]),
+            &format!("loopherd init: --repo {slug:?} is not <owner>/<name>\n"),
+        );
+    }
+}
+
+#[test]
+fn init_refuses_while_a_herd_file_it_cant_read_could_run_this_repo() {
+    for (contents, mode) in [
+        ("repo = [", 0o644),
+        ("repo = \"/x\"\nunknown = 1\n", 0o644),
+        ("repo = \"/x\"\n", 0o000),
+    ] {
+        let fixture = Fixture::new(&["acme"]);
+        fs::create_dir_all(fixture.herds()).unwrap();
+        let broken = fixture.herds().join("old.toml");
+        fs::write(&broken, contents).unwrap();
+        fs::set_permissions(&broken, fs::Permissions::from_mode(mode)).unwrap();
+
+        let out = fixture.init(&[]);
+
+        assert_eq!(out.status.code(), Some(1), "{contents}");
+        assert!(
+            text(&out.stderr).starts_with(&format!(
+                "loopherd init: can't tell which repo {} runs; fix or remove it",
+                broken.display()
+            )),
+            "{}",
+            text(&out.stderr)
+        );
+        assert_eq!(fixture.gh_calls(), "");
+        assert!(!fixture.herds().join("widgets.toml").exists());
+    }
+}
+
+#[test]
+fn a_toml_directory_or_dangling_symlink_among_the_herds_doesnt_stop_init() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::create_dir_all(fixture.herds().join("dir.toml")).unwrap();
+    std::os::unix::fs::symlink("/nonexistent", fixture.herds().join("x.toml")).unwrap();
+
+    assert_ok(&fixture.init(&[]));
 }
