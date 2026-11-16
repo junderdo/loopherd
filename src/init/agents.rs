@@ -7,11 +7,12 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use super::tracker::read;
+use super::tracker::{Kind, read};
 
 const SECTION: &str = include_str!("agents/section.md");
 const LOOPHERD: &str = include_str!("agents/loopherd.md");
 const LOOPHERD_LOCAL: &str = include_str!("agents/loopherd-local.md");
+const LOOPHERD_OTHER: &str = include_str!("agents/loopherd-other.md");
 
 const AGENTS_MD: &str = "AGENTS.md";
 const LOOPHERD_DOC: &str = "docs/agents/loopherd.md";
@@ -80,8 +81,7 @@ pub struct Herd<'a> {
     pub branch: &'a str,
     pub checks: &'a [String],
     pub needs_info: &'a str,
-    /// Whether the tracker is local markdown rather than GitHub-shaped.
-    pub local: bool,
+    pub tracker: Kind,
 }
 
 /// What init writes into the repo, and the steps left to the human where
@@ -143,9 +143,10 @@ pub fn present(repo: &Path, herd: &Herd) -> Result<Option<Doc>> {
 
 fn loopherd_doc(herd: &Herd) -> Doc {
     let checks: Vec<String> = herd.checks.iter().map(|c| format!("- `{c}`")).collect();
-    let template = match herd.local {
-        true => LOOPHERD_LOCAL,
-        false => LOOPHERD,
+    let template = match herd.tracker {
+        Kind::GitHub => LOOPHERD,
+        Kind::Local => LOOPHERD_LOCAL,
+        Kind::Other => LOOPHERD_OTHER,
     };
     let (gh_note, hand_in, handed_in) = match herd.account {
         Some(account) => (
@@ -176,6 +177,7 @@ fn loopherd_doc(herd: &Herd) -> Doc {
             ("GH_NOTE", &gh_note),
             ("HAND_IN", &hand_in),
             ("HANDED_IN", handed_in),
+            ("FILL_IN", super::FILL_IN),
         ],
     );
     Doc::new(LOOPHERD_DOC, text)

@@ -17,8 +17,7 @@ tracker's own commands.
 3. Build it with the {skill} skill.
 4. Before calling it done, run each check and fix what fails:
 @CHECKS@
-5. Push the branch with `git push -u origin HEAD` and hand it in on task
-   {number}, so the task closes when the work merges into @BRANCH@. (fill in)
+5. Push the branch with `git push -u origin HEAD`, @OTHER_HAND_IN@ (fill in)
 6. Finish with `loopherd report --kind done "<@HANDED_IN@ and one-line summary>"`.
 
 If @BRANCH@ moves under you, merge origin/@BRANCH@ into your branch; never

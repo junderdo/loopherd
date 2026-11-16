@@ -4313,7 +4313,7 @@ fn an_other_tracker_without_an_origin_makes_no_gh_call_and_takes_the_current_bra
     assert!(
         fixture
             .herd_get("template.issue.prompt")
-            .contains("merges into develop"),
+            .contains("merges it into develop"),
         "{}",
         fixture.herd_get("template.issue.prompt")
     );
@@ -4350,7 +4350,7 @@ fn an_other_tracker_with_a_gitlab_origin_takes_origin_head_and_omits_merged_with
     let issue = herd_toml(&fixture)["template"]["issue"].clone();
     assert!(!issue.as_table().unwrap().contains_key("merged"), "{issue}");
     let prompt = fixture.herd_get("template.issue.prompt");
-    assert!(prompt.contains("merges into trunk"), "{prompt}");
+    assert!(prompt.contains("merges it into trunk"), "{prompt}");
     assert!(!prompt.contains("feat/x"), "{prompt}");
 }
 
@@ -4436,7 +4436,9 @@ fn an_other_tracker_names_no_github_issue_gh_command_or_account_and_marks_what_t
                 "  3. Fill in from docs/agents/issue-tracker.md, in {}: the line marked (fill in).",
                 lead_file.display()
             ),
-            "  4. Adapt docs/agents/loopherd.md to the same tracker.".to_string(),
+            "  4. Fill in each section of docs/agents/loopherd.md marked (fill in), or adapt the \
+                 doc to the same tracker if it was already there."
+                .to_string(),
         ] {
             assert!(next.contains(&step), "{step:?} missing from:\n{next}");
         }
@@ -4456,7 +4458,11 @@ fn a_ready_for_agent_label_the_queue_reads_as_a_type_or_skill_is_refused_before_
             "the queue reads a skill: label as the worker's skill",
         ),
     ] {
-        for tracker in [None, Some("# Issue tracker: Local Markdown\n")] {
+        for tracker in [
+            None,
+            Some("# Issue tracker: Local Markdown\n"),
+            Some("# Issue tracker: Linear\n"),
+        ] {
             let fixture = Fixture::new(&["acme"]);
             write_docs(
                 &fixture,
@@ -4481,5 +4487,92 @@ fn a_ready_for_agent_label_the_queue_reads_as_a_type_or_skill_is_refused_before_
                 .count();
             assert_eq!(before, after);
         }
+    }
+}
+
+#[test]
+fn diff_on_another_branch_reads_the_default_branch_back_when_origin_head_is_unset() {
+    let fixture = Fixture::new(&["acme"]);
+    git(&fixture.repo(), &["remote", "remove", "origin"]);
+    fixture.commit_on("main");
+    fixture.fail_gh();
+    let out = fixture.init(&OTHER);
+    assert_ok(&out);
+    assert!(
+        text(&out.stderr)
+            .contains("origin/HEAD isn't set, so the default branch is the checked-out main"),
+        "{}",
+        text(&out.stderr)
+    );
+    git(&fixture.repo(), &["checkout", "-q", "-b", "feature"]);
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_ok(&out);
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn an_other_tracker_on_a_detached_head_without_origin_head_names_how_to_set_the_branch() {
+    let fixture = Fixture::new(&["acme"]);
+    git(&fixture.repo(), &["remote", "remove", "origin"]);
+    fixture.commit_on("main");
+    git(&fixture.repo(), &["checkout", "-q", "--detach"]);
+    fixture.fail_gh();
+
+    let out = fixture.init(&OTHER);
+
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert!(
+        text(&out.stderr).contains(
+            "origin/HEAD isn't set and HEAD is detached; check out the default branch \
+             or run `git remote set-head origin <branch>`"
+        ),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!fixture.herds().exists());
+}
+
+#[test]
+fn an_other_tracker_asks_for_a_pull_request_only_with_a_github_origin() {
+    for github in [true, false] {
+        let fixture = Fixture::new(&["acme"]);
+        if !github {
+            git(&fixture.repo(), &["remote", "remove", "origin"]);
+            fixture.commit_on("main");
+            fixture.fail_gh();
+        }
+
+        let out = fixture.init(&OTHER);
+
+        assert_ok(&out);
+        let prompt = fixture.herd_get("template.issue.prompt");
+        let doc = fs::read_to_string(fixture.repo().join("docs/agents/loopherd.md")).unwrap();
+        let (step, hand_in, report) = match github {
+            true => (
+                "open a pull request into main",
+                "open a PR with `--base main`",
+                "<PR link and one-line summary>",
+            ),
+            false => (
+                "open no pull request",
+                "open no pull request; the human merges it into main",
+                "<branch and one-line summary>",
+            ),
+        };
+        assert!(prompt.contains(step), "{prompt}");
+        assert!(prompt.contains(report), "{prompt}");
+        assert!(doc.contains(hand_in), "{doc}");
+        assert!(
+            doc.contains("Fill in from docs/agents/issue-tracker.md"),
+            "{doc}"
+        );
+        for unexpected in ["GitHub", " gh ", "`gh ", "acme", "Closes #"] {
+            assert!(!doc.contains(unexpected), "{unexpected:?} in:\n{doc}");
+        }
+        let add_origin = text(&out.stdout).contains("Add an origin remote");
+        assert_eq!(add_origin, !github, "{}", text(&out.stdout));
     }
 }

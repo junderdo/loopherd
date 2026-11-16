@@ -160,15 +160,18 @@ push their branch with no PR, for the human to merge. It still needs an
 `origin` remote to branch from and push to. On a terminal, Enter at the
 GitHub question means none.
 
-Any other tracker needs no GitHub either, nor an origin. Its herd names no
+Any other tracker needs no GitHub either, and init runs without an origin
+(add one before feeding; the printed steps say so). Its herd names no
 GitHub issue, gh command or account: `source` is empty, `done` is left out,
-and the worker prompt's tracker steps and one line of the lead prompt are
-marked `(fill in)`, each under `Fill in from docs/agents/issue-tracker.md`;
-the printed steps list every placeholder. When `origin` isn't on GitHub and
-`--repo` isn't given, init makes no gh call, takes the default branch from
-the local `origin/HEAD`, else the checked-out branch, and leaves out
-`merged` with the same warning; with a GitHub origin `merged` stays the
-GitHub PR check.
+and the worker prompt's tracker steps, one line of the lead prompt and the
+sections of `docs/agents/loopherd.md` are marked `(fill in)`, each under
+`Fill in from docs/agents/issue-tracker.md`; the printed steps list every
+placeholder. When `origin` isn't on GitHub and `--repo` isn't given, init
+makes no gh call, takes the default branch from the local `origin/HEAD`,
+else the checked-out branch (with a warning; `--diff` reads the recorded one
+back), and leaves out `merged` with the same warning; workers open no pull
+request. With a GitHub origin, `merged` stays the GitHub PR check and
+workers open a pull request into the default branch.
 
 Every gh call runs as the logged-in account matching the
 remote's owner, else `--gh-account`; `--repo` names the GitHub repo when

@@ -34,12 +34,14 @@ Init never launches an agent.
    herds` lists the herd file it wrote.
 2. Read the repo's `AGENTS.md`, `docs/agents/issue-tracker.md` and
    `docs/agents/loopherd.md`.
-3. If the tracker isn't GitHub, init left `[queue] source` empty. Fill it
-   from the tracker doc with a command printing one task per line, its
-   words in the template's `params` order. Then move the rest of the herd
-   to that tracker: the template's `done` and `merged` checks, the worker
-   prompt's commands that read, claim, escalate a question and close the
-   task, and `docs/agents/loopherd.md`.
+3. If the tracker is neither GitHub nor local markdown, init left `[queue]
+   source` empty. Fill it from the tracker doc with a command printing one
+   task per line, its words in the template's `params` order. Then fill
+   every other placeholder init marked `(fill in)` and listed in its
+   steps: the template's `done` check, the worker prompt's steps that read,
+   claim, escalate a question and close the task, the lead prompt's line, and `docs/agents/loopherd.md`. Keep `merged` if
+   init wrote one (the GitHub PR check); without it, the lead feeds after
+   each merge.
 4. Adjust the worker prompt and the checks it lists to how the repo builds,
    tests and reviews; for a herd with a lead, its prompt file too.
 5. Edit only what init wrote: the herd file (with `loopherd herd set`), the
