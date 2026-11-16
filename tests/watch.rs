@@ -655,3 +655,47 @@ fn notify_run_leads_its_own_process_group_so_the_watch_ending_leaves_it_running(
     let (notify_run, group) = ids.trim().split_once(' ').unwrap();
     assert_eq!(notify_run, group, "{ids}");
 }
+
+#[test]
+fn a_leads_watch_with_no_shepherds_watch_sends_the_leads_own_question_once() {
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+    let state = sandbox.path("state/loopherd");
+    fs::write(
+        state.join("ledger.json"),
+        r#"{"lead-cards": {"name": "lead-cards", "pane_id": "w1:p0", "session_id": null,
+            "repo": "/", "worktree": null, "workspace": "w1", "prompt": null,
+            "prompt_sent": true, "created": "2026-11-01T00:00:00Z",
+            "herd": "cards", "role": "lead", "socket": "/run/watched.sock"}}"#,
+    )
+    .unwrap();
+    let out = sandbox.path("command.out");
+    let command = sandbox.script(
+        "notify-stub",
+        &format!("printf '%s|' \"$@\" >> {}; echo >> {0}", out.display()),
+    );
+    sandbox.notify_config(&format!(
+        "herdr = false\ncommand = '{} {{herd}} {{member}} {{kind}} {{text}}'\n",
+        command.display()
+    ));
+    fs::write(
+        state.join("reports/lead-cards.jsonl"),
+        r#"{"at":"2026-11-02T09:01:00Z","kind":"question","text":"Merge #107?"}
+"#,
+    )
+    .unwrap();
+
+    let watched = sandbox
+        .loopherd(&["watch", "--timeout", "0"])
+        .env("PATH", sandbox.path("bin"))
+        .env("HERDR_PANE_ID", "w1:p0")
+        .env("HERDR_SOCKET_PATH", "/run/watched.sock")
+        .output()
+        .unwrap();
+
+    assert_eq!(watched.status.code(), Some(2), "{}", stderr(&watched));
+    let sent = "cards|lead-cards|question|Merge #107?|\n";
+    assert_eq!(eventually(&out, |t| !t.is_empty()), sent);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(fs::read_to_string(&out).unwrap(), sent);
+}
