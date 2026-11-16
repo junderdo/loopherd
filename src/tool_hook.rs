@@ -1,7 +1,7 @@
 //! `loopherd tool-hook`: Claude's PreToolUse hook on Bash. Blocks a command
 //! from a lead's pane that needs a switch its herd file leaves off (D17), or
 //! a `loopherd restart --force` (D20), a `loopherd pause` or `resume`
-//! (D23), a `loopherd herd set`, `unset` (D29) or `remove` (D42), a write of the lead
+//! (D23), a `loopherd herd set`, `unset` (D29) or `remove` (D43), a write of the lead
 //! defaults (D31), a `loopherd config set`, `unset` or `setup` (D39), cargo
 //! run through an alias it can't read, or a `$(…)` whose end it can't find,
 //! which no switch allows.
