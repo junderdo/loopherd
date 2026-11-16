@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::process::Command;
 
 const REPO: &str = env!("CARGO_MANIFEST_DIR");
@@ -17,6 +18,12 @@ esac
 /// What `scripts/herdr-dev` gives its command as `LOOPHERD_CONFIG_DIR`, run
 /// with `env` set and the variables in `unset` removed.
 fn config_dir_seen(env: &[(&str, &str)], unset: &[&str]) -> String {
+    printed_by(r#"printf %s "$LOOPHERD_CONFIG_DIR""#, env, unset)
+}
+
+/// What `script` prints when `scripts/herdr-dev` runs it with `env` set and
+/// the variables in `unset` removed.
+fn printed_by(script: &str, env: &[(&str, &str)], unset: &[&str]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
     fs::create_dir_all(&bin).unwrap();
@@ -32,7 +39,7 @@ fn config_dir_seen(env: &[(&str, &str)], unset: &[&str]) -> String {
     assert!(copied.success());
     fs::set_permissions(bin.join("herdr"), fs::Permissions::from_mode(0o755)).unwrap();
     let mut cmd = Command::new(format!("{REPO}/scripts/herdr-dev"));
-    cmd.args(["sh", "-c", "printf %s \"$LOOPHERD_CONFIG_DIR\""])
+    cmd.args(["sh", "-c", script])
         .env(
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
@@ -58,18 +65,21 @@ fn a_run_reads_loopherds_config_from_the_users_runtime_dir() {
 }
 
 #[test]
-fn without_a_runtime_dir_a_run_reads_a_fresh_private_temp_dir() {
+fn without_a_runtime_dir_a_run_reads_a_fresh_private_temp_dir_removed_after() {
     let tmp = tempfile::tempdir().unwrap();
     let tmpdir = tmp.path().to_str().unwrap();
     let env = [("TMPDIR", tmpdir)];
+    let dir_and_mode =
+        r#"printf '%s %s' "$LOOPHERD_CONFIG_DIR" "$(stat -c %a "$LOOPHERD_CONFIG_DIR")""#;
 
-    let first = config_dir_seen(&env, &["XDG_RUNTIME_DIR"]);
+    let first = printed_by(dir_and_mode, &env, &["XDG_RUNTIME_DIR"]);
     let second = config_dir_seen(&env, &["XDG_RUNTIME_DIR"]);
 
-    assert!(first.starts_with(tmpdir), "{first}");
-    assert_ne!(first, second);
-    let mode = fs::metadata(&first).unwrap().permissions().mode();
-    assert_eq!(mode & 0o077, 0, "{mode:o}");
+    let (dir, mode) = first.split_once(' ').unwrap();
+    assert!(dir.starts_with(tmpdir), "{dir}");
+    assert_ne!(dir, second);
+    assert_eq!(mode, "700");
+    assert!(!Path::new(dir).exists(), "{dir}");
 }
 
 #[test]

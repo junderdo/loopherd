@@ -23,6 +23,7 @@ if [[ -z "${LOOPHERD_CONFIG_DIR:-}" ]]; then
     LOOPHERD_CONFIG_DIR="$XDG_RUNTIME_DIR/loopherd-dev/config"
   else
     LOOPHERD_CONFIG_DIR=$(mktemp -d)
+    trap 'rm -rf -- "$LOOPHERD_CONFIG_DIR"' EXIT
   fi
 fi
 export LOOPHERD_CONFIG_DIR
@@ -50,4 +51,5 @@ if [[ -n "$live_labels" ]]; then
   done <<<"$dev_labels"
 fi
 
-exec "$@"
+# Not exec: the EXIT trap removing a mktemp config dir has to outlive the command.
+"$@"
