@@ -117,6 +117,8 @@ fn the_skill_tells_the_shepherd_to_edit_herd_files_with_herd_set() {
         "`loopherd herd set <herd> <key> <value>`",
         "`loopherd herd unset <herd> <key>`",
         "The hook always denies `loopherd herd set` and `unset` in your pane",
+        "`[lead_defaults]` in `$LOOPHERD_CONFIG_DIR/config.toml`",
+        "`loopherd lead-defaults --set` and `scripts/install --lead-defaults`",
     ] {
         assert!(flat.contains(usage), "{usage}");
     }

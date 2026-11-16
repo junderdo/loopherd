@@ -1,3 +1,4 @@
+mod config;
 mod context;
 mod feed;
 mod herd;
@@ -81,6 +82,16 @@ enum Command {
     Herd {
         #[command(subcommand)]
         action: HerdAction,
+    },
+    /// Show config.toml's [lead_defaults], each lead's switches wherever its herd
+    /// file's [lead] leaves one unset, as one `<switch> on|off` line each.
+    /// Prints nothing when config.toml has no [lead_defaults].
+    LeadDefaults {
+        /// Write [lead_defaults] with these switches on and the rest off: a comma
+        /// list such as `merge,install`, or `none`. Keeps config.toml's other
+        /// keys and comments.
+        #[arg(long, value_name = "SWITCHES")]
+        set: Option<String>,
     },
     /// Start the herd's lead member, lead-<herd>, from its herd file's [lead] table,
     /// in a detached worktree of the same name.
@@ -217,8 +228,9 @@ enum Command {
     /// stdin. Outside a member's pane it changes nothing. Set up by install-hook.
     SessionHook,
     /// Claude's PreToolUse hook on Bash: in a lead's pane, denies a merge, install,
-    /// rebase or force-push its herd file's switch leaves to the human, and any
-    /// `loopherd restart --force`, `pause`, `resume`, `herd set` or `herd unset`,
+    /// rebase or force-push its switches leave to the human, and any
+    /// `loopherd restart --force`, `pause`, `resume`, `herd set`, `herd unset` or
+    /// `lead-defaults --set`, or `scripts/install --lead-defaults`,
     /// read from the hook input on stdin, by printing a
     /// deny decision. Elsewhere it prints nothing.
     /// Always exits 0. Set up by install-hook.
@@ -370,6 +382,7 @@ fn main() -> ExitCode {
         Command::Add(args) => ("add", run_add(args)),
         Command::Herds => ("herds", run_herds()),
         Command::Herd { action } => ("herd", run_herd(action)),
+        Command::LeadDefaults { set } => ("lead-defaults", run_lead_defaults(set)),
         Command::Lead(args) => ("lead", run_lead(args)),
         Command::Feed {
             herd,
@@ -429,6 +442,17 @@ fn run_herd(action: HerdAction) -> Result<i32> {
             true => println!("unset {key} in {herd}"),
             false => println!("{key} was not set in {herd}"),
         },
+    }
+    Ok(0)
+}
+
+fn run_lead_defaults(set: Option<String>) -> Result<i32> {
+    let config = Paths::from_env()?.herds.with_file_name("config.toml");
+    if let Some(list) = set {
+        config::set_lead_defaults(&config, &list)?;
+    }
+    if let Some(defaults) = config::lead_defaults(&config)? {
+        println!("{}", defaults.over(&Default::default()).lines());
     }
     Ok(0)
 }

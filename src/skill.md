@@ -257,7 +257,16 @@ watch and carry on from its next steps.
   `lead.merge`, `template.card.args`); the value is TOML, so quote strings
   (`'"x"'`). It keeps the file's comments and layout, creates missing
   tables, and refuses, changing nothing, any edit `loopherd herds` would
-  call invalid. Turn a lead's switches on only when the human says so.
+  call invalid. `herd unset <herd> lead.<switch>` hands the switch back to
+  `[lead_defaults]`, not to off. Turn a lead's switches on only when the
+  human says so.
+- **Lead defaults** are `[lead_defaults]` in
+  `$LOOPHERD_CONFIG_DIR/config.toml`: each lead's switches wherever its herd
+  file's `[lead]` doesn't set one. `scripts/install` asks for them on a
+  terminal the first time; `scripts/install --lead-defaults` asks again and
+  `--lead-defaults merge,install` (or `none`) sets them without asking.
+  `loopherd lead-defaults` prints them. Change them only when the human
+  says so.
 - **When the human asks to pause or resume a herd**, run `loopherd pause
   <herd> [--reason <text>]` or `loopherd resume <herd>` (`--all` for every
   herd), not a prose prompt to its lead. A paused herd's `feed` retires
@@ -309,7 +318,9 @@ shepherd:
   "<the exact question>"`, then end your turn; the shepherd's watch sees it
   and relays it. Don't wait in a loop for an answer.
 - **Switches.** Your prompt lists six, each `on` or `off`; off means the
-  human does it, so ask instead:
+  human does it, so ask instead. Each comes from your herd file's `[lead]`,
+  else `[lead_defaults]` in `$LOOPHERD_CONFIG_DIR/config.toml` (set by
+  `scripts/install`), else off; `loopherd herds` shows which:
 
   | Switch | When on, you may |
   |---|---|
@@ -324,7 +335,7 @@ shepherd:
   blocks the Bash commands that need it (`gh pr merge` or the merge API, a
   `scripts/install` or `loopherd install-hook`, a rebase or force-push), in
   your pane and in any Claude nested in it, with a line naming the switch;
-  ask instead. A herd file it can't read blocks all three. A `feed` from
+  ask instead. A herd file or `config.toml` it can't read blocks all three. A `feed` from
   your pane runs none of `after_merge` when the hook would deny any command
   in it, leaving a `note` naming why; that run counts as done, so run the
   commands it held back by hand or ask the human to. It denies
@@ -332,10 +343,11 @@ shepherd:
   PR's merge endpoint are denied too, so ask the human to run a `rebase
   --abort`, and check merges with `gh pr view <n> --json state`. Grilling
   is always the human's.
-- **Herd files are the human's.** The hook always denies `loopherd herd
-  set` and `unset` in your pane, whatever your switches, so you can't turn
-  your own switches on; `loopherd herd get` is fine. Ask for a change
-  instead.
+- **Herd files and lead defaults are the human's.** The hook always
+  denies `loopherd herd set` and `unset` in your pane, and also `loopherd
+  lead-defaults --set` and `scripts/install --lead-defaults`, whatever your
+  switches, so you can't turn your own switches on; `loopherd herd get` and
+  `loopherd lead-defaults` are fine. Ask for a change instead.
 - **Pausing is the human's.** The hook always denies `loopherd pause` and
   `loopherd resume` in your pane, whatever your switches. While your herd
   is paused your watch prints no `claimable` and `feed` spawns nothing;
