@@ -1,7 +1,7 @@
 //! `loopherd tool-hook`: Claude's PreToolUse hook on Bash. Blocks a command
 //! from a lead's pane that needs a switch its herd file leaves off (D17), or
 //! a `loopherd restart --force` (D20), a `loopherd pause` or `resume`
-//! (D23), a `loopherd herd set` or `unset` (D29), a write of the lead
+//! (D23), a `loopherd herd set`, `unset` (D29) or `remove` (D42), a write of the lead
 //! defaults (D31), a `loopherd config set`, `unset` or `setup` (D39), cargo
 //! run through an alias it can't read, or a `$(…)` whose end it can't find,
 //! which no switch allows.
@@ -30,8 +30,8 @@ pub enum Switch {
     ForceRestart,
     /// `loopherd pause` or `resume`. Not a switch: always the human's.
     Pause,
-    /// `loopherd herd set` or `unset`, which could turn a lead's own switches
-    /// on. Not a switch: always the human's.
+    /// `loopherd herd set`, `unset` or `remove`, which could turn a lead's own
+    /// switches on or delete its herd. Not a switch: always the human's.
     HerdEdit,
     /// `loopherd lead-defaults --set` or `scripts/install --lead-defaults`,
     /// which could turn a lead's own switches on. Not a switch: always the human's.
@@ -155,7 +155,7 @@ fn decide(
     };
     if needed == Switch::HerdEdit {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run `loopherd herd set` or `loopherd herd unset`, which could turn its own switches on: {}; ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run `loopherd herd set`, `herd unset` or `herd remove`, which could turn its own switches on or delete its herd: {}; ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -795,9 +795,8 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
             Some(&"setup") => runs_setup(args).then_some(Switch::Config),
             Some(&"restart") => forces_restart(args),
             Some(&"pause" | &"resume") => Some(Switch::Pause),
-            Some(&"herd") => {
-                matches!(positional.get(1), Some(&"set" | &"unset")).then_some(Switch::HerdEdit)
-            }
+            Some(&"herd") => matches!(positional.get(1), Some(&"set" | &"unset" | &"remove"))
+                .then_some(Switch::HerdEdit),
             _ => None,
         },
         // `cargo run -- herd set` and `pause` in a loopherd checkout, in any
@@ -977,10 +976,10 @@ fn loopherd_args(run_args: &[String]) -> Option<&[String]> {
     Some(run_args.get(i..).unwrap_or_default())
 }
 
-/// Whether `herd` then `set` or `unset` appear in `args`, side by side.
+/// Whether `herd` then `set`, `unset` or `remove` appear in `args`, side by side.
 fn edits_herd<S: AsRef<str>>(args: &[S]) -> bool {
     args.windows(2)
-        .any(|w| w[0].as_ref() == "herd" && matches!(w[1].as_ref(), "set" | "unset"))
+        .any(|w| w[0].as_ref() == "herd" && matches!(w[1].as_ref(), "set" | "unset" | "remove"))
 }
 
 /// Whether `cargo run` with `run_args` runs `config set` or `unset`, or a
@@ -1837,18 +1836,23 @@ mod tests {
         "rustup run --install stable cargo run -- herd unset h lead.merge",
         "rustup run stable -- loopherd herd set h lead.merge true",
         "rustup run stable --install loopherd herd set h lead.merge true",
+        "loopherd herd remove h",
+        "loopherd herd remove --dry-run h",
+        "cargo run -- herd remove --keep-history h",
+        "cd /x && scripts/herdr-dev loopherd herd remove h",
     ];
 
     #[test]
-    fn a_leads_herd_set_or_unset_is_denied_whatever_its_switches() {
+    fn a_leads_herd_set_unset_or_remove_is_denied_whatever_its_switches() {
         let leads = ledger(vec![lead()]);
         for command in HERD_EDITS {
             assert_eq!(needs(command), [Switch::HerdEdit], "{command}");
             let message =
                 run(&leads, all_on(), command).unwrap_or_else(|| panic!("{command} was allowed"));
             assert!(
-                message.contains("lead-h may not run `loopherd herd set` or `loopherd herd unset`")
-                    && message.contains("the human edits herd files"),
+                message.contains(
+                    "lead-h may not run `loopherd herd set`, `herd unset` or `herd remove`"
+                ) && message.contains("the human edits herd files"),
                 "{message}"
             );
         }
@@ -1985,6 +1989,7 @@ mod tests {
         for words in [
             "-- herd get h herd set h lead.merge true",
             "herd get h herd unset h lead.merge",
+            "herd get h herd remove h",
         ] {
             let args: Vec<String> = words.split(' ').map(String::from).collect();
             assert!(!runs_herd_get(&args), "{words}");

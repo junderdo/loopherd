@@ -105,8 +105,44 @@ pub trait Ledger {
         name: &str,
         change: &mut dyn FnMut(&mut AgentRecord) -> Result<()>,
     ) -> Result<AgentRecord>;
+    /// Removes every entry of `herd`, read fresh under the ledger lock;
+    /// refuses, removing nothing, while any of them is not retired. Returns
+    /// the removed names.
+    fn remove_herd(&mut self, herd: &str) -> Result<Vec<String>>;
     /// Appends a `start` boundary to `name`'s mailbox.
     fn started(&mut self, name: &str, at: SystemTime) -> Result<()>;
+}
+
+/// The names of `herd`'s entries that are not retired.
+pub fn live_in_herd(entries: &BTreeMap<String, AgentRecord>, herd: &str) -> Vec<String> {
+    in_herd(entries, herd)
+        .filter(|r| !r.retired)
+        .map(|r| r.name.clone())
+        .collect()
+}
+
+fn in_herd<'a>(
+    entries: &'a BTreeMap<String, AgentRecord>,
+    herd: &'a str,
+) -> impl Iterator<Item = &'a AgentRecord> {
+    entries
+        .values()
+        .filter(move |r| r.herd.as_deref() == Some(herd))
+}
+
+fn remove_herd_from(
+    entries: &mut BTreeMap<String, AgentRecord>,
+    herd: &str,
+) -> Result<Vec<String>> {
+    let live = live_in_herd(entries, herd);
+    if !live.is_empty() {
+        anyhow::bail!("not retired: {}", live.join(", "));
+    }
+    let names: Vec<String> = in_herd(entries, herd).map(|r| r.name.clone()).collect();
+    for name in &names {
+        entries.remove(name);
+    }
+    Ok(names)
 }
 
 /// A JSON file of entries keyed by agent name.
@@ -219,6 +255,16 @@ impl Ledger for FileLedger {
         Ok(saved)
     }
 
+    fn remove_herd(&mut self, herd: &str) -> Result<Vec<String>> {
+        let _lock = self.lock()?;
+        let mut entries = self.load()?;
+        let removed = remove_herd_from(&mut entries, herd)?;
+        if !removed.is_empty() {
+            self.save(&entries)?;
+        }
+        Ok(removed)
+    }
+
     fn started(&mut self, name: &str, at: SystemTime) -> Result<()> {
         report::append(&self.reports_dir()?, name, &Entry::new(at, Body::Start))
     }
@@ -253,6 +299,10 @@ impl Ledger for MemLedger {
         Ok(record.clone())
     }
 
+    fn remove_herd(&mut self, herd: &str) -> Result<Vec<String>> {
+        remove_herd_from(&mut self.0, herd)
+    }
+
     fn started(&mut self, name: &str, _at: SystemTime) -> Result<()> {
         self.1.push(name.into());
         Ok(())
@@ -282,6 +332,10 @@ impl Ledger for NoMailbox {
         self.0.update(name, change)
     }
 
+    fn remove_herd(&mut self, herd: &str) -> Result<Vec<String>> {
+        self.0.remove_herd(herd)
+    }
+
     fn started(&mut self, _: &str, _: SystemTime) -> Result<()> {
         anyhow::bail!("disk full")
     }
@@ -307,6 +361,10 @@ impl Ledger for NoUpdate {
         _: &mut dyn FnMut(&mut AgentRecord) -> Result<()>,
     ) -> Result<AgentRecord> {
         anyhow::bail!("disk full")
+    }
+
+    fn remove_herd(&mut self, herd: &str) -> Result<Vec<String>> {
+        self.0.remove_herd(herd)
     }
 
     fn started(&mut self, name: &str, at: SystemTime) -> Result<()> {
@@ -421,6 +479,45 @@ mod tests {
         assert!(failed.is_err());
         assert!(!ledger.entries().unwrap()["a"].retired);
         assert!(ledger.update("zz", &mut |_| Ok(())).is_err());
+    }
+
+    fn member(name: &str, herd: &str, retired: bool) -> AgentRecord {
+        AgentRecord {
+            herd: Some(herd.into()),
+            retired,
+            ..record(name, true)
+        }
+    }
+
+    #[test]
+    fn remove_herd_removes_its_entries_and_keeps_a_write_made_since_the_caller_read_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.json");
+        let mut remover = FileLedger::new(path.clone());
+        let mut other = FileLedger::new(path);
+        remover.record(member("a", "old", true)).unwrap();
+        remover.record(member("b", "old", true)).unwrap();
+        remover.record(member("c", "live", false)).unwrap();
+        let _stale = remover.entries().unwrap();
+
+        other.record(member("d", "live", false)).unwrap();
+        assert_eq!(remover.remove_herd("old").unwrap(), ["a", "b"]);
+
+        let left: Vec<_> = remover.entries().unwrap().into_keys().collect();
+        assert_eq!(left, ["c", "d"]);
+    }
+
+    #[test]
+    fn remove_herd_removes_nothing_while_one_of_its_entries_is_not_retired() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = FileLedger::new(dir.path().join("ledger.json"));
+        ledger.record(member("a", "old", true)).unwrap();
+        ledger.record(member("b", "old", false)).unwrap();
+
+        let err = ledger.remove_herd("old").unwrap_err();
+
+        assert_eq!(format!("{err:#}"), "not retired: b");
+        assert_eq!(ledger.entries().unwrap().len(), 2);
     }
 
     #[test]

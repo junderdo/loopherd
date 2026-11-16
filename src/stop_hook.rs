@@ -765,6 +765,9 @@ mod tests {
             ) -> anyhow::Result<AgentRecord> {
                 self.1.update(name, change)
             }
+            fn remove_herd(&mut self, _: &str) -> anyhow::Result<Vec<String>> {
+                unreachable!()
+            }
             fn started(&mut self, n: &str, at: SystemTime) -> anyhow::Result<()> {
                 self.1.started(n, at)
             }

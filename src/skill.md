@@ -325,6 +325,15 @@ question as its own sends a second notification.
   call invalid. `herd unset <herd> lead.<switch>` hands the switch back to
   `[lead_defaults]`, not to off. Turn a lead's switches on only when the
   human says so.
+- **Remove a finished herd** with `loopherd herd remove <herd>` once the
+  human says so: it deletes the herd file, its pause, its `[lead]`
+  `prompt_file` (when that lies in the herds dir and no other herd file
+  names it), and every member's ledger entry, mailbox and handoffs, so the
+  herd leaves `herds`, `status --all` and `stats`. It refuses while any
+  member, lead included, isn't retired; `loopherd retire --close <name>`
+  each first, which also cleans up tabs, worktrees and branches that
+  `herd remove` never touches. `--dry-run` lists what would go;
+  `--keep-history` keeps the ledger entries and mailboxes for `stats`.
 - **Lead defaults** are `[lead_defaults]` in
   `$LOOPHERD_CONFIG_DIR/config.toml`: each lead's switches wherever its herd
   file's `[lead]` doesn't set one. `loopherd setup`, which
@@ -411,7 +420,7 @@ shepherd:
   --abort`, and check merges with `gh pr view <n> --json state`. Grilling
   is always the human's.
 - **Herd files and loopherd's config are the human's.** The hook always
-  denies `loopherd herd set` and `unset` in your pane, and also `loopherd
+  denies `loopherd herd set`, `unset` and `remove` in your pane, and also `loopherd
   lead-defaults --set`, `loopherd config set` and `unset`, `loopherd
   setup`, and `scripts/install --lead-defaults` or `--context`, whatever
   your switches, so you can't turn your own switches on or raise your own

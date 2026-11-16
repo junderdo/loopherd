@@ -262,7 +262,8 @@ enum Command {
     SessionHook,
     /// Claude's PreToolUse hook on Bash: in a lead's pane, denies a merge, install,
     /// rebase or force-push its switches leave to the human, and any
-    /// `loopherd restart --force`, `pause`, `resume`, `herd set`, `herd unset` or
+    /// `loopherd restart --force`, `pause`, `resume`, `herd set`, `herd unset`,
+    /// `herd remove` or
     /// `lead-defaults --set`, `config set`, `config unset` or `setup`, or
     /// `scripts/install --lead-defaults` or `--context`,
     /// read from the hook input on stdin, by printing a
@@ -332,6 +333,21 @@ enum HerdAction {
     /// Remove the key; succeeds if it isn't set. Refuses, changing nothing, a
     /// file `loopherd herds` would call invalid.
     Unset { herd: String, key: String },
+    /// Delete a finished herd: its herd file, its pause, its `[lead]`
+    /// `prompt_file` when that lies in the herds dir and no other herd file
+    /// names it, and its members' ledger entries, mailboxes and handoffs.
+    /// Refuses, changing nothing, while any member (lead included) is not
+    /// retired. Never touches worktrees, branches or tabs; `retire --close`
+    /// does that.
+    Remove {
+        herd: String,
+        /// Print every path and ledger entry it would remove; change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Keep the ledger entries and mailboxes, so `stats` still counts them.
+        #[arg(long)]
+        keep_history: bool,
+    },
 }
 
 #[derive(Args)]
@@ -566,6 +582,19 @@ fn run_herd(action: HerdAction) -> Result<i32> {
             true => println!("unset {key} in {herd}"),
             false => println!("{key} was not set in {herd}"),
         },
+        HerdAction::Remove {
+            herd,
+            dry_run,
+            keep_history,
+        } => {
+            let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+            let state = ledger.dir()?;
+            let how = herd::Removal {
+                dry_run,
+                keep_history,
+            };
+            print!("{}", herd::remove(&paths, &mut ledger, &state, &herd, how)?);
+        }
     }
     Ok(0)
 }

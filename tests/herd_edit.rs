@@ -78,3 +78,44 @@ fn herd_gets_sets_and_unsets_one_value() {
     left.sort();
     assert_eq!(left, [".h.toml.lock", "h.toml"], "a temp file was left");
 }
+
+#[test]
+fn herd_remove_deletes_a_finished_herd_and_its_ledger_entries() {
+    let config = tempfile::tempdir().unwrap();
+    let herds = config.path().join("herds");
+    fs::create_dir(&herds).unwrap();
+    fs::write(herds.join("old.toml"), "repo = \"/r\"\n").unwrap();
+    let state = config.path().join("state/loopherd");
+    fs::create_dir_all(&state).unwrap();
+    let member = |name: &str, herd: &str| {
+        serde_json::json!({
+            "name": name, "pane_id": "w1:p1", "session_id": null, "repo": "/r",
+            "worktree": null, "workspace": "w1", "prompt": null, "prompt_sent": true,
+            "created": "2026-11-01T00:00:00Z", "herd": herd, "retired": true,
+        })
+    };
+    let ledger = serde_json::json!({"a": member("a", "old"), "b": member("b", "live")});
+    fs::write(state.join("ledger.json"), ledger.to_string()).unwrap();
+
+    let (stdout, stderr, code) = out(&herd(config.path(), &["remove", "old"]));
+
+    assert_eq!((stderr.as_str(), code), ("", Some(0)), "{stdout}");
+    assert_eq!(
+        stdout,
+        format!(
+            "removed ledger entry a\nremoved {}\n",
+            herds.join("old.toml").display()
+        )
+    );
+    let left: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(state.join("ledger.json")).unwrap()).unwrap();
+    let names: Vec<_> = left.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(names, ["b"]);
+
+    let (_, stderr, code) = out(&herd(config.path(), &["remove", "old"]));
+    assert_eq!(code, Some(1));
+    assert!(
+        stderr.starts_with("loopherd herd: no herd old: "),
+        "{stderr}"
+    );
+}
