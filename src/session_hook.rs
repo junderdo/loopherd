@@ -594,6 +594,13 @@ mod tests {
             ) -> anyhow::Result<AgentRecord> {
                 self.0.update(name, change)
             }
+            fn remove_herd(
+                &mut self,
+                _: &str,
+                _: &mut dyn FnMut(&[String]) -> anyhow::Result<()>,
+            ) -> anyhow::Result<Vec<String>> {
+                unreachable!()
+            }
             fn started(&mut self, name: &str, at: std::time::SystemTime) -> anyhow::Result<()> {
                 self.0.started(name, at)
             }
