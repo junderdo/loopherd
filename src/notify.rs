@@ -1053,6 +1053,7 @@ mod tests {
                 "Authorization: Token abc123 ok?",
                 "Authorization: [redacted]?",
             ),
+            ("Authorization: Token hunter", "Authorization: [redacted]"),
             (
                 r#""password": "hunter2" ok?"#,
                 r#""password": [redacted] ok?"#,
@@ -1176,6 +1177,8 @@ mod tests {
             "Is the bearer token flow done?",
             "Rotate the token by Fri?",
             "Run it with --auth disabled?",
+            "Is AUTH broken?",
+            "KEY rotation next?",
         ] {
             assert_eq!(text_sent(question), question);
         }
