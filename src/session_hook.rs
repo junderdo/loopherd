@@ -7,6 +7,7 @@ use std::path::Path;
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::continuation::{follow_recorded, live_for};
 use crate::ledger::Ledger;
 use crate::process::{self, Claim, Procs};
 
@@ -22,11 +23,14 @@ pub struct Pane<'a> {
 /// session changes are adopted whatever the source and other processes' are
 /// not; until then only `clear` and `resume` are. A pane matched without an
 /// exact socket, or a session another live member owns, changes nothing.
+/// Sessions are taken as `live_session` resolves them, and a recorded one
+/// that resolves elsewhere is moved there first.
 pub fn session_hook(
     ledger: &mut dyn Ledger,
     procs: &dyn Procs,
     pane: &Pane,
     input: &[u8],
+    live_session: &dyn Fn(&str) -> String,
     warn: &mut dyn FnMut(String),
 ) -> Result<Option<String>> {
     let Some((source, session)) = parse(input) else {
@@ -41,6 +45,9 @@ pub fn session_hook(
     else {
         return Ok(None);
     };
+    let followed = follow_recorded(ledger, &entries, member, live_session)?;
+    let member = followed.as_ref().unwrap_or(member);
+    let session = live_for(&entries, member, &session, live_session);
     if live().any(|e| e.name != member.name && e.session_id.as_deref() == Some(session.as_str())) {
         return Ok(None);
     }
@@ -146,7 +153,90 @@ mod tests {
             socket: socket.map(Path::new),
             claude_pid,
         };
-        session_hook(ledger, procs, &pane, input.as_bytes(), &mut |_| {}).unwrap()
+        session_hook(
+            ledger,
+            procs,
+            &pane,
+            input.as_bytes(),
+            &|s| s.to_string(),
+            &mut |_| {},
+        )
+        .unwrap()
+    }
+
+    fn continued(session: &str) -> String {
+        match session {
+            "stub" => "live".into(),
+            other => other.into(),
+        }
+    }
+
+    fn run_continued(ledger: &mut MemLedger, input: &str) -> Option<String> {
+        let pane = Pane {
+            id: "w1:p1",
+            socket: Some(Path::new(SOCKET)),
+            claude_pid: None,
+        };
+        let procs = FakeProcs::default();
+        session_hook(
+            ledger,
+            &procs,
+            &pane,
+            input.as_bytes(),
+            &continued,
+            &mut |_| {},
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_recorded_session_that_continued_is_moved_to_the_live_one_on_any_start() {
+        let mut l = ledger(vec![member("lh-1", "w1:p1", Some(SOCKET), "stub")]);
+        run_continued(&mut l, &start("startup", "unrelated"));
+        assert_eq!(session_of(&l, "lh-1").as_deref(), Some("live"));
+    }
+
+    #[test]
+    fn resuming_a_continued_session_records_the_live_one() {
+        let mut l = ledger(vec![member("lh-1", "w1:p1", Some(SOCKET), "old")]);
+        assert_eq!(
+            run_continued(&mut l, &start("resume", "stub")).as_deref(),
+            Some("lh-1")
+        );
+        assert_eq!(session_of(&l, "lh-1").as_deref(), Some("live"));
+    }
+
+    #[test]
+    fn a_member_already_moved_to_its_live_session_keeps_it_when_a_start_reports_the_stub() {
+        let mut l = ledger(vec![member("lh-1", "w1:p1", Some(SOCKET), "live")]);
+        assert_eq!(
+            run_continued(&mut l, &start("resume", "stub")).as_deref(),
+            Some("lh-1")
+        );
+        assert_eq!(session_of(&l, "lh-1").as_deref(), Some("live"));
+    }
+
+    #[test]
+    fn resuming_a_session_whose_continuation_another_member_owns_keeps_it() {
+        let mut l = ledger(vec![
+            member("lh-1", "w1:p1", Some(SOCKET), "stub"),
+            member("lh-2", "w1:p2", Some(SOCKET), "live"),
+        ]);
+        assert_eq!(
+            run_continued(&mut l, &start("resume", "stub")).as_deref(),
+            Some("lh-1")
+        );
+        assert_eq!(session_of(&l, "lh-1").as_deref(), Some("stub"));
+    }
+
+    #[test]
+    fn a_continued_session_another_live_member_owns_is_not_followed() {
+        let mut l = ledger(vec![
+            member("lh-1", "w1:p1", Some(SOCKET), "stub"),
+            member("lh-2", "w1:p2", Some(SOCKET), "live"),
+        ]);
+        run_continued(&mut l, &start("startup", "unrelated"));
+        assert_eq!(session_of(&l, "lh-1").as_deref(), Some("stub"));
     }
 
     fn start(source: &str, session: &str) -> String {
@@ -444,6 +534,7 @@ mod tests {
             &procs,
             &pane,
             start("fork", "n").as_bytes(),
+            &|s| s.to_string(),
             &mut |w| said.push(w),
         )
         .unwrap();

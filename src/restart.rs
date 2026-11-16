@@ -7,12 +7,15 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::context::handoff_path;
+use crate::continuation::follow_recorded;
 use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::Ledger;
 use crate::report::{SinceHandoff, since_handoff};
 use crate::shell::quote;
 
 pub struct RestartRequest<'a> {
+    /// Resolves a session to the one Claude continued it in.
+    pub live: &'a dyn Fn(&str) -> String,
     pub name: &'a str,
     /// Restart even if the member isn't finished since its handoff.
     pub force: bool,
@@ -26,11 +29,12 @@ pub struct RestartRequest<'a> {
 }
 
 /// Sends `/clear` to the member, waits for its ledger entry to move to the
-/// new session, marks a start in its mailbox, then prompts it to read its
-/// handoff. Refuses a pane showing a subagent's view, where `/clear` opens a
-/// dialog instead. Refuses, without `force`, unless it reported a handoff since its
-/// last start, its last stop since is `finished` with nothing in flight, and
-/// herdr shows it idle or done.
+/// new session, records the session Claude continued that one in, marks a
+/// start in its mailbox, then prompts it to read its handoff. Refuses a pane
+/// showing a subagent's view, where `/clear` opens a dialog instead. Refuses,
+/// without `force`, unless it reported a handoff since its last start, its
+/// last stop since is `finished` with nothing in flight, and herdr shows it
+/// idle or done.
 pub fn restart(
     herdr: &dyn Herdr,
     ledger: &mut dyn Ledger,
@@ -112,8 +116,9 @@ pub fn restart(
     }
     let lead = record.is_lead();
     let old = record.session_id;
+    let old_live = old.as_deref().map(req.live);
     herdr.prompt(name, "/clear")?;
-    let new = wait_for_new_session(ledger, name, old.as_deref(), req);
+    let new = wait_for_new_session(ledger, name, old.as_deref(), old_live, req);
     if let Err(e) = &new {
         // A narrow pane wraps the dialog's text inside its box.
         let shows_dialog = herdr.visible_text(pane).is_ok_and(|t| {
@@ -141,6 +146,15 @@ pub fn restart(
             quote(&resume)
         );
     }
+    let new = new?;
+    let entries = ledger.entries()?;
+    let current = entries
+        .get(name)
+        .ok_or_else(|| anyhow!("{name} left the ledger during the restart"))?;
+    let live = follow_recorded(ledger, &entries, current, req.live)?
+        .unwrap_or_else(|| current.clone())
+        .session_id
+        .unwrap_or(new);
     // Moved aside once the new session is confirmed, so no later restart resumes from it.
     let read = handoff.with_extension("prev.md");
     std::fs::rename(&handoff, &read)
@@ -148,8 +162,7 @@ pub fn restart(
     ledger.started(name, now)?;
     herdr.prompt(name, &resume_prompt(lead, &read))?;
     Ok(format!(
-        "restarted {name} in session {}; prompted it to read {}",
-        new?,
+        "restarted {name} in session {live}; prompted it to read {}",
         read.display()
     ))
 }
@@ -215,22 +228,28 @@ const LEAD_REARM: &str = "Your `loopherd watch` is no longer running: \
     run `loopherd status` and `loopherd reports --all`, then re-arm your watch per the \
     Lead section of `loopherd --skill`.";
 
+/// `old_live` is the session Claude continued `old` in before the `/clear`; a
+/// hook moving the ledger there isn't the clear.
 fn wait_for_new_session(
     ledger: &dyn Ledger,
     name: &str,
     old: Option<&str>,
+    old_live: Option<String>,
     req: &RestartRequest,
 ) -> Result<String> {
     let deadline = Instant::now() + req.settle_timeout;
     loop {
         let session = ledger.entries()?.remove(name).and_then(|r| r.session_id);
-        if let Some(new) = session.filter(|s| Some(s.as_str()) != old) {
-            return Ok(new);
+        if let Some(new) = session
+            .as_ref()
+            .filter(|s| Some(s.as_str()) != old && Some(*s) != old_live.as_ref())
+        {
+            return Ok(new.clone());
         }
         if Instant::now() >= deadline {
             bail!(
                 "sent /clear, but {name}'s ledger session is still {} after {:?}",
-                old.unwrap_or("unset"),
+                session.as_deref().unwrap_or("unset"),
                 req.settle_timeout
             );
         }
@@ -281,6 +300,10 @@ mod tests {
         herdr: &'a FakeHerdr,
         follows: bool,
         clears_before: usize,
+        /// Where a hook moves the recorded session as the `/clear` lands,
+        /// when no new session follows.
+        continued: Option<&'static str>,
+        recorded: Option<String>,
     }
 
     impl Ledger for Clearing<'_> {
@@ -293,9 +316,16 @@ mod tests {
                 .filter(|(_, t)| t == "/clear")
                 .count();
             let cleared = clears > self.clears_before;
-            if self.follows && cleared {
-                for record in entries.values_mut() {
-                    record.session_id = Some("new".into());
+            let session = match cleared {
+                true if self.follows => Some("new"),
+                true => self.continued,
+                false => None,
+            };
+            // Leaves alone a session restart has written since.
+            let untouched = |r: &AgentRecord| r.session_id == self.recorded;
+            if let Some(session) = session {
+                for record in entries.values_mut().filter(|r| untouched(r)) {
+                    record.session_id = Some(session.into());
                 }
             }
             Ok(entries)
@@ -308,6 +338,10 @@ mod tests {
             n: &str,
             c: &mut dyn FnMut(&mut AgentRecord) -> Result<()>,
         ) -> Result<AgentRecord> {
+            // Sees the session the hook wrote, as a real ledger's fresh read would.
+            if let Some(seen) = self.entries()?.remove(n) {
+                self.ledger.record(seen)?;
+            }
             self.ledger.update(n, c)
         }
         fn started(&mut self, n: &str, at: SystemTime) -> Result<()> {
@@ -373,12 +407,26 @@ mod tests {
             own_pane: Option<&str>,
             edit: &dyn Fn(&mut AgentRecord),
         ) -> (Result<String>, MemLedger) {
+            self.restart_continued(force, follows, own_pane, edit, None, &|s| s.to_string())
+        }
+
+        fn restart_continued(
+            &self,
+            force: bool,
+            follows: bool,
+            own_pane: Option<&str>,
+            edit: &dyn Fn(&mut AgentRecord),
+            continued: Option<&'static str>,
+            live: &dyn Fn(&str) -> String,
+        ) -> (Result<String>, MemLedger) {
             let mut member = record("lh-1");
             edit(&mut member);
             let mut ledger = Clearing {
+                recorded: member.session_id.clone(),
                 ledger: MemLedger([("lh-1".to_string(), member)].into(), vec![]),
                 herdr: &self.herdr,
                 follows,
+                continued,
                 clears_before: self
                     .herdr
                     .prompts()
@@ -393,6 +441,7 @@ mod tests {
                 state: self.state.path(),
                 settle_timeout: Duration::from_millis(50),
                 poll: Duration::from_millis(1),
+                live,
             };
             let result = restart(&self.herdr, &mut ledger, &req, SystemTime::UNIX_EPOCH);
             let mut after = ledger.ledger.clone();
@@ -436,6 +485,74 @@ mod tests {
         );
         assert_eq!(ledger.0["lh-1"].session_id.as_deref(), Some("new"));
         assert_eq!(ledger.1, ["lh-1"]);
+    }
+
+    fn continued(session: &str) -> String {
+        match session {
+            "stub" => "old".into(),
+            "new" => "newer".into(),
+            other => other.into(),
+        }
+    }
+
+    #[test]
+    fn a_cleared_session_that_continued_is_restarted_in_and_recorded_as_the_live_one() {
+        let w = World::new();
+        w.handed_off();
+        let (result, ledger) = w.restart_continued(false, true, None, &|_| {}, None, &continued);
+        assert!(
+            result
+                .unwrap()
+                .starts_with("restarted lh-1 in session newer;"),
+        );
+        assert_eq!(ledger.0["lh-1"].session_id.as_deref(), Some("newer"));
+    }
+
+    #[test]
+    fn a_clear_that_continues_the_old_session_into_the_new_one_is_confirmed() {
+        let w = World::new();
+        w.handed_off();
+        let cleared = || w.herdr.prompts().iter().any(|(_, t)| t == "/clear");
+        let live = |s: &str| match s {
+            "old" if cleared() => "new".to_string(),
+            other => other.to_string(),
+        };
+        let (result, _) = w.restart_continued(false, true, None, &|_| {}, None, &live);
+        assert!(
+            result
+                .unwrap()
+                .starts_with("restarted lh-1 in session new;")
+        );
+    }
+
+    #[test]
+    fn a_recorded_stub_moving_to_its_live_session_is_not_taken_for_the_clear() {
+        let w = World::new();
+        w.handed_off();
+        let stub = |m: &mut AgentRecord| m.session_id = Some("stub".into());
+        let (result, _) = w.restart_continued(false, false, None, &stub, Some("old"), &continued);
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("ledger session is still old after"),
+            "{error}"
+        );
+        assert_eq!(
+            w.herdr.prompts(),
+            [("lh-1".to_string(), "/clear".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_clear_that_never_lands_names_the_session_the_ledger_still_records() {
+        let w = World::new();
+        w.handed_off();
+        let stub = |m: &mut AgentRecord| m.session_id = Some("stub".into());
+        let (result, _) = w.restart_continued(false, false, None, &stub, None, &continued);
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("ledger session is still stub after"),
+            "{error}"
+        );
     }
 
     #[test]
