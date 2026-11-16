@@ -110,15 +110,19 @@ offer_lead_defaults() {
       return 0
       ;;
   esac
-  if [[ ! -t 0 ]]; then
-    echo "skipped the lead defaults (no terminal); add --lead-defaults <switches|none> to set them"
-    return 0
-  fi
   current=$("$loopherd" lead-defaults) || {
+    if [[ "$want" == reask ]]; then
+      echo "install: loopherd couldn't read the lead defaults" >&2
+      exit 1
+    fi
     echo "skipped the lead defaults: loopherd couldn't read them" >&2
     return 0
   }
   [[ "$want" == reask || -z "$current" ]] || return 0
+  if [[ ! -t 0 ]]; then
+    echo "skipped the lead defaults (no terminal); add --lead-defaults <switches|none> to set them"
+    return 0
+  fi
   echo "Lead defaults: what a herd's lead may do on its own wherever its herd file's [lead] doesn't say. Off means the human does it."
   for i in "${!lead_switches[@]}"; do
     default=n

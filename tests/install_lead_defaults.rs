@@ -254,6 +254,36 @@ fn without_a_terminal_or_with_no_extras_config_toml_is_left_alone() {
 }
 
 #[test]
+fn without_a_terminal_the_hint_shows_only_while_there_are_no_lead_defaults() {
+    let sandbox = Sandbox::new();
+    sandbox.write_config("[lead_defaults]\nmerge = true\n");
+
+    let out = succeeded(&sandbox.install(&[]));
+
+    assert!(!out.contains("lead defaults"), "{out}");
+}
+
+#[test]
+fn an_unreadable_config_fails_an_explicit_ask_but_not_a_plain_install() {
+    let sandbox = Sandbox::new();
+    sandbox.write_config("[lead_defaults]\nmerge = tru\n");
+
+    let plain = sandbox.install(&[]);
+    assert!(plain.status.success(), "{plain:?}");
+
+    let asked = sandbox.install(&["--lead-defaults"]);
+    assert_eq!(asked.status.code(), Some(1), "{asked:?}");
+    assert!(
+        String::from_utf8_lossy(&asked.stderr).contains("couldn't read the lead defaults"),
+        "{asked:?}"
+    );
+    assert_eq!(
+        sandbox.read_config().unwrap(),
+        "[lead_defaults]\nmerge = tru\n"
+    );
+}
+
+#[test]
 fn naming_another_extra_skips_the_lead_defaults_questions() {
     let sandbox = Sandbox::new();
 
