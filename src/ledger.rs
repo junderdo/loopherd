@@ -287,6 +287,33 @@ impl Ledger for NoMailbox {
     }
 }
 
+/// A [`MemLedger`] whose entries can't be updated.
+#[cfg(test)]
+pub struct NoUpdate(pub MemLedger);
+
+#[cfg(test)]
+impl Ledger for NoUpdate {
+    fn entries(&self) -> Result<BTreeMap<String, AgentRecord>> {
+        self.0.entries()
+    }
+
+    fn record(&mut self, record: AgentRecord) -> Result<()> {
+        self.0.record(record)
+    }
+
+    fn update(
+        &mut self,
+        _: &str,
+        _: &mut dyn FnMut(&mut AgentRecord) -> Result<()>,
+    ) -> Result<AgentRecord> {
+        anyhow::bail!("disk full")
+    }
+
+    fn started(&mut self, name: &str, at: SystemTime) -> Result<()> {
+        self.0.started(name, at)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
