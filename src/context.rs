@@ -36,7 +36,7 @@ struct ConfigFile {
     shepherd: Option<ShepherdConfig>,
     /// Read and checked by `notify`, so a broken table can't cost the limits.
     #[serde(rename = "notify")]
-    _notify: Option<toml::Table>,
+    _notify: Option<toml::Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -405,6 +405,14 @@ mod tests {
             "default_context_limit = 90000\ncontext_window = 1000000\n[shepherd]\ncontext_limit = 900000\n",
         ));
         assert_eq!(shepherd_limit(&path).unwrap(), 800_000);
+    }
+
+    #[test]
+    fn a_notify_value_of_any_shape_leaves_the_limits_readable() {
+        for notify in ["notify = true", "[notify]\nkinds = [\"done\"]"] {
+            let (_dir, path) = config(Some(&format!("context_window = 1000000\n{notify}\n")));
+            assert_eq!(effective_limit(None, &path).unwrap(), 250_000, "{notify}");
+        }
     }
 
     #[test]
