@@ -3202,7 +3202,9 @@ fn a_local_tracker_herd_feeds_the_ready_unblocked_issues_pushed_to_the_default_b
     assert_ok(&feed);
     assert_eq!(
         text(&feed.stdout),
-        "would add widgets-auth-01 (template issue)\n\
+        "source: skipped .scratch/auth/issues/09-audit-log.md: its Blocked by item \
+         \"the login form\" names no issue number\n\
+         would add widgets-auth-01 (template issue)\n\
          would add widgets-auth-05 (template issue)\n\
          would add widgets-auth-07 (template issue)\n\
          would add widgets-billing-01 (template issue)\n\
@@ -3750,6 +3752,59 @@ fn only_a_word_starting_with_a_number_names_a_blocker_and_a_missing_one_is_noted
 }
 
 #[test]
+fn a_blocker_names_its_first_numbers_and_a_path_names_its_own_feature() {
+    let fixture = Fixture::new(&["acme"]);
+    let blocked_by = |n: &str, line: &str| {
+        (
+            format!(".scratch/f/issues/{n}-x.md"),
+            format!("{line}\nStatus: ready-for-agent\n"),
+        )
+    };
+    let issues = [
+        (
+            ".scratch/f/issues/01-a.md".to_string(),
+            "Status: resolved\n".to_string(),
+        ),
+        (
+            ".scratch/f/issues/02-b.md".to_string(),
+            "Status: needs-info\n".to_string(),
+        ),
+        (
+            ".scratch/g/issues/02-c.md".to_string(),
+            "Status: resolved\n".to_string(),
+        ),
+        blocked_by("10", "Blocked by: 01 - Node 20 upgrade"),
+        blocked_by("11", "Blocked by: #01 Node 20 upgrade"),
+        blocked_by("12", "Blocked by: see 01"),
+        blocked_by("13", "Blocked by: .scratch/g/issues/02-c.md"),
+        blocked_by("14", "Blocked by: Node upgrade (#01)"),
+        blocked_by("15", "Blocked by: .scratch/h/issues/01-d.md"),
+    ];
+    let issues: Vec<(&str, &str)> = issues
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+
+    let out = fixture.local_source(&issues);
+
+    assert_ok(&out);
+    assert_eq!(
+        text(&out.stdout),
+        "f-10 feat tdd x .scratch/f/issues/10-x.md\n\
+         f-11 feat tdd x .scratch/f/issues/11-x.md\n\
+         f-12 feat tdd x .scratch/f/issues/12-x.md\n\
+         f-13 feat tdd x .scratch/f/issues/13-x.md\n"
+    );
+    assert_eq!(
+        text(&out.stderr),
+        "skipped .scratch/f/issues/14-x.md: its Blocked by item \"node upgrade (#01)\" \
+         names no issue number\n\
+         skipped .scratch/f/issues/15-x.md: its Blocked by names \
+         .scratch/h/issues/01-d.md, which is no issue\n"
+    );
+}
+
+#[test]
 fn an_issue_file_whose_path_the_queue_cant_read_is_noted_on_stderr() {
     let fixture = Fixture::new(&["acme"]);
     let ready = "Status: ready-for-agent\n";
@@ -4225,6 +4280,28 @@ fn diff_right_after_a_local_init_without_github_prints_nothing_and_makes_no_gh_c
     assert_eq!(text(&out.stderr), "");
     assert_eq!(everything(&fixture), before);
     assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn diff_reads_back_the_repo_passed_to_init_over_an_origin_that_isnt_github() {
+    for tracker in ["local", "github"] {
+        let fixture = Fixture::new(&["acme"]);
+        fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
+        let init = fixture.init(&["--tracker", tracker, "--repo", "acme/widgets"]);
+        assert_ok(&init);
+        let before = everything(&fixture);
+
+        let out = fixture.init(&["--diff"]);
+
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{tracker}: {}",
+            text(&out.stderr)
+        );
+        assert_eq!(text(&out.stdout), "", "{tracker}");
+        assert_eq!(everything(&fixture), before, "{tracker}");
+    }
 }
 
 #[test]

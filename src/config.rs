@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use toml_edit::{DocumentMut, Item, Table, Value};
+use toml_edit::{DocumentMut, Item, RawString, Table, TableLike, Value};
 
 use crate::context::check_tokens;
 use crate::herd::SwitchValues;
@@ -45,27 +45,279 @@ pub fn lead_defaults(config: &Path) -> Result<Option<SwitchValues>> {
 /// Refuses, changing nothing, when the result would be an invalid config.
 pub fn set_lead_defaults(config: &Path, on: &str) -> Result<()> {
     let on = switch_list(on)?;
+    edit(config, |doc| {
+        let table = doc
+            .entry("lead_defaults")
+            .or_insert_with(|| Item::Table(Table::new()))
+            .as_table_like_mut()
+            .context("lead_defaults is not a table")?;
+        for name in SwitchValues::NAMES {
+            replace_value(table, name, Value::from(on.contains(&name)));
+        }
+        Ok(())
+    })
+}
+
+/// The keys `config get`, `set` and `unset` take.
+pub const KEYS: [&str; 3] = [
+    "context_window",
+    "default_context_limit",
+    "shepherd.context_limit",
+];
+
+/// `key`'s value in `config`, `None` when unset.
+pub fn get(config: &Path, key: &str) -> Result<Option<u64>> {
+    let file = read(config)?;
+    Ok(match known(key)? {
+        "context_window" => file.context_window,
+        "default_context_limit" => file.default_context_limit,
+        _ => file.shepherd.and_then(|s| s.context_limit),
+    })
+}
+
+/// Writes `key = value`, keeping the file's other keys and comments.
+/// Refuses, changing nothing, an unknown key or a value under the minimum.
+pub fn set(config: &Path, key: &str, value: &str) -> Result<()> {
+    let key = known(key)?;
+    let value: u64 = value
+        .trim()
+        .replace('_', "")
+        .parse()
+        .with_context(|| format!("{key} must be a whole number of tokens, got {value:?}"))?;
+    let value = i64::try_from(value).with_context(|| format!("{key}: {value} is too big"))?;
+    edit(config, |doc| {
+        let (table, name) = match key.split_once('.') {
+            Some((table, name)) => (
+                doc.entry(table)
+                    .or_insert_with(|| Item::Table(Table::new()))
+                    .as_table_like_mut()
+                    .with_context(|| format!("{table} is not a table"))?,
+                name,
+            ),
+            None => {
+                if doc.get(key).is_none() {
+                    lift_header(doc);
+                }
+                (doc.as_table_mut() as &mut dyn TableLike, key)
+            }
+        };
+        replace_value(table, name, Value::from(value));
+        Ok(())
+    })
+}
+
+/// Removes `key`, and `[shepherd]` once it's empty; false when `key` was unset.
+pub fn unset(config: &Path, key: &str) -> Result<bool> {
+    let key = known(key)?;
+    if get(config, key)?.is_none() {
+        return Ok(false);
+    }
+    edit(config, |doc| {
+        match key.split_once('.') {
+            Some((table, name)) => {
+                let root = doc.as_table_mut();
+                let only_key = root
+                    .get(table)
+                    .and_then(Item::as_table_like)
+                    .is_some_and(|t| t.len() == 1 && t.contains_key(name));
+                match root.get_mut(table) {
+                    Some(Item::Table(t)) if !t.is_dotted() => {
+                        let mut comment = remove_key(t, name);
+                        let position = t.position();
+                        if t.is_empty() {
+                            comment = comment_in(t.decor().prefix()) + &comment;
+                            doc.remove(table);
+                        }
+                        place_comment(doc, position, &comment);
+                    }
+                    // An inline or dotted table is one root line, kept or removed whole.
+                    _ if only_key => {
+                        let comment = remove_key(root, table);
+                        place_comment(doc, None, &comment);
+                    }
+                    Some(item) => {
+                        if let Some(t) = item.as_table_like_mut() {
+                            t.remove(name);
+                        }
+                    }
+                    None => {}
+                }
+            }
+            None => {
+                let comment = remove_key(doc.as_table_mut(), key);
+                place_comment(doc, None, &comment);
+            }
+        }
+        Ok(())
+    })?;
+    Ok(true)
+}
+
+/// Removes `name` from `table`, moving the comment lines above it onto the
+/// next key's line; returns them when no line follows.
+fn remove_key(table: &mut Table, name: &str) -> String {
+    let comment = line_comment(table, name);
+    let next = table
+        .iter()
+        .filter(|(_, item)| is_line(item))
+        .map(|(k, _)| k)
+        .skip_while(|k| *k != name)
+        .nth(1)
+        .map(str::to_string);
+    table.remove(name);
+    match next {
+        Some(next) => {
+            prepend_comment(table, &next, &comment);
+            String::new()
+        }
+        None => comment,
+    }
+}
+
+/// Whether `item` prints as a `key = value` line among its table's keys.
+fn is_line(item: &Item) -> bool {
+    item.is_value() || item.as_table().is_some_and(Table::is_dotted)
+}
+
+/// The comment above `name`'s line, which a dotted table keeps on its first key.
+fn line_comment(table: &Table, name: &str) -> String {
+    match table
+        .get(name)
+        .and_then(Item::as_table)
+        .filter(|t| t.is_dotted())
+    {
+        Some(dotted) => dotted
+            .iter()
+            .next()
+            .map(|(first, _)| line_comment(dotted, first))
+            .unwrap_or_default(),
+        None => table
+            .key(name)
+            .map(|k| comment_in(k.leaf_decor().prefix()))
+            .unwrap_or_default(),
+    }
+}
+
+fn prepend_comment(table: &mut Table, name: &str, comment: &str) {
+    if let Some(dotted) = table
+        .get_mut(name)
+        .and_then(Item::as_table_mut)
+        .filter(|t| t.is_dotted())
+    {
+        let first = dotted.iter().next().map(|(k, _)| k.to_string());
+        if let Some(first) = first {
+            prepend_comment(dotted, &first, comment);
+        }
+        return;
+    }
+    if let Some(mut key) = table.key_mut(name) {
+        let decor = key.leaf_decor_mut();
+        let own = text_of(decor.prefix()).to_string();
+        decor.set_prefix(format!("{comment}{own}"));
+    }
+}
+
+/// Puts `comment` above the first table after `position` (any table when
+/// `None`), or at the end of the file when there's none.
+fn place_comment(doc: &mut DocumentMut, position: Option<isize>, comment: &str) {
+    if comment.is_empty() {
+        return;
+    }
+    let after = position.unwrap_or(isize::MIN);
+    let next = doc
+        .as_table_mut()
+        .iter_mut()
+        .filter_map(|(_, item)| item.as_table_mut())
+        .filter(|table| table.position().is_some_and(|p| p > after))
+        .min_by_key(|table| table.position());
+    match next {
+        Some(table) => {
+            let own = text_of(table.decor().prefix()).to_string();
+            table.decor_mut().set_prefix(format!("{comment}{own}"));
+        }
+        None => {
+            let own = text_of(Some(doc.trailing())).to_string();
+            doc.set_trailing(format!("{comment}{own}"));
+        }
+    }
+}
+
+/// `prefix` when it holds a comment; blank lines alone aren't kept.
+fn comment_in(prefix: Option<&RawString>) -> String {
+    let text = text_of(prefix);
+    match text.contains('#') {
+        true => text.to_string(),
+        false => String::new(),
+    }
+}
+
+fn text_of(raw: Option<&RawString>) -> &str {
+    raw.and_then(RawString::as_str).unwrap_or_default()
+}
+
+/// A file with tables and no root keys keeps its header comment in the first
+/// table's decor, so a new root key would land above it: move the comment
+/// lines before that table's last blank line, or all of them when there's
+/// none, to the doc's own prefix.
+fn lift_header(doc: &mut DocumentMut) {
+    if doc.iter().any(|(_, item)| item.is_value()) {
+        return;
+    }
+    let first = doc
+        .as_table_mut()
+        .iter_mut()
+        .filter_map(|(_, item)| item.as_table_mut())
+        .min_by_key(|table| table.position());
+    let Some(table) = first else {
+        return;
+    };
+    let prefix = text_of(table.decor().prefix()).to_string();
+    let split = match prefix.rfind("\n\n") {
+        Some(blank) => blank + 1,
+        None if prefix.contains('#') => prefix.len(),
+        None => return,
+    };
+    table.decor_mut().set_prefix(&prefix[split..]);
+    doc.decor_mut().set_prefix(&prefix[..split]);
+}
+
+fn known(key: &str) -> Result<&'static str> {
+    match KEYS.iter().find(|k| **k == key) {
+        Some(key) => Ok(key),
+        None => bail!("unknown key {key:?}: name one of {}", KEYS.join(", ")),
+    }
+}
+
+/// Sets `name` to `value`, keeping the comments around an old value.
+fn replace_value(table: &mut dyn TableLike, name: &str, mut value: Value) {
+    match table.get_mut(name).and_then(Item::as_value_mut) {
+        Some(old) => {
+            *value.decor_mut() = old.decor().clone();
+            *old = value;
+        }
+        None => {
+            table.insert(name, Item::Value(value));
+        }
+    }
+}
+
+/// Applies `change` to `config` through its symlinks, refusing, changing
+/// nothing, a result that isn't a valid config.
+fn edit(config: &Path, change: impl FnOnce(&mut DocumentMut) -> Result<()>) -> Result<()> {
     let config = &link_target(config)?;
     let mut doc: DocumentMut = read_text(config)?
         .parse()
         .with_context(|| config.display().to_string())?;
-    let table = doc
-        .entry("lead_defaults")
-        .or_insert_with(|| Item::Table(Table::new()))
-        .as_table_like_mut()
-        .context("lead_defaults is not a table")?;
-    for name in SwitchValues::NAMES {
-        let mut value = Value::from(on.contains(&name));
-        match table.get_mut(name).and_then(Item::as_value_mut) {
-            Some(old) => {
-                *value.decor_mut() = old.decor().clone();
-                *old = value;
-            }
-            None => {
-                table.insert(name, Item::Value(value));
-            }
+    if doc.is_empty() {
+        // A comment-only file parses as trailing text, which would print after anything added.
+        let mut comments = doc.trailing().as_str().unwrap_or_default().to_string();
+        if !comments.trim().is_empty() && !comments.ends_with("\n\n") {
+            comments.push('\n');
         }
+        doc.set_trailing("");
+        doc.decor_mut().set_prefix(comments);
     }
+    change(&mut doc)?;
     let text = doc.to_string();
     check(&text).with_context(|| format!("refused, {} is unchanged", config.display()))?;
     let written = || format!("write {}", config.display());
@@ -297,5 +549,222 @@ mod tests {
         let err = format!("{:#}", set_lead_defaults(&path, "merge").unwrap_err());
         assert!(err.contains("context_window"), "{err}");
         assert_eq!(fs::read_to_string(&path).unwrap(), "context_window = 1\n");
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    fn config_with(text: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, text).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn each_key_round_trips_through_set_get_and_unset() {
+        let (_dir, path) = config_with("");
+        for key in [
+            "default_context_limit",
+            "context_window",
+            "shepherd.context_limit",
+        ] {
+            assert_eq!(get(&path, key).unwrap(), None, "{key}");
+            set(&path, key, "300000").unwrap();
+            assert_eq!(get(&path, key).unwrap(), Some(300_000), "{key}");
+            assert!(unset(&path, key).unwrap(), "{key}");
+            assert_eq!(get(&path, key).unwrap(), None, "{key}");
+            assert!(!unset(&path, key).unwrap(), "{key}");
+        }
+    }
+
+    #[test]
+    fn setting_a_key_keeps_the_files_comments_and_layout() {
+        let (_dir, path) = config_with(
+            "# my limits\ncontext_window = 1000000 # big\n\n[shepherd] # me\ncontext_limit = 400000 # mine\n",
+        );
+
+        set(&path, "context_window", "500000").unwrap();
+        set(&path, "shepherd.context_limit", "300000").unwrap();
+        set(&path, "default_context_limit", "200000").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "# my limits\ncontext_window = 500000 # big\ndefault_context_limit = 200000\n\n\
+             [shepherd] # me\ncontext_limit = 300000 # mine\n"
+        );
+    }
+
+    #[test]
+    fn a_root_key_set_after_a_table_keeps_a_leading_comment_first() {
+        let (_dir, path) = config_with("# mine\n\n[lead_defaults]\nmerge = true\n");
+
+        set(&path, "context_window", "1000000").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "# mine\ncontext_window = 1000000\n\n[lead_defaults]\nmerge = true\n"
+        );
+    }
+
+    #[test]
+    fn unset_keeps_the_comment_above_an_inline_or_dotted_shepherd_line() {
+        for (text, left) in [
+            (
+                "# a\nshepherd = { context_limit = 100000 }\ncontext_window = 1000000\n",
+                "# a\ncontext_window = 1000000\n",
+            ),
+            (
+                "# a\nshepherd.context_limit = 100000\n# b\ncontext_window = 1000000\n\n[notify]\nenabled = false\n",
+                "# a\n# b\ncontext_window = 1000000\n\n[notify]\nenabled = false\n",
+            ),
+            (
+                "context_window = 1000000\n# a\nshepherd.context_limit = 100000\n\n[notify]\nenabled = false\n",
+                "context_window = 1000000\n# a\n\n[notify]\nenabled = false\n",
+            ),
+        ] {
+            let (_dir, path) = config_with(text);
+
+            unset(&path, "shepherd.context_limit").unwrap();
+
+            assert_eq!(fs::read_to_string(&path).unwrap(), left, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn unsetting_a_root_key_moves_its_comment_onto_a_dotted_line_after_it() {
+        let (_dir, path) =
+            config_with("# a\ncontext_window = 1000000\n# b\nshepherd.context_limit = 100000\n");
+
+        unset(&path, "context_window").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "# a\n# b\nshepherd.context_limit = 100000\n"
+        );
+    }
+
+    #[test]
+    fn a_header_comment_with_no_blank_line_after_it_stays_first() {
+        let text = "# loopherd config\n[lead_defaults]\nmerge = true\n";
+        let (_dir, path) = config_with(text);
+
+        set(&path, "context_window", "1000000").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "# loopherd config\ncontext_window = 1000000\n[lead_defaults]\nmerge = true\n"
+        );
+        unset(&path, "context_window").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    }
+
+    #[test]
+    fn set_then_unset_leaves_the_file_as_it_was() {
+        for text in [
+            "",
+            "# top\n\n[notify] # n\nenabled = false\n",
+            "# mine\n[notify]\nenabled = false\n",
+            "# mine\ndefault_context_limit = 150000\n",
+            "default_context_limit = 150000 # mine\n\n[notify]\nenabled = false\n",
+        ] {
+            let (_dir, path) = config_with(text);
+
+            set(&path, "context_window", "1000000").unwrap();
+            unset(&path, "context_window").unwrap();
+            set(&path, "shepherd.context_limit", "100000").unwrap();
+            unset(&path, "shepherd.context_limit").unwrap();
+
+            assert_eq!(fs::read_to_string(&path).unwrap(), text, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn unset_keeps_the_comment_above_the_key_it_removes() {
+        for (text, left) in [
+            (
+                "# my limits: tuned for opus 1M\ncontext_window = 1000000\n",
+                "# my limits: tuned for opus 1M\n",
+            ),
+            (
+                "# window\ncontext_window = 1000000\n# limit\ndefault_context_limit = 150000\n",
+                "# window\n# limit\ndefault_context_limit = 150000\n",
+            ),
+            (
+                "# window\ncontext_window = 1000000\n\n[notify]\nenabled = false\n",
+                "# window\n\n[notify]\nenabled = false\n",
+            ),
+            (
+                "[shepherd]\n# tuned\ncontext_limit = 100000\n\n# n\n[notify]\nenabled = false\n",
+                "# tuned\n\n# n\n[notify]\nenabled = false\n",
+            ),
+            (
+                "[notify]\nenabled = false\n\n# the shepherd\n[shepherd]\n# tuned\ncontext_limit = 100000\n",
+                "[notify]\nenabled = false\n\n# the shepherd\n# tuned\n",
+            ),
+        ] {
+            let (_dir, path) = config_with(text);
+            let key = match text.contains("[shepherd]") {
+                true => "shepherd.context_limit",
+                false => "context_window",
+            };
+
+            unset(&path, key).unwrap();
+
+            assert_eq!(fs::read_to_string(&path).unwrap(), left, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_comment_only_file_keeps_its_comment_first() {
+        let (_dir, path) = config_with("# mine\n");
+
+        set_lead_defaults(&path, "merge").unwrap();
+        set(&path, "context_window", "1000000").unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.starts_with("# mine\ncontext_window = 1000000\n\n[lead_defaults]\nmerge = true\n"),
+            "{text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setting_a_key_through_a_symlink_writes_its_target() {
+        let (dir, target) = config_with("context_window = 1000000\n");
+        let link = dir.path().join("link.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        set(&link, "context_window", "500000").unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(get(&target, "context_window").unwrap(), Some(500_000));
+    }
+
+    #[test]
+    fn an_unknown_key_or_a_bad_value_is_refused_and_changes_nothing() {
+        let text = "context_window = 1000000\n";
+        let (_dir, path) = config_with(text);
+        for (key, value, says) in [
+            ("context_windw", "300000", "unknown key"),
+            ("lead_defaults.merge", "true", "unknown key"),
+            ("context_window", "9999", "at least 10000"),
+            ("default_context_limit", "lots", "a whole number"),
+            ("shepherd.context_limit", "-1", "a whole number"),
+        ] {
+            let err = format!("{:#}", set(&path, key, value).unwrap_err());
+            assert!(err.contains(says), "{key} {value}: {err}");
+        }
+        assert!(format!("{:#}", unset(&path, "window").unwrap_err()).contains("unknown key"));
+        assert!(format!("{:#}", get(&path, "window").unwrap_err()).contains("unknown key"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
     }
 }

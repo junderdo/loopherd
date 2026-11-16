@@ -88,7 +88,10 @@ pub fn feed(
             pending,
         });
     }
-    let output = run_source(&queue, req.command_timeout).context("source")?;
+    let (output, notes) = run_source(&queue, req.command_timeout).context("source")?;
+    if req.dry_run {
+        lines.extend(notes.lines().map(|note| format!("source: {note}")));
+    }
     let reaped = reap(herdr, ledger, paths, &queue, req, &mut lines)?;
     let mut errors = reaped.errors;
     let pending = pending(&queue, reaped.after_merge);
@@ -213,7 +216,7 @@ pub fn claimable(
     freed: usize,
     timeout: Duration,
 ) -> Result<Vec<String>> {
-    let output = run_source(queue, timeout)?;
+    let (output, _) = run_source(queue, timeout)?;
     let entries = ledger.entries().context("ledger")?;
     let mut free = queue
         .max
@@ -753,8 +756,9 @@ fn task_request(
     )
 }
 
-/// The source's stdout; fails if it exits non-zero or outruns `timeout`.
-fn run_source(queue: &Queue, timeout: Duration) -> Result<String> {
+/// The source's stdout and stderr; fails if it exits non-zero or outruns
+/// `timeout`.
+fn run_source(queue: &Queue, timeout: Duration) -> Result<(String, String)> {
     let output = run_within(
         Command::new("sh")
             .arg("-c")
@@ -777,7 +781,10 @@ fn run_source(queue: &Queue, timeout: Duration) -> Result<String> {
             stderr => bail!("{failed}: {stderr}"),
         }
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok((
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ))
 }
 
 #[cfg(test)]
@@ -1260,6 +1267,28 @@ mod tests {
         assert!(herdr.tabs().is_empty());
         assert!(herdr.started().is_empty());
         assert_eq!(ledger.0.keys().collect::<Vec<_>>(), ["zpr-1"]);
+    }
+
+    #[test]
+    fn only_a_dry_run_prints_a_succeeding_sources_stderr() {
+        let setup = Setup::new("echo 1; echo 'skipped 2: blocked' >&2", 2);
+
+        let dry = setup
+            .feed(&herdr(), &mut MemLedger::default(), true)
+            .unwrap();
+        let real = setup
+            .feed(&herdr(), &mut MemLedger::default(), false)
+            .unwrap();
+
+        assert_eq!(
+            dry.lines,
+            [
+                "source: skipped 2: blocked",
+                "would add zpr-1 (template pr)",
+                "prs: 0 would retire, 1 would add, 0 skipped, 0 errors",
+            ]
+        );
+        assert!(!real.lines.iter().any(|l| l.starts_with("source:")));
     }
 
     #[test]
@@ -2105,7 +2134,7 @@ mod tests {
             ]
         );
         let queue = crate::herd::queue(&setup.paths(), "prs").unwrap();
-        let output = run_source(&queue, Duration::from_secs(1)).unwrap();
+        let (output, _) = run_source(&queue, Duration::from_secs(1)).unwrap();
         let checkouts: Vec<_> = output
             .lines()
             .map(|task| {

@@ -53,8 +53,9 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D36](decisions/D36.md) | `loopherd init` reads `docs/agents/issue-tracker.md` (GitHub title → built-in snippets, else an empty `source` `herds` rejects) and `triage-labels.md` label names; with no doc it asks or takes `--tracker` and writes both, uncommitted. |
 | [D37](decisions/D37.md) | `loopherd init` on a terminal asks for each value with its inferred default (checks from Cargo.toml/package.json, `max`, lead, `context_limit`) and confirms a summary; a flag answers its question, and unattended a value with neither flag nor inference is an error naming the flag. |
 | [D38](decisions/D38.md) | `loopherd init --diff` prints a unified diff from each file init wrote to what today's built-ins would write, reading the original answers back from the herd file; it writes nothing and exits 0 same, 1 drift, 2 trouble. |
-| [D39](decisions/D39.md) | `loopherd init` gives a local-markdown tracker working snippets: `.scratch/<feature>/issues/` files on origin's default branch, `Status:` words as labels, `Blocked by:` numbers, closed when the branch that sets `resolved` merges. |
-| [D40](decisions/D40.md) | `loopherd init` for a tracker it has no snippets for runs without GitHub when origin isn't GitHub (no gh call, branch from the local `origin/HEAD` else the current one, no `merged`), names no gh in its `(fill in)` placeholders, and refuses a ready-for-agent label the queue reads as a type or skill. |
+| [D39](decisions/D39.md) | `loopherd setup` asks for the lead defaults and the context window and handoff limits while unset (from `/dev/tty`, flags to skip), `loopherd config` reads and writes the limits, and `scripts/install` calls setup; a lead's hook denies both writes. |
+| [D40](decisions/D40.md) | `loopherd init` gives a local-markdown tracker working snippets: `.scratch/<feature>/issues/` files on origin's default branch, `Status:` words as labels, `Blocked by:` numbers, closed when the branch that sets `resolved` merges. |
+| [D41](decisions/D41.md) | `loopherd init` for a tracker it has no snippets for runs without GitHub when origin isn't GitHub (no gh call, branch from the local `origin/HEAD` else the current one, no `merged`), names no gh in its `(fill in)` placeholders, and refuses a ready-for-agent label the queue reads as a type or skill. |
 
 ## Emerging model
 
