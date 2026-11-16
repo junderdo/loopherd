@@ -393,7 +393,7 @@ struct InitArgs {
     #[arg(long, value_name = "TOKENS")]
     context_limit: Option<u64>,
     /// Print a unified diff from the files init wrote to what it would write
-    /// now, inferring again; write nothing. Exits 1 when they differ.
+    /// now, inferring again; write nothing. Exits 1 when they differ, 2 on error.
     #[arg(long)]
     diff: bool,
 }
