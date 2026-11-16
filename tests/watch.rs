@@ -491,7 +491,7 @@ fn a_question_is_sent_to_herdrs_toast_on_the_watched_socket_and_to_the_command()
     assert_eq!(watched.status.code(), Some(0), "{}", stderr(&watched));
     assert_eq!(
         eventually(&sandbox.path("herdr.out"), |t| !t.is_empty()),
-        "/run/watched.sock\nnotification\nshow\nlh-1\n--body\nMerge PR #107?\n--sound\nrequest\n"
+        "/run/watched.sock\nnotification\nshow\nlh-1\n--body=Merge PR #107?\n--sound\nrequest\n"
     );
     assert_eq!(
         eventually(&out, |t| !t.is_empty()),

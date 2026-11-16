@@ -165,7 +165,9 @@ pub fn send(
                 "" => event.member.clone(),
                 herd => format!("{herd}: {}", event.member),
             };
-            let toast = ["herdr", "notification", "show", &title, "--body", &text];
+            // `--body=`, so a text starting with `-` isn't read as a flag.
+            let body = format!("--body={text}");
+            let toast = ["herdr", "notification", "show", &title, &body];
             let args = toast.iter().chain(&["--sound", "request"]);
             launches.push((Sender::Herdr, args.map(|a| a.to_string()).collect()));
         }
@@ -499,8 +501,7 @@ mod tests {
                         "notification",
                         "show",
                         "cards: lh-3",
-                        "--body",
-                        "Merge PR #107?",
+                        "--body=Merge PR #107?",
                         "--sound",
                         "request",
                     ]),
@@ -537,7 +538,7 @@ mod tests {
         let launched = sent(&config, dir.path(), &[again, next]);
 
         assert_eq!(launched.len(), 1);
-        assert_eq!(launched[0].args[5], "Which way now?");
+        assert_eq!(launched[0].args[4], "--body=Which way now?");
     }
 
     #[test]
@@ -604,6 +605,20 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(tried, 4);
         assert!(sent(&config, dir.path(), &[question("lh-3", "Which way?", "t1")]).is_empty());
+    }
+
+    #[test]
+    fn a_question_starting_with_a_dash_stays_the_toasts_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = enabled("");
+
+        let launched = sent(
+            &config,
+            dir.path(),
+            &[question("lh-3", "-- merge it?", "t1")],
+        );
+
+        assert_eq!(launched[0].args[4], "--body=-- merge it?");
     }
 
     fn load_text(text: &str) -> Result<Option<Config>> {
