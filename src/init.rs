@@ -547,6 +547,9 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
         ));
     }
     steps.extend(herd.agents_steps.iter().cloned());
+    steps.push(
+        "Tailor the herd to the repo per \"Setting up a project\" in `loopherd --skill`.".into(),
+    );
     if !herd.docs.is_empty() {
         let paths: Vec<String> = herd.docs.iter().map(|doc| doc.path.to_string()).collect();
         steps.push(format!(
@@ -554,9 +557,6 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
             and_list(&paths)
         ));
     }
-    steps.push(
-        "Tailor the herd to the repo per \"Setting up a project\" in `loopherd --skill`.".into(),
-    );
     steps.extend([
         "loopherd herds".into(),
         format!("loopherd feed {name} --dry-run"),

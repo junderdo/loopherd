@@ -36,7 +36,10 @@ Init never launches an agent.
    `docs/agents/loopherd.md`.
 3. If the tracker isn't GitHub, init left `[queue] source` empty. Fill it
    from the tracker doc with a command printing one task per line, its
-   words in the template's `params` order, then rewrite the template's `done` and `merged` checks for the same tracker.
+   words in the template's `params` order. Then move the rest of the herd
+   to that tracker: the template's `done` and `merged` checks, the worker
+   prompt's commands that read, claim, escalate a question and close the
+   task, and `docs/agents/loopherd.md`.
 4. Adjust the worker prompt and the checks it lists to how the repo builds,
    tests and reviews; for a herd with a lead, its prompt file too.
 5. Edit only what init wrote: the herd file (with `loopherd herd set`), the
@@ -45,7 +48,8 @@ Init never launches an agent.
 6. You're done when `loopherd herds` calls the herd valid and
    `loopherd feed <herd> --dry-run` lists the tasks you expect from the
    tracker.
-7. Remind the human to open Claude in the repo once and accept its
+7. Have the human review and commit the repo files you and init changed.
+8. Remind the human to open Claude in the repo once and accept its
    trust dialog, since members can't start past it, and that
    `loopherd lead <herd>` starts the herd's lead when they want one.
 
