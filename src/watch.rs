@@ -1766,6 +1766,37 @@ mod tests {
     }
 
     #[test]
+    fn a_leads_watch_alone_sends_the_leads_block_and_again_after_it_unblocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = quiet_led_world();
+        let notifier = Notifier::new(dir.path());
+        let own = |events: &[Waiting]| notifier.send(events);
+        let req = Request {
+            timeout: Some(Duration::from_secs(8)),
+            notify_own: Some(&own),
+            ..from_pane("w9:p0")
+        };
+
+        let woke = run(
+            &herdr,
+            &ledger,
+            dir.path(),
+            &req,
+            &mut steps(|poll| match poll {
+                1 | 3 => herdr.set_status("lead-cards", AgentStatus::Blocked),
+                2 => {
+                    assert_eq!(notifier.sent(), [sent_for("lead-cards", "blocked")]);
+                    herdr.set_status("lead-cards", AgentStatus::Working);
+                }
+                _ => {}
+            }),
+        );
+
+        assert_eq!(woke, None);
+        assert_eq!(notifier.sent(), vec![sent_for("lead-cards", "blocked"); 2]);
+    }
+
+    #[test]
     fn a_leads_watch_reads_only_its_own_herds_workers() {
         let dir = tempfile::tempdir().unwrap();
         let (mut ledger, herdr) = led_world(dir.path());
