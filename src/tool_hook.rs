@@ -357,6 +357,12 @@ fn commands(script: &str) -> Option<Vec<Vec<Word>>> {
                 word.get_or_insert_default().mark_substituted();
                 commands.extend(self::commands(&substitution(&mut chars)?)?);
             }
+            '$' if chars.peek() == Some(&'\'') => {
+                chars.next();
+                let w = word.get_or_insert_default();
+                w.text.push('$');
+                ansi_c_quoted(&mut chars, &mut w.text);
+            }
             '`' => {
                 let inner: String = chars.by_ref().take_while(|&c| c != '`').collect();
                 word.get_or_insert_default().mark_substituted();
@@ -390,9 +396,11 @@ fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<Stri
     let mut inner = String::new();
     let mut word = String::new();
     let mut saw_case = false;
-    // Delimiters of heredocs whose bodies start after this line, and whether
-    // `<<-` lets their lines start with tabs.
-    let mut heredocs: Vec<(String, bool)> = vec![];
+    // Delimiters of heredocs whose bodies start after this line, whether
+    // `<<-` lets their lines start with tabs, and whether the delimiter is unquoted.
+    let mut heredocs: Vec<(String, bool, bool)> = vec![];
+    // The closing `}` or `]` of each open `${…}` or `$[…]`, where `<<` is no heredoc.
+    let mut expansions: Vec<char> = vec![];
     while let Some(c) = chars.next() {
         if c == '\\' && chars.next_if_eq(&'\n').is_some() {
             continue;
@@ -414,8 +422,15 @@ fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<Stri
             }
             ')' => {
                 depth -= 1;
+                // `((…)` then anything but `)` may be nested subshells, not arithmetic.
+                if arithmetic_from.is_some_and(|from| depth == from + 1)
+                    && chars.peek() != Some(&')')
+                {
+                    return None;
+                }
                 if depth == 0 {
-                    return Some(inner);
+                    // Bash reads the body of a heredoc left open here from the lines after.
+                    return heredocs.is_empty().then_some(inner);
                 }
                 if arithmetic_from.is_some_and(|from| depth <= from) {
                     arithmetic_from = None;
@@ -430,12 +445,15 @@ fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<Stri
             }
             '\n' => {
                 inner.push(c);
-                for (delimiter, tabs) in std::mem::take(&mut heredocs) {
-                    heredoc_body(chars, &delimiter, tabs, &mut inner)?;
+                for (delimiter, tabs, unquoted) in std::mem::take(&mut heredocs) {
+                    heredoc_body(chars, &delimiter, tabs, unquoted, &mut inner)?;
                 }
                 continue;
             }
             '<' if arithmetic_from.is_none() && chars.peek() == Some(&'<') => {
+                if !expansions.is_empty() {
+                    return None;
+                }
                 chars.next();
                 inner.push_str("<<");
                 if let Some(c) = chars.next_if(|&c| c == '<' || c == '-') {
@@ -449,9 +467,15 @@ fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<Stri
                     inner.push(c);
                 }
                 let mut delimiter = String::new();
+                let mut unquoted = true;
                 while let Some(c) = chars.next_if(|&c| !separates(c)) {
                     inner.push(c);
+                    if matches!(c, '\'' | '"' | '\\') {
+                        unquoted = false;
+                    }
                     match c {
+                        // Bash may expand or decode these; the hook can't tell the delimiter.
+                        '$' | '`' => return None,
                         '\'' | '"' => {
                             for q in chars.by_ref() {
                                 inner.push(q);
@@ -470,7 +494,7 @@ fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<Stri
                         _ => delimiter.push(c),
                     }
                 }
-                heredocs.push((delimiter, tabs));
+                heredocs.push((delimiter, tabs, unquoted));
                 continue;
             }
             '\\' => {
@@ -478,6 +502,30 @@ fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<Stri
                 inner.extend(chars.next());
                 word.push(c);
                 continue;
+            }
+            '$' if chars.peek() == Some(&'\'') => {
+                inner.push_str("$'");
+                chars.next();
+                ansi_c_quoted(chars, &mut inner);
+                inner.push('\'');
+                word.push(c);
+                continue;
+            }
+            '$' if matches!(chars.peek(), Some('{' | '[')) => {
+                let open = chars.next()?;
+                expansions.push(if open == '{' { '}' } else { ']' });
+                inner.push(c);
+                inner.push(open);
+                word.push(c);
+                continue;
+            }
+            '{' | '[' if !expansions.is_empty() => {
+                expansions.push(if c == '{' { '}' } else { ']' });
+                word.push(c);
+            }
+            '}' | ']' if expansions.last() == Some(&c) => {
+                expansions.pop();
+                word.push(c);
             }
             '\'' | '"' | '`' => {
                 inner.push(c);
@@ -491,6 +539,21 @@ fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<Stri
         inner.push(c);
     }
     Some(inner)
+}
+
+/// Copies the body of a `$'…'` whose `$'` was just read onto `text`, escapes
+/// raw, and reads its closing `'`.
+fn ansi_c_quoted(chars: &mut std::iter::Peekable<std::str::Chars>, text: &mut String) {
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => break,
+            '\\' => {
+                text.push(c);
+                text.extend(chars.next());
+            }
+            _ => text.push(c),
+        }
+    }
 }
 
 fn separates(c: char) -> bool {
@@ -525,18 +588,24 @@ fn quoted(
 }
 
 /// Copies a heredoc's body onto `inner` through its `delimiter` line.
-/// `None` when the script ends first, or a line starts with the delimiter and
-/// holds a `)`, as `EOF)` does, which bash takes as the end.
+/// `None` when the script ends first, a line starts with the delimiter and
+/// holds a `)`, as `EOF)` does, which bash takes as the end, or, for an
+/// `unquoted` delimiter, a line ends in a backslash that joins the next.
 fn heredoc_body(
     chars: &mut std::iter::Peekable<std::str::Chars>,
     delimiter: &str,
     tabs: bool,
+    unquoted: bool,
     inner: &mut String,
 ) -> Option<()> {
     while chars.peek().is_some() {
         let mut line = String::new();
         while let Some(c) = chars.next_if(|&c| c != '\n') {
             line.push(c);
+        }
+        let backslashes = line.chars().rev().take_while(|&c| c == '\\').count();
+        if unquoted && backslashes % 2 == 1 {
+            return None;
         }
         inner.push_str(&line);
         inner.extend(chars.next());
@@ -1015,6 +1084,9 @@ mod tests {
 
     const MERGES: &[&str] = &[
         "gh pr merge 12",
+        "x=$(echo $'it\\'s'); gh pr merge 1",
+        "echo $'it\\'s'; gh pr merge 1",
+        "x=\"$(echo $'it\\'s ')')\"; gh pr merge 1",
         "gh pr merge 12 --squash --delete-branch",
         "gh -R junderdo/loopherd pr merge 12",
         "gh pr --repo junderdo/loopherd merge 12",
@@ -1996,6 +2068,19 @@ mod tests {
             "x=$(cat <<-'EOF'\n	Body\n	EOF); gh pr merge 1",
             "x=$(cat <<'EOF'\nBody",
             "x=$(cat <<'EOF'\nit's\nEOF)\ngh pr merge 1\nEOF\n)",
+            "x=$(echo $((1<<2)); cat <<'EOF'\nit's\nEOF)\ngh pr merge 1\nEOF\n)",
+            "x=$(cat <<EOF\nit's\nEOF\\\n)\ngh pr merge 1\nEOF\n)",
+            "x=$(cat <<-EOF\nit's\n	EOF\\\n)\ngh pr merge 1\nEOF\n)",
+            "gh pr create --body \"$(cat <<EOF\nit's\nEOF\\\n)\" && gh pr merge 1\nEOF\n)\"",
+            "x=$(cat <<EOF\nit's\nE\\\nOF\n)\ngh pr merge 1\nEOF\n)",
+            "x=$(cat <<EOF\nit's\n\\\nEOF\n)\ngh pr merge 1\nEOF\n)",
+            "x=$(cat <<EOF\nit's\nEO\\\nF)\ngh pr merge 1\nEOF\n)",
+            "gh pr create --body \"$(echo $[1<<2]\n)\" && gh pr merge 1\n2]\n)\"",
+            "x=\"$(echo $[1<<2]\n)\"; gh pr merge 1\n2]\n)\"",
+            "x=\"$(echo ${y//<<E/z}\n)\"; gh pr merge 1\nE/z}\n)\"",
+            "x=\"$(cat <<$'EOF'\na\nEOF\n)\"; gh pr merge 1\n$EOF\n)\"",
+            "x=\"$(cat <<EOF)\"\n\"\nEOF\ngh pr merge 1",
+            "x=\"$( ((cat <<EOF\n)\nEOF\n) ) )\"; gh pr merge 1",
         ] {
             let message =
                 run(&leads, all_on(), command).unwrap_or_else(|| panic!("{command} was allowed"));
@@ -2016,6 +2101,9 @@ mod tests {
             "x=$(cat <<-EOF\n\tEOF is reached\n\tEOF\n)",
             "x=$(echo $((1<<2))\necho hi\n)",
             "x=$(echo \"$((1<<2))\"\necho hi\n)",
+            "x=$(cat <<EOF\nPath is C:\\\\\nEOF\n)",
+            "x=$(echo $((1 << 2)) $(( (1+2) * 3 ))\necho hi\n)",
+            "x=$(echo ${y:-z} $'a\\'b'\necho hi\n)",
         ] {
             assert_eq!(run(&leads, Switches::default(), command), None, "{command}");
         }
