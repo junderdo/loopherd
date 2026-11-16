@@ -628,3 +628,30 @@ fn a_notification_that_cannot_start_is_noted_in_the_mailbox() {
         "{mailbox}"
     );
 }
+
+#[test]
+fn notify_run_leads_its_own_process_group_so_the_watch_ending_leaves_it_running() {
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+    let out = sandbox.path("group.out");
+    let command = sandbox.script(
+        "group-stub",
+        &format!(
+            "read -r pid comm state ppid pgid rest < /proc/$PPID/stat\n\
+             echo \"$PPID $pgid\" > {}.tmp && /bin/mv {0}.tmp {0}",
+            out.display()
+        ),
+    );
+    sandbox.notifying(
+        &format!("herdr = false\ncommand = '{}'\n", command.display()),
+        "2026-11-02T09:01:00Z",
+        "Which way?",
+    );
+
+    let watched = sandbox.notify_watch();
+
+    assert_eq!(watched.status.code(), Some(0), "{}", stderr(&watched));
+    let ids = eventually(&out, |t| !t.is_empty());
+    let (notify_run, group) = ids.trim().split_once(' ').unwrap();
+    assert_eq!(notify_run, group, "{ids}");
+}
