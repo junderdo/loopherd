@@ -840,6 +840,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn watches_marking_the_same_question_at_once_send_it_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = enabled("");
+        let start = std::sync::Barrier::new(16);
+
+        let sends: usize = std::thread::scope(|scope| {
+            let watches: Vec<_> = (0..16)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        sent(&config, dir.path(), &[question("lh-3", "Which way?", "t1")]).len()
+                    })
+                })
+                .collect();
+            watches.into_iter().map(|w| w.join().unwrap()).sum()
+        });
+
+        assert_eq!(sends, 1);
+    }
+
+    #[test]
+    fn placeholders_inside_the_question_stay_literal() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = enabled("command = ['n', '{text}', '{member}']\n");
+
+        let launched = sent(
+            &config,
+            dir.path(),
+            &[question("lh-3", "say {member} and {{x}} {text}", "t1")],
+        );
+
+        assert_eq!(launched[0].args[4], "--body=say {member} and {{x}} {text}");
+        assert_eq!(
+            launched[1].args,
+            args(&["n", "say {member} and {{x}} {text}", "lh-3"])
+        );
+    }
+
     fn load_text(text: &str) -> Result<Option<Config>> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
