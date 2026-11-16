@@ -143,7 +143,9 @@ an issue feeds once it is pushed. Its `Status:` line stands in for labels:
 an issue feeds when the line has `ready-for-agent`, none of the other three
 or `resolved`/`closed`/`done`, and its `Blocked by:` line is missing,
 `None`, or lists only resolved issue numbers of its feature. Members are
-`<herd>-<feature>-<NN>`, the feature cut to fit 32 characters. A worker
+`<herd>-<feature>-<NN>`; a feature that isn't lowercase letters, digits
+and `-`, or that doesn't fit 32 characters, is cut and takes a short hash,
+`<herd>-<cut>_<hash>-<NN>`. A worker
 claims by setting the line to `claimed`, and its PR sets it to `resolved`,
 which is what `done` checks; `merged` is the GitHub PR check.
 

@@ -3210,7 +3210,7 @@ fn the_local_queue_names_each_issues_id_type_skill_slug_and_path() {
 }
 
 #[test]
-fn a_long_feature_name_is_cut_so_the_member_name_fits() {
+fn a_long_feature_name_is_cut_and_hashed_so_the_member_name_fits() {
     let fixture = Fixture::new(&["acme"]);
     let env = fixture.push_local_issues(&[(
         ".scratch/a-very-long-feature-name-indeed/issues/03-first.md",
@@ -3221,7 +3221,7 @@ fn a_long_feature_name_is_cut_so_the_member_name_fits() {
     let feed = fixture.loopherd_with(&env, &["feed", "widgets", "--dry-run"]);
 
     assert_ok(&feed);
-    let name = "widgets-a-very-long-feature-n-03";
+    let name = "widgets-a-very-long-featu_162-03";
     assert_eq!(name.len(), 32);
     assert!(
         text(&feed.stdout).starts_with(&format!("would add {name} (template issue)\n")),
@@ -3619,5 +3619,44 @@ fn blocked_by_blocks_on_every_number_it_names_and_on_a_list_below_it() {
         tasks,
         "f-07 feat tdd x .scratch/f/issues/07-x.md\n\
          f-08 feat tdd x .scratch/f/issues/08-x.md\n"
+    );
+}
+
+#[test]
+fn features_that_cut_or_reshape_to_the_same_id_get_distinct_ids() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let tasks = fixture.local_tasks(&[
+        (
+            ".scratch/Auth_v2/issues/01-a.md",
+            "Status: ready-for-agent\n",
+        ),
+        (
+            ".scratch/auth-v2/issues/01-b.md",
+            "Status: ready-for-agent\n",
+        ),
+        (
+            ".scratch/user-settings-page-redesign/issues/01-c.md",
+            "Status: ready-for-agent\n",
+        ),
+        (
+            ".scratch/user-settings-page-reorder/issues/01-d.md",
+            "Status: ready-for-agent\n",
+        ),
+    ]);
+
+    let ids: Vec<&str> = tasks
+        .lines()
+        .map(|l| l.split(' ').next().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 4, "{tasks}");
+    assert!(ids.contains(&"auth-v2-01"), "{tasks}");
+    let mut unique = ids.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), 4, "{tasks}");
+    assert!(
+        ids.iter().all(|id| "widgets-".len() + id.len() <= 32),
+        "{tasks}"
     );
 }
