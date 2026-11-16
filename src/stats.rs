@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result};
+use anyhow::{Result, anyhow};
 use serde::Serialize;
 
 use crate::ledger::{AgentRecord, Ledger};
@@ -110,7 +110,8 @@ pub fn stats(
                 .filter(|e| matches!(e.body, Body::Done { .. }))
                 .filter_map(|e| parse_time(&e.at))
                 .filter(|at| started.is_none_or(|s| *at >= s))
-                .filter(|at| retired_at.is_none_or(|r| *at <= r))
+                // retired_at has whole seconds; mailbox times have nanos.
+                .filter(|at| retired_at.is_none_or(|r| *at < r + Duration::from_secs(1)))
                 .collect();
             retired.push(Retired {
                 first_done_secs: started.zip(dones.first()).map(|(s, d)| secs_between(s, *d)),
@@ -144,7 +145,11 @@ fn summarize(retired: &[Retired]) -> Summary {
             max_secs: values.last().copied(),
         }
     };
-    let mut rounds: Vec<u64> = retired.iter().map(|r| r.rounds as u64).collect();
+    let mut rounds: Vec<u64> = retired
+        .iter()
+        .filter(|r| r.rounds > 0)
+        .map(|r| r.rounds as u64)
+        .collect();
     rounds.sort_unstable();
     Summary {
         members: retired.len(),
@@ -173,14 +178,40 @@ fn parse_time(at: &str) -> Option<SystemTime> {
     humantime::parse_rfc3339_weak(at).ok()
 }
 
-/// `--since`: a UTC date, `2026-11-01`, or an RFC 3339 time.
+/// `--since`: a date, `2026-11-01`, meaning midnight UTC, or an RFC 3339 time
+/// with `Z` or a numeric offset.
 pub fn parse_since(value: &str) -> Result<SystemTime> {
-    let full = match value.len() {
-        10 => format!("{value}T00:00:00Z"),
-        _ => value.to_string(),
+    let invalid = || anyhow!("{value:?} is not a date (2026-11-01) or RFC 3339 time");
+    if value.len() == 10 {
+        return humantime::parse_rfc3339(&format!("{value}T00:00:00Z")).map_err(|_| invalid());
+    }
+    let (local, offset) = split_offset(value).ok_or_else(invalid)?;
+    // parse_rfc3339_weak would ignore an offset it was given.
+    let at = humantime::parse_rfc3339_weak(local).map_err(|_| invalid())?;
+    match offset < 0 {
+        true => Ok(at + Duration::from_secs(offset.unsigned_abs())),
+        false => Ok(at - Duration::from_secs(offset as u64)),
+    }
+}
+
+/// The time without its `Z` or `±HH:MM`, and the offset east of UTC in seconds.
+fn split_offset(value: &str) -> Option<(&str, i64)> {
+    if let Some(local) = value.strip_suffix(['Z', 'z']) {
+        return Some((local, 0));
+    }
+    let split = value.len().checked_sub(6)?;
+    let (local, offset) = (value.get(..split)?, value.get(split..)?);
+    let sign = match offset.as_bytes()[0] {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
     };
-    humantime::parse_rfc3339_weak(&full)
-        .with_context(|| format!("{value:?} is not a date (2026-11-01) or RFC 3339 time"))
+    let hours: i64 = offset.get(1..3)?.parse().ok()?;
+    let minutes: i64 = offset.get(4..6)?.parse().ok()?;
+    if offset.as_bytes()[3] != b':' || hours > 23 || minutes > 59 {
+        return None;
+    }
+    Some((local, sign * (hours * 3600 + minutes * 60)))
 }
 
 pub fn render(herds: &[Herd]) -> String {

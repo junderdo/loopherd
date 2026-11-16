@@ -9,6 +9,7 @@ struct Member<'a> {
     herd: Option<&'a str>,
     lead: bool,
     created: &'a str,
+    retired: bool,
     retired_at: Option<&'a str>,
 }
 
@@ -19,12 +20,20 @@ impl<'a> Member<'a> {
             herd: Some("h"),
             lead: false,
             created,
+            retired: false,
             retired_at: None,
         }
     }
 
     fn retired(mut self, at: &'a str) -> Self {
+        self.retired = true;
         self.retired_at = Some(at);
+        self
+    }
+
+    /// As in ledgers written before retire recorded the time.
+    fn retired_untimed(mut self) -> Self {
+        self.retired = true;
         self
     }
 
@@ -42,7 +51,7 @@ impl<'a> Member<'a> {
         serde_json::json!({
             "name": self.name, "pane_id": "w1:p1", "session_id": null, "repo": "/",
             "worktree": null, "workspace": "w1", "prompt": null, "prompt_sent": true,
-            "created": self.created, "retired": self.retired_at.is_some(),
+            "created": self.created, "retired": self.retired,
             "retired_at": self.retired_at, "herd": self.herd,
             "template": self.herd.map(|_| "card"),
             "role": if self.lead { Some("lead") } else { None },
@@ -91,6 +100,20 @@ fn run(state: &Path, args: &[&str]) -> Output {
         .env_remove("HERDR_SOCKET_PATH")
         .output()
         .unwrap()
+}
+
+fn json(state: &Path, args: &[&str]) -> serde_json::Value {
+    let args: Vec<&str> = args.iter().copied().chain(["--json"]).collect();
+    serde_json::from_str(&stdout(&run(state, &args))).unwrap()
+}
+
+fn names(json: &serde_json::Value, list: &str) -> Vec<String> {
+    json["herds"][0][list]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["name"].as_str().unwrap().to_string())
+        .collect()
 }
 
 fn stdout(out: &Output) -> String {
@@ -247,9 +270,15 @@ fn herd_and_since_narrow_the_members() {
 #[test]
 fn a_bad_since_is_refused() {
     let state = tempfile::tempdir().unwrap();
-    let out = run(state.path(), &["--since", "last week"]);
-    assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("--since"));
+    for since in [
+        "last week",
+        "2026-11-01T12:00:00+0500",
+        "2026-11-01T12:00:00+25:00",
+    ] {
+        let out = run(state.path(), &["--since", since]);
+        assert_eq!(out.status.code(), Some(2), "--since {since}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("--since"));
+    }
 }
 
 #[test]
@@ -326,4 +355,163 @@ fn a_reused_name_counts_only_reports_from_its_own_life() {
     let row = &json["herds"][0]["retired"][0];
     assert_eq!(row["rounds"], 1);
     assert_eq!(row["first_done_secs"], 3 * 3600);
+}
+
+#[test]
+fn a_done_in_the_second_of_retirement_counts() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[Member::new("lh-1", "2026-11-01T00:00:00Z").retired("2026-11-01T05:00:00Z")],
+    );
+    write_mailbox(
+        state.path(),
+        "lh-1",
+        &[("2026-11-01T05:00:00.400000000Z", "done")],
+    );
+
+    let row = &json(state.path(), &[])["herds"][0]["retired"][0];
+
+    assert_eq!(row["rounds"], 1);
+    assert_eq!(row["merge_wait_secs"], 0);
+}
+
+#[test]
+fn a_done_after_retirement_is_not_counted() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[Member::new("lh-1", "2026-11-01T00:00:00Z").retired("2026-11-01T05:00:00Z")],
+    );
+    write_mailbox(
+        state.path(),
+        "lh-1",
+        &[
+            ("2026-11-01T02:00:00Z", "done"),
+            ("2026-11-01T05:00:01Z", "done"),
+        ],
+    );
+
+    let row = &json(state.path(), &[])["herds"][0]["retired"][0];
+
+    assert_eq!(row["rounds"], 1);
+    assert_eq!(row["merge_wait_secs"], 3 * 3600);
+}
+
+#[test]
+fn a_member_without_a_done_keeps_its_row_but_not_the_rounds_median() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[
+            Member::new("lh-1", "2026-11-01T00:00:00Z").retired("2026-11-01T05:00:00Z"),
+            Member::new("lh-2", "2026-11-02T00:00:00Z").retired("2026-11-02T01:00:00Z"),
+        ],
+    );
+    write_mailbox(state.path(), "lh-1", &[("2026-11-01T02:00:00Z", "done")]);
+
+    let herd = &json(state.path(), &[])["herds"][0];
+
+    assert_eq!(
+        herd["retired"][1],
+        serde_json::json!({
+            "name": "lh-2", "template": "card", "started": "2026-11-02T00:00:00Z",
+            "first_done_secs": null, "rounds": 0, "merge_wait_secs": null,
+            "total_secs": 3600,
+        })
+    );
+    assert_eq!(herd["summary"]["rounds_median"], 1.0);
+    assert_eq!(herd["summary"]["total"]["median_secs"], 3 * 3600);
+}
+
+#[test]
+fn an_untimed_retirement_shows_no_merge_wait_or_total() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[Member::new("lh-1", "2026-11-01T00:00:00Z").retired_untimed()],
+    );
+    write_mailbox(state.path(), "lh-1", &[("2026-11-01T02:00:00Z", "done")]);
+
+    let row = &json(state.path(), &[])["herds"][0]["retired"][0];
+
+    assert_eq!(row["first_done_secs"], 7200);
+    assert_eq!(row["merge_wait_secs"], serde_json::Value::Null);
+    assert_eq!(row["total_secs"], serde_json::Value::Null);
+}
+
+#[test]
+fn rows_are_ordered_by_start_time() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[
+            Member::new("lh-a", "2026-11-02T00:00:00Z").retired("2026-11-02T05:00:00Z"),
+            Member::new("lh-b", "2026-11-01T00:00:00Z").retired("2026-11-01T05:00:00Z"),
+        ],
+    );
+
+    assert_eq!(names(&json(state.path(), &[]), "retired"), ["lh-b", "lh-a"]);
+}
+
+fn since_fixture(state: &Path) {
+    write_ledger(
+        state,
+        &[
+            Member::new("before", "2026-11-01T11:59:59Z"),
+            Member::new("at", "2026-11-01T12:00:00Z"),
+        ],
+    );
+}
+
+#[test]
+fn since_is_on_or_after_and_honors_an_offset() {
+    let state = tempfile::tempdir().unwrap();
+    since_fixture(state.path());
+
+    for since in [
+        "2026-11-01T12:00:00Z",
+        "2026-11-01T12:00:00+00:00",
+        "2026-11-01T05:00:00-07:00",
+        "2026-11-01T17:00:00.0+05:00",
+    ] {
+        let json = json(state.path(), &["--since", since]);
+        assert_eq!(names(&json, "open"), ["at"], "--since {since}");
+    }
+}
+
+#[test]
+fn a_date_since_means_midnight_utc() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[
+            Member::new("before", "2026-10-31T23:59:59Z"),
+            Member::new("at", "2026-11-01T00:00:00Z"),
+        ],
+    );
+
+    let json = json(state.path(), &["--since", "2026-11-01"]);
+
+    assert_eq!(names(&json, "open"), ["at"]);
+}
+
+#[test]
+fn an_unparsable_mailbox_line_is_warned_about() {
+    let state = tempfile::tempdir().unwrap();
+    one_retired_member(state.path());
+    let mailbox = state.path().join("loopherd/reports/lh-1.jsonl");
+    let mut text = fs::read_to_string(&mailbox).unwrap();
+    text.push_str("not json\n");
+    fs::write(&mailbox, text).unwrap();
+
+    let out = run(state.path(), &[]);
+
+    assert_eq!(out.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("loopherd stats: warning: skipped a bad line in"),
+        "{stderr}"
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("lh-1"));
 }

@@ -150,7 +150,8 @@ enum Command {
         /// Only this herd.
         #[arg(long)]
         herd: Option<String>,
-        /// Only members started on or after this UTC date (2026-11-01) or RFC 3339 time.
+        /// Only members started on or after this date (2026-11-01, midnight UTC) or RFC 3339
+        /// time with `Z` or an offset.
         #[arg(long, value_parser = stats::parse_since)]
         since: Option<SystemTime>,
         /// Print JSON.
