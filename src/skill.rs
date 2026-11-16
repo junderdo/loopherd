@@ -76,7 +76,32 @@ mod tests {
     }
 
     #[test]
+    fn the_shepherd_has_a_setting_up_a_project_section() {
+        let section = SKILL
+            .split_once("\n### Setting up a project\n")
+            .map(|(_, rest)| rest.split_once("\n## ").map_or(rest, |(s, _)| s))
+            .expect("a Setting up a project section");
+        for step in [
+            "loopherd init",
+            "loopherd herds",
+            "loopherd feed <herd> --dry-run",
+            "trust dialog",
+            "loopherd lead <herd>",
+        ] {
+            assert!(section.contains(step), "the section misses {step:?}");
+        }
+    }
+
+    #[test]
     fn names_nothing_from_this_repo() {
+        // init writes these into any repo, so the skill may name them.
+        let skill = [
+            "AGENTS.md",
+            "docs/agents/issue-tracker.md",
+            "docs/agents/loopherd.md",
+        ]
+        .iter()
+        .fold(SKILL.to_owned(), |skill, path| skill.replace(path, ""));
         for word in [
             "lh-",
             "LH-",
@@ -88,7 +113,7 @@ mod tests {
             "AGENTS.md",
             "cargo",
         ] {
-            assert!(!SKILL.contains(word), "the skill names {word:?}");
+            assert!(!skill.contains(word), "the skill names {word:?}");
         }
     }
 

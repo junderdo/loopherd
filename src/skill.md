@@ -25,6 +25,30 @@ that pane. Read `herdr --skill` before controlling herdr.
 
 ## Shepherd
 
+### Setting up a project
+
+`loopherd init` writes a herd's structure; you tailor its prose to the repo.
+Init never launches an agent.
+
+1. Run `loopherd init` in the repo, or check it already ran: `loopherd
+   herds` lists the herd file it wrote.
+2. Read the repo's `AGENTS.md`, `docs/agents/issue-tracker.md` and
+   `docs/agents/loopherd.md`.
+3. If the tracker isn't GitHub, init left `[queue] source` empty. Fill it
+   from the tracker doc with a command printing one task per line, its
+   words in the template's `params` order, then rewrite the template's `done` and `merged` checks for the same tracker.
+4. Adjust the worker prompt and the checks it lists to how the repo builds,
+   tests and reviews; for a herd with a lead, its prompt file too.
+5. Edit only what init wrote: the herd file (with `loopherd herd set`), the
+   lead's prompt file beside it, and the repo files init listed. Leave the
+   rest of the repo and other herds alone.
+6. You're done when `loopherd herds` calls the herd valid and
+   `loopherd feed <herd> --dry-run` lists the tasks you expect from the
+   tracker.
+7. Remind the human to open Claude in the repo once and accept its
+   trust dialog, since members can't start past it, and that
+   `loopherd lead <herd>` starts the herd's lead when they want one.
+
 ### A task's life
 
 1. **Feed.** Keep the `loopherd` on PATH current, since members call it for
