@@ -14,7 +14,7 @@ const HERDR_STUB: &str = r#"#!/usr/bin/env bash
 case $1 in
   status) printf '  socket: %s\nstatus: running\n' "$HOME/.config/herdr/sessions/loopherd-dev/herdr.sock" ;;
   workspace) echo '{"result":{"workspaces":[]}}' ;;
-  --session) printf %s "$LOOPHERD_CONFIG_DIR" > "$HOME/server-config-dir.part"
+  --session) printf %s "$LOOPHERD_CONFIG_DIR" > "$HOME/server-config-dir.part" &&
     mv "$HOME/server-config-dir.part" "$HOME/server-config-dir" ;;
 esac
 "#;
