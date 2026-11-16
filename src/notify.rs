@@ -157,6 +157,11 @@ pub fn send(
 ) -> Result<()> {
     let mut failed = None;
     for event in events.iter().filter(|e| config.kinds.contains(&e.kind)) {
+        // Before the mark, so a text that can't be built never leaves a question marked.
+        let text = match event.kind {
+            Kind::Question => summary(&event.text),
+            Kind::Blocked => Kind::Blocked.as_str().to_string(),
+        };
         let marked = match &event.at {
             Some(at) => first_to_notify(mailboxes, &event.member, at),
             None => first_to_notify_blocked(mailboxes, &event.member),
@@ -169,10 +174,6 @@ pub fn send(
                 continue;
             }
         }
-        let text = match event.kind {
-            Kind::Question => summary(&event.text),
-            Kind::Blocked => Kind::Blocked.as_str().to_string(),
-        };
         let herd = event.herd.as_deref().unwrap_or_default();
         let mut launches = vec![];
         if config.herdr {
@@ -459,7 +460,7 @@ fn clause_start(value: &str) -> (Shown<'_>, Next) {
 /// The punctuation ending `word`'s clause (`,` `;` `?` `!` `.` or a closing quote
 /// or bracket), if it ends one. A cookie's `a=b;` doesn't, so its next pair is hidden.
 fn clause_end(word: &str) -> Option<&str> {
-    let value = word.trim_end_matches(|c: char| ",;?!.)]}\"'".contains(c));
+    let value = word.trim_end_matches(|c: char| ",;?!.)]}\"'”’".contains(c));
     let end = &word[value.len()..];
     let cookie_pair = end.starts_with(';') && value.contains('=');
     (!end.is_empty() && !cookie_pair).then_some(end)
@@ -637,8 +638,10 @@ fn carried_value(word: &str) -> Option<(bool, &str)> {
     word.match_indices([':', '=']).find_map(|(at, _)| {
         let left = word[..at].trim_end_matches(['"', '\'']);
         let key_start = left
-            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
-            .map_or(0, |i| i + 1);
+            .char_indices()
+            .rev()
+            .find(|&(_, c)| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+            .map_or(0, |(i, c)| i + c.len_utf8());
         let value = &word[at + 1..];
         let key = secret_key(&left[key_start..], true)?;
         let starts_word = left[..key_start]
@@ -1228,6 +1231,46 @@ mod tests {
             mailbox(dir.path()),
             [note(
                 "notify command failed (could not start loopherd); \
+                 further failures go unnoted until it next succeeds"
+            )]
+        );
+    }
+
+    #[test]
+    fn a_question_with_non_ascii_text_is_sent() {
+        for (question, text) in [
+            (
+                "Reviewer said “done”: merge?",
+                "Reviewer said “done”: merge?",
+            ),
+            ("Is the café: open?", "Is the café: open?"),
+            ("Run git rev-parse …: fatal?", "Run git rev-parse …: fatal?"),
+            (
+                "Docs say “token: abc” ok?",
+                "Docs say “token: [redacted]” ok?",
+            ),
+            ("Merge? naïve=ok", "Merge? naïve=ok"),
+        ] {
+            assert_eq!(text_sent(question), text, "{question}");
+        }
+    }
+
+    #[test]
+    fn a_failing_commands_non_ascii_stderr_is_noted() {
+        let dir = tempfile::tempdir().unwrap();
+
+        run(
+            &stub("echo 'naïve=ok: café' >&2; exit 3"),
+            dir.path(),
+            SOON,
+            SystemTime::now(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            mailbox(dir.path()),
+            [note(
+                "notify command failed (exit 3: naïve=ok: café); \
                  further failures go unnoted until it next succeeds"
             )]
         );
