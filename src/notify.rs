@@ -378,12 +378,12 @@ fn first_to_notify(mailboxes: &Path, member: &str, at: &str) -> Result<bool> {
 const MAX_TEXT: usize = 200;
 
 /// The question's first non-blank line, cut to [`MAX_TEXT`] characters, with each word
-/// that looks like a token, carries one or follows a key replaced by `[redacted]`,
-/// and a URL's userinfo hidden. A key followed only by a space (`password hunter2`)
-/// hides the next word only if it [looks like a secret](looks_like_a_secret), so
-/// "the auth flow" survives; an identifier (`GITHUB_TOKEN`, `API-KEY`), `Bearer`,
-/// `--password` or `password:` hides it outright. Best-effort: a secret in a shape
-/// it doesn't know gets through.
+/// that looks like a token, carries one (`token=abc`) or is a key's value replaced by
+/// `[redacted]`, and a URL's userinfo hidden. A key with a separator (`password:`,
+/// `password =`, `--password`) hides the next word outright; any other mention of a
+/// key hides it only if it [looks like a secret](looks_like_a_secret), so a merge
+/// question naming `GITHUB_TOKEN` or "the auth flow" survives. Best-effort: a secret
+/// in a shape it doesn't know gets through.
 fn summary(question: &str) -> String {
     let line = question
         .lines()
@@ -393,17 +393,16 @@ fn summary(question: &str) -> String {
     let words: Vec<String> = line
         .split_whitespace()
         .map(|word| {
-            let norm = normalized(word);
             let hidden;
             (hidden, next) = match next {
-                Next::Quoted(quote) => (true, Next::closed_by(word, quote)),
-                Next::Value | Next::MaybeValue if [":", "="].contains(&norm.as_str()) => {
-                    (false, Next::Value)
-                }
-                Next::Value | Next::MaybeValue if FILLERS.contains(&norm.as_str()) => (false, next),
+                Next::Closing(closer) => (true, Next::closed_by(word, closer)),
                 Next::Value => (true, Next::after_value(word)),
-                Next::MaybeValue if looks_like_a_secret(word) => (true, Next::after_value(word)),
-                Next::Free | Next::MaybeValue => match carried_value(word) {
+                Next::Key(key) if is_separator(word) => (false, key.value()),
+                Next::Key(_) if FILLERS.contains(&normalized(word).as_str()) => (false, next),
+                Next::Key(_) | Next::MaybeValue if looks_like_a_secret(word) => {
+                    (true, Next::after_value(word))
+                }
+                Next::Free | Next::Key(_) | Next::MaybeValue => match carried_value(word) {
                     Some(value) => (true, Next::after_value(value)),
                     None => (token_shaped(word), key_named_by(word)),
                 },
@@ -425,55 +424,81 @@ fn summary(question: &str) -> String {
 #[derive(Clone, Copy)]
 enum Next {
     Free,
-    /// After `password:`, `--token` or `Bearer`.
+    /// Hidden outright.
     Value,
-    /// After a bare key word such as `password`.
+    /// Hidden if it looks like a secret.
     MaybeValue,
-    /// Inside a quoted value, until the word that closes it.
-    Quoted(char),
+    /// After a key with no separator yet: `password`, `the token is`.
+    Key(Key),
+    /// Inside a quoted or bracketed value, until the word that closes it.
+    Closing(char),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Key {
+    /// `password`, `GITHUB_TOKEN`, `privateKey`.
+    Strong,
+    /// A short key alone (`key`, `auth`, `session`): `Auth: merge #107 now?`.
+    Weak,
+}
+
+impl Key {
+    /// The next word, once a separator follows this key.
+    fn value(self) -> Next {
+        match self {
+            Key::Strong => Next::Value,
+            Key::Weak => Next::MaybeValue,
+        }
+    }
 }
 
 impl Next {
-    /// After a hidden `value`: the rest of an unclosed quote, or the credential
-    /// after an auth scheme, is hidden too.
+    /// After a hidden `value`: the rest of an unclosed quote or bracket, the
+    /// next `a=b;` pair, or the credential after an auth scheme.
     fn after_value(value: &str) -> Next {
-        let value = value.trim_start_matches(['{', '(', '[']);
-        match value.chars().next() {
-            Some(quote @ ('"' | '\'')) => Next::closed_by(&value[1..], quote),
-            _ if AUTH_SCHEMES.contains(&normalized(value).as_str()) => Next::Value,
-            _ => Next::Free,
+        let closer = match value.chars().next() {
+            Some('"') => Some('"'),
+            Some('\'') => Some('\''),
+            Some('[') => Some(']'),
+            Some('(') => Some(')'),
+            Some('{') => Some('}'),
+            _ => None,
+        };
+        let scheme = normalized(value);
+        match closer {
+            Some(closer) => Next::closed_by(&value[1..], closer),
+            None if value.ends_with(';') => Next::Value,
+            None if ["bearer", "basic", "digest"].contains(&scheme.as_str()) => Next::Value,
+            None if scheme == "token" => Next::MaybeValue,
+            None => Next::Free,
         }
     }
 
-    fn closed_by(word: &str, quote: char) -> Next {
-        match word.contains(quote) {
+    fn closed_by(word: &str, closer: char) -> Next {
+        match word.contains(closer) {
             true => Next::Free,
-            false => Next::Quoted(quote),
+            false => Next::Closing(closer),
         }
     }
 }
 
-const SECRET_KEYS: [&str; 15] = [
+/// Matched at the end of a key, so `accessToken`, `PGPASSWORD` and `x-api-key` count.
+const SECRET_KEYS: [&str; 10] = [
     "token",
     "secret",
     "password",
     "passwd",
     "passphrase",
-    "pwd",
     "apikey",
-    "auth",
     "authorization",
     "bearer",
     "credential",
-    "credentials",
     "cookie",
-    "session",
-    "key",
 ];
+/// Matched only whole or after a `_`/`-`/case boundary, so `monkey` and `hotkey` don't.
+const SHORT_KEYS: [&str; 4] = ["key", "auth", "pwd", "session"];
 /// Kept between a key and its value: `the password is hunter2`.
 const FILLERS: [&str; 3] = ["is", "was", "to"];
-/// After `Authorization:`, the scheme and the credential both go.
-const AUTH_SCHEMES: [&str; 4] = ["bearer", "basic", "digest", "token"];
 const TOKEN_PREFIXES: [&str; 11] = [
     "ghp_",
     "gho_",
@@ -488,44 +513,69 @@ const TOKEN_PREFIXES: [&str; 11] = [
     "AKIA",
 ];
 
-/// Lowercase, with `-` spelled `_`, so `X-Api-Key` reads as `x_api_key`.
+/// Lowercase, with `-` and a lower-to-upper case change spelled `_`, so
+/// `X-Api-Key` and `privateKey` read as `x_api_key` and `private_key`.
 fn normalized(word: &str) -> String {
-    word.to_ascii_lowercase().replace('-', "_")
+    let mut out = String::with_capacity(word.len());
+    let mut lower_before = false;
+    for c in word.chars() {
+        if lower_before && c.is_ascii_uppercase() {
+            out.push('_');
+        }
+        lower_before = c.is_ascii_lowercase();
+        out.push(match c {
+            '-' => '_',
+            c => c.to_ascii_lowercase(),
+        });
+    }
+    out
 }
 
-/// `name` is a secret key as a whole word or as the last part of one:
-/// `token`, `GITHUB_TOKEN`, `x-api-key`, but not `monkey` or `hotkey`.
-fn is_secret_key(name: &str) -> bool {
+/// `name` as a secret key, if it is one.
+fn secret_key(name: &str) -> Option<Key> {
     let name = normalized(name);
-    SECRET_KEYS
+    if SHORT_KEYS.contains(&name.as_str()) {
+        return Some(Key::Weak);
+    }
+    let short = SHORT_KEYS
         .iter()
-        .any(|key| name == *key || name.ends_with(&format!("_{key}")))
+        .any(|key| name.ends_with(&format!("_{key}")));
+    (short || SECRET_KEYS.iter().any(|key| name.ends_with(key))).then_some(Key::Strong)
 }
 
-/// How `word` makes the next one a value: `password:`, `"token":`,
-/// `--password`, `GITHUB_TOKEN` or `Bearer` hide it outright; a bare key word
-/// like `password` only when it looks like a secret.
+/// `:`, `=`, or a filler carrying one: `password = x`, `the token is: x`.
+fn is_separator(word: &str) -> bool {
+    word.strip_suffix([':', '='])
+        .is_some_and(|rest| rest.is_empty() || FILLERS.contains(&normalized(rest).as_str()))
+}
+
+/// What `word` makes the next one: a value after `password:`, `"token":` or
+/// `--password`; one after a whole capitalised key (`TOKEN`), read as a label;
+/// else a key awaiting its separator.
 fn key_named_by(word: &str) -> Next {
     let word = word.trim_start_matches(['"', '\'', '{', '(', '[']);
     let flag = word.trim_start_matches('-');
-    let (key, explicit) = match word.strip_suffix([':', '=']) {
-        Some(key) => (key.trim_end_matches(['"', '\'']), true),
-        None => (flag, flag.len() < word.len()),
+    let (name, separated) = match flag.strip_suffix([':', '=']) {
+        Some(name) => (name, true),
+        None => (flag, false),
     };
-    match is_secret_key(key) {
-        false => Next::Free,
-        true if explicit || key.contains(['_', '-']) || key.eq_ignore_ascii_case("bearer") => {
-            Next::Value
-        }
-        true => Next::MaybeValue,
+    let name = name.trim_end_matches(['"', '\'']);
+    let Some(key) = secret_key(name) else {
+        return Next::Free;
+    };
+    let label = name.chars().all(|c| c.is_ascii_uppercase()) && key == Key::Strong;
+    match () {
+        _ if separated => key.value(),
+        _ if flag.len() < word.len() || label => Next::Value,
+        _ => Next::Key(key),
     }
 }
 
-/// A digit, or 8 or more letters with no vowel: `hunter2`, `xkcdqwrtz`,
-/// but not `flow`, `now` or `reset`.
+/// Six or more characters with a digit, or eight or more with no vowel:
+/// `hunter2`, `xkcdqwrtz`, but not `v2`, `#107`, `flow` or `reset`.
 fn looks_like_a_secret(word: &str) -> bool {
     let word = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
-    word.contains(|c: char| c.is_ascii_digit())
+    (word.len() >= 6 && word.contains(|c: char| c.is_ascii_digit()))
         || (word.len() >= 8 && !word.contains(|c: char| "aeiouAEIOU".contains(c)))
 }
 
@@ -538,7 +588,7 @@ fn carried_value(word: &str) -> Option<&str> {
             .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
             .map_or(0, |i| i + 1);
         let value = &word[at + 1..];
-        (is_secret_key(&left[key_start..]) && !value.is_empty()).then_some(value)
+        (secret_key(&left[key_start..]).is_some() && !value.is_empty()).then_some(value)
     })
 }
 
@@ -888,7 +938,7 @@ mod tests {
             ("--password pw2 ok?", "--password [redacted] ok?"),
             ("auth=q ok?", "[redacted] ok?"),
             ("credential: c1 ok?", "credential: [redacted] ok?"),
-            ("Bearer xyz ok?", "Bearer [redacted] ok?"),
+            ("Bearer abc123def ok?", "Bearer [redacted] ok?"),
             (
                 "Authorization: Bearer xyz ok?",
                 "Authorization: [redacted] [redacted] ok?",
@@ -924,8 +974,8 @@ mod tests {
                 r#""password": [redacted] ok?"#,
             ),
             (r#"{"token":"abc"} ok?"#, "[redacted] ok?"),
-            ("GITHUB_TOKEN abc ok?", "GITHUB_TOKEN [redacted] ok?"),
-            ("API-KEY abc ok?", "API-KEY [redacted] ok?"),
+            ("GITHUB_TOKEN abc123 ok?", "GITHUB_TOKEN [redacted] ok?"),
+            ("API-KEY abc123 ok?", "API-KEY [redacted] ok?"),
             (
                 r#"password: "hunter 2" ok?"#,
                 "password: [redacted] [redacted] ok?",
@@ -934,6 +984,31 @@ mod tests {
             ("session=abc ok?", "[redacted] ok?"),
             ("Cookie: sid=abc ok?", "Cookie: [redacted] ok?"),
             ("the secret xkcdqwrtz ok?", "the secret [redacted] ok?"),
+            ("accessToken=abc ok?", "[redacted] ok?"),
+            ("clientSecret: abc ok?", "clientSecret: [redacted] ok?"),
+            ("PGPASSWORD=abc ok?", "[redacted] ok?"),
+            ("secretKey=hunter ok?", "[redacted] ok?"),
+            ("privateKey: hunter ok?", "privateKey: [redacted] ok?"),
+            ("dbPassword: hunter ok?", "dbPassword: [redacted] ok?"),
+            ("password = hunter ok?", "password = [redacted] ok?"),
+            ("password : x ok?", "password : [redacted] ok?"),
+            (r#"password = "hunter" ok?"#, "password = [redacted] ok?"),
+            (
+                r#""password" : "hunter" ok?"#,
+                r#""password" : [redacted] ok?"#,
+            ),
+            (
+                r#""password" = "hunter" ok?"#,
+                r#""password" = [redacted] ok?"#,
+            ),
+            ("the token is: hunter ok?", "the token is: [redacted] ok?"),
+            (
+                "Cookie: sid=abc; other=def ok?",
+                "Cookie: [redacted] [redacted] ok?",
+            ),
+            ("password=[abc def] ok?", "[redacted] [redacted] ok?"),
+            ("TOKEN hunter ok?", "TOKEN [redacted] ok?"),
+            ("PASSWORD hunter ok?", "PASSWORD [redacted] ok?"),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
         }
@@ -950,6 +1025,16 @@ mod tests {
             "Which hotkey: ctrl or alt?",
             "Merge #12 (monkey=patch fix)?",
             "Is the session over?",
+            "Merge #107, the auth-token refresh fix?",
+            "Merge #107 (x-api-key header)?",
+            "Merge #110 that renames GITHUB_TOKEN handling?",
+            "Merge the session-cookie fix?",
+            "Auth: merge #107 now?",
+            "Key: which of #107 or #108 first?",
+            "Update auth to v2?",
+            "Is the token 2 days old?",
+            "Is the bearer token flow done?",
+            "Rotate the token by Fri?",
         ] {
             assert_eq!(text_sent(question), question);
         }
