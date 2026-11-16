@@ -48,6 +48,8 @@ reviewer verified.";
 
 const NO_MERGED: &str =
     "without GitHub the herd has no merged check, so after_merge never runs for its members";
+const NO_MERGED_NOTE: &str =
+    "Without GitHub it has no merged check, so after_merge never runs for its members.\n";
 
 pub struct Request<'a> {
     pub dir: &'a Path,
@@ -101,14 +103,13 @@ pub fn init(paths: &Paths, req: Request) -> Result<Vec<String>> {
         terminal: ask::interactive(),
     };
     let herd = settle(paths, req, &ask, Mode::Write)?;
-    if herd.github.is_none() {
-        eprintln!("warning: {NO_MERGED}");
-    }
     if ask.terminal {
         eprint!("{}", summary(&herd));
         if !ask.yes("Write this herd?", None, true)? {
             bail!("nothing written");
         }
+    } else if herd.github.is_none() {
+        eprintln!("warning: {NO_MERGED}");
     }
     write(paths, herd)
 }
@@ -603,10 +604,14 @@ fn summary(herd: &Herd) -> String {
         ),
         None => format!("branch  {}", herd.branch),
     };
+    let no_merged = match herd.github {
+        Some(_) => "",
+        None => NO_MERGED_NOTE,
+    };
     format!(
         "\nHerd {name}:\n  repo    {repo}\n  {branch}\n  \
          max     {max} workers at once\n  lead    {lead}\n  limit   {limit}\n  checks  {checks}\n\
-         {also}",
+         {also}{no_merged}",
         name = herd.name,
         repo = herd.repo.display(),
         max = herd.max,

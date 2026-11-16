@@ -3568,6 +3568,10 @@ fn on_a_terminal_a_local_tracker_without_github_takes_enter_as_none() {
         !shown.contains("gh account") && !shown.contains("GitHub  "),
         "{shown}"
     );
+    let note = "Without GitHub it has no merged check, so after_merge never runs for its \
+                members.\r\nWrite this herd?";
+    assert!(shown.contains(note), "{shown}");
+    assert!(!shown.contains("warning: without GitHub"), "{shown}");
     assert_eq!(fixture.gh_calls(), "");
 }
 
