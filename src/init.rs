@@ -10,24 +10,14 @@ use anyhow::{Context, Result, bail};
 use crate::herd::{self, Paths};
 use crate::worktree::{repo_root, same_dir};
 
-const HERD: &str = include_str!("init/herd.toml");
-const LEAD: &str = include_str!("init/lead.md");
+mod tracker;
 
-/// The labels the herd's queue and workers use, with a description and colour each.
-const LABELS: [(&str, &str, &str); 4] = [
-    (
-        "ready-for-agent",
-        "Fully specified; an agent may claim it",
-        "0E8A16",
-    ),
-    (
-        "needs-info",
-        "Stopped on a question for the human",
-        "D876E3",
-    ),
-    ("ready-for-human", "Needs a human to work it", "FBCA04"),
-    ("blocked", "Waiting on other issues", "B60205"),
-];
+pub use tracker::Choice as Tracker;
+
+const HERD: &str = include_str!("init/herd.toml");
+const GITHUB_SOURCE: &str = include_str!("init/github-source.toml");
+const PLACEHOLDER_SOURCE: &str = include_str!("init/placeholder-source.toml");
+const LEAD: &str = include_str!("init/lead.md");
 
 pub struct Request<'a> {
     pub dir: &'a Path,
@@ -36,12 +26,14 @@ pub struct Request<'a> {
     pub gh_account: Option<&'a str>,
     /// `<owner>/<name>`, for an origin init can't read as GitHub.
     pub github: Option<&'a str>,
+    /// The tracker to record when the repo has no tracker doc.
+    pub tracker: Option<Tracker>,
 }
 
 /// Writes the herd file and its lead prompt and creates missing labels,
 /// returning what it did and the next steps. Refuses, changing nothing,
 /// when either file exists.
-pub fn init(paths: &Paths, req: &Request) -> Result<Vec<String>> {
+pub fn init(paths: &Paths, req: Request) -> Result<Vec<String>> {
     let repo = repo_root(req.dir)?;
     let herd = match req.herd {
         Some(herd) => herd.to_string(),
@@ -75,6 +67,7 @@ pub fn init(paths: &Paths, req: &Request) -> Result<Vec<String>> {
     let herd_file = paths.herds.join(format!("{herd}.toml"));
     let lead_file = paths.herds.join(format!("{herd}-lead.md"));
     refuse_existing(paths, &herd, &repo, &herd_file, &lead_file)?;
+    let tracker = tracker::resolve(&repo, req.tracker)?;
     let checks = req
         .checks
         .iter()
@@ -109,7 +102,12 @@ pub fn init(paths: &Paths, req: &Request) -> Result<Vec<String>> {
         .join("\n");
     let repo_path = toml_string(&repo.to_string_lossy());
     let lead_prompt = toml_string(&format!("{herd}-lead.md"));
-    let values = [
+    let labels = &tracker.labels;
+    let (needs_info_lc, ready_for_human_lc) = (
+        labels.needs_info.to_ascii_lowercase(),
+        labels.ready_for_human.to_ascii_lowercase(),
+    );
+    let mut values = vec![
         ("OWNER_REPO", slug.as_str()),
         ("ACCOUNT", &account),
         ("HERD", &herd),
@@ -118,17 +116,63 @@ pub fn init(paths: &Paths, req: &Request) -> Result<Vec<String>> {
         ("CHECKS", &checks),
         ("LEAD_PROMPT", &lead_prompt),
         ("SWITCHES", &switches),
+        ("READY_FOR_AGENT", &labels.ready_for_agent),
+        ("NEEDS_INFO", &labels.needs_info),
+        ("READY_FOR_HUMAN", &labels.ready_for_human),
+        ("NEEDS_INFO_LC", &needs_info_lc),
+        ("READY_FOR_HUMAN_LC", &ready_for_human_lc),
     ];
+    // Filled before it joins the herd file, whose fill leaves inserted text literal.
+    let source = fill(
+        match tracker.github {
+            true => GITHUB_SOURCE,
+            false => PLACEHOLDER_SOURCE,
+        },
+        &values,
+    );
+    let source = source.trim_end();
+    values.push(("SOURCE", source));
     fs::create_dir_all(&paths.herds)
         .with_context(|| format!("create {}", paths.herds.display()))?;
-    let mut lines = create_labels(token, &slug)?;
-    write_new(&lead_file, &fill(LEAD, &values))?;
-    if let Err(e) = write_new(&herd_file, &fill(HERD, &values)) {
-        let _ = fs::remove_file(&lead_file);
-        return Err(e);
+    let mut lines = match tracker.github {
+        true => create_labels(token, &slug, labels)?,
+        false => vec![],
+    };
+    let mut written: Vec<PathBuf> = vec![];
+    let files = [
+        (lead_file.clone(), fill(LEAD, &values)),
+        (herd_file.clone(), fill(HERD, &values)),
+    ]
+    .into_iter()
+    .chain(
+        tracker
+            .writes
+            .iter()
+            .map(|(path, text)| (repo.join(path), text.clone())),
+    );
+    for (path, text) in files {
+        if let Err(e) = write_new(&path, &text) {
+            for path in &written {
+                let _ = fs::remove_file(path);
+            }
+            return Err(e);
+        }
+        written.push(path);
     }
     lines.push(format!("wrote {}", herd_file.display()));
     lines.push(format!("wrote {}", lead_file.display()));
+    for (path, _) in &tracker.writes {
+        lines.push(format!("wrote {path} (uncommitted)"));
+    }
+    if !tracker.github {
+        lines.push(format!(
+            "The tracker isn't GitHub, so the herd's queue source is a placeholder and \
+             `loopherd herds` reports it invalid: fill [queue] source in {} from \
+             {}, and adapt its issue template to the same tracker.",
+            herd_file.display(),
+            tracker::TRACKER_DOC
+        ));
+    }
     lines.extend([
         "Next:".into(),
         format!(
@@ -277,8 +321,27 @@ fn account(owner: &str, wanted: Option<&str>) -> Result<String> {
     }
 }
 
-/// Creates each of [`LABELS`] the repo lacks, one line per label created.
-fn create_labels(token: &str, slug: &str) -> Result<Vec<String>> {
+/// Creates each label the herd's queue and workers use that the repo lacks,
+/// one line per label created.
+fn create_labels(token: &str, slug: &str, labels: &tracker::Labels) -> Result<Vec<String>> {
+    let wanted = [
+        (
+            labels.ready_for_agent.as_str(),
+            "Fully specified; an agent may claim it",
+            "0E8A16",
+        ),
+        (
+            &labels.needs_info,
+            "Stopped on a question for the human",
+            "D876E3",
+        ),
+        (
+            &labels.ready_for_human,
+            "Needs a human to work it",
+            "FBCA04",
+        ),
+        ("blocked", "Waiting on other issues", "B60205"),
+    ];
     let existing = gh(
         Some(token),
         &[
@@ -288,7 +351,7 @@ fn create_labels(token: &str, slug: &str) -> Result<Vec<String>> {
     )?;
     let existing: Vec<&str> = existing.lines().collect();
     let mut created = vec![];
-    for (name, description, color) in LABELS {
+    for (name, description, color) in wanted {
         if existing
             .iter()
             .any(|label| label.eq_ignore_ascii_case(name))
@@ -378,7 +441,10 @@ fn toml_string(value: &str) -> String {
 }
 
 /// Writes `text` to a new file at `path`, leaving no file behind on failure.
-fn write_new(path: &PathBuf, text: &str) -> Result<()> {
+fn write_new(path: &Path, text: &str) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    }
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)

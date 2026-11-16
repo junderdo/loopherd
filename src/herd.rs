@@ -981,6 +981,9 @@ fn validate_queue(queue: &QueueFile, templates: &BTreeMap<String, TemplateFile>)
     if queue.max < 1 {
         bail!("max must be at least 1, got {}", queue.max);
     }
+    if queue.source.trim().is_empty() {
+        bail!("source is empty; set the shell command that prints the ready tasks");
+    }
     Ok(())
 }
 
@@ -2045,6 +2048,10 @@ args = ["--model", "opus"]
                 "queue: max must be at least 1, got -2",
             ),
             ("template = \"t\"\nmax = 1", "missing field `source`"),
+            (
+                "template = \"t\"\nsource = \" \\n\"\nmax = 1",
+                "queue: source is empty",
+            ),
             (
                 "template = \"t\"\ntemplates = [\"t\"]\nsource = \"echo 1\"\nmax = 1",
                 "queue: set one of template and templates, not both",

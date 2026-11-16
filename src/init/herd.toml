@@ -5,22 +5,7 @@ args = ["--permission-mode", "auto"]
 
 [queue]
 template = "issue"
-# Prints "<number> <type> <skill> <slug>" per open issue labelled
-# ready-for-agent and none of blocked, needs-info, ready-for-human, oldest
-# first, matching labels whatever their case.
-# $types maps a label to the branch type (else feat); a skill:<name> label
-# names the skill the worker builds with (else tdd).
-source = '''
-GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue list --repo @OWNER_REPO@ --state open --label ready-for-agent --limit 1000 --json number,title,labels --jq '
-  {"bug": "fix", "documentation": "docs"} as $types
-  | sort_by(.number)[]
-  | [.labels[].name | ascii_downcase] as $labels
-  | select(any($labels[]; . == "blocked" or . == "needs-info" or . == "ready-for-human") | not)
-  | ([$labels[] | $types[.] | values][0] // "feat") as $type
-  | ([$labels[] | select(startswith("skill:")) | ltrimstr("skill:") | select(test("^[a-z0-9._:-]+$"))][0] // "tdd") as $skill
-  | ([.title | ascii_downcase | scan("[a-z0-9]+")][:5] | join("-")) as $slug
-  | "\(.number) \($type) \($skill) \(if $slug == "" then "issue" else $slug end)"'
-'''
+@SOURCE@
 max = 3
 
 [template.issue]
@@ -53,7 +38,7 @@ If @BRANCH@ moves under you, merge origin/@BRANCH@ into your branch; never
 rebase or force-push.
 
 If you hit a question only the human can answer, stop rather than guess:
-`GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue edit {number} --repo @OWNER_REPO@ --add-label needs-info`, comment the
+`GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue edit {number} --repo @OWNER_REPO@ --add-label @NEEDS_INFO@`, comment the
 question and the options you see on the issue, then
 `loopherd report --kind question "<the exact question>"`.
 '''

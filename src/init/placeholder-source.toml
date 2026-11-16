@@ -1,0 +1,5 @@
+# Fill in from docs/agents/issue-tracker.md: a shell command printing
+# "<number> <type> <skill> <slug>" per ready task, oldest first. Then adapt
+# the issue template's done check and prompt to the same tracker. Until this
+# is set, `loopherd herds` reports the herd invalid and feed refuses it.
+source = ""

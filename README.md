@@ -89,8 +89,18 @@ For a repo whose `origin` is on GitHub, with its tasks as GitHub issues:
 
 ```bash
 cd <repo>
-loopherd init --check "cargo fmt --check" --check "cargo test"   # [--herd <name>] [--gh-account <login>] [--repo <owner>/<name>]
+loopherd init --check "cargo fmt --check" --check "cargo test"   # [--herd <name>] [--gh-account <login>] [--repo <owner>/<name>] [--tracker github|local|other [--tracker-desc <text>]]
 ```
+
+init reads the tracker from `docs/agents/issue-tracker.md`, in
+mattpocock-skills' format. With none, it asks on a terminal, else takes
+`--tracker` (default `github`), and writes that doc plus
+`docs/agents/triage-labels.md` with the default labels, uncommitted. A doc
+titled `# Issue tracker: GitHub` gets the GitHub snippets below; any other
+tracker gets an empty queue `source` that `loopherd herds` reports invalid
+until you fill it from the doc. When `triage-labels.md` exists, its labels for
+`ready-for-agent`, `needs-info` and `ready-for-human` replace those names
+below; `blocked` is always loopherd's.
 
 It writes `<herd>.toml` (named after the repo dir) and `<herd>-lead.md` in
 the herds dir, and creates the labels `ready-for-agent`, `needs-info`,
