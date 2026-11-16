@@ -3,7 +3,8 @@
 Read `loopherd --skill` first: it is the shepherd's and lead's guide for any
 herd (D19). This file adds only what's specific to this repo's herd,
 `loopherd-cards`, whose members work Trello cards per
-[issue-tracker.md](issue-tracker.md).
+[issue-tracker.md](issue-tracker.md). Setting up a herd in another repo
+after `loopherd init` is the skill's "Setting up a project".
 
 ## Feed
 

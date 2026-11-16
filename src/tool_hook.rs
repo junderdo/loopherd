@@ -1,8 +1,9 @@
 //! `loopherd tool-hook`: Claude's PreToolUse hook on Bash. Blocks a command
 //! from a lead's pane that needs a switch its herd file leaves off (D17), or
 //! a `loopherd restart --force` (D20), a `loopherd pause` or `resume`
-//! (D23), a `loopherd herd set` or `unset` (D29), or a write of the lead
-//! defaults (D31), which no switch allows.
+//! (D23), a `loopherd herd set` or `unset` (D29), a write of the lead
+//! defaults (D31), cargo run through an alias it can't read, or a `$(…)`
+//! whose end it can't find, which no switch allows.
 //! A guardrail on the command text, not a sandbox.
 
 use std::path::Path;
@@ -34,6 +35,13 @@ pub enum Switch {
     /// `loopherd lead-defaults --set` or `scripts/install --lead-defaults`,
     /// which could turn a lead's own switches on. Not a switch: always the human's.
     LeadDefaults,
+    /// `cargo` run through a `CARGO_ALIAS_*` whose value the hook can't read.
+    /// Not a switch: always the human's.
+    OpaqueCargoAlias,
+    /// A command the hook may read differently from bash: one in a form
+    /// [`unreadable`] lists, or a `$(…)` whose end it can't find. Not a
+    /// switch: always the human's.
+    Unreadable,
 }
 
 impl Switch {
@@ -46,6 +54,8 @@ impl Switch {
             Switch::Pause => "pause",
             Switch::HerdEdit => "herd set",
             Switch::LeadDefaults => "lead-defaults",
+            Switch::OpaqueCargoAlias => "cargo alias",
+            Switch::Unreadable => "unreadable command",
         }
     }
 
@@ -58,6 +68,8 @@ impl Switch {
             Switch::Pause => "the human pauses and resumes herds",
             Switch::HerdEdit => "the human edits herd files",
             Switch::LeadDefaults => "the human sets lead defaults",
+            Switch::OpaqueCargoAlias => "the human runs cargo through such aliases",
+            Switch::Unreadable => "the human runs commands the hook can't read",
         }
     }
 
@@ -66,7 +78,12 @@ impl Switch {
             Switch::Merge => switches.merge,
             Switch::Install => switches.install,
             Switch::Rebase => switches.rebase,
-            Switch::ForceRestart | Switch::Pause | Switch::HerdEdit | Switch::LeadDefaults => false,
+            Switch::ForceRestart
+            | Switch::Pause
+            | Switch::HerdEdit
+            | Switch::LeadDefaults
+            | Switch::OpaqueCargoAlias
+            | Switch::Unreadable => false,
         }
     }
 }
@@ -109,6 +126,8 @@ fn decide(
                 Switch::Pause,
                 Switch::HerdEdit,
                 Switch::LeadDefaults,
+                Switch::OpaqueCargoAlias,
+                Switch::Unreadable,
             ]
         });
     if needed.is_empty() {
@@ -135,6 +154,20 @@ fn decide(
     if needed == Switch::LeadDefaults {
         return Ok(Some(format!(
             "loopherd: blocked: {} may not set lead defaults with `loopherd lead-defaults --set` or `scripts/install --lead-defaults`, which could turn its own switches on: {}; ask with `loopherd report --kind question`",
+            lead.name,
+            needed.humans_part()
+        )));
+    }
+    if needed == Switch::OpaqueCargoAlias {
+        return Ok(Some(format!(
+            "loopherd: blocked: {} may not run cargo through a `CARGO_ALIAS_*` whose value can't be read from the command: {}; spell the cargo command out, or ask with `loopherd report --kind question`",
+            lead.name,
+            needed.humans_part()
+        )));
+    }
+    if needed == Switch::Unreadable {
+        return Ok(Some(format!(
+            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, `$'…'`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc that leaves a quote open, a `<<` in `((…))`, or a `case` in `$(…)`: {}; rewrite it, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -196,102 +229,420 @@ fn bash_command(input: &[u8]) -> Option<String> {
 
 /// Every switch the simple commands in `script` need, in order.
 pub fn needs(script: &str) -> Vec<Switch> {
-    commands(script)
+    needs_with(script, &mut Aliases::default())
+}
+
+/// The `CARGO_ALIAS_*` variables assigned so far in a script.
+#[derive(Clone, Default)]
+struct Aliases {
+    /// Values by the alias's upper-case name; `None` when it can't be read.
+    values: std::collections::HashMap<String, Option<String>>,
+    /// Whether one was assigned under a name that can't be read, so any
+    /// alias may be set.
+    unreadable_name: bool,
+}
+
+impl Aliases {
+    fn assign(&mut self, word: &Word) {
+        if word.name_expands() {
+            self.unreadable_name = true;
+            return;
+        }
+        let Some((name, value)) = word
+            .text
+            .strip_prefix("CARGO_ALIAS_")
+            .and_then(|rest| rest.split_once('='))
+        else {
+            return;
+        };
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            self.unreadable_name = true;
+            return;
+        }
+        let readable =
+            !value.trim().is_empty() && !value.contains('$') && word.substituted_at.is_none();
+        self.values
+            .insert(name.to_uppercase(), readable.then(|| value.to_string()));
+    }
+}
+
+/// [`needs`] with the cargo aliases assigned before `script`. An assignment
+/// counts for the rest of the script, exported or not.
+fn needs_with(script: &str, aliases: &mut Aliases) -> Vec<Switch> {
+    let Some(commands) = commands(script).filter(|_| !unreadable(script)) else {
+        return vec![Switch::Unreadable];
+    };
+    commands
         .iter()
-        .flat_map(|words| needs_one(words))
+        .flat_map(|command| needs_one(command, aliases))
         .collect()
 }
 
-/// The simple commands in `script`, each as its words with quotes removed.
-/// `;`, `&`, `|`, newlines, parentheses, backticks and `$(` end a command;
-/// a `$(…)` or backtick inside double quotes is lexed as commands too.
-fn commands(script: &str) -> Vec<Vec<String>> {
+/// A word with quotes removed, and where in `text` its first `$(…)` or
+/// backtick substitution stood.
+#[derive(Default)]
+struct Word {
+    text: String,
+    substituted_at: Option<usize>,
+}
+
+impl Word {
+    fn mark_substituted(&mut self) {
+        self.substituted_at.get_or_insert(self.text.len());
+    }
+
+    /// Whether a `$` or a substitution may build the part before the first
+    /// `=`, or the whole word when it has none.
+    fn name_expands(&self) -> bool {
+        let name = self.text.split_once('=').map_or(&*self.text, |(n, _)| n);
+        name.contains('$') || self.substituted_at.is_some_and(|at| at <= name.len())
+    }
+}
+
+/// Whether `script` holds a form the lexer may read differently from bash,
+/// wherever it sits, even in quotes: a backslash-newline, a `$` before a
+/// quote, or a `${…}` or `$[…]` holding more than a plain name and operator.
+fn unreadable(script: &str) -> bool {
+    ["\\\n", "$'", "$\""]
+        .iter()
+        .any(|form| script.contains(form))
+        || script
+            .match_indices(['{', '['])
+            .filter(|&(at, _)| script[..at].ends_with('$'))
+            .any(|(at, _)| !plain_expansion(&script[at..]))
+}
+
+/// Whether the `${…}` or `$[…]` that `text` opens closes before any
+/// character that could hide its end or a heredoc from the hook.
+fn plain_expansion(text: &str) -> bool {
+    let mut closers = vec![];
+    for c in text.chars() {
+        match c {
+            '{' => closers.push('}'),
+            '[' => closers.push(']'),
+            _ if closers.last() == Some(&c) => {
+                closers.pop();
+                if closers.is_empty() {
+                    return true;
+                }
+            }
+            '(' | ')' | '<' | '>' | ';' | '&' | '|' | '\'' | '"' | '\\' | '`' => return false,
+            _ if c.is_whitespace() => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// The simple commands in `script`, each as its words.
+/// `;`, `&`, `|`, newlines and parentheses end a command; the contents of a
+/// `$(…)` or backtick substitution, and heredoc bodies, are lexed as commands
+/// of their own. `None` when the script ends inside a quote, backtick or
+/// `$(…)`, a `$(…)` holds a `case`, a heredoc's end can't be told, or bash may
+/// read a `<<` as a shift or a backtick as escaped where the hook doesn't.
+fn commands(script: &str) -> Option<Vec<Vec<Word>>> {
     let mut commands = vec![];
     let mut words = vec![];
-    let mut word: Option<String> = None;
+    let mut word: Option<Word> = None;
+    let mut heredocs: Vec<(String, bool)> = vec![];
+    let mut in_arithmetic = false;
     let mut chars = script.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             '\'' => {
                 let w = word.get_or_insert_default();
-                w.extend(chars.by_ref().take_while(|&c| c != '\''));
-            }
-            '"' => {
-                let w = word.get_or_insert_default();
-                while let Some(c) = chars.next() {
-                    match c {
-                        '"' => break,
-                        '\\' => w.extend(chars.next()),
-                        '$' if chars.peek() == Some(&'(') => {
-                            chars.next();
-                            commands.extend(self::commands(&substitution(&mut chars)));
-                        }
-                        '`' => {
-                            let inner: String = chars.by_ref().take_while(|&c| c != '`').collect();
-                            commands.extend(self::commands(&inner));
-                        }
-                        _ => w.push(c),
+                loop {
+                    match chars.next()? {
+                        '\'' => break,
+                        c => w.text.push(c),
                     }
                 }
             }
-            '#' if word.is_none() => {
-                chars.by_ref().find(|&c| c == '\n');
+            '"' => {
+                let w = word.get_or_insert_default();
+                loop {
+                    match chars.next()? {
+                        '"' => break,
+                        '\\' => w.text.extend(chars.next()),
+                        '$' if chars.peek() == Some(&'(') => {
+                            chars.next();
+                            w.mark_substituted();
+                            commands.extend(self::commands(&substitution(&mut chars)?)?);
+                        }
+                        '`' => {
+                            w.mark_substituted();
+                            commands.extend(self::commands(&backticked(&mut chars)?)?);
+                        }
+                        c => w.text.push(c),
+                    }
+                }
+            }
+            '#' if word.is_none() => while chars.next_if(|&c| c != '\n').is_some() {},
+            '\\' => word.get_or_insert_default().text.extend(chars.next()),
+            // `2>&1`, `<&3` and `&>file` are redirections, not `&`.
+            '&' if word.as_ref().is_some_and(|w| w.text.ends_with(['>', '<']))
+                || chars.peek() == Some(&'>') =>
+            {
+                word.get_or_insert_default().text.push(c);
+            }
+            '<' if chars.peek() == Some(&'<') => {
+                chars.next();
+                let w = word.get_or_insert_default();
+                // Bash reads `<<` in `((…))` or a `name[…]` subscript as a shift.
+                if in_arithmetic || w.text.matches('[').count() > w.text.matches(']').count() {
+                    return None;
+                }
+                w.text.push_str("<<");
+                if chars.next_if_eq(&'<').is_some() {
+                    w.text.push('<');
+                } else {
+                    heredocs.push(heredoc_operator(&mut chars, &mut w.text)?);
+                }
+            }
+            '$' if chars.peek() == Some(&'(') => {
+                chars.next();
+                word.get_or_insert_default().mark_substituted();
+                commands.extend(self::commands(&substitution(&mut chars)?)?);
+            }
+            '`' => {
+                word.get_or_insert_default().mark_substituted();
+                commands.extend(self::commands(&backticked(&mut chars)?)?);
+            }
+            ';' | '&' | '|' | '\n' | '(' | ')' => {
+                if chars.peek() == Some(&c) && matches!(c, '(' | ')') {
+                    in_arithmetic = c == '(';
+                }
                 words.extend(word.take());
                 if !words.is_empty() {
                     commands.push(std::mem::take(&mut words));
                 }
-            }
-            '\\' => match chars.next() {
-                Some('\n') | None => {}
-                Some(c) => word.get_or_insert_default().push(c),
-            },
-            // `2>&1`, `<&3` and `&>file` are redirections, not `&`.
-            '&' if word.as_deref().is_some_and(|w| w.ends_with(['>', '<']))
-                || chars.peek() == Some(&'>') =>
-            {
-                word.get_or_insert_default().push(c);
-            }
-            ';' | '&' | '|' | '\n' | '(' | ')' | '`' | '$'
-                if c != '$' || chars.peek() == Some(&'(') =>
-            {
-                words.extend(word.take());
-                if !words.is_empty() {
-                    commands.push(std::mem::take(&mut words));
+                if c == '\n' {
+                    for (delimiter, tabs) in std::mem::take(&mut heredocs) {
+                        let mut body = String::new();
+                        heredoc_body(&mut chars, &delimiter, tabs, &mut body)?;
+                        commands.extend(self::commands(&body)?);
+                    }
                 }
             }
             c if c.is_whitespace() => words.extend(word.take()),
-            _ => word.get_or_insert_default().push(c),
+            _ => word.get_or_insert_default().text.push(c),
         }
     }
     words.extend(word.take());
     if !words.is_empty() {
         commands.push(words);
     }
-    commands
+    Some(commands)
 }
 
-/// The text of a `$(…)` whose `$(` was just read, through its matching `)`.
-fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
+/// The text of a backtick substitution whose opening backtick was just read.
+/// `None` when it isn't closed, or ends in `\`, as in ``echo `a \`b\`` ``,
+/// where bash nests a substitution the hook doesn't.
+fn backticked(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<String> {
+    let mut inner = String::new();
+    loop {
+        match chars.next()? {
+            '`' if inner.ends_with('\\') => return None,
+            '`' => return Some(inner),
+            c => inner.push(c),
+        }
+    }
+}
+
+/// The text of a `$(…)` whose `$(` was just read, through its matching `)`,
+/// skipping quotes, escapes, comments and heredoc bodies. `None` when it
+/// holds a `case … in`, since a pattern's `)` would end it early, or its end
+/// can't be told for some other reason.
+fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<String> {
+    // While in `$((…))` or `((…))`, the depth it ends at; `<<` there is a shift.
+    let mut arithmetic_from = (chars.peek() == Some(&'(')).then_some(0);
     let mut depth = 1;
     let mut inner = String::new();
-    for c in chars.by_ref() {
+    let mut word = String::new();
+    let mut saw_case = false;
+    // Heredocs whose bodies start after this line.
+    let mut heredocs: Vec<(String, bool)> = vec![];
+    while let Some(c) = chars.next() {
+        if separates(c) && !word.is_empty() {
+            if word == "case" {
+                saw_case = true;
+            } else if saw_case && word == "in" {
+                return None;
+            }
+            word.clear();
+        }
         match c {
-            '(' => depth += 1,
+            '(' => {
+                if arithmetic_from.is_none() && chars.peek() == Some(&'(') {
+                    arithmetic_from = Some(depth);
+                }
+                depth += 1;
+            }
             ')' => {
                 depth -= 1;
+                // `((…)` then anything but `)` may be nested subshells, not arithmetic.
+                if arithmetic_from.is_some_and(|from| depth == from + 1)
+                    && chars.peek() != Some(&')')
+                {
+                    return None;
+                }
                 if depth == 0 {
-                    break;
+                    // Bash reads the body of a heredoc left open here from the lines after.
+                    return heredocs.is_empty().then_some(inner);
+                }
+                if arithmetic_from.is_some_and(|from| depth <= from) {
+                    arithmetic_from = None;
                 }
             }
+            '#' if word.is_empty() => {
+                inner.push(c);
+                while let Some(c) = chars.next_if(|&c| c != '\n') {
+                    inner.push(c);
+                }
+                continue;
+            }
+            '\n' => {
+                inner.push(c);
+                for (delimiter, tabs) in std::mem::take(&mut heredocs) {
+                    heredoc_body(chars, &delimiter, tabs, &mut inner)?;
+                }
+                continue;
+            }
+            '<' if arithmetic_from.is_none() && chars.peek() == Some(&'<') => {
+                chars.next();
+                inner.push_str("<<");
+                if chars.next_if_eq(&'<').is_some() {
+                    inner.push('<');
+                } else {
+                    heredocs.push(heredoc_operator(chars, &mut inner)?);
+                }
+                continue;
+            }
+            '\\' => {
+                inner.push(c);
+                inner.extend(chars.next());
+                word.push(c);
+                continue;
+            }
+            '\'' | '"' | '`' => {
+                inner.push(c);
+                quoted(chars, c, &mut inner)?;
+                word.push(c);
+                continue;
+            }
+            _ if !separates(c) => word.push(c),
             _ => {}
         }
         inner.push(c);
     }
-    inner
+    None
+}
+
+fn separates(c: char) -> bool {
+    c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>')
+}
+
+/// Copies a quoted span whose opening `quote` was just read onto `inner`,
+/// through its closing one. `None` when it isn't closed.
+fn quoted(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    quote: char,
+    inner: &mut String,
+) -> Option<()> {
+    loop {
+        let c = chars.next()?;
+        if quote == '"' && c == '$' && chars.next_if_eq(&'(').is_some() {
+            inner.push_str("$(");
+            inner.push_str(&substitution(chars)?);
+            inner.push(')');
+            continue;
+        }
+        inner.push(c);
+        if c == quote {
+            return Some(());
+        }
+        if quote == '"' && c == '`' {
+            quoted(chars, c, inner)?;
+        } else if c == '\\' && quote != '\'' {
+            inner.extend(chars.next());
+        }
+    }
+}
+
+/// Copies the rest of a heredoc operator whose `<<` was just read onto
+/// `text`, and returns its delimiter and whether `<<-` strips tabs. `None`
+/// when the delimiter holds a `$` or a backtick.
+fn heredoc_operator(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    text: &mut String,
+) -> Option<(String, bool)> {
+    let tabs = chars.next_if_eq(&'-').is_some();
+    if tabs {
+        text.push('-');
+    }
+    while let Some(c) = chars.next_if(|&c| c == ' ' || c == '\t') {
+        text.push(c);
+    }
+    let mut delimiter = String::new();
+    while let Some(c) = chars.next_if(|&c| !separates(c)) {
+        text.push(c);
+        match c {
+            '$' | '`' => return None,
+            '\'' | '"' => {
+                for q in chars.by_ref() {
+                    text.push(q);
+                    if q == c {
+                        break;
+                    }
+                    delimiter.push(q);
+                }
+            }
+            '\\' => {
+                if let Some(e) = chars.next() {
+                    text.push(e);
+                    delimiter.push(e);
+                }
+            }
+            _ => delimiter.push(c),
+        }
+    }
+    Some((delimiter, tabs))
+}
+
+/// Copies a heredoc's body onto `text` through its `delimiter` line. `None`
+/// when the script ends first, or a line starts with the delimiter and holds
+/// a `)`, as `EOF)` does, which bash inside `$(…)` takes as the end.
+fn heredoc_body(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    delimiter: &str,
+    tabs: bool,
+    text: &mut String,
+) -> Option<()> {
+    while chars.peek().is_some() {
+        let mut line = String::new();
+        while let Some(c) = chars.next_if(|&c| c != '\n') {
+            line.push(c);
+        }
+        chars.next();
+        text.push_str(&line);
+        text.push('\n');
+        let stripped = if tabs {
+            line.trim_start_matches('\t')
+        } else {
+            &line
+        };
+        if stripped == delimiter {
+            return Some(());
+        }
+        if stripped.starts_with(delimiter) && stripped.contains(')') {
+            return None;
+        }
+    }
+    None
 }
 
 /// Words that run the command after them, with their options that take a value.
-const WRAPPERS: [(&str, &[&str]); 13] = [
+const WRAPPERS: [(&str, &[&str]); 14] = [
     ("env", &["-u", "-C", "-S"]),
     ("sudo", &["-u", "-g", "-C", "-D"]),
     ("exec", &["-a"]),
@@ -304,6 +655,7 @@ const WRAPPERS: [(&str, &[&str]); 13] = [
     ("noglob", &[]),
     ("xargs", &["-I", "-n", "-P", "-L", "-d", "-s", "-E", "-a"]),
     ("timeout", &["-s", "-k"]),
+    ("setsid", &[]),
     // This repo's `scripts/herdr-dev`.
     ("herdr-dev", &[]),
 ];
@@ -311,9 +663,14 @@ const KEYWORDS: [&str; 10] = [
     "if", "then", "else", "elif", "do", "while", "until", "!", "{", "source",
 ];
 const SHELLS: [&str; 5] = ["sh", "bash", "zsh", "dash", "ksh"];
+/// Builtins whose arguments may assign variables.
+const DECLARERS: [&str; 5] = ["export", "declare", "typeset", "local", "readonly"];
 
-fn needs_one(words: &[String]) -> Vec<Switch> {
+fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
+    let words: Vec<String> = command.iter().map(|w| w.text.clone()).collect();
+    let words = words.as_slice();
     let mut i = 0;
+    let mut in_env = false;
     loop {
         let Some(word) = words.get(i) else {
             return vec![];
@@ -321,13 +678,44 @@ fn needs_one(words: &[String]) -> Vec<Switch> {
         let program = file_name(word);
         if let Some(bare) = redirection(word) {
             i += if bare { 2 } else { 1 };
-        } else if is_assignment(word) || KEYWORDS.contains(&word.as_str()) || word == "." {
+        } else if in_env && (word.contains('=') || word.is_empty()) && command[i].name_expands() {
+            // `env` may get an assignment whose name the hook can't read.
+            aliases.assign(&command[i]);
             i += 1;
+        } else if word.is_empty() && command[i].substituted_at.is_some() {
+            // An unquoted substitution that prints nothing leaves no word.
+            i += 1;
+        } else if is_assignment(word) {
+            aliases.assign(&command[i]);
+            i += 1;
+        } else if KEYWORDS.contains(&word.as_str()) || word == "." {
+            i += 1;
+        } else if DECLARERS.contains(&program) {
+            let args = &command[i + 1..];
+            let nameref = |w: &Word| w.text.starts_with('-') && w.text.contains('n');
+            if !["export", "readonly"].contains(&program) && args.iter().any(nameref) {
+                // A nameref (`declare -n r=CARGO_ALIAS_X`) assigns through another name.
+                aliases.unreadable_name = true;
+            }
+            args.iter().for_each(|w| aliases.assign(w));
+            return vec![];
         } else if let Some((_, with_value)) = WRAPPERS.iter().find(|(w, _)| *w == program) {
+            in_env |= program == "env";
             i = skip_options(words, i + 1, with_value);
             if program == "timeout" {
                 i += 1;
             }
+        } else if program == "rustup" {
+            // `rustup [-q] [+toolchain] run [--install] <toolchain> [--install] [--] <command>`
+            i += 1;
+            while words.get(i).is_some_and(|w| w.starts_with(['-', '+'])) {
+                i += 1;
+            }
+            if words.get(i).is_none_or(|w| w != "run") {
+                return vec![];
+            }
+            let toolchain = skip_options(words, i + 1, &[]);
+            i = skip_options(words, toolchain + 1, &[]);
         } else if SHELLS.contains(&program) {
             i += 1;
             // `-o pipefail`, `-O extglob`: the next word is the option's value.
@@ -339,7 +727,9 @@ fn needs_one(words: &[String]) -> Vec<Switch> {
                 }
                 if !option.starts_with("--") && option.contains('c') {
                     let script = skip_options(words, i + 1, &WITH_VALUE);
-                    return words.get(script).map_or(vec![], |script| needs(script));
+                    return words
+                        .get(script)
+                        .map_or(vec![], |script| needs_with(script, &mut aliases.clone()));
                 }
                 i += if WITH_VALUE.contains(&option.as_str()) {
                     2
@@ -348,7 +738,9 @@ fn needs_one(words: &[String]) -> Vec<Switch> {
                 };
             }
         } else if program == "eval" {
-            return needs(&words[i + 1..].join(" "));
+            return needs_with(&words[i + 1..].join(" "), aliases);
+        } else if program == "cargo" {
+            return cargo_needs(word, &words[i + 1..], aliases);
         } else {
             return needs_program(word, &words[i + 1..]).into_iter().collect();
         }
@@ -409,12 +801,94 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
     }
 }
 
+/// Cargo's built-in subcommands, which ignore an alias of the same name.
+/// Its short forms (`b`, `r`, `t`…) are not here: an alias overrides them.
+const CARGO_BUILTINS: [&str; 39] = [
+    "add",
+    "bench",
+    "build",
+    "check",
+    "clean",
+    "config",
+    "doc",
+    "fetch",
+    "fix",
+    "generate-lockfile",
+    "git-checkout",
+    "help",
+    "info",
+    "init",
+    "install",
+    "locate-project",
+    "login",
+    "logout",
+    "metadata",
+    "new",
+    "owner",
+    "package",
+    "pkgid",
+    "publish",
+    "read-manifest",
+    "remove",
+    "report",
+    "run",
+    "rustc",
+    "rustdoc",
+    "search",
+    "test",
+    "tree",
+    "uninstall",
+    "update",
+    "vendor",
+    "verify-project",
+    "version",
+    "yank",
+];
+
+/// What `cargo args` needs as written and after each step of expanding its
+/// subcommand through `aliases`.
+fn cargo_needs(path: &str, args: &[String], aliases: &Aliases) -> Vec<Switch> {
+    // Past this many expansions the alias is circular, which cargo refuses too.
+    const MAX_EXPANSIONS: usize = 16;
+    let mut needed: Vec<Switch> = needs_program(path, args).into_iter().collect();
+    let mut args = args.to_vec();
+    for _ in 0..MAX_EXPANSIONS {
+        let at = cargo_subcommand(&args);
+        let Some(subcommand) = args
+            .get(at)
+            .filter(|sub| !CARGO_BUILTINS.contains(&sub.as_str()))
+        else {
+            return needed;
+        };
+        if aliases.unreadable_name {
+            return vec![Switch::OpaqueCargoAlias];
+        }
+        let Some(value) = aliases
+            .values
+            .get(&subcommand.to_uppercase().replace(['-', '.'], "_"))
+        else {
+            return needed;
+        };
+        let Some(value) = value else {
+            return vec![Switch::OpaqueCargoAlias];
+        };
+        args.splice(at..=at, value.split_whitespace().map(String::from));
+        needed.extend(needs_program(path, &args).filter(|s| !needed.contains(s)));
+    }
+    vec![Switch::OpaqueCargoAlias]
+}
+
+/// The index of cargo's subcommand in `args`, past a `+toolchain` and global options.
+fn cargo_subcommand(args: &[String]) -> usize {
+    const GLOBAL_WITH_VALUE: [&str; 4] = ["--color", "--config", "-Z", "-C"];
+    let toolchain = usize::from(args.first().is_some_and(|a| a.starts_with('+')));
+    skip_options(args, toolchain, &GLOBAL_WITH_VALUE)
+}
+
 /// The args after `cargo run` (or `r`), options and `--` included; none for
 /// other subcommands, since `cargo test pause` is a filter.
 fn cargo_run_args(args: &[String]) -> &[String] {
-    const GLOBAL_WITH_VALUE: [&str; 4] = ["--color", "--config", "-Z", "-C"];
-    let toolchain = usize::from(args.first().is_some_and(|a| a.starts_with('+')));
-    let at = skip_options(args, toolchain, &GLOBAL_WITH_VALUE);
+    let at = cargo_subcommand(args);
     match args.get(at) {
         Some(run) if run == "run" || run == "r" => &args[at + 1..],
         _ => &[],
@@ -605,6 +1079,7 @@ fn file_name(word: &str) -> &str {
 
 fn is_assignment(word: &str) -> bool {
     word.split_once('=').is_some_and(|(name, _)| {
+        let name = name.strip_suffix('+').unwrap_or(name);
         !name.is_empty()
             && !name.starts_with(|c: char| c.is_ascii_digit())
             && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -697,6 +1172,28 @@ mod tests {
         "curl -sX PUT https://api.github.com/repos/o/r/pulls/12/merge",
         "curl -X GET -X PUT https://api.github.com/repos/o/r/pulls/12/merge",
         "wget -qO- https://api.github.com/repos/o/r/pulls/12/merge",
+        "setsid gh pr merge 12",
+        "setsid -f -w gh pr merge 12",
+        "rustup run stable gh pr merge 12",
+        "rustup --quiet run --install nightly-2026-01-01 gh pr merge 12",
+        "rustup +stable run stable gh pr merge 12",
+        "rustup run stable -- gh pr merge 12",
+        "rustup run stable --install gh pr merge 12",
+        "rustup run stable --install -- gh pr merge 12",
+        "GH_TOKEN=$(echo t)x gh pr merge 12",
+        "GH_TOKEN=`echo t`x gh pr merge 12",
+        "$(true) gh pr merge 12",
+        "`true` gh pr merge 12",
+        "echo $(gh pr merge 1)",
+        "echo x$(gh pr merge 1)y",
+        "X+=1 gh pr merge 12",
+        "echo $(echo ')'; gh pr merge 12)",
+        "echo $(echo \")\"; gh pr merge 12)",
+        "echo $(echo \\); gh pr merge 12)",
+        "x=$(echo ')'; gh pr merge 12)",
+        "echo \"$(echo ')'; gh pr merge 12)\"",
+        "echo $(echo \"$(echo ')')\"; gh pr merge 12)",
+        "echo $(echo \"\\\")\"; gh pr merge 12)",
     ];
     const INSTALLS: &[&str] = &[
         "scripts/install",
@@ -721,6 +1218,7 @@ mod tests {
         "cargo r -- install-hook",
         "cargo +nightly run -- install-hook",
         "cargo test install-hook",
+        "echo $(echo ')'; scripts/install)",
     ];
     const REBASES: &[&str] = &[
         "git rebase origin/main",
@@ -754,6 +1252,8 @@ mod tests {
         "git rebase --skip",
         "git rebase --help",
         "git rebase -x --abort main",
+        "echo $(echo ')'; git rebase main)",
+        "echo $(echo ')'; git push --force)",
     ];
     const ALLOWED: &[&str] = &[
         "gh pr view 12",
@@ -786,6 +1286,36 @@ mod tests {
         "gh api --jq .merged repos/o/r/pulls/12/merge",
         "cargo run -- status",
         "cargo build",
+        "rustup update",
+        "rustup run stable cargo test",
+        "setsid cargo build",
+        "out=$(gh pr view 12)x; echo \"$out\"",
+        "grep -rn CARGO_ALIAS_TEST= src; cargo test",
+        "rg 'CARGO_ALIAS_B=' . && cargo b",
+        "echo CARGO_ALIAS_$N=x; cargo x",
+        "CARGO_ALIAS_BUILD=$X cargo build",
+        "CARGO_ALIAS_BUILD='run -- herd set h lead.merge true' cargo build",
+        "CARGO_ALIAS_TEST=\"$(cat alias)\" cargo test",
+        "export CARGO_ALIAS_$N=x; cargo build",
+        "CARGO_ALIAS_X='build --release' cargo x",
+        "CARGO_ALIAS_X='run -- herd set' cargo build",
+        "CARGO_ALIAS_X=$CMD cargo test",
+        "CARGO_ALIAS_X=$CMD cargo y",
+        "export PATH=\"$HOME/bin:$PATH\"; cargo nextest run",
+        "N=$(git rev-parse HEAD) cargo nextest run",
+        "echo $(echo ')') done",
+        "echo \"$(echo ')')\" done",
+        "'' gh pr merge 12",
+        "gh pr create --title t --body \"$(cat <<'EOF'\n- Handles the edge\ncase where it is empty.\nEOF\n)\"",
+        "gh pr create --title t --body \"$(cat <<'EOF'\n| case | result |\n|---|---|\nEOF\n)\"",
+        "git commit -m \"$(cat <<'EOF'\nFix the empty herd (case 3)\nEOF\n)\"",
+        "gh pr create --title t --body \"$(cat <<'EOF'\n- [ ] cargo test (case 1); case 2 next\nEOF\n)\"",
+        "gh pr create --title t --body \"$(cat <<-EOF\n	it is a case in point\n	EOF\n)\"",
+        "export -n RUST_LOG; cargo nextest run",
+        "x=$(cat <<'EOF'\nBody\nEOF\n); echo \"$x\"",
+        "gh pr create --body \"$(cat <<'EOF'\nBody\nEOF\n)\"",
+        "x=$(cat <<'EOF'\nBody\n EOF\nEOF\n); echo \"$x\"",
+        "echo \"$((1 << 2))\"",
     ];
 
     #[test]
@@ -967,7 +1497,12 @@ mod tests {
             Switch::Merge => s.merge = false,
             Switch::Install => s.install = false,
             Switch::Rebase => s.rebase = false,
-            Switch::ForceRestart | Switch::Pause | Switch::HerdEdit | Switch::LeadDefaults => {}
+            Switch::ForceRestart
+            | Switch::Pause
+            | Switch::HerdEdit
+            | Switch::LeadDefaults
+            | Switch::OpaqueCargoAlias
+            | Switch::Unreadable => {}
         }
         s
     }
@@ -1007,7 +1542,12 @@ mod tests {
                 Switch::Merge => others_off.merge = true,
                 Switch::Install => others_off.install = true,
                 Switch::Rebase => others_off.rebase = true,
-                Switch::ForceRestart | Switch::Pause | Switch::HerdEdit | Switch::LeadDefaults => {}
+                Switch::ForceRestart
+                | Switch::Pause
+                | Switch::HerdEdit
+                | Switch::LeadDefaults
+                | Switch::OpaqueCargoAlias
+                | Switch::Unreadable => {}
             }
             for command in commands {
                 assert_eq!(run(&leads, others_off, command), None, "{command}");
@@ -1235,6 +1775,12 @@ mod tests {
         "cargo +nightly run --release herd set h lead.merge true",
         "cargo run -- herd set h template.t.prompt '\"install-hook\"'",
         "cargo run -- herd set h template.t.prompt '\"pause\"'",
+        "setsid loopherd herd set h lead.merge true",
+        "setsid -f cargo run -- herd set h lead.merge true",
+        "rustup run stable loopherd herd set h lead.merge true",
+        "rustup run --install stable cargo run -- herd unset h lead.merge",
+        "rustup run stable -- loopherd herd set h lead.merge true",
+        "rustup run stable --install loopherd herd set h lead.merge true",
     ];
 
     #[test]
@@ -1369,6 +1915,473 @@ mod tests {
             "cargo test herd set",
         ] {
             assert_eq!(needs(command), [], "{command}");
+        }
+    }
+
+    #[test]
+    fn allowed_commands_pass_a_lead_with_every_switch_off() {
+        let leads = ledger(vec![lead()]);
+        for command in ALLOWED {
+            assert_eq!(run(&leads, Switches::default(), command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn a_cargo_alias_assigned_in_the_script_is_judged_by_its_expansion() {
+        let leads = ledger(vec![lead()]);
+        for (command, want) in [
+            (
+                "CARGO_ALIAS_X='run -- herd set h lead.merge true' cargo x",
+                Switch::HerdEdit,
+            ),
+            (
+                "env CARGO_ALIAS_X='run -- herd set h lead.merge true' cargo x",
+                Switch::HerdEdit,
+            ),
+            (
+                "env -u FOO CARGO_ALIAS_HS='run -- herd set' cargo -q hs h lead.merge true",
+                Switch::HerdEdit,
+            ),
+            (
+                "export CARGO_ALIAS_X='run -- pause h'; cargo x",
+                Switch::Pause,
+            ),
+            (
+                "declare -x CARGO_ALIAS_X='run -- pause h'; cargo x",
+                Switch::Pause,
+            ),
+            (
+                "typeset -x CARGO_ALIAS_X='run -- pause h'; cargo x",
+                Switch::Pause,
+            ),
+            (
+                "local CARGO_ALIAS_X='run -- pause h'; cargo x",
+                Switch::Pause,
+            ),
+            (
+                "readonly CARGO_ALIAS_X='run -- pause h'; export CARGO_ALIAS_X; cargo x",
+                Switch::Pause,
+            ),
+            (
+                "CARGO_ALIAS_A=b CARGO_ALIAS_B='run -- install-hook' cargo a",
+                Switch::Install,
+            ),
+            (
+                "CARGO_ALIAS_MY_HOOK='run -- install-hook' cargo my-hook",
+                Switch::Install,
+            ),
+            (
+                "CARGO_ALIAS_MY_HOOK='run -- install-hook' cargo my.hook",
+                Switch::Install,
+            ),
+            (
+                "CARGO_ALIAS_X='run -- herd set' bash -c 'cargo x h lead.merge true'",
+                Switch::HerdEdit,
+            ),
+            (
+                "CARGO_ALIAS_X='run -- herd set h lead.merge true' eval cargo x",
+                Switch::HerdEdit,
+            ),
+            (
+                "CARGO_ALIAS_X='r -- restart --force' rustup run stable cargo +nightly x lh-1",
+                Switch::ForceRestart,
+            ),
+            ("CARGO_ALIAS_R='run -- pause h' cargo r", Switch::Pause),
+            ("CARGO_ALIAS_RUN=build cargo run -- pause h", Switch::Pause),
+        ] {
+            assert_eq!(needs(command), [want], "{command}");
+            assert!(
+                run(&leads, only_off(want), command).is_some(),
+                "{command} was allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cargo_alias_that_cant_be_read_is_denied_whatever_its_switches() {
+        let leads = ledger(vec![lead()]);
+        for command in [
+            "CARGO_ALIAS_X=$CMD cargo x",
+            "CARGO_ALIAS_X=\"$(cat alias)\" cargo x h lead.merge true",
+            "CARGO_ALIAS_X=$(cat alias) cargo x",
+            "CARGO_ALIAS_X=`cat alias` cargo x",
+            "CARGO_ALIAS_X=\"run -- herd $(echo set) h lead.merge true\" cargo x",
+            "CARGO_ALIAS_X=run$(echo ' -- herd set h lead.merge true') cargo x",
+            "CARGO_ALIAS_X=run`echo ' -- herd set h lead.merge true'` cargo x",
+            "CARGO_ALIAS_X=x cargo x",
+            "env CARGO_ALIAS_X= cargo x",
+            "N=X; export CARGO_ALIAS_$N='run -- herd set h lead.merge true'; cargo x",
+            "export CARGO_ALIAS_X\"$EMPTY\"='run -- herd set h lead.merge true'; cargo x",
+            "export CARGO_ALIAS_${N}='run -- pause h'; cargo clippy",
+            "CARGO_ALIAS_\"$(echo X)\"='run -- pause h' cargo x",
+            "CARGO_ALIAS_X=$(echo run)' -- herd set h lead.merge true' cargo x",
+            "CARGO_ALIAS_X=`echo run`' -- herd set h lead.merge true' cargo x",
+            "CARGO_ALIAS_X=$(echo run)x cargo x",
+            "export CARGO_ALIAS_$(echo X)='run -- herd set h lead.merge true'; cargo x",
+            "export CARGO_ALIAS_`echo X`='run -- herd set h lead.merge true'; cargo x",
+            "CARGO_ALIAS_X='run -- pause h'; export CARGO_ALIAS_$(echo Y); cargo y",
+            "CARGO_ALIAS_X=\"run -- `echo pause` h\" cargo x",
+            "CARGO_ALIAS_X=run CARGO_ALIAS_X+=' -- herd set h lead.merge true' cargo x",
+            "CARGO_ALIAS_X=$(echo ')' >/dev/null)'run -- pause h' cargo x",
+            "export CARGO_ALIA$(echo S_X)='run -- pause h'; cargo x",
+            "export $(echo CARGO_ALIAS_X)='run -- pause h'; cargo x",
+            "N=CARGO_ALIAS_X; export $N='run -- pause h'; cargo x",
+            "env CARGO_ALIA$(echo S_X)='run -- pause h' cargo x",
+            "env $(printf 'CARGO_ALIAS_%s=run' X) cargo x -- pause h",
+            "declare -n r=CARGO_ALIAS_X; r='run -- pause h'; export CARGO_ALIAS_X; cargo x",
+            "local -n r=CARGO_ALIAS_X; r='run -- pause h'; cargo x",
+            "typeset -xn r=CARGO_ALIAS_X; r='run -- pause h'; cargo x",
+        ] {
+            assert_eq!(needs(command), [Switch::OpaqueCargoAlias], "{command}");
+            let message =
+                run(&leads, all_on(), command).unwrap_or_else(|| panic!("{command} was allowed"));
+            assert!(
+                message.contains("lead-h may not run cargo through a `CARGO_ALIAS_*`"),
+                "{message}"
+            );
+        }
+        let workers = ledger(vec![entry("lh-1", None)]);
+        assert_eq!(
+            run(&workers, Switches::default(), "CARGO_ALIAS_X=$CMD cargo x"),
+            None
+        );
+    }
+
+    fn assert_unreadable(command: &str) {
+        let leads = ledger(vec![lead()]);
+        let message =
+            run(&leads, all_on(), command).unwrap_or_else(|| panic!("{command} was allowed"));
+        assert!(
+            message.contains("lead-h may not run a command the hook can't read"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_backslash_newline_anywhere_is_denied() {
+        for command in [
+            "gh pr view 115 \\\n  --json state",
+            "echo \"a\\\nb\"",
+            "x=$(echo a \\\n b)",
+            "x=\"$(cat <\\\n<EOF\n)\nEOF\ngh pr merge 1\n)\"",
+            "echo \"$\\\n(gh pr merge 1)\"",
+            "x=\"$(echo $\\\n'it\\'s' )\"; gh pr merge 1",
+            "x=$(cat <<EOF\nit's\nEOF\\\n)\ngh pr merge 1\nEOF\n)",
+        ] {
+            assert_unreadable(command);
+        }
+    }
+
+    #[test]
+    fn a_dollar_before_a_quote_is_denied() {
+        for command in [
+            "echo $$'\\'; gh pr merge 1 #'",
+            "x=\"$(echo $$'\\' )\"; gh pr merge 1 #'",
+            "x=$(echo $'it\\'s'); gh pr merge 1",
+            "echo $'it\\'s'; gh pr merge 1",
+            "echo $\"hi\"",
+            "$'\\x67h' pr merge 1",
+        ] {
+            assert_unreadable(command);
+        }
+    }
+
+    #[test]
+    fn an_expansion_holding_parentheses_or_a_heredoc_is_denied() {
+        for command in [
+            "x=\"$(echo ${y:-$(echo })<<E}\n)\"; gh pr merge 1\nE}\n)\"",
+            "x=\"$(echo $[$(echo ])<<2]\n)\"; gh pr merge 1\n2]\n)\"",
+            "x=\"$(echo ${y:-)}; gh pr merge 1)\"",
+            "x=\"$(echo ${y//<<E/z}\n)\"; gh pr merge 1 #\"\nE/z}\n)\"",
+            "echo ${x:- #}; gh pr merge 1",
+            "echo ${x:-",
+        ] {
+            assert_unreadable(command);
+        }
+    }
+
+    #[test]
+    fn nested_backticks_are_denied() {
+        for command in [
+            "echo \"`echo \\`gh pr merge 1\\``\"",
+            "echo `echo \\`gh pr merge 1\\``",
+            "echo `echo \\`gh pr merge 1\\`` #`",
+        ] {
+            assert_unreadable(command);
+        }
+    }
+
+    #[test]
+    fn a_heredoc_body_that_leaves_a_quote_open_is_denied() {
+        for command in [
+            "cat > notes.md <<'EOF'\nIt's green, merging now.\nEOF\ngh pr merge 115 --squash",
+            "cat > notes.md <<'EOF'\nIt's rebased.\nEOF\ngit rebase origin/main",
+            "cat <<'EOF'\nsay \"hi\nEOF",
+            "cat <<'EOF'\nuse ` here\nEOF",
+            "cat <<'EOF'\nuse $(here\nEOF",
+            "x=$(cat <<'EOF'\nit's\nEOF\ngh pr merge 1\n)",
+            "gh pr create --body \"$(cat <<'EOF'\nIt's ready.\nEOF\n)\"; gh pr merge 1",
+            "cat <<E\r\nx\nE\r\necho '\"' \"\nE\n\"; gh pr merge 1",
+            "cat <<\\'\n'\n'; gh pr merge 1 #'",
+            "x=$(cat <<'EOF'\n\"'\" '\nEOF\ngh pr merge 1\n)",
+        ] {
+            assert_unreadable(command);
+        }
+    }
+
+    #[test]
+    fn a_shift_the_hook_would_read_as_a_heredoc_is_denied() {
+        for gated in [
+            "gh pr merge 1",
+            "scripts/install",
+            "loopherd herd set h lead.merge true",
+            "git rebase origin/main",
+        ] {
+            for command in [
+                format!("((y=1<<2))\necho '\"' \"\n2\n\"; {gated}"),
+                format!("(( y = 1 << 2 ))\necho '\"' \"\n2\n\"; {gated}"),
+                format!("a[1<<2]=x\necho '\"' \"\n2]=x\n\"; {gated}"),
+                format!("((y=1<<2))\necho \"'\" '\n2\n'; {gated}"),
+                format!("x=$( ((y=1<<2))\necho '\"' \"\n2\n\"; {gated}\n)"),
+                format!("((y=1<<2 '\n')); {gated} #'\n2"),
+                format!("((y=1<<\\'))\n'\n'; {gated} #'"),
+                format!("a[1<<2]=x\n2]=x\n{gated}"),
+            ] {
+                assert_unreadable(&command);
+            }
+        }
+    }
+
+    #[test]
+    fn a_heredoc_fed_to_a_shell_is_judged_line_by_line() {
+        let leads = ledger(vec![lead()]);
+        for command in [
+            "bash <<'EOF'\ngh pr merge 1\nEOF",
+            "x=$(bash <<'EOF'\ngh pr merge 1\nEOF\n)",
+        ] {
+            let message = run(&leads, only_off(Switch::Merge), command)
+                .unwrap_or_else(|| panic!("{command} was allowed"));
+            assert!(message.contains("the human merges PRs"), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_heredoc_after_a_parenthesis_and_hash_inside_a_substitution_is_denied() {
+        for command in [
+            "x=\"$(echo $(echo)#<<EOF\n)\nEOF\ngh pr merge 1\n)\"",
+            "x=\"$(echo $((1))#<<EOF\n)\nEOF\ngh pr merge 1\n)\"",
+        ] {
+            assert_unreadable(command);
+        }
+    }
+
+    #[test]
+    fn everyday_lead_commands_pass_with_every_switch_off() {
+        let leads = ledger(vec![lead()]);
+        for command in [
+            "gh pr create --title t --body \"$(cat <<'EOF'\nIt's green and it's merged.\nEOF\n)\"",
+            "gh pr create --title t --body \"$(cat <<'EOF'\nGreen, ready for review.\nEOF\n)\"",
+            "cat > notes.md <<'EOF'\nIt's green and it's ready.\nEOF\ngh pr view 115 --json state",
+            "cat <<'EOF' # notes\nGreen.\nEOF",
+            "gh pr view 115 --json state",
+            "loopherd feed loopherd-cards",
+            "echo \"${HOME}/x\" ${arr[@]}",
+            "gh pr comment 115 --body \"Fixed in \\`tool_hook.rs\\`; see \\`D17\\`.\"",
+            "git commit -m \"Deny escaped backticks in \\`unreadable\\`\"",
+            "gh pr create --body \"$(cat <<EOF\nRun \\`cargo test\\`.\nEOF\n)\"",
+        ] {
+            assert_eq!(run(&leads, Switches::default(), command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn a_heredoc_outside_a_substitution_still_shows_what_follows() {
+        let leads = ledger(vec![lead()]);
+        for command in [
+            "cat <<'EOF'\nGreen.\nEOF\ngh pr merge 1",
+            "cat <<'EOF' # notes\nGreen, it's\nEOF\ngh pr merge 1",
+        ] {
+            assert!(
+                run(&leads, only_off(Switch::Merge), command).is_some(),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_substitution_the_hook_cant_end_is_denied_whatever_its_switches() {
+        let leads = ledger(vec![lead()]);
+        for command in [
+            "echo $(case x in x) gh pr merge 12;; esac)",
+            "echo \"$(case x in x) echo hi;; esac)\"; gh pr merge 12",
+            "x=$(case x in (x) loopherd pause h;; esac)",
+            "echo \"$(true; case x in x) :;; esac)\"",
+            "echo \"$(true&&case x in x) :;; esac)\"",
+            "echo \"$(echo \"$(case x in x) echo;; esac)\")\"",
+            "echo $(time case x in x) gh pr merge 12;; esac)",
+            "echo $(time -p case x in x) gh pr merge 12;; esac)",
+            "echo $(! time case x in x) gh pr merge 12;; esac)",
+            "echo $(coproc case x in x) gh pr merge 12;; esac)",
+            "echo $(function f case x in x) gh pr merge 12;; esac; f)",
+            "echo $(\\\ncase x in x) gh pr merge 12;; esac)",
+            "echo $(ca\\\nse x in x) gh pr merge 12;; esac)",
+            "echo $({ case x in x) gh pr merge 12;; esac; })",
+            "echo $(! case x in x) gh pr merge 12;; esac)",
+            "echo $(if case x in x) gh pr merge 12;; esac; then :; fi)",
+            "echo $(if true; then case x in x) gh pr merge 12;; esac; fi)",
+            "gh pr create --body \"$(cat <<'EOF'\nBody\nEOF)\" && gh pr merge 1",
+            "gh pr create --body \"$(cat <<'EOF'\nBody\nEOF)\"\ngh pr merge 1",
+            "gh pr create --body \"$(cat <<EOF\nBody\nEOF)\" && gh pr merge 1",
+            "git commit -m \"$(cat <<'EOF'\nFix it\nEOF)\" && git push --force",
+            "git commit -m \"$(cat <<'EOF'\nFix it\nEOF)\" && git rebase origin/main",
+            "gh pr create --body \"$(cat <<'EOF'\nBody\nEOF)\" && loopherd herd set h lead.merge true",
+            "gh pr create --body \"$(cat <<'EOF'\nBody\nEOF)\" && scripts/install",
+            "gh pr create --body \"$(cat <<'EOF'\nBody\nEOF )\" && gh pr merge 1",
+            "x=$(cat <<'EOF'\nBody\nEOF)x\ngh pr merge 1",
+            "x=$(cat <<'EOF'\nBody\nEOF); gh pr merge 1",
+            "x=$(cat <<'EOF'\nBody\nEOF)\ngh pr merge 1",
+            "x=$(cat <<-'EOF'\n	Body\n	EOF); gh pr merge 1",
+            "x=$(cat <<'EOF'\nBody",
+            "x=$(cat <<'EOF'\nit's, it's\nEOF)\ngh pr merge 1\nEOF\n)",
+            "x=$(echo $((1<<2)); cat <<'EOF'\nit's, it's\nEOF)\ngh pr merge 1\nEOF\n)",
+            "x=$(cat <<EOF\nit's\nEOF\\\n)\ngh pr merge 1\nEOF\n)",
+            "x=$(cat <<-EOF\nit's\n	EOF\\\n)\ngh pr merge 1\nEOF\n)",
+            "gh pr create --body \"$(cat <<EOF\nit's\nEOF\\\n)\" && gh pr merge 1\nEOF\n)\"",
+            "x=$(cat <<EOF\nit's\nE\\\nOF\n)\ngh pr merge 1\nEOF\n)",
+            "x=$(cat <<EOF\nit's\n\\\nEOF\n)\ngh pr merge 1\nEOF\n)",
+            "x=$(cat <<EOF\nit's\nEO\\\nF)\ngh pr merge 1\nEOF\n)",
+            "gh pr create --body \"$(echo $[1<<2]\n)\" && gh pr merge 1\n2]\n)\"",
+            "x=\"$(echo $[1<<2]\n)\"; gh pr merge 1\n2]\n)\"",
+            "x=\"$(echo ${y//<<E/z}\n)\"; gh pr merge 1\nE/z}\n)\"",
+            "x=\"$(cat <<$'EOF'\na\nEOF\n)\"; gh pr merge 1\n$EOF\n)\"",
+            "x=\"$(cat <<EOF)\"\n\"\nEOF\ngh pr merge 1",
+            "x=\"$( ((cat <<EOF\n)\nEOF\n) ) )\"; gh pr merge 1",
+        ] {
+            assert_unreadable(command);
+        }
+        for command in [
+            "echo $(echo case) done",
+            "echo $(echo 'case x in x)')",
+            "git commit -m \"$(cat <<'EOF'\nHandle EOF in parser\n\nEOF handling was wrong.\nEOF\n)\"",
+            "gh pr create --body \"$(cat <<'EOF'\nEOF is reached early now.\nEOF\n)\"",
+            "x=$(cat <<'EOF'\nEOFError fix\nEOF\n)",
+            "x=$(cat <<'BODY'\nBODY text\nBODY\n)",
+            "x=$(cat <<'MSG'\nMSGs are fine\nMSG\n)",
+            "x=$(cat <<'END'\nENDPOINT changes\nEND\n)",
+            "x=$(cat <<-EOF\n\tEOF is reached\n\tEOF\n)",
+            "x=$(echo $((1<<2))\necho hi\n)",
+            "x=$(echo \"$((1<<2))\"\necho hi\n)",
+            "x=$(echo $((1 << 2)) $(( (1+2) * 3 ))\necho hi\n)",
+            "x=$(echo ${y:-z} ${arr[@]}\necho hi\n)",
+        ] {
+            assert_eq!(run(&leads, Switches::default(), command), None, "{command}");
+        }
+        let workers = ledger(vec![entry("lh-1", None)]);
+        assert_eq!(
+            run(
+                &workers,
+                Switches::default(),
+                "echo $(case x in x) :;; esac)"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_command_after_an_env_dollar_word_heredoc_or_comment_is_judged() {
+        let leads = ledger(vec![lead()]);
+        for (command, want) in [
+            ("env $HOME/bin/gh pr merge 12", Switch::Merge),
+            ("env \"$HOME/bin/gh\" pr merge 12", Switch::Merge),
+            ("env GH_TOKEN=x $HOME/bin/gh pr merge 12", Switch::Merge),
+            (
+                "env -u GITHUB_TOKEN ${HOME}/bin/gh pr merge 12",
+                Switch::Merge,
+            ),
+            ("env nohup $HOME/bin/gh pr merge 12", Switch::Merge),
+            ("env \"$PWD/scripts/install\"", Switch::Install),
+            (
+                "env $(git rev-parse --show-toplevel)/scripts/install --lead-defaults",
+                Switch::LeadDefaults,
+            ),
+            (
+                "env $HOME/.cargo/bin/loopherd herd set h lead.merge true",
+                Switch::HerdEdit,
+            ),
+            ("env $HOME/.cargo/bin/loopherd pause h", Switch::Pause),
+            ("env $HOME/bin/git rebase main", Switch::Rebase),
+            (
+                "env CARGO_ALIAS_X='run -- pause h' $HOME/.cargo/bin/cargo x",
+                Switch::Pause,
+            ),
+            (
+                "gh pr create --body \"$(cat <<'EOF'\nThe lead's hook's\nEOF\n)\" && gh pr merge 1",
+                Switch::Merge,
+            ),
+            (
+                "gh pr create --body \"$(cat <<'EOF'\nThe lead's hook's\nEOF\n)\"\ngh pr merge 1",
+                Switch::Merge,
+            ),
+            (
+                "gh pr create --body \"$(cat <<'EOF'\nThe lead's hook's\nEOF\n)\" && loopherd herd set h lead.merge true",
+                Switch::HerdEdit,
+            ),
+            (
+                "gh pr create --body \"$(cat <<'EOF'\nThe lead's hook's\nEOF\n)\" && scripts/install",
+                Switch::Install,
+            ),
+            (
+                "gh pr create --body \"$(cat <<EOF\nThe lead's hook's\nEOF\n)\" && gh pr merge 1",
+                Switch::Merge,
+            ),
+            (
+                "gh pr create --body \"$(cat << \"EOF\"\nThe lead's hook's\nEOF\n)\" && gh pr merge 1",
+                Switch::Merge,
+            ),
+            (
+                "git commit -m \"$(cat <<'EOF'\nDon't deny it, don't\nEOF\n)\" && git push --force",
+                Switch::Rebase,
+            ),
+            (
+                "git commit -m \"$(cat <<'EOF'\nDon't deny it, don't\nEOF\n)\" && git rebase origin/main",
+                Switch::Rebase,
+            ),
+            (
+                "x=$(cat <<'EOF'\nit's, it's\nEOF\n); gh pr merge 1",
+                Switch::Merge,
+            ),
+            (
+                "x=$(cat <<-'EOF'\n	it's, it's\n	EOF\n); gh pr merge 1",
+                Switch::Merge,
+            ),
+            (
+                "x=$(cat <<'A' <<'B'\nit's, it's\nA\nit's, it's\nB\n); gh pr merge 1",
+                Switch::Merge,
+            ),
+            ("x=$(true # 1) don't\n); gh pr merge 1", Switch::Merge),
+            ("echo $(true # )'\ngh pr merge 12\n#'\n)", Switch::Merge),
+            (
+                "echo $(echo \"`echo \")\"`\"; gh pr merge 12)",
+                Switch::Merge,
+            ),
+            (
+                "echo $(echo ')'; loopherd herd set h lead.merge true)",
+                Switch::HerdEdit,
+            ),
+            (
+                "eval \"export CARGO_ALIAS_X='run -- pause h'\"; cargo x",
+                Switch::Pause,
+            ),
+        ] {
+            assert!(
+                needs(command).contains(&want),
+                "{command}: {:?}",
+                needs(command)
+            );
+            assert!(
+                run(&leads, only_off(want), command).is_some(),
+                "{command} was allowed"
+            );
         }
     }
 }

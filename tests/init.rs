@@ -374,6 +374,7 @@ fn init_prints_the_files_it_wrote_and_the_next_steps() {
         ),
         "trust dialog".into(),
         "init never accepts it for you".into(),
+        "\"Setting up a project\" in `loopherd --skill`".into(),
         "loopherd herds".into(),
         "loopherd feed widgets --dry-run".into(),
         "loopherd lead widgets".into(),
@@ -1492,7 +1493,15 @@ fn with_a_placeholder_source_the_next_steps_fill_it_before_feeding() {
         next.contains("adapt its issue template and docs/agents/loopherd.md to the same tracker"),
         "{next}"
     );
-    assert!(next.contains("  6. loopherd lead widgets"), "{next}");
+    assert!(
+        next.contains("  3. Tailor the herd to the repo per \"Setting up a project\""),
+        "{next}"
+    );
+    assert!(
+        next.contains("  4. Review and commit what init wrote in the repo"),
+        "{next}"
+    );
+    assert!(next.contains("  7. loopherd lead widgets"), "{next}");
 }
 
 #[test]
