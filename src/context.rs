@@ -43,6 +43,23 @@ pub fn shepherd_limit(config: &Path) -> Result<u64> {
     Ok(file.limit(own))
 }
 
+/// The highest limit a member may take: 80% of `config`'s `context_window`,
+/// else of [`DEFAULT_WINDOW`].
+pub struct Cap {
+    pub limit: u64,
+    pub window: u64,
+}
+
+pub fn limit_cap(config: &Path) -> Result<Cap> {
+    let window = config::read(config)?
+        .context_window
+        .unwrap_or(DEFAULT_WINDOW);
+    Ok(Cap {
+        limit: window / 5 * 4,
+        window,
+    })
+}
+
 impl ConfigFile {
     fn limit(&self, own: Option<u64>) -> u64 {
         let limit = own.or(self.default_context_limit).unwrap_or(DEFAULT_LIMIT);
