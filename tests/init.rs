@@ -3521,3 +3521,64 @@ fn a_default_branch_the_herds_shell_commands_cant_hold_is_refused() {
     );
     assert!(!fixture.herds().join("widgets.toml").exists());
 }
+
+impl Fixture {
+    /// The tasks the herd's queue source prints for `issues` pushed to origin.
+    fn local_tasks(&self, issues: &[(&str, &str)]) -> String {
+        let env = self.push_local_issues(issues);
+        assert_ok(&self.init(&["--tracker", "local"]));
+        let tasks = self.run(
+            Command::new("sh")
+                .args(["-c", &self.herd_get("queue.source")])
+                .envs(env.iter().map(|(k, v)| (k, v))),
+        );
+        assert_ok(&tasks);
+        text(&tasks.stdout)
+    }
+}
+
+#[test]
+fn an_issue_without_a_final_newline_or_with_crlf_lines_still_reads() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let tasks = fixture.local_tasks(&[
+        (".scratch/f/issues/01-a.md", "Status: ready-for-agent"),
+        (".scratch/f/issues/02-b.md", "Status: ready-for-agent\n"),
+        (
+            ".scratch/f/issues/03-c.md",
+            "# 03\r\n\r\nStatus: ready-for-agent\r\n",
+        ),
+    ]);
+
+    assert_eq!(
+        tasks,
+        "f-01 feat tdd a .scratch/f/issues/01-a.md\n\
+         f-02 feat tdd b .scratch/f/issues/02-b.md\n\
+         f-03 feat tdd c .scratch/f/issues/03-c.md\n"
+    );
+}
+
+#[test]
+fn the_local_done_check_says_not_done_for_a_missing_file_and_reads_crlf() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.push_local_issues(&[(".scratch/f/issues/01-a.md", "Status: resolved\r\n")]);
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+    let done = fixture.herd_get("template.issue.done");
+    let check = |path: &str| {
+        let script = done
+            .replace("{path}", path)
+            .replace("{{", "{")
+            .replace("}}", "}");
+        fixture
+            .run(
+                Command::new("sh")
+                    .args(["-c", &script])
+                    .envs(env.iter().map(|(k, v)| (k, v))),
+            )
+            .status
+            .code()
+    };
+
+    assert_eq!(check(".scratch/f/issues/01-a.md"), Some(0));
+    assert_eq!(check(".scratch/f/issues/09-gone.md"), Some(1));
+}

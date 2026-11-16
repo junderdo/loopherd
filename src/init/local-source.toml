@@ -8,10 +8,11 @@
 source = '''
 @FETCH@files=$(git ls-tree -r --name-only @REF@ -- .scratch) || exit
 printf '%s\n' "$files" | grep -E '^\.scratch/[A-Za-z0-9._-]+/issues/[0-9]+-[A-Za-z0-9._-]*\.md$' | while read -r f; do
-  printf '\036%s\n' "$f"
+  printf '\n\036%s\n' "$f"
   git show "@REF@:$f"
 done | awk -v room=@ID_ROOM@ '
   BEGIN { types["bug"] = "fix"; types["documentation"] = "docs" }
+  { sub(/\r$/, "") }
   function has(f, label) { return index(labels[f], " " label " ") > 0 }
   function closed(f) { return has(f, "resolved") || has(f, "closed") || has(f, "done") }
   function value(line) { sub(/^[^:]*:/, "", line); gsub(/[*`]/, " ", line); return line }
