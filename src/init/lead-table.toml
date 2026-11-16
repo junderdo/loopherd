@@ -1,0 +1,4 @@
+[lead]
+prompt_file = @LEAD_PROMPT@
+# From [lead_defaults] when init ran. Off means the lead asks the human.
+@SWITCHES@
