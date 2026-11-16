@@ -219,17 +219,21 @@ fn a_lead_defaults_list_sets_those_on_and_the_rest_off_without_asking() {
 }
 
 #[test]
-fn an_unknown_switch_in_the_list_fails_the_install_and_changes_nothing() {
-    let sandbox = Sandbox::new();
+fn a_bad_list_fails_before_installing_anything() {
+    for list in ["merj", "no", "ask", "reask", "merge,", "", "none,merge"] {
+        let sandbox = Sandbox::new();
 
-    let out = sandbox.install(&["--lead-defaults", "merj"]);
+        let out = sandbox.install(&[&format!("--lead-defaults={list}")]);
 
-    assert!(!out.status.success(), "{out:?}");
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("merj"),
-        "{out:?}"
-    );
-    assert_eq!(sandbox.read_config(), None);
+        assert_eq!(out.status.code(), Some(2), "{list:?}: {out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("unknown lead switch"),
+            "{list:?}: {out:?}"
+        );
+        assert!(!sandbox.home.join(".local").exists(), "{list:?}");
+        assert!(!sandbox.settings.exists(), "{list:?}");
+        assert_eq!(sandbox.read_config(), None, "{list:?}");
+    }
 }
 
 #[test]

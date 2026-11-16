@@ -25,6 +25,9 @@ wherever a herd file's [lead] doesn't set them. Other arguments go to
                                        turn those lead switches on and the rest off (or: none), asking nothing else
   scripts/install --no-extras          install no extras and leave the lead defaults, without the questions
   scripts/install -h, --help           print this and exit
+
+The lead defaults go to config.toml in $LOOPHERD_CONFIG_DIR (default
+$XDG_CONFIG_HOME/loopherd or ~/.config/loopherd), whatever --settings names.
 USAGE
 }
 
@@ -32,6 +35,7 @@ splash=1
 agents=ask
 skills=ask
 lead_defaults=ask
+lead_list=
 no_extras=
 settings=
 removing=
@@ -42,7 +46,7 @@ for arg in "$@"; do
   if [[ -n "$want_settings" ]]; then settings=$arg; want_settings=; fi
   if [[ -n "$want_lead_list" ]]; then
     want_lead_list=
-    [[ "$arg" == -* ]] || { lead_defaults=$arg; continue; }
+    [[ "$arg" == -* ]] || { lead_defaults=set lead_list=$arg; continue; }
   fi
   case "$arg" in
     -h | --help) usage; exit 0 ;;
@@ -51,7 +55,7 @@ for arg in "$@"; do
     --with-skills) skills=yes ;;
     --no-extras) no_extras=1 ;;
     --lead-defaults) lead_defaults=reask want_lead_list=1 ;;
-    --lead-defaults=*) lead_defaults=${arg#--lead-defaults=} ;;
+    --lead-defaults=*) lead_defaults=set lead_list=${arg#--lead-defaults=} ;;
     --settings) want_settings=1; args+=("$arg") ;;
     --remove) removing=1; args+=("$arg") ;;
     --settings=*) settings=${arg#--settings=}; args+=("$arg") ;;
@@ -80,16 +84,29 @@ lead_switch_help=(
   "answer a member's blocking dialog"
 )
 
-# Usage: offer_lead_defaults <ask|reask|no|<switches>> <loopherd>
+trim() { local s=${1#"${1%%[![:space:]]*}"}; echo "${s%"${s##*[![:space:]]}"}"; }
+if [[ "$lead_defaults" == set && "$(trim "$lead_list")" != none ]]; then
+  # The extra comma keeps a trailing empty name, which read would drop.
+  IFS=, read -r -a named <<<"$lead_list,"
+  for name in "${named[@]}"; do
+    name=$(trim "$name")
+    [[ -n "$name" && " ${lead_switches[*]} " == *" $name "* ]] || {
+      echo "install: unknown lead switch \"$name\" in --lead-defaults: name some of ${lead_switches[*]}, or none" >&2
+      exit 2
+    }
+  done
+fi
+
+# Usage: offer_lead_defaults <ask|reask|no|set> <loopherd> [<switches>]
 # ask: only while config.toml has no [lead_defaults]; reask: always.
 offer_lead_defaults() {
-  local want=$1 loopherd=$2 current answer default i on=()
+  local want=$1 loopherd=$2 list=${3-} current answer default i on=()
   case "$want" in
     no) return 0 ;;
     ask | reask) ;;
-    *)
-      "$loopherd" lead-defaults --set "$want" >/dev/null
-      echo "set the lead defaults: $want"
+    set)
+      "$loopherd" lead-defaults --set "$list" >/dev/null
+      echo "set the lead defaults: $list"
       return 0
       ;;
   esac
@@ -117,8 +134,7 @@ offer_lead_defaults() {
       *) [[ "$default" == n ]] || on+=("${lead_switches[i]}") ;;
     esac
   done
-  local list
-  list=$(IFS=,; echo "${on[*]}")
+  list=$(IFS=,; echo "${on[*]+${on[*]}}")
   "$loopherd" lead-defaults --set "${list:-none}" >/dev/null
   echo "set the lead defaults: ${list:-none}"
 }
@@ -172,4 +188,4 @@ if [[ -n "$settings" ]]; then
 else
   offer_skills "$skills" "$claude_dir"
 fi
-offer_lead_defaults "$lead_defaults" "$bin_dir/loopherd"
+offer_lead_defaults "$lead_defaults" "$bin_dir/loopherd" "$lead_list"
