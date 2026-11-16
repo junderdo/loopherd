@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::{ErrorKind, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -42,12 +42,7 @@ pub fn lead_defaults(config: &Path) -> Result<Option<SwitchValues>> {
 /// Refuses, changing nothing, when the result would be an invalid config.
 pub fn set_lead_defaults(config: &Path, on: &str) -> Result<()> {
     let on = switch_list(on)?;
-    // Renaming over a symlink would replace it, so edit its target.
-    let config = &match fs::canonicalize(config) {
-        Ok(target) => target,
-        Err(e) if e.kind() == ErrorKind::NotFound => config.to_path_buf(),
-        Err(e) => return Err(e).with_context(|| format!("read {}", config.display())),
-    };
+    let config = &link_target(config)?;
     let mut doc: DocumentMut = read_text(config)?
         .parse()
         .with_context(|| config.display().to_string())?;
@@ -82,6 +77,25 @@ pub fn set_lead_defaults(config: &Path, on: &str) -> Result<()> {
     }
     temp.persist(config).with_context(written)?;
     Ok(())
+}
+
+/// The file at the end of `path`'s symlinks, existing or not: renaming over
+/// a symlink would replace it, so writes go to its target.
+fn link_target(path: &Path) -> Result<PathBuf> {
+    let mut path = path.to_path_buf();
+    for _ in 0..40 {
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let target =
+                    fs::read_link(&path).with_context(|| format!("read {}", path.display()))?;
+                path = path.parent().unwrap_or(Path::new("")).join(target);
+            }
+            Ok(_) => return Ok(path),
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(path),
+            Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+        }
+    }
+    bail!("{}: too many levels of symlinks", path.display())
 }
 
 fn switch_list(list: &str) -> Result<Vec<&str>> {
@@ -217,6 +231,38 @@ mod tests {
                 .is_symlink()
         );
         assert_eq!(lead_defaults(&target).unwrap().unwrap().merge, Some(true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setting_lead_defaults_through_a_dangling_symlink_creates_its_target() {
+        let (dir, _) = config_with(None);
+        let link = dir.path().join("config.toml");
+        std::os::unix::fs::symlink("dotfiles/loopherd.toml", &link).unwrap();
+
+        set_lead_defaults(&link, "merge").unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let target = dir.path().join("dotfiles/loopherd.toml");
+        assert_eq!(lead_defaults(&target).unwrap().unwrap().merge, Some(true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setting_lead_defaults_keeps_the_files_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, path) = config_with(Some("context_window = 1000000\n"));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        set_lead_defaults(&path, "merge").unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o640);
     }
 
     #[test]
