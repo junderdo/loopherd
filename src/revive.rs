@@ -41,8 +41,19 @@ impl Revived {
     }
 }
 
-pub fn revive(herdr: &dyn Herdr, ledger: &mut dyn Ledger, req: &ReviveRequest) -> Result<Revived> {
-    let agents = settled_agents(herdr, req).context("settle")?;
+/// Brings back each ledger entry, taking its session as `live` resolves it,
+/// so a session Claude continued elsewhere is matched and resumed there.
+pub fn revive(
+    herdr: &dyn Herdr,
+    ledger: &mut dyn Ledger,
+    req: &ReviveRequest,
+    live: &dyn Fn(&str) -> String,
+) -> Result<Revived> {
+    let mut agents = settled_agents(herdr, req).context("settle")?;
+    // herdr may still list a continued session under its old id.
+    for agent in &mut agents {
+        agent.session_id = agent.session_id.take().map(|s| live(&s));
+    }
     let mut revived = Revived::default();
     let mut entries = ledger.entries()?;
     if let Some(name) = &req.name {
@@ -51,7 +62,8 @@ pub fn revive(herdr: &dyn Herdr, ledger: &mut dyn Ledger, req: &ReviveRequest) -
             .ok_or_else(|| anyhow!("{name} is not in the ledger"))?;
         entries = BTreeMap::from([(name.clone(), only)]);
     }
-    for record in entries.into_values() {
+    for mut record in entries.into_values() {
+        record.session_id = record.session_id.map(|s| live(&s));
         let mut warnings = vec![];
         let mut outcome = revive_one(herdr, req, &agents, &record, &mut warnings);
         if let Outcome::Started {
@@ -62,7 +74,9 @@ pub fn revive(herdr: &dyn Herdr, ledger: &mut dyn Ledger, req: &ReviveRequest) -
         {
             let restarted = ledger.update(&record.name, &mut |current| {
                 current.pane_id = pane_id.clone();
-                current.session_id = session_id.clone().or(current.session_id.take());
+                current.session_id = session_id
+                    .clone()
+                    .or(current.session_id.take().map(|s| live(&s)));
                 current.socket = herdr.socket().or(current.socket.take());
                 current.process = None;
                 Ok(())
@@ -479,7 +493,76 @@ mod tests {
     }
 
     fn run(herdr: &FakeHerdr, ledger: &mut MemLedger, req: &ReviveRequest) -> (String, i32) {
-        revive(herdr, ledger, req).unwrap().report()
+        revive(herdr, ledger, req, &|s| s.to_string())
+            .unwrap()
+            .report()
+    }
+
+    fn continued(session: &str) -> String {
+        match session {
+            "stub" => "live".into(),
+            other => other.into(),
+        }
+    }
+
+    fn stub(name: &str, cwd: &Path) -> AgentRecord {
+        AgentRecord {
+            session_id: Some("stub".into()),
+            ..record(name, cwd)
+        }
+    }
+
+    #[test]
+    fn an_entry_whose_session_continued_resumes_and_records_the_live_session() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut ledger = ledger([stub("a", cwd.path())]);
+        let (out, _) = revive(&herdr, &mut ledger, &request(), &continued)
+            .unwrap()
+            .report();
+        assert_eq!(out, "resumed a w1:p1");
+        assert_eq!(
+            herdr.started()[0].args,
+            vec!["--resume", "live", "--model", "opus"]
+        );
+        assert_eq!(ledger.0["a"].session_id.as_deref(), Some("live"));
+    }
+
+    #[test]
+    fn an_entry_whose_session_continued_into_a_live_agent_is_alive() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr().with_live_agent(Some("a"), Some("live"), "w1:p4");
+        let mut ledger = ledger([stub("a", cwd.path())]);
+        let (out, _) = revive(&herdr, &mut ledger, &request(), &continued)
+            .unwrap()
+            .report();
+        assert_eq!(out, "alive a w1:p4");
+        assert!(herdr.started().is_empty());
+    }
+
+    #[test]
+    fn a_live_agent_herdr_still_lists_under_the_stub_is_alive() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr().with_live_agent(Some("a"), Some("stub"), "w1:p4");
+        let mut ledger = ledger([stub("a", cwd.path())]);
+        let (out, _) = revive(&herdr, &mut ledger, &request(), &continued)
+            .unwrap()
+            .report();
+        assert_eq!(out, "alive a w1:p4");
+        assert!(herdr.started().is_empty());
+    }
+
+    #[test]
+    fn a_continued_entry_resumed_at_a_dialog_records_the_live_session() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut herdr = herdr();
+        herdr.startup = Startup::BlockedThenIdle;
+        let mut ledger = ledger([stub("a", cwd.path())]);
+        let (out, _) = revive(&herdr, &mut ledger, &request(), &continued)
+            .unwrap()
+            .report();
+        assert_eq!(out, "blocked a w1:p1");
+        assert_eq!(ledger.0["a"].session_id.as_deref(), Some("live"));
     }
 
     #[test]
@@ -520,7 +603,7 @@ mod tests {
             settle_timeout: Duration::from_millis(20),
             ..request()
         };
-        let err = revive(&herdr, &mut ledger, &req).unwrap_err();
+        let err = revive(&herdr, &mut ledger, &req, &|s| s.to_string()).unwrap_err();
         assert_eq!(
             format!("{err:#}"),
             "settle: herdr is still launching 1 agent(s) after 20ms"
@@ -681,7 +764,9 @@ mod tests {
         let cwd = tempfile::tempdir().unwrap();
         let herdr = herdr();
         let mut ledger = crate::ledger::NoMailbox(ledger([record("a", cwd.path())]));
-        let (out, code) = revive(&herdr, &mut ledger, &request()).unwrap().report();
+        let (out, code) = revive(&herdr, &mut ledger, &request(), &|s| s.to_string())
+            .unwrap()
+            .report();
         assert_eq!(
             (out.as_str(), code),
             (
@@ -911,7 +996,7 @@ mod tests {
             name: Some("ghost".into()),
             ..request()
         };
-        let err = revive(&herdr, &mut ledger, &req).unwrap_err();
+        let err = revive(&herdr, &mut ledger, &req, &|s| s.to_string()).unwrap_err();
         assert_eq!(format!("{err:#}"), "ghost is not in the ledger");
     }
 

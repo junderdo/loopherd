@@ -1,4 +1,5 @@
 mod context;
+mod continuation;
 mod feed;
 mod herd;
 mod herd_view;
@@ -482,7 +483,7 @@ fn run_revive(dry_run: bool, name: Option<String>) -> Result<i32> {
         start_timeout: Duration::from_secs(60),
         watch_dir: ledger.reports_dir()?,
     };
-    let (message, code) = revive(&CliHerdr, &mut ledger, &req)?.report();
+    let (message, code) = revive(&CliHerdr, &mut ledger, &req, &live_session)?.report();
     if !message.is_empty() {
         println!("{message}");
     }
@@ -558,6 +559,7 @@ fn run_restart(name: &str, force: bool) -> Result<i32> {
         state: &state,
         settle_timeout: Duration::from_secs(30),
         poll: Duration::from_millis(250),
+        live: &live_session,
     };
     println!(
         "{}",
@@ -679,6 +681,14 @@ fn shepherd_handoff(paths: &Paths, state: &Path) -> Option<context::ShepherdHand
     })
 }
 
+/// The session `session` lives on in, unchanged when Claude's dir is unknown.
+fn live_session(session: &str) -> String {
+    match install_hook::claude_dir() {
+        Ok(dir) => continuation::live_session(&dir, session),
+        Err(_) => session.to_string(),
+    }
+}
+
 fn run_stop_hook() -> Result<i32> {
     // Outside herdr there is no member to find; skip even the ledger read.
     let Some(pane) = own_pane() else {
@@ -712,6 +722,7 @@ fn run_stop_hook() -> Result<i32> {
         &pane,
         &input,
         SystemTime::now(),
+        &live_session,
         &handoff,
         &mut |warning| eprintln!("loopherd stop-hook: {warning}"),
     )?;
@@ -744,6 +755,7 @@ fn run_session_hook() -> Result<i32> {
         &process::ProcFs,
         &pane,
         &input,
+        &live_session,
         &mut |warning| eprintln!("loopherd session-hook: {warning}"),
     )?;
     Ok(0)
