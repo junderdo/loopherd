@@ -119,7 +119,8 @@ enum Command {
     /// malformed source lines, and 1 on any other error.
     Feed {
         herd: String,
-        /// Run the source and done checks and print what would happen; retire and spawn nothing.
+        /// Run the source and done checks and print what would happen, with the source's
+        /// stderr notes; retire and spawn nothing.
         #[arg(long)]
         dry_run: bool,
         /// Seconds to wait for each agent to become idle.
