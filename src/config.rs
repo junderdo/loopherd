@@ -114,29 +114,35 @@ pub fn unset(config: &Path, key: &str) -> Result<bool> {
     }
     edit(config, |doc| {
         match key.split_once('.') {
-            Some((table, name)) => match doc.get_mut(table).and_then(Item::as_table_mut) {
-                Some(t) => {
-                    let mut comment = remove_key(t, name);
-                    let position = t.position();
-                    if t.is_empty() {
-                        comment = comment_in(t.decor().prefix()) + &comment;
-                        doc.remove(table);
+            Some((table, name)) => {
+                let root = doc.as_table_mut();
+                let only_key = root
+                    .get(table)
+                    .and_then(Item::as_table_like)
+                    .is_some_and(|t| t.len() == 1 && t.contains_key(name));
+                match root.get_mut(table) {
+                    Some(Item::Table(t)) if !t.is_dotted() => {
+                        let mut comment = remove_key(t, name);
+                        let position = t.position();
+                        if t.is_empty() {
+                            comment = comment_in(t.decor().prefix()) + &comment;
+                            doc.remove(table);
+                        }
+                        place_comment(doc, position, &comment);
                     }
-                    place_comment(doc, position, &comment);
-                }
-                None => {
-                    let emptied = doc
-                        .get_mut(table)
-                        .and_then(Item::as_table_like_mut)
-                        .is_some_and(|t| {
+                    // An inline or dotted table is one root line, kept or removed whole.
+                    _ if only_key => {
+                        let comment = remove_key(root, table);
+                        place_comment(doc, None, &comment);
+                    }
+                    Some(item) => {
+                        if let Some(t) = item.as_table_like_mut() {
                             t.remove(name);
-                            t.is_empty()
-                        });
-                    if emptied {
-                        doc.remove(table);
+                        }
                     }
+                    None => {}
                 }
-            },
+            }
             None => {
                 let comment = remove_key(doc.as_table_mut(), key);
                 place_comment(doc, None, &comment);
@@ -148,28 +154,66 @@ pub fn unset(config: &Path, key: &str) -> Result<bool> {
 }
 
 /// Removes `name` from `table`, moving the comment lines above it onto the
-/// next key; returns them when no key follows.
+/// next key's line; returns them when no line follows.
 fn remove_key(table: &mut Table, name: &str) -> String {
-    let comment = table
-        .key(name)
-        .map(|k| comment_in(k.leaf_decor().prefix()))
-        .unwrap_or_default();
+    let comment = line_comment(table, name);
     let next = table
         .iter()
-        .filter(|(_, item)| item.is_value())
+        .filter(|(_, item)| is_line(item))
         .map(|(k, _)| k)
         .skip_while(|k| *k != name)
         .nth(1)
         .map(str::to_string);
     table.remove(name);
-    match next.and_then(|next| table.key_mut(&next)) {
-        Some(mut next) => {
-            let decor = next.leaf_decor_mut();
-            let own = text_of(decor.prefix()).to_string();
-            decor.set_prefix(comment + &own);
+    match next {
+        Some(next) => {
+            prepend_comment(table, &next, &comment);
             String::new()
         }
         None => comment,
+    }
+}
+
+/// Whether `item` prints as a `key = value` line among its table's keys.
+fn is_line(item: &Item) -> bool {
+    item.is_value() || item.as_table().is_some_and(Table::is_dotted)
+}
+
+/// The comment above `name`'s line, which a dotted table keeps on its first key.
+fn line_comment(table: &Table, name: &str) -> String {
+    match table
+        .get(name)
+        .and_then(Item::as_table)
+        .filter(|t| t.is_dotted())
+    {
+        Some(dotted) => dotted
+            .iter()
+            .next()
+            .map(|(first, _)| line_comment(dotted, first))
+            .unwrap_or_default(),
+        None => table
+            .key(name)
+            .map(|k| comment_in(k.leaf_decor().prefix()))
+            .unwrap_or_default(),
+    }
+}
+
+fn prepend_comment(table: &mut Table, name: &str, comment: &str) {
+    if let Some(dotted) = table
+        .get_mut(name)
+        .and_then(Item::as_table_mut)
+        .filter(|t| t.is_dotted())
+    {
+        let first = dotted.iter().next().map(|(k, _)| k.to_string());
+        if let Some(first) = first {
+            prepend_comment(dotted, &first, comment);
+        }
+        return;
+    }
+    if let Some(mut key) = table.key_mut(name) {
+        let decor = key.leaf_decor_mut();
+        let own = text_of(decor.prefix()).to_string();
+        decor.set_prefix(format!("{comment}{own}"));
     }
 }
 
@@ -562,6 +606,43 @@ mod key_tests {
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "# mine\ncontext_window = 1000000\n\n[lead_defaults]\nmerge = true\n"
+        );
+    }
+
+    #[test]
+    fn unset_keeps_the_comment_above_an_inline_or_dotted_shepherd_line() {
+        for (text, left) in [
+            (
+                "# a\nshepherd = { context_limit = 100000 }\ncontext_window = 1000000\n",
+                "# a\ncontext_window = 1000000\n",
+            ),
+            (
+                "# a\nshepherd.context_limit = 100000\n# b\ncontext_window = 1000000\n\n[notify]\nenabled = false\n",
+                "# a\n# b\ncontext_window = 1000000\n\n[notify]\nenabled = false\n",
+            ),
+            (
+                "context_window = 1000000\n# a\nshepherd.context_limit = 100000\n\n[notify]\nenabled = false\n",
+                "context_window = 1000000\n# a\n\n[notify]\nenabled = false\n",
+            ),
+        ] {
+            let (_dir, path) = config_with(text);
+
+            unset(&path, "shepherd.context_limit").unwrap();
+
+            assert_eq!(fs::read_to_string(&path).unwrap(), left, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn unsetting_a_root_key_moves_its_comment_onto_a_dotted_line_after_it() {
+        let (_dir, path) =
+            config_with("# a\ncontext_window = 1000000\n# b\nshepherd.context_limit = 100000\n");
+
+        unset(&path, "context_window").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "# a\n# b\nshepherd.context_limit = 100000\n"
         );
     }
 
