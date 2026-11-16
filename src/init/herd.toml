@@ -34,18 +34,18 @@ You're {name}, working GitHub issue #{number} of @OWNER_REPO@ on branch
 {branch} in {worktree}.
 
 Run every gh command as @ACCOUNT@, prefixed with
-`GH_TOKEN=$(gh auth token --user @ACCOUNT@)`.
+`GH_TOKEN=$(gh auth token --user @ACCOUNT@)` as in the commands below.
 
 1. Read the issue and every comment:
-   `gh issue view {number} --repo @OWNER_REPO@ --comments`.
-2. Claim it: `gh issue comment {number} --repo @OWNER_REPO@ --body "claimed by {name}"`,
-   then `gh issue edit {number} --repo @OWNER_REPO@ --add-assignee @ACCOUNT@`.
+   `GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue view {number} --repo @OWNER_REPO@ --comments`.
+2. Claim it: `GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue comment {number} --repo @OWNER_REPO@ --body "claimed by {name}"`,
+   then `GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue edit {number} --repo @OWNER_REPO@ --add-assignee @ACCOUNT@`.
 3. Build it with the {skill} skill.
 4. Before calling it done, run each check and fix what fails:
 @CHECKS@
 5. Push the branch as @ACCOUNT@:
    `GH_TOKEN=$(gh auth token --user @ACCOUNT@) git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin HEAD`.
-   Open a PR with `gh pr create --repo @OWNER_REPO@ --base @BRANCH@ --head {branch} --assignee @ACCOUNT@ --title "<title>" --body "<summary>"`,
+   Open a PR with `GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh pr create --repo @OWNER_REPO@ --base @BRANCH@ --head {branch} --assignee @ACCOUNT@ --title "<title>" --body "<summary>"`,
    the body ending with the line `Closes #{number}`.
 6. Finish with `loopherd report --kind done "<PR link and one-line summary>"`.
 
@@ -53,7 +53,7 @@ If @BRANCH@ moves under you, merge origin/@BRANCH@ into your branch; never
 rebase or force-push.
 
 If you hit a question only the human can answer, stop rather than guess:
-`gh issue edit {number} --repo @OWNER_REPO@ --add-label needs-info`, comment the
+`GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue edit {number} --repo @OWNER_REPO@ --add-label needs-info`, comment the
 question and the options you see on the issue, then
 `loopherd report --kind question "<the exact question>"`.
 '''

@@ -89,7 +89,7 @@ For a repo whose `origin` is on GitHub, with its tasks as GitHub issues:
 
 ```bash
 cd <repo>
-loopherd init --check "cargo fmt --check" --check "cargo test"   # [--herd <name>] [--gh-account <login>]
+loopherd init --check "cargo fmt --check" --check "cargo test"   # [--herd <name>] [--gh-account <login>] [--repo <owner>/<name>]
 ```
 
 It writes `<herd>.toml` (named after the repo dir) and `<herd>-lead.md` in
@@ -98,7 +98,8 @@ the herds dir, and creates the labels `ready-for-agent`, `needs-info`,
 open issue labelled `ready-for-agent` and none of the other three, on branch
 `<type>/<n>-<slug>`; a `skill:<name>` label picks the skill it builds with
 (`tdd` by default). Every gh call runs as the logged-in account matching the
-remote's owner, else `--gh-account`. init infers the rest, commits nothing,
+remote's owner, else `--gh-account`; `--repo` names the GitHub repo when
+origin is an ssh host alias. init infers the rest, commits nothing,
 and refuses to replace either file; the files are yours to edit. Then follow
 the steps it prints: trust the repo in Claude once, `loopherd herds`,
 `loopherd feed <herd> --dry-run`, `loopherd lead <herd>`.

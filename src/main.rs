@@ -351,6 +351,9 @@ struct InitArgs {
     /// matches origin's owner.
     #[arg(long, value_name = "LOGIN")]
     gh_account: Option<String>,
+    /// The GitHub repo, for an origin init can't read as one (an ssh host alias).
+    #[arg(long, value_name = "OWNER/NAME")]
+    repo: Option<String>,
 }
 
 #[derive(Args)]
@@ -1018,6 +1021,7 @@ fn run_init(args: InitArgs) -> Result<i32> {
         herd: args.herd.as_deref(),
         checks: &args.checks,
         gh_account: args.gh_account.as_deref(),
+        github: args.repo.as_deref(),
     };
     for line in init::init(&paths, &req)? {
         println!("{line}");

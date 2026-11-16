@@ -11,6 +11,7 @@ use tempfile::TempDir;
 /// its own directory, applying `--jq` with jq, and logs each call with its
 /// GH_TOKEN.
 const FAKE_GH: &str = r#"#!/bin/sh
+ulimit -S -f unlimited
 dir=$(dirname "$0")
 echo "GH_TOKEN=$GH_TOKEN $*" >> "$dir/calls"
 filter=.
@@ -33,14 +34,21 @@ jq -r "$filter" "$dir/$fixture"
 
 struct Fixture {
     root: TempDir,
+    dir: String,
 }
 
 impl Fixture {
     /// A repo `widgets` whose origin is `acme/widgets` on GitHub, with gh
     /// logged in as `logins`, no labels and no issues.
     fn new(logins: &[&str]) -> Fixture {
+        Fixture::in_dir("widgets", logins)
+    }
+
+    /// As [`Fixture::new`], with the repo in a directory named `dir`.
+    fn in_dir(dir: &str, logins: &[&str]) -> Fixture {
         let fixture = Fixture {
             root: tempfile::tempdir().unwrap(),
+            dir: dir.into(),
         };
         let repo = fixture.repo();
         fs::create_dir_all(&repo).unwrap();
@@ -70,7 +78,7 @@ impl Fixture {
     }
 
     fn repo(&self) -> PathBuf {
-        self.root.path().join("widgets")
+        self.root.path().join(&self.dir)
     }
 
     fn gh_dir(&self) -> PathBuf {
@@ -98,14 +106,32 @@ impl Fixture {
     }
 
     fn loopherd(&self, args: &[&str]) -> Output {
+        self.run(Command::new(env!("CARGO_BIN_EXE_loopherd")).args(args))
+    }
+
+    /// `loopherd init` with the usual checks, unable to write files over
+    /// `blocks` of 512 bytes.
+    fn init_with_file_size_limit(&self, blocks: u32) -> Output {
+        self.run(Command::new("sh").args([
+            "-c",
+            r#"ulimit -S -f "$1"; trap '' XFSZ; exec "$2" init --check "cargo test""#,
+            "sh",
+            &blocks.to_string(),
+            env!("CARGO_BIN_EXE_loopherd"),
+        ]))
+    }
+
+    /// Runs `command` in the repo unless it names its own directory.
+    fn run(&self, command: &mut Command) -> Output {
+        if command.get_current_dir().is_none() {
+            command.current_dir(self.repo());
+        }
         let path = format!(
             "{}:{}",
             self.gh_dir().display(),
             std::env::var("PATH").unwrap()
         );
-        Command::new(env!("CARGO_BIN_EXE_loopherd"))
-            .args(args)
-            .current_dir(self.repo())
+        command
             .env("PATH", path)
             .env("LOOPHERD_CONFIG_DIR", self.config())
             .env("XDG_STATE_HOME", self.state())
@@ -254,15 +280,19 @@ fn the_worker_prompt_claims_builds_checks_opens_a_closing_pr_and_reports() {
     for expected in [
         r#"branch = "{type}/{number}-{slug}""#,
         "GH_TOKEN=$(gh auth token --user acme) gh issue view {number} --repo acme/widgets",
-        "gh issue comment {number} --repo acme/widgets --body \"claimed by {name}\"",
-        "gh issue edit {number} --repo acme/widgets --add-assignee acme",
+        "GH_TOKEN=$(gh auth token --user acme) gh issue comment {number} --repo acme/widgets \
+         --body \"claimed by {name}\"",
+        "GH_TOKEN=$(gh auth token --user acme) gh issue edit {number} --repo acme/widgets \
+         --add-assignee acme",
+        "GH_TOKEN=$(gh auth token --user acme) gh pr create --repo acme/widgets",
+        "GH_TOKEN=$(gh auth token --user acme) gh issue edit {number} --repo acme/widgets \
+         --add-label needs-info",
         "the {skill} skill",
         "cargo test",
         "cargo fmt --check",
         "--base main",
         "Closes #{number}",
         "loopherd report --kind done",
-        "--add-label needs-info",
         "\"bug\": \"fix\", \"documentation\": \"docs\"",
     ] {
         assert!(herd.contains(expected), "missing {expected:?} in\n{herd}");
@@ -327,6 +357,7 @@ fn init_prints_the_files_it_wrote_and_the_next_steps() {
             fixture.herds().join("widgets-lead.md").display()
         ),
         "trust dialog".into(),
+        "init never accepts it for you".into(),
         "loopherd herds".into(),
         "loopherd feed widgets --dry-run".into(),
         "loopherd lead widgets".into(),
@@ -444,7 +475,8 @@ fn a_remote_that_is_not_on_github_is_an_error() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         text(&out.stderr),
-        "loopherd init: origin https://gitlab.com/acme/widgets.git is not a GitHub repo\n"
+        "loopherd init: origin https://gitlab.com/acme/widgets.git is not a GitHub repo; \
+         pass --repo <owner>/<name>\n"
     );
 }
 
@@ -553,6 +585,8 @@ fn origins_over_ssh_or_with_credentials_name_the_repo_too() {
         "ssh://git@github.com/acme/widgets.git",
         "ssh://git@ssh.github.com:443/acme/widgets.git",
         "https://user@github.com/acme/widgets.git",
+        "https://www.github.com/acme/widgets",
+        "git@GitHub.com:acme/widgets.git",
     ] {
         let fixture = Fixture::new(&["acme"]);
         git(&fixture.repo(), &["remote", "set-url", "origin", url]);
@@ -644,7 +678,8 @@ fn a_herd_name_with_a_control_character_is_refused() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         text(&out.stderr),
-        "loopherd init: \"x\\ny\" is not a herd name\n"
+        "loopherd init: \"x\\ny\" can't name a herd: it needs a lowercase letter then at most \
+         26 of a-z, 0-9, _ and -, to name its lead and members; pass --herd <name>\n"
     );
 }
 
@@ -658,4 +693,242 @@ fn a_dangling_symlink_at_the_herd_file_is_refused_before_any_label_is_created() 
 
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(fixture.gh_calls(), "");
+}
+
+fn assert_refused(fixture: &Fixture, out: &Output, stderr: &str) {
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert_eq!(text(&out.stderr), stderr);
+    assert!(!fixture.herds().exists());
+}
+
+fn herd_repo(fixture: &Fixture, herd: &str) -> String {
+    let file = fs::read_to_string(fixture.herds().join(format!("{herd}.toml"))).unwrap();
+    toml::from_str::<toml::Table>(&file).unwrap()["repo"]
+        .as_str()
+        .unwrap()
+        .into()
+}
+
+#[test]
+fn a_repo_dir_that_cant_name_a_lead_and_members_is_refused_before_any_gh_call() {
+    for dir in ["MyApp", "foo.github.io", "2048", &"a".repeat(28)] {
+        let fixture = Fixture::in_dir(dir, &["acme"]);
+
+        let out = fixture.init(&[]);
+
+        assert_refused(
+            &fixture,
+            &out,
+            &format!(
+                "loopherd init: {dir:?} can't name a herd: it needs a lowercase letter then at \
+                 most 26 of a-z, 0-9, _ and -, to name its lead and members; pass --herd <name>\n"
+            ),
+        );
+        assert_eq!(fixture.gh_calls(), "", "{dir}");
+    }
+}
+
+#[test]
+fn herd_names_a_herd_for_a_repo_dir_that_cant() {
+    let fixture = Fixture::in_dir("MyApp", &["acme"]);
+
+    assert_ok(&fixture.init(&["--herd", &"a".repeat(27)]));
+}
+
+#[test]
+fn an_ssh_host_alias_origin_needs_repo() {
+    let fixture = Fixture::new(&["acme"]);
+    git(
+        &fixture.repo(),
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github-personal:acme/widgets.git",
+        ],
+    );
+
+    assert_refused(
+        &fixture,
+        &fixture.init(&[]),
+        "loopherd init: origin git@github-personal:acme/widgets.git is not a GitHub repo; \
+         pass --repo <owner>/<name>\n",
+    );
+    assert_ok(&fixture.init(&["--repo", "acme/widgets"]));
+
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(herd.contains("--repo acme/widgets"), "{herd}");
+}
+
+#[test]
+fn a_repo_without_an_origin_needs_repo() {
+    let fixture = Fixture::new(&["acme"]);
+    git(&fixture.repo(), &["remote", "remove", "origin"]);
+
+    assert_refused(
+        &fixture,
+        &fixture.init(&[]),
+        &format!(
+            "loopherd init: {} has no origin remote; pass --repo <owner>/<name>\n",
+            fixture.repo().display()
+        ),
+    );
+    assert_ok(&fixture.init(&["--repo", "acme/widgets"]));
+}
+
+#[test]
+fn an_owner_repo_or_login_outside_githubs_characters_is_refused() {
+    let fixture = Fixture::new(&["acme"]);
+    git(
+        &fixture.repo(),
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:ac$me/widgets.git",
+        ],
+    );
+    assert_refused(
+        &fixture,
+        &fixture.init(&[]),
+        "loopherd init: origin git@github.com:ac$me/widgets.git is not a GitHub repo; \
+         pass --repo <owner>/<name>\n",
+    );
+    assert_refused(
+        &fixture,
+        &fixture.init(&["--repo", "acme/wid gets"]),
+        "loopherd init: --repo \"acme/wid gets\" is not <owner>/<name>\n",
+    );
+
+    let fixture = Fixture::new(&["ac me"]);
+    assert_refused(
+        &fixture,
+        &fixture.init(&["--gh-account", "ac me"]),
+        "loopherd init: gh has no logged-in account ac me (found: )\n",
+    );
+}
+
+#[test]
+fn gh_account_matches_whatever_its_case() {
+    let fixture = Fixture::new(&["someone", "other"]);
+
+    assert_ok(&fixture.init(&["--gh-account", "OTHER"]));
+
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(herd.contains("gh auth token --user other)"), "{herd}");
+}
+
+#[test]
+fn without_a_logged_in_gh_account_init_says_to_log_in() {
+    let fixture = Fixture::new(&[]);
+
+    assert_refused(
+        &fixture,
+        &fixture.init(&[]),
+        "loopherd init: gh has no logged-in account; run `gh auth login`\n",
+    );
+}
+
+#[test]
+fn init_refuses_a_second_herd_for_the_same_repo() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    let before = fixture.config_listing();
+    fs::remove_file(fixture.gh_dir().join("calls")).unwrap();
+
+    let out = fixture.init(&["--herd", "other"]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        format!(
+            "loopherd init: herd widgets already runs {}; init writes one herd per repo\n",
+            fixture.repo().display()
+        )
+    );
+    assert_eq!(fixture.config_listing(), before);
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn a_failed_herd_file_write_leaves_neither_file_and_a_rerun_succeeds() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init_with_file_size_limit(4);
+
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).starts_with(&format!(
+            "loopherd init: write {}",
+            fixture.herds().join("widgets.toml").display()
+        )),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(fs::read_dir(fixture.herds()).unwrap().count(), 0);
+    assert_ok(&fixture.init(&[]));
+}
+
+#[test]
+fn a_failed_lead_prompt_write_leaves_no_file() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init_with_file_size_limit(2);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).starts_with(&format!(
+            "loopherd init: write {}",
+            fixture.herds().join("widgets-lead.md").display()
+        )),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(fs::read_dir(fixture.herds()).unwrap().count(), 0);
+}
+
+#[test]
+fn a_repo_path_with_a_quote_is_written_as_a_toml_string() {
+    let fixture = Fixture::in_dir("wid\"gets", &["acme"]);
+
+    assert_ok(&fixture.init(&["--herd", "widgets"]));
+
+    assert_eq!(
+        herd_repo(&fixture, "widgets"),
+        fixture.repo().to_string_lossy()
+    );
+}
+
+#[test]
+fn a_check_with_a_triple_quote_is_refused() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.loopherd(&["init", "--check", "echo '''"]);
+
+    assert_refused(
+        &fixture,
+        &out,
+        "loopherd init: \"echo '''\" can't go in the worker prompt: it has ''' or a control \
+         character\n",
+    );
+}
+
+#[test]
+fn init_from_a_subdirectory_points_the_herd_at_the_repo_root() {
+    let fixture = Fixture::new(&["acme"]);
+    let sub = fixture.repo().join("src/deep");
+    fs::create_dir_all(&sub).unwrap();
+
+    assert_ok(
+        &fixture.run(
+            Command::new(env!("CARGO_BIN_EXE_loopherd"))
+                .args(["init", "--check", "cargo test"])
+                .current_dir(&sub),
+        ),
+    );
+
+    assert_eq!(
+        herd_repo(&fixture, "widgets"),
+        fixture.repo().to_string_lossy()
+    );
 }
