@@ -73,11 +73,8 @@ impl Sandbox {
             fs::create_dir_all(d).unwrap();
         }
         let built = dir.path().join("built-loopherd");
-        // Reports lead defaults already set, so a run on a terminal asks nothing about them.
-        executable(
-            &built,
-            "#!/bin/sh\n[ \"$1\" != lead-defaults ] || echo 'merge off'\n",
-        );
+        // Does nothing, setup included, so a run on a terminal asks nothing about config.toml.
+        executable(&built, "#!/bin/sh\n");
         executable(
             &fake_bin.join("cargo"),
             &format!(

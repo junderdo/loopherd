@@ -60,11 +60,24 @@ offer when there is no `claude` CLI. With `--settings <file>`, `claude`
 runs with `CLAUDE_CONFIG_DIR` set to that file's directory, so the plugin
 goes there too, and the installer names that dir when it asks and reports.
 
+Last it runs `loopherd setup`, which asks for `config.toml`'s machine-wide
+settings, each group only while it's unset: the lead defaults (what a lead
+may do wherever its herd file's `[lead]` doesn't say), then the context
+window and the handoff limits, Enter keeping the value shown. It reads
+`/dev/tty`, and with no terminal it asks nothing and names the flags to
+set what's unset. Values given with `--lead-defaults` or `--context` are
+set right after the build, before anything is installed, so a bad one
+installs nothing.
+
 ```bash
 scripts/install --with-agents       # install or update the agent types and ask nothing else;
                                     # with no terminal, keeps any file of yours and says so
 scripts/install --with-skills       # install the mattpocock-skills plugin and ask nothing else
-scripts/install --no-extras         # neither extra, no questions
+scripts/install --lead-defaults merge,install       # set the lead switches (or none), ask nothing
+scripts/install --context window=1000000,limit=500000,shepherd=400000
+                                    # set any of these, ask nothing; alone, ask them again
+scripts/install --no-extras         # neither extra, no setup, no questions
+loopherd setup [--again]            # ask the settings again (--again: every group)
 scripts/install --settings <file>   # hooks in another settings file; pass the same
                                     # --settings <file> to install-hook --remove and watch
 git pull && scripts/install         # update; replaces the binary, edits settings only if out of date
@@ -312,7 +325,14 @@ context_limit = 150000
 # $LOOPHERD_CONFIG_DIR/config.toml (optional)
 default_context_limit = 150000   # for members without their own
 context_window = 200000          # limits are capped at 80% of this
+
+[shepherd]
+context_limit = 150000
 ```
+
+`loopherd setup --context` asks for the config.toml values, and `loopherd
+config get|set|unset <key>` reads or writes one, keeping the file's
+comments.
 
 ## Status
 

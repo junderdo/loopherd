@@ -172,7 +172,11 @@ report `--kind handoff`, and end its turn. The last handoff moves to
 `<name>.prev.md`. The limit is the template's or `[lead]`'s
 `context_limit`, else `default_context_limit` in
 `$LOOPHERD_CONFIG_DIR/config.toml`, else 250000, never over 80% of that
-file's `context_window` (default 200000). A broken `config.toml` or herd
+file's `context_window` (default 200000). `loopherd setup --context` asks
+for the three `config.toml` values and `loopherd config get|set|unset
+<key>` reads or writes one (`context_window`, `default_context_limit`,
+`shepherd.context_limit`); change them only when the human says so. A
+broken `config.toml` or herd
 file falls back to 160000, and the hook leaves a `note` from the member once
 per session naming the file; fix it (`loopherd herds` validates both).
 
@@ -321,9 +325,11 @@ question as its own sends a second notification.
   human says so.
 - **Lead defaults** are `[lead_defaults]` in
   `$LOOPHERD_CONFIG_DIR/config.toml`: each lead's switches wherever its herd
-  file's `[lead]` doesn't set one. `scripts/install` asks for them on a
-  terminal the first time; `scripts/install --lead-defaults` asks again and
-  `--lead-defaults merge,install` (or `none`) sets them without asking.
+  file's `[lead]` doesn't set one. `loopherd setup`, which
+  `scripts/install` runs, asks for them on a terminal while they're unset;
+  `loopherd setup --lead-defaults` asks again and `--lead-defaults
+  merge,install` (or `none`) sets them without asking, as do the same
+  flags on `scripts/install`.
   `loopherd lead-defaults` prints them. Change them only when the human
   says so.
 - **When the human asks to pause or resume a herd**, run `loopherd pause
@@ -402,11 +408,13 @@ shepherd:
   PR's merge endpoint are denied too, so ask the human to run a `rebase
   --abort`, and check merges with `gh pr view <n> --json state`. Grilling
   is always the human's.
-- **Herd files and lead defaults are the human's.** The hook always
+- **Herd files and loopherd's config are the human's.** The hook always
   denies `loopherd herd set` and `unset` in your pane, and also `loopherd
-  lead-defaults --set` and `scripts/install --lead-defaults`, whatever your
-  switches, so you can't turn your own switches on; `loopherd herd get` and
-  `loopherd lead-defaults` are fine. Ask for a change instead.
+  lead-defaults --set`, `loopherd config set` and `unset`, `loopherd
+  setup`, and `scripts/install --lead-defaults` or `--context`, whatever
+  your switches, so you can't turn your own switches on or raise your own
+  handoff limit; `loopherd herd get`, `loopherd config get` and `loopherd
+  lead-defaults` are fine. Ask for a change instead.
 - **Pausing is the human's.** The hook always denies `loopherd pause` and
   `loopherd resume` in your pane, whatever your switches. While your herd
   is paused your watch prints no `claimable` and `feed` spawns nothing;

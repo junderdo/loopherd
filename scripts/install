@@ -4,15 +4,17 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage: scripts/install [--no-splash]
-                       [[--with-agents] [--with-skills] [--lead-defaults [<switches>]] | --no-extras]
+                       [[--with-agents] [--with-skills] [--lead-defaults [<switches>]]
+                        [--context [<values>]] | --no-extras]
                        [--settings <file>] [install-hook args...]
 
 Build loopherd, install it as ~/.local/bin/loopherd, and add its Claude
 Stop/StopFailure/SessionStart/PreToolUse hooks and the loopherd skill.
 On a terminal it then offers loopherd's agent types (builder, reviewer,
-researcher, scout) and the mattpocock-skills plugin, each default no, and,
-until config.toml has a [lead_defaults], asks which lead switches are on
-wherever a herd file's [lead] doesn't set them. Other arguments go to
+researcher, scout) and the mattpocock-skills plugin, each default no, then
+runs `loopherd setup`, which asks, while config.toml leaves them unset,
+which lead switches are on wherever a herd file's [lead] doesn't set them,
+and the context window and handoff limits. Other arguments go to
 `loopherd install-hook`.
 
   scripts/install                      hooks in ~/.claude/settings.json, skill in ~/.claude/skills
@@ -23,10 +25,15 @@ wherever a herd file's [lead] doesn't set them. Other arguments go to
   scripts/install --lead-defaults      ask about the lead switches again, current values as defaults
   scripts/install --lead-defaults merge,install
                                        turn those lead switches on and the rest off (or: none), asking nothing else
-  scripts/install --no-extras          install no extras and leave the lead defaults, without the questions
+  scripts/install --context            ask about the context window and handoff limits again
+  scripts/install --context window=1000000,limit=500000,shepherd=400000
+                                       set any of those, in tokens, asking nothing else
+  scripts/install --no-extras          install no extras and run no setup, without the questions
   scripts/install -h, --help           print this and exit
 
-The lead defaults go to config.toml in $LOOPHERD_CONFIG_DIR (default
+Values given with --lead-defaults or --context are set right after the
+build, before anything is installed, so a bad one installs nothing.
+The settings go to config.toml in $LOOPHERD_CONFIG_DIR (default
 $XDG_CONFIG_HOME/loopherd or ~/.config/loopherd), whatever --settings names.
 USAGE
 }
@@ -34,19 +41,25 @@ USAGE
 splash=1
 agents=ask
 skills=ask
-lead_defaults=ask
-lead_list=
+setup_args=()
 no_extras=
 settings=
 removing=
 args=()
 want_settings=
-want_lead_list=
+want_value=
+lead_list=
+lead_set=
 for arg in "$@"; do
   if [[ -n "$want_settings" ]]; then settings=$arg; want_settings=; fi
-  if [[ -n "$want_lead_list" ]]; then
-    want_lead_list=
-    [[ "$arg" == -* ]] || { lead_defaults=set lead_list=$arg; continue; }
+  if [[ -n "$want_value" ]]; then
+    if [[ "$arg" != -* ]]; then
+      setup_args[${#setup_args[@]}-1]+="=$arg"
+      [[ "$want_value" != --lead-defaults ]] || lead_set=1 lead_list=$arg
+      want_value=
+      continue
+    fi
+    want_value=
   fi
   case "$arg" in
     -h | --help) usage; exit 0 ;;
@@ -54,8 +67,9 @@ for arg in "$@"; do
     --with-agents) agents=yes ;;
     --with-skills) skills=yes ;;
     --no-extras) no_extras=1 ;;
-    --lead-defaults) lead_defaults=reask want_lead_list=1 ;;
-    --lead-defaults=*) lead_defaults=set lead_list=${arg#--lead-defaults=} ;;
+    --lead-defaults | --context) setup_args+=("$arg") want_value=$arg ;;
+    --lead-defaults=*) setup_args+=("$arg") lead_set=1 lead_list=${arg#--lead-defaults=} ;;
+    --context=*) setup_args+=("$arg") ;;
     --settings) want_settings=1; args+=("$arg") ;;
     --remove) removing=1; args+=("$arg") ;;
     --settings=*) settings=${arg#--settings=}; args+=("$arg") ;;
@@ -63,29 +77,23 @@ for arg in "$@"; do
   esac
 done
 
+setup=ask
+[[ ${#setup_args[@]} -eq 0 ]] || setup=given
 if [[ -n "$no_extras" ]]; then
-  [[ "$agents$skills$lead_defaults" == askaskask ]] || { echo "install: --no-extras can't go with --with-agents, --with-skills or --lead-defaults" >&2; exit 2; }
-  agents=no skills=no lead_defaults=no
-elif [[ "$agents$skills$lead_defaults" != askaskask ]]; then
+  [[ "$agents$skills$setup" == askaskask ]] || { echo "install: --no-extras can't go with --with-agents, --with-skills, --lead-defaults or --context" >&2; exit 2; }
+  agents=no skills=no setup=no
+elif [[ "$agents$skills$setup" != askaskask ]]; then
   # Naming one extra means just those, with no questions.
   [[ "$agents" == yes ]] || agents=no
   [[ "$skills" == yes ]] || skills=no
-  [[ "$lead_defaults" != ask ]] || lead_defaults=no
+  [[ "$setup" == given ]] || setup=no
 fi
-[[ -z "$removing" ]] || agents=no skills=no lead_defaults=no
+[[ -z "$removing" ]] || agents=no skills=no setup=no
 
 lead_switches=(merge install rebase new_cards design_escalation blocked_dialogs)
-lead_switch_help=(
-  "merge a PR its reviewer verified"
-  "run scripts/install and loopherd install-hook"
-  "have a member rebase and force-push"
-  "create cards for out-of-scope gaps"
-  "settle a design question a member raises"
-  "answer a member's blocking dialog"
-)
-
 trim() { local s=${1#"${1%%[![:space:]]*}"}; echo "${s%"${s##*[![:space:]]}"}"; }
-if [[ "$lead_defaults" == set && "$(trim "$lead_list")" != none ]]; then
+# Checked here too, so a typo fails before anything is built or installed.
+if [[ -n "$lead_set" && "$(trim "$lead_list")" != none ]]; then
   # The extra comma keeps a trailing empty name, which read would drop.
   IFS=, read -r -a named <<<"$lead_list,"
   for name in "${named[@]}"; do
@@ -96,52 +104,6 @@ if [[ "$lead_defaults" == set && "$(trim "$lead_list")" != none ]]; then
     }
   done
 fi
-
-# Usage: offer_lead_defaults <ask|reask|no|set> <loopherd> [<switches>]
-# ask: only while config.toml has no [lead_defaults]; reask: always.
-offer_lead_defaults() {
-  local want=$1 loopherd=$2 list=${3-} current answer default i on=()
-  case "$want" in
-    no) return 0 ;;
-    ask | reask) ;;
-    set)
-      "$loopherd" lead-defaults --set "$list" >/dev/null
-      echo "set the lead defaults: $list"
-      return 0
-      ;;
-  esac
-  current=$("$loopherd" lead-defaults) || {
-    if [[ "$want" == reask ]]; then
-      echo "install: loopherd couldn't read the lead defaults" >&2
-      exit 1
-    fi
-    echo "skipped the lead defaults: loopherd couldn't read them" >&2
-    return 0
-  }
-  [[ "$want" == reask || -z "$current" ]] || return 0
-  if [[ ! -t 0 ]]; then
-    echo "skipped the lead defaults (no terminal); add --lead-defaults <switches|none> to set them"
-    return 0
-  fi
-  echo "Lead defaults: what a herd's lead may do on its own wherever its herd file's [lead] doesn't say. Off means the human does it."
-  for i in "${!lead_switches[@]}"; do
-    default=n
-    grep -qx "${lead_switches[i]} on" <<<"$current" && default=y
-    if [[ "$default" == y ]]; then
-      read -r -p "  ${lead_switches[i]}: ${lead_switch_help[i]}? [Y/n] " answer || answer=
-    else
-      read -r -p "  ${lead_switches[i]}: ${lead_switch_help[i]}? [y/N] " answer || answer=
-    fi
-    case "$answer" in
-      [yY]*) on+=("${lead_switches[i]}") ;;
-      [nN]*) ;;
-      *) [[ "$default" == n ]] || on+=("${lead_switches[i]}") ;;
-    esac
-  done
-  list=$(IFS=,; echo "${on[*]+${on[*]}}")
-  "$loopherd" lead-defaults --set "${list:-none}" >/dev/null
-  echo "set the lead defaults: ${list:-none}"
-}
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=install-agents.bash
@@ -161,6 +123,8 @@ built=$(cargo build --release --manifest-path "$root/Cargo.toml" \
   --message-format=json-render-diagnostics |
   jq -r 'select(.reason == "compiler-artifact" and .target.name == "loopherd" and .executable != null) | .executable')
 [[ -x "$built" ]] || { echo "install: cargo built no loopherd binary" >&2; exit 1; }
+# Before installing, so a bad --context or --lead-defaults value installs nothing.
+[[ "$setup" != given ]] || "$built" setup "${setup_args[@]}"
 
 mkdir -p "$bin_dir"
 tmp=$(mktemp "$bin_dir/.loopherd.XXXXXX")
@@ -192,4 +156,4 @@ if [[ -n "$settings" ]]; then
 else
   offer_skills "$skills" "$claude_dir"
 fi
-offer_lead_defaults "$lead_defaults" "$bin_dir/loopherd" "$lead_list"
+[[ "$setup" != ask ]] || "$bin_dir/loopherd" setup || echo "install: setup failed; run loopherd setup once config.toml is fixed" >&2
