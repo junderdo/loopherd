@@ -42,6 +42,12 @@ pub fn lead_defaults(config: &Path) -> Result<Option<SwitchValues>> {
 /// Refuses, changing nothing, when the result would be an invalid config.
 pub fn set_lead_defaults(config: &Path, on: &str) -> Result<()> {
     let on = switch_list(on)?;
+    // Renaming over a symlink would replace it, so edit its target.
+    let config = &match fs::canonicalize(config) {
+        Ok(target) => target,
+        Err(e) if e.kind() == ErrorKind::NotFound => config.to_path_buf(),
+        Err(e) => return Err(e).with_context(|| format!("read {}", config.display())),
+    };
     let mut doc: DocumentMut = read_text(config)?
         .parse()
         .with_context(|| config.display().to_string())?;
@@ -52,10 +58,15 @@ pub fn set_lead_defaults(config: &Path, on: &str) -> Result<()> {
         .context("lead_defaults is not a table")?;
     for name in SwitchValues::NAMES {
         let mut value = Value::from(on.contains(&name));
-        if let Some(old) = table.get(name).and_then(Item::as_value) {
-            *value.decor_mut() = old.decor().clone();
+        match table.get_mut(name).and_then(Item::as_value_mut) {
+            Some(old) => {
+                *value.decor_mut() = old.decor().clone();
+                *old = value;
+            }
+            None => {
+                table.insert(name, Item::Value(value));
+            }
         }
-        table.insert(name, Item::Value(value));
     }
     let text = doc.to_string();
     check(&text).with_context(|| format!("refused, {} is unchanged", config.display()))?;
@@ -175,6 +186,37 @@ mod tests {
             "{text}"
         );
         assert_eq!(lead_defaults(&path).unwrap(), Some(only_on(false, false)));
+    }
+
+    #[test]
+    fn setting_lead_defaults_keeps_comment_lines_above_existing_switches() {
+        let (_dir, path) = config_with(Some("[lead_defaults]\n# lets leads merge\nmerge = true\n"));
+
+        set_lead_defaults(&path, "none").unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.starts_with("[lead_defaults]\n# lets leads merge\nmerge = false\n"),
+            "{text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setting_lead_defaults_through_a_symlink_writes_its_target() {
+        let (dir, target) = config_with(Some("context_window = 1000000\n"));
+        let link = dir.path().join("config.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        set_lead_defaults(&link, "merge").unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(lead_defaults(&target).unwrap().unwrap().merge, Some(true));
     }
 
     #[test]
