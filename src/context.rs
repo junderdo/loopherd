@@ -6,9 +6,9 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
 use serde_json::Value;
 
+use crate::config::{self, ConfigFile};
 use crate::ledger::AgentRecord;
 use crate::process::{self, Procs};
 
@@ -27,51 +27,19 @@ const FALLBACK_LIMIT: u64 = if DEFAULT_LIMIT < DEFAULT_WINDOW / 5 * 4 {
     DEFAULT_WINDOW / 5 * 4
 };
 
-/// `$LOOPHERD_CONFIG_DIR/config.toml`; optional.
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ConfigFile {
-    default_context_limit: Option<u64>,
-    context_window: Option<u64>,
-    shepherd: Option<ShepherdConfig>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ShepherdConfig {
-    context_limit: Option<u64>,
-}
-
 /// `own` (a template's or `[lead]`'s `context_limit`), else `config`'s
 /// `default_context_limit`, else [`DEFAULT_LIMIT`]; never over 80% of
 /// `config`'s `context_window`, else of [`DEFAULT_WINDOW`].
 pub fn effective_limit(own: Option<u64>, config: &Path) -> Result<u64> {
-    Ok(read_config(config)?.limit(own))
+    Ok(config::read(config)?.limit(own))
 }
 
 /// The shepherd's limit: `config`'s `[shepherd] context_limit` in place of a
 /// member's own, resolved as [`effective_limit`].
 pub fn shepherd_limit(config: &Path) -> Result<u64> {
-    let file = read_config(config)?;
+    let file = config::read(config)?;
     let own = file.shepherd.as_ref().and_then(|s| s.context_limit);
     Ok(file.limit(own))
-}
-
-fn read_config(config: &Path) -> Result<ConfigFile> {
-    let file: ConfigFile = match fs::read_to_string(config) {
-        Ok(text) => toml::from_str(&text).with_context(|| config.display().to_string())?,
-        Err(e) if e.kind() == ErrorKind::NotFound => ConfigFile::default(),
-        Err(e) => return Err(e).with_context(|| format!("read {}", config.display())),
-    };
-    let shepherd = file.shepherd.as_ref().and_then(|s| s.context_limit);
-    for (key, value) in [
-        ("default_context_limit", file.default_context_limit),
-        ("context_window", file.context_window),
-        ("shepherd.context_limit", shepherd),
-    ] {
-        check_tokens(key, value).with_context(|| config.display().to_string())?;
-    }
-    Ok(file)
 }
 
 impl ConfigFile {

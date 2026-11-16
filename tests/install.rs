@@ -374,6 +374,41 @@ fn the_installed_tool_hook_denies_a_leads_merge_and_exits_0() {
 }
 
 #[test]
+fn the_installed_tool_hook_resolves_switches_through_lead_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let command = installed_tool_hook_command(dir.path());
+    fs::create_dir_all(dir.path().join("state/loopherd")).unwrap();
+    fs::write(
+        dir.path().join("state/loopherd/ledger.json"),
+        r#"{"lead-h": {"name": "lead-h", "pane_id": "w1:p1", "session_id": null, "repo": "/",
+            "worktree": null, "workspace": "w1", "prompt": null, "prompt_sent": true,
+            "created": "2026-11-01T00:00:00Z", "socket": "/run/herdr/herdr.sock",
+            "herd": "h", "role": "lead"}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(dir.path().join("config/herds")).unwrap();
+    fs::write(
+        dir.path().join("config/herds/h.toml"),
+        "repo = \"/r\"\n[lead]\nprompt = \"go\"\nmerge = false\n",
+    )
+    .unwrap();
+    let config = dir.path().join("config/config.toml");
+    fs::write(&config, "[lead_defaults]\nmerge = true\nrebase = true\n").unwrap();
+
+    let on_by_default = run_tool_hook(&command, dir.path(), Some("w1:p1"), "git push --force");
+    assert_eq!(denial(&on_by_default), None);
+
+    let overridden = run_tool_hook(&command, dir.path(), Some("w1:p1"), "gh pr merge 3");
+    let reason = denial(&overridden).expect("the herd file's merge = false was ignored");
+    assert!(reason.contains("`merge` switch is off"), "{reason}");
+
+    fs::write(&config, "[lead_defaults]\nrebase = tru\n").unwrap();
+    let broken = run_tool_hook(&command, dir.path(), Some("w1:p1"), "git push --force");
+    let reason = denial(&broken).expect("a broken config.toml allowed a rebase");
+    assert!(reason.contains("config.toml"), "{reason}");
+}
+
+#[test]
 fn an_installed_tool_hook_whose_binary_fails_with_exit_2_does_not_block() {
     let dir = tempfile::tempdir().unwrap();
     let real = installed_tool_hook_command(dir.path());

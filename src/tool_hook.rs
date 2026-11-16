@@ -147,7 +147,7 @@ fn decide(
     );
     if let Some(why) = unread {
         message.push_str(&format!(
-            " (its herd file couldn't be read, so every switch counts as off: {why})"
+            " (its switches couldn't be read, so every switch counts as off: {why})"
         ));
     }
     Ok(Some(message))

@@ -384,7 +384,7 @@ struct HeldBack {
     command: String,
     switch: Switch,
     herd: String,
-    /// Why the lead's herd file couldn't be read, counting every switch off.
+    /// Why the lead's switches couldn't be read, counting every switch off.
     unread: Option<String>,
 }
 
@@ -404,7 +404,7 @@ impl HeldBack {
         };
         if let Some(unread) = &self.unread {
             why.push_str(&format!(
-                " (its herd file couldn't be read, so every switch counts as off: {unread})"
+                " (its switches couldn't be read, so every switch counts as off: {unread})"
             ));
         }
         why
@@ -2666,7 +2666,7 @@ mod tests {
         assert!(
             note.starts_with(
                 "after_merge not run: `scripts/install` needs the install switch, off in gone's [lead] \
-                 (its herd file couldn't be read, so every switch counts as off: herd: "
+                 (its switches couldn't be read, so every switch counts as off: herd: "
             ),
             "{note}"
         );
