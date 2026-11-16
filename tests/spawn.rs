@@ -87,3 +87,26 @@ fn a_spawn_goes_ahead_whatever_herds_are_paused() {
     let ledger: serde_json::Value = serde_json::from_slice(&ledger).unwrap();
     assert!(ledger["a"].is_object(), "{ledger}");
 }
+
+#[test]
+fn a_checkout_spawn_cant_resolve_is_not_called_outside_a_git_repo() {
+    let bin = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let git = bin.path().join("git");
+    fs::write(&git, "#!/bin/sh\necho /nonexistent/checkout/.git\n").unwrap();
+    fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .args(["spawn", "--name", "a", "--workspace", "ws"])
+        .current_dir(dir.path())
+        .env_clear()
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.path().display()))
+        .env("XDG_STATE_HOME", dir.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("repo: /nonexistent/checkout"), "{stderr}");
+    assert!(!stderr.contains("not in a git repo"), "{stderr}");
+}

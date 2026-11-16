@@ -2247,6 +2247,8 @@ fn a_repo_git_refuses_to_read_is_refused_with_gits_reason() {
         "{stderr}"
     );
     assert!(stderr.contains("safe.directory"), "{stderr}");
+    assert!(!stderr.contains("--repo"), "{stderr}");
+    assert!(!stderr.contains("not in a git repo"), "{stderr}");
 }
 
 #[test]
