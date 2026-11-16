@@ -115,7 +115,9 @@ local ones; any other tracker gets an empty queue `source` that
 `loopherd herds` reports invalid until you fill it from the doc. Only GitHub
 gets labels. When `triage-labels.md` exists, its labels for
 `ready-for-agent`, `needs-info` and `ready-for-human` replace those names
-below; `blocked` is always loopherd's.
+below; `blocked` is always loopherd's. A `ready-for-agent` label the queue
+also reads as a branch type (`bug`, `documentation`) or a skill (`skill:…`)
+is refused.
 
 In the repo it also writes `docs/agents/loopherd.md`, how a worker claims,
 branches, checks, opens its `Closes #<n>` PR, stops on a question and
@@ -158,13 +160,23 @@ push their branch with no PR, for the human to merge. It still needs an
 `origin` remote to branch from and push to. On a terminal, Enter at the
 GitHub question means none.
 
+Any other tracker needs no GitHub either, nor an origin. Its herd names no
+GitHub issue, gh command or account: `source` is empty, `done` is left out,
+and the worker prompt's tracker steps and one line of the lead prompt are
+marked `(fill in)`, each under `Fill in from docs/agents/issue-tracker.md`;
+the printed steps list every placeholder. When `origin` isn't on GitHub and
+`--repo` isn't given, init makes no gh call, takes the default branch from
+the local `origin/HEAD`, else the checked-out branch, and leaves out
+`merged` with the same warning; with a GitHub origin `merged` stays the
+GitHub PR check.
+
 Every gh call runs as the logged-in account matching the
 remote's owner, else `--gh-account`; `--repo` names the GitHub repo when
 origin is an ssh host alias. init infers the rest, commits nothing,
 and refuses to replace either file (`--no-lead` leaves an existing lead
 prompt alone); the files are yours to edit. Then follow
-the steps it prints: trust the repo in Claude once, fill the queue `source`
-for a tracker other than GitHub, review and commit the repo files,
+the steps it prints: trust the repo in Claude once, fill each placeholder
+for a tracker other than GitHub or local markdown, review and commit the repo files,
 `loopherd herds`,
 `loopherd feed <herd> --dry-run`, `loopherd lead <herd>`.
 

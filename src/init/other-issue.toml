@@ -1,0 +1,30 @@
+[template.issue]
+params = ["number", "type", "skill", "slug"]
+name = "{herd}-{number}"
+branch = "{type}/{number}-{slug}"
+# @FILL_IN@:
+# done, a shell command that exits 0 once task {number} is closed, its braces
+# doubled. Until it's set no member counts as done, so feed never retires one.
+@CONTEXT_LIMIT@@MERGED@
+prompt = '''
+You're {name}, working task {number} on branch {branch} in {worktree}.
+
+@FILL_IN@: each step marked (fill in), with this
+tracker's own commands.
+
+1. Read task {number} and every comment on it. (fill in)
+2. Claim it: comment `claimed by {name}` on it. (fill in)
+3. Build it with the {skill} skill.
+4. Before calling it done, run each check and fix what fails:
+@CHECKS@
+5. Push the branch with `git push -u origin HEAD` and hand it in on task
+   {number}, so the task closes when the work merges into @BRANCH@. (fill in)
+6. Finish with `loopherd report --kind done "<@HANDED_IN@ and one-line summary>"`.
+
+If @BRANCH@ moves under you, merge origin/@BRANCH@ into your branch; never
+rebase or force-push.
+
+If you hit a question only the human can answer, stop rather than guess: mark
+task {number} @NEEDS_INFO@ (fill in), comment the question and the options you
+see on it, then `loopherd report --kind question "<the exact question>"`.
+'''

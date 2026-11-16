@@ -1100,7 +1100,7 @@ fn an_existing_doc_naming_another_tracker_gets_a_placeholder_source_herds_report
     assert_ok(&out);
     assert!(
         text(&out.stdout).contains(&format!(
-            "Fill [queue] source in {} from docs/agents/issue-tracker.md",
+            "Fill in from docs/agents/issue-tracker.md, in {}: [queue] source",
             fixture.herds().join("widgets.toml").display()
         )),
         "{}",
@@ -1457,7 +1457,10 @@ fn a_tracker_other_than_github_takes_labels_no_shell_command_runs() {
     assert_ok(&fixture.init(&[]));
 
     let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
-    assert!(herd.contains("--add-label Needs {{more}} info"), "{herd}");
+    assert!(
+        herd.contains("mark\ntask {number} Needs {{more}} info (fill in)"),
+        "{herd}"
+    );
 }
 
 #[test]
@@ -1504,24 +1507,20 @@ fn with_a_placeholder_source_the_next_steps_fill_it_before_feeding() {
     let next = &stdout[stdout.find("Next:").unwrap()..];
     assert!(
         next.contains(&format!(
-            "  2. Fill [queue] source in {} from docs/agents/issue-tracker.md",
+            "  2. Fill in from docs/agents/issue-tracker.md, in {}: [queue] source",
             fixture.herds().join("widgets.toml").display()
         )),
         "{next}"
     );
     assert!(
-        next.contains("adapt its issue template and docs/agents/loopherd.md to the same tracker"),
+        next.contains("  5. Tailor the herd to the repo per \"Setting up a project\""),
         "{next}"
     );
     assert!(
-        next.contains("  3. Tailor the herd to the repo per \"Setting up a project\""),
+        next.contains("  6. Review and commit what init wrote in the repo"),
         "{next}"
     );
-    assert!(
-        next.contains("  4. Review and commit what init wrote in the repo"),
-        "{next}"
-    );
-    assert!(next.contains("  7. loopherd lead widgets"), "{next}");
+    assert!(next.contains("  9. loopherd lead widgets"), "{next}");
 }
 
 #[test]
@@ -4266,6 +4265,182 @@ fn diff_shows_drift_in_each_file_a_local_init_wrote() {
         "{stdout}"
     );
     assert_eq!(fixture.gh_calls(), "");
+}
+
+impl Fixture {
+    /// A commit on `main`, checked out, so the repo has a current branch.
+    fn commit_on(&self, branch: &str) {
+        git(&self.repo(), &["checkout", "-q", "-b", branch]);
+        git(
+            &self.repo(),
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "first",
+            ],
+        );
+    }
+
+    fn set_origin(&self, url: &str) {
+        git(&self.repo(), &["remote", "set-url", "origin", url]);
+    }
+}
+
+const OTHER: [&str; 4] = [
+    "--tracker",
+    "other",
+    "--tracker-desc",
+    "Issues live in Linear.",
+];
+
+#[test]
+fn an_other_tracker_without_an_origin_makes_no_gh_call_and_takes_the_current_branch() {
+    let fixture = Fixture::new(&["acme"]);
+    git(&fixture.repo(), &["remote", "remove", "origin"]);
+    fixture.commit_on("develop");
+    fixture.fail_gh();
+
+    let out = fixture.init(&OTHER);
+
+    assert_ok(&out);
+    assert_eq!(fixture.gh_calls(), "");
+    assert!(
+        fixture
+            .herd_get("template.issue.prompt")
+            .contains("merges into develop"),
+        "{}",
+        fixture.herd_get("template.issue.prompt")
+    );
+}
+
+#[test]
+fn an_other_tracker_with_a_gitlab_origin_takes_origin_head_and_omits_merged_with_a_warning() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.commit_on("feat/x");
+    fixture.set_origin("git@gitlab.com:acme/widgets.git");
+    git(
+        &fixture.repo(),
+        &["update-ref", "refs/remotes/origin/trunk", "HEAD"],
+    );
+    git(
+        &fixture.repo(),
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/trunk",
+        ],
+    );
+    fixture.fail_gh();
+
+    let out = fixture.init(&OTHER);
+
+    assert_ok(&out);
+    assert_eq!(fixture.gh_calls(), "");
+    assert!(
+        text(&out.stderr).contains("warning: without GitHub the herd has no merged check"),
+        "{}",
+        text(&out.stderr)
+    );
+    let issue = herd_toml(&fixture)["template"]["issue"].clone();
+    assert!(!issue.as_table().unwrap().contains_key("merged"), "{issue}");
+    let prompt = fixture.herd_get("template.issue.prompt");
+    assert!(prompt.contains("merges into trunk"), "{prompt}");
+    assert!(!prompt.contains("feat/x"), "{prompt}");
+}
+
+#[test]
+fn an_other_tracker_with_a_github_origin_keeps_the_github_merged_check() {
+    let fixture = Fixture::new(&["acme"]);
+
+    assert_ok(&fixture.init(&OTHER));
+
+    assert!(
+        fixture
+            .herd_get("template.issue.merged")
+            .contains("gh pr list --repo acme/widgets --head {branch} --state merged"),
+    );
+}
+
+#[test]
+fn an_other_tracker_names_no_github_issue_gh_command_or_account_and_marks_what_to_fill() {
+    for github in [true, false] {
+        let fixture = Fixture::new(&["acme"]);
+        if !github {
+            git(&fixture.repo(), &["remote", "remove", "origin"]);
+            fixture.commit_on("main");
+            fixture.fail_gh();
+        }
+
+        let out = fixture.init(&OTHER);
+
+        assert_ok(&out);
+        let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+        let header: String = herd.lines().take_while(|l| l.starts_with('#')).collect();
+        let issue = herd_toml(&fixture)["template"]["issue"].clone();
+        let done_comment =
+            &herd[herd.find("[template.issue]").unwrap()..herd.find("prompt =").unwrap()];
+        let prompt = issue["prompt"].as_str().unwrap().to_string();
+        let lead = fs::read_to_string(fixture.herds().join("widgets-lead.md")).unwrap();
+        assert!(!issue.as_table().unwrap().contains_key("done"), "{issue}");
+        for (what, text) in [
+            ("header", &header),
+            (
+                "done",
+                &done_comment.replace(
+                    issue
+                        .get("merged")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("\u{0}"),
+                    "",
+                ),
+            ),
+            ("prompt", &prompt),
+            ("lead", &lead),
+        ] {
+            for unexpected in ["GitHub", " gh ", "`gh ", "GH_TOKEN", "acme"] {
+                assert!(
+                    !text.contains(unexpected),
+                    "{unexpected:?} in the {what} (github origin: {github}):\n{text}"
+                );
+            }
+        }
+        for (what, text) in [("done", done_comment), ("prompt", &prompt), ("lead", &lead)] {
+            assert!(
+                text.contains("Fill in from docs/agents/issue-tracker.md"),
+                "no placeholder in the {what}:\n{text}"
+            );
+        }
+        let herds = fixture.loopherd(&["herds"]);
+        assert!(
+            text(&herds.stdout).contains("source is empty"),
+            "{}",
+            text(&herds.stdout)
+        );
+        let stdout = text(&out.stdout);
+        let next = &stdout[stdout.find("Next:").unwrap()..];
+        let herd_file = fixture.herds().join("widgets.toml");
+        let lead_file = fixture.herds().join("widgets-lead.md");
+        for step in [
+            format!(
+                "  2. Fill in from docs/agents/issue-tracker.md, in {}: [queue] source, \
+                 [template.issue] done, and each prompt step marked (fill in).",
+                herd_file.display()
+            ),
+            format!(
+                "  3. Fill in from docs/agents/issue-tracker.md, in {}: the line marked (fill in).",
+                lead_file.display()
+            ),
+            "  4. Adapt docs/agents/loopherd.md to the same tracker.".to_string(),
+        ] {
+            assert!(next.contains(&step), "{step:?} missing from:\n{next}");
+        }
+    }
 }
 
 #[test]
