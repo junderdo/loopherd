@@ -529,8 +529,12 @@ impl Next {
         }
     }
 
+    /// A closer followed by a letter or digit is an apostrophe (`it’s`), not a close.
     fn closed_by(word: &str, closer: char) -> Next {
-        match word.contains(closer) {
+        let closes = word.match_indices(closer).any(|(at, _)| {
+            !word[at + closer.len_utf8()..].starts_with(|c: char| c.is_alphanumeric())
+        });
+        match closes {
             true => Next::Free,
             false => Next::Closing(closer),
         }
@@ -1302,6 +1306,34 @@ mod tests {
             (
                 "password: ‘two words’ ok?",
                 "password: [redacted] [redacted] ok?",
+            ),
+        ] {
+            assert_eq!(text_sent(question), text, "{question}");
+        }
+    }
+
+    #[test]
+    fn an_apostrophe_inside_a_quoted_value_does_not_close_it() {
+        for (question, text) in [
+            (
+                "passphrase: ‘it’s a long passphrase’ ok?",
+                "passphrase: [redacted] [redacted] [redacted] [redacted] ok?",
+            ),
+            (
+                "pw: ‘don’t panic2 now’",
+                "pw: [redacted] [redacted] [redacted]",
+            ),
+            (
+                "Use ‘password’: ‘don’t tell anyone’ ok?",
+                "Use ‘password’: [redacted] [redacted] [redacted] ok?",
+            ),
+            (
+                "Use 'password': 'don't tell anyone' ok?",
+                "Use 'password': [redacted] [redacted] [redacted] ok?",
+            ),
+            (
+                r#"{"token":"abc","x":1} then merge?"#,
+                "[redacted] then merge?",
             ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
