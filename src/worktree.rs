@@ -33,12 +33,25 @@ pub fn planned_worktree(repo: &Path, branch: &str) -> Result<PathBuf> {
 
 /// The main checkout of the repo containing `dir`, even from a linked worktree.
 pub fn repo_root(dir: &Path) -> Result<PathBuf> {
+    let common = git_common_dir(dir)
+        .with_context(|| format!("{} is not in a git repo; pass --repo", dir.display()))?;
+    checkout_above(&common)
+}
+
+/// [`repo_root`] failing with git's own reason and no hint.
+pub fn checkout_root(dir: &Path) -> Result<PathBuf> {
+    checkout_above(&git_common_dir(dir)?)
+}
+
+fn git_common_dir(dir: &Path) -> Result<PathBuf> {
     let common = git(
         dir,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )
-    .with_context(|| format!("{} is not in a git repo; pass --repo", dir.display()))?;
-    let common = PathBuf::from(common.trim());
+    )?;
+    Ok(PathBuf::from(common.trim()))
+}
+
+fn checkout_above(common: &Path) -> Result<PathBuf> {
     let root = common
         .parent()
         .with_context(|| format!("no checkout above {}", common.display()))?;
