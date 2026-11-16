@@ -4,6 +4,7 @@ use std::process::Command;
 
 fn git(args: &[&str]) -> Option<String> {
     let out = Command::new("git")
+        .arg("--no-optional-locks")
         .args(args)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
