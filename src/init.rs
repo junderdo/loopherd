@@ -574,6 +574,10 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
     // Leaves room for "<herd>-" in a member name of at most 32 characters.
     let id_room = (32 - name.len() - 1).to_string();
     let local = tracker.kind == tracker::Kind::Local;
+    let (slug, account) = match github {
+        Some(github) => (github.slug.as_str(), github.account.as_str()),
+        None => ("", ""),
+    };
     let (task, lead_tasks) = match local {
         true => (
             "ready issue under .scratch/ in this repo".to_string(),
@@ -584,15 +588,11 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
             ),
         ),
         false => (
-            "ready GitHub issue in @OWNER_REPO@".to_string(),
+            format!("ready GitHub issue in {slug}"),
             "Tasks are GitHub issues in @OWNER_REPO@. A worker opens a PR whose body \
              carries `Closes #<n>`, so its issue closes when the PR merges."
                 .to_string(),
         ),
-    };
-    let (slug, account) = match github {
-        Some(github) => (github.slug.as_str(), github.account.as_str()),
-        None => ("", ""),
     };
     let dir_name = repo.file_name().unwrap_or_default().to_string_lossy();
     let checkout_of = match github {

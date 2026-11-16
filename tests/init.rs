@@ -246,6 +246,19 @@ fn init_writes_a_herd_whose_feed_lists_the_repos_ready_issues() {
 }
 
 #[test]
+fn the_herd_file_opens_by_naming_the_github_repo_its_issues_come_from() {
+    let fixture = Fixture::new(&["acme"]);
+
+    assert_ok(&fixture.init(&[]));
+
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(
+        herd.starts_with("# Herd widgets: one worker per ready GitHub issue in acme/widgets.\n"),
+        "{herd}"
+    );
+}
+
+#[test]
 fn the_queue_names_each_issues_branch_type_skill_and_slug_from_its_labels_and_title() {
     let fixture = Fixture::new(&["acme"]);
     fixture.gh_json("issues.json", ISSUES);
