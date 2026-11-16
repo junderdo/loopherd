@@ -261,11 +261,16 @@ pub fn failed(launch: &Launch, mailboxes: &Path, problem: &str, now: SystemTime)
     };
     let text =
         format!("{what} failed ({problem}); further failures go unnoted until it next succeeds");
-    report::append(
+    let noted = report::append(
         mailboxes,
         &launch.member,
         &Entry::new(now, Body::Note { text }),
-    )
+    );
+    if noted.is_err() {
+        // Unmarked, so the next failure tries the note again.
+        let _ = fs::remove_file(&mark);
+    }
+    noted
 }
 
 /// Marks `member`'s question at `at` notified unless a watch already did.
@@ -814,6 +819,25 @@ mod tests {
     #[test]
     fn the_text_is_the_first_line_that_isnt_blank() {
         assert_eq!(text_sent("\n  \nWhich way?\nMore."), "Which way?");
+    }
+
+    #[test]
+    fn a_note_that_cannot_be_written_leaves_the_next_failure_noted() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("lh-3.jsonl")).unwrap();
+        let fail = stub("exit 3");
+
+        assert!(run(&fail, dir.path(), SOON, SystemTime::now()).is_err());
+        fs::remove_dir(dir.path().join("lh-3.jsonl")).unwrap();
+        run(&fail, dir.path(), SOON, SystemTime::now()).unwrap();
+
+        assert_eq!(
+            mailbox(dir.path()),
+            [note(
+                "notify command failed (exit 3); \
+                 further failures go unnoted until it next succeeds"
+            )]
+        );
     }
 
     fn load_text(text: &str) -> Result<Option<Config>> {
