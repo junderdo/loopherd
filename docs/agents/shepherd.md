@@ -54,6 +54,10 @@ human to paste:
 ! GH_TOKEN=$(gh auth token --user junderdo) gh pr merge <n> --merge --match-head-commit <full sha>
 ```
 
+A switch its `[lead]` leaves unset comes from `[lead_defaults]` in
+`~/.config/loopherd/config.toml` (`scripts/install --lead-defaults` to change
+them), else is off; `loopherd herds` shows each switch's value and source.
+
 ## Gotchas
 
 - Run the live suite after changing retire or feed output.

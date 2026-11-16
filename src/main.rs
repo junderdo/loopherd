@@ -211,8 +211,9 @@ enum Command {
     /// stdin. Outside a member's pane it changes nothing. Set up by install-hook.
     SessionHook,
     /// Claude's PreToolUse hook on Bash: in a lead's pane, denies a merge, install,
-    /// rebase or force-push its herd file's switch leaves to the human, and any
-    /// `loopherd restart --force`, `pause`, `resume`, `herd set` or `herd unset`,
+    /// rebase or force-push its switches leave to the human, and any
+    /// `loopherd restart --force`, `pause`, `resume`, `herd set`, `herd unset` or
+    /// `lead-defaults --set`, or `scripts/install --lead-defaults`,
     /// read from the hook input on stdin, by printing a
     /// deny decision. Elsewhere it prints nothing.
     /// Always exits 0. Set up by install-hook.
