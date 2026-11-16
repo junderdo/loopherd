@@ -146,8 +146,9 @@ or `resolved`/`closed`/`done`, and its `Blocked by:` line is missing,
 `<herd>-<feature>-<NN>`; a feature that isn't lowercase letters, digits
 and `-`, or that doesn't fit 32 characters, is cut and takes a short hash,
 `<herd>-<cut>_<hash>-<NN>`. A worker
-claims by setting the line to `claimed`, and its PR sets it to `resolved`,
-which is what `done` checks; `merged` is the GitHub PR check.
+claims by setting the line to `claimed`, and its branch sets it to
+`resolved`, which is what `done` checks once the branch merges. With a
+GitHub origin the worker opens a PR, and `merged` is the GitHub PR check.
 
 A local-markdown repo needs no GitHub. When `origin` isn't on GitHub and
 `--repo` isn't given, init makes no gh call (and refuses `--gh-account`),
