@@ -302,7 +302,8 @@ impl Word {
 /// The simple commands in `script`, each as its words.
 /// `;`, `&`, `|`, newlines and parentheses end a command; the contents of a
 /// `$(…)` or backtick substitution are lexed as commands of their own.
-/// `None` when a `$(…)` holds a `case`.
+/// `None` when a `$(…)` holds a `case` or a heredoc without its own
+/// delimiter line.
 fn commands(script: &str) -> Option<Vec<Vec<Word>>> {
     let mut commands = vec![];
     let mut words = vec![];
@@ -380,9 +381,11 @@ fn commands(script: &str) -> Option<Vec<Vec<Word>>> {
 
 /// The text of a `$(…)` whose `$(` was just read, through its matching `)`,
 /// skipping quotes, escapes, comments and heredoc bodies. `None` when it
-/// holds a `case … in`, since a pattern's `)` would end it early.
+/// holds a `case … in`, since a pattern's `)` would end it early, or a heredoc
+/// the hook can't end.
 fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<String> {
-    let arithmetic = chars.peek() == Some(&'(');
+    // While in `$((…))` or `((…))`, the depth it ends at; `<<` there is a shift.
+    let mut arithmetic_from = (chars.peek() == Some(&'(')).then_some(0);
     let mut depth = 1;
     let mut inner = String::new();
     let mut word = String::new();
@@ -403,11 +406,19 @@ fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<Stri
             word.clear();
         }
         match c {
-            '(' => depth += 1,
+            '(' => {
+                if arithmetic_from.is_none() && chars.peek() == Some(&'(') {
+                    arithmetic_from = Some(depth);
+                }
+                depth += 1;
+            }
             ')' => {
                 depth -= 1;
                 if depth == 0 {
                     return Some(inner);
+                }
+                if arithmetic_from.is_some_and(|from| depth <= from) {
+                    arithmetic_from = None;
                 }
             }
             '#' if word.is_empty() => {
@@ -424,7 +435,7 @@ fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<Stri
                 }
                 continue;
             }
-            '<' if !arithmetic && chars.peek() == Some(&'<') => {
+            '<' if arithmetic_from.is_none() && chars.peek() == Some(&'<') => {
                 chars.next();
                 inner.push_str("<<");
                 if let Some(c) = chars.next_if(|&c| c == '<' || c == '-') {
@@ -514,8 +525,8 @@ fn quoted(
 }
 
 /// Copies a heredoc's body onto `inner` through its `delimiter` line.
-/// `None` when the script ends first, or a line starts with the delimiter
-/// but has more, as `EOF)` does, which bash may take as the end.
+/// `None` when the script ends first, or a line starts with the delimiter and
+/// holds a `)`, as `EOF)` does, which bash takes as the end.
 fn heredoc_body(
     chars: &mut std::iter::Peekable<std::str::Chars>,
     delimiter: &str,
@@ -537,7 +548,7 @@ fn heredoc_body(
         if line == delimiter {
             return Some(());
         }
-        if line.starts_with(delimiter) {
+        if line.starts_with(delimiter) && line.contains(')') {
             return None;
         }
     }
@@ -1984,6 +1995,7 @@ mod tests {
             "x=$(cat <<'EOF'\nBody\nEOF)\ngh pr merge 1",
             "x=$(cat <<-'EOF'\n	Body\n	EOF); gh pr merge 1",
             "x=$(cat <<'EOF'\nBody",
+            "x=$(cat <<'EOF'\nit's\nEOF)\ngh pr merge 1\nEOF\n)",
         ] {
             let message =
                 run(&leads, all_on(), command).unwrap_or_else(|| panic!("{command} was allowed"));
@@ -1992,7 +2004,19 @@ mod tests {
                 "{message}"
             );
         }
-        for command in ["echo $(echo case) done", "echo $(echo 'case x in x)')"] {
+        for command in [
+            "echo $(echo case) done",
+            "echo $(echo 'case x in x)')",
+            "git commit -m \"$(cat <<'EOF'\nHandle EOF in parser\n\nEOF handling was wrong.\nEOF\n)\"",
+            "gh pr create --body \"$(cat <<'EOF'\nEOF is reached early now.\nEOF\n)\"",
+            "x=$(cat <<'EOF'\nEOFError fix\nEOF\n)",
+            "x=$(cat <<'BODY'\nBODY text\nBODY\n)",
+            "x=$(cat <<'MSG'\nMSGs are fine\nMSG\n)",
+            "x=$(cat <<'END'\nENDPOINT changes\nEND\n)",
+            "x=$(cat <<-EOF\n\tEOF is reached\n\tEOF\n)",
+            "x=$(echo $((1<<2))\necho hi\n)",
+            "x=$(echo \"$((1<<2))\"\necho hi\n)",
+        ] {
             assert_eq!(run(&leads, Switches::default(), command), None, "{command}");
         }
         let workers = ledger(vec![entry("lh-1", None)]);
