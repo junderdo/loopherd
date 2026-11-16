@@ -405,7 +405,7 @@ fn summary(question: &str) -> String {
             Next::Value if FILLERS.contains(&normalized(word).as_str()) => {
                 (Shown::Word(word.to_string()), next)
             }
-            Next::Value => (Shown::redacted(), Next::after_value(word)),
+            Next::Value => (Shown::redacted(), value_then(word)),
             Next::Key(key) if is_separator(word) => (Shown::Word(word.to_string()), key.value()),
             Next::Key(_) if FILLERS.contains(&normalized(word).as_str()) => {
                 (Shown::Word(word.to_string()), next)
@@ -415,13 +415,7 @@ fn summary(question: &str) -> String {
             }
             Next::Free | Next::Key(_) | Next::MaybeValue => match carried_value(word) {
                 Some((true, value)) => clause_start(value),
-                Some((false, value)) => (
-                    Shown::redacted(),
-                    match key_named_by(value) {
-                        Next::Free => Next::after_value(value),
-                        next => next,
-                    },
-                ),
+                Some((false, value)) => (Shown::redacted(), value_then(value)),
                 None if token_shaped(word) => (Shown::redacted(), key_named_by(word)),
                 None => (Shown::Word(without_userinfo(word)), key_named_by(word)),
             },
@@ -486,7 +480,7 @@ fn clause_end(word: &str) -> Option<&str> {
 #[derive(Clone, Copy)]
 enum Next {
     Free,
-    /// Hidden outright.
+    /// Hidden outright, unless it is a separator or filler, which is shown.
     Value,
     /// A separated strong key's value: hidden to the end of its clause.
     ClauseStart,
@@ -626,6 +620,15 @@ fn secret_key(name: &str, separated: bool) -> Option<Key> {
 fn is_separator(word: &str) -> bool {
     word.strip_suffix([':', '='])
         .is_some_and(|rest| rest.is_empty() || FILLERS.contains(&normalized(rest).as_str()))
+}
+
+/// What follows a hidden `value`: the rest of a quote it opens, else what it names as a
+/// key (`auth=Bearer x` hides `x`).
+fn value_then(value: &str) -> Next {
+    match Next::after_value(value) {
+        Next::Free => key_named_by(value),
+        next => next,
+    }
 }
 
 /// What `word` makes the next one: a value after `password:`, `"token":` or
@@ -1412,6 +1415,22 @@ mod tests {
             ),
             ("Is SECRET = abc123def456 right?", "Is SECRET = [redacted]?"),
             ("TOKEN abc123 ok?", "TOKEN [redacted] ok?"),
+            (
+                "The TOKEN is Bearer abc123def456 then merge #107?",
+                "The TOKEN is [redacted] [redacted] then merge #107?",
+            ),
+            (
+                r#"Set "TOKEN" is Bearer abc123def456 then merge?"#,
+                r#"Set "TOKEN" is [redacted] [redacted] then merge?"#,
+            ),
+            (
+                "The SECRET was token abc123def456 then merge?",
+                "The SECRET was [redacted] [redacted] then merge?",
+            ),
+            (
+                "TOKEN Bearer abc123def456 then merge?",
+                "TOKEN [redacted] [redacted] then merge?",
+            ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
         }
@@ -1443,6 +1462,26 @@ mod tests {
             (
                 "Open https://x.io/?token=Bearer then merge #107?",
                 "Open [redacted] then merge #107?",
+            ),
+            (
+                r#"Set auth="Bearer correct-horse-battery-staple" then merge #107?"#,
+                "Set [redacted] [redacted] then merge #107?",
+            ),
+            (
+                "Set auth='Bearer xyz.abc.def' then merge #107?",
+                "Set [redacted] [redacted] then merge #107?",
+            ),
+            (
+                r#"Set session="token correct horse battery" then merge #107?"#,
+                "Set [redacted] [redacted] [redacted] [redacted] then merge #107?",
+            ),
+            (
+                "Set auth=(Bearer correct horse) then merge #107?",
+                "Set [redacted] [redacted] [redacted] then merge #107?",
+            ),
+            (
+                r#"Use {"headers":{"Authorization":"Bearer correct-horse-battery"}} then merge #107?"#,
+                "Use [redacted] [redacted] then merge #107?",
             ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
