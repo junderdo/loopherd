@@ -23,7 +23,8 @@ if [[ -z "${LOOPHERD_CONFIG_DIR:-}" ]]; then
     LOOPHERD_CONFIG_DIR="$XDG_RUNTIME_DIR/loopherd-dev/config"
   else
     LOOPHERD_CONFIG_DIR=$(mktemp -d)
-    trap 'rm -rf -- "$LOOPHERD_CONFIG_DIR"' EXIT
+    # --start's server hands it on to every pane it opens, so only a one-off run removes it.
+    [[ "${1:-}" == --start ]] || trap 'rm -rf -- "$LOOPHERD_CONFIG_DIR"' EXIT
   fi
 fi
 export LOOPHERD_CONFIG_DIR
