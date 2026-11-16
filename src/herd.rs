@@ -686,6 +686,11 @@ pub fn herds(paths: &Paths) -> Result<(String, i32)> {
         lines.push(format!("invalid {}", format!("{e:#}").trim_end()));
         code = 1;
     }
+    // After a context error, which also covers a file that isn't TOML.
+    if let (0, Err(e)) = (code, crate::notify::load(&config_file(paths))) {
+        lines.push(format!("invalid {}", format!("{e:#}").trim_end()));
+        code = 1;
+    }
     let files = herd_files(&paths.herds)?;
     if files.is_empty() {
         lines.push(format!(
@@ -1881,6 +1886,32 @@ args = ["--model", "opus"]
         let (report, code) = herds(&config.paths()).unwrap();
         assert!(!report.contains("invalid"), "{report}");
         assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn herds_reports_a_broken_notify_table_and_exits_1_while_context_limits_still_read() {
+        let config = Config::with(&[("prs", PR_HERD)]);
+        let file = config.path().join("config.toml");
+        fs::write(
+            &file,
+            "context_window = 300000\n[notify]\nkinds = [\"done\"]\n",
+        )
+        .unwrap();
+
+        let (report, code) = herds(&config.paths()).unwrap();
+
+        let first = report.lines().next().unwrap();
+        assert!(
+            first.starts_with(&format!("invalid {}: [notify]", file.display())),
+            "{report}"
+        );
+        assert!(first.contains("done"), "{report}");
+        assert_eq!(report.matches("invalid").count(), 1, "{report}");
+        assert_eq!(code, 1, "{report}");
+        assert_eq!(
+            crate::context::effective_limit(None, &file).unwrap(),
+            240_000
+        );
     }
 
     #[test]

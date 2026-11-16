@@ -16,6 +16,7 @@ use crate::herd_view::{Member, Options, View};
 use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::{AfterMerge, AgentRecord, Ledger, Process};
 use crate::lock::Lock;
+use crate::notify::{self, Waiting};
 use crate::pause;
 use crate::process::{Procs, live};
 use crate::report::{Body, Filter, Mailbox, Pending, Stop, member_in, peek_reports, unread_stops};
@@ -98,6 +99,8 @@ const CHECK_EVERY: Duration = Duration::from_secs(60);
 #[must_use = "what woke it stays unread until mark_read"]
 pub struct Wake {
     pub lines: Vec<String>,
+    /// What among `lines` waits on the human.
+    pub waiting: Vec<Waiting>,
     pending: Vec<Pending>,
     fired: Option<Fired>,
     handoff: Option<ShepherdHandoff>,
@@ -178,6 +181,7 @@ pub fn watch(
         let members = in_scope(read.view, req, &reader)?;
         let names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
         let mut lines = vec![];
+        let mut waiting = vec![];
         let mut pending = vec![];
         // An empty filter means every mailbox.
         if !names.is_empty() {
@@ -197,6 +201,18 @@ pub fn watch(
                 .iter()
                 .for_each(|w| warn(&format!("warning: {w}")));
             lines.extend(read.lines);
+            waiting.extend(read.entries.into_iter().filter_map(|(member, entry)| {
+                let Body::Question { text } = entry.body else {
+                    return None;
+                };
+                Some(Waiting {
+                    herd: None,
+                    member,
+                    kind: notify::Kind::Question,
+                    text,
+                    at: Some(entry.at),
+                })
+            }));
             lines.extend(stops.iter().flat_map(stop_wakes));
             pending.extend([stops_read, reports_read]);
         }
@@ -226,6 +242,13 @@ pub fn watch(
                 && was.is_some_and(|w| w != AgentStatus::Blocked)
             {
                 lines.push(format!("{} {}", member.name, line::BLOCKED));
+                waiting.push(Waiting {
+                    herd: None,
+                    member: member.name.clone(),
+                    kind: notify::Kind::Blocked,
+                    text: String::new(),
+                    at: None,
+                });
             }
             if member.status != AgentStatus::Unknown {
                 last.insert(member.name.clone(), member.status);
@@ -238,8 +261,15 @@ pub fn watch(
             .flatten();
         lines.extend(handoff.iter().map(|h| h.line.clone()));
         if !lines.is_empty() {
+            if !waiting.is_empty() {
+                let entries = ledger.entries()?;
+                for event in &mut waiting {
+                    event.herd = entries.get(&event.member).and_then(|e| e.herd.clone());
+                }
+            }
             return Ok(Some(Wake {
                 lines,
+                waiting,
                 pending,
                 fired,
                 handoff,
@@ -882,6 +912,69 @@ mod tests {
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
             ["lh-1 blocked"]
+        );
+    }
+
+    fn waiting(wake: &Wake) -> Vec<(Option<&str>, &str, notify::Kind, &str, bool)> {
+        wake.waiting
+            .iter()
+            .map(|w| {
+                let herd = w.herd.as_deref();
+                (
+                    herd,
+                    w.member.as_str(),
+                    w.kind,
+                    w.text.as_str(),
+                    w.at.is_some(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_wake_hands_on_each_question_and_blocked_member_it_read_as_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![
+            member("lh-1", "w9:p1", Some("cards")),
+            member("solo", "w9:p2", None),
+        ]);
+        let herdr = FakeHerdr::new(&[])
+            .with_live_agent(Some("lh-1"), None, "w9:p1")
+            .with_live_agent(Some("solo"), None, "w9:p2");
+        herdr.set_status("solo", AgentStatus::Working);
+        send(&ledger, dir.path(), "lh-1", Kind::Note, "starting");
+        let mut clock = steps(|poll| match poll {
+            1 => {
+                send(&ledger, dir.path(), "lh-1", Kind::Question, "which DB?");
+                herdr.set_status("solo", AgentStatus::Blocked);
+            }
+            _ => panic!("slept past the wake"),
+        });
+        let first = watch(
+            &herdr,
+            &ledger,
+            dir.path(),
+            &EVERY,
+            &mut steps(|_| {}),
+            &mut |_| {},
+        );
+        first.unwrap().unwrap().mark_read().unwrap();
+
+        let wake = watch(&herdr, &ledger, dir.path(), &EVERY, &mut clock, &mut |_| {});
+
+        let wake = wake.unwrap().unwrap();
+        assert_eq!(
+            waiting(&wake),
+            [
+                (
+                    Some("cards"),
+                    "lh-1",
+                    notify::Kind::Question,
+                    "which DB?",
+                    true
+                ),
+                (None, "solo", notify::Kind::Blocked, "", false),
+            ]
         );
     }
 

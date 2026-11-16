@@ -34,6 +34,9 @@ struct ConfigFile {
     default_context_limit: Option<u64>,
     context_window: Option<u64>,
     shepherd: Option<ShepherdConfig>,
+    /// Read and checked by `notify`, so a broken table can't cost the limits.
+    #[serde(rename = "notify")]
+    _notify: Option<toml::Table>,
 }
 
 #[derive(Debug, Default, Deserialize)]

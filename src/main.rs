@@ -8,6 +8,7 @@ mod lead;
 mod ledger;
 mod lock;
 mod matching;
+mod notify;
 mod pause;
 mod process;
 mod prompt;
@@ -28,6 +29,7 @@ mod watch;
 mod worktree;
 
 use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
@@ -206,6 +208,17 @@ enum Command {
     /// deny decision. Elsewhere it prints nothing.
     /// Always exits 0. Set up by install-hook.
     ToolHook,
+    /// Send one notification for `watch`, detached from it: runs the command
+    /// within 30s and notes a failure in the member's mailbox.
+    #[command(hide = true)]
+    NotifyRun {
+        #[arg(long)]
+        member: String,
+        #[arg(long, value_enum)]
+        sender: notify::Sender,
+        #[arg(last = true, required = true)]
+        args: Vec<String>,
+    },
     /// Add loopherd's Stop, StopFailure, SessionStart and PreToolUse hooks to Claude's
     /// user settings, calling this binary, and write the `--skill` guide as the loopherd
     /// skill; safe to re-run. Backs the settings file up before changing it.
@@ -381,6 +394,11 @@ fn main() -> ExitCode {
         Command::StopHook => ("stop-hook", run_stop_hook()),
         Command::SessionHook => ("session-hook", run_session_hook()),
         Command::ToolHook => ("tool-hook", run_tool_hook()),
+        Command::NotifyRun {
+            member,
+            sender,
+            args,
+        } => ("notify-run", run_notify(member, sender, args)),
         Command::InstallHook {
             remove,
             settings,
@@ -618,7 +636,66 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         .try_for_each(|line| writeln!(out, "{line}"))
         .and_then(|()| out.flush())
         .context("print the wake; left it unread")?;
+    let config = herd_paths.herds.with_file_name("config.toml");
+    notify_waiting(&wake.waiting, &config, &ledger.reports_dir()?);
     wake.mark_read()?;
+    Ok(0)
+}
+
+/// Launches each notification `config` asks for as its own `notify-run`,
+/// so neither a slow command nor its failure holds up the watch.
+fn notify_waiting(waiting: &[notify::Waiting], config: &Path, mailboxes: &Path) {
+    if waiting.is_empty() {
+        return;
+    }
+    let config = match notify::load(config) {
+        Ok(Some(config)) => config,
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!("loopherd watch: warning: sent no notification: {e:#}");
+            return;
+        }
+    };
+    let sent = std::env::current_exe()
+        .context("find this binary")
+        .and_then(|exe| {
+            notify::send(&config, mailboxes, waiting, &mut |launch| {
+                let sender = match launch.sender {
+                    notify::Sender::Herdr => "herdr",
+                    notify::Sender::Command => "command",
+                };
+                std::process::Command::new(&exe)
+                    .args(["notify-run", "--member", &launch.member, "--sender", sender])
+                    .arg("--")
+                    .args(&launch.args)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    // Its own group, so ending the watch's task leaves it running.
+                    .process_group(0)
+                    .spawn()
+                    .map(drop)
+                    .context("start notify-run")
+            })
+        });
+    if let Err(e) = sent {
+        eprintln!("loopherd watch: warning: notify: {e:#}");
+    }
+}
+
+fn run_notify(member: String, sender: notify::Sender, args: Vec<String>) -> Result<i32> {
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let launch = notify::Launch {
+        sender,
+        member,
+        args,
+    };
+    notify::run(
+        &launch,
+        &ledger.reports_dir()?,
+        notify::TIMEOUT,
+        SystemTime::now(),
+    )?;
     Ok(0)
 }
 

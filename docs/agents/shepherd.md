@@ -54,6 +54,14 @@ human to paste:
 ! GH_TOKEN=$(gh auth token --user junderdo) gh pr merge <n> --merge --match-head-commit <full sha>
 ```
 
+## Notify
+
+The human's `[notify]` table in `~/.config/loopherd/config.toml` decides
+whether questions and blocked dialogs also reach them outside herdr (see
+"Notifying the human" in `loopherd --skill`). Manual and test runs set a temp
+`LOOPHERD_CONFIG_DIR`, so they never send to the human; give such a run its
+own `[notify]` with a stub `command` to see a send.
+
 ## Gotchas
 
 - Run the live suite after changing retire or feed output.

@@ -44,6 +44,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D27](decisions/D27.md) | `scripts/install` reads the mattpocock-skills plugin's skill names from its GitHub manifest at the catalog's pinned commit; naming one extra installs just it, asking nothing else. |
 | [D28](decisions/D28.md) | A herd file's top-level `after_merge` runs from `loopherd feed` once per member when its `merged` check first passes, after feed releases its lock, noted in its mailbox; from a lead's pane, any command the hook would deny holds back all of them. |
 | [D29](decisions/D29.md) | `loopherd herd get\|set\|unset` edits herd files format-preservingly, refusing any result `loopherd herds` calls invalid; the tool hook denies `set`/`unset` in a lead's pane. |
+| [D30](decisions/D30.md) | `[notify]` in `config.toml` sends herdr's toast and an optional command, detached, when the watch that first reads it prints a `question` or `blocked`; once per question. |
 
 ## Emerging model
 
