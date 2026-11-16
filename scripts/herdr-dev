@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Run a command against the loopherd-dev herdr session, never the inherited one.
+# Run a command against the loopherd-dev herdr session, never the inherited one,
+# with loopherd's config (herd files, config.toml and its [notify]) read from
+# $TMPDIR/loopherd-dev/config unless LOOPHERD_CONFIG_DIR is already set.
 #
 #   scripts/herdr-dev cargo run -- spawn --workspace <label> ...
 #   scripts/herdr-dev herdr agent list
@@ -14,6 +16,7 @@ live_labels=$(herdr workspace list 2>/dev/null | jq -r '.result.workspaces[].lab
 
 unset HERDR_ENV HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID
 export HERDR_SOCKET_PATH="$dev_socket"
+export LOOPHERD_CONFIG_DIR="${LOOPHERD_CONFIG_DIR:-${TMPDIR:-/tmp}/loopherd-dev/config}"
 
 if [[ "${1:-}" == --start ]]; then
   nohup herdr --session loopherd-dev server >/dev/null 2>&1 &
