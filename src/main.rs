@@ -337,7 +337,8 @@ enum HerdAction {
     /// `prompt_file` when that lies in the herds dir and no other herd file
     /// names it, and its members' ledger entries, mailboxes and handoffs.
     /// Refuses, changing nothing, while any member (lead included) is not
-    /// retired. Never touches worktrees, branches or tabs; `retire --close`
+    /// retired or herdr still shows its agent or tab, or herdr can't be
+    /// reached. Never touches worktrees, branches or tabs; `retire --close`
     /// does that.
     Remove {
         herd: String,
@@ -593,7 +594,12 @@ fn run_herd(action: HerdAction) -> Result<i32> {
                 dry_run,
                 keep_history,
             };
-            print!("{}", herd::remove(&paths, &mut ledger, &state, &herd, how)?);
+            let mut out = vec![];
+            let result = herd::remove(&paths, &CliHerdr, &mut ledger, &state, &herd, how, &mut out);
+            for line in out {
+                println!("{line}");
+            }
+            result?;
         }
     }
     Ok(0)

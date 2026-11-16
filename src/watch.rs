@@ -2514,7 +2514,11 @@ mod tests {
         ) -> Result<AgentRecord> {
             self.0.borrow_mut().update(name, change)
         }
-        fn remove_herd(&mut self, _: &str) -> anyhow::Result<Vec<String>> {
+        fn remove_herd(
+            &mut self,
+            _: &str,
+            _: &mut dyn FnMut(&[String]) -> anyhow::Result<()>,
+        ) -> anyhow::Result<Vec<String>> {
             unreachable!()
         }
         fn started(&mut self, name: &str, at: std::time::SystemTime) -> Result<()> {

@@ -330,7 +330,8 @@ question as its own sends a second notification.
   `prompt_file` (when that lies in the herds dir and no other herd file
   names it), and every member's ledger entry, mailbox and handoffs, so the
   herd leaves `herds`, `status --all` and `stats`. It refuses while any
-  member, lead included, isn't retired; `loopherd retire --close <name>`
+  member, lead included, isn't retired or herdr still shows its agent or
+  tab, and while herdr can't be reached; `loopherd retire --close <name>`
   each first, which also cleans up tabs, worktrees and branches that
   `herd remove` never touches. `--dry-run` lists what would go;
   `--keep-history` keeps the ledger entries and mailboxes for `stats`.

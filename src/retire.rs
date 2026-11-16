@@ -64,7 +64,7 @@ pub fn retire_and_close(
             out.push(format!("closed tab {tab_id}"));
             None
         }
-        TabFate::Kept { tab_id, reason } => {
+        TabFate::Kept { tab_id, reason } | TabFate::Taken { tab_id, reason } => {
             out.push(format!("kept tab {tab_id}: {reason}"));
             Some("its tab was kept")
         }
@@ -113,6 +113,21 @@ pub fn retire_and_close(
     Ok(())
 }
 
+/// Why `record`'s tab is still open, found as `retire_and_close` finds it,
+/// or `None` once herdr shows neither its agent nor its tab. `others` are
+/// the other ledger entries.
+pub fn open_tab(
+    herdr: &dyn Herdr,
+    record: &AgentRecord,
+    others: &BTreeMap<String, AgentRecord>,
+) -> Result<Option<String>> {
+    Ok(match agent_tab(herdr, record, others, None)? {
+        TabFate::Ours(tab_id) => Some(format!("tab {tab_id} is open")),
+        TabFate::Kept { tab_id, reason } => Some(format!("tab {tab_id} is open: {reason}")),
+        TabFate::Gone | TabFate::Taken { .. } | TabFate::Unmatched(_) => None,
+    })
+}
+
 /// An active entry other than `name` whose worktree is `path`.
 fn other_user(ledger: &dyn Ledger, name: &str, path: &Path) -> Result<Option<String>> {
     Ok(ledger
@@ -128,6 +143,11 @@ enum TabFate {
     Gone,
     Ours(String),
     Kept {
+        tab_id: String,
+        reason: String,
+    },
+    /// The recorded pane is open but someone else's now.
+    Taken {
         tab_id: String,
         reason: String,
     },
@@ -184,7 +204,10 @@ fn agent_tab(
         && let Some(pane) = &pane
         && let Some(reason) = reused_by(herdr, record, &pane.id, &agents, others)?
     {
-        return kept(&pane.tab_id, reason);
+        return Ok(TabFate::Taken {
+            tab_id: pane.tab_id.clone(),
+            reason,
+        });
     }
     let cwd = record.worktree.as_ref().unwrap_or(&record.repo);
     match (pane, live) {

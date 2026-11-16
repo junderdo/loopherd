@@ -1685,7 +1685,11 @@ mod tests {
             anyhow::bail!("read-only")
         }
 
-        fn remove_herd(&mut self, _: &str) -> anyhow::Result<Vec<String>> {
+        fn remove_herd(
+            &mut self,
+            _: &str,
+            _: &mut dyn FnMut(&[String]) -> anyhow::Result<()>,
+        ) -> anyhow::Result<Vec<String>> {
             unreachable!()
         }
         fn started(&mut self, _: &str, _: std::time::SystemTime) -> Result<()> {
