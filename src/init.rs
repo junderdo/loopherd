@@ -46,6 +46,9 @@ const LEAD_BRANCH_MERGE_ASK: &str = "With merge off, a merge question carries th
 branch, any branch that must merge first, and the full sha of the head your
 reviewer verified.";
 
+const NO_MERGED: &str =
+    "without GitHub the herd has no merged check, so after_merge never runs for its members";
+
 pub struct Request<'a> {
     pub dir: &'a Path,
     pub herd: Option<&'a str>,
@@ -98,6 +101,9 @@ pub fn init(paths: &Paths, req: Request) -> Result<Vec<String>> {
         terminal: ask::interactive(),
     };
     let herd = settle(paths, req, &ask, Mode::Write)?;
+    if herd.github.is_none() {
+        eprintln!("warning: {NO_MERGED}");
+    }
     if ask.terminal {
         eprint!("{}", summary(&herd));
         if !ask.yes("Write this herd?", None, true)? {
@@ -722,13 +728,7 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
     let source = source.trim_end();
     let merged = match github {
         Some(_) => fill(MERGED_GITHUB, &values),
-        None => {
-            eprintln!(
-                "warning: without GitHub the herd has no merged check, so after_merge \
-                 never runs for its members"
-            );
-            String::new()
-        }
+        None => String::new(),
     };
     let lead_tasks = fill(&lead_tasks, &values);
     values.push(("MERGED", merged.trim_end()));

@@ -3411,6 +3411,7 @@ impl Fixture {
             &self.repo(),
             &["remote", "set-url", "origin", origin.to_str().unwrap()],
         );
+        git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
         git(&self.repo(), &["fetch", "-q", "origin"]);
         git(&self.repo(), &["remote", "set-head", "origin", "main"]);
     }
@@ -4071,4 +4072,61 @@ fn diff_keeps_the_recorded_checks_around_a_reworded_one() {
         ],
         "{stdout}"
     );
+}
+
+#[test]
+fn diff_right_after_a_local_init_without_github_prints_nothing_and_makes_no_gh_call() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
+    fixture.fail_gh();
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+    let before = everything(&fixture);
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(text(&out.stderr), "");
+    assert_eq!(everything(&fixture), before);
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn diff_shows_drift_in_each_file_a_local_init_wrote() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
+    fixture.fail_gh();
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+    let files = [
+        fixture.herds().join("widgets.toml"),
+        fixture.herds().join("widgets-lead.md"),
+        fixture.repo().join("docs/agents/issue-tracker.md"),
+        fixture.repo().join("docs/agents/loopherd.md"),
+        fixture.repo().join("docs/agents/triage-labels.md"),
+    ];
+    for path in &files {
+        let mine = format!("{}# Ours.\n", fs::read_to_string(path).unwrap());
+        fs::write(path, mine).unwrap();
+    }
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    for path in &files {
+        let shown = path.display();
+        let header = format!("--- {shown}\n+++ {shown} (init now)\n");
+        let at = stdout
+            .find(&header)
+            .unwrap_or_else(|| panic!("{shown}: {stdout}"));
+        let rest = &stdout[at + header.len()..];
+        let end = rest.find("\n--- ").map_or(rest.len(), |end| end + 1);
+        assert!(rest[..end].ends_with("-# Ours.\n"), "{shown}: {stdout}");
+    }
+    assert_eq!(
+        stdout.matches("\n--- ").count() + 1,
+        files.len(),
+        "{stdout}"
+    );
+    assert_eq!(fixture.gh_calls(), "");
 }
