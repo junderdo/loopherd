@@ -1132,6 +1132,14 @@ mod tests {
             ("password: a.b,c d, ok?", "password: [redacted], ok?"),
             ("password: hunter2, ok?", "password: [redacted], ok?"),
             (
+                r#"Is "passphrase=correct horse battery staple" right?"#,
+                r#"Is [redacted]" right?"#,
+            ),
+            (
+                "Is ('password=correct horse battery') right?",
+                "Is [redacted]') right?",
+            ),
+            (
                 r#"password: "two words" ok?"#,
                 "password: [redacted] [redacted] ok?",
             ),
