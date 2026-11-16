@@ -147,6 +147,14 @@ or `resolved`/`closed`/`done`, and its `Blocked by:` line is missing,
 claims by setting the line to `claimed`, and its PR sets it to `resolved`,
 which is what `done` checks; `merged` is the GitHub PR check.
 
+A local-markdown repo needs no GitHub. When `origin` isn't on GitHub and
+`--repo` isn't given, init makes no gh call (and refuses `--gh-account`),
+takes the default branch from `origin/HEAD`, else the checked-out branch,
+and leaves out `merged`, warning that `after_merge` then never runs. Workers
+push their branch with no PR, for the human to merge. With no `origin`
+remote, the source and `done` read the local branch without fetching. On a
+terminal, Enter at the GitHub question means none.
+
 Every gh call runs as the logged-in account matching the
 remote's owner, else `--gh-account`; `--repo` names the GitHub repo when
 origin is an ssh host alias. init infers the rest, commits nothing,

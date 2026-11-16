@@ -1520,7 +1520,7 @@ impl Fixture {
     fn init_on_terminal(&self, extra: &[&str], input: &str) -> Output {
         let mut args = vec!["--check", "cargo test"];
         args.extend(extra);
-        self.on_terminal(&args, &format!("\n\n\n{input}\n\n\n\n\n\n"))
+        self.on_terminal(&args, &format!("\n\n{input}\n\n\n\n\n\n\n"))
     }
 
     /// `loopherd init <args>` with stdin and stderr on a terminal, typing `input`.
@@ -1795,8 +1795,8 @@ fn on_a_terminal_init_shows_each_inferred_value_takes_edits_and_re_asks_bad_ones
     let typed = [
         "",        // repo
         "gadgets", // herd name
-        "",        // owner/name
         "",        // tracker
+        "",        // owner/name
         "",        // use the suggested checks
         "0", "4", // max
         "n", // lead
@@ -1855,7 +1855,7 @@ fn on_a_terminal_init_shows_each_inferred_value_takes_edits_and_re_asks_bad_ones
 fn on_a_terminal_declining_the_summary_writes_nothing() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\nn\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\n\nn\n");
 
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stdout).contains("nothing written"));
@@ -1993,7 +1993,7 @@ fn on_a_terminal_a_taken_herd_name_or_lead_prompt_is_asked_again() {
 fn on_a_terminal_a_branch_that_cant_go_in_the_prompt_is_asked_again() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\n\nma\x27\x27\x27in\ntrunk\n\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\nma\x27\x27\x27in\ntrunk\n\n");
 
     assert_ok(&out);
     assert!(text(&out.stdout).contains("can't go in the worker prompt"));
@@ -2005,7 +2005,7 @@ fn on_a_terminal_a_branch_that_cant_go_in_the_prompt_is_asked_again() {
 fn on_a_terminal_an_unmatched_account_is_asked_from_the_logged_in_ones() {
     let fixture = Fixture::new(&["bot", "other"]);
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\nnobody\nother\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\nnobody\nother\n");
 
     assert_ok(&out);
     let shown = text(&out.stdout);
@@ -2111,7 +2111,7 @@ fn on_a_terminal_the_summary_says_an_unset_limit_takes_the_default() {
 fn on_a_terminal_a_limit_of_exactly_80_percent_is_taken_and_one_more_asked_again() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n160001\n160000\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n160001\n160000\n");
 
     assert_ok(&out);
     let shown = text(&out.stdout);
@@ -2147,7 +2147,7 @@ fn a_context_limit_of_exactly_80_percent_of_the_window_is_taken() {
 fn on_a_terminal_a_branch_with_whitespace_is_asked_again() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\n\nma in\ntrunk\n\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\nma in\ntrunk\n\n");
 
     assert_ok(&out);
     assert!(
@@ -2185,7 +2185,7 @@ fn on_a_terminal_a_repo_answer_outside_git_is_asked_again_naming_no_flag() {
 fn on_a_terminal_a_max_too_big_for_a_herd_file_says_so() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init_on_terminal(&[], "\n9223372036854775808\n4\n");
+    let out = fixture.init_on_terminal(&[], "\n\n9223372036854775808\n4\n");
 
     assert_ok(&out);
     assert!(
@@ -2817,7 +2817,7 @@ fn on_a_terminal_declining_the_summary_leaves_an_existing_agents_md_as_it_was() 
     let fixture = Fixture::new(&["acme"]);
     fs::write(fixture.repo().join("AGENTS.md"), "# Widgets\n").unwrap();
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\nn\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\n\nn\n");
 
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     assert!(text(&out.stdout).contains("nothing written"));
@@ -3342,4 +3342,166 @@ fn an_existing_local_markdown_tracker_doc_gets_the_local_snippets() {
         "{}",
         text(&feed.stdout)
     );
+}
+
+impl Fixture {
+    /// Swaps the fake gh for one that fails on any call, logging it.
+    fn fail_gh(&self) {
+        fs::write(
+            self.gh_dir().join("gh"),
+            "#!/bin/sh\necho \"$*\" >> \"$(dirname \"$0\")/calls\"\nexit 1\n",
+        )
+        .unwrap();
+    }
+
+    /// Pushes `issues` to a bare repo and makes it origin, with origin/HEAD at main.
+    fn push_local_issues_to_plain_origin(&self, issues: &[(&str, &str)]) {
+        self.push_local_issues(issues);
+        let origin = self.root.path().join("origin.git");
+        git(
+            &self.repo(),
+            &["remote", "set-url", "origin", origin.to_str().unwrap()],
+        );
+        git(&self.repo(), &["fetch", "-q", "origin"]);
+        git(&self.repo(), &["remote", "set-head", "origin", "main"]);
+    }
+}
+
+#[test]
+fn a_local_tracker_without_github_makes_no_gh_call_and_feeds_from_origin() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
+    fixture.fail_gh();
+
+    let out = fixture.init(&["--tracker", "local", "--max", "4"]);
+
+    assert_ok(&out);
+    assert_eq!(fixture.gh_calls(), "");
+    assert!(
+        text(&out.stderr).contains("warning: without GitHub the herd has no merged check"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(
+        !herd_toml(&fixture)["template"]["issue"]
+            .as_table()
+            .unwrap()
+            .contains_key("merged")
+    );
+    let feed = fixture.loopherd(&["feed", "widgets", "--dry-run"]);
+    assert_ok(&feed);
+    assert!(
+        text(&feed.stdout).contains("4 would add"),
+        "{}",
+        text(&feed.stdout)
+    );
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn a_local_tracker_without_github_hands_in_a_pushed_branch_and_never_mentions_gh() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
+    fixture.fail_gh();
+
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+
+    let prompt = fixture.herd_get("template.issue.prompt");
+    assert!(prompt.contains("`git push -u origin HEAD`"), "{prompt}");
+    assert!(
+        prompt.contains("the human merges the branch into main"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("\"<branch and one-line summary>\""),
+        "{prompt}"
+    );
+    let lead = fs::read_to_string(fixture.herds().join("widgets-lead.md")).unwrap();
+    let doc = repo_file(&fixture, "docs/agents/loopherd.md");
+    for (what, text) in [("prompt", &prompt), ("lead", &lead), ("doc", &doc)] {
+        for unexpected in [" gh ", "`gh ", "GH_TOKEN", "acme", "PR"] {
+            assert!(
+                !text.contains(unexpected),
+                "{unexpected:?} in the {what}:\n{text}"
+            );
+        }
+    }
+    assert!(doc.contains("open no pull request"), "{doc}");
+}
+
+#[test]
+fn a_local_tracker_without_any_origin_reads_the_current_branch_without_fetching() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.push_local_issues(LOCAL_ISSUES);
+    git(&fixture.repo(), &["remote", "remove", "origin"]);
+    fixture.fail_gh();
+
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+
+    let source = fixture.herd_get("queue.source");
+    assert!(!source.contains("fetch"), "{source}");
+    let tasks = fixture.run(Command::new("sh").args(["-c", &source]));
+    assert_ok(&tasks);
+    assert!(
+        text(&tasks.stdout).starts_with("auth-01 feat tdd login-form "),
+        "{}",
+        text(&tasks.stdout)
+    );
+    let done = fixture.herd_get("template.issue.done");
+    assert!(
+        !done.contains("fetch") && done.contains("git show trunk:{path}"),
+        "{done}"
+    );
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn gh_account_without_a_github_repo_is_refused_before_any_change() {
+    let fixture = Fixture::new(&["acme"]);
+    git(&fixture.repo(), &["remote", "remove", "origin"]);
+    fixture.fail_gh();
+
+    assert_refused(
+        &fixture,
+        &fixture.init(&["--tracker", "local", "--gh-account", "acme"]),
+        "loopherd init: --gh-account needs a GitHub repo; pass --repo <owner>/<name> or drop it\n",
+    );
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn a_local_tracker_without_github_still_takes_repo() {
+    let fixture = Fixture::new(&["acme"]);
+    git(&fixture.repo(), &["remote", "remove", "origin"]);
+
+    assert_ok(&fixture.init(&["--tracker", "local", "--repo", "acme/widgets"]));
+
+    assert!(
+        fixture
+            .herd_get("template.issue.prompt")
+            .contains("gh pr create --repo acme/widgets --base main"),
+    );
+}
+
+#[test]
+fn on_a_terminal_a_local_tracker_without_github_takes_enter_as_none() {
+    let fixture = Fixture::new(&["acme"]);
+    git(&fixture.repo(), &["remote", "remove", "origin"]);
+    fixture.fail_gh();
+
+    let out = fixture.init_on_terminal(&[], "local\n");
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains("GitHub repo (owner/name); Enter for none: "),
+        "{shown}"
+    );
+    assert!(shown.contains("Default branch (trunk): "), "{shown}");
+    assert!(shown.contains("\n  branch  trunk\r\n"), "{shown}");
+    assert!(
+        !shown.contains("gh account") && !shown.contains("GitHub  "),
+        "{shown}"
+    );
+    assert_eq!(fixture.gh_calls(), "");
 }

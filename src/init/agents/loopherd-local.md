@@ -13,7 +13,7 @@ commands; this doc says what each step is for. How the tracker works is in
 
 Read the issue file in full first. Then set its `Status:` line to `claimed`,
 append `claimed by <member>` under `## Comments`, with your member name, and
-commit on your branch. Every gh command runs as @ACCOUNT@.
+commit on your branch.@GH_NOTE@
 
 ## Branch names
 
@@ -31,12 +31,11 @@ Before calling the work done, run each check and fix what fails:
 
 @CHECKS@
 
-## The pull request
+## Handing in
 
 Before pushing, set the issue's `Status:` line to `resolved` and append a
-one-line summary under `## Comments`, so merging the PR closes the issue;
-loopherd counts the issue done once @BRANCH@ has it resolved. Push the branch
-and open a PR with `--base @BRANCH@`.
+one-line summary under `## Comments`, so merging the branch closes the issue;
+loopherd counts the issue done once @BRANCH@ has it resolved. @HAND_IN@
 
 ## Stopping on a question
 
@@ -48,5 +47,5 @@ under `## Comments`, commit and push, then report it.
 
 Tell the shepherd how the work ended:
 
-- Done: `loopherd report --kind done "<PR link and one-line summary>"`.
+- Done: `loopherd report --kind done "<@HANDED_IN@ and one-line summary>"`.
 - Stopped on a question: `loopherd report --kind question "<the exact question>"`.
