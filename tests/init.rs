@@ -3277,3 +3277,73 @@ fn diff_shows_drift_in_loopherd_md_and_triage_labels_md() {
         assert!(rest[..end].ends_with("-Ours.\n"), "{doc}: {stdout}");
     }
 }
+
+#[test]
+fn diff_exits_2_on_a_tracker_desc_without_tracker_other() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+
+    let out = fixture.init(&["--diff", "--tracker-desc", "x"]);
+
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stderr),
+        "loopherd init: --tracker-desc goes with --tracker other\n"
+    );
+    assert_eq!(text(&out.stdout), "");
+}
+
+#[test]
+fn diff_exits_2_without_home() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+
+    let out = fixture.run(
+        Command::new(env!("CARGO_BIN_EXE_loopherd"))
+            .args(["init", "--diff"])
+            .env_remove("HOME"),
+    );
+
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("HOME is not set"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(text(&out.stdout), "");
+}
+
+#[test]
+fn diff_keeps_the_recorded_checks_around_a_reworded_one() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&["--check", "make lint"]));
+    let herd_file = fixture.herds().join("widgets.toml");
+    let reworded = fs::read_to_string(&herd_file).unwrap().replace(
+        "   - `cargo fmt --check`\n",
+        "   - `cargo fmt --check` (strict)\n",
+    );
+    fs::write(&herd_file, reworded).unwrap();
+
+    let out = fixture.loopherd(&["init", "--diff"]);
+
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    let shown = herd_file.display();
+    assert!(
+        stdout.starts_with(&format!("--- {shown}\n+++ {shown} (init now)\n")),
+        "{stdout}"
+    );
+    let changed: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.starts_with(['-', '+']) && !line.starts_with("--- "))
+        .filter(|line| !line.starts_with("+++ "))
+        .collect();
+    assert_eq!(
+        changed,
+        [
+            "-   - `cargo fmt --check` (strict)",
+            "-- `cargo fmt --check`"
+        ],
+        "{stdout}"
+    );
+}

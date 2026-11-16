@@ -1138,6 +1138,18 @@ fn own_process() -> Result<Process> {
 const AFTER_MERGE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 fn run_init(args: InitArgs) -> Result<i32> {
+    let diff = args.diff;
+    match init_or_diff(args) {
+        // diff(1)'s codes, so trouble can't read as drift.
+        Err(e) if diff => {
+            eprintln!("loopherd init: {e:#}");
+            Ok(2)
+        }
+        result => result,
+    }
+}
+
+fn init_or_diff(args: InitArgs) -> Result<i32> {
     let paths = Paths::from_env().context("herd")?;
     let dir = std::env::current_dir().context("current directory")?;
     let req = init::Request {
@@ -1158,16 +1170,11 @@ fn run_init(args: InitArgs) -> Result<i32> {
         context_limit: args.context_limit,
     };
     if args.diff {
-        // diff(1)'s codes, so trouble can't read as drift.
-        return Ok(match init::diff(&paths, req) {
-            Ok(None) => 0,
-            Ok(Some(diff)) => {
+        return Ok(match init::diff(&paths, req)? {
+            None => 0,
+            Some(diff) => {
                 print!("{diff}");
                 1
-            }
-            Err(e) => {
-                eprintln!("loopherd init: {e:#}");
-                2
             }
         });
     }

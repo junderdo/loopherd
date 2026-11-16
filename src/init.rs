@@ -798,7 +798,7 @@ struct Recorded {
     lead: bool,
     max: Option<u64>,
     context_limit: Option<u64>,
-    /// From the worker prompt's checklist; empty when the human reworded it.
+    /// The worker prompt's checklist items that are a bare `check`; a reworded one is skipped.
     checks: Vec<String>,
 }
 
@@ -822,7 +822,8 @@ impl Recorded {
             .lines()
             .skip_while(|line| !line.starts_with("4. Before calling it done"))
             .skip(1)
-            .map_while(|line| line.strip_prefix("   - `")?.strip_suffix('`'))
+            .map_while(|line| line.strip_prefix("   - "))
+            .filter_map(|item| item.strip_prefix('`')?.strip_suffix('`'))
             .map(|check| check.replace("{{", "{").replace("}}", "}"))
             .collect();
         Some(Recorded {
