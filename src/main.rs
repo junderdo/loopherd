@@ -656,28 +656,35 @@ fn notify_waiting(waiting: &[notify::Waiting], config: &Path, mailboxes: &Path) 
             return;
         }
     };
-    let sent = std::env::current_exe()
-        .context("find this binary")
-        .and_then(|exe| {
-            notify::send(&config, mailboxes, waiting, &mut |launch| {
-                let sender = match launch.sender {
-                    notify::Sender::Herdr => "herdr",
-                    notify::Sender::Command => "command",
-                };
-                std::process::Command::new(&exe)
-                    .args(["notify-run", "--member", &launch.member, "--sender", sender])
-                    .arg("--")
-                    .args(&launch.args)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    // Its own group, so ending the watch's task leaves it running.
-                    .process_group(0)
-                    .spawn()
-                    .map(drop)
-                    .context("start notify-run")
-            })
-        });
+    // A reinstall moves a new binary over this one, leaving it unrunnable.
+    let exe = std::env::current_exe()
+        .ok()
+        .filter(|exe| !exe.to_string_lossy().ends_with(" (deleted)"))
+        .unwrap_or_else(|| PathBuf::from("loopherd"));
+    let sent = notify::send(&config, mailboxes, waiting, &mut |launch| {
+        let sender = match launch.sender {
+            notify::Sender::Herdr => "herdr",
+            notify::Sender::Command => "command",
+        };
+        let spawned = std::process::Command::new(&exe)
+            .args(["notify-run", "--member", &launch.member, "--sender", sender])
+            .arg("--")
+            .args(&launch.args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            // Its own group, so ending the watch's task leaves it running.
+            .process_group(0)
+            .spawn();
+        match spawned {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let problem = format!("could not start {}: {e}", exe.display());
+                notify::failed(&launch, mailboxes, &problem, SystemTime::now())
+                    .and(Err(e).context("start notify-run"))
+            }
+        }
+    });
     if let Err(e) = sent {
         eprintln!("loopherd watch: warning: notify: {e:#}");
     }

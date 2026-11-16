@@ -230,27 +230,34 @@ pub fn run(launch: &Launch, mailboxes: &Path, timeout: Duration, now: SystemTime
         }
         Ok(Some(_)) => None,
     };
-    let (what, file) = match launch.sender {
-        Sender::Herdr => ("herdr's toast", ".notify-herdr.failed"),
-        Sender::Command => ("notify command", ".notify-command.failed"),
-    };
-    let failed = mailboxes.join(file);
-    let Some(problem) = problem else {
-        return match fs::remove_file(&failed) {
-            Err(e) if e.kind() != ErrorKind::NotFound => {
-                Err(e).with_context(|| format!("remove {}", failed.display()))
-            }
+    match problem {
+        Some(problem) => failed(launch, mailboxes, &problem, now),
+        None => match fs::remove_file(marker(mailboxes, launch.sender)) {
+            Err(e) if e.kind() != ErrorKind::NotFound => Err(e).context("clear the failure mark"),
             _ => Ok(()),
-        };
+        },
+    }
+}
+
+fn marker(mailboxes: &Path, sender: Sender) -> std::path::PathBuf {
+    mailboxes.join(match sender {
+        Sender::Herdr => ".notify-herdr.failed",
+        Sender::Command => ".notify-command.failed",
+    })
+}
+
+/// Notes in its member's mailbox that `launch` failed with `problem`, unless
+/// its sender failed since it last succeeded.
+pub fn failed(launch: &Launch, mailboxes: &Path, problem: &str, now: SystemTime) -> Result<()> {
+    let what = match launch.sender {
+        Sender::Herdr => "herdr's toast",
+        Sender::Command => "notify command",
     };
+    let mark = marker(mailboxes, launch.sender);
     fs::create_dir_all(mailboxes).with_context(|| format!("create {}", mailboxes.display()))?;
-    match OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&failed)
-    {
+    match OpenOptions::new().write(true).create_new(true).open(&mark) {
         Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(()),
-        opened => opened.with_context(|| format!("create {}", failed.display()))?,
+        opened => opened.with_context(|| format!("create {}", mark.display()))?,
     };
     let text =
         format!("{what} failed ({problem}); further failures go unnoted until it next succeeds");
@@ -694,6 +701,34 @@ mod tests {
 
         assert!(format!("{:#}", result.unwrap_err()).contains("lh-3.notified"));
         assert_eq!(launched, [args(&["n", "lh-4"])]);
+    }
+
+    #[test]
+    fn a_launch_that_never_ran_is_noted_like_a_failed_run() {
+        let dir = tempfile::tempdir().unwrap();
+
+        failed(
+            &stub("true"),
+            dir.path(),
+            "could not start loopherd",
+            SystemTime::now(),
+        )
+        .unwrap();
+        failed(
+            &stub("true"),
+            dir.path(),
+            "could not start loopherd",
+            SystemTime::now(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            mailbox(dir.path()),
+            [note(
+                "notify command failed (could not start loopherd); \
+                 further failures go unnoted until it next succeeds"
+            )]
+        );
     }
 
     fn load_text(text: &str) -> Result<Option<Config>> {

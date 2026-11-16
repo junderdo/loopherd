@@ -549,3 +549,58 @@ fn a_broken_notify_table_sends_nothing_and_warns() {
     std::thread::sleep(Duration::from_millis(500));
     assert!(!sandbox.path("herdr.out").exists());
 }
+
+impl Sandbox {
+    /// A watch run from a copy of loopherd that is replaced, as a reinstall
+    /// does, before `question` arrives.
+    fn notify_watch_from_a_replaced_binary(&self, question: &str) -> Output {
+        self.install_hook();
+        let read = self.loopherd(&["reports"]).output().unwrap();
+        assert!(read.status.success(), "{}", stderr(&read));
+        let old = self.path("old/loopherd");
+        fs::create_dir_all(old.parent().unwrap()).unwrap();
+        fs::copy(env!("CARGO_BIN_EXE_loopherd"), &old).unwrap();
+        let watch = self.loopherd(&["watch", "--timeout", "10"]);
+        let watch = Command::new(&old)
+            .args(watch.get_args())
+            .envs(watch.get_envs().filter_map(|(k, v)| Some((k, v?))))
+            .env("PATH", self.path("bin"))
+            .env("HERDR_SOCKET_PATH", "/run/watched.sock")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        fs::write(self.path("new"), b"").unwrap();
+        fs::rename(self.path("new"), &old).unwrap();
+        self.notifying("", "2026-11-02T09:01:00Z", question);
+        watch.wait_with_output().unwrap()
+    }
+}
+
+#[test]
+fn a_watch_whose_binary_was_replaced_sends_through_loopherd_on_path() {
+    let sandbox = Sandbox::new();
+    fs::create_dir_all(sandbox.path("bin")).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_loopherd"), sandbox.path("bin/loopherd")).unwrap();
+
+    let watched = sandbox.notify_watch_from_a_replaced_binary("Which way?");
+
+    assert_eq!(watched.status.code(), Some(0), "{}", stderr(&watched));
+    assert!(
+        eventually(&sandbox.path("herdr.out"), |t| !t.is_empty()).contains("--body=Which way?")
+    );
+}
+
+#[test]
+fn a_notification_that_cannot_start_is_noted_in_the_mailbox() {
+    let sandbox = Sandbox::new();
+
+    let watched = sandbox.notify_watch_from_a_replaced_binary("Which way?");
+
+    assert_eq!(watched.status.code(), Some(0), "{}", stderr(&watched));
+    let mailbox = fs::read_to_string(sandbox.mailbox()).unwrap();
+    assert!(
+        mailbox.contains("herdr's toast failed (could not start loopherd"),
+        "{mailbox}"
+    );
+}
