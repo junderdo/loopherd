@@ -765,9 +765,10 @@ mod tests {
     }
 
     #[test]
-    fn a_session_herdr_never_reports_stops_the_wait_short_of_the_ready_timeout() {
+    fn a_session_later_than_10s_stops_the_wait_short_of_the_ready_timeout() {
         let mut herdr = herdr();
-        herdr.session_after_gets = u32::MAX;
+        // Arrives after about 15s of polls: past the 10s cap, well inside the 60s ready timeout.
+        herdr.session_after_gets = 75;
         let mut ledger = MemLedger::default();
         let started = Instant::now();
         let spawned = run(&herdr, &mut ledger, &request("a")).unwrap();
@@ -789,7 +790,7 @@ mod tests {
     #[test]
     fn a_failed_session_read_keeps_the_ready_agent_with_a_warning() {
         let mut herdr = herdr();
-        herdr.session_after_gets = u32::MAX;
+        herdr.session_after_gets = 1;
         herdr.agent_get_fails_after_start = true;
         let mut ledger = MemLedger::default();
         let spawned = run(&herdr, &mut ledger, &request("a")).unwrap();
