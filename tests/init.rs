@@ -3243,12 +3243,39 @@ fn a_long_feature_name_is_cut_and_hashed_so_the_member_name_fits() {
     let feed = fixture.loopherd_with(&env, &["feed", "widgets", "--dry-run"]);
 
     assert_ok(&feed);
-    let name = "widgets-a-very-long-featu_162-03";
+    let name = "widgets-a-very-long-featu_ha2-03";
     assert_eq!(name.len(), 32);
     assert!(
         text(&feed.stdout).starts_with(&format!("would add {name} (template issue)\n")),
         "{}",
         text(&feed.stdout)
+    );
+}
+
+#[test]
+fn two_cut_features_whose_names_hash_alike_still_get_different_ids() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let tasks = fixture.local_tasks(&[
+        (
+            ".scratch/a-very-long-feature-name-000/issues/01-first.md",
+            "Status: ready-for-agent\n",
+        ),
+        (
+            ".scratch/a-very-long-feature-name-aqo/issues/01-second.md",
+            "Status: ready-for-agent\n",
+        ),
+    ]);
+
+    let ids: Vec<&str> = tasks
+        .lines()
+        .map(|l| l.split(' ').next().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 2, "{tasks}");
+    assert_eq!(ids[0], "a-very-long-featu_eno-01", "{tasks}");
+    assert!(
+        ids[1].starts_with("a-very-long-featu_") && ids[1] != ids[0],
+        "{tasks}"
     );
 }
 
