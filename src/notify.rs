@@ -415,7 +415,13 @@ fn summary(question: &str) -> String {
             }
             Next::Free | Next::Key(_) | Next::MaybeValue => match carried_value(word) {
                 Some((true, value)) => clause_start(value),
-                Some((false, value)) => (Shown::redacted(), Next::after_value(value)),
+                Some((false, value)) => (
+                    Shown::redacted(),
+                    match key_named_by(value) {
+                        Next::Free => Next::after_value(value),
+                        next => next,
+                    },
+                ),
                 None if token_shaped(word) => (Shown::redacted(), key_named_by(word)),
                 None => (Shown::Word(without_userinfo(word)), key_named_by(word)),
             },
@@ -1406,6 +1412,38 @@ mod tests {
             ),
             ("Is SECRET = abc123def456 right?", "Is SECRET = [redacted]?"),
             ("TOKEN abc123 ok?", "TOKEN [redacted] ok?"),
+        ] {
+            assert_eq!(text_sent(question), text, "{question}");
+        }
+    }
+
+    #[test]
+    fn a_key_carried_as_a_value_hides_the_word_after_it() {
+        for (question, text) in [
+            (
+                "Set «auth»=Bearer abc123def456 then merge?",
+                "Set [redacted] [redacted] then merge?",
+            ),
+            (
+                "Set «session»:Bearer abc123def456 then merge?",
+                "Set [redacted] [redacted] then merge?",
+            ),
+            (
+                "Set «key»=Bearer abc123def456 then merge?",
+                "Set [redacted] [redacted] then merge?",
+            ),
+            (
+                "Set auth=Bearer abc123def456 then merge?",
+                "Set [redacted] [redacted] then merge?",
+            ),
+            (
+                r#"Set "auth":Bearer abc123def456 then merge?"#,
+                "Set [redacted] [redacted] then merge?",
+            ),
+            (
+                "Open https://x.io/?token=Bearer then merge #107?",
+                "Open [redacted] then merge #107?",
+            ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
         }
