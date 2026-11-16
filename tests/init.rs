@@ -2931,6 +2931,7 @@ fn a_setext_loopherd_heading_after_a_list_or_blockquote_ends_is_a_loopherd_secti
         "- one\n\nLoopherd\n========\n",
         "- one\n# h\nLoopherd\n---\n",
         "- one\n```\n```\nLoopherd\n---\n",
+        "*\nLoopherd\n---\n",
     ] {
         let fixture = Fixture::new(&["acme"]);
         fs::write(fixture.repo().join("AGENTS.md"), agents).unwrap();
@@ -2954,4 +2955,40 @@ fn a_tilde_line_with_a_backtick_after_the_run_opens_a_fence() {
         written.starts_with(agents) && written.contains("~~~\n\n## loopherd\n"),
         "{written}"
     );
+}
+
+#[test]
+fn a_relative_config_dir_in_a_cwd_init_cant_write_is_refused_before_any_change() {
+    let fixture = Fixture::new(&["acme"]);
+    let agents_dir = fixture.repo().join("docs/agents");
+    fs::create_dir_all(&agents_dir).unwrap();
+    fs::write(
+        agents_dir.join("issue-tracker.md"),
+        "# Issue tracker: GitHub\n",
+    )
+    .unwrap();
+    fs::write(fixture.repo().join("AGENTS.md"), "# W\n\n## loopherd\n").unwrap();
+    fs::set_permissions(fixture.repo(), fs::Permissions::from_mode(0o555)).unwrap();
+
+    let out = fixture.run(
+        Command::new("sh")
+            .args([
+                "-c",
+                r#"LOOPHERD_CONFIG_DIR=cfg exec "$@""#,
+                "sh",
+                env!("CARGO_BIN_EXE_loopherd"),
+                "init",
+            ])
+            .args(Fixture::CHECKS),
+    );
+
+    fs::set_permissions(fixture.repo(), fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
+    assert!(
+        text(&out.stderr).contains("write cfg/herds/widgets.toml"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!fixture.gh_calls().contains("label create"));
+    assert!(!agents_dir.join("loopherd.md").exists());
 }

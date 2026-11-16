@@ -572,7 +572,17 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
 fn refuse_unwritable(new_files: impl IntoIterator<Item = PathBuf>) -> Result<()> {
     use std::os::unix::ffi::OsStrExt;
     for path in new_files {
-        let Some(dir) = path.ancestors().skip(1).find(|dir| dir.exists()) else {
+        // A relative path's walk ends at "", the cwd.
+        let cwd_for_empty = |dir: &Path| match dir.as_os_str().is_empty() {
+            true => Path::new(".").to_path_buf(),
+            false => dir.to_path_buf(),
+        };
+        let Some(dir) = path
+            .ancestors()
+            .skip(1)
+            .map(cwd_for_empty)
+            .find(|dir| dir.exists())
+        else {
             continue;
         };
         let c_dir = std::ffi::CString::new(dir.as_os_str().as_bytes())?;
