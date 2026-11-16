@@ -38,10 +38,10 @@ pub enum Switch {
     /// `cargo` run through a `CARGO_ALIAS_*` whose value the hook can't read.
     /// Not a switch: always the human's.
     OpaqueCargoAlias,
-    /// A `$(…)` whose end the hook can't find: one holding a `case`, whose
-    /// pattern's `)` looks like its end, or a heredoc without its delimiter
-    /// line. Not a switch: always the human's.
-    UnreadableSubstitution,
+    /// A command the hook may read differently from bash: one in a form
+    /// [`unreadable`] lists, or a `$(…)` whose end it can't find. Not a
+    /// switch: always the human's.
+    Unreadable,
 }
 
 impl Switch {
@@ -55,7 +55,7 @@ impl Switch {
             Switch::HerdEdit => "herd set",
             Switch::LeadDefaults => "lead-defaults",
             Switch::OpaqueCargoAlias => "cargo alias",
-            Switch::UnreadableSubstitution => "unreadable substitution",
+            Switch::Unreadable => "unreadable command",
         }
     }
 
@@ -69,7 +69,7 @@ impl Switch {
             Switch::HerdEdit => "the human edits herd files",
             Switch::LeadDefaults => "the human sets lead defaults",
             Switch::OpaqueCargoAlias => "the human runs cargo through such aliases",
-            Switch::UnreadableSubstitution => "the human runs commands the hook can't read",
+            Switch::Unreadable => "the human runs commands the hook can't read",
         }
     }
 
@@ -83,7 +83,7 @@ impl Switch {
             | Switch::HerdEdit
             | Switch::LeadDefaults
             | Switch::OpaqueCargoAlias
-            | Switch::UnreadableSubstitution => false,
+            | Switch::Unreadable => false,
         }
     }
 }
@@ -127,7 +127,7 @@ fn decide(
                 Switch::HerdEdit,
                 Switch::LeadDefaults,
                 Switch::OpaqueCargoAlias,
-                Switch::UnreadableSubstitution,
+                Switch::Unreadable,
             ]
         });
     if needed.is_empty() {
@@ -165,9 +165,9 @@ fn decide(
             needed.humans_part()
         )));
     }
-    if needed == Switch::UnreadableSubstitution {
+    if needed == Switch::Unreadable {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run a `$(…)` whose end the hook can't find, as with a `case` or a heredoc without its own delimiter line: {}; rewrite it, or ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, `$'…'`, an odd quote in a heredoc, or a `case` in `$(…)`: {}; rewrite it, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -269,8 +269,8 @@ impl Aliases {
 /// [`needs`] with the cargo aliases assigned before `script`. An assignment
 /// counts for the rest of the script, exported or not.
 fn needs_with(script: &str, aliases: &mut Aliases) -> Vec<Switch> {
-    let Some(commands) = commands(script) else {
-        return vec![Switch::UnreadableSubstitution];
+    let Some(commands) = commands(script).filter(|_| !unreadable(script)) else {
+        return vec![Switch::Unreadable];
     };
     commands
         .iter()
@@ -299,15 +299,52 @@ impl Word {
     }
 }
 
+/// Whether `script` holds a form the lexer may read differently from bash,
+/// wherever it sits, even in quotes: a backslash-newline, a `$` before a
+/// quote, an escaped backtick, or a `${…}` or `$[…]` holding more than a
+/// plain name and operator.
+fn unreadable(script: &str) -> bool {
+    ["\\\n", "$'", "$\"", "\\`"]
+        .iter()
+        .any(|form| script.contains(form))
+        || script
+            .match_indices(['{', '['])
+            .filter(|&(at, _)| script[..at].ends_with('$'))
+            .any(|(at, _)| !plain_expansion(&script[at..]))
+}
+
+/// Whether the `${…}` or `$[…]` that `text` opens closes before any
+/// character that could hide its end or a heredoc from the hook.
+fn plain_expansion(text: &str) -> bool {
+    let mut closers = vec![];
+    for c in text.chars() {
+        match c {
+            '{' => closers.push('}'),
+            '[' => closers.push(']'),
+            _ if closers.last() == Some(&c) => {
+                closers.pop();
+                if closers.is_empty() {
+                    return true;
+                }
+            }
+            '(' | ')' | '<' | '>' | ';' | '&' | '|' | '\'' | '"' | '\\' | '`' => return false,
+            _ if c.is_whitespace() => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// The simple commands in `script`, each as its words.
 /// `;`, `&`, `|`, newlines and parentheses end a command; the contents of a
-/// `$(…)` or backtick substitution are lexed as commands of their own.
-/// `None` when a `$(…)` holds a `case` or a heredoc without its own
-/// delimiter line.
+/// `$(…)` or backtick substitution, and heredoc bodies, are lexed as commands
+/// of their own. `None` when a `$(…)` holds a `case`, or a heredoc's end
+/// can't be told.
 fn commands(script: &str) -> Option<Vec<Vec<Word>>> {
     let mut commands = vec![];
     let mut words = vec![];
     let mut word: Option<Word> = None;
+    let mut heredocs: Vec<(String, bool)> = vec![];
     let mut chars = script.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
@@ -335,33 +372,28 @@ fn commands(script: &str) -> Option<Vec<Vec<Word>>> {
                     }
                 }
             }
-            '#' if word.is_none() => {
-                chars.by_ref().find(|&c| c == '\n');
-                words.extend(word.take());
-                if !words.is_empty() {
-                    commands.push(std::mem::take(&mut words));
-                }
-            }
-            '\\' => match chars.next() {
-                Some('\n') | None => {}
-                Some(c) => word.get_or_insert_default().text.push(c),
-            },
+            '#' if word.is_none() => while chars.next_if(|&c| c != '\n').is_some() {},
+            '\\' => word.get_or_insert_default().text.extend(chars.next()),
             // `2>&1`, `<&3` and `&>file` are redirections, not `&`.
             '&' if word.as_ref().is_some_and(|w| w.text.ends_with(['>', '<']))
                 || chars.peek() == Some(&'>') =>
             {
                 word.get_or_insert_default().text.push(c);
             }
+            '<' if chars.peek() == Some(&'<') => {
+                chars.next();
+                let w = word.get_or_insert_default();
+                w.text.push_str("<<");
+                if chars.next_if_eq(&'<').is_some() {
+                    w.text.push('<');
+                } else {
+                    heredocs.push(heredoc_operator(&mut chars, &mut w.text)?);
+                }
+            }
             '$' if chars.peek() == Some(&'(') => {
                 chars.next();
                 word.get_or_insert_default().mark_substituted();
                 commands.extend(self::commands(&substitution(&mut chars)?)?);
-            }
-            '$' if chars.peek() == Some(&'\'') => {
-                chars.next();
-                let w = word.get_or_insert_default();
-                w.text.push('$');
-                ansi_c_quoted(&mut chars, &mut w.text);
             }
             '`' => {
                 let inner: String = chars.by_ref().take_while(|&c| c != '`').collect();
@@ -372,6 +404,13 @@ fn commands(script: &str) -> Option<Vec<Vec<Word>>> {
                 words.extend(word.take());
                 if !words.is_empty() {
                     commands.push(std::mem::take(&mut words));
+                }
+                if c == '\n' {
+                    for (delimiter, tabs) in std::mem::take(&mut heredocs) {
+                        let mut body = String::new();
+                        heredoc_body(&mut chars, &delimiter, tabs, &mut body)?;
+                        commands.extend(self::commands(&body)?);
+                    }
                 }
             }
             c if c.is_whitespace() => words.extend(word.take()),
@@ -387,8 +426,8 @@ fn commands(script: &str) -> Option<Vec<Vec<Word>>> {
 
 /// The text of a `$(…)` whose `$(` was just read, through its matching `)`,
 /// skipping quotes, escapes, comments and heredoc bodies. `None` when it
-/// holds a `case … in`, since a pattern's `)` would end it early, or a heredoc
-/// the hook can't end.
+/// holds a `case … in`, since a pattern's `)` would end it early, or its end
+/// can't be told for some other reason.
 fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<String> {
     // While in `$((…))` or `((…))`, the depth it ends at; `<<` there is a shift.
     let mut arithmetic_from = (chars.peek() == Some(&'(')).then_some(0);
@@ -396,15 +435,9 @@ fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<Stri
     let mut inner = String::new();
     let mut word = String::new();
     let mut saw_case = false;
-    // Delimiters of heredocs whose bodies start after this line, whether
-    // `<<-` lets their lines start with tabs, and whether the delimiter is unquoted.
-    let mut heredocs: Vec<(String, bool, bool)> = vec![];
-    // The closing `}` or `]` of each open `${…}` or `$[…]`, where `<<` is no heredoc.
-    let mut expansions: Vec<char> = vec![];
+    // Heredocs whose bodies start after this line.
+    let mut heredocs: Vec<(String, bool)> = vec![];
     while let Some(c) = chars.next() {
-        if c == '\\' && chars.next_if_eq(&'\n').is_some() {
-            continue;
-        }
         if separates(c) && !word.is_empty() {
             if word == "case" {
                 saw_case = true;
@@ -445,56 +478,19 @@ fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<Stri
             }
             '\n' => {
                 inner.push(c);
-                for (delimiter, tabs, unquoted) in std::mem::take(&mut heredocs) {
-                    heredoc_body(chars, &delimiter, tabs, unquoted, &mut inner)?;
+                for (delimiter, tabs) in std::mem::take(&mut heredocs) {
+                    heredoc_body(chars, &delimiter, tabs, &mut inner)?;
                 }
                 continue;
             }
             '<' if arithmetic_from.is_none() && chars.peek() == Some(&'<') => {
-                if !expansions.is_empty() {
-                    return None;
-                }
                 chars.next();
                 inner.push_str("<<");
-                if let Some(c) = chars.next_if(|&c| c == '<' || c == '-') {
-                    inner.push(c);
-                    if c == '<' {
-                        continue;
-                    }
+                if chars.next_if_eq(&'<').is_some() {
+                    inner.push('<');
+                } else {
+                    heredocs.push(heredoc_operator(chars, &mut inner)?);
                 }
-                let tabs = inner.ends_with('-');
-                while let Some(c) = chars.next_if(|&c| c == ' ' || c == '\t') {
-                    inner.push(c);
-                }
-                let mut delimiter = String::new();
-                let mut unquoted = true;
-                while let Some(c) = chars.next_if(|&c| !separates(c)) {
-                    inner.push(c);
-                    if matches!(c, '\'' | '"' | '\\') {
-                        unquoted = false;
-                    }
-                    match c {
-                        // Bash may expand or decode these; the hook can't tell the delimiter.
-                        '$' | '`' => return None,
-                        '\'' | '"' => {
-                            for q in chars.by_ref() {
-                                inner.push(q);
-                                if q == c {
-                                    break;
-                                }
-                                delimiter.push(q);
-                            }
-                        }
-                        '\\' => {
-                            if let Some(e) = chars.next() {
-                                inner.push(e);
-                                delimiter.push(e);
-                            }
-                        }
-                        _ => delimiter.push(c),
-                    }
-                }
-                heredocs.push((delimiter, tabs, unquoted));
                 continue;
             }
             '\\' => {
@@ -502,30 +498,6 @@ fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<Stri
                 inner.extend(chars.next());
                 word.push(c);
                 continue;
-            }
-            '$' if chars.peek() == Some(&'\'') => {
-                inner.push_str("$'");
-                chars.next();
-                ansi_c_quoted(chars, &mut inner);
-                inner.push('\'');
-                word.push(c);
-                continue;
-            }
-            '$' if matches!(chars.peek(), Some('{' | '[')) => {
-                let open = chars.next()?;
-                expansions.push(if open == '{' { '}' } else { ']' });
-                inner.push(c);
-                inner.push(open);
-                word.push(c);
-                continue;
-            }
-            '{' | '[' if !expansions.is_empty() => {
-                expansions.push(if c == '{' { '}' } else { ']' });
-                word.push(c);
-            }
-            '}' | ']' if expansions.last() == Some(&c) => {
-                expansions.pop();
-                word.push(c);
             }
             '\'' | '"' | '`' => {
                 inner.push(c);
@@ -539,21 +511,6 @@ fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<Stri
         inner.push(c);
     }
     Some(inner)
-}
-
-/// Copies the body of a `$'…'` whose `$'` was just read onto `text`, escapes
-/// raw, and reads its closing `'`.
-fn ansi_c_quoted(chars: &mut std::iter::Peekable<std::str::Chars>, text: &mut String) {
-    while let Some(c) = chars.next() {
-        match c {
-            '\'' => break,
-            '\\' => {
-                text.push(c);
-                text.extend(chars.next());
-            }
-            _ => text.push(c),
-        }
-    }
 }
 
 fn separates(c: char) -> bool {
@@ -587,38 +544,78 @@ fn quoted(
     Some(())
 }
 
-/// Copies a heredoc's body onto `inner` through its `delimiter` line.
-/// `None` when the script ends first, a line starts with the delimiter and
-/// holds a `)`, as `EOF)` does, which bash takes as the end, or, for an
-/// `unquoted` delimiter, a line ends in a backslash that joins the next.
+/// Copies the rest of a heredoc operator whose `<<` was just read onto
+/// `text`, and returns its delimiter and whether `<<-` strips tabs. `None`
+/// when the delimiter holds a `$` or a backtick.
+fn heredoc_operator(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    text: &mut String,
+) -> Option<(String, bool)> {
+    let tabs = chars.next_if_eq(&'-').is_some();
+    if tabs {
+        text.push('-');
+    }
+    while let Some(c) = chars.next_if(|&c| c == ' ' || c == '\t') {
+        text.push(c);
+    }
+    let mut delimiter = String::new();
+    while let Some(c) = chars.next_if(|&c| !separates(c)) {
+        text.push(c);
+        match c {
+            '$' | '`' => return None,
+            '\'' | '"' => {
+                for q in chars.by_ref() {
+                    text.push(q);
+                    if q == c {
+                        break;
+                    }
+                    delimiter.push(q);
+                }
+            }
+            '\\' => {
+                if let Some(e) = chars.next() {
+                    text.push(e);
+                    delimiter.push(e);
+                }
+            }
+            _ => delimiter.push(c),
+        }
+    }
+    Some((delimiter, tabs))
+}
+
+/// Copies a heredoc's body onto `text` through its `delimiter` line. `None`
+/// when the script ends first, the body holds an odd number of `'`, `"` or
+/// backticks, or a line starts with the delimiter and holds a `)`, as `EOF)`
+/// does, which bash inside `$(…)` takes as the end.
 fn heredoc_body(
     chars: &mut std::iter::Peekable<std::str::Chars>,
     delimiter: &str,
     tabs: bool,
-    unquoted: bool,
-    inner: &mut String,
+    text: &mut String,
 ) -> Option<()> {
+    let mut quotes = [0; 3];
     while chars.peek().is_some() {
         let mut line = String::new();
         while let Some(c) = chars.next_if(|&c| c != '\n') {
             line.push(c);
         }
-        let backslashes = line.chars().rev().take_while(|&c| c == '\\').count();
-        if unquoted && backslashes % 2 == 1 {
-            return None;
-        }
-        inner.push_str(&line);
-        inner.extend(chars.next());
-        let line = if tabs {
+        chars.next();
+        text.push_str(&line);
+        text.push('\n');
+        let stripped = if tabs {
             line.trim_start_matches('\t')
         } else {
             &line
         };
-        if line == delimiter {
-            return Some(());
+        if stripped == delimiter {
+            return quotes.iter().all(|n| n % 2 == 0).then_some(());
         }
-        if line.starts_with(delimiter) && line.contains(')') {
+        if stripped.starts_with(delimiter) && stripped.contains(')') {
             return None;
+        }
+        for (n, quote) in quotes.iter_mut().zip(['\'', '"', '`']) {
+            *n += line.matches(quote).count();
         }
     }
     None
@@ -1084,9 +1081,7 @@ mod tests {
 
     const MERGES: &[&str] = &[
         "gh pr merge 12",
-        "x=$(echo $'it\\'s'); gh pr merge 1",
-        "echo $'it\\'s'; gh pr merge 1",
-        "x=\"$(echo $'it\\'s ')')\"; gh pr merge 1",
+        "x=$(cat <<'EOF'\n\"'\" '\nEOF\ngh pr merge 1\n)",
         "gh pr merge 12 --squash --delete-branch",
         "gh -R junderdo/loopherd pr merge 12",
         "gh pr --repo junderdo/loopherd merge 12",
@@ -1296,7 +1291,7 @@ mod tests {
         "gh pr create --title t --body \"$(cat <<'EOF'\n| case | result |\n|---|---|\nEOF\n)\"",
         "git commit -m \"$(cat <<'EOF'\nFix the empty herd (case 3)\nEOF\n)\"",
         "gh pr create --title t --body \"$(cat <<'EOF'\n- [ ] cargo test (case 1); case 2 next\nEOF\n)\"",
-        "gh pr create --title t --body \"$(cat <<-EOF\n	it's a case in point\n	EOF\n)\"",
+        "gh pr create --title t --body \"$(cat <<-EOF\n	it is a case in point\n	EOF\n)\"",
         "export -n RUST_LOG; cargo nextest run",
         "x=$(cat <<'EOF'\nBody\nEOF\n); echo \"$x\"",
         "gh pr create --body \"$(cat <<'EOF'\nBody\nEOF\n)\"",
@@ -1488,7 +1483,7 @@ mod tests {
             | Switch::HerdEdit
             | Switch::LeadDefaults
             | Switch::OpaqueCargoAlias
-            | Switch::UnreadableSubstitution => {}
+            | Switch::Unreadable => {}
         }
         s
     }
@@ -1533,7 +1528,7 @@ mod tests {
                 | Switch::HerdEdit
                 | Switch::LeadDefaults
                 | Switch::OpaqueCargoAlias
-                | Switch::UnreadableSubstitution => {}
+                | Switch::Unreadable => {}
             }
             for command in commands {
                 assert_eq!(run(&leads, others_off, command), None, "{command}");
@@ -2033,6 +2028,123 @@ mod tests {
         );
     }
 
+    fn assert_unreadable(command: &str) {
+        let leads = ledger(vec![lead()]);
+        let message =
+            run(&leads, all_on(), command).unwrap_or_else(|| panic!("{command} was allowed"));
+        assert!(
+            message.contains("lead-h may not run a command the hook can't read"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_backslash_newline_anywhere_is_denied() {
+        for command in [
+            "gh pr view 115 \\\n  --json state",
+            "echo \"a\\\nb\"",
+            "x=$(echo a \\\n b)",
+            "x=\"$(cat <\\\n<EOF\n)\nEOF\ngh pr merge 1\n)\"",
+            "echo \"$\\\n(gh pr merge 1)\"",
+            "x=\"$(echo $\\\n'it\\'s' )\"; gh pr merge 1",
+            "x=$(cat <<EOF\nit's\nEOF\\\n)\ngh pr merge 1\nEOF\n)",
+        ] {
+            assert_unreadable(command);
+        }
+    }
+
+    #[test]
+    fn a_dollar_before_a_quote_is_denied() {
+        for command in [
+            "echo $$'\\'; gh pr merge 1 #'",
+            "x=\"$(echo $$'\\' )\"; gh pr merge 1 #'",
+            "x=$(echo $'it\\'s'); gh pr merge 1",
+            "echo $'it\\'s'; gh pr merge 1",
+            "echo $\"hi\"",
+            "$'\\x67h' pr merge 1",
+        ] {
+            assert_unreadable(command);
+        }
+    }
+
+    #[test]
+    fn an_expansion_holding_parentheses_or_a_heredoc_is_denied() {
+        for command in [
+            "x=\"$(echo ${y:-$(echo })<<E}\n)\"; gh pr merge 1\nE}\n)\"",
+            "x=\"$(echo $[$(echo ])<<2]\n)\"; gh pr merge 1\n2]\n)\"",
+            "x=\"$(echo ${y:-)}; gh pr merge 1)\"",
+            "x=\"$(echo ${y//<<E/z}\n)\"; gh pr merge 1\nE/z}\n)\"",
+            "echo ${x:- #}; gh pr merge 1",
+            "echo ${x:-",
+        ] {
+            assert_unreadable(command);
+        }
+    }
+
+    #[test]
+    fn nested_backticks_are_denied() {
+        for command in [
+            "echo \"`echo \\`gh pr merge 1\\``\"",
+            "echo `echo \\`gh pr merge 1\\``",
+        ] {
+            assert_unreadable(command);
+        }
+    }
+
+    #[test]
+    fn a_heredoc_body_with_an_odd_quote_is_denied() {
+        for command in [
+            "cat > notes.md <<'EOF'\nIt's green, merging now.\nEOF\ngh pr merge 115 --squash",
+            "cat > notes.md <<'EOF'\nIt's rebased.\nEOF\ngit rebase origin/main",
+            "cat <<'EOF'\nsay \"hi\nEOF",
+            "cat <<'EOF'\nuse ` here\nEOF",
+            "x=$(cat <<'EOF'\nit's\nEOF\ngh pr merge 1\n)",
+            "gh pr create --body \"$(cat <<'EOF'\nIt's ready.\nEOF\n)\"; gh pr merge 1",
+        ] {
+            assert_unreadable(command);
+        }
+    }
+
+    #[test]
+    fn a_heredoc_after_a_parenthesis_and_hash_inside_a_substitution_is_denied() {
+        for command in [
+            "x=\"$(echo $(echo)#<<EOF\n)\nEOF\ngh pr merge 1\n)\"",
+            "x=\"$(echo $((1))#<<EOF\n)\nEOF\ngh pr merge 1\n)\"",
+        ] {
+            assert_unreadable(command);
+        }
+    }
+
+    #[test]
+    fn everyday_lead_commands_pass_with_every_switch_off() {
+        let leads = ledger(vec![lead()]);
+        for command in [
+            "gh pr create --title t --body \"$(cat <<'EOF'\nIt's green and it's merged.\nEOF\n)\"",
+            "gh pr create --title t --body \"$(cat <<'EOF'\nGreen, ready for review.\nEOF\n)\"",
+            "cat > notes.md <<'EOF'\nIt's green and it's ready.\nEOF\ngh pr view 115 --json state",
+            "cat <<'EOF' # notes\nGreen.\nEOF",
+            "gh pr view 115 --json state",
+            "loopherd feed loopherd-cards",
+            "echo \"${HOME}/x\" ${arr[@]}",
+        ] {
+            assert_eq!(run(&leads, Switches::default(), command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn a_heredoc_outside_a_substitution_still_shows_what_follows() {
+        let leads = ledger(vec![lead()]);
+        for command in [
+            "cat <<'EOF'\nGreen.\nEOF\ngh pr merge 1",
+            "cat <<'EOF' # notes\nGreen, it's\nEOF\ngh pr merge 1",
+        ] {
+            assert!(
+                run(&leads, only_off(Switch::Merge), command).is_some(),
+                "{command}"
+            );
+        }
+    }
+
     #[test]
     fn a_substitution_the_hook_cant_end_is_denied_whatever_its_switches() {
         let leads = ledger(vec![lead()]);
@@ -2067,8 +2179,8 @@ mod tests {
             "x=$(cat <<'EOF'\nBody\nEOF)\ngh pr merge 1",
             "x=$(cat <<-'EOF'\n	Body\n	EOF); gh pr merge 1",
             "x=$(cat <<'EOF'\nBody",
-            "x=$(cat <<'EOF'\nit's\nEOF)\ngh pr merge 1\nEOF\n)",
-            "x=$(echo $((1<<2)); cat <<'EOF'\nit's\nEOF)\ngh pr merge 1\nEOF\n)",
+            "x=$(cat <<'EOF'\nit's, it's\nEOF)\ngh pr merge 1\nEOF\n)",
+            "x=$(echo $((1<<2)); cat <<'EOF'\nit's, it's\nEOF)\ngh pr merge 1\nEOF\n)",
             "x=$(cat <<EOF\nit's\nEOF\\\n)\ngh pr merge 1\nEOF\n)",
             "x=$(cat <<-EOF\nit's\n	EOF\\\n)\ngh pr merge 1\nEOF\n)",
             "gh pr create --body \"$(cat <<EOF\nit's\nEOF\\\n)\" && gh pr merge 1\nEOF\n)\"",
@@ -2082,12 +2194,7 @@ mod tests {
             "x=\"$(cat <<EOF)\"\n\"\nEOF\ngh pr merge 1",
             "x=\"$( ((cat <<EOF\n)\nEOF\n) ) )\"; gh pr merge 1",
         ] {
-            let message =
-                run(&leads, all_on(), command).unwrap_or_else(|| panic!("{command} was allowed"));
-            assert!(
-                message.contains("lead-h may not run a `$(…)` whose end the hook can't find"),
-                "{message}"
-            );
+            assert_unreadable(command);
         }
         for command in [
             "echo $(echo case) done",
@@ -2101,9 +2208,8 @@ mod tests {
             "x=$(cat <<-EOF\n\tEOF is reached\n\tEOF\n)",
             "x=$(echo $((1<<2))\necho hi\n)",
             "x=$(echo \"$((1<<2))\"\necho hi\n)",
-            "x=$(cat <<EOF\nPath is C:\\\\\nEOF\n)",
             "x=$(echo $((1 << 2)) $(( (1+2) * 3 ))\necho hi\n)",
-            "x=$(echo ${y:-z} $'a\\'b'\necho hi\n)",
+            "x=$(echo ${y:-z} ${arr[@]}\necho hi\n)",
         ] {
             assert_eq!(run(&leads, Switches::default(), command), None, "{command}");
         }
@@ -2146,47 +2252,47 @@ mod tests {
                 Switch::Pause,
             ),
             (
-                "gh pr create --body \"$(cat <<'EOF'\nThe lead's hook\nEOF\n)\" && gh pr merge 1",
+                "gh pr create --body \"$(cat <<'EOF'\nThe lead's hook's\nEOF\n)\" && gh pr merge 1",
                 Switch::Merge,
             ),
             (
-                "gh pr create --body \"$(cat <<'EOF'\nThe lead's hook\nEOF\n)\"\ngh pr merge 1",
+                "gh pr create --body \"$(cat <<'EOF'\nThe lead's hook's\nEOF\n)\"\ngh pr merge 1",
                 Switch::Merge,
             ),
             (
-                "gh pr create --body \"$(cat <<'EOF'\nThe lead's hook\nEOF\n)\" && loopherd herd set h lead.merge true",
+                "gh pr create --body \"$(cat <<'EOF'\nThe lead's hook's\nEOF\n)\" && loopherd herd set h lead.merge true",
                 Switch::HerdEdit,
             ),
             (
-                "gh pr create --body \"$(cat <<'EOF'\nThe lead's hook\nEOF\n)\" && scripts/install",
+                "gh pr create --body \"$(cat <<'EOF'\nThe lead's hook's\nEOF\n)\" && scripts/install",
                 Switch::Install,
             ),
             (
-                "gh pr create --body \"$(cat <<EOF\nThe lead's hook\nEOF\n)\" && gh pr merge 1",
+                "gh pr create --body \"$(cat <<EOF\nThe lead's hook's\nEOF\n)\" && gh pr merge 1",
                 Switch::Merge,
             ),
             (
-                "gh pr create --body \"$(cat << \"EOF\"\nThe lead's hook\nEOF\n)\" && gh pr merge 1",
+                "gh pr create --body \"$(cat << \"EOF\"\nThe lead's hook's\nEOF\n)\" && gh pr merge 1",
                 Switch::Merge,
             ),
             (
-                "git commit -m \"$(cat <<'EOF'\nDon't deny it\nEOF\n)\" && git push --force",
+                "git commit -m \"$(cat <<'EOF'\nDon't deny it, don't\nEOF\n)\" && git push --force",
                 Switch::Rebase,
             ),
             (
-                "git commit -m \"$(cat <<'EOF'\nDon't deny it\nEOF\n)\" && git rebase origin/main",
+                "git commit -m \"$(cat <<'EOF'\nDon't deny it, don't\nEOF\n)\" && git rebase origin/main",
                 Switch::Rebase,
             ),
             (
-                "x=$(cat <<'EOF'\nit's\nEOF\n); gh pr merge 1",
+                "x=$(cat <<'EOF'\nit's, it's\nEOF\n); gh pr merge 1",
                 Switch::Merge,
             ),
             (
-                "x=$(cat <<-'EOF'\n	it's\n	EOF\n); gh pr merge 1",
+                "x=$(cat <<-'EOF'\n	it's, it's\n	EOF\n); gh pr merge 1",
                 Switch::Merge,
             ),
             (
-                "x=$(cat <<'A' <<'B'\nit's\nA\nit's\nB\n); gh pr merge 1",
+                "x=$(cat <<'A' <<'B'\nit's, it's\nA\nit's, it's\nB\n); gh pr merge 1",
                 Switch::Merge,
             ),
             ("x=$(true # 1) don't\n); gh pr merge 1", Switch::Merge),
