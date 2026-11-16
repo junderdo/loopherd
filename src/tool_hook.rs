@@ -167,7 +167,7 @@ fn decide(
     }
     if needed == Switch::Unreadable {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, `$'…'`, an odd quote in a heredoc, or a `case` in `$(…)`: {}; rewrite it, or ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, `$'…'`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc that leaves a quote open, a `<<` in `((…))`, or a `case` in `$(…)`: {}; rewrite it, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -301,10 +301,9 @@ impl Word {
 
 /// Whether `script` holds a form the lexer may read differently from bash,
 /// wherever it sits, even in quotes: a backslash-newline, a `$` before a
-/// quote, an escaped backtick, or a `${…}` or `$[…]` holding more than a
-/// plain name and operator.
+/// quote, or a `${…}` or `$[…]` holding more than a plain name and operator.
 fn unreadable(script: &str) -> bool {
-    ["\\\n", "$'", "$\"", "\\`"]
+    ["\\\n", "$'", "$\""]
         .iter()
         .any(|form| script.contains(form))
         || script
@@ -338,24 +337,31 @@ fn plain_expansion(text: &str) -> bool {
 /// The simple commands in `script`, each as its words.
 /// `;`, `&`, `|`, newlines and parentheses end a command; the contents of a
 /// `$(…)` or backtick substitution, and heredoc bodies, are lexed as commands
-/// of their own. `None` when a `$(…)` holds a `case`, or a heredoc's end
-/// can't be told.
+/// of their own. `None` when the script ends inside a quote, backtick or
+/// `$(…)`, a `$(…)` holds a `case`, a heredoc's end can't be told, or bash may
+/// read a `<<` as a shift or a backtick as escaped where the hook doesn't.
 fn commands(script: &str) -> Option<Vec<Vec<Word>>> {
     let mut commands = vec![];
     let mut words = vec![];
     let mut word: Option<Word> = None;
     let mut heredocs: Vec<(String, bool)> = vec![];
+    let mut in_arithmetic = false;
     let mut chars = script.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
             '\'' => {
                 let w = word.get_or_insert_default();
-                w.text.extend(chars.by_ref().take_while(|&c| c != '\''));
+                loop {
+                    match chars.next()? {
+                        '\'' => break,
+                        c => w.text.push(c),
+                    }
+                }
             }
             '"' => {
                 let w = word.get_or_insert_default();
-                while let Some(c) = chars.next() {
-                    match c {
+                loop {
+                    match chars.next()? {
                         '"' => break,
                         '\\' => w.text.extend(chars.next()),
                         '$' if chars.peek() == Some(&'(') => {
@@ -364,11 +370,10 @@ fn commands(script: &str) -> Option<Vec<Vec<Word>>> {
                             commands.extend(self::commands(&substitution(&mut chars)?)?);
                         }
                         '`' => {
-                            let inner: String = chars.by_ref().take_while(|&c| c != '`').collect();
                             w.mark_substituted();
-                            commands.extend(self::commands(&inner)?);
+                            commands.extend(self::commands(&backticked(&mut chars)?)?);
                         }
-                        _ => w.text.push(c),
+                        c => w.text.push(c),
                     }
                 }
             }
@@ -383,6 +388,10 @@ fn commands(script: &str) -> Option<Vec<Vec<Word>>> {
             '<' if chars.peek() == Some(&'<') => {
                 chars.next();
                 let w = word.get_or_insert_default();
+                // Bash reads `<<` in `((…))` or a `name[…]` subscript as a shift.
+                if in_arithmetic || w.text.matches('[').count() > w.text.matches(']').count() {
+                    return None;
+                }
                 w.text.push_str("<<");
                 if chars.next_if_eq(&'<').is_some() {
                     w.text.push('<');
@@ -396,11 +405,13 @@ fn commands(script: &str) -> Option<Vec<Vec<Word>>> {
                 commands.extend(self::commands(&substitution(&mut chars)?)?);
             }
             '`' => {
-                let inner: String = chars.by_ref().take_while(|&c| c != '`').collect();
                 word.get_or_insert_default().mark_substituted();
-                commands.extend(self::commands(&inner)?);
+                commands.extend(self::commands(&backticked(&mut chars)?)?);
             }
             ';' | '&' | '|' | '\n' | '(' | ')' => {
+                if chars.peek() == Some(&c) && matches!(c, '(' | ')') {
+                    in_arithmetic = c == '(';
+                }
                 words.extend(word.take());
                 if !words.is_empty() {
                     commands.push(std::mem::take(&mut words));
@@ -422,6 +433,20 @@ fn commands(script: &str) -> Option<Vec<Vec<Word>>> {
         commands.push(words);
     }
     Some(commands)
+}
+
+/// The text of a backtick substitution whose opening backtick was just read.
+/// `None` when it isn't closed, or ends in `\`, as in ``echo `a \`b\`` ``,
+/// where bash nests a substitution the hook doesn't.
+fn backticked(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<String> {
+    let mut inner = String::new();
+    loop {
+        match chars.next()? {
+            '`' if inner.ends_with('\\') => return None,
+            '`' => return Some(inner),
+            c => inner.push(c),
+        }
+    }
 }
 
 /// The text of a `$(…)` whose `$(` was just read, through its matching `)`,
@@ -510,7 +535,7 @@ fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<Stri
         }
         inner.push(c);
     }
-    Some(inner)
+    None
 }
 
 fn separates(c: char) -> bool {
@@ -518,13 +543,14 @@ fn separates(c: char) -> bool {
 }
 
 /// Copies a quoted span whose opening `quote` was just read onto `inner`,
-/// through its closing one.
+/// through its closing one. `None` when it isn't closed.
 fn quoted(
     chars: &mut std::iter::Peekable<std::str::Chars>,
     quote: char,
     inner: &mut String,
 ) -> Option<()> {
-    while let Some(c) = chars.next() {
+    loop {
+        let c = chars.next()?;
         if quote == '"' && c == '$' && chars.next_if_eq(&'(').is_some() {
             inner.push_str("$(");
             inner.push_str(&substitution(chars)?);
@@ -533,7 +559,7 @@ fn quoted(
         }
         inner.push(c);
         if c == quote {
-            break;
+            return Some(());
         }
         if quote == '"' && c == '`' {
             quoted(chars, c, inner)?;
@@ -541,7 +567,6 @@ fn quoted(
             inner.extend(chars.next());
         }
     }
-    Some(())
 }
 
 /// Copies the rest of a heredoc operator whose `<<` was just read onto
@@ -585,16 +610,14 @@ fn heredoc_operator(
 }
 
 /// Copies a heredoc's body onto `text` through its `delimiter` line. `None`
-/// when the script ends first, the body holds an odd number of `'`, `"` or
-/// backticks, or a line starts with the delimiter and holds a `)`, as `EOF)`
-/// does, which bash inside `$(…)` takes as the end.
+/// when the script ends first, or a line starts with the delimiter and holds
+/// a `)`, as `EOF)` does, which bash inside `$(…)` takes as the end.
 fn heredoc_body(
     chars: &mut std::iter::Peekable<std::str::Chars>,
     delimiter: &str,
     tabs: bool,
     text: &mut String,
 ) -> Option<()> {
-    let mut quotes = [0; 3];
     while chars.peek().is_some() {
         let mut line = String::new();
         while let Some(c) = chars.next_if(|&c| c != '\n') {
@@ -609,13 +632,10 @@ fn heredoc_body(
             &line
         };
         if stripped == delimiter {
-            return quotes.iter().all(|n| n % 2 == 0).then_some(());
+            return Some(());
         }
         if stripped.starts_with(delimiter) && stripped.contains(')') {
             return None;
-        }
-        for (n, quote) in quotes.iter_mut().zip(['\'', '"', '`']) {
-            *n += line.matches(quote).count();
         }
     }
     None
@@ -1081,7 +1101,6 @@ mod tests {
 
     const MERGES: &[&str] = &[
         "gh pr merge 12",
-        "x=$(cat <<'EOF'\n\"'\" '\nEOF\ngh pr merge 1\n)",
         "gh pr merge 12 --squash --delete-branch",
         "gh -R junderdo/loopherd pr merge 12",
         "gh pr --repo junderdo/loopherd merge 12",
@@ -2073,7 +2092,7 @@ mod tests {
             "x=\"$(echo ${y:-$(echo })<<E}\n)\"; gh pr merge 1\nE}\n)\"",
             "x=\"$(echo $[$(echo ])<<2]\n)\"; gh pr merge 1\n2]\n)\"",
             "x=\"$(echo ${y:-)}; gh pr merge 1)\"",
-            "x=\"$(echo ${y//<<E/z}\n)\"; gh pr merge 1\nE/z}\n)\"",
+            "x=\"$(echo ${y//<<E/z}\n)\"; gh pr merge 1 #\"\nE/z}\n)\"",
             "echo ${x:- #}; gh pr merge 1",
             "echo ${x:-",
         ] {
@@ -2086,22 +2105,63 @@ mod tests {
         for command in [
             "echo \"`echo \\`gh pr merge 1\\``\"",
             "echo `echo \\`gh pr merge 1\\``",
+            "echo `echo \\`gh pr merge 1\\`` #`",
         ] {
             assert_unreadable(command);
         }
     }
 
     #[test]
-    fn a_heredoc_body_with_an_odd_quote_is_denied() {
+    fn a_heredoc_body_that_leaves_a_quote_open_is_denied() {
         for command in [
             "cat > notes.md <<'EOF'\nIt's green, merging now.\nEOF\ngh pr merge 115 --squash",
             "cat > notes.md <<'EOF'\nIt's rebased.\nEOF\ngit rebase origin/main",
             "cat <<'EOF'\nsay \"hi\nEOF",
             "cat <<'EOF'\nuse ` here\nEOF",
+            "cat <<'EOF'\nuse $(here\nEOF",
             "x=$(cat <<'EOF'\nit's\nEOF\ngh pr merge 1\n)",
             "gh pr create --body \"$(cat <<'EOF'\nIt's ready.\nEOF\n)\"; gh pr merge 1",
+            "cat <<E\r\nx\nE\r\necho '\"' \"\nE\n\"; gh pr merge 1",
+            "cat <<\\'\n'\n'; gh pr merge 1 #'",
+            "x=$(cat <<'EOF'\n\"'\" '\nEOF\ngh pr merge 1\n)",
         ] {
             assert_unreadable(command);
+        }
+    }
+
+    #[test]
+    fn a_shift_the_hook_would_read_as_a_heredoc_is_denied() {
+        for gated in [
+            "gh pr merge 1",
+            "scripts/install",
+            "loopherd herd set h lead.merge true",
+            "git rebase origin/main",
+        ] {
+            for command in [
+                format!("((y=1<<2))\necho '\"' \"\n2\n\"; {gated}"),
+                format!("(( y = 1 << 2 ))\necho '\"' \"\n2\n\"; {gated}"),
+                format!("a[1<<2]=x\necho '\"' \"\n2]=x\n\"; {gated}"),
+                format!("((y=1<<2))\necho \"'\" '\n2\n'; {gated}"),
+                format!("x=$( ((y=1<<2))\necho '\"' \"\n2\n\"; {gated}\n)"),
+                format!("((y=1<<2 '\n')); {gated} #'\n2"),
+                format!("((y=1<<\\'))\n'\n'; {gated} #'"),
+                format!("a[1<<2]=x\n2]=x\n{gated}"),
+            ] {
+                assert_unreadable(&command);
+            }
+        }
+    }
+
+    #[test]
+    fn a_heredoc_fed_to_a_shell_is_judged_line_by_line() {
+        let leads = ledger(vec![lead()]);
+        for command in [
+            "bash <<'EOF'\ngh pr merge 1\nEOF",
+            "x=$(bash <<'EOF'\ngh pr merge 1\nEOF\n)",
+        ] {
+            let message = run(&leads, only_off(Switch::Merge), command)
+                .unwrap_or_else(|| panic!("{command} was allowed"));
+            assert!(message.contains("the human merges PRs"), "{message}");
         }
     }
 
@@ -2126,6 +2186,9 @@ mod tests {
             "gh pr view 115 --json state",
             "loopherd feed loopherd-cards",
             "echo \"${HOME}/x\" ${arr[@]}",
+            "gh pr comment 115 --body \"Fixed in \\`tool_hook.rs\\`; see \\`D17\\`.\"",
+            "git commit -m \"Deny escaped backticks in \\`unreadable\\`\"",
+            "gh pr create --body \"$(cat <<EOF\nRun \\`cargo test\\`.\nEOF\n)\"",
         ] {
             assert_eq!(run(&leads, Switches::default(), command), None, "{command}");
         }
