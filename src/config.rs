@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use toml_edit::{DocumentMut, Item, Table, Value};
+use toml_edit::{DocumentMut, Item, Table, TableLike, Value};
 
 use crate::context::check_tokens;
 use crate::herd::SwitchValues;
@@ -45,27 +45,162 @@ pub fn lead_defaults(config: &Path) -> Result<Option<SwitchValues>> {
 /// Refuses, changing nothing, when the result would be an invalid config.
 pub fn set_lead_defaults(config: &Path, on: &str) -> Result<()> {
     let on = switch_list(on)?;
+    edit(config, |doc| {
+        let table = doc
+            .entry("lead_defaults")
+            .or_insert_with(|| Item::Table(Table::new()))
+            .as_table_like_mut()
+            .context("lead_defaults is not a table")?;
+        for name in SwitchValues::NAMES {
+            replace_value(table, name, Value::from(on.contains(&name)));
+        }
+        Ok(())
+    })
+}
+
+/// The keys `config get`, `set` and `unset` take.
+pub const KEYS: [&str; 3] = [
+    "context_window",
+    "default_context_limit",
+    "shepherd.context_limit",
+];
+
+/// `key`'s value in `config`, `None` when unset.
+pub fn get(config: &Path, key: &str) -> Result<Option<u64>> {
+    let file = read(config)?;
+    Ok(match known(key)? {
+        "context_window" => file.context_window,
+        "default_context_limit" => file.default_context_limit,
+        _ => file.shepherd.and_then(|s| s.context_limit),
+    })
+}
+
+/// Writes `key = value`, keeping the file's other keys and comments.
+/// Refuses, changing nothing, an unknown key or a value under the minimum.
+pub fn set(config: &Path, key: &str, value: &str) -> Result<()> {
+    let key = known(key)?;
+    let value: u64 = value
+        .trim()
+        .replace('_', "")
+        .parse()
+        .with_context(|| format!("{key} must be a whole number of tokens, got {value:?}"))?;
+    let value = i64::try_from(value).with_context(|| format!("{key}: {value} is too big"))?;
+    edit(config, |doc| {
+        let (table, name) = match key.split_once('.') {
+            Some((table, name)) => (
+                doc.entry(table)
+                    .or_insert_with(|| Item::Table(Table::new()))
+                    .as_table_like_mut()
+                    .with_context(|| format!("{table} is not a table"))?,
+                name,
+            ),
+            None => {
+                if doc.get(key).is_none() {
+                    lift_header(doc);
+                }
+                (doc.as_table_mut() as &mut dyn TableLike, key)
+            }
+        };
+        replace_value(table, name, Value::from(value));
+        Ok(())
+    })
+}
+
+/// Removes `key`, and `[shepherd]` once it's empty; false when `key` was unset.
+pub fn unset(config: &Path, key: &str) -> Result<bool> {
+    let key = known(key)?;
+    if get(config, key)?.is_none() {
+        return Ok(false);
+    }
+    edit(config, |doc| {
+        match key.split_once('.') {
+            Some((table, name)) => {
+                let emptied = doc
+                    .get_mut(table)
+                    .and_then(Item::as_table_like_mut)
+                    .is_some_and(|t| {
+                        t.remove(name);
+                        t.is_empty()
+                    });
+                if emptied {
+                    doc.remove(table);
+                }
+            }
+            None => {
+                doc.remove(key);
+            }
+        }
+        Ok(())
+    })?;
+    Ok(true)
+}
+
+/// A file with tables and no root keys keeps its header comment in the first
+/// table's decor, so a new root key would land above it: move the comment
+/// lines before that table's last blank line to the doc's own prefix.
+fn lift_header(doc: &mut DocumentMut) {
+    if doc.iter().any(|(_, item)| item.is_value()) {
+        return;
+    }
+    let first = doc
+        .as_table_mut()
+        .iter_mut()
+        .filter_map(|(_, item)| item.as_table_mut())
+        .min_by_key(|table| table.position());
+    let Some(table) = first else {
+        return;
+    };
+    let prefix = table
+        .decor()
+        .prefix()
+        .and_then(|p| p.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let Some(blank) = prefix.rfind("\n\n") else {
+        return;
+    };
+    table.decor_mut().set_prefix(&prefix[blank + 1..]);
+    let header = prefix[..blank + 1].to_string();
+    doc.decor_mut().set_prefix(header);
+}
+
+fn known(key: &str) -> Result<&'static str> {
+    match KEYS.iter().find(|k| **k == key) {
+        Some(key) => Ok(key),
+        None => bail!("unknown key {key:?}: name one of {}", KEYS.join(", ")),
+    }
+}
+
+/// Sets `name` to `value`, keeping the comments around an old value.
+fn replace_value(table: &mut dyn TableLike, name: &str, mut value: Value) {
+    match table.get_mut(name).and_then(Item::as_value_mut) {
+        Some(old) => {
+            *value.decor_mut() = old.decor().clone();
+            *old = value;
+        }
+        None => {
+            table.insert(name, Item::Value(value));
+        }
+    }
+}
+
+/// Applies `change` to `config` through its symlinks, refusing, changing
+/// nothing, a result that isn't a valid config.
+fn edit(config: &Path, change: impl FnOnce(&mut DocumentMut) -> Result<()>) -> Result<()> {
     let config = &link_target(config)?;
     let mut doc: DocumentMut = read_text(config)?
         .parse()
         .with_context(|| config.display().to_string())?;
-    let table = doc
-        .entry("lead_defaults")
-        .or_insert_with(|| Item::Table(Table::new()))
-        .as_table_like_mut()
-        .context("lead_defaults is not a table")?;
-    for name in SwitchValues::NAMES {
-        let mut value = Value::from(on.contains(&name));
-        match table.get_mut(name).and_then(Item::as_value_mut) {
-            Some(old) => {
-                *value.decor_mut() = old.decor().clone();
-                *old = value;
-            }
-            None => {
-                table.insert(name, Item::Value(value));
-            }
+    if doc.is_empty() {
+        // A comment-only file parses as trailing text, which would print after anything added.
+        let mut comments = doc.trailing().as_str().unwrap_or_default().to_string();
+        if !comments.trim().is_empty() && !comments.ends_with("\n\n") {
+            comments.push('\n');
         }
+        doc.set_trailing("");
+        doc.decor_mut().set_prefix(comments);
     }
+    change(&mut doc)?;
     let text = doc.to_string();
     check(&text).with_context(|| format!("refused, {} is unchanged", config.display()))?;
     let written = || format!("write {}", config.display());
@@ -297,5 +432,114 @@ mod tests {
         let err = format!("{:#}", set_lead_defaults(&path, "merge").unwrap_err());
         assert!(err.contains("context_window"), "{err}");
         assert_eq!(fs::read_to_string(&path).unwrap(), "context_window = 1\n");
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    fn config_with(text: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, text).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn each_key_round_trips_through_set_get_and_unset() {
+        let (_dir, path) = config_with("");
+        for key in [
+            "default_context_limit",
+            "context_window",
+            "shepherd.context_limit",
+        ] {
+            assert_eq!(get(&path, key).unwrap(), None, "{key}");
+            set(&path, key, "300000").unwrap();
+            assert_eq!(get(&path, key).unwrap(), Some(300_000), "{key}");
+            assert!(unset(&path, key).unwrap(), "{key}");
+            assert_eq!(get(&path, key).unwrap(), None, "{key}");
+            assert!(!unset(&path, key).unwrap(), "{key}");
+        }
+    }
+
+    #[test]
+    fn setting_a_key_keeps_the_files_comments_and_layout() {
+        let (_dir, path) = config_with(
+            "# my limits\ncontext_window = 1000000 # big\n\n[shepherd] # me\ncontext_limit = 400000 # mine\n",
+        );
+
+        set(&path, "context_window", "500000").unwrap();
+        set(&path, "shepherd.context_limit", "300000").unwrap();
+        set(&path, "default_context_limit", "200000").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "# my limits\ncontext_window = 500000 # big\ndefault_context_limit = 200000\n\n\
+             [shepherd] # me\ncontext_limit = 300000 # mine\n"
+        );
+    }
+
+    #[test]
+    fn a_root_key_set_after_a_table_keeps_a_leading_comment_first() {
+        let (_dir, path) = config_with("# mine\n\n[lead_defaults]\nmerge = true\n");
+
+        set(&path, "context_window", "1000000").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "# mine\ncontext_window = 1000000\n\n[lead_defaults]\nmerge = true\n"
+        );
+    }
+
+    #[test]
+    fn a_comment_only_file_keeps_its_comment_first() {
+        let (_dir, path) = config_with("# mine\n");
+
+        set_lead_defaults(&path, "merge").unwrap();
+        set(&path, "context_window", "1000000").unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.starts_with("# mine\ncontext_window = 1000000\n\n[lead_defaults]\nmerge = true\n"),
+            "{text}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setting_a_key_through_a_symlink_writes_its_target() {
+        let (dir, target) = config_with("context_window = 1000000\n");
+        let link = dir.path().join("link.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        set(&link, "context_window", "500000").unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(get(&target, "context_window").unwrap(), Some(500_000));
+    }
+
+    #[test]
+    fn an_unknown_key_or_a_bad_value_is_refused_and_changes_nothing() {
+        let text = "context_window = 1000000\n";
+        let (_dir, path) = config_with(text);
+        for (key, value, says) in [
+            ("context_windw", "300000", "unknown key"),
+            ("lead_defaults.merge", "true", "unknown key"),
+            ("context_window", "9999", "at least 10000"),
+            ("default_context_limit", "lots", "a whole number"),
+            ("shepherd.context_limit", "-1", "a whole number"),
+        ] {
+            let err = format!("{:#}", set(&path, key, value).unwrap_err());
+            assert!(err.contains(says), "{key} {value}: {err}");
+        }
+        assert!(format!("{:#}", unset(&path, "window").unwrap_err()).contains("unknown key"));
+        assert!(format!("{:#}", get(&path, "window").unwrap_err()).contains("unknown key"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
     }
 }

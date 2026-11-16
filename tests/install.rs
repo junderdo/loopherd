@@ -125,7 +125,7 @@ fn install_copies_the_build_into_place_then_runs_install_hook() {
     );
     assert_eq!(
         fs::read_to_string(&sandbox.log).unwrap(),
-        "new install-hook --settings /tmp/s.json\nnew lead-defaults\n"
+        "new install-hook --settings /tmp/s.json\nnew setup\n"
     );
     assert_eq!(sandbox.bin_dir_entries(), ["loopherd"]);
 }
@@ -470,7 +470,7 @@ fn a_lead_defaults_list_is_consumed_and_not_passed_to_install_hook() {
         assert!(out.status.success(), "{args:?}: {out:?}");
         assert_eq!(
             fs::read_to_string(&sandbox.log).unwrap(),
-            "new install-hook --settings /tmp/s.json\nnew lead-defaults --set merge,install\n",
+            "new install-hook --settings /tmp/s.json\nnew setup --lead-defaults=merge,install\n",
             "{args:?}"
         );
     }
@@ -489,7 +489,7 @@ fn no_splash_is_consumed_and_not_passed_to_install_hook() {
     );
     assert_eq!(
         fs::read_to_string(&sandbox.log).unwrap(),
-        "new install-hook --settings /tmp/s.json\nnew lead-defaults\n"
+        "new install-hook --settings /tmp/s.json\nnew setup\n"
     );
 }
 
@@ -606,7 +606,7 @@ fn install_without_the_splash_file_still_installs() {
     );
     assert_eq!(
         fs::read_to_string(&sandbox.log).unwrap(),
-        "new install-hook --settings /tmp/s.json\nnew lead-defaults\n"
+        "new install-hook --settings /tmp/s.json\nnew setup\n"
     );
 }
 

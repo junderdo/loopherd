@@ -1,9 +1,11 @@
-//! `scripts/install`'s lead defaults: the questions on a terminal,
-//! `--lead-defaults`, and when `config.toml` is left alone.
+//! `scripts/install`'s settings through `loopherd setup`: the questions on a
+//! terminal, `--lead-defaults` and `--context`, and when `config.toml` is
+//! left alone.
 
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -15,7 +17,7 @@ fn executable(path: &Path, script: &str) {
 }
 
 /// A temp HOME, state dir and `$LOOPHERD_CONFIG_DIR`, and a fake cargo whose
-/// "build" runs the real loopherd for `lead-defaults` and nothing else.
+/// "build" runs the real loopherd for `lead-defaults` and `setup` and nothing else.
 struct Sandbox {
     _dir: tempfile::TempDir,
     home: PathBuf,
@@ -36,7 +38,7 @@ impl Sandbox {
         executable(
             &built,
             &format!(
-                "#!/bin/sh\n[ \"$1\" != lead-defaults ] || exec '{}' \"$@\"\n",
+                "#!/bin/sh\ncase \"$1\" in lead-defaults | setup) exec '{}' \"$@\" ;; esac\n",
                 env!("CARGO_BIN_EXE_loopherd")
             ),
         );
@@ -85,7 +87,7 @@ impl Sandbox {
             .env_remove("CLAUDE_CONFIG_DIR");
     }
 
-    /// Runs the installer with stdin not a terminal.
+    /// Runs the installer in a new session, so it has no terminal at all.
     fn install(&self, args: &[&str]) -> Output {
         let mut cmd = Command::new(INSTALL);
         cmd.arg("--settings")
@@ -93,6 +95,13 @@ impl Sandbox {
             .args(args)
             .stdin(Stdio::null());
         self.env(&mut cmd);
+        // SAFETY: setsid is async-signal-safe.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
         cmd.output().unwrap()
     }
 
@@ -274,7 +283,7 @@ fn an_unreadable_config_fails_an_explicit_ask_but_not_a_plain_install() {
     let asked = sandbox.install(&["--lead-defaults"]);
     assert_eq!(asked.status.code(), Some(1), "{asked:?}");
     assert!(
-        String::from_utf8_lossy(&asked.stderr).contains("couldn't read the lead defaults"),
+        String::from_utf8_lossy(&asked.stderr).contains("loopherd setup:"),
         "{asked:?}"
     );
     assert_eq!(
@@ -293,4 +302,29 @@ fn naming_another_extra_skips_the_lead_defaults_questions() {
 
     assert!(!out.contains("merge a PR"), "{out}");
     assert_eq!(sandbox.read_config(), None);
+}
+
+#[test]
+fn a_context_flag_passes_through_to_setup_without_asking() {
+    let sandbox = Sandbox::new();
+
+    succeeded(&sandbox.install(&["--context", "window=1000000,limit=500000"]));
+    assert_eq!(
+        sandbox.read_config().unwrap(),
+        "context_window = 1000000\ndefault_context_limit = 500000\n"
+    );
+
+    let over = sandbox.install(&["--context=limit=900000"]);
+    assert_eq!(over.status.code(), Some(1), "{over:?}");
+    assert!(
+        String::from_utf8_lossy(&over.stderr).contains("over the cap of 800000"),
+        "{over:?}"
+    );
+
+    let both = sandbox.install(&["--no-extras", "--context", "limit=100000"]);
+    assert_eq!(both.status.code(), Some(2), "{both:?}");
+    assert_eq!(
+        sandbox.read_config().unwrap(),
+        "context_window = 1000000\ndefault_context_limit = 500000\n"
+    );
 }
