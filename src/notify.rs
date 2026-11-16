@@ -140,7 +140,8 @@ pub struct Launch {
 
 /// Hands `launch` herdr's toast and the command for each event `config`
 /// covers, skipping a question already marked notified in `mailboxes` and
-/// marking it first. Every launch is tried; the first failure is returned.
+/// marking it first. A question that can't be marked is skipped; every
+/// other launch is tried, and the first failure is returned.
 pub fn send(
     config: &Config,
     mailboxes: &Path,
@@ -149,10 +150,15 @@ pub fn send(
 ) -> Result<()> {
     let mut failed = None;
     for event in events.iter().filter(|e| config.kinds.contains(&e.kind)) {
-        if let Some(at) = &event.at
-            && !first_to_notify(mailboxes, &event.member, at)?
-        {
-            continue;
+        if let Some(at) = &event.at {
+            match first_to_notify(mailboxes, &event.member, at) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(e) => {
+                    failed.get_or_insert(e);
+                    continue;
+                }
+            }
         }
         let text = match event.kind {
             Kind::Question => summary(&event.text),
@@ -619,6 +625,27 @@ mod tests {
         );
 
         assert_eq!(launched[0].args[4], "--body=-- merge it?");
+    }
+
+    #[test]
+    fn a_question_that_cannot_be_marked_is_skipped_and_the_rest_are_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("lh-3.notified")).unwrap();
+        let config = enabled("herdr = false\ncommand = ['n', '{member}']\n");
+        let mut launched = vec![];
+
+        let result = send(
+            &config,
+            dir.path(),
+            &[question("lh-3", "Which way?", "t1"), blocked("lh-4")],
+            &mut |l| {
+                launched.push(l.args);
+                Ok(())
+            },
+        );
+
+        assert!(format!("{:#}", result.unwrap_err()).contains("lh-3.notified"));
+        assert_eq!(launched, [args(&["n", "lh-4"])]);
     }
 
     fn load_text(text: &str) -> Result<Option<Config>> {
