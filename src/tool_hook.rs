@@ -2,8 +2,8 @@
 //! from a lead's pane that needs a switch its herd file leaves off (D17), or
 //! a `loopherd restart --force` (D20), a `loopherd pause` or `resume`
 //! (D23), a `loopherd herd set` or `unset` (D29), a write of the lead
-//! defaults (D31), or cargo run through an alias it can't read, which no
-//! switch allows.
+//! defaults (D31), cargo run through an alias it can't read, or a `case`
+//! inside `$(…)`, which no switch allows.
 //! A guardrail on the command text, not a sandbox.
 
 use std::path::Path;
@@ -38,6 +38,9 @@ pub enum Switch {
     /// `cargo` run through a `CARGO_ALIAS_*` whose value the hook can't read.
     /// Not a switch: always the human's.
     OpaqueCargoAlias,
+    /// A `case` inside `$(…)`, whose pattern's `)` the hook can't tell from
+    /// the one closing the substitution. Not a switch: always the human's.
+    UnreadableCase,
 }
 
 impl Switch {
@@ -51,6 +54,7 @@ impl Switch {
             Switch::HerdEdit => "herd set",
             Switch::LeadDefaults => "lead-defaults",
             Switch::OpaqueCargoAlias => "cargo alias",
+            Switch::UnreadableCase => "case in a substitution",
         }
     }
 
@@ -64,6 +68,7 @@ impl Switch {
             Switch::HerdEdit => "the human edits herd files",
             Switch::LeadDefaults => "the human sets lead defaults",
             Switch::OpaqueCargoAlias => "the human runs cargo through such aliases",
+            Switch::UnreadableCase => "the human runs commands the hook can't read",
         }
     }
 
@@ -76,7 +81,8 @@ impl Switch {
             | Switch::Pause
             | Switch::HerdEdit
             | Switch::LeadDefaults
-            | Switch::OpaqueCargoAlias => false,
+            | Switch::OpaqueCargoAlias
+            | Switch::UnreadableCase => false,
         }
     }
 }
@@ -120,6 +126,7 @@ fn decide(
                 Switch::HerdEdit,
                 Switch::LeadDefaults,
                 Switch::OpaqueCargoAlias,
+                Switch::UnreadableCase,
             ]
         });
     if needed.is_empty() {
@@ -153,6 +160,13 @@ fn decide(
     if needed == Switch::OpaqueCargoAlias {
         return Ok(Some(format!(
             "loopherd: blocked: {} may not run cargo through a `CARGO_ALIAS_*` whose value can't be read from the command: {}; spell the cargo command out, or ask with `loopherd report --kind question`",
+            lead.name,
+            needed.humans_part()
+        )));
+    }
+    if needed == Switch::UnreadableCase {
+        return Ok(Some(format!(
+            "loopherd: blocked: {} may not run a `case` inside `$(…)`, which the hook can't read: {}; rewrite it without, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -229,22 +243,23 @@ struct Aliases {
 
 impl Aliases {
     fn assign(&mut self, word: &Word) {
-        let Some(rest) = word.text.strip_prefix("CARGO_ALIAS_") else {
-            return;
-        };
-        // A substitution may have been in the name, so it counts as unreadable.
-        if word.substituted {
+        if word.name_expands() {
             self.unreadable_name = true;
             return;
         }
-        let Some((name, value)) = rest.split_once('=') else {
+        let Some((name, value)) = word
+            .text
+            .strip_prefix("CARGO_ALIAS_")
+            .and_then(|rest| rest.split_once('='))
+        else {
             return;
         };
         if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             self.unreadable_name = true;
             return;
         }
-        let readable = !value.trim().is_empty() && !value.contains('$');
+        let readable =
+            !value.trim().is_empty() && !value.contains('$') && word.substituted_at.is_none();
         self.values
             .insert(name.to_uppercase(), readable.then(|| value.to_string()));
     }
@@ -253,24 +268,41 @@ impl Aliases {
 /// [`needs`] with the cargo aliases assigned before `script`. An assignment
 /// counts for the rest of the script, exported or not.
 fn needs_with(script: &str, mut aliases: Aliases) -> Vec<Switch> {
-    commands(script)
+    let Some(commands) = commands(script) else {
+        return vec![Switch::UnreadableCase];
+    };
+    commands
         .iter()
         .flat_map(|command| needs_one(command, &mut aliases))
         .collect()
 }
 
-/// A word with quotes removed, and whether a `$(…)` or backtick
-/// substitution was part of it.
+/// A word with quotes removed, and where in `text` its first `$(…)` or
+/// backtick substitution stood.
 #[derive(Default)]
 struct Word {
     text: String,
-    substituted: bool,
+    substituted_at: Option<usize>,
+}
+
+impl Word {
+    fn mark_substituted(&mut self) {
+        self.substituted_at.get_or_insert(self.text.len());
+    }
+
+    /// Whether a `$` or a substitution may build the part before the first
+    /// `=`, or the whole word when it has none.
+    fn name_expands(&self) -> bool {
+        let name = self.text.split_once('=').map_or(&*self.text, |(n, _)| n);
+        name.contains('$') || self.substituted_at.is_some_and(|at| at <= name.len())
+    }
 }
 
 /// The simple commands in `script`, each as its words.
 /// `;`, `&`, `|`, newlines and parentheses end a command; the contents of a
 /// `$(…)` or backtick substitution are lexed as commands of their own.
-fn commands(script: &str) -> Vec<Vec<Word>> {
+/// `None` when a `$(…)` holds a `case`.
+fn commands(script: &str) -> Option<Vec<Vec<Word>>> {
     let mut commands = vec![];
     let mut words = vec![];
     let mut word: Option<Word> = None;
@@ -289,13 +321,13 @@ fn commands(script: &str) -> Vec<Vec<Word>> {
                         '\\' => w.text.extend(chars.next()),
                         '$' if chars.peek() == Some(&'(') => {
                             chars.next();
-                            w.substituted = true;
-                            commands.extend(self::commands(&substitution(&mut chars)));
+                            w.mark_substituted();
+                            commands.extend(self::commands(&substitution(&mut chars)?)?);
                         }
                         '`' => {
                             let inner: String = chars.by_ref().take_while(|&c| c != '`').collect();
-                            w.substituted = true;
-                            commands.extend(self::commands(&inner));
+                            w.mark_substituted();
+                            commands.extend(self::commands(&inner)?);
                         }
                         _ => w.text.push(c),
                     }
@@ -320,13 +352,13 @@ fn commands(script: &str) -> Vec<Vec<Word>> {
             }
             '$' if chars.peek() == Some(&'(') => {
                 chars.next();
-                word.get_or_insert_default().substituted = true;
-                commands.extend(self::commands(&substitution(&mut chars)));
+                word.get_or_insert_default().mark_substituted();
+                commands.extend(self::commands(&substitution(&mut chars)?)?);
             }
             '`' => {
                 let inner: String = chars.by_ref().take_while(|&c| c != '`').collect();
-                word.get_or_insert_default().substituted = true;
-                commands.extend(self::commands(&inner));
+                word.get_or_insert_default().mark_substituted();
+                commands.extend(self::commands(&inner)?);
             }
             ';' | '&' | '|' | '\n' | '(' | ')' => {
                 words.extend(word.take());
@@ -342,27 +374,72 @@ fn commands(script: &str) -> Vec<Vec<Word>> {
     if !words.is_empty() {
         commands.push(words);
     }
-    commands
+    Some(commands)
 }
 
-/// The text of a `$(…)` whose `$(` was just read, through its matching `)`.
-fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
+/// The text of a `$(…)` whose `$(` was just read, through its matching `)`,
+/// skipping quotes and escapes. `None` when it holds a `case` at a command's
+/// start, since a pattern's `)` would end it early.
+fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<String> {
     let mut depth = 1;
     let mut inner = String::new();
-    for c in chars.by_ref() {
+    let mut word = String::new();
+    let mut command_start = true;
+    while let Some(c) = chars.next() {
+        let separates = c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')');
+        if separates {
+            if !word.is_empty() {
+                if command_start && word == "case" {
+                    return None;
+                }
+                command_start = KEYWORDS.contains(&word.as_str());
+                word.clear();
+            }
+            if c != ' ' && c != '\t' {
+                command_start = true;
+            }
+        }
         match c {
             '(' => depth += 1,
             ')' => {
                 depth -= 1;
                 if depth == 0 {
-                    break;
+                    return Some(inner);
                 }
             }
+            '\\' => {
+                inner.push(c);
+                inner.extend(chars.next());
+                word.push(c);
+                continue;
+            }
+            '\'' | '"' | '`' => {
+                inner.push(c);
+                while let Some(q) = chars.next() {
+                    if q == '$' && c == '"' && chars.peek() == Some(&'(') {
+                        chars.next();
+                        inner.push_str("$(");
+                        inner.push_str(&substitution(chars)?);
+                        inner.push(')');
+                        continue;
+                    }
+                    inner.push(q);
+                    if q == c {
+                        break;
+                    }
+                    if q == '\\' && c != '\'' {
+                        inner.extend(chars.next());
+                    }
+                }
+                word.push(c);
+                continue;
+            }
+            _ if !separates => word.push(c),
             _ => {}
         }
         inner.push(c);
     }
-    inner
+    (!(command_start && word == "case")).then_some(inner)
 }
 
 /// Words that run the command after them, with their options that take a value.
@@ -394,6 +471,7 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
     let words: Vec<String> = command.iter().map(|w| w.text.clone()).collect();
     let words = words.as_slice();
     let mut i = 0;
+    let mut in_env = false;
     loop {
         let Some(word) = words.get(i) else {
             return vec![];
@@ -401,7 +479,11 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
         let program = file_name(word);
         if let Some(bare) = redirection(word) {
             i += if bare { 2 } else { 1 };
-        } else if word.is_empty() && command[i].substituted {
+        } else if in_env && command[i].name_expands() {
+            // `env` may get an assignment whose name the hook can't read.
+            aliases.assign(&command[i]);
+            i += 1;
+        } else if word.is_empty() && command[i].substituted_at.is_some() {
             // An unquoted substitution that prints nothing leaves no word.
             i += 1;
         } else if is_assignment(word) {
@@ -410,9 +492,18 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
         } else if KEYWORDS.contains(&word.as_str()) || word == "." {
             i += 1;
         } else if DECLARERS.contains(&program) {
-            command[i + 1..].iter().for_each(|w| aliases.assign(w));
+            let args = &command[i + 1..];
+            if args
+                .iter()
+                .any(|w| w.text.starts_with('-') && w.text.contains('n'))
+            {
+                // A nameref (`declare -n r=CARGO_ALIAS_X`) assigns through another name.
+                aliases.unreadable_name = true;
+            }
+            args.iter().for_each(|w| aliases.assign(w));
             return vec![];
         } else if let Some((_, with_value)) = WRAPPERS.iter().find(|(w, _)| *w == program) {
+            in_env |= program == "env";
             i = skip_options(words, i + 1, with_value);
             if program == "timeout" {
                 i += 1;
@@ -899,6 +990,13 @@ mod tests {
         "echo $(gh pr merge 1)",
         "echo x$(gh pr merge 1)y",
         "X+=1 gh pr merge 12",
+        "echo $(echo ')'; gh pr merge 12)",
+        "echo $(echo \")\"; gh pr merge 12)",
+        "echo $(echo \\); gh pr merge 12)",
+        "x=$(echo ')'; gh pr merge 12)",
+        "echo \"$(echo ')'; gh pr merge 12)\"",
+        "echo $(echo \"$(echo ')')\"; gh pr merge 12)",
+        "echo $(echo \"\\\")\"; gh pr merge 12)",
     ];
     const INSTALLS: &[&str] = &[
         "scripts/install",
@@ -923,6 +1021,7 @@ mod tests {
         "cargo r -- install-hook",
         "cargo +nightly run -- install-hook",
         "cargo test install-hook",
+        "echo $(echo ')'; scripts/install)",
     ];
     const REBASES: &[&str] = &[
         "git rebase origin/main",
@@ -956,6 +1055,8 @@ mod tests {
         "git rebase --skip",
         "git rebase --help",
         "git rebase -x --abort main",
+        "echo $(echo ')'; git rebase main)",
+        "echo $(echo ')'; git push --force)",
     ];
     const ALLOWED: &[&str] = &[
         "gh pr view 12",
@@ -1002,6 +1103,12 @@ mod tests {
         "CARGO_ALIAS_X='build --release' cargo x",
         "CARGO_ALIAS_X='run -- herd set' cargo build",
         "CARGO_ALIAS_X=$CMD cargo test",
+        "CARGO_ALIAS_X=$CMD cargo y",
+        "export PATH=\"$HOME/bin:$PATH\"; cargo nextest run",
+        "N=$(git rev-parse HEAD) cargo nextest run",
+        "echo $(echo ')') done",
+        "echo \"$(echo ')')\" done",
+        "'' gh pr merge 12",
     ];
 
     #[test]
@@ -1187,7 +1294,8 @@ mod tests {
             | Switch::Pause
             | Switch::HerdEdit
             | Switch::LeadDefaults
-            | Switch::OpaqueCargoAlias => {}
+            | Switch::OpaqueCargoAlias
+            | Switch::UnreadableCase => {}
         }
         s
     }
@@ -1231,7 +1339,8 @@ mod tests {
                 | Switch::Pause
                 | Switch::HerdEdit
                 | Switch::LeadDefaults
-                | Switch::OpaqueCargoAlias => {}
+                | Switch::OpaqueCargoAlias
+                | Switch::UnreadableCase => {}
             }
             for command in commands {
                 assert_eq!(run(&leads, others_off, command), None, "{command}");
@@ -1706,6 +1815,16 @@ mod tests {
             "CARGO_ALIAS_X='run -- pause h'; export CARGO_ALIAS_$(echo Y); cargo y",
             "CARGO_ALIAS_X=\"run -- `echo pause` h\" cargo x",
             "CARGO_ALIAS_X=run CARGO_ALIAS_X+=' -- herd set h lead.merge true' cargo x",
+            "CARGO_ALIAS_X=$(echo ')' >/dev/null)'run -- pause h' cargo x",
+            "export CARGO_ALIA$(echo S_X)='run -- pause h'; cargo x",
+            "export $(echo CARGO_ALIAS_X)='run -- pause h'; cargo x",
+            "N=CARGO_ALIAS_X; export $N='run -- pause h'; cargo x",
+            "env CARGO_ALIA$(echo S_X)='run -- pause h' cargo x",
+            "env CARGO_ALIA$(echo S_X=run) cargo x -- pause h",
+            "env $(printf 'CARGO_ALIAS_%s=run' X) cargo x -- pause h",
+            "declare -n r=CARGO_ALIAS_X; r='run -- pause h'; export CARGO_ALIAS_X; cargo x",
+            "local -n r=CARGO_ALIAS_X; r='run -- pause h'; cargo x",
+            "typeset -xn r=CARGO_ALIAS_X; r='run -- pause h'; cargo x",
         ] {
             assert_eq!(needs(command), [Switch::OpaqueCargoAlias], "{command}");
             let message =
@@ -1718,6 +1837,38 @@ mod tests {
         let workers = ledger(vec![entry("lh-1", None)]);
         assert_eq!(
             run(&workers, Switches::default(), "CARGO_ALIAS_X=$CMD cargo x"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_case_inside_a_substitution_is_denied_whatever_its_switches() {
+        let leads = ledger(vec![lead()]);
+        for command in [
+            "echo $(case x in x) gh pr merge 12;; esac)",
+            "echo \"$(case x in x) echo hi;; esac)\"; gh pr merge 12",
+            "x=$(case x in (x) loopherd pause h;; esac)",
+            "echo \"$(true; case x in x) :;; esac)\"",
+            "echo \"$(true&&case x in x) :;; esac)\"",
+            "echo \"$(echo \"$(case x in x) echo;; esac)\")\"",
+        ] {
+            let message =
+                run(&leads, all_on(), command).unwrap_or_else(|| panic!("{command} was allowed"));
+            assert!(
+                message.contains("lead-h may not run a `case` inside `$(…)`"),
+                "{message}"
+            );
+        }
+        for command in ["echo $(echo case) done", "echo $(echo 'case x in x)')"] {
+            assert_eq!(run(&leads, Switches::default(), command), None, "{command}");
+        }
+        let workers = ledger(vec![entry("lh-1", None)]);
+        assert_eq!(
+            run(
+                &workers,
+                Switches::default(),
+                "echo $(case x in x) :;; esac)"
+            ),
             None
         );
     }
