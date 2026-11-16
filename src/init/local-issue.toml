@@ -1,0 +1,46 @@
+[template.issue]
+params = ["id", "type", "skill", "slug", "path"]
+name = "{herd}-{id}"
+branch = "{type}/{id}-{slug}"
+# Done once @REF@ has the issue's Status: line resolved, closed or done, and
+# not done while the file is missing there. Braces are doubled, as loopherd
+# fills {placeholders} in checks.
+@CONTEXT_LIMIT@done = '''
+@FETCH@git cat-file -e @REF@:{path} 2>/dev/null || exit 1
+text=$(git show @REF@:{path}) && printf '%s\n' "$text" | awk '
+  {{ sub(/\r$/, "") }}
+  tolower($0) ~ /^#+[ \t]*comments[ \t]*$/ {{ exit }}
+  tolower($0) ~ /^[ \t*_]*status[ \t*_]*:/ {{
+    s = tolower($0); sub(/^[^:]*:/, "", s); gsub(/[*`,]/, " ", s)
+    closed = " " s " " ~ /[ \t](resolved|closed|done)[ \t]/
+    exit
+  }}
+  END {{ exit !closed }}'
+'''
+@MERGED@
+prompt = '''
+You're {name}, working the local issue {path} on branch {branch} in
+{worktree}. The issue is a markdown file in the repo; its `Status:` line near
+the top holds its triage state, and comments go under a `## Comments` heading
+at the bottom.
+@GH_NOTE@
+1. Read {path} in full, comments included.
+2. Claim it: set its `Status:` line to `claimed`, append `claimed by {name}`
+   under `## Comments` (adding the heading if it's missing), and commit.
+3. Build it with the {skill} skill.
+4. Before calling it done, run each check and fix what fails:
+@CHECKS@
+5. Set the issue's `Status:` line to `resolved`, append a one-line summary of
+   the work under `## Comments`, and commit, so the issue closes when your
+   branch merges.
+@HAND_IN@
+7. Finish with `loopherd report --kind done "<@HANDED_IN@ and one-line summary>"`.
+
+If @BRANCH@ moves under you, merge origin/@BRANCH@ into your branch; never
+rebase or force-push.
+
+If you hit a question only the human can answer, stop rather than guess: set
+the issue's `Status:` line to `@NEEDS_INFO@`, append the question and the
+options you see under `## Comments`, commit and push the branch, then
+`loopherd report --kind question "<the exact question>"`.
+'''

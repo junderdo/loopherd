@@ -246,6 +246,19 @@ fn init_writes_a_herd_whose_feed_lists_the_repos_ready_issues() {
 }
 
 #[test]
+fn the_herd_file_opens_by_naming_the_github_repo_its_issues_come_from() {
+    let fixture = Fixture::new(&["acme"]);
+
+    assert_ok(&fixture.init(&[]));
+
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(
+        herd.starts_with("# Herd widgets: one worker per ready GitHub issue in acme/widgets.\n"),
+        "{herd}"
+    );
+}
+
+#[test]
 fn the_queue_names_each_issues_branch_type_skill_and_slug_from_its_labels_and_title() {
     let fixture = Fixture::new(&["acme"]);
     fixture.gh_json("issues.json", ISSUES);
@@ -356,6 +369,13 @@ fn the_lead_takes_its_switches_from_lead_defaults_and_a_prompt_file_beside_the_h
     );
     let lead = fs::read_to_string(fixture.herds().join("widgets-lead.md")).unwrap();
     assert!(lead.contains("{switches}"), "{lead}");
+    assert!(
+        lead.contains(
+            "re-arm after every exit. On `<member> merged`, run `loopherd feed {herd}`,\n   \
+             which retires it once its issue is closed. On `<name> claimable`, feed."
+        ),
+        "{lead}"
+    );
 }
 
 #[test]
@@ -1218,15 +1238,17 @@ fn a_triage_label_init_cant_put_in_a_shell_command_or_blocked_is_refused_before_
 
 #[test]
 fn tracker_names_the_doc_init_writes_when_there_is_none() {
-    for (args, title, github) in [
+    for (args, title, valid, github) in [
         (
             &["--tracker", "github"][..],
             "# Issue tracker: GitHub\n",
+            true,
             true,
         ),
         (
             &["--tracker", "local"][..],
             "# Issue tracker: Local Markdown\n",
+            true,
             false,
         ),
         (
@@ -1237,6 +1259,7 @@ fn tracker_names_the_doc_init_writes_when_there_is_none() {
                 "Issues live in Linear, team WID.",
             ][..],
             "# Issue tracker\n\nIssues live in Linear, team WID.\n",
+            false,
             false,
         ),
     ] {
@@ -1253,7 +1276,7 @@ fn tracker_names_the_doc_init_writes_when_there_is_none() {
         let herds = fixture.loopherd(&["herds"]);
         assert_eq!(
             herds.status.code(),
-            Some(if github { 0 } else { 1 }),
+            Some(if valid { 0 } else { 1 }),
             "{args:?}"
         );
         assert_eq!(
@@ -1371,11 +1394,63 @@ fn write_docs(fixture: &Fixture, tracker: Option<&str>, labels: &str) {
 }
 
 #[test]
-fn a_tracker_other_than_github_takes_labels_no_shell_command_runs() {
+fn a_local_tracker_refuses_a_label_its_shell_snippets_cant_hold() {
     let fixture = Fixture::new(&["acme"]);
     write_docs(
         &fixture,
         Some("# Issue tracker: Local Markdown\n"),
+        "| `ready-for-human` | `$(x)` | x |\n",
+    );
+
+    let out = fixture.init(&[]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("maps ready-for-human to \"$(x)\""),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!fixture.herds().join("widgets.toml").exists());
+}
+
+#[test]
+fn a_local_tracker_reads_its_triage_labels_names() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.push_local_issues(&[
+        (".scratch/f/issues/01-a.md", "Status: AFK\n"),
+        (".scratch/f/issues/02-b.md", "Status: AFK, Asked\n"),
+        (".scratch/f/issues/03-c.md", "Status: ready-for-agent\n"),
+    ]);
+    write_docs(
+        &fixture,
+        Some("# Issue tracker: Local Markdown\n"),
+        "| `ready-for-agent` | `AFK` | x |\n| `needs-info` | `asked` | x |\n",
+    );
+
+    assert_ok(&fixture.init(&[]));
+
+    let feed = fixture.loopherd_with(&env, &["feed", "widgets", "--dry-run"]);
+    assert_ok(&feed);
+    assert!(
+        text(&feed.stdout).starts_with(
+            "would add widgets-f-01 (template issue)\nwidgets: 0 would retire, 1 would add"
+        ),
+        "{}",
+        text(&feed.stdout)
+    );
+    assert!(
+        fixture
+            .herd_get("template.issue.prompt")
+            .contains("`Status:` line to `asked`")
+    );
+}
+
+#[test]
+fn a_tracker_other_than_github_takes_labels_no_shell_command_runs() {
+    let fixture = Fixture::new(&["acme"]);
+    write_docs(
+        &fixture,
+        Some("# Issue tracker: Jira\n"),
         "| `needs-info` | `Needs {more} info` | x |\n",
     );
 
@@ -1422,7 +1497,7 @@ fn two_roles_mapped_to_one_label_are_refused_before_any_gh_call() {
 fn with_a_placeholder_source_the_next_steps_fill_it_before_feeding() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init(&["--tracker", "local"]);
+    let out = fixture.init(&["--tracker", "other", "--tracker-desc", "Linear"]);
 
     assert_ok(&out);
     let stdout = text(&out.stdout);
@@ -1474,7 +1549,7 @@ impl Fixture {
     fn init_on_terminal(&self, extra: &[&str], input: &str) -> Output {
         let mut args = vec!["--check", "cargo test"];
         args.extend(extra);
-        self.on_terminal(&args, &format!("\n\n\n{input}\n\n\n\n\n\n"))
+        self.on_terminal(&args, &format!("\n\n{input}\n\n\n\n\n\n\n"))
     }
 
     /// `loopherd init <args>` with stdin and stderr on a terminal, typing `input`.
@@ -1749,8 +1824,8 @@ fn on_a_terminal_init_shows_each_inferred_value_takes_edits_and_re_asks_bad_ones
     let typed = [
         "",        // repo
         "gadgets", // herd name
-        "",        // owner/name
         "",        // tracker
+        "",        // owner/name
         "",        // use the suggested checks
         "0", "4", // max
         "n", // lead
@@ -1809,7 +1884,7 @@ fn on_a_terminal_init_shows_each_inferred_value_takes_edits_and_re_asks_bad_ones
 fn on_a_terminal_declining_the_summary_writes_nothing() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\nn\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\n\nn\n");
 
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stdout).contains("nothing written"));
@@ -1947,7 +2022,7 @@ fn on_a_terminal_a_taken_herd_name_or_lead_prompt_is_asked_again() {
 fn on_a_terminal_a_branch_that_cant_go_in_the_prompt_is_asked_again() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\n\nma\x27\x27\x27in\ntrunk\n\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\nma\x27\x27\x27in\ntrunk\n\n");
 
     assert_ok(&out);
     assert!(text(&out.stdout).contains("can't go in the worker prompt"));
@@ -1959,7 +2034,7 @@ fn on_a_terminal_a_branch_that_cant_go_in_the_prompt_is_asked_again() {
 fn on_a_terminal_an_unmatched_account_is_asked_from_the_logged_in_ones() {
     let fixture = Fixture::new(&["bot", "other"]);
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\nnobody\nother\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\nnobody\nother\n");
 
     assert_ok(&out);
     let shown = text(&out.stdout);
@@ -2065,7 +2140,7 @@ fn on_a_terminal_the_summary_says_an_unset_limit_takes_the_default() {
 fn on_a_terminal_a_limit_of_exactly_80_percent_is_taken_and_one_more_asked_again() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n160001\n160000\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n160001\n160000\n");
 
     assert_ok(&out);
     let shown = text(&out.stdout);
@@ -2101,7 +2176,7 @@ fn a_context_limit_of_exactly_80_percent_of_the_window_is_taken() {
 fn on_a_terminal_a_branch_with_whitespace_is_asked_again() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\n\nma in\ntrunk\n\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\nma in\ntrunk\n\n");
 
     assert_ok(&out);
     assert!(
@@ -2139,7 +2214,7 @@ fn on_a_terminal_a_repo_answer_outside_git_is_asked_again_naming_no_flag() {
 fn on_a_terminal_a_max_too_big_for_a_herd_file_says_so() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init_on_terminal(&[], "\n9223372036854775808\n4\n");
+    let out = fixture.init_on_terminal(&[], "\n\n9223372036854775808\n4\n");
 
     assert_ok(&out);
     assert!(
@@ -2771,7 +2846,7 @@ fn on_a_terminal_declining_the_summary_leaves_an_existing_agents_md_as_it_was() 
     let fixture = Fixture::new(&["acme"]);
     fs::write(fixture.repo().join("AGENTS.md"), "# Widgets\n").unwrap();
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\nn\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\n\nn\n");
 
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     assert!(text(&out.stdout).contains("nothing written"));
@@ -3000,6 +3075,849 @@ fn a_relative_config_dir_in_a_cwd_init_cant_write_is_refused_before_any_change()
     );
     assert!(!fixture.gh_calls().contains("label create"));
     assert!(!agents_dir.join("loopherd.md").exists());
+}
+
+/// Issue files in mattpocock-skills' local-markdown layout, as `(path, text)`.
+const LOCAL_ISSUES: &[(&str, &str)] = &[
+    (
+        ".scratch/auth/spec.md",
+        "# Auth\n\nStatus: ready-for-agent\n",
+    ),
+    (
+        ".scratch/auth/issues/01-login-form.md",
+        "# 01: Login form\n\nStatus: ready-for-agent\n",
+    ),
+    (
+        ".scratch/auth/issues/02-logout.md",
+        "# 02: Logout\n\n**Blocked by:** 01\n\n**Status:** ready-for-agent\n",
+    ),
+    (
+        ".scratch/auth/issues/03-session-expiry.md",
+        "# 03: Session expiry\n\nStatus: needs-info\n",
+    ),
+    (
+        ".scratch/auth/issues/04-reset-password.md",
+        "# 04: Reset password\n\nStatus: resolved\n\n## Comments\n\nStatus: ready-for-agent\n",
+    ),
+    (
+        ".scratch/auth/issues/05-remember-me.md",
+        "# 05: Remember me\n\nBlocked by: 04\nStatus: ready-for-agent\n",
+    ),
+    (
+        ".scratch/auth/issues/06-oauth.md",
+        "# 06: OAuth\n\nStatus: ready-for-agent, blocked\n",
+    ),
+    (
+        ".scratch/auth/issues/07-two-factor.md",
+        "# 07: Two factor\n\n**Blocked by:** None (can start immediately)\n\n\
+         **Status:** Ready-for-agent, bug, skill:diagnosing-bugs\n",
+    ),
+    (
+        ".scratch/auth/issues/08-pick-a-provider.md",
+        "# 08: Pick a provider\n\nStatus: ready-for-agent ready-for-human\n",
+    ),
+    (
+        ".scratch/auth/issues/09-audit-log.md",
+        "# 09: Audit log\n\nBlocked by: the login form\nStatus: ready-for-agent\n",
+    ),
+    (
+        ".scratch/billing/issues/01-invoices.md",
+        "# 01: Invoices\n\nStatus: ready-for-agent, documentation\n",
+    ),
+];
+
+impl Fixture {
+    /// Commits `issues` and pushes them as `main` of a bare repo that stands
+    /// in for origin, returning the env that sends origin's URL there.
+    fn push_local_issues(&self, issues: &[(&str, &str)]) -> Vec<(String, String)> {
+        let origin = self.root.path().join("origin.git");
+        git(
+            self.root.path(),
+            &["init", "-q", "--bare", origin.to_str().unwrap()],
+        );
+        for (path, text) in issues {
+            let path = self.repo().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        git(&self.repo(), &["add", ".scratch"]);
+        git(
+            &self.repo(),
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "issues",
+            ],
+        );
+        git(
+            &self.repo(),
+            &["push", "-q", origin.to_str().unwrap(), "HEAD:main"],
+        );
+        vec![
+            ("GIT_CONFIG_COUNT".into(), "1".into()),
+            (
+                "GIT_CONFIG_KEY_0".into(),
+                format!("url.{}.insteadOf", origin.display()),
+            ),
+            (
+                "GIT_CONFIG_VALUE_0".into(),
+                "git@github.com:acme/widgets.git".into(),
+            ),
+        ]
+    }
+
+    fn loopherd_with(&self, env: &[(String, String)], args: &[&str]) -> Output {
+        self.run(
+            Command::new(env!("CARGO_BIN_EXE_loopherd"))
+                .args(args)
+                .envs(env.iter().map(|(k, v)| (k, v))),
+        )
+    }
+
+    fn herd_get(&self, key: &str) -> String {
+        let out = self.loopherd(&["herd", "get", "widgets", key]);
+        assert_ok(&out);
+        toml::from_str::<toml::Table>(&format!("v = {}", text(&out.stdout))).unwrap()["v"]
+            .as_str()
+            .unwrap()
+            .into()
+    }
+}
+
+#[test]
+fn a_local_tracker_herd_feeds_the_ready_unblocked_issues_pushed_to_the_default_branch() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.push_local_issues(LOCAL_ISSUES);
+    let draft = fixture.repo().join(".scratch/billing/issues/02-draft.md");
+    fs::write(draft, "# 02: Draft\n\nStatus: ready-for-agent\n").unwrap();
+
+    assert_ok(&fixture.init(&["--tracker", "local", "--max", "4"]));
+
+    assert_ok(&fixture.loopherd(&["herds"]));
+    let feed = fixture.loopherd_with(&env, &["feed", "widgets", "--dry-run"]);
+    assert_ok(&feed);
+    assert_eq!(
+        text(&feed.stdout),
+        "source: skipped .scratch/auth/issues/09-audit-log.md: its Blocked by item \
+         \"the login form\" names no issue number\n\
+         would add widgets-auth-01 (template issue)\n\
+         would add widgets-auth-05 (template issue)\n\
+         would add widgets-auth-07 (template issue)\n\
+         would add widgets-billing-01 (template issue)\n\
+         widgets: 0 would retire, 4 would add, 0 skipped, 0 errors\n"
+    );
+}
+
+#[test]
+fn the_local_queue_names_each_issues_id_type_skill_slug_and_path() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.push_local_issues(LOCAL_ISSUES);
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+
+    let tasks = fixture.run(
+        Command::new("sh")
+            .args(["-c", &fixture.herd_get("queue.source")])
+            .envs(env.iter().map(|(k, v)| (k, v))),
+    );
+
+    assert_ok(&tasks);
+    assert_eq!(
+        text(&tasks.stdout),
+        "auth-01 feat tdd login-form .scratch/auth/issues/01-login-form.md\n\
+         auth-05 feat tdd remember-me .scratch/auth/issues/05-remember-me.md\n\
+         auth-07 fix diagnosing-bugs two-factor .scratch/auth/issues/07-two-factor.md\n\
+         billing-01 docs tdd invoices .scratch/billing/issues/01-invoices.md\n"
+    );
+    assert_eq!(fixture.herd_get("template.issue.name"), "{herd}-{id}");
+    assert_eq!(
+        fixture.herd_get("template.issue.branch"),
+        "{type}/{id}-{slug}"
+    );
+}
+
+#[test]
+fn a_long_feature_name_is_cut_and_hashed_so_the_member_name_fits() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.push_local_issues(&[(
+        ".scratch/a-very-long-feature-name-indeed/issues/03-first.md",
+        "Status: ready-for-agent\n",
+    )]);
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+
+    let feed = fixture.loopherd_with(&env, &["feed", "widgets", "--dry-run"]);
+
+    assert_ok(&feed);
+    let name = "widgets-a-very-long-featu_ha2-03";
+    assert_eq!(name.len(), 32);
+    assert!(
+        text(&feed.stdout).starts_with(&format!("would add {name} (template issue)\n")),
+        "{}",
+        text(&feed.stdout)
+    );
+}
+
+#[test]
+fn two_cut_features_whose_names_hash_alike_still_get_different_ids() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let tasks = fixture.local_tasks(&[
+        (
+            ".scratch/a-very-long-feature-name-000/issues/01-first.md",
+            "Status: ready-for-agent\n",
+        ),
+        (
+            ".scratch/a-very-long-feature-name-aqo/issues/01-second.md",
+            "Status: ready-for-agent\n",
+        ),
+    ]);
+
+    let ids: Vec<&str> = tasks
+        .lines()
+        .map(|l| l.split(' ').next().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 2, "{tasks}");
+    assert_eq!(ids[0], "a-very-long-featu_eno-01", "{tasks}");
+    assert!(
+        ids[1].starts_with("a-very-long-featu_") && ids[1] != ids[0],
+        "{tasks}"
+    );
+}
+
+#[test]
+fn the_local_done_check_passes_once_the_default_branch_marks_the_issue_resolved() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.push_local_issues(LOCAL_ISSUES);
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+    let done = fixture.herd_get("template.issue.done");
+
+    let check = |path: &str| {
+        fixture
+            .run(
+                Command::new("sh")
+                    .args([
+                        "-c",
+                        &done
+                            .replace("{path}", path)
+                            .replace("{{", "{")
+                            .replace("}}", "}"),
+                    ])
+                    .envs(env.iter().map(|(k, v)| (k, v))),
+            )
+            .status
+            .code()
+    };
+
+    assert_eq!(check(".scratch/auth/issues/04-reset-password.md"), Some(0));
+    assert_eq!(check(".scratch/auth/issues/01-login-form.md"), Some(1));
+    assert_eq!(check(".scratch/auth/issues/03-session-expiry.md"), Some(1));
+}
+
+#[test]
+fn a_local_tracker_with_a_github_origin_keeps_the_pr_merged_check_and_creates_no_labels() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init(&["--tracker", "local"]);
+
+    assert_ok(&out);
+    assert_eq!(
+        fixture.herd_get("template.issue.merged"),
+        "GH_TOKEN=$(gh auth token --user acme) gh pr list --repo acme/widgets --head {branch} \
+         --state merged --json number --jq 'length > 0' | grep -qx true"
+    );
+    assert!(
+        !fixture.gh_calls().contains("label"),
+        "{}",
+        fixture.gh_calls()
+    );
+    assert!(
+        !text(&out.stdout).contains("placeholder") && !text(&out.stdout).contains("Fill [queue]"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn the_local_worker_prompt_claims_and_resolves_by_editing_the_issue_file() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+
+    let prompt = fixture.herd_get("template.issue.prompt");
+
+    for expected in [
+        "{path}",
+        "`Status:` line to `claimed`",
+        "claimed by {name}",
+        "## Comments",
+        "`Status:` line to `resolved`",
+        "`Status:` line to `needs-info`",
+        "the {skill} skill",
+        "cargo test",
+        "GH_TOKEN=$(gh auth token --user acme) gh pr create --repo acme/widgets --base main",
+        "loopherd report --kind done",
+    ] {
+        assert!(
+            prompt.contains(expected),
+            "missing {expected:?} in\n{prompt}"
+        );
+    }
+    for unexpected in ["gh issue", "Closes #"] {
+        assert!(!prompt.contains(unexpected), "{unexpected:?} in\n{prompt}");
+    }
+    let doc = repo_file(&fixture, "docs/agents/loopherd.md");
+    assert!(
+        doc.contains("`Status:`") && !doc.contains("Closes #"),
+        "{doc}"
+    );
+    let lead = fs::read_to_string(fixture.herds().join("widgets-lead.md")).unwrap();
+    assert!(
+        lead.contains(".scratch/") && !lead.contains("Closes #"),
+        "{lead}"
+    );
+}
+
+#[test]
+fn an_existing_local_markdown_tracker_doc_gets_the_local_snippets() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.push_local_issues(LOCAL_ISSUES);
+    fs::create_dir_all(fixture.repo().join("docs/agents")).unwrap();
+    fs::write(
+        fixture.repo().join("docs/agents/issue-tracker.md"),
+        "# Issue Tracker: local markdown\n\nOur words.\n",
+    )
+    .unwrap();
+
+    assert_ok(&fixture.init(&["--max", "4"]));
+
+    let feed = fixture.loopherd_with(&env, &["feed", "widgets", "--dry-run"]);
+    assert_ok(&feed);
+    assert!(
+        text(&feed.stdout).contains("4 would add"),
+        "{}",
+        text(&feed.stdout)
+    );
+}
+
+impl Fixture {
+    /// Swaps the fake gh for one that fails on any call, logging it.
+    fn fail_gh(&self) {
+        fs::write(
+            self.gh_dir().join("gh"),
+            "#!/bin/sh\necho \"$*\" >> \"$(dirname \"$0\")/calls\"\nexit 1\n",
+        )
+        .unwrap();
+    }
+
+    /// Pushes `issues` to a bare repo and makes it origin, with origin/HEAD at main.
+    fn push_local_issues_to_plain_origin(&self, issues: &[(&str, &str)]) {
+        self.push_local_issues(issues);
+        let origin = self.root.path().join("origin.git");
+        git(
+            &self.repo(),
+            &["remote", "set-url", "origin", origin.to_str().unwrap()],
+        );
+        git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        git(&self.repo(), &["fetch", "-q", "origin"]);
+        git(&self.repo(), &["remote", "set-head", "origin", "main"]);
+    }
+}
+
+#[test]
+fn a_local_tracker_without_github_makes_no_gh_call_and_feeds_from_origin() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
+    fixture.fail_gh();
+
+    let out = fixture.init(&["--tracker", "local", "--max", "4"]);
+
+    assert_ok(&out);
+    assert_eq!(fixture.gh_calls(), "");
+    assert!(
+        text(&out.stderr).contains("warning: without GitHub the herd has no merged check"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(
+        !herd_toml(&fixture)["template"]["issue"]
+            .as_table()
+            .unwrap()
+            .contains_key("merged")
+    );
+    let feed = fixture.loopherd(&["feed", "widgets", "--dry-run"]);
+    assert_ok(&feed);
+    assert!(
+        text(&feed.stdout).contains("4 would add"),
+        "{}",
+        text(&feed.stdout)
+    );
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn a_local_tracker_without_github_hands_in_a_pushed_branch_and_never_mentions_gh() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
+    fixture.fail_gh();
+
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+
+    let prompt = fixture.herd_get("template.issue.prompt");
+    assert!(prompt.contains("`git push -u origin HEAD`"), "{prompt}");
+    assert!(
+        prompt.contains("the human merges the branch into main"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("\"<branch and one-line summary>\""),
+        "{prompt}"
+    );
+    let lead = fs::read_to_string(fixture.herds().join("widgets-lead.md")).unwrap();
+    let doc = repo_file(&fixture, "docs/agents/loopherd.md");
+    for (what, text) in [("prompt", &prompt), ("lead", &lead), ("doc", &doc)] {
+        for unexpected in [" gh ", "`gh ", "GH_TOKEN", "acme", "PR"] {
+            assert!(
+                !text.contains(unexpected),
+                "{unexpected:?} in the {what}:\n{text}"
+            );
+        }
+    }
+    assert!(doc.contains("open no pull request"), "{doc}");
+    assert!(!lead.contains("On `<member> merged`"), "{lead}");
+    assert!(
+        lead.contains("No `<member> merged` line comes, as the herd\n   has no merged check"),
+        "{lead}"
+    );
+}
+
+#[test]
+fn a_local_tracker_without_github_takes_origins_default_branch_not_the_checked_out_one() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.push_local_issues(LOCAL_ISSUES);
+    let origin = fixture.root.path().join("origin.git");
+    git(
+        &fixture.repo(),
+        &["remote", "set-url", "origin", origin.to_str().unwrap()],
+    );
+    git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    git(&fixture.repo(), &["checkout", "-q", "-b", "feat/x"]);
+    git(&fixture.repo(), &["push", "-q", "origin", "HEAD"]);
+    git(&fixture.repo(), &["fetch", "-q", "origin"]);
+    fixture.fail_gh();
+
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+
+    let source = fixture.herd_get("queue.source");
+    assert!(source.contains("git fetch -q origin main"), "{source}");
+    assert!(!source.contains("feat/x"), "{source}");
+}
+
+#[test]
+fn a_local_tracker_without_an_origin_remote_is_refused_before_any_change() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.push_local_issues(LOCAL_ISSUES);
+    git(&fixture.repo(), &["remote", "remove", "origin"]);
+    fixture.fail_gh();
+
+    assert_refused(
+        &fixture,
+        &fixture.init(&["--tracker", "local"]),
+        &format!(
+            "loopherd init: {} has no origin remote; a herd's members branch from origin \
+             and push to it, so add one\n",
+            fixture.repo().display()
+        ),
+    );
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn gh_account_without_a_github_repo_is_refused_before_any_change() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
+    fixture.fail_gh();
+
+    assert_refused(
+        &fixture,
+        &fixture.init(&["--tracker", "local", "--gh-account", "acme"]),
+        "loopherd init: --gh-account needs a GitHub repo; pass --repo <owner>/<name> or drop it\n",
+    );
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn a_local_tracker_without_github_still_takes_repo() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
+
+    assert_ok(&fixture.init(&["--tracker", "local", "--repo", "acme/widgets"]));
+
+    assert!(
+        fixture
+            .herd_get("template.issue.prompt")
+            .contains("gh pr create --repo acme/widgets --base main"),
+    );
+}
+
+#[test]
+fn on_a_terminal_a_local_tracker_without_github_takes_enter_as_none() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
+    fixture.fail_gh();
+
+    let out = fixture.init_on_terminal(&[], "local\n");
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains("GitHub repo (owner/name); Enter for none: "),
+        "{shown}"
+    );
+    assert!(shown.contains("Default branch (main): "), "{shown}");
+    assert!(shown.contains("\n  branch  main\r\n"), "{shown}");
+    assert!(
+        !shown.contains("gh account") && !shown.contains("GitHub  "),
+        "{shown}"
+    );
+    let note = "Without GitHub it has no merged check, so after_merge never runs for its \
+                members.\r\nWrite this herd?";
+    assert!(shown.contains(note), "{shown}");
+    assert!(!shown.contains("warning: without GitHub"), "{shown}");
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn a_default_branch_the_herds_shell_commands_cant_hold_is_refused() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.gh_json("repo.json", r#"{"defaultBranchRef": {"name": "a{b}"}}"#);
+
+    let out = fixture.init(&[]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("init takes a branch of letters, digits and - _ . / only"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!fixture.herds().join("widgets.toml").exists());
+}
+
+impl Fixture {
+    /// The tasks the herd's queue source prints for `issues` pushed to origin.
+    fn local_tasks(&self, issues: &[(&str, &str)]) -> String {
+        let tasks = self.local_source(issues);
+        assert_ok(&tasks);
+        text(&tasks.stdout)
+    }
+
+    /// Runs the herd's queue source over `issues` pushed to origin.
+    fn local_source(&self, issues: &[(&str, &str)]) -> Output {
+        let env = self.push_local_issues(issues);
+        assert_ok(&self.init(&["--tracker", "local"]));
+        self.run(
+            Command::new("sh")
+                .args(["-c", &self.herd_get("queue.source")])
+                .envs(env.iter().map(|(k, v)| (k, v))),
+        )
+    }
+}
+
+#[test]
+fn an_issue_without_a_final_newline_or_with_crlf_lines_still_reads() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let tasks = fixture.local_tasks(&[
+        (".scratch/f/issues/01-a.md", "Status: ready-for-agent"),
+        (".scratch/f/issues/02-b.md", "Status: ready-for-agent\n"),
+        (
+            ".scratch/f/issues/03-c.md",
+            "# 03\r\n\r\nStatus: ready-for-agent\r\n",
+        ),
+    ]);
+
+    assert_eq!(
+        tasks,
+        "f-01 feat tdd a .scratch/f/issues/01-a.md\n\
+         f-02 feat tdd b .scratch/f/issues/02-b.md\n\
+         f-03 feat tdd c .scratch/f/issues/03-c.md\n"
+    );
+}
+
+#[test]
+fn the_local_done_check_says_not_done_for_a_missing_file_and_reads_crlf() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.push_local_issues(&[(".scratch/f/issues/01-a.md", "Status: resolved\r\n")]);
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+    let done = fixture.herd_get("template.issue.done");
+    let check = |path: &str| {
+        let script = done
+            .replace("{path}", path)
+            .replace("{{", "{")
+            .replace("}}", "}");
+        fixture
+            .run(
+                Command::new("sh")
+                    .args(["-c", &script])
+                    .envs(env.iter().map(|(k, v)| (k, v))),
+            )
+            .status
+            .code()
+    };
+
+    assert_eq!(check(".scratch/f/issues/01-a.md"), Some(0));
+    assert_eq!(check(".scratch/f/issues/09-gone.md"), Some(1));
+}
+
+#[test]
+fn blocked_by_blocks_on_every_number_it_names_and_on_a_list_below_it_unless_none() {
+    let fixture = Fixture::new(&["acme"]);
+    let blocked_by = |n: &str, line: &str| {
+        (
+            format!(".scratch/f/issues/{n}-x.md"),
+            format!("{line}\nStatus: ready-for-agent\n"),
+        )
+    };
+    let issues = [
+        (
+            ".scratch/f/issues/01-done.md".to_string(),
+            "Status: resolved\n".to_string(),
+        ),
+        (
+            ".scratch/f/issues/02-open.md".to_string(),
+            "Status: needs-info\n".to_string(),
+        ),
+        blocked_by("03", "Blocked by: 01 and 02"),
+        blocked_by("04", "Blocked by: 01 02"),
+        blocked_by("05", "Blocked by: #01 / #02"),
+        blocked_by("06", "**Blocked by:**\n\n- 01\n- 02\n"),
+        blocked_by("07", "Blocked by: 01: Login form; #01"),
+        blocked_by("08", "**Blocked by:**\n- 01\n"),
+        blocked_by("09", "Blocked by:\n- None\n"),
+    ];
+    let issues: Vec<(&str, &str)> = issues
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+
+    let tasks = fixture.local_tasks(&issues);
+
+    assert_eq!(
+        tasks,
+        "f-07 feat tdd x .scratch/f/issues/07-x.md\n\
+         f-08 feat tdd x .scratch/f/issues/08-x.md\n\
+         f-09 feat tdd x .scratch/f/issues/09-x.md\n"
+    );
+}
+
+#[test]
+fn only_a_word_starting_with_a_number_names_a_blocker_and_a_missing_one_is_noted() {
+    let fixture = Fixture::new(&["acme"]);
+    let blocked_by = |n: &str, line: &str| {
+        (
+            format!(".scratch/f/issues/{n}-x.md"),
+            format!("{line}\nStatus: ready-for-agent\n"),
+        )
+    };
+    let issues = [
+        (
+            ".scratch/f/issues/01-step-2-of-3.md".to_string(),
+            "Status: resolved\n".to_string(),
+        ),
+        blocked_by("04", "**Blocked by:** 01 (Node 20 upgrade)"),
+        blocked_by("05", "Blocked by: .scratch/f/issues/01-step-2-of-3.md"),
+        blocked_by("06", "Blocked by: 01: Upgrade to Node 20"),
+        blocked_by("07", "Blocked by: 01, 20"),
+    ];
+    let issues: Vec<(&str, &str)> = issues
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+
+    let out = fixture.local_source(&issues);
+
+    assert_ok(&out);
+    assert_eq!(
+        text(&out.stdout),
+        "f-04 feat tdd x .scratch/f/issues/04-x.md\n\
+         f-05 feat tdd x .scratch/f/issues/05-x.md\n\
+         f-06 feat tdd x .scratch/f/issues/06-x.md\n"
+    );
+    assert_eq!(
+        text(&out.stderr),
+        "skipped .scratch/f/issues/07-x.md: its Blocked by names 20, which is no issue \
+         of its feature\n"
+    );
+}
+
+#[test]
+fn a_blocker_names_its_first_numbers_and_a_path_names_its_own_feature() {
+    let fixture = Fixture::new(&["acme"]);
+    let blocked_by = |n: &str, line: &str| {
+        (
+            format!(".scratch/f/issues/{n}-x.md"),
+            format!("{line}\nStatus: ready-for-agent\n"),
+        )
+    };
+    let issues = [
+        (
+            ".scratch/f/issues/01-a.md".to_string(),
+            "Status: resolved\n".to_string(),
+        ),
+        (
+            ".scratch/f/issues/02-b.md".to_string(),
+            "Status: needs-info\n".to_string(),
+        ),
+        (
+            ".scratch/g/issues/02-c.md".to_string(),
+            "Status: resolved\n".to_string(),
+        ),
+        blocked_by("10", "Blocked by: 01 - Node 20 upgrade"),
+        blocked_by("11", "Blocked by: #01 Node 20 upgrade"),
+        blocked_by("12", "Blocked by: see 01"),
+        blocked_by("13", "Blocked by: .scratch/g/issues/02-c.md"),
+        blocked_by("14", "Blocked by: Node upgrade (#01)"),
+        blocked_by("15", "Blocked by: .scratch/h/issues/01-d.md"),
+    ];
+    let issues: Vec<(&str, &str)> = issues
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+
+    let out = fixture.local_source(&issues);
+
+    assert_ok(&out);
+    assert_eq!(
+        text(&out.stdout),
+        "f-10 feat tdd x .scratch/f/issues/10-x.md\n\
+         f-11 feat tdd x .scratch/f/issues/11-x.md\n\
+         f-12 feat tdd x .scratch/f/issues/12-x.md\n\
+         f-13 feat tdd x .scratch/f/issues/13-x.md\n"
+    );
+    assert_eq!(
+        text(&out.stderr),
+        "skipped .scratch/f/issues/14-x.md: its Blocked by item \"node upgrade (#01)\" \
+         names no issue number\n\
+         skipped .scratch/f/issues/15-x.md: its Blocked by names \
+         .scratch/h/issues/01-d.md, which is no issue\n"
+    );
+}
+
+#[test]
+fn an_issue_file_whose_path_the_queue_cant_read_is_noted_on_stderr() {
+    let fixture = Fixture::new(&["acme"]);
+    let ready = "Status: ready-for-agent\n";
+
+    let out = fixture.local_source(&[
+        (".scratch/auth/issues/01-login.md", ready),
+        (".scratch/My Feature/issues/01-x.md", ready),
+        (".scratch/auth/issues/02_logout.md", ready),
+        (".scratch/auth/spec.md", ready),
+    ]);
+
+    assert_ok(&out);
+    assert_eq!(
+        text(&out.stdout),
+        "auth-01 feat tdd login .scratch/auth/issues/01-login.md\n"
+    );
+    let rule = "an issue path is .scratch/<feature>/issues/<NN>-<slug>.md of letters, \
+                digits and . _ -";
+    assert_eq!(
+        text(&out.stderr),
+        format!(
+            "skipped .scratch/My Feature/issues/01-x.md: {rule}\n\
+             skipped .scratch/auth/issues/02_logout.md: {rule}\n"
+        )
+    );
+}
+
+#[test]
+fn the_local_source_and_done_retry_a_fetch_that_lost_a_race() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.push_local_issues(&[(".scratch/f/issues/01-a.md", "Status: resolved\n")]);
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+    let real_git = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let lost = fixture.root.path().join("lost");
+    let script = fixture.gh_dir().join("git");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = fetch ] && [ ! -e {lost} ]; then\n  : > {lost}\n  \
+             echo \"error: cannot lock ref 'refs/remotes/origin/main'\" >&2\n  exit 1\nfi\n\
+             exec {real_git} \"$@\"\n",
+            lost = lost.display(),
+            real_git = real_git.trim(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let run = |snippet: String| {
+        let _ = fs::remove_file(&lost);
+        fixture.run(
+            Command::new("sh")
+                .args(["-c", &snippet])
+                .envs(env.iter().map(|(k, v)| (k, v))),
+        )
+    };
+
+    let source = run(fixture.herd_get("queue.source"));
+    let done = run(fixture
+        .herd_get("template.issue.done")
+        .replace("{path}", ".scratch/f/issues/01-a.md"));
+
+    assert_ok(&source);
+    assert_eq!(text(&source.stderr), "");
+    assert_eq!(done.status.code(), Some(0), "{}", text(&done.stderr));
+    assert_eq!(text(&done.stderr), "");
+    assert!(lost.exists());
+}
+
+#[test]
+fn features_that_cut_or_reshape_to_the_same_id_get_distinct_ids() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let tasks = fixture.local_tasks(&[
+        (
+            ".scratch/Auth_v2/issues/01-a.md",
+            "Status: ready-for-agent\n",
+        ),
+        (
+            ".scratch/auth-v2/issues/01-b.md",
+            "Status: ready-for-agent\n",
+        ),
+        (
+            ".scratch/user-settings-page-redesign/issues/01-c.md",
+            "Status: ready-for-agent\n",
+        ),
+        (
+            ".scratch/user-settings-page-reorder/issues/01-d.md",
+            "Status: ready-for-agent\n",
+        ),
+    ]);
+
+    let ids: Vec<&str> = tasks
+        .lines()
+        .map(|l| l.split(' ').next().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 4, "{tasks}");
+    assert!(ids.contains(&"auth-v2-01"), "{tasks}");
+    let mut unique = ids.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), 4, "{tasks}");
+    assert!(
+        ids.iter().all(|id| "widgets-".len() + id.len() <= 32),
+        "{tasks}"
+    );
 }
 
 /// The herd's files and the repo's, so `--diff` can be shown to write nothing.
@@ -3346,4 +4264,83 @@ fn diff_keeps_the_recorded_checks_around_a_reworded_one() {
         ],
         "{stdout}"
     );
+}
+
+#[test]
+fn diff_right_after_a_local_init_without_github_prints_nothing_and_makes_no_gh_call() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
+    fixture.fail_gh();
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+    let before = everything(&fixture);
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(text(&out.stderr), "");
+    assert_eq!(everything(&fixture), before);
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn diff_reads_back_the_repo_passed_to_init_over_an_origin_that_isnt_github() {
+    for tracker in ["local", "github"] {
+        let fixture = Fixture::new(&["acme"]);
+        fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
+        let init = fixture.init(&["--tracker", tracker, "--repo", "acme/widgets"]);
+        assert_ok(&init);
+        let before = everything(&fixture);
+
+        let out = fixture.init(&["--diff"]);
+
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{tracker}: {}",
+            text(&out.stderr)
+        );
+        assert_eq!(text(&out.stdout), "", "{tracker}");
+        assert_eq!(everything(&fixture), before, "{tracker}");
+    }
+}
+
+#[test]
+fn diff_shows_drift_in_each_file_a_local_init_wrote() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
+    fixture.fail_gh();
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+    let files = [
+        fixture.herds().join("widgets.toml"),
+        fixture.herds().join("widgets-lead.md"),
+        fixture.repo().join("docs/agents/issue-tracker.md"),
+        fixture.repo().join("docs/agents/loopherd.md"),
+        fixture.repo().join("docs/agents/triage-labels.md"),
+    ];
+    for path in &files {
+        let mine = format!("{}# Ours.\n", fs::read_to_string(path).unwrap());
+        fs::write(path, mine).unwrap();
+    }
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    for path in &files {
+        let shown = path.display();
+        let header = format!("--- {shown}\n+++ {shown} (init now)\n");
+        let at = stdout
+            .find(&header)
+            .unwrap_or_else(|| panic!("{shown}: {stdout}"));
+        let rest = &stdout[at + header.len()..];
+        let end = rest.find("\n--- ").map_or(rest.len(), |end| end + 1);
+        assert!(rest[..end].ends_with("-# Ours.\n"), "{shown}: {stdout}");
+    }
+    assert_eq!(
+        stdout.matches("\n--- ").count() + 1,
+        files.len(),
+        "{stdout}"
+    );
+    assert_eq!(fixture.gh_calls(), "");
 }
