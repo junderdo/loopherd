@@ -2,8 +2,8 @@
 //! from a lead's pane that needs a switch its herd file leaves off (D17), or
 //! a `loopherd restart --force` (D20), a `loopherd pause` or `resume`
 //! (D23), a `loopherd herd set` or `unset` (D29), a write of the lead
-//! defaults (D31), cargo run through an alias it can't read, or a `case`
-//! inside `$(…)`, which no switch allows.
+//! defaults (D31), cargo run through an alias it can't read, or a `$(…)`
+//! whose end it can't find, which no switch allows.
 //! A guardrail on the command text, not a sandbox.
 
 use std::path::Path;
@@ -38,9 +38,10 @@ pub enum Switch {
     /// `cargo` run through a `CARGO_ALIAS_*` whose value the hook can't read.
     /// Not a switch: always the human's.
     OpaqueCargoAlias,
-    /// A `case` inside `$(…)`, whose pattern's `)` the hook can't tell from
-    /// the one closing the substitution. Not a switch: always the human's.
-    UnreadableCase,
+    /// A `$(…)` whose end the hook can't find: one holding a `case`, whose
+    /// pattern's `)` looks like its end, or a heredoc without its delimiter
+    /// line. Not a switch: always the human's.
+    UnreadableSubstitution,
 }
 
 impl Switch {
@@ -54,7 +55,7 @@ impl Switch {
             Switch::HerdEdit => "herd set",
             Switch::LeadDefaults => "lead-defaults",
             Switch::OpaqueCargoAlias => "cargo alias",
-            Switch::UnreadableCase => "case in a substitution",
+            Switch::UnreadableSubstitution => "unreadable substitution",
         }
     }
 
@@ -68,7 +69,7 @@ impl Switch {
             Switch::HerdEdit => "the human edits herd files",
             Switch::LeadDefaults => "the human sets lead defaults",
             Switch::OpaqueCargoAlias => "the human runs cargo through such aliases",
-            Switch::UnreadableCase => "the human runs commands the hook can't read",
+            Switch::UnreadableSubstitution => "the human runs commands the hook can't read",
         }
     }
 
@@ -82,7 +83,7 @@ impl Switch {
             | Switch::HerdEdit
             | Switch::LeadDefaults
             | Switch::OpaqueCargoAlias
-            | Switch::UnreadableCase => false,
+            | Switch::UnreadableSubstitution => false,
         }
     }
 }
@@ -126,7 +127,7 @@ fn decide(
                 Switch::HerdEdit,
                 Switch::LeadDefaults,
                 Switch::OpaqueCargoAlias,
-                Switch::UnreadableCase,
+                Switch::UnreadableSubstitution,
             ]
         });
     if needed.is_empty() {
@@ -164,9 +165,9 @@ fn decide(
             needed.humans_part()
         )));
     }
-    if needed == Switch::UnreadableCase {
+    if needed == Switch::UnreadableSubstitution {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run a `case` inside `$(…)`, which the hook can't read: {}; rewrite it without, or ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run a `$(…)` whose end the hook can't find, as with a `case` or a heredoc without its own delimiter line: {}; rewrite it, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -269,7 +270,7 @@ impl Aliases {
 /// counts for the rest of the script, exported or not.
 fn needs_with(script: &str, aliases: &mut Aliases) -> Vec<Switch> {
     let Some(commands) = commands(script) else {
-        return vec![Switch::UnreadableCase];
+        return vec![Switch::UnreadableSubstitution];
     };
     commands
         .iter()
@@ -419,7 +420,7 @@ fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<Stri
             '\n' => {
                 inner.push(c);
                 for (delimiter, tabs) in std::mem::take(&mut heredocs) {
-                    heredoc_body(chars, &delimiter, tabs, &mut inner);
+                    heredoc_body(chars, &delimiter, tabs, &mut inner)?;
                 }
                 continue;
             }
@@ -513,12 +514,14 @@ fn quoted(
 }
 
 /// Copies a heredoc's body onto `inner` through its `delimiter` line.
+/// `None` when the script ends first, or a line starts with the delimiter
+/// but has more, as `EOF)` does, which bash may take as the end.
 fn heredoc_body(
     chars: &mut std::iter::Peekable<std::str::Chars>,
     delimiter: &str,
     tabs: bool,
     inner: &mut String,
-) {
+) -> Option<()> {
     while chars.peek().is_some() {
         let mut line = String::new();
         while let Some(c) = chars.next_if(|&c| c != '\n') {
@@ -532,9 +535,13 @@ fn heredoc_body(
             &line
         };
         if line == delimiter {
-            return;
+            return Some(());
+        }
+        if line.starts_with(delimiter) {
+            return None;
         }
     }
+    None
 }
 
 /// Words that run the command after them, with their options that take a value.
@@ -1208,6 +1215,9 @@ mod tests {
         "gh pr create --title t --body \"$(cat <<'EOF'\n- [ ] cargo test (case 1); case 2 next\nEOF\n)\"",
         "gh pr create --title t --body \"$(cat <<-EOF\n	it's a case in point\n	EOF\n)\"",
         "export -n RUST_LOG; cargo nextest run",
+        "x=$(cat <<'EOF'\nBody\nEOF\n); echo \"$x\"",
+        "gh pr create --body \"$(cat <<'EOF'\nBody\nEOF\n)\"",
+        "x=$(cat <<'EOF'\nBody\n EOF\nEOF\n); echo \"$x\"",
         "echo \"$((1 << 2))\"",
     ];
 
@@ -1395,7 +1405,7 @@ mod tests {
             | Switch::HerdEdit
             | Switch::LeadDefaults
             | Switch::OpaqueCargoAlias
-            | Switch::UnreadableCase => {}
+            | Switch::UnreadableSubstitution => {}
         }
         s
     }
@@ -1440,7 +1450,7 @@ mod tests {
                 | Switch::HerdEdit
                 | Switch::LeadDefaults
                 | Switch::OpaqueCargoAlias
-                | Switch::UnreadableCase => {}
+                | Switch::UnreadableSubstitution => {}
             }
             for command in commands {
                 assert_eq!(run(&leads, others_off, command), None, "{command}");
@@ -1941,7 +1951,7 @@ mod tests {
     }
 
     #[test]
-    fn a_case_inside_a_substitution_is_denied_whatever_its_switches() {
+    fn a_substitution_the_hook_cant_end_is_denied_whatever_its_switches() {
         let leads = ledger(vec![lead()]);
         for command in [
             "echo $(case x in x) gh pr merge 12;; esac)",
@@ -1961,11 +1971,24 @@ mod tests {
             "echo $(! case x in x) gh pr merge 12;; esac)",
             "echo $(if case x in x) gh pr merge 12;; esac; then :; fi)",
             "echo $(if true; then case x in x) gh pr merge 12;; esac; fi)",
+            "gh pr create --body \"$(cat <<'EOF'\nBody\nEOF)\" && gh pr merge 1",
+            "gh pr create --body \"$(cat <<'EOF'\nBody\nEOF)\"\ngh pr merge 1",
+            "gh pr create --body \"$(cat <<EOF\nBody\nEOF)\" && gh pr merge 1",
+            "git commit -m \"$(cat <<'EOF'\nFix it\nEOF)\" && git push --force",
+            "git commit -m \"$(cat <<'EOF'\nFix it\nEOF)\" && git rebase origin/main",
+            "gh pr create --body \"$(cat <<'EOF'\nBody\nEOF)\" && loopherd herd set h lead.merge true",
+            "gh pr create --body \"$(cat <<'EOF'\nBody\nEOF)\" && scripts/install",
+            "gh pr create --body \"$(cat <<'EOF'\nBody\nEOF )\" && gh pr merge 1",
+            "x=$(cat <<'EOF'\nBody\nEOF)x\ngh pr merge 1",
+            "x=$(cat <<'EOF'\nBody\nEOF); gh pr merge 1",
+            "x=$(cat <<'EOF'\nBody\nEOF)\ngh pr merge 1",
+            "x=$(cat <<-'EOF'\n	Body\n	EOF); gh pr merge 1",
+            "x=$(cat <<'EOF'\nBody",
         ] {
             let message =
                 run(&leads, all_on(), command).unwrap_or_else(|| panic!("{command} was allowed"));
             assert!(
-                message.contains("lead-h may not run a `case` inside `$(…)`"),
+                message.contains("lead-h may not run a `$(…)` whose end the hook can't find"),
                 "{message}"
             );
         }
