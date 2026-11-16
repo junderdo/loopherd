@@ -367,6 +367,20 @@ struct InitArgs {
     /// The GitHub repo, for an origin init can't read as one (an ssh host alias).
     #[arg(long, value_name = "OWNER/NAME")]
     repo: Option<String>,
+    /// Where the repo tracks issues, when it has no docs/agents/issue-tracker.md;
+    /// asked on a terminal, else github.
+    #[arg(long, value_enum)]
+    tracker: Option<TrackerArg>,
+    /// How an `other` tracker works, in prose, for the tracker doc.
+    #[arg(long, value_name = "TEXT")]
+    tracker_desc: Option<String>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum TrackerArg {
+    Github,
+    Local,
+    Other,
 }
 
 #[derive(Args)]
@@ -1110,8 +1124,15 @@ fn run_init(args: InitArgs) -> Result<i32> {
         checks: &args.checks,
         gh_account: args.gh_account.as_deref(),
         github: args.repo.as_deref(),
+        tracker: match (args.tracker, args.tracker_desc) {
+            (Some(TrackerArg::Other), desc) => Some(init::Tracker::Other(desc)),
+            (_, Some(_)) => bail!("--tracker-desc goes with --tracker other"),
+            (Some(TrackerArg::Github), None) => Some(init::Tracker::GitHub),
+            (Some(TrackerArg::Local), None) => Some(init::Tracker::Local),
+            (None, None) => None,
+        },
     };
-    for line in init::init(&paths, &req)? {
+    for line in init::init(&paths, req)? {
         println!("{line}");
     }
     Ok(0)
