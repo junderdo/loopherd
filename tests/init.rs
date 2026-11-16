@@ -1054,7 +1054,8 @@ fn without_a_tracker_doc_init_writes_githubs_and_the_default_labels_uncommitted(
         .unwrap();
     assert_eq!(
         text(&status.stdout),
-        "?? docs/agents/issue-tracker.md\n?? docs/agents/triage-labels.md\n"
+        "?? AGENTS.md\n?? docs/agents/issue-tracker.md\n?? docs/agents/loopherd.md\n\
+         ?? docs/agents/triage-labels.md\n"
     );
     assert!(
         text(&out.stdout).contains(
@@ -1432,7 +1433,7 @@ fn with_a_placeholder_source_the_next_steps_fill_it_before_feeding() {
         )),
         "{next}"
     );
-    assert!(next.contains("  5. loopherd lead widgets"), "{next}");
+    assert!(next.contains("  6. loopherd lead widgets"), "{next}");
 }
 
 #[test]
@@ -1801,6 +1802,7 @@ fn on_a_terminal_declining_the_summary_writes_nothing() {
     assert!(text(&out.stdout).contains("nothing written"));
     assert!(!fixture.herds().exists());
     assert!(!fixture.gh_calls().contains("label create"));
+    assert!(!fixture.repo().join("AGENTS.md").exists());
     assert!(!fixture.repo().join("docs").exists());
 }
 
@@ -2219,8 +2221,8 @@ fn on_a_terminal_the_summary_names_the_labels_and_docs_writing_creates() {
         text(&out.stdout).contains(
             "Writing it also creates the labels ready-for-agent, needs-info, ready-for-human \
              and blocked in acme/widgets where missing, and writes \
-             docs/agents/issue-tracker.md and docs/agents/triage-labels.md in the repo, \
-             uncommitted.\r\n"
+             docs/agents/issue-tracker.md, docs/agents/triage-labels.md, \
+             docs/agents/loopherd.md and AGENTS.md in the repo, uncommitted.\r\n"
         ),
         "{}",
         text(&out.stdout)
@@ -2366,6 +2368,158 @@ fn on_a_terminal_a_default_limit_over_a_configured_windows_cap_names_that_window
     assert!(
         text(&out.stdout).contains(
             "so the cap of 80000 (80% of config.toml's 100000-token context window) applies: "
+        ),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn in_a_fresh_repo_init_writes_agents_md_pointing_at_the_herd_docs() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init(&[]);
+
+    assert_ok(&out);
+    let agents = repo_file(&fixture, "AGENTS.md");
+    assert!(agents.contains("## loopherd\n"), "{agents}");
+    for doc in ["docs/agents/loopherd.md", "docs/agents/issue-tracker.md"] {
+        assert!(
+            agents.contains(&format!("`{doc}`")),
+            "missing {doc} in\n{agents}"
+        );
+    }
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.contains(
+            "wrote docs/agents/loopherd.md (uncommitted)\nwrote AGENTS.md (uncommitted)\n"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "Review and commit what init wrote in the repo: docs/agents/issue-tracker.md, \
+             docs/agents/triage-labels.md, docs/agents/loopherd.md and AGENTS.md."
+        ),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn the_loopherd_doc_covers_claiming_branches_checks_the_closing_pr_questions_and_reports() {
+    let fixture = Fixture::new(&["acme"]);
+    write_docs(&fixture, None, "| `needs-info` | `Q:Info` | x |\n");
+
+    assert_ok(&fixture.init(&[]));
+
+    let doc = repo_file(&fixture, "docs/agents/loopherd.md");
+    for expected in [
+        "`docs/agents/issue-tracker.md`",
+        "`claimed by <member>`",
+        "assign it to acme",
+        "`<type>/<number>-<slug>`",
+        "- `cargo test`\n- `cargo fmt --check`\n",
+        "`Closes #<number>`",
+        "--base main",
+        "`Q:Info`",
+        "loopherd report --kind done",
+        "loopherd report --kind question",
+    ] {
+        assert!(doc.contains(expected), "missing {expected:?} in\n{doc}");
+    }
+}
+
+#[test]
+fn an_agents_md_without_a_loopherd_section_gets_one_appended() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::write(fixture.repo().join("AGENTS.md"), "# Widgets\n\nRun `make`.").unwrap();
+
+    let out = fixture.init(&[]);
+
+    assert_ok(&out);
+    let agents = repo_file(&fixture, "AGENTS.md");
+    assert!(
+        agents.starts_with("# Widgets\n\nRun `make`.\n\n## loopherd\n"),
+        "{agents}"
+    );
+    assert!(agents.contains("`docs/agents/loopherd.md`"), "{agents}");
+    assert!(
+        text(&out.stdout).contains("added a loopherd section to AGENTS.md (uncommitted)\n"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn an_agents_md_with_a_loopherd_section_is_left_as_it_was() {
+    let fixture = Fixture::new(&["acme"]);
+    let agents = "# Widgets\n\n### Working with LoopHerd\n\nOur own words.\n";
+    fs::write(fixture.repo().join("AGENTS.md"), agents).unwrap();
+
+    let out = fixture.init(&[]);
+
+    assert_ok(&out);
+    assert_eq!(repo_file(&fixture, "AGENTS.md"), agents);
+    assert!(
+        !text(&out.stdout).contains("AGENTS.md"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn an_existing_loopherd_doc_is_left_as_it_was() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::create_dir_all(fixture.repo().join("docs/agents")).unwrap();
+    fs::write(fixture.repo().join("docs/agents/loopherd.md"), "ours\n").unwrap();
+
+    let out = fixture.init(&[]);
+
+    assert_ok(&out);
+    assert_eq!(repo_file(&fixture, "docs/agents/loopherd.md"), "ours\n");
+    assert!(
+        !text(&out.stdout).contains("wrote docs/agents/loopherd.md"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn an_agents_md_init_cant_append_to_is_left_as_it_was_with_no_other_file() {
+    let fixture = Fixture::new(&["acme"]);
+    let agents = fixture.repo().join("AGENTS.md");
+    fs::write(&agents, "# Widgets\n").unwrap();
+    fs::set_permissions(&agents, fs::Permissions::from_mode(0o444)).unwrap();
+
+    let out = fixture.init(&[]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains(&format!("write {}", agents.display())),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(repo_file(&fixture, "AGENTS.md"), "# Widgets\n");
+    for doc in ["issue-tracker.md", "triage-labels.md", "loopherd.md"] {
+        assert!(
+            !fixture.repo().join("docs/agents").join(doc).exists(),
+            "{doc}"
+        );
+    }
+    assert_eq!(fs::read_dir(fixture.herds()).unwrap().count(), 0);
+}
+
+#[test]
+fn on_a_terminal_the_summary_names_a_section_added_to_an_existing_agents_md() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::write(fixture.repo().join("AGENTS.md"), "# Widgets\n").unwrap();
+
+    let out = fixture.init_on_terminal(&[], "\n");
+
+    assert_ok(&out);
+    assert!(
+        text(&out.stdout).contains(
+            "docs/agents/loopherd.md and a loopherd section in AGENTS.md in the repo, uncommitted."
         ),
         "{}",
         text(&out.stdout)

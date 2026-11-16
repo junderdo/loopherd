@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use crate::herd::{self, Paths};
 use crate::worktree::{checkout_root, same_dir};
 
+mod agents;
 mod ask;
 mod tracker;
 
@@ -54,6 +55,7 @@ struct Herd {
     context_limit: Option<u64>,
     /// The limit that applies when `context_limit` is unset.
     config_limit: String,
+    docs: Vec<agents::Doc>,
 }
 
 /// Writes the herd file and its lead prompt and creates missing labels,
@@ -122,7 +124,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
         },
     )?;
     let slug = format!("{owner}/{repo_name}");
-    let tracker = tracker::resolve(&repo, req.tracker)?;
+    let mut tracker = tracker::resolve(&repo, req.tracker)?;
     for check in req.checks {
         prompt_text(check)?;
     }
@@ -242,6 +244,20 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
             },
         )?,
     };
+    let mut docs: Vec<agents::Doc> = tracker
+        .writes
+        .drain(..)
+        .map(|(path, text)| agents::Doc::new(path, text))
+        .collect();
+    docs.extend(agents::missing(
+        &repo,
+        agents::Herd {
+            account: &account,
+            branch: &branch,
+            checks: &checks,
+            needs_info: &tracker.labels.needs_info,
+        },
+    )?);
     Ok(Herd {
         repo,
         name,
@@ -256,6 +272,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
         switches,
         context_limit,
         config_limit,
+        docs,
     })
 }
 
@@ -375,11 +392,11 @@ fn summary(herd: &Herd) -> String {
             herd.slug
         ));
     }
-    if !herd.tracker.writes.is_empty() {
-        let docs: Vec<&str> = herd.tracker.writes.iter().map(|(path, _)| *path).collect();
+    if !herd.docs.is_empty() {
+        let docs: Vec<String> = herd.docs.iter().map(agents::Doc::planned).collect();
         also.push(format!(
             "writes {} in the repo, uncommitted",
-            docs.join(" and ")
+            and_list(&docs)
         ));
     }
     let also = match also.is_empty() {
@@ -478,31 +495,30 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
     };
     let mut written: Vec<PathBuf> = vec![];
     let lead = herd.lead.then(|| (lead_file.clone(), fill(LEAD, &values)));
-    let files = lead
+    let herd_files = lead
         .into_iter()
-        .chain([(herd_file.clone(), fill(HERD, &values))])
-        .chain(
-            tracker
-                .writes
-                .iter()
-                .map(|(path, text)| (repo.join(path), text.clone())),
-        );
-    for (path, text) in files {
+        .chain([(herd_file.clone(), fill(HERD, &values))]);
+    for (path, text) in herd_files {
         if let Err(e) = write_new(&path, &text) {
-            for path in &written {
-                let _ = fs::remove_file(path);
-            }
+            remove(&written);
             return Err(e);
         }
         written.push(path);
+    }
+    for doc in &herd.docs {
+        if let Err(e) = doc.write(repo) {
+            remove(&written);
+            return Err(e);
+        }
+        if !doc.append {
+            written.push(repo.join(doc.path));
+        }
     }
     lines.push(format!("wrote {}", herd_file.display()));
     if herd.lead {
         lines.push(format!("wrote {}", lead_file.display()));
     }
-    for (path, _) in &tracker.writes {
-        lines.push(format!("wrote {path} (uncommitted)"));
-    }
+    lines.extend(herd.docs.iter().map(agents::Doc::done));
     let mut steps = vec![format!(
         "Open Claude in {} once and accept its trust dialog; members can't start past \
          it, and init never accepts it for you.",
@@ -521,6 +537,13 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
             tracker::TRACKER_DOC
         ));
     }
+    if !herd.docs.is_empty() {
+        let paths: Vec<String> = herd.docs.iter().map(|doc| doc.path.to_string()).collect();
+        steps.push(format!(
+            "Review and commit what init wrote in the repo: {}.",
+            and_list(&paths)
+        ));
+    }
     steps.extend([
         "loopherd herds".into(),
         format!("loopherd feed {name} --dry-run"),
@@ -533,6 +556,20 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
         lines.push(format!("  {}. {step}", n + 1));
     }
     Ok(lines)
+}
+
+fn remove(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// `a`, `a and b`, `a, b and c`.
+fn and_list(items: &[String]) -> String {
+    match items.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => items.join(""),
+    }
 }
 
 fn refuse_taken_name(paths: &Paths, herd: &str, repo: &Path) -> Result<()> {
