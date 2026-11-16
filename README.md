@@ -243,7 +243,7 @@ agents pulling cards from the
 [Trello board](https://trello.com/b/MtiTIrp1/loopherd), with tests and lints
 as the back-pressure. Agent instructions start at [AGENTS.md](AGENTS.md);
 the card workflow is
-[docs/agents/issue-tracking.md](docs/agents/issue-tracking.md).
+[docs/agents/issue-tracker.md](docs/agents/issue-tracker.md).
 
 ```bash
 cargo fmt --check && cargo clippy -- -D warnings && cargo test
