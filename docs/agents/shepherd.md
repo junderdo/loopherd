@@ -62,7 +62,9 @@ them), else is off; `loopherd herds` shows each switch's value and source.
 
 The human's `[notify]` table in `~/.config/loopherd/config.toml` decides
 whether questions and blocked dialogs also reach them outside herdr (see
-"Notifying the human" in `loopherd --skill`). Manual and test runs set a temp
+"Notifying the human" in `loopherd --skill`). Each lead's watch sends its
+workers' and its own; yours sends the rest and, deduplicated by per-event
+marks in the reports directory, the leads' too. Manual and test runs set a temp
 `LOOPHERD_CONFIG_DIR`, so they never send to the human; give such a run its
 own `[notify]` with a stub `command` to see a send.
 

@@ -89,7 +89,12 @@ pub struct Request<'a> {
     /// Tells a lead's watch whether the feed running a worker's after_merge
     /// still runs.
     pub procs: &'a dyn Procs,
+    /// Given a lead's own questions and blocks as its watch first sees them,
+    /// which wake only the shepherd's watch.
+    pub notify_own: Option<NotifyOwn<'a>>,
 }
+
+pub type NotifyOwn<'a> = &'a dyn Fn(&[Waiting]);
 
 /// How often a lead's watch runs its merged and claimable checks.
 const CHECK_EVERY: Duration = Duration::from_secs(60);
@@ -154,6 +159,7 @@ pub fn watch(
     let mut last: HashMap<String, AgentStatus> = HashMap::new();
     let mut gone = Gone::default();
     let mut code = 0;
+    let mut own_questions_seen = HashSet::new();
     loop {
         let read = status::read_statuses(
             herdr,
@@ -178,7 +184,7 @@ pub fn watch(
             .flatten()
             .map(|stray| stray.pane.clone())
             .collect();
-        let members = in_scope(read.view, req, &reader)?;
+        let (members, own) = in_scope(read.view, req, &reader)?;
         let names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
         let mut lines = vec![];
         let mut waiting = vec![];
@@ -252,6 +258,34 @@ pub fn watch(
             }
             if member.status != AgentStatus::Unknown {
                 last.insert(member.name.clone(), member.status);
+            }
+        }
+        if let (Some(notify_own), Some(own), Reader::Lead { herd, .. }) =
+            (req.notify_own, &own, &reader)
+        {
+            let mut events = own_questions(ledger, dir, &own.name, &mut own_questions_seen)?;
+            let was = last.get(&own.name).copied();
+            if own.status == AgentStatus::Blocked && was.is_some_and(|w| w != AgentStatus::Blocked)
+            {
+                events.push(Waiting {
+                    herd: None,
+                    member: own.name.clone(),
+                    kind: notify::Kind::Blocked,
+                    text: String::new(),
+                    at: None,
+                });
+            }
+            if own.status != AgentStatus::Unknown {
+                last.insert(own.name.clone(), own.status);
+            }
+            if !events.is_empty() {
+                events.iter_mut().for_each(|e| e.herd = Some(herd.clone()));
+                notify_own(&events);
+            }
+        }
+        for member in members.iter().chain(&own) {
+            if !matches!(member.status, AgentStatus::Blocked | AgentStatus::Unknown) {
+                notify::unblocked(dir, &member.name)?;
             }
         }
         let left = req.timeout.map(|t| t.saturating_sub(clock.elapsed()));
@@ -731,17 +765,22 @@ fn stop_wakes(mailbox: &Mailbox) -> Vec<String> {
     wakes
 }
 
-/// The view's non-retired members `reader` owns, narrowed to `req.herds`.
-/// A herd with a lead, even a gone one, is the lead's but for the lead itself.
-/// Fails once a lead reading is no longer its herd's lead.
-fn in_scope(view: View, req: &Request, reader: &Reader) -> Result<Vec<Member>> {
+/// The view's non-retired members `reader` owns, narrowed to `req.herds`,
+/// and for a lead's watch the lead itself. A herd with a lead, even a gone
+/// one, is the lead's but for the lead itself. Fails once a lead reading is
+/// no longer its herd's lead.
+fn in_scope(view: View, req: &Request, reader: &Reader) -> Result<(Vec<Member>, Option<Member>)> {
     if let Reader::Lead { name, herd, .. } = reader {
         let own = view.herds.into_iter().find(|h| h.name == *herd);
-        let workers = own.map(|h| h.members).unwrap_or_default();
-        if !workers.iter().any(|m| m.lead && m.name == *name) {
+        let (leads, workers): (Vec<_>, Vec<_>) = own
+            .map(|h| h.members)
+            .unwrap_or_default()
+            .into_iter()
+            .partition(|m| m.lead);
+        let Some(lead) = leads.into_iter().find(|m| m.name == *name) else {
             bail!("{name} was retired, so its watch ends");
-        }
-        return Ok(workers.into_iter().filter(|m| !m.lead).collect());
+        };
+        return Ok((workers, Some(lead)));
     }
     let mut members = vec![];
     for herd in view.herds {
@@ -753,7 +792,38 @@ fn in_scope(view: View, req: &Request, reader: &Reader) -> Result<Vec<Member>> {
     if req.herds.is_empty() {
         members.extend(view.ungrouped);
     }
-    Ok(members)
+    Ok((members, None))
+}
+
+/// `lead`'s unread questions not in `seen`, adding them; its cursor is left
+/// alone, as they are the shepherd's to read.
+fn own_questions(
+    ledger: &dyn Ledger,
+    dir: &Path,
+    lead: &str,
+    seen: &mut HashSet<String>,
+) -> Result<Vec<Waiting>> {
+    let names = [lead.to_string()];
+    let filter = Filter {
+        names: &names,
+        herd: None,
+        all: false,
+    };
+    let (read, _unsaved) = peek_reports(ledger, dir, &filter)?;
+    Ok(read
+        .entries
+        .into_iter()
+        .filter_map(|(member, entry)| match entry.body {
+            Body::Question { text } if seen.insert(entry.at.clone()) => Some(Waiting {
+                herd: None,
+                member,
+                kind: notify::Kind::Question,
+                text,
+                at: Some(entry.at),
+            }),
+            _ => None,
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -844,6 +914,7 @@ mod tests {
         herd_files: None,
         check_timeout: || bail!("only a lead's watch reads the check timeout"),
         shepherd_handoff: None,
+        notify_own: None,
     };
 
     fn run(
@@ -1144,6 +1215,7 @@ mod tests {
         herd_files: None,
         check_timeout: || bail!("only a lead's watch reads the check timeout"),
         shepherd_handoff: None,
+        notify_own: None,
     };
 
     /// One poll of a fresh watch.
@@ -1531,6 +1603,166 @@ mod tests {
             own_pane: Some(pane),
             ..ONCE
         }
+    }
+
+    /// A working lead of cards and its working worker, nothing in a mailbox.
+    fn quiet_led_world() -> (MemLedger, FakeHerdr) {
+        let ledger = ledger(vec![
+            lead("lead-cards", "w9:p0", "cards"),
+            member("lh-1", "w9:p1", Some("cards")),
+        ]);
+        let herdr = FakeHerdr::new(&[])
+            .with_live_agent(Some("lead-cards"), None, "w9:p0")
+            .with_live_agent(Some("lh-1"), None, "w9:p1");
+        herdr.set_status("lead-cards", AgentStatus::Working);
+        herdr.set_status("lh-1", AgentStatus::Working);
+        (ledger, herdr)
+    }
+
+    /// Notifying through `dir`'s marks, recording each command launched.
+    struct Notifier {
+        config: notify::Config,
+        dir: PathBuf,
+        sent: std::cell::RefCell<Vec<Vec<String>>>,
+    }
+
+    impl Notifier {
+        fn new(dir: &Path) -> Notifier {
+            let config = dir.join("config.toml");
+            fs::write(
+                &config,
+                "[notify]\nenabled = true\nherdr = false\ncommand = ['n', '{herd}', '{member}', '{kind}']\n",
+            )
+            .unwrap();
+            Notifier {
+                config: notify::load(&config).unwrap().unwrap(),
+                dir: dir.to_path_buf(),
+                sent: Default::default(),
+            }
+        }
+
+        fn send(&self, events: &[Waiting]) {
+            notify::send(&self.config, &self.dir, events, &mut |l| {
+                self.sent.borrow_mut().push(l.args);
+                Ok(())
+            })
+            .unwrap();
+        }
+
+        /// The shepherd's watch, sending what it wakes on as `loopherd watch` does.
+        fn shepherd(
+            &self,
+            herdr: &FakeHerdr,
+            ledger: &dyn Ledger,
+            clock: &mut dyn Clock,
+        ) -> Vec<String> {
+            let req = Request {
+                timeout: Some(Duration::from_secs(4)),
+                ..EVERY
+            };
+            let wake = watch(herdr, ledger, &self.dir, &req, clock, &mut |_| {})
+                .unwrap()
+                .expect("the shepherd's watch woke");
+            self.send(&wake.waiting);
+            printed(wake)
+        }
+
+        /// The lead's watch, sending its own events through `notify_own`.
+        fn lead(
+            &self,
+            herdr: &FakeHerdr,
+            ledger: &dyn Ledger,
+            clock: &mut dyn Clock,
+        ) -> Option<Vec<String>> {
+            let own = |events: &[Waiting]| self.send(events);
+            let req = Request {
+                timeout: Some(Duration::from_secs(4)),
+                notify_own: Some(&own),
+                ..from_pane("w9:p0")
+            };
+            run(herdr, ledger, &self.dir, &req, clock)
+        }
+
+        fn sent(&self) -> Vec<Vec<String>> {
+            self.sent.borrow().clone()
+        }
+    }
+
+    fn sent_for(member: &str, kind: &str) -> Vec<String> {
+        ["n", "cards", member, kind].map(String::from).to_vec()
+    }
+
+    #[test]
+    fn a_leads_watch_sends_the_leads_own_question_without_waking_on_it_or_reading_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = quiet_led_world();
+        send(
+            &ledger,
+            dir.path(),
+            "lead-cards",
+            Kind::Question,
+            "Merge #1?",
+        );
+        let notifier = Notifier::new(dir.path());
+
+        let woke = notifier.lead(&herdr, &ledger, &mut steps(|_| {}));
+
+        assert_eq!(woke, None);
+        assert_eq!(notifier.sent(), [sent_for("lead-cards", "question")]);
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &ONCE, &mut steps(|_| {})).unwrap(),
+            ["lead-cards question 2026-11-01 09:00 Merge #1?"]
+        );
+    }
+
+    #[test]
+    fn a_leads_question_read_by_its_watch_and_the_shepherds_is_sent_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = quiet_led_world();
+        send(
+            &ledger,
+            dir.path(),
+            "lead-cards",
+            Kind::Question,
+            "Merge #1?",
+        );
+        let notifier = Notifier::new(dir.path());
+
+        notifier.lead(&herdr, &ledger, &mut steps(|_| {}));
+        let printed = notifier.shepherd(&herdr, &ledger, &mut steps(|_| {}));
+
+        assert_eq!(printed, ["lead-cards question 2026-11-01 09:00 Merge #1?"]);
+        assert_eq!(notifier.sent(), [sent_for("lead-cards", "question")]);
+    }
+
+    #[test]
+    fn a_lead_going_blocked_is_sent_once_by_both_watches_and_again_once_unblocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = quiet_led_world();
+        let notifier = Notifier::new(dir.path());
+        let blocks = |poll| {
+            if poll == 1 {
+                herdr.set_status("lead-cards", AgentStatus::Blocked);
+            }
+        };
+
+        // The lead's watch runs between two of the shepherd's polls, so both
+        // see the lead go from working to blocked.
+        let printed = notifier.shepherd(
+            &herdr,
+            &ledger,
+            &mut steps(|poll| {
+                if poll == 1 {
+                    assert_eq!(notifier.lead(&herdr, &ledger, &mut steps(blocks)), None);
+                }
+            }),
+        );
+        assert_eq!(printed, ["lead-cards blocked"]);
+        assert_eq!(notifier.sent(), [sent_for("lead-cards", "blocked")]);
+
+        herdr.set_status("lead-cards", AgentStatus::Working);
+        notifier.shepherd(&herdr, &ledger, &mut steps(blocks));
+        assert_eq!(notifier.sent().len(), 2);
     }
 
     #[test]

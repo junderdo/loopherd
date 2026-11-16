@@ -675,11 +675,16 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         check_timeout: remote_timeout,
         shepherd_handoff: None,
         procs: &process::ProcFs,
+        notify_own: None,
     };
     let state = ledger.dir()?;
     let handoff = || shepherd_handoff(&herd_paths, &state);
+    let config = herd_paths.herds.with_file_name("config.toml");
+    let mailboxes = ledger.reports_dir()?;
+    let notify_own = |events: &[notify::Waiting]| notify_waiting(events, &config, &mailboxes);
     let req = watch::Request {
         shepherd_handoff: Some(&handoff),
+        notify_own: Some(&notify_own),
         ..req
     };
     let woke = watch::watch(
@@ -699,8 +704,7 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         .try_for_each(|line| writeln!(out, "{line}"))
         .and_then(|()| out.flush())
         .context("print the wake; left it unread")?;
-    let config = herd_paths.herds.with_file_name("config.toml");
-    notify_waiting(&wake.waiting, &config, &ledger.reports_dir()?);
+    notify_waiting(&wake.waiting, &config, &mailboxes);
     wake.mark_read()?;
     Ok(0)
 }

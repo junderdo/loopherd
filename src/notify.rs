@@ -150,14 +150,16 @@ pub fn send(
 ) -> Result<()> {
     let mut failed = None;
     for event in events.iter().filter(|e| config.kinds.contains(&e.kind)) {
-        if let Some(at) = &event.at {
-            match first_to_notify(mailboxes, &event.member, at) {
-                Ok(true) => {}
-                Ok(false) => continue,
-                Err(e) => {
-                    failed.get_or_insert(e);
-                    continue;
-                }
+        let marked = match &event.at {
+            Some(at) => first_to_notify(mailboxes, &event.member, at),
+            None => first_to_notify_blocked(mailboxes, &event.member),
+        };
+        match marked {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(e) => {
+                failed.get_or_insert(e);
+                continue;
             }
         }
         let text = match event.kind {
@@ -271,6 +273,30 @@ pub fn failed(launch: &Launch, mailboxes: &Path, problem: &str, now: SystemTime)
         let _ = fs::remove_file(&mark);
     }
     noted
+}
+
+/// Marks `member` notified as blocked unless a watch already did since it
+/// was last seen unblocked.
+fn first_to_notify_blocked(mailboxes: &Path, member: &str) -> Result<bool> {
+    fs::create_dir_all(mailboxes).with_context(|| format!("create {}", mailboxes.display()))?;
+    let path = mailboxes.join(format!("{member}.blocked"));
+    match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("create {}", path.display())),
+    }
+}
+
+/// Clears `member`'s blocked mark, as a watch saw it not blocked, so its next
+/// block is sent.
+pub fn unblocked(mailboxes: &Path, member: &str) -> Result<()> {
+    let path = mailboxes.join(format!("{member}.blocked"));
+    match fs::remove_file(&path) {
+        Err(e) if e.kind() != ErrorKind::NotFound => {
+            Err(e).with_context(|| format!("remove {}", path.display()))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Marks `member`'s question at `at` notified unless a watch already did.

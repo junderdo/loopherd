@@ -234,8 +234,10 @@ watch and carry on from its next steps.
 
 With `[notify] enabled = true` in `$LOOPHERD_CONFIG_DIR/config.toml`, the
 watch that first prints a `question` report or a `blocked` line also tells
-the human outside your pane, once per event, whether or not a shepherd
-session runs (a lead's watch sends for its workers):
+the human outside your pane, once per event. A lead's watch sends for its
+workers and for the lead itself, so a lead's questions and blocks reach the
+human with no shepherd session running; the shepherd's watch still prints
+the lead's, and a mark per event keeps it to one send:
 
 ```toml
 [notify]
@@ -254,8 +256,8 @@ gets through), or `blocked`. Each send runs detached within 30s; a failing
 one leaves a `note` in the member's mailbox, once until it next succeeds.
 `loopherd herds` reports a broken table, which sends nothing. Notifying
 doesn't replace relaying: still tell the human in your pane. Not sent: a
-question you read with `loopherd reports` before a watch printed it, and a
-member already blocked when the watch started. A lead relaying a worker's
+question you read with `loopherd reports` before a watch saw it, and a
+member already blocked when every watch started. A lead relaying a worker's
 question as its own sends a second notification.
 
 ### Commands
