@@ -1307,6 +1307,8 @@ mod tests {
                 "password: ‘two words’ ok?",
                 "password: [redacted] [redacted] ok?",
             ),
+            ("Set “pwd”: hunter2 then merge?", "Set “pwd”: [redacted]?"),
+            ("“--password” correct horse ok?", "“--password” [redacted]?"),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
         }
