@@ -287,12 +287,18 @@ fn first_to_notify(mailboxes: &Path, member: &str, at: &str) -> Result<bool> {
 const MAX_TEXT: usize = 200;
 
 /// The question's first line, cut to [`MAX_TEXT`] characters, with each word
-/// that looks like a token or carries one replaced by `[redacted]`.
+/// that looks like a token, carries one or follows a key such as
+/// `password:` replaced by `[redacted]`.
 fn summary(question: &str) -> String {
     let line = question.lines().next().unwrap_or_default();
+    let mut after_key = false;
     let words: Vec<&str> = line
         .split_whitespace()
-        .map(|word| if secret(word) { "[redacted]" } else { word })
+        .map(|word| {
+            let hidden = after_key || secret(word);
+            after_key = names_a_secret(word);
+            if hidden { "[redacted]" } else { word }
+        })
         .collect();
     let line = words.join(" ");
     match line.char_indices().nth(MAX_TEXT) {
@@ -301,14 +307,19 @@ fn summary(question: &str) -> String {
     }
 }
 
-const SECRET_KEYS: [&str; 7] = [
-    "token=",
-    "secret=",
-    "password=",
-    "passwd=",
-    "api_key=",
-    "apikey=",
-    "access_key=",
+const SECRET_KEYS: [&str; 12] = [
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "api_key",
+    "apikey",
+    "access_key",
+    "auth",
+    "bearer",
+    "credential",
+    "credentials",
+    "pwd",
 ];
 const TOKEN_PREFIXES: [&str; 11] = [
     "ghp_",
@@ -324,9 +335,30 @@ const TOKEN_PREFIXES: [&str; 11] = [
     "AKIA",
 ];
 
+/// `password:`, `token=`, `--password` or `Bearer`: the next word is the secret.
+fn names_a_secret(word: &str) -> bool {
+    let lower = word.to_ascii_lowercase();
+    let key = match lower.strip_suffix([':', '=']) {
+        Some(key) => key,
+        None if lower == "bearer" => return true,
+        None => match lower.strip_prefix('-') {
+            Some(flag) => flag.trim_start_matches('-'),
+            None => return false,
+        },
+    };
+    SECRET_KEYS.iter().any(|k| key.ends_with(k))
+}
+
 fn secret(word: &str) -> bool {
     let lower = word.to_ascii_lowercase();
-    if SECRET_KEYS.iter().any(|key| lower.contains(key)) {
+    let carries_value = |sep| {
+        SECRET_KEYS.iter().any(|key| {
+            lower
+                .split_once(&format!("{key}{sep}"))
+                .is_some_and(|(_, value)| !value.is_empty())
+        })
+    };
+    if carries_value(':') || carries_value('=') {
         return true;
     }
     let token_char = |c: char| c.is_ascii_alphanumeric() || "_-+=".contains(c);
@@ -625,6 +657,22 @@ mod tests {
         );
 
         assert_eq!(launched[0].args[4], "--body=-- merge it?");
+    }
+
+    #[test]
+    fn secrets_given_as_key_colon_flags_or_bearer_are_redacted() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = enabled("herdr = false\ncommand = ['n', '{text}']\n");
+        let text = "password: hunter2 token:abc --password pw2 \
+                    Authorization: Bearer xyz auth=q credential: c1 then which way?";
+
+        let launched = sent(&config, dir.path(), &[question("lh-3", text, "t1")]);
+
+        assert_eq!(
+            launched[0].args[1],
+            "password: [redacted] [redacted] --password [redacted] \
+             Authorization: Bearer [redacted] [redacted] credential: [redacted] then which way?"
+        );
     }
 
     #[test]
