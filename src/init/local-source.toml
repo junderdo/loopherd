@@ -16,15 +16,20 @@ done | awk -v room=@ID_ROOM@ '
   function has(f, label) { return index(labels[f], " " label " ") > 0 }
   function closed(f) { return has(f, "resolved") || has(f, "closed") || has(f, "done") }
   function value(line) { sub(/^[^:]*:/, "", line); gsub(/[*`]/, " ", line); return line }
-  function unblocked(f,    items, k, i, item, b) {
+  function unblocked(f,    items, k, i, rest, found, b) {
     if (!(f in blockers) || blockers[f] ~ /^[ \t]*(none|$)/) return 1
-    k = split(blockers[f], items, ",")
+    k = split(blockers[f], items, /[,;]/)
     for (i = 1; i <= k; i++) {
-      item = items[i]
-      gsub(/^[ \t#]+|[ \t]+$/, "", item)
-      if (!match(item, /^[0-9]+([^0-9a-z]|$)/)) return 0
-      b = issue[feature[f] "/" (substr(item, 1, RLENGTH) + 0)]
-      if (b == "" || !closed(b)) return 0
+      if (items[i] ~ /^[ \t]*$/) continue
+      rest = " " items[i] " "
+      found = 0
+      while (match(rest, /[^0-9a-z][0-9]+[^0-9a-z]/)) {
+        b = issue[feature[f] "/" (substr(rest, RSTART + 1, RLENGTH - 2) + 0)]
+        if (b == "" || !closed(b)) return 0
+        found = 1
+        rest = substr(rest, RSTART + RLENGTH - 1)
+      }
+      if (!found) return 0
     }
     return 1
   }
@@ -38,6 +43,7 @@ done | awk -v room=@ID_ROOM@ '
     sub(/-.*/, "", num[f])
     issue[part[2] "/" (num[f] + 0)] = f
     comments = 0
+    listing = 0
     next
   }
   { line = tolower($0) }
@@ -48,7 +54,16 @@ done | awk -v room=@ID_ROOM@ '
     gsub(/[ \t,]+/, " ", s)
     labels[f] = " " s " "
   }
-  !(f in blockers) && line ~ /^[ \t*_]*blocked by[ \t*_]*:/ { blockers[f] = value(line) }
+  listing && line ~ /^[ \t]*[-*+][ \t]/ {
+    sub(/^[ \t]*[-*+][ \t]+/, "", line)
+    blockers[f] = blockers[f] "," line
+    next
+  }
+  listing && line !~ /^[ \t]*$/ { listing = 0 }
+  !(f in blockers) && line ~ /^[ \t*_]*blocked by[ \t*_]*:/ {
+    blockers[f] = value(line)
+    listing = blockers[f] ~ /^[ \t]*$/
+  }
   END {
     for (i = 1; i <= n; i++) {
       f = files[i]

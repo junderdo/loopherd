@@ -3582,3 +3582,42 @@ fn the_local_done_check_says_not_done_for_a_missing_file_and_reads_crlf() {
     assert_eq!(check(".scratch/f/issues/01-a.md"), Some(0));
     assert_eq!(check(".scratch/f/issues/09-gone.md"), Some(1));
 }
+
+#[test]
+fn blocked_by_blocks_on_every_number_it_names_and_on_a_list_below_it() {
+    let fixture = Fixture::new(&["acme"]);
+    let blocked_by = |n: &str, line: &str| {
+        (
+            format!(".scratch/f/issues/{n}-x.md"),
+            format!("{line}\nStatus: ready-for-agent\n"),
+        )
+    };
+    let issues = [
+        (
+            ".scratch/f/issues/01-done.md".to_string(),
+            "Status: resolved\n".to_string(),
+        ),
+        (
+            ".scratch/f/issues/02-open.md".to_string(),
+            "Status: needs-info\n".to_string(),
+        ),
+        blocked_by("03", "Blocked by: 01 and 02"),
+        blocked_by("04", "Blocked by: 01 02"),
+        blocked_by("05", "Blocked by: #01 / #02"),
+        blocked_by("06", "**Blocked by:**\n\n- 01\n- 02\n"),
+        blocked_by("07", "Blocked by: 01: Login form; #01"),
+        blocked_by("08", "**Blocked by:**\n- 01\n"),
+    ];
+    let issues: Vec<(&str, &str)> = issues
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+
+    let tasks = fixture.local_tasks(&issues);
+
+    assert_eq!(
+        tasks,
+        "f-07 feat tdd x .scratch/f/issues/07-x.md\n\
+         f-08 feat tdd x .scratch/f/issues/08-x.md\n"
+    );
+}
