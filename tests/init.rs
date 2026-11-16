@@ -369,6 +369,13 @@ fn the_lead_takes_its_switches_from_lead_defaults_and_a_prompt_file_beside_the_h
     );
     let lead = fs::read_to_string(fixture.herds().join("widgets-lead.md")).unwrap();
     assert!(lead.contains("{switches}"), "{lead}");
+    assert!(
+        lead.contains(
+            "re-arm after every exit. On `<member> merged`, run `loopherd feed {herd}`,\n   \
+             which retires it once its issue is closed. On `<name> claimable`, feed."
+        ),
+        "{lead}"
+    );
 }
 
 #[test]
@@ -3477,6 +3484,11 @@ fn a_local_tracker_without_github_hands_in_a_pushed_branch_and_never_mentions_gh
         }
     }
     assert!(doc.contains("open no pull request"), "{doc}");
+    assert!(!lead.contains("On `<member> merged`"), "{lead}");
+    assert!(
+        lead.contains("No `<member> merged` line comes, as the herd\n   has no merged check"),
+        "{lead}"
+    );
 }
 
 #[test]

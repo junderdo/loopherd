@@ -37,6 +37,11 @@ const LOCAL_PUSH_HAND_IN: &str =
    the human merges the branch into @BRANCH@.";
 const LEAD_GH: &str = "Run every gh command as @ACCOUNT@, prefixed with
 `GH_TOKEN=$(gh auth token --user @ACCOUNT@)`. ";
+const LEAD_ON_MERGED: &str = "On `<member> merged`, run `loopherd feed {herd}`,
+   which retires it once its issue is closed.";
+const LEAD_ON_BRANCH_MERGED: &str = "No `<member> merged` line comes, as the herd
+   has no merged check: once a worker's branch merges, run `loopherd feed {herd}`,
+   which retires it once its issue is closed.";
 const LEAD_PR_MERGE_ASK: &str = "With merge off, a merge question carries the PR
 link, any PR that must merge first, and the line
 `! GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh pr merge <n> --repo @OWNER_REPO@ --merge --match-head-commit <full sha>`
@@ -716,6 +721,10 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
         ("GH_NOTE", github_text(LOCAL_GH_NOTE, "")),
         ("HAND_IN", github_text(LOCAL_PR_HAND_IN, LOCAL_PUSH_HAND_IN)),
         ("LEAD_GH", github_text(LEAD_GH, "")),
+        (
+            "ON_MERGED",
+            github_text(LEAD_ON_MERGED, LEAD_ON_BRANCH_MERGED),
+        ),
         (
             "MERGE_ASK",
             github_text(LEAD_PR_MERGE_ASK, LEAD_BRANCH_MERGE_ASK),
