@@ -49,6 +49,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D32](decisions/D32.md) | `[notify]` in `config.toml` sends herdr's toast and an optional command, detached, when a watch prints a `question` or `blocked`, and from a lead's watch for the lead's own; once per event, by per-event marks. |
 | [D33](decisions/D33.md) | A member's ledger session follows Claude's `continued-in` transcript records to the live session, in the Stop and SessionStart hooks, the handoff check, `revive` and `restart`. |
 | [D34](decisions/D34.md) | `ready-for-agent` and `blocked` are independent: a fully specified card is written with both, and `scripts/trello unblock` only removes `blocked`, never adding `ready-for-agent`. |
+| [D35](decisions/D35.md) | `loopherd init` writes a herd file, lead prompt and tracker labels the human then owns; GitHub Issues first (`ready-for-agent` minus `blocked`/`needs-info`/`ready-for-human`, `Closes #<n>` PRs), refusing to replace existing files. |
 
 ## Emerging model
 

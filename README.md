@@ -83,6 +83,27 @@ shares it ([details](docs/research/claude-workspace-trust.md)). If a spawn
 still blocks, answer the dialog in the pane it names and run
 `loopherd prompt <name>` to send the stored prompt.
 
+## Set up a repo
+
+For a repo whose `origin` is on GitHub, with its tasks as GitHub issues:
+
+```bash
+cd <repo>
+loopherd init --check "cargo fmt --check" --check "cargo test"   # [--herd <name>] [--gh-account <login>] [--repo <owner>/<name>]
+```
+
+It writes `<herd>.toml` (named after the repo dir) and `<herd>-lead.md` in
+the herds dir, and creates the labels `ready-for-agent`, `needs-info`,
+`ready-for-human` and `blocked` where missing. The herd feeds one worker per
+open issue labelled `ready-for-agent` and none of the other three, on branch
+`<type>/<n>-<slug>`; a `skill:<name>` label picks the skill it builds with
+(`tdd` by default). Every gh call runs as the logged-in account matching the
+remote's owner, else `--gh-account`; `--repo` names the GitHub repo when
+origin is an ssh host alias. init infers the rest, commits nothing,
+and refuses to replace either file; the files are yours to edit. Then follow
+the steps it prints: trust the repo in Claude once, `loopherd herds`,
+`loopherd feed <herd> --dry-run`, `loopherd lead <herd>`.
+
 ## Quickstart
 
 A herd is one TOML file; the filename is the herd's name. Herd files live in

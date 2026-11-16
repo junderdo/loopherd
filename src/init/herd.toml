@@ -1,0 +1,64 @@
+# Herd @HERD@: one worker per ready GitHub issue in @OWNER_REPO@.
+# Written by `loopherd init`; yours to edit, loopherd never rewrites it.
+repo = @REPO@
+args = ["--permission-mode", "auto"]
+
+[queue]
+template = "issue"
+# Prints "<number> <type> <skill> <slug>" per open issue labelled
+# ready-for-agent and none of blocked, needs-info, ready-for-human, oldest
+# first, matching labels whatever their case.
+# $types maps a label to the branch type (else feat); a skill:<name> label
+# names the skill the worker builds with (else tdd).
+source = '''
+GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue list --repo @OWNER_REPO@ --state open --label ready-for-agent --limit 1000 --json number,title,labels --jq '
+  {"bug": "fix", "documentation": "docs"} as $types
+  | sort_by(.number)[]
+  | [.labels[].name | ascii_downcase] as $labels
+  | select(any($labels[]; . == "blocked" or . == "needs-info" or . == "ready-for-human") | not)
+  | ([$labels[] | $types[.] | values][0] // "feat") as $type
+  | ([$labels[] | select(startswith("skill:")) | ltrimstr("skill:") | select(test("^[a-z0-9._:-]+$"))][0] // "tdd") as $skill
+  | ([.title | ascii_downcase | scan("[a-z0-9]+")][:5] | join("-")) as $slug
+  | "\(.number) \($type) \($skill) \(if $slug == "" then "issue" else $slug end)"'
+'''
+max = 3
+
+[template.issue]
+params = ["number", "type", "skill", "slug"]
+name = "{herd}-{number}"
+branch = "{type}/{number}-{slug}"
+done = "GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue view {number} --repo @OWNER_REPO@ --json state --jq .state | grep -qx CLOSED"
+merged = "GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh pr list --repo @OWNER_REPO@ --head {branch} --state merged --json number --jq 'length > 0' | grep -qx true"
+prompt = '''
+You're {name}, working GitHub issue #{number} of @OWNER_REPO@ on branch
+{branch} in {worktree}.
+
+Run every gh command as @ACCOUNT@, prefixed with
+`GH_TOKEN=$(gh auth token --user @ACCOUNT@)` as in the commands below.
+
+1. Read the issue and every comment:
+   `GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue view {number} --repo @OWNER_REPO@ --comments`.
+2. Claim it: `GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue comment {number} --repo @OWNER_REPO@ --body "claimed by {name}"`,
+   then `GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue edit {number} --repo @OWNER_REPO@ --add-assignee @ACCOUNT@`.
+3. Build it with the {skill} skill.
+4. Before calling it done, run each check and fix what fails:
+@CHECKS@
+5. Push the branch as @ACCOUNT@:
+   `GH_TOKEN=$(gh auth token --user @ACCOUNT@) git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin HEAD`.
+   Open a PR with `GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh pr create --repo @OWNER_REPO@ --base @BRANCH@ --head {branch} --assignee @ACCOUNT@ --title "<title>" --body "<summary>"`,
+   the body ending with the line `Closes #{number}`.
+6. Finish with `loopherd report --kind done "<PR link and one-line summary>"`.
+
+If @BRANCH@ moves under you, merge origin/@BRANCH@ into your branch; never
+rebase or force-push.
+
+If you hit a question only the human can answer, stop rather than guess:
+`GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue edit {number} --repo @OWNER_REPO@ --add-label needs-info`, comment the
+question and the options you see on the issue, then
+`loopherd report --kind question "<the exact question>"`.
+'''
+
+[lead]
+prompt_file = @LEAD_PROMPT@
+# From [lead_defaults] when init ran. Off means the lead asks the human.
+@SWITCHES@

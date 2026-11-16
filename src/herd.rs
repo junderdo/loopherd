@@ -65,6 +65,12 @@ pub struct Switches {
 impl Switches {
     /// One `<switch> on|off` line each, for the lead's `{switches}`.
     pub fn lines(&self) -> String {
+        self.named()
+            .map(|(name, on)| format!("{name} {}", on_off(on)))
+            .join("\n")
+    }
+
+    pub fn named(&self) -> [(&'static str, bool); 6] {
         [
             ("merge", self.merge),
             ("install", self.install),
@@ -73,8 +79,6 @@ impl Switches {
             ("design_escalation", self.design_escalation),
             ("blocked_dialogs", self.blocked_dialogs),
         ]
-        .map(|(name, on)| format!("{name} {}", on_off(on)))
-        .join("\n")
     }
 }
 
@@ -660,6 +664,12 @@ pub fn context_limit(paths: &Paths, member: &AgentRecord) -> Result<u64> {
 
 fn config_file(paths: &Paths) -> PathBuf {
     paths.herds.with_file_name("config.toml")
+}
+
+/// The repo a herd's file names, with a leading `~` expanded.
+pub fn repo(paths: &Paths, herd: &str) -> Result<PathBuf> {
+    let file = load(&paths.herds, herd)?;
+    Ok(expand_home(&file.repo, &paths.home))
 }
 
 /// A herd's lead's switches, without reading its prompt.
