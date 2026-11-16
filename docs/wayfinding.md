@@ -52,6 +52,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D35](decisions/D35.md) | `loopherd init` writes a herd file, lead prompt and tracker labels the human then owns; GitHub Issues first (`ready-for-agent` minus `blocked`/`needs-info`/`ready-for-human`, `Closes #<n>` PRs), refusing to replace existing files. |
 | [D36](decisions/D36.md) | `loopherd init` reads `docs/agents/issue-tracker.md` (GitHub title → built-in snippets, else an empty `source` `herds` rejects) and `triage-labels.md` label names; with no doc it asks or takes `--tracker` and writes both, uncommitted. |
 | [D37](decisions/D37.md) | `loopherd init` on a terminal asks for each value with its inferred default (checks from Cargo.toml/package.json, `max`, lead, `context_limit`) and confirms a summary; a flag answers its question, and unattended a value with neither flag nor inference is an error naming the flag. |
+| [D38](decisions/D38.md) | `loopherd init` gives a local-markdown tracker working snippets: `.scratch/<feature>/issues/` files on origin's default branch, `Status:` words as labels, `Blocked by:` numbers, closed when the PR sets `resolved`. |
 
 ## Emerging model
 

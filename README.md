@@ -110,9 +110,10 @@ mattpocock-skills' format. With none, it takes `--tracker` (`other` with
 `--tracker-desc`), else asks on a terminal, else uses `github`, and writes
 that doc plus `docs/agents/triage-labels.md` with the default labels,
 uncommitted. A doc titled `# Issue tracker: GitHub` (any case) gets the
-GitHub snippets below; any other tracker gets an empty queue `source` that
-`loopherd herds` reports invalid until you fill it from the doc, and no
-labels. When `triage-labels.md` exists, its labels for
+GitHub snippets below, and one titled `# Issue tracker: Local Markdown` the
+local ones; any other tracker gets an empty queue `source` that
+`loopherd herds` reports invalid until you fill it from the doc. Only GitHub
+gets labels. When `triage-labels.md` exists, its labels for
 `ready-for-agent`, `needs-info` and `ready-for-human` replace those names
 below; `blocked` is always loopherd's.
 
@@ -134,7 +135,19 @@ It writes `<herd>.toml` (named after the repo dir) and, unless
 `ready-for-human` and `blocked` where missing. The herd feeds one worker per
 open issue labelled `ready-for-agent` and none of the other three, on branch
 `<type>/<n>-<slug>`; a `skill:<name>` label picks the skill it builds with
-(`tdd` by default). Every gh call runs as the logged-in account matching the
+(`tdd` by default).
+
+A local-markdown herd reads issue files at
+`.scratch/<feature>/issues/<NN>-<slug>.md` on origin's default branch, so
+an issue feeds once it is pushed. Its `Status:` line stands in for labels:
+an issue feeds when the line has `ready-for-agent`, none of the other three
+or `resolved`/`closed`/`done`, and its `Blocked by:` line is missing,
+`None`, or lists only resolved issue numbers of its feature. Members are
+`<herd>-<feature>-<NN>`, the feature cut to fit 32 characters. A worker
+claims by setting the line to `claimed`, and its PR sets it to `resolved`,
+which is what `done` checks; `merged` is the GitHub PR check.
+
+Every gh call runs as the logged-in account matching the
 remote's owner, else `--gh-account`; `--repo` names the GitHub repo when
 origin is an ssh host alias. init infers the rest, commits nothing,
 and refuses to replace either file (`--no-lead` leaves an existing lead

@@ -1,0 +1,48 @@
+[template.issue]
+params = ["id", "type", "skill", "slug", "path"]
+name = "{herd}-{id}"
+branch = "{type}/{id}-{slug}"
+# Done once @REF@ has the issue's Status: line resolved, closed or done;
+# braces are doubled, as loopherd fills {placeholders} in checks.
+@CONTEXT_LIMIT@done = '''
+@FETCH@text=$(git show @REF@:{path}) && printf '%s\n' "$text" | awk '
+  tolower($0) ~ /^#+[ \t]*comments[ \t]*$/ {{ exit }}
+  tolower($0) ~ /^[ \t*_]*status[ \t*_]*:/ {{
+    s = tolower($0); sub(/^[^:]*:/, "", s); gsub(/[*`,]/, " ", s)
+    closed = " " s " " ~ /[ \t](resolved|closed|done)[ \t]/
+    exit
+  }}
+  END {{ exit !closed }}'
+'''
+@MERGED@
+prompt = '''
+You're {name}, working the local issue {path} on branch {branch} in
+{worktree}. The issue is a markdown file in the repo; its `Status:` line near
+the top holds its triage state, and comments go under a `## Comments` heading
+at the bottom.
+
+Run every gh command as @ACCOUNT@, prefixed with
+`GH_TOKEN=$(gh auth token --user @ACCOUNT@)` as in the commands below.
+
+1. Read {path} in full, comments included.
+2. Claim it: set its `Status:` line to `claimed`, append `claimed by {name}`
+   under `## Comments` (adding the heading if it's missing), and commit.
+3. Build it with the {skill} skill.
+4. Before calling it done, run each check and fix what fails:
+@CHECKS@
+5. Set the issue's `Status:` line to `resolved`, append a one-line summary of
+   the work under `## Comments`, and commit, so the issue closes when your
+   branch merges.
+6. Push the branch as @ACCOUNT@:
+   `GH_TOKEN=$(gh auth token --user @ACCOUNT@) git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin HEAD`.
+   Open a PR with `GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh pr create --repo @OWNER_REPO@ --base @BRANCH@ --head {branch} --assignee @ACCOUNT@ --title "<title>" --body "<summary>"`.
+7. Finish with `loopherd report --kind done "<PR link and one-line summary>"`.
+
+If @BRANCH@ moves under you, merge origin/@BRANCH@ into your branch; never
+rebase or force-push.
+
+If you hit a question only the human can answer, stop rather than guess: set
+the issue's `Status:` line to `@NEEDS_INFO@`, append the question and the
+options you see under `## Comments`, commit and push the branch, then
+`loopherd report --kind question "<the exact question>"`.
+'''

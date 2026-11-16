@@ -1217,15 +1217,17 @@ fn a_triage_label_init_cant_put_in_a_shell_command_or_blocked_is_refused_before_
 
 #[test]
 fn tracker_names_the_doc_init_writes_when_there_is_none() {
-    for (args, title, github) in [
+    for (args, title, valid, github) in [
         (
             &["--tracker", "github"][..],
             "# Issue tracker: GitHub\n",
+            true,
             true,
         ),
         (
             &["--tracker", "local"][..],
             "# Issue tracker: Local Markdown\n",
+            true,
             false,
         ),
         (
@@ -1236,6 +1238,7 @@ fn tracker_names_the_doc_init_writes_when_there_is_none() {
                 "Issues live in Linear, team WID.",
             ][..],
             "# Issue tracker\n\nIssues live in Linear, team WID.\n",
+            false,
             false,
         ),
     ] {
@@ -1252,7 +1255,7 @@ fn tracker_names_the_doc_init_writes_when_there_is_none() {
         let herds = fixture.loopherd(&["herds"]);
         assert_eq!(
             herds.status.code(),
-            Some(if github { 0 } else { 1 }),
+            Some(if valid { 0 } else { 1 }),
             "{args:?}"
         );
         assert_eq!(
@@ -1370,11 +1373,63 @@ fn write_docs(fixture: &Fixture, tracker: Option<&str>, labels: &str) {
 }
 
 #[test]
-fn a_tracker_other_than_github_takes_labels_no_shell_command_runs() {
+fn a_local_tracker_refuses_a_label_its_shell_snippets_cant_hold() {
     let fixture = Fixture::new(&["acme"]);
     write_docs(
         &fixture,
         Some("# Issue tracker: Local Markdown\n"),
+        "| `ready-for-human` | `$(x)` | x |\n",
+    );
+
+    let out = fixture.init(&[]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("maps ready-for-human to \"$(x)\""),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!fixture.herds().join("widgets.toml").exists());
+}
+
+#[test]
+fn a_local_tracker_reads_its_triage_labels_names() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.push_local_issues(&[
+        (".scratch/f/issues/01-a.md", "Status: AFK\n"),
+        (".scratch/f/issues/02-b.md", "Status: AFK, Asked\n"),
+        (".scratch/f/issues/03-c.md", "Status: ready-for-agent\n"),
+    ]);
+    write_docs(
+        &fixture,
+        Some("# Issue tracker: Local Markdown\n"),
+        "| `ready-for-agent` | `AFK` | x |\n| `needs-info` | `asked` | x |\n",
+    );
+
+    assert_ok(&fixture.init(&[]));
+
+    let feed = fixture.loopherd_with(&env, &["feed", "widgets", "--dry-run"]);
+    assert_ok(&feed);
+    assert!(
+        text(&feed.stdout).starts_with(
+            "would add widgets-f-01 (template issue)\nwidgets: 0 would retire, 1 would add"
+        ),
+        "{}",
+        text(&feed.stdout)
+    );
+    assert!(
+        fixture
+            .herd_get("template.issue.prompt")
+            .contains("`Status:` line to `asked`")
+    );
+}
+
+#[test]
+fn a_tracker_other_than_github_takes_labels_no_shell_command_runs() {
+    let fixture = Fixture::new(&["acme"]);
+    write_docs(
+        &fixture,
+        Some("# Issue tracker: Jira\n"),
         "| `needs-info` | `Needs {more} info` | x |\n",
     );
 
@@ -1421,7 +1476,7 @@ fn two_roles_mapped_to_one_label_are_refused_before_any_gh_call() {
 fn with_a_placeholder_source_the_next_steps_fill_it_before_feeding() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init(&["--tracker", "local"]);
+    let out = fixture.init(&["--tracker", "other", "--tracker-desc", "Linear"]);
 
     assert_ok(&out);
     let stdout = text(&out.stdout);
@@ -2991,4 +3046,300 @@ fn a_relative_config_dir_in_a_cwd_init_cant_write_is_refused_before_any_change()
     );
     assert!(!fixture.gh_calls().contains("label create"));
     assert!(!agents_dir.join("loopherd.md").exists());
+}
+
+/// Issue files in mattpocock-skills' local-markdown layout, as `(path, text)`.
+const LOCAL_ISSUES: &[(&str, &str)] = &[
+    (
+        ".scratch/auth/spec.md",
+        "# Auth\n\nStatus: ready-for-agent\n",
+    ),
+    (
+        ".scratch/auth/issues/01-login-form.md",
+        "# 01: Login form\n\nStatus: ready-for-agent\n",
+    ),
+    (
+        ".scratch/auth/issues/02-logout.md",
+        "# 02: Logout\n\n**Blocked by:** 01\n\n**Status:** ready-for-agent\n",
+    ),
+    (
+        ".scratch/auth/issues/03-session-expiry.md",
+        "# 03: Session expiry\n\nStatus: needs-info\n",
+    ),
+    (
+        ".scratch/auth/issues/04-reset-password.md",
+        "# 04: Reset password\n\nStatus: resolved\n\n## Comments\n\nStatus: ready-for-agent\n",
+    ),
+    (
+        ".scratch/auth/issues/05-remember-me.md",
+        "# 05: Remember me\n\nBlocked by: 04\nStatus: ready-for-agent\n",
+    ),
+    (
+        ".scratch/auth/issues/06-oauth.md",
+        "# 06: OAuth\n\nStatus: ready-for-agent, blocked\n",
+    ),
+    (
+        ".scratch/auth/issues/07-two-factor.md",
+        "# 07: Two factor\n\n**Blocked by:** None (can start immediately)\n\n\
+         **Status:** Ready-for-agent, bug, skill:diagnosing-bugs\n",
+    ),
+    (
+        ".scratch/auth/issues/08-pick-a-provider.md",
+        "# 08: Pick a provider\n\nStatus: ready-for-agent ready-for-human\n",
+    ),
+    (
+        ".scratch/auth/issues/09-audit-log.md",
+        "# 09: Audit log\n\nBlocked by: the login form\nStatus: ready-for-agent\n",
+    ),
+    (
+        ".scratch/billing/issues/01-invoices.md",
+        "# 01: Invoices\n\nStatus: ready-for-agent, documentation\n",
+    ),
+];
+
+impl Fixture {
+    /// Commits `issues` and pushes them as `main` of a bare repo that stands
+    /// in for origin, returning the env that sends origin's URL there.
+    fn push_local_issues(&self, issues: &[(&str, &str)]) -> Vec<(String, String)> {
+        let origin = self.root.path().join("origin.git");
+        git(
+            self.root.path(),
+            &["init", "-q", "--bare", origin.to_str().unwrap()],
+        );
+        for (path, text) in issues {
+            let path = self.repo().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        git(&self.repo(), &["add", ".scratch"]);
+        git(
+            &self.repo(),
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "issues",
+            ],
+        );
+        git(
+            &self.repo(),
+            &["push", "-q", origin.to_str().unwrap(), "HEAD:main"],
+        );
+        vec![
+            ("GIT_CONFIG_COUNT".into(), "1".into()),
+            (
+                "GIT_CONFIG_KEY_0".into(),
+                format!("url.{}.insteadOf", origin.display()),
+            ),
+            (
+                "GIT_CONFIG_VALUE_0".into(),
+                "git@github.com:acme/widgets.git".into(),
+            ),
+        ]
+    }
+
+    fn loopherd_with(&self, env: &[(String, String)], args: &[&str]) -> Output {
+        self.run(
+            Command::new(env!("CARGO_BIN_EXE_loopherd"))
+                .args(args)
+                .envs(env.iter().map(|(k, v)| (k, v))),
+        )
+    }
+
+    fn herd_get(&self, key: &str) -> String {
+        let out = self.loopherd(&["herd", "get", "widgets", key]);
+        assert_ok(&out);
+        toml::from_str::<toml::Table>(&format!("v = {}", text(&out.stdout))).unwrap()["v"]
+            .as_str()
+            .unwrap()
+            .into()
+    }
+}
+
+#[test]
+fn a_local_tracker_herd_feeds_the_ready_unblocked_issues_pushed_to_the_default_branch() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.push_local_issues(LOCAL_ISSUES);
+    let draft = fixture.repo().join(".scratch/billing/issues/02-draft.md");
+    fs::write(draft, "# 02: Draft\n\nStatus: ready-for-agent\n").unwrap();
+
+    assert_ok(&fixture.init(&["--tracker", "local", "--max", "4"]));
+
+    assert_ok(&fixture.loopherd(&["herds"]));
+    let feed = fixture.loopherd_with(&env, &["feed", "widgets", "--dry-run"]);
+    assert_ok(&feed);
+    assert_eq!(
+        text(&feed.stdout),
+        "would add widgets-auth-01 (template issue)\n\
+         would add widgets-auth-05 (template issue)\n\
+         would add widgets-auth-07 (template issue)\n\
+         would add widgets-billing-01 (template issue)\n\
+         widgets: 0 would retire, 4 would add, 0 skipped, 0 errors\n"
+    );
+}
+
+#[test]
+fn the_local_queue_names_each_issues_id_type_skill_slug_and_path() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.push_local_issues(LOCAL_ISSUES);
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+
+    let tasks = fixture.run(
+        Command::new("sh")
+            .args(["-c", &fixture.herd_get("queue.source")])
+            .envs(env.iter().map(|(k, v)| (k, v))),
+    );
+
+    assert_ok(&tasks);
+    assert_eq!(
+        text(&tasks.stdout),
+        "auth-01 feat tdd login-form .scratch/auth/issues/01-login-form.md\n\
+         auth-05 feat tdd remember-me .scratch/auth/issues/05-remember-me.md\n\
+         auth-07 fix diagnosing-bugs two-factor .scratch/auth/issues/07-two-factor.md\n\
+         billing-01 docs tdd invoices .scratch/billing/issues/01-invoices.md\n"
+    );
+    assert_eq!(fixture.herd_get("template.issue.name"), "{herd}-{id}");
+    assert_eq!(
+        fixture.herd_get("template.issue.branch"),
+        "{type}/{id}-{slug}"
+    );
+}
+
+#[test]
+fn a_long_feature_name_is_cut_so_the_member_name_fits() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.push_local_issues(&[(
+        ".scratch/a-very-long-feature-name-indeed/issues/03-first.md",
+        "Status: ready-for-agent\n",
+    )]);
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+
+    let feed = fixture.loopherd_with(&env, &["feed", "widgets", "--dry-run"]);
+
+    assert_ok(&feed);
+    let name = "widgets-a-very-long-feature-n-03";
+    assert_eq!(name.len(), 32);
+    assert!(
+        text(&feed.stdout).starts_with(&format!("would add {name} (template issue)\n")),
+        "{}",
+        text(&feed.stdout)
+    );
+}
+
+#[test]
+fn the_local_done_check_passes_once_the_default_branch_marks_the_issue_resolved() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.push_local_issues(LOCAL_ISSUES);
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+    let done = fixture.herd_get("template.issue.done");
+
+    let check = |path: &str| {
+        fixture
+            .run(
+                Command::new("sh")
+                    .args([
+                        "-c",
+                        &done
+                            .replace("{path}", path)
+                            .replace("{{", "{")
+                            .replace("}}", "}"),
+                    ])
+                    .envs(env.iter().map(|(k, v)| (k, v))),
+            )
+            .status
+            .code()
+    };
+
+    assert_eq!(check(".scratch/auth/issues/04-reset-password.md"), Some(0));
+    assert_eq!(check(".scratch/auth/issues/01-login-form.md"), Some(1));
+    assert_eq!(check(".scratch/auth/issues/03-session-expiry.md"), Some(1));
+}
+
+#[test]
+fn a_local_tracker_with_a_github_origin_keeps_the_pr_merged_check_and_creates_no_labels() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init(&["--tracker", "local"]);
+
+    assert_ok(&out);
+    assert_eq!(
+        fixture.herd_get("template.issue.merged"),
+        "GH_TOKEN=$(gh auth token --user acme) gh pr list --repo acme/widgets --head {branch} \
+         --state merged --json number --jq 'length > 0' | grep -qx true"
+    );
+    assert!(
+        !fixture.gh_calls().contains("label"),
+        "{}",
+        fixture.gh_calls()
+    );
+    assert!(
+        !text(&out.stdout).contains("placeholder") && !text(&out.stdout).contains("Fill [queue]"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn the_local_worker_prompt_claims_and_resolves_by_editing_the_issue_file() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+
+    let prompt = fixture.herd_get("template.issue.prompt");
+
+    for expected in [
+        "{path}",
+        "`Status:` line to `claimed`",
+        "claimed by {name}",
+        "## Comments",
+        "`Status:` line to `resolved`",
+        "`Status:` line to `needs-info`",
+        "the {skill} skill",
+        "cargo test",
+        "GH_TOKEN=$(gh auth token --user acme) gh pr create --repo acme/widgets --base main",
+        "loopherd report --kind done",
+    ] {
+        assert!(
+            prompt.contains(expected),
+            "missing {expected:?} in\n{prompt}"
+        );
+    }
+    for unexpected in ["gh issue", "Closes #"] {
+        assert!(!prompt.contains(unexpected), "{unexpected:?} in\n{prompt}");
+    }
+    let doc = repo_file(&fixture, "docs/agents/loopherd.md");
+    assert!(
+        doc.contains("`Status:`") && !doc.contains("Closes #"),
+        "{doc}"
+    );
+    let lead = fs::read_to_string(fixture.herds().join("widgets-lead.md")).unwrap();
+    assert!(
+        lead.contains(".scratch/") && !lead.contains("Closes #"),
+        "{lead}"
+    );
+}
+
+#[test]
+fn an_existing_local_markdown_tracker_doc_gets_the_local_snippets() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.push_local_issues(LOCAL_ISSUES);
+    fs::create_dir_all(fixture.repo().join("docs/agents")).unwrap();
+    fs::write(
+        fixture.repo().join("docs/agents/issue-tracker.md"),
+        "# Issue Tracker: local markdown\n\nOur words.\n",
+    )
+    .unwrap();
+
+    assert_ok(&fixture.init(&["--max", "4"]));
+
+    let feed = fixture.loopherd_with(&env, &["feed", "widgets", "--dry-run"]);
+    assert_ok(&feed);
+    assert!(
+        text(&feed.stdout).contains("4 would add"),
+        "{}",
+        text(&feed.stdout)
+    );
 }

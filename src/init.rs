@@ -19,7 +19,11 @@ pub use tracker::Choice as Tracker;
 const HERD: &str = include_str!("init/herd.toml");
 const LEAD_TABLE: &str = include_str!("init/lead-table.toml");
 const GITHUB_SOURCE: &str = include_str!("init/github-source.toml");
+const GITHUB_ISSUE: &str = include_str!("init/github-issue.toml");
+const LOCAL_SOURCE: &str = include_str!("init/local-source.toml");
+const LOCAL_ISSUE: &str = include_str!("init/local-issue.toml");
 const PLACEHOLDER_SOURCE: &str = include_str!("init/placeholder-source.toml");
+const MERGED_GITHUB: &str = include_str!("init/merged-github.toml");
 const LEAD: &str = include_str!("init/lead.md");
 
 pub struct Request<'a> {
@@ -258,6 +262,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
             branch: &branch,
             checks: &checks,
             needs_info: &tracker.labels.needs_info,
+            local: tracker.kind == tracker::Kind::Local,
         },
     )?;
     docs.extend(plan.docs);
@@ -394,7 +399,7 @@ fn suggested_checks(repo: &Path) -> Vec<String> {
 
 fn summary(herd: &Herd) -> String {
     let mut also = vec![];
-    if herd.tracker.github {
+    if herd.tracker.kind == tracker::Kind::GitHub {
         let names = wanted_labels(&herd.tracker.labels).map(|(name, ..)| name);
         let (last, rest) = names.split_last().expect("four labels");
         also.push(format!(
@@ -462,10 +467,32 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
         .unwrap_or_default();
     let labels = &tracker.labels;
     let needs_info = prompt_text(&labels.needs_info)?;
-    let (needs_info_lc, ready_for_human_lc) = (
+    let (ready_for_agent_lc, needs_info_lc, ready_for_human_lc) = (
+        labels.ready_for_agent.to_ascii_lowercase(),
         labels.needs_info.to_ascii_lowercase(),
         labels.ready_for_human.to_ascii_lowercase(),
     );
+    let fetch = format!("git fetch -q origin {branch} || exit\n");
+    let git_ref = format!("origin/{branch}");
+    // Leaves room for "<herd>-" in a member name of at most 32 characters.
+    let id_room = (32 - name.len() - 1).to_string();
+    let local = tracker.kind == tracker::Kind::Local;
+    let (task, lead_tasks) = match local {
+        true => (
+            "ready issue under .scratch/ in this repo".to_string(),
+            format!(
+                "Tasks are issue files under `.scratch/` on origin's {branch}. A \
+                 worker's branch sets its issue's `Status:` line to `resolved`, so \
+                 the issue closes when its PR merges."
+            ),
+        ),
+        false => (
+            format!("ready GitHub issue in {slug}"),
+            "Tasks are GitHub issues in @OWNER_REPO@. A worker opens a PR whose body \
+             carries `Closes #<n>`, so its issue closes when the PR merges."
+                .to_string(),
+        ),
+    };
     let mut values = vec![
         ("OWNER_REPO", slug.as_str()),
         ("ACCOUNT", account),
@@ -482,23 +509,33 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
         ("READY_FOR_HUMAN", &labels.ready_for_human),
         ("NEEDS_INFO_LC", &needs_info_lc),
         ("READY_FOR_HUMAN_LC", &ready_for_human_lc),
+        ("READY_FOR_AGENT_LC", &ready_for_agent_lc),
+        ("FETCH", &fetch),
+        ("REF", &git_ref),
+        ("ID_ROOM", &id_room),
+        ("TASK", &task),
     ];
     // Filled before they join the herd file, whose fill leaves inserted text literal.
-    let source = fill(
-        match tracker.github {
-            true => GITHUB_SOURCE,
-            false => PLACEHOLDER_SOURCE,
-        },
-        &values,
-    );
+    let (source, template) = match tracker.kind {
+        tracker::Kind::GitHub => (GITHUB_SOURCE, GITHUB_ISSUE),
+        tracker::Kind::Local => (LOCAL_SOURCE, LOCAL_ISSUE),
+        tracker::Kind::Other => (PLACEHOLDER_SOURCE, GITHUB_ISSUE),
+    };
+    let source = fill(source, &values);
     let source = source.trim_end();
+    let merged = fill(MERGED_GITHUB, &values);
+    let lead_tasks = fill(&lead_tasks, &values);
+    values.push(("MERGED", merged.trim_end()));
+    let template = fill(template, &values);
     let lead_table = match herd.lead {
         true => format!("\n{}", fill(LEAD_TABLE, &values)),
         false => String::new(),
     };
     values.push(("SOURCE", source));
+    values.push(("TEMPLATE", template.trim_end()));
     values.push(("LEAD_TABLE", &lead_table));
-    let mut lines = match tracker.github {
+    values.push(("LEAD_TASKS", &lead_tasks));
+    let mut lines = match tracker.kind == tracker::Kind::GitHub {
         true => create_labels(token, slug, labels)?,
         false => vec![],
     };
@@ -533,7 +570,7 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
          it, and init never accepts it for you.",
         repo.display()
     )];
-    if !tracker.github {
+    if tracker.kind == tracker::Kind::Other {
         lines.push(
             "The tracker isn't GitHub, so the herd's queue source is a placeholder that \
              `loopherd herds` reports invalid until it's filled."

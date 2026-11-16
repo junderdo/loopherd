@@ -1,0 +1,77 @@
+# Prints "<id> <type> <skill> <slug> <path>" per issue file on @REF@ under
+# .scratch/<feature>/issues/<NN>-<slug>.md whose Status: line has
+# @READY_FOR_AGENT@ and none of blocked, @NEEDS_INFO@, @READY_FOR_HUMAN@,
+# resolved, closed or done, and whose Blocked by: line names only resolved
+# issues of its feature. The id is <feature>-<NN>, the feature cut to fit the
+# member name. The Status: words act as labels: types maps one to the branch
+# type (else feat), and skill:<name> names the worker's skill (else tdd).
+source = '''
+@FETCH@files=$(git ls-tree -r --name-only @REF@ -- .scratch) || exit
+printf '%s\n' "$files" | grep -E '^\.scratch/[A-Za-z0-9._-]+/issues/[0-9]+-[A-Za-z0-9._-]*\.md$' | while read -r f; do
+  printf '\036%s\n' "$f"
+  git show "@REF@:$f"
+done | awk -v room=@ID_ROOM@ '
+  BEGIN { types["bug"] = "fix"; types["documentation"] = "docs" }
+  function has(f, label) { return index(labels[f], " " label " ") > 0 }
+  function closed(f) { return has(f, "resolved") || has(f, "closed") || has(f, "done") }
+  function value(line) { sub(/^[^:]*:/, "", line); gsub(/[*`]/, " ", line); return line }
+  function unblocked(f,    items, k, i, item, b) {
+    if (!(f in blockers) || blockers[f] ~ /^[ \t]*(none|$)/) return 1
+    k = split(blockers[f], items, ",")
+    for (i = 1; i <= k; i++) {
+      item = items[i]
+      gsub(/^[ \t#]+|[ \t]+$/, "", item)
+      if (!match(item, /^[0-9]+([^0-9a-z]|$)/)) return 0
+      b = issue[feature[f] "/" (substr(item, 1, RLENGTH) + 0)]
+      if (b == "" || !closed(b)) return 0
+    }
+    return 1
+  }
+  /^\036/ {
+    f = substr($0, 2)
+    files[++n] = f
+    split(f, part, "/")
+    feature[f] = part[2]
+    name[f] = part[4]
+    num[f] = name[f]
+    sub(/-.*/, "", num[f])
+    issue[part[2] "/" (num[f] + 0)] = f
+    comments = 0
+    next
+  }
+  { line = tolower($0) }
+  line ~ /^#+[ \t]*comments[ \t]*$/ { comments = 1 }
+  comments { next }
+  !(f in labels) && line ~ /^[ \t*_]*status[ \t*_]*:/ {
+    s = value(line)
+    gsub(/[ \t,]+/, " ", s)
+    labels[f] = " " s " "
+  }
+  !(f in blockers) && line ~ /^[ \t*_]*blocked by[ \t*_]*:/ { blockers[f] = value(line) }
+  END {
+    for (i = 1; i <= n; i++) {
+      f = files[i]
+      if (!has(f, "@READY_FOR_AGENT_LC@") || has(f, "blocked") || has(f, "@NEEDS_INFO_LC@") \
+          || has(f, "@READY_FOR_HUMAN_LC@") || closed(f) || !unblocked(f)) continue
+      type = "feat"; skill = "tdd"
+      k = split(labels[f], words, " ")
+      for (j = k; j >= 1; j--) {
+        if (words[j] in types) type = types[words[j]]
+        if (words[j] ~ /^skill:[a-z0-9._:-]+$/) skill = substr(words[j], 7)
+      }
+      slug = tolower(name[f])
+      sub(/^[0-9]+-/, "", slug); sub(/\.md$/, "", slug)
+      gsub(/[^a-z0-9]+/, " ", slug)
+      k = split(slug, words, " ")
+      slug = ""
+      for (j = 1; j <= k && j <= 5; j++) slug = slug (j > 1 ? "-" : "") words[j]
+      if (slug == "") slug = "issue"
+      id = tolower(feature[f])
+      gsub(/[^a-z0-9]+/, "-", id)
+      id = substr(id, 1, room - length(num[f]) - 1)
+      gsub(/^-+|-+$/, "", id)
+      id = (id == "" ? "" : id "-") num[f]
+      print id, type, skill, slug, f
+    }
+  }'
+'''

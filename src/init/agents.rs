@@ -11,6 +11,7 @@ use super::tracker::read;
 
 const SECTION: &str = include_str!("agents/section.md");
 const LOOPHERD: &str = include_str!("agents/loopherd.md");
+const LOOPHERD_LOCAL: &str = include_str!("agents/loopherd-local.md");
 
 const AGENTS_MD: &str = "AGENTS.md";
 const LOOPHERD_DOC: &str = "docs/agents/loopherd.md";
@@ -68,6 +69,8 @@ pub struct Herd<'a> {
     pub branch: &'a str,
     pub checks: &'a [String],
     pub needs_info: &'a str,
+    /// Whether the tracker is local markdown rather than GitHub-shaped.
+    pub local: bool,
 }
 
 /// What init writes into the repo, and the steps left to the human where
@@ -85,8 +88,12 @@ pub fn missing(repo: &Path, herd: Herd) -> Result<Plan> {
     let mut steps = vec![];
     if fs::symlink_metadata(repo.join(LOOPHERD_DOC)).is_err() {
         let checks: Vec<String> = herd.checks.iter().map(|c| format!("- `{c}`")).collect();
+        let template = match herd.local {
+            true => LOOPHERD_LOCAL,
+            false => LOOPHERD,
+        };
         let text = super::fill(
-            LOOPHERD,
+            template,
             &[
                 ("ACCOUNT", herd.account),
                 ("BRANCH", herd.branch),
