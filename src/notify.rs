@@ -543,6 +543,8 @@ const SECRET_KEYS: [&str; 10] = [
 ];
 /// Matched only whole or after a `_`/`-`/case boundary, so `monkey` and `hotkey` don't.
 const SHORT_KEYS: [&str; 4] = ["key", "auth", "pwd", "session"];
+/// Keys only whole and right before `:` or `=`, so "pass the test" and "pwd shows" stay.
+const PASSWORD_SHORTHANDS: [&str; 3] = ["pwd", "pw", "pass"];
 /// Kept between a key and its value: `the password is hunter2`.
 const FILLERS: [&str; 3] = ["is", "was", "to"];
 const TOKEN_PREFIXES: [&str; 11] = [
@@ -577,9 +579,12 @@ fn normalized(word: &str) -> String {
     out
 }
 
-/// `name` as a secret key, if it is one.
-fn secret_key(name: &str) -> Option<Key> {
+/// `name` as a secret key, if it is one; `separated` when `:` or `=` follows it.
+fn secret_key(name: &str, separated: bool) -> Option<Key> {
     let name = normalized(name);
+    if PASSWORD_SHORTHANDS.contains(&name.as_str()) {
+        return separated.then_some(Key::Strong);
+    }
     if SHORT_KEYS.contains(&name.as_str()) {
         return Some(Key::Weak);
     }
@@ -606,7 +611,7 @@ fn key_named_by(word: &str) -> Next {
         None => (flag, false),
     };
     let name = name.trim_end_matches(['"', '\'']);
-    let Some(key) = secret_key(name) else {
+    let Some(key) = secret_key(name, separated) else {
         return Next::Free;
     };
     let label = name.chars().all(|c| c.is_ascii_uppercase()) && key == Key::Strong;
@@ -635,7 +640,7 @@ fn carried_value(word: &str) -> Option<(bool, &str)> {
             .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
             .map_or(0, |i| i + 1);
         let value = &word[at + 1..];
-        let key = secret_key(&left[key_start..])?;
+        let key = secret_key(&left[key_start..], true)?;
         let starts_word = left[..key_start]
             .trim_start_matches(['"', '\'', '{', '(', '[', '-'])
             .is_empty();
@@ -1126,6 +1131,24 @@ mod tests {
                 r#"password: "two words" ok?"#,
                 "password: [redacted] [redacted] ok?",
             ),
+        ] {
+            assert_eq!(text_sent(question), text, "{question}");
+        }
+    }
+
+    #[test]
+    fn pwd_pw_and_pass_are_keys_only_right_before_a_separator() {
+        for (question, text) in [
+            ("pwd: hunter", "pwd: [redacted]"),
+            ("pw: hunter2", "pw: [redacted]"),
+            ("pw: Summer2024!", "pw: [redacted]!"),
+            ("pw=Summer2024!", "[redacted]!"),
+            ("pass: Summer2024!", "pass: [redacted]!"),
+            ("pass=hunter", "[redacted]"),
+            ("Did the tests pass?", "Did the tests pass?"),
+            ("pass the flag through", "pass the flag through"),
+            ("pwd shows the worktree?", "pwd shows the worktree?"),
+            ("Is db_pwd hunter2 ok?", "Is db_pwd [redacted] ok?"),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
         }
