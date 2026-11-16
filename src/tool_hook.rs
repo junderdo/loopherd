@@ -2,8 +2,9 @@
 //! from a lead's pane that needs a switch its herd file leaves off (D17), or
 //! a `loopherd restart --force` (D20), a `loopherd pause` or `resume`
 //! (D23), a `loopherd herd set` or `unset` (D29), a write of the lead
-//! defaults (D31), a `loopherd config set`, `unset` or `setup` (D38), cargo run through an alias it can't read, or a `$(…)`
-//! whose end it can't find, which no switch allows.
+//! defaults (D31), a `loopherd config set`, `unset` or `setup` (D38), cargo
+//! run through an alias it can't read, or a `$(…)` whose end it can't find,
+//! which no switch allows.
 //! A guardrail on the command text, not a sandbox.
 
 use std::path::Path;
@@ -919,9 +920,17 @@ fn cargo_run_args(args: &[String]) -> &[String] {
     }
 }
 
-/// Whether `run_args` run loopherd's `herd get`: every option before `herd`
-/// is one cargo knows, and no `herd set` or `unset` hides among the words.
+/// Whether `run_args` run loopherd's `herd get`, with no `herd set` or
+/// `unset` hidden among the words.
 fn runs_herd_get(run_args: &[String]) -> bool {
+    loopherd_args(run_args).is_some_and(|rest| {
+        rest.starts_with(&["herd".to_string(), "get".to_string()]) && !edits_herd(rest)
+    })
+}
+
+/// The args `cargo run` hands loopherd, past cargo's options and `--`;
+/// `None` when an option cargo might take a value for comes first.
+fn loopherd_args(run_args: &[String]) -> Option<&[String]> {
     const WITH_VALUE: [&str; 16] = [
         "--bin",
         "-p",
@@ -961,12 +970,11 @@ fn runs_herd_get(run_args: &[String]) -> bool {
             }
             a if WITH_VALUE.contains(&a) => i += 2,
             a if FLAGS.contains(&a) => i += 1,
-            a if a.starts_with('-') => return false,
+            a if a.starts_with('-') => return None,
             _ => break,
         }
     }
-    let rest = run_args.get(i..).unwrap_or_default();
-    rest.starts_with(&["herd".to_string(), "get".to_string()]) && !edits_herd(rest)
+    Some(run_args.get(i..).unwrap_or_default())
 }
 
 /// Whether `herd` then `set` or `unset` appear in `args`, side by side.
@@ -975,14 +983,22 @@ fn edits_herd<S: AsRef<str>>(args: &[S]) -> bool {
         .any(|w| w[0].as_ref() == "herd" && matches!(w[1].as_ref(), "set" | "unset"))
 }
 
-/// Whether `args` run `config set` or `unset`, or a `setup` that isn't just its help.
-fn edits_config(args: &[String]) -> bool {
+/// Whether `cargo run` with `run_args` runs `config set` or `unset`, or a
+/// `setup` that isn't just its help. Past an option it can't read, any such
+/// words count.
+fn edits_config(run_args: &[String]) -> bool {
+    let (args, anywhere) = match loopherd_args(run_args) {
+        Some(args) => (args, false),
+        None => (run_args, true),
+    };
+    let starts = |at: usize| anywhere || at == 0;
     args.windows(2)
-        .any(|w| w[0] == "config" && matches!(w[1].as_str(), "set" | "unset"))
+        .enumerate()
+        .any(|(at, w)| starts(at) && w[0] == "config" && matches!(w[1].as_str(), "set" | "unset"))
         || args
             .iter()
-            .position(|a| a == "setup")
-            .is_some_and(|at| runs_setup(&args[at + 1..]))
+            .enumerate()
+            .any(|(at, a)| starts(at) && a == "setup" && runs_setup(&args[at + 1..]))
 }
 
 fn runs_setup(args: &[String]) -> bool {
@@ -1891,8 +1907,16 @@ mod tests {
             "cargo run -- config set context_window 1000000",
             "cargo r -q config unset context_window",
             "cargo run -- setup --lead-defaults merge",
+            "cargo run --some-new-option x -- setup",
             "scripts/install --context limit=500000",
             "./scripts/install --no-splash --context=window=1000000",
+            "bash scripts/install --context limit=500000",
+            "env FOO=1 loopherd setup",
+            "command loopherd config unset default_context_limit",
+            "/home/u/.local/bin/loopherd setup --again",
+            "./target/debug/loopherd config set context_window 1000000",
+            "timeout 5 target/release/loopherd setup",
+            "sh -c 'loopherd config unset context_window'",
         ] {
             assert_eq!(needs(command), [Switch::Config], "{command}");
             let message =
@@ -1907,6 +1931,11 @@ mod tests {
             "loopherd config get context_window",
             "cargo run -- config get default_context_limit",
             "loopherd setup --help",
+            "env loopherd config get context_window",
+            "./target/debug/loopherd config get context_window",
+            "cargo run -- feed h setup",
+            "cargo run -- report --body setup",
+            "cargo run -- feed h config set context_window 1",
         ] {
             assert_eq!(needs(command), [], "{command}");
         }
