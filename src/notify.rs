@@ -1159,6 +1159,8 @@ mod tests {
             ("pass=hunter", "[redacted]"),
             ("Did the tests pass?", "Did the tests pass?"),
             ("pass the flag through", "pass the flag through"),
+            ("PASS the build?", "PASS the build?"),
+            ("pw hunter2 ok?", "pw hunter2 ok?"),
             ("pwd shows the worktree?", "pwd shows the worktree?"),
             ("Is db_pwd hunter2 ok?", "Is db_pwd [redacted] ok?"),
         ] {
