@@ -57,11 +57,21 @@ pub fn stop_hook(
     let Some(member) = member_in(&entries, pane.id, pane.socket) else {
         return Ok(None);
     };
-    let followed = follow_recorded(ledger, &entries, member, live).unwrap_or_else(|e| {
-        warn(format!("could not update {}'s session: {e:#}", member.name));
-        None
-    });
-    let member = followed.as_ref().unwrap_or(member);
+    let member = match follow_recorded(ledger, &entries, member, live) {
+        Ok(followed) => followed.unwrap_or_else(|| member.clone()),
+        Err(e) => {
+            warn(format!("could not update {}'s session: {e:#}", member.name));
+            // Compared as if moved, so the stop isn't dropped against a stale session.
+            AgentRecord {
+                session_id: member
+                    .session_id
+                    .as_deref()
+                    .map(|s| live_for(&entries, member, s, live)),
+                ..member.clone()
+            }
+        }
+    };
+    let member = &member;
     let mut stop = parse(input);
     stop.session = stop.session.map(|s| live_for(&entries, member, &s, live));
     if let Some(pid) = pane.claude_pid {
@@ -203,7 +213,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::ledger::{AgentRecord, MemLedger, Process};
+    use crate::ledger::{AgentRecord, MemLedger, NoUpdate, Process};
     use crate::process::{CLAUDE, FakeProcs};
 
     const SOCKET: &str = "/run/herdr/herdr.sock";
@@ -666,7 +676,15 @@ mod tests {
         }
     }
 
-    fn stop_continued(ledger: &mut MemLedger, input: &str) -> (Option<Stopped>, String) {
+    fn stop_continued(ledger: &mut dyn Ledger, input: &str) -> (Option<Stopped>, String) {
+        stop_warned(ledger, input, &mut |_| {})
+    }
+
+    fn stop_warned(
+        ledger: &mut dyn Ledger,
+        input: &str,
+        warn: &mut dyn FnMut(String),
+    ) -> (Option<Stopped>, String) {
         let dir = tempfile::tempdir().unwrap();
         let pane = Pane {
             id: "w1:p1",
@@ -682,7 +700,7 @@ mod tests {
             at(),
             &continued,
             &|_| Ok(None),
-            &mut |_| {},
+            warn,
         )
         .unwrap();
         (stopped, mailbox(dir.path(), "lh-1"))
@@ -697,6 +715,75 @@ mod tests {
             assert!(mailbox.contains(r#""session":"live""#), "{stop}: {mailbox}");
             assert_eq!(l.0["lh-1"].session_id.as_deref(), Some("live"), "{stop}");
         }
+    }
+
+    #[test]
+    fn a_member_already_moved_to_its_live_session_files_a_stop_its_hook_still_reports_as_the_stub()
+    {
+        let mut l = in_session(Some("live"));
+        let (stopped, mailbox) = stop_continued(&mut l, &stop_from("stub"));
+        assert_eq!(stopped, Some(Stopped::Filed("lh-1".into())));
+        assert!(mailbox.contains(r#""session":"live""#), "{mailbox}");
+        assert_eq!(l.0["lh-1"].session_id.as_deref(), Some("live"));
+    }
+
+    #[test]
+    fn a_failed_move_to_the_live_session_still_files_the_stop() {
+        for stop in ["stub", "live"] {
+            let mut l = NoUpdate(in_session(Some("stub")));
+            let (stopped, mailbox) = stop_continued(&mut l, &stop_from(stop));
+            assert_eq!(stopped, Some(Stopped::Filed("lh-1".into())), "{stop}");
+            assert!(mailbox.contains(r#""session":"live""#), "{stop}: {mailbox}");
+            assert_eq!(l.0.0["lh-1"].session_id.as_deref(), Some("stub"), "{stop}");
+        }
+    }
+
+    #[test]
+    fn a_member_on_its_live_session_is_not_written() {
+        let mut l = NoUpdate(in_session(Some("live")));
+        let mut warnings = vec![];
+        let (stopped, _) = stop_warned(&mut l, &stop_from("live"), &mut |w| warnings.push(w));
+        assert_eq!(stopped, Some(Stopped::Filed("lh-1".into())));
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_session_recorded_since_the_ledger_was_read_is_not_overwritten() {
+        /// Reads the stub; updates see the session a SessionStart wrote since.
+        struct Raced(MemLedger, MemLedger);
+        impl Ledger for Raced {
+            fn entries(&self) -> anyhow::Result<std::collections::BTreeMap<String, AgentRecord>> {
+                self.0.entries()
+            }
+            fn record(&mut self, r: AgentRecord) -> anyhow::Result<()> {
+                self.1.record(r)
+            }
+            fn update(
+                &mut self,
+                name: &str,
+                change: &mut dyn FnMut(&mut AgentRecord) -> anyhow::Result<()>,
+            ) -> anyhow::Result<AgentRecord> {
+                self.1.update(name, change)
+            }
+            fn started(&mut self, n: &str, at: SystemTime) -> anyhow::Result<()> {
+                self.1.started(n, at)
+            }
+        }
+        let mut l = Raced(in_session(Some("stub")), in_session(Some("fresh")));
+        stop_continued(&mut l, &stop_from("fresh"));
+        assert_eq!(l.1.0["lh-1"].session_id.as_deref(), Some("fresh"));
+    }
+
+    #[test]
+    fn a_retired_member_recording_the_live_session_does_not_hold_it() {
+        let mut l = in_session(Some("stub"));
+        let mut other = member("lh-2", "w1:p2", Some(SOCKET));
+        other.session_id = Some("live".into());
+        other.retired = true;
+        l.0.insert("lh-2".into(), other);
+        let (stopped, _) = stop_continued(&mut l, &stop_from("stub"));
+        assert_eq!(stopped, Some(Stopped::Filed("lh-1".into())));
+        assert_eq!(l.0["lh-1"].session_id.as_deref(), Some("live"));
     }
 
     #[test]
@@ -725,27 +812,8 @@ mod tests {
 
     #[test]
     fn a_ledger_error_after_the_stop_is_filed_does_not_lose_it() {
-        struct Failing(MemLedger);
-        impl Ledger for Failing {
-            fn entries(&self) -> anyhow::Result<std::collections::BTreeMap<String, AgentRecord>> {
-                self.0.entries()
-            }
-            fn record(&mut self, r: AgentRecord) -> anyhow::Result<()> {
-                self.0.record(r)
-            }
-            fn update(
-                &mut self,
-                _: &str,
-                _: &mut dyn FnMut(&mut AgentRecord) -> anyhow::Result<()>,
-            ) -> anyhow::Result<AgentRecord> {
-                anyhow::bail!("disk full")
-            }
-            fn started(&mut self, n: &str, at: SystemTime) -> anyhow::Result<()> {
-                self.0.started(n, at)
-            }
-        }
         let dir = tempfile::tempdir().unwrap();
-        let mut l = Failing(claimed(Some("old"), 30, 300));
+        let mut l = NoUpdate(claimed(Some("old"), 30, 300));
         let mut warnings = vec![];
         let pane = Pane {
             id: "w1:p1",

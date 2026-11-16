@@ -207,6 +207,16 @@ mod tests {
     }
 
     #[test]
+    fn a_member_already_moved_to_its_live_session_keeps_it_when_a_start_reports_the_stub() {
+        let mut l = ledger(vec![member("lh-1", "w1:p1", Some(SOCKET), "live")]);
+        assert_eq!(
+            run_continued(&mut l, &start("resume", "stub")).as_deref(),
+            Some("lh-1")
+        );
+        assert_eq!(session_of(&l, "lh-1").as_deref(), Some("live"));
+    }
+
+    #[test]
     fn resuming_a_session_whose_continuation_another_member_owns_keeps_it() {
         let mut l = ledger(vec![
             member("lh-1", "w1:p1", Some(SOCKET), "stub"),

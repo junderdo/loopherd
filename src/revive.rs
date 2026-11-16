@@ -63,7 +63,9 @@ pub fn revive(
         entries = BTreeMap::from([(name.clone(), only)]);
     }
     for mut record in entries.into_values() {
-        record.session_id = record.session_id.map(|s| live(&s));
+        if !record.retired {
+            record.session_id = record.session_id.map(|s| live(&s));
+        }
         let mut warnings = vec![];
         let mut outcome = revive_one(herdr, req, &agents, &record, &mut warnings);
         if let Outcome::Started {
@@ -76,7 +78,8 @@ pub fn revive(
                 current.pane_id = pane_id.clone();
                 current.session_id = session_id
                     .clone()
-                    .or(current.session_id.take().map(|s| live(&s)));
+                    .or(current.session_id.take())
+                    .map(|s| live(&s));
                 current.socket = herdr.socket().or(current.socket.take());
                 current.process = None;
                 Ok(())
@@ -550,6 +553,25 @@ mod tests {
             .report();
         assert_eq!(out, "alive a w1:p4");
         assert!(herdr.started().is_empty());
+    }
+
+    #[test]
+    fn a_retired_entrys_session_is_not_resolved() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let retired = AgentRecord {
+            retired: true,
+            ..stub("a", cwd.path())
+        };
+        let mut ledger = ledger([retired]);
+        let live = |s: &str| match s {
+            "stub" => panic!("resolved a retired entry's session"),
+            other => other.to_string(),
+        };
+        let (out, _) = revive(&herdr, &mut ledger, &request(), &live)
+            .unwrap()
+            .report();
+        assert_eq!(out, "skipped a: retired");
     }
 
     #[test]

@@ -23,8 +23,9 @@ pub fn live_session(claude_dir: &Path, session: &str) -> String {
 }
 
 /// Moves `member`'s recorded session to the one `live` resolves it to, unless
-/// another live member in `entries` records that one; the updated record when
-/// it moved.
+/// another live member in `entries` records that one or the ledger's entry no
+/// longer records the session `member` was read with; the entry as saved when
+/// it tried.
 pub fn follow_recorded(
     ledger: &mut dyn Ledger,
     entries: &BTreeMap<String, AgentRecord>,
@@ -39,7 +40,9 @@ pub fn follow_recorded(
         return Ok(None);
     }
     let updated = ledger.update(&member.name, &mut |record| {
-        record.session_id = Some(resolved.clone());
+        if record.session_id == member.session_id {
+            record.session_id = Some(resolved.clone());
+        }
         Ok(())
     })?;
     Ok(Some(updated))
@@ -63,32 +66,47 @@ pub fn live_for(
     }
 }
 
-/// Follows `transcript`'s `continued-in` records to the sibling transcript
-/// its conversation lives on in, stopping at a missing transcript, a cycle,
-/// or [`MAX_HOPS`].
+/// Follows `transcript`'s `continued-in` records to the transcript its
+/// conversation lives on in, looking in its own project first and then in the
+/// others, and stopping at a missing transcript or [`MAX_HOPS`]. A cycle means
+/// no continuation, so every session in it resolves to itself.
 pub fn live_transcript(transcript: &Path) -> PathBuf {
     let mut current = transcript.to_path_buf();
     let mut seen = HashSet::from([session_in(&current)]);
     for _ in 0..MAX_HOPS {
-        let Some(next) = continued_in(&current)
-            .filter(|next| seen.insert(next.clone()))
-            .map(|next| current.with_file_name(format!("{next}.jsonl")))
-            .filter(|next| next.is_file())
-        else {
+        let Some(next) = continued_in(&current) else {
             break;
         };
-        current = next;
+        if !seen.insert(next.clone()) {
+            return transcript.to_path_buf();
+        }
+        let sibling = current.with_file_name(format!("{next}.jsonl"));
+        let found = match sibling.is_file() {
+            true => Some(sibling),
+            false => current
+                .parent()
+                .and_then(Path::parent)
+                .and_then(|projects| in_projects(projects, &next)),
+        };
+        let Some(found) = found else {
+            break;
+        };
+        current = found;
     }
     current
 }
 
 /// `projects/<project>/<session>.jsonl`, in whichever project holds it.
 pub fn transcript_of(claude_dir: &Path, session: &str) -> Option<PathBuf> {
+    in_projects(&claude_dir.join("projects"), session)
+}
+
+fn in_projects(projects: &Path, session: &str) -> Option<PathBuf> {
     if !is_plain_name(session) {
         return None;
     }
     let name = format!("{session}.jsonl");
-    fs::read_dir(claude_dir.join("projects"))
+    fs::read_dir(projects)
         .ok()?
         .flatten()
         .map(|project| project.path().join(&name))
@@ -106,7 +124,8 @@ pub fn session_in(transcript: &Path) -> String {
 /// The session the last `continued-in` record names, when it is a plain file
 /// name and no turn follows it: a resumed session goes on in its own transcript.
 fn continued_in(transcript: &Path) -> Option<String> {
-    let text = fs::read_to_string(transcript).ok()?;
+    let bytes = fs::read(transcript).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
     let last = text
         .lines()
         .rev()
@@ -144,7 +163,11 @@ mod tests {
 
         /// A transcript for `session` in project `p`, continued in `next` if given.
         fn transcript(&self, session: &str, next: Option<&str>) -> PathBuf {
-            let project = self.dir().join("projects").join("p");
+            self.transcript_in("p", session, next)
+        }
+
+        fn transcript_in(&self, project: &str, session: &str, next: Option<&str>) -> PathBuf {
+            let project = self.dir().join("projects").join(project);
             std::fs::create_dir_all(&project).unwrap();
             let mut lines = vec![format!(
                 r#"{{"type":"user","sessionId":"{session}","message":{{"role":"user","content":"hi"}}}}"#
@@ -196,10 +219,64 @@ mod tests {
     }
 
     #[test]
-    fn a_cycle_stops_before_revisiting_a_session() {
+    fn a_cycle_is_no_continuation_so_each_session_in_it_is_its_own_live_one() {
         let c = Claude::new();
         c.transcript("a", Some("b"));
         c.transcript("b", Some("a"));
+        for x in ["a", "b"] {
+            let live = live_session(c.dir(), x);
+            assert_eq!(live, x);
+            assert_eq!(live_session(c.dir(), &live), live);
+        }
+    }
+
+    #[test]
+    fn a_chain_is_followed_at_most_32_hops() {
+        let c = Claude::new();
+        for i in 0..40 {
+            c.transcript(&format!("s{i}"), Some(&format!("s{}", i + 1)));
+        }
+        c.transcript("s40", None);
+        assert_eq!(live_session(c.dir(), "s0"), "s32");
+        assert_eq!(live_session(c.dir(), "s30"), "s40");
+    }
+
+    #[test]
+    fn a_continuation_into_another_project_is_followed() {
+        let c = Claude::new();
+        c.transcript_in("p", "a", Some("b"));
+        c.transcript_in("q", "b", None);
+        assert_eq!(live_session(c.dir(), "a"), "b");
+    }
+
+    #[test]
+    fn a_continuation_naming_a_path_is_ignored() {
+        let c = Claude::new();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let target = elsewhere.path().join("x");
+        std::fs::write(target.with_extension("jsonl"), "").unwrap();
+        c.transcript("a", Some(target.to_str().unwrap()));
+        assert_eq!(live_session(c.dir(), "a"), "a");
+    }
+
+    #[test]
+    fn a_session_naming_a_path_has_no_transcript() {
+        let c = Claude::new();
+        c.transcript("a", None);
+        let elsewhere = tempfile::tempdir().unwrap();
+        let target = elsewhere.path().join("x");
+        std::fs::write(target.with_extension("jsonl"), "").unwrap();
+        assert_eq!(transcript_of(c.dir(), target.to_str().unwrap()), None);
+    }
+
+    #[test]
+    fn a_transcript_with_invalid_utf8_is_still_followed() {
+        let c = Claude::new();
+        let a = c.transcript("a", Some("b"));
+        c.transcript("b", None);
+        let mut bytes = b"\xff\xfe not text\n".to_vec();
+        bytes.extend(std::fs::read(&a).unwrap());
+        std::fs::write(&a, bytes).unwrap();
         assert_eq!(live_session(c.dir(), "a"), "b");
     }
 
