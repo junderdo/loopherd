@@ -380,44 +380,89 @@ const MAX_TEXT: usize = 200;
 /// The question's first non-blank line, cut to [`MAX_TEXT`] characters, with each word
 /// that looks like a token, carries one (`token=abc`) or is a key's value replaced by
 /// `[redacted]`, and a URL's userinfo hidden. A key with a separator (`password:`,
-/// `password =`, `--password`) hides the next word outright; any other mention of a
-/// key hides it only if it [looks like a secret](looks_like_a_secret), so a merge
-/// question naming `GITHUB_TOKEN` or "the auth flow" survives. Best-effort: a secret
-/// in a shape it doesn't know gets through.
+/// `password =`, `--password`) hides its value outright, to the end of its clause; any
+/// other mention of a key hides the next word only if it [looks like a
+/// secret](looks_like_a_secret), so a merge question naming `GITHUB_TOKEN` or "the auth
+/// flow" survives. Best-effort: a secret in a shape it doesn't know gets through.
 fn summary(question: &str) -> String {
-    let line = question
+    let first = question
         .lines()
         .find(|line| !line.trim().is_empty())
         .unwrap_or_default();
     let mut next = Next::Free;
-    let words: Vec<String> = line
-        .split_whitespace()
-        .map(|word| {
-            let hidden;
-            (hidden, next) = match next {
-                Next::Closing(closer) => (true, Next::closed_by(word, closer)),
-                Next::Value => (true, Next::after_value(word)),
-                Next::Key(key) if is_separator(word) => (false, key.value()),
-                Next::Key(_) if FILLERS.contains(&normalized(word).as_str()) => (false, next),
-                Next::Key(_) | Next::MaybeValue if looks_like_a_secret(word) => {
-                    (true, Next::after_value(word))
-                }
-                Next::Free | Next::Key(_) | Next::MaybeValue => match carried_value(word) {
-                    Some(value) => (true, Next::after_value(value)),
-                    None => (token_shaped(word), key_named_by(word)),
-                },
-            };
-            match hidden {
-                true => "[redacted]".to_string(),
-                false => without_userinfo(word),
+    let mut line = String::new();
+    for word in first.split_whitespace() {
+        let shown;
+        (shown, next) = match next {
+            Next::Clause => match clause_end(word) {
+                Some(end) => (Shown::Glued(end), Next::Free),
+                None => (Shown::Glued(""), Next::Clause),
+            },
+            Next::ClauseStart => clause_start(word),
+            Next::Closing(closer) => (Shown::redacted(), Next::closed_by(word, closer)),
+            Next::Value => (Shown::redacted(), Next::after_value(word)),
+            Next::Key(key) if is_separator(word) => (Shown::Word(word.to_string()), key.value()),
+            Next::Key(_) if FILLERS.contains(&normalized(word).as_str()) => {
+                (Shown::Word(word.to_string()), next)
             }
-        })
-        .collect();
-    let line = words.join(" ");
+            Next::Key(_) | Next::MaybeValue if looks_like_a_secret(word) => {
+                (Shown::redacted(), Next::after_value(word))
+            }
+            Next::Free | Next::Key(_) | Next::MaybeValue => match carried_value(word) {
+                Some((true, value)) => clause_start(value),
+                Some((false, value)) => (Shown::redacted(), Next::after_value(value)),
+                None if token_shaped(word) => (Shown::redacted(), key_named_by(word)),
+                None => (Shown::Word(without_userinfo(word)), key_named_by(word)),
+            },
+        };
+        match shown {
+            Shown::Word(shown) => {
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(&shown);
+            }
+            Shown::Glued(end) => line.push_str(end),
+        }
+    }
     match line.char_indices().nth(MAX_TEXT) {
         Some((cut, _)) => format!("{}…", &line[..cut]),
         None => line,
     }
+}
+
+/// A word as [`summary`] shows it: whole, or only a clause's end glued to the
+/// `[redacted]` before it.
+enum Shown<'a> {
+    Word(String),
+    Glued(&'a str),
+}
+
+impl Shown<'_> {
+    fn redacted() -> Self {
+        Shown::Word("[redacted]".to_string())
+    }
+}
+
+/// The first word of a separated strong key's value, hidden with the rest of its
+/// clause unless it opens a quote or bracket.
+fn clause_start(value: &str) -> (Shown<'_>, Next) {
+    if value.starts_with(['"', '\'', '[', '(', '{']) {
+        return (Shown::redacted(), Next::after_value(value));
+    }
+    match clause_end(value) {
+        Some(end) => (Shown::Word(format!("[redacted]{end}")), Next::Free),
+        None => (Shown::redacted(), Next::Clause),
+    }
+}
+
+/// The punctuation ending `word`'s clause (`,` `;` `?` `!` `.` or a closing quote
+/// or bracket), if it ends one. A cookie's `a=b;` doesn't, so its next pair is hidden.
+fn clause_end(word: &str) -> Option<&str> {
+    let value = word.trim_end_matches(|c: char| ",;?!.)]}\"'".contains(c));
+    let end = &word[value.len()..];
+    let cookie_pair = end.starts_with(';') && value.contains('=');
+    (!end.is_empty() && !cookie_pair).then_some(end)
 }
 
 /// What the next word is to [`summary`].
@@ -426,6 +471,10 @@ enum Next {
     Free,
     /// Hidden outright.
     Value,
+    /// A separated strong key's value: hidden to the end of its clause.
+    ClauseStart,
+    /// Inside a [`ClauseStart`](Next::ClauseStart) value, already shown as `[redacted]`.
+    Clause,
     /// Hidden if it looks like a secret.
     MaybeValue,
     /// After a key with no separator yet: `password`, `the token is`.
@@ -446,15 +495,15 @@ impl Key {
     /// The next word, once a separator follows this key.
     fn value(self) -> Next {
         match self {
-            Key::Strong => Next::Value,
+            Key::Strong => Next::ClauseStart,
             Key::Weak => Next::MaybeValue,
         }
     }
 }
 
 impl Next {
-    /// After a hidden `value`: the rest of an unclosed quote or bracket, the
-    /// next `a=b;` pair, or the credential after an auth scheme.
+    /// After a hidden `value`: the rest of an unclosed quote or bracket, or the
+    /// next `a=b;` pair.
     fn after_value(value: &str) -> Next {
         let closer = match value.chars().next() {
             Some('"') => Some('"'),
@@ -464,12 +513,9 @@ impl Next {
             Some('{') => Some('}'),
             _ => None,
         };
-        let scheme = normalized(value);
         match closer {
             Some(closer) => Next::closed_by(&value[1..], closer),
             None if value.ends_with(';') => Next::Value,
-            None if ["bearer", "basic", "digest"].contains(&scheme.as_str()) => Next::Value,
-            None if scheme == "token" => Next::MaybeValue,
             None => Next::Free,
         }
     }
@@ -565,8 +611,8 @@ fn key_named_by(word: &str) -> Next {
     };
     let label = name.chars().all(|c| c.is_ascii_uppercase()) && key == Key::Strong;
     match () {
-        _ if separated => key.value(),
-        _ if flag.len() < word.len() || label => Next::Value,
+        _ if separated || flag.len() < word.len() => key.value(),
+        _ if label => Next::Value,
         _ => Next::Key(key),
     }
 }
@@ -579,16 +625,21 @@ fn looks_like_a_secret(word: &str) -> bool {
         || (word.len() >= 8 && !word.contains(|c: char| "aeiouAEIOU".contains(c)))
 }
 
-/// The value in a `key=value` or `key:value` word whose key is a secret key,
-/// quoted or not: `token=abc`, `{"token":"abc"}`, `Authorization:Bearer`.
-fn carried_value(word: &str) -> Option<&str> {
+/// The value in a `key=value` or `key:value` word whose key is a secret key, quoted
+/// or not (`token=abc`, `{"token":"abc"}`, `Authorization:Bearer`), and whether it
+/// runs to the end of its clause: a strong key starting the word, not in a URL's query.
+fn carried_value(word: &str) -> Option<(bool, &str)> {
     word.match_indices([':', '=']).find_map(|(at, _)| {
         let left = word[..at].trim_end_matches(['"', '\'']);
         let key_start = left
             .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
             .map_or(0, |i| i + 1);
         let value = &word[at + 1..];
-        (secret_key(&left[key_start..]).is_some() && !value.is_empty()).then_some(value)
+        let key = secret_key(&left[key_start..])?;
+        let starts_word = left[..key_start]
+            .trim_start_matches(['"', '\'', '{', '(', '[', '-'])
+            .is_empty();
+        (!value.is_empty()).then_some((starts_word && key == Key::Strong, value))
     })
 }
 
@@ -961,19 +1012,19 @@ mod tests {
     #[test]
     fn secrets_after_a_key_in_a_url_or_in_an_authorization_header_are_redacted() {
         for (question, text) in [
-            ("password: hunter2 ok?", "password: [redacted] ok?"),
-            ("token:abc ok?", "[redacted] ok?"),
-            ("--password pw2 ok?", "--password [redacted] ok?"),
+            ("password: hunter2 ok?", "password: [redacted]?"),
+            ("token:abc ok?", "[redacted]?"),
+            ("--password pw2 ok?", "--password [redacted]?"),
             ("auth=q ok?", "[redacted] ok?"),
-            ("credential: c1 ok?", "credential: [redacted] ok?"),
+            ("credential: c1 ok?", "credential: [redacted]?"),
             ("Bearer abc123def ok?", "Bearer [redacted] ok?"),
             (
                 "Authorization: Bearer xyz ok?",
-                "Authorization: [redacted] [redacted] ok?",
+                "Authorization: [redacted]?",
             ),
             (
                 "Authorization: Basic dXNlcjpwYXNz ok?",
-                "Authorization: [redacted] [redacted] ok?",
+                "Authorization: [redacted]?",
             ),
             (
                 "clone https://ci:hunter2pass@git.example.com/r.git ok?",
@@ -983,19 +1034,19 @@ mod tests {
                 "use postgres://admin:s3cretpw@db/x ok?",
                 "use postgres://[redacted]@db/x ok?",
             ),
-            ("x-api-key: abc123def ok?", "x-api-key: [redacted] ok?"),
-            ("api-key=abc ok?", "[redacted] ok?"),
+            ("x-api-key: abc123def ok?", "x-api-key: [redacted]?"),
+            ("api-key=abc ok?", "[redacted]?"),
             (
                 "the password is hunter2 ok?",
                 "the password is [redacted] ok?",
             ),
             ("PASSWORD hunter2 ok?", "PASSWORD [redacted] ok?"),
             ("key=AIzaSyA1 ok?", "[redacted] ok?"),
-            ("Authorization:Bearer xyz ok?", "[redacted] [redacted] ok?"),
-            ("Authorization=Bearer xyz ok?", "[redacted] [redacted] ok?"),
+            ("Authorization:Bearer xyz ok?", "[redacted]?"),
+            ("Authorization=Bearer xyz ok?", "[redacted]?"),
             (
                 "Authorization: Token abc123 ok?",
-                "Authorization: [redacted] [redacted] ok?",
+                "Authorization: [redacted]?",
             ),
             (
                 r#""password": "hunter2" ok?"#,
@@ -1008,18 +1059,18 @@ mod tests {
                 r#"password: "hunter 2" ok?"#,
                 "password: [redacted] [redacted] ok?",
             ),
-            ("passphrase=abc ok?", "[redacted] ok?"),
+            ("passphrase=abc ok?", "[redacted]?"),
             ("session=abc ok?", "[redacted] ok?"),
-            ("Cookie: sid=abc ok?", "Cookie: [redacted] ok?"),
+            ("Cookie: sid=abc ok?", "Cookie: [redacted]?"),
             ("the secret xkcdqwrtz ok?", "the secret [redacted] ok?"),
-            ("accessToken=abc ok?", "[redacted] ok?"),
-            ("clientSecret: abc ok?", "clientSecret: [redacted] ok?"),
-            ("PGPASSWORD=abc ok?", "[redacted] ok?"),
-            ("secretKey=hunter ok?", "[redacted] ok?"),
-            ("privateKey: hunter ok?", "privateKey: [redacted] ok?"),
-            ("dbPassword: hunter ok?", "dbPassword: [redacted] ok?"),
-            ("password = hunter ok?", "password = [redacted] ok?"),
-            ("password : x ok?", "password : [redacted] ok?"),
+            ("accessToken=abc ok?", "[redacted]?"),
+            ("clientSecret: abc ok?", "clientSecret: [redacted]?"),
+            ("PGPASSWORD=abc ok?", "[redacted]?"),
+            ("secretKey=hunter ok?", "[redacted]?"),
+            ("privateKey: hunter ok?", "privateKey: [redacted]?"),
+            ("dbPassword: hunter ok?", "dbPassword: [redacted]?"),
+            ("password = hunter ok?", "password = [redacted]?"),
+            ("password : x ok?", "password : [redacted]?"),
             (r#"password = "hunter" ok?"#, "password = [redacted] ok?"),
             (
                 r#""password" : "hunter" ok?"#,
@@ -1029,14 +1080,52 @@ mod tests {
                 r#""password" = "hunter" ok?"#,
                 r#""password" = [redacted] ok?"#,
             ),
-            ("the token is: hunter ok?", "the token is: [redacted] ok?"),
-            (
-                "Cookie: sid=abc; other=def ok?",
-                "Cookie: [redacted] [redacted] ok?",
-            ),
+            ("the token is: hunter ok?", "the token is: [redacted]?"),
+            ("Cookie: sid=abc; other=def ok?", "Cookie: [redacted]?"),
             ("password=[abc def] ok?", "[redacted] [redacted] ok?"),
             ("TOKEN hunter ok?", "TOKEN [redacted] ok?"),
             ("PASSWORD hunter ok?", "PASSWORD [redacted] ok?"),
+        ] {
+            assert_eq!(text_sent(question), text, "{question}");
+        }
+    }
+
+    #[test]
+    fn a_separated_strong_keys_value_is_hidden_to_the_end_of_its_clause() {
+        for (question, text) in [
+            (
+                "password: correct horse battery staple",
+                "password: [redacted]",
+            ),
+            ("passphrase=correct horse battery staple", "[redacted]"),
+            (
+                "passphrase: correct horse battery staple, ok?",
+                "passphrase: [redacted], ok?",
+            ),
+            (
+                "password: two words; merge?",
+                "password: [redacted]; merge?",
+            ),
+            (
+                "password: two words. Merge?",
+                "password: [redacted]. Merge?",
+            ),
+            (
+                "password: two words! Merge?",
+                "password: [redacted]! Merge?",
+            ),
+            (
+                "(password: two words) merge?",
+                "(password: [redacted]) merge?",
+            ),
+            ("--password two words, ok?", "--password [redacted], ok?"),
+            ("--auth abc123 ok?", "--auth [redacted] ok?"),
+            ("password: a.b,c d, ok?", "password: [redacted], ok?"),
+            ("password: hunter2, ok?", "password: [redacted], ok?"),
+            (
+                r#"password: "two words" ok?"#,
+                "password: [redacted] [redacted] ok?",
+            ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
         }
@@ -1063,6 +1152,7 @@ mod tests {
             "Is the token 2 days old?",
             "Is the bearer token flow done?",
             "Rotate the token by Fri?",
+            "Run it with --auth disabled?",
         ] {
             assert_eq!(text_sent(question), question);
         }
