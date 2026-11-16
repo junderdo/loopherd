@@ -66,8 +66,8 @@ whether questions and blocked dialogs also reach them outside herdr (see
 workers' and its own; yours sends the rest and, deduplicated by per-event
 marks in the reports directory, the leads' too. Tests and manual runs set a
 temp `LOOPHERD_CONFIG_DIR` (`scripts/herdr-dev` exports
-`$TMPDIR/loopherd-dev/config` unless one is set), so they never send to the
-human; give such a run its own `[notify]` with a stub `command` to see a send.
+`$XDG_RUNTIME_DIR/loopherd-dev/config`, else a fresh `mktemp -d`, unless one
+is set), so they never send to the human; give such a run its own `[notify]` with a stub `command` to see a send.
 
 ## Gotchas
 
