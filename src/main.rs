@@ -4,6 +4,7 @@ mod feed;
 mod herd;
 mod herd_view;
 mod herdr;
+mod init;
 mod install_hook;
 mod lead;
 mod ledger;
@@ -74,6 +75,11 @@ enum Command {
     Spawn(SpawnArgs),
     /// Spawn a herd member from a template in the herd's file.
     Add(AddArgs),
+    /// Write a herd for the GitHub repo around the current directory: its herd
+    /// file and lead prompt, plus any missing issue labels. Infers the repo, its
+    /// default branch and the gh account matching origin's owner. Refuses,
+    /// changing nothing, when the herd file or lead prompt exists.
+    Init(InitArgs),
     /// List herd files with a usage line per template; exits 1 if any is invalid.
     Herds,
     /// Read or edit one value in a herd file, keeping its comments and layout.
@@ -333,6 +339,20 @@ struct SpawnArgs {
 }
 
 #[derive(Args)]
+struct InitArgs {
+    /// Defaults to the repo's directory name.
+    #[arg(long)]
+    herd: Option<String>,
+    /// A command workers run before calling their work done; repeatable.
+    #[arg(long = "check", value_name = "CMD", required = true, num_args = 1..)]
+    checks: Vec<String>,
+    /// The gh account every gh call runs as; needed when no logged-in account
+    /// matches origin's owner.
+    #[arg(long, value_name = "LOGIN")]
+    gh_account: Option<String>,
+}
+
+#[derive(Args)]
 struct LeadArgs {
     herd: String,
     /// Print the resolved lead; create nothing.
@@ -380,6 +400,7 @@ fn main() -> ExitCode {
     let (command, result) = match command {
         Command::Spawn(args) => ("spawn", run_spawn(args)),
         Command::Add(args) => ("add", run_add(args)),
+        Command::Init(args) => ("init", run_init(args)),
         Command::Herds => ("herds", run_herds()),
         Command::Herd { action } => ("herd", run_herd(action)),
         Command::LeadDefaults { set } => ("lead-defaults", run_lead_defaults(set)),
@@ -976,6 +997,21 @@ fn own_process() -> Result<Process> {
 
 /// Long enough for `scripts/install` to build a release binary.
 const AFTER_MERGE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+fn run_init(args: InitArgs) -> Result<i32> {
+    let paths = Paths::from_env().context("herd")?;
+    let dir = std::env::current_dir().context("current directory")?;
+    let req = init::Request {
+        dir: &dir,
+        herd: args.herd.as_deref(),
+        checks: &args.checks,
+        gh_account: args.gh_account.as_deref(),
+    };
+    for line in init::init(&paths, &req)? {
+        println!("{line}");
+    }
+    Ok(0)
+}
 
 fn run_herds() -> Result<i32> {
     let (report, code) = herds(&Paths::from_env().context("herd")?)?;
