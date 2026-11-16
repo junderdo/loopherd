@@ -658,7 +658,10 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
         labels.needs_info.to_ascii_lowercase(),
         labels.ready_for_human.to_ascii_lowercase(),
     );
-    let fetch = format!("git fetch -q origin {branch} || exit\n");
+    // A fetch that loses a race to update origin/<branch> fails; its retry finds it current.
+    let fetch = format!(
+        "git fetch -q origin {branch} 2>/dev/null || git fetch -q origin {branch} || exit\n"
+    );
     let git_ref = format!("origin/{branch}");
     // Leaves room for "<herd>-" in a member name of at most 32 characters.
     let id_room = (32 - name.len() - 1).to_string();

@@ -3779,6 +3779,54 @@ fn an_issue_file_whose_path_the_queue_cant_read_is_noted_on_stderr() {
 }
 
 #[test]
+fn the_local_source_and_done_retry_a_fetch_that_lost_a_race() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.push_local_issues(&[(".scratch/f/issues/01-a.md", "Status: resolved\n")]);
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+    let real_git = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let lost = fixture.root.path().join("lost");
+    let script = fixture.gh_dir().join("git");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = fetch ] && [ ! -e {lost} ]; then\n  : > {lost}\n  \
+             echo \"error: cannot lock ref 'refs/remotes/origin/main'\" >&2\n  exit 1\nfi\n\
+             exec {real_git} \"$@\"\n",
+            lost = lost.display(),
+            real_git = real_git.trim(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let run = |snippet: String| {
+        let _ = fs::remove_file(&lost);
+        fixture.run(
+            Command::new("sh")
+                .args(["-c", &snippet])
+                .envs(env.iter().map(|(k, v)| (k, v))),
+        )
+    };
+
+    let source = run(fixture.herd_get("queue.source"));
+    let done = run(fixture
+        .herd_get("template.issue.done")
+        .replace("{path}", ".scratch/f/issues/01-a.md"));
+
+    assert_ok(&source);
+    assert_eq!(text(&source.stderr), "");
+    assert_eq!(done.status.code(), Some(0), "{}", text(&done.stderr));
+    assert_eq!(text(&done.stderr), "");
+    assert!(lost.exists());
+}
+
+#[test]
 fn features_that_cut_or_reshape_to_the_same_id_get_distinct_ids() {
     let fixture = Fixture::new(&["acme"]);
 
