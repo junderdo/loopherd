@@ -1,5 +1,5 @@
 //! `loopherd setup`: config.toml's machine-wide settings, the lead defaults
-//! and the handoff limits, asked on a terminal or set by flags (D38).
+//! and the handoff limits, asked on a terminal or set by flags (D39).
 
 use std::io::{BufRead, Write};
 use std::path::Path;

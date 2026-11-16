@@ -434,6 +434,10 @@ struct InitArgs {
     /// The workers' handoff limit in tokens; unset, config.toml's default applies.
     #[arg(long, value_name = "TOKENS")]
     context_limit: Option<u64>,
+    /// Print a unified diff from the files init wrote to what it would write
+    /// now, inferring again; write nothing. Exits 1 when they differ, 2 on error.
+    #[arg(long)]
+    diff: bool,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -1229,6 +1233,18 @@ fn own_process() -> Result<Process> {
 const AFTER_MERGE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 fn run_init(args: InitArgs) -> Result<i32> {
+    let diff = args.diff;
+    match init_or_diff(args) {
+        // diff(1)'s codes, so trouble can't read as drift.
+        Err(e) if diff => {
+            eprintln!("loopherd init: {e:#}");
+            Ok(2)
+        }
+        result => result,
+    }
+}
+
+fn init_or_diff(args: InitArgs) -> Result<i32> {
     let paths = Paths::from_env().context("herd")?;
     let dir = std::env::current_dir().context("current directory")?;
     let req = init::Request {
@@ -1248,6 +1264,15 @@ fn run_init(args: InitArgs) -> Result<i32> {
         lead: args.no_lead.then_some(false),
         context_limit: args.context_limit,
     };
+    if args.diff {
+        return Ok(match init::diff(&paths, req)? {
+            None => 0,
+            Some(diff) => {
+                print!("{diff}");
+                1
+            }
+        });
+    }
     for line in init::init(&paths, req)? {
         println!("{line}");
     }

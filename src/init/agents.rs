@@ -46,6 +46,16 @@ impl Doc {
         }
     }
 
+    /// Refuses a file init would append to but can't write, before any change.
+    pub fn refuse_unappendable(&self, repo: &Path) -> Result<()> {
+        let path = repo.join(self.path);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("write {}", path.display()))?;
+        Ok(())
+    }
+
     /// Appends the doc to its file under `repo`, leaving the file as it was on failure.
     pub fn append_to(&self, repo: &Path) -> Result<()> {
         let path = repo.join(self.path);
@@ -78,24 +88,13 @@ pub struct Plan {
     pub steps: Vec<String>,
 }
 
-/// The docs the repo lacks. Refuses an `AGENTS.md` init would append to but
-/// can't write, so that fails before any change.
-pub fn missing(repo: &Path, herd: Herd) -> Result<Plan> {
+/// The docs the repo lacks.
+pub fn missing(repo: &Path, herd: &Herd) -> Result<Plan> {
     let mut docs = vec![];
     let mut steps = vec![];
     if fs::symlink_metadata(repo.join(LOOPHERD_DOC)).is_err() {
-        let checks: Vec<String> = herd.checks.iter().map(|c| format!("- `{c}`")).collect();
-        let text = super::fill(
-            LOOPHERD,
-            &[
-                ("ACCOUNT", herd.account),
-                ("BRANCH", herd.branch),
-                ("CHECKS", &checks.join("\n")),
-                ("NEEDS_INFO", herd.needs_info),
-            ],
-        );
         match lands_inside(repo, LOOPHERD_DOC)? {
-            true => docs.push(Doc::new(LOOPHERD_DOC, text)),
+            true => docs.push(loopherd_doc(herd)),
             false => steps.push(format!(
                 "{LOOPHERD_DOC} would land outside the repo through a symlink, so init \
                  didn't write it; write it in the repo by hand."
@@ -123,10 +122,6 @@ pub fn missing(repo: &Path, herd: Herd) -> Result<Plan> {
         )),
         Some(agents) if has_loopherd_section(&agents) => {}
         Some(agents) => {
-            fs::OpenOptions::new()
-                .append(true)
-                .open(&agents_md)
-                .with_context(|| format!("write {}", agents_md.display()))?;
             docs.push(Doc {
                 path: AGENTS_MD,
                 text: appended(&agents),
@@ -135,6 +130,25 @@ pub fn missing(repo: &Path, herd: Herd) -> Result<Plan> {
         }
     }
     Ok(Plan { docs, steps })
+}
+
+/// Today's `docs/agents/loopherd.md` when the repo has one, for `--diff`.
+pub fn present(repo: &Path, herd: &Herd) -> Result<Option<Doc>> {
+    Ok(read(&repo.join(LOOPHERD_DOC))?.map(|_| loopherd_doc(herd)))
+}
+
+fn loopherd_doc(herd: &Herd) -> Doc {
+    let checks: Vec<String> = herd.checks.iter().map(|c| format!("- `{c}`")).collect();
+    let text = super::fill(
+        LOOPHERD,
+        &[
+            ("ACCOUNT", herd.account),
+            ("BRANCH", herd.branch),
+            ("CHECKS", &checks.join("\n")),
+            ("NEEDS_INFO", herd.needs_info),
+        ],
+    );
+    Doc::new(LOOPHERD_DOC, text)
 }
 
 /// The section to append to `existing`, a blank line apart and in its line endings.

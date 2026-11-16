@@ -2,7 +2,7 @@
 //! from a lead's pane that needs a switch its herd file leaves off (D17), or
 //! a `loopherd restart --force` (D20), a `loopherd pause` or `resume`
 //! (D23), a `loopherd herd set` or `unset` (D29), a write of the lead
-//! defaults (D31), a `loopherd config set`, `unset` or `setup` (D38), cargo
+//! defaults (D31), a `loopherd config set`, `unset` or `setup` (D39), cargo
 //! run through an alias it can't read, or a `$(…)` whose end it can't find,
 //! which no switch allows.
 //! A guardrail on the command text, not a sandbox.
