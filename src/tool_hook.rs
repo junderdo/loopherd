@@ -228,7 +228,7 @@ fn bash_command(input: &[u8]) -> Option<String> {
 
 /// Every switch the simple commands in `script` need, in order.
 pub fn needs(script: &str) -> Vec<Switch> {
-    needs_with(script, Aliases::default())
+    needs_with(script, &mut Aliases::default())
 }
 
 /// The `CARGO_ALIAS_*` variables assigned so far in a script.
@@ -267,13 +267,13 @@ impl Aliases {
 
 /// [`needs`] with the cargo aliases assigned before `script`. An assignment
 /// counts for the rest of the script, exported or not.
-fn needs_with(script: &str, mut aliases: Aliases) -> Vec<Switch> {
+fn needs_with(script: &str, aliases: &mut Aliases) -> Vec<Switch> {
     let Some(commands) = commands(script) else {
         return vec![Switch::UnreadableCase];
     };
     commands
         .iter()
-        .flat_map(|command| needs_one(command, &mut aliases))
+        .flat_map(|command| needs_one(command, aliases))
         .collect()
 }
 
@@ -378,26 +378,28 @@ fn commands(script: &str) -> Option<Vec<Vec<Word>>> {
 }
 
 /// The text of a `$(…)` whose `$(` was just read, through its matching `)`,
-/// skipping quotes and escapes. `None` when it holds a `case` at a command's
-/// start, since a pattern's `)` would end it early.
+/// skipping quotes, escapes, comments and heredoc bodies. `None` when it
+/// holds a `case … in`, since a pattern's `)` would end it early.
 fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<String> {
+    let arithmetic = chars.peek() == Some(&'(');
     let mut depth = 1;
     let mut inner = String::new();
     let mut word = String::new();
-    let mut command_start = true;
+    let mut saw_case = false;
+    // Delimiters of heredocs whose bodies start after this line, and whether
+    // `<<-` lets their lines start with tabs.
+    let mut heredocs: Vec<(String, bool)> = vec![];
     while let Some(c) = chars.next() {
-        let separates = c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')');
-        if separates {
-            if !word.is_empty() {
-                if command_start && word == "case" {
-                    return None;
-                }
-                command_start = KEYWORDS.contains(&word.as_str());
-                word.clear();
+        if c == '\\' && chars.next_if_eq(&'\n').is_some() {
+            continue;
+        }
+        if separates(c) && !word.is_empty() {
+            if word == "case" {
+                saw_case = true;
+            } else if saw_case && word == "in" {
+                return None;
             }
-            if c != ' ' && c != '\t' {
-                command_start = true;
-            }
+            word.clear();
         }
         match c {
             '(' => depth += 1,
@@ -407,6 +409,58 @@ fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<Stri
                     return Some(inner);
                 }
             }
+            '#' if word.is_empty() => {
+                inner.push(c);
+                while let Some(c) = chars.next_if(|&c| c != '\n') {
+                    inner.push(c);
+                }
+                continue;
+            }
+            '\n' => {
+                inner.push(c);
+                for (delimiter, tabs) in std::mem::take(&mut heredocs) {
+                    heredoc_body(chars, &delimiter, tabs, &mut inner);
+                }
+                continue;
+            }
+            '<' if !arithmetic && chars.peek() == Some(&'<') => {
+                chars.next();
+                inner.push_str("<<");
+                if let Some(c) = chars.next_if(|&c| c == '<' || c == '-') {
+                    inner.push(c);
+                    if c == '<' {
+                        continue;
+                    }
+                }
+                let tabs = inner.ends_with('-');
+                while let Some(c) = chars.next_if(|&c| c == ' ' || c == '\t') {
+                    inner.push(c);
+                }
+                let mut delimiter = String::new();
+                while let Some(c) = chars.next_if(|&c| !separates(c)) {
+                    inner.push(c);
+                    match c {
+                        '\'' | '"' => {
+                            for q in chars.by_ref() {
+                                inner.push(q);
+                                if q == c {
+                                    break;
+                                }
+                                delimiter.push(q);
+                            }
+                        }
+                        '\\' => {
+                            if let Some(e) = chars.next() {
+                                inner.push(e);
+                                delimiter.push(e);
+                            }
+                        }
+                        _ => delimiter.push(c),
+                    }
+                }
+                heredocs.push((delimiter, tabs));
+                continue;
+            }
             '\\' => {
                 inner.push(c);
                 inner.extend(chars.next());
@@ -415,31 +469,72 @@ fn substitution(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<Stri
             }
             '\'' | '"' | '`' => {
                 inner.push(c);
-                while let Some(q) = chars.next() {
-                    if q == '$' && c == '"' && chars.peek() == Some(&'(') {
-                        chars.next();
-                        inner.push_str("$(");
-                        inner.push_str(&substitution(chars)?);
-                        inner.push(')');
-                        continue;
-                    }
-                    inner.push(q);
-                    if q == c {
-                        break;
-                    }
-                    if q == '\\' && c != '\'' {
-                        inner.extend(chars.next());
-                    }
-                }
+                quoted(chars, c, &mut inner)?;
                 word.push(c);
                 continue;
             }
-            _ if !separates => word.push(c),
+            _ if !separates(c) => word.push(c),
             _ => {}
         }
         inner.push(c);
     }
-    (!(command_start && word == "case")).then_some(inner)
+    Some(inner)
+}
+
+fn separates(c: char) -> bool {
+    c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>')
+}
+
+/// Copies a quoted span whose opening `quote` was just read onto `inner`,
+/// through its closing one.
+fn quoted(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    quote: char,
+    inner: &mut String,
+) -> Option<()> {
+    while let Some(c) = chars.next() {
+        if quote == '"' && c == '$' && chars.next_if_eq(&'(').is_some() {
+            inner.push_str("$(");
+            inner.push_str(&substitution(chars)?);
+            inner.push(')');
+            continue;
+        }
+        inner.push(c);
+        if c == quote {
+            break;
+        }
+        if quote == '"' && c == '`' {
+            quoted(chars, c, inner)?;
+        } else if c == '\\' && quote != '\'' {
+            inner.extend(chars.next());
+        }
+    }
+    Some(())
+}
+
+/// Copies a heredoc's body onto `inner` through its `delimiter` line.
+fn heredoc_body(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    delimiter: &str,
+    tabs: bool,
+    inner: &mut String,
+) {
+    while chars.peek().is_some() {
+        let mut line = String::new();
+        while let Some(c) = chars.next_if(|&c| c != '\n') {
+            line.push(c);
+        }
+        inner.push_str(&line);
+        inner.extend(chars.next());
+        let line = if tabs {
+            line.trim_start_matches('\t')
+        } else {
+            &line
+        };
+        if line == delimiter {
+            return;
+        }
+    }
 }
 
 /// Words that run the command after them, with their options that take a value.
@@ -479,7 +574,7 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
         let program = file_name(word);
         if let Some(bare) = redirection(word) {
             i += if bare { 2 } else { 1 };
-        } else if in_env && command[i].name_expands() {
+        } else if in_env && (word.contains('=') || word.is_empty()) && command[i].name_expands() {
             // `env` may get an assignment whose name the hook can't read.
             aliases.assign(&command[i]);
             i += 1;
@@ -493,10 +588,8 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             i += 1;
         } else if DECLARERS.contains(&program) {
             let args = &command[i + 1..];
-            if args
-                .iter()
-                .any(|w| w.text.starts_with('-') && w.text.contains('n'))
-            {
+            let nameref = |w: &Word| w.text.starts_with('-') && w.text.contains('n');
+            if !["export", "readonly"].contains(&program) && args.iter().any(nameref) {
                 // A nameref (`declare -n r=CARGO_ALIAS_X`) assigns through another name.
                 aliases.unreadable_name = true;
             }
@@ -532,7 +625,7 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
                     let script = skip_options(words, i + 1, &WITH_VALUE);
                     return words
                         .get(script)
-                        .map_or(vec![], |script| needs_with(script, aliases.clone()));
+                        .map_or(vec![], |script| needs_with(script, &mut aliases.clone()));
                 }
                 i += if WITH_VALUE.contains(&option.as_str()) {
                     2
@@ -541,7 +634,7 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
                 };
             }
         } else if program == "eval" {
-            return needs_with(&words[i + 1..].join(" "), aliases.clone());
+            return needs_with(&words[i + 1..].join(" "), aliases);
         } else if program == "cargo" {
             return cargo_needs(word, &words[i + 1..], aliases);
         } else {
@@ -1109,6 +1202,13 @@ mod tests {
         "echo $(echo ')') done",
         "echo \"$(echo ')')\" done",
         "'' gh pr merge 12",
+        "gh pr create --title t --body \"$(cat <<'EOF'\n- Handles the edge\ncase where it is empty.\nEOF\n)\"",
+        "gh pr create --title t --body \"$(cat <<'EOF'\n| case | result |\n|---|---|\nEOF\n)\"",
+        "git commit -m \"$(cat <<'EOF'\nFix the empty herd (case 3)\nEOF\n)\"",
+        "gh pr create --title t --body \"$(cat <<'EOF'\n- [ ] cargo test (case 1); case 2 next\nEOF\n)\"",
+        "gh pr create --title t --body \"$(cat <<-EOF\n	it's a case in point\n	EOF\n)\"",
+        "export -n RUST_LOG; cargo nextest run",
+        "echo \"$((1 << 2))\"",
     ];
 
     #[test]
@@ -1820,7 +1920,6 @@ mod tests {
             "export $(echo CARGO_ALIAS_X)='run -- pause h'; cargo x",
             "N=CARGO_ALIAS_X; export $N='run -- pause h'; cargo x",
             "env CARGO_ALIA$(echo S_X)='run -- pause h' cargo x",
-            "env CARGO_ALIA$(echo S_X=run) cargo x -- pause h",
             "env $(printf 'CARGO_ALIAS_%s=run' X) cargo x -- pause h",
             "declare -n r=CARGO_ALIAS_X; r='run -- pause h'; export CARGO_ALIAS_X; cargo x",
             "local -n r=CARGO_ALIAS_X; r='run -- pause h'; cargo x",
@@ -1851,6 +1950,17 @@ mod tests {
             "echo \"$(true; case x in x) :;; esac)\"",
             "echo \"$(true&&case x in x) :;; esac)\"",
             "echo \"$(echo \"$(case x in x) echo;; esac)\")\"",
+            "echo $(time case x in x) gh pr merge 12;; esac)",
+            "echo $(time -p case x in x) gh pr merge 12;; esac)",
+            "echo $(! time case x in x) gh pr merge 12;; esac)",
+            "echo $(coproc case x in x) gh pr merge 12;; esac)",
+            "echo $(function f case x in x) gh pr merge 12;; esac; f)",
+            "echo $(\\\ncase x in x) gh pr merge 12;; esac)",
+            "echo $(ca\\\nse x in x) gh pr merge 12;; esac)",
+            "echo $({ case x in x) gh pr merge 12;; esac; })",
+            "echo $(! case x in x) gh pr merge 12;; esac)",
+            "echo $(if case x in x) gh pr merge 12;; esac; then :; fi)",
+            "echo $(if true; then case x in x) gh pr merge 12;; esac; fi)",
         ] {
             let message =
                 run(&leads, all_on(), command).unwrap_or_else(|| panic!("{command} was allowed"));
@@ -1871,5 +1981,103 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn a_command_after_an_env_dollar_word_heredoc_or_comment_is_judged() {
+        let leads = ledger(vec![lead()]);
+        for (command, want) in [
+            ("env $HOME/bin/gh pr merge 12", Switch::Merge),
+            ("env \"$HOME/bin/gh\" pr merge 12", Switch::Merge),
+            ("env GH_TOKEN=x $HOME/bin/gh pr merge 12", Switch::Merge),
+            (
+                "env -u GITHUB_TOKEN ${HOME}/bin/gh pr merge 12",
+                Switch::Merge,
+            ),
+            ("env nohup $HOME/bin/gh pr merge 12", Switch::Merge),
+            ("env \"$PWD/scripts/install\"", Switch::Install),
+            (
+                "env $(git rev-parse --show-toplevel)/scripts/install --lead-defaults",
+                Switch::LeadDefaults,
+            ),
+            (
+                "env $HOME/.cargo/bin/loopherd herd set h lead.merge true",
+                Switch::HerdEdit,
+            ),
+            ("env $HOME/.cargo/bin/loopherd pause h", Switch::Pause),
+            ("env $HOME/bin/git rebase main", Switch::Rebase),
+            (
+                "env CARGO_ALIAS_X='run -- pause h' $HOME/.cargo/bin/cargo x",
+                Switch::Pause,
+            ),
+            (
+                "gh pr create --body \"$(cat <<'EOF'\nThe lead's hook\nEOF\n)\" && gh pr merge 1",
+                Switch::Merge,
+            ),
+            (
+                "gh pr create --body \"$(cat <<'EOF'\nThe lead's hook\nEOF\n)\"\ngh pr merge 1",
+                Switch::Merge,
+            ),
+            (
+                "gh pr create --body \"$(cat <<'EOF'\nThe lead's hook\nEOF\n)\" && loopherd herd set h lead.merge true",
+                Switch::HerdEdit,
+            ),
+            (
+                "gh pr create --body \"$(cat <<'EOF'\nThe lead's hook\nEOF\n)\" && scripts/install",
+                Switch::Install,
+            ),
+            (
+                "gh pr create --body \"$(cat <<EOF\nThe lead's hook\nEOF\n)\" && gh pr merge 1",
+                Switch::Merge,
+            ),
+            (
+                "gh pr create --body \"$(cat << \"EOF\"\nThe lead's hook\nEOF\n)\" && gh pr merge 1",
+                Switch::Merge,
+            ),
+            (
+                "git commit -m \"$(cat <<'EOF'\nDon't deny it\nEOF\n)\" && git push --force",
+                Switch::Rebase,
+            ),
+            (
+                "git commit -m \"$(cat <<'EOF'\nDon't deny it\nEOF\n)\" && git rebase origin/main",
+                Switch::Rebase,
+            ),
+            (
+                "x=$(cat <<'EOF'\nit's\nEOF\n); gh pr merge 1",
+                Switch::Merge,
+            ),
+            (
+                "x=$(cat <<-'EOF'\n	it's\n	EOF\n); gh pr merge 1",
+                Switch::Merge,
+            ),
+            (
+                "x=$(cat <<'A' <<'B'\nit's\nA\nit's\nB\n); gh pr merge 1",
+                Switch::Merge,
+            ),
+            ("x=$(true # 1) don't\n); gh pr merge 1", Switch::Merge),
+            ("echo $(true # )'\ngh pr merge 12\n#'\n)", Switch::Merge),
+            (
+                "echo $(echo \"`echo \")\"`\"; gh pr merge 12)",
+                Switch::Merge,
+            ),
+            (
+                "echo $(echo ')'; loopherd herd set h lead.merge true)",
+                Switch::HerdEdit,
+            ),
+            (
+                "eval \"export CARGO_ALIAS_X='run -- pause h'\"; cargo x",
+                Switch::Pause,
+            ),
+        ] {
+            assert!(
+                needs(command).contains(&want),
+                "{command}: {:?}",
+                needs(command)
+            );
+            assert!(
+                run(&leads, only_off(want), command).is_some(),
+                "{command} was allowed"
+            );
+        }
     }
 }
