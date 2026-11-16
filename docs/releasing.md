@@ -42,3 +42,9 @@ on main, delete the tag, and tag again.
 `v<version>` tag, and the version plus the short commit for any other build
 from git (`loopherd 0.1.0 (ea71305)`, `-dirty` with uncommitted changes).
 A build with no git prints the bare version.
+
+## Rust toolchain
+
+`rust-toolchain.toml` pins the compiler for local builds and the release
+workflow alike, so a newer runner image can't fail a tag on a lint main
+never saw. Bump it in its own PR, with the gate passing on the new version.
