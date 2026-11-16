@@ -13,8 +13,9 @@ gh command runs as. An issue someone else has claimed isn't yours.
 
 ## Branch names
 
-`<type>/<number>-<slug>`: the type is `fix` for a `bug` issue, `docs` for a
-`documentation` one, else `feat`; the slug is the title's first five words.
+`<type>/<number>-<slug>`: the type comes from the issue's labels through the
+herd file's type map (by default `fix` for `bug`, `docs` for
+`documentation`, else `feat`); the slug comes from the title.
 loopherd creates the branch and its worktree; work only there. If @BRANCH@
 moves under you, merge `origin/@BRANCH@` into your branch; never rebase or
 force-push.
@@ -39,7 +40,7 @@ see, then report it.
 
 ## Reporting
 
-Finish every stop, done or stuck, with one report to the shepherd:
+Tell the shepherd how the work ended:
 
-- `loopherd report --kind done "<PR link and one-line summary>"`
-- `loopherd report --kind question "<the exact question>"`
+- Done: `loopherd report --kind done "<PR link and one-line summary>"`.
+- Stopped on a question: `loopherd report --kind question "<the exact question>"`.

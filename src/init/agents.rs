@@ -73,11 +73,19 @@ pub struct Herd<'a> {
     pub needs_info: &'a str,
 }
 
-/// The docs the repo lacks, `AGENTS.md`'s last so a failed append is the
-/// only write left to undo.
-pub fn missing(repo: &Path, herd: Herd) -> Result<Vec<Doc>> {
+/// What init writes into the repo and, for a linked `AGENTS.md`, the step
+/// left to the human.
+pub struct Plan {
+    /// `AGENTS.md`'s last, so a failed append is the only write left to undo.
+    pub docs: Vec<Doc>,
+    pub step: Option<String>,
+}
+
+/// The docs the repo lacks.
+pub fn missing(repo: &Path, herd: Herd) -> Result<Plan> {
     let mut docs = vec![];
-    if read(&repo.join(LOOPHERD_DOC))?.is_none() {
+    let mut step = None;
+    if fs::symlink_metadata(repo.join(LOOPHERD_DOC)).is_err() {
         let checks: Vec<String> = herd.checks.iter().map(|c| format!("- `{c}`")).collect();
         let text = super::fill(
             LOOPHERD,
@@ -90,7 +98,16 @@ pub fn missing(repo: &Path, herd: Herd) -> Result<Vec<Doc>> {
         );
         docs.push(Doc::new(LOOPHERD_DOC, text));
     }
-    match read(&repo.join(AGENTS_MD))? {
+    let agents_md = repo.join(AGENTS_MD);
+    let linked = fs::symlink_metadata(&agents_md).is_ok_and(|m| m.file_type().is_symlink());
+    match read(&agents_md)? {
+        // Appending through a link could change a file outside the repo.
+        Some(agents) if linked && !has_loopherd_section(&agents) => {
+            step = Some(format!(
+                "{AGENTS_MD} is a symlink, so init left it alone; add a loopherd section \
+                 pointing at {LOOPHERD_DOC} and docs/agents/issue-tracker.md to it by hand."
+            ));
+        }
         None => docs.push(Doc::new(
             AGENTS_MD,
             format!("# Agent instructions\n\n{SECTION}"),
@@ -110,16 +127,38 @@ pub fn missing(repo: &Path, herd: Herd) -> Result<Vec<Doc>> {
             });
         }
     }
-    Ok(docs)
+    Ok(Plan { docs, step })
 }
 
-/// Whether any Markdown heading names loopherd, in any case.
+/// Whether any ATX heading outside a fenced or indented code block names
+/// loopherd, in any case.
 fn has_loopherd_section(text: &str) -> bool {
-    text.lines().any(|line| {
-        let line = line.trim_start_matches('\u{feff}').trim_start();
+    let mut fence: Option<&str> = None;
+    for line in text.lines() {
+        let line = line.trim_start_matches('\u{feff}');
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        let line = line.trim_start();
+        if let Some(open) = fence {
+            if line.starts_with(open) {
+                fence = None;
+            }
+            continue;
+        }
+        if indent >= 4 || line.starts_with('\t') {
+            continue;
+        }
+        if line.starts_with("```") || line.starts_with("~~~") {
+            fence = Some(&line[..3]);
+            continue;
+        }
         let title = line.trim_start_matches('#');
-        title.len() < line.len()
+        let level = line.len() - title.len();
+        if (1..=6).contains(&level)
             && (title.is_empty() || title.starts_with(char::is_whitespace))
             && title.to_ascii_lowercase().contains("loopherd")
-    })
+        {
+            return true;
+        }
+    }
+    false
 }

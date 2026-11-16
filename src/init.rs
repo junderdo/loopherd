@@ -56,6 +56,8 @@ struct Herd {
     /// The limit that applies when `context_limit` is unset.
     config_limit: String,
     docs: Vec<agents::Doc>,
+    /// What the human adds to `AGENTS.md` that init couldn't.
+    agents_step: Option<String>,
 }
 
 /// Writes the herd file and its lead prompt and creates missing labels,
@@ -249,7 +251,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
         .drain(..)
         .map(|(path, text)| agents::Doc::new(path, text))
         .collect();
-    docs.extend(agents::missing(
+    let plan = agents::missing(
         &repo,
         agents::Herd {
             account: &account,
@@ -257,7 +259,8 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
             checks: &checks,
             needs_info: &tracker.labels.needs_info,
         },
-    )?);
+    )?;
+    docs.extend(plan.docs);
     Ok(Herd {
         repo,
         name,
@@ -273,6 +276,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker) -> Result<Herd> {
         context_limit,
         config_limit,
         docs,
+        agents_step: plan.step,
     })
 }
 
@@ -531,12 +535,13 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
                 .into(),
         );
         steps.push(format!(
-            "Fill [queue] source in {} from {}, and adapt its issue template to the same \
-             tracker.",
+            "Fill [queue] source in {} from {}, and adapt its issue template and \
+             docs/agents/loopherd.md to the same tracker.",
             herd_file.display(),
             tracker::TRACKER_DOC
         ));
     }
+    steps.extend(herd.agents_step.clone());
     if !herd.docs.is_empty() {
         let paths: Vec<String> = herd.docs.iter().map(|doc| doc.path.to_string()).collect();
         steps.push(format!(

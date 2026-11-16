@@ -1433,6 +1433,10 @@ fn with_a_placeholder_source_the_next_steps_fill_it_before_feeding() {
         )),
         "{next}"
     );
+    assert!(
+        next.contains("adapt its issue template and docs/agents/loopherd.md to the same tracker"),
+        "{next}"
+    );
     assert!(next.contains("  6. loopherd lead widgets"), "{next}");
 }
 
@@ -2524,4 +2528,55 @@ fn on_a_terminal_the_summary_names_a_section_added_to_an_existing_agents_md() {
         "{}",
         text(&out.stdout)
     );
+}
+
+#[test]
+fn loopherd_in_a_code_block_is_not_a_loopherd_section() {
+    let fixture = Fixture::new(&["acme"]);
+    let agents = "# Widgets\n\n```sh\n# install loopherd first\n```\n\n    # loopherd too\n";
+    fs::write(fixture.repo().join("AGENTS.md"), agents).unwrap();
+
+    assert_ok(&fixture.init(&[]));
+
+    let written = repo_file(&fixture, "AGENTS.md");
+    assert!(
+        written.starts_with(agents) && written.contains("\n## loopherd\n"),
+        "{written}"
+    );
+}
+
+#[test]
+fn a_symlinked_agents_md_is_left_alone_with_a_step_to_add_the_section() {
+    let fixture = Fixture::new(&["acme"]);
+    let outside = fixture.root.path().join("global.md");
+    fs::write(&outside, "# Mine\n").unwrap();
+    std::os::unix::fs::symlink(&outside, fixture.repo().join("AGENTS.md")).unwrap();
+
+    let out = fixture.init(&[]);
+
+    assert_ok(&out);
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "# Mine\n");
+    assert!(
+        text(&out.stdout).contains(
+            "AGENTS.md is a symlink, so init left it alone; add a loopherd section pointing \
+             at docs/agents/loopherd.md and docs/agents/issue-tracker.md to it by hand."
+        ),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn an_unreadable_loopherd_doc_is_left_as_it_was() {
+    let fixture = Fixture::new(&["acme"]);
+    let doc = fixture.repo().join("docs/agents/loopherd.md");
+    fs::create_dir_all(doc.parent().unwrap()).unwrap();
+    fs::write(&doc, "ours\n").unwrap();
+    fs::set_permissions(&doc, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let out = fixture.init(&[]);
+
+    fs::set_permissions(&doc, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_ok(&out);
+    assert_eq!(fs::read_to_string(&doc).unwrap(), "ours\n");
 }
