@@ -22,6 +22,7 @@ const GITHUB_SOURCE: &str = include_str!("init/github-source.toml");
 const GITHUB_ISSUE: &str = include_str!("init/github-issue.toml");
 const LOCAL_SOURCE: &str = include_str!("init/local-source.toml");
 const LOCAL_ISSUE: &str = include_str!("init/local-issue.toml");
+const OTHER_ISSUE: &str = include_str!("init/other-issue.toml");
 const PLACEHOLDER_SOURCE: &str = include_str!("init/placeholder-source.toml");
 const MERGED_GITHUB: &str = include_str!("init/merged-github.toml");
 const LEAD: &str = include_str!("init/lead.md");
@@ -47,6 +48,15 @@ link, any PR that must merge first, and the line
 `! GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh pr merge <n> --repo @OWNER_REPO@ --merge --match-head-commit <full sha>`
 for the head your reviewer verified. Single-quote that question ('...', not
 \"...\"): double quotes run the $(...) and leak the token.";
+const LEAD_WORK_MERGE_ASK: &str = "With merge off, a merge question carries the
+@WORK@, any @WORK@ that must merge first, and the full sha of the head your
+reviewer verified.";
+const OTHER_PR_HAND_IN: &str = "open a pull request into @BRANCH@,
+   and link it on task {number}, so the task closes when the PR merges.";
+const OTHER_PUSH_HAND_IN: &str = "open no pull request, and hand it
+   in on task {number}, so the task closes when the human merges it into @BRANCH@.";
+/// Marks what the human fills for a tracker init has no snippets for.
+const FILL_IN: &str = "Fill in from docs/agents/issue-tracker.md";
 const LEAD_BRANCH_MERGE_ASK: &str = "With merge off, a merge question carries the
 branch, any branch that must merge first, and the full sha of the head your
 reviewer verified.";
@@ -115,6 +125,12 @@ pub fn init(paths: &Paths, req: Request) -> Result<Vec<String>> {
         }
     } else if herd.github.is_none() {
         eprintln!("warning: {NO_MERGED}");
+        if has_origin(&herd.repo) {
+            eprintln!(
+                "note: if origin is GitHub behind an ssh host alias, pass --repo <owner>/<name> \
+                 to keep the merged check"
+            );
+        }
     }
     write(paths, herd)
 }
@@ -229,9 +245,9 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         _ => bail!("--repo {slug:?} is not <owner>/<name>"),
     };
     let recorded_github = recorded.as_ref().and_then(|r| r.github.as_deref());
-    // A local tracker needs GitHub only for its PRs, so it can go without.
+    // Only a GitHub tracker needs GitHub; the others use it only for PRs.
     let github = match (&origin, tracker.kind) {
-        (Err(_), tracker::Kind::Local) => ask.value(
+        (Err(_), tracker::Kind::Local | tracker::Kind::Other) => ask.value(
             "GitHub repo (owner/name); Enter for none",
             req.github,
             Some(recorded_github.unwrap_or("")),
@@ -386,23 +402,59 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
                 ".defaultBranchRef.name // \"\"",
             ],
         )?,
-        None => {
+        None if tracker.kind == tracker::Kind::Local => {
             let branch = crate::worktree::default_branch(&repo)?;
             branch
                 .strip_prefix("origin/")
                 .unwrap_or(&branch)
                 .to_string()
         }
+        None => match origin_head(&repo)? {
+            Some(branch) => branch,
+            None => {
+                let recorded = recorded.as_ref().and_then(|r| r.branch.clone());
+                match recorded.or(symbolic_ref(&repo, "HEAD")?) {
+                    Some(branch) => {
+                        if mode == Mode::Write {
+                            eprintln!(
+                                "origin/HEAD isn't set, so the default branch is the checked-out \
+                                 {branch}; `git remote set-head origin <branch>` sets it."
+                            );
+                        }
+                        branch
+                    }
+                    None => String::new(),
+                }
+            }
+        },
     };
-    let branch = match branch.trim() {
+    let unknown_branch = format!(
+        "can't tell {}'s default branch: origin/HEAD isn't set and HEAD is detached; \
+         check out the default branch or run `git remote set-head origin <branch>`",
+        repo.display()
+    );
+    let default_branch = match branch.trim() {
         "" => match &github {
             Some(github) => bail!(
                 "{} has no default branch yet; push a first commit",
                 github.slug
             ),
-            None => bail!("can't tell {}'s default branch from origin", repo.display()),
+            None if tracker.kind == tracker::Kind::Local => {
+                bail!("can't tell {}'s default branch from origin", repo.display())
+            }
+            None => None,
         },
-        branch => ask.value("Default branch", None, Some(branch), "", |branch| {
+        branch => Some(branch),
+    };
+    let branch = ask.value(
+        "Default branch",
+        None,
+        default_branch,
+        match default_branch {
+            Some(_) => "",
+            None => &unknown_branch,
+        },
+        |branch| {
             if branch.contains(char::is_whitespace) {
                 bail!("{branch:?} can't name a branch");
             }
@@ -419,8 +471,8 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
                 );
             }
             Ok(branch.to_string())
-        })?,
-    };
+        },
+    )?;
     let mut docs: Vec<agents::Doc> = tracker
         .writes
         .drain(..)
@@ -431,7 +483,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         branch: &branch,
         checks: &checks,
         needs_info: &tracker.labels.needs_info,
-        local: tracker.kind == tracker::Kind::Local,
+        tracker: tracker.kind,
     };
     let plan = agents::missing(&repo, &agents_herd)?;
     docs.extend(plan.docs);
@@ -666,13 +718,12 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
     let git_ref = format!("origin/{branch}");
     // Leaves room for "<herd>-" in a member name of at most 32 characters.
     let id_room = (32 - name.len() - 1).to_string();
-    let local = tracker.kind == tracker::Kind::Local;
     let (slug, account) = match github {
         Some(github) => (github.slug.as_str(), github.account.as_str()),
         None => ("", ""),
     };
-    let (task, lead_tasks) = match local {
-        true => (
+    let (task, lead_tasks) = match tracker.kind {
+        tracker::Kind::Local => (
             "ready issue under .scratch/ in this repo".to_string(),
             format!(
                 "Tasks are issue files under `.scratch/` on origin's {branch}. A \
@@ -680,21 +731,35 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
                  the issue closes when the branch merges."
             ),
         ),
-        false => (
+        tracker::Kind::GitHub => (
             format!("ready GitHub issue in {slug}"),
             "Tasks are GitHub issues in @OWNER_REPO@. A worker opens a PR whose body \
              carries `Closes #<n>`, so its issue closes when the PR merges."
                 .to_string(),
         ),
+        tracker::Kind::Other => (
+            format!("ready task in the tracker {}", tracker::TRACKER_DOC),
+            format!(
+                "Tasks come from the tracker {doc} describes. {FILL_IN}: how a \
+                 worker's task closes when its @WORK@ merges. (fill in)",
+                doc = tracker::TRACKER_DOC
+            ),
+        ),
     };
     let dir_name = repo.file_name().unwrap_or_default().to_string_lossy();
     let checkout_of = match github {
-        Some(github) => github.slug.as_str(),
-        None => &dir_name,
+        Some(github) if tracker.kind != tracker::Kind::Other => github.slug.as_str(),
+        _ => &dir_name,
     };
     let github_text = |github_text: &'static str, otherwise: &'static str| match github {
         Some(_) => github_text,
         None => otherwise,
+    };
+    let other = tracker.kind == tracker::Kind::Other;
+    // An other tracker's prompts name no gh command, whatever origin is.
+    let gh_text = |gh_text: &'static str, otherwise: &'static str| match other {
+        true => otherwise,
+        false => github_text(gh_text, otherwise),
     };
     let mut values = vec![
         ("OWNER_REPO", slug),
@@ -718,20 +783,28 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
         ("REF", &git_ref),
         ("ID_ROOM", &id_room),
         ("TASK", &task),
+        ("FILL_IN", FILL_IN),
         ("HANDED_IN", github_text("PR link", "branch")),
         ("WORK", github_text("PR", "branch")),
     ];
     let snippets = [
-        ("GH_NOTE", github_text(LOCAL_GH_NOTE, "")),
-        ("HAND_IN", github_text(LOCAL_PR_HAND_IN, LOCAL_PUSH_HAND_IN)),
-        ("LEAD_GH", github_text(LEAD_GH, "")),
+        ("GH_NOTE", gh_text(LOCAL_GH_NOTE, "")),
+        ("HAND_IN", gh_text(LOCAL_PR_HAND_IN, LOCAL_PUSH_HAND_IN)),
+        (
+            "OTHER_HAND_IN",
+            github_text(OTHER_PR_HAND_IN, OTHER_PUSH_HAND_IN),
+        ),
+        ("LEAD_GH", gh_text(LEAD_GH, "")),
         (
             "ON_MERGED",
             github_text(LEAD_ON_MERGED, LEAD_ON_BRANCH_MERGED),
         ),
         (
             "MERGE_ASK",
-            github_text(LEAD_PR_MERGE_ASK, LEAD_BRANCH_MERGE_ASK),
+            match other {
+                true => LEAD_WORK_MERGE_ASK,
+                false => github_text(LEAD_PR_MERGE_ASK, LEAD_BRANCH_MERGE_ASK),
+            },
         ),
     ]
     .map(|(key, text)| (key, fill(text, &values)));
@@ -740,7 +813,7 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
     let (source, template) = match tracker.kind {
         tracker::Kind::GitHub => (GITHUB_SOURCE, GITHUB_ISSUE),
         tracker::Kind::Local => (LOCAL_SOURCE, LOCAL_ISSUE),
-        tracker::Kind::Other => (PLACEHOLDER_SOURCE, GITHUB_ISSUE),
+        tracker::Kind::Other => (PLACEHOLDER_SOURCE, OTHER_ISSUE),
     };
     let source = fill(source, &values);
     let source = source.trim_end();
@@ -812,16 +885,33 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
     )];
     if tracker.kind == tracker::Kind::Other {
         lines.push(
-            "The tracker isn't GitHub, so the herd's queue source is a placeholder that \
-             `loopherd herds` reports invalid until it's filled."
+            "The tracker isn't one init has snippets for, so the herd holds placeholders, \
+             and `loopherd herds` reports it invalid until its queue source is filled."
                 .into(),
         );
         steps.push(format!(
-            "Fill [queue] source in {} from {}, and adapt its issue template and \
-             docs/agents/loopherd.md to the same tracker.",
-            herd_file.display(),
-            tracker::TRACKER_DOC
+            "{FILL_IN}, in {}: [queue] source, [template.issue] done, and each prompt step \
+             marked (fill in).",
+            herd_file.display()
         ));
+        if herd.lead {
+            steps.push(format!(
+                "{FILL_IN}, in {}: the line marked (fill in).",
+                lead_file.display()
+            ));
+        }
+        steps.push(
+            "Fill in each section of docs/agents/loopherd.md marked (fill in), or adapt the \
+             doc to the same tracker if it was already there."
+                .into(),
+        );
+    }
+    if !has_origin(repo) {
+        steps.push(
+            "Add an origin remote (`git remote add origin <url>`): members branch from it, \
+             and `loopherd feed` fails without one."
+                .into(),
+        );
     }
     steps.extend(herd.agents_steps.iter().cloned());
     steps.push(
@@ -978,6 +1068,8 @@ struct Recorded {
     context_limit: Option<u64>,
     /// The worker prompt's checklist items that are a bare `check`; a reworded one is skipped.
     checks: Vec<String>,
+    /// The default branch the worker prompt names.
+    branch: Option<String>,
     /// The `owner/name` that `merged` checks PRs on.
     github: Option<String>,
 }
@@ -1006,7 +1098,12 @@ impl Recorded {
             .filter_map(|item| item.strip_prefix('`')?.strip_suffix('`'))
             .map(|check| check.replace("{{", "{").replace("}}", "}"))
             .collect();
+        let branch = prompt.lines().find_map(|line| {
+            let branch = line.strip_prefix("If ")?.split_once(" moves under you")?.0;
+            Some(branch.to_string())
+        });
         Some(Recorded {
+            branch,
             lead: herd.contains_key("lead"),
             max: number(herd.get("queue").and_then(|q| q.get("max"))),
             context_limit: number(issue.and_then(|t| t.get("context_limit"))),
@@ -1019,6 +1116,24 @@ impl Recorded {
                 .map(String::from),
         })
     }
+}
+
+/// The branch the local origin/HEAD names; asks no remote.
+fn origin_head(repo: &Path) -> Result<Option<String>> {
+    Ok(symbolic_ref(repo, "refs/remotes/origin/HEAD")?
+        .map(|head| head.strip_prefix("origin/").unwrap_or(&head).to_string()))
+}
+
+fn symbolic_ref(repo: &Path, name: &str) -> Result<Option<String>> {
+    let out = Command::new("git")
+        .args(["symbolic-ref", "--quiet", "--short", name])
+        .current_dir(repo)
+        .output()
+        .context("run git")?;
+    Ok(out
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string()))
 }
 
 fn has_origin(repo: &Path) -> bool {
