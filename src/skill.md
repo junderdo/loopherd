@@ -253,7 +253,9 @@ watch and carry on from its next steps.
   `lead.merge`, `template.card.args`); the value is TOML, so quote strings
   (`'"x"'`). It keeps the file's comments and layout, creates missing
   tables, and refuses, changing nothing, any edit `loopherd herds` would
-  call invalid. Turn a lead's switches on only when the human says so.
+  call invalid. `herd unset <herd> lead.<switch>` hands the switch back to
+  `[lead_defaults]`, not to off. Turn a lead's switches on only when the
+  human says so.
 - **Lead defaults** are `[lead_defaults]` in
   `$LOOPHERD_CONFIG_DIR/config.toml`: each lead's switches wherever its herd
   file's `[lead]` doesn't set one. `scripts/install` asks for them on a
