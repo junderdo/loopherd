@@ -3,10 +3,11 @@
 //! written when not.
 
 use std::fs;
-use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+
+use super::ask::{interactive, line};
 
 const GITHUB: &str = include_str!("tracker/github.md");
 const LOCAL: &str = include_str!("tracker/local.md");
@@ -108,7 +109,7 @@ fn other_doc(desc: Option<String>) -> Result<String> {
         Some(desc) if desc.trim().is_empty() => bail!("the tracker description is empty"),
         Some(desc) => desc,
         None if interactive() => loop {
-            let answer = prompt("Describe how this repo tracks issues, in one paragraph: ")?;
+            let answer = line("Describe how this repo tracks issues, in one paragraph: ")?;
             if !answer.trim().is_empty() {
                 break answer;
             }
@@ -191,13 +192,9 @@ fn read(path: &PathBuf) -> Result<Option<String>> {
     }
 }
 
-fn interactive() -> bool {
-    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
-}
-
 fn ask() -> Result<Choice> {
     loop {
-        let answer = prompt(&format!(
+        let answer = line(&format!(
             "No {TRACKER_DOC}. Where does this repo track issues? \
              [github/local/other] (github): "
         ))?;
@@ -208,14 +205,4 @@ fn ask() -> Result<Choice> {
             _ => eprintln!("answer github, local or other"),
         }
     }
-}
-
-fn prompt(question: &str) -> Result<String> {
-    eprint!("{question}");
-    std::io::stderr().flush()?;
-    let mut line = String::new();
-    if std::io::stdin().lock().read_line(&mut line)? == 0 {
-        bail!("no answer on stdin");
-    }
-    Ok(line)
 }

@@ -78,8 +78,10 @@ enum Command {
     Add(AddArgs),
     /// Write a herd for the GitHub repo around the current directory: its herd
     /// file and lead prompt, plus any missing issue labels. Infers the repo, its
-    /// default branch and the gh account matching origin's owner. Refuses,
-    /// changing nothing, when the herd file or lead prompt exists.
+    /// default branch, the gh account matching origin's owner and checks from
+    /// Cargo.toml or package.json; on a terminal, asks for each with that as
+    /// the default and confirms before writing. Refuses, changing nothing,
+    /// when the herd file exists, or the lead prompt does without --no-lead.
     Init(InitArgs),
     /// List herd files with a usage line per template; exits 1 if any is invalid.
     Herds,
@@ -345,7 +347,8 @@ struct InitArgs {
     #[arg(long)]
     herd: Option<String>,
     /// A command workers run before calling their work done; repeatable.
-    #[arg(long = "check", value_name = "CMD", required = true, num_args = 1..)]
+    /// Suggested from Cargo.toml or package.json when not given.
+    #[arg(long = "check", value_name = "CMD", num_args = 1..)]
     checks: Vec<String>,
     /// The gh account every gh call runs as; needed when no logged-in account
     /// matches origin's owner.
@@ -361,6 +364,15 @@ struct InitArgs {
     /// How an `other` tracker works, in prose, for the tracker doc.
     #[arg(long, value_name = "TEXT")]
     tracker_desc: Option<String>,
+    /// How many workers run at once; default 3.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(i64).range(1..))]
+    max: Option<i64>,
+    /// Write no [lead] table and no lead prompt.
+    #[arg(long)]
+    no_lead: bool,
+    /// The workers' handoff limit in tokens; unset, config.toml's default applies.
+    #[arg(long, value_name = "TOKENS")]
+    context_limit: Option<u64>,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -1043,6 +1055,9 @@ fn run_init(args: InitArgs) -> Result<i32> {
             (Some(TrackerArg::Local), None) => Some(init::Tracker::Local),
             (None, None) => None,
         },
+        max: args.max.map(|max| max as u64),
+        lead: args.no_lead.then_some(false),
+        context_limit: args.context_limit,
     };
     for line in init::init(&paths, req)? {
         println!("{line}");

@@ -89,8 +89,19 @@ For a repo whose `origin` is on GitHub, with its tasks as GitHub issues:
 
 ```bash
 cd <repo>
-loopherd init --check "cargo fmt --check" --check "cargo test"   # [--herd <name>] [--gh-account <login>] [--repo <owner>/<name>] [--tracker github|local|other [--tracker-desc <text>]]
+loopherd init   # [--check <cmd>]... [--max <n>] [--no-lead] [--context-limit <tokens>] [--herd <name>] [--gh-account <login>] [--repo <owner>/<name>] [--tracker github|local|other [--tracker-desc <text>]]
 ```
+
+On a terminal, init asks for the repo, herd name, GitHub repo, checks, how
+many workers run at once (`max`, default 3), whether the herd gets a lead,
+the workers' handoff limit (`context_limit`; Enter leaves it unset so
+`config.toml`'s default applies), the gh account and the default branch,
+each with what it inferred as the default, then shows a summary to confirm
+before writing. A flag answers its question. Checks are suggested from
+`Cargo.toml` (`cargo fmt --check`, `cargo clippy -- -D warnings`,
+`cargo test`) or `package.json` (`npm run lint`, `npm test`). Without a
+terminal it uses flags and inferred values, and names the flag for any it
+can't infer.
 
 init reads the tracker from `docs/agents/issue-tracker.md`, in
 mattpocock-skills' format. With none, it takes `--tracker` (`other` with
@@ -103,15 +114,16 @@ labels. When `triage-labels.md` exists, its labels for
 `ready-for-agent`, `needs-info` and `ready-for-human` replace those names
 below; `blocked` is always loopherd's.
 
-It writes `<herd>.toml` (named after the repo dir) and `<herd>-lead.md` in
-the herds dir, and for GitHub creates the labels `ready-for-agent`, `needs-info`,
+It writes `<herd>.toml` (named after the repo dir) and, unless
+`--no-lead`, `<herd>-lead.md` in the herds dir, and for GitHub creates the labels `ready-for-agent`, `needs-info`,
 `ready-for-human` and `blocked` where missing. The herd feeds one worker per
 open issue labelled `ready-for-agent` and none of the other three, on branch
 `<type>/<n>-<slug>`; a `skill:<name>` label picks the skill it builds with
 (`tdd` by default). Every gh call runs as the logged-in account matching the
 remote's owner, else `--gh-account`; `--repo` names the GitHub repo when
 origin is an ssh host alias. init infers the rest, commits nothing,
-and refuses to replace either file; the files are yours to edit. Then follow
+and refuses to replace either file (`--no-lead` leaves an existing lead
+prompt alone); the files are yours to edit. Then follow
 the steps it prints: trust the repo in Claude once, fill the queue `source`
 for a tracker other than GitHub, `loopherd herds`,
 `loopherd feed <herd> --dry-run`, `loopherd lead <herd>`.

@@ -550,7 +550,7 @@ fn init_refuses_changing_nothing_when_the_lead_prompt_exists() {
     assert_eq!(
         text(&out.stderr),
         format!(
-            "loopherd init: {} already exists; init never replaces a lead prompt\n",
+            "loopherd init: {} already exists; init never replaces a lead prompt; pass --no-lead to write the herd without a lead\n",
             fixture.herds().join("widgets-lead.md").display()
         )
     );
@@ -579,20 +579,6 @@ fn init_refuses_a_herd_name_that_points_at_another_repo() {
     );
     assert_eq!(fixture.config_listing(), before);
     assert_eq!(fixture.gh_calls(), "");
-}
-
-#[test]
-fn init_needs_at_least_one_check() {
-    let fixture = Fixture::new(&["acme"]);
-
-    let out = fixture.loopherd(&["init"]);
-
-    assert_eq!(out.status.code(), Some(2));
-    assert!(
-        text(&out.stderr).contains("--check"),
-        "{}",
-        text(&out.stderr)
-    );
 }
 
 #[test]
@@ -1468,15 +1454,20 @@ fn a_github_title_in_any_case_after_other_text_or_a_bom_gets_the_github_snippets
 }
 
 impl Fixture {
-    /// `loopherd init` with stdin and stderr on a terminal, typing `input`.
+    /// `loopherd init --check 'cargo test'` on a terminal, typing `before`
+    /// up to the tracker question, then `input`, then Enter for the rest.
     fn init_on_terminal(&self, extra: &[&str], input: &str) -> Output {
+        let mut args = vec!["--check", "cargo test"];
+        args.extend(extra);
+        self.on_terminal(&args, &format!("\n\n\n{input}\n\n\n\n\n\n"))
+    }
+
+    /// `loopherd init <args>` with stdin and stderr on a terminal, typing `input`.
+    fn on_terminal(&self, args: &[&str], input: &str) -> Output {
         let typed = self.root.path().join("typed");
         fs::write(&typed, input).unwrap();
-        let mut line = format!(
-            "'{}' init --check 'cargo test'",
-            env!("CARGO_BIN_EXE_loopherd")
-        );
-        for arg in extra {
+        let mut line = format!("'{}' init", env!("CARGO_BIN_EXE_loopherd"));
+        for arg in args {
             line.push_str(&format!(" '{arg}'"));
         }
         let mut command = Command::new("script");
@@ -1552,4 +1543,425 @@ fn on_a_terminal_tracker_answers_the_question() {
         repo_file(&fixture, "docs/agents/issue-tracker.md")
             .starts_with("# Issue tracker: Local Markdown\n")
     );
+}
+
+fn herd_toml(fixture: &Fixture) -> toml::Table {
+    toml::from_str(&fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap()).unwrap()
+}
+
+#[test]
+fn without_check_init_takes_cargos_checks_from_cargo_toml() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::write(
+        fixture.repo().join("Cargo.toml"),
+        "[package]\nname = \"w\"\n",
+    )
+    .unwrap();
+
+    assert_ok(&fixture.loopherd(&["init"]));
+
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(
+        herd.contains(
+            "   - `cargo fmt --check`\n   - `cargo clippy -- -D warnings`\n   - `cargo test`\n"
+        ),
+        "{herd}"
+    );
+}
+
+#[test]
+fn without_check_init_takes_package_jsons_lint_and_test_scripts() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::write(
+        fixture.repo().join("package.json"),
+        r#"{"scripts": {"build": "tsc", "test": "vitest", "lint": "eslint ."}}"#,
+    )
+    .unwrap();
+
+    assert_ok(&fixture.loopherd(&["init"]));
+
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(
+        herd.contains("   - `npm run lint`\n   - `npm test`\n"),
+        "{herd}"
+    );
+}
+
+#[test]
+fn without_check_or_a_build_file_init_names_the_flag() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::write(
+        fixture.repo().join("package.json"),
+        r#"{"scripts": {"build": "tsc"}}"#,
+    )
+    .unwrap();
+
+    let out = fixture.loopherd(&["init"]);
+
+    assert_refused(
+        &fixture,
+        &out,
+        "loopherd init: no checks found in Cargo.toml or package.json; pass --check <cmd>\n",
+    );
+}
+
+#[test]
+fn max_sets_how_many_workers_run_at_once() {
+    let fixture = Fixture::new(&["acme"]);
+
+    assert_ok(&fixture.init(&["--max", "5"]));
+
+    assert_eq!(herd_toml(&fixture)["queue"]["max"].as_integer(), Some(5));
+    assert!(text(&fixture.loopherd(&["herds"]).stdout).contains("max 5"),);
+}
+
+#[test]
+fn a_max_that_isnt_a_positive_integer_is_refused() {
+    for max in ["0", "-1", "three"] {
+        let fixture = Fixture::new(&["acme"]);
+
+        let out = fixture.init(&[&format!("--max={max}")]);
+
+        assert_eq!(out.status.code(), Some(2), "{max}");
+        assert!(text(&out.stderr).contains("--max"), "{}", text(&out.stderr));
+        assert!(!fixture.herds().exists());
+    }
+}
+
+#[test]
+fn no_lead_writes_no_lead_table_or_prompt_and_no_lead_step() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init(&["--no-lead"]);
+
+    assert_ok(&out);
+    assert!(!herd_toml(&fixture).contains_key("lead"));
+    assert!(!fixture.herds().join("widgets-lead.md").exists());
+    assert!(!text(&out.stdout).contains("lead"), "{}", text(&out.stdout));
+    assert_ok(&fixture.loopherd(&["herds"]));
+}
+
+#[test]
+fn no_lead_ignores_an_existing_lead_prompt() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::create_dir_all(fixture.herds()).unwrap();
+    fs::write(fixture.herds().join("widgets-lead.md"), "mine\n").unwrap();
+
+    assert_ok(&fixture.init(&["--no-lead"]));
+
+    assert_eq!(
+        fs::read_to_string(fixture.herds().join("widgets-lead.md")).unwrap(),
+        "mine\n"
+    );
+}
+
+#[test]
+fn context_limit_sets_the_workers_handoff_limit() {
+    let fixture = Fixture::new(&["acme"]);
+
+    assert_ok(&fixture.init(&["--context-limit", "120000"]));
+
+    assert_eq!(
+        herd_toml(&fixture)["template"]["issue"]["context_limit"].as_integer(),
+        Some(120000)
+    );
+    assert_ok(&fixture.loopherd(&["herds"]));
+}
+
+#[test]
+fn without_context_limit_the_template_leaves_it_unset() {
+    let fixture = Fixture::new(&["acme"]);
+
+    assert_ok(&fixture.init(&[]));
+
+    assert!(
+        !herd_toml(&fixture)["template"]["issue"]
+            .as_table()
+            .unwrap()
+            .contains_key("context_limit")
+    );
+}
+
+#[test]
+fn a_context_limit_over_80_percent_of_the_window_names_the_cap() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::write(
+        fixture.config().join("config.toml"),
+        "context_window = 100000\n",
+    )
+    .unwrap();
+
+    let out = fixture.init(&["--context-limit", "80001"]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        "loopherd init: context_limit 80001 is over 80000, 80% of the 100000-token \
+         context window\n"
+    );
+    assert!(!fixture.herds().exists());
+}
+
+#[test]
+fn a_context_limit_under_the_minimum_is_refused() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init(&["--context-limit", "9999"]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("context_limit must be at least 10000"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!fixture.herds().exists());
+}
+
+#[test]
+fn on_a_terminal_init_shows_each_inferred_value_takes_edits_and_re_asks_bad_ones() {
+    let fixture = Fixture::new(&["acme", "bot"]);
+    fs::write(
+        fixture.repo().join("Cargo.toml"),
+        "[package]\nname = \"w\"\n",
+    )
+    .unwrap();
+    let typed = [
+        "",        // repo
+        "gadgets", // herd name
+        "",        // owner/name
+        "",        // tracker
+        "",        // use the suggested checks
+        "0", "4", // max
+        "n", // lead
+        "170000", "100000", // context_limit
+        "bot",    // gh account
+        "trunk",  // default branch
+        "",       // confirm
+    ];
+
+    let out = fixture.on_terminal(&[], &(typed.join("\n") + "\n"));
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    for expected in [
+        format!("Repo ({}): ", fixture.repo().display()),
+        "Herd name (widgets): ".into(),
+        "GitHub repo (owner/name) (acme/widgets): ".into(),
+        "  cargo fmt --check\r\n  cargo clippy -- -D warnings\r\n  cargo test\r\n".into(),
+        "Use these checks? [Y/n]: ".into(),
+        "max, how many workers run at once (3): ".into(),
+        "max must be a positive integer, got \"0\"".into(),
+        "Give the herd a lead, a member that feeds, watches and verifies its workers? [Y/n]: "
+            .into(),
+        "Workers' handoff limit in tokens (context_limit); Enter leaves it unset, so \
+         config.toml's 160000 applies: "
+            .into(),
+        "context_limit 170000 is over 160000, 80% of the 200000-token context window".into(),
+        "gh account (logged in: acme, bot) (acme): ".into(),
+        "Default branch (main): ".into(),
+        "Herd gadgets:".into(),
+        "  max     4 workers at once".into(),
+        "  lead    no".into(),
+        "  limit   100000".into(),
+        "  checks  cargo fmt --check; cargo clippy -- -D warnings; cargo test".into(),
+        "Write this herd? [Y/n]: ".into(),
+    ] {
+        assert!(
+            shown.contains(&expected),
+            "missing {expected:?} in\n{shown}"
+        );
+    }
+    let herd = fs::read_to_string(fixture.herds().join("gadgets.toml")).unwrap();
+    let table: toml::Table = toml::from_str(&herd).unwrap();
+    assert_eq!(table["queue"]["max"].as_integer(), Some(4));
+    assert_eq!(
+        table["template"]["issue"]["context_limit"].as_integer(),
+        Some(100000)
+    );
+    assert!(!table.contains_key("lead"));
+    assert!(herd.contains("--base trunk"), "{herd}");
+    assert!(herd.contains("gh auth token --user bot"), "{herd}");
+    assert!(!fixture.herds().join("gadgets-lead.md").exists());
+}
+
+#[test]
+fn on_a_terminal_declining_the_summary_writes_nothing() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\nn\n");
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stdout).contains("nothing written"));
+    assert!(!fixture.herds().exists());
+    assert!(!fixture.gh_calls().contains("label create"));
+    assert!(!fixture.repo().join("docs").exists());
+}
+
+#[test]
+fn on_a_terminal_without_a_build_file_init_asks_for_checks_until_one_is_given() {
+    let fixture = Fixture::new(&["acme"]);
+    let typed = "\n\n\n\n\nmake lint\nmake test\n\n\n\n\n\n\n\n";
+
+    let out = fixture.on_terminal(&[], typed);
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    assert_eq!(
+        shown
+            .matches("A check workers run before calling work done: ")
+            .count(),
+        2,
+        "{shown}"
+    );
+    assert!(!shown.contains("Use these checks?"), "{shown}");
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(
+        herd.contains("   - `make lint`\n   - `make test`\n"),
+        "{herd}"
+    );
+}
+
+#[test]
+fn on_a_terminal_declining_the_suggested_checks_edits_each_then_adds_more() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::write(
+        fixture.repo().join("Cargo.toml"),
+        "[package]\nname = \"w\"\n",
+    )
+    .unwrap();
+    let typed = [
+        "",
+        "",
+        "",
+        "",  // repo, herd name, owner/name, tracker
+        "n", // use the suggested checks
+        "",  // keep cargo fmt --check
+        "-", // drop clippy
+        "cargo nextest run",
+        "just check",
+        "", // no more checks
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+    ];
+
+    let out = fixture.on_terminal(&[], &(typed.join("\n") + "\n"));
+
+    assert_ok(&out);
+    assert!(
+        text(&out.stdout).contains("Check (cargo clippy -- -D warnings): "),
+        "{}",
+        text(&out.stdout)
+    );
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(
+        herd.contains("   - `cargo fmt --check`\n   - `cargo nextest run`\n   - `just check`\n5."),
+        "{herd}"
+    );
+}
+
+#[test]
+fn a_max_over_what_a_herd_file_holds_is_refused() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init(&["--max", "9223372036854775808"]);
+
+    assert_eq!(out.status.code(), Some(2));
+    assert!(!fixture.herds().exists());
+}
+
+#[test]
+fn npm_inits_placeholder_test_script_is_not_suggested() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::write(
+        fixture.repo().join("package.json"),
+        r#"{"scripts": {"lint": "eslint .", "test": "echo \"Error: no test specified\" && exit 1"}}"#,
+    )
+    .unwrap();
+
+    assert_ok(&fixture.loopherd(&["init"]));
+
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(herd.contains("   - `npm run lint`\n5."), "{herd}");
+}
+
+#[test]
+fn on_a_terminal_a_taken_herd_name_or_lead_prompt_is_asked_again() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::create_dir_all(fixture.herds()).unwrap();
+    fs::write(
+        fixture.herds().join("widgets.toml"),
+        "repo = \"/elsewhere\"\n",
+    )
+    .unwrap();
+    fs::write(fixture.herds().join("gadgets-lead.md"), "mine\n").unwrap();
+    let typed = ["", "", "gadgets", "", "", "", "y", "n", "", "", "", ""];
+
+    let out = fixture.on_terminal(&["--check", "cargo test"], &(typed.join("\n") + "\n"));
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains("herd widgets already points at /elsewhere"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains(
+            "gadgets-lead.md already exists; init never replaces a lead prompt; answer n"
+        ),
+        "{shown}"
+    );
+    assert!(fixture.herds().join("gadgets.toml").exists());
+    assert_eq!(
+        fs::read_to_string(fixture.herds().join("gadgets-lead.md")).unwrap(),
+        "mine\n"
+    );
+}
+
+#[test]
+fn on_a_terminal_a_branch_that_cant_go_in_the_prompt_is_asked_again() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\nma\x27\x27\x27in\ntrunk\n\n");
+
+    assert_ok(&out);
+    assert!(text(&out.stdout).contains("can't go in the worker prompt"));
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(herd.contains("--base trunk"), "{herd}");
+}
+
+#[test]
+fn on_a_terminal_an_unmatched_account_is_asked_from_the_logged_in_ones() {
+    let fixture = Fixture::new(&["bot", "other"]);
+
+    let out = fixture.init_on_terminal(&[], "\n\n\n\nnobody\nother\n");
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains("gh account (logged in: bot, other): "),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("gh has no logged-in account nobody (found: bot, other)"),
+        "{shown}"
+    );
+    assert!(fixture.gh_calls().contains("auth token --user other"));
+}
+
+#[test]
+fn on_a_terminal_flags_answer_their_questions() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out =
+        fixture.init_on_terminal(&["--max", "2", "--no-lead", "--context-limit", "50000"], "");
+
+    let shown = text(&out.stdout);
+    for question in ["max,", "Give the herd a lead", "handoff limit"] {
+        assert!(!shown.contains(question), "{question} in\n{shown}");
+    }
+    assert!(shown.contains("  max     2 workers at once"), "{shown}");
 }
