@@ -125,6 +125,12 @@ pub fn init(paths: &Paths, req: Request) -> Result<Vec<String>> {
         }
     } else if herd.github.is_none() {
         eprintln!("warning: {NO_MERGED}");
+        if has_origin(&herd.repo) {
+            eprintln!(
+                "note: if origin is GitHub behind an ssh host alias, pass --repo <owner>/<name> \
+                 to keep the merged check"
+            );
+        }
     }
     write(paths, herd)
 }

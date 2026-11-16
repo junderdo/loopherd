@@ -174,8 +174,9 @@ push their branch with no PR, for the human to merge. It still needs an
 GitHub question means none.
 
 Any other tracker needs no GitHub either, and init runs without an origin
-(add one before feeding; the printed steps say so). Its herd names no
-GitHub issue, gh command or account: `source` is empty, `done` is left out,
+(add one before feeding; the printed steps say so). Apart from the
+`merged` check a GitHub origin keeps, its herd names no GitHub issue, gh
+command or account: `source` is empty, `done` is left out,
 and the worker prompt's tracker steps, one line of the lead prompt and the
 sections of `docs/agents/loopherd.md` are marked `(fill in)`, each under
 `Fill in from docs/agents/issue-tracker.md`; the printed steps list every

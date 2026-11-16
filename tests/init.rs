@@ -4653,3 +4653,54 @@ fn an_other_tracker_asks_for_a_pull_request_only_with_a_github_origin() {
         assert_eq!(add_origin, !github, "{}", text(&out.stdout));
     }
 }
+
+#[test]
+fn on_a_terminal_a_detached_head_without_origin_head_asks_for_the_default_branch() {
+    let fixture = Fixture::new(&["acme"]);
+    git(&fixture.repo(), &["remote", "remove", "origin"]);
+    fixture.commit_on("main");
+    git(&fixture.repo(), &["checkout", "-q", "--detach"]);
+    fixture.fail_gh();
+    let mut args = vec!["--check", "cargo test"];
+    args.extend(OTHER);
+
+    let out = fixture.on_terminal(&args, "\n\n\n\n\n\nmain\n\n");
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains(
+            "origin/HEAD isn't set and HEAD is detached; check out the default branch \
+             or run `git remote set-head origin <branch>`\r\nDefault branch: "
+        ),
+        "{shown}"
+    );
+    let prompt = fixture.herd_get("template.issue.prompt");
+    assert!(prompt.contains("merges it into main"), "{prompt}");
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn an_other_tracker_behind_an_ssh_host_alias_warns_to_pass_repo_and_without_an_origin_does_not() {
+    for origin in [Some("git@github-work:acme/widgets.git"), None] {
+        let fixture = Fixture::new(&["acme"]);
+        match origin {
+            Some(url) => fixture.set_origin(url),
+            None => git(&fixture.repo(), &["remote", "remove", "origin"]),
+        }
+        fixture.commit_on("main");
+        fixture.fail_gh();
+
+        let out = fixture.init(&OTHER);
+
+        assert_ok(&out);
+        let hint = "note: if origin is GitHub behind an ssh host alias, pass --repo \
+                    <owner>/<name> to keep the merged check";
+        assert_eq!(
+            text(&out.stderr).contains(hint),
+            origin.is_some(),
+            "{}",
+            text(&out.stderr)
+        );
+    }
+}
