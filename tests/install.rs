@@ -470,7 +470,7 @@ fn a_lead_defaults_list_is_consumed_and_not_passed_to_install_hook() {
         assert!(out.status.success(), "{args:?}: {out:?}");
         assert_eq!(
             fs::read_to_string(&sandbox.log).unwrap(),
-            "new install-hook --settings /tmp/s.json\nnew setup --lead-defaults=merge,install\n",
+            "new setup --lead-defaults=merge,install\nnew install-hook --settings /tmp/s.json\n",
             "{args:?}"
         );
     }

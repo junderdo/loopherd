@@ -17,7 +17,7 @@ fn executable(path: &Path, script: &str) {
 }
 
 /// A temp HOME, state dir and `$LOOPHERD_CONFIG_DIR`, and a fake cargo whose
-/// "build" runs the real loopherd for `lead-defaults` and `setup` and nothing else.
+/// "build" runs the real loopherd for `setup` and nothing else.
 struct Sandbox {
     _dir: tempfile::TempDir,
     home: PathBuf,
@@ -38,7 +38,7 @@ impl Sandbox {
         executable(
             &built,
             &format!(
-                "#!/bin/sh\ncase \"$1\" in lead-defaults | setup) exec '{}' \"$@\" ;; esac\n",
+                "#!/bin/sh\ncase \"$1\" in setup) exec '{}' \"$@\" ;; esac\n",
                 env!("CARGO_BIN_EXE_loopherd")
             ),
         );
@@ -314,12 +314,16 @@ fn a_context_flag_passes_through_to_setup_without_asking() {
         "context_window = 1000000\ndefault_context_limit = 500000\n"
     );
 
-    let over = sandbox.install(&["--context=limit=900000"]);
+    let fresh = Sandbox::new();
+    let over = fresh.install(&["--context=limit=900000"]);
     assert_eq!(over.status.code(), Some(1), "{over:?}");
     assert!(
-        String::from_utf8_lossy(&over.stderr).contains("over the cap of 800000"),
+        String::from_utf8_lossy(&over.stderr).contains("over the cap of 160000"),
         "{over:?}"
     );
+    assert!(!fresh.home.join(".local/bin/loopherd").exists());
+    assert!(!fresh.settings.exists(), "install-hook ran");
+    assert_eq!(fresh.read_config(), None);
 
     let both = sandbox.install(&["--no-extras", "--context", "limit=100000"]);
     assert_eq!(both.status.code(), Some(2), "{both:?}");

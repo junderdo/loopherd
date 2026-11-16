@@ -65,7 +65,9 @@ settings, each group only while it's unset: the lead defaults (what a lead
 may do wherever its herd file's `[lead]` doesn't say), then the context
 window and the handoff limits, Enter keeping the value shown. It reads
 `/dev/tty`, and with no terminal it asks nothing and names the flags to
-set what's unset.
+set what's unset. Values given with `--lead-defaults` or `--context` are
+set right after the build, before anything is installed, so a bad one
+installs nothing.
 
 ```bash
 scripts/install --with-agents       # install or update the agent types and ask nothing else;

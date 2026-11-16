@@ -31,6 +31,8 @@ and the context window and handoff limits. Other arguments go to
   scripts/install --no-extras          install no extras and run no setup, without the questions
   scripts/install -h, --help           print this and exit
 
+Values given with --lead-defaults or --context are set right after the
+build, before anything is installed, so a bad one installs nothing.
 The settings go to config.toml in $LOOPHERD_CONFIG_DIR (default
 $XDG_CONFIG_HOME/loopherd or ~/.config/loopherd), whatever --settings names.
 USAGE
@@ -121,6 +123,8 @@ built=$(cargo build --release --manifest-path "$root/Cargo.toml" \
   --message-format=json-render-diagnostics |
   jq -r 'select(.reason == "compiler-artifact" and .target.name == "loopherd" and .executable != null) | .executable')
 [[ -x "$built" ]] || { echo "install: cargo built no loopherd binary" >&2; exit 1; }
+# Before installing, so a bad --context or --lead-defaults value installs nothing.
+[[ "$setup" != given ]] || "$built" setup "${setup_args[@]}"
 
 mkdir -p "$bin_dir"
 tmp=$(mktemp "$bin_dir/.loopherd.XXXXXX")
@@ -152,7 +156,4 @@ if [[ -n "$settings" ]]; then
 else
   offer_skills "$skills" "$claude_dir"
 fi
-case "$setup" in
-  given) "$bin_dir/loopherd" setup "${setup_args[@]}" ;;
-  ask) "$bin_dir/loopherd" setup || echo "install: setup failed; run loopherd setup once config.toml is fixed" >&2 ;;
-esac
+[[ "$setup" != ask ]] || "$bin_dir/loopherd" setup || echo "install: setup failed; run loopherd setup once config.toml is fixed" >&2
