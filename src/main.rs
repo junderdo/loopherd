@@ -1158,12 +1158,17 @@ fn run_init(args: InitArgs) -> Result<i32> {
         context_limit: args.context_limit,
     };
     if args.diff {
-        return Ok(match init::diff(&paths, req)? {
-            Some(diff) => {
+        // diff(1)'s codes, so trouble can't read as drift.
+        return Ok(match init::diff(&paths, req) {
+            Ok(None) => 0,
+            Ok(Some(diff)) => {
                 print!("{diff}");
                 1
             }
-            None => 0,
+            Err(e) => {
+                eprintln!("loopherd init: {e:#}");
+                2
+            }
         });
     }
     for line in init::init(&paths, req)? {

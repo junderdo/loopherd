@@ -159,6 +159,11 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
     if !ask.terminal && mode == Mode::Write {
         refuse_second_herd(paths, &repo)?;
     }
+    let herd_file = paths.herds.join(format!("{name}.toml"));
+    let recorded = match mode {
+        Mode::Diff => Recorded::read(&herd_file),
+        Mode::Write => None,
+    };
     let origin = github_repo(&repo).map(|(owner, name)| format!("{owner}/{name}"));
     let (owner, repo_name) = ask.value(
         "GitHub repo (owner/name)",
@@ -197,10 +202,18 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         .map(|(name, on)| format!("{name} = {on}"))
         .join("\n");
 
-    let checks = checks(&repo, req.checks, ask)?;
+    let recorded_checks = recorded.as_ref().map(|r| r.checks.as_slice());
+    let given = match req.checks {
+        [] => recorded_checks.unwrap_or_default(),
+        given => given,
+    };
+    let checks = checks(&repo, given, ask)?;
     let max = ask.value(
         "max, how many workers run at once",
-        req.max.map(|m| m.to_string()).as_deref(),
+        req.max
+            .or(recorded.as_ref().and_then(|r| r.max))
+            .map(|m| m.to_string())
+            .as_deref(),
         Some("3"),
         "",
         |max| match max.parse::<i64>() {
@@ -212,12 +225,11 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         },
     )?;
     let lead_file = paths.herds.join(format!("{name}-lead.md"));
-    let herd_file = paths.herds.join(format!("{name}.toml"));
     let lead = loop {
         let lead = ask.yes(
             "Give the herd a lead, a member that feeds, watches and verifies its workers?",
             req.lead,
-            mode == Mode::Write || !herd_file.exists() || has_lead_table(&herd_file),
+            recorded.as_ref().is_none_or(|r| r.lead),
         )?;
         if !lead || mode == Mode::Diff || fs::symlink_metadata(&lead_file).is_err() {
             break lead;
@@ -256,7 +268,10 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
             "Workers' handoff limit in tokens (context_limit); Enter leaves it unset, \
              so {config_limit} applies"
         ),
-        req.context_limit.map(|l| l.to_string()).as_deref(),
+        req.context_limit
+            .or(recorded.as_ref().and_then(|r| r.context_limit))
+            .map(|l| l.to_string())
+            .as_deref(),
         Some(""),
         "",
         |limit| {
@@ -321,6 +336,9 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
     docs.extend(plan.docs);
     match mode {
         Mode::Write => {
+            for doc in docs.iter().filter(|doc| doc.append) {
+                doc.refuse_unappendable(&repo)?;
+            }
             let new_docs = docs.iter().filter(|doc| !doc.append);
             refuse_unwritable(
                 [herd_file]
@@ -772,12 +790,45 @@ fn herd_running(paths: &Paths, repo: &Path) -> Result<Option<String>> {
     Ok(None)
 }
 
-/// Whether the herd file has a `[lead]` table; false when it can't be read.
-fn has_lead_table(herd_file: &Path) -> bool {
-    fs::read_to_string(herd_file)
-        .ok()
-        .and_then(|text| text.parse::<toml::Table>().ok())
-        .is_some_and(|table| table.contains_key("lead"))
+/// The answers an earlier init left in its herd file, for `--diff` to render with.
+struct Recorded {
+    lead: bool,
+    max: Option<u64>,
+    context_limit: Option<u64>,
+    /// From the worker prompt's checklist; empty when the human reworded it.
+    checks: Vec<String>,
+}
+
+impl Recorded {
+    fn read(herd_file: &Path) -> Option<Recorded> {
+        let herd: toml::Table = fs::read_to_string(herd_file).ok()?.parse().ok()?;
+        let issue = herd
+            .get("template")
+            .and_then(|t| t.get("issue"))
+            .and_then(toml::Value::as_table);
+        let number = |value: Option<&toml::Value>| {
+            value
+                .and_then(toml::Value::as_integer)
+                .and_then(|n| u64::try_from(n).ok())
+        };
+        let prompt = issue
+            .and_then(|t| t.get("prompt"))
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default();
+        let checks = prompt
+            .lines()
+            .skip_while(|line| !line.starts_with("4. Before calling it done"))
+            .skip(1)
+            .map_while(|line| line.strip_prefix("   - `")?.strip_suffix('`'))
+            .map(|check| check.replace("{{", "{").replace("}}", "}"))
+            .collect();
+        Some(Recorded {
+            lead: herd.contains_key("lead"),
+            max: number(herd.get("queue").and_then(|q| q.get("max"))),
+            context_limit: number(issue.and_then(|t| t.get("context_limit"))),
+            checks,
+        })
+    }
 }
 
 /// `origin`'s GitHub owner and repo name.

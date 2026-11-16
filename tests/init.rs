@@ -3037,7 +3037,7 @@ fn diff_shows_an_edited_herd_file_against_todays_built_in_and_exits_1() {
     let herd_file = fixture.herds().join("widgets.toml");
     let edited = fs::read_to_string(&herd_file)
         .unwrap()
-        .replace("max = 3\n", "max = 5\n");
+        .replace("args = [\"--permission-mode\", \"auto\"]\n", "args = []\n");
     fs::write(&herd_file, &edited).unwrap();
     let before = everything(&fixture);
 
@@ -3051,7 +3051,7 @@ fn diff_shows_an_edited_herd_file_against_todays_built_in_and_exits_1() {
         text(&out.stdout)
     );
     assert!(
-        text(&out.stdout).contains("\n-max = 5\n+max = 3\n"),
+        text(&out.stdout).contains("\n-args = []\n+args = [\"--permission-mode\", \"auto\"]\n"),
         "{}",
         text(&out.stdout)
     );
@@ -3172,11 +3172,99 @@ fn diff_refuses_a_herd_name_that_points_at_another_repo() {
 
     let out = fixture.init(&["--diff"]);
 
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
     assert_eq!(
         text(&out.stderr),
         "loopherd init: herd widgets already points at /elsewhere/widgets; \
          pass --herd <name> to name this repo's herd\n"
     );
     assert_eq!(text(&out.stdout), "");
+}
+
+#[test]
+fn diff_exits_2_when_it_cant_read_a_herd_file() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    let herd_file = fixture.herds().join("widgets.toml");
+    fs::set_permissions(&herd_file, fs::Permissions::from_mode(0o000)).unwrap();
+
+    let out = fixture.init(&["--diff"]);
+
+    fs::set_permissions(&herd_file, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).starts_with("loopherd init: can't tell which repo"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(text(&out.stdout), "");
+}
+
+#[test]
+fn diff_shows_the_loopherd_section_init_would_append_to_a_read_only_agents_md() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    let agents_md = fixture.repo().join("AGENTS.md");
+    fs::write(&agents_md, "# Mine\n").unwrap();
+    fs::set_permissions(&agents_md, fs::Permissions::from_mode(0o444)).unwrap();
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    let hunk = format!(
+        "--- {shown}\n+++ {shown} (init now)\n@@ -1 +1,",
+        shown = agents_md.display()
+    );
+    let at = stdout.find(&hunk).unwrap_or_else(|| panic!("{stdout}"));
+    let body = &stdout[at + hunk.len()..];
+    let body = &body[body.find(" @@\n").unwrap() + 4..];
+    assert!(body.starts_with(" # Mine\n+\n+## "), "{stdout}");
+    assert!(!body.contains("\n-"), "{stdout}");
+    assert_eq!(fs::read_to_string(&agents_md).unwrap(), "# Mine\n");
+}
+
+#[test]
+fn diff_reads_max_context_limit_and_checks_back_from_the_herd_file() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[
+        "--max",
+        "5",
+        "--context-limit",
+        "50000",
+        "--check",
+        "echo {x}",
+    ]));
+
+    let out = fixture.loopherd(&["init", "--diff"]);
+
+    assert_ok(&out);
+    assert_eq!(text(&out.stdout), "");
+}
+
+#[test]
+fn diff_shows_drift_in_loopherd_md_and_triage_labels_md() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    let docs = ["docs/agents/loopherd.md", "docs/agents/triage-labels.md"];
+    for doc in docs {
+        let path = fixture.repo().join(doc);
+        let mine = format!("{}Ours.\n", fs::read_to_string(&path).unwrap());
+        fs::write(&path, mine).unwrap();
+    }
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    for doc in docs {
+        let shown = fixture.repo().join(doc).display().to_string();
+        let header = format!("--- {shown}\n+++ {shown} (init now)\n");
+        let at = stdout
+            .find(&header)
+            .unwrap_or_else(|| panic!("{doc}: {stdout}"));
+        let rest = &stdout[at + header.len()..];
+        let end = rest.find("\n--- ").map_or(rest.len(), |end| end + 1);
+        assert!(rest[..end].ends_with("-Ours.\n"), "{doc}: {stdout}");
+    }
 }

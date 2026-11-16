@@ -46,6 +46,16 @@ impl Doc {
         }
     }
 
+    /// Refuses a file init would append to but can't write, before any change.
+    pub fn refuse_unappendable(&self, repo: &Path) -> Result<()> {
+        let path = repo.join(self.path);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("write {}", path.display()))?;
+        Ok(())
+    }
+
     /// Appends the doc to its file under `repo`, leaving the file as it was on failure.
     pub fn append_to(&self, repo: &Path) -> Result<()> {
         let path = repo.join(self.path);
@@ -78,8 +88,7 @@ pub struct Plan {
     pub steps: Vec<String>,
 }
 
-/// The docs the repo lacks. Refuses an `AGENTS.md` init would append to but
-/// can't write, so that fails before any change.
+/// The docs the repo lacks.
 pub fn missing(repo: &Path, herd: &Herd) -> Result<Plan> {
     let mut docs = vec![];
     let mut steps = vec![];
@@ -113,10 +122,6 @@ pub fn missing(repo: &Path, herd: &Herd) -> Result<Plan> {
         )),
         Some(agents) if has_loopherd_section(&agents) => {}
         Some(agents) => {
-            fs::OpenOptions::new()
-                .append(true)
-                .open(&agents_md)
-                .with_context(|| format!("write {}", agents_md.display()))?;
             docs.push(Doc {
                 path: AGENTS_MD,
                 text: appended(&agents),
