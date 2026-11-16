@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use toml_edit::{DocumentMut, Item, Table, TableLike, Value};
+use toml_edit::{DocumentMut, Item, RawString, Table, TableLike, Value};
 
 use crate::context::check_tokens;
 use crate::herd::SwitchValues;
@@ -114,20 +114,32 @@ pub fn unset(config: &Path, key: &str) -> Result<bool> {
     }
     edit(config, |doc| {
         match key.split_once('.') {
-            Some((table, name)) => {
-                let emptied = doc
-                    .get_mut(table)
-                    .and_then(Item::as_table_like_mut)
-                    .is_some_and(|t| {
-                        t.remove(name);
-                        t.is_empty()
-                    });
-                if emptied {
-                    doc.remove(table);
+            Some((table, name)) => match doc.get_mut(table).and_then(Item::as_table_mut) {
+                Some(t) => {
+                    let mut comment = remove_key(t, name);
+                    let position = t.position();
+                    if t.is_empty() {
+                        comment = comment_in(t.decor().prefix()) + &comment;
+                        doc.remove(table);
+                    }
+                    place_comment(doc, position, &comment);
                 }
-            }
+                None => {
+                    let emptied = doc
+                        .get_mut(table)
+                        .and_then(Item::as_table_like_mut)
+                        .is_some_and(|t| {
+                            t.remove(name);
+                            t.is_empty()
+                        });
+                    if emptied {
+                        doc.remove(table);
+                    }
+                }
+            },
             None => {
-                doc.remove(key);
+                let comment = remove_key(doc.as_table_mut(), key);
+                place_comment(doc, None, &comment);
             }
         }
         Ok(())
@@ -135,9 +147,74 @@ pub fn unset(config: &Path, key: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Removes `name` from `table`, moving the comment lines above it onto the
+/// next key; returns them when no key follows.
+fn remove_key(table: &mut Table, name: &str) -> String {
+    let comment = table
+        .key(name)
+        .map(|k| comment_in(k.leaf_decor().prefix()))
+        .unwrap_or_default();
+    let next = table
+        .iter()
+        .filter(|(_, item)| item.is_value())
+        .map(|(k, _)| k)
+        .skip_while(|k| *k != name)
+        .nth(1)
+        .map(str::to_string);
+    table.remove(name);
+    match next.and_then(|next| table.key_mut(&next)) {
+        Some(mut next) => {
+            let decor = next.leaf_decor_mut();
+            let own = text_of(decor.prefix()).to_string();
+            decor.set_prefix(comment + &own);
+            String::new()
+        }
+        None => comment,
+    }
+}
+
+/// Puts `comment` above the first table after `position` (any table when
+/// `None`), or at the end of the file when there's none.
+fn place_comment(doc: &mut DocumentMut, position: Option<isize>, comment: &str) {
+    if comment.is_empty() {
+        return;
+    }
+    let after = position.unwrap_or(isize::MIN);
+    let next = doc
+        .as_table_mut()
+        .iter_mut()
+        .filter_map(|(_, item)| item.as_table_mut())
+        .filter(|table| table.position().is_some_and(|p| p > after))
+        .min_by_key(|table| table.position());
+    match next {
+        Some(table) => {
+            let own = text_of(table.decor().prefix()).to_string();
+            table.decor_mut().set_prefix(format!("{comment}{own}"));
+        }
+        None => {
+            let own = text_of(Some(doc.trailing())).to_string();
+            doc.set_trailing(format!("{comment}{own}"));
+        }
+    }
+}
+
+/// `prefix` when it holds a comment; blank lines alone aren't kept.
+fn comment_in(prefix: Option<&RawString>) -> String {
+    let text = text_of(prefix);
+    match text.contains('#') {
+        true => text.to_string(),
+        false => String::new(),
+    }
+}
+
+fn text_of(raw: Option<&RawString>) -> &str {
+    raw.and_then(RawString::as_str).unwrap_or_default()
+}
+
 /// A file with tables and no root keys keeps its header comment in the first
 /// table's decor, so a new root key would land above it: move the comment
-/// lines before that table's last blank line to the doc's own prefix.
+/// lines before that table's last blank line, or all of them when there's
+/// none, to the doc's own prefix.
 fn lift_header(doc: &mut DocumentMut) {
     if doc.iter().any(|(_, item)| item.is_value()) {
         return;
@@ -150,18 +227,14 @@ fn lift_header(doc: &mut DocumentMut) {
     let Some(table) = first else {
         return;
     };
-    let prefix = table
-        .decor()
-        .prefix()
-        .and_then(|p| p.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let Some(blank) = prefix.rfind("\n\n") else {
-        return;
+    let prefix = text_of(table.decor().prefix()).to_string();
+    let split = match prefix.rfind("\n\n") {
+        Some(blank) => blank + 1,
+        None if prefix.contains('#') => prefix.len(),
+        None => return,
     };
-    table.decor_mut().set_prefix(&prefix[blank + 1..]);
-    let header = prefix[..blank + 1].to_string();
-    doc.decor_mut().set_prefix(header);
+    table.decor_mut().set_prefix(&prefix[split..]);
+    doc.decor_mut().set_prefix(&prefix[..split]);
 }
 
 fn known(key: &str) -> Result<&'static str> {
@@ -490,6 +563,77 @@ mod key_tests {
             fs::read_to_string(&path).unwrap(),
             "# mine\ncontext_window = 1000000\n\n[lead_defaults]\nmerge = true\n"
         );
+    }
+
+    #[test]
+    fn a_header_comment_with_no_blank_line_after_it_stays_first() {
+        let text = "# loopherd config\n[lead_defaults]\nmerge = true\n";
+        let (_dir, path) = config_with(text);
+
+        set(&path, "context_window", "1000000").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "# loopherd config\ncontext_window = 1000000\n[lead_defaults]\nmerge = true\n"
+        );
+        unset(&path, "context_window").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    }
+
+    #[test]
+    fn set_then_unset_leaves_the_file_as_it_was() {
+        for text in [
+            "",
+            "# top\n\n[notify] # n\nenabled = false\n",
+            "# mine\n[notify]\nenabled = false\n",
+            "# mine\ndefault_context_limit = 150000\n",
+            "default_context_limit = 150000 # mine\n\n[notify]\nenabled = false\n",
+        ] {
+            let (_dir, path) = config_with(text);
+
+            set(&path, "context_window", "1000000").unwrap();
+            unset(&path, "context_window").unwrap();
+            set(&path, "shepherd.context_limit", "100000").unwrap();
+            unset(&path, "shepherd.context_limit").unwrap();
+
+            assert_eq!(fs::read_to_string(&path).unwrap(), text, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn unset_keeps_the_comment_above_the_key_it_removes() {
+        for (text, left) in [
+            (
+                "# my limits: tuned for opus 1M\ncontext_window = 1000000\n",
+                "# my limits: tuned for opus 1M\n",
+            ),
+            (
+                "# window\ncontext_window = 1000000\n# limit\ndefault_context_limit = 150000\n",
+                "# window\n# limit\ndefault_context_limit = 150000\n",
+            ),
+            (
+                "# window\ncontext_window = 1000000\n\n[notify]\nenabled = false\n",
+                "# window\n\n[notify]\nenabled = false\n",
+            ),
+            (
+                "[shepherd]\n# tuned\ncontext_limit = 100000\n\n# n\n[notify]\nenabled = false\n",
+                "# tuned\n\n# n\n[notify]\nenabled = false\n",
+            ),
+            (
+                "[notify]\nenabled = false\n\n# the shepherd\n[shepherd]\n# tuned\ncontext_limit = 100000\n",
+                "[notify]\nenabled = false\n\n# the shepherd\n# tuned\n",
+            ),
+        ] {
+            let (_dir, path) = config_with(text);
+            let key = match text.contains("[shepherd]") {
+                true => "shepherd.context_limit",
+                false => "context_window",
+            };
+
+            unset(&path, key).unwrap();
+
+            assert_eq!(fs::read_to_string(&path).unwrap(), left, "{text:?}");
+        }
     }
 
     #[test]
