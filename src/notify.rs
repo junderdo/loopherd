@@ -445,10 +445,15 @@ impl Shown<'_> {
     }
 }
 
+/// Trimmed from after a key: `"password":`, `‘token’=`.
+const QUOTES: [char; 6] = ['"', '\'', '“', '”', '‘', '’'];
+/// Open a quoted or bracketed value, and are trimmed from before a key.
+const OPENERS: [char; 7] = ['"', '\'', '“', '‘', '[', '(', '{'];
+
 /// The first word of a separated strong key's value, hidden with the rest of its
 /// clause unless it opens a quote or bracket.
 fn clause_start(value: &str) -> (Shown<'_>, Next) {
-    if value.starts_with(['"', '\'', '[', '(', '{']) {
+    if value.starts_with(OPENERS) {
         return (Shown::redacted(), Next::after_value(value));
     }
     match clause_end(value) {
@@ -506,16 +511,19 @@ impl Next {
     /// After a hidden `value`: the rest of an unclosed quote or bracket, or the
     /// next `a=b;` pair.
     fn after_value(value: &str) -> Next {
-        let closer = match value.chars().next() {
-            Some('"') => Some('"'),
-            Some('\'') => Some('\''),
-            Some('[') => Some(']'),
-            Some('(') => Some(')'),
-            Some('{') => Some('}'),
+        let opener = value.chars().next().unwrap_or_default();
+        let closer = match opener {
+            '"' => Some('"'),
+            '\'' => Some('\''),
+            '“' => Some('”'),
+            '‘' => Some('’'),
+            '[' => Some(']'),
+            '(' => Some(')'),
+            '{' => Some('}'),
             _ => None,
         };
         match closer {
-            Some(closer) => Next::closed_by(&value[1..], closer),
+            Some(closer) => Next::closed_by(&value[opener.len_utf8()..], closer),
             None if value.ends_with(';') => Next::Value,
             None => Next::Free,
         }
@@ -605,13 +613,13 @@ fn is_separator(word: &str) -> bool {
 /// `--password`; one after a whole capitalised key (`TOKEN`), read as a label;
 /// else a key awaiting its separator.
 fn key_named_by(word: &str) -> Next {
-    let word = word.trim_start_matches(['"', '\'', '{', '(', '[']);
+    let word = word.trim_start_matches(OPENERS);
     let flag = word.trim_start_matches('-');
     let (name, separated) = match flag.strip_suffix([':', '=']) {
         Some(name) => (name, true),
         None => (flag, false),
     };
-    let name = name.trim_end_matches(['"', '\'']);
+    let name = name.trim_end_matches(QUOTES);
     let Some(key) = secret_key(name, separated) else {
         return Next::Free;
     };
@@ -636,7 +644,7 @@ fn looks_like_a_secret(word: &str) -> bool {
 /// runs to the end of its clause: a strong key starting the word, not in a URL's query.
 fn carried_value(word: &str) -> Option<(bool, &str)> {
     word.match_indices([':', '=']).find_map(|(at, _)| {
-        let left = word[..at].trim_end_matches(['"', '\'']);
+        let left = word[..at].trim_end_matches(QUOTES);
         let key_start = left
             .char_indices()
             .rev()
@@ -645,7 +653,7 @@ fn carried_value(word: &str) -> Option<(bool, &str)> {
         let value = &word[at + 1..];
         let key = secret_key(&left[key_start..], true)?;
         let starts_word = left[..key_start]
-            .trim_start_matches(['"', '\'', '{', '(', '[', '-'])
+            .trim_start_matches(|c| OPENERS.contains(&c) || c == '-')
             .is_empty();
         (!value.is_empty()).then_some((starts_word && key == Key::Strong, value))
     })
@@ -1264,6 +1272,37 @@ mod tests {
                 "Docs say “token: [redacted]” ok?",
             ),
             ("Merge? naïve=ok", "Merge? naïve=ok"),
+        ] {
+            assert_eq!(text_sent(question), text, "{question}");
+        }
+    }
+
+    #[test]
+    fn curly_quotes_are_read_like_straight_ones() {
+        for (question, text) in [
+            (
+                "Set “password”: hunter2 then merge?",
+                "Set “password”: [redacted]?",
+            ),
+            (
+                "Is “GITHUB_TOKEN”: s3cretvalue right?",
+                "Is “GITHUB_TOKEN”: [redacted]?",
+            ),
+            ("Use ‘token’=abc123xyz ok?", "Use [redacted]?"),
+            ("{“password”:“hunter2”} ok?", "[redacted] ok?"),
+            ("“password”:hunter2 ok?", "[redacted]?"),
+            (
+                "session: “abc123 def456” ok?",
+                "session: [redacted] [redacted] ok?",
+            ),
+            (
+                "auth=“abc123 def456 ghi789” ok?",
+                "[redacted] [redacted] [redacted] ok?",
+            ),
+            (
+                "password: ‘two words’ ok?",
+                "password: [redacted] [redacted] ok?",
+            ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
         }
