@@ -121,8 +121,11 @@ branches, checks, opens its `Closes #<n>` PR, stops on a question and
 reports, and adds a `## loopherd` section pointing at it and the tracker doc
 to `AGENTS.md`, creating that file if missing. Each is skipped when already
 there: the doc when the file exists, the section when any `AGENTS.md`
-heading outside a code block names loopherd. A symlinked `AGENTS.md` is left
-alone, with a step to add the section by hand. Nothing is committed; the printed steps list the
+heading outside a code block (`#` or setext) names loopherd. A symlinked
+`AGENTS.md`, live or dangling, is left alone, and so is a `loopherd.md`
+whose directory links outside the repo; init prints a step to write each by
+hand. A read-only `AGENTS.md` it would append to stops init before any
+change. Nothing is committed; the printed steps list the
 repo files to review and commit.
 
 It writes `<herd>.toml` (named after the repo dir) and, unless
