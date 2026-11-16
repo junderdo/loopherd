@@ -1,7 +1,8 @@
 //! `loopherd tool-hook`: Claude's PreToolUse hook on Bash. Blocks a command
 //! from a lead's pane that needs a switch its herd file leaves off (D17), or
 //! a `loopherd restart --force` (D20), a `loopherd pause` or `resume`
-//! (D23), or a `loopherd herd set` or `unset` (D29), which no switch allows.
+//! (D23), a `loopherd herd set` or `unset` (D29), or a write of the lead
+//! defaults (D30), which no switch allows.
 //! A guardrail on the command text, not a sandbox.
 
 use std::path::Path;
@@ -30,6 +31,9 @@ pub enum Switch {
     /// `loopherd herd set` or `unset`, which could turn a lead's own switches
     /// on. Not a switch: always the human's.
     HerdEdit,
+    /// `loopherd lead-defaults --set` or `scripts/install --lead-defaults`,
+    /// which could turn a lead's own switches on. Not a switch: always the human's.
+    LeadDefaults,
 }
 
 impl Switch {
@@ -41,6 +45,7 @@ impl Switch {
             Switch::ForceRestart => "restart --force",
             Switch::Pause => "pause",
             Switch::HerdEdit => "herd set",
+            Switch::LeadDefaults => "lead-defaults",
         }
     }
 
@@ -52,6 +57,7 @@ impl Switch {
             Switch::ForceRestart => "the human forces a restart",
             Switch::Pause => "the human pauses and resumes herds",
             Switch::HerdEdit => "the human edits herd files",
+            Switch::LeadDefaults => "the human sets lead defaults",
         }
     }
 
@@ -60,7 +66,7 @@ impl Switch {
             Switch::Merge => switches.merge,
             Switch::Install => switches.install,
             Switch::Rebase => switches.rebase,
-            Switch::ForceRestart | Switch::Pause | Switch::HerdEdit => false,
+            Switch::ForceRestart | Switch::Pause | Switch::HerdEdit | Switch::LeadDefaults => false,
         }
     }
 }
@@ -102,6 +108,7 @@ fn decide(
                 Switch::ForceRestart,
                 Switch::Pause,
                 Switch::HerdEdit,
+                Switch::LeadDefaults,
             ]
         });
     if needed.is_empty() {
@@ -121,6 +128,13 @@ fn decide(
     if needed == Switch::HerdEdit {
         return Ok(Some(format!(
             "loopherd: blocked: {} may not run `loopherd herd set` or `loopherd herd unset`, which could turn its own switches on: {}; ask with `loopherd report --kind question`",
+            lead.name,
+            needed.humans_part()
+        )));
+    }
+    if needed == Switch::LeadDefaults {
+        return Ok(Some(format!(
+            "loopherd: blocked: {} may not set lead defaults with `loopherd lead-defaults --set` or `scripts/install --lead-defaults`, which could turn its own switches on: {}; ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -343,7 +357,10 @@ fn needs_one(words: &[String]) -> Vec<Switch> {
 
 fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
     if Path::new(path).ends_with("scripts/install") {
-        return Some(Switch::Install);
+        return Some(match args.iter().any(|a| is_flag(a, "--lead-defaults")) {
+            true => Switch::LeadDefaults,
+            false => Switch::Install,
+        });
     }
     let positional = positionals(args, &[]);
     match file_name(path) {
@@ -359,6 +376,7 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
         "git" => git_needs(args),
         "loopherd" => match positional.first() {
             Some(&"install-hook") => Some(Switch::Install),
+            Some(&"lead-defaults") => sets_lead_defaults(args),
             Some(&"restart") => forces_restart(args),
             Some(&"pause" | &"resume") => Some(Switch::Pause),
             Some(&"herd") => {
@@ -369,6 +387,12 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
         // `cargo run -- herd set` and `pause` in a loopherd checkout, in any
         // spelling; first, since a value or reason may hold any word.
         "cargo" if edits_herd(cargo_run_args(args)) => Some(Switch::HerdEdit),
+        "cargo"
+            if cargo_run_args(args).iter().any(|a| a == "lead-defaults")
+                && sets_lead_defaults(args).is_some() =>
+        {
+            Some(Switch::LeadDefaults)
+        }
         // A key or value read by `herd get` may be any word.
         "cargo" if runs_herd_get(cargo_run_args(args)) => None,
         "cargo"
@@ -451,6 +475,18 @@ fn runs_herd_get(run_args: &[String]) -> bool {
 fn edits_herd<S: AsRef<str>>(args: &[S]) -> bool {
     args.windows(2)
         .any(|w| w[0].as_ref() == "herd" && matches!(w[1].as_ref(), "set" | "unset"))
+}
+
+fn sets_lead_defaults(args: &[String]) -> Option<Switch> {
+    args.iter()
+        .any(|a| is_flag(a, "--set"))
+        .then_some(Switch::LeadDefaults)
+}
+
+/// Whether `arg` is `flag`, alone or as `flag=value`.
+fn is_flag(arg: &str, flag: &str) -> bool {
+    arg.strip_prefix(flag)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('='))
 }
 
 fn forces_restart(args: &[String]) -> Option<Switch> {
@@ -931,7 +967,7 @@ mod tests {
             Switch::Merge => s.merge = false,
             Switch::Install => s.install = false,
             Switch::Rebase => s.rebase = false,
-            Switch::ForceRestart | Switch::Pause | Switch::HerdEdit => {}
+            Switch::ForceRestart | Switch::Pause | Switch::HerdEdit | Switch::LeadDefaults => {}
         }
         s
     }
@@ -971,7 +1007,7 @@ mod tests {
                 Switch::Merge => others_off.merge = true,
                 Switch::Install => others_off.install = true,
                 Switch::Rebase => others_off.rebase = true,
-                Switch::ForceRestart | Switch::Pause | Switch::HerdEdit => {}
+                Switch::ForceRestart | Switch::Pause | Switch::HerdEdit | Switch::LeadDefaults => {}
             }
             for command in commands {
                 assert_eq!(run(&leads, others_off, command), None, "{command}");
@@ -1214,6 +1250,46 @@ mod tests {
                 "{message}"
             );
         }
+    }
+
+    #[test]
+    fn a_leads_lead_defaults_write_is_denied_whatever_its_switches() {
+        let leads = ledger(vec![lead()]);
+        for command in [
+            "loopherd lead-defaults --set merge",
+            "loopherd lead-defaults --set=none",
+            "bash -c 'loopherd lead-defaults --set merge,install'",
+            "cargo run -- lead-defaults --set merge",
+            "cargo r -q lead-defaults --set=rebase",
+            "scripts/install --lead-defaults merge",
+            "./scripts/install --no-splash --lead-defaults=none",
+            "bash scripts/install --lead-defaults",
+        ] {
+            assert_eq!(needs(command), [Switch::LeadDefaults], "{command}");
+            let message =
+                run(&leads, all_on(), command).unwrap_or_else(|| panic!("{command} was allowed"));
+            assert!(
+                message.contains("lead-h may not set lead defaults")
+                    && message.contains("the human sets lead defaults"),
+                "{message}"
+            );
+        }
+        for command in [
+            "loopherd lead-defaults",
+            "cargo run -- lead-defaults",
+            "cat ~/.config/loopherd/config.toml",
+        ] {
+            assert_eq!(needs(command), [], "{command}");
+        }
+        let workers = ledger(vec![entry("lh-1", None)]);
+        assert_eq!(
+            run(
+                &workers,
+                Switches::default(),
+                "loopherd lead-defaults --set merge"
+            ),
+            None
+        );
     }
 
     #[test]

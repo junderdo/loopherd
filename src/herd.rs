@@ -117,7 +117,7 @@ impl SwitchValues {
     }
 
     /// Each switch from `self`, else from `defaults`, else off.
-    fn over(&self, defaults: &SwitchValues) -> Switches {
+    pub fn over(&self, defaults: &SwitchValues) -> Switches {
         let on = |own: Option<bool>, default: Option<bool>| own.or(default).unwrap_or(false);
         Switches {
             merge: on(self.merge, defaults.merge),
