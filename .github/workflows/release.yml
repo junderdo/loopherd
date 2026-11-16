@@ -11,7 +11,7 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Tag matches Cargo.toml
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
@@ -21,11 +21,13 @@ jobs:
           fi
       - run: rustup component add rustfmt clippy
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
       - run: shellcheck scripts/install.sh
       - name: A build of the tag prints the bare version
-        run: test "$(cargo run -q -- --version)" = "loopherd ${GITHUB_REF_NAME#v}"
+        run: |
+          printed=$(cargo run -q --locked -- --version)
+          [ "$printed" = "loopherd ${GITHUB_REF_NAME#v}" ] || { echo "a tag build printed: $printed" >&2; exit 1; }
 
   build:
     needs: gate
@@ -42,7 +44,7 @@ jobs:
             runner: macos-latest
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: rustup target add ${{ matrix.target }}
@@ -51,7 +53,7 @@ jobs:
         run: |
           mkdir dist
           tar -czf dist/loopherd-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release loopherd
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: loopherd-${{ matrix.target }}
           path: dist/loopherd-${{ matrix.target }}.tar.gz
@@ -62,8 +64,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
         with:
           path: dist
           merge-multiple: true

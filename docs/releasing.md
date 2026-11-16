@@ -20,7 +20,7 @@ supported with migrations.
 
    ```bash
    git fetch origin
-   git tag v0.2.0 origin/main
+   git tag v0.2.0 <merge commit>
    git push origin v0.2.0
    ```
 

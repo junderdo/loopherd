@@ -97,7 +97,7 @@ main() {
   download "$url/$tarball" "$work/$tarball"
   download "$url/SHA256SUMS" "$work/SHA256SUMS"
   verify "$work" "$tarball"
-  tar -xzf "$work/$tarball" -C "$work" loopherd || die "$tarball holds no loopherd"
+  tar -xzf "$work/$tarball" -C "$work" loopherd || die "could not unpack loopherd from $tarball"
 
   mkdir -p "$bin_dir"
   tmp=$(mktemp "$bin_dir/.loopherd.XXXXXX")
