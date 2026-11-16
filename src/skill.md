@@ -248,7 +248,7 @@ command = "notify-send {herd}/{member} {text}"
 `command` is optional: words split on whitespace (no quotes; use an array
 of arguments for spaces), each placeholder (`{herd}`, `{member}`, `{kind}`,
 `{text}`) filled within its own argument, never through a shell. `{text}`
-is the question's first line, cut to 200 characters with token-like words
+is the question's first non-blank line, cut to 200 characters with token-like words
 and URL passwords `[redacted]` (best-effort: a secret in an unknown shape
 gets through), or `blocked`. Each send runs detached within 30s; a failing
 one leaves a `note` in the member's mailbox, once until it next succeeds.

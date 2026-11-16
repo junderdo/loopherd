@@ -293,12 +293,15 @@ fn first_to_notify(mailboxes: &Path, member: &str, at: &str) -> Result<bool> {
 
 const MAX_TEXT: usize = 200;
 
-/// The question's first line, cut to [`MAX_TEXT`] characters, with each word
+/// The question's first non-blank line, cut to [`MAX_TEXT`] characters, with each word
 /// that looks like a token, carries one or follows a key such as
 /// `password:` replaced by `[redacted]`, and a URL's userinfo hidden.
 /// Best-effort: a secret in a shape it doesn't know gets through.
 fn summary(question: &str) -> String {
-    let line = question.lines().next().unwrap_or_default();
+    let line = question
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default();
     let mut after_key = false;
     let words: Vec<String> = line
         .split_whitespace()
@@ -806,6 +809,11 @@ mod tests {
                  further failures go unnoted until it next succeeds"
             )]
         );
+    }
+
+    #[test]
+    fn the_text_is_the_first_line_that_isnt_blank() {
+        assert_eq!(text_sent("\n  \nWhich way?\nMore."), "Which way?");
     }
 
     fn load_text(text: &str) -> Result<Option<Config>> {
