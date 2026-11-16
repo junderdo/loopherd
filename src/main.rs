@@ -82,12 +82,12 @@ enum Command {
     Spawn(SpawnArgs),
     /// Spawn a herd member from a template in the herd's file.
     Add(AddArgs),
-    /// Write a herd for the GitHub repo around the current directory: its herd
-    /// file and lead prompt, plus any missing issue labels, and, uncommitted, any
-    /// missing tracker doc, docs/agents/loopherd.md and AGENTS.md loopherd
-    /// section. Infers the repo, its
-    /// default branch, the gh account matching origin's owner and checks from
-    /// Cargo.toml and package.json. On a terminal (stdin and stderr, a herdr
+    /// Write a herd for the repo around the current directory: its herd file
+    /// and lead prompt, plus any missing GitHub issue labels, and, uncommitted,
+    /// any missing tracker doc, docs/agents/loopherd.md and AGENTS.md loopherd
+    /// section. Infers the repo, its default branch, the gh account matching
+    /// origin's owner when the herd has a GitHub repo (a local-markdown tracker
+    /// can go without one) and checks from Cargo.toml and package.json. On a terminal (stdin and stderr, a herdr
     /// pane included) it asks for each with that as the default, asking again
     /// for a taken herd name or an existing lead prompt, and confirms before
     /// writing; the repo, default branch and confirm questions have no flag.
@@ -137,7 +137,8 @@ enum Command {
     /// malformed source lines, and 1 on any other error.
     Feed {
         herd: String,
-        /// Run the source and done checks and print what would happen; retire and spawn nothing.
+        /// Run the source and done checks and print what would happen, with the source's
+        /// stderr notes; retire and spawn nothing.
         #[arg(long)]
         dry_run: bool,
         /// Seconds to wait for each agent to become idle.

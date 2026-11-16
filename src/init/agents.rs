@@ -11,6 +11,7 @@ use super::tracker::read;
 
 const SECTION: &str = include_str!("agents/section.md");
 const LOOPHERD: &str = include_str!("agents/loopherd.md");
+const LOOPHERD_LOCAL: &str = include_str!("agents/loopherd-local.md");
 
 const AGENTS_MD: &str = "AGENTS.md";
 const LOOPHERD_DOC: &str = "docs/agents/loopherd.md";
@@ -74,10 +75,13 @@ impl Doc {
 
 /// The values `docs/agents/loopherd.md` names.
 pub struct Herd<'a> {
-    pub account: &'a str,
+    /// The gh account, when the herd has a GitHub repo.
+    pub account: Option<&'a str>,
     pub branch: &'a str,
     pub checks: &'a [String],
     pub needs_info: &'a str,
+    /// Whether the tracker is local markdown rather than GitHub-shaped.
+    pub local: bool,
 }
 
 /// What init writes into the repo, and the steps left to the human where
@@ -139,13 +143,39 @@ pub fn present(repo: &Path, herd: &Herd) -> Result<Option<Doc>> {
 
 fn loopherd_doc(herd: &Herd) -> Doc {
     let checks: Vec<String> = herd.checks.iter().map(|c| format!("- `{c}`")).collect();
+    let template = match herd.local {
+        true => LOOPHERD_LOCAL,
+        false => LOOPHERD,
+    };
+    let (gh_note, hand_in, handed_in) = match herd.account {
+        Some(account) => (
+            format!(" Every gh command runs as {account}."),
+            format!(
+                "Push the branch and open a PR with `--base {}`.",
+                herd.branch
+            ),
+            "PR link",
+        ),
+        None => (
+            String::new(),
+            format!(
+                "Push the branch and open no pull request; the human merges it \
+                 into {}.",
+                herd.branch
+            ),
+            "branch",
+        ),
+    };
     let text = super::fill(
-        LOOPHERD,
+        template,
         &[
-            ("ACCOUNT", herd.account),
+            ("ACCOUNT", herd.account.unwrap_or_default()),
             ("BRANCH", herd.branch),
             ("CHECKS", &checks.join("\n")),
             ("NEEDS_INFO", herd.needs_info),
+            ("GH_NOTE", &gh_note),
+            ("HAND_IN", &hand_in),
+            ("HANDED_IN", handed_in),
         ],
     );
     Doc::new(LOOPHERD_DOC, text)

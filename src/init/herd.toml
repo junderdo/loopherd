@@ -1,4 +1,4 @@
-# Herd @HERD@: one worker per ready GitHub issue in @OWNER_REPO@.
+# Herd @HERD@: one worker per @TASK@.
 # Written by `loopherd init`; yours to edit, loopherd never rewrites it.
 repo = @REPO@
 args = ["--permission-mode", "auto"]
@@ -8,38 +8,5 @@ template = "issue"
 @SOURCE@
 max = @MAX@
 
-[template.issue]
-params = ["number", "type", "skill", "slug"]
-name = "{herd}-{number}"
-branch = "{type}/{number}-{slug}"
-@CONTEXT_LIMIT@done = "GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue view {number} --repo @OWNER_REPO@ --json state --jq .state | grep -qx CLOSED"
-merged = "GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh pr list --repo @OWNER_REPO@ --head {branch} --state merged --json number --jq 'length > 0' | grep -qx true"
-prompt = '''
-You're {name}, working GitHub issue #{number} of @OWNER_REPO@ on branch
-{branch} in {worktree}.
-
-Run every gh command as @ACCOUNT@, prefixed with
-`GH_TOKEN=$(gh auth token --user @ACCOUNT@)` as in the commands below.
-
-1. Read the issue and every comment:
-   `GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue view {number} --repo @OWNER_REPO@ --comments`.
-2. Claim it: `GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue comment {number} --repo @OWNER_REPO@ --body "claimed by {name}"`,
-   then `GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue edit {number} --repo @OWNER_REPO@ --add-assignee @ACCOUNT@`.
-3. Build it with the {skill} skill.
-4. Before calling it done, run each check and fix what fails:
-@CHECKS@
-5. Push the branch as @ACCOUNT@:
-   `GH_TOKEN=$(gh auth token --user @ACCOUNT@) git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin HEAD`.
-   Open a PR with `GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh pr create --repo @OWNER_REPO@ --base @BRANCH@ --head {branch} --assignee @ACCOUNT@ --title "<title>" --body "<summary>"`,
-   the body ending with the line `Closes #{number}`.
-6. Finish with `loopherd report --kind done "<PR link and one-line summary>"`.
-
-If @BRANCH@ moves under you, merge origin/@BRANCH@ into your branch; never
-rebase or force-push.
-
-If you hit a question only the human can answer, stop rather than guess:
-`GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue edit {number} --repo @OWNER_REPO@ --add-label @NEEDS_INFO@`, comment the
-question and the options you see on the issue, then
-`loopherd report --kind question "<the exact question>"`.
-'''
+@TEMPLATE@
 @LEAD_TABLE@

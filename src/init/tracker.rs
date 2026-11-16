@@ -24,10 +24,18 @@ pub enum Choice {
     Other(Option<String>),
 }
 
+/// Which built-in snippets fit the tracker.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    GitHub,
+    /// mattpocock-skills' local markdown: issue files under `.scratch/`.
+    Local,
+    /// Anything else, which gets a placeholder queue source.
+    Other,
+}
+
 pub struct Tracker {
-    /// Whether loopherd's built-in GitHub snippets fit; anything else gets a
-    /// placeholder queue source.
-    pub github: bool,
+    pub kind: Kind,
     pub labels: Labels,
     /// Docs init writes into the repo, relative to it.
     pub writes: Vec<(&'static str, String)>,
@@ -64,42 +72,42 @@ impl Default for Labels {
 /// else asked on a terminal, else GitHub.
 pub fn resolve(repo: &Path, choice: Option<Choice>) -> Result<Tracker> {
     let labels = read_labels(repo)?;
-    let (github, writes) = match read(&repo.join(TRACKER_DOC))? {
+    let (kind, writes) = match read(&repo.join(TRACKER_DOC))? {
         Some(_) if choice.is_some() => {
             bail!("{TRACKER_DOC} already names the tracker; drop --tracker")
         }
-        Some(doc) => (names_github(&doc), vec![]),
+        Some(doc) => (kind_named(&doc), vec![]),
         None => {
             let choice = match choice {
                 Some(choice) => choice,
                 None if interactive() => ask()?,
                 None => Choice::GitHub,
             };
-            let (github, doc) = match choice {
-                Choice::GitHub => (true, GITHUB.to_string()),
-                Choice::Local => (false, LOCAL.to_string()),
-                Choice::Other(desc) => (false, other_doc(desc)?),
+            let (kind, doc) = match choice {
+                Choice::GitHub => (Kind::GitHub, GITHUB.to_string()),
+                Choice::Local => (Kind::Local, LOCAL.to_string()),
+                Choice::Other(desc) => (Kind::Other, other_doc(desc)?),
             };
             let mut writes = vec![(TRACKER_DOC, doc)];
             if fs::symlink_metadata(repo.join(LABELS_DOC)).is_err() {
                 writes.push((LABELS_DOC, TRIAGE_LABELS.to_string()));
             }
-            (github, writes)
+            (kind, writes)
         }
     };
-    // Only GitHub's snippets put the labels in shell commands.
-    if github {
+    // The built-in snippets put the labels in shell commands.
+    if kind != Kind::Other {
         for (role, label) in labels.roles() {
             if !is_label(label) {
                 bail!(
-                    "{LABELS_DOC} maps {role} to {label:?}; init takes GitHub labels of \
+                    "{LABELS_DOC} maps {role} to {label:?}; init takes labels of \
                      letters, digits and - _ . : / only, not starting with -"
                 );
             }
         }
     }
     Ok(Tracker {
-        github,
+        kind,
         labels,
         writes,
     })
@@ -138,9 +146,13 @@ fn other_doc(desc: Option<String>) -> Result<String> {
     Ok(format!("# Issue tracker\n\n{}\n", desc.trim()))
 }
 
-/// Whether the doc's title is mattpocock-skills' GitHub one, in any case.
-fn names_github(doc: &str) -> bool {
-    title_kind(doc).as_deref() == Some("github")
+/// The tracker the doc's title names in mattpocock-skills' words, in any case.
+fn kind_named(doc: &str) -> Kind {
+    match title_kind(doc).as_deref() {
+        Some("github") => Kind::GitHub,
+        Some("local markdown") => Kind::Local,
+        _ => Kind::Other,
+    }
 }
 
 /// The lowercased tracker a `# Issue tracker: <kind>` title names.
