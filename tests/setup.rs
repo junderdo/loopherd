@@ -277,6 +277,53 @@ fn without_a_terminal_setup_asks_nothing_and_names_the_flags_for_whats_unset() {
         out.contains("--lead-defaults") && !out.contains("--context"),
         "{out}"
     );
+
+    let config = Config::new(None);
+    let out = succeeded(&config.setup(&["--lead-defaults=merge"]));
+    assert!(
+        out.contains("set the lead defaults: merge")
+            && out.contains("--context window=<n>,limit=<n>,shepherd=<n>")
+            && !out.contains("--lead-defaults <"),
+        "{out}"
+    );
+
+    let config = Config::new(None);
+    let out = succeeded(&config.setup(&["--context=window=1000000"]));
+    assert!(
+        out.contains("--lead-defaults <switches|none>") && !out.contains("--context window="),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_smaller_window_is_refused_when_a_limit_already_set_goes_over_its_cap() {
+    let text = "context_window = 1000000\ndefault_context_limit = 700000\n";
+    let config = Config::new(Some(text));
+
+    let out = config.setup(&["--context", "window=300000"]);
+
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("default_context_limit 700000 is over the cap of 240000"),
+        "{err}"
+    );
+    assert_eq!(config.text().unwrap(), text);
+
+    let config = Config::new(Some("[shepherd]\ncontext_limit = 700000\n"));
+    let out = config.setup(&["--context", "window=300000,limit=200000"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("shepherd.context_limit 700000"),
+        "{out:?}"
+    );
+
+    let config = Config::new(Some(text));
+    succeeded(&config.setup(&["--context", "window=300000,limit=200000"]));
+    assert_eq!(
+        config.values()["default_context_limit"].as_integer(),
+        Some(200000)
+    );
 }
 
 #[test]

@@ -77,10 +77,10 @@ pub fn setup(req: Request, tty: Option<Tty>) -> Result<Vec<String>> {
 
     let Some(tty) = tty else {
         let mut flags = vec![];
-        if ask_lead && file.lead_defaults.is_none() {
+        if file.lead_defaults.is_none() && !matches!(req.lead_defaults, Some(Some(_))) {
             flags.push(LEAD_FLAG);
         }
-        if ask_context && context_unset {
+        if context_unset && !matches!(req.context, Some(Some(_))) {
             flags.push(CONTEXT_FLAG);
         }
         if !flags.is_empty() {
@@ -156,9 +156,18 @@ fn context_flag(flag: &str, file: &ConfigFile) -> Result<Limits> {
         .window
         .or(file.context_window)
         .unwrap_or(DEFAULT_WINDOW);
-    for limit in [context.limit, context.shepherd].into_iter().flatten() {
-        if let Some(over) = over_cap(limit, window) {
-            bail!("--context: {over}");
+    for (key, limit) in [
+        (
+            "default_context_limit",
+            context.limit.or(file.default_context_limit),
+        ),
+        (
+            "shepherd.context_limit",
+            context.shepherd.or(shepherd(file)),
+        ),
+    ] {
+        if let Some(over) = limit.and_then(|limit| over_cap(limit, window)) {
+            bail!("--context: {key} {over}");
         }
     }
     Ok(context)
