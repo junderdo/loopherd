@@ -1116,6 +1116,10 @@ mod tests {
                 "password: [redacted]; merge?",
             ),
             (
+                r#"curl -H "Authorization: Bearer abc" now and later?"#,
+                r#"curl -H "Authorization: [redacted]" now and later?"#,
+            ),
+            (
                 "password: two words. Merge?",
                 "password: [redacted]. Merge?",
             ),
