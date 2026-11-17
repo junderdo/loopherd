@@ -73,7 +73,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 One concept seems to carry all four outcomes: a **herd** declared in a file.
 
 - **Herd** — a named, cross-cutting group with a purpose
-  (e.g. `zagops-prs`, `personal-priorities`). Not tied to one herdr workspace.
+  (e.g. `my-app-prs`, `personal-priorities`). Not tied to one herdr workspace.
 - **Member template** — how to spawn one member: repo, worktree naming,
   agent kind, starting prompt, parameters (e.g. a PR number).
 - **Member** — a live instance: herdr agent name, pane, Claude session ID,
@@ -86,9 +86,9 @@ One concept seems to carry all four outcomes: a **herd** declared in a file.
 Herd file (D9):
 
 ```toml
-# ~/.config/loopherd/herds/zagops-prs.toml  (herd name = filename)
-repo = "~/work/projects/zagops/zagops"
-workspace = "zagops"
+# ~/.config/loopherd/herds/my-app-prs.toml  (herd name = filename)
+repo = "~/src/my-app"
+workspace = "my-app"
 args = ["--permission-mode", "auto"]
 
 [template.pr]
@@ -99,7 +99,7 @@ prompt = "You're {name}. Run `gh pr checkout --detach {number}`, read review com
 ```
 
 ```bash
-loopherd add zagops-prs pr 1050   # worktree + herdr tab + named agent + prompt
+loopherd add my-app-prs pr 1050   # worktree + herdr tab + named agent + prompt
 loopherd                          # TUI: members grouped by herd, what needs me
 loopherd revive                   # after reboot: resume every member from the ledger
 ```

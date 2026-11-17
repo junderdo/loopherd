@@ -513,7 +513,7 @@ mod tests {
     }
 
     fn herdr() -> FakeHerdr {
-        FakeHerdr::new(&[("w1", "loopherd"), ("w2", "zagops")])
+        FakeHerdr::new(&[("w1", "loopherd"), ("w2", "my-app")])
     }
 
     fn run(herdr: &FakeHerdr, ledger: &mut MemLedger, req: &SpawnRequest) -> Result<Spawned> {
@@ -591,7 +591,7 @@ mod tests {
     fn workspace_flag_picks_a_workspace_by_label() {
         let herdr = herdr();
         let req = SpawnRequest {
-            workspace: Some("zagops".into()),
+            workspace: Some("my-app".into()),
             ..request("a")
         };
         run(&herdr, &mut MemLedger::default(), &req).unwrap();
@@ -676,7 +676,7 @@ mod tests {
 
     #[test]
     fn records_the_workspace_label_and_claude_args_for_revive() {
-        for (flag, inherited) in [(Some("zagops"), None), (None, Some("w2"))] {
+        for (flag, inherited) in [(Some("my-app"), None), (None, Some("w2"))] {
             let herdr = herdr();
             let mut ledger = MemLedger::default();
             let req = SpawnRequest {
@@ -687,7 +687,7 @@ mod tests {
             spawn(&herdr, &mut ledger, &req, inherited).unwrap();
             let rec = &ledger.0["a"];
             assert_eq!(rec.workspace, "w2");
-            assert_eq!(rec.workspace_label.as_deref(), Some("zagops"));
+            assert_eq!(rec.workspace_label.as_deref(), Some("my-app"));
             assert_eq!(rec.claude_args, vec!["--model", "opus"]);
         }
     }

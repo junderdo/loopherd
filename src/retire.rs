@@ -1079,7 +1079,7 @@ mod tests {
     }
 
     fn two_workspaces() -> FakeHerdr {
-        FakeHerdr::new(&[("w1", "loopherd"), ("w2", "zagops")])
+        FakeHerdr::new(&[("w1", "loopherd"), ("w2", "my-app")])
     }
 
     /// Retires and closes `a`, whose tab is open in `cwd`, with `mailboxes`.
@@ -1216,7 +1216,7 @@ mod tests {
     #[test]
     fn close_reports_no_matching_tab_for_a_recorded_pane_in_another_workspace() {
         let cwd = tempfile::tempdir().unwrap();
-        let herdr = FakeHerdr::new(&[("w1", "zagops"), ("w2", "loopherd")]);
+        let herdr = FakeHerdr::new(&[("w1", "my-app"), ("w2", "loopherd")]);
         let pane = herdr.add_tab("w1", "a", cwd.path(), true);
         let mut ledger = plain(cwd.path(), &pane);
 
@@ -1224,7 +1224,7 @@ mod tests {
             close(&herdr, &mut ledger),
             [
                 "retired a".to_string(),
-                format!("no matching tab (pane {pane} is in workspace zagops)"),
+                format!("no matching tab (pane {pane} is in workspace my-app)"),
             ]
         );
         assert_eq!(herdr.tabs().len(), 1);

@@ -61,7 +61,7 @@ under the probe's claude pid:
 
 ```
   PID  PPID  PGID   SID CMD
-16107 15641 16107 16107 /bin/bash -c source /home/jeffu/.claude/shell-snapshots/sn…
+16107 15641 16107 16107 /bin/bash -c source ~/.claude/shell-snapshots/sn…
 16112 16107 …            sleep 240
 ```
 

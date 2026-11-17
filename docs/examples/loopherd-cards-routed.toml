@@ -35,7 +35,7 @@ name = "research-{card}"
 branch = "{type}/LH-{card}-{slug}"
 args = ["--model", "sonnet"]
 done = "scripts/trello show LH-{card} | grep -qx 'list: Done'"
-merged = "GH_TOKEN=$(gh auth token --user junderdo) gh pr list --head {branch} --state merged --json number --jq length | grep -qx 1"
+merged = "GH_TOKEN=$(gh auth token --user <gh-user>) gh pr list --head {branch} --state merged --json number --jq length | grep -qx 1"
 prompt = """
 You're {name}, working on branch {branch} in {worktree}.
 
@@ -43,7 +43,7 @@ Work Trello card LH-{card} per AGENTS.md and docs/agents/issue-tracker.md: read 
 comment with `scripts/trello show LH-{card}`, claim it (move to In Progress, comment "claimed by {name}"),
 and resolve it with the skill its kind label names. Wayfinding output goes on this branch.
 
-Push as junderdo: `GH_TOKEN=$(gh auth token --user junderdo) git -c credential.helper= -c credential.helper='!gh auth git-credential' push ...`.
+Push as <gh-user>: `GH_TOKEN=$(gh auth token --user <gh-user>) git -c credential.helper= -c credential.helper='!gh auth git-credential' push ...`.
 Open the PR with --assignee @me, title `docs(LH-{card}): ...`, card URL as the first line. Comment the PR
 link and a three-line summary on the card and move it to Review. Never rebase or force-push.
 
