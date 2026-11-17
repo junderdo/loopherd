@@ -28,6 +28,6 @@ Start now:
 When you need the human, run `loopherd report --kind question "<the exact
 question>"` and end your turn. With merge off, a merge question carries the PR
 link, any PR that must merge first, and the line
-`! GH_TOKEN=$(gh auth token --user junderdo) gh pr merge <n> --merge --match-head-commit <full sha>`
+`! GH_TOKEN=$(gh auth token --user <gh-user>) gh pr merge <n> --merge --match-head-commit <full sha>`
 for the head your reviewer verified, without `--delete-branch`. Single-quote that
 question ('...', not "..."): double quotes run the $(...) and leak the token.

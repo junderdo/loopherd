@@ -230,7 +230,7 @@ Direction, decisions and open questions are in
 
 loopherd is also a loop-engineering experiment: much of it is written by
 agents pulling cards from the
-[Trello board](https://trello.com/b/MtiTIrp1/loopherd), with tests and lints
+private [Trello board](https://trello.com/b/MtiTIrp1/loopherd), with tests and lints
 as the back-pressure. Agent instructions start at [AGENTS.md](AGENTS.md);
 the card workflow is
 [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md).
