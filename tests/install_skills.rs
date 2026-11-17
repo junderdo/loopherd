@@ -2,19 +2,16 @@
 //! the question on a terminal, and the overlap listing, driven against a stub
 //! `claude` and `curl` so no test installs a real plugin.
 
+mod fakes;
+
+use fakes::executable;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 const REPO: &str = env!("CARGO_MANIFEST_DIR");
 const PLUGIN: &str = "mattpocock-skills@claude-plugins-official";
-
-fn executable(path: &Path, script: &str) {
-    fs::write(path, script).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-}
 
 /// A dir of links to everything on the test's PATH except `claude`.
 fn path_without_claude(dir: &Path) -> String {
@@ -51,7 +48,11 @@ impl Sandbox {
         let root = dir.path().join("repo");
         fs::create_dir_all(root.join("scripts")).unwrap();
         fs::create_dir_all(root.join("agents")).unwrap();
-        for file in ["install", "install-agents.bash", "install-skills.bash"] {
+        executable(
+            &root.join("scripts/install"),
+            &fs::read_to_string(format!("{REPO}/scripts/install")).unwrap(),
+        );
+        for file in ["install-agents.bash", "install-skills.bash"] {
             fs::copy(
                 format!("{REPO}/scripts/{file}"),
                 root.join(format!("scripts/{file}")),

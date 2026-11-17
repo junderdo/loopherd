@@ -1,17 +1,15 @@
 //! `scripts/install.sh`, the one-line installer, run against a fake release
 //! directory through `LOOPHERD_RELEASE_BASE`.
 
+mod fakes;
+
+use fakes::executable;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
 const INSTALL_SH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install.sh");
-
-fn executable(path: &Path, script: &str) {
-    fs::write(path, script).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-}
 
 /// A temp HOME, a fake `uname`, and a release directory laid out like
 /// GitHub's: `latest/download/<file>` and `download/<tag>/<file>`.
