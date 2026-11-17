@@ -39,9 +39,13 @@ curl -fsSL https://junderdo.dev/loopherd/install.sh | sh
 ```
 
 Picks the build for your OS and arch (Linux or macOS, x86_64 or aarch64)
-and checks it against the release's `SHA256SUMS`. Put
-`LOOPHERD_VERSION=v0.1.0` before `sh` to pin a release. The same script is
-served as
+and checks it against the release's `SHA256SUMS`. To pin a release:
+
+```bash
+curl -fsSL https://junderdo.dev/loopherd/install.sh | LOOPHERD_VERSION=v0.1.0 sh
+```
+
+The same script is served as
 `https://github.com/junderdo/loopherd/releases/latest/download/install.sh`.
 
 **Update:** run the one-liner again.
@@ -69,8 +73,17 @@ default no. `scripts/install --help` lists its flags.
 
 `loopherd setup` asks for `config.toml`'s machine-wide settings while
 they're unset: what a lead may do by default, then the context window and
-handoff limits. Run it again with `--again`. To uninstall:
-`loopherd install-hook --remove`, then `rm ~/.local/bin/loopherd`.
+handoff limits. Run it again with `--again`.
+
+To uninstall:
+
+```bash
+loopherd install-hook --remove      # add --settings <file> if you installed with one
+rm ~/.local/bin/loopherd
+```
+
+Agent types from `scripts/install` are yours to remove: the files listed in
+`$XDG_STATE_HOME/loopherd/agents.sha256`, then that file.
 
 The hooks act only in a member's pane: they record each stop in its
 mailbox, keep its session current across `/clear` and resume, and deny a
@@ -90,9 +103,10 @@ loopherd lead <herd>                # starts the lead, which feeds and watches t
 `loopherd init` infers what it can (repo, herd name, GitHub repo and
 account, default branch, checks from `Cargo.toml` and `package.json`) and
 asks for each on a terminal, the inferred value as the default. It writes
-`<herd>.toml` and `<herd>-lead.md` in `~/.config/loopherd/herds/`
-(`LOOPHERD_CONFIG_DIR` replaces `~/.config/loopherd`), creates the GitHub
-labels the queue reads, and, uncommitted, adds `docs/agents/loopherd.md`,
+`<herd>.toml` and `<herd>-lead.md` in `$XDG_CONFIG_HOME/loopherd/herds/`
+(default `~/.config/loopherd/herds/`; `LOOPHERD_CONFIG_DIR` replaces the
+`loopherd` dir), for a GitHub tracker creates the labels the queue reads,
+and, uncommitted, adds `docs/agents/loopherd.md`,
 a tracker doc if the repo has none, and a `## loopherd` section in
 `AGENTS.md`. The tracker can be GitHub issues, local markdown issue files,
 or another one you describe; `loopherd init --help` has the flags. Follow
@@ -145,7 +159,7 @@ table and the rest are what `init` writes; start from its output or from
 | `herds` | List herd files and their templates; exits 1 if any is invalid. |
 | `herd get\|set\|unset <herd> <key>` | Read or edit one value in a herd file, keeping its comments (`queue.max`, `lead.merge`). |
 | `herd remove <herd>` | Delete a finished herd's file and its members' records. |
-| `lead-defaults` | Show the lead switches `config.toml` turns on where a herd file doesn't say; `--set` writes them. |
+| `lead-defaults` | Show `config.toml`'s lead switches, on or off, for herds whose `[lead]` doesn't set them; `--set` writes them. |
 | `config get\|set\|unset <key>` | Read or edit `context_window`, `default_context_limit` or `shepherd.context_limit`. |
 | `install-hook` | Add loopherd's Claude hooks and skill (`--remove` takes them out). |
 
