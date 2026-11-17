@@ -362,8 +362,16 @@ mod tests {
 
         let mut out = vec![];
         let now = std::time::SystemTime::now();
-        crate::retire::retire_and_close(&herdr, &mut ledger, "lead-h", now, None, &mut out)
-            .unwrap();
+        crate::retire::retire_and_close(
+            &herdr,
+            &mut ledger,
+            "lead-h",
+            now,
+            std::path::Path::new("/nonexistent/reports"),
+            None,
+            &mut out,
+        )
+        .unwrap();
 
         assert!(ledger.0["lead-h"].retired);
         assert!(herdr.tabs().is_empty(), "{out:?}");

@@ -362,7 +362,9 @@ fn reap(
             Ok(true) => {
                 let mut out = vec![];
                 let own_pane = req.own_pane.as_deref();
-                match retire_and_close(herdr, ledger, name, SystemTime::now(), own_pane, &mut out) {
+                let now = SystemTime::now();
+                match retire_and_close(herdr, ledger, name, now, &req.mailboxes, own_pane, &mut out)
+                {
                     Ok(()) => {
                         lines.push(out.join("; "));
                         reaped.retired += 1;
@@ -1342,6 +1344,52 @@ mod tests {
             herdr.tabs().iter().map(|t| &t.label).collect::<Vec<_>>(),
             ["zpr-2"]
         );
+    }
+
+    #[test]
+    fn retiring_a_done_member_removes_its_notify_marks_only() {
+        let setup = Setup::with_done("cat tasks", 1, "test -f done-{number}");
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        setup.tasks("1\n");
+        setup.feed(&herdr, &mut ledger, false).unwrap();
+        let mailboxes = setup.config.path().join("reports");
+        fs::create_dir_all(&mailboxes).unwrap();
+        for member in ["zpr-1", "zpr-9"] {
+            fs::write(
+                mailboxes.join(format!("{member}.notified")),
+                "question t1\n",
+            )
+            .unwrap();
+            fs::write(mailboxes.join(format!("{member}.blocked")), "").unwrap();
+        }
+        setup.touch("done-1");
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert!(ledger.0["zpr-1"].retired, "{:?}", fed.lines);
+        assert!(!mailboxes.join("zpr-1.notified").exists());
+        assert!(!mailboxes.join("zpr-1.blocked").exists());
+        assert!(mailboxes.join("zpr-9.notified").exists());
+        assert!(mailboxes.join("zpr-9.blocked").exists());
+        assert_eq!(fed.code, 0);
+    }
+
+    #[test]
+    fn retiring_a_done_member_without_notify_marks_is_not_an_error() {
+        let setup = Setup::with_done("cat tasks", 1, "test -f done-{number}");
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        setup.tasks("1\n");
+        setup.feed(&herdr, &mut ledger, false).unwrap();
+        let tab = herdr.tabs()[0].id.clone();
+        setup.touch("done-1");
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(fed.lines[0], format!("retired zpr-1; closed tab {tab}"));
+        assert!(ledger.0["zpr-1"].retired);
+        assert_eq!(fed.code, 0);
     }
 
     /// A ledger holding `zpr-1`, a member of `prs` spawned by an earlier feed.
