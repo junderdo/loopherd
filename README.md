@@ -101,8 +101,9 @@ as its main checkout. Then, in order:
    ([details](docs/research/claude-workspace-trust.md)).
 2. **Write the herd.** In the repo, run `loopherd init`. It asks on a
    terminal and takes flags otherwise (`loopherd init --help`). Follow the
-   steps it prints, fill each `(fill in)` placeholder it lists, then
-   review and commit the repo files it added.
+   steps it prints up to `loopherd herds`, filling each `(fill in)`
+   placeholder it lists, then review and commit the repo files it added.
+   Its last steps, the checks and `loopherd lead`, come below.
 3. **Check it.** `loopherd herds` calls the herd file valid, and
    `loopherd feed <herd> --dry-run` lists the tasks you expect.
 4. **Open the herd view.** In a new herdr tab, run `loopherd view`. It
@@ -123,6 +124,11 @@ as its main checkout. Then, in order:
    the switches you set; the shepherd's watch reads the lead and relays
    its questions to you.
 
+The guide a shepherd or lead follows, from setting up a herd to cleaning up
+after merges, is the loopherd skill: `loopherd --skill` prints it
+(`--section lead` prints one section), and `install-hook` installs it for
+Claude.
+
 ### What `init` writes
 
 `loopherd init` infers the repo, herd name, GitHub repo and account,
@@ -135,21 +141,16 @@ and, uncommitted, adds `docs/agents/loopherd.md`, a tracker doc if the repo
 has none, and a `## loopherd` section in `AGENTS.md`. The tracker can be
 GitHub issues, local markdown issue files, or another one you describe.
 
-Its printed steps also cover, when they apply: adding an origin remote,
-writing by hand a repo file init left alone (a symlinked `AGENTS.md`, a doc
-that would land outside the repo), and tailoring the herd to the repo per
-"Setting up a project" in `loopherd --skill`.
+Its printed steps also cover adding an origin remote and writing by hand a
+repo file init left alone (a symlinked `AGENTS.md`, a doc that would land
+outside the repo), each when it applies, and always tailoring the herd to
+the repo per "Setting up a project" in `loopherd --skill`.
 
 ### If a spawn blocks on the trust dialog
 
 A spawn that still meets the dialog exits 3 and names the pane. Answer the
 dialog there, then run `loopherd prompt <name>` to send the member its
 prompt.
-
-The guide a shepherd or lead follows, from setting up a herd to cleaning up
-after merges, is the loopherd skill: `loopherd --skill` prints it
-(`--section lead` prints one section), and `install-hook` installs it for
-Claude.
 
 ### Writing a herd file by hand
 
