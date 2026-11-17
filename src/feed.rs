@@ -204,19 +204,18 @@ fn pending(queue: &Queue, members: Vec<String>) -> Option<Pending> {
     })
 }
 
-/// The names feed would spawn now, as `feed --dry-run` plans them: tasks
-/// with no member, while slots are free under `max`, `freed` being the
-/// members whose done check passes. Fails if the source fails; a task feed
-/// would error on is skipped.
+/// The names feed would spawn now from `tasks`, the source's output, as
+/// `feed --dry-run` plans them: tasks with no member, while slots are free
+/// under `max`, `freed` being the members whose done check passes. A task
+/// feed would error on is skipped.
 pub fn claimable(
     ledger: &dyn Ledger,
     paths: &Paths,
     queue: &Queue,
     herd: &str,
     freed: usize,
-    timeout: Duration,
+    tasks: &str,
 ) -> Result<Vec<String>> {
-    let (output, _) = run_source(queue, timeout)?;
     let entries = ledger.entries().context("ledger")?;
     let mut free = queue
         .max
@@ -226,7 +225,7 @@ pub fn claimable(
         herd: herd.into(),
         dry_run: true,
         ready_timeout: Duration::ZERO,
-        command_timeout: timeout,
+        command_timeout: Duration::ZERO,
         own_pane: None,
         own_socket: None,
         mailboxes: PathBuf::new(),
@@ -235,7 +234,7 @@ pub fn claimable(
         procs: &crate::process::ProcFs,
     };
     let mut names = vec![];
-    for task in output.lines().map(str::trim) {
+    for task in tasks.lines().map(str::trim) {
         if free == 0 {
             break;
         }
@@ -760,7 +759,7 @@ fn task_request(
 
 /// The source's stdout and stderr; fails if it exits non-zero or outruns
 /// `timeout`.
-fn run_source(queue: &Queue, timeout: Duration) -> Result<(String, String)> {
+pub(crate) fn run_source(queue: &Queue, timeout: Duration) -> Result<(String, String)> {
     let output = run_within(
         Command::new("sh")
             .arg("-c")
@@ -2135,15 +2134,8 @@ mod tests {
         let paths = setup.paths();
         let queue = crate::herd::queue(&paths, "prs").unwrap();
 
-        let names = claimable(
-            &MemLedger::default(),
-            &paths,
-            &queue,
-            "prs",
-            0,
-            Duration::from_secs(1),
-        )
-        .unwrap();
+        let (tasks, _) = run_source(&queue, Duration::from_secs(1)).unwrap();
+        let names = claimable(&MemLedger::default(), &paths, &queue, "prs", 0, &tasks).unwrap();
 
         assert_eq!(names, ["research-1", "lh-2"]);
     }
