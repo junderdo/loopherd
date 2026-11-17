@@ -43,6 +43,9 @@ pub enum Switch {
     /// `cargo` run through a `CARGO_ALIAS_*` whose value the hook can't read.
     /// Not a switch: always the human's.
     OpaqueCargoAlias,
+    /// A `gh`, `git` or shell alias, which could name a gated command the
+    /// hook can't see. Not a switch: always the human's.
+    Alias,
     /// A command the hook may read differently from bash: one in a form
     /// [`unreadable`] lists, or a `$(…)` whose end it can't find. Not a
     /// switch: always the human's.
@@ -61,6 +64,7 @@ impl Switch {
             Switch::LeadDefaults => "lead-defaults",
             Switch::Config => "config",
             Switch::OpaqueCargoAlias => "cargo alias",
+            Switch::Alias => "alias",
             Switch::Unreadable => "unreadable command",
         }
     }
@@ -76,6 +80,7 @@ impl Switch {
             Switch::LeadDefaults => "the human sets lead defaults",
             Switch::Config => "the human sets loopherd's config",
             Switch::OpaqueCargoAlias => "the human runs cargo through such aliases",
+            Switch::Alias => "the human sets gh, git and shell aliases",
             Switch::Unreadable => "the human runs commands the hook can't read",
         }
     }
@@ -91,6 +96,7 @@ impl Switch {
             | Switch::LeadDefaults
             | Switch::Config
             | Switch::OpaqueCargoAlias
+            | Switch::Alias
             | Switch::Unreadable => false,
         }
     }
@@ -181,9 +187,16 @@ fn decide(
             needed.humans_part()
         )));
     }
+    if needed == Switch::Alias {
+        return Ok(Some(format!(
+            "loopherd: blocked: {} may not set a `gh alias`, a `git -c alias.*` or a shell `alias`, which could hide a command its switches gate: {}; spell the command out, or ask with `loopherd report --kind question`",
+            lead.name,
+            needed.humans_part()
+        )));
+    }
     if needed == Switch::Unreadable {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like, a `<<` in `((…))`, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like, a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -408,6 +421,16 @@ impl Word {
         self.text.matches('[').count() > self.text.matches(']').count()
     }
 
+    /// Whether the word ends inside a subscript after a variable's name, as
+    /// in an assignment `a[i]=x`.
+    fn in_name_subscript(&self) -> bool {
+        self.in_subscript()
+            && self
+                .text
+                .split_once('[')
+                .is_some_and(|(name, _)| is_name(name))
+    }
+
     fn mark_substituted(&mut self) {
         self.substituted_at.get_or_insert(self.text.len());
     }
@@ -600,6 +623,13 @@ fn commands(script: &str) -> Option<Lexed> {
             '`' => {
                 word.get_or_insert_default().mark_substituted();
                 lexed.extend(self::commands(&backticked(&mut chars, false)?)?);
+            }
+            // Bash keeps an assignment's `name[` open across these to its `]`.
+            '(' | ' ' | '\t'
+                if word.as_ref().is_some_and(Word::in_name_subscript)
+                    && words.iter().all(|w: &Word| is_assignment(&w.text)) =>
+            {
+                return None;
             }
             ';' | '&' | '|' | '\n' | '(' | ')' => {
                 let doubled = chars.peek() == Some(&c) && matches!(c, '(' | ')');
@@ -1088,7 +1118,7 @@ fn heredoc_body(
 }
 
 /// Words that run the command after them, with their options that take a value.
-const WRAPPERS: [(&str, &[&str]); 14] = [
+const WRAPPERS: [(&str, &[&str]); 17] = [
     ("env", &["-u", "-C", "-S"]),
     ("sudo", &["-u", "-g", "-C", "-D"]),
     ("exec", &["-a"]),
@@ -1102,6 +1132,9 @@ const WRAPPERS: [(&str, &[&str]); 14] = [
     ("xargs", &["-I", "-n", "-P", "-L", "-d", "-s", "-E", "-a"]),
     ("timeout", &["-s", "-k"]),
     ("setsid", &[]),
+    ("ionice", &["-c", "-n", "-p", "-P", "-u"]),
+    ("taskset", &[]),
+    ("flock", &["-w", "--timeout", "-E", "--conflict-exit-code"]),
     // This repo's `scripts/herdr-dev`.
     ("herdr-dev", &[]),
 ];
@@ -1141,6 +1174,15 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             None => kept.push(word),
         }
     }
+    // A shell's script from `<(…)`, `<<<` or `< file` is out of the hook's
+    // sight; a `<<` heredoc's body is judged on its own.
+    let reads_input = command.iter().any(|w| {
+        redirection(&w.text).is_some()
+            && w.text
+                .trim_start_matches(|c: char| c.is_ascii_digit())
+                .starts_with('<')
+            && !(w.text.contains("<<") && !w.text.contains("<<<"))
+    });
     let words: Vec<String> = kept.iter().map(|w| w.text.clone()).collect();
     let words = words.as_slice();
     let mut i = 0;
@@ -1160,10 +1202,24 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
         } else if is_assignment(word) {
             aliases.assign(kept[i]);
             i += 1;
-        } else if kept[i].pattern() {
+        } else if kept[i].pattern() || ((word == "source" || word == ".") && reads_input) {
             return vec![Switch::Unreadable];
         } else if KEYWORDS.contains(&word.as_str()) || word == "." {
             i += 1;
+        } else if word == "function" {
+            i += 2;
+        } else if word == "coproc" {
+            // `coproc NAME { … }` names the coprocess; `coproc cmd args` doesn't.
+            i += if words.get(i + 2).is_some_and(|w| w == "{") {
+                2
+            } else {
+                1
+            };
+        } else if word == "trap" {
+            let action = skip_options(words, i + 1, &[]);
+            return words.get(action).map_or(vec![], |script| {
+                needs_with(script, &mut aliases.clone(), true)
+            });
         } else if DECLARERS.contains(&program) {
             let args = &kept[i + 1..];
             let nameref = |w: &&Word| w.text.starts_with('-') && w.text.contains('n');
@@ -1175,8 +1231,17 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             return vec![];
         } else if let Some((_, with_value)) = WRAPPERS.iter().find(|(w, _)| *w == program) {
             in_env |= program == "env";
+            let rest = &words[i + 1..];
+            if program == "flock"
+                && let Some(at) = rest.iter().position(|w| w == "-c" || w == "--command")
+            {
+                return rest.get(at + 1).map_or(vec![], |script| {
+                    needs_with(script, &mut aliases.clone(), true)
+                });
+            }
             i = skip_options(words, i + 1, with_value);
-            if program == "timeout" {
+            // The duration, CPU mask or lock file before the command.
+            if ["timeout", "taskset", "flock"].contains(&program) {
                 i += 1;
             }
         } else if program == "rustup" {
@@ -1211,6 +1276,9 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
                     1
                 };
             }
+            if reads_input {
+                return vec![Switch::Unreadable];
+            }
         } else if program == "eval" {
             return needs_with(&words[i + 1..].join(" "), aliases, true);
         } else if GATED.contains(&program) && kept[i + 1..].iter().any(|w| w.braced()) {
@@ -1242,8 +1310,17 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
             let api_merge = positional.first() == Some(&"api")
                 && args.iter().any(|a| merges(a))
                 && gh_api_writes(args);
+            if positional.starts_with(&["alias", "set"])
+                || positional.starts_with(&["alias", "import"])
+            {
+                return Some(Switch::Alias);
+            }
             (pr_merge || api_merge).then_some(Switch::Merge)
         }
+        "alias" => args
+            .iter()
+            .any(|a| a.contains('='))
+            .then_some(Switch::Alias),
         "curl" | "wget" => args.iter().any(|a| merges(a)).then_some(Switch::Merge),
         "git" => git_needs(args),
         "loopherd" => match positional.first() {
@@ -1493,6 +1570,19 @@ fn git_needs(args: &[String]) -> Option<Switch> {
         "--super-prefix",
     ];
     let start = skip_options(args, 0, &GLOBAL_WITH_VALUE);
+    let globals = &args[..start.min(args.len())];
+    let sets_alias = globals.iter().enumerate().any(|(at, option)| {
+        let value = match option.as_str() {
+            "-c" | "--config-env" => globals.get(at + 1).map(String::as_str),
+            _ => option
+                .strip_prefix("--config-env=")
+                .or_else(|| option.strip_prefix("-c")),
+        };
+        value.is_some_and(|v| v.to_ascii_lowercase().starts_with("alias."))
+    });
+    if sets_alias {
+        return Some(Switch::Alias);
+    }
     let (subcommand, rest) = args.get(start..)?.split_first()?;
     let rebases = |a: &String| {
         a == "-r" || a == "--rebase" || a.strip_prefix("--rebase=").is_some_and(|v| v != "false")
@@ -1597,10 +1687,14 @@ fn is_assignment(word: &str) -> bool {
             Some((array, subscript)) if subscript.ends_with(']') => array,
             _ => name,
         };
-        !name.is_empty()
-            && !name.starts_with(|c: char| c.is_ascii_digit())
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        is_name(name)
     })
+}
+
+fn is_name(word: &str) -> bool {
+    !word.is_empty()
+        && !word.starts_with(|c: char| c.is_ascii_digit())
+        && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 #[cfg(test)]
@@ -2020,6 +2114,7 @@ mod tests {
             | Switch::LeadDefaults
             | Switch::Config
             | Switch::OpaqueCargoAlias
+            | Switch::Alias
             | Switch::Unreadable => {}
         }
         s
@@ -2066,6 +2161,7 @@ mod tests {
                 | Switch::LeadDefaults
                 | Switch::Config
                 | Switch::OpaqueCargoAlias
+                | Switch::Alias
                 | Switch::Unreadable => {}
             }
             for command in commands {
@@ -3450,5 +3546,117 @@ mod tests {
         ] {
             assert_passes(command);
         }
+    }
+
+    #[test]
+    fn a_heredoc_delimiter_with_a_cr_or_unicode_space_is_one_word() {
+        assert_judged(
+            "cat <<E\u{a0}x\nE\n'\nE\u{a0}x\ngh pr merge 1 #'",
+            Switch::Merge,
+        );
+        assert_judged("cat <<E\r\nE\n'\nE\r\ngh pr merge 1 #'", Switch::Merge);
+    }
+
+    #[test]
+    fn function_coproc_and_trap_bodies_are_read_as_commands() {
+        for command in [
+            "function f { gh pr merge 1; }; f",
+            "function f() { gh pr merge 1; }; f",
+            "coproc gh pr merge 1; wait",
+            "coproc { gh pr merge 1; }; wait",
+            "coproc N { gh pr merge 1; }; wait",
+            "trap 'gh pr merge 1' EXIT",
+            "trap -- 'gh pr merge 1' EXIT",
+        ] {
+            assert_judged(command, Switch::Merge);
+        }
+        assert_passes("trap 'rm -f /tmp/x' EXIT");
+        assert_passes("trap -p");
+    }
+
+    #[test]
+    fn ionice_taskset_and_flock_wrap_a_command() {
+        for command in [
+            "ionice gh pr merge 1",
+            "ionice -c 3 gh pr merge 1",
+            "taskset 1 gh pr merge 1",
+            "taskset -c 0 gh pr merge 1",
+            "flock /dev/null gh pr merge 1",
+            "flock -w 5 /tmp/l gh pr merge 1",
+            "flock /tmp/l -c 'gh pr merge 1'",
+            "flock --command 'gh pr merge 1' /tmp/l",
+        ] {
+            assert_judged(command, Switch::Merge);
+        }
+        assert_judged("flock -x /tmp/l git rebase origin/main", Switch::Rebase);
+        assert_passes("flock /tmp/l gh pr view 1");
+    }
+
+    #[test]
+    fn a_leads_gh_git_or_shell_alias_is_denied_whatever_its_switches() {
+        for command in [
+            "gh alias set mm 'pr merge' && gh mm 1",
+            "gh alias import aliases.yml",
+            "git -c alias.r=rebase r origin/main",
+            "git -c Alias.r=rebase r origin/main",
+            "git -calias.r=rebase r origin/main",
+            "git --config-env=alias.r=R r origin/main",
+            "git --config-env alias.r=R r origin/main",
+            "shopt -s expand_aliases\nalias g=gh\ng pr merge 1",
+        ] {
+            assert!(needs(command).contains(&Switch::Alias), "{command}");
+            let leads = ledger(vec![lead()]);
+            let message = run(&leads, all_on(), command).expect(command);
+            assert!(message.contains("may not set a `gh alias`"), "{message}");
+        }
+        for command in ["gh alias list", "git -c user.name=x commit -m x", "alias"] {
+            assert_passes(command);
+        }
+    }
+
+    #[test]
+    fn a_shell_or_source_reading_its_script_from_input_is_denied() {
+        for command in [
+            "bash <(echo gh pr merge 1)",
+            "source <(echo gh pr merge 1)",
+            ". <(echo gh pr merge 1)",
+            "bash <<< 'gh pr merge 1'",
+            "sh < script.sh",
+        ] {
+            assert_unreadable(command);
+        }
+        assert_judged("bash <<EOF\ngh pr merge 1\nEOF", Switch::Merge);
+        assert_passes("bash -c 'cat' < notes.md");
+        assert_passes("cat <(echo hi)");
+    }
+
+    #[test]
+    fn a_brace_expansion_building_the_program_is_denied() {
+        assert_unreadable("{gh,} pr merge 1");
+    }
+
+    #[test]
+    fn a_shift_nested_in_arithmetic_or_a_spaced_subscript_is_denied() {
+        let hidden = |first: &str, gated: &str| format!("{first}; cat <<E\n'\nE\n{gated} #'\n2\nE");
+        for gated in [
+            "gh pr merge 1",
+            "git rebase origin/main",
+            "scripts/install",
+            "loopherd herd set h lead.merge true",
+        ] {
+            for first in [
+                "((x=((1))<<2))",
+                "(( ((1)) << 2 ))",
+                "a[(1<<2)]=x",
+                "a[ 1<<2 ]=x",
+                "x=1 a[ 1<<2 ]=x",
+            ] {
+                assert_unreadable(&hidden(first, gated));
+            }
+            assert_unreadable(&format!("x=$( {} )", hidden("((x=((1))<<2))", gated)));
+        }
+        assert_passes("a[i+1]=x; echo ${a[1]}");
+        assert_passes("declare a[1]=x");
+        assert_passes("[ -f x ] && echo y");
     }
 }
