@@ -9,7 +9,7 @@ branch = "{type}/{number}-{slug}"
 prompt = '''
 You're {name}, working task {number} on branch {branch} in {worktree}.
 
-@FILL_IN@: each step marked (fill in), with this
+@FILL_IN@: each line marked (fill in), with this
 tracker's own commands.
 @GH_NOTE@
 1. Read task {number} and every comment on it. (fill in)

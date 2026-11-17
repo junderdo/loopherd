@@ -4911,7 +4911,7 @@ fn an_other_tracker_names_the_gh_account_for_pr_commands_only_with_a_github_orig
         let note = "Run every gh command as acme, prefixed with\n\
                     `GH_TOKEN=$(gh auth token --user acme)`";
         let fill_in = "Link it on task {number}, so the task closes when the PR merges. \
-                       (fill in this line only)\n6. Finish";
+                       (fill in)\n6. Finish";
         for (what, text, expected) in [
             ("prompt", &prompt, note),
             (
@@ -4932,6 +4932,11 @@ fn an_other_tracker_names_the_gh_account_for_pr_commands_only_with_a_github_orig
                 &format!("tracker's own commands.\n\n{note}"),
             ),
             ("prompt", &prompt, fill_in),
+            (
+                "prompt",
+                &prompt,
+                "5. Push the branch as acme:\n   `GH_TOKEN",
+            ),
             ("lead", &lead, note),
             (
                 "lead",
@@ -4945,6 +4950,10 @@ fn an_other_tracker_names_the_gh_account_for_pr_commands_only_with_a_github_orig
                 "{expected:?} in the {what} (github origin: {github}):\n{text}"
             );
         }
+        assert!(
+            prompt.contains("each line marked (fill in), with this\ntracker's own commands"),
+            "{prompt}"
+        );
         if !github {
             for (what, text) in [("prompt", &prompt), ("lead", &lead)] {
                 for unexpected in [" gh ", "`gh ", "GH_TOKEN", "acme"] {

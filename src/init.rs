@@ -51,7 +51,7 @@ for the head your reviewer verified. Single-quote that question ('...', not
 const OTHER_PR_HAND_IN: &str = "5. Push the branch as @ACCOUNT@:
    `GH_TOKEN=$(gh auth token --user @ACCOUNT@) git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin HEAD`.
    Then open a pull request into @BRANCH@ with `GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh pr create --repo @OWNER_REPO@ --base @BRANCH@ --head {branch} --assignee @ACCOUNT@ --title \"<title>\" --body \"<summary>\"`.
-   Link it on task {number}, so the task closes when the PR merges. (fill in this line only)";
+   Link it on task {number}, so the task closes when the PR merges. (fill in)";
 const OTHER_PUSH_HAND_IN: &str =
     "5. Push the branch with `git push -u origin HEAD`, open no pull request, and hand it
    in on task {number}, so the task closes when the human merges it into @BRANCH@. (fill in)";
