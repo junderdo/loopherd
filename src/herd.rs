@@ -312,6 +312,15 @@ pub fn members(ledger: &dyn Ledger, herd: &str) -> Result<usize> {
         .count())
 }
 
+/// Whether `herd` has a herd file in `dir` or any ledger record, retired included.
+pub fn known(dir: &Path, ledger: &dyn Ledger, herd: &str) -> Result<bool> {
+    if is_name(herd) && dir.join(format!("{herd}.toml")).is_file() {
+        return Ok(true);
+    }
+    let entries = ledger.entries().context("ledger")?;
+    Ok(entries.values().any(|e| e.herd.as_deref() == Some(herd)))
+}
+
 /// Whether `record` counts against its herd's queue `max`.
 pub fn holds_slot(record: &AgentRecord) -> bool {
     !record.retired && !record.is_lead()
