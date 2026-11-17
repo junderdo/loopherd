@@ -415,7 +415,7 @@ impl Lexed {
 
 /// A word with quotes removed, and where in `text` its first `$(…)` or
 /// backtick substitution stood.
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct Word {
     text: String,
     substituted_at: Option<usize>,
@@ -1315,26 +1315,14 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             in_env |= program == "env";
             let options = i + 1;
             i = skip_options(words, options, with_value);
+            // Any word under a replace string may become a lead's name.
             if program == "xargs"
-                && let Some(replace) = xargs_replace_string(&words[options..i.min(words.len())])
+                && xargs_may_replace(&words[options..i.min(words.len())])
+                && words[i.min(words.len())..]
+                    .iter()
+                    .any(|w| w.contains("retire"))
             {
-                // Any word holding the replace string may become anything.
-                let rest = |unknown: Option<&str>| -> Vec<Word> {
-                    kept[i.min(kept.len())..]
-                        .iter()
-                        .map(|w| Word {
-                            text: unknown.map_or(w.text.clone(), |u| w.text.replace(&replace, u)),
-                            ..(*w).clone()
-                        })
-                        .collect()
-                };
-                let mut needs = needs_one(&rest(None), &mut aliases.clone());
-                for need in needs_one(&rest(Some("$_")), aliases) {
-                    if !needs.contains(&need) {
-                        needs.push(need);
-                    }
-                }
-                return needs;
+                return vec![Switch::RetireLead];
             }
             // The duration, CPU mask or lock file before the command.
             if ["timeout", "taskset", "flock"].contains(&program) {
@@ -1396,43 +1384,37 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
     }
 }
 
-/// The string `xargs` replaces with each input line, from its options:
-/// `-I R`, `-iR` or `--replace=R`, alone or ending a cluster like `-tI R`.
-fn xargs_replace_string(options: &[String]) -> Option<String> {
-    let mut options = options.iter();
-    while let Some(option) = options.next() {
-        let replace = if option == "--replace" {
-            Some("{}".to_string())
-        } else if let Some(r) = option.strip_prefix("--replace=") {
-            Some(r.to_string())
-        } else if let Some(cluster) = option.strip_prefix('-').filter(|c| !c.starts_with('-')) {
-            short_replace(cluster, &mut options)
-        } else {
-            None
-        };
-        if let Some(replace) = replace.filter(|r| !r.is_empty()) {
-            return Some(replace);
-        }
-    }
-    None
-}
-
-/// The replace string a cluster of xargs's short options sets, reading
-/// `-I`'s value from the next word when the cluster ends with it.
-fn short_replace<'a>(cluster: &str, next: &mut impl Iterator<Item = &'a String>) -> Option<String> {
-    for (at, c) in cluster.char_indices() {
-        let rest = &cluster[at + c.len_utf8()..];
-        match c {
-            'I' if rest.is_empty() => return next.next().cloned(),
-            'I' => return Some(rest.to_string()),
-            'i' if rest.is_empty() => return Some("{}".to_string()),
-            'i' => return Some(rest.to_string()),
-            // The rest of the cluster is this option's value.
-            'n' | 'P' | 'L' | 'd' | 's' | 'E' | 'a' | 'e' | 'l' => return None,
-            _ => {}
-        }
-    }
-    None
+/// Whether `xargs`'s options may set a replace string: any `I` or `i` in
+/// a short option, or a long one it can't tell from xargs's other long
+/// options, `--replace` and its abbreviations included.
+fn xargs_may_replace(options: &[String]) -> bool {
+    const LONG: [&str; 15] = [
+        "arg-file",
+        "delimiter",
+        "eof",
+        "exit",
+        "interactive",
+        "max-args",
+        "max-chars",
+        "max-lines",
+        "max-procs",
+        "no-run-if-empty",
+        "null",
+        "open-tty",
+        "process-slot-var",
+        "show-limits",
+        "verbose",
+    ];
+    options
+        .iter()
+        .any(|option| match option.strip_prefix("--") {
+            Some("") => false,
+            Some(long) => {
+                let name = long.split('=').next().unwrap_or(long);
+                "replace".starts_with(name) || !LONG.iter().any(|known| known.starts_with(name))
+            }
+            None => option.starts_with('-') && option.contains(['I', 'i']),
+        })
 }
 
 fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
@@ -2698,6 +2680,14 @@ mod tests {
         "echo lead-h | xargs -I X sh -c 'loopherd retire X'",
         "echo lead-h | xargs -I X bash -c \"loopherd retire X\"",
         "echo lead-h | xargs -I X env loopherd retire X",
+        "echo lead-h | xargs -I Y -I X loopherd retire X",
+        "echo lead-h | xargs -I X -I Y loopherd retire Y",
+        "echo lead-h | xargs --rep=X loopherd retire X",
+        "echo lead-h | xargs --re=X loopherd retire X",
+        "echo lead-h | xargs --r=X loopherd retire X",
+        "echo lead-h | xargs --frob -I X loopherd retire X",
+        "echo lead-h | xargs --unknown=X loopherd retire X",
+        "echo lh-1 | xargs -I X loopherd retire lh-1",
         "cargo run --target-dir retire -- retire lead-h",
         "cargo run -q --target-dir retire -- retire lead-h",
         "cargo run --unknown retire -- retire lead-h",
@@ -2727,7 +2717,9 @@ mod tests {
             "cargo run -- retire lh-1",
             "cargo run -- tell lh-1 retire",
             "cargo run -- report --kind note lead-h will retire",
-            "echo lh-1 | xargs -I X loopherd retire lh-1",
+            "ls | xargs -I X echo X",
+            "echo lh-1 | xargs loopherd retire --close lh-1",
+            "echo lh-1 | xargs -n1 --max-procs=2 loopherd retire lh-1",
             "loopherd status lead-h",
             "git commit -m 'retire lead-h'",
         ] {
