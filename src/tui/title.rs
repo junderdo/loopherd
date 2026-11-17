@@ -48,8 +48,7 @@ impl Outlines {
         let outline = self.0.get(&herd.name);
         let slots = match outline {
             Some(Ok(Outline { max: Some(max), .. })) => {
-                let open = herd.members.iter().filter(|m| !m.lead).count();
-                format!(" · {open}/{max} slots")
+                format!(" · {}/{max} slots", herd.slots)
             }
             Some(Ok(_)) => String::new(),
             None | Some(Err(_)) => " · ? slots".into(),

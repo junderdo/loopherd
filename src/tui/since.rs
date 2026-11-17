@@ -244,6 +244,7 @@ mod tests {
                 name: "prs".into(),
                 paused: None,
                 members: vec![member("h", status, false)],
+                slots: 1,
             }],
             retired: Some(vec![member("r", status, false)]),
             ..snapshot(vec![])

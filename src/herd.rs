@@ -308,8 +308,13 @@ pub fn members(ledger: &dyn Ledger, herd: &str) -> Result<usize> {
     let entries = ledger.entries().context("ledger")?;
     Ok(entries
         .values()
-        .filter(|e| !e.retired && !e.is_lead() && e.herd.as_deref() == Some(herd))
+        .filter(|e| holds_slot(e) && e.herd.as_deref() == Some(herd))
         .count())
+}
+
+/// Whether `record` counts against its herd's queue `max`.
+pub fn holds_slot(record: &AgentRecord) -> bool {
+    !record.retired && !record.is_lead()
 }
 
 /// What `add` would do, one `key value` line each, then the prompt.
