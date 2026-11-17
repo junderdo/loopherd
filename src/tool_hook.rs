@@ -348,7 +348,7 @@ fn runs_nothing(command: &[Word]) -> bool {
     let mut words = command.iter();
     while let Some(word) = words.next() {
         let text = word.text.as_str();
-        if let Some(bare) = redirection(text) {
+        if let Some(bare) = word.redirection() {
             if bare {
                 words.next();
             }
@@ -398,6 +398,8 @@ struct Word {
     substituted_at: Option<usize>,
     /// Any part of it quoted, so it can't be a keyword.
     quoted: bool,
+    /// Where in `text` its first quote or backslash stood.
+    quoted_at: Option<usize>,
     /// Its unquoted `*?[]{},` characters, a `.` for each `..`, and each `$`
     /// that opens a `${` or `$[`, in order.
     globs: String,
@@ -429,6 +431,20 @@ impl Word {
                 .text
                 .split_once('[')
                 .is_some_and(|(name, _)| is_name(name))
+    }
+
+    /// Whether the word is a redirection, and if so whether it's bare, so
+    /// its target is the next word. A quoted operator (`"<<EOF"`) is an
+    /// argument, not a redirection.
+    fn redirection(&self) -> Option<bool> {
+        let bare = redirection(&self.text)?;
+        let target = self
+            .text
+            .trim_start_matches(|c: char| c.is_ascii_digit() || matches!(c, '<' | '>' | '&' | '|'));
+        let operator = self.text.len() - target.len();
+        self.quoted_at
+            .is_none_or(|at| at >= operator)
+            .then_some(bare)
     }
 
     fn mark_substituted(&mut self) {
@@ -560,6 +576,7 @@ fn commands(script: &str) -> Option<Lexed> {
             '\'' => {
                 let w = word.get_or_insert_default();
                 w.quoted = true;
+                w.quoted_at.get_or_insert(w.text.len());
                 loop {
                     match chars.next()? {
                         '\'' => break,
@@ -570,6 +587,7 @@ fn commands(script: &str) -> Option<Lexed> {
             '"' => {
                 let w = word.get_or_insert_default();
                 w.quoted = true;
+                w.quoted_at.get_or_insert(w.text.len());
                 loop {
                     match chars.next()? {
                         '"' => break,
@@ -588,7 +606,11 @@ fn commands(script: &str) -> Option<Lexed> {
                 }
             }
             '#' if word.is_none() => while chars.next_if(|&c| c != '\n').is_some() {},
-            '\\' => word.get_or_insert_default().text.extend(chars.next()),
+            '\\' => {
+                let w = word.get_or_insert_default();
+                w.quoted_at.get_or_insert(w.text.len());
+                w.text.extend(chars.next());
+            }
             // `2>&1`, `<&3` and `&>file` are redirections, not `&`.
             '&' if word.as_ref().is_some_and(|w| w.text.ends_with(['>', '<'])) => {
                 word.get_or_insert_default().text.push(c);
@@ -1192,25 +1214,29 @@ const DECLARERS: [&str; 5] = ["export", "declare", "typeset", "local", "readonly
 fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
     // Bash takes a redirection out of the words wherever it stands.
     let mut kept: Vec<&Word> = vec![];
+    let mut redirects: Vec<&Word> = vec![];
     let mut all = command.iter();
     while let Some(word) = all.next() {
-        match redirection(&word.text) {
-            Some(true) => {
-                all.next();
+        match word.redirection() {
+            Some(bare) => {
+                redirects.push(word);
+                if bare {
+                    all.next();
+                }
             }
-            Some(false) => {}
             None => kept.push(word),
         }
     }
-    if command.iter().any(|w| sets_alias_variable(&w.text)) {
+    let texts: Vec<&str> = kept.iter().map(|w| w.text.as_str()).collect();
+    if sets_alias_variable(&texts) {
         return vec![Switch::Alias];
     }
     // A shell's script from its input is out of the hook's sight, unless a
     // `<<` heredoc, whose body is judged on its own, feeds it.
     let reads_script_from_input = |script: Option<&String>| match script {
-        None => !heredoc_feeds(command, 0),
+        None => !heredoc_feeds(&redirects, 0),
         Some(script) => match input_descriptor(script) {
-            Some(Some(fd)) => !heredoc_feeds(command, fd),
+            Some(Some(fd)) => !heredoc_feeds(&redirects, fd),
             Some(None) => true,
             None => false,
         },
@@ -1308,7 +1334,8 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
                     1
                 };
             }
-            if (stdin_script && !heredoc_feeds(command, 0)) || reads_script_from_input(words.get(i))
+            if (stdin_script && !heredoc_feeds(&redirects, 0))
+                || reads_script_from_input(words.get(i))
             {
                 return vec![Switch::Unreadable];
             }
@@ -1647,14 +1674,33 @@ fn defines_git_alias(key: &str) -> bool {
         .any(|prefix| key.starts_with(prefix))
 }
 
-/// A word naming a variable that sets git config or a shell alias: an
-/// assignment, a name for `read` or `export`, `printf -vNAME`, or a nameref's
-/// target (`declare -n A=BASH_ALIASES`).
-fn sets_alias_variable(word: &str) -> bool {
+/// Whether a command sets a variable that sets git config or a shell alias:
+/// by assignment, as a name a builtin sets (`read`, `export`, `printf -v`),
+/// or as a nameref's target (`declare -n A=BASH_ALIASES`).
+fn sets_alias_variable(words: &[&str]) -> bool {
     let names = |w: &str| w.starts_with("GIT_CONFIG") || w.starts_with("BASH_ALIASES");
-    let word = word.strip_prefix("-v").unwrap_or(word);
-    names(word)
-        || is_assignment(word) && word.split_once('=').is_some_and(|(_, value)| names(value))
+    if words.iter().any(|w| is_assignment(w) && names(w)) {
+        return true;
+    }
+    let mut rest = words
+        .iter()
+        .copied()
+        .skip_while(|w| is_assignment(w) || matches!(*w, "builtin" | "command"));
+    match rest.next() {
+        Some(
+            "read" | "export" | "declare" | "local" | "typeset" | "readonly" | "unset" | "mapfile"
+            | "readarray" | "let" | "getopts" | "for" | "select",
+        ) => rest.any(|w| names(w) || w.split_once('=').is_some_and(|(_, value)| names(value))),
+        Some("printf") => {
+            let mut after_v = false;
+            rest.any(|w| {
+                let named = (after_v && names(w)) || w.strip_prefix("-v").is_some_and(names);
+                after_v = w == "-v";
+                named
+            })
+        }
+        _ => false,
+    }
 }
 
 /// Where a shell script operand reads its script from: `Some(Some(fd))` for
@@ -1673,6 +1719,9 @@ fn input_descriptor(script: &str) -> Option<Option<u32>> {
             part => parts.push(part),
         }
     }
+    if !script.starts_with('/') || !matches!(parts.first(), Some(&("dev" | "proc"))) {
+        return None;
+    }
     let fd = |n: &str| n.parse::<u32>().ok();
     match parts.as_slice() {
         [.., "dev", "stdin"] => Some(Some(0)),
@@ -1686,12 +1735,9 @@ fn input_descriptor(script: &str) -> Option<Option<u32>> {
 
 /// Whether the last redirection of descriptor `fd` on `command` is a `<<`
 /// heredoc, whose body the hook judges on its own.
-fn heredoc_feeds(command: &[Word], fd: u32) -> bool {
+fn heredoc_feeds(redirects: &[&Word], fd: u32) -> bool {
     let mut fed = false;
-    for word in command {
-        if redirection(&word.text).is_none() {
-            continue;
-        }
+    for word in redirects {
         let digits: String = word.text.chars().take_while(char::is_ascii_digit).collect();
         let op = &word.text[digits.len()..];
         let target = match digits.parse::<u32>() {
@@ -3843,6 +3889,12 @@ mod tests {
             "bash <<EOF < s.sh\n:\nEOF",
             "bash /dev/stdin 3<<EOF\n:\nEOF",
             "bash /proc/1/fd/0 <<EOF\n:\nEOF",
+            "bash -s <<< 'gh pr merge 1' '<<EOF'",
+            "bash -s <<< 'gh pr merge 1' \"<<EOF\"",
+            "bash -s <<< 'gh pr merge 1' -- \"<<EOF\"",
+            "bash -s <<< 'gh pr merge 1' \\<<EOF",
+            "bash -s <<< 'gh pr merge 1' 2> \"<<EOF\"",
+            "bash -s <<< 'gh pr merge 1' > '<<EOF'",
         ] {
             assert_unreadable(command);
         }
@@ -3870,6 +3922,12 @@ mod tests {
     }
 
     #[test]
+    fn a_script_that_only_ends_in_stdin_or_fd_n_is_a_file() {
+        assert_passes("bash ./stdin");
+        assert_passes("bash scripts/fd/3");
+    }
+
+    #[test]
     fn an_alias_or_git_config_variable_set_by_a_builtin_is_denied() {
         for command in [
             "shopt -s expand_aliases\nread 'BASH_ALIASES[g]' <<< gh\ng pr merge 1",
@@ -3880,7 +3938,18 @@ mod tests {
         ] {
             assert_judged(command, Switch::Alias);
         }
-        assert_passes("loopherd report 'denies BASH_ALIASES and GIT_CONFIG_GLOBAL'");
+        for command in [
+            "rg -n GIT_CONFIG src/tool_hook.rs",
+            "grep -rn BASH_ALIASES docs",
+            "git log --oneline -S GIT_CONFIG",
+            "loopherd tell lh-1 \"GIT_CONFIG_GLOBAL is denied now\"",
+            "loopherd report --kind done \"GIT_CONFIG variables are denied\"",
+            "echo GIT_CONFIG_COUNT",
+            "MSG=BASH_ALIASES true",
+            "printf '%s' GIT_CONFIG",
+        ] {
+            assert_passes(command);
+        }
     }
 
     #[test]
