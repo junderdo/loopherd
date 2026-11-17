@@ -73,7 +73,7 @@ pub fn waiting(view: &View, mail: &Mail) -> Waiting {
         .map(|m| format!("{} question", m.name))
         .collect();
     let blocked: Vec<_> = active(view)
-        .filter(|m| m.status == AgentStatus::Blocked && !m.gone)
+        .filter(|m| m.status == AgentStatus::Blocked)
         .map(|m| format!("{} blocked", m.name))
         .collect();
     Waiting {

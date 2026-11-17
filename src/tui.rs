@@ -297,9 +297,15 @@ impl App {
             blocked,
             items,
         } = waiting(&read.view, &self.mail);
-        if items.is_empty() {
+        // Without herdr's agents every status is unknown, blocked included.
+        let statuses_read = read.code == 0;
+        if items.is_empty() && statuses_read {
             return Line::styled(" nothing waiting on you", Modifier::DIM);
         }
+        let blocked = match statuses_read {
+            true => blocked.to_string(),
+            false => "?".into(),
+        };
         let plural = if questions == 1 { "" } else { "s" };
         let mut text = format!(" ⚑ {questions} question{plural} · {blocked} blocked");
         let width = width as usize;
@@ -943,6 +949,35 @@ mod tests {
             assert_eq!(c.fg, ORANGE, "x {x}");
             assert!(c.modifier.contains(Modifier::BOLD), "x {x}");
         }
+    }
+
+    #[test]
+    fn with_herdr_unreachable_the_blocked_count_is_unknown_not_zero() {
+        let ledger = ledger();
+        let mut herdr = herdr();
+        herdr.unreachable = true;
+        let now = Instant::now();
+        let mail = quiet_mail(&ledger);
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        assert_eq!(banner(&render(&app, now)), "⚑ 0 questions · ? blocked");
+        post(mail.path(), "c", question("which base?"));
+        let mut app = app;
+        refresh_with_mail(&mut app, &herdr, &ledger, mail.path(), now);
+        assert_eq!(
+            banner(&render(&app, now)),
+            "⚑ 1 question · ? blocked — c question"
+        );
+    }
+
+    fn refresh_with_mail(
+        app: &mut App,
+        herdr: &FakeHerdr,
+        ledger: &MemLedger,
+        mailboxes: &std::path::Path,
+        now: Instant,
+    ) {
+        let response = serve(Request::Read(app.options), herdr, ledger, &dirs(mailboxes));
+        app.apply(response, now).unwrap();
     }
 
     #[test]
