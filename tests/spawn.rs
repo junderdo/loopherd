@@ -1,5 +1,7 @@
+mod fakes;
+
+use fakes::executable;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Output;
 
@@ -23,8 +25,7 @@ fn spawn_outside_herdr(state: &Path, status: &str) -> Output {
     let bin = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
     let shim = bin.path().join("herdr");
-    fs::write(&shim, SHIM).unwrap();
-    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    executable(&shim, SHIM);
     std::process::Command::new(env!("CARGO_BIN_EXE_loopherd"))
         .args(["spawn", "--name", "a", "--workspace", "ws", "--repo"])
         .arg(repo.path())
@@ -93,8 +94,7 @@ fn a_checkout_spawn_cant_resolve_is_not_called_outside_a_git_repo() {
     let bin = tempfile::tempdir().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let git = bin.path().join("git");
-    fs::write(&git, "#!/bin/sh\necho /nonexistent/checkout/.git\n").unwrap();
-    fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
+    executable(&git, "#!/bin/sh\necho /nonexistent/checkout/.git\n");
 
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_loopherd"))
         .args(["spawn", "--name", "a", "--workspace", "ws"])

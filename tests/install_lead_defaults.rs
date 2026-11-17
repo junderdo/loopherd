@@ -34,14 +34,14 @@ impl Sandbox {
         let built = dir.path().join("built-loopherd");
         executable(
             &built,
-            &format!(
+            format!(
                 "#!/bin/sh\ncase \"$1\" in setup) exec '{}' \"$@\" ;; esac\n",
                 env!("CARGO_BIN_EXE_loopherd")
             ),
         );
         executable(
             &fake_bin.join("cargo"),
-            &format!(
+            format!(
                 "#!/bin/sh\necho '{{\"reason\":\"compiler-artifact\",\"target\":{{\"name\":\"loopherd\"}},\"executable\":\"{}\"}}'\n",
                 built.display()
             ),

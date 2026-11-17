@@ -1,7 +1,9 @@
 //! `loopherd status` through the binary, with a stub `herdr` on PATH.
 
+mod fakes;
+
+use fakes::executable;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -25,12 +27,10 @@ fn stub_herdr(bin: &Path, reply: Option<&str>) -> std::path::PathBuf {
         None => "echo 'herdr: server not running' >&2; exit 1".into(),
     };
     let shim = bin.join("herdr");
-    fs::write(
+    executable(
         &shim,
         format!("#!/bin/sh\necho \"$@\" >> {}\n{body}\n", calls.display()),
-    )
-    .unwrap();
-    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     calls
 }
 
