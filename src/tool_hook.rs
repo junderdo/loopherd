@@ -551,6 +551,7 @@ fn commands(script: &str) -> Option<Lexed> {
                             && words.iter().all(|w: &Word| is_assignment(&w.text)))
                             || (w.in_subscript()
                                 && w.text.starts_with('[')
+                                && w.globs.starts_with('[')
                                 && parens.last() == Some(&Paren::Data))
                     }) =>
             {
@@ -1206,12 +1207,14 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
     }
     // A shell's script from its input is out of the hook's sight, unless a
     // `<<` heredoc, whose body is judged on its own, feeds it.
-    let heredoc_fed = command.iter().any(|w| {
-        let op = w.text.trim_start_matches(|c: char| c.is_ascii_digit());
-        op.starts_with("<<") && !op.starts_with("<<<")
-    });
-    let reads_script_from_input =
-        |script: Option<&String>| !heredoc_fed && script.is_none_or(|s| from_input(s));
+    let reads_script_from_input = |script: Option<&String>| match script {
+        None => !heredoc_feeds(command, 0),
+        Some(script) => match input_descriptor(script) {
+            Some(Some(fd)) => !heredoc_feeds(command, fd),
+            Some(None) => true,
+            None => false,
+        },
+    };
     let words: Vec<String> = kept.iter().map(|w| w.text.clone()).collect();
     let words = words.as_slice();
     let mut i = 0;
@@ -1305,7 +1308,8 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
                     1
                 };
             }
-            if (stdin_script && !heredoc_fed) || reads_script_from_input(words.get(i)) {
+            if (stdin_script && !heredoc_feeds(command, 0)) || reads_script_from_input(words.get(i))
+            {
                 return vec![Switch::Unreadable];
             }
         } else if program == "eval" {
@@ -1643,14 +1647,63 @@ fn defines_git_alias(key: &str) -> bool {
         .any(|prefix| key.starts_with(prefix))
 }
 
-/// An assignment to a variable that sets git config or a shell alias.
+/// A word naming a variable that sets git config or a shell alias: an
+/// assignment, a name for `read` or `export`, `printf -vNAME`, or a nameref's
+/// target (`declare -n A=BASH_ALIASES`).
 fn sets_alias_variable(word: &str) -> bool {
-    is_assignment(word) && (word.starts_with("GIT_CONFIG") || word.starts_with("BASH_ALIASES"))
+    let names = |w: &str| w.starts_with("GIT_CONFIG") || w.starts_with("BASH_ALIASES");
+    let word = word.strip_prefix("-v").unwrap_or(word);
+    names(word)
+        || is_assignment(word) && word.split_once('=').is_some_and(|(_, value)| names(value))
 }
 
-/// A shell script operand that names the shell's input.
-fn from_input(script: &str) -> bool {
-    script == "-" || script == "/dev/stdin" || script.starts_with("/dev/fd/")
+/// Where a shell script operand reads its script from: `Some(Some(fd))` for
+/// one of the shell's own descriptors, `Some(None)` for another process's.
+fn input_descriptor(script: &str) -> Option<Option<u32>> {
+    if script == "-" {
+        return Some(Some(0));
+    }
+    let mut parts: Vec<&str> = vec![];
+    for part in script.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    let fd = |n: &str| n.parse::<u32>().ok();
+    match parts.as_slice() {
+        [.., "dev", "stdin"] => Some(Some(0)),
+        [.., "dev", "fd", n] => fd(n).map(Some),
+        [.., "proc", "self" | "thread-self", "fd", n] => fd(n).map(Some),
+        [.., "fd", n] if fd(n).is_some() => Some(None),
+        [.., "stdin"] => Some(None),
+        _ => None,
+    }
+}
+
+/// Whether the last redirection of descriptor `fd` on `command` is a `<<`
+/// heredoc, whose body the hook judges on its own.
+fn heredoc_feeds(command: &[Word], fd: u32) -> bool {
+    let mut fed = false;
+    for word in command {
+        if redirection(&word.text).is_none() {
+            continue;
+        }
+        let digits: String = word.text.chars().take_while(char::is_ascii_digit).collect();
+        let op = &word.text[digits.len()..];
+        let target = match digits.parse::<u32>() {
+            Ok(n) => n,
+            Err(_) if op.starts_with('<') => 0,
+            Err(_) => 1,
+        };
+        if target == fd {
+            fed = op.starts_with("<<") && !op.starts_with("<<<");
+        }
+    }
+    fed
 }
 
 /// `gh api` sends a GET only with no method and no fields, in any form
@@ -1703,14 +1756,27 @@ fn skip_options(words: &[String], mut i: usize, with_value: &[&str]) -> usize {
         if !word.starts_with('-') || word == "-" {
             break;
         }
-        // `-nw 5`: a cluster of short options ending in one that takes a value.
-        let last_short = (!word.starts_with("--") && word.len() > 2)
-            .then(|| format!("-{}", &word[word.len() - 1..]));
-        let takes_value = with_value.contains(&word.as_str())
-            || last_short.is_some_and(|o| with_value.contains(&o.as_str()));
-        i += if takes_value { 2 } else { 1 };
+        i += if takes_next_word(word, with_value) {
+            2
+        } else {
+            1
+        };
     }
     i.min(words.len())
+}
+
+/// Whether option word `word` takes the next word as its value. In a cluster
+/// of short options (`-nw 5`), the first that takes a value ends it, and
+/// takes the next word only when nothing follows it (`env -uC` unsets `C`).
+fn takes_next_word(word: &str, with_value: &[&str]) -> bool {
+    if word.starts_with("--") || with_value.contains(&word) {
+        return with_value.contains(&word);
+    }
+    let shorts: Vec<char> = word.chars().skip(1).collect();
+    shorts
+        .iter()
+        .position(|c| with_value.contains(&format!("-{c}").as_str()))
+        .is_some_and(|at| at == shorts.len() - 1)
 }
 
 fn positionals<'a>(args: &'a [String], with_value: &[&str]) -> Vec<&'a str> {
@@ -3750,5 +3816,77 @@ mod tests {
         assert_passes("[ -f x ] && echo y");
         assert_passes("(( a[ 1 ] ))");
         assert_passes("x=( [k]=v ); a[$i]=x b=1");
+    }
+
+    #[test]
+    fn an_option_value_attached_in_a_cluster_does_not_take_the_next_word() {
+        for command in [
+            "env -uC gh pr merge 1",
+            "env -uS gh pr merge 1",
+            "env -uu gh pr merge 1",
+            "env -iuC gh pr merge 1",
+            "sudo -uhug gh pr merge 1",
+        ] {
+            assert_judged(command, Switch::Merge);
+        }
+        assert_judged("env -uC git rebase origin/main", Switch::Rebase);
+        assert_judged("env -uC scripts/install", Switch::Install);
+        assert_judged("env -iu HOME gh pr merge 1", Switch::Merge);
+    }
+
+    #[test]
+    fn a_shell_is_heredoc_fed_only_when_its_last_input_redirect_is_the_heredoc() {
+        for command in [
+            "bash 3<<EOF <<< 'gh pr merge 1'\n:\nEOF",
+            "bash <<EOF <<< 'gh pr merge 1'\n:\nEOF",
+            "bash <<EOF 0<&3\n:\nEOF",
+            "bash <<EOF < s.sh\n:\nEOF",
+            "bash /dev/stdin 3<<EOF\n:\nEOF",
+            "bash /proc/1/fd/0 <<EOF\n:\nEOF",
+        ] {
+            assert_unreadable(command);
+        }
+        assert_judged("bash /dev/fd/3 3<<'EOF'\ngh pr merge 1\nEOF", Switch::Merge);
+        assert_judged("bash <<< x 0<<'EOF'\ngh pr merge 1\nEOF", Switch::Merge);
+    }
+
+    #[test]
+    fn every_name_for_a_shells_input_is_read_as_its_input() {
+        for script in [
+            "/proc/self/fd/0",
+            "/proc/thread-self/fd/0",
+            "//dev/stdin",
+            "/dev/./stdin",
+            "/dev/../dev/stdin",
+            "/dev//fd/0",
+        ] {
+            assert_unreadable(&format!("bash {script} <<< 'gh pr merge 1'"));
+            assert_unreadable(&format!("source {script} <<< 'gh pr merge 1'"));
+            assert_judged(
+                &format!("bash {script} <<'EOF'\ngh pr merge 1\nEOF"),
+                Switch::Merge,
+            );
+        }
+    }
+
+    #[test]
+    fn an_alias_or_git_config_variable_set_by_a_builtin_is_denied() {
+        for command in [
+            "shopt -s expand_aliases\nread 'BASH_ALIASES[g]' <<< gh\ng pr merge 1",
+            "shopt -s expand_aliases\nprintf -v 'BASH_ALIASES[g]' gh\ng pr merge 1",
+            "shopt -s expand_aliases\ndeclare -n A=BASH_ALIASES; A[g]=gh\ng pr merge 1",
+            "read GIT_CONFIG_GLOBAL <<< x.cfg; export GIT_CONFIG_GLOBAL; git r",
+            "printf -vGIT_CONFIG_GLOBAL x.cfg; export GIT_CONFIG_GLOBAL; git r",
+        ] {
+            assert_judged(command, Switch::Alias);
+        }
+        assert_passes("loopherd report 'denies BASH_ALIASES and GIT_CONFIG_GLOBAL'");
+    }
+
+    #[test]
+    fn a_quoted_bracket_in_an_array_literal_passes() {
+        assert_passes("args=( -e '[' x )");
+        assert_passes("args=( \"[\" )");
+        assert_unreadable("arr=( [ 1<<2 ]=x ); gh pr merge 1");
     }
 }
