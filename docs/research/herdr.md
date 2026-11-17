@@ -6,8 +6,26 @@ Researched 2026-10-31 against herdr 0.9.5 (installed at `~/.local/bin/herdr`).
 
 Agent-aware terminal multiplexer, Rust + Ratatui, AGPL-3.0. A background
 server owns the PTYs; TUI clients attach/detach. Topology is
-workspace → tab → pane, with opaque stable IDs (`w1`, `w1:t1`, `w1:p1`;
-closed IDs are never reused).
+workspace → tab → pane, with opaque stable IDs (`w1`, `w1:t1`, `w1:p1`).
+A closed ID is never reused within one server, but it can be after a restart
+(below).
+
+### ID reuse across a server restart
+
+Checked 2026-11-17 against herdr 0.9.5 in a throwaway session
+(`herdr --session <name> server`, then `herdr server stop` and start again):
+
+- A restart restores every open workspace, tab and pane under its old ID,
+  with its label.
+- Workspace IDs are reused: the next one is one past the highest restored.
+  With `w4` restored, closing `w5` and restarting gave the next workspace
+  `w5` again; closing every workspace and restarting gave `w1`. Without a
+  restart, closing `w1` and creating one gave `w3`.
+- Pane and tab numbers in a restored workspace are not reused: closing
+  `w4:t3` and restarting gave the next tab `w4:t4`, pane `w4:p4`.
+- So a pane ID like `w1:p1` recorded for a workspace closed before a
+  restart can name a pane in a new, unrelated workspace afterwards. A new
+  tab's default label is its number (`1`), not a name.
 
 ## Agent model
 

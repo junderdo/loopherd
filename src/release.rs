@@ -45,10 +45,10 @@ pub fn release(
             socket.display()
         );
     }
-    if let Some(why) = open_tab(herdr, &record, &others)
+    if let Some(fix) = open_tab(herdr, &record, &others)
         .with_context(|| format!("refused: can't ask herdr whether {name}'s tab is closed"))?
     {
-        bail!("refused: {name}'s {why}; close it first with `loopherd retire --close {name}`");
+        bail!("refused: {name}'s tab may still be open; close it first:\n  {fix}");
     }
     let in_use = |path: &Path| {
         others
@@ -395,10 +395,10 @@ mod tests {
         let err = s.release("zpr-1", Fate::Clear).unwrap_err();
 
         let msg = format!("{err:#}");
-        assert!(msg.starts_with("refused: zpr-1's tab "), "{msg}");
-        assert!(
-            msg.ends_with("close it first with `loopherd retire --close zpr-1`"),
-            "{msg}"
+        assert_eq!(
+            msg,
+            "refused: zpr-1's tab may still be open; close it first:\n  \
+             herdr tab close w9:t9  # zpr-1: tab w9:t9 is open: not in workspace loopherd"
         );
         assert_eq!(s.ledger.0["zpr-1"].released_at, None);
     }

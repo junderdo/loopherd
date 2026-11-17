@@ -114,13 +114,17 @@ fn refuse_open(
     let mut open = Vec::new();
     let mut here = None;
     for member in members {
-        let why = match (member.retired, &member.socket) {
-            (false, _) => Some("not retired".to_string()),
+        let fix = match (member.retired, &member.socket) {
+            (false, _) => Some(format!(
+                "loopherd retire --close {}  # not retired",
+                member.name
+            )),
             (true, Some(socket))
                 if here.get_or_insert_with(|| herdr.socket()).as_ref() != Some(socket) =>
             {
                 Some(format!(
-                    "on herdr session {}, not this one; run it there",
+                    "loopherd retire --close {}  # on herdr session {}, not this one; run it there",
+                    member.name,
                     socket.display()
                 ))
             }
@@ -135,11 +139,8 @@ fn refuse_open(
                 })?
             }
         };
-        if let Some(why) = why {
-            open.push(format!(
-                "\n  loopherd retire --close {}  # {why}",
-                member.name
-            ));
+        if let Some(line) = fix {
+            open.push(format!("\n  {line}"));
         }
     }
     if !open.is_empty() {
@@ -622,7 +623,9 @@ mod tests {
 
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("loopherd retire --close lead-old  # tab "),
+            msg.contains(
+                "herdr tab close w9:t9  # lead-old: tab w9:t9 is open: not in workspace w1"
+            ),
             "{msg}"
         );
         assert_eq!(s.names(), ["lead-old"]);
@@ -858,8 +861,9 @@ mod tests {
 
         assert!(
             msg.ends_with(&format!(
-                "loopherd retire --close a  # not confirmed closed: \
-                 no matching tab (pane {pane} is in {})",
+                "herdr tab close w1:t1  # a: not confirmed closed: \
+                 no matching tab (pane {pane} is in {}); \
+                 if that tab isn't a's, label it otherwise: herdr tab rename w1:t1 <label>",
                 moved.display()
             )),
             "{msg}"
@@ -876,7 +880,8 @@ mod tests {
 
         assert!(
             msg.ends_with(
-                "loopherd retire --close a  # tab w1:t1 is open: pane is running a command"
+                "herdr tab close w1:t1  # a: tab w1:t1 is open: pane is running a command; \
+                 if that tab isn't a's, label it otherwise: herdr tab rename w1:t1 <label>"
             ),
             "{msg}"
         );
@@ -893,11 +898,138 @@ mod tests {
 
         assert!(
             msg.ends_with(&format!(
-                "loopherd retire --close a  # not confirmed closed: no matching tab: \
-                 workspace before not found, but pane {pane} is in workspace loopherd"
+                "herdr tab close w1:t1  # a: not confirmed closed: no matching tab: \
+                 workspace before not found, but pane {pane} is in workspace loopherd; \
+                 if that tab isn't a's, label it otherwise: herdr tab rename w1:t1 <label>"
             )),
             "{msg}"
         );
+    }
+
+    #[test]
+    fn removes_a_member_whose_pane_id_a_restart_gave_another_workspaces_tab() {
+        let mut s = Setup::new();
+        let pane = s.herdr.add_tab("w1", "1", &s.path("work"), true);
+        retired_in(&mut s, &pane);
+        s.ledger.0.get_mut("a").unwrap().workspace_label = Some("zagops".into());
+
+        s.remove("old", Removal::default()).unwrap();
+
+        assert!(s.names().is_empty());
+    }
+
+    #[test]
+    fn removes_a_member_whose_pane_id_another_tab_reused_at_its_cwd() {
+        let mut s = Setup::new();
+        let pane = s.herdr.add_tab("w1", "1", &s.path("work"), true);
+        retired_in(&mut s, &pane);
+
+        s.remove("old", Removal::default()).unwrap();
+
+        assert!(s.names().is_empty());
+    }
+
+    #[test]
+    fn removes_a_member_whose_pane_id_another_tab_reused_to_run_a_command() {
+        let mut s = Setup::new();
+        let elsewhere = s.path("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        let pane = s.herdr.add_tab("w1", "1", &elsewhere, false);
+        retired_in(&mut s, &pane);
+
+        s.remove("old", Removal::default()).unwrap();
+
+        assert!(s.names().is_empty());
+    }
+
+    #[test]
+    fn refuses_a_renamed_tab_still_running_the_members_own_session() {
+        let mut s = Setup::new();
+        let moved = s.path("moved");
+        fs::create_dir(&moved).unwrap();
+        let pane = s.herdr.add_tab("w1", "a-renamed", &moved, false);
+        s.herdr = std::mem::replace(&mut s.herdr, FakeHerdr::new(&[])).with_live_agent(
+            None,
+            Some("ours"),
+            &pane,
+        );
+        retired_in(&mut s, &pane);
+        s.ledger.0.get_mut("a").unwrap().session_id = Some("ours".into());
+
+        let msg = refusal(&mut s);
+
+        assert!(
+            msg.contains("herdr tab close w1:t1  # a: not confirmed closed"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn refuses_a_members_tab_split_with_another_pane_naming_a_tab_close() {
+        let mut s = Setup::new();
+        let pane = s.herdr.add_tab("w1", "a", &s.path("work"), true);
+        s.herdr.split("w1:t1", &s.path("work"));
+        retired_in(&mut s, &pane);
+
+        assert!(
+            refusal(&mut s)
+                .ends_with("herdr tab close w1:t1  # a: tab w1:t1 is open: it has 2 panes")
+        );
+    }
+
+    #[test]
+    fn refuses_a_name_held_by_another_session_naming_how_to_unname_it() {
+        let mut s = Setup::new();
+        let pane = s.herdr.add_tab("w1", "a", &s.path("work"), false);
+        s.herdr = std::mem::replace(&mut s.herdr, FakeHerdr::new(&[])).with_live_agent(
+            Some("a"),
+            Some("theirs"),
+            &pane,
+        );
+        retired_in(&mut s, &pane);
+        s.ledger.0.get_mut("a").unwrap().session_id = Some("ours".into());
+
+        let msg = refusal(&mut s);
+
+        assert!(
+            msg.ends_with(
+                "herdr agent rename a --clear  # a: tab w1:t1 is open: the name is held by \
+                 another session; if that agent is a, close its tab instead: herdr tab close w1:t1"
+            ),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn removes_a_member_whose_pane_id_is_reused_in_its_workspace_by_another_tab() {
+        let mut s = Setup::new();
+        let elsewhere = s.path("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        let pane = s.herdr.add_tab("w1", "notes", &elsewhere, true);
+        retired_in(&mut s, &pane);
+
+        s.remove("old", Removal::default()).unwrap();
+
+        assert!(s.names().is_empty());
+    }
+
+    #[test]
+    fn removes_a_member_whose_pane_id_now_runs_an_agent_from_another_session() {
+        let mut s = Setup::new();
+        let pane = s.herdr.add_tab("w1", "a", &s.path("work"), true);
+        s.herdr = std::mem::replace(&mut s.herdr, FakeHerdr::new(&[])).with_live_agent(
+            None,
+            Some("theirs"),
+            &pane,
+        );
+        retired_in(&mut s, &pane);
+        let a = s.ledger.0.get_mut("a").unwrap();
+        a.session_id = Some("ours".into());
+        a.workspace_label = Some("zagops".into());
+
+        s.remove("old", Removal::default()).unwrap();
+
+        assert!(s.names().is_empty());
     }
 
     #[test]
