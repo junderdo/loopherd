@@ -67,6 +67,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D50](decisions/D50.md) | A retired lead's pane keeps its hook gates, and the hook always denies a lead's `loopherd retire` of a lead or of a name it can't read. |
 | [D51](decisions/D51.md) | `loopherd release <name>` lets feed spawn a retired member's name again, clearing its worktree and its branch, locally and on origin, unless they hold commits not on the base (`--keep-branch`/`--drop-branch`) and making its lead's watch forget the name. |
 | [D52](decisions/D52.md) | An agent in a retired entry's recorded pane with no name and a session missing on either side is unidentified: `retire --close` keeps its tab, and `herd remove` and `release` refuse, offering to close the tab or name the agent. |
+| [D53](decisions/D53.md) | A heredoc body a sink writes only to files is data beside other programs, unless the script can reach those files by name, glob, `$`, pipe, substitution, function, shell or state-changing builtin. |
 
 ## Emerging model
 

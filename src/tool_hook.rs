@@ -212,7 +212,7 @@ fn decide(
     }
     if needed == Switch::Unreadable {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like, a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like (write prose with `cat > file <<'EOF'` and no pipe, `$`, shell or other mention of the file), a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -327,20 +327,19 @@ fn needs_with(script: &str, aliases: &mut Aliases, in_shell: bool) -> Vec<Switch
     let Some(lexed) = commands(script).filter(|_| !unreadable(script)) else {
         return vec![Switch::Unreadable];
     };
-    let read_bodies = in_shell || runs_code(&lexed.commands);
-    judge(&lexed, aliases, read_bodies)
+    judge(&lexed, aliases, in_shell)
 }
 
-/// The switches `lexed` needs, judging each heredoc body that `read_bodies`
-/// says may run where bash runs it, so the aliases it sees are the ones set
-/// before it.
-fn judge(lexed: &Lexed, aliases: &mut Aliases, read_bodies: bool) -> Vec<Switch> {
+/// The switches `lexed` needs, judging each heredoc body that may run where
+/// bash runs it, so the aliases it sees are the ones set before it.
+fn judge(lexed: &Lexed, aliases: &mut Aliases, in_shell: bool) -> Vec<Switch> {
+    let runs_code = in_shell || runs_code(&lexed.commands);
     let mut needs = vec![];
     let mut bodies = lexed.bodies.iter().peekable();
     for at in 0..=lexed.commands.len() {
-        while let Some((_, body)) = bodies.next_if(|(from, _)| *from <= at) {
+        while let Some((from, body)) = bodies.next_if(|(from, _)| *from <= at) {
             match body {
-                _ if !read_bodies => {}
+                _ if !runs_code || (!in_shell && only_written(lexed, *from)) => {}
                 Some(body) => {
                     let mut seen = aliases.clone();
                     needs.extend(judge(body, &mut seen, true));
@@ -362,6 +361,126 @@ fn judge(lexed: &Lexed, aliases: &mut Aliases, read_bodies: bool) -> Vec<Switch>
 /// wrote: unless every command is a [`SINKS`] program, it may.
 fn runs_code(commands: &[Vec<Word>]) -> bool {
     !commands.iter().all(|command| runs_nothing(command))
+}
+
+/// Whether the body read before command `at` only goes to files its sink
+/// writes, in a script that can't reach them: no command reads another's
+/// output or defines a function, and every other command is a sink or a
+/// [`plain_program`] that names none of the files.
+fn only_written(lexed: &Lexed, at: usize) -> bool {
+    let Some(feeding) = at.checked_sub(1) else {
+        return false;
+    };
+    let Some(files) = written_files(&lexed.commands[feeding]) else {
+        return false;
+    };
+    !lexed.output_read
+        && !lexed.defines_function
+        && lexed
+            .commands
+            .iter()
+            .enumerate()
+            .all(|(i, command)| i == feeding || leaves_files(command, &files))
+}
+
+/// The files a [`SINKS`] command writes when its output goes only to files:
+/// its output targets and arguments. `None` for any other command, or when a
+/// file isn't plainly named.
+fn written_files(command: &[Word]) -> Option<Vec<&str>> {
+    let (kept, redirects) = split_redirects(command);
+    let program = kept.iter().position(|w| !is_assignment(&w.text))?;
+    if !runs_nothing(command)
+        || !SINKS.contains(&kept[program].text.as_str())
+        || !writes_output_to_file(&redirects)
+    {
+        return None;
+    }
+    let targets = redirects
+        .iter()
+        .map(|&(op, target)| redirect_parts(op, target))
+        .filter(|(_, op, _)| op.contains('>'))
+        .map(|(_, _, target)| (target, false));
+    let args = kept[program + 1..].iter().filter_map(|w| {
+        let text = w.text.as_str();
+        match text.strip_prefix('-') {
+            Some(option) => option.split_once('=').map(|(_, v)| (v, false)),
+            None => Some((text, w.substituted_at.is_some())),
+        }
+    });
+    let mut files = vec![];
+    for (file, substituted) in targets.chain(args) {
+        if file == "/dev/null" {
+            continue;
+        }
+        let plain = !file.is_empty()
+            && file.chars().all(names_char)
+            && !file_name(file).is_empty()
+            && !file.starts_with("/dev/")
+            && !file.starts_with("/proc/");
+        if substituted || !plain {
+            return None;
+        }
+        files.push(file);
+    }
+    Some(files)
+}
+
+/// Whether the last redirection of descriptor 1 writes a file.
+fn writes_output_to_file(redirects: &[(&Word, Option<&Word>)]) -> bool {
+    let mut to_file = false;
+    for &(op, target) in redirects {
+        let (fd, operator, _) = redirect_parts(op, target);
+        if fd == 1 {
+            to_file = matches!(operator, ">" | ">>" | ">|" | "&>" | "&>>");
+        }
+    }
+    to_file
+}
+
+/// Whether `command` can't reach the `files` a heredoc body was written to:
+/// a sink that names one only to read it, without copying it on, or a
+/// [`plain_program`] with no `$`, substitution or glob that names none.
+fn leaves_files(command: &[Word], files: &[&str]) -> bool {
+    let (kept, redirects) = split_redirects(command);
+    let names_one = |word: &Word| {
+        word.text
+            .split(|c| !names_char(c))
+            .any(|token| files.iter().any(|f| file_name(token) == file_name(f)))
+    };
+    if runs_nothing(command) {
+        let program = kept.iter().find(|w| !is_assignment(&w.text));
+        let copies = program.is_some_and(|w| ["cp", "mv", "tee"].contains(&w.text.as_str()))
+            || writes_output_to_file(&redirects);
+        let inputs = redirects
+            .iter()
+            .filter(|(op, target)| !redirect_parts(op, *target).1.contains('>'))
+            .filter_map(|(_, target)| *target);
+        return !copies || !kept.into_iter().chain(inputs).any(names_one);
+    }
+    let program = kept
+        .iter()
+        .find(|w| !is_assignment(&w.text) && !COMPOUND.contains(&w.text.as_str()));
+    program.is_some_and(|w| plain_program(w))
+        && !command.iter().any(|w| {
+            w.text.contains('$') || w.substituted_at.is_some() || w.pattern() || names_one(w)
+        })
+}
+
+/// Whether a program word runs only the program it names, one that neither
+/// changes what a later name runs nor runs a file or command it's handed.
+fn plain_program(word: &Word) -> bool {
+    let name = file_name(&word.text);
+    !word.text.contains('$')
+        && word.substituted_at.is_none()
+        && !word.pattern()
+        && !SHELLS.contains(&name)
+        && !WRAPPERS.iter().any(|(w, _)| *w == name)
+        && !RUNNERS.contains(&name)
+}
+
+/// Characters a plainly named file may hold.
+fn names_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "._/~+@%,:-".contains(c)
 }
 
 /// Whether a command runs only a [`SINKS`] program, or none, and sets only
@@ -395,13 +514,21 @@ fn runs_nothing(command: &[Word]) -> bool {
 #[derive(Default)]
 struct Lexed {
     commands: Vec<Vec<Word>>,
+    /// Whether a command's output goes to another, through a pipe, a `$(…)`
+    /// or backtick substitution, or a `<(…)` or `>(…)`.
+    output_read: bool,
+    /// Whether a `name(` or `name (` may define a function.
+    defines_function: bool,
     /// Each body with the index of the command it runs before; `None` for
     /// one that doesn't lex.
     bodies: Vec<(usize, Option<Lexed>)>,
 }
 
 impl Lexed {
+    /// Adds the commands of a substitution, whose output another reads.
     fn extend(&mut self, other: Lexed) {
+        self.output_read |= other.output_read || !other.commands.is_empty();
+        self.defines_function |= other.defines_function;
         let offset = self.commands.len();
         self.commands.extend(other.commands);
         self.bodies.extend(
@@ -684,6 +811,9 @@ fn commands(script: &str) -> Option<Lexed> {
                 lexed.extend(self::commands(&backticked(&mut chars, false)?)?);
             }
             ';' | '&' | '|' | '\n' | '(' | ')' => {
+                if c == '|' && chars.next_if_eq(&'|').is_none() && !in_patterns {
+                    lexed.output_read = true;
+                }
                 let doubled = chars.peek() == Some(&c) && matches!(c, '(' | ')');
                 let in_arithmetic = arithmetic_from.is_some();
                 if c == '(' {
@@ -698,8 +828,11 @@ fn commands(script: &str) -> Option<Lexed> {
                     parens.push(if text.ends_with('=') || doubled || in_arithmetic {
                         Paren::Data
                     } else if text.ends_with(['<', '>']) {
+                        lexed.output_read = true;
                         Paren::Process
                     } else {
+                        lexed.defines_function |= !text.is_empty()
+                            || words.iter().any(|w| !COMPOUND.contains(&w.text.as_str()));
                         Paren::Subshell
                     });
                 }
@@ -1230,26 +1363,64 @@ const COMPOUND: [&str; 12] = [
 const COPROC_COMPOUND: [&str; 9] = [
     "{", "while", "until", "if", "for", "select", "case", "[[", "((",
 ];
+/// Builtins and programs that change what a later name runs, or run a file
+/// or command they're handed without naming it.
+const RUNNERS: [&str; 31] = [
+    ".",
+    "alias",
+    "builtin",
+    "case",
+    "command",
+    "coproc",
+    "declare",
+    "enable",
+    "eval",
+    "exec",
+    "export",
+    "find",
+    "for",
+    "function",
+    "getopts",
+    "hash",
+    "let",
+    "local",
+    "mapfile",
+    "parallel",
+    "printf",
+    "read",
+    "readarray",
+    "readonly",
+    "select",
+    "set",
+    "shopt",
+    "source",
+    "trap",
+    "typeset",
+    "xargs",
+];
 const SHELLS: [&str; 5] = ["sh", "bash", "zsh", "dash", "ksh"];
 /// Builtins whose arguments may assign variables.
 const DECLARERS: [&str; 5] = ["export", "declare", "typeset", "local", "readonly"];
 
-fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
-    // Bash takes a redirection out of the words wherever it stands.
-    let mut kept: Vec<&Word> = vec![];
-    let mut redirects: Vec<&Word> = vec![];
+/// A command's words and its redirections, each with its target word when
+/// the operator is bare. Bash takes a redirection out of the words wherever
+/// it stands.
+fn split_redirects(command: &[Word]) -> (Vec<&Word>, Vec<(&Word, Option<&Word>)>) {
+    let mut kept = vec![];
+    let mut redirects = vec![];
     let mut all = command.iter();
     while let Some(word) = all.next() {
         match word.redirection() {
-            Some(bare) => {
-                redirects.push(word);
-                if bare {
-                    all.next();
-                }
-            }
+            Some(bare) => redirects.push((word, if bare { all.next() } else { None })),
             None => kept.push(word),
         }
     }
+    (kept, redirects)
+}
+
+fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
+    let (kept, redirects) = split_redirects(command);
+    let redirects: Vec<&Word> = redirects.into_iter().map(|(op, _)| op).collect();
     let texts: Vec<&str> = kept.iter().map(|w| w.text.as_str()).collect();
     if sets_alias_variable(&texts) {
         return vec![Switch::Alias];
@@ -1829,18 +2000,26 @@ fn input_descriptor(script: &str) -> Option<Option<u32>> {
 fn heredoc_feeds(redirects: &[&Word], fd: u32) -> bool {
     let mut fed = false;
     for word in redirects {
-        let digits: String = word.text.chars().take_while(char::is_ascii_digit).collect();
-        let op = &word.text[digits.len()..];
-        let target = match digits.parse::<u32>() {
-            Ok(n) => n,
-            Err(_) if op.starts_with('<') => 0,
-            Err(_) => 1,
-        };
+        let (target, op, _) = redirect_parts(word, None);
         if target == fd {
-            fed = op.starts_with("<<") && !op.starts_with("<<<");
+            fed = op == "<<";
         }
     }
     fed
+}
+
+/// A redirection's descriptor, operator and target: `2>` `>` `out`, with
+/// the target taken from `target` when the operator is bare.
+fn redirect_parts<'a>(op: &'a Word, target: Option<&'a Word>) -> (u32, &'a str, &'a str) {
+    let text = op.text.as_str();
+    let digits = text.len() - text.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let rest = &text[digits..];
+    let glued = rest.trim_start_matches(['<', '>', '&', '|']);
+    let operator = &rest[..rest.len() - glued.len()];
+    let fd = text[..digits]
+        .parse()
+        .unwrap_or(if operator.starts_with('<') { 0 } else { 1 });
+    (fd, operator, target.map_or(glued, |w| w.text.as_str()))
 }
 
 /// `gh api` sends a GET only with no method and no fields, in any form
@@ -3740,6 +3919,51 @@ mod tests {
             "mkdir -p d && cat > d/notes.md <<'EOF'\nIt's green.\nEOF",
         ] {
             assert_passes(command);
+        }
+    }
+
+    #[test]
+    fn a_body_a_sink_only_writes_to_a_file_is_data_beside_other_programs() {
+        let prose = "scripts/install is the shepherd's.\ngh pr merge 1 waits.";
+        for command in [
+            format!("cat > notes.md <<'EOF' && wc -l notes.md; cargo fmt\n{prose}\nEOF"),
+            format!("cat > notes.md <<'EOF'\n{prose}\nEOF\nwc -l notes.md; cargo fmt"),
+            format!("cat >> notes.md <<EOF\n{prose}\nEOF\ncargo test 2>&1; cat notes.md"),
+            format!("tee notes.md >/dev/null <<'EOF'\n{prose}\nEOF\ncargo clippy"),
+            format!("cat > a.md <<'A'\n{prose}\nA\ncat >> a.md <<'B'\n{prose}\nB\ncargo fmt"),
+            format!("RUST_LOG=x cargo test; cat > notes.md <<'EOF'\n{prose}\nEOF"),
+        ] {
+            assert_passes(&command);
+        }
+    }
+
+    #[test]
+    fn a_body_a_shell_or_a_later_command_may_run_is_still_read_as_commands() {
+        let body = "<<'EOF'\ngh pr merge 1\nEOF";
+        let written = "cat > s.sh <<'EOF'\ngh pr merge 1\nEOF\n";
+        for command in [
+            format!("bash {body}\ncargo fmt"),
+            format!("sh -s {body}\ncargo fmt"),
+            format!("eval \"$(cat)\" {body}\ncargo fmt"),
+            format!("{written}bash s.sh; cargo fmt"),
+            format!("{written}cargo fmt; ./s.sh"),
+            format!("{written}cp s.sh t.sh; cargo fmt"),
+            format!("{written}cat s.sh > t.sh; cargo fmt"),
+            format!("{written}ls | rbash"),
+            format!("{written}bash ./*.sh"),
+            format!("{written}f=t; bash $f.sh"),
+            format!("{written}rbash -c '. s.sh'"),
+            format!("{written}xargs -a list cargo"),
+            format!("{written}PATH=.:$PATH; cargo fmt"),
+            format!("cat() {{ rbash; }}\ncat > o {body}"),
+            format!("alias cat=rbash; cat > o {body}"),
+            format!("(rbash) > o {body}"),
+            format!("while read -r l; do $l; done > o {body}"),
+            format!("cat > o >&2 {body}\ncargo fmt"),
+            format!("cat > \"$f\" {body}\ncargo fmt"),
+            format!("cat > o {body}\n<o rbash"),
+        ] {
+            assert_judged(&command, Switch::Merge);
         }
     }
 
