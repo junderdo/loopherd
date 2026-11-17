@@ -405,16 +405,16 @@ fn summary(question: &str) -> String {
             Next::Value if FILLERS.contains(&normalized(word).as_str()) => {
                 (Shown::Word(word.to_string()), next)
             }
-            Next::Value => match carried_value(word) {
-                Some((true, value)) => clause_start(value),
-                _ => (Shown::redacted(), value_then(word)),
+            Next::Value => match clause_carried_by(word) {
+                Some(value) => clause_start(value),
+                None => (Shown::redacted(), value_then(word)),
             },
             Next::Key(key) if is_separator(word) => (Shown::Word(word.to_string()), key.value()),
             Next::Key(_) if FILLERS.contains(&normalized(word).as_str()) => {
                 (Shown::Word(word.to_string()), next)
             }
             Next::Key(_) | Next::MaybeValue
-                if looks_like_a_secret(word) && carried_value(word).is_none() =>
+                if looks_like_a_secret(word) && clause_carried_by(word).is_none() =>
             {
                 (Shown::redacted(), Next::after_value(word))
             }
@@ -687,6 +687,15 @@ fn carried_value(word: &str) -> Option<(bool, &str)> {
             .is_empty();
         (!value.is_empty()).then_some((starts_word && key == Key::Strong, value))
     })
+}
+
+/// The value of a `password=x` word that runs to the end of its clause, unless the word
+/// opens a quote or bracket or ends in `;`, which are followed like any hidden value.
+fn clause_carried_by(word: &str) -> Option<&str> {
+    match carried_value(word) {
+        Some((true, value)) if !word.starts_with(OPENERS) && !word.ends_with(';') => Some(value),
+        _ => None,
+    }
 }
 
 /// `word` with the `user:password@` of a URL in it replaced.
@@ -1548,6 +1557,10 @@ mod tests {
                 "password: ‚abc‘ then merge #107?",
                 "password: [redacted] then merge #107?",
             ),
+            (
+                "password: ‚don’t panic‘ then merge #107?",
+                "password: [redacted] [redacted] then merge #107?",
+            ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
         }
@@ -1574,6 +1587,14 @@ mod tests {
             ),
             (
                 "password: «abc123»s Then merge #107?",
+                "password: [redacted] Then merge #107?",
+            ),
+            (
+                "password: 'abc123'是吗 Then merge #107?",
+                "password: [redacted] Then merge #107?",
+            ),
+            (
+                r#"password: "abc123"def Then merge #107?"#,
                 "password: [redacted] Then merge #107?",
             ),
         ] {
@@ -1603,6 +1624,30 @@ mod tests {
             (
                 "TOKEN passphrase=hunter22 horse battery, then merge?",
                 "TOKEN [redacted], then merge?",
+            ),
+            (
+                "TOKEN passphrase=hunter22; sid=xyz789abc then merge?",
+                "TOKEN [redacted] [redacted] then merge?",
+            ),
+            (
+                "Cookie sid=abc123; password=hunter2; csrf=s3cr3tval ok?",
+                "Cookie [redacted] [redacted] [redacted] ok?",
+            ),
+            (
+                r#"password "session=abc123 correct horse" then merge?"#,
+                "password [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                r#"auth: "session=abc123 correct horse" then merge?"#,
+                "auth: [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                r#"password "x_token=abc123, correct horse" then merge?"#,
+                "password [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                r#"TOKEN "password=abc, def123 ghi456" then merge?"#,
+                "TOKEN [redacted] [redacted] [redacted] then merge?",
             ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
