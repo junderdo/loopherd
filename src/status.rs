@@ -206,12 +206,28 @@ fn text(view: &View, color: bool) -> String {
         .iter()
         .map(|(_, members)| members.iter().map(text_row).collect())
         .collect();
-    let widths = widths(rows.iter().flatten());
+    let members_and_rows = || {
+        sections
+            .iter()
+            .zip(&rows)
+            .flat_map(|((_, members), rows)| members.iter().zip(rows))
+    };
+    // A retired row's long status cell widens only retired rows, not live ones.
+    let open_widths = widths(
+        members_and_rows()
+            .filter(|(m, _)| m.retired.is_none())
+            .map(|(_, row)| row),
+    );
+    let all_widths = widths(rows.iter().flatten());
     let mut out = String::new();
     for ((name, members), rows) in sections.iter().zip(&rows) {
         out += &format!("{name}\n");
         for (member, row) in members.iter().zip(rows) {
-            let line = aligned(row, &widths);
+            let widths = match member.retired {
+                Some(_) => &all_widths,
+                None => &open_widths,
+            };
+            let line = aligned(row, widths);
             out += &match color && member.gone {
                 true => format!("  \x1b[2m{line}\x1b[0m\n"),
                 false => format!("  {line}\n"),
@@ -819,6 +835,8 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             row,
             "  old    retired 2026-11-17T08:00:00Z  -  old-wt  w1:pold"
         );
+        let live = text.stdout.lines().find(|l| l.contains("lh-42")).unwrap();
+        assert_eq!(live, "  lh-42  idle     -  feat-x  w1:tlh-42/w1:plh-42");
         let json: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
         assert_eq!(json["retired"][0]["retired"], "2026-11-17T08:00:00Z");
         assert_eq!(json["ungrouped"][0]["retired"], serde_json::Value::Null);
