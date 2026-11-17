@@ -6,9 +6,10 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::num::NonZeroUsize;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -258,6 +259,10 @@ pub struct Filter<'a> {
     pub herd: Option<&'a str>,
     /// Full history, `stop` and `start` entries included, leaving the cursor alone.
     pub all: bool,
+    /// With `all`, only entries at or after this time.
+    pub since: Option<SystemTime>,
+    /// With `all`, only the last this many entries after the other filters.
+    pub tail: Option<NonZeroUsize>,
 }
 
 /// The reports `filter` selects, one rendered line each, unread only unless
@@ -280,6 +285,30 @@ pub fn reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<Read>
 /// `Pending`, once what was read is safely out.
 pub fn peek_reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<(Read, Pending)> {
     reports_with(ledger, dir, filter, Locked::Take)
+}
+
+/// `reports --since`: anything `stats --since` takes, or a span such as `30m`,
+/// `2h` or `1d` back from `now`.
+pub fn parse_since(value: &str, now: SystemTime) -> Result<SystemTime> {
+    let span = value
+        .strip_suffix(['m', 'h', 'd'])
+        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|n| n.parse::<u64>().ok())
+        .map(|n| match value.as_bytes()[value.len() - 1] {
+            b'm' => n * 60,
+            b'h' => n * 3600,
+            _ => n * 86_400,
+        });
+    match span {
+        Some(secs) => now
+            .checked_sub(Duration::from_secs(secs))
+            .ok_or_else(|| anyhow!("{value:?} reaches back past the epoch")),
+        None => crate::stats::parse_moment(
+            value,
+            "a date (2026-11-01), RFC 3339 time (2026-11-01T12:00:00Z) \
+             or span back from now (30m, 2h, 1d)",
+        ),
+    }
 }
 
 /// Whether the caller already holds the cursor's lock.
@@ -314,6 +343,12 @@ fn reports_with(
         ),
         false => Cursor::Reports.read(dir, &names, locked, |e| e.report().is_some())?,
     };
+    if let Some(since) = filter.since {
+        found.retain(|(_, e)| humantime::parse_rfc3339_weak(&e.at).is_ok_and(|at| at >= since));
+    }
+    if let Some(tail) = filter.tail {
+        found.drain(..found.len().saturating_sub(tail.get()));
+    }
     if !filter.all {
         found.sort_by(|(_, a), (_, b)| {
             let question = |e: &Entry| e.report().is_some_and(|(k, _)| k == Kind::Question);
@@ -919,7 +954,157 @@ mod tests {
         names: &[],
         herd: None,
         all: false,
+        since: None,
+        tail: None,
     };
+
+    const ALL: Filter = Filter {
+        all: true,
+        ..UNREAD
+    };
+
+    fn tail(n: usize) -> Option<NonZeroUsize> {
+        NonZeroUsize::new(n)
+    }
+
+    /// lh-1 in herd cards and zpr-2 in herd prs, sending alternately on the hour.
+    fn two_herds_mail(dir: &Path) -> MemLedger {
+        let ledger = ledger(vec![
+            member("lh-1", "w1:p1", Some("cards"), false),
+            member("zpr-2", "w1:p2", Some("prs"), false),
+        ]);
+        for (name, text, time) in [
+            ("lh-1", "a", "2026-11-01T09:00:00Z"),
+            ("zpr-2", "b", "2026-11-01T10:00:00Z"),
+            ("lh-1", "c", "2026-11-01T11:00:00Z"),
+            ("zpr-2", "d", "2026-11-01T12:00:00Z"),
+        ] {
+            send(&ledger, dir, name, Kind::Note, text, time);
+        }
+        ledger
+    }
+
+    #[test]
+    fn since_keeps_entries_at_or_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = two_herds_mail(dir.path());
+        let since = Filter {
+            since: Some(at("2026-11-01T11:00:00Z")),
+            ..ALL
+        };
+
+        assert_eq!(
+            reports(&ledger, dir.path(), &since).unwrap().lines,
+            [
+                "lh-1 note 2026-11-01 11:00 UTC c",
+                "zpr-2 note 2026-11-01 12:00 UTC d",
+            ]
+        );
+    }
+
+    #[test]
+    fn tail_keeps_the_last_entries_after_the_other_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = two_herds_mail(dir.path());
+        let lines = |filter: Filter| reports(&ledger, dir.path(), &filter).unwrap().lines;
+
+        assert_eq!(
+            lines(Filter {
+                tail: tail(3),
+                ..ALL
+            }),
+            [
+                "zpr-2 note 2026-11-01 10:00 UTC b",
+                "lh-1 note 2026-11-01 11:00 UTC c",
+                "zpr-2 note 2026-11-01 12:00 UTC d",
+            ]
+        );
+        assert_eq!(
+            lines(Filter {
+                tail: tail(1),
+                since: Some(at("2026-11-01T10:00:00Z")),
+                ..ALL
+            }),
+            ["zpr-2 note 2026-11-01 12:00 UTC d"]
+        );
+        assert_eq!(
+            lines(Filter {
+                tail: tail(5),
+                since: Some(at("2026-11-01T10:00:00Z")),
+                ..ALL
+            }),
+            [
+                "zpr-2 note 2026-11-01 10:00 UTC b",
+                "lh-1 note 2026-11-01 11:00 UTC c",
+                "zpr-2 note 2026-11-01 12:00 UTC d",
+            ]
+        );
+        assert_eq!(
+            lines(Filter {
+                tail: tail(1),
+                herd: Some("cards"),
+                ..ALL
+            }),
+            ["lh-1 note 2026-11-01 11:00 UTC c"]
+        );
+    }
+
+    #[test]
+    fn tail_counts_entries_and_keeps_their_continuation_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![member("lh-1", "w1:p1", None, false)]);
+        for (text, time) in [
+            ("old", "2026-11-01T09:00:00Z"),
+            ("Which store?\n- sqlite\n- json", "2026-11-01T10:00:00Z"),
+            ("merged", "2026-11-01T11:00:00Z"),
+        ] {
+            send(&ledger, dir.path(), "lh-1", Kind::Note, text, time);
+        }
+        let last_two = Filter {
+            tail: tail(2),
+            ..ALL
+        };
+
+        assert_eq!(
+            reports(&ledger, dir.path(), &last_two).unwrap().lines,
+            [
+                "lh-1 note 2026-11-01 10:00 UTC Which store?",
+                "    - sqlite",
+                "    - json",
+                "lh-1 note 2026-11-01 11:00 UTC merged",
+            ]
+        );
+    }
+
+    #[test]
+    fn since_takes_a_date_a_time_or_a_span_back_from_now() {
+        let now = at("2026-11-16T15:00:00Z");
+        for (value, expected) in [
+            ("2026-11-01", "2026-11-01T00:00:00Z"),
+            ("2026-11-01T12:00:00Z", "2026-11-01T12:00:00Z"),
+            ("2026-11-01T12:00:00+05:00", "2026-11-01T07:00:00Z"),
+            ("30m", "2026-11-16T14:30:00Z"),
+            ("2h", "2026-11-16T13:00:00Z"),
+            ("1d", "2026-11-15T15:00:00Z"),
+        ] {
+            assert_eq!(parse_since(value, now).unwrap(), at(expected), "{value}");
+        }
+    }
+
+    #[test]
+    fn a_bad_since_names_every_accepted_form() {
+        let now = at("2026-11-16T15:00:00Z");
+        for value in ["yesterday", "30", "2w", "m", "-1h"] {
+            let error = parse_since(value, now).unwrap_err().to_string();
+            assert_eq!(
+                error,
+                format!(
+                    "{value:?} is not a date (2026-11-01), RFC 3339 time \
+                     (2026-11-01T12:00:00Z) or span back from now (30m, 2h, 1d)"
+                ),
+            );
+        }
+    }
 
     #[test]
     fn reports_shows_unread_questions_first_then_by_time_and_marks_them_read() {

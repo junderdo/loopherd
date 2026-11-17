@@ -1580,6 +1580,8 @@ max = 3
             names: &[],
             herd: None,
             all: false,
+            since: None,
+            tail: None,
         };
         let printed = report::reports(&ledger, mail.path(), &filter).unwrap();
         assert!(
@@ -2916,6 +2918,8 @@ max = 3
             names: &[],
             herd: None,
             all: false,
+            since: None,
+            tail: None,
         };
         let printed = report::reports(&ledger, mail.path(), &filter).unwrap();
         assert!(
@@ -3204,6 +3208,8 @@ max = 3
             names: &[],
             herd: None,
             all: false,
+            since: None,
+            tail: None,
         };
         let printed = report::reports(&ledger, mail.path(), &filter).unwrap();
         assert!(

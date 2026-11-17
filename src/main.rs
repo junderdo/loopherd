@@ -37,12 +37,13 @@ mod watch;
 mod worktree;
 
 use std::io::{Read, Write};
+use std::num::NonZeroUsize;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
@@ -253,6 +254,13 @@ enum Command {
         /// Print every report, read or not, and mark none read.
         #[arg(long)]
         all: bool,
+        /// Only entries at or after this: a date (2026-11-01), an RFC 3339 time
+        /// (2026-11-01T12:00:00Z), or a span back from now (30m, 2h, 1d). Needs --all.
+        #[arg(long, requires = "all", value_parser = since_now)]
+        since: Option<SystemTime>,
+        /// Only the last N entries, after the other filters. Needs --all.
+        #[arg(long, value_name = "N", requires = "all", value_parser = at_least_one)]
+        tail: Option<NonZeroUsize>,
     },
     /// Claude's Stop and StopFailure hook: records the stop, read from the hook
     /// input on stdin, in the mailbox of the member running in this pane. Once per
@@ -542,7 +550,13 @@ fn main() -> ExitCode {
             as_name,
             text,
         } => ("report", run_report(kind, as_name, &text)),
-        Command::Reports { names, herd, all } => ("reports", run_reports(names, herd, all)),
+        Command::Reports {
+            names,
+            herd,
+            all,
+            since,
+            tail,
+        } => ("reports", run_reports(names, herd, all, since, tail)),
         Command::Watch {
             herds,
             timeout,
@@ -834,13 +848,33 @@ fn run_report(kind: Kind, as_name: Option<String>, text: &str) -> Result<i32> {
     Ok(0)
 }
 
-fn run_reports(names: Vec<String>, herd: Option<String>, all: bool) -> Result<i32> {
+fn since_now(value: &str) -> Result<SystemTime> {
+    report::parse_since(value, SystemTime::now())
+}
+
+fn at_least_one(value: &str) -> Result<NonZeroUsize> {
+    value
+        .parse::<usize>()
+        .ok()
+        .and_then(NonZeroUsize::new)
+        .ok_or_else(|| anyhow!("{value:?} is not a count; it must be at least 1"))
+}
+
+fn run_reports(
+    names: Vec<String>,
+    herd: Option<String>,
+    all: bool,
+    since: Option<SystemTime>,
+    tail: Option<NonZeroUsize>,
+) -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     require_known(&ledger, herd.as_deref())?;
     let filter = Filter {
         names: &names,
         herd: herd.as_deref(),
         all,
+        since,
+        tail,
     };
     let read = reports(&ledger, &ledger.reports_dir()?, &filter)?;
     for line in read.lines {
