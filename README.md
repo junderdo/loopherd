@@ -92,44 +92,59 @@ lead the commands its switches leave to you. `install-hook` backs up
 
 ## Set up a repo
 
-```bash
-cd <repo>
-loopherd init                       # writes the herd; asks on a terminal, flags otherwise
-loopherd herds                      # the herd file is valid
-loopherd feed <herd> --dry-run      # lists the tasks you expect
-loopherd lead <herd>                # starts the lead, which feeds and watches the herd
-```
+Start with loopherd installed (above), herdr running, and the repo cloned
+as its main checkout. Then, in order:
 
-`loopherd init` infers what it can (repo, herd name, GitHub repo and
-account, default branch, checks from `Cargo.toml` and `package.json`) and
-asks for each on a terminal, the inferred value as the default. It writes
+1. **Trust the repo in Claude Code.** Members can't start past Claude's
+   trust dialog, so accept it once from the main checkout: `cd <repo> &&
+   claude`, accept, exit. Every worktree shares it
+   ([details](docs/research/claude-workspace-trust.md)).
+2. **Write the herd.** In the repo, run `loopherd init`. It asks on a
+   terminal and takes flags otherwise (`loopherd init --help`). Follow the
+   steps it prints, fill each `(fill in)` placeholder it lists, then
+   review and commit the repo files it added.
+3. **Check it.** `loopherd herds` calls the herd file valid, and
+   `loopherd feed <herd> --dry-run` lists the tasks you expect.
+4. **Open the herd view.** In a new herdr tab, run `loopherd view`. It
+   lists every member, sorted by what needs you; Enter focuses the
+   selected member's pane.
+5. **Start the shepherd.** In another herdr tab, `cd` to the main
+   checkout, run `claude`, and give it this first prompt:
+
+   ```text
+   You're the shepherd for the <herd> herd in this repo. Read `loopherd --skill`
+   and follow its Shepherd section: feed the herd, watch it, verify members'
+   work, and clean up after merges.
+   ```
+
+6. **Start the lead,** if the herd file has a `[lead]` table:
+   `loopherd lead <herd>`. Run it yourself, or ask the shepherd to. The
+   lead, `lead-<herd>`, then feeds and watches the herd's workers within
+   the switches you set; the shepherd's watch reads the lead and relays
+   its questions to you.
+
+### What `init` writes
+
+`loopherd init` infers the repo, herd name, GitHub repo and account,
+default branch, and checks from `Cargo.toml` and `package.json`, and on a
+terminal asks for each with the inferred value as the default. It writes
 `<herd>.toml` and `<herd>-lead.md` in `$XDG_CONFIG_HOME/loopherd/herds/`
 (default `~/.config/loopherd/herds/`; `LOOPHERD_CONFIG_DIR` replaces the
-`loopherd` dir), for a GitHub tracker creates the labels the queue reads,
-and, uncommitted, adds `docs/agents/loopherd.md`,
-a tracker doc if the repo has none, and a `## loopherd` section in
-`AGENTS.md`. The tracker can be GitHub issues, local markdown issue files,
-or another one you describe; `loopherd init --help` has the flags. Then
-follow the steps it prints, in order, each only when it applies:
+`loopherd` dir), creates the labels the queue reads for a GitHub tracker,
+and, uncommitted, adds `docs/agents/loopherd.md`, a tracker doc if the repo
+has none, and a `## loopherd` section in `AGENTS.md`. The tracker can be
+GitHub issues, local markdown issue files, or another one you describe.
 
-1. Open Claude in the repo once and accept its trust dialog (below).
-2. For a tracker init has no snippets for, fill each `(fill in)` in the
-   herd file, the lead prompt and `docs/agents/loopherd.md`.
-3. Add an origin remote if the repo has none.
-4. Write by hand any repo file init left alone (a symlinked `AGENTS.md`,
-   a doc that would land outside the repo).
-5. Tailor the herd to the repo per "Setting up a project" in
-   `loopherd --skill`.
-6. Review and commit the repo files init wrote.
-7. `loopherd herds`, `loopherd feed <herd> --dry-run`, and with a lead,
-   `loopherd lead <herd>`, as above.
+Its printed steps also cover, when they apply: adding an origin remote,
+writing by hand a repo file init left alone (a symlinked `AGENTS.md`, a doc
+that would land outside the repo), and tailoring the herd to the repo per
+"Setting up a project" in `loopherd --skill`.
 
-Claude Code asks whether to trust a repo the first time it starts there,
-and members can't start past that dialog. Trust each repo once from its
-main checkout (`cd <repo> && claude`, accept, exit); every worktree shares
-it ([details](docs/research/claude-workspace-trust.md)). If a spawn still
-blocks (exit 3), answer the dialog in the pane it names and run
-`loopherd prompt <name>`.
+### If a spawn blocks on the trust dialog
+
+A spawn that still meets the dialog exits 3 and names the pane. Answer the
+dialog there, then run `loopherd prompt <name>` to send the member its
+prompt.
 
 The guide a shepherd or lead follows, from setting up a herd to cleaning up
 after merges, is the loopherd skill: `loopherd --skill` prints it
