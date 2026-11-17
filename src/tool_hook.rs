@@ -295,6 +295,9 @@ struct Aliases {
     /// in a heredoc body that may run in this shell or a child, so any alias
     /// or `GH_CONFIG_DIR` may be set.
     unreadable_name: bool,
+    /// Whether the script defines a function or loads a builtin, which may
+    /// take a read-only program's name.
+    redefines_programs: bool,
 }
 
 impl Aliases {
@@ -346,6 +349,12 @@ fn needs_with(script: &str, aliases: &mut Aliases, in_shell: bool) -> Vec<Switch
 /// before it.
 fn judge(lexed: &Lexed, aliases: &mut Aliases, read_bodies: bool) -> Vec<Switch> {
     let mut needs = vec![];
+    aliases.redefines_programs |= lexed.defines_function
+        || lexed
+            .commands
+            .iter()
+            .flatten()
+            .any(|w| !w.quoted && ["function", "enable"].contains(&w.text.as_str()));
     let mut bodies = lexed.bodies.iter().peekable();
     for at in 0..=lexed.commands.len() {
         while let Some((_, body)) = bodies.next_if(|(from, _)| *from <= at) {
@@ -354,6 +363,7 @@ fn judge(lexed: &Lexed, aliases: &mut Aliases, read_bodies: bool) -> Vec<Switch>
                 Some(body) => {
                     let mut seen = aliases.clone();
                     needs.extend(judge(body, &mut seen, true));
+                    aliases.redefines_programs |= seen.redefines_programs;
                     if seen != *aliases {
                         aliases.unreadable_name = true;
                     }
@@ -408,11 +418,14 @@ struct Lexed {
     /// Each body with the index of the command it runs before; `None` for
     /// one that doesn't lex.
     bodies: Vec<(usize, Option<Lexed>)>,
+    /// Whether a `name()` function definition was read.
+    defines_function: bool,
 }
 
 impl Lexed {
     fn extend(&mut self, other: Lexed) {
         let offset = self.commands.len();
+        self.defines_function |= other.defines_function;
         self.commands.extend(other.commands);
         self.bodies.extend(
             other
@@ -716,6 +729,9 @@ fn commands(script: &str) -> Option<Lexed> {
                 let doubled = chars.peek() == Some(&c) && matches!(c, '(' | ')');
                 let in_arithmetic = arithmetic_from.is_some();
                 if c == '(' {
+                    let mut ahead = chars.clone();
+                    while ahead.next_if(|&c| c == ' ' || c == '\t').is_some() {}
+                    lexed.defines_function |= !in_arithmetic && ahead.peek() == Some(&')');
                     let text = word.as_ref().map_or("", |w| w.text.as_str());
                     // `@(…)`, `+(…)` and `!(…)` are extglob patterns.
                     if !in_arithmetic && text.ends_with(['@', '+', '!']) {
@@ -1307,7 +1323,9 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             None => kept.push(word),
         }
     }
-    if command.iter().any(|w| names_alias_variable(&w.text)) && !only_mentions(&kept) {
+    if command.iter().any(|w| names_alias_variable(&w.text))
+        && (aliases.redefines_programs || !only_mentions(&kept))
+    {
         return vec![Switch::Alias];
     }
     // A shell's script from its input is out of the hook's sight, unless a
@@ -1927,6 +1945,10 @@ fn expansion_names_alias_variable(script: &str) -> bool {
     while let Some(c) = rest.chars().next() {
         if !closers.is_empty() && ALIAS_VARIABLES.iter().any(|n| rest.starts_with(n)) {
             return true;
+        }
+        // A quote may hide a closer, so the expansion stays open to the end.
+        if !closers.is_empty() && matches!(c, '\'' | '"' | '\\') {
+            return names_alias_variable(rest);
         }
         let (step, opens) = match rest {
             _ if rest.starts_with("${") => (2, Some("}")),
@@ -4565,6 +4587,34 @@ mod tests {
         ] {
             assert_passes(command);
         }
+    }
+
+    #[test]
+    fn a_read_only_program_the_script_may_redefine_is_no_mention() {
+        for command in [
+            "echo() { export \"$@\"; }; echo GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.zz 'GIT_CONFIG_VALUE_0=!gh pr merge 1'; git zz",
+            "echo() { export \"$@\"; }\necho GIT_CONFIG_COUNT=1\ngit zz",
+            "echo ( ) { export \"$@\"; }; \"echo\" GIT_CONFIG_COUNT=1",
+            "function git { export \"$@\"; }; git GIT_CONFIG_COUNT=1",
+            "printf() { builtin printf -v \"$@\"; }; printf GIT_CONFIG_COUNT 1",
+            "cat() { declare -g \"$1=$2\"; }; cat GIT_CONFIG_COUNT 1",
+            "x=$(cat() { declare -g \"$1=$2\"; }); cat GIT_CONFIG_COUNT 1",
+            "bash <<'EOF'\ncat() { declare -g \"$1=$2\"; }\ncat GIT_CONFIG_COUNT 1\nEOF",
+            "enable -f ./echo.so echo; echo GIT_CONFIG_COUNT=1",
+        ] {
+            assert_judged(command, Switch::Alias);
+        }
+        assert_passes("git commit -m 'only_mentions() is no function for GIT_CONFIG'");
+        assert_passes("f() { :; }; gh pr view 1");
+        assert_judged("f() { :; }; echo GIT_CONFIG", Switch::Alias);
+    }
+
+    #[test]
+    fn a_quote_inside_an_expansion_keeps_it_open() {
+        assert_judged(
+            "declare -A A; echo $(( A[\"]))\"]=1, GIT_CONFIG_COUNT=1 ))",
+            Switch::Alias,
+        );
     }
 
     #[test]
