@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use toml_edit::{DocumentMut, Item, Key, Table, TableLike, Value};
 
 use super::{Paths, check, file_of};
+use crate::line_ending::LineEnding;
 use crate::lock::Lock;
 
 /// The value at dotted `key` in `herd`'s file, as TOML; an error when unset.
@@ -93,11 +94,12 @@ fn edit(
     // Renaming over a symlink would replace it, so edit its target.
     let file = fs::canonicalize(&file).with_context(|| format!("read {}", file.display()))?;
     let _lock = lock(&file)?;
-    let mut doc = read(&file)?;
+    let original = read_text(&file)?;
+    let mut doc = parse(&original, &file)?;
     if !change(&mut doc)? {
         return Ok(false);
     }
-    let text = doc.to_string();
+    let text = LineEnding::of(&original).apply(&doc.to_string());
     check(&text, paths).with_context(|| format!("refused, {} is unchanged", file.display()))?;
     let written = || format!("write {}", file.display());
     let dir = file.parent().context("herd file has no directory")?;
@@ -125,7 +127,14 @@ fn lock(file: &Path) -> Result<Lock> {
 }
 
 fn read(file: &Path) -> Result<DocumentMut> {
-    let text = fs::read_to_string(file).with_context(|| format!("read {}", file.display()))?;
+    parse(&read_text(file)?, file)
+}
+
+fn read_text(file: &Path) -> Result<String> {
+    fs::read_to_string(file).with_context(|| format!("read {}", file.display()))
+}
+
+fn parse(text: &str, file: &Path) -> Result<DocumentMut> {
     text.parse::<DocumentMut>()
         .with_context(|| file.display().to_string())
 }
@@ -281,6 +290,52 @@ merge = false
         let err = format!("{:#}", unset(&paths, "h", "repo").unwrap_err());
         assert!(err.contains("missing field `repo`"), "{err}");
         assert_eq!(text(&paths), HERD);
+    }
+
+    #[test]
+    fn set_and_unset_keep_a_crlf_files_line_endings() {
+        let crlf = HERD.replace('\n', "\r\n");
+        let (_dir, paths) = herds(&crlf);
+        set(&paths, "h", "queue.max", "3").unwrap();
+        set(&paths, "h", "workspace", "\"w\"").unwrap();
+        assert!(unset(&paths, "h", "lead.merge").unwrap());
+        assert_eq!(
+            text(&paths),
+            HERD.replace("max = 2 # slots", "max = 3 # slots")
+                .replace("/src/repo\"\n", "/src/repo\"\nworkspace = \"w\"\n")
+                .replace("merge = false\n", "")
+                .replace('\n', "\r\n")
+        );
+    }
+
+    #[test]
+    fn set_adds_a_new_table_to_a_crlf_file_with_crlf() {
+        let (_dir, paths) = herds("repo = \"/r\"\r\n");
+        set(&paths, "h", "lead.prompt", "\"lead {herd}\"").unwrap();
+        assert_eq!(
+            text(&paths),
+            "repo = \"/r\"\r\n\r\n[lead]\r\nprompt = \"lead {herd}\"\r\n"
+        );
+    }
+
+    #[test]
+    fn a_mixed_file_takes_its_first_lines_ending() {
+        let (_dir, paths) = herds("repo = \"/r\"\r\n\nworkspace = \"a\"\n");
+        set(&paths, "h", "workspace", "\"b\"").unwrap();
+        assert_eq!(text(&paths), "repo = \"/r\"\r\n\r\nworkspace = \"b\"\r\n");
+
+        let (_dir, paths) = herds("repo = \"/r\"\n\r\nworkspace = \"a\"\r\n");
+        set(&paths, "h", "workspace", "\"b\"").unwrap();
+        assert_eq!(text(&paths), "repo = \"/r\"\n\nworkspace = \"b\"\n");
+    }
+
+    #[test]
+    fn a_refused_edit_of_a_crlf_file_leaves_its_bytes() {
+        let crlf = HERD.replace('\n', "\r\n");
+        let (_dir, paths) = herds(&crlf);
+        assert!(set(&paths, "h", "queue.max", "0").is_err());
+        assert!(unset(&paths, "h", "repo").is_err());
+        assert_eq!(text(&paths), crlf);
     }
 
     #[test]
