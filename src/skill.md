@@ -414,9 +414,9 @@ question as its own sends a second notification.
 - **After a herdr restart** run `loopherd revive` (`--dry-run` first). It
   resumes non-retired members by session ID, and prompts each lead whose
   watch isn't running to re-arm it. It never prompts workers. It skips a
-  lead whose pane shows a subagent's view (`--dry-run` says so too): switch
-  that pane back to the main conversation, then run `loopherd revive --name
-  <lead>`.
+  lead whose pane shows a subagent's view and exits 1 (`--dry-run` says
+  so too): switch that pane back to the main conversation, then run
+  `loopherd revive --name <lead>`.
 
 ### Talking to members
 
@@ -424,7 +424,9 @@ question as its own sends a second notification.
   `herdr agent prompt`. It refuses, sending nothing, while the member's
   pane shows a subagent's view (text would reach the subagent instead):
   ask the human to switch that pane back to the main conversation, then
-  run it again. It says whether the member went `working`.
+  run it again. It says whether the member went `working`. Text that is
+  itself a flag (`--help`, `-h`) prints help and sends nothing; put `--`
+  before it: `loopherd tell <name> -- --help`.
 - A PR conflicting after another merged: prompt the member to merge the base
   branch into its branch and push. Members rebase and force-push only with
   the human's say.

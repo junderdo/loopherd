@@ -117,7 +117,7 @@ pub fn revive(
         revived.failed |= matches!(outcome, Outcome::Failed { .. })
             || matches!(
                 outcome.rearm(),
-                Some(Rearm::Failed(_) | Rearm::SubagentView)
+                Some(Rearm::Failed(_) | Rearm::Unchecked(_) | Rearm::SubagentView)
             );
         revived.lines.push(outcome.line(&record));
     }
@@ -147,6 +147,7 @@ fn rearm_lead(herdr: &dyn Herdr, req: &ReviveRequest, record: &AgentRecord, outc
         Ok(true) => Rearm::WatchRunning,
         Ok(false) => match pane.map(main_view).transpose() {
             Err(error) if error.is::<ShowsSubagentView>() => Rearm::SubagentView,
+            Err(error) if req.dry_run => Rearm::Unchecked(error),
             Err(error) => Rearm::Failed(error),
             Ok(_) if req.dry_run => Rearm::WouldSend,
             Ok(_) => match herdr.prompt(name, REARM_PROMPT) {
@@ -184,6 +185,8 @@ enum Rearm {
     Sent,
     /// Text typed there would reach the subagent, not the lead.
     SubagentView,
+    /// Dry run: the pane couldn't be read, so nothing says whether it would be prompted.
+    Unchecked(anyhow::Error),
     Failed(anyhow::Error),
 }
 
@@ -198,6 +201,9 @@ impl Rearm {
                 " (not prompted to re-arm: its pane shows a subagent's view; \
                  switch it back to the main conversation, then run loopherd revive --name {name})"
             ),
+            Rearm::Unchecked(error) => {
+                format!(" (can't tell whether it would be prompted: {error:#})")
+            }
             Rearm::Failed(error) => {
                 format!(" (re-arm failed: {error:#}; run loopherd revive --name {name})")
             }
@@ -1122,8 +1128,31 @@ mod tests {
             dry_run: true,
             ..request()
         };
-        let (out, _) = run(&herdr, &mut ledger, &req);
+        let (out, code) = run(&herdr, &mut ledger, &req);
         assert_eq!(out, format!("alive lead-h w1:p4{SKIPPED_REARM}"));
+        assert_eq!(code, 1, "the real run would exit 1");
+        assert!(herdr.prompts().is_empty());
+    }
+
+    #[test]
+    fn dry_run_says_it_could_not_check_a_lead_whose_pane_it_cannot_read() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut herdr = herdr().with_live_agent(Some("lead-h"), Some("sess-lead-h"), "w1:p4");
+        herdr.fail_visible_text = true;
+        let mut ledger = ledger([lead("lead-h", cwd.path())]);
+        let req = ReviveRequest {
+            dry_run: true,
+            ..request()
+        };
+        let (out, code) = run(&herdr, &mut ledger, &req);
+        assert_eq!(
+            (out.as_str(), code),
+            (
+                "alive lead-h w1:p4 (can't tell whether it would be prompted: read lead-h's pane \
+                 w1:p4 to check for a subagent view: pane read refused)",
+                1
+            )
+        );
         assert!(herdr.prompts().is_empty());
     }
 

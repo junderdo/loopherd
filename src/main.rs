@@ -1518,6 +1518,17 @@ mod tests {
     }
 
     #[test]
+    fn tell_sends_a_flag_name_as_text_after_a_double_dash() {
+        for flag in ["--help", "-h", "--text-file"] {
+            let cli = Cli::try_parse_from(["loopherd", "tell", "lh-1", "--", flag]).unwrap();
+            let Some(Command::Tell { text, .. }) = cli.command else {
+                panic!("not a tell: {flag}");
+            };
+            assert_eq!(text.as_deref(), Some(flag));
+        }
+    }
+
+    #[test]
     fn a_feeds_own_process_is_live_by_its_pid_and_start_time() {
         let owner = own_process().unwrap();
         assert_eq!(owner.pid, std::process::id());
