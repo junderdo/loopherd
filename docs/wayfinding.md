@@ -61,6 +61,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D44](decisions/D44.md) | `stats`, `reports` and `watch` label their printed wall-clock times UTC (`started (UTC)` headers, a ` UTC` suffix on report lines) rather than converting to local time; `--json` is unchanged. |
 | [D45](decisions/D45.md) | The Stop hook defers a member's handoff ask while its stop shows subagents running, until a stop without them or until its context passes 1.5x its limit; background shells alone don't defer it. |
 | [D46](decisions/D46.md) | Re-verify rounds after a PR's first review run the reviewer on Sonnet, and reviewers tail or grep gate output instead of Reading saved `tool-results/` files whole. |
+| [D47](decisions/D47.md) | Members are messaged with `loopherd tell`, which, like `prompt`, `restart` and revive's lead re-arm, refuses while the pane shows a subagent's view, then says whether the member went `working`. |
 
 ## Emerging model
 

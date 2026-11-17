@@ -141,7 +141,7 @@ pub fn restart(
         bail!(
             "{e:#}: the /clear may be queued behind a running turn, or loopherd's SessionStart hook isn't installed. \
              No handoff prompt was sent and the handoff is still at {}. Once {name}'s pane shows a cleared session, \
-             run: herdr agent prompt {} {}",
+             run: loopherd tell {} {}",
             handoff.display(),
             quote(name),
             quote(&resume)
@@ -653,7 +653,7 @@ mod tests {
                 "sent /clear, but lh-1's ledger session is still old after 50ms: the /clear may be \
                  queued behind a running turn, or loopherd's SessionStart hook isn't installed. No \
                  handoff prompt was sent and the handoff is still at {md}. Once lh-1's pane shows a \
-                 cleared session, run: herdr agent prompt 'lh-1' 'Read your handoff at {md}, then \
+                 cleared session, run: loopherd tell 'lh-1' 'Read your handoff at {md}, then \
                  continue from it.'"
             )
         );
