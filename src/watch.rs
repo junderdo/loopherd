@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use crate::context::ShepherdHandoff;
-use crate::feed::{claimable, run_check};
+use crate::feed::{claimable, run_check, run_source};
 use crate::herd::{MemberCheck, MemberChecks, Paths, lead_checks};
 use crate::herd_view::{Member, Options, View};
 use crate::herdr::{AgentStatus, Herdr};
@@ -410,9 +410,10 @@ impl Checks<'_> {
         // After the pause, so a resume during the member checks counts now.
         self.fired.reload()?;
         if let (false, Some(queue), Some(timeout)) = (paused, queue, budget.left()) {
-            match claimable(ledger, self.paths, &queue, &self.herd, freed, timeout) {
-                Ok(names) => {
+            match run_source(&queue, timeout) {
+                Ok((tasks, _)) => {
                     passing.push("source".into());
+                    let names = claimable(ledger, self.paths, &queue, &self.herd, freed, &tasks)?;
                     // A running feed may be spawning these before it records them.
                     if !feeding(self.paths)? {
                         events.extend(
@@ -422,6 +423,7 @@ impl Checks<'_> {
                         );
                     }
                 }
+                Err(_) if budget.cut(timeout) => {}
                 Err(e) => failing.push(("source".into(), why(&queue.source, &format!("{e:#}")))),
             }
         }
@@ -469,7 +471,27 @@ impl Event {
 fn why(command: &str, error: &str) -> String {
     let last = error.trim().lines().last().unwrap_or_default();
     let last = last.strip_prefix(&format!("{command:?} ")).unwrap_or(last);
-    format!("{command:?}: {last}")
+    format!("{command:?}: {}", printable(last))
+}
+
+/// The most of a command's stderr line a watch line shows.
+const WHY_MAX: usize = 200;
+
+/// `text` without ANSI escapes or other control characters, cut to [`WHY_MAX`].
+fn printable(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.next_if_eq(&'[').is_some() {
+            chars.find(|c| ('@'..='~').contains(c));
+        } else if !c.is_control() {
+            out.push(c);
+        }
+    }
+    match out.char_indices().nth(WHY_MAX) {
+        Some((at, _)) => format!("{}…", &out[..at]),
+        None => out,
+    }
 }
 
 /// Read fresh: the owning feed may have noted it during the member checks.
@@ -498,12 +520,18 @@ impl Budget {
         let left = self.deadline.saturating_duration_since(Instant::now());
         (!left.is_zero()).then(|| left.min(self.each))
     }
+
+    /// Whether a command given `timeout` and failing now was cut off by
+    /// the deadline rather than failing in its own right.
+    fn cut(&self, timeout: Duration) -> bool {
+        timeout < self.each && self.left().is_none()
+    }
 }
 
 /// Why a member check has no answer.
 #[derive(PartialEq)]
 enum Unchecked {
-    /// The round's [`CHECK_EVERY`] ran out first.
+    /// The round's [`CHECK_EVERY`] ran out before or while it ran.
     OutOfTime,
     Failed(String),
 }
@@ -518,16 +546,25 @@ fn run_member_check(
 ) -> Option<Result<bool, Unchecked>> {
     let check = checks.get(worker.template.as_ref()?)?;
     let Some(params) = &worker.params else {
-        return Some(Err(Unchecked::Failed("no recorded params".into())));
+        return Some(Err(Unchecked::Failed(why(
+            check.text(),
+            "no recorded params",
+        ))));
     };
     let Some(timeout) = budget.left() else {
         return Some(Err(Unchecked::OutOfTime));
     };
     let command = match check.render(worker, params) {
         Ok(command) => command,
-        Err(e) => return Some(Err(Unchecked::Failed(e.to_string()))),
+        Err(e) => return Some(Err(Unchecked::Failed(why(check.text(), &e.to_string())))),
     };
-    Some(run_check(&command, &herd.repo, timeout).map_err(|e| Unchecked::Failed(why(&command, &e))))
+    Some(run_check(&command, &herd.repo, timeout).map_err(|e| {
+        if budget.cut(timeout) {
+            Unchecked::OutOfTime
+        } else {
+            Unchecked::Failed(why(&command, &e))
+        }
+    }))
 }
 
 /// Whether a feed holds the feed lock, probed without waiting.
@@ -2619,26 +2656,36 @@ mod tests {
     fn a_done_worker_frees_its_slot_unless_its_after_merge_is_due_or_its_merged_check_errors() {
         let none = None;
         let noted = Some(AfterMerge::Noted);
-        // (case, herd's after_merge, merged check, ledger's after_merge, frees its slot)
+        let frees = Some(vec!["lh-2 claimable".to_string()]);
+        let errors = Some(vec![
+            "cards failing  lh-1 merged \"exit 3\": exit 3".to_string(),
+        ]);
+        // (case, herd's after_merge, merged check, ledger's after_merge, what it wakes on)
         let cases = [
-            ("no after_merge, merged", "", "exit 0", none, true),
-            ("after_merge, unmerged", "[\"true\"]", "exit 1", none, true),
+            ("no after_merge, merged", "", "exit 0", none, frees.clone()),
+            (
+                "after_merge, unmerged",
+                "[\"true\"]",
+                "exit 1",
+                none,
+                frees.clone(),
+            ),
             (
                 "after_merge, merged check errors",
                 "[\"true\"]",
                 "exit 3",
                 none,
-                false,
+                errors,
             ),
             (
                 "after_merge noted, merged",
                 "[\"true\"]",
                 "exit 0",
                 noted,
-                true,
+                frees,
             ),
         ];
-        for (case, after_merge, merged, recorded, frees) in cases {
+        for (case, after_merge, merged, recorded, woke) in cases {
             let mut world =
                 Checked::with_template(&format!("done = \"exit 0\"\nmerged = \"{merged}\"\n"));
             world.edit_herd(|herd| {
@@ -2650,12 +2697,7 @@ mod tests {
             });
             world.ledger.0.get_mut("lh-1").unwrap().after_merge = recorded;
             world.touch("tasks", "1\n2\n3\n");
-            let woke = world.once("w9:p0").unwrap_or_default();
-            assert_eq!(
-                woke.contains(&"lh-2 claimable".into()),
-                frees,
-                "{case}: {woke:?}"
-            );
+            assert_eq!(world.once("w9:p0"), woke, "{case}");
         }
     }
 
@@ -2760,7 +2802,7 @@ mod tests {
         let source = "cat tasks; echo first >&2; echo origin unreachable >&2; exit 2";
         let failing = format!("cards failing  source {source:?}: origin unreachable");
         world.edit_herd(|h| h.replace("\"cat tasks\"", &format!("{source:?}")));
-        assert_eq!(world.once("w9:p0").unwrap(), [failing.clone()]);
+        assert_eq!(world.once("w9:p0").unwrap(), std::slice::from_ref(&failing));
         assert_eq!(world.once("w9:p0"), None, "woke twice in one streak");
 
         world.edit_herd(|h| h.replace(&format!("{source:?}"), "\"cat tasks\""));
@@ -2791,6 +2833,31 @@ mod tests {
         world.touch("done-1", "");
         assert_eq!(world.once("w9:p0").unwrap(), ["cards recovered  lh-1 done"]);
         assert_eq!(world.once("w9:p0"), None, "woke twice on one recovery");
+    }
+
+    #[test]
+    fn a_check_with_no_recorded_params_names_the_check_as_the_herd_file_writes_it() {
+        let mut world = Checked::new();
+        world.ledger.0.get_mut("lh-1").unwrap().params = None;
+        assert_eq!(
+            world.once("w9:p0").unwrap(),
+            [
+                "cards failing  lh-1 done \"test -f done-{n}\": no recorded params",
+                "cards failing  lh-1 merged \"test -f merged-{n}\": no recorded params",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failing_line_drops_escapes_and_control_characters_and_cuts_a_long_stderr_line() {
+        let check = "printf '\\033[31mred\\033[0m \\a%0300d\\n' 0 >&2; exit 2";
+        let world = Checked::with_template(&format!("done = {check:?}\n"));
+        let woke = world.once("w9:p0").unwrap();
+        let shown = format!("exit 2: red {}…", "0".repeat(WHY_MAX - 12));
+        assert_eq!(
+            woke,
+            [format!("cards failing  lh-1 done {check:?}: {shown}")]
+        );
     }
 
     #[test]
@@ -2963,7 +3030,7 @@ mod tests {
         let cut = run_member_check(&checks.done, &checks, worker, &budget);
         let after = run_member_check(&checks.done, &checks, worker, &budget);
 
-        assert!(matches!(cut, Some(Err(Unchecked::Failed(why))) if why.contains("timed out")));
+        assert!(matches!(cut, Some(Err(Unchecked::OutOfTime))));
         assert!(matches!(after, Some(Err(Unchecked::OutOfTime))));
         assert!(started.elapsed() < Duration::from_secs(2));
         // Past the check's own `sleep 2`, so a check left running would have touched it.

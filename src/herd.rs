@@ -451,6 +451,8 @@ fn checks_of(
 
 /// A template's `done` or `merged` command, rendered per member like its prompt.
 pub struct MemberCheck {
+    /// The command as the herd file writes it, placeholders and all.
+    text: String,
     command: Template,
     branch: Option<Template>,
 }
@@ -462,6 +464,9 @@ impl MemberCheck {
         field: &'static str,
         command: Option<&str>,
     ) -> Result<Option<MemberCheck>> {
+        let Some(text) = command else {
+            return Ok(None);
+        };
         let Some(command) = pattern(command, &template.params, &BUILT_INS).context(field)? else {
             return Ok(None);
         };
@@ -471,7 +476,15 @@ impl MemberCheck {
             &["herd", "name"],
         )
         .context("branch")?;
-        Ok(Some(MemberCheck { command, branch }))
+        Ok(Some(MemberCheck {
+            text: text.to_string(),
+            command,
+            branch,
+        }))
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
     }
 
     /// The command for `member`, whose `params` are its recorded values, each
