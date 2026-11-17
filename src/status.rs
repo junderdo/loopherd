@@ -204,14 +204,30 @@ fn text(view: &View, color: bool) -> String {
     let sections = sections(view);
     let rows: Vec<Vec<Vec<String>>> = sections
         .iter()
-        .map(|(_, members)| members.iter().map(row).collect())
+        .map(|(_, members)| members.iter().map(text_row).collect())
         .collect();
-    let widths = widths(rows.iter().flatten());
+    let members_and_rows = || {
+        sections
+            .iter()
+            .zip(&rows)
+            .flat_map(|((_, members), rows)| members.iter().zip(rows))
+    };
+    // A retired row's long status cell widens only retired rows, not live ones.
+    let open_widths = widths(
+        members_and_rows()
+            .filter(|(m, _)| m.retired.is_none())
+            .map(|(_, row)| row),
+    );
+    let all_widths = widths(rows.iter().flatten());
     let mut out = String::new();
     for ((name, members), rows) in sections.iter().zip(&rows) {
         out += &format!("{name}\n");
         for (member, row) in members.iter().zip(rows) {
-            let line = aligned(row, &widths);
+            let widths = match member.retired {
+                Some(_) => &all_widths,
+                None => &open_widths,
+            };
+            let line = aligned(row, widths);
             out += &match color && member.gone {
                 true => format!("  \x1b[2m{line}\x1b[0m\n"),
                 false => format!("  {line}\n"),
@@ -223,6 +239,19 @@ fn text(view: &View, color: bool) -> String {
         out += "gone: no live agent matches it; `loopherd revive` can bring it back\n";
     }
     out
+}
+
+/// [`row`], with a retired entry's status naming its retirement so a grepped row
+/// can't pass for an open member.
+fn text_row(member: &Member) -> Vec<String> {
+    let mut cells = row(member);
+    if let Some(at) = &member.retired {
+        cells[1] = match at.as_str() {
+            "unknown" => "retired".into(),
+            at => format!("retired {at}"),
+        };
+    }
+    cells
 }
 
 pub fn row(member: &Member) -> Vec<String> {
@@ -748,7 +777,7 @@ ungrouped
   lh-42  idle     -  feat-x  w1:tlh-42/w1:plh-42
   \x1b[2mold    gone     -  old-wt  w1:pold\x1b[0m
 retired
-  zpr-1  working  -  pr-1    w1:tzpr-1/w1:pzpr-1
+  zpr-1  retired  -  pr-1    w1:tzpr-1/w1:pzpr-1
 +1 stray (live in herdr, not in loopherd's ledger)
   w2:p7  /src/elsewhere  poking around
 gone: no live agent matches it; `loopherd revive` can bring it back
@@ -779,12 +808,53 @@ gone: no live agent matches it; `loopherd revive` can bring it back
 
         assert!(
             text.stdout
-                .contains("retired\n  zpr-1 (released)  working  -  pr-1"),
+                .contains("retired\n  zpr-1 (released)  retired  -  pr-1"),
             "{}",
             text.stdout
         );
         let json: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
         assert_eq!(json["retired"][0]["released"], true);
+    }
+
+    #[test]
+    fn all_marks_each_retired_row_retired_with_its_time_even_when_grepped_alone() {
+        let mut ledger = ledger();
+        let old = ledger.0.get_mut("old").unwrap();
+        old.retired = true;
+        old.retired_at = Some("2026-11-17T08:00:00Z".into());
+        let all = Options {
+            all: true,
+            strays: false,
+        };
+
+        let text = status(&herdr(), &ledger, &not_paused(), all, PLAIN).unwrap();
+        let json = status(&herdr(), &ledger, &not_paused(), all, Format::Json).unwrap();
+
+        let row = text.stdout.lines().find(|l| l.contains("old")).unwrap();
+        assert_eq!(
+            row,
+            "  old    retired 2026-11-17T08:00:00Z  -  old-wt  w1:pold"
+        );
+        let live = text.stdout.lines().find(|l| l.contains("lh-42")).unwrap();
+        assert_eq!(live, "  lh-42  idle     -  feat-x  w1:tlh-42/w1:plh-42");
+        let json: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
+        assert_eq!(json["retired"][0]["retired"], "2026-11-17T08:00:00Z");
+        assert_eq!(json["ungrouped"][0]["retired"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_retired_entry_with_no_recorded_time_is_still_marked_retired() {
+        let mut ledger = ledger();
+        ledger.0.get_mut("old").unwrap().retired = true;
+        let all = Options {
+            all: true,
+            strays: false,
+        };
+
+        let json = status(&herdr(), &ledger, &not_paused(), all, Format::Json).unwrap();
+
+        let json: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
+        assert_eq!(json["retired"][0]["retired"], "unknown");
     }
 
     #[test]
@@ -808,7 +878,9 @@ gone: no live agent matches it; `loopherd revive` can bring it back
     #[test]
     fn json_has_the_documented_shape() {
         let mut ledger = ledger();
-        ledger.0.get_mut("old").unwrap().retired = true;
+        let old = ledger.0.get_mut("old").unwrap();
+        old.retired = true;
+        old.retired_at = Some("2026-11-17T08:00:00Z".into());
         ledger.0.get_mut("zpr-1").unwrap().template = Some("pr".into());
         let out = status(
             &herdr(),
@@ -824,7 +896,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         let json: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
         let member = |name: &str, status: &str, gone: bool, wt: &str, pane: &str, tab| {
             serde_json::json!({"name": name, "status": status, "gone": gone, "branch": null,
-                "worktree": wt, "pane": pane, "tab": tab, "lead": false, "template": null, "released": false})
+                "worktree": wt, "pane": pane, "tab": tab, "lead": false, "template": null, "released": false, "retired": null})
         };
         let mut zpr_1 = member(
             "zpr-1",
@@ -835,6 +907,8 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             Some("w1:tzpr-1"),
         );
         zpr_1["template"] = "pr".into();
+        let mut old = member("old", "unknown", false, "old-wt", "w1:pold", None);
+        old["retired"] = "2026-11-17T08:00:00Z".into();
         assert_eq!(
             json,
             serde_json::json!({
@@ -844,7 +918,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
                     zpr_1,
                 ]}],
                 "ungrouped": [member("lh-42", "idle", false, "feat-x", "w1:plh-42", Some("w1:tlh-42"))],
-                "retired": [member("old", "unknown", false, "old-wt", "w1:pold", None)],
+                "retired": [old],
                 "strays": {"count": 1, "agents": [{"pane": "w2:p7", "tab": "w2:t7", "status": "idle",
                     "cwd": "/src/elsewhere", "title": "poking around"}]},
             })
