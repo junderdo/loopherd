@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow, bail};
 
 use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::Ledger;
-use crate::subagent_view::ensure_main_view;
+use crate::subagent_view::{TEXT_REACHES_SUBAGENT, ensure_main_view};
 
 /// Sends `name`'s stored prompt to its live agent and marks it sent,
 /// refusing a pane that shows a subagent's view.
@@ -35,6 +35,7 @@ pub fn prompt(herdr: &dyn Herdr, ledger: &mut dyn Ledger, name: &str, force: boo
         herdr,
         name,
         &agent.pane_id,
+        TEXT_REACHES_SUBAGENT,
         &format!("run loopherd prompt {name} again"),
     )?;
     herdr.prompt(name, &text)?;

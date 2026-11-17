@@ -89,6 +89,7 @@ pub struct FakeHerdr {
     pub fail_create_tab: bool,
     pub fail_close_tab: bool,
     pub fail_prompt: bool,
+    pub fail_wait: bool,
     /// After `start_claude`, this many `agent` calls answer without the
     /// session, as herdr does before it has read it; a ready start's reply too.
     pub session_after_gets: u32,
@@ -126,6 +127,7 @@ impl FakeHerdr {
             fail_create_tab: false,
             fail_close_tab: false,
             fail_prompt: false,
+            fail_wait: false,
             session_after_gets: 0,
             agent_get_fails_after_start: false,
             new_tab_prompt_after: Some(0),
@@ -549,6 +551,9 @@ impl Herdr for FakeHerdr {
     }
 
     fn wait(&self, name: &str, until: &[AgentStatus], _timeout: Duration) -> Result<WaitOutcome> {
+        if self.fail_wait {
+            bail!("wait refused");
+        }
         if self.startup == Startup::BlockedThenIdle {
             self.set_status(name, AgentStatus::Idle);
         }
