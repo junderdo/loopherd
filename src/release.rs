@@ -10,29 +10,19 @@ use crate::ledger::Ledger;
 use crate::report::{Body, Entry, append};
 use crate::retire::open_tab;
 use crate::watch::forget_member;
-use crate::worktree::{Cleared, clear_branch};
-
-/// What to do with a released member's local branch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BranchFate {
-    /// Delete it, with its worktree, unless it has commits not on the base.
-    Clear,
-    /// Leave it and its worktree for the new member to start from.
-    Keep,
-    /// Delete it, with its worktree, even with commits not on the base.
-    Drop,
-}
+use crate::worktree::{Cleared, Fate, clear_checkout, same_dir};
 
 /// Marks the retired `name` released, so the next `feed` may spawn a member
-/// by that name, after clearing its branch per `fate` so the new member
-/// starts afresh. Refuses, changing nothing, a live entry, one whose tab may
-/// still be open, or a branch it would lose work from. Pushes one line per
-/// action to `out`.
+/// by that name, after clearing its worktree and branch per `fate` so the
+/// new member starts afresh. Refuses, changing nothing, a live entry, a
+/// lead, one whose tab may still be open, or a checkout it would lose work
+/// from. Rerunning it on a released entry clears and forgets again. Pushes
+/// one line per action to `out`.
 pub fn release(
     herdr: &dyn Herdr,
     ledger: &mut dyn Ledger,
     name: &str,
-    fate: BranchFate,
+    fate: Fate,
     now: SystemTime,
     mailboxes: &Path,
     out: &mut Vec<String>,
@@ -44,9 +34,8 @@ pub fn release(
     if !record.retired {
         bail!("refused: {name} is not retired; only a retired member's task can be fed again");
     }
-    if let Some(at) = &record.released_at {
-        out.push(format!("{name} is already released (since {at})"));
-        return Ok(());
+    if record.is_lead() {
+        bail!("refused: {name} is a lead, which feed never spawns; use `loopherd lead`");
     }
     if let Some(socket) = &record.socket
         && herdr.socket().as_ref() != Some(socket)
@@ -61,32 +50,40 @@ pub fn release(
     {
         bail!("refused: {name}'s {why}; close it first with `loopherd retire --close {name}`");
     }
-    let branch = record.branch.as_deref().filter(|b| !b.is_empty());
-    if let Some(branch) = branch {
-        if let Some(user) = others
+    let in_use = |path: &Path| {
+        others
             .values()
-            .find(|r| !r.retired && r.repo == record.repo && r.branch.as_deref() == Some(branch))
-        {
-            bail!("refused: {branch} is in use by {}", user.name);
-        }
-        clear(&record.repo, branch, fate, out)?;
-    }
+            .find(|r| !r.retired && r.worktree.as_deref().is_some_and(|w| same_dir(w, path)))
+            .map(|r| r.name.clone())
+    };
+    let branch = record.branch.as_deref().filter(|b| !b.is_empty());
+    let cleared = clear_checkout(
+        &record.repo,
+        record.worktree.as_deref(),
+        branch,
+        fate,
+        &in_use,
+    )?;
+    report_cleared(cleared, branch, out)?;
     ledger.update(name, &mut |r| {
         if !r.retired {
             bail!("refused: {name} is no longer retired");
         }
-        r.released_at = Some(humantime::format_rfc3339_seconds(now).to_string());
+        if r.released_at.is_none() {
+            r.released_at = Some(humantime::format_rfc3339_seconds(now).to_string());
+        }
         Ok(())
     })?;
-    out.push(format!("released {name}: feed may spawn it again"));
-    let note = Entry::new(
-        now,
-        Body::Note {
-            text: format!("released: feed may spawn {name} again"),
-        },
-    );
-    if let Err(e) = append(mailboxes, name, &note) {
-        out.push(format!("warning: note to {name}'s mailbox: {e:#}"));
+    match &record.released_at {
+        Some(at) => out.push(format!("{name} is already released (since {at})")),
+        None => {
+            out.push(format!("released {name}: feed may spawn it again"));
+            let text = format!("released: feed may spawn {name} again");
+            let note = Entry::new(now, Body::Note { text });
+            if let Err(e) = append(mailboxes, name, &note) {
+                out.push(format!("warning: note to {name}'s mailbox: {e:#}"));
+            }
+        }
     }
     let lead = others
         .values()
@@ -95,50 +92,54 @@ pub fn release(
         && let Err(e) = forget_member(mailboxes, &lead.name, name)
     {
         out.push(format!(
-            "warning: {}'s watch won't announce {name} claimable: {e:#}",
+            "warning: {}'s watch won't announce {name} claimable: {e:#}; rerun to retry",
             lead.name
         ));
     }
     Ok(())
 }
 
-fn clear(repo: &Path, branch: &str, fate: BranchFate, out: &mut Vec<String>) -> Result<()> {
-    if fate == BranchFate::Keep {
-        out.push(format!(
-            "kept branch {branch}: the new member starts from it"
-        ));
-        return Ok(());
-    }
-    match clear_branch(repo, branch, fate == BranchFate::Drop)? {
+fn report_cleared(cleared: Cleared, branch: Option<&str>, out: &mut Vec<String>) -> Result<()> {
+    let short = |head: &str| head[..head.len().min(12)].to_string();
+    match cleared {
         Cleared::Absent => {}
+        Cleared::Kept => {
+            out.push("kept its worktree and branch: the new member starts from them".into())
+        }
         Cleared::Removed {
-            head,
+            worktrees,
+            branch: head,
             ahead,
             base,
-            worktree,
         } => {
-            if let Some(path) = worktree {
-                out.push(format!("removed {}", path.display()));
+            for (path, head) in worktrees {
+                out.push(format!("removed {} (at {})", path.display(), short(&head)));
             }
-            let short = &head[..head.len().min(12)];
-            out.push(match ahead {
-                0 => format!("deleted branch {branch} (was {short})"),
-                n => format!(
-                    "deleted branch {branch} (was {short}), dropping {n} commit{} not on {base}",
-                    if n == 1 { "" } else { "s" }
-                ),
-            });
+            if let (Some(branch), Some(head)) = (branch, head) {
+                out.push(format!("deleted branch {branch} (was {})", short(&head)));
+            }
+            if ahead > 0 {
+                out.push(format!(
+                    "dropped {ahead} commit{} not on {base}",
+                    plural(ahead)
+                ));
+            }
         }
         Cleared::Ahead { count, base } => bail!(
-            "refused: {branch} has {count} commit{} not on {base}; pass --keep-branch to start \
-             the new member from it, or --drop-branch to delete it",
-            if count == 1 { "" } else { "s" }
+            "refused: its branch or worktree has {count} commit{} not on {base}; pass \
+             --keep-branch to start the new member from them, or --drop-branch to delete them",
+            plural(count)
         ),
-        Cleared::Kept(reason) => {
+        Cleared::Dirty(reason) => {
             bail!("refused: {reason}; clean it up, or pass --keep-branch to start from it")
         }
+        Cleared::Taken(reason) => bail!("refused: {reason}"),
     }
     Ok(())
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }
 
 #[cfg(test)]
@@ -216,7 +217,7 @@ mod tests {
             self.root.path().join("reports")
         }
 
-        fn release(&mut self, name: &str, fate: BranchFate) -> Result<Vec<String>> {
+        fn release(&mut self, name: &str, fate: Fate) -> Result<Vec<String>> {
             let mut out = vec![];
             let now = humantime::parse_rfc3339("2026-11-17T12:00:00Z").unwrap();
             let mailboxes = self.mailboxes();
@@ -238,7 +239,7 @@ mod tests {
         let mut s = Setup::new();
         s.add(record("zpr-1", s.repo.clone(), true));
 
-        let out = s.release("zpr-1", BranchFate::Clear).unwrap();
+        let out = s.release("zpr-1", Fate::Clear).unwrap();
 
         assert_eq!(out, ["released zpr-1: feed may spawn it again"]);
         let released = &s.ledger.0["zpr-1"];
@@ -267,7 +268,7 @@ mod tests {
         std::fs::create_dir_all(s.mailboxes()).unwrap();
         std::fs::write(&fired, "lead t\nzpr-1 claimable\n").unwrap();
 
-        s.release("zpr-1", BranchFate::Clear).unwrap();
+        s.release("zpr-1", Fate::Clear).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&fired).unwrap(),
@@ -281,7 +282,7 @@ mod tests {
         s.add(record("zpr-1", s.repo.clone(), false));
         let before = s.ledger.0.clone();
 
-        let err = s.release("zpr-1", BranchFate::Clear).unwrap_err();
+        let err = s.release("zpr-1", Fate::Clear).unwrap_err();
 
         assert_eq!(
             format!("{err:#}"),
@@ -294,7 +295,7 @@ mod tests {
     fn refuses_an_unknown_name() {
         let mut s = Setup::new();
 
-        let err = s.release("ghost", BranchFate::Clear).unwrap_err();
+        let err = s.release("ghost", Fate::Clear).unwrap_err();
 
         assert_eq!(format!("{err:#}"), "ghost is not in the ledger");
     }
@@ -306,7 +307,7 @@ mod tests {
         r.released_at = Some("2026-11-16T12:00:00Z".into());
         s.add(r);
 
-        let out = s.release("zpr-1", BranchFate::Clear).unwrap();
+        let out = s.release("zpr-1", Fate::Clear).unwrap();
 
         assert_eq!(
             out,
@@ -319,12 +320,62 @@ mod tests {
     }
 
     #[test]
+    fn a_rerun_with_another_fate_clears_what_the_first_kept() {
+        let mut s = Setup::new();
+        let wt = s.retired_on("zpr-1", "feat/zpr-1");
+        commit(&wt, "unpushed");
+        s.release("zpr-1", Fate::Keep).unwrap();
+
+        let out = s.release("zpr-1", Fate::Drop).unwrap();
+
+        assert_eq!(
+            out.last().unwrap(),
+            "zpr-1 is already released (since 2026-11-17T12:00:00Z)"
+        );
+        assert!(!wt.exists());
+        assert!(!has_branch(&s.repo, "feat/zpr-1"));
+    }
+
+    #[test]
+    fn refuses_a_lead() {
+        let mut s = Setup::new();
+        let mut lead = record("lead-prs", s.repo.clone(), true);
+        lead.role = Some(Role::Lead);
+        s.add(lead);
+
+        let err = s.release("lead-prs", Fate::Clear).unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "refused: lead-prs is a lead, which feed never spawns; use `loopherd lead`"
+        );
+    }
+
+    #[test]
+    fn clears_a_detached_worktree_so_the_new_member_gets_a_fresh_one() {
+        let mut s = Setup::new();
+        let wt = crate::worktree::ensure_detached_worktree(&s.repo, "zpr-1").unwrap();
+        let mut r = record("zpr-1", s.repo.clone(), true);
+        r.worktree = Some(wt.clone());
+        s.add(r);
+        let start = head(&wt);
+
+        let out = s.release("zpr-1", Fate::Clear).unwrap();
+
+        assert_eq!(
+            out[0],
+            format!("removed {} (at {})", wt.display(), &start[..12])
+        );
+        assert!(!wt.exists());
+    }
+
+    #[test]
     fn refuses_while_herdr_still_shows_its_agent() {
         let mut s = Setup::new();
         s.add(record("zpr-1", s.repo.clone(), true));
         s.herdr = FakeHerdr::new(&[("w1", "loopherd")]).with_agent("zpr-1");
 
-        let err = s.release("zpr-1", BranchFate::Clear).unwrap_err();
+        let err = s.release("zpr-1", Fate::Clear).unwrap_err();
 
         let msg = format!("{err:#}");
         assert!(msg.starts_with("refused: zpr-1's tab "), "{msg}");
@@ -342,7 +393,7 @@ mod tests {
         r.socket = Some("/run/other/herdr.sock".into());
         s.add(r);
 
-        let err = s.release("zpr-1", BranchFate::Clear).unwrap_err();
+        let err = s.release("zpr-1", Fate::Clear).unwrap_err();
 
         assert_eq!(
             format!("{err:#}"),
@@ -357,12 +408,12 @@ mod tests {
         let wt = s.retired_on("zpr-1", "feat/zpr-1");
         let start = head(&wt);
 
-        let out = s.release("zpr-1", BranchFate::Clear).unwrap();
+        let out = s.release("zpr-1", Fate::Clear).unwrap();
 
         assert_eq!(
             out,
             [
-                format!("removed {}", wt.display()),
+                format!("removed {} (at {})", wt.display(), &start[..12]),
                 format!("deleted branch feat/zpr-1 (was {})", &start[..12]),
                 "released zpr-1: feed may spawn it again".into(),
             ]
@@ -376,12 +427,12 @@ mod tests {
         let wt = s.retired_on("zpr-1", "feat/zpr-1");
         commit(&wt, "unpushed");
 
-        let err = s.release("zpr-1", BranchFate::Clear).unwrap_err();
+        let err = s.release("zpr-1", Fate::Clear).unwrap_err();
 
         assert_eq!(
             format!("{err:#}"),
-            "refused: feat/zpr-1 has 1 commit not on origin/main; pass --keep-branch to start \
-             the new member from it, or --drop-branch to delete it"
+            "refused: its branch or worktree has 1 commit not on origin/main; pass \
+             --keep-branch to start the new member from them, or --drop-branch to delete them"
         );
         assert!(has_branch(&s.repo, "feat/zpr-1"));
         assert_eq!(s.ledger.0["zpr-1"].released_at, None);
@@ -393,12 +444,12 @@ mod tests {
         let wt = s.retired_on("zpr-1", "feat/zpr-1");
         commit(&wt, "unpushed");
 
-        let out = s.release("zpr-1", BranchFate::Keep).unwrap();
+        let out = s.release("zpr-1", Fate::Keep).unwrap();
 
         assert_eq!(
             out,
             [
-                "kept branch feat/zpr-1: the new member starts from it",
+                "kept its worktree and branch: the new member starts from them",
                 "released zpr-1: feed may spawn it again",
             ]
         );
@@ -413,30 +464,34 @@ mod tests {
         commit(&wt, "unpushed");
         let unpushed = head(&wt);
 
-        let out = s.release("zpr-1", BranchFate::Drop).unwrap();
+        let out = s.release("zpr-1", Fate::Drop).unwrap();
 
         assert_eq!(
-            out[1],
-            format!(
-                "deleted branch feat/zpr-1 (was {}), dropping 1 commit not on origin/main",
-                &unpushed[..12]
-            )
+            out[1..3],
+            [
+                format!("deleted branch feat/zpr-1 (was {})", &unpushed[..12]),
+                "dropped 1 commit not on origin/main".into(),
+            ]
         );
         assert!(!has_branch(&s.repo, "feat/zpr-1"));
         assert!(s.ledger.0["zpr-1"].released_at.is_some());
     }
 
     #[test]
-    fn refuses_a_branch_a_live_entry_is_on() {
+    fn refuses_a_worktree_a_live_entry_is_in() {
         let mut s = Setup::new();
         s.retired_on("zpr-1", "feat/zpr-1");
+        let wt = s.ledger.0["zpr-1"].worktree.clone();
         let mut live = record("other", s.repo.clone(), false);
-        live.branch = Some("feat/zpr-1".into());
+        live.worktree = wt.clone();
         s.add(live);
 
-        let err = s.release("zpr-1", BranchFate::Drop).unwrap_err();
+        let err = s.release("zpr-1", Fate::Drop).unwrap_err();
 
-        assert_eq!(format!("{err:#}"), "refused: feat/zpr-1 is in use by other");
+        assert_eq!(
+            format!("{err:#}"),
+            format!("refused: {} is in use by other", wt.unwrap().display())
+        );
         assert!(has_branch(&s.repo, "feat/zpr-1"));
     }
 }

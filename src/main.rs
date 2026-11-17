@@ -60,13 +60,13 @@ use crate::lead::LeadRequest;
 use crate::ledger::{FileLedger, Process};
 use crate::process::Procs;
 use crate::prompt::prompt;
-use crate::release::{BranchFate, release};
+use crate::release::release;
 use crate::report::{Filter, Kind, Reporter, report, reports};
 use crate::retire::{retire, retire_and_close};
 use crate::revive::{ReviveRequest, revive};
 use crate::spawn::{Checkout, Prompt, SHELL_TIMEOUT, SpawnRequest, spawn};
 use crate::status::{Format, status};
-use crate::worktree::{remote_timeout, repo_root};
+use crate::worktree::{Fate, remote_timeout, repo_root};
 
 #[derive(Parser)]
 #[command(
@@ -787,9 +787,9 @@ fn run_retire(name: &str, close: bool) -> Result<i32> {
 fn run_release(name: &str, keep_branch: bool, drop_branch: bool) -> Result<i32> {
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let fate = match (keep_branch, drop_branch) {
-        (true, _) => BranchFate::Keep,
-        (_, true) => BranchFate::Drop,
-        _ => BranchFate::Clear,
+        (true, _) => Fate::Keep,
+        (_, true) => Fate::Drop,
+        _ => Fate::Clear,
     };
     let mailboxes = ledger.reports_dir()?;
     let mut lines = vec![];
