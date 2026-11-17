@@ -591,7 +591,7 @@ fn suggested_checks(repo: &Path) -> Vec<String> {
         checks.extend(
             [
                 "cargo fmt --check",
-                "cargo clippy -- -D warnings",
+                "cargo clippy --all-targets -- -D warnings",
                 "cargo test",
             ]
             .map(String::from),

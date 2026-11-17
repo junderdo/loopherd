@@ -252,7 +252,7 @@ the card workflow is
 [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md).
 
 ```bash
-cargo fmt --check && cargo clippy -- -D warnings && cargo test
+cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 LOOPHERD_LIVE=1 scripts/herdr-dev cargo test --test live   # against a dev herdr session
 scripts/trello help                                        # needs TRELLO_API_KEY / TRELLO_TOKEN
 ```

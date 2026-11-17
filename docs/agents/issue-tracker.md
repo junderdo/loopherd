@@ -75,7 +75,7 @@ missing card is left and warned about.
    label (`feat`, `fix`, `refactor`, or `chore`). Wayfinding output goes on
    `docs/LH-<n>-<slug>`.
 4. **Finish.** The card is finished when every acceptance criterion is met and
-   the checks pass (`cargo fmt --check`, `cargo clippy -- -D warnings`,
+   the checks pass (`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
    `cargo test`).
    - Open a PR titled `<type>(LH-<n>): <summary>` with the card URL as the
      first line of the description.
