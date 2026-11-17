@@ -942,10 +942,16 @@ fn refuse_unwritable(new_files: impl IntoIterator<Item = PathBuf>) -> Result<()>
             .ancestors()
             .skip(1)
             .map(cwd_for_empty)
-            .find(|dir| dir.exists())
+            .find(|dir| fs::symlink_metadata(dir).is_ok())
         else {
             continue;
         };
+        if !dir.exists() {
+            bail!(
+                "{} is a dangling symlink; init won't write through it",
+                dir.display()
+            );
+        }
         let c_dir = std::ffi::CString::new(dir.as_os_str().as_bytes())?;
         // SAFETY: c_dir is a valid NUL-terminated path for the call's duration.
         if unsafe { libc::access(c_dir.as_ptr(), libc::W_OK) } != 0 {
