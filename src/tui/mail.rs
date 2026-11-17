@@ -12,7 +12,7 @@ use crate::report::{Body, Entry, history};
 #[derive(Debug, Default)]
 pub struct Mail {
     boxes: BTreeMap<String, Vec<Entry>>,
-    /// One per mailbox that is missing or unreadable, or per bad line.
+    /// One short line per mailbox that is missing, unreadable or has bad lines.
     pub warnings: Vec<String>,
 }
 
@@ -23,21 +23,24 @@ impl Mail {
         for member in active(view) {
             let name = &member.name;
             if !dir.join(format!("{name}.jsonl")).is_file() {
-                mail.warnings.push(format!(
-                    "warning: {name} has no mailbox in {}",
-                    dir.display()
-                ));
+                mail.warnings.push(format!("warning: {name}: no mailbox"));
                 continue;
             }
             match history(dir, name) {
                 Ok((entries, bad)) => {
-                    mail.warnings
-                        .extend(bad.into_iter().map(|w| format!("warning: {w}")));
+                    let lines = if bad.len() == 1 { "line" } else { "lines" };
+                    if !bad.is_empty() {
+                        mail.warnings.push(format!(
+                            "warning: {name}: {} bad {lines} in its mailbox",
+                            bad.len()
+                        ));
+                    }
                     mail.boxes.insert(name.clone(), entries);
                 }
-                Err(e) => mail
-                    .warnings
-                    .push(format!("warning: can't read {name}'s mailbox: {e:#}")),
+                Err(e) => mail.warnings.push(format!(
+                    "warning: {name}: unreadable mailbox: {}",
+                    e.root_cause()
+                )),
             }
         }
         mail

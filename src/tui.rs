@@ -309,10 +309,15 @@ impl App {
         let plural = if questions == 1 { "" } else { "s" };
         let mut text = format!(" ⚑ {questions} question{plural} · {blocked} blocked");
         let width = width as usize;
+        let columns = |s: &str| Span::raw(s).width();
         for (i, item) in items.iter().enumerate() {
             let separator = if i == 0 { " — " } else { ", " };
-            let ellipsis = if i + 1 < items.len() { " …".len() } else { 0 };
-            let wanted = [&text, separator, item].map(|s| s.chars().count());
+            let ellipsis = if i + 1 < items.len() {
+                columns(" …")
+            } else {
+                0
+            };
+            let wanted = [&text, separator, item].map(columns);
             if wanted.iter().sum::<usize>() + ellipsis > width {
                 text.push_str(" …");
                 break;
@@ -475,13 +480,14 @@ impl App {
                     "gone: no live agent matches it; `loopherd revive` can bring it back".into(),
                 );
             }
+            // Before herdr's problem, since the notes keep the newest when cut.
+            notes.extend(self.mail.warnings.iter().cloned());
             notes.extend(
                 read.problem
                     .iter()
                     .flat_map(|p| p.lines())
                     .map(String::from),
             );
-            notes.extend(self.mail.warnings.iter().cloned());
         }
         match (&self.read, self.reading) {
             (None, _) => notes.push("reading herdr and the ledger…".into()),
@@ -892,6 +898,15 @@ mod tests {
         report::append(dir, name, &Entry::new(SystemTime::now(), body)).unwrap();
     }
 
+    fn stop() -> Body {
+        Body::Stop(report::Stop {
+            background: report::Tally::Known(report::Background::default()),
+            crons: report::Tally::Known(0),
+            error: None,
+            session: None,
+        })
+    }
+
     fn question(text: &str) -> Body {
         Body::Question { text: text.into() }
     }
@@ -969,6 +984,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn with_herdrs_agent_list_malformed_the_blocked_count_is_unknown() {
+        let ledger = ledger();
+        let mut herdr = herdr();
+        herdr.malformed_agents = true;
+        let now = Instant::now();
+        let mail = quiet_mail(&ledger);
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        assert_eq!(banner(&render(&app, now)), "⚑ 0 questions · ? blocked");
+    }
+
     fn refresh_with_mail(
         app: &mut App,
         herdr: &FakeHerdr,
@@ -1016,6 +1042,45 @@ mod tests {
     }
 
     #[test]
+    fn the_banner_reserves_the_ellipsis_by_its_width_not_its_bytes() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        for name in ["a", "c", "old"] {
+            post(mail.path(), name, question("?"));
+        }
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        assert_eq!(
+            banner(&render_at(&app, now, 55, 14)),
+            "⚑ 3 questions · 1 blocked — a question, c question …"
+        );
+        assert_eq!(
+            banner(&render_at(&app, now, 54, 14)),
+            "⚑ 3 questions · 1 blocked — a question …"
+        );
+    }
+
+    #[test]
+    fn the_banner_measures_a_wide_name_by_the_columns_it_takes() {
+        let mut ledger = ledger();
+        let wide = entry("日本語日本語日本語", None);
+        ledger.0.insert(wide.name.clone(), wide);
+        let (herdr, now) = (herdr(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post(mail.path(), "日本語日本語日本語", question("?"));
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        assert_eq!(
+            banner(&render_at(&app, now, 52, 14)),
+            "⚑ 1 question · 1 blocked …"
+        );
+        // The test buffer shows a blank cell after each double-width glyph.
+        let wide_fits = banner(&render_at(&app, now, 64, 14)).replace(' ', "");
+        assert!(
+            wide_fits.ends_with("—日本語日本語日本語question…"),
+            "{wide_fits}"
+        );
+    }
+
+    #[test]
     fn a_question_answered_by_a_later_start_or_followed_by_a_done_is_not_waiting() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let mail = quiet_mail(&ledger);
@@ -1025,6 +1090,7 @@ mod tests {
         post(mail.path(), "c", done("PR opened"));
         post(mail.path(), "old", question("still open"));
         post(mail.path(), "old", Body::Note { text: "fyi".into() });
+        post(mail.path(), "old", stop());
         let terminal = render(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
         assert_eq!(
             banner(&terminal),
@@ -1065,11 +1131,43 @@ mod tests {
             banner(&terminal),
             "⚑ 1 question · 1 blocked — c question, b blocked"
         );
-        let shown = text(&terminal).join("\n");
-        assert!(shown.contains("warning: a has no mailbox in"), "{shown}");
+        let shown = text(&terminal);
         assert!(
-            shown.contains("warning: can't read old's mailbox: read "),
-            "{shown}"
+            shown.contains(&"warning: a: no mailbox".to_string()),
+            "{shown:#?}"
+        );
+        assert!(
+            shown.contains(
+                &"warning: old: unreadable mailbox: Permission denied (os error 13)".to_string()
+            ),
+            "{shown:#?}"
+        );
+    }
+
+    #[test]
+    fn mailbox_warnings_take_a_line_each_and_never_push_herdrs_problem_off_screen() {
+        let ledger = ledger();
+        let mut herdr = herdr();
+        herdr.unreachable = true;
+        let now = Instant::now();
+        let mail = quiet_mail(&ledger);
+        let mut a = std::fs::OpenOptions::new()
+            .append(true)
+            .open(mail.path().join("a.jsonl"))
+            .unwrap();
+        std::io::Write::write_all(&mut a, "not json\n".repeat(8).as_bytes()).unwrap();
+        std::fs::remove_file(mail.path().join("c.jsonl")).unwrap();
+        let terminal = render(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        let shown = text(&terminal);
+        assert!(
+            shown
+                .iter()
+                .any(|l| l.starts_with("warning: herdr unreachable")),
+            "{shown:#?}"
+        );
+        assert!(
+            shown.contains(&"warning: a: 8 bad lines in its mailbox".to_string()),
+            "{shown:#?}"
         );
     }
 
