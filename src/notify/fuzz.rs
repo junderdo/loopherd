@@ -210,8 +210,9 @@ fn words(text: &str) -> impl Iterator<Item = &str> {
 }
 
 /// What `head` shows that `base` doesn't: a whole word shown more often, or a cut
-/// word's start that no word `base` shows begins with. `base`'s own cut token may be a
-/// whole word cut just after it, so it counts as shown.
+/// word's start that no word `base` shows begins with. `base` is the base's summary
+/// with its cut lifted, so a word the base only cut off doesn't count as hidden; a line
+/// that still ends in `…` ends in a token that may be a whole word, so it counts as shown.
 fn shown_only_in(head: &str, base: &str) -> Vec<String> {
     let (mut base_whole, base_cut) = shown_words(base);
     for &word in &base_cut {
@@ -244,8 +245,9 @@ fn write_summaries() {
 fn shows_no_word_the_base_hid() {
     let (seed, count) = seed_and_count();
     let base = std::fs::read_to_string(env("LOOPHERD_FUZZ_BASE")).unwrap();
+    let uncut = std::fs::read_to_string(env("LOOPHERD_FUZZ_BASE_UNCUT")).unwrap();
     let (mut leaks, mut changed, mut cut) = (Vec::new(), 0, 0);
-    for (question, base) in questions(seed, count).zip(base.lines()) {
+    for ((question, base), uncut) in questions(seed, count).zip(base.lines()).zip(uncut.lines()) {
         cut += usize::from(base.ends_with('…'));
         let head = summary(&question);
         if head == base {
@@ -255,10 +257,10 @@ fn shows_no_word_the_base_hid() {
         if changed <= 20 {
             println!("{question}\n  base: {base}\n  head: {head}");
         }
-        let new = shown_only_in(&head, base);
+        let new = shown_only_in(&head, uncut);
         if !new.is_empty() {
             leaks.push(format!(
-                "{question}\n  base: {base}\n  head: {head}\n  new: {new:?}"
+                "{question}\n  base: {base}\n  uncut: {uncut}\n  head: {head}\n  new: {new:?}"
             ));
         }
     }
@@ -267,4 +269,19 @@ fn shows_no_word_the_base_hid() {
         leaks.len()
     );
     assert!(leaks.is_empty(), "{}", leaks.join("\n"));
+}
+
+#[test]
+fn a_word_past_the_bases_cut_is_not_a_leak_but_one_its_rules_hid_is() {
+    let uncut = "password: [redacted] then merge #107?";
+    assert!(shown_only_in("password: [redacted] then merge #107?", uncut).is_empty());
+    assert!(shown_only_in("password: [redacted] then me…", uncut).is_empty());
+    assert_eq!(
+        shown_only_in("password: hunter22 then merge", uncut),
+        ["hunter22"]
+    );
+    assert_eq!(
+        shown_only_in("password: [redacted] then hun…", uncut),
+        ["hun"]
+    );
 }
