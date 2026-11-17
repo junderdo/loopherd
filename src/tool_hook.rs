@@ -1951,6 +1951,19 @@ fn expansion_names_alias_variable(script: &str) -> bool {
         if !closers.is_empty() && matches!(c, '\'' | '"' | '\\') {
             let quoted = match c {
                 '\\' => rest.chars().nth(1).map(|e| 1 + e.len_utf8()),
+                '"' => {
+                    let mut inside = rest.char_indices().skip(1);
+                    loop {
+                        match inside.next() {
+                            Some((_, '\\')) => {
+                                inside.next();
+                            }
+                            Some((end, '"')) => break Some(end + 1),
+                            Some(_) => {}
+                            None => break None,
+                        }
+                    }
+                }
                 _ => rest[1..].find(c).map(|end| end + 2),
             };
             let Some(len) = quoted else {
@@ -4633,6 +4646,10 @@ mod tests {
     fn a_quote_inside_an_expansion_is_skipped_unless_it_names_one() {
         assert_passes("echo $((1 + \"2\" )) ; rg GIT_CONFIG");
         assert_judged("echo $(( a[\"GIT_CONFIG_COUNT\"] ))", Switch::Alias);
+        assert_judged(
+            "echo $(( A[\"\\\"]))\"]=1, GIT_CONFIG_COUNT=1 ))",
+            Switch::Alias,
+        );
     }
 
     #[test]
