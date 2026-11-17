@@ -1,5 +1,8 @@
 //! `loopherd herd get|set|unset` through the binary.
 
+mod fakes;
+
+use fakes::executable;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -82,7 +85,6 @@ fn herd_gets_sets_and_unsets_one_value() {
 /// `loopherd herd` with a stub `herdr` first on PATH: one that answers empty
 /// agent and workspace lists, or with `up` false, fails every call.
 fn herd_with_herdr(config: &Path, up: bool, args: &[&str]) -> Output {
-    use std::os::unix::fs::PermissionsExt;
     let bin = config.join("bin");
     fs::create_dir_all(&bin).unwrap();
     let body = match up {
@@ -96,8 +98,7 @@ fn herd_with_herdr(config: &Path, up: bool, args: &[&str]) -> Output {
         false => "echo 'herdr: server not running' >&2; exit 1\n",
     };
     let shim = bin.join("herdr");
-    fs::write(&shim, format!("#!/bin/sh\n{body}")).unwrap();
-    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    executable(&shim, format!("#!/bin/sh\n{body}"));
     Command::new(env!("CARGO_BIN_EXE_loopherd"))
         .arg("herd")
         .args(args)

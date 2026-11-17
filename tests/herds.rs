@@ -1,7 +1,9 @@
 //! `loopherd herds` through the binary, with a `herdr` on PATH that records any call.
 
+mod fakes;
+
+use fakes::executable;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -18,12 +20,10 @@ fn run_herds(config: &Path, bin: &Path) -> Output {
 fn recording_herdr(bin: &Path) -> std::path::PathBuf {
     let calls = bin.join("calls");
     let shim = bin.join("herdr");
-    fs::write(
+    executable(
         &shim,
         format!("#!/bin/sh\necho \"$@\" >> {}\nexit 1\n", calls.display()),
-    )
-    .unwrap();
-    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     calls
 }
 

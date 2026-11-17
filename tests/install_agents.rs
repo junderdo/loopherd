@@ -42,7 +42,7 @@ impl Sandbox {
         .unwrap();
         executable(
             &root.join("scripts/install"),
-            &fs::read_to_string(format!("{REPO}/scripts/install")).unwrap(),
+            fs::read_to_string(format!("{REPO}/scripts/install")).unwrap(),
         );
         for name in AGENTS {
             fs::copy(
@@ -61,7 +61,7 @@ impl Sandbox {
         executable(&built, "#!/bin/sh\n");
         executable(
             &fake_bin.join("cargo"),
-            &format!(
+            format!(
                 "#!/bin/sh\necho '{{\"reason\":\"compiler-artifact\",\"target\":{{\"name\":\"loopherd\"}},\"executable\":\"{}\"}}'\n",
                 built.display()
             ),

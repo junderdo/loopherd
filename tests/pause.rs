@@ -1,7 +1,9 @@
 //! `loopherd pause` and `resume` through the binary, with a `herdr` on PATH that records any call.
 
+mod fakes;
+
+use fakes::executable;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -21,12 +23,10 @@ impl Setup {
         fs::create_dir(&bin).unwrap();
         let shim = bin.join("herdr");
         let calls = dir.path().join("herdr-calls");
-        fs::write(
+        executable(
             &shim,
             format!("#!/bin/sh\necho \"$@\" >> {}\nexit 1\n", calls.display()),
-        )
-        .unwrap();
-        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         Setup { dir }
     }
 

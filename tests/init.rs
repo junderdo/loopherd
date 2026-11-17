@@ -1,5 +1,8 @@
 //! `loopherd init` through the binary, against a temp repo and a fake `gh`.
 
+mod fakes;
+
+use fakes::executable;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -59,8 +62,7 @@ impl Fixture {
         );
         fs::create_dir_all(fixture.gh_dir()).unwrap();
         let gh = fixture.gh_dir().join("gh");
-        fs::write(&gh, FAKE_GH).unwrap();
-        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+        executable(&gh, FAKE_GH);
         let hosts: Vec<String> = logins
             .iter()
             .map(|login| format!(r#"{{"login": "{login}", "state": "success"}}"#))
@@ -4150,7 +4152,7 @@ fn the_local_source_and_done_retry_a_fetch_that_lost_a_race() {
     .unwrap();
     let lost = fixture.root.path().join("lost");
     let script = fixture.gh_dir().join("git");
-    fs::write(
+    executable(
         &script,
         format!(
             "#!/bin/sh\nif [ \"$1\" = fetch ] && [ ! -e {lost} ]; then\n  : > {lost}\n  \
@@ -4159,9 +4161,7 @@ fn the_local_source_and_done_retry_a_fetch_that_lost_a_race() {
             lost = lost.display(),
             real_git = real_git.trim(),
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let run = |snippet: String| {
         let _ = fs::remove_file(&lost);
         fixture.run(

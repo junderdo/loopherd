@@ -2,8 +2,10 @@
 //! board and logs every write, so no test reaches the real Trello API. The
 //! board carries a stale duplicate `blocked` label ahead of the one cards use.
 
+mod fakes;
+
+use fakes::executable;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
@@ -57,8 +59,7 @@ impl Board {
         fs::create_dir_all(&stub).unwrap();
         fs::create_dir_all(&bin).unwrap();
         let curl = bin.join("curl");
-        fs::write(&curl, CURL_STUB).unwrap();
-        fs::set_permissions(&curl, fs::Permissions::from_mode(0o755)).unwrap();
+        executable(&curl, CURL_STUB);
 
         let lists = ["Backlog", "In Progress", "Review", "Done"];
         let labels = ["blocked", "ready-for-agent", "impl:feat"];
