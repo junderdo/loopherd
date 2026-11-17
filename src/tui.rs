@@ -303,18 +303,19 @@ impl App {
         let window = self.block().title(self.theme.wordmark(" loopherd "));
         let inner = window.inner(frame.area());
         frame.render_widget(window, frame.area());
-        let notes: Vec<Line> = self
+        let notes: Vec<Vec<Line>> = self
             .notes(now)
             .iter()
-            .flat_map(|n| wrapped(n, inner.width.saturating_sub(1)))
+            .map(|n| wrapped(n, inner.width.saturating_sub(1)))
             .collect();
         let ticker_height = match frame.area().height >= TICKER_MIN_HEIGHT {
             true => 4,
             false => 0,
         };
-        // Notes keep half the space at most, and the newest when cut.
+        // Notes keep half the space at most, and the newest whole notes when cut.
         let room = inner.height.saturating_sub(2 + ticker_height) / 2;
-        let notes_height = notes.len().min(room as usize);
+        let notes = newest_whole(notes, room as usize);
+        let notes_height = notes.len();
         let [banner, body, notes_area, ticker_area, footer] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(0),
@@ -337,8 +338,7 @@ impl App {
         if let Some(area) = detail {
             self.draw_detail(frame.buffer_mut(), area, now);
         }
-        let newest = notes[notes.len() - notes_height..].to_vec();
-        frame.render_widget(Paragraph::new(newest), notes_area);
+        frame.render_widget(Paragraph::new(notes), notes_area);
         if ticker_height > 0 {
             self.draw_ticker(frame.buffer_mut(), ticker_area);
         }
@@ -608,7 +608,8 @@ impl App {
         members.chain(strays).collect()
     }
 
-    /// Lines under the panels: the legend, problems, and what the last key did.
+    /// Lines under the panels: the gone legend, mail, outline and herdr problems,
+    /// that the first read is pending or herdr is slow, and what the last key did.
     fn notes(&self, now: Instant) -> Vec<String> {
         let mut notes = vec![];
         if let Some(read) = &self.read {
@@ -779,6 +780,24 @@ impl App {
         }
         panels
     }
+}
+
+/// The newest whole notes that fit in `room` lines, oldest dropped first. When
+/// not even the newest fits, its opening lines, so no note shows from mid-text.
+fn newest_whole(notes: Vec<Vec<Line<'static>>>, room: usize) -> Vec<Line<'static>> {
+    let mut kept: Vec<Vec<Line>> = vec![];
+    let mut used = 0;
+    for note in notes.into_iter().rev() {
+        if used + note.len() > room {
+            if kept.is_empty() {
+                kept.push(note.into_iter().take(room).collect());
+            }
+            break;
+        }
+        used += note.len();
+        kept.push(note);
+    }
+    kept.into_iter().rev().flatten().collect()
 }
 
 /// `note` indented one column and broken into lines of `width` columns.
@@ -1686,6 +1705,20 @@ max = 3
             .collect()
     }
 
+    /// The note rows between the panels and the footer, borders trimmed.
+    fn shown_notes(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        let lines = lines(terminal);
+        let footer = lines.len() - 2;
+        let mut notes: Vec<String> = lines[..footer]
+            .iter()
+            .rev()
+            .take_while(|l| l.starts_with("│ ") && !l.starts_with("│ ⚑"))
+            .map(|l| l.trim_matches(['│', ' ']).to_string())
+            .collect();
+        notes.reverse();
+        notes
+    }
+
     /// The glyph leading member `name`'s row.
     fn glyph(terminal: &Terminal<TestBackend>, name: &str) -> Cell {
         let (x, y) = pos(terminal, &format!(" {name} "));
@@ -2207,6 +2240,40 @@ max = 3
                 .any(|l| l.starts_with("warning: herdr unreachable"))
         );
         assert!(shown.contains(&"a has no live pane to focus".to_string()));
+    }
+
+    #[test]
+    fn overflowing_notes_drop_the_oldest_whole_rather_than_its_start() {
+        let ledger = ledger();
+        let mut herdr = herdr();
+        herdr.malformed_agents = true;
+        let now = Instant::now();
+        let mut app = app(&herdr, &ledger, now);
+        press(&mut app, &[KeyCode::Enter], &herdr, &ledger);
+        let terminal = render_at(&app, now, 30, 14);
+        assert_eq!(
+            shown_notes(&terminal),
+            ["a has no live pane to focus"],
+            "{:#?}",
+            lines(&terminal)
+        );
+    }
+
+    #[test]
+    fn a_note_too_long_for_the_notes_area_is_cut_at_its_end() {
+        let ledger = ledger();
+        let mut herdr = herdr();
+        herdr.unreachable = true;
+        let now = Instant::now();
+        let mut app = app(&herdr, &ledger, now);
+        press(&mut app, &[KeyCode::Enter], &herdr, &ledger);
+        let terminal = render_at(&app, now, 20, 6);
+        assert_eq!(
+            shown_notes(&terminal),
+            ["a has no live pan"],
+            "{:#?}",
+            lines(&terminal)
+        );
     }
 
     #[test]
