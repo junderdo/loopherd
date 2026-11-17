@@ -10,6 +10,7 @@ use toml_edit::{DocumentMut, Item, RawString, Table, TableLike, Value};
 
 use crate::context::check_tokens;
 use crate::herd::SwitchValues;
+use crate::line_ending::LineEnding;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -305,7 +306,8 @@ fn replace_value(table: &mut dyn TableLike, name: &str, mut value: Value) {
 /// nothing, a result that isn't a valid config.
 fn edit(config: &Path, change: impl FnOnce(&mut DocumentMut) -> Result<()>) -> Result<()> {
     let config = &link_target(config)?;
-    let mut doc: DocumentMut = read_text(config)?
+    let original = read_text(config)?;
+    let mut doc: DocumentMut = original
         .parse()
         .with_context(|| config.display().to_string())?;
     if doc.is_empty() {
@@ -318,7 +320,7 @@ fn edit(config: &Path, change: impl FnOnce(&mut DocumentMut) -> Result<()>) -> R
         doc.decor_mut().set_prefix(comments);
     }
     change(&mut doc)?;
-    let text = doc.to_string();
+    let text = LineEnding::of(&original).apply(&doc.to_string());
     check(&text).with_context(|| format!("refused, {} is unchanged", config.display()))?;
     let written = || format!("write {}", config.display());
     let dir = config.parent().context("config.toml has no directory")?;
@@ -540,6 +542,31 @@ mod tests {
     }
 
     #[test]
+    fn setting_lead_defaults_in_a_crlf_file_writes_crlf() {
+        let (_dir, path) = config_with(Some("# mine\r\ncontext_window = 1000000\r\n"));
+
+        set_lead_defaults(&path, "merge").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "# mine\r\ncontext_window = 1000000\r\n\r\n[lead_defaults]\r\n\
+             merge = true\r\ninstall = false\r\nrebase = false\r\nnew_cards = false\r\n\
+             design_escalation = false\r\nblocked_dialogs = false\r\n"
+        );
+    }
+
+    #[test]
+    fn a_refused_lead_defaults_edit_leaves_a_crlf_files_bytes() {
+        let (_dir, path) = config_with(Some("# mine\r\ncontext_window = 1\r\n"));
+        let err = format!("{:#}", set_lead_defaults(&path, "merge").unwrap_err());
+        assert!(err.contains("context_window"), "{err}");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "# mine\r\ncontext_window = 1\r\n"
+        );
+    }
+
+    #[test]
     fn an_unknown_switch_or_an_invalid_file_is_refused_and_changes_nothing() {
         let (_dir, path) = config_with(Some("context_window = 1\n"));
         for list in ["merj", "", "none,merge"] {
@@ -594,6 +621,24 @@ mod key_tests {
             fs::read_to_string(&path).unwrap(),
             "# my limits\ncontext_window = 500000 # big\ndefault_context_limit = 200000\n\n\
              [shepherd] # me\ncontext_limit = 300000 # mine\n"
+        );
+    }
+
+    #[test]
+    fn setting_and_unsetting_keys_in_a_crlf_file_keeps_crlf() {
+        let (_dir, path) = config_with("# my limits\r\ncontext_window = 1000000 # big\r\n");
+
+        set(&path, "context_window", "500000").unwrap();
+        set(&path, "shepherd.context_limit", "300000").unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "# my limits\r\ncontext_window = 500000 # big\r\n\r\n[shepherd]\r\ncontext_limit = 300000\r\n"
+        );
+
+        assert!(unset(&path, "context_window").unwrap());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "# my limits\r\n\r\n[shepherd]\r\ncontext_limit = 300000\r\n"
         );
     }
 
