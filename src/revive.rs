@@ -13,8 +13,9 @@ use crate::ledger::{AgentRecord, Ledger};
 pub const REARM_PROMPT: &str = "You were revived after a restart, so your \
 `loopherd watch` is no longer running. Run `loopherd status` and \
 `loopherd reports --all --tail 40` (for a fuller history, `--since <time>` \
-or plain `--all`), then re-read only `loopherd --skill --section lead` \
-and re-arm your watch per it.";
+or plain `--all`), then read the skill's Lead section \
+(`loopherd --skill --section lead`, not the whole skill) and re-arm your \
+watch as it says.";
 
 #[derive(Debug, Clone)]
 pub struct ReviveRequest {
@@ -1235,7 +1236,8 @@ mod tests {
     fn the_rearm_prompt_points_to_the_skills_lead_section_only() {
         assert!(
             REARM_PROMPT.contains(
-                "then re-read only `loopherd --skill --section lead` and re-arm your watch per it."
+                "then read the skill's Lead section (`loopherd --skill --section lead`, not the whole \
+                 skill) and re-arm your watch as it says."
             ),
             "{REARM_PROMPT}"
         );

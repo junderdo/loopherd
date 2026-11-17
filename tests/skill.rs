@@ -167,6 +167,7 @@ fn skill_section_prints_only_that_section() {
     assert!(printed.contains("- **On each wake**"), "{printed}");
     assert!(!printed.contains("## Shepherd"), "{printed}");
     assert!(!printed.contains("name: loopherd"), "{printed}");
+    assert!(printed.ends_with("never commit in it.\n"), "{printed}");
 }
 
 #[test]
@@ -204,4 +205,6 @@ fn section_needs_skill() {
         .output()
         .unwrap();
     assert!(!out.status.success(), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--skill"), "{err}");
 }

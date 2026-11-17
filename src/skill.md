@@ -416,8 +416,29 @@ question as its own sends a second notification.
 A lead is member `lead-<herd>`, started by the shepherd with `loopherd lead
 <herd>` from the herd file's `[lead]` table, in a detached worktree of the
 same name. It runs the Shepherd section's task life for its own herd's
-workers. Its prompt file carries the project's facts. What differs from the
-shepherd:
+workers. Its prompt file carries the project's facts.
+
+**Task life, in brief**, for a lead that read only this section (the
+Shepherd section has the detail):
+
+1. **Feed:** `loopherd feed <herd> --dry-run`, then `loopherd feed <herd>`
+   if it reads right.
+2. **Watch:** keep `loopherd watch --timeout 3600` in the background (see
+   Heartbeat).
+3. **On wake:** read the watch's lines and the member's reports.
+4. **Verify** a `done` member's output with a read-only reviewer subagent
+   against the task's acceptance criteria, with a temp `XDG_STATE_HOME` and
+   `LOOPHERD_CONFIG_DIR`, building under `<scratch>/pr<n>/`.
+5. **After merge** (`gh pr view <n> --json state`): close out the task in
+   the tracker, unblock dependents, run `loopherd feed <herd>` (it runs
+   `after_merge`; do by hand what its note says didn't run), then `git
+   worktree remove --force` each verify worktree under `<scratch>/pr<n>/`
+   and delete that directory.
+6. **Handoff:** write `$XDG_STATE_HOME/loopherd/handoffs/<your name>.md` in
+   the outline under Handoffs (`## State`, `## Next steps`, `## Gotchas`),
+   listing each `<scratch>/pr<n>/` still in use.
+
+What differs from the shepherd:
 
 - **No human in the pane.** Nobody reads your screen or answers there. A
   decision that isn't yours goes out as `loopherd report --kind question
@@ -504,13 +525,14 @@ shepherd:
   to re-arm whenever nothing holds `watch-<your name>.lock`, whether herdr
   resumed you or revive did. Re-read `loopherd status` and `loopherd reports
   --all --tail 40` (for a fuller history, `--since <time>` or plain
-  `--all`), and of this skill only `loopherd --skill --section lead`, then
-  arm your watch again.
+  `--all`) and the skill's Lead section (`loopherd --skill --section
+  lead`, not the whole skill), then arm your watch again.
 - **On each wake** re-read `loopherd status` and `loopherd reports --all
   --tail 40` (for a fuller history, `--since <time>` or plain `--all`)
   before acting: auto-compaction drops detail, and your state lives in the
   tracker, ledger and mailbox, not in your context. After a compaction,
-  re-read `loopherd --skill --section lead` too, not the whole skill.
+  re-read the Lead section too (`loopherd --skill --section lead`, not the
+  whole skill).
 - **Your own handoff.** Past your limit, your Stop hook asks you for a
   handoff like any member's (see Handoffs): stop your own watch (TaskStop
   it, or kill it), write it, report `--kind handoff`, and end your turn. The shepherd restarts you. Restart your

@@ -159,6 +159,27 @@ mod tests {
     }
 
     #[test]
+    fn the_lead_section_carries_the_task_life_a_restarted_lead_needs() {
+        let lead = super::section("lead")
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for step in [
+            "**Task life, in brief**",
+            "`loopherd feed <herd> --dry-run`",
+            "read-only reviewer subagent",
+            "`gh pr view <n> --json state`",
+            "close out the task in the tracker",
+            "`git worktree remove --force`",
+            "`$XDG_STATE_HOME/loopherd/handoffs/<your name>.md`",
+            "`## State`",
+        ] {
+            assert!(lead.contains(step), "missing {step}:\n{lead}");
+        }
+    }
+
+    #[test]
     fn reviewers_write_findings_to_a_file_forwarded_as_a_pr_comment() {
         let verify = section("4. **Verify**", "5. **After merge**");
         for rule in [
