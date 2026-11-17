@@ -228,6 +228,7 @@ pub fn spawn(
         process: None,
         role: req.member_of.as_ref().and_then(|m| m.role),
         after_merge: None,
+        earlier: vec![],
     };
     let (agent, no_session) = match readiness {
         Readiness::Blocked => {
@@ -269,7 +270,7 @@ fn record_started(ledger: &mut dyn Ledger, record: AgentRecord) -> Result<Option
     let name = record.name.clone();
     ledger.record(record).context("ledger")?;
     Ok(ledger
-        .started(&name, SystemTime::now())
+        .started(&name, SystemTime::now(), false)
         .err()
         .map(|e| format!("{e:#}")))
 }

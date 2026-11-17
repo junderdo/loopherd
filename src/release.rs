@@ -277,6 +277,7 @@ mod tests {
             process: None,
             role: None,
             after_merge: None,
+            earlier: vec![],
         }
     }
 

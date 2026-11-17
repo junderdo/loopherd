@@ -70,7 +70,11 @@ pub fn stats(
     query: &Query,
 ) -> Result<(Vec<Herd>, Vec<String>)> {
     let mut by_herd: BTreeMap<String, Vec<AgentRecord>> = BTreeMap::new();
-    for record in ledger.entries()?.into_values() {
+    let runs = ledger.entries()?.into_values().flat_map(|mut record| {
+        let earlier = std::mem::take(&mut record.earlier);
+        earlier.into_iter().chain([record])
+    });
+    for record in runs {
         let Some(herd) = record.herd.clone() else {
             continue;
         };

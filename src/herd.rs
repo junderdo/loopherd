@@ -2498,6 +2498,7 @@ args = ["--model", "opus"]
             process: None,
             role: lead.then_some(crate::ledger::Role::Lead),
             after_merge: None,
+            earlier: vec![],
         }
     }
 

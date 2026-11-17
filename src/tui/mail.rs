@@ -69,7 +69,7 @@ impl Mail {
         let newest = entries
             .iter()
             .rev()
-            .find(|e| matches!(e.body, Body::Stop(_) | Body::Start))?;
+            .find(|e| matches!(e.body, Body::Stop(_) | Body::Start { .. }))?;
         match &newest.body {
             Body::Stop(stop) => stop.context.zip(stop.limit),
             _ => None,
@@ -90,7 +90,7 @@ impl Mail {
                 })
             })
             .filter(|e| match &e.entry.body {
-                Body::Start => false,
+                Body::Start { .. } => false,
                 Body::Stop(s) => s.error.is_some() || s.in_flight() == (None, None),
                 _ => true,
             })
@@ -105,7 +105,7 @@ impl Mail {
         for entry in entries.iter().rev() {
             match entry.body {
                 Body::Question { .. } => return true,
-                Body::Done { .. } | Body::Start => return false,
+                Body::Done { .. } | Body::Start { .. } => return false,
                 _ => {}
             }
         }

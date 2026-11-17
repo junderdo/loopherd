@@ -252,6 +252,7 @@ mod tests {
             process: None,
             role: None,
             after_merge: None,
+            earlier: vec![],
         }
     }
 
@@ -783,8 +784,8 @@ mod tests {
             ) -> anyhow::Result<Vec<String>> {
                 unreachable!()
             }
-            fn started(&mut self, n: &str, at: SystemTime) -> anyhow::Result<()> {
-                self.1.started(n, at)
+            fn started(&mut self, n: &str, at: SystemTime, resumed: bool) -> anyhow::Result<()> {
+                self.1.started(n, at, resumed)
             }
         }
         let mut l = Raced(in_session(Some("stub")), in_session(Some("fresh")));

@@ -128,6 +128,7 @@ mod tests {
             process: None,
             role: None,
             after_merge: None,
+            earlier: vec![],
         }
     }
 
@@ -602,8 +603,13 @@ mod tests {
             ) -> anyhow::Result<Vec<String>> {
                 unreachable!()
             }
-            fn started(&mut self, name: &str, at: std::time::SystemTime) -> anyhow::Result<()> {
-                self.0.started(name, at)
+            fn started(
+                &mut self,
+                name: &str,
+                at: std::time::SystemTime,
+                resumed: bool,
+            ) -> anyhow::Result<()> {
+                self.0.started(name, at, resumed)
             }
         }
 
