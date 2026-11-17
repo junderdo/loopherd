@@ -212,7 +212,7 @@ fn decide(
     }
     if needed == Switch::Unreadable {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like, a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, or from a relative `stdin`, `fd/<n>` or all-digit path, a `trap`, `sh -c` or `eval` script that a substitution prints, `gh` after `GH_CONFIG_DIR` is set, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like, a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, or from a relative `stdin`, `fd/<n>` or all-digit path, a `trap`, `sh -c` or `eval` script that a substitution prints, `gh` after `GH_CONFIG_DIR` is set or with a command or `pr` subcommand that a `$` or substitution builds, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -497,6 +497,11 @@ impl Word {
         self.quoted_at
             .is_none_or(|at| at >= operator)
             .then_some(bare)
+    }
+
+    /// Whether a `$` or a command substitution may build any of the word.
+    fn built(&self) -> bool {
+        self.commands_print || self.text.contains('$')
     }
 
     fn mark_substituted(&mut self) {
@@ -1442,11 +1447,21 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
                 .iter()
                 .map(|&reading| shell_options(words, i + 1, reading))
                 .collect();
-            let scripts: std::collections::BTreeSet<usize> = read
+            let mut scripts: std::collections::BTreeSet<usize> = read
                 .iter()
                 .filter(|options| options.command_script)
                 .map(|options| options.end)
                 .collect();
+            // A `$` or substitution among the options, or as the operand where
+            // no `-c` was read, may print `-c`.
+            let built = read
+                .iter()
+                .flat_map(|options| i + 1..options.end + usize::from(!options.command_script))
+                .filter(|&at| kept.get(at).is_some_and(|w| w.built()))
+                .min();
+            if let Some(built) = built {
+                scripts.extend(built + 1..kept.len());
+            }
             if !scripts.is_empty() {
                 return scripts
                     .into_iter()
@@ -1474,12 +1489,33 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             return vec![Switch::Unreadable];
         } else if program == "cargo" {
             return cargo_needs(word, &words[i + 1..], aliases);
-        } else if program == "gh" && (aliases.gh_config_dir || aliases.unreadable_name) {
+        } else if program == "gh"
+            && (aliases.gh_config_dir
+                || aliases.unreadable_name
+                || gh_command_built(&kept[i + 1..]))
+        {
             return vec![Switch::Unreadable];
         } else {
             return needs_program(word, &words[i + 1..]).into_iter().collect();
         }
     }
+}
+
+/// Whether a `$` or a command substitution may build gh's command, or the
+/// subcommand after `pr`, or an unquoted word before them that may split
+/// into either. Words after them, such as a PR number, may be built.
+fn gh_command_built(args: &[&Word]) -> bool {
+    let words: Vec<String> = args.iter().map(|w| w.text.clone()).collect();
+    let with_value = ["-R", "--repo"];
+    let command = skip_options(&words, 0, &with_value);
+    let last = match words.get(command) {
+        Some(pr) if pr == "pr" => skip_options(&words, command + 1, &with_value),
+        _ => command,
+    };
+    args.iter()
+        .take(last + 1)
+        .enumerate()
+        .any(|(at, w)| w.built() && (at == command || at == last || !w.quoted))
 }
 
 /// What `watch` running `command` needs. Without `-x` it runs the words
@@ -1592,7 +1628,7 @@ fn shell_options(words: &[String], from: usize, reading: ShellReading) -> ShellO
             break;
         }
         if let Some(long) = option.strip_prefix("--") {
-            i += usize::from(["rcfile", "init-file"].contains(&long));
+            i += usize::from(["rcfile", "init-file", "emulate"].contains(&long));
             continue;
         }
         let mut shorts = option[1..].chars();
@@ -4435,6 +4471,64 @@ mod tests {
         assert_passes("zsh -noprofile -c 'cargo test'");
         assert_passes("sh -o pipefail -c 'cargo test'");
         assert_passes("bash -oc pipefail 'cargo test'");
+    }
+
+    #[test]
+    fn zshs_emulate_takes_the_next_word() {
+        assert_judged("zsh --emulate csh -c 'gh pr merge 1'", Switch::Merge);
+        assert_judged("sh --emulate sh -c 'gh pr merge 1'", Switch::Merge);
+        assert_passes("zsh --emulate sh -c 'cargo test'");
+    }
+
+    #[test]
+    fn a_shell_option_or_operand_a_substitution_or_variable_builds_may_be_its_c() {
+        for command in [
+            "bash $(echo -c) 'gh pr merge 1'",
+            "bash -$(printf c) 'gh pr merge 1'",
+            "bash `echo -c` 'gh pr merge 1'",
+            "C=-c; bash $C 'gh pr merge 1'",
+            "bash \"$C\" 'gh pr merge 1'",
+            "zsh -o pipefail $C 'gh pr merge 1'",
+            "bash -$C 'gh pr merge 1'",
+        ] {
+            assert_judged(command, Switch::Merge);
+        }
+        assert_unreadable("bash $C \"$(cat f)\"");
+        assert_passes("bash \"$script\" one two");
+        assert_passes("bash --rcfile \"$f\" -c 'cargo test'");
+        assert_passes("bash -c 'cargo test' \"$(pwd)\"");
+    }
+
+    #[test]
+    fn gh_whose_command_words_a_substitution_or_variable_builds_is_denied() {
+        for command in [
+            "gh pr \"$(echo merge)\" 1",
+            "gh pr $(echo merge) 1",
+            "gh pr `echo merge` 1",
+            "gh \"$(echo pr)\" merge 1",
+            "gh $(true) pr merge 1",
+            "gh pr $M 1",
+            "gh $P merge 1",
+            "gh pr -R $(echo 'o/r merge') 1",
+            "eval 'gh pr $(echo merge) 1'",
+            "trap 'gh pr $(echo merge) 1' EXIT",
+            "bash -c 'gh pr $(echo merge) 1'",
+        ] {
+            assert_unreadable(command);
+        }
+        for command in [
+            "gh pr view \"$(git branch --show-current)\"",
+            "gh pr view $(git branch --show-current) --json state",
+            "gh pr checks \"$PR\"",
+            "gh pr -R \"$REPO\" view 1",
+            "gh -R \"$(git remote get-url origin)\" pr view 1",
+            "gh api \"repos/$OWNER/r/pulls\"",
+            "gh issue view \"$N\"",
+            "gh run view $(gh run list -L1 --json databaseId -q '.[0].databaseId')",
+            "trap 'gh pr view \"$(git branch --show-current)\"' EXIT",
+        ] {
+            assert_passes(command);
+        }
     }
 
     #[test]
