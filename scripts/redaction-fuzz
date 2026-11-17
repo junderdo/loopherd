@@ -28,18 +28,24 @@ cp "$root/src/notify/fuzz.rs" "$tmp/base/src/notify/fuzz.rs"
 grep -q '^mod fuzz;' "$tmp/base/src/notify.rs" ||
   printf '\n#[cfg(test)]\nmod fuzz;\n' >>"$tmp/base/src/notify.rs"
 cp -r "$tmp/base" "$tmp/base-uncut"
-(cd "$root" && git ls-files -z -co --exclude-standard | xargs -0 cp --parents -t "$tmp/head-uncut" 2>/dev/null) || true
+# ls-files still lists a tracked file deleted in the working tree; skip those.
+(
+  cd "$root"
+  git ls-files -z -co --exclude-standard | while IFS= read -r -d '' path; do
+    if [[ -e $path || -L $path ]]; then printf '%s\0' "$path"; fi
+  done | xargs -0 -r cp --parents -t "$tmp/head-uncut"
+)
 
 max_text='const MAX_TEXT: usize = 200;'
 lift_cut() {
   grep -qxF "$max_text" "$1/src/notify.rs" || {
-    echo "redaction-fuzz: $1/src/notify.rs has no line '$max_text' to lift" >&2
+    echo "redaction-fuzz: $2's src/notify.rs has no line '$max_text' to lift" >&2
     exit 1
   }
   sed -i "s/^$max_text\$/const MAX_TEXT: usize = usize::MAX;/" "$1/src/notify.rs"
 }
-lift_cut "$tmp/base-uncut"
-lift_cut "$tmp/head-uncut"
+lift_cut "$tmp/base-uncut" "$base"
+lift_cut "$tmp/head-uncut" "the working tree"
 
 export LOOPHERD_FUZZ_SEED=$seed LOOPHERD_FUZZ_COUNT=$count
 target=${CARGO_TARGET_DIR:-$root/target}
