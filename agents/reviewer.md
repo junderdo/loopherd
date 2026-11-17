@@ -14,7 +14,9 @@ branch, or a range) and the task it answers.
   directory the caller gives, and point any state at temp dirs
   (`XDG_STATE_HOME`, `LOOPHERD_CONFIG_DIR`), never the real ones.
 - Check each acceptance criterion against the code and say whether it is
-  met, naming the test that covers it. Run the repo's checks.
+  met, naming the test that covers it. Run the repo's checks, piping
+  their output through `tail` (or grepping the failures), and never Read a
+  saved `tool-results/` file whole.
 - Hunt for bugs the tests miss: edge cases, error paths, races, and for
   anything that deletes, overwrites or closes, the safety rule that stops
   it and the test that proves that rule.
