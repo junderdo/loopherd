@@ -216,3 +216,16 @@ fn a_lead_can_retire_its_own_workers() {
     assert!(out.status.success(), "{out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "retired lh-1\n");
 }
+
+#[test]
+fn a_lead_can_be_retired_from_its_pane_id_on_another_socket() {
+    let state = tempfile::tempdir().unwrap();
+    write_herd_ledger(state.path());
+    let out = shell_in(
+        state.path(),
+        Some(LEAD_PANE),
+        "HERDR_SOCKET_PATH=/other.sock loopherd retire lead-k",
+    );
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "retired lead-k\n");
+}
