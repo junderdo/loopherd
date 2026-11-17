@@ -182,6 +182,7 @@ mod tests {
             "current review file",
             "`review-<round - 1>.md`",
             "`git diff <its head sha>..<new head>`",
+            "later rounds pass `model: sonnet`",
         ] {
             assert!(lead.contains(step), "missing {step}:\n{lead}");
         }

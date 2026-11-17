@@ -509,7 +509,8 @@ What differs from the shepherd:
   to the worker; out-of-scope ones become tasks. Each round after the
   first checks only the last round's findings and the diff since its head:
   hand the reviewer `review-<round - 1>.md` and `git diff <its head
-  sha>..<new head>`. `<round>` counts per PR across handoffs; your
+  sha>..<new head>`. A first review uses the reviewer as defined; later
+  rounds pass `model: sonnet` to the subagent. `<round>` counts per PR across handoffs; your
   handoff's current review file carries it. After round 3 start no other
   round; send `loopherd report --kind question`
   asking whether to merge as-is, narrow the scope, or change approach,
