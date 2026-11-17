@@ -1045,7 +1045,7 @@ max = 3
     }
 
     #[test]
-    fn a_broken_config_toml_keeps_slots_and_says_so_once() {
+    fn a_broken_config_toml_keeps_slots_turns_every_chip_off_and_says_so_once() {
         let herd = format!("{QUEUED_HERD}[lead]\nprompt = \"lead\"\nmerge = true\n");
         let other = "repo = \"/r\"\n[lead]\nprompt = \"lead\"\n";
         let mut ledger = ledger();
@@ -1061,6 +1061,14 @@ max = 3
             title_row(&terminal, "prs").starts_with("│╭ prs · 2/3 slots  merge install"),
             "{:#?}",
             lines(&terminal)
+        );
+        let y = pos(&terminal, "prs · 2/3 slots").1;
+        let row = &lines(&terminal)[y as usize];
+        let x = row[..row.find("merge").unwrap()].chars().count() as u16;
+        let merge = cell(&terminal, (x, y));
+        assert!(
+            merge.modifier.contains(Modifier::DIM) && merge.fg != ORANGE,
+            "the herd file's merge = true is off, as the lead's hook enforces"
         );
         let problems = lines(&terminal)
             .iter()

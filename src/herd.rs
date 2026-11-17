@@ -700,21 +700,23 @@ pub struct Outline {
     pub max: Option<usize>,
     /// The lead's switches, when the herd has a `[lead]`.
     pub switches: Option<Switches>,
-    /// Why `config.toml`'s `[lead_defaults]` couldn't be read; the switches
-    /// then come from the herd file alone.
+    /// Why `config.toml`'s `[lead_defaults]` couldn't be read; every switch
+    /// is then off, as `herds` shows and the lead's hook enforces.
     pub defaults_problem: Option<String>,
 }
 
 pub fn outline(paths: &Paths, herd: &str) -> Result<Outline> {
     let file = load(&paths.herds, herd)?;
-    let (defaults, defaults_problem) = match file.lead.is_some().then(|| lead_defaults(paths)) {
-        Some(Err(e)) => (SwitchValues::default(), Some(format!("{e:#}"))),
-        Some(Ok(defaults)) => (defaults, None),
-        None => (SwitchValues::default(), None),
+    let (switches, defaults_problem) = match &file.lead {
+        None => (None, None),
+        Some(lead) => match lead_defaults(paths) {
+            Ok(defaults) => (Some(lead.switches().over(&defaults)), None),
+            Err(e) => (Some(Switches::default()), Some(format!("{e:#}"))),
+        },
     };
     Ok(Outline {
         max: file.queue.map(|q| q.max as usize),
-        switches: file.lead.map(|lead| lead.switches().over(&defaults)),
+        switches,
         defaults_problem,
     })
 }
