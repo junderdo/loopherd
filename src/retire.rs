@@ -158,13 +158,11 @@ pub fn open_tab(
             format!("tab {tab_id} is open: {BUSY}"),
             relabel(&tab_id),
         ),
-        TabFate::NameHeld(tab_id) => close(
-            &tab_id,
-            format!("tab {tab_id} is open: {NAME_HELD}"),
-            Some(format!(
-                "that agent isn't {name}, unname it: herdr agent rename {name} --clear"
-            )),
-        ),
+        // Another session's agent most likely isn't the member, so unnaming it comes first.
+        TabFate::NameHeld(tab_id) => Some(format!(
+            "herdr agent rename {name} --clear  # {name}: tab {tab_id} is open: {NAME_HELD}; \
+             if that agent is {name}, close its tab instead: herdr tab close {tab_id}"
+        )),
         TabFate::Unmatched { line, tab_id } => close(
             &tab_id,
             format!("not confirmed closed: {line}"),

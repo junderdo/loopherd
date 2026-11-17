@@ -993,8 +993,8 @@ mod tests {
 
         assert!(
             msg.ends_with(
-                "herdr tab close w1:t1  # a: tab w1:t1 is open: the name is held by another \
-                 session; if that agent isn't a, unname it: herdr agent rename a --clear"
+                "herdr agent rename a --clear  # a: tab w1:t1 is open: the name is held by \
+                 another session; if that agent is a, close its tab instead: herdr tab close w1:t1"
             ),
             "{msg}"
         );
