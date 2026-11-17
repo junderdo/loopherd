@@ -7,6 +7,7 @@ pub mod theme;
 mod ticker;
 mod watcher;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -117,10 +118,10 @@ pub struct App {
     opened: Option<Instant>,
     read: Option<Read>,
     mail: Mail,
-    /// The newest event's time as of the last read; `None` before the first.
-    newest_event: Option<String>,
-    /// Events newer than this arrived with the last read and show bold.
-    seen_event: Option<String>,
+    /// Every event read so far, by member and time; `None` before the first read.
+    seen_events: Option<HashSet<(String, String)>>,
+    /// Events that arrived with the last read, shown bold.
+    fresh_events: HashSet<(String, String)>,
     since: Since,
     selected: usize,
     /// The selected row's identity, to keep it selected as rows re-sort.
@@ -183,8 +184,8 @@ impl App {
             opened: None,
             read: None,
             mail: Mail::default(),
-            newest_event: None,
-            seen_event: None,
+            seen_events: None,
+            fresh_events: HashSet::new(),
             since: Since::default(),
             selected: 0,
             selected_key: None,
@@ -242,13 +243,14 @@ impl App {
                 self.polled = Some(now);
                 let (read, mail) = result?;
                 self.since = self.since.observe(&read.view, now);
-                let newest = mail.events(&read.view).first().map(|(_, e)| e.at.clone());
-                self.seen_event = self.newest_event.take();
-                self.newest_event = Some(
-                    newest
-                        .unwrap_or_default()
-                        .max(self.seen_event.clone().unwrap_or_default()),
-                );
+                let events: HashSet<_> = mail
+                    .events(&read.view)
+                    .into_iter()
+                    .map(|(name, e)| (name.to_string(), e.at.clone()))
+                    .collect();
+                let seen = self.seen_events.get_or_insert_with(|| events.clone());
+                self.fresh_events = events.difference(seen).cloned().collect();
+                seen.extend(events);
                 self.read = Some(read);
                 self.mail = mail;
                 let kept = self
@@ -354,8 +356,10 @@ impl App {
             .into_iter()
             .take(2)
             .map(|(name, entry)| {
-                let seen = self.seen_event.as_deref();
-                ticker::line(name, entry, seen, text.width, self.theme)
+                let fresh = self
+                    .fresh_events
+                    .contains(&(name.to_string(), entry.at.clone()));
+                ticker::line(name, entry, fresh, text.width, self.theme)
             })
             .collect();
         Paragraph::new(lines).render(text, out);
@@ -2844,5 +2848,105 @@ mod tests {
         };
         assert!(!shows(15));
         assert!(shows(16));
+    }
+
+    #[test]
+    fn the_ticker_leaves_out_stops_with_unknown_background_work_or_crons() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        let unknown = report::Unknown::Unknown;
+        let stopped = |background, crons| {
+            Body::Stop(report::Stop {
+                background,
+                crons,
+                error: None,
+                session: None,
+            })
+        };
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", done("before"));
+        post_at(
+            mail.path(),
+            "a",
+            "2026-11-16T10:06:00Z",
+            stopped(report::Tally::Unknown(unknown), report::Tally::Known(0)),
+        );
+        post_at(
+            mail.path(),
+            "c",
+            "2026-11-16T10:07:00Z",
+            stopped(
+                report::Tally::Known(report::Background::default()),
+                report::Tally::Unknown(unknown),
+            ),
+        );
+        let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert_eq!(ticker(&terminal), ["10:05 a done before", ""]);
+    }
+
+    #[test]
+    fn an_event_stamped_before_one_already_shown_is_still_bold_on_arrival() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(mail.path(), "c", "2026-11-16T10:08:00Z", done("first in"));
+        let mut app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        post_at(
+            mail.path(),
+            "a",
+            "2026-11-16T10:07:30Z",
+            note("landed late"),
+        );
+        refresh_with_mail(&mut app, &herdr, &ledger, mail.path(), now);
+        let terminal = render_ticker(&app, now);
+        assert_eq!(
+            ticker(&terminal),
+            ["10:08 c done first in", "10:07 a note landed late"]
+        );
+        assert!(
+            at(&terminal, "note landed")
+                .modifier
+                .contains(Modifier::BOLD)
+        );
+        assert!(
+            !at(&terminal, "done first")
+                .modifier
+                .contains(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn events_stamped_alike_put_the_later_written_on_top() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(
+            mail.path(),
+            "a",
+            "2026-11-16T10:05:00Z",
+            note("written first"),
+        );
+        post_at(
+            mail.path(),
+            "a",
+            "2026-11-16T10:05:00Z",
+            note("written second"),
+        );
+        let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert_eq!(
+            ticker(&terminal),
+            ["10:05 a note written second", "10:05 a note written first"]
+        );
+    }
+
+    #[test]
+    fn the_ticker_shows_a_reports_first_non_blank_line() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(
+            mail.path(),
+            "a",
+            "2026-11-16T10:05:00Z",
+            done("\n  \nshipped\nmore"),
+        );
+        let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert_eq!(ticker(&terminal)[0], "10:05 a done shipped");
     }
 }
