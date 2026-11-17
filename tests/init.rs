@@ -1020,6 +1020,33 @@ fn a_repo_name_starting_with_a_dot_is_accepted_from_origin() {
 }
 
 #[test]
+fn an_owner_name_starting_with_a_dot_is_accepted() {
+    let fixture = Fixture::new(&["acme"]);
+
+    assert_ok(&fixture.init(&["--repo", ".acme/widgets", "--gh-account", "acme"]));
+
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(herd.contains("--repo .acme/widgets"), "{herd}");
+}
+
+#[test]
+fn an_origin_that_is_a_path_step_once_its_git_suffix_is_stripped_is_refused() {
+    for url in ["git@github.com:acme/..git", "git@github.com:acme/...git"] {
+        let fixture = Fixture::new(&["acme"]);
+        git(&fixture.repo(), &["remote", "set-url", "origin", url]);
+
+        assert_refused(
+            &fixture,
+            &fixture.init(&[]),
+            &format!(
+                "loopherd init: origin {url} is not a GitHub repo; pass --repo <owner>/<name>\n"
+            ),
+        );
+        assert_eq!(fixture.gh_calls(), "", "{url}");
+    }
+}
+
+#[test]
 fn a_gh_login_starting_with_a_dot_is_not_offered() {
     let fixture = Fixture::new(&[".acme"]);
 
