@@ -983,13 +983,51 @@ fn a_herd_name_with_an_uppercase_letter_or_a_space_after_the_first_is_refused() 
 }
 
 #[test]
+fn a_repo_name_starting_with_a_dot_is_accepted_from_repo() {
+    let fixture = Fixture::new(&["acme"]);
+
+    assert_ok(&fixture.init(&["--repo", "acme/.github"]));
+
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(
+        herd.contains("GitHub issue #{number} of acme/.github"),
+        "{herd}"
+    );
+    assert!(herd.contains("--repo acme/.github"), "{herd}");
+}
+
+#[test]
+fn a_repo_name_starting_with_a_dot_is_accepted_from_origin() {
+    let fixture = Fixture::new(&["acme"]);
+    git(
+        &fixture.repo(),
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:acme/.github.git",
+        ],
+    );
+
+    assert_ok(&fixture.init(&[]));
+
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(
+        herd.contains("GitHub issue #{number} of acme/.github"),
+        "{herd}"
+    );
+    assert!(herd.contains("--repo acme/.github"), "{herd}");
+}
+
+#[test]
 fn repo_refuses_a_name_that_is_a_path_step_an_option_or_has_a_git_suffix() {
     for slug in [
         "acme/.",
         "acme/..",
         "acme/-widgets",
         "-acme/widgets",
-        ".acme/widgets",
+        "./widgets",
+        "../widgets",
         "acme/widgets.git",
     ] {
         let fixture = Fixture::new(&["acme"]);
@@ -999,6 +1037,7 @@ fn repo_refuses_a_name_that_is_a_path_step_an_option_or_has_a_git_suffix() {
             &fixture.init(&[&format!("--repo={slug}")]),
             &format!("loopherd init: --repo {slug:?} is not <owner>/<name>\n"),
         );
+        assert_eq!(fixture.gh_calls(), "", "{slug}");
     }
 }
 

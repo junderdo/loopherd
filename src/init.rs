@@ -1191,8 +1191,8 @@ fn github_path(url: &str) -> Option<&str> {
 /// Safe to put unquoted in the herd's shell commands and prompts, and not
 /// an option, a path step or a `.git` suffix.
 fn is_github_name(name: &str) -> bool {
-    !name.is_empty()
-        && !name.starts_with(['-', '.'])
+    !matches!(name, "" | "." | "..")
+        && !name.starts_with('-')
         && !name.ends_with(".git")
         && name
             .chars()
