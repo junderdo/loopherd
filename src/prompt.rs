@@ -4,8 +4,10 @@ use anyhow::{Result, anyhow, bail};
 
 use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::Ledger;
+use crate::subagent_view::ensure_main_view;
 
-/// Sends `name`'s stored prompt to its live agent and marks it sent.
+/// Sends `name`'s stored prompt to its live agent and marks it sent,
+/// refusing a pane that shows a subagent's view.
 pub fn prompt(herdr: &dyn Herdr, ledger: &mut dyn Ledger, name: &str, force: bool) -> Result<()> {
     let record = ledger
         .entries()?
@@ -29,6 +31,12 @@ pub fn prompt(herdr: &dyn Herdr, ledger: &mut dyn Ledger, name: &str, force: boo
             agent.pane_id
         );
     }
+    ensure_main_view(
+        herdr,
+        name,
+        &agent.pane_id,
+        &format!("run loopherd prompt {name} again"),
+    )?;
     herdr.prompt(name, &text)?;
     ledger
         .update(name, &mut |record| {
@@ -43,6 +51,7 @@ mod tests {
     use super::*;
     use crate::herdr::fake::FakeHerdr;
     use crate::ledger::{AgentRecord, MemLedger};
+    use crate::subagent_view::screens::{SUBAGENT_PICKER, SUBAGENT_PROMPT};
 
     fn record(name: &str) -> AgentRecord {
         AgentRecord {
@@ -172,5 +181,21 @@ mod tests {
             false,
             "a has no stored prompt",
         );
+    }
+
+    #[test]
+    fn a_pane_showing_a_subagent_view_is_refused_even_with_force() {
+        for screen in [SUBAGENT_PROMPT, SUBAGENT_PICKER] {
+            let herdr = FakeHerdr::new(&[]).with_agent("a");
+            herdr.set_screen("w9:p9", screen);
+            assert_refused(
+                &herdr,
+                ledger_with(record("a")),
+                "a",
+                true,
+                "a's pane w9:p9 is showing a subagent's view, so text sent there would reach the \
+                 subagent: switch the pane back to the main conversation, then run loopherd prompt a again",
+            );
+        }
     }
 }

@@ -28,6 +28,8 @@ mod spawn;
 mod stats;
 mod status;
 mod stop_hook;
+mod subagent_view;
+mod tell;
 mod template;
 mod tool_hook;
 mod tui;
@@ -226,6 +228,15 @@ enum Command {
         /// Send it even if it was already sent.
         #[arg(long)]
         force: bool,
+    },
+    /// Message a live member, refusing while its pane shows a subagent's view,
+    /// then confirm it went working.
+    Tell {
+        name: String,
+        #[arg(required_unless_present = "text_file", conflicts_with = "text_file")]
+        text: Option<String>,
+        #[arg(long)]
+        text_file: Option<PathBuf>,
     },
     /// Give a member that wrote its handoff a fresh session in the same pane:
     /// sends it /clear, waits for the ledger to follow the new session, then
@@ -560,6 +571,11 @@ fn main() -> ExitCode {
         Command::Retire { name, close } => ("retire", run_retire(&name, close)),
         Command::Revive { dry_run, name } => ("revive", run_revive(dry_run, name)),
         Command::Prompt { name, force } => ("prompt", run_prompt(&name, force)),
+        Command::Tell {
+            name,
+            text,
+            text_file,
+        } => ("tell", run_tell(&name, text, text_file)),
         Command::Restart { name, force } => ("restart", run_restart(&name, force)),
         Command::Status { all, strays, json } => ("status", run_status(all, strays, json)),
         Command::Stats { herd, since, json } => ("stats", run_stats(herd, since, json)),
@@ -824,6 +840,21 @@ fn run_prompt(name: &str, force: bool) -> Result<i32> {
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     prompt(&CliHerdr, &mut ledger, name, force)?;
     println!("prompted {name}");
+    Ok(0)
+}
+
+fn run_tell(name: &str, text: Option<String>, text_file: Option<PathBuf>) -> Result<i32> {
+    let text = match (text, text_file) {
+        (Some(text), _) => text,
+        (None, Some(path)) => {
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?
+        }
+        (None, None) => unreachable!("clap requires text or --text-file"),
+    };
+    println!(
+        "{}",
+        tell::tell(&CliHerdr, name, &text, Duration::from_secs(10))?
+    );
     Ok(0)
 }
 
