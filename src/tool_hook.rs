@@ -205,14 +205,14 @@ fn decide(
     }
     if needed == Switch::Alias {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not set a `gh alias`, a `git -c alias.*` or a shell `alias`, which could hide a command its switches gate: {}; spell the command out, or ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not set a `gh alias`, a `git -c alias.*` or a shell `alias`, nor name `GIT_CONFIG*` or `BASH_ALIASES` outside `echo`, `rg`, `grep`, `git`, `gh`, `loopherd`, `cat`, `trello`, `printf` or `declare -p`, or in a `${{…}}` or `((…))`, which could hide a command its switches gate: {}; spell the command out, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
     }
     if needed == Switch::Unreadable {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like, a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, a `trap`, `sh -c` or `eval` script that a substitution prints, `gh` after `GH_CONFIG_DIR` is set, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like, a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, or from a relative `stdin`, `fd/<n>` or all-digit path, a `trap`, `sh -c` or `eval` script that a substitution prints, `gh` after `GH_CONFIG_DIR` is set, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -295,6 +295,10 @@ struct Aliases {
     /// in a heredoc body that may run in this shell or a child, so any alias
     /// or `GH_CONFIG_DIR` may be set.
     unreadable_name: bool,
+    /// Whether the script defines a function, loads a builtin, or sets a
+    /// trap whose action may do either, so a read-only program's name may run
+    /// something else.
+    redefines_programs: bool,
 }
 
 impl Aliases {
@@ -334,6 +338,9 @@ fn needs_with(script: &str, aliases: &mut Aliases, in_shell: bool) -> Vec<Switch
     let Some(lexed) = commands(script).filter(|_| !unreadable(script)) else {
         return vec![Switch::Unreadable];
     };
+    if expansion_names_alias_variable(script) {
+        return vec![Switch::Alias];
+    }
     let read_bodies = in_shell || runs_code(&lexed.commands);
     judge(&lexed, aliases, read_bodies)
 }
@@ -343,6 +350,12 @@ fn needs_with(script: &str, aliases: &mut Aliases, in_shell: bool) -> Vec<Switch
 /// before it.
 fn judge(lexed: &Lexed, aliases: &mut Aliases, read_bodies: bool) -> Vec<Switch> {
     let mut needs = vec![];
+    aliases.redefines_programs |= lexed.defines_function
+        || lexed
+            .commands
+            .iter()
+            .flatten()
+            .any(|w| ["function", "enable", "trap"].contains(&w.text.as_str()));
     let mut bodies = lexed.bodies.iter().peekable();
     for at in 0..=lexed.commands.len() {
         while let Some((_, body)) = bodies.next_if(|(from, _)| *from <= at) {
@@ -351,6 +364,7 @@ fn judge(lexed: &Lexed, aliases: &mut Aliases, read_bodies: bool) -> Vec<Switch>
                 Some(body) => {
                     let mut seen = aliases.clone();
                     needs.extend(judge(body, &mut seen, true));
+                    aliases.redefines_programs |= seen.redefines_programs;
                     if seen != *aliases {
                         aliases.unreadable_name = true;
                     }
@@ -405,11 +419,14 @@ struct Lexed {
     /// Each body with the index of the command it runs before; `None` for
     /// one that doesn't lex.
     bodies: Vec<(usize, Option<Lexed>)>,
+    /// Whether a `name()` function definition was read.
+    defines_function: bool,
 }
 
 impl Lexed {
     fn extend(&mut self, other: Lexed) {
         let offset = self.commands.len();
+        self.defines_function |= other.defines_function;
         self.commands.extend(other.commands);
         self.bodies.extend(
             other
@@ -433,6 +450,8 @@ struct Word {
     quoted: bool,
     /// Where in `text` its first quote or backslash stood.
     quoted_at: Option<usize>,
+    /// Whether it holds a `<<` heredoc operator the lexer read as one.
+    heredoc: bool,
     /// Its unquoted `*?[]{},` characters, a `.` for each `..`, and each `$`
     /// that opens a `${` or `$[`, in order.
     globs: String,
@@ -677,6 +696,7 @@ fn commands(script: &str) -> Option<Lexed> {
                     w.text.push('<');
                 } else {
                     let heredoc = heredoc_operator(&mut chars, &mut w.text)?;
+                    w.heredoc = true;
                     heredocs.push((heredoc, parens.len(), None));
                 }
             }
@@ -693,7 +713,10 @@ fn commands(script: &str) -> Option<Lexed> {
             }
             '$' if chars.next_if_eq(&'\'').is_some() => {
                 let decoded = ansi_c(&mut chars)?;
-                word.get_or_insert_default().text.push_str(&decoded);
+                let w = word.get_or_insert_default();
+                w.quoted = true;
+                w.quoted_at.get_or_insert(w.text.len());
+                w.text.push_str(&decoded);
             }
             // Bash translates `$"…"` through a message catalog the hook can't read.
             '$' if chars.peek() == Some(&'"') => return None,
@@ -707,6 +730,9 @@ fn commands(script: &str) -> Option<Lexed> {
                 let doubled = chars.peek() == Some(&c) && matches!(c, '(' | ')');
                 let in_arithmetic = arithmetic_from.is_some();
                 if c == '(' {
+                    let mut ahead = chars.clone();
+                    while ahead.next_if(|&c| c == ' ' || c == '\t').is_some() {}
+                    lexed.defines_function |= !in_arithmetic && ahead.peek() == Some(&')');
                     let text = word.as_ref().map_or("", |w| w.text.as_str());
                     // `@(…)`, `+(…)` and `!(…)` are extglob patterns.
                     if !in_arithmetic && text.ends_with(['@', '+', '!']) {
@@ -1271,6 +1297,14 @@ const BASH_LONG_OPTIONS: [&str; 18] = [
     "wordexp",
 ];
 const SHELLS: [&str; 5] = ["sh", "bash", "zsh", "dash", "ksh"];
+/// Names whose variables set git config (`GIT_CONFIG_COUNT`, …) or shell
+/// aliases.
+const ALIAS_VARIABLES: [&str; 2] = ["GIT_CONFIG", "BASH_ALIASES"];
+/// Programs that can't set a shell variable, so an [`ALIAS_VARIABLES`] name
+/// among their words is only a mention.
+const MENTIONERS: [&str; 8] = [
+    "echo", "rg", "grep", "git", "gh", "loopherd", "cat", "trello",
+];
 /// Builtins whose arguments may assign variables.
 const DECLARERS: [&str; 5] = ["export", "declare", "typeset", "local", "readonly"];
 
@@ -1290,8 +1324,9 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             None => kept.push(word),
         }
     }
-    let texts: Vec<&str> = kept.iter().map(|w| w.text.as_str()).collect();
-    if sets_alias_variable(&texts) {
+    if command.iter().any(|w| names_alias_variable(&w.text))
+        && (aliases.redefines_programs || !only_mentions(&kept))
+    {
         return vec![Switch::Alias];
     }
     // A shell's script from its input is out of the hook's sight, unless a
@@ -1324,7 +1359,8 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             aliases.assign(kept[i]);
             i += 1;
         } else if kept[i].pattern()
-            || ((word == "source" || word == ".") && reads_script_from_input(words.get(i + 1)))
+            || ((word == "source" || word == ".")
+                && reads_script_from_input(words.get(skip_options(words, i + 1, &[]))))
         {
             return vec![Switch::Unreadable];
         } else if KEYWORDS.contains(&word.as_str()) || word == "." {
@@ -1897,37 +1933,98 @@ fn defines_git_alias(key: &str) -> bool {
         .any(|prefix| key.starts_with(prefix))
 }
 
-/// Whether a command sets a variable that sets git config or a shell alias:
-/// by assignment, as a name a builtin sets (`read`, `export`, `printf -v`),
-/// or as a nameref's target (`declare -n A=BASH_ALIASES`).
-fn sets_alias_variable(words: &[&str]) -> bool {
-    let names = |w: &str| w.starts_with("GIT_CONFIG") || w.starts_with("BASH_ALIASES");
-    if words.iter().any(|w| is_assignment(w) && names(w)) {
-        return true;
-    }
-    let mut rest = words
-        .iter()
-        .copied()
-        .skip_while(|w| is_assignment(w) || matches!(*w, "builtin" | "command"));
-    match rest.next() {
-        Some(
-            "read" | "export" | "declare" | "local" | "typeset" | "readonly" | "unset" | "mapfile"
-            | "readarray" | "let" | "getopts" | "for" | "select",
-        ) => rest.any(|w| names(w) || w.split_once('=').is_some_and(|(_, value)| names(value))),
-        Some("printf") => {
-            let mut after_v = false;
-            rest.any(|w| {
-                let named = (after_v && names(w)) || w.strip_prefix("-v").is_some_and(names);
-                after_v = w == "-v";
-                named
-            })
+/// Whether `text` names a variable that sets git config or a shell alias.
+fn names_alias_variable(text: &str) -> bool {
+    ALIAS_VARIABLES.iter().any(|name| text.contains(name))
+}
+
+/// Whether such a name stands inside a `${…}`, `$[…]` or `((…))`, which may
+/// assign it (`${GIT_CONFIG_COUNT:=1}`, `$((GIT_CONFIG_COUNT=1))`).
+fn expansion_names_alias_variable(script: &str) -> bool {
+    let mut closers: Vec<&str> = vec![];
+    let mut rest = script;
+    while let Some(c) = rest.chars().next() {
+        if !closers.is_empty() && ALIAS_VARIABLES.iter().any(|n| rest.starts_with(n)) {
+            return true;
         }
-        _ => false,
+        // A quoted span may hide a closer; one left open runs to the end.
+        if !closers.is_empty() && matches!(c, '\'' | '"' | '\\') {
+            let quoted = match c {
+                '\\' => rest.chars().nth(1).map(|e| 1 + e.len_utf8()),
+                '"' => {
+                    let mut inside = rest.char_indices().skip(1);
+                    loop {
+                        match inside.next() {
+                            Some((_, '\\')) => {
+                                inside.next();
+                            }
+                            Some((end, '"')) => break Some(end + 1),
+                            Some(_) => {}
+                            None => break None,
+                        }
+                    }
+                }
+                _ => rest[1..].find(c).map(|end| end + 2),
+            };
+            let Some(len) = quoted else {
+                return names_alias_variable(rest);
+            };
+            if names_alias_variable(&rest[..len]) {
+                return true;
+            }
+            rest = &rest[len..];
+            continue;
+        }
+        let (step, opens) = match rest {
+            _ if rest.starts_with("${") => (2, Some("}")),
+            _ if rest.starts_with("$[") => (2, Some("]")),
+            _ if rest.starts_with("((") => (2, Some("))")),
+            _ if closers.last().is_some_and(|top| rest.starts_with(top)) => {
+                let top = closers.pop().unwrap_or_default();
+                (top.len(), None)
+            }
+            _ if closers.is_empty() => (c.len_utf8(), None),
+            _ => (
+                c.len_utf8(),
+                match c {
+                    '{' => Some("}"),
+                    '[' => Some("]"),
+                    '(' => Some(")"),
+                    _ => None,
+                },
+            ),
+        };
+        closers.extend(opens);
+        rest = &rest[step..];
+    }
+    false
+}
+
+/// Whether a command can only read its words, so an [`ALIAS_VARIABLES`]
+/// name among them is a mention; anything before the program may set it.
+fn only_mentions(kept: &[&Word]) -> bool {
+    let Some((first, args)) = kept.split_first() else {
+        return false;
+    };
+    if first.substituted_at.is_some() || first.text.contains('$') {
+        return false;
+    }
+    match file_name(&first.text) {
+        // A `$` or substitution may expand to `-v`.
+        "printf" => !args.iter().any(|w| {
+            w.text.starts_with("-v") || w.text.contains('$') || w.substituted_at.is_some()
+        }),
+        "declare" | "typeset" => {
+            args.iter().any(|w| w.text == "-p")
+                && args.iter().all(|w| w.text == "-p" || is_name(&w.text))
+        }
+        program => MENTIONERS.contains(&program),
     }
 }
 
 /// Where a shell script operand reads its script from: `Some(Some(fd))` for
-/// one of the shell's own descriptors, `Some(None)` for another process's.
+/// one of the shell's own descriptors, `Some(None)` for another process's or
+/// one it can't tell.
 fn input_descriptor(script: &str) -> Option<Option<u32>> {
     if script == "-" {
         return Some(Some(0));
@@ -1942,10 +2039,18 @@ fn input_descriptor(script: &str) -> Option<Option<u32>> {
             part => parts.push(part),
         }
     }
-    if !script.starts_with('/') || !matches!(parts.first(), Some(&("dev" | "proc"))) {
+    let fd = |n: &str| n.parse::<u32>().ok();
+    // After a `cd`, `..` or `~`, a relative path may name the shell's input.
+    if !script.starts_with('/') {
+        return match parts.as_slice() {
+            [.., "stdin"] => Some(Some(0)),
+            [.., "fd", n] | [n] if fd(n).is_some() => Some(None),
+            _ => None,
+        };
+    }
+    if !matches!(parts.first(), Some(&("dev" | "proc"))) {
         return None;
     }
-    let fd = |n: &str| n.parse::<u32>().ok();
     match parts.as_slice() {
         [.., "dev", "stdin"] => Some(Some(0)),
         [.., "dev", "fd", n] => fd(n).map(Some),
@@ -1969,7 +2074,7 @@ fn heredoc_feeds(redirects: &[&Word], fd: u32) -> bool {
             Err(_) => 1,
         };
         if target == fd {
-            fed = op.starts_with("<<") && !op.starts_with("<<<");
+            fed = word.heredoc;
         }
     }
     fed
@@ -3410,6 +3515,16 @@ mod tests {
             "gh pr comment 115 --body \"Fixed in \\`tool_hook.rs\\`; see \\`D17\\`.\"",
             "git commit -m \"Deny escaped backticks in \\`unreadable\\`\"",
             "gh pr create --body \"$(cat <<EOF\nRun \\`cargo test\\`.\nEOF\n)\"",
+            "loopherd report --kind question 'merge PR #12? run: gh pr merge 12 --squash'",
+            "gh pr view 12 --json state,mergeable",
+            "git fetch --prune",
+            "git checkout --detach origin/main",
+            "git worktree add ../worktrees/x origin/main",
+            "git worktree remove ../worktrees/x",
+            "cargo test",
+            "scripts/trello move LH-1 Done",
+            "cat <<\"EOF\"\nhi\nEOF",
+            "cat <<-EOF\n\thi\n\tEOF",
         ] {
             assert_eq!(run(&leads, Switches::default(), command), None, "{command}");
         }
@@ -4383,6 +4498,8 @@ mod tests {
             "bash -s <<< 'gh pr merge 1' \\<<EOF",
             "bash -s <<< 'gh pr merge 1' 2> \"<<EOF\"",
             "bash -s <<< 'gh pr merge 1' > '<<EOF'",
+            "bash -s <<< 'gh pr merge 1' $'<<EOF'",
+            "bash -s <<< 'gh pr merge 1' $'<<'EOF",
         ] {
             assert_unreadable(command);
         }
@@ -4410,33 +4527,157 @@ mod tests {
     }
 
     #[test]
-    fn a_script_that_only_ends_in_stdin_or_fd_n_is_a_file() {
-        assert_passes("bash ./stdin");
-        assert_passes("bash scripts/fd/3");
+    fn a_relative_script_named_stdin_or_fd_n_is_read_as_the_shells_input() {
+        for command in [
+            "bash ~/../../dev/stdin <<< 'gh pr merge 1'",
+            "bash ../dev/stdin <<< 'gh pr merge 1'",
+            "cd /dev && bash stdin <<< 'gh pr merge 1'",
+            "cd /dev && bash ./stdin <<< 'gh pr merge 1'",
+            "cd /dev && bash fd/0 <<< 'gh pr merge 1'",
+            "cd /dev/fd && bash 0 <<< 'gh pr merge 1'",
+            "cd /dev && echo 'gh pr merge 1' | source stdin",
+            "source -- /dev/stdin <<< 'gh pr merge 1'",
+            ". -- /dev/stdin <<< 'gh pr merge 1'",
+            "cd /dev && source -- stdin <<< 'gh pr merge 1'",
+            "cd /dev && bash fd/0 <<'EOF'\n:\nEOF",
+            "bash scripts/fd/3",
+        ] {
+            assert_unreadable(command);
+        }
+        assert_judged(
+            "cd /dev && bash stdin <<'EOF'\ngh pr merge 1\nEOF",
+            Switch::Merge,
+        );
+        assert_passes("bash scripts/check.sh < /dev/null");
     }
 
     #[test]
-    fn an_alias_or_git_config_variable_set_by_a_builtin_is_denied() {
+    fn an_alias_or_git_config_name_is_denied_wherever_a_command_may_set_it() {
         for command in [
+            "{ read GIT_CONFIG_COUNT; } <<< 1; { export GIT_CONFIG_COUNT GIT_CONFIG_KEY_0=alias.zz GIT_CONFIG_VALUE_0=rebase; }; git zz",
+            "shopt -s expand_aliases\n! read \"BASH_ALIASES[g]\" <<< gh\ng pr merge 1",
+            "time read GIT_CONFIG_COUNT <<< 1",
+            "if true; then read GIT_CONFIG_COUNT <<< 1; fi",
+            "for i in 1; do read GIT_CONFIG_COUNT <<< 1; done",
+            "command -p read GIT_CONFIG_COUNT <<< 1",
+            "builtin -- read GIT_CONFIG_COUNT <<< 1",
+            "shopt -s expand_aliases\ndeclare -n r; r=BASH_ALIASES; r[g]=gh\ng pr merge 1",
+            "shopt -s expand_aliases\ndeclare -n A=B; B=BASH_ALIASES; A[g]=gh\ng pr merge 1",
             "shopt -s expand_aliases\nread 'BASH_ALIASES[g]' <<< gh\ng pr merge 1",
             "shopt -s expand_aliases\nprintf -v 'BASH_ALIASES[g]' gh\ng pr merge 1",
-            "shopt -s expand_aliases\ndeclare -n A=BASH_ALIASES; A[g]=gh\ng pr merge 1",
             "read GIT_CONFIG_GLOBAL <<< x.cfg; export GIT_CONFIG_GLOBAL; git r",
             "printf -vGIT_CONFIG_GLOBAL x.cfg; export GIT_CONFIG_GLOBAL; git r",
+            "env GIT_CONFIG_COUNT=1 git zz",
+            "echo ${a[GIT_CONFIG_COUNT=1]}",
+            "echo \"${GIT_CONFIG_COUNT:=1}\"",
+            "echo $((GIT_CONFIG_COUNT=1))",
+            "cat <<< ${GIT_CONFIG_COUNT:=1}",
+            "echo x > \"${GIT_CONFIG_COUNT:=1}\"",
+            "(( GIT_CONFIG_COUNT = 1 ))",
+            "[[ GIT_CONFIG_COUNT=1 -eq 1 ]]",
+            "let GIT_CONFIG_COUNT=1",
+            "declare -p GIT_CONFIG_COUNT=1",
+            "printf '%s' GIT_CONFIG -v BASH_ALIASES",
+            "o=-v; printf $o GIT_CONFIG_COUNT 1",
+            "o=-v; printf \"$o\" GIT_CONFIG_COUNT 1",
+            "printf $(echo -v) GIT_CONFIG_COUNT 1",
+            "v=v; printf -$v GIT_CONFIG_COUNT 1",
+            "echo $[GIT_CONFIG_COUNT=1]",
+            "echo ${x[a[0],GIT_CONFIG_COUNT=1]}",
+            "echo $(( a[0], GIT_CONFIG_COUNT=1 ))",
+            "echo $(( (1), GIT_CONFIG_COUNT=1 ))",
+            ": <<EOF\n$(( a[0], GIT_CONFIG_COUNT=1 ))\nEOF",
         ] {
             assert_judged(command, Switch::Alias);
         }
+    }
+
+    #[test]
+    fn a_mention_of_an_alias_or_git_config_name_passes() {
         for command in [
-            "rg -n GIT_CONFIG src/tool_hook.rs",
+            "echo GIT_CONFIG_X=1",
+            "rg GIT_CONFIG_COUNT=1 docs",
+            "rg -n GIT_CONFIG src/",
             "grep -rn BASH_ALIASES docs",
-            "git log --oneline -S GIT_CONFIG",
-            "loopherd tell lh-1 \"GIT_CONFIG_GLOBAL is denied now\"",
+            "git log -S BASH_ALIASES",
+            "loopherd tell lh-1 \"GIT_CONFIG is denied\"",
             "loopherd report --kind done \"GIT_CONFIG variables are denied\"",
-            "echo GIT_CONFIG_COUNT",
-            "MSG=BASH_ALIASES true",
+            "declare -p GIT_CONFIG_COUNT",
+            "typeset -p GIT_CONFIG_COUNT",
             "printf '%s' GIT_CONFIG",
+            "echo ${a[0]} $((1)) GIT_CONFIG",
+            "scripts/trello comment LH-1 'GIT_CONFIG is denied'",
+            "cat <<'EOF'\nset GIT_CONFIG_COUNT=1\nEOF",
+            "echo hi > GIT_CONFIG.md",
         ] {
             assert_passes(command);
+        }
+    }
+
+    #[test]
+    fn a_read_only_program_the_script_may_redefine_is_no_mention() {
+        for command in [
+            "echo() { export \"$@\"; }; echo GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.zz 'GIT_CONFIG_VALUE_0=!gh pr merge 1'; git zz",
+            "echo() { export \"$@\"; }\necho GIT_CONFIG_COUNT=1\ngit zz",
+            "echo ( ) { export \"$@\"; }; \"echo\" GIT_CONFIG_COUNT=1",
+            "function git { export \"$@\"; }; git GIT_CONFIG_COUNT=1",
+            "printf() { builtin printf -v \"$@\"; }; printf GIT_CONFIG_COUNT 1",
+            "cat() { declare -g \"$1=$2\"; }; cat GIT_CONFIG_COUNT 1",
+            "x=$(cat() { declare -g \"$1=$2\"; }); cat GIT_CONFIG_COUNT 1",
+            "bash <<'EOF'\ncat() { declare -g \"$1=$2\"; }\ncat GIT_CONFIG_COUNT 1\nEOF",
+            "enable -f ./echo.so echo; echo GIT_CONFIG_COUNT=1",
+            "\"enable\" -f ./echo.so echo; echo GIT_CONFIG_COUNT=1",
+            "builtin 'enable' -f ./echo.so echo; echo GIT_CONFIG_COUNT=1",
+            "trap 'echo() { export \"$@\"; }' DEBUG; echo GIT_CONFIG_COUNT=1",
+            "trap 'echo() { export \"$@\"; }' RETURN; echo GIT_CONFIG_COUNT=1",
+            "trap -- 'echo() { export \"$@\"; }' DEBUG; echo GIT_CONFIG_COUNT=1",
+        ] {
+            assert_judged(command, Switch::Alias);
+        }
+        assert_passes("git commit -m 'only_mentions() is no function for GIT_CONFIG'");
+        assert_passes("f() { :; }; gh pr view 1");
+        assert_judged("f() { :; }; echo GIT_CONFIG", Switch::Alias);
+        assert_judged("git commit -m trap; rg GIT_CONFIG", Switch::Alias);
+        assert_passes("cat <<'EOF'\nf() { :; }\nEOF\necho GIT_CONFIG");
+        assert_passes("cat > notes.md <<'EOF'\nCall only_mentions() on GIT_CONFIG.\nEOF");
+    }
+
+    #[test]
+    fn a_quote_inside_an_expansion_is_skipped_unless_it_names_one() {
+        assert_passes("echo $((1 + \"2\" )) ; rg GIT_CONFIG");
+        assert_judged("echo $(( a[\"GIT_CONFIG_COUNT\"] ))", Switch::Alias);
+        assert_judged(
+            "echo $(( A[\"\\\"]))\"]=1, GIT_CONFIG_COUNT=1 ))",
+            Switch::Alias,
+        );
+    }
+
+    #[test]
+    fn a_quoted_closer_inside_an_expansion_doesnt_close_it() {
+        assert_judged(
+            "declare -A A; echo $(( A[\"]))\"]=1, GIT_CONFIG_COUNT=1 ))",
+            Switch::Alias,
+        );
+    }
+
+    #[test]
+    fn a_mention_the_hook_cant_tell_from_setting_is_denied() {
+        for command in [
+            "for f in GIT_CONFIG.md; do echo $f; done",
+            "MSG=BASH_ALIASES true",
+            "time rg GIT_CONFIG",
+            "sed -n /GIT_CONFIG/p f",
+            "bash -c 'echo GIT_CONFIG'",
+            "sort > GIT_CONFIG.md",
+            "echo ${GIT_CONFIG_COUNT}",
+            "echo '${GIT_CONFIG_COUNT}'",
+            "declare -px GIT_CONFIG_COUNT",
+            "cargo test <<EOF\nthe GIT_CONFIG rule\nEOF",
+            "git commit -m 'a (( b GIT_CONFIG'",
+            "XGIT_CONFIGY=1 true",
+            "printf '%s' \"$x\" GIT_CONFIG",
+        ] {
+            assert_judged(command, Switch::Alias);
         }
     }
 
