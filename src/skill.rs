@@ -9,6 +9,39 @@ use anyhow::{Context, Result};
 
 pub const SKILL: &str = include_str!("skill.md");
 
+/// The `## <name>` section, matched case-insensitively, up to the next `## `.
+pub fn section(name: &str) -> Option<&'static str> {
+    let starts = section_starts();
+    let i = starts
+        .iter()
+        .position(|&(_, title)| title.eq_ignore_ascii_case(name))?;
+    let end = starts.get(i + 1).map_or(SKILL.len(), |&(at, _)| at);
+    Some(&SKILL[starts[i].0..end])
+}
+
+/// Each section's name, lowercased, as `section` takes it.
+pub fn section_names() -> Vec<String> {
+    section_starts()
+        .into_iter()
+        .map(|(_, title)| title.to_lowercase())
+        .collect()
+}
+
+fn section_starts() -> Vec<(usize, &'static str)> {
+    let mut at = 0;
+    let mut fenced = false;
+    let mut starts = Vec::new();
+    for line in SKILL.split_inclusive('\n') {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+        } else if let Some(title) = line.strip_prefix("## ").filter(|_| !fenced) {
+            starts.push((at, title.trim_end()));
+        }
+        at += line.len();
+    }
+    starts
+}
+
 /// Where the skill goes under a Claude skills directory.
 pub fn path(skills_dir: &Path) -> PathBuf {
     skills_dir.join("loopherd").join("SKILL.md")
@@ -101,6 +134,58 @@ mod tests {
         let (_, rest) = SKILL.split_once(start).expect("section start");
         let (body, _) = rest.split_once(end).expect("section end");
         body.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn the_leads_restart_and_wake_advice_reads_its_section_and_recent_reports() {
+        let lead = super::section("lead").unwrap();
+        let bullet = |name: &str| {
+            let start = lead.find(&format!("- **{name}**")).unwrap();
+            let rest = &lead[start + 2..];
+            rest[..rest.find("\n- **").unwrap_or(rest.len())].replace("\n  ", " ")
+        };
+        for name in ["After a restart", "On each wake"] {
+            let advice = bullet(name);
+            assert!(advice.contains("`loopherd status`"), "{advice}");
+            assert!(
+                advice.contains("`loopherd reports --all --tail 40`"),
+                "{advice}"
+            );
+            assert!(
+                advice.contains("`loopherd --skill --section lead`"),
+                "{advice}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_lead_section_carries_the_task_life_a_restarted_lead_needs() {
+        let lead = super::section("lead")
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for step in [
+            "**Task life, in brief**",
+            "`loopherd feed <herd> --dry-run`",
+            "read-only reviewer subagent",
+            "`gh pr view <n> --json state`",
+            "close out the task in the tracker",
+            "`git worktree remove --force`",
+            "`$XDG_STATE_HOME/loopherd/handoffs/<your name>.md`",
+            "`## State`",
+            "`<scratch>/pr<n>/review-<round>.md`",
+            "`pass <head sha>`",
+            "`fail <head sha>: <b> blocking, <m> minor`",
+            "`gh pr comment <n> --body-file <file>`",
+            "until the PR merges or closes",
+            "current review file",
+            "`review-<round - 1>.md`",
+            "`git diff <its head sha>..<new head>`",
+            "later rounds pass `model: sonnet`",
+        ] {
+            assert!(lead.contains(step), "missing {step}:\n{lead}");
+        }
     }
 
     #[test]

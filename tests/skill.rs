@@ -157,3 +157,54 @@ fn verify_blocks_on_in_scope_findings_rereviews_the_delta_and_caps_rounds() {
         assert!(lead.contains(rule), "Lead misses {rule:?}");
     }
 }
+
+#[test]
+fn skill_section_prints_only_that_section() {
+    let home = tempfile::tempdir().unwrap();
+    let printed =
+        String::from_utf8(loopherd(home.path(), &["--skill", "--section", "lead"]).stdout).unwrap();
+    assert!(printed.starts_with("## Lead\n"), "{printed}");
+    assert!(printed.contains("- **On each wake**"), "{printed}");
+    assert!(!printed.contains("## Shepherd"), "{printed}");
+    assert!(!printed.contains("name: loopherd"), "{printed}");
+    assert!(printed.ends_with("never commit in it.\n"), "{printed}");
+}
+
+#[test]
+fn skill_section_runs_to_the_next_section_past_fenced_headings() {
+    let home = tempfile::tempdir().unwrap();
+    let printed =
+        String::from_utf8(loopherd(home.path(), &["--skill", "--section", "Shepherd"]).stdout)
+            .unwrap();
+    assert!(printed.starts_with("## Shepherd\n"), "{printed}");
+    assert!(printed.contains("\n## State\n"), "{printed}");
+    assert!(printed.contains("\n### Talking to members\n"), "{printed}");
+    assert!(!printed.contains("\n## Lead\n"), "{printed}");
+}
+
+#[test]
+fn skill_section_names_the_sections_when_it_knows_none_by_that_name() {
+    let home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .args(["--skill", "--section", "nope"])
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no section `nope`"), "{err}");
+    assert!(err.contains("shepherd") && err.contains("lead"), "{err}");
+}
+
+#[test]
+fn section_needs_skill() {
+    let home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .args(["--section", "lead"])
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--skill"), "{err}");
+}

@@ -121,8 +121,9 @@ blocks (exit 3), answer the dialog in the pane it names and run
 `loopherd prompt <name>`.
 
 The guide a shepherd or lead follows, from setting up a herd to cleaning up
-after merges, is the loopherd skill: `loopherd --skill` prints it, and
-`install-hook` installs it for Claude.
+after merges, is the loopherd skill: `loopherd --skill` prints it
+(`--section lead` prints one section), and `install-hook` installs it for
+Claude.
 
 ### Writing a herd file by hand
 

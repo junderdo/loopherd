@@ -421,8 +421,36 @@ question as its own sends a second notification.
 A lead is member `lead-<herd>`, started by the shepherd with `loopherd lead
 <herd>` from the herd file's `[lead]` table, in a detached worktree of the
 same name. It runs the Shepherd section's task life for its own herd's
-workers. Its prompt file carries the project's facts. What differs from the
-shepherd:
+workers. Its prompt file carries the project's facts.
+
+**Task life, in brief**, for a lead that read only this section (the
+Shepherd section has the detail):
+
+1. **Feed:** `loopherd feed <herd> --dry-run`, then `loopherd feed <herd>`
+   if it reads right.
+2. **Watch:** keep `loopherd watch --timeout 3600` in the background (see
+   Heartbeat).
+3. **On wake:** read the watch's lines and the member's reports.
+4. **Verify** a `done` member's output with a read-only reviewer subagent
+   against the task's acceptance criteria, with a temp `XDG_STATE_HOME` and
+   `LOOPHERD_CONFIG_DIR`, building under `<scratch>/pr<n>/`. It writes its
+   findings to `<scratch>/pr<n>/review-<round>.md` and returns one line:
+   `pass <head sha>`, or `fail <head sha>: <b> blocking, <m> minor` plus
+   the file's path. Read the file only to forward findings or ask a merge
+   question. Members can't read your scratch dir: forward findings as a PR
+   comment (`gh pr comment <n> --body-file <file>`), then prompt the member
+   to read it. Keep the files until the PR merges or closes.
+5. **After merge** (`gh pr view <n> --json state`): close out the task in
+   the tracker, unblock dependents, run `loopherd feed <herd>` (it runs
+   `after_merge`; do by hand what its note says didn't run), then `git
+   worktree remove --force` each verify worktree under `<scratch>/pr<n>/`
+   and delete that directory.
+6. **Handoff:** write `$XDG_STATE_HOME/loopherd/handoffs/<your name>.md` in
+   the outline under Handoffs (`## State`, `## Next steps`, `## Gotchas`),
+   listing each `<scratch>/pr<n>/` still in use and naming each PR's
+   current review file.
+
+What differs from the shepherd:
 
 - **No human in the pane.** Nobody reads your screen or answers there. A
   decision that isn't yours goes out as `loopherd report --kind question
@@ -475,10 +503,16 @@ shepherd:
   report, `loopherd report --kind question '<question with the merge
   line>'`: double quotes run any `$(...)` in it and can leak a token into
   the report.
-- **Review rounds.** Verify as the shepherd does: only blocking and
-  in-scope findings go back to the worker, and each round after the first
-  checks the last round's findings and the diff since its head. After
-  round 3 start no other round; send `loopherd report --kind question`
+- **Review rounds.** A finding is blocking when it's inside the task's
+  acceptance criteria, or a correctness or safety bug the PR introduces;
+  give the reviewer this bar. Blocking and other in-scope findings go back
+  to the worker; out-of-scope ones become tasks. Each round after the
+  first checks only the last round's findings and the diff since its head:
+  hand the reviewer `review-<round - 1>.md` and `git diff <its head
+  sha>..<new head>`. A first review uses the reviewer as defined; later
+  rounds pass `model: sonnet` to the subagent. `<round>` counts per PR across handoffs; your
+  handoff's current review file carries it. After round 3 start no other
+  round; send `loopherd report --kind question`
   asking whether to merge as-is, narrow the scope, or change approach,
   with the PR link and the open blocking findings, then end your turn.
   With `new_cards` off, list out-of-scope findings in a question rather
@@ -509,11 +543,14 @@ shepherd:
   to re-arm whenever nothing holds `watch-<your name>.lock`, whether herdr
   resumed you or revive did. Re-read `loopherd status` and `loopherd reports
   --all --tail 40` (for a fuller history, `--since <time>` or plain
-  `--all`), then arm your watch again.
+  `--all`) and the skill's Lead section (`loopherd --skill --section
+  lead`, not the whole skill), then arm your watch again.
 - **On each wake** re-read `loopherd status` and `loopherd reports --all
   --tail 40` (for a fuller history, `--since <time>` or plain `--all`)
   before acting: auto-compaction drops detail, and your state lives in the
-  tracker, ledger and mailbox, not in your context.
+  tracker, ledger and mailbox, not in your context. After a compaction,
+  re-read the Lead section too (`loopherd --skill --section lead`, not the
+  whole skill).
 - **Your own handoff.** Past your limit, your Stop hook asks you for a
   handoff like any member's (see Handoffs): stop your own watch (TaskStop
   it, or kill it), write it, report `--kind handoff`, and end your turn. The shepherd restarts you. Restart your
