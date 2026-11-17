@@ -1,5 +1,6 @@
 //! `loopherd view`: the herd view, live.
 
+mod detail;
 mod mail;
 mod since;
 pub mod theme;
@@ -39,6 +40,8 @@ const SUBSCRIBED_POLL: Duration = Duration::from_secs(10);
 const TICK: Duration = Duration::from_millis(100);
 /// Wide enough for `for 59m`, so the columns don't jump when a time appears.
 const TIME_WIDTH: usize = 7;
+/// The narrowest terminal that shows the detail pane beside the list.
+const DETAIL_MIN_WIDTH: u16 = 100;
 /// Over a member's cells, the time's column left blank.
 const HEADINGS: [&str; 6] = ["NAME", "STATUS", "", "BRANCH", "WORKTREE", "PANE"];
 
@@ -281,7 +284,19 @@ impl App {
         ])
         .areas(inner);
         frame.render_widget(self.banner(banner.width), banner);
-        self.draw_panels(frame.buffer_mut(), body, now);
+        let (list, detail) = match frame.area().width >= DETAIL_MIN_WIDTH {
+            true => {
+                let [list, detail] =
+                    Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
+                        .areas(body);
+                (list, Some(detail))
+            }
+            false => (body, None),
+        };
+        self.draw_panels(frame.buffer_mut(), list, now);
+        if let Some(area) = detail {
+            self.draw_detail(frame.buffer_mut(), area, now);
+        }
         let newest = notes[notes.len() - notes_height..].to_vec();
         frame.render_widget(Paragraph::new(newest), notes_area);
         frame.render_widget(self.keys(), footer);
@@ -392,6 +407,32 @@ impl App {
                 out[(body.x + x, body.y + y)] = page[(x, scroll + y)].clone();
             }
         }
+    }
+
+    /// The selected agent's details in a box titled with its name.
+    fn draw_detail(&self, out: &mut Buffer, area: Rect, now: Instant) {
+        let targets = self.targets();
+        let (title, lines) = match targets.get(self.selected) {
+            Some(Target::Member(m)) => {
+                let time = time(self.since.of(&m.name, now));
+                let lines = detail::member(m, &self.mail, &time, self.theme);
+                (m.name.as_str(), lines)
+            }
+            Some(Target::Stray(s)) => ("stray", detail::stray(s)),
+            None => ("", vec![]),
+        };
+        let mut block = self.block();
+        if !title.is_empty() {
+            block = block.title(Span::styled(format!(" {title} "), self.theme.title()));
+        }
+        let inner = block.inner(area);
+        block.render(area, out);
+        let text = Rect {
+            x: inner.x + 1,
+            width: inner.width.saturating_sub(2),
+            ..inner
+        };
+        Paragraph::new(detail::fit(lines, text.width, text.height)).render(text, out);
     }
 
     fn keys(&self) -> Line<'static> {
@@ -2022,5 +2063,411 @@ mod tests {
         );
         quit.send(()).unwrap();
         assert_eq!(looping.join().unwrap().unwrap(), 0);
+    }
+
+    /// The pane's box: its rows from its top border down, cut to its columns.
+    fn pane(terminal: &Terminal<TestBackend>, title: &str) -> Vec<String> {
+        let lines = lines(terminal);
+        let top = format!("╭ {title} ");
+        let (y, x) = lines
+            .iter()
+            .enumerate()
+            .find_map(|(y, l)| l.find(&top).map(|x| (y, l[..x].chars().count())))
+            .unwrap_or_else(|| panic!("no pane {title:?} in {lines:#?}"));
+        lines[y..]
+            .iter()
+            .map(|l| l.chars().skip(x).collect::<String>())
+            .take_while(|l| !l.starts_with('╰'))
+            .collect()
+    }
+
+    /// The pane's text rows, borders trimmed.
+    fn pane_text(terminal: &Terminal<TestBackend>, title: &str) -> Vec<String> {
+        pane(terminal, title)[1..]
+            .iter()
+            .map(|l| l.trim_matches(['│', ' ']).to_string())
+            .collect()
+    }
+
+    #[test]
+    fn at_100_columns_the_body_splits_into_the_list_and_a_purple_pane_titled_with_the_selection() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let app = app(&herdr, &ledger, now);
+
+        let wide = render_at(&app, now, 100, 20);
+        let (x, y) = pos(&wide, "╭ b ");
+        // Inside the window's border, 98 columns split 54/44.
+        assert_eq!(x, 55, "{:#?}", lines(&wide));
+        assert_eq!(cell(&wide, (x, y)).fg, PURPLE);
+        assert!(lines(&wide)[y as usize].starts_with("│╭ prs "));
+
+        let narrow = render_at(&app, now, 99, 20);
+        assert!(
+            !lines(&narrow).iter().any(|l| l.contains("╭ b ")),
+            "{:#?}",
+            lines(&narrow)
+        );
+        assert!(
+            lines(&narrow)[2].ends_with("─╮│"),
+            "the list fills the width"
+        );
+    }
+
+    fn post_at(dir: &std::path::Path, name: &str, at: &str, body: Body) {
+        let at = humantime::parse_rfc3339(at).unwrap();
+        report::append(dir, name, &Entry::new(at, body)).unwrap();
+    }
+
+    /// A worktree on branch `feat/x`.
+    fn on_branch() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = std::process::Command::new("git")
+            .args(["init", "--quiet", "-b", "feat/x"])
+            .arg(dir.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        dir
+    }
+
+    fn paused(shells: u32, subagents: u32) -> Body {
+        Body::Stop(report::Stop {
+            background: report::Tally::Known(report::Background {
+                shells,
+                subagents,
+                other: 0,
+            }),
+            crons: report::Tally::Known(0),
+            error: None,
+            session: None,
+        })
+    }
+
+    #[test]
+    fn the_pane_shows_status_and_time_template_role_branch_worktree_stop_and_latest_report() {
+        let mut ledger = ledger();
+        let worktree = on_branch();
+        let b = ledger.0.get_mut("b").unwrap();
+        b.template = Some("feat".into());
+        b.worktree = Some(worktree.path().into());
+        let (herdr, t0) = (herdr(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(mail.path(), "b", "2026-11-16T10:00:00Z", done("older"));
+        post_at(mail.path(), "b", "2026-11-16T10:05:00Z", paused(1, 2));
+        post_at(
+            mail.path(),
+            "b",
+            "2026-11-16T10:06:00Z",
+            question("which base, main or next?"),
+        );
+        let mut app = app_with_mail(&herdr, &ledger, mail.path(), t0);
+        herdr.set_status("b", AgentStatus::Done);
+        refresh_with_mail(
+            &mut app,
+            &herdr,
+            &ledger,
+            mail.path(),
+            t0 + Duration::from_secs(2),
+        );
+
+        let terminal = render_at(&app, t0 + Duration::from_secs(182), 120, 24);
+
+        let shown = pane_text(&terminal, "b");
+        let worktree = format!("worktree {}", worktree.path().display());
+        assert_eq!(
+            shown[..9],
+            [
+                "done for 3m",
+                "feat · worker",
+                "branch feat/x",
+                worktree.as_str(),
+                "pane w1:tb/w1:pb",
+                "stop 2026-11-16 10:05 paused 1 shell, 2 subagents",
+                "",
+                "question 2026-11-16 10:06",
+                "which base, main or next?",
+            ],
+            "{shown:#?}"
+        );
+        assert_eq!(at(&terminal, "question 2026").fg, ORANGE);
+    }
+
+    #[test]
+    fn the_report_is_colored_by_its_kind() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let kinds = [
+            (done("ok"), "done", Color::Green),
+            (question("?"), "question", ORANGE),
+            (Body::Handoff { text: "h".into() }, "handoff", PURPLE),
+            (Body::Note { text: "n".into() }, "note", GREY_VIOLET),
+        ];
+        for (body, kind, color) in kinds {
+            let mail = quiet_mail(&ledger);
+            post(mail.path(), "b", body);
+            let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+            let terminal = render_at(&app, now, 120, 24);
+            let (x, y) = pos(&terminal, &format!("{kind} 20"));
+            assert!(x > 60, "{kind} is in the pane");
+            assert_eq!(cell(&terminal, (x, y)).fg, color, "{kind}");
+        }
+    }
+
+    #[test]
+    fn a_member_with_an_empty_mailbox_shows_no_stop_report_or_blank_lines() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        let shown = pane_text(&render_at(&app, now, 120, 24), "b");
+        assert_eq!(
+            shown[..4],
+            [
+                "blocked",
+                "worker",
+                "worktree /nonexistent/wt-b",
+                "pane w1:tb/w1:pb"
+            ],
+            "{shown:#?}"
+        );
+        assert!(shown[4..].iter().all(String::is_empty), "{shown:#?}");
+    }
+
+    #[test]
+    fn a_stop_says_finished_failed_or_what_is_unknown_without_claiming_a_pause() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let failed = Body::Stop(report::Stop {
+            error: Some("rate_limit".into()),
+            ..match stop() {
+                Body::Stop(s) => s,
+                _ => unreachable!(),
+            }
+        });
+        let unknown = Body::Stop(report::Stop {
+            background: report::Tally::Unknown(report::Unknown::Unknown),
+            ..match stop() {
+                Body::Stop(s) => s,
+                _ => unreachable!(),
+            }
+        });
+        for (body, line) in [
+            (stop(), "finished"),
+            (failed, "failed rate_limit"),
+            (unknown, "background unknown"),
+        ] {
+            let mail = quiet_mail(&ledger);
+            post_at(mail.path(), "b", "2026-11-16T10:05:00Z", body);
+            let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+            let shown = pane_text(&render_at(&app, now, 120, 24), "b");
+            assert!(
+                shown.contains(&format!("stop 2026-11-16 10:05 {line}")),
+                "{shown:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn urls_in_the_report_are_underlined_and_the_words_around_them_are_not() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post(
+            mail.path(),
+            "b",
+            done("opened https://github.com/o/r/pull/7 for review"),
+        );
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        let terminal = render_at(&app, now, 120, 24);
+        let (x, y) = pos(&terminal, "https://github.com/o/r/pull/7");
+        let underlined = |x| {
+            cell(&terminal, (x, y))
+                .modifier
+                .contains(Modifier::UNDERLINED)
+        };
+        assert!((x..x + 29).all(underlined));
+        assert!(!underlined(x - 2), "opened");
+        assert!(!underlined(x + 29), "the space after");
+        assert!(!underlined(x + 30), "for");
+    }
+
+    #[test]
+    fn a_long_report_wraps_at_words_and_is_cut_with_an_ellipsis_at_the_pane_bottom() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        let words = "lorem ipsum dolor sit amet ".repeat(40);
+        post(mail.path(), "b", Body::Note { text: words });
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        let shown = pane_text(&render_at(&app, now, 120, 16), "b");
+        let text: Vec<_> = shown
+            .iter()
+            .skip_while(|l| !l.starts_with("note "))
+            .skip(1)
+            .collect();
+        assert!(text.len() > 2, "{shown:#?}");
+        for line in &text[..text.len() - 1] {
+            assert!(
+                line.ends_with(['m', 't', 'r', 'l']),
+                "breaks between words: {line:?}"
+            );
+        }
+        assert!(text.last().unwrap().ends_with('…'), "{shown:#?}");
+    }
+
+    #[test]
+    fn a_selected_stray_shows_its_pane_tab_cwd_and_title() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mut app = app(&herdr, &ledger, now);
+        press(&mut app, &[KeyCode::Char('s')], &herdr, &ledger);
+        for _ in 0..4 {
+            assert!(app.press(KeyCode::Down, now).is_none());
+        }
+        let shown = pane_text(&render_at(&app, now, 120, 24), "stray");
+        assert_eq!(
+            shown[..4],
+            [
+                "pane w2:p7",
+                "tab w2:t7",
+                "cwd /src/elsewhere",
+                "title poking around"
+            ],
+        );
+        assert!(shown[4..].iter().all(String::is_empty), "{shown:#?}");
+    }
+
+    #[test]
+    fn moving_the_selection_redraws_the_pane_without_asking_herdr() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post(mail.path(), "a", done("a's work"));
+        let mut app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        assert!(pane_text(&render_at(&app, now, 120, 24), "b")[0] == "blocked");
+
+        assert!(app.press(KeyCode::Down, now).is_none(), "no read, no focus");
+
+        let shown = pane_text(&render_at(&app, now, 120, 24), "a");
+        assert_eq!(shown[0], "working");
+        assert!(shown.contains(&"a's work".to_string()), "{shown:#?}");
+    }
+
+    #[test]
+    fn a_report_the_pane_has_shown_is_still_printed_by_a_later_reports() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post(mail.path(), "b", done("shipped it"));
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        let shown = pane_text(&render_at(&app, now, 120, 24), "b");
+        assert!(shown.contains(&"shipped it".to_string()), "{shown:#?}");
+        let filter = report::Filter {
+            names: &[],
+            herd: None,
+            all: false,
+        };
+        let printed = report::reports(&ledger, mail.path(), &filter).unwrap();
+        assert!(
+            printed.lines.iter().any(|l| l.contains("shipped it")),
+            "{:#?}",
+            printed.lines
+        );
+    }
+
+    #[test]
+    fn a_url_in_brackets_is_underlined_without_its_closing_punctuation() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post(mail.path(), "b", done("see (https://x.y/z)."));
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        let terminal = render_at(&app, now, 120, 24);
+        let (x, y) = pos(&terminal, "https://x.y/z");
+        let underlined = |x| {
+            cell(&terminal, (x, y))
+                .modifier
+                .contains(Modifier::UNDERLINED)
+        };
+        assert!((x..x + 13).all(underlined));
+        assert!(!underlined(x - 1), "(");
+        assert!(!underlined(x + 13), ")");
+    }
+
+    #[test]
+    fn tabs_in_a_report_draw_as_spaces() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post(mail.path(), "b", done("key\tvalue"));
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        let shown = pane_text(&render_at(&app, now, 120, 24), "b");
+        assert!(shown.contains(&"key    value".to_string()), "{shown:#?}");
+    }
+
+    #[test]
+    fn before_anything_is_selected_the_pane_is_an_empty_box() {
+        let app = App::new(Options::default(), truecolor());
+        let now = Instant::now();
+        let terminal = render_at(&app, now, 120, 20);
+        assert!(
+            lines(&terminal)[2].contains("╭─"),
+            "{:#?}",
+            lines(&terminal)
+        );
+    }
+
+    #[test]
+    fn a_selected_retired_member_shows_its_report_and_stop() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(mail.path(), "done-1", "2026-11-16T10:05:00Z", stop());
+        post_at(
+            mail.path(),
+            "done-1",
+            "2026-11-16T10:06:00Z",
+            done("merged #120"),
+        );
+        let mut app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        let request = app.press(KeyCode::Char('a'), now).unwrap();
+        app.apply(serve(request, &herdr, &ledger, &dirs(mail.path())), now)
+            .unwrap();
+        for _ in 0..4 {
+            app.press(KeyCode::Down, now);
+        }
+        let shown = pane_text(&render_at(&app, now, 120, 24), "done-1");
+        assert!(
+            shown.contains(&"stop 2026-11-16 10:05 finished".to_string()),
+            "{shown:#?}"
+        );
+        assert!(shown.contains(&"merged #120".to_string()), "{shown:#?}");
+    }
+
+    #[test]
+    fn a_url_keeps_a_closing_paren_it_opened() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post(mail.path(), "b", done("(see https://w.org/Foo_(bar))"));
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        let terminal = render_at(&app, now, 120, 24);
+        let (x, y) = pos(&terminal, "https://w.org/Foo_(bar)");
+        let underlined = |x| {
+            cell(&terminal, (x, y))
+                .modifier
+                .contains(Modifier::UNDERLINED)
+        };
+        assert!((x..x + 23).all(underlined));
+        assert!(!underlined(x + 23), "the outer )");
+    }
+
+    #[test]
+    fn tabs_draw_as_spaces_on_every_pane_line() {
+        let (mut herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mut stray = agent(None, "w2:p8", AgentStatus::Idle);
+        stray.title = Some("build\tlogs".into());
+        herdr = herdr.with_raw_agent(stray);
+        let mut app = app(&herdr, &ledger, now);
+        press(&mut app, &[KeyCode::Char('s')], &herdr, &ledger);
+        for _ in 0..5 {
+            app.press(KeyCode::Down, now);
+        }
+        let shown = pane_text(&render_at(&app, now, 120, 24), "stray");
+        assert!(
+            shown.contains(&"title build    logs".to_string()),
+            "{shown:#?}"
+        );
     }
 }

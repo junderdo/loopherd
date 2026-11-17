@@ -3,6 +3,7 @@
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::herdr::AgentStatus;
+use crate::report::Kind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Depth {
@@ -93,6 +94,17 @@ impl Theme {
             true => self.fg(ORANGE),
             false => Style::new().add_modifier(Modifier::DIM),
         }
+    }
+
+    /// A report's kind: questions orange, done green, handoffs purple, notes grey.
+    pub fn report(&self, kind: Kind) -> Style {
+        let style = match kind {
+            Kind::Question => self.fg(ORANGE),
+            Kind::Done => self.plain_fg(Color::Green),
+            Kind::Handoff => self.fg(PURPLE),
+            Kind::Note => self.fg(GREY_VIOLET),
+        };
+        style.add_modifier(Modifier::BOLD)
     }
 
     /// The glyph leading a member's row; `frame` picks the spinner's frame.
