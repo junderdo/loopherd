@@ -478,8 +478,10 @@ fn last_chars(word: &str, count: usize) -> &str {
 /// How each of `words` is shown, by the key and value rules.
 fn redacted(words: &[&str]) -> Vec<Shown> {
     let mut next = Next::Free;
+    let mut run_on: Option<RunOn> = None;
     let mut shown_words = Vec::with_capacity(words.len());
     for &word in words {
+        let mut starts = None;
         let shown;
         (shown, next) = match next {
             Next::Clause => match clause_end(word) {
@@ -497,15 +499,56 @@ fn redacted(words: &[&str]) -> Vec<Shown> {
                 (Shown::redacted(), Next::after_value(word))
             }
             Next::Free | Next::Key(_) | Next::MaybeValue => match carried_value(word) {
-                Some((true, value)) => clause_start(value),
+                Some((true, value)) => {
+                    starts = RunOn::after_pair(word, value);
+                    clause_start(value)
+                }
                 Some((false, value)) => (Shown::redacted(), value_then(value)),
                 None if token_shaped(word) => (Shown::redacted(), key_named_by(word)),
                 None => (Shown::Word, key_named_by(word)),
             },
         };
+        let shown = match (starts, run_on, shown) {
+            (Some(_), _, _) | (None, Some(_), Shown::Word) => Shown::redacted(),
+            _ => shown,
+        };
+        run_on = starts.or_else(|| run_on.and_then(|run| run.after(word)));
         shown_words.push(shown);
     }
     shown_words
+}
+
+/// Words hidden on top of what the key and value rules hide, after a strong `key=value`
+/// word that opens a quote (up to its close) or ends in `;` (the next word). Only adding
+/// hiding, never changing [`Next`], keeps every word those rules hide hidden.
+#[derive(Clone, Copy)]
+enum RunOn {
+    Quote(char),
+    Pair,
+}
+
+impl RunOn {
+    fn after_pair(word: &str, value: &str) -> Option<RunOn> {
+        if value.starts_with(OPENERS) {
+            return None;
+        }
+        match Next::after_value(word) {
+            Next::Closing(closer) => Some(RunOn::Quote(closer)),
+            _ if value.ends_with(';') => Some(RunOn::Pair),
+            _ => None,
+        }
+    }
+
+    /// What is left of the run once `word`, which it hides, is read.
+    fn after(self, word: &str) -> Option<RunOn> {
+        match self {
+            RunOn::Quote(closer) => match Next::closed_by(word, closer) {
+                Next::Free => None,
+                _ => Some(self),
+            },
+            RunOn::Pair => None,
+        }
+    }
 }
 
 /// A word as [`summary`] shows it: whole, as `[redacted]` followed by its last `n`
@@ -1511,6 +1554,30 @@ mod tests {
             (
                 "TOKEN Bearer abc123def456 then merge?",
                 "TOKEN [redacted] [redacted] then merge?",
+            ),
+        ] {
+            assert_eq!(text_sent(question), text, "{question}");
+        }
+    }
+
+    #[test]
+    fn a_key_value_word_that_opens_a_quote_or_ends_in_a_semicolon_hides_past_its_clause() {
+        for (question, text) in [
+            (
+                r#"Set "x_token=abc123, correct horse" then merge?"#,
+                "Set [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                r#"Set "password=abc, def123 ghi456" then merge?"#,
+                "Set [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                "Set password=hunter2; csrf=s3cr3tval then merge?",
+                "Set [redacted] [redacted] then merge?",
+            ),
+            (
+                r#"Set "password=abc123" then merge?"#,
+                r#"Set [redacted]" then merge?"#,
             ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
