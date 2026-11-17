@@ -6,10 +6,11 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 
 use crate::herdr::{AgentStatus, Herdr, WaitOutcome};
-use crate::subagent_view::ensure_main_view;
+use crate::subagent_view::{TEXT_REACHES_SUBAGENT, ensure_main_view};
 
 /// Sends `text` to `name` after checking its pane shows the main
-/// conversation, then waits up to `timeout` for it to go `working`.
+/// conversation, then waits up to `timeout` for it to go `working`. Once the
+/// text is sent it returns `Ok`, so a caller never resends it.
 pub fn tell(herdr: &dyn Herdr, name: &str, text: &str, timeout: Duration) -> Result<String> {
     let agent = herdr
         .agents()?
@@ -23,15 +24,20 @@ pub fn tell(herdr: &dyn Herdr, name: &str, text: &str, timeout: Duration) -> Res
             agent.pane_id
         );
     }
-    ensure_main_view(herdr, name, &agent.pane_id, &retry)?;
+    ensure_main_view(herdr, name, &agent.pane_id, TEXT_REACHES_SUBAGENT, &retry)?;
     herdr.prompt(name, text)?;
-    Ok(match herdr.wait(name, &[AgentStatus::Working], timeout)? {
-        WaitOutcome::Reached => format!("told {name}; it's working"),
-        WaitOutcome::TimedOut => format!(
-            "told {name}, but it wasn't working after {}; check its pane {}",
+    let pane = &agent.pane_id;
+    Ok(match herdr.wait(name, &[AgentStatus::Working], timeout) {
+        Ok(WaitOutcome::Reached) => format!("told {name}; it's working"),
+        Ok(WaitOutcome::TimedOut) => format!(
+            "told {name}, but it wasn't working after {}; check its pane {pane}",
             humantime::format_duration(timeout),
-            agent.pane_id
         ),
+        Err(error) => {
+            format!(
+                "told {name}, but couldn't check it went working ({error:#}); check its pane {pane}"
+            )
+        }
     })
 }
 
@@ -80,6 +86,19 @@ mod tests {
         assert_eq!(
             out,
             "told lh-1, but it wasn't working after 10s; check its pane w9:p9"
+        );
+        assert_eq!(herdr.prompts().len(), 1);
+    }
+
+    #[test]
+    fn a_wait_that_errors_after_the_send_still_says_the_text_went() {
+        let mut herdr = FakeHerdr::new(&[]).with_agent("lh-1");
+        herdr.fail_wait = true;
+        herdr.set_screen(PANE, MAIN_VIEW);
+        let out = tell(&herdr, "lh-1", "rebase onto main", WAIT).unwrap();
+        assert_eq!(
+            out,
+            "told lh-1, but couldn't check it went working (wait refused); check its pane w9:p9"
         );
         assert_eq!(herdr.prompts().len(), 1);
     }
