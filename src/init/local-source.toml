@@ -2,7 +2,8 @@
 # .scratch/<feature>/issues/<NN>-<slug>.md whose Status: line has
 # @READY_FOR_AGENT@ and none of blocked, @NEEDS_INFO@, @READY_FOR_HUMAN@,
 # resolved, closed or done, and whose Blocked by: line names only resolved
-# issues of its feature, or of the feature an issue path names. The id is <feature>-<NN>; a feature that isn't
+# issues of its feature, or of the feature the issue path before each number
+# names. The id is <feature>-<NN>; a feature that isn't
 # lowercase letters, digits and - or doesn't fit the member name is cut and
 # takes a 3-character hash, as <cut>_<hash>-<NN>, rehashed when another
 # feature holds it. The Status: words act as labels: types maps one to the branch
@@ -25,7 +26,7 @@ done | awk -v room=@ID_ROOM@ '
   function has(f, label) { return index(labels[f], " " label " ") > 0 }
   function closed(f) { return has(f, "resolved") || has(f, "closed") || has(f, "done") }
   function value(line) { sub(/^[^:]*:/, "", line); gsub(/[*`]/, " ", line); return line }
-  function unblocked(f,    items, k, i, item, said, words, w, j, n, of, b, found) {
+  function unblocked(f,    items, k, i, item, said, words, w, j, n, of, b, found, dir) {
     if (!(f in blockers) || blockers[f] ~ /^[ \t,]*(none|$)/) return 1
     k = split(blockers[f], items, /[,;]/)
     for (i = 1; i <= k; i++) {
@@ -39,11 +40,23 @@ done | awk -v room=@ID_ROOM@ '
       gsub(/\([^)]*\)/, " ", item)
       sub(/:.*/, "", item)
       of = feature[f]
-      if (match(item, /[^ \t\/]+\/issues\//)) of = features[substr(item, RSTART, RLENGTH - 8)]
-      gsub(/[^ \t]*issues\//, "", item)
+      # Each path becomes one \001<dir> word naming the feature of the numbers
+      # after it. Only a bare ./issues/ or ../issues/ names the feature of the
+      # issue itself; a longer path ending in . or .. names none.
+      while (match(item, /[^ \t]*\/issues\//)) {
+        dir = substr(item, RSTART, RLENGTH - 8)
+        if (dir !~ /^\.\.?$/ && sub(/.*\//, "", dir) && dir ~ /^\.\.?$/) dir = ""
+        item = substr(item, 1, RSTART - 1) " \001" dir " " substr(item, RSTART + RLENGTH)
+      }
+      gsub(/(^|[ \t])issues\//, " ", item)
       w = split(item, words, /[ \t\/]+/)
       found = 0
       for (j = 1; j <= w; j++) {
+        if (words[j] ~ /^\001/) {
+          dir = substr(words[j], 2)
+          of = dir ~ /^\.\.?$/ ? feature[f] : features[dir]
+          continue
+        }
         if (words[j] !~ /^#?[0-9]/) {
           if (found && words[j] !~ /^(and|&|\+)?$/) break
           continue

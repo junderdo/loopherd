@@ -1111,7 +1111,7 @@ impl Recorded {
             github: issue
                 .and_then(|t| t.get("merged"))
                 .and_then(toml::Value::as_str)
-                .and_then(|merged| merged.split_once("--repo "))
+                .and_then(|merged| merged.split_once(" gh pr list --repo "))
                 .and_then(|(_, rest)| rest.split_whitespace().next())
                 .map(String::from),
         })
