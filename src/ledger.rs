@@ -64,6 +64,10 @@ pub struct AgentRecord {
     /// How far `feed` has got with its herd's `after_merge` for this member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_merge: Option<AfterMerge>,
+    /// Earlier runs of this name, oldest first: each released record that a
+    /// new one replaced, kept for `stats`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub earlier: Vec<AgentRecord>,
 }
 
 /// A member's `after_merge`, once a feed has taken it on; it never runs twice.
@@ -98,7 +102,8 @@ pub struct Process {
 
 pub trait Ledger {
     fn entries(&self) -> Result<BTreeMap<String, AgentRecord>>;
-    /// Inserts or replaces the entry for `record.name`.
+    /// Inserts or replaces the entry for `record.name`; a released entry it
+    /// replaces moves into the new one's `earlier`.
     fn record(&mut self, record: AgentRecord) -> Result<()>;
     /// Applies `change` to the current entry for `name`, read fresh under the
     /// ledger lock, so a write made since the caller's `entries` survives.
@@ -119,6 +124,20 @@ pub trait Ledger {
     ) -> Result<Vec<String>>;
     /// Appends a `start` boundary to `name`'s mailbox.
     fn started(&mut self, name: &str, at: SystemTime) -> Result<()>;
+}
+
+fn insert(entries: &mut BTreeMap<String, AgentRecord>, mut record: AgentRecord) {
+    if let Some(mut old) = entries.remove(&record.name) {
+        let mut earlier = std::mem::take(&mut old.earlier);
+        if old.released_at.is_some() {
+            earlier.push(old);
+        }
+        // A caller's copy of the entry already carries them.
+        if record.earlier.is_empty() {
+            record.earlier = earlier;
+        }
+    }
+    entries.insert(record.name.clone(), record);
 }
 
 /// The names of `herd`'s entries that are not retired.
@@ -245,7 +264,7 @@ impl Ledger for FileLedger {
     fn record(&mut self, record: AgentRecord) -> Result<()> {
         let _lock = self.lock()?;
         let mut entries = self.load()?;
-        entries.insert(record.name.clone(), record);
+        insert(&mut entries, record);
         self.save(&entries)
     }
 
@@ -296,7 +315,7 @@ impl Ledger for MemLedger {
     }
 
     fn record(&mut self, record: AgentRecord) -> Result<()> {
-        self.0.insert(record.name.clone(), record);
+        insert(&mut self.0, record);
         Ok(())
     }
 
@@ -426,6 +445,7 @@ mod tests {
             process: None,
             role: None,
             after_merge: None,
+            earlier: vec![],
         }
     }
 
@@ -450,6 +470,49 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries["a"], record("a", true));
         assert_eq!(entries["b"], record("b", false));
+    }
+
+    #[test]
+    fn recording_over_a_released_entry_keeps_it_as_an_earlier_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = FileLedger::new(dir.path().join("ledger.json"));
+        let first = AgentRecord {
+            retired: true,
+            released_at: Some("2026-11-02T00:00:00Z".into()),
+            ..record("a", true)
+        };
+        ledger.record(first.clone()).unwrap();
+        let second = AgentRecord {
+            retired: true,
+            released_at: Some("2026-11-04T00:00:00Z".into()),
+            created: "2026-11-03T00:00:00Z".into(),
+            ..record("a", true)
+        };
+        ledger.record(second.clone()).unwrap();
+
+        ledger.record(record("a", false)).unwrap();
+
+        let entry = &ledger.entries().unwrap()["a"];
+        assert_eq!(entry.earlier, [first, second]);
+        assert!(!entry.retired);
+    }
+
+    #[test]
+    fn recording_over_an_unreleased_entry_replaces_it_and_keeps_its_earlier_runs() {
+        let mut ledger = MemLedger::default();
+        let earlier = AgentRecord {
+            retired: true,
+            released_at: Some("2026-11-02T00:00:00Z".into()),
+            ..record("a", true)
+        };
+        ledger.record(earlier.clone()).unwrap();
+        ledger.record(record("a", false)).unwrap();
+
+        ledger.record(record("a", true)).unwrap();
+
+        let entry = &ledger.entries().unwrap()["a"];
+        assert_eq!(entry.earlier, [earlier]);
+        assert!(entry.prompt_sent);
     }
 
     #[test]
@@ -626,6 +689,7 @@ mod tests {
         let lead = AgentRecord {
             role: Some(Role::Lead),
             after_merge: None,
+            earlier: vec![],
             ..record("lead-h", true)
         };
         FileLedger::new(path.clone()).record(lead).unwrap();

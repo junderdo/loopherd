@@ -397,6 +397,36 @@ fn a_reused_name_counts_only_reports_from_its_own_life() {
 }
 
 #[test]
+fn a_released_and_refed_name_gets_a_row_per_run_and_since_filters_each() {
+    let state = tempfile::tempdir().unwrap();
+    let mut current = Member::new("lh-1", "2026-11-05T00:00:00Z").json();
+    let mut earlier = Member::new("lh-1", "2026-11-01T00:00:00Z")
+        .retired("2026-11-01T02:00:00Z")
+        .json();
+    earlier["released_at"] = "2026-11-04T00:00:00Z".into();
+    current["earlier"] = serde_json::json!([earlier]);
+    fs::create_dir_all(state.path().join("loopherd")).unwrap();
+    fs::write(
+        state.path().join("loopherd/ledger.json"),
+        serde_json::json!({ "lh-1": current }).to_string(),
+    )
+    .unwrap();
+
+    let all = json(state.path(), &[]);
+    let since = json(state.path(), &["--since", "2026-11-03"]);
+
+    assert_eq!(names(&all, "retired"), ["lh-1"]);
+    assert_eq!(all["herds"][0]["retired"][0]["total_secs"], 2 * 3600);
+    assert_eq!(names(&all, "open"), ["lh-1"]);
+    assert_eq!(
+        all["herds"][0]["open"][0]["started"],
+        "2026-11-05T00:00:00Z"
+    );
+    assert!(names(&since, "retired").is_empty());
+    assert_eq!(names(&since, "open"), ["lh-1"]);
+}
+
+#[test]
 fn a_done_in_the_second_of_retirement_counts() {
     let state = tempfile::tempdir().unwrap();
     write_ledger(

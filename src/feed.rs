@@ -989,6 +989,7 @@ mod tests {
             process: None,
             role: None,
             after_merge: None,
+            earlier: vec![],
         }
     }
 
@@ -1074,6 +1075,35 @@ mod tests {
         let fresh = &ledger.0["zpr-1"];
         assert!(!fresh.retired);
         assert_eq!(fresh.released_at, None);
+    }
+
+    #[test]
+    fn stats_keeps_a_released_members_earlier_run_beside_its_new_one() {
+        let setup = Setup::new("printf '1\\n'", 5);
+        let herdr = herdr();
+        let mut released = member("zpr-1", Some("prs"), true);
+        released.retired_at = Some("2026-11-02T00:00:00Z".into());
+        released.released_at = Some("2026-11-16T12:00:00Z".into());
+        let mut ledger = ledger(&[released]);
+
+        setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        let reports = tempfile::tempdir().unwrap();
+        let query = crate::stats::Query {
+            herd: None,
+            since: None,
+            now: SystemTime::now(),
+        };
+        let (herds, _) = crate::stats::stats(&ledger, reports.path(), &query).unwrap();
+        let earlier: Vec<_> = herds[0]
+            .retired
+            .iter()
+            .map(|r| (r.name.as_str(), r.started.as_str(), r.total_secs))
+            .collect();
+        assert_eq!(earlier, [("zpr-1", "2026-11-01T00:00:00Z", Some(86_400))]);
+        let open: Vec<_> = herds[0].open.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(open, ["zpr-1"]);
+        assert_ne!(herds[0].open[0].started, "2026-11-01T00:00:00Z");
     }
 
     #[test]
