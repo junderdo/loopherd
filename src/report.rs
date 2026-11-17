@@ -303,7 +303,7 @@ fn reports_with(
     }
     let ((mut found, warnings), pending) = match filter.all {
         true => (
-            read_all(dir, &names)?,
+            read_all(dir, &names),
             Pending::nothing(Cursor::Reports, dir),
         ),
         false => Cursor::Reports.read(dir, &names, locked, |e| e.report().is_some())?,
@@ -334,9 +334,10 @@ pub fn unread_stops(dir: &Path, names: &[String]) -> Result<(Vec<Mailbox>, Pendi
         .filter(|n| names.contains(n))
         .collect();
     let mut stops = vec![];
-    let pending = Cursor::Watch.peek(dir, &names, Locked::Take, |name, read, unread| {
+    // `reports` warns about bad lines and unreadable mailboxes; its cursor
+    // reads the same bytes.
+    let (pending, _) = Cursor::Watch.peek(dir, &names, Locked::Take, |name, read, unread| {
         let mut entries = vec![];
-        // `reports` warns about bad lines; its cursor reads the same bytes.
         parse(dir, name, unread, &mut entries, &mut vec![]);
         if !entries.iter().any(|(_, e)| matches!(e.body, Body::Stop(_))) {
             return;
@@ -391,7 +392,7 @@ pub fn since_handoff(dir: &Path, name: &str) -> Result<SinceHandoff> {
 /// Every entry in `name`'s mailbox in file order, and a warning per bad line.
 /// Reads no cursor and takes no lock.
 pub fn history(dir: &Path, name: &str) -> Result<(Vec<Entry>, Vec<String>)> {
-    if !dir.join(format!("{name}.jsonl")).is_file() {
+    if !dir.join(format!("{name}.jsonl")).exists() {
         return Ok((vec![], vec![]));
     }
     let (bytes, end) = complete_lines(dir, name)?;
@@ -457,23 +458,25 @@ pub struct Mailbox {
 
 type Found = (Vec<(String, Entry)>, Vec<String>);
 
-/// Every entry of `names`, by time.
-fn read_all(dir: &Path, names: &[String]) -> Result<Found> {
+/// Every entry of `names`, by time; an unreadable mailbox is a warning.
+fn read_all(dir: &Path, names: &[String]) -> Found {
     let mut found = vec![];
     let mut warnings = vec![];
     for name in names {
-        let (bytes, end) = complete_lines(dir, name)?;
-        parse(dir, name, &bytes[..end], &mut found, &mut warnings);
+        match complete_lines(dir, name) {
+            Ok((bytes, end)) => parse(dir, name, &bytes[..end], &mut found, &mut warnings),
+            Err(e) => warnings.push(format!("{e:#}")),
+        }
     }
     found.sort_by(|(_, a), (_, b)| a.at.cmp(&b.at));
-    Ok((found, warnings))
+    (found, warnings)
 }
 
 /// The mailbox's bytes and where its last complete line ends; a line still
 /// being appended has no newline yet.
 fn complete_lines(dir: &Path, name: &str) -> Result<(Vec<u8>, usize)> {
     let path = dir.join(format!("{name}.jsonl"));
-    let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let bytes = fs::read(&path).with_context(|| format!("could not read {}", path.display()))?;
     let end = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
     Ok((bytes, end))
 }
@@ -620,26 +623,29 @@ impl Cursor {
         keep: impl Fn(&Entry) -> bool,
     ) -> Result<(Found, Pending)> {
         let mut found = vec![];
-        let mut warnings = vec![];
-        let pending = self.peek(dir, names, locked, |name, _, unread| {
-            parse(dir, name, unread, &mut found, &mut warnings)
+        let mut bad_lines = vec![];
+        let (pending, mut warnings) = self.peek(dir, names, locked, |name, _, unread| {
+            parse(dir, name, unread, &mut found, &mut bad_lines)
         })?;
+        warnings.extend(bad_lines);
         found.retain(|(_, e)| keep(e));
         Ok(((found, warnings), pending))
     }
 
     /// Calls `visit` with each of `names`' complete lines split at the
-    /// cursor, already read then unread; returns the move past them.
+    /// cursor, already read then unread; returns the move past them, and a
+    /// warning per unreadable mailbox, whose cursor stays put.
     fn peek(
         self,
         dir: &Path,
         names: &[String],
         locked: Locked,
         mut visit: impl FnMut(&str, &[u8], &[u8]),
-    ) -> Result<Pending> {
+    ) -> Result<(Pending, Vec<String>)> {
         let mut pending = Pending::nothing(self, dir);
+        let mut unreadable = vec![];
         if names.is_empty() {
-            return Ok(pending);
+            return Ok((pending, unreadable));
         }
         let offsets = match locked {
             Locked::Held => self.load(dir)?,
@@ -649,14 +655,20 @@ impl Cursor {
             }
         };
         for name in names {
-            let (bytes, end) = complete_lines(dir, name)?;
+            let (bytes, end) = match complete_lines(dir, name) {
+                Ok(read) => read,
+                Err(e) => {
+                    unreadable.push(format!("{e:#}"));
+                    continue;
+                }
+            };
             let from = offsets.read_to(name);
             // Past the end: the file was truncated or replaced, so all of it is new.
             let start = if from > end { 0 } else { from };
             visit(name, &bytes[..start], &bytes[start..end]);
             pending.moves.push((name.clone(), from, end));
         }
-        Ok(pending)
+        Ok((pending, unreadable))
     }
 
     /// Held across load and save, so concurrent readers never move it back.

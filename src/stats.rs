@@ -32,8 +32,8 @@ pub struct Retired {
     pub template: Option<String>,
     pub started: String,
     pub first_done_secs: Option<u64>,
-    /// `done` reports: one per review round.
-    pub rounds: usize,
+    /// `done` reports: one per review round; `None` when its mailbox is unreadable.
+    pub rounds: Option<usize>,
     /// From the last `done` to retirement: waiting on merge.
     pub merge_wait_secs: Option<u64>,
     pub total_secs: Option<u64>,
@@ -101,23 +101,36 @@ pub fn stats(
                 });
                 continue;
             }
-            let (entries, bad) = report::history(reports_dir, &record.name)?;
-            warnings.extend(bad);
+            let entries = match report::history(reports_dir, &record.name) {
+                Ok((entries, bad)) => {
+                    warnings.extend(bad);
+                    Some(entries)
+                }
+                Err(e) => {
+                    warnings.push(format!("{e:#}"));
+                    None
+                }
+            };
             let retired_at = record.retired_at.as_deref().and_then(parse_time);
             // A reused name's mailbox still holds its earlier life's entries.
-            let dones: Vec<SystemTime> = entries
-                .iter()
-                .filter(|e| matches!(e.body, Body::Done { .. }))
-                .filter_map(|e| parse_time(&e.at))
-                .filter(|at| started.is_none_or(|s| *at >= s))
-                // retired_at has whole seconds; mailbox times have nanos.
-                .filter(|at| retired_at.is_none_or(|r| *at < r + Duration::from_secs(1)))
-                .collect();
+            let dones: Option<Vec<SystemTime>> = entries.map(|entries| {
+                entries
+                    .iter()
+                    .filter(|e| matches!(e.body, Body::Done { .. }))
+                    .filter_map(|e| parse_time(&e.at))
+                    .filter(|at| started.is_none_or(|s| *at >= s))
+                    // retired_at has whole seconds; mailbox times have nanos.
+                    .filter(|at| retired_at.is_none_or(|r| *at < r + Duration::from_secs(1)))
+                    .collect()
+            });
+            let dones = dones.as_deref();
             retired.push(Retired {
-                first_done_secs: started.zip(dones.first()).map(|(s, d)| secs_between(s, *d)),
-                rounds: dones.len(),
+                first_done_secs: started
+                    .zip(dones.and_then(<[_]>::first))
+                    .map(|(s, d)| secs_between(s, *d)),
+                rounds: dones.map(<[_]>::len),
                 merge_wait_secs: dones
-                    .last()
+                    .and_then(<[_]>::last)
                     .zip(retired_at)
                     .map(|(d, r)| secs_between(*d, r)),
                 total_secs: started.zip(retired_at).map(|(s, r)| secs_between(s, r)),
@@ -147,8 +160,8 @@ fn summarize(retired: &[Retired]) -> Summary {
     };
     let mut rounds: Vec<u64> = retired
         .iter()
-        .filter(|r| r.rounds > 0)
-        .map(|r| r.rounds as u64)
+        .filter_map(|r| r.rounds.filter(|&n| n > 0))
+        .map(|n| n as u64)
         .collect();
     rounds.sort_unstable();
     Summary {
@@ -274,7 +287,7 @@ pub fn render(herds: &[Herd]) -> String {
                     template(&r.template),
                     minute(&r.started),
                     duration(r.first_done_secs),
-                    r.rounds.to_string(),
+                    r.rounds.map_or("-".to_string(), |n| n.to_string()),
                     duration(r.merge_wait_secs),
                     duration(r.total_secs),
                 ]

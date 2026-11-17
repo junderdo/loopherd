@@ -160,6 +160,8 @@ pub fn watch(
     let mut gone = Gone::default();
     let mut code = 0;
     let mut own_questions_seen = HashSet::new();
+    // An unreadable mailbox warns every poll until it's readable; say it once.
+    let mut warned: HashSet<String> = HashSet::new();
     loop {
         let marks = notify::BlockMarks::read(dir)?;
         let read = status::read_statuses(
@@ -204,9 +206,10 @@ pub fn watch(
                     all: false,
                 },
             )?;
-            read.warnings
-                .iter()
-                .for_each(|w| warn(&format!("warning: {w}")));
+            for w in read.warnings.iter().filter(|w| !warned.contains(*w)) {
+                warn(&format!("warning: {w}"));
+            }
+            warned = read.warnings.into_iter().collect();
             lines.extend(read.lines);
             waiting.extend(read.entries.into_iter().filter_map(|(member, entry)| {
                 let Body::Question { text } = entry.body else {
@@ -1123,6 +1126,41 @@ mod tests {
         );
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("herdr unreachable"), "{warnings:?}");
+    }
+
+    #[test]
+    fn an_unreadable_mailbox_warns_once_and_another_members_report_still_wakes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![
+            member("lh-1", "w9:p1", None),
+            member("lh-2", "w9:p2", None),
+        ]);
+        let herdr = FakeHerdr::new(&[]);
+        let unreadable = dir.path().join("lh-1.jsonl");
+        fs::create_dir(&unreadable).unwrap();
+        let mut clock = steps(|poll| match poll {
+            1 | 2 => {}
+            3 => send(&ledger, dir.path(), "lh-2", Kind::Question, "which DB?"),
+            _ => panic!("slept past the wake"),
+        });
+        let mut warnings = vec![];
+
+        let woke = watch(&herdr, &ledger, dir.path(), &EVERY, &mut clock, &mut |w| {
+            warnings.push(w.to_string())
+        })
+        .unwrap();
+
+        assert_eq!(
+            printed(woke.unwrap()),
+            ["lh-2 question 2026-11-01 09:00 UTC which DB?"]
+        );
+        assert_eq!(
+            warnings,
+            [format!(
+                "warning: could not read {}: Is a directory (os error 21)",
+                unreadable.display()
+            )]
+        );
     }
 
     #[test]

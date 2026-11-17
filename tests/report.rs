@@ -513,3 +513,88 @@ fn an_unparseable_herd_file_falls_back_to_the_built_in_limit_and_notes_it() {
         "{notes:?}"
     );
 }
+
+#[test]
+fn an_unreadable_mailbox_warns_and_every_other_members_reports_still_print() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    run(state.path(), None, &["report", "--as", "lh-1", "PR #9"]);
+    let unreadable = state.path().join("loopherd/reports/lh-2.jsonl");
+    fs::create_dir(&unreadable).unwrap();
+    let warning = format!(
+        "warning: could not read {}: Is a directory (os error 21)\n",
+        unreadable.display()
+    );
+
+    for args in [&["reports", "--all"][..], &["reports"]] {
+        let out = run(state.path(), None, args);
+
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(stderr, format!("loopherd reports: {warning}"), "{args:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.starts_with("lh-1 note 20"), "{args:?}: {stdout}");
+        assert!(stdout.ends_with(" PR #9\n"), "{args:?}: {stdout}");
+        assert_eq!(out.status.code(), Some(0), "{args:?}");
+    }
+}
+
+#[test]
+fn an_unreadable_mailboxs_reports_are_read_once_it_is_readable_again() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root reads a mode 000 file");
+        return;
+    }
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    run(state.path(), None, &["report", "--as", "lh-1", "one"]);
+    run(state.path(), None, &["report", "--as", "lh-2", "two"]);
+    let mailbox = state.path().join("loopherd/reports/lh-2.jsonl");
+    let mode = |m| fs::set_permissions(&mailbox, fs::Permissions::from_mode(m)).unwrap();
+    mode(0o000);
+
+    let out = run(state.path(), None, &["reports"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        stderr,
+        format!(
+            "loopherd reports: warning: could not read {}: Permission denied (os error 13)\n",
+            mailbox.display()
+        )
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.starts_with("lh-1 note "), "{stdout}");
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    assert_eq!(out.status.code(), Some(0));
+
+    mode(0o644);
+    let out = run(state.path(), None, &["reports"]);
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.starts_with("lh-2 note "), "{stdout}");
+    assert!(stdout.ends_with(" two\n"), "{stdout}");
+}
+
+#[test]
+fn watch_warns_about_an_unreadable_mailbox_and_wakes_on_another_members_report() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    install_hook(state.path());
+    run(state.path(), None, &["report", "--as", "lh-1", "PR #9"]);
+    let unreadable = state.path().join("loopherd/reports/lh-2.jsonl");
+    fs::create_dir(&unreadable).unwrap();
+
+    let out = run(state.path(), None, &["watch", "--timeout", "0"]);
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "warning: could not read {}: Is a directory (os error 21)\n",
+            unreadable.display()
+        )),
+        "{stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.starts_with("lh-1 note 20"), "{stdout}");
+    assert_eq!(out.status.code(), Some(0));
+}

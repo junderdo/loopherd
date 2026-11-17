@@ -566,3 +566,66 @@ fn a_since_without_a_zone_says_so() {
         "{out:?}"
     );
 }
+
+#[test]
+fn an_unreadable_mailbox_warns_and_its_row_keeps_the_ledger_columns() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[
+            Member::new("lh-1", "2026-11-01T00:00:00Z").retired("2026-11-01T05:00:00Z"),
+            Member::new("lh-2", "2026-11-02T00:00:00Z").retired("2026-11-02T03:00:00Z"),
+        ],
+    );
+    write_mailbox(state.path(), "lh-1", &[("2026-11-01T02:00:00Z", "done")]);
+    let unreadable = state.path().join("loopherd/reports/lh-2.jsonl");
+    fs::create_dir(&unreadable).unwrap();
+
+    let out = run(state.path(), &[]);
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        stderr,
+        format!(
+            "loopherd stats: warning: could not read {}: Is a directory (os error 21)\n",
+            unreadable.display()
+        )
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let row = |name: &str| -> Vec<String> {
+        stdout
+            .lines()
+            .find(|l| l.trim_start().starts_with(name))
+            .unwrap_or_else(|| panic!("no {name} row in:\n{stdout}"))
+            .split_whitespace()
+            .map(String::from)
+            .collect()
+    };
+    assert_eq!(
+        row("lh-1"),
+        [
+            "lh-1",
+            "card",
+            "2026-11-01",
+            "00:00",
+            "2h00m",
+            "1",
+            "3h00m",
+            "5h00m"
+        ]
+    );
+    assert_eq!(
+        row("lh-2"),
+        [
+            "lh-2",
+            "card",
+            "2026-11-02",
+            "00:00",
+            "-",
+            "-",
+            "-",
+            "3h00m"
+        ]
+    );
+}
