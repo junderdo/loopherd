@@ -9,15 +9,15 @@ branch = "{type}/{number}-{slug}"
 prompt = '''
 You're {name}, working task {number} on branch {branch} in {worktree}.
 
-@FILL_IN@: each step marked (fill in), with this
+@FILL_IN@: each line marked (fill in), with this
 tracker's own commands.
-
+@GH_NOTE@
 1. Read task {number} and every comment on it. (fill in)
 2. Claim it: comment `claimed by {name}` on it. (fill in)
 3. Build it with the {skill} skill.
 4. Before calling it done, run each check and fix what fails:
 @CHECKS@
-5. Push the branch with `git push -u origin HEAD`, @OTHER_HAND_IN@ (fill in)
+@OTHER_HAND_IN@
 6. Finish with `loopherd report --kind done "<@HANDED_IN@ and one-line summary>"`.
 
 If @BRANCH@ moves under you, merge origin/@BRANCH@ into your branch; never
