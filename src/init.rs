@@ -1189,7 +1189,8 @@ fn github_path(url: &str) -> Option<&str> {
 }
 
 /// Safe to put unquoted in the herd's shell commands and prompts, and not
-/// an option, a path step or a `.git` suffix.
+/// an option, a path step (`.` or `..`) or a `.git` suffix. A leading dot is
+/// allowed: GitHub repos like `<org>/.github` have one.
 fn is_github_name(name: &str) -> bool {
     !matches!(name, "" | "." | "..")
         && !name.starts_with('-')
@@ -1213,7 +1214,10 @@ fn account(owner: &str, wanted: Option<&str>, ask: &ask::Asker) -> Result<String
             r#".hosts["github.com"][]?.login"#,
         ],
     )?;
-    let logins: Vec<&str> = logins.lines().filter(|l| is_github_name(l)).collect();
+    let logins: Vec<&str> = logins
+        .lines()
+        .filter(|l| is_github_name(l) && !l.starts_with('.'))
+        .collect();
     if logins.is_empty() {
         bail!("gh has no logged-in account; run `gh auth login`");
     }

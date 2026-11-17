@@ -1020,6 +1020,17 @@ fn a_repo_name_starting_with_a_dot_is_accepted_from_origin() {
 }
 
 #[test]
+fn a_gh_login_starting_with_a_dot_is_not_offered() {
+    let fixture = Fixture::new(&[".acme"]);
+
+    assert_refused(
+        &fixture,
+        &fixture.init(&["--gh-account", ".acme"]),
+        "loopherd init: gh has no logged-in account; run `gh auth login`\n",
+    );
+}
+
+#[test]
 fn repo_refuses_a_name_that_is_a_path_step_an_option_or_has_a_git_suffix() {
     for slug in [
         "acme/.",
