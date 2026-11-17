@@ -1268,8 +1268,8 @@ mod tests {
             (self.race)(&mut self.inner);
             self.inner.remove_herd(herd, before)
         }
-        fn started(&mut self, name: &str, at: std::time::SystemTime) -> Result<()> {
-            self.inner.started(name, at)
+        fn started(&mut self, name: &str, at: std::time::SystemTime, resumed: bool) -> Result<()> {
+            self.inner.started(name, at, resumed)
         }
     }
 }

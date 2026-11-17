@@ -117,8 +117,9 @@ pub trait Ledger {
         herd: &str,
         before: &mut dyn FnMut(&[String]) -> Result<()>,
     ) -> Result<Vec<String>>;
-    /// Appends a `start` boundary to `name`'s mailbox.
-    fn started(&mut self, name: &str, at: SystemTime) -> Result<()>;
+    /// Appends a `start` boundary to `name`'s mailbox; `resumed` when the
+    /// conversation carried over, as on a revive.
+    fn started(&mut self, name: &str, at: SystemTime, resumed: bool) -> Result<()>;
 }
 
 /// The names of `herd`'s entries that are not retired.
@@ -279,8 +280,12 @@ impl Ledger for FileLedger {
         Ok(removed)
     }
 
-    fn started(&mut self, name: &str, at: SystemTime) -> Result<()> {
-        report::append(&self.reports_dir()?, name, &Entry::new(at, Body::Start))
+    fn started(&mut self, name: &str, at: SystemTime, resumed: bool) -> Result<()> {
+        report::append(
+            &self.reports_dir()?,
+            name,
+            &Entry::new(at, Body::Start { resumed }),
+        )
     }
 }
 
@@ -321,7 +326,7 @@ impl Ledger for MemLedger {
         remove_herd_from(&mut self.0, herd, before)
     }
 
-    fn started(&mut self, name: &str, _at: SystemTime) -> Result<()> {
+    fn started(&mut self, name: &str, _at: SystemTime, _resumed: bool) -> Result<()> {
         self.1.push(name.into());
         Ok(())
     }
@@ -358,7 +363,7 @@ impl Ledger for NoMailbox {
         self.0.remove_herd(herd, before)
     }
 
-    fn started(&mut self, _: &str, _: SystemTime) -> Result<()> {
+    fn started(&mut self, _: &str, _: SystemTime, _resumed: bool) -> Result<()> {
         anyhow::bail!("disk full")
     }
 }
@@ -393,8 +398,8 @@ impl Ledger for NoUpdate {
         self.0.remove_herd(herd, before)
     }
 
-    fn started(&mut self, name: &str, at: SystemTime) -> Result<()> {
-        self.0.started(name, at)
+    fn started(&mut self, name: &str, at: SystemTime, resumed: bool) -> Result<()> {
+        self.0.started(name, at, resumed)
     }
 }
 
@@ -639,18 +644,16 @@ mod tests {
     }
 
     #[test]
-    fn started_appends_a_start_entry_to_the_mailbox_beside_the_ledger() {
+    fn started_appends_a_start_entry_marking_a_resume_to_the_mailbox_beside_the_ledger() {
         let dir = tempfile::tempdir().unwrap();
         let mut ledger = FileLedger::new(dir.path().join("loopherd/ledger.json"));
-        ledger
-            .started(
-                "lh-1",
-                humantime::parse_rfc3339("2026-11-02T09:00:00Z").unwrap(),
-            )
-            .unwrap();
+        let at = humantime::parse_rfc3339("2026-11-02T09:00:00Z").unwrap();
+        ledger.started("lh-1", at, false).unwrap();
+        ledger.started("lh-1", at, true).unwrap();
         assert_eq!(
             fs::read_to_string(dir.path().join("loopherd/reports/lh-1.jsonl")).unwrap(),
-            "{\"at\":\"2026-11-02T09:00:00.000000000Z\",\"kind\":\"start\"}\n"
+            "{\"at\":\"2026-11-02T09:00:00.000000000Z\",\"kind\":\"start\"}\n\
+             {\"at\":\"2026-11-02T09:00:00.000000000Z\",\"kind\":\"start\",\"resumed\":true}\n"
         );
     }
 }

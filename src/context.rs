@@ -12,6 +12,7 @@ use crate::config::{self, ConfigFile};
 use crate::continuation::{is_plain_name, live_transcript, session_in, transcript_of};
 use crate::ledger::AgentRecord;
 use crate::process::{self, Procs};
+use crate::report::{self, Body};
 
 /// The shepherd's handoff file's name; no member may take it.
 pub const SHEPHERD: &str = "shepherd";
@@ -181,11 +182,15 @@ fn ask(
     }
     // Rotate before marking, so a failed rotation leaves the ask for the next stop.
     let handoff = handoff_path(state, &member.name);
-    if handoff.exists() {
-        let prev = handoff.with_extension("prev.md");
-        fs::rename(&handoff, &prev)
-            .with_context(|| format!("move {} to {}", handoff.display(), prev.display()))?;
-    }
+    let moved = match handoff.exists() && !written_this_run(&handoff, state, &member.name)? {
+        true => {
+            let prev = handoff.with_extension("prev.md");
+            fs::rename(&handoff, &prev)
+                .with_context(|| format!("move {} to {}", handoff.display(), prev.display()))?;
+            Some(prev)
+        }
+        false => None,
+    };
     fs::create_dir_all(&asked).with_context(|| format!("create {}", asked.display()))?;
     match fs::OpenOptions::new()
         .write(true)
@@ -196,7 +201,38 @@ fn ask(
         Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("create {}", marker.display())),
     }
-    Ok(Some(reason(member, tokens, limit, &handoff)))
+    Ok(Some(reason(
+        member,
+        tokens,
+        limit,
+        &handoff,
+        moved.as_deref(),
+    )))
+}
+
+/// Whether `handoff` was written after `name`'s last context boundary in its
+/// mailbox: a `start` with a fresh context (not a revive's) or a `handoff`
+/// report, which consumed the file before it. Without one, it is last time's.
+fn written_this_run(handoff: &Path, state: &Path, name: &str) -> Result<bool> {
+    let (entries, _) = report::history(&state.join("reports"), name)?;
+    let boundary = entries
+        .iter()
+        .rev()
+        .find(|e| {
+            matches!(
+                e.body,
+                Body::Start { resumed: false } | Body::Handoff { .. }
+            )
+        })
+        .and_then(|e| humantime::parse_rfc3339(&e.at).ok());
+    let Some(boundary) = boundary else {
+        return Ok(false);
+    };
+    let written = fs::metadata(handoff)
+        .and_then(|m| m.modified())
+        .with_context(|| format!("read {}'s modified time", handoff.display()))?;
+    // A tie counts as last time's: restart then refuses rather than resuming a stale file.
+    Ok(written > boundary)
 }
 
 fn note_once(
@@ -239,7 +275,13 @@ fn is_snippet(line: &str) -> bool {
     gutter.starts_with('|') || gutter.starts_with(" |")
 }
 
-fn reason(member: &AgentRecord, tokens: u64, limit: u64, handoff: &Path) -> String {
+fn reason(
+    member: &AgentRecord,
+    tokens: u64,
+    limit: u64,
+    handoff: &Path,
+    moved: Option<&Path>,
+) -> String {
     // A lead's watch is a background shell; left running, its stop reads
     // paused and restart refuses it.
     let (save, plan) = match member.is_lead() {
@@ -252,12 +294,21 @@ fn reason(member: &AgentRecord, tokens: u64, limit: u64, handoff: &Path) -> Stri
             "your plan as next steps",
         ),
     };
+    let moved = moved
+        .map(|prev| {
+            format!(
+                " The handoff that was there is from before your last start or handoff, \
+                 so it was moved to {}; write a new one even if you think it is current.",
+                prev.display()
+            )
+        })
+        .unwrap_or_default();
     format!(
         "loopherd: your context is at {tokens} tokens, past your limit of {limit}. \
          Stop your current work: {save}write your handoff to {} (your state, {plan}, \
          gotchas; nothing already in the tracker or the ledger), run \
          `loopherd report --kind handoff \"<one line on where you are>\"`, and end your turn. \
-         Whoever reads your reports restarts you fresh from that file; don't restart yourself.",
+         Whoever reads your reports restarts you fresh from that file; don't restart yourself.{moved}",
         handoff.display()
     )
 }
@@ -724,20 +775,140 @@ mod tests {
         }
     }
 
+    use crate::report::Body;
+
+    fn posted(state: &Path, name: &str, at: &str, body: Body) {
+        let at = humantime::parse_rfc3339(at).unwrap();
+        crate::report::append(
+            &state.join("reports"),
+            name,
+            &crate::report::Entry::new(at, body),
+        )
+        .unwrap();
+    }
+
+    fn fresh_start() -> Body {
+        Body::Start { resumed: false }
+    }
+
+    fn written_at(path: &Path, text: &str, at: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+        let at = humantime::parse_rfc3339(at).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    }
+
     #[test]
-    fn asking_again_keeps_the_last_handoff_as_prev() {
+    fn a_handoff_written_since_the_members_last_start_is_kept_when_its_first_ask_comes() {
         let w = World::new();
-        let who = member("lh-1", None);
-        let t = w.transcript(&[assistant(0, 0, 200, false)]);
+        let lead = member("lead-loopherd-cards", Some(Role::Lead));
         let handoffs = w.state().join("handoffs");
-        fs::create_dir_all(&handoffs).unwrap();
-        fs::write(handoffs.join("lh-1.md"), "first").unwrap();
-        w.block(&who, &w.stop("s1", &t, ""), 100).unwrap();
-        assert!(!handoffs.join("lh-1.md").exists());
-        assert_eq!(
-            fs::read_to_string(handoffs.join("lh-1.prev.md")).unwrap(),
-            "first"
+        posted(
+            &w.state(),
+            &lead.name,
+            "2026-11-17T02:00:00Z",
+            fresh_start(),
         );
+        written_at(
+            &handoffs.join("lead-loopherd-cards.md"),
+            "## State\nfresh",
+            "2026-11-17T05:01:02Z",
+        );
+        let t = w.transcript(&[assistant(1, 367, 320_000, false)]);
+        let stop = w.stop(
+            "add790dc-d78c-4aad-9c9d-929c7ca8f0ec",
+            &t,
+            r#","background_tasks":[{"type":"shell","status":"running"}],"session_crons":[]"#,
+        );
+
+        let reason = w.block(&lead, &stop, 300_000).unwrap();
+
+        assert!(reason.contains("320368 tokens"), "{reason}");
+        assert!(!reason.contains("moved"), "{reason}");
+        assert_eq!(
+            fs::read_to_string(handoffs.join("lead-loopherd-cards.md")).unwrap(),
+            "## State\nfresh"
+        );
+        assert!(!handoffs.join("lead-loopherd-cards.prev.md").exists());
+    }
+
+    #[test]
+    fn a_handoff_from_before_the_last_fresh_start_or_handoff_report_moves_to_prev() {
+        let handoff = || Body::Handoff {
+            text: "at step 3".into(),
+        };
+        let resumed = || Body::Start { resumed: true };
+        type Mailbox = Vec<(&'static str, Body)>;
+        let cases: [(&str, Mailbox, &str, bool); 7] = [
+            ("no boundary in the mailbox", vec![], "02:00:00", true),
+            (
+                "written before a fresh start",
+                vec![("02:00:00", fresh_start())],
+                "01:00:00",
+                true,
+            ),
+            (
+                "written at the same instant as a fresh start",
+                vec![("02:00:00", fresh_start())],
+                "02:00:00",
+                true,
+            ),
+            (
+                "written then handed off, with no start since",
+                vec![("01:00:00", fresh_start()), ("03:00:00", handoff())],
+                "02:00:00",
+                true,
+            ),
+            (
+                "rewritten after the last handoff report",
+                vec![("01:00:00", fresh_start()), ("03:00:00", handoff())],
+                "04:00:00",
+                false,
+            ),
+            (
+                "written before a revive's start",
+                vec![("01:00:00", fresh_start()), ("03:00:00", resumed())],
+                "02:00:00",
+                false,
+            ),
+            (
+                "written after a fresh start",
+                vec![("01:00:00", fresh_start())],
+                "02:00:00",
+                false,
+            ),
+        ];
+        for (case, mailbox, written, moved) in cases {
+            let w = World::new();
+            let who = member("lh-1", None);
+            let handoffs = w.state().join("handoffs");
+            for (at, body) in mailbox {
+                posted(&w.state(), "lh-1", &format!("2026-11-17T{at}Z"), body);
+            }
+            written_at(
+                &handoffs.join("lh-1.md"),
+                "earlier",
+                &format!("2026-11-17T{written}Z"),
+            );
+            let t = w.transcript(&[assistant(0, 0, 200, false)]);
+
+            let reason = w.block(&who, &w.stop("s1", &t, ""), 100).unwrap();
+
+            let prev = handoffs.join("lh-1.prev.md");
+            assert_eq!(prev.exists(), moved, "{case}");
+            assert_eq!(handoffs.join("lh-1.md").exists(), !moved, "{case}");
+            let told = format!(
+                "The handoff that was there is from before your last start or handoff, \
+                 so it was moved to {}; write a new one even if you think it is current.",
+                prev.display()
+            );
+            assert_eq!(reason.ends_with(&told), moved, "{case}: {reason}");
+        }
     }
 
     #[test]

@@ -158,7 +158,7 @@ pub fn restart(
     let read = handoff.with_extension("prev.md");
     std::fs::rename(&handoff, &read)
         .with_context(|| format!("move {} to {}", handoff.display(), read.display()))?;
-    ledger.started(name, now)?;
+    ledger.started(name, now, false)?;
     herdr.prompt(name, &resume_prompt(lead, &read))?;
     Ok(format!(
         "restarted {name} in session {live}; prompted it to read {}",
@@ -311,8 +311,8 @@ mod tests {
         ) -> anyhow::Result<Vec<String>> {
             unreachable!()
         }
-        fn started(&mut self, n: &str, at: SystemTime) -> Result<()> {
-            self.ledger.started(n, at)
+        fn started(&mut self, n: &str, at: SystemTime, resumed: bool) -> Result<()> {
+            self.ledger.started(n, at, resumed)
         }
     }
 
@@ -348,7 +348,11 @@ mod tests {
         }
 
         fn put(&self, body: Body) {
-            let at = humantime::parse_rfc3339("2026-11-02T09:00:00Z").unwrap();
+            self.put_at("2026-11-02T09:00:00Z", body);
+        }
+
+        fn put_at(&self, at: &str, body: Body) {
+            let at = humantime::parse_rfc3339(at).unwrap();
             append(
                 &self.state.path().join("reports"),
                 "lh-1",
@@ -553,7 +557,7 @@ mod tests {
             (
                 &|w| {
                     w.handed_off();
-                    w.put(Body::Start);
+                    w.put(Body::Start { resumed: false });
                     w.stop(0, None);
                 },
                 "lh-1 hasn't handed off since it started (after a revive, check `loopherd reports --all lh-1` for its handoff)",
@@ -623,6 +627,90 @@ mod tests {
         let (again, _) = w.restart(true, true);
         assert!(format!("{:#}", again.unwrap_err()).starts_with("lh-1 has no handoff at "),);
         assert_eq!(w.herdr.prompts().len(), 2);
+    }
+
+    /// The member's Stop hook asks for a handoff in `session`, past its limit.
+    fn asked(w: &World, session: &str) -> String {
+        let transcript = w.state.path().join("t.jsonl");
+        fs::write(
+            &transcript,
+            r#"{"type":"assistant","isSidechain":false,"message":{"usage":{"input_tokens":1,"cache_read_input_tokens":200}}}"#,
+        )
+        .unwrap();
+        let stop = format!(
+            r#"{{"hook_event_name":"Stop","session_id":"{session}","transcript_path":"{}"}}"#,
+            transcript.display()
+        );
+        crate::context::handoff_block(
+            &record("lh-1"),
+            stop.as_bytes(),
+            Ok(100),
+            w.state.path(),
+            &|_| Ok(()),
+        )
+        .reason
+        .unwrap()
+        .expect("asked")
+    }
+
+    fn handoff_written_at(w: &World, at: &str) {
+        fs::File::options()
+            .write(true)
+            .open(w.state.path().join("handoffs/lh-1.md"))
+            .unwrap()
+            .set_modified(humantime::parse_rfc3339(at).unwrap())
+            .unwrap();
+    }
+
+    #[test]
+    fn a_handoff_written_before_the_context_ask_is_still_there_to_restart_from() {
+        let w = World::new();
+        w.put_at("2026-11-02T08:00:00Z", Body::Start { resumed: false });
+        handoff_written_at(&w, "2026-11-02T08:30:00Z");
+        asked(&w, "old");
+        w.handed_off();
+
+        let (result, _) = w.restart(false, true);
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(fs::read_to_string(w.handoff()).unwrap(), "## State\n");
+    }
+
+    #[test]
+    fn a_handoff_written_before_a_revive_is_still_there_to_restart_from() {
+        let w = World::new();
+        w.put_at("2026-11-02T08:00:00Z", Body::Start { resumed: false });
+        handoff_written_at(&w, "2026-11-02T08:30:00Z");
+        w.put_at("2026-11-02T08:45:00Z", Body::Start { resumed: true });
+        asked(&w, "old");
+        w.handed_off();
+
+        let (result, _) = w.restart(false, true);
+
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn after_a_restart_that_timed_out_the_next_ask_moves_the_consumed_handoff() {
+        let w = World::new();
+        w.put_at("2026-11-02T08:00:00Z", Body::Start { resumed: false });
+        handoff_written_at(&w, "2026-11-02T08:30:00Z");
+        w.handed_off();
+        let (timed_out, _) = w.restart(false, false);
+        assert!(timed_out.is_err());
+
+        let reason = asked(&w, "new");
+        w.put_at(
+            "2026-11-02T10:00:00Z",
+            Body::Handoff {
+                text: "again".into(),
+            },
+        );
+        w.stop(0, None);
+        let (result, _) = w.restart(false, true);
+
+        assert!(reason.contains("write a new one"), "{reason}");
+        assert!(format!("{:#}", result.unwrap_err()).starts_with("lh-1 has no handoff at "),);
     }
 
     #[test]
