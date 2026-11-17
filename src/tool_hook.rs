@@ -1264,6 +1264,7 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
     let words = words.as_slice();
     let mut i = 0;
     let mut in_env = false;
+    let mut xargs_replaces: Option<String> = None;
     loop {
         let Some(word) = words.get(i) else {
             return vec![];
@@ -1309,7 +1310,11 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             return vec![];
         } else if let Some((_, with_value)) = WRAPPERS.iter().find(|(w, _)| *w == program) {
             in_env |= program == "env";
-            i = skip_options(words, i + 1, with_value);
+            let options = i + 1;
+            i = skip_options(words, options, with_value);
+            if program == "xargs" {
+                xargs_replaces = xargs_replace_string(&words[options..i.min(words.len())]);
+            }
             // The duration, CPU mask or lock file before the command.
             if ["timeout", "taskset", "flock"].contains(&program) {
                 i += 1;
@@ -1363,11 +1368,52 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
         } else if GATED.contains(&program) && kept[i + 1..].iter().any(|w| w.braced()) {
             return vec![Switch::Unreadable];
         } else if program == "cargo" {
-            return cargo_needs(word, &words[i + 1..], aliases);
+            let args = &words[i + 1..];
+            let needs = cargo_needs(word, args, aliases);
+            return match &xargs_replaces {
+                Some(r) if needs.is_empty() => cargo_needs(word, &replaced(args, r), aliases),
+                _ => needs,
+            };
         } else {
-            return needs_program(word, &words[i + 1..]).into_iter().collect();
+            let args = &words[i + 1..];
+            let needs = needs_program(word, args).or_else(|| {
+                xargs_replaces
+                    .as_ref()
+                    .and_then(|r| needs_program(word, &replaced(args, r)))
+            });
+            return needs.into_iter().collect();
         }
     }
+}
+
+/// The string `xargs` replaces with each input line, given its options.
+fn xargs_replace_string(options: &[String]) -> Option<String> {
+    let mut options = options.iter();
+    while let Some(option) = options.next() {
+        let replace = match option.as_str() {
+            "-I" => options.next().cloned(),
+            "-i" | "--replace" => Some("{}".into()),
+            o => o
+                .strip_prefix("--replace=")
+                .or_else(|| o.strip_prefix("-I"))
+                .or_else(|| o.strip_prefix("-i"))
+                .map(str::to_string),
+        };
+        if let Some(replace) = replace.filter(|r| !r.is_empty()) {
+            return Some(replace);
+        }
+    }
+    None
+}
+
+/// `args` with each one holding `xargs`'s replace string read as unknown.
+fn replaced(args: &[String], replace: &str) -> Vec<String> {
+    args.iter()
+        .map(|a| match a.contains(replace) {
+            true => "$".to_string(),
+            false => a.clone(),
+        })
+        .collect()
 }
 
 fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
@@ -1629,11 +1675,16 @@ fn retires_lead(names: &[&str]) -> bool {
     })
 }
 
+/// Whether `cargo run` with `run_args` retires a lead. Past an option it
+/// can't read, any `retire` word counts.
 fn retires_lead_through_cargo(run_args: &[String]) -> bool {
-    run_args
-        .iter()
-        .position(|a| a == "retire")
-        .is_some_and(|at| retires_lead(&positionals(&run_args[at + 1..], &[])))
+    let retires_at = |args: &[String], at: usize| {
+        args[at] == "retire" && retires_lead(&positionals(&args[at + 1..], &[]))
+    };
+    match loopherd_args(run_args) {
+        Some(args) => !args.is_empty() && retires_at(args, 0),
+        None => (0..run_args.len()).any(|at| retires_at(run_args, at)),
+    }
 }
 
 fn runs_setup(args: &[String]) -> bool {
@@ -2582,6 +2633,15 @@ mod tests {
         "scripts/herdr-dev loopherd retire lead-h",
         "scripts/herdr-dev cargo run -- retire lead-h",
         "gh pr view 1; loopherd retire lead-h",
+        "echo lead-h | xargs -I X loopherd retire X",
+        "echo lead-h | xargs -IX loopherd retire X",
+        "echo h | xargs -I X loopherd retire lead-X",
+        "echo lead-h | xargs --replace=R loopherd retire R",
+        "echo lead-h | xargs -i loopherd retire {}",
+        "echo lead-h | xargs -I % cargo run -- retire %",
+        "cargo run --target-dir retire -- retire lead-h",
+        "cargo run -q --target-dir retire -- retire lead-h",
+        "cargo run --unknown retire -- retire lead-h",
     ];
 
     #[test]
@@ -2606,6 +2666,9 @@ mod tests {
             "loopherd retire lh-1",
             "loopherd retire --close lh-1",
             "cargo run -- retire lh-1",
+            "cargo run -- tell lh-1 retire",
+            "cargo run -- report --kind note lead-h will retire",
+            "echo lh-1 | xargs -I X loopherd retire lh-1",
             "loopherd status lead-h",
             "git commit -m 'retire lead-h'",
         ] {
