@@ -249,7 +249,11 @@ enum Command {
     /// then confirm it went working.
     Tell {
         name: String,
-        #[arg(required_unless_present = "text_file", conflicts_with = "text_file")]
+        #[arg(
+            required_unless_present = "text_file",
+            conflicts_with = "text_file",
+            allow_hyphen_values = true
+        )]
         text: Option<String>,
         #[arg(long)]
         text_file: Option<PathBuf>,
@@ -1490,6 +1494,39 @@ fn inherited_workspace() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tell_takes_text_that_starts_with_a_hyphen() {
+        for text in ["- fix the test", "--text"] {
+            let cli = Cli::try_parse_from(["loopherd", "tell", "lh-1", text]).unwrap();
+            let Some(Command::Tell {
+                name, text: sent, ..
+            }) = cli.command
+            else {
+                panic!("not a tell: {text}");
+            };
+            assert_eq!((name.as_str(), sent.as_deref()), ("lh-1", Some(text)));
+        }
+        let cli = Cli::try_parse_from(["loopherd", "tell", "lh-1", "--text-file", "m.md"]).unwrap();
+        let Some(Command::Tell {
+            text, text_file, ..
+        }) = cli.command
+        else {
+            panic!("not a tell");
+        };
+        assert_eq!((text, text_file), (None, Some(PathBuf::from("m.md"))));
+    }
+
+    #[test]
+    fn tell_sends_a_flag_name_as_text_after_a_double_dash() {
+        for flag in ["--help", "-h", "--text-file"] {
+            let cli = Cli::try_parse_from(["loopherd", "tell", "lh-1", "--", flag]).unwrap();
+            let Some(Command::Tell { text, .. }) = cli.command else {
+                panic!("not a tell: {flag}");
+            };
+            assert_eq!(text.as_deref(), Some(flag));
+        }
+    }
 
     #[test]
     fn a_feeds_own_process_is_live_by_its_pid_and_start_time() {

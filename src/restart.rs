@@ -12,7 +12,7 @@ use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::Ledger;
 use crate::report::{SinceHandoff, since_handoff};
 use crate::shell::quote;
-use crate::subagent_view::shows_subagent_view;
+use crate::subagent_view::ensure_main_view;
 
 pub struct RestartRequest<'a> {
     /// Resolves a session to the one Claude continued it in.
@@ -106,15 +106,13 @@ pub fn restart(
         }
     }
     let pane = &agent.pane_id;
-    let screen = herdr
-        .visible_text(pane)
-        .with_context(|| format!("read {name}'s pane {pane} to check for a subagent view"))?;
-    if shows_subagent_view(&screen) {
-        bail!(
-            "{name}'s pane {pane} is showing a subagent's view, and /clear there doesn't reach the main \
-             conversation: switch the pane back to the main conversation, then run loopherd restart {name} again"
-        );
-    }
+    ensure_main_view(
+        herdr,
+        name,
+        pane,
+        "and /clear there doesn't reach the main conversation",
+        &format!("run loopherd restart {name} again"),
+    )?;
     let lead = record.is_lead();
     let old = record.session_id;
     let old_live = old.as_deref().map(req.live);
