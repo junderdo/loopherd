@@ -3039,6 +3039,25 @@ mod tests {
     }
 
     #[test]
+    fn a_check_that_outruns_its_own_timeout_before_the_deadline_is_failing() {
+        let world = Checked::with_template("done = \"sleep 3\"\n");
+        let (checks, _) = lead_checks(&world.paths, "cards").unwrap();
+        let worker = &world.ledger.0["lh-1"];
+        let budget = Budget {
+            deadline: Instant::now() + Duration::from_secs(30),
+            each: Duration::from_millis(300),
+        };
+
+        let timed_out = run_member_check(&checks.done, &checks, worker, &budget);
+
+        assert!(
+            matches!(&timed_out, Some(Err(Unchecked::Failed(why))) if why.contains("timed out")),
+            "{:?}",
+            timed_out.map(|r| r.map_err(|e| matches!(e, Unchecked::OutOfTime)))
+        );
+    }
+
+    #[test]
     fn a_re_created_lead_wakes_on_what_its_predecessor_was_told() {
         let mut world = Checked::new();
         world.touch("merged-1", "");
