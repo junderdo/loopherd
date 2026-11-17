@@ -514,7 +514,7 @@ fn redacted(words: &[&str]) -> Vec<Shown> {
             _ => shown,
         };
         runs = runs.into_iter().filter_map(|run| run.after(word)).collect();
-        runs.extend(starts);
+        runs.extend(starts.filter(|run| !runs.contains(run)));
         shown_words.push(shown);
     }
     shown_words
@@ -522,9 +522,10 @@ fn redacted(words: &[&str]) -> Vec<Shown> {
 
 /// Words hidden on top of what the key and value rules hide, after a strong `key=value`
 /// word that opens a quote (up to its close) or ends in `;` (the next word, and on while
-/// each ends in `;`). A run inside another leaves the outer one open. Only adding
+/// each ends in `;`). A run inside another leaves the outer one open; a run already
+/// open isn't added twice, so the list stays short on a long line. Only adding
 /// hiding, never changing [`Next`], keeps every word those rules hide hidden.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum RunOn {
     Quote(char),
     Pair,
@@ -1606,6 +1607,14 @@ mod tests {
         ] {
             assert_eq!(text_sent(question), text, "{question}");
         }
+    }
+
+    #[test]
+    fn a_long_line_of_semicolon_chained_pairs_is_summarised_in_linear_time() {
+        let line = "password=a; ".repeat(40_000);
+        let started = std::time::Instant::now();
+        summary(&line);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]
