@@ -303,12 +303,9 @@ impl Aliases {
             self.unreadable_name = true;
             return;
         }
-        if word
-            .text
-            .split_once('=')
-            .map(|(name, _)| name.trim_end_matches('+'))
-            == Some("GH_CONFIG_DIR")
-        {
+        // A bare `export GH_CONFIG_DIR` counts: `${GH_CONFIG_DIR:=…}` or `for` may have set it.
+        let name = word.text.split_once('=').map_or(&*word.text, |(n, _)| n);
+        if name.trim_end_matches('+') == "GH_CONFIG_DIR" {
             self.gh_config_dir = true;
         }
         let Some((name, value)) = word
@@ -486,8 +483,10 @@ impl Word {
 
     /// Whether a `$` or a substitution may build the part before the first
     /// `=`, or the whole word when it has none.
+    /// A subscript (`a[$i]=x`) doesn't count: bash exports no arrays.
     fn name_expands(&self) -> bool {
         let name = self.text.split_once('=').map_or(&*self.text, |(n, _)| n);
+        let name = name.split_once('[').map_or(name, |(n, _)| n);
         name.contains('$') || self.substituted_at.is_some_and(|at| at <= name.len())
     }
 
@@ -1240,6 +1239,26 @@ const COMPOUND: [&str; 12] = [
 const COPROC_COMPOUND: [&str; 9] = [
     "{", "while", "until", "if", "for", "select", "case", "[[", "((",
 ];
+const BASH_LONG_OPTIONS: [&str; 18] = [
+    "debug",
+    "debugger",
+    "dump-po-strings",
+    "dump-strings",
+    "help",
+    "init-file",
+    "login",
+    "noediting",
+    "noprofile",
+    "norc",
+    "posix",
+    "pretty-print",
+    "protected",
+    "rcfile",
+    "restricted",
+    "verbose",
+    "version",
+    "wordexp",
+];
 const SHELLS: [&str; 5] = ["sh", "bash", "zsh", "dash", "ksh"];
 /// Builtins whose arguments may assign variables.
 const DECLARERS: [&str; 5] = ["export", "declare", "typeset", "local", "readonly"];
@@ -1356,6 +1375,14 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             i = skip_options(words, toolchain + 1, &[]);
         } else if SHELLS.contains(&program) {
             i += 1;
+            // Bash reads its long options first, with one dash or two: `-login`, `--rcfile f`.
+            while let Some(long) = words
+                .get(i)
+                .and_then(|w| w.strip_prefix("--").or_else(|| w.strip_prefix('-')))
+                .filter(|long| BASH_LONG_OPTIONS.contains(long))
+            {
+                i += 1 + usize::from(["rcfile", "init-file"].contains(&long));
+            }
             let mut command_script = false;
             let mut stdin_script = false;
             while let Some(option) = words.get(i).filter(|w| w.starts_with(['-', '+'])) {
@@ -4060,6 +4087,11 @@ mod tests {
             "bash +oc posix 'gh pr merge 1'",
             "bash --rcfile /dev/null -c 'gh pr merge 1'",
             "bash --init-file /dev/null -c 'gh pr merge 1'",
+            "bash -rcfile /dev/null -c 'gh pr merge 1'",
+            "bash -init-file /dev/null -c 'gh pr merge 1'",
+            "bash -login -c 'gh pr merge 1'",
+            "bash -noediting -noprofile -c 'gh pr merge 1'",
+            "bash --login -oc pipefail 'gh pr merge 1'",
         ] {
             assert_judged(command, Switch::Merge);
         }
@@ -4078,12 +4110,15 @@ mod tests {
             "export GH_CONFIG_DIR=/tmp/g; bash -c 'gh mm 1'",
             "export $N=/tmp/g; gh mm 1",
             "GH_CONFIG_DIR+=/g; gh mm 1",
+            ": ${GH_CONFIG_DIR:=/tmp/g}; export GH_CONFIG_DIR; gh mm 1",
+            "for GH_CONFIG_DIR in /tmp/g; do export GH_CONFIG_DIR; gh mm 1; done",
         ] {
             assert_unreadable(command);
         }
         assert_passes("gh pr view 1");
         assert_passes("gh mm 1; GH_CONFIG_DIR=/tmp/g true");
         assert_passes("export GH_TOKEN=x; gh pr view 1");
+        assert_passes("arr[$i]=x; gh pr view 1");
     }
 
     #[test]
