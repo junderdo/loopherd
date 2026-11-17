@@ -10,6 +10,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 const INSTALL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install");
 
@@ -1141,20 +1142,27 @@ fn the_splash_waits_without_starting_a_sleep_process() {
         std::env::var("PATH").unwrap()
     );
 
-    for size in ["cols 160 rows 45", "cols 40 rows 10"] {
+    // 100 frames of 50ms, or 8 letters of 0.1s: a wait that returns at once plays faster.
+    for (size, at_least) in [
+        ("cols 160 rows 45", Duration::from_millis(4500)),
+        ("cols 40 rows 10", Duration::from_millis(700)),
+    ] {
         let Some(mut cmd) = pty(&format!(
             "stty {size}; bash -c 'source {SPLASH}; splash_play'"
         )) else {
             eprintln!("skipped: needs util-linux script");
             return;
         };
+        let started = Instant::now();
         let raw =
             String::from_utf8_lossy(&cmd.env("PATH", &path).output().unwrap().stdout).into_owned();
+        let took = started.elapsed();
 
         assert!(
             raw.contains("\x1b[?25h"),
             "{size}: the splash never finished: {raw:?}"
         );
+        assert!(took >= at_least, "{size}: the splash took only {took:?}");
     }
 
     assert_eq!(fs::read_to_string(&sleeps).unwrap_or_default(), "");
