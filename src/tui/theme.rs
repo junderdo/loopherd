@@ -165,15 +165,16 @@ impl Theme {
     /// `context` of `limit` as six cells and a percent: grey-violet below
     /// 60%, light orange from 60%, bold red from 85%.
     pub fn gauge(&self, context: u64, limit: u64) -> Span<'static> {
-        let limit = limit.max(1);
+        let (context, limit) = (u128::from(context), u128::from(limit.max(1)));
         let filled = ((context * 12 + limit) / (limit * 2)).min(6) as usize;
-        let style = match context * 100 {
-            used if used >= 85 * limit => self.plain_fg(Color::Red).add_modifier(Modifier::BOLD),
-            used if used >= 60 * limit => self.fg(LIGHT_ORANGE),
+        let percent = context * 100 / limit;
+        let style = match percent {
+            85.. => self.plain_fg(Color::Red).add_modifier(Modifier::BOLD),
+            60.. => self.fg(LIGHT_ORANGE),
             _ => self.fg(GREY_VIOLET),
         };
         let cells = "▰".repeat(filled) + &"▱".repeat(6 - filled);
-        Span::styled(format!("{cells} {}%", context * 100 / limit), style)
+        Span::styled(format!("{cells} {percent}%"), style)
     }
 
     /// The glyph leading a member's row; `frame` picks the spinner's frame.
@@ -188,5 +189,20 @@ impl Theme {
             AgentStatus::Blocked => ("⚠", self.plain_fg(Color::Yellow)),
             AgentStatus::Unknown => ("?", Style::new().add_modifier(Modifier::DIM)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_gauge_of_huge_values_does_not_overflow() {
+        let theme = Theme::from_env(None, true);
+        assert_eq!(
+            theme.gauge(u64::MAX, 1).content,
+            format!("▰▰▰▰▰▰ {}00%", u64::MAX)
+        );
+        assert_eq!(theme.gauge(1, u64::MAX).content, "▱▱▱▱▱▱ 0%");
     }
 }
