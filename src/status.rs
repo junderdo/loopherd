@@ -234,9 +234,10 @@ pub fn row(member: &Member) -> Vec<String> {
         Some(tab) => format!("{tab}/{}", member.pane),
         None => member.pane.clone(),
     };
-    let name = match member.lead {
-        true => format!("{} (lead)", member.name),
-        false => member.name.clone(),
+    let name = match (member.lead, member.released) {
+        (true, _) => format!("{} (lead)", member.name),
+        (false, true) => format!("{} (released)", member.name),
+        (false, false) => member.name.clone(),
     };
     vec![
         name,
@@ -321,6 +322,7 @@ mod tests {
             created: "2026-11-01T00:00:00Z".into(),
             retired: false,
             retired_at: None,
+            released_at: None,
             herd: herd.map(str::to_string),
             template: None,
             params: None,
@@ -755,6 +757,37 @@ gone: no live agent matches it; `loopherd revive` can bring it back
     }
 
     #[test]
+    fn all_marks_a_released_entry_in_the_retired_section() {
+        let mut ledger = ledger();
+        let zpr = ledger.0.get_mut("zpr-1").unwrap();
+        zpr.retired = true;
+        zpr.released_at = Some("2026-11-17T12:00:00Z".into());
+        let options = Options {
+            all: true,
+            strays: false,
+        };
+
+        let text = status(
+            &herdr(),
+            &ledger,
+            &not_paused(),
+            options,
+            Format::Text { color: false },
+        )
+        .unwrap();
+        let json = status(&herdr(), &ledger, &not_paused(), options, Format::Json).unwrap();
+
+        assert!(
+            text.stdout
+                .contains("retired\n  zpr-1 (released)  working  -  pr-1"),
+            "{}",
+            text.stdout
+        );
+        let json: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
+        assert_eq!(json["retired"][0]["released"], true);
+    }
+
+    #[test]
     fn all_marks_a_herd_with_only_retired_entries_instead_of_a_bare_header() {
         let mut ledger = ledger();
         for name in ["zpr-1", "zpr-2"] {
@@ -791,7 +824,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         let json: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
         let member = |name: &str, status: &str, gone: bool, wt: &str, pane: &str, tab| {
             serde_json::json!({"name": name, "status": status, "gone": gone, "branch": null,
-                "worktree": wt, "pane": pane, "tab": tab, "lead": false, "template": null})
+                "worktree": wt, "pane": pane, "tab": tab, "lead": false, "template": null, "released": false})
         };
         let mut zpr_1 = member(
             "zpr-1",

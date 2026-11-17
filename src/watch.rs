@@ -622,6 +622,8 @@ impl Fired {
         for line in lines {
             if line == RESUMED {
                 self.keys.retain(|k| !is_claimable(k));
+            } else if let Some(name) = line.strip_prefix(RELEASED) {
+                self.keys.retain(|k| !is_about(k, name));
             } else if let Some(failing) = failing_key(line) {
                 self.keys.remove(&failing);
             } else {
@@ -666,6 +668,40 @@ pub fn forget_claimable(dir: &Path, lead: &str) -> Result<()> {
             .and_then(|mut file| file.write_all(format!("{RESUMED}\n").as_bytes()))
             .with_context(|| format!("write {}", path.display())),
     }
+}
+
+/// Starts the line `release` appends to `watch-<lead>.fired`, before the
+/// released member's name.
+const RELEASED: &str = "released: ";
+
+/// Makes `lead`'s watch forget every event it printed about the released
+/// member `name`, whose name feed may now spawn again. A lead whose watch
+/// never fired has nothing to forget.
+pub fn forget_member(dir: &Path, lead: &str, name: &str) -> Result<()> {
+    let path = fired_path(dir, lead);
+    match OpenOptions::new().append(true).open(&path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        file => file
+            .and_then(|mut file| file.write_all(format!("{RELEASED}{name}\n").as_bytes()))
+            .with_context(|| format!("write {}", path.display())),
+    }
+}
+
+/// Whether `key` is an event about the member `name`: its own line, or its
+/// herd's `failing` or `recovered` line for one of its checks.
+fn is_about(key: &str, name: &str) -> bool {
+    let names = |rest: &str| {
+        rest.strip_prefix(name)
+            .is_some_and(|after| after.starts_with(' '))
+    };
+    names(key)
+        || key.split_once(' ').is_some_and(|(_, rest)| {
+            [line::FAILING, line::RECOVERED].iter().any(|kind| {
+                rest.strip_prefix(kind)
+                    .and_then(|r| r.strip_prefix(' '))
+                    .is_some_and(names)
+            })
+        })
 }
 
 /// The `failing` key a `recovered` key ends.
@@ -972,6 +1008,7 @@ mod tests {
             created: "2026-11-01T00:00:00Z".into(),
             retired: false,
             retired_at: None,
+            released_at: None,
             herd: herd.map(Into::into),
             template: None,
             params: None,
@@ -3193,6 +3230,47 @@ mod tests {
         let woke = run(&world.herdr, &world.ledger, &dir, &req, &mut clock);
         assert_eq!(woke.unwrap(), ["lh-2 claimable"]);
         assert_eq!(clock.elapsed, CHECK_EVERY);
+    }
+
+    #[test]
+    fn a_released_member_is_announced_claimable_again() {
+        let world = Checked::new();
+        world.touch("tasks", "1\n2\n");
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-2 claimable"]);
+        let dir = world.config.path().join("reports");
+
+        forget_member(&dir, "lead-cards", "lh-2").unwrap();
+
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-2 claimable"]);
+    }
+
+    #[test]
+    fn a_release_forgets_only_its_members_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fired_path(dir.path(), "lead-cards");
+        let keys = [
+            "lh-2 claimable",
+            "lh-2 merged",
+            "cards failing lh-2 done",
+            "lh-21 claimable",
+            "cards failing lh-21 done",
+            "cards failing source",
+        ];
+        fs::write(&path, format!("lead t\n{}\n", keys.join("\n"))).unwrap();
+
+        forget_member(dir.path(), "lead-cards", "lh-2").unwrap();
+
+        let fired = Fired::load(dir.path(), "lead-cards", "t").unwrap();
+        let mut kept: Vec<&str> = fired.keys.iter().map(String::as_str).collect();
+        kept.sort();
+        assert_eq!(
+            kept,
+            [
+                "cards failing lh-21 done",
+                "cards failing source",
+                "lh-21 claimable"
+            ]
+        );
     }
 
     #[test]

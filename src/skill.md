@@ -349,6 +349,23 @@ question as its own sends a second notification.
 - `loopherd retire <name>` marks a member finished in the ledger only;
   `--close` also closes its tab and removes its worktree and branch if
   they're clean and merged. Feed's `done` check does this for you.
+- **Re-feed a retired task** (its member was retired before it finished,
+  e.g. a tab closed by accident or a rescoped card) with `loopherd release
+  <name>`, then `loopherd feed <herd>`. Feed skips every name in the
+  ledger until it's released, so a merged task isn't spawned again while
+  its card is still open. Release refuses a member not retired, a lead, or
+  one whose tab may be open (`loopherd retire --close <name>` first). It
+  removes the member's worktree, any leftover at the path the new member
+  spawns into, its local branch and its branch on origin, so the new member
+  starts afresh; when they hold commits not on the base (pushed or not) it
+  refuses until you pass `--keep-branch` (the new member continues from
+  them) or `--drop-branch` (deleted; the lines printed name each head sha).
+  It never removes uncommitted changes, a locked worktree, the main
+  checkout, a worktree loopherd didn't make, or a live member's worktree;
+  it refuses and names them, and refuses while a feed runs. A lead
+  may run it; it's part of feeding. `status --all` marks the entry
+  `(released)`, its mailbox gets a `released` note, and its lead's watch
+  announces it claimable again.
 - `loopherd prompt <name>` sends a member its stored prompt, e.g. after a
   spawn exited 3 on a dialog.
 - `loopherd tell <name> "<text>"` messages a member (see Talking to

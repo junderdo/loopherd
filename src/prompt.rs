@@ -69,6 +69,7 @@ mod tests {
             created: "2026-10-31T00:00:00Z".into(),
             retired: false,
             retired_at: None,
+            released_at: None,
             herd: None,
             template: None,
             params: None,

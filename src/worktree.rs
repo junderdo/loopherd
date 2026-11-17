@@ -180,6 +180,227 @@ pub fn remove_if_gone(repo: &Path, path: &Path) -> Result<Option<Gone>> {
     Ok(Some(Gone::Removed { kept_branch }))
 }
 
+/// What [`clear_checkout`] does with a branch, and worktrees, a member leaves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fate {
+    /// Remove them, unless they hold commits not on the base.
+    Clear,
+    /// Leave them for the next member to start from.
+    Keep,
+    /// Remove them even with commits not on the base.
+    Drop,
+}
+
+/// What [`clear_checkout`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cleared {
+    /// There was no worktree, local branch or origin branch to clear.
+    Absent,
+    /// Left them, as [`Fate::Keep`] asked: a worktree or local branch
+    /// when `local`, origin's branch when `remote`.
+    Kept { local: bool, remote: bool },
+    /// Removed each worktree, at its head, the local branch, at its head, and
+    /// origin's branch, at its head; `dropped` counts the commits that were
+    /// on neither `base` nor any other origin branch.
+    Removed {
+        worktrees: Vec<(PathBuf, String)>,
+        branch: Option<String>,
+        remote: Option<String>,
+        dropped: usize,
+        base: String,
+    },
+    /// Changed nothing: they hold `count` commits not on `base`.
+    Ahead { count: usize, base: String },
+    /// Changed nothing: a worktree has work that isn't committed.
+    Dirty(String),
+    /// Changed nothing: something else is on it or in the way.
+    Taken(String),
+}
+
+/// Clears the worktree at `worktree`, the one at the path [`ensure_worktree`]
+/// makes for `branch`, the local `branch`, and origin's `branch`, per `fate`,
+/// so [`ensure_worktree`] next makes them afresh. `in_use` names the live
+/// member using a worktree. Never removes a worktree with changes, mid-operation
+/// or locked, nor touches the main checkout, one in use, or another worktree on
+/// the branch, whatever the fate; those refuse, changing nothing.
+pub fn clear_checkout(
+    repo: &Path,
+    worktree: Option<&Path>,
+    branch: Option<&str>,
+    fate: Fate,
+    in_use: &dyn Fn(&Path) -> Option<String>,
+) -> Result<Cleared> {
+    let branch_head = match branch {
+        Some(b) => git(repo, &["rev-parse", "--verify", &format!("refs/heads/{b}")])
+            .ok()
+            .map(|h| h.trim().to_string()),
+        None => None,
+    };
+    let spawn_path = branch.map(|b| worktree_path(repo, b));
+    let ours = |path: &Path| {
+        worktree
+            .into_iter()
+            .chain(spawn_path.as_deref())
+            .any(|p| same_dir(p, path))
+    };
+    if let Some(b) = branch
+        && let Some(path) = find_worktree(repo, b)?
+        && !ours(&path)
+    {
+        let shown = path.display();
+        return Ok(Cleared::Taken(match listed_worktree(repo, &path)? {
+            None => format!("{b} is checked out in the main checkout {shown}"),
+            Some(_) => format!("{b} is checked out in {shown}, a worktree loopherd didn't make"),
+        }));
+    }
+    let mut worktrees: Vec<ListedWorktree> = vec![];
+    for path in worktree.iter().copied().chain(spawn_path.as_deref()) {
+        if worktrees.iter().any(|w| same_dir(Path::new(&w.path), path)) {
+            continue;
+        }
+        let Some(listed) = listed_worktree(repo, path)? else {
+            let in_the_way = std::fs::read_dir(path).is_ok_and(|mut d| d.next().is_some());
+            if Some(path) == spawn_path.as_deref() && in_the_way {
+                return Ok(Cleared::Taken(format!(
+                    "{} is in the way and isn't a worktree of {}",
+                    path.display(),
+                    repo.display()
+                )));
+            }
+            continue;
+        };
+        if let Some(user) = in_use(path) {
+            return Ok(Cleared::Taken(format!(
+                "{} is in use by {user}",
+                path.display()
+            )));
+        }
+        worktrees.push(listed);
+    }
+    let remote_head = match branch {
+        Some(b) => remote_branch_head(repo, b)?,
+        None => None,
+    };
+    let local = !worktrees.is_empty() || branch_head.is_some();
+    if !local && remote_head.is_none() {
+        return Ok(Cleared::Absent);
+    }
+    if fate == Fate::Keep {
+        let elsewhere = worktrees
+            .iter()
+            .find(|w| w.branch.as_deref() != branch && Path::new(&w.path).exists());
+        if let (Some(b), Some(w)) = (branch, elsewhere) {
+            return Ok(Cleared::Taken(format!(
+                "{} isn't on {b}, so the new member can't start there; \
+                 rerun without --keep-branch to clear it",
+                w.path
+            )));
+        }
+        let remote = remote_head.is_some();
+        return Ok(Cleared::Kept { local, remote });
+    }
+    for w in &worktrees {
+        let path = Path::new(&w.path);
+        if let Some(reason) = &w.locked {
+            let why = reason
+                .as_deref()
+                .map(|r| format!(" ({r})"))
+                .unwrap_or_default();
+            return Ok(Cleared::Taken(format!("{} is locked{why}", w.path)));
+        }
+        if !path.exists() {
+            continue;
+        }
+        if let Some(op) = operation_in_progress(path)? {
+            return Ok(Cleared::Dirty(format!("{} has a {op} in progress", w.path)));
+        }
+        if let Some(reason) = unclean(path)? {
+            return Ok(Cleared::Dirty(format!("{} has {reason}", w.path)));
+        }
+    }
+    let heads: Vec<&str> = worktrees
+        .iter()
+        .map(|w| w.head.as_str())
+        .chain(branch_head.as_deref())
+        .chain(remote_head.as_deref())
+        .filter(|h| !h.is_empty())
+        .collect();
+    fetch(repo)?;
+    let base = default_branch(repo)?;
+    let count = |not: &[&str]| -> Result<usize> {
+        let mut args = vec!["rev-list", "--count"];
+        args.extend(&heads);
+        args.push("--not");
+        args.extend(not);
+        git(repo, &args)?
+            .trim()
+            .parse()
+            .context("git rev-list --count")
+    };
+    let ahead = if heads.is_empty() {
+        0
+    } else {
+        count(&[&base])?
+    };
+    if ahead > 0 && fate == Fate::Clear {
+        return Ok(Cleared::Ahead { count: ahead, base });
+    }
+    let dropped = match (ahead, branch) {
+        (0, _) => 0,
+        (_, None) => ahead,
+        (_, Some(b)) => {
+            let exclude = format!("--exclude=origin/{b}");
+            count(&[&base, &exclude, "--remotes=origin"])?
+        }
+    };
+    if let (Some(b), Some(head)) = (branch, &remote_head) {
+        delete_remote_branch(repo, b, head)?;
+    }
+    for w in &worktrees {
+        git(repo, &["worktree", "remove", &w.path])?;
+    }
+    if let (Some(b), Some(head)) = (branch, &branch_head) {
+        delete_branch(repo, b, head)?;
+    }
+    Ok(Cleared::Removed {
+        worktrees: worktrees
+            .into_iter()
+            .map(|w| (PathBuf::from(w.path), w.head))
+            .collect(),
+        branch: branch_head,
+        remote: remote_head,
+        dropped,
+        base,
+    })
+}
+
+/// The head of `branch` on origin, fetched into origin/`branch`, if origin
+/// has it. Asks origin directly, since a plain fetch never prunes a
+/// tracking ref whose branch was deleted.
+fn remote_branch_head(repo: &Path, branch: &str) -> Result<Option<String>> {
+    let name = format!("refs/heads/{branch}");
+    let listed = remote_git(repo, &["ls-remote", "--heads", "origin", &name])?;
+    if listed.trim().is_empty() {
+        return Ok(None);
+    }
+    let tracking = format!("refs/remotes/origin/{branch}");
+    remote_git(
+        repo,
+        &["fetch", "--quiet", "origin", &format!("+{name}:{tracking}")],
+    )?;
+    Ok(Some(
+        git(repo, &["rev-parse", &tracking])?.trim().to_string(),
+    ))
+}
+
+fn delete_remote_branch(repo: &Path, branch: &str, head: &str) -> Result<()> {
+    // The lease makes origin refuse the delete if the branch moved since it was counted.
+    let lease = format!("--force-with-lease=refs/heads/{branch}:{head}");
+    let refspec = format!(":refs/heads/{branch}");
+    remote_git(repo, &["push", "--quiet", &lease, "origin", &refspec])?;
+    Ok(())
+}
+
 /// Why `branch` at `head` isn't merged into origin's default branch, if it isn't.
 fn unmerged(repo: &Path, branch: &str, head: &str) -> Result<Option<String>> {
     fetch(repo)?;
@@ -918,6 +1139,466 @@ mod tests {
         let base = git(&wt, &["merge-base", "HEAD", "origin/main"]).unwrap();
         let head = git(&wt, &["rev-parse", "HEAD"]).unwrap();
         assert_eq!(base, head);
+    }
+
+    fn nobody(_: &Path) -> Option<String> {
+        None
+    }
+
+    fn clear(repo: &Path, worktree: Option<&Path>, fate: Fate) -> Cleared {
+        clear_checkout(repo, worktree, Some("feat/x"), fate, &nobody).unwrap()
+    }
+
+    #[test]
+    fn clearing_a_branch_that_was_never_made_finds_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+
+        assert_eq!(clear(&repo, None, Fate::Clear), Cleared::Absent);
+    }
+
+    #[test]
+    fn clearing_a_branch_with_nothing_new_removes_it_and_its_worktree() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+        let start = head(&wt);
+
+        let cleared = clear(&repo, None, Fate::Clear);
+
+        assert_eq!(
+            cleared,
+            Cleared::Removed {
+                worktrees: vec![(wt.clone(), start.clone())],
+                branch: Some(start),
+                remote: None,
+                dropped: 0,
+                base: "origin/main".into(),
+            }
+        );
+        assert!(!wt.exists());
+        assert!(!has_branch(&repo, "feat/x"));
+    }
+
+    #[test]
+    fn clearing_a_branch_with_commits_not_on_the_base_changes_nothing_unless_dropped() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+        commit(&wt, "unpushed");
+
+        let kept = clear(&repo, None, Fate::Clear);
+
+        assert_eq!(
+            kept,
+            Cleared::Ahead {
+                count: 1,
+                base: "origin/main".into()
+            }
+        );
+        assert!(wt.exists());
+        assert!(has_branch(&repo, "feat/x"));
+
+        let dropped = clear(&repo, None, Fate::Drop);
+
+        assert!(
+            matches!(dropped, Cleared::Removed { dropped: 1, .. }),
+            "{dropped:?}"
+        );
+        assert!(!has_branch(&repo, "feat/x"));
+    }
+
+    #[test]
+    fn keeping_changes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+
+        assert_eq!(
+            clear(&repo, Some(&wt), Fate::Keep),
+            Cleared::Kept {
+                local: true,
+                remote: false
+            }
+        );
+        assert!(wt.exists());
+        assert!(has_branch(&repo, "feat/x"));
+    }
+
+    #[test]
+    fn clearing_a_branch_whose_worktree_has_changes_changes_nothing_even_when_dropped() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+        std::fs::write(wt.join("notes"), "draft").unwrap();
+
+        let cleared = clear(&repo, None, Fate::Drop);
+
+        assert_eq!(
+            cleared,
+            Cleared::Dirty(format!(
+                "{} has uncommitted or untracked changes",
+                wt.display()
+            ))
+        );
+        assert!(wt.join("notes").exists());
+        assert!(has_branch(&repo, "feat/x"));
+    }
+
+    #[test]
+    fn a_branch_checked_out_in_the_main_checkout_is_taken_even_when_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        git_in(&repo, &["checkout", "--quiet", "-b", "feat/x"]);
+
+        for fate in [Fate::Keep, Fate::Drop] {
+            assert_eq!(
+                clear(&repo, None, fate),
+                Cleared::Taken(format!(
+                    "feat/x is checked out in the main checkout {}",
+                    repo.display()
+                ))
+            );
+        }
+        assert!(has_branch(&repo, "feat/x"));
+    }
+
+    #[test]
+    fn a_worktree_a_live_member_uses_is_taken() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+
+        let cleared = clear_checkout(&repo, None, Some("feat/x"), Fate::Drop, &|_| {
+            Some("lh-9".into())
+        })
+        .unwrap();
+
+        assert_eq!(
+            cleared,
+            Cleared::Taken(format!("{} is in use by lh-9", wt.display()))
+        );
+        assert!(wt.exists());
+    }
+
+    #[test]
+    fn clears_the_recorded_worktree_even_when_it_left_the_branch() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+        git_in(&wt, &["checkout", "--quiet", "--detach"]);
+        git_in(&repo, &["branch", "--quiet", "-D", "feat/x"]);
+
+        let cleared = clear(&repo, Some(&wt), Fate::Clear);
+
+        assert!(
+            matches!(&cleared, Cleared::Removed { branch: None, worktrees, .. } if worktrees.len() == 1),
+            "{cleared:?}"
+        );
+        assert!(!wt.exists());
+        ensure_worktree(&repo, "feat/x").unwrap();
+    }
+
+    #[test]
+    fn counts_a_detached_worktrees_own_commits() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_detached_worktree(&repo, "lead-x").unwrap();
+        commit(&wt, "detached work");
+
+        let cleared = clear_checkout(&repo, Some(&wt), None, Fate::Clear, &nobody).unwrap();
+
+        assert_eq!(
+            cleared,
+            Cleared::Ahead {
+                count: 1,
+                base: "origin/main".into()
+            }
+        );
+    }
+
+    #[test]
+    fn clearing_a_branch_whose_worktree_dir_is_gone_removes_its_record_and_the_branch() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+        std::fs::remove_dir_all(&wt).unwrap();
+
+        let cleared = clear(&repo, Some(&wt), Fate::Clear);
+
+        assert!(
+            matches!(cleared, Cleared::Removed { dropped: 0, .. }),
+            "{cleared:?}"
+        );
+        assert!(!worktree_list(&repo).contains("feat/x"));
+        assert!(!has_branch(&repo, "feat/x"));
+    }
+
+    fn on_origin(root: &Path, branch: &str) -> bool {
+        has_ref(&root.join("origin.git"), &format!("refs/heads/{branch}"))
+    }
+
+    /// A `feat/x` pushed with one commit not on the base, then removed locally.
+    fn pushed_only(root: &Path, repo: &Path) -> String {
+        let wt = ensure_worktree(repo, "feat/x").unwrap();
+        commit(&wt, "pushed");
+        push_head(&wt, "feat/x");
+        let pushed = head(&wt);
+        git_in(repo, &["worktree", "remove", path_str(&wt)]);
+        git_in(repo, &["branch", "--quiet", "-D", "feat/x"]);
+        assert!(on_origin(root, "feat/x"));
+        pushed
+    }
+
+    fn path_str(p: &Path) -> &str {
+        p.to_str().unwrap()
+    }
+
+    #[test]
+    fn an_origin_branch_with_commits_not_on_the_base_changes_nothing_unless_dropped() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let pushed = pushed_only(root.path(), &repo);
+
+        assert_eq!(
+            clear(&repo, None, Fate::Clear),
+            Cleared::Ahead {
+                count: 1,
+                base: "origin/main".into()
+            }
+        );
+        assert!(on_origin(root.path(), "feat/x"));
+
+        let dropped = clear(&repo, None, Fate::Drop);
+
+        assert_eq!(
+            dropped,
+            Cleared::Removed {
+                worktrees: vec![],
+                branch: None,
+                remote: Some(pushed),
+                dropped: 1,
+                base: "origin/main".into(),
+            }
+        );
+        assert!(!on_origin(root.path(), "feat/x"));
+        assert_eq!(clear(&repo, None, Fate::Clear), Cleared::Absent);
+    }
+
+    #[test]
+    fn keeping_an_origin_branch_says_the_new_member_starts_from_it() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        pushed_only(root.path(), &repo);
+
+        assert_eq!(
+            clear(&repo, None, Fate::Keep),
+            Cleared::Kept {
+                local: false,
+                remote: true
+            }
+        );
+        assert!(on_origin(root.path(), "feat/x"));
+    }
+
+    #[test]
+    fn an_origin_branch_already_on_the_base_is_cleared() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+        push_head(&wt, "feat/x");
+
+        let cleared = clear(&repo, None, Fate::Clear);
+
+        assert!(
+            matches!(
+                &cleared,
+                Cleared::Removed {
+                    remote: Some(_),
+                    dropped: 0,
+                    ..
+                }
+            ),
+            "{cleared:?}"
+        );
+        assert!(!on_origin(root.path(), "feat/x"));
+        assert!(!has_branch(&repo, "feat/x"));
+    }
+
+    #[test]
+    fn commits_another_origin_branch_holds_are_not_counted_dropped() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+        commit(&wt, "saved elsewhere");
+        push_head(&wt, "backup");
+        commit(&wt, "only here");
+
+        let cleared = clear(&repo, None, Fate::Drop);
+
+        assert!(
+            matches!(&cleared, Cleared::Removed { dropped: 1, .. }),
+            "{cleared:?}"
+        );
+    }
+
+    #[test]
+    fn keeping_nothing_finds_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+
+        assert_eq!(clear(&repo, None, Fate::Keep), Cleared::Absent);
+    }
+
+    #[test]
+    fn a_locked_worktree_is_taken_and_nothing_is_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let recorded = ensure_detached_worktree(&repo, "old").unwrap();
+        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+        git_in(
+            &repo,
+            &["worktree", "lock", "--reason", "on a stick", path_str(&wt)],
+        );
+
+        let cleared = clear(&repo, Some(&recorded), Fate::Drop);
+
+        assert_eq!(
+            cleared,
+            Cleared::Taken(format!("{} is locked (on a stick)", wt.display()))
+        );
+        assert!(recorded.exists());
+        assert!(has_branch(&repo, "feat/x"));
+    }
+
+    #[test]
+    fn another_worktree_on_the_branch_is_taken_and_left() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let review = root.path().join("my-review");
+        git_in(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feat/x",
+                path_str(&review),
+            ],
+        );
+
+        let cleared = clear(&repo, None, Fate::Drop);
+
+        assert_eq!(
+            cleared,
+            Cleared::Taken(format!(
+                "feat/x is checked out in {}, a worktree loopherd didn't make",
+                review.display()
+            ))
+        );
+        assert!(review.exists());
+    }
+
+    #[test]
+    fn a_clean_leftover_at_the_spawn_path_is_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let leftover = worktree_path(&repo, "feat/x");
+        git_in(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                path_str(&leftover),
+            ],
+        );
+
+        let cleared = clear(&repo, None, Fate::Clear);
+
+        assert!(
+            matches!(&cleared, Cleared::Removed { worktrees, .. } if worktrees.len() == 1),
+            "{cleared:?}"
+        );
+        assert!(!leftover.exists());
+        ensure_worktree(&repo, "feat/x").unwrap();
+    }
+
+    #[test]
+    fn a_leftover_with_changes_at_the_spawn_path_is_refused_and_named() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let leftover = worktree_path(&repo, "feat/x");
+        git_in(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                path_str(&leftover),
+            ],
+        );
+        std::fs::write(leftover.join("notes"), "draft").unwrap();
+
+        for fate in [Fate::Clear, Fate::Drop] {
+            assert_eq!(
+                clear(&repo, None, fate),
+                Cleared::Dirty(format!(
+                    "{} has uncommitted or untracked changes",
+                    leftover.display()
+                ))
+            );
+        }
+        assert!(leftover.join("notes").exists());
+    }
+
+    #[test]
+    fn a_leftover_off_the_branch_at_the_spawn_path_is_taken_when_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let leftover = worktree_path(&repo, "feat/x");
+        git_in(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                path_str(&leftover),
+            ],
+        );
+
+        let cleared = clear(&repo, None, Fate::Keep);
+
+        assert!(
+            matches!(&cleared, Cleared::Taken(why) if why.contains("isn't on feat/x")),
+            "{cleared:?}"
+        );
+        assert!(leftover.exists());
+    }
+
+    #[test]
+    fn a_directory_in_the_way_at_the_spawn_path_is_taken_and_left() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let leftover = worktree_path(&repo, "feat/x");
+        std::fs::create_dir_all(&leftover).unwrap();
+        std::fs::write(leftover.join("notes"), "draft").unwrap();
+
+        for fate in [Fate::Clear, Fate::Keep, Fate::Drop] {
+            assert_eq!(
+                clear(&repo, Some(&leftover), fate),
+                Cleared::Taken(format!(
+                    "{} is in the way and isn't a worktree of {}",
+                    leftover.display(),
+                    repo.display()
+                ))
+            );
+        }
+        assert!(leftover.join("notes").exists());
     }
 
     #[test]
