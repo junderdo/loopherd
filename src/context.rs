@@ -81,30 +81,59 @@ pub fn handoff_path(state: &Path, name: &str) -> PathBuf {
     state.join("handoffs").join(format!("{name}.md"))
 }
 
-/// The reason to block the stop `input` describes, when `member`'s context
-/// is over `limit`: once per session, never on a stop a Stop hook already
-/// continued. Before asking, moves any handoff from last time to
-/// `<name>.prev.md`. A failed `limit` falls back to the built-in one and is
-/// passed to `note` once per session.
+/// What the Stop hook learned about a member's context on one stop.
+#[derive(Debug)]
+pub struct Check {
+    /// `Some` when the stop is to be blocked to ask for a handoff. An error
+    /// in asking leaves `measured` intact.
+    pub reason: Result<Option<String>>,
+    /// `None` when the transcript is missing or has no usage yet.
+    pub measured: Option<Measured>,
+}
+
+impl Default for Check {
+    fn default() -> Self {
+        Check {
+            reason: Ok(None),
+            measured: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Measured {
+    pub tokens: u64,
+    pub limit: u64,
+}
+
+/// Measures the context of the stop `input` describes, and gives the reason
+/// to block it when `member`'s context is over `limit`: once per session,
+/// never on a stop a Stop hook already continued. Before asking, moves any
+/// handoff from last time to `<name>.prev.md`. A failed `limit` falls back
+/// to the built-in one and is passed to `note` once per session.
 pub fn handoff_block(
     member: &AgentRecord,
     input: &[u8],
     limit: Result<u64>,
     state: &Path,
     note: &dyn Fn(String) -> Result<()>,
-) -> Result<Option<String>> {
+) -> Check {
     let Ok(input) = serde_json::from_slice::<Value>(input) else {
-        return Ok(None);
-    };
-    if input["hook_event_name"] != "Stop" || input["stop_hook_active"] == true {
-        return Ok(None);
-    }
-    let Some(session) = input["session_id"].as_str().filter(|s| is_plain_name(s)) else {
-        return Ok(None);
+        return Check::default();
     };
     let live = input["transcript_path"]
         .as_str()
         .map(|t| live_transcript(Path::new(t)));
+    let tokens = live.as_deref().and_then(tokens_in);
+    let measured = |limit| tokens.map(|tokens| Measured { tokens, limit });
+    let session = input["session_id"].as_str().filter(|s| is_plain_name(s));
+    let askable = input["hook_event_name"] == "Stop" && input["stop_hook_active"] != true;
+    let Some(session) = session.filter(|_| askable) else {
+        return Check {
+            reason: Ok(None),
+            measured: measured(*limit.as_ref().unwrap_or(&FALLBACK_LIMIT)),
+        };
+    };
     let session = match &live {
         Some(live) if input["transcript_path"].as_str() != live.to_str() => session_in(live),
         _ => session.to_string(),
@@ -115,26 +144,27 @@ pub fn handoff_block(
         Err(e) => (FALLBACK_LIMIT, note_once(state, session, &e, note)),
     };
     // A failed note must not skip the check; it surfaces only when nothing is asked.
-    let asked = match &live {
-        Some(transcript) => ask(member, transcript, session, limit, state)?,
-        None => None,
+    let reason = match tokens.filter(|&t| t > limit) {
+        Some(tokens) => ask(member, tokens, session, limit, state),
+        None => Ok(None),
     };
-    match asked {
-        Some(reason) => Ok(Some(reason)),
-        None => noted.map(|()| None),
+    let reason = match reason {
+        Ok(None) => noted.map(|()| None),
+        reason => reason,
+    };
+    Check {
+        reason,
+        measured: measured(limit),
     }
 }
 
 fn ask(
     member: &AgentRecord,
-    transcript: &Path,
+    tokens: u64,
     session: &str,
     limit: u64,
     state: &Path,
 ) -> Result<Option<String>> {
-    let Some(tokens) = tokens_in(transcript).filter(|&t| t > limit) else {
-        return Ok(None);
-    };
     let asked = state.join("handoff-asked");
     let marker = asked.join(session);
     if marker.exists() {
@@ -496,7 +526,9 @@ mod tests {
         }
 
         fn block(&self, who: &AgentRecord, input: &[u8], limit: u64) -> Option<String> {
-            handoff_block(who, input, Ok(limit), &self.state(), &|_| Ok(())).unwrap()
+            handoff_block(who, input, Ok(limit), &self.state(), &|_| Ok(()))
+                .reason
+                .unwrap()
         }
     }
 
@@ -683,6 +715,7 @@ mod tests {
                 &w.state(),
                 &|_| Ok(())
             )
+            .reason
             .is_err()
         );
         fs::remove_dir_all(handoffs.join("lh-1.prev.md")).unwrap();
@@ -698,6 +731,7 @@ mod tests {
         let reason = handoff_block(&who, &w.stop("s1", &t, ""), broken(), &w.state(), &|_| {
             anyhow::bail!("mailbox full")
         })
+        .reason
         .unwrap()
         .unwrap();
         assert!(reason.contains("past your limit of 160000"), "{reason}");
@@ -711,7 +745,9 @@ mod tests {
         for _ in 0..2 {
             let stop = w.stop("s1", &t, "");
             assert_eq!(
-                handoff_block(&who, &stop, broken(), &w.state(), &note).unwrap(),
+                handoff_block(&who, &stop, broken(), &w.state(), &note)
+                    .reason
+                    .unwrap(),
                 None
             );
         }
@@ -735,8 +771,72 @@ mod tests {
             &w.state(),
             &|_| anyhow::bail!("mailbox full"),
         )
+        .reason
         .unwrap_err();
         assert_eq!(format!("{err:#}"), "mailbox full");
+    }
+
+    #[test]
+    fn a_failing_note_or_ask_keeps_the_measurement() {
+        let w = World::new();
+        let who = member("lh-1", None);
+        let at = Some(Measured {
+            tokens: 100,
+            limit: FALLBACK_LIMIT,
+        });
+        let t = w.transcript(&[assistant(0, 0, 100, false)]);
+        let noted = handoff_block(
+            &who,
+            &w.stop("s1", &t, ""),
+            Err(anyhow::anyhow!("bad")),
+            &w.state(),
+            &|_| anyhow::bail!("mailbox full"),
+        );
+        assert!(noted.reason.is_err());
+        assert_eq!(noted.measured, at);
+
+        let handoffs = w.state().join("handoffs");
+        fs::create_dir_all(handoffs.join("lh-1.prev.md/x")).unwrap();
+        fs::write(handoffs.join("lh-1.md"), "first").unwrap();
+        let t = w.transcript(&[assistant(0, 0, 200, false)]);
+        let asked = handoff_block(
+            &who,
+            &w.stop("s2", &t, ""),
+            Ok(100),
+            &w.state(),
+            &|_| Ok(()),
+        );
+        assert!(asked.reason.is_err());
+        assert_eq!(
+            asked.measured,
+            Some(Measured {
+                tokens: 200,
+                limit: 100
+            })
+        );
+    }
+
+    #[test]
+    fn every_stop_with_a_transcript_is_measured_even_one_not_asked_about() {
+        let w = World::new();
+        let who = member("lh-1", None);
+        let t = w.transcript(&[assistant(0, 0, 120_000, false)]);
+        let measure = |input: &[u8], limit| {
+            handoff_block(&who, input, limit, &w.state(), &|_| Ok(())).measured
+        };
+        let at = |limit| {
+            Some(Measured {
+                tokens: 120_000,
+                limit,
+            })
+        };
+        assert_eq!(measure(&w.stop("s1", &t, ""), Ok(150_000)), at(150_000));
+        let continued = w.stop("s1", &t, r#","stop_hook_active":true"#);
+        assert_eq!(measure(&continued, Ok(150_000)), at(150_000));
+        let broken = Err(anyhow::anyhow!("bad"));
+        assert_eq!(measure(&continued, broken), at(160_000));
+        let untranscribed = br#"{"hook_event_name":"Stop","session_id":"s1"}"#;
+        assert_eq!(measure(untranscribed, Ok(150_000)), None);
     }
 
     #[test]
@@ -753,9 +853,8 @@ mod tests {
                 noted.borrow_mut().push(text);
                 Ok(())
             },
-        )
-        .unwrap();
-        assert_eq!(blocked, None);
+        );
+        assert_eq!(blocked.reason.unwrap(), None);
         assert_eq!(noted.borrow().len(), 1);
     }
 

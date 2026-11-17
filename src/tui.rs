@@ -60,6 +60,8 @@ const SHEEP: [&str; 4] = [
 ];
 /// Over a member's cells, the time's column left blank.
 const HEADINGS: [&str; 6] = ["NAME", "STATUS", "", "BRANCH", "WORKTREE", "PANE"];
+/// Where the CONTEXT column goes when any row has a gauge: after the status time.
+const GAUGE: usize = 3;
 
 /// Work for the reader thread: anything that touches herdr or the ledger,
 /// which can hang, so the input loop never does.
@@ -648,20 +650,42 @@ impl App {
         };
         let view = &read.view;
         let sections = sections(view);
-        let cells: Vec<Vec<Vec<String>>> = sections
+        let gauges: Vec<Vec<Option<Span>>> = sections
             .iter()
             .map(|(_, members)| {
                 members
                     .iter()
                     .map(|m| {
+                        let (context, limit) = self.mail.context_use(&m.name)?;
+                        Some(self.theme.gauge(context, limit))
+                    })
+                    .collect()
+            })
+            .collect();
+        let gauged = gauges.iter().flatten().any(Option::is_some);
+        let cells: Vec<Vec<Vec<String>>> = sections
+            .iter()
+            .zip(&gauges)
+            .map(|((_, members), gauges)| {
+                members
+                    .iter()
+                    .zip(gauges)
+                    .map(|(m, gauge)| {
                         let mut cells = row(m);
                         cells.insert(2, time(self.since.of(&m.name, now)));
+                        if gauged {
+                            let gauge = gauge.as_ref().map(|g| g.content.to_string());
+                            cells.insert(GAUGE, gauge.unwrap_or_default());
+                        }
                         cells
                     })
                     .collect()
             })
             .collect();
-        let headings: Vec<String> = HEADINGS.map(String::from).to_vec();
+        let mut headings: Vec<String> = HEADINGS.map(String::from).to_vec();
+        if gauged {
+            headings.insert(GAUGE, "CONTEXT".into());
+        }
         let mut widths = widths(cells.iter().flatten().chain([&headings]));
         if let Some(w) = widths.get_mut(2) {
             *w = (*w).max(TIME_WIDTH);
@@ -675,7 +699,9 @@ impl App {
         }) as usize;
         let mut panels = vec![];
         let mut target = 0;
-        for (i, ((name, members), cells)) in sections.iter().zip(&cells).enumerate() {
+        for (i, (((name, members), cells), gauges)) in
+            sections.iter().zip(&cells).zip(gauges).enumerate()
+        {
             let mut rows = vec![];
             if !members.is_empty() {
                 rows.push(Row {
@@ -683,11 +709,14 @@ impl App {
                     target: None,
                 });
             }
-            for (member, cells) in members.iter().zip(cells) {
+            for ((member, cells), gauge) in members.iter().zip(cells).zip(gauges) {
                 let (glyph, style) = self.theme.glyph(member.status, member.gone, spinner);
                 let mut spans = vec![Span::raw(" "), Span::styled(glyph, style), Span::raw(" ")];
-                match member.gone {
-                    true => spans.push(Span::styled(aligned(cells, &widths), Modifier::DIM)),
+                let (text_style, time_style) = match member.gone {
+                    true => (
+                        Style::new().add_modifier(Modifier::DIM),
+                        Modifier::DIM.into(),
+                    ),
                     false => {
                         let time = self.since.of(&member.name, now);
                         let time_style = match time.map(|t| staleness(member, t)) {
@@ -695,14 +724,30 @@ impl App {
                             Some(Staleness::Overdue) => self.theme.overdue(),
                             _ => Style::new(),
                         };
-                        let (before, after) = cells.split_at(2);
-                        spans.extend([
-                            Span::raw(format!("{}  ", padded(before, &widths))),
-                            Span::styled(format!("{:w$}", after[0], w = widths[2]), time_style),
-                            Span::raw(format!("  {}", aligned(&after[1..], &widths[3..]))),
-                        ]);
+                        (Style::new(), time_style)
                     }
-                }
+                };
+                let (before, after) = cells.split_at(2);
+                spans.extend([
+                    Span::styled(format!("{}  ", padded(before, &widths)), text_style),
+                    Span::styled(format!("{:w$}", after[0], w = widths[2]), time_style),
+                ]);
+                let rest = match gauged {
+                    true => {
+                        let cell = format!("{:w$}", after[1], w = widths[GAUGE]);
+                        let gauge_style = gauge.map_or(text_style, |g| g.style.patch(text_style));
+                        spans.extend([
+                            Span::styled("  ", text_style),
+                            Span::styled(cell, gauge_style),
+                        ]);
+                        GAUGE + 1
+                    }
+                    false => GAUGE,
+                };
+                spans.push(Span::styled(
+                    format!("  {}", aligned(&cells[rest..], &widths[rest..])),
+                    text_style,
+                ));
                 rows.push(Row {
                     line: Line::from(spans),
                     target: Some(target),
@@ -1245,6 +1290,8 @@ max = 3
             background: report::Tally::Known(report::Background::default()),
             crons: report::Tally::Known(0),
             error: None,
+            context: None,
+            limit: None,
             session: None,
         })
     }
@@ -2593,6 +2640,8 @@ max = 3
             }),
             crons: report::Tally::Known(0),
             error: None,
+            context: None,
+            limit: None,
             session: None,
         })
     }
@@ -2664,6 +2713,61 @@ max = 3
             assert!(x > 60, "{kind} is in the pane");
             assert_eq!(cell(&terminal, (x, y)).fg, color, "{kind}");
         }
+    }
+
+    fn measured(context: u64, limit: u64) -> Body {
+        let Body::Stop(stop) = paused(0, 0) else {
+            unreachable!()
+        };
+        Body::Stop(report::Stop {
+            context: Some(context),
+            limit: Some(limit),
+            ..stop
+        })
+    }
+
+    #[test]
+    fn each_row_gauges_its_latest_stops_context_use_violet_then_orange_from_60_then_red_from_85() {
+        let (ledger, herdr, t0) = (ledger(), herdr(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post(mail.path(), "a", measured(88_500, 150_000));
+        post(mail.path(), "c", measured(90_000, 150_000));
+        post(mail.path(), "old", measured(127_500, 150_000));
+        post(mail.path(), "b", measured(127_500, 150_000));
+        post(mail.path(), "b", paused(0, 0));
+        let app = app_with_mail(&herdr, &ledger, mail.path(), t0);
+
+        let terminal = render_at(&app, t0, 120, 30);
+
+        let violet = at(&terminal, "▰▰▰▰▱▱ 59%");
+        assert_eq!(violet.fg, GREY_VIOLET);
+        let orange = at(&terminal, "▰▰▰▰▱▱ 60%");
+        assert_eq!(orange.fg, LIGHT_ORANGE);
+        let red = at(&terminal, "▰▰▰▰▰▱ 85%");
+        assert_eq!(red.fg, Color::Red);
+        assert!(red.modifier.contains(Modifier::BOLD));
+        assert!(!violet.modifier.contains(Modifier::BOLD));
+        let gauges = lines(&terminal)
+            .iter()
+            .filter(|l| l.contains('▰') || l.contains('▱'))
+            .count();
+        assert_eq!(gauges, 3, "{:#?}", lines(&terminal));
+    }
+
+    #[test]
+    fn a_restarted_member_drops_its_last_sessions_gauge_and_a_gone_ones_is_dimmed() {
+        let (ledger, herdr, t0) = (ledger(), herdr(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post(mail.path(), "a", measured(151_000, 150_000));
+        post(mail.path(), "a", Body::Start);
+        post(mail.path(), "old", measured(75_000, 150_000));
+        let app = app_with_mail(&herdr, &ledger, mail.path(), t0);
+
+        let terminal = render_at(&app, t0, 120, 30);
+
+        assert!(at(&terminal, "▰▰▰▱▱▱ 50%").modifier.contains(Modifier::DIM));
+        let gauges = lines(&terminal).iter().filter(|l| l.contains('▰')).count();
+        assert_eq!(gauges, 1, "{:#?}", lines(&terminal));
     }
 
     #[test]
@@ -3013,6 +3117,8 @@ max = 3
                 }),
                 crons: report::Tally::Known(0),
                 error: error.map(str::to_string),
+                context: None,
+                limit: None,
                 session: None,
             })
         };
@@ -3132,6 +3238,8 @@ max = 3
                 background,
                 crons,
                 error: None,
+                context: None,
+                limit: None,
                 session: None,
             })
         };

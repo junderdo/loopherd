@@ -1181,6 +1181,8 @@ mod tests {
             }),
             crons: Tally::Known(crons),
             error: None,
+            context: None,
+            limit: None,
         })
     }
 
@@ -1190,6 +1192,8 @@ mod tests {
             background: Tally::Unknown(Unknown::Unknown),
             crons: Tally::Unknown(Unknown::Unknown),
             error: Some(error.into()),
+            context: None,
+            limit: None,
         })
     }
 
@@ -1262,6 +1266,26 @@ mod tests {
     }
 
     #[test]
+    fn a_stops_context_use_stays_out_of_its_wake_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = working_pair();
+        put(dir.path(), "lh-1", Body::Start);
+        let Body::Stop(measured) = stop(1, 0) else {
+            unreachable!()
+        };
+        let measured = Stop {
+            context: Some(120_000),
+            limit: Some(150_000),
+            ..measured
+        };
+        put(dir.path(), "lh-1", Body::Stop(measured));
+        assert_eq!(
+            once(&herdr, &ledger, dir.path()).unwrap(),
+            ["lh-1 paused  1 shell"]
+        );
+    }
+
+    #[test]
     fn a_handoff_counts_as_the_report_before_a_finish() {
         let dir = tempfile::tempdir().unwrap();
         let (ledger, herdr) = working_pair();
@@ -1309,6 +1333,8 @@ mod tests {
                 background: Tally::Unknown(Unknown::Unknown),
                 crons: Tally::Known(0),
                 error: None,
+                context: None,
+                limit: None,
             }),
         );
         assert_eq!(
