@@ -59,6 +59,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D42](decisions/D42.md) | loopherd ships as GitHub Releases built by a `v*` tag workflow (musl Linux, macOS, `SHA256SUMS`, a tag-stamped `install.sh`); `curl … install.sh \| sh` installs one and runs `install-hook` and `setup`; SemVer from 0.1.0 per `docs/releasing.md`; `--version` names the commit for non-release builds. |
 | [D43](decisions/D43.md) | `loopherd herd remove <herd>` deletes a finished herd (file, pause, an unshared lead `prompt_file` in the herds dir, and its members' ledger entries under the lock, mailboxes and handoffs), refusing while any member is unretired, on another herdr session, or not confirmed closed in herdr (or herdr is unreachable) and never touching worktrees or tabs; a lead's hook denies it. |
 | [D44](decisions/D44.md) | `stats`, `reports` and `watch` label their printed wall-clock times UTC (`started (UTC)` headers, a ` UTC` suffix on report lines) rather than converting to local time; `--json` is unchanged. |
+| [D45](decisions/D45.md) | The Stop hook defers a member's handoff ask while its stop shows subagents running, until a stop without them or until its context passes 1.5x its limit; background shells alone don't defer it. |
 
 ## Emerging model
 
