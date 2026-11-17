@@ -395,9 +395,15 @@ fn summary(question: &str) -> String {
     for word in first.split_whitespace() {
         let shown;
         (shown, next) = match next {
-            Next::Clause => match clause_end(word) {
-                Some(end) => (Shown::Glued(end), Next::Free),
-                None => (Shown::Glued(""), Next::Clause),
+            Next::Clause => match Next::after_value(word) {
+                Next::Closing(closers) if word.starts_with(OPENERS) => {
+                    (Shown::Glued(""), Next::ClauseQuote(closers))
+                }
+                _ => clause_goes_on(word),
+            },
+            Next::ClauseQuote(closers) => match Next::closed_by(word, closers) {
+                Next::Free => clause_goes_on(word),
+                _ => (Shown::Glued(""), next),
             },
             Next::ClauseStart => clause_start(word),
             Next::Closing(closers) => (Shown::redacted(), Next::closed_by(word, closers)),
@@ -406,10 +412,7 @@ fn summary(question: &str) -> String {
                 (Shown::Word(word.to_string()), next)
             }
             Next::Value => match clause_carried_by(word) {
-                Some(value) => match clause_start(value) {
-                    (shown, Next::Free) => (shown, key_named_by(value)),
-                    started => started,
-                },
+                Some(value) => clause_start(value),
                 None => (Shown::redacted(), value_then(word)),
             },
             Next::Key(key) if is_separator(word) => (Shown::Word(word.to_string()), key.value()),
@@ -464,14 +467,28 @@ const QUOTES: [char; 7] = ['"', '\'', '“', '”', '‘', '’', '»'];
 const OPENERS: [char; 12] = ['"', '\'', '“', '‘', '”', '’', '„', '‚', '«', '[', '(', '{'];
 
 /// The first word of a separated strong key's value, hidden with the rest of its
-/// clause unless it opens a quote or bracket.
+/// clause unless it opens a quote or bracket. A value that ends there and is itself a
+/// key (`«Bearer»`, `Bearer”`) is read as one.
 fn clause_start(value: &str) -> (Shown<'_>, Next) {
-    if value.starts_with(OPENERS) {
-        return (Shown::redacted(), Next::after_value(value));
+    let (shown, next) = match () {
+        _ if value.starts_with(OPENERS) => (Shown::redacted(), Next::after_value(value)),
+        _ => match clause_end(value) {
+            Some(end) => (Shown::Word(format!("[redacted]{end}")), Next::Free),
+            None => (Shown::redacted(), Next::Clause),
+        },
+    };
+    match next {
+        Next::Free => (shown, key_named_by(value)),
+        next => (shown, next),
     }
-    match clause_end(value) {
-        Some(end) => (Shown::Word(format!("[redacted]{end}")), Next::Free),
-        None => (Shown::redacted(), Next::Clause),
+}
+
+/// A hidden clause's `word`: its end, after which `word` may be a key (`auth=Bearer”`),
+/// or more of the clause.
+fn clause_goes_on(word: &str) -> (Shown<'_>, Next) {
+    match clause_end(word) {
+        Some(end) => (Shown::Glued(end), key_named_by(word)),
+        None => (Shown::Glued(""), Next::Clause),
     }
 }
 
@@ -494,6 +511,8 @@ enum Next {
     ClauseStart,
     /// Inside a [`ClauseStart`](Next::ClauseStart) value, already shown as `[redacted]`.
     Clause,
+    /// Inside a quote opened within a [`Clause`](Next::Clause), which goes on after it.
+    ClauseQuote(&'static [char]),
     /// Hidden if it looks like a secret.
     MaybeValue,
     /// After a key with no separator yet: `password`, `the token is`.
@@ -545,17 +564,13 @@ impl Next {
         }
     }
 
-    /// A `'` or `’` followed by a Latin letter or a digit is an apostrophe (`it’s`,
-    /// `l’été`), not a close; any other closer closes whatever follows it.
+    /// A `'` or `’` followed by a letter or digit is an apostrophe (`it’s`, `l’été`),
+    /// not a close, unless it is CJK, Cyrillic or a superscript; any other closer closes.
     fn closed_by(word: &str, closers: &'static [char]) -> Next {
-        let latin_block = |c: char| {
-            matches!(c, '\0'..='\u{24F}' | '\u{1E00}'..='\u{1EFF}')
-                || matches!(c, '\u{2C60}'..='\u{2C7F}' | '\u{A720}'..='\u{A7FF}')
-        };
-        let latin = |c: char| c.is_ascii_alphanumeric() || c.is_alphabetic() && latin_block(c);
+        let in_word = |c: char| c.is_alphanumeric() && !closes_before(c);
         let closes = word.match_indices(closers).any(|(at, closer)| {
             let apostrophe =
-                ["'", "’"].contains(&closer) && word[at + closer.len()..].starts_with(latin);
+                ["'", "’"].contains(&closer) && word[at + closer.len()..].starts_with(in_word);
             !apostrophe
         });
         match closes {
@@ -563,6 +578,21 @@ impl Next {
             false => Next::Closing(closers),
         }
     }
+}
+
+/// CJK, Cyrillic and superscript digits: text that can follow a closing quote with no
+/// space between, so a `’` before one closes its value rather than being an apostrophe.
+fn closes_before(c: char) -> bool {
+    let cjk = matches!(c,
+        '\u{1100}'..='\u{11FF}' | '\u{2E80}'..='\u{2FDF}' | '\u{3040}'..='\u{31FF}'
+        | '\u{3400}'..='\u{4DBF}' | '\u{4E00}'..='\u{9FFF}' | '\u{A960}'..='\u{A97F}'
+        | '\u{AC00}'..='\u{D7FF}' | '\u{F900}'..='\u{FAFF}' | '\u{FF66}'..='\u{FFDC}'
+        | '\u{20000}'..='\u{3FFFF}');
+    let cyrillic = matches!(c,
+        '\u{0400}'..='\u{052F}' | '\u{1C80}'..='\u{1C8F}' | '\u{2DE0}'..='\u{2DFF}'
+        | '\u{A640}'..='\u{A69F}' | '\u{1E030}'..='\u{1E08F}');
+    let superscript = matches!(c, '¹' | '²' | '³' | '\u{2070}' | '\u{2074}'..='\u{2079}');
+    cjk || cyrillic || superscript
 }
 
 /// Matched at the end of a key, so `accessToken`, `PGPASSWORD` and `x-api-key` count.
@@ -1556,6 +1586,26 @@ mod tests {
                 "password: ‘a’ꝁb hunter22 xyz’ ok?",
                 "password: [redacted] [redacted] [redacted] ok?",
             ),
+            (
+                "password: ‘a’ɐb hunter22 xyz’ ok?",
+                "password: [redacted] [redacted] [redacted] ok?",
+            ),
+            (
+                "password: ‘a’ﬁb hunter22 xyz’ ok?",
+                "password: [redacted] [redacted] [redacted] ok?",
+            ),
+            (
+                "password: ‘a’ｂb hunter22 xyz’ ok?",
+                "password: [redacted] [redacted] [redacted] ok?",
+            ),
+            (
+                "password: ‘a’ꭓb hunter22 xyz’ ok?",
+                "password: [redacted] [redacted] [redacted] ok?",
+            ),
+            (
+                "password: ‘a’ᴀb hunter22 xyz’ ok?",
+                "password: [redacted] [redacted] [redacted] ok?",
+            ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
         }
@@ -1610,6 +1660,14 @@ mod tests {
             ),
             (
                 "password: «abc123»s Then merge #107?",
+                "password: [redacted] Then merge #107?",
+            ),
+            (
+                "password: ‘abc123’² Then merge #107?",
+                "password: [redacted] Then merge #107?",
+            ),
+            (
+                "password: ‘abc123’です Then merge #107?",
                 "password: [redacted] Then merge #107?",
             ),
             (
@@ -1687,6 +1745,34 @@ mod tests {
             (
                 r#"TOKEN authorization=Bearer" abc123def456 then merge?"#,
                 r#"TOKEN [redacted]" [redacted] then merge?"#,
+            ),
+            (
+                "password passphrase=hunter22 auth=password” abc123def456 ok",
+                "password [redacted]” [redacted] ok",
+            ),
+            (
+                "password passphrase=hunter22 x auth=Bearer” abc123def456 ok",
+                "password [redacted]” [redacted] ok",
+            ),
+            (
+                "Bearer passphrase=hunter22 x TOKEN ’ﬁx battery, xyz789abc",
+                "Bearer [redacted]",
+            ),
+            (
+                "key ok? auth=Bearer” passphrase=hunter22 token= «abc s3cr3tval, abc123def456",
+                "key ok? [redacted] [redacted]",
+            ),
+            (
+                "passphrase=hunter22 «Bearer» : «Bearer» csrf=s3cr3tval ok",
+                "[redacted]» : [redacted] [redacted] ok",
+            ),
+            (
+                r#"passphrase=hunter22 "abc"def csrf=s3cr3tval x) ok"#,
+                "[redacted]) ok",
+            ),
+            (
+                "PASSWORD : Bearer ‘a’ɐb ’² hunter22 Bearer",
+                "PASSWORD : [redacted]",
             ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
