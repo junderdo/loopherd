@@ -64,6 +64,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D47](decisions/D47.md) | Members are messaged with `loopherd tell`, which, like `prompt`, `restart` and revive's lead re-arm, refuses while the pane shows a subagent's view, then says whether the member went `working`. |
 | [D48](decisions/D48.md) | The lead hook keeps its fail-closed hand lexer over a bash parser crate, since every crate tried silently missed a command bash runs; LH-165's indirection forms are patched or named in D29's Limits. |
 | [D49](decisions/D49.md) | A lead's watch prints `<herd> failing` once per streak when its source or a worker's check fails, and `<herd> recovered` when it passes again. |
+| [D50](decisions/D50.md) | A retired lead's pane keeps its hook gates, and the hook always denies a lead's `loopherd retire` of a lead or of a name it can't read. |
 | [D51](decisions/D51.md) | `loopherd release <name>` lets feed spawn a retired member's name again, clearing its worktree and its branch, locally and on origin, unless they hold commits not on the base (`--keep-branch`/`--drop-branch`) and making its lead's watch forget the name. |
 
 ## Emerging model

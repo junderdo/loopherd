@@ -370,6 +370,50 @@ fn the_installed_tool_hook_denies_a_leads_merge_and_exits_0() {
 }
 
 #[test]
+fn the_installed_tool_hook_keeps_a_retired_leads_gates() {
+    let dir = tempfile::tempdir().unwrap();
+    let command = installed_tool_hook_command(dir.path());
+    fs::create_dir_all(dir.path().join("state/loopherd")).unwrap();
+    fs::write(
+        dir.path().join("state/loopherd/ledger.json"),
+        r#"{"lead-h": {"name": "lead-h", "pane_id": "w1:p1", "session_id": null, "repo": "/",
+            "worktree": null, "workspace": "w1", "prompt": null, "prompt_sent": true,
+            "created": "2026-11-01T00:00:00Z", "socket": "/run/herdr/herdr.sock",
+            "herd": "h", "role": "lead", "retired": true,
+            "retired_at": "2026-11-02T00:00:00Z"}}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(dir.path().join("config/herds")).unwrap();
+    fs::write(
+        dir.path().join("config/herds/h.toml"),
+        "repo = \"/r\"\n[lead]\nprompt = \"go\"\nrebase = true\n",
+    )
+    .unwrap();
+
+    for (bash, why) in [
+        ("gh pr merge 3", "`merge` switch is off"),
+        ("scripts/install", "`install` switch is off"),
+        (
+            "loopherd herd set h lead.merge true",
+            "may not run `loopherd herd set`",
+        ),
+        ("loopherd pause h", "may not run `loopherd pause`"),
+        ("loopherd retire lead-h", "may not retire a lead"),
+    ] {
+        let out = run_tool_hook(&command, dir.path(), Some("w1:p1"), bash);
+        let reason = denial(&out).unwrap_or_else(|| panic!("{bash} was allowed"));
+        assert!(
+            reason.contains("lead-h") && reason.contains(why),
+            "{reason}"
+        );
+    }
+    for bash in ["git push --force", "loopherd retire lh-1", "cargo test"] {
+        let out = run_tool_hook(&command, dir.path(), Some("w1:p1"), bash);
+        assert_eq!(denial(&out), None, "{bash}");
+    }
+}
+
+#[test]
 fn the_installed_tool_hook_resolves_switches_through_lead_defaults() {
     let dir = tempfile::tempdir().unwrap();
     let command = installed_tool_hook_command(dir.path());

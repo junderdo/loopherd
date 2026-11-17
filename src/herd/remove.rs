@@ -119,25 +119,20 @@ fn refuse_open(
                 "loopherd retire --close {}  # not retired",
                 member.name
             )),
-            (true, Some(socket))
-                if here.get_or_insert_with(|| herdr.socket()).as_ref() != Some(socket) =>
-            {
-                Some(format!(
+            (true, Some(socket)) => match here.get_or_insert_with(|| herdr.socket()) {
+                None => bail!(
+                    "refused: can't ask herdr whether {}'s tab is closed: \
+                     herdr didn't say which session it runs",
+                    member.name
+                ),
+                Some(here) if here != socket => Some(format!(
                     "loopherd retire --close {}  # on herdr session {}, not this one; run it there",
                     member.name,
                     socket.display()
-                ))
-            }
-            (true, _) => {
-                let mut others = entries.clone();
-                others.remove(&member.name);
-                open_tab(herdr, member, &others).with_context(|| {
-                    format!(
-                        "refused: can't ask herdr whether {}'s tab is closed",
-                        member.name
-                    )
-                })?
-            }
+                )),
+                Some(_) => open_tab_of(herdr, member, entries)?,
+            },
+            (true, None) => open_tab_of(herdr, member, entries)?,
         };
         if let Some(line) = fix {
             open.push(format!("\n  {line}"));
@@ -150,6 +145,21 @@ fn refuse_open(
         );
     }
     Ok(())
+}
+
+fn open_tab_of(
+    herdr: &dyn Herdr,
+    member: &AgentRecord,
+    entries: &BTreeMap<String, AgentRecord>,
+) -> Result<Option<String>> {
+    let mut others = entries.clone();
+    others.remove(&member.name);
+    open_tab(herdr, member, &others).with_context(|| {
+        format!(
+            "refused: can't ask herdr whether {}'s tab is closed",
+            member.name
+        )
+    })
 }
 
 /// Each member's handoffs, after its mailbox when `mailboxes`.
@@ -647,6 +657,26 @@ mod tests {
                 },
             )
             .unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.starts_with("refused: can't ask herdr whether a's tab is closed: "),
+            "{msg}"
+        );
+        assert_eq!(s.names(), ["a"]);
+        assert!(s.path("herds/old.toml").exists());
+    }
+
+    #[test]
+    fn refuses_a_socketed_member_as_unaskable_when_herdr_cant_be_reached() {
+        let mut s = Setup::new();
+        s.write("herds/old.toml", "repo = \"/r\"\n");
+        s.member("a", "old", true, false);
+        s.ledger.0.get_mut("a").unwrap().socket = Some("/run/other/herdr.sock".into());
+        s.herdr.set_unreachable(true);
+        s.herdr.socket = None;
+
+        let err = s.remove("old", Removal::default()).unwrap_err();
 
         let msg = format!("{err:#}");
         assert!(

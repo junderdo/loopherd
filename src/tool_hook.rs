@@ -1,7 +1,8 @@
 //! `loopherd tool-hook`: Claude's PreToolUse hook on Bash. Blocks a command
 //! from a lead's pane that needs a switch its herd file leaves off (D17), or
 //! a `loopherd restart --force` (D20), a `loopherd pause` or `resume`
-//! (D23), a `loopherd herd set`, `unset` (D29) or `remove` (D43), a write of the lead
+//! (D23), a `loopherd herd set`, `unset` (D29) or `remove` (D43), a `loopherd
+//! retire` of a lead (D50), a write of the lead
 //! defaults (D31), a `loopherd config set`, `unset` or `setup` (D39), cargo
 //! run through an alias it can't read, or a `$(…)` whose end it can't find,
 //! which no switch allows.
@@ -33,6 +34,10 @@ pub enum Switch {
     /// `loopherd herd set`, `unset` or `remove`, which could turn a lead's own
     /// switches on or delete its herd. Not a switch: always the human's.
     HerdEdit,
+    /// `loopherd retire` of a lead, or of a name the hook can't read, since
+    /// a lead that retires itself would drop its own gates. Not a switch:
+    /// the shepherd's or the human's.
+    RetireLead,
     /// `loopherd lead-defaults --set` or `scripts/install --lead-defaults`,
     /// which could turn a lead's own switches on. Not a switch: always the human's.
     LeadDefaults,
@@ -61,6 +66,7 @@ impl Switch {
             Switch::ForceRestart => "restart --force",
             Switch::Pause => "pause",
             Switch::HerdEdit => "herd set",
+            Switch::RetireLead => "retire lead",
             Switch::LeadDefaults => "lead-defaults",
             Switch::Config => "config",
             Switch::OpaqueCargoAlias => "cargo alias",
@@ -77,6 +83,7 @@ impl Switch {
             Switch::ForceRestart => "the human forces a restart",
             Switch::Pause => "the human pauses and resumes herds",
             Switch::HerdEdit => "the human edits herd files",
+            Switch::RetireLead => "the shepherd or the human retires leads",
             Switch::LeadDefaults => "the human sets lead defaults",
             Switch::Config => "the human sets loopherd's config",
             Switch::OpaqueCargoAlias => "the human runs cargo through such aliases",
@@ -93,6 +100,7 @@ impl Switch {
             Switch::ForceRestart
             | Switch::Pause
             | Switch::HerdEdit
+            | Switch::RetireLead
             | Switch::LeadDefaults
             | Switch::Config
             | Switch::OpaqueCargoAlias
@@ -139,6 +147,7 @@ fn decide(
                 Switch::ForceRestart,
                 Switch::Pause,
                 Switch::HerdEdit,
+                Switch::RetireLead,
                 Switch::LeadDefaults,
                 Switch::Config,
                 Switch::OpaqueCargoAlias,
@@ -162,6 +171,13 @@ fn decide(
     if needed == Switch::HerdEdit {
         return Ok(Some(format!(
             "loopherd: blocked: {} may not run `loopherd herd set`, `herd unset` or `herd remove`, which could turn its own switches on or delete its herd: {}; ask with `loopherd report --kind question`",
+            lead.name,
+            needed.humans_part()
+        )));
+    }
+    if needed == Switch::RetireLead {
+        return Ok(Some(format!(
+            "loopherd: blocked: {} may not retire a lead with `loopherd retire`, nor a name it can't read from the command: {}; spell out a member's name, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -229,14 +245,21 @@ fn decide(
     Ok(Some(message))
 }
 
-/// The unretired lead running in `pane`, if any.
+/// The lead running in `pane`. A retired lead counts while no unretired
+/// entry holds the pane, since its agent may still run there.
 pub fn lead_in(ledger: &dyn Ledger, pane: &Pane) -> Result<Option<AgentRecord>> {
     let Some(socket) = pane.socket else {
         return Ok(None);
     };
-    Ok(ledger.entries()?.into_values().find(|e| {
-        !e.retired && e.is_lead() && e.pane_id == pane.id && e.socket.as_deref() == Some(socket)
-    }))
+    let (live, retired): (Vec<_>, Vec<_>) = ledger
+        .entries()?
+        .into_values()
+        .filter(|e| e.pane_id == pane.id && e.socket.as_deref() == Some(socket))
+        .partition(|e| !e.retired);
+    Ok(match live.into_iter().next() {
+        Some(entry) => entry.is_lead().then_some(entry),
+        None => retired.into_iter().find(AgentRecord::is_lead),
+    })
 }
 
 /// The PreToolUse output that denies the Bash call, telling Claude `reason`.
@@ -1290,7 +1313,17 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             return vec![];
         } else if let Some((_, with_value)) = WRAPPERS.iter().find(|(w, _)| *w == program) {
             in_env |= program == "env";
-            i = skip_options(words, i + 1, with_value);
+            let options = i + 1;
+            i = skip_options(words, options, with_value);
+            // Any word under a replace string may become a lead's name.
+            if program == "xargs"
+                && xargs_may_replace(&words[options..i.min(words.len())])
+                && words[i.min(words.len())..]
+                    .iter()
+                    .any(|w| w.contains("retire"))
+            {
+                return vec![Switch::RetireLead];
+            }
             // The duration, CPU mask or lock file before the command.
             if ["timeout", "taskset", "flock"].contains(&program) {
                 i += 1;
@@ -1351,6 +1384,39 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
     }
 }
 
+/// Whether `xargs`'s options may set a replace string: any `I` or `i` in
+/// a short option, or a long one it can't tell from xargs's other long
+/// options, `--replace` and its abbreviations included.
+fn xargs_may_replace(options: &[String]) -> bool {
+    const LONG: [&str; 15] = [
+        "arg-file",
+        "delimiter",
+        "eof",
+        "exit",
+        "interactive",
+        "max-args",
+        "max-chars",
+        "max-lines",
+        "max-procs",
+        "no-run-if-empty",
+        "null",
+        "open-tty",
+        "process-slot-var",
+        "show-limits",
+        "verbose",
+    ];
+    options
+        .iter()
+        .any(|option| match option.strip_prefix("--") {
+            Some("") => false,
+            Some(long) => {
+                let name = long.split('=').next().unwrap_or(long);
+                "replace".starts_with(name) || !LONG.iter().any(|known| known.starts_with(name))
+            }
+            None => option.starts_with('-') && option.contains(['I', 'i']),
+        })
+}
+
 fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
     if Path::new(path).ends_with("scripts/install") {
         let flag = |name| args.iter().any(|a| is_flag(a, name));
@@ -1392,6 +1458,7 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
             Some(&"setup") => runs_setup(args).then_some(Switch::Config),
             Some(&"restart") => forces_restart(args),
             Some(&"pause" | &"resume") => Some(Switch::Pause),
+            Some(&"retire") => retires_lead(&positional[1..]).then_some(Switch::RetireLead),
             Some(&"herd") => matches!(positional.get(1), Some(&"set" | &"unset" | &"remove"))
                 .then_some(Switch::HerdEdit),
             _ => None,
@@ -1405,6 +1472,7 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
         {
             Some(Switch::LeadDefaults)
         }
+        "cargo" if retires_lead_through_cargo(cargo_run_args(args)) => Some(Switch::RetireLead),
         // A key or value read by `herd get` may be any word.
         "cargo" if runs_herd_get(cargo_run_args(args)) => None,
         "cargo" if edits_config(cargo_run_args(args)) => Some(Switch::Config),
@@ -1595,6 +1663,29 @@ fn edits_config(run_args: &[String]) -> bool {
             .iter()
             .enumerate()
             .any(|(at, a)| starts(at) && a == "setup" && runs_setup(&args[at + 1..]))
+}
+
+/// Whether `loopherd retire`'s positional args name a lead, or a name the
+/// hook can't read: none, an empty one left by a substitution, or one bash
+/// may expand.
+fn retires_lead(names: &[&str]) -> bool {
+    names.first().is_none_or(|name| {
+        name.is_empty()
+            || name.starts_with("lead-")
+            || name.contains(['$', '`', '*', '?', '[', '{'])
+    })
+}
+
+/// Whether `cargo run` with `run_args` retires a lead. Past an option it
+/// can't read, any `retire` word counts.
+fn retires_lead_through_cargo(run_args: &[String]) -> bool {
+    let retires_at = |args: &[String], at: usize| {
+        args[at] == "retire" && retires_lead(&positionals(&args[at + 1..], &[]))
+    };
+    match loopherd_args(run_args) {
+        Some(args) => !args.is_empty() && retires_at(args, 0),
+        None => (0..run_args.len()).any(|at| retires_at(run_args, at)),
+    }
 }
 
 fn runs_setup(args: &[String]) -> bool {
@@ -2275,6 +2366,7 @@ mod tests {
             Switch::ForceRestart
             | Switch::Pause
             | Switch::HerdEdit
+            | Switch::RetireLead
             | Switch::LeadDefaults
             | Switch::Config
             | Switch::OpaqueCargoAlias
@@ -2322,6 +2414,7 @@ mod tests {
                 Switch::ForceRestart
                 | Switch::Pause
                 | Switch::HerdEdit
+                | Switch::RetireLead
                 | Switch::LeadDefaults
                 | Switch::Config
                 | Switch::OpaqueCargoAlias
@@ -2335,16 +2428,78 @@ mod tests {
     }
 
     #[test]
-    fn a_worker_or_a_retired_lead_is_allowed_everything() {
+    fn a_worker_is_allowed_everything() {
+        let workers = ledger(vec![entry("lh-1", None)]);
+        for (commands, _) in tables() {
+            for command in commands {
+                assert_eq!(
+                    run(&workers, Switches::default(), command),
+                    None,
+                    "{command}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_live_entry_on_a_retired_leads_pane_id_wins_over_the_retired_lead() {
+        let mut retired = entry("lead-a", Some(Role::Lead));
+        retired.retired = true;
+        retired.herd = Some("a".into());
+        let live = entry("lead-b", Some(Role::Lead));
+        let leads = ledger(vec![retired.clone(), live]);
+        let switches = |herd: &str| {
+            Ok(match herd {
+                "a" => all_on(),
+                _ => Switches::default(),
+            })
+        };
+        for command in ["gh pr merge 3", "git push --force"] {
+            let message = run_with(&leads, Some(SOCKET), &input(command), &switches)
+                .unwrap_or_else(|| panic!("{command} was allowed"));
+            assert!(message.contains("lead-b"), "{message}");
+        }
+
+        let with_worker = ledger(vec![retired, entry("lh-9", None)]);
+        for command in [
+            "gh pr merge 3",
+            "git push --force",
+            "loopherd retire lead-a",
+        ] {
+            assert_eq!(
+                run_with(&with_worker, Some(SOCKET), &input(command), &switches),
+                None,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_retired_leads_pane_keeps_the_leads_gates() {
         let mut retired = lead();
         retired.retired = true;
-        for entries in [vec![entry("lh-1", None)], vec![retired]] {
-            let l = ledger(entries);
-            for (commands, _) in tables() {
-                for command in commands {
-                    assert_eq!(run(&l, Switches::default(), command), None, "{command}");
-                }
+        let retired = ledger(vec![retired]);
+        for (commands, switch) in tables() {
+            for command in commands {
+                assert!(
+                    run(&retired, only_off(switch), command).is_some(),
+                    "{command} was allowed"
+                );
             }
+        }
+        for command in [
+            "loopherd herd set h lead.merge true",
+            "loopherd herd unset h lead.merge",
+            "loopherd herd remove h",
+            "loopherd pause h",
+            "loopherd resume h",
+            "loopherd setup",
+            "loopherd config set handoff.limit 1",
+            "loopherd retire lead-h",
+        ] {
+            let message =
+                run(&retired, all_on(), command).unwrap_or_else(|| panic!("{command} was allowed"));
+            assert!(message.contains("lead-h"), "{message}");
         }
     }
 
@@ -2489,6 +2644,97 @@ mod tests {
         "scripts/herdr-dev loopherd pause h",
         "scripts/herdr-dev cargo run -- resume h",
     ];
+
+    const LEAD_RETIRES: &[&str] = &[
+        "loopherd retire lead-h",
+        "loopherd retire --close lead-h",
+        "loopherd retire lead-h --close",
+        "loopherd retire -- lead-h",
+        "loopherd retire lead-other",
+        "loopherd retire \"$ME\"",
+        "loopherd retire $(echo lead-h)",
+        "loopherd retire lead-*",
+        "loopherd retire",
+        "echo lead-h | xargs loopherd retire",
+        "~/.cargo/bin/loopherd retire lead-h",
+        "env loopherd retire lead-h",
+        "nohup loopherd retire lead-h",
+        "bash -c 'loopherd retire lead-h'",
+        "eval loopherd retire lead-h",
+        "cargo run -- retire lead-h",
+        "cargo r -q retire --close lead-h",
+        "cargo run --release retire lead-h",
+        "CARGO_ALIAS_X='run -- retire lead-h' cargo x",
+        "scripts/herdr-dev loopherd retire lead-h",
+        "scripts/herdr-dev cargo run -- retire lead-h",
+        "gh pr view 1; loopherd retire lead-h",
+        "echo lead-h | xargs -I X loopherd retire X",
+        "echo lead-h | xargs -IX loopherd retire X",
+        "echo h | xargs -I X loopherd retire lead-X",
+        "echo lead-h | xargs --replace=R loopherd retire R",
+        "echo lead-h | xargs -i loopherd retire {}",
+        "echo lead-h | xargs -I % cargo run -- retire %",
+        "echo lead-h | xargs -tI X loopherd retire X",
+        "echo lead-h | xargs -rIX loopherd retire X",
+        "printf lead-h | xargs -0I X loopherd retire X",
+        "echo lead-h | xargs -ti loopherd retire {}",
+        "echo lead-h | xargs -I X sh -c 'loopherd retire X'",
+        "echo lead-h | xargs -I X bash -c \"loopherd retire X\"",
+        "echo lead-h | xargs -I X env loopherd retire X",
+        "echo lead-h | xargs -I Y -I X loopherd retire X",
+        "echo lead-h | xargs -I X -I Y loopherd retire Y",
+        "echo lead-h | xargs --rep=X loopherd retire X",
+        "echo lead-h | xargs --re=X loopherd retire X",
+        "echo lead-h | xargs --r=X loopherd retire X",
+        "echo lead-h | xargs --frob -I X loopherd retire X",
+        "echo lead-h | xargs --unknown=X loopherd retire X",
+        "echo lh-1 | xargs -I X loopherd retire lh-1",
+        "cargo run --target-dir retire -- retire lead-h",
+        "cargo run -q --target-dir retire -- retire lead-h",
+        "cargo run --unknown retire -- retire lead-h",
+    ];
+
+    #[test]
+    fn a_leads_retire_of_a_lead_is_denied_whatever_its_switches() {
+        let leads = ledger(vec![lead()]);
+        for command in LEAD_RETIRES {
+            assert_eq!(needs(command), [Switch::RetireLead], "{command}");
+            let message =
+                run(&leads, all_on(), command).unwrap_or_else(|| panic!("{command} was allowed"));
+            assert!(
+                message.contains("lead-h may not retire a lead with `loopherd retire`")
+                    && message.contains("the shepherd or the human retires leads"),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn retiring_a_member_or_retiring_outside_a_leads_pane_passes() {
+        let leads = ledger(vec![lead()]);
+        for command in [
+            "loopherd retire lh-1",
+            "loopherd retire --close lh-1",
+            "cargo run -- retire lh-1",
+            "cargo run -- tell lh-1 retire",
+            "cargo run -- report --kind note lead-h will retire",
+            "ls | xargs -I X echo X",
+            "echo lh-1 | xargs loopherd retire --close lh-1",
+            "echo lh-1 | xargs -n1 --max-procs=2 loopherd retire lh-1",
+            "loopherd status lead-h",
+            "git commit -m 'retire lead-h'",
+        ] {
+            assert_eq!(run(&leads, Switches::default(), command), None, "{command}");
+        }
+        let workers = ledger(vec![entry("lh-1", None)]);
+        for command in LEAD_RETIRES {
+            assert_eq!(
+                run(&workers, Switches::default(), command),
+                None,
+                "{command}"
+            );
+        }
+    }
 
     #[test]
     fn a_leads_pause_or_resume_is_denied_whatever_its_switches() {

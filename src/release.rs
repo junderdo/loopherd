@@ -37,13 +37,18 @@ pub fn release(
     if record.is_lead() {
         bail!("refused: {name} is a lead, which feed never spawns; use `loopherd lead`");
     }
-    if let Some(socket) = &record.socket
-        && herdr.socket().as_ref() != Some(socket)
-    {
-        bail!(
-            "refused: {name} ran on herdr session {}, not this one; run it there",
-            socket.display()
-        );
+    if let Some(socket) = &record.socket {
+        match herdr.socket() {
+            None => bail!(
+                "refused: can't ask herdr whether {name}'s tab is closed: \
+                 herdr didn't say which session it runs"
+            ),
+            Some(here) if &here != socket => bail!(
+                "refused: {name} ran on herdr session {}, not this one; run it there",
+                socket.display()
+            ),
+            Some(_) => {}
+        }
     }
     if let Some(fix) = open_tab(herdr, &record, &others)
         .with_context(|| format!("refused: can't ask herdr whether {name}'s tab is closed"))?
@@ -415,6 +420,25 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             "refused: zpr-1 ran on herdr session /run/other/herdr.sock, not this one; run it there"
+        );
+        assert_eq!(s.ledger.0["zpr-1"].released_at, None);
+    }
+
+    #[test]
+    fn refuses_a_socketed_entry_as_unaskable_when_herdr_cant_be_reached() {
+        let mut s = Setup::new();
+        let mut r = record("zpr-1", s.repo.clone(), true);
+        r.socket = Some("/run/other/herdr.sock".into());
+        s.add(r);
+        s.herdr.set_unreachable(true);
+        s.herdr.socket = None;
+
+        let err = s.release("zpr-1", Fate::Clear).unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.starts_with("refused: can't ask herdr whether zpr-1's tab is closed: "),
+            "{msg}"
         );
         assert_eq!(s.ledger.0["zpr-1"].released_at, None);
     }
