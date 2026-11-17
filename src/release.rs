@@ -409,6 +409,27 @@ mod tests {
     }
 
     #[test]
+    fn refuses_while_its_pane_runs_an_agent_herdr_cant_identify() {
+        let mut s = Setup::new();
+        let pane = s.herdr.add_tab("w1", "zpr-1", &s.repo.clone(), true);
+        s.herdr =
+            std::mem::replace(&mut s.herdr, FakeHerdr::new(&[])).with_live_agent(None, None, &pane);
+        let mut r = record("zpr-1", s.repo.clone(), true);
+        r.pane_id = pane.clone();
+        s.add(r);
+
+        let err = s.release("zpr-1", Fate::Clear).unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("herdr tab close w1:t1  # zpr-1: "), "{msg}");
+        assert!(
+            msg.contains(&format!("herdr agent rename {pane} <label>")),
+            "{msg}"
+        );
+        assert_eq!(s.ledger.0["zpr-1"].released_at, None);
+    }
+
+    #[test]
     fn refuses_an_entry_from_another_herdr_session() {
         let mut s = Setup::new();
         let mut r = record("zpr-1", s.repo.clone(), true);

@@ -80,6 +80,10 @@ pub fn retire_and_close(
             out.push(format!("kept tab {tab_id}: {NAME_HELD}"));
             Some("its tab was kept")
         }
+        TabFate::Unidentified { tab_id, .. } => {
+            out.push(format!("kept tab {tab_id}: {UNIDENTIFIED}"));
+            Some("its tab was kept")
+        }
         TabFate::Unmatched { line, .. } | TabFate::NoWorkspace { line, .. } => {
             out.push(line);
             Some("tab not confirmed closed")
@@ -163,6 +167,13 @@ pub fn open_tab(
             "herdr agent rename {name} --clear  # {name}: tab {tab_id} is open: {NAME_HELD}; \
              if that agent is {name}, close its tab instead: herdr tab close {tab_id}"
         )),
+        TabFate::Unidentified { tab_id, pane_id } => close(
+            &tab_id,
+            format!("tab {tab_id} is open: {UNIDENTIFIED}"),
+            Some(format!(
+                "that agent isn't {name}'s, name it: herdr agent rename {pane_id} <label>"
+            )),
+        ),
         TabFate::Unmatched { line, tab_id } => close(
             &tab_id,
             format!("not confirmed closed: {line}"),
@@ -213,6 +224,12 @@ enum TabFate {
     Busy(String),
     /// An agent from another session goes by the entry's name.
     NameHeld(String),
+    /// The recorded pane runs an agent with nothing to tell it from the
+    /// entry's own.
+    Unidentified {
+        tab_id: String,
+        pane_id: String,
+    },
     /// The recorded pane is open but no tab matched, and it may still be the
     /// entry's; holds the line to print.
     Unmatched {
@@ -265,6 +282,10 @@ fn agent_tab(
                 Elsewhere::NotIts { tab_id, reason } => {
                     return Ok(TabFate::Taken { tab_id, reason });
                 }
+                Elsewhere::Unidentified { tab_id } => {
+                    let pane_id = record.pane_id.clone();
+                    return Ok(TabFate::Unidentified { tab_id, pane_id });
+                }
                 Elsewhere::Maybe { label, tab_id } => Some((label, tab_id)),
             };
             return Ok(TabFate::NoWorkspace { line, tab });
@@ -287,7 +308,10 @@ fn agent_tab(
             PaneUse::Free => {}
             PaneUse::Held(reason) => return Ok(TabFate::Taken { tab_id, reason }),
             PaneUse::Busy => return Ok(TabFate::Busy(tab_id)),
-            PaneUse::Unidentified => return kept(&tab_id, UNIDENTIFIED.into()),
+            PaneUse::Unidentified => {
+                let pane_id = pane.id.clone();
+                return Ok(TabFate::Unidentified { tab_id, pane_id });
+            }
         }
     }
     let cwd = record.worktree.as_ref().unwrap_or(&record.repo);
@@ -295,6 +319,10 @@ fn agent_tab(
         (None, None) => Ok(match pane_elsewhere(herdr, record, &agents, others)? {
             Elsewhere::Nowhere => TabFate::Gone,
             Elsewhere::NotIts { tab_id, reason } => TabFate::Taken { tab_id, reason },
+            Elsewhere::Unidentified { tab_id } => TabFate::Unidentified {
+                tab_id,
+                pane_id: record.pane_id.clone(),
+            },
             Elsewhere::Maybe { label, tab_id } => TabFate::Unmatched {
                 line: format!("no matching tab (pane {pane_id} is in workspace {label})"),
                 tab_id,
@@ -330,6 +358,7 @@ fn agent_tab(
 enum Elsewhere {
     Nowhere,
     NotIts { tab_id: String, reason: String },
+    Unidentified { tab_id: String },
     Maybe { label: String, tab_id: String },
 }
 
@@ -348,7 +377,8 @@ fn pane_elsewhere(
         return Ok(
             match pane_use(herdr, record, &ws.id, pane, agents, others)? {
                 PaneUse::Held(reason) => Elsewhere::NotIts { tab_id, reason },
-                PaneUse::Free | PaneUse::Busy | PaneUse::Unidentified => Elsewhere::Maybe {
+                PaneUse::Unidentified => Elsewhere::Unidentified { tab_id },
+                PaneUse::Free | PaneUse::Busy => Elsewhere::Maybe {
                     label: ws.label,
                     tab_id,
                 },
@@ -369,8 +399,8 @@ fn shown_cwd(pane: &Pane) -> String {
 enum PaneUse {
     /// Safe to treat as the entry's.
     Free,
-    /// Another entry recorded it, it runs an agent with another name or
-    /// session, or its tab isn't labeled with the entry's name as spawn and
+    /// Another entry recorded it or its session, it runs an agent with another
+    /// name or session, or its tab isn't labeled with the entry's name as spawn and
     /// revive label it.
     Held(String),
     /// It runs an agent with no name and no session to tell it from the
@@ -395,8 +425,13 @@ fn pane_use(
         return Ok(PaneUse::Held(format!("pane belongs to {}", other.name)));
     }
     if let Some(agent) = agents.iter().find(|a| a.pane_id == pane_id) {
+        let session_of =
+            |e: &&AgentRecord| e.session_id.is_some() && e.session_id == agent.session_id;
         return Ok(match &agent.name {
             _ if same_session(agent, record) => PaneUse::Free,
+            _ if let Some(other) = others.values().find(session_of) => {
+                PaneUse::Held(format!("pane hosts {}'s session", other.name))
+            }
             Some(name) => PaneUse::Held(format!("pane hosts agent {name}")),
             None if session_conflict(agent, record) => {
                 PaneUse::Held("pane hosts another agent".into())

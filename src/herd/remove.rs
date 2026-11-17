@@ -1079,7 +1079,8 @@ mod tests {
         assert!(
             msg.ends_with(
                 "herdr tab close w1:t1  # a: tab w1:t1 is open: its pane runs an agent \
-                 herdr can't identify"
+                 herdr can't identify; if that agent isn't a's, name it: \
+                 herdr agent rename w1:p1 <label>"
             ),
             "{msg}"
         );
@@ -1104,6 +1105,22 @@ mod tests {
         retired_in(&mut s, &pane);
 
         refusal(&mut s);
+    }
+
+    #[test]
+    fn removes_a_member_whose_pane_runs_another_entrys_unnamed_session() {
+        let mut s = Setup::new();
+        let pane = s.herdr.add_tab("w1", "a", &s.path("work"), true);
+        with_agent_in(&mut s, &pane, Some("sess-b"));
+        retired_in(&mut s, &pane);
+        s.member("b", "live", true, false);
+        let b = s.ledger.0.get_mut("b").unwrap();
+        b.pane_id = "w1:p9".into();
+        b.session_id = Some("sess-b".into());
+
+        s.remove("old", Removal::default()).unwrap();
+
+        assert_eq!(s.names(), ["b"]);
     }
 
     #[test]
