@@ -1794,7 +1794,7 @@ fn without_check_init_takes_cargos_checks_from_cargo_toml() {
     let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
     assert!(
         herd.contains(
-            "   - `cargo fmt --check`\n   - `cargo clippy -- -D warnings`\n   - `cargo test`\n"
+            "   - `cargo fmt --check`\n   - `cargo clippy --all-targets -- -D warnings`\n   - `cargo test`\n"
         ),
         "{herd}"
     );
@@ -1978,7 +1978,8 @@ fn on_a_terminal_init_shows_each_inferred_value_takes_edits_and_re_asks_bad_ones
         format!("Repo ({}): ", fixture.repo().display()),
         "Herd name (widgets): ".into(),
         "GitHub repo (owner/name) (acme/widgets): ".into(),
-        "  cargo fmt --check\r\n  cargo clippy -- -D warnings\r\n  cargo test\r\n".into(),
+        "  cargo fmt --check\r\n  cargo clippy --all-targets -- -D warnings\r\n  cargo test\r\n"
+            .into(),
         "Use these checks? [Y/n]: ".into(),
         "max, how many workers run at once (3): ".into(),
         "max must be a positive integer, got \"0\"".into(),
@@ -1994,7 +1995,7 @@ fn on_a_terminal_init_shows_each_inferred_value_takes_edits_and_re_asks_bad_ones
         "  max     4 workers at once".into(),
         "  lead    no".into(),
         "  limit   100000".into(),
-        "  checks  cargo fmt --check; cargo clippy -- -D warnings; cargo test".into(),
+        "  checks  cargo fmt --check; cargo clippy --all-targets -- -D warnings; cargo test".into(),
         "Write this herd? [Y/n]: ".into(),
     ] {
         assert!(
@@ -2084,7 +2085,7 @@ fn on_a_terminal_declining_the_suggested_checks_edits_each_then_adds_more() {
 
     assert_ok(&out);
     assert!(
-        text(&out.stdout).contains("Check (cargo clippy -- -D warnings): "),
+        text(&out.stdout).contains("Check (cargo clippy --all-targets -- -D warnings): "),
         "{}",
         text(&out.stdout)
     );

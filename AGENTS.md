@@ -26,4 +26,4 @@ together across sessions, built as a layer over herdr's CLI/socket API.
   which `scripts/install --with-agents` offers and hash-tracks (D26). Write
   them fresh; never copy from the human's `~/.claude/agents/` or `~/leaven`.
 - **Checks** before calling work done: `cargo fmt --check`,
-  `cargo clippy -- -D warnings`, `cargo test`.
+  `cargo clippy --all-targets -- -D warnings`, `cargo test`.
