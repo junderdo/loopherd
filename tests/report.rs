@@ -43,6 +43,8 @@ fn loopherd_in(state: &Path, pane: Option<(&str, &str)>, args: &[&str]) -> Comma
         // Never the real ~/.claude/settings.json.
         .env("CLAUDE_CONFIG_DIR", state.join("claude"))
         .env("PATH", "")
+        // Printed times are UTC whatever the local zone.
+        .env("TZ", "America/New_York")
         .env_remove("HERDR_PANE_ID")
         .env_remove("HERDR_SOCKET_PATH");
     if let Some((pane, socket)) = pane {
@@ -85,6 +87,45 @@ fn a_member_reports_and_the_shepherd_reads_it_once() {
     let out = run(state.path(), None, &["reports"]);
     assert_eq!(out.stdout, b"");
     assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn reports_and_watch_label_each_time_utc_and_keep_an_uncut_time_as_stored() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    install_hook(state.path());
+    let mailbox = state.path().join("loopherd/reports");
+    fs::create_dir_all(&mailbox).unwrap();
+    fs::write(
+        mailbox.join("lh-1.jsonl"),
+        concat!(
+            r#"{"at":"2026-11-10T10:00:00Z","kind":"start"}"#,
+            "\n",
+            r#"{"at":"2026-11-10T11:00:00Z","kind":"done","text":"PR #9"}"#,
+            "\n",
+            r#"{"at":"2026-11-10T11:05:00Z","kind":"stop","background":{"shells":0,"subagents":0,"other":0},"crons":0}"#,
+            "\n",
+            r#"{"at":"soon","kind":"note","text":"odd"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let all = run(state.path(), None, &["reports", "--all"]);
+    assert_eq!(
+        String::from_utf8_lossy(&all.stdout),
+        "lh-1 start 2026-11-10 10:00 UTC\n\
+         lh-1 done 2026-11-10 11:00 UTC PR #9\n\
+         lh-1 stop 2026-11-10 11:05 UTC finished\n\
+         lh-1 note soon odd\n"
+    );
+
+    let watched = run(state.path(), None, &["watch", "--timeout", "0"]);
+    let watched = String::from_utf8_lossy(&watched.stdout);
+    assert!(
+        watched.contains("lh-1 done 2026-11-10 11:00 UTC PR #9\n"),
+        "{watched}"
+    );
 }
 
 #[test]
@@ -296,7 +337,7 @@ fn the_stop_hook_files_a_members_stops_which_only_reports_all_shows() {
         .map(|l| {
             let (_, rest) = l.split_once(' ').unwrap();
             let (kind, rest) = rest.split_once(' ').unwrap();
-            format!("{kind}{}", rest.get(16..).unwrap_or_default())
+            format!("{kind}{}", rest.get(20..).unwrap_or_default())
         })
         .collect();
     assert_eq!(

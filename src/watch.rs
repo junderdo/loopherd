@@ -948,8 +948,8 @@ mod tests {
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
             [
-                "lh-1 question 2026-11-01 09:00 which DB?",
-                "lh-1 note 2026-11-01 09:00 starting",
+                "lh-1 question 2026-11-01 09:00 UTC which DB?",
+                "lh-1 note 2026-11-01 09:00 UTC starting",
             ]
         );
 
@@ -1087,7 +1087,7 @@ mod tests {
         send(&ledger, dir.path(), "lh-1", Kind::Note, "PR #9");
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &req, &mut steps(|_| {})).unwrap(),
-            ["lh-1 note 2026-11-01 09:00 PR #9"]
+            ["lh-1 note 2026-11-01 09:00 UTC PR #9"]
         );
         let every = Request {
             timeout: Some(Duration::ZERO),
@@ -1095,7 +1095,7 @@ mod tests {
         };
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &every, &mut steps(|_| {})).unwrap(),
-            ["solo note 2026-11-01 09:00 hi"]
+            ["solo note 2026-11-01 09:00 UTC hi"]
         );
     }
 
@@ -1119,7 +1119,7 @@ mod tests {
 
         assert_eq!(
             printed(woke.unwrap()),
-            ["lh-1 question 2026-11-01 09:00 which DB?"]
+            ["lh-1 question 2026-11-01 09:00 UTC which DB?"]
         );
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("herdr unreachable"), "{warnings:?}");
@@ -1276,7 +1276,10 @@ mod tests {
         put(dir.path(), "lh-1", stop(0, 0));
         assert_eq!(
             once(&herdr, &ledger, dir.path()).unwrap(),
-            ["lh-1 handoff 2026-11-01 09:00 at step 3", "lh-1 finished"]
+            [
+                "lh-1 handoff 2026-11-01 09:00 UTC at step 3",
+                "lh-1 finished"
+            ]
         );
     }
 
@@ -1322,7 +1325,7 @@ mod tests {
         send(&ledger, dir.path(), "lh-1", Kind::Done, "PR #9");
         assert_eq!(
             once(&herdr, &ledger, dir.path()).unwrap(),
-            ["lh-1 done 2026-11-01 09:00 PR #9"]
+            ["lh-1 done 2026-11-01 09:00 UTC PR #9"]
         );
 
         put(dir.path(), "lh-1", failed("overloaded"));
@@ -1345,8 +1348,8 @@ mod tests {
         assert_eq!(
             once(&herdr, &ledger, dir.path()).unwrap(),
             [
-                "lh-1 question 2026-11-01 09:00 which DB?",
-                "lh-2 done 2026-11-01 09:00 PR #8",
+                "lh-1 question 2026-11-01 09:00 UTC which DB?",
+                "lh-2 done 2026-11-01 09:00 UTC PR #8",
                 "lh-1 finished",
                 "lh-2 finished  no report",
             ]
@@ -1357,7 +1360,7 @@ mod tests {
         assert_eq!(
             once(&herdr, &ledger, dir.path()).unwrap(),
             [
-                "lh-1 note 2026-11-01 09:00 still here",
+                "lh-1 note 2026-11-01 09:00 UTC still here",
                 "lh-1 finished  no report"
             ]
         );
@@ -1507,7 +1510,7 @@ mod tests {
         );
         drop(lost.unwrap().unwrap());
 
-        let want = ["lh-1 done 2026-11-01 09:00 PR #9", "lh-1 finished"];
+        let want = ["lh-1 done 2026-11-01 09:00 UTC PR #9", "lh-1 finished"];
         assert_eq!(once(&herdr, &ledger, dir.path()).unwrap(), want);
         assert_eq!(once(&herdr, &ledger, dir.path()), None);
     }
@@ -1712,7 +1715,7 @@ mod tests {
         assert_eq!(notifier.sent(), [sent_for("lead-cards", "question")]);
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &ONCE, &mut steps(|_| {})).unwrap(),
-            ["lead-cards question 2026-11-01 09:00 Merge #1?"]
+            ["lead-cards question 2026-11-01 09:00 UTC Merge #1?"]
         );
     }
 
@@ -1732,7 +1735,10 @@ mod tests {
         notifier.lead(&herdr, &ledger, &mut steps(|_| {}));
         let printed = notifier.shepherd(&herdr, &ledger, &mut steps(|_| {}));
 
-        assert_eq!(printed, ["lead-cards question 2026-11-01 09:00 Merge #1?"]);
+        assert_eq!(
+            printed,
+            ["lead-cards question 2026-11-01 09:00 UTC Merge #1?"]
+        );
         assert_eq!(notifier.sent(), [sent_for("lead-cards", "question")]);
     }
 
@@ -1840,7 +1846,7 @@ mod tests {
                 &mut steps(|_| {})
             )
             .unwrap(),
-            ["lh-1 note 2026-11-01 09:00 hi"]
+            ["lh-1 note 2026-11-01 09:00 UTC hi"]
         );
     }
 
@@ -1874,7 +1880,7 @@ mod tests {
         };
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &own, &mut steps(|_| {})).unwrap(),
-            ["lh-1 note 2026-11-01 09:00 hi"]
+            ["lh-1 note 2026-11-01 09:00 UTC hi"]
         );
     }
 
@@ -1976,9 +1982,9 @@ mod tests {
         assert_eq!(
             woke,
             [
-                "lead-cards note 2026-11-01 09:00 hi",
-                "solo note 2026-11-01 09:00 hi",
-                "zpr-2 note 2026-11-01 09:00 hi",
+                "lead-cards note 2026-11-01 09:00 UTC hi",
+                "solo note 2026-11-01 09:00 UTC hi",
+                "zpr-2 note 2026-11-01 09:00 UTC hi",
             ]
         );
     }
@@ -1995,7 +2001,7 @@ mod tests {
 
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &req, &mut steps(|_| {})).unwrap(),
-            ["lead-cards note 2026-11-01 09:00 hi"]
+            ["lead-cards note 2026-11-01 09:00 UTC hi"]
         );
     }
 
@@ -2013,7 +2019,7 @@ mod tests {
         };
         assert_eq!(
             shepherd(&ledger).unwrap(),
-            ["zpr-2 note 2026-11-01 09:00 hi"]
+            ["zpr-2 note 2026-11-01 09:00 UTC hi"]
         );
 
         ledger
@@ -2029,7 +2035,7 @@ mod tests {
                 &mut steps(|_| {})
             )
             .unwrap(),
-            ["zpr-2 note 2026-11-01 09:00 hi"]
+            ["zpr-2 note 2026-11-01 09:00 UTC hi"]
         );
 
         // Gone, it still owns its herd; retired, it lets go.
@@ -2039,8 +2045,8 @@ mod tests {
         assert_eq!(
             shepherd(&ledger).unwrap(),
             [
-                "zpr-2 note 2026-11-01 09:00 hi",
-                "zpr-2 note 2026-11-01 09:00 hi",
+                "zpr-2 note 2026-11-01 09:00 UTC hi",
+                "zpr-2 note 2026-11-01 09:00 UTC hi",
             ]
         );
     }
@@ -2095,7 +2101,7 @@ mod tests {
         mem.0.into_values().for_each(|e| ledger.record(e).unwrap());
         assert_eq!(
             run_dyn(&herdr, &ledger, dir.path(), &from_pane("w9:p0")).unwrap(),
-            ["lh-1 note 2026-11-01 09:00 hi"]
+            ["lh-1 note 2026-11-01 09:00 UTC hi"]
         );
         let req = Request {
             own_pane: Some("w9:p0"),
@@ -2123,7 +2129,7 @@ mod tests {
         // The shepherd now owns cards, and the lead's watch left it unread.
         let woke = run_dyn(&herdr, &ledger, dir.path(), &ONCE).unwrap();
         assert!(
-            woke.contains(&"lh-1 note 2026-11-01 09:00 after".to_string()),
+            woke.contains(&"lh-1 note 2026-11-01 09:00 UTC after".to_string()),
             "{woke:?}"
         );
     }
@@ -2157,7 +2163,7 @@ mod tests {
 
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &req, &mut steps(|_| {})).unwrap(),
-            ["lh-1 note 2026-11-01 09:00 hi"]
+            ["lh-1 note 2026-11-01 09:00 UTC hi"]
         );
     }
 
@@ -2237,7 +2243,7 @@ mod tests {
 
             let woke = run(&herdr, &ledger, dir.path(), &req, &mut steps(|_| {})).unwrap();
             assert!(
-                woke.contains(&"lead-cards note 2026-11-01 09:00 hi".to_string()),
+                woke.contains(&"lead-cards note 2026-11-01 09:00 UTC hi".to_string()),
                 "{socket:?}: {woke:?}"
             );
         }
@@ -2250,7 +2256,7 @@ mod tests {
         let socketless = from_pane("w9:p0");
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &socketless, &mut steps(|_| {})).unwrap(),
-            ["lh-1 note 2026-11-01 09:00 hi"]
+            ["lh-1 note 2026-11-01 09:00 UTC hi"]
         );
 
         let dir = tempfile::tempdir().unwrap();
@@ -2261,7 +2267,7 @@ mod tests {
         };
         let woke = run(&herdr, &ledger, dir.path(), &socketed, &mut steps(|_| {})).unwrap();
         assert!(
-            woke.contains(&"lead-cards note 2026-11-01 09:00 hi".to_string()),
+            woke.contains(&"lead-cards note 2026-11-01 09:00 UTC hi".to_string()),
             "{woke:?}"
         );
     }
@@ -2277,7 +2283,7 @@ mod tests {
 
         let woke = run(&herdr, &ledger, dir.path(), &req, &mut steps(|_| {})).unwrap();
         assert!(
-            woke.contains(&"lead-cards note 2026-11-01 09:00 hi".to_string()),
+            woke.contains(&"lead-cards note 2026-11-01 09:00 UTC hi".to_string()),
             "{woke:?}"
         );
     }
@@ -2628,7 +2634,7 @@ mod tests {
         assert_eq!(
             woke,
             [
-                "lh-1 note 2026-11-01 09:00 hi",
+                "lh-1 note 2026-11-01 09:00 UTC hi",
                 "lh-1 merged",
                 "lh-2 claimable",
                 "lh-1 blocked",

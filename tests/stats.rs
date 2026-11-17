@@ -96,6 +96,8 @@ fn run(state: &Path, args: &[&str]) -> Output {
         .env("XDG_STATE_HOME", state)
         .env("CLAUDE_CONFIG_DIR", state.join("claude"))
         .env("PATH", "")
+        // Printed times are UTC whatever the local zone.
+        .env("TZ", "America/New_York")
         .env_remove("HERDR_PANE_ID")
         .env_remove("HERDR_SOCKET_PATH")
         .output()
@@ -229,6 +231,31 @@ fn leads_are_left_out_and_unretired_members_are_listed_as_open() {
         .collect();
     assert_eq!(row[..4], ["lh-2", "card", "2020-01-01", "00:00"], "{out}");
     assert!(row[4].contains('d'), "years open, shown in days: {out}");
+}
+
+#[test]
+fn both_tables_label_started_as_utc() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[
+            Member::new("lh-1", "2026-11-10T10:00:00Z").retired("2026-11-10T12:00:00Z"),
+            Member::new("lh-2", "2026-11-10T11:00:00Z"),
+        ],
+    );
+
+    let out = stdout(&run(state.path(), &[]));
+
+    let header = |first: &str| {
+        out.lines()
+            .find(|l| l.trim_start().starts_with(first))
+            .unwrap_or_else(|| panic!("no {first} header in:\n{out}"))
+            .to_string()
+    };
+    assert!(header("member").contains("  started (UTC)  "), "{out}");
+    assert!(header("open").contains("  started (UTC)  "), "{out}");
+    assert!(out.contains("  2026-11-10 10:00  "), "{out}");
+    assert!(out.contains("  2026-11-10 11:00  "), "{out}");
 }
 
 #[test]

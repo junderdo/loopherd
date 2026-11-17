@@ -514,7 +514,10 @@ fn mailboxes(dir: &Path) -> Result<Vec<String>> {
 }
 
 fn render(name: &str, entry: &Entry) -> Vec<String> {
-    let when = entry.when();
+    let when = match entry.when() {
+        cut if cut != entry.at => format!("{cut} UTC"),
+        stored => stored,
+    };
     let (kind, text) = match &entry.body {
         Body::Stop(stop) => ("stop", describe(stop)),
         Body::Start => return vec![format!("{name} start {when}")],
@@ -925,9 +928,9 @@ mod tests {
         assert_eq!(
             reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
             [
-                "lh-2 question 2026-11-01 11:00 which DB?",
-                "lh-2 note 2026-11-01 09:00 starting",
-                "lh-1 done 2026-11-01 10:00 PR #9",
+                "lh-2 question 2026-11-01 11:00 UTC which DB?",
+                "lh-2 note 2026-11-01 09:00 UTC starting",
+                "lh-1 done 2026-11-01 10:00 UTC PR #9",
             ]
         );
         assert!(
@@ -947,7 +950,7 @@ mod tests {
         );
         assert_eq!(
             reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
-            ["lh-1 note 2026-11-01 12:00 merged main"]
+            ["lh-1 note 2026-11-01 12:00 UTC merged main"]
         );
     }
 
@@ -980,13 +983,13 @@ mod tests {
         assert_eq!(
             reports(&ledger, dir.path(), &all).unwrap().lines,
             [
-                "lh-1 note 2026-11-01 09:00 one",
-                "lh-1 note 2026-11-01 10:00 two",
+                "lh-1 note 2026-11-01 09:00 UTC one",
+                "lh-1 note 2026-11-01 10:00 UTC two",
             ]
         );
         assert_eq!(
             reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
-            ["lh-1 note 2026-11-01 10:00 two"]
+            ["lh-1 note 2026-11-01 10:00 UTC two"]
         );
     }
 
@@ -1017,7 +1020,7 @@ mod tests {
         };
         assert_eq!(
             reports(&ledger, dir.path(), &by_name).unwrap().lines,
-            ["lh-1 note 2026-11-01 09:00 hi"]
+            ["lh-1 note 2026-11-01 09:00 UTC hi"]
         );
         let by_herd = Filter {
             herd: Some("cards"),
@@ -1025,11 +1028,11 @@ mod tests {
         };
         assert_eq!(
             reports(&ledger, dir.path(), &by_herd).unwrap().lines,
-            ["lh-2 note 2026-11-01 09:00 hi"]
+            ["lh-2 note 2026-11-01 09:00 UTC hi"]
         );
         assert_eq!(
             reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
-            ["zpr-3 note 2026-11-01 09:00 hi"]
+            ["zpr-3 note 2026-11-01 09:00 UTC hi"]
         );
     }
 
@@ -1049,7 +1052,7 @@ mod tests {
         assert_eq!(
             reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
             [
-                "lh-1 question 2026-11-01 09:00 Which store?",
+                "lh-1 question 2026-11-01 09:00 UTC Which store?",
                 "    - sqlite",
                 "    - json",
             ]
@@ -1105,8 +1108,8 @@ mod tests {
         assert_eq!(
             read.lines,
             [
-                "lh-1 note 2026-11-01 09:00 one",
-                "lh-1 done 2026-11-01 10:00 two",
+                "lh-1 note 2026-11-01 09:00 UTC one",
+                "lh-1 done 2026-11-01 10:00 UTC two",
             ]
         );
         assert_eq!(read.warnings.len(), 1);
@@ -1153,9 +1156,9 @@ mod tests {
         assert_eq!(
             read.lines,
             [
-                "lh-1 note 2026-11-01 09:00 one",
-                "lh-1 note 2026-11-01 10:00 two",
-                "lh-2 note 2026-11-01 11:00 hi",
+                "lh-1 note 2026-11-01 09:00 UTC one",
+                "lh-1 note 2026-11-01 10:00 UTC two",
+                "lh-2 note 2026-11-01 11:00 UTC hi",
             ]
         );
         assert_eq!(read.warnings.len(), 1);
@@ -1196,7 +1199,7 @@ mod tests {
 
         assert_eq!(
             reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
-            ["lh-1 note 2026-11-01 10:00 new"]
+            ["lh-1 note 2026-11-01 10:00 UTC new"]
         );
     }
 
@@ -1327,8 +1330,8 @@ mod tests {
         assert_eq!(
             reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
             [
-                "lh-2 question 2026-11-01 09:04 which?",
-                "lh-1 note 2026-11-01 09:02 hi",
+                "lh-2 question 2026-11-01 09:04 UTC which?",
+                "lh-1 note 2026-11-01 09:02 UTC hi",
             ]
         );
         let all = Filter {
@@ -1338,11 +1341,11 @@ mod tests {
         assert_eq!(
             reports(&ledger, dir.path(), &all).unwrap().lines,
             [
-                "lh-1 start 2026-11-01 09:00",
-                "lh-2 start 2026-11-01 09:01",
-                "lh-1 note 2026-11-01 09:02 hi",
-                "lh-1 stop 2026-11-01 09:03 paused: 1 shell",
-                "lh-2 question 2026-11-01 09:04 which?",
+                "lh-1 start 2026-11-01 09:00 UTC",
+                "lh-2 start 2026-11-01 09:01 UTC",
+                "lh-1 note 2026-11-01 09:02 UTC hi",
+                "lh-1 stop 2026-11-01 09:03 UTC paused: 1 shell",
+                "lh-2 question 2026-11-01 09:04 UTC which?",
             ]
         );
     }
@@ -1499,8 +1502,8 @@ mod tests {
         assert_eq!(
             reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
             [
-                "lh-2 note 2026-11-01 09:04 no stop",
-                "lh-1 note 2026-11-01 09:05 more"
+                "lh-2 note 2026-11-01 09:04 UTC no stop",
+                "lh-1 note 2026-11-01 09:05 UTC more"
             ]
         );
     }
