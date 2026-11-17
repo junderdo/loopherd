@@ -40,6 +40,22 @@ Checked 2026-11-17 against herdr 0.9.5 in a throwaway session
 - Panes get `HERDR_ENV=1`, `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`,
   `HERDR_PANE_ID` injected.
 
+### When an agent's name or session is missing
+
+Checked 2026-11-17 against herdr 0.9.5 in a throwaway session, with herdr's
+Claude integration hook installed:
+
+- `agent start <name> --kind claude` returns with the name and the session
+  (`source: herdr:claude`) both set.
+- `agent rename <target> --clear` leaves `name: null`; the session stays.
+- A Claude typed by hand in a pane shows `name: null` with its session set
+  by the first `agent list`.
+- A Claude that doesn't run the integration hook (here, one started with an
+  empty `CLAUDE_CONFIG_DIR`) shows `name: null` and `agent_session: null`
+  for as long as it runs.
+- After `server stop` and a restart, resumed agents come back with
+  `name: null` and their session set: names don't survive a restart.
+
 ## Control surface (everything we need to layer on top)
 
 All commands return JSON over the socket API.

@@ -1062,6 +1062,50 @@ mod tests {
         assert!(s.names().is_empty());
     }
 
+    fn with_agent_in(s: &mut Setup, pane: &str, session: Option<&str>) {
+        s.herdr = std::mem::replace(&mut s.herdr, FakeHerdr::new(&[]))
+            .with_live_agent(None, session, pane);
+    }
+
+    #[test]
+    fn refuses_a_member_whose_pane_runs_an_agent_neither_side_can_identify() {
+        let mut s = Setup::new();
+        let pane = s.herdr.add_tab("w1", "a", &s.path("work"), true);
+        with_agent_in(&mut s, &pane, None);
+        retired_in(&mut s, &pane);
+
+        let msg = refusal(&mut s);
+
+        assert!(
+            msg.ends_with(
+                "herdr tab close w1:t1  # a: tab w1:t1 is open: its pane runs an agent \
+                 herdr can't identify"
+            ),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn refuses_a_member_whose_pane_runs_an_agent_with_no_session_yet() {
+        let mut s = Setup::new();
+        let pane = s.herdr.add_tab("w1", "a", &s.path("work"), true);
+        with_agent_in(&mut s, &pane, None);
+        retired_in(&mut s, &pane);
+        s.ledger.0.get_mut("a").unwrap().session_id = Some("ours".into());
+
+        refusal(&mut s);
+    }
+
+    #[test]
+    fn refuses_a_member_with_no_session_whose_pane_runs_an_unnamed_agent() {
+        let mut s = Setup::new();
+        let pane = s.herdr.add_tab("w1", "a", &s.path("work"), true);
+        with_agent_in(&mut s, &pane, Some("theirs"));
+        retired_in(&mut s, &pane);
+
+        refusal(&mut s);
+    }
+
     #[test]
     fn removes_a_member_whose_workspace_and_pane_are_gone() {
         let mut s = Setup::new();

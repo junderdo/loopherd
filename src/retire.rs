@@ -184,6 +184,7 @@ pub fn open_tab(
 
 const BUSY: &str = "pane is running a command";
 const NAME_HELD: &str = "the name is held by another session";
+const UNIDENTIFIED: &str = "its pane runs an agent herdr can't identify";
 
 /// An active entry other than `name` whose worktree is `path`.
 fn other_user(ledger: &dyn Ledger, name: &str, path: &Path) -> Result<Option<String>> {
@@ -286,6 +287,7 @@ fn agent_tab(
             PaneUse::Free => {}
             PaneUse::Held(reason) => return Ok(TabFate::Taken { tab_id, reason }),
             PaneUse::Busy => return Ok(TabFate::Busy(tab_id)),
+            PaneUse::Unidentified => return kept(&tab_id, UNIDENTIFIED.into()),
         }
     }
     let cwd = record.worktree.as_ref().unwrap_or(&record.repo);
@@ -346,7 +348,7 @@ fn pane_elsewhere(
         return Ok(
             match pane_use(herdr, record, &ws.id, pane, agents, others)? {
                 PaneUse::Held(reason) => Elsewhere::NotIts { tab_id, reason },
-                PaneUse::Free | PaneUse::Busy => Elsewhere::Maybe {
+                PaneUse::Free | PaneUse::Busy | PaneUse::Unidentified => Elsewhere::Maybe {
                     label: ws.label,
                     tab_id,
                 },
@@ -367,9 +369,13 @@ fn shown_cwd(pane: &Pane) -> String {
 enum PaneUse {
     /// Safe to treat as the entry's.
     Free,
-    /// Another entry recorded it, it runs an agent from another session, or
-    /// its tab isn't labeled with the entry's name as spawn and revive label it.
+    /// Another entry recorded it, it runs an agent with another name or
+    /// session, or its tab isn't labeled with the entry's name as spawn and
+    /// revive label it.
     Held(String),
+    /// It runs an agent with no name and no session to tell it from the
+    /// entry's own.
+    Unidentified,
     /// Its shell is running a command.
     Busy,
 }
@@ -389,11 +395,13 @@ fn pane_use(
         return Ok(PaneUse::Held(format!("pane belongs to {}", other.name)));
     }
     if let Some(agent) = agents.iter().find(|a| a.pane_id == pane_id) {
-        let ours = same_session(agent, record);
-        return Ok(match (ours, &agent.name) {
-            (true, _) => PaneUse::Free,
-            (false, Some(name)) => PaneUse::Held(format!("pane hosts agent {name}")),
-            (false, None) => PaneUse::Held("pane hosts another agent".into()),
+        return Ok(match &agent.name {
+            _ if same_session(agent, record) => PaneUse::Free,
+            Some(name) => PaneUse::Held(format!("pane hosts agent {name}")),
+            None if session_conflict(agent, record) => {
+                PaneUse::Held("pane hosts another agent".into())
+            }
+            None => PaneUse::Unidentified,
         });
     }
     let tabs = herdr.tabs_in(ws_id)?;
@@ -1827,7 +1835,7 @@ mod tests {
     }
 
     #[test]
-    fn close_keeps_a_reused_pane_hosting_an_agent_when_the_entry_has_no_session() {
+    fn close_keeps_a_reused_pane_hosting_an_agent_it_cant_identify() {
         let root = tempfile::tempdir().unwrap();
         let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
         let wt = root.path().join("proj/worktrees/feat-new");
@@ -1835,7 +1843,7 @@ mod tests {
         let pane = reused_after_restart(&herdr, &mut ledger, &wt, false);
         let herdr = herdr.with_live_agent(None, None, &pane);
 
-        kept_reused(&close(&herdr, &mut ledger), &wt, "pane hosts another agent");
+        kept_reused(&close(&herdr, &mut ledger), &wt, UNIDENTIFIED);
         assert_eq!(herdr.tabs().len(), 1);
     }
 
