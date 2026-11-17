@@ -98,7 +98,7 @@ fn feed_is_refused_while_another_run_holds_the_lock() {
 
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
-        "loopherd feed: feed already running\n"
+        "loopherd feed: feed already running; retry once it ends\n"
     );
     assert!(out.stdout.is_empty());
     assert_eq!(out.status.code(), Some(1));
@@ -169,7 +169,7 @@ fn add_into_a_queue_herd_is_refused_while_feed_holds_the_lock() {
 
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
-        "loopherd add: feed already running\n"
+        "loopherd add: feed already running; retry once it ends\n"
     );
     assert!(out.stdout.is_empty());
     assert_eq!(out.status.code(), Some(1));
@@ -196,7 +196,7 @@ fn release_is_refused_while_a_feed_holds_the_lock() {
 
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
-        "loopherd release: feed already running\n"
+        "loopherd release: feed already running; retry once it ends\n"
     );
     assert!(out.stdout.is_empty());
     assert_eq!(out.status.code(), Some(1));

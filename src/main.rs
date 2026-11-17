@@ -2,6 +2,7 @@ mod config;
 mod context;
 mod continuation;
 mod feed;
+mod github;
 mod herd;
 mod herd_view;
 mod herdr;
@@ -178,14 +179,16 @@ enum Command {
     /// Let `feed` spawn a retired member's name again, for a task it left
     /// unfinished. Deletes its local branch and worktree so the new member
     /// starts afresh, refusing while the branch has commits not on the base
-    /// unless told to keep or drop them. Refuses a member not retired or
-    /// whose tab may be open.
+    /// unless told to keep or drop them, and deletes its branch on origin
+    /// last, refusing while an open PR is on it unless told to drop it.
+    /// Refuses a member not retired or whose tab may be open.
     Release {
         name: String,
         /// Leave its branch and worktree; the new member starts from them.
         #[arg(long, conflicts_with = "drop_branch")]
         keep_branch: bool,
-        /// Delete its branch and worktree even with commits not on the base.
+        /// Delete its branch and worktree even with commits not on the base,
+        /// or an open PR on its origin branch.
         #[arg(long)]
         drop_branch: bool,
     },
@@ -801,6 +804,7 @@ fn run_release(name: &str, keep_branch: bool, drop_branch: bool) -> Result<i32> 
     let mut lines = vec![];
     let result = release(
         &CliHerdr,
+        &github::GhCli,
         &mut ledger,
         name,
         fate,

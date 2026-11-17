@@ -368,7 +368,11 @@ question as its own sends a second notification.
   them) or `--drop-branch` (deleted; the lines printed name each head sha).
   It never removes uncommitted changes, a locked worktree, the main
   checkout, a worktree loopherd didn't make, or a live member's worktree;
-  it refuses and names them, and refuses while a feed runs. A lead
+  it refuses and names them, and refuses while a feed runs (retry once it
+  ends). It won't delete an origin branch that an open PR is on, naming
+  the PR, unless you pass `--drop-branch`, which closes the PR. It deletes
+  the origin branch last; if that fails, the rest is done and a rerun
+  retries it. `--keep-branch` never contacts origin. A lead
   may run it; it's part of feeding. `status --all` marks the entry
   `(released)`, its mailbox gets a `released` note, and its lead's watch
   announces it claimable again.
