@@ -504,19 +504,30 @@ splash_show_tagline() {
   splash_paint_row "$splash_tagline_row" "$text" "${kinds// /0}"
 }
 
+# Bash drops a SIGINT that lands between a child's exit and its reap, so waits
+# read a held pipe that never gets data instead of running sleep, where bash can.
+splash_sleep() { # <seconds>
+  local REPLY
+  if [[ -n "${splash_sleep_fd:-}" ]]; then
+    read -rt "$1" -u "$splash_sleep_fd" || :
+  else
+    sleep "$1" || :
+  fi
+}
+
 # Sleeps until <frame> is due, or a plain frame's length where the clock is missing.
 splash_wait() { # <start_us> <frame>
   local now wait
   now=${EPOCHREALTIME:-}
   now=${now//[!0-9]/}
   if [[ -z "$1" || -z "$now" ]]; then
-    sleep 0.05 || :
+    splash_sleep 0.05
     return
   fi
   wait=$(($1 + ($2 + 1) * splash_frame_us - now))
   ((wait > 0)) || return 0
   printf -v wait '%d.%06d' $((wait / 1000000)) $((wait % 1000000))
-  sleep "$wait" || :
+  splash_sleep "$wait"
 }
 
 splash_prepare() {
@@ -571,7 +582,7 @@ splash_title() {
     else
       printf '%s' "${word:i:1}" || :
     fi
-    sleep 0.1 || :
+    splash_sleep 0.1
   done
   printf '\n\n' || :
 }
@@ -581,6 +592,8 @@ splash_restore() {
   printf '\e[?25h' || :
   if [[ -n "${splash_alt_screen:-}" ]]; then printf '\e[?1049l' || :; fi
   splash_alt_screen=
+  if [[ -n "${splash_sleep_fd:-}" ]]; then exec {splash_sleep_fd}>&-; fi
+  splash_sleep_fd=
 }
 
 # Returns 130 when interrupted, leaving the caller's own traps in place.
@@ -592,6 +605,16 @@ splash_play() {
   [[ "$rows" =~ ^[1-9][0-9]*$ && "$cols" =~ ^[1-9][0-9]*$ ]] || return 0
   splash_colours
   splash_alt_screen=
+  splash_sleep_fd=
+  # $! names a process substitution from bash 4.4. Reaping it before the INT
+  # trap is set leaves no child for bash to lose a SIGINT to.
+  if ((BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 404)); then
+    if { exec {splash_sleep_fd}<> <(:); } 2>/dev/null; then
+      wait "$!" || :
+    else
+      splash_sleep_fd=
+    fi
+  fi
   splash_interrupted=0
   callers_traps=$(trap -p INT EXIT)
   trap 'splash_interrupted=1' INT
