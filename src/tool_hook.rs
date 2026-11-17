@@ -3890,8 +3890,8 @@ mod tests {
         let written = "cat > s.sh <<'EOF'\ngh pr merge 1\nEOF\n";
         for command in [
             format!("{written}rg --pre=sh . s.sh"),
-            format!("sort --compress-program=sh <<'EOF' >/dev/null\ngh pr merge 1\nEOF"),
-            format!("printf -v PATH '%s' \"$PWD:$PATH\"; git <<'EOF'\ngh pr merge 1\nEOF"),
+            "sort --compress-program=sh <<'EOF' >/dev/null\ngh pr merge 1\nEOF".to_string(),
+            "printf -v PATH '%s' \"$PWD:$PATH\"; git <<'EOF'\ngh pr merge 1\nEOF".to_string(),
         ] {
             assert_judged(&command, Switch::Merge);
         }
