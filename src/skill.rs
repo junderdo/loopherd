@@ -174,6 +174,14 @@ mod tests {
             "`git worktree remove --force`",
             "`$XDG_STATE_HOME/loopherd/handoffs/<your name>.md`",
             "`## State`",
+            "`<scratch>/pr<n>/review-<round>.md`",
+            "`pass <head sha>`",
+            "`fail <head sha>: <b> blocking, <m> minor`",
+            "`gh pr comment <n> --body-file <file>`",
+            "until the PR merges or closes",
+            "current review file",
+            "`review-<round - 1>.md`",
+            "`git diff <its head sha>..<new head>`",
         ] {
             assert!(lead.contains(step), "missing {step}:\n{lead}");
         }

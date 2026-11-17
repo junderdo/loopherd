@@ -431,7 +431,13 @@ Shepherd section has the detail):
 3. **On wake:** read the watch's lines and the member's reports.
 4. **Verify** a `done` member's output with a read-only reviewer subagent
    against the task's acceptance criteria, with a temp `XDG_STATE_HOME` and
-   `LOOPHERD_CONFIG_DIR`, building under `<scratch>/pr<n>/`.
+   `LOOPHERD_CONFIG_DIR`, building under `<scratch>/pr<n>/`. It writes its
+   findings to `<scratch>/pr<n>/review-<round>.md` and returns one line:
+   `pass <head sha>`, or `fail <head sha>: <b> blocking, <m> minor` plus
+   the file's path. Read the file only to forward findings or ask a merge
+   question. Members can't read your scratch dir: forward findings as a PR
+   comment (`gh pr comment <n> --body-file <file>`), then prompt the member
+   to read it. Keep the files until the PR merges or closes.
 5. **After merge** (`gh pr view <n> --json state`): close out the task in
    the tracker, unblock dependents, run `loopherd feed <herd>` (it runs
    `after_merge`; do by hand what its note says didn't run), then `git
@@ -439,7 +445,8 @@ Shepherd section has the detail):
    and delete that directory.
 6. **Handoff:** write `$XDG_STATE_HOME/loopherd/handoffs/<your name>.md` in
    the outline under Handoffs (`## State`, `## Next steps`, `## Gotchas`),
-   listing each `<scratch>/pr<n>/` still in use.
+   listing each `<scratch>/pr<n>/` still in use and naming each PR's
+   current review file.
 
 What differs from the shepherd:
 
@@ -494,10 +501,15 @@ What differs from the shepherd:
   report, `loopherd report --kind question '<question with the merge
   line>'`: double quotes run any `$(...)` in it and can leak a token into
   the report.
-- **Review rounds.** Verify as the shepherd does: only blocking and
-  in-scope findings go back to the worker, and each round after the first
-  checks the last round's findings and the diff since its head. After
-  round 3 start no other round; send `loopherd report --kind question`
+- **Review rounds.** A finding is blocking when it's inside the task's
+  acceptance criteria, or a correctness or safety bug the PR introduces;
+  give the reviewer this bar. Blocking and other in-scope findings go back
+  to the worker; out-of-scope ones become tasks. Each round after the
+  first checks only the last round's findings and the diff since its head:
+  hand the reviewer `review-<round - 1>.md` and `git diff <its head
+  sha>..<new head>`. `<round>` counts per PR across handoffs; your
+  handoff's current review file carries it. After round 3 start no other
+  round; send `loopherd report --kind question`
   asking whether to merge as-is, narrow the scope, or change approach,
   with the PR link and the open blocking findings, then end your turn.
   With `new_cards` off, list out-of-scope findings in a question rather
