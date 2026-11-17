@@ -48,13 +48,13 @@ link, any PR that must merge first, and the line
 `! GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh pr merge <n> --repo @OWNER_REPO@ --merge --match-head-commit <full sha>`
 for the head your reviewer verified. Single-quote that question ('...', not
 \"...\"): double quotes run the $(...) and leak the token.";
-const LEAD_WORK_MERGE_ASK: &str = "With merge off, a merge question carries the
-@WORK@, any @WORK@ that must merge first, and the full sha of the head your
-reviewer verified.";
-const OTHER_PR_HAND_IN: &str = "open a pull request into @BRANCH@,
-   and link it on task {number}, so the task closes when the PR merges.";
-const OTHER_PUSH_HAND_IN: &str = "open no pull request, and hand it
-   in on task {number}, so the task closes when the human merges it into @BRANCH@.";
+const OTHER_PR_HAND_IN: &str = "5. Push the branch as @ACCOUNT@:
+   `GH_TOKEN=$(gh auth token --user @ACCOUNT@) git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin HEAD`.
+   Then open a pull request into @BRANCH@ with `GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh pr create --repo @OWNER_REPO@ --base @BRANCH@ --head {branch} --assignee @ACCOUNT@ --title \"<title>\" --body \"<summary>\"`.
+   Link it on task {number}, so the task closes when the PR merges. (fill in)";
+const OTHER_PUSH_HAND_IN: &str =
+    "5. Push the branch with `git push -u origin HEAD`, open no pull request, and hand it
+   in on task {number}, so the task closes when the human merges it into @BRANCH@. (fill in)";
 /// Marks what the human fills for a tracker init has no snippets for.
 const FILL_IN: &str = "Fill in from docs/agents/issue-tracker.md";
 const LEAD_BRANCH_MERGE_ASK: &str = "With merge off, a merge question carries the
@@ -755,12 +755,6 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
         Some(_) => github_text,
         None => otherwise,
     };
-    let other = tracker.kind == tracker::Kind::Other;
-    // An other tracker's prompts name no gh command, whatever origin is.
-    let gh_text = |gh_text: &'static str, otherwise: &'static str| match other {
-        true => otherwise,
-        false => github_text(gh_text, otherwise),
-    };
     let mut values = vec![
         ("OWNER_REPO", slug),
         ("ACCOUNT", account),
@@ -788,23 +782,20 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
         ("WORK", github_text("PR", "branch")),
     ];
     let snippets = [
-        ("GH_NOTE", gh_text(LOCAL_GH_NOTE, "")),
-        ("HAND_IN", gh_text(LOCAL_PR_HAND_IN, LOCAL_PUSH_HAND_IN)),
+        ("GH_NOTE", github_text(LOCAL_GH_NOTE, "")),
+        ("HAND_IN", github_text(LOCAL_PR_HAND_IN, LOCAL_PUSH_HAND_IN)),
         (
             "OTHER_HAND_IN",
             github_text(OTHER_PR_HAND_IN, OTHER_PUSH_HAND_IN),
         ),
-        ("LEAD_GH", gh_text(LEAD_GH, "")),
+        ("LEAD_GH", github_text(LEAD_GH, "")),
         (
             "ON_MERGED",
             github_text(LEAD_ON_MERGED, LEAD_ON_BRANCH_MERGED),
         ),
         (
             "MERGE_ASK",
-            match other {
-                true => LEAD_WORK_MERGE_ASK,
-                false => github_text(LEAD_PR_MERGE_ASK, LEAD_BRANCH_MERGE_ASK),
-            },
+            github_text(LEAD_PR_MERGE_ASK, LEAD_BRANCH_MERGE_ASK),
         ),
     ]
     .map(|(key, text)| (key, fill(text, &values)));
