@@ -543,7 +543,7 @@ fn render(name: &str, entry: &Entry) -> Vec<String> {
 }
 
 fn kilo(tokens: u64) -> u64 {
-    (tokens + 500) / 1000
+    tokens / 1000
 }
 
 /// `finished`, `paused: 1 shell, 2 crons`, or what's unknown, after any error.
@@ -1366,13 +1366,17 @@ mod tests {
     }
 
     #[test]
-    fn all_shows_a_stops_context_use_in_thousands_when_it_was_measured() {
+    fn all_shows_a_stops_context_use_in_whole_thousands_rounded_down_when_it_was_measured() {
         let dir = tempfile::tempdir().unwrap();
         let ledger = ledger(vec![member("lh-1", "w1:p1", None, false)]);
         let measured = Stop {
             context: Some(120_400),
             limit: Some(150_000),
             ..finished_stop()
+        };
+        let nearly_full = Stop {
+            context: Some(149_600),
+            ..measured.clone()
         };
         put(
             dir.path(),
@@ -1386,6 +1390,12 @@ mod tests {
             "2026-11-01T09:01:00Z",
             Body::Stop(finished_stop()),
         );
+        put(
+            dir.path(),
+            "lh-1",
+            "2026-11-01T09:02:00Z",
+            Body::Stop(nearly_full),
+        );
         let all = Filter {
             all: true,
             ..UNREAD
@@ -1395,6 +1405,7 @@ mod tests {
             [
                 "lh-1 stop 2026-11-01 09:00 finished 120k/150k",
                 "lh-1 stop 2026-11-01 09:01 finished",
+                "lh-1 stop 2026-11-01 09:02 finished 149k/150k",
             ]
         );
     }
