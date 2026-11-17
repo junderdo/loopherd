@@ -1161,6 +1161,21 @@ fn the_splash_waits_without_starting_a_sleep_process() {
 }
 
 #[test]
+fn the_splash_leaves_the_callers_last_background_pid_alone() {
+    let Some(mut cmd) = pty(&format!(
+        "stty cols 40 rows 10; bash -c 'source {SPLASH}; sleep 30 & job=$!; splash_play; \
+         [[ $! == \"$job\" ]] && echo kept || echo \"lost $job to $!\"; kill \"$job\"'"
+    )) else {
+        eprintln!("skipped: needs util-linux script");
+        return;
+    };
+
+    let out = String::from_utf8_lossy(&cmd.output().unwrap().stdout).into_owned();
+
+    assert!(out.contains("kept"), "{out:?}");
+}
+
+#[test]
 fn a_caller_with_a_strict_ifs_and_set_u_gets_the_whole_splash() {
     let dir = tempfile::tempdir().unwrap();
     let caller = dir.path().join("caller.bash");

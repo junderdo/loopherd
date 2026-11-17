@@ -596,7 +596,20 @@ splash_restore() {
   splash_sleep_fd=
 }
 
-# Returns 130 when interrupted, leaving the caller's own traps in place.
+# A FIFO held open read-write never gets data or EOF, so read -t on it sleeps
+# without a process. Opened before the INT trap is set, and unlinked at once.
+# Not a process substitution: that would overwrite the caller's $!.
+splash_open_sleep_fd() {
+  local dir
+  ((BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 401)) || return 0 # {fd} redirects
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/loopherd-splash.XXXXXX" 2>/dev/null) || return 0
+  if mkfifo "$dir/wait" 2>/dev/null; then
+    { exec {splash_sleep_fd}<>"$dir/wait"; } 2>/dev/null || splash_sleep_fd=
+  fi
+  rm -rf "$dir"
+}
+
+# Returns 130 when interrupted, leaving the caller's own traps and $! in place.
 splash_play() {
   local size rows= cols= callers_traps status=0
   # stty reads stdin, which may not be the terminal; fd 3 is stdout from outside the $(...).
@@ -606,15 +619,7 @@ splash_play() {
   splash_colours
   splash_alt_screen=
   splash_sleep_fd=
-  # $! names a process substitution from bash 4.4. Reaping it before the INT
-  # trap is set leaves no child for bash to lose a SIGINT to.
-  if ((BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 404)); then
-    if { exec {splash_sleep_fd}<> <(:); } 2>/dev/null; then
-      wait "$!" || :
-    else
-      splash_sleep_fd=
-    fi
-  fi
+  splash_open_sleep_fd
   splash_interrupted=0
   callers_traps=$(trap -p INT EXIT)
   trap 'splash_interrupted=1' INT
