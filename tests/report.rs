@@ -650,3 +650,102 @@ fn reports_of_a_herd_with_a_file_or_only_retired_records_are_empty_not_refused()
         assert_eq!(String::from_utf8_lossy(&out.stderr), "", "{herd}");
     }
 }
+
+fn write_notes(state: &Path) {
+    let mailbox = state.join("loopherd/reports");
+    fs::create_dir_all(&mailbox).unwrap();
+    fs::write(
+        mailbox.join("lh-1.jsonl"),
+        concat!(
+            r#"{"at":"2026-11-10T10:00:00Z","kind":"note","text":"one"}"#,
+            "\n",
+            r#"{"at":"2026-11-10T11:00:00Z","kind":"note","text":"two"}"#,
+            "\n",
+            r#"{"at":"2026-11-10T12:00:00Z","kind":"note","text":"three"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn reports_all_takes_since_and_tail() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    write_notes(state.path());
+
+    let out = run(
+        state.path(),
+        None,
+        &[
+            "reports",
+            "--all",
+            "--since",
+            "2026-11-10T11:00:00Z",
+            "--tail",
+            "1",
+        ],
+    );
+
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "lh-1 note 2026-11-10 12:00 UTC three\n"
+    );
+}
+
+#[test]
+fn a_bad_since_or_a_zero_tail_is_refused() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    write_notes(state.path());
+
+    for (args, error) in [
+        (["--since", "soon"], "or span back from now (30m, 2h, 1d)"),
+        (["--tail", "0"], "must be at least 1"),
+    ] {
+        let out = run(
+            state.path(),
+            None,
+            &[&["reports", "--all"][..], &args].concat(),
+        );
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        assert_eq!(out.stdout, b"", "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(error), "{args:?}: {stderr}");
+    }
+}
+
+#[test]
+fn since_and_tail_without_all_are_refused_and_mark_nothing_read() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    write_notes(state.path());
+
+    for args in [["--since", "1d"], ["--tail", "40"]] {
+        let out = run(state.path(), None, &[&["reports"][..], &args].concat());
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        assert_eq!(out.stdout, b"", "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("--all"), "{args:?}: {stderr}");
+    }
+
+    let unread = run(state.path(), None, &["reports"]);
+    assert_eq!(String::from_utf8_lossy(&unread.stdout).lines().count(), 3);
+}
+
+#[test]
+fn reports_help_documents_since_and_tail() {
+    let state = tempfile::tempdir().unwrap();
+    let out = run(state.path(), None, &["reports", "--help"]);
+    let help = String::from_utf8_lossy(&out.stdout);
+
+    for flag in [
+        "--since <SINCE>",
+        "30m, 2h, 1d",
+        "--tail <N>",
+        "Needs --all",
+    ] {
+        assert!(help.contains(flag), "{flag} missing from:\n{help}");
+    }
+}

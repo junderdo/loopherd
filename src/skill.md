@@ -160,8 +160,22 @@ Init never launches an agent.
    Keep the files until the PR merges or closes.
    For anything that deletes or closes, have it hunt for safety gaps and
    name the test covering each rule. Report as soon as it lands; the human
-   often merges fast. Gaps inside the task's scope go back to the member;
-   the rest become new tasks.
+   often merges fast.
+
+   A finding is blocking when it's inside the task's acceptance criteria,
+   or a correctness or safety bug the PR introduces; give the reviewer this
+   bar, so its `<b> blocking` counts only these. Blocking findings, and
+   any other finding that should be fixed and fits within the task's scope,
+   go back to the member in the PR comment. Out-of-scope findings become
+   new tasks (or, when no task is warranted, a PR comment marked
+   non-blocking); the PR doesn't wait on them. Each round after the first
+   checks the previous round's findings and the diff since that round's
+   head, not the whole PR: hand the reviewer `review-<round - 1>.md` and
+   `git diff <its head sha>..<new head>`, so fixes don't open findings in
+   settled code. `<round>` counts per PR across handoffs; the handoff's
+   current review file carries it. After round 3, start no other round:
+   ask the human whether to merge as-is, narrow the scope, or change
+   approach, listing the open blocking findings from the last review file.
 5. **After merge** (confirm with `gh pr view <n> --json state`): close out
    the task in the project's tracker, unblock dependents, then `loopherd
    feed <herd>`, which first runs the herd file's `after_merge` (read its
@@ -217,8 +231,8 @@ workers. Wait for its `finished` line, then `loopherd restart <name>`. It
 sends `/clear`, waits for the ledger to follow the new session, and prompts
 the member to read its handoff, which it moves to `<name>.prev.md` so no
 later restart reuses it; same pane, worktree and branch. A lead's prompt
-also tells it to re-read `loopherd status` and `loopherd reports --all` and
-re-arm its watch. Without `--force`
+also tells it to re-read `loopherd status` and `loopherd reports --all
+--tail 40` and re-arm its watch. Without `--force`
 it refuses unless the member reported a handoff since its last start, its
 last stop since is `finished` with nothing in flight, and herdr shows it
 idle or done. `--force` skips those checks; a `/clear` sent mid-turn waits
@@ -272,8 +286,9 @@ and, once per session past your limit, adds `shepherd handoff <n>k over
    and end your turn. Never `/clear` yourself.
 
 Given that prompt in a fresh session, run `loopherd --skill`, read the
-handoff, `loopherd status` and `loopherd reports --all`, then re-arm your
-watch and carry on from its next steps.
+handoff, `loopherd status` and `loopherd reports --all --tail 40` (for a
+fuller history, `--since <time>` or plain `--all`), then re-arm your watch
+and carry on from its next steps.
 
 ### Notifying the human
 
@@ -313,7 +328,9 @@ question as its own sends a second notification.
   the ledger. `loopherd view` is the same as a live TUI.
 - `loopherd reports` prints unread reports, questions first, and marks them
   read; `loopherd reports --all` prints every report and stop and marks
-  none read. Both take member names or `--herd <herd>`.
+  none read. Both take member names or `--herd <herd>`. `--all` also takes
+  `--since <date, time or span such as 2h>` and `--tail <n>` (the last n
+  entries after the other filters).
 - `loopherd stats` shows how each herd's work flowed: per retired worker,
   time to its first `done`, review rounds, merge wait and total, with
   medians per herd and open workers apart. `--herd`, `--since <date or time>`,
@@ -453,6 +470,14 @@ shepherd:
   report, `loopherd report --kind question '<question with the merge
   line>'`: double quotes run any `$(...)` in it and can leak a token into
   the report.
+- **Review rounds.** Verify as the shepherd does: only blocking and
+  in-scope findings go back to the worker, and each round after the first
+  checks the last round's findings and the diff since its head. After
+  round 3 start no other round; send `loopherd report --kind question`
+  asking whether to merge as-is, narrow the scope, or change approach,
+  with the PR link and the open blocking findings, then end your turn.
+  With `new_cards` off, list out-of-scope findings in a question rather
+  than creating tasks.
 - **Heartbeat.** Keep `loopherd watch --timeout 3600` as a background task.
   Run from your pane, it's your watch: it reads your herd's workers only,
   never you, and naming any other herd is an error. It holds `watch-<your
@@ -478,8 +503,10 @@ shepherd:
 - **After a restart** the shepherd runs `loopherd revive`, which prompts you
   to re-arm whenever nothing holds `watch-<your name>.lock`, whether herdr
   resumed you or revive did. Re-read `loopherd status` and `loopherd reports
-  --all`, then arm your watch again.
-- **On each wake** re-read `loopherd status` and `loopherd reports --all`
+  --all --tail 40` (for a fuller history, `--since <time>` or plain
+  `--all`), then arm your watch again.
+- **On each wake** re-read `loopherd status` and `loopherd reports --all
+  --tail 40` (for a fuller history, `--since <time>` or plain `--all`)
   before acting: auto-compaction drops detail, and your state lives in the
   tracker, ledger and mailbox, not in your context.
 - **Your own handoff.** Past your limit, your Stop hook asks you for a
