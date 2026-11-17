@@ -4816,3 +4816,70 @@ fn an_other_tracker_behind_an_ssh_host_alias_warns_to_pass_repo_and_without_an_o
         );
     }
 }
+
+/// Replaces the fake gh with one that logs its call and fails.
+fn fail_every_gh_call(fixture: &Fixture) {
+    fs::write(
+        fixture.gh_dir().join("gh"),
+        "#!/bin/sh\necho \"$*\" >> \"$(dirname \"$0\")/calls\"\nexit 1\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_triage_role_mapped_twice_is_refused_before_any_gh_call_or_write() {
+    for (first, second, message) in [
+        (
+            "| `ready-for-agent` | `AFK` | x |",
+            "| `ready-for-agent` | `go` | x |",
+            "maps ready-for-agent twice, to AFK and go",
+        ),
+        (
+            "| `needs-info` | `Q:Info` | x |",
+            "| `needs-info` | `ask` | x |",
+            "maps needs-info twice, to Q:Info and ask",
+        ),
+        (
+            "| `ready-for-human` | `HFK` | x |",
+            "| `ready-for-human` | `mine` | x |",
+            "maps ready-for-human twice, to HFK and mine",
+        ),
+        (
+            "| `ready-for-agent` | `AFK` | x |",
+            "| `Ready-For-Agent` | `go` | x |",
+            "maps ready-for-agent twice, to AFK and go",
+        ),
+        (
+            "| `needs-info` | `Q:Info` | x |",
+            "| `needs-info` | `Q:Info` | x |",
+            "maps needs-info twice, to Q:Info and Q:Info",
+        ),
+    ] {
+        let fixture = Fixture::new(&["acme"]);
+        write_docs(&fixture, None, &format!("{first}\n{second}\n"));
+        fail_every_gh_call(&fixture);
+
+        let out = fixture.init(&[]);
+
+        assert_eq!(out.status.code(), Some(1), "{first} {second}");
+        assert!(text(&out.stderr).contains(message), "{}", text(&out.stderr));
+        assert_eq!(fixture.gh_calls(), "");
+        assert!(!fixture.herds().exists());
+        assert!(!fixture.repo().join("docs/agents/issue-tracker.md").exists());
+    }
+}
+
+#[test]
+fn a_role_loopherd_doesnt_read_may_repeat() {
+    let fixture = Fixture::new(&["acme"]);
+    write_docs(
+        &fixture,
+        None,
+        "| `needs-triage` | `triage` | x |\n\
+         | `needs-triage` | `inbox` | x |\n\
+         | `wontfix` | `no` | x |\n\
+         | `wontfix` | `no` | x |\n",
+    );
+
+    assert_ok(&fixture.init(&[]));
+}

@@ -171,6 +171,7 @@ fn read_labels(repo: &Path) -> Result<Labels> {
     let Some(doc) = read(&repo.join(LABELS_DOC))? else {
         return Ok(labels);
     };
+    let mut mapped = std::collections::HashSet::new();
     for line in doc.lines() {
         let cells: Vec<&str> = line
             .trim()
@@ -190,6 +191,9 @@ fn read_labels(repo: &Path) -> Result<Labels> {
         };
         if label.eq_ignore_ascii_case("blocked") {
             bail!("{LABELS_DOC} maps {role} to blocked, which is loopherd's own label");
+        }
+        if !mapped.insert(role.clone()) {
+            bail!("{LABELS_DOC} maps {role} twice, to {slot} and {label}");
         }
         *slot = label.to_string();
     }
