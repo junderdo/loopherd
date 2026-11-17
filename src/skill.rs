@@ -159,6 +159,19 @@ mod tests {
     }
 
     #[test]
+    fn the_shepherds_wake_step_reads_recent_reports_not_the_whole_day() {
+        let step = section("3. **On wake,**", "| Line | Means |");
+        for text in [
+            "`loopherd reports --all --tail 40`",
+            "`--since <time>`",
+            "plain `--all`",
+            "`--all <name>` for one member",
+        ] {
+            assert!(step.contains(text), "missing {text}: {step}");
+        }
+    }
+
+    #[test]
     fn the_lead_section_carries_the_task_life_a_restarted_lead_needs() {
         let lead = super::section("lead")
             .unwrap()
