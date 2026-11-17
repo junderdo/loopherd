@@ -95,6 +95,7 @@ mod tests {
             lead: false,
             template: None,
             released: false,
+            retired: None,
         }
     }
 

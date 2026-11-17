@@ -39,6 +39,8 @@ pub struct Member {
     pub template: Option<String>,
     /// Retired, and released so `feed` may spawn its name again.
     pub released: bool,
+    /// When it was retired (RFC 3339, or `unknown` if the ledger has no time); `None` while open.
+    pub retired: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -199,6 +201,12 @@ fn member(
         lead: record.is_lead(),
         template: record.template.clone(),
         released: record.released_at.is_some(),
+        retired: record.retired.then(|| {
+            record
+                .retired_at
+                .clone()
+                .unwrap_or_else(|| "unknown".into())
+        }),
     }
 }
 
