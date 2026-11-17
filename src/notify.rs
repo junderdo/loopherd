@@ -1698,6 +1698,26 @@ mod tests {
     }
 
     #[test]
+    fn an_in_word_apostrophe_in_cyrillic_keeps_a_quoted_value_open() {
+        for (question, text) in [
+            (
+                "password: ‘п’ять hunter22’ ok?",
+                "password: [redacted] [redacted] ok?",
+            ),
+            (
+                "password: ‘м’ясо hunter22’ ok?",
+                "password: [redacted] [redacted] ok?",
+            ),
+            (
+                "password: ‘hunter22’ так, merge?",
+                "password: [redacted] так, merge?",
+            ),
+        ] {
+            assert_eq!(text_sent(question), text, "{question}");
+        }
+    }
+
+    #[test]
     fn a_key_in_any_quote_mark_is_read_like_one_in_straight_quotes() {
         for (question, text) in [
             (
