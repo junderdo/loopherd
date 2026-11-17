@@ -212,7 +212,7 @@ fn decide(
     }
     if needed == Switch::Unreadable {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like (write prose with `cat > notes.md <<'EOF'` beside only reading sinks and programs like `cargo`, with no pipe, `(`, quote, `$`, glob or brace in them and no other mention of the file), a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like (write prose with `cat` or `tee` into an .md, .txt, .log, .json, .csv, .html, .diff, .out or .msg file in the working tree or /tmp, outside .git and .cargo, with any other heredoc in the call written the same way, beside only reading sinks and programs like `cargo` holding no pipe, `(`, quote, `$`, glob, brace or mention of the file), a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -337,7 +337,7 @@ fn judge(lexed: &Lexed, aliases: &mut Aliases, in_shell: bool) -> Vec<Switch> {
     let mut needs = vec![];
     let mut bodies = lexed.bodies.iter().peekable();
     for at in 0..=lexed.commands.len() {
-        while let Some((from, _, body)) = bodies.next_if(|(from, _, _)| *from <= at) {
+        while let Some((from, body)) = bodies.next_if(|(from, _)| *from <= at) {
             match body {
                 _ if !runs_code || (!in_shell && only_written(lexed, *from)) => {}
                 Some(body) => {
@@ -366,7 +366,7 @@ fn runs_code(commands: &[Vec<Word>]) -> bool {
 /// Whether the body read before command `at` only goes to files its sink
 /// writes, in a script that can't reach them: no command reads another's
 /// output or defines a function, every other command [`leaves_files`], and
-/// no other body, which a config file may run from, names one of them.
+/// every other body is such a write too, so none lands in a config file.
 fn only_written(lexed: &Lexed, at: usize) -> bool {
     let Some(feeding) = at.checked_sub(1) else {
         return false;
@@ -374,23 +374,23 @@ fn only_written(lexed: &Lexed, at: usize) -> bool {
     let Some(files) = written_files(&lexed.commands[feeding]) else {
         return false;
     };
-    let names_one = |text: &str| {
-        let text = text.to_lowercase();
-        files
-            .iter()
-            .any(|f| text.contains(&file_name(f).to_lowercase()))
-    };
     !lexed.output_read
         && !lexed.defines_function
         && lexed
             .bodies
             .iter()
-            .all(|(from, text, _)| *from == at || !names_one(text))
+            .all(|(from, _)| *from == at || writes_prose(lexed, *from))
         && lexed
             .commands
             .iter()
             .enumerate()
             .all(|(i, command)| i == feeding || leaves_files(command, &files))
+}
+
+/// Whether the body read before command `at` goes to a [`written_files`] write.
+fn writes_prose(lexed: &Lexed, at: usize) -> bool {
+    at.checked_sub(1)
+        .is_some_and(|feeding| written_files(&lexed.commands[feeding]).is_some())
 }
 
 /// The files `cat` or `tee` writes when its output goes only to files: its
@@ -554,9 +554,9 @@ struct Lexed {
     output_read: bool,
     /// Whether a `name(` or `name (` may define a function.
     defines_function: bool,
-    /// Each body with the index of the command it runs before, its text, and
-    /// its commands; `None` for one that doesn't lex.
-    bodies: Vec<(usize, String, Option<Lexed>)>,
+    /// Each body with the index of the command it runs before; `None` for
+    /// one that doesn't lex.
+    bodies: Vec<(usize, Option<Lexed>)>,
 }
 
 impl Lexed {
@@ -570,7 +570,7 @@ impl Lexed {
             other
                 .bodies
                 .into_iter()
-                .map(|(at, text, body)| (at + offset, text, body)),
+                .map(|(at, body)| (at + offset, body)),
         );
     }
 }
@@ -925,8 +925,7 @@ fn commands(script: &str) -> Option<Lexed> {
                         if !heredoc.quoted {
                             lexed.extend(expansions(&body)?);
                         }
-                        let lexed_body = commands(&body);
-                        lexed.bodies.push((at, body, lexed_body));
+                        lexed.bodies.push((at, commands(&body)));
                     }
                 }
             }
@@ -4004,6 +4003,15 @@ mod tests {
             format!("cat > zq.md {merge}cp -r . ../e; cargo fmt"),
             format!("cat > zq.md {merge}gh extension install .; cargo fmt"),
             format!("cat > zq.md {merge}RUSTC_WRAPPER=sh cargo build"),
+            format!(
+                "cat > zq.md {merge}mkdir -p .cargo\ncat > .cargo/config.toml <<'B'\ntarget.x86_64-unknown-linux-gnu.runner = [\"sh\", \"-c\", \"sh z*\"]\nB\ncargo test"
+            ),
+            format!(
+                "cat > zq.md {merge}cat > ~/.cargo/config.toml <<'B'\ntarget.x86_64-unknown-linux-gnu.runner = [\"sh\", \"-c\", \"sh z*\"]\nB\ncargo test"
+            ),
+            format!(
+                "cat > zq.md {merge}cat > .cargo/config.toml <<'B'\ntarget.x86_64-unknown-linux-gnu.runner = [\"sh\", \"-c\", \"sh z*\"]\nB\nrustfmt --version"
+            ),
             format!("cat > build.rs <<'EOF'\nfn f<'a>(x: &str) {{ let _ = x; }}\nEOF\ncargo build"),
             format!("git apply > out.md <<'EOF'\n{patch}EOF\nPATH=d:/usr/bin cargo zz"),
         ] {
