@@ -1,6 +1,7 @@
 //! The install splash's purple-and-orange palette, as ratatui styles.
 
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 
 use crate::herdr::AgentStatus;
 use crate::report::Kind;
@@ -21,6 +22,10 @@ const LIGHT_ORANGE: Paint = ((255, 192, 77), 214);
 const GREY_VIOLET: Paint = ((120, 110, 140), 60);
 const SOFT_VIOLET: Paint = ((160, 165, 190), 146);
 const LIGHT: Paint = ((235, 235, 242), 254);
+const WHITE: Paint = ((255, 255, 255), 231);
+
+/// The splash's 256-color stand-ins for its purple-to-orange gradient.
+const PURPLE_TO_ORANGE: [u8; 5] = [93, 134, 169, 203, 202];
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -69,6 +74,33 @@ impl Theme {
         self.fg(ORANGE).add_modifier(Modifier::BOLD)
     }
 
+    /// `text` in bold, its letters running from purple to orange like the
+    /// splash's wordmark.
+    pub fn wordmark(&self, text: &str) -> Line<'static> {
+        let last = text.trim().chars().count().saturating_sub(1).max(1) as u32;
+        let mut letter = 0;
+        let spans = text.chars().map(|c| {
+            if c == ' ' {
+                return Span::raw(" ");
+            }
+            let fg = match self.depth {
+                Depth::Truecolor => Some(Color::Rgb(
+                    (150 + 105 * letter / last) as u8,
+                    (50 + 30 * letter / last) as u8,
+                    (230 - 230 * letter / last) as u8,
+                )),
+                Depth::Indexed => Some(Color::Indexed(
+                    PURPLE_TO_ORANGE[(4 * letter / last) as usize],
+                )),
+                Depth::None => None,
+            };
+            letter += 1;
+            let style = Style::new().add_modifier(Modifier::BOLD);
+            Span::styled(c.to_string(), fg.map_or(style, |fg| style.fg(fg)))
+        });
+        Line::from(spans.collect::<Vec<_>>())
+    }
+
     pub fn heading(&self) -> Style {
         self.fg(GREY_VIOLET).add_modifier(Modifier::BOLD)
     }
@@ -79,6 +111,11 @@ impl Theme {
             (Some(bg), Some(fg)) => Style::new().bg(bg).fg(fg),
             _ => Style::new().add_modifier(Modifier::REVERSED),
         }
+    }
+
+    /// The splash's nearest sheep: bold white.
+    pub fn sheep(&self) -> Style {
+        self.fg(WHITE).add_modifier(Modifier::BOLD)
     }
 
     pub fn key(&self) -> Style {
