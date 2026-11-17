@@ -113,10 +113,10 @@ Init never launches an agent.
    first then by time; then stop lines grouped by member in name order,
    oldest first within a member; then a lead's `failing` and `recovered`,
    then its `interrupted` and `merged`, by member in name order, then its
-   `claimable`; then `blocked` and
-   `gone`. A `drained` line prints only on a poll nothing else woke,
-   alone but for a due `shepherd handoff`. The first watch after an install, or over members a herd-scoped
-   watch skipped, prints every unread stop change since; judge each against
+   `claimable`; then `blocked` and `gone`. A `drained` line prints only on
+   a poll nothing else woke, alone but for a due `shepherd handoff`. The
+   first watch after an install, or over members a herd-scoped watch
+   skipped, prints every unread stop change since; judge each against
    `reports --all`.
 3. **On wake,** read the watch's lines and the task (`loopherd reports
    --all --tail 40` for the timeline, stops included; for a fuller
@@ -598,13 +598,13 @@ What differs from the shepherd:
   hand what its note says. Each wakes you
   once, so a claimable task you don't feed then shows up again only in the
   heartbeat's dry run. On `<herd> drained` (your herd is paused and no
-  worker is open), report done, stop, and don't re-arm. Exit 2 is a heartbeat, not idleness: still check
-  each PR waiting on review (`gh pr view <n> --json state`), run the
-  after-merge steps for any the human merged, and run `loopherd feed <herd>
-  --dry-run`. After every exit, run `loopherd status` and re-arm in the
-  same message as your first action, unless the wake needs a handoff or
-  says `<herd> drained` (then don't re-arm). Read the watch's output once; don't read it again after
-  acting.
+  worker is open), report done, stop, and don't re-arm. Exit 2 is a
+  heartbeat, not idleness: still check each PR waiting on review (`gh pr
+  view <n> --json state`), run the after-merge steps for any the human
+  merged, and run `loopherd feed <herd> --dry-run`. After every exit, run
+  `loopherd status` and re-arm in the same message as your first action,
+  unless the wake needs a handoff or says `<herd> drained` (then don't
+  re-arm). Read the watch's output once; don't read it again after acting.
 - **After a restart** the shepherd runs `loopherd revive`, which prompts you
   to re-arm whenever nothing holds `watch-<your name>.lock`, whether herdr
   resumed you or revive did. Re-read `loopherd status` and `loopherd reports

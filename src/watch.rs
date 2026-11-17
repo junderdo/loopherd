@@ -166,9 +166,9 @@ pub fn watch(
     // Each member's last known status; an unreadable poll keeps it.
     let mut last: HashMap<String, AgentStatus> = HashMap::new();
     let mut gone = Gone::default();
-    // Gone on the first poll and not live since; any other gone member
-    // counts as in flight until its `gone` line prints.
-    let mut gone_at_start: Option<HashSet<String>> = None;
+    // Unlike `gone`, kept while herdr is unreadable: a member seen live and
+    // now gone counts as in flight, though a restart may keep `gone` quiet.
+    let mut seen_live: HashSet<String> = HashSet::new();
     let mut code = 0;
     let mut own_questions_seen = HashSet::new();
     // An unreadable mailbox warns every poll until it's readable; say it once.
@@ -200,10 +200,6 @@ pub fn watch(
             .map(|stray| stray.pane.clone())
             .collect();
         let (members, own) = in_scope(read.view, req, &reader)?;
-        let gone_at_start = gone_at_start.get_or_insert_with(|| {
-            let gone = members.iter().filter(|m| m.gone);
-            gone.map(|m| m.name.clone()).collect()
-        });
         let names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
         let mut lines = vec![];
         let mut waiting = vec![];
@@ -264,7 +260,9 @@ pub fn watch(
                 continue;
             }
             gone.seen(member, agents_read);
-            gone_at_start.remove(&member.name);
+            if agents_read {
+                seen_live.insert(member.name.clone());
+            }
             let was = last.get(&member.name).copied();
             // Only on change: one blocked at start would re-wake every re-armed watch.
             if member.status == AgentStatus::Blocked
@@ -314,7 +312,7 @@ pub fn watch(
         if lines.is_empty() {
             let flight = Flight {
                 dir,
-                gone_at_start,
+                seen_live: &seen_live,
                 before: &before,
             };
             lines.extend(drained(ledger, &flight, req, &reader, &members)?);
@@ -392,15 +390,15 @@ fn drained(
 /// What a watch has seen that says whether a member may still work.
 struct Flight<'a> {
     dir: &'a Path,
-    gone_at_start: &'a HashSet<String>,
+    seen_live: &'a HashSet<String>,
     /// Statuses as of the poll before, since herdr can show a member idle
     /// before its Stop hook has written the stop.
     before: &'a HashMap<String, AgentStatus>,
 }
 
 impl Flight<'_> {
-    /// Whether `member` may still work: gone since the watch started but
-    /// not yet reported gone, busy, blocked or unknown on this poll or the
+    /// Whether `member` may still work: gone after this watch saw it live,
+    /// busy, blocked or unknown on this poll or the
     /// last, or its last stop since its start failed or left work in
     /// flight. An unreadable mailbox counts as in flight.
     fn carries(&self, member: &Member) -> bool {
@@ -411,7 +409,7 @@ impl Flight<'_> {
             )
         };
         if member.gone {
-            return !self.gone_at_start.contains(&member.name);
+            return self.seen_live.contains(&member.name);
         }
         if busy(member.status) || self.before.get(&member.name).copied().is_some_and(busy) {
             return true;
@@ -3663,7 +3661,10 @@ mod tests {
             }
         });
         assert_eq!(woke.unwrap(), ["all drained"]);
-        assert_eq!(polls, 2, "drained on the first poll it read idle");
+        assert_eq!(
+            polls, 2,
+            "drained on the first idle poll, with no grace poll"
+        );
     }
 
     #[test]
@@ -3682,5 +3683,19 @@ mod tests {
             _ => {}
         });
         assert_eq!(woke.unwrap(), ["lead-cards gone"]);
+    }
+
+    #[test]
+    fn a_member_gone_when_herdr_first_answers_does_not_hold_off_drained() {
+        let world = Checked::drained();
+        world.herdr.remove_agent("lead-cards");
+        world.herdr.set_unreachable(true);
+        let (woke, polls) = world.shepherd_until(Some(Duration::from_secs(10)), |poll| {
+            if poll == 1 {
+                world.herdr.set_unreachable(false);
+            }
+        });
+        assert_eq!(woke.unwrap(), ["all drained"]);
+        assert_eq!(polls, 1);
     }
 }
