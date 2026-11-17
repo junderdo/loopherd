@@ -4028,6 +4028,14 @@ fn each_blocker_path_names_its_own_feature_and_a_relative_one_names_the_issues()
             ready("../issues/04-node.md"),
         ),
         (".scratch/auth/issues/12-x.md", ready("./issues/04-node.md")),
+        (
+            ".scratch/auth/issues/13-x.md",
+            ready("../../issues/04-node.md"),
+        ),
+        (
+            ".scratch/auth/issues/14-x.md",
+            ready(".scratch/auth/../issues/04-node.md"),
+        ),
     ];
     let issues: Vec<(&str, &str)> = issues.iter().map(|(p, t)| (*p, t.as_str())).collect();
 
@@ -4039,7 +4047,13 @@ fn each_blocker_path_names_its_own_feature_and_a_relative_one_names_the_issues()
         "auth-11 feat tdd x .scratch/auth/issues/11-x.md\n\
          auth-12 feat tdd x .scratch/auth/issues/12-x.md\n"
     );
-    assert_eq!(text(&out.stderr), "");
+    assert_eq!(
+        text(&out.stderr),
+        "skipped .scratch/auth/issues/13-x.md: its Blocked by names \
+         ../../issues/04-node.md, which is no issue\n\
+         skipped .scratch/auth/issues/14-x.md: its Blocked by names \
+         .scratch/auth/../issues/04-node.md, which is no issue\n"
+    );
 }
 
 #[test]

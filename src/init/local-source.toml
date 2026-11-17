@@ -41,10 +41,11 @@ done | awk -v room=@ID_ROOM@ '
       sub(/:.*/, "", item)
       of = feature[f]
       # Each path becomes one \001<dir> word naming the feature of the numbers
-      # after it; a . or .. dir names the feature of the issue itself.
+      # after it. Only a bare ./issues/ or ../issues/ names the feature of the
+      # issue itself; a longer path ending in . or .. names none.
       while (match(item, /[^ \t]*\/issues\//)) {
         dir = substr(item, RSTART, RLENGTH - 8)
-        sub(/.*\//, "", dir)
+        if (dir !~ /^\.\.?$/ && sub(/.*\//, "", dir) && dir ~ /^\.\.?$/) dir = ""
         item = substr(item, 1, RSTART - 1) " \001" dir " " substr(item, RSTART + RLENGTH)
       }
       gsub(/(^|[ \t])issues\//, " ", item)
