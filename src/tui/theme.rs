@@ -84,6 +84,24 @@ impl Theme {
         self.fg(LIGHT_ORANGE)
     }
 
+    pub fn paused(&self) -> Style {
+        self.fg(LIGHT_ORANGE)
+    }
+
+    /// A time in status past its first threshold.
+    /// Without color it is underlined, to stay apart from a fresh time.
+    pub fn stale(&self) -> Style {
+        match self.depth {
+            Depth::None => Style::new().add_modifier(Modifier::UNDERLINED),
+            _ => self.fg(LIGHT_ORANGE),
+        }
+    }
+
+    /// A time in status past its last threshold.
+    pub fn overdue(&self) -> Style {
+        self.plain_fg(Color::Red).add_modifier(Modifier::BOLD)
+    }
+
     pub fn label(&self) -> Style {
         self.fg(GREY_VIOLET)
     }

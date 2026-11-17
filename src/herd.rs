@@ -688,6 +688,32 @@ pub fn lead_switches(paths: &Paths, herd: &str) -> Result<Switches> {
     Ok(lead.switches().over(&lead_defaults(paths)?))
 }
 
+/// What a herd's box in `loopherd view` shows from its herd file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outline {
+    /// The `[queue]`'s `max`, when the herd has a queue.
+    pub max: Option<usize>,
+    /// The lead's switches, when the herd has a `[lead]`.
+    pub switches: Option<Switches>,
+    /// Why `config.toml`'s `[lead_defaults]` couldn't be read; the switches
+    /// then come from the herd file alone.
+    pub defaults_problem: Option<String>,
+}
+
+pub fn outline(paths: &Paths, herd: &str) -> Result<Outline> {
+    let file = load(&paths.herds, herd)?;
+    let (defaults, defaults_problem) = match file.lead.is_some().then(|| lead_defaults(paths)) {
+        Some(Err(e)) => (SwitchValues::default(), Some(format!("{e:#}"))),
+        Some(Ok(defaults)) => (defaults, None),
+        None => (SwitchValues::default(), None),
+    };
+    Ok(Outline {
+        max: file.queue.map(|q| q.max as usize),
+        switches: file.lead.map(|lead| lead.switches().over(&defaults)),
+        defaults_problem,
+    })
+}
+
 fn lead_defaults(paths: &Paths) -> Result<SwitchValues> {
     let file = crate::config::read(&config_file(paths))?;
     Ok(file.lead_defaults.unwrap_or_default())
