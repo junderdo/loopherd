@@ -102,8 +102,9 @@ pub struct Process {
 
 pub trait Ledger {
     fn entries(&self) -> Result<BTreeMap<String, AgentRecord>>;
-    /// Inserts or replaces the entry for `record.name`; a released entry it
-    /// replaces moves into the new one's `earlier`.
+    /// Inserts or replaces the entry for `record.name`. An empty `earlier`
+    /// inherits the replaced entry's; a released entry of a different run
+    /// (another `created`) is then appended to it.
     fn record(&mut self, record: AgentRecord) -> Result<()>;
     /// Applies `change` to the current entry for `name`, read fresh under the
     /// ledger lock, so a write made since the caller's `entries` survives.
@@ -128,13 +129,12 @@ pub trait Ledger {
 
 fn insert(entries: &mut BTreeMap<String, AgentRecord>, mut record: AgentRecord) {
     if let Some(mut old) = entries.remove(&record.name) {
-        let mut earlier = std::mem::take(&mut old.earlier);
-        if old.released_at.is_some() {
-            earlier.push(old);
-        }
-        // A caller's copy of the entry already carries them.
+        let kept = std::mem::take(&mut old.earlier);
         if record.earlier.is_empty() {
-            record.earlier = earlier;
+            record.earlier = kept;
+        }
+        if old.released_at.is_some() && old.created != record.created {
+            record.earlier.push(old);
         }
     }
     entries.insert(record.name.clone(), record);
@@ -506,13 +506,59 @@ mod tests {
             ..record("a", true)
         };
         ledger.record(earlier.clone()).unwrap();
-        ledger.record(record("a", false)).unwrap();
+        let current = AgentRecord {
+            created: "2026-11-03T00:00:00Z".into(),
+            ..record("a", false)
+        };
+        ledger.record(current.clone()).unwrap();
 
-        ledger.record(record("a", true)).unwrap();
+        ledger
+            .record(AgentRecord {
+                prompt_sent: true,
+                ..current
+            })
+            .unwrap();
 
         let entry = &ledger.entries().unwrap()["a"];
         assert_eq!(entry.earlier, [earlier]);
         assert!(entry.prompt_sent);
+    }
+
+    fn released(name: &str, created: &str) -> AgentRecord {
+        AgentRecord {
+            retired: true,
+            created: created.into(),
+            released_at: Some("2026-11-10T00:00:00Z".into()),
+            ..record(name, true)
+        }
+    }
+
+    #[test]
+    fn re_recording_a_released_entry_as_it_is_keeps_no_copy_of_it() {
+        let mut ledger = MemLedger::default();
+        let entry = released("a", "2026-11-01T00:00:00Z");
+        ledger.record(entry.clone()).unwrap();
+
+        ledger.record(entry.clone()).unwrap();
+
+        assert_eq!(ledger.entries().unwrap()["a"], entry);
+    }
+
+    #[test]
+    fn a_new_run_with_its_own_earlier_list_still_gets_the_released_one_appended() {
+        let mut ledger = MemLedger::default();
+        let oldest = released("a", "2026-11-01T00:00:00Z");
+        let replaced = released("a", "2026-11-03T00:00:00Z");
+        ledger.record(replaced.clone()).unwrap();
+
+        ledger
+            .record(AgentRecord {
+                earlier: vec![oldest.clone()],
+                ..record("a", false)
+            })
+            .unwrap();
+
+        assert_eq!(ledger.entries().unwrap()["a"].earlier, [oldest, replaced]);
     }
 
     #[test]
