@@ -60,13 +60,6 @@ impl Outlines {
         if herd.members.is_empty() && herd.paused.is_none() {
             spans.push(Span::styled(" (retired only)", Modifier::BOLD));
         }
-        if let Some(pause) = &herd.paused {
-            let reason = pause
-                .shown_reason()
-                .map_or(String::new(), |r| format!(" — {r}"));
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(format!("⏸ paused{reason}"), theme.paused()));
-        }
         if let Some(Ok(Outline {
             switches: Some(switches),
             ..
@@ -76,6 +69,14 @@ impl Outlines {
                 spans.push(Span::raw(if i == 0 { "  " } else { " " }));
                 spans.push(Span::styled(chip, theme.toggle(on)));
             }
+        }
+        // Last, since a long reason is cut off at the box's edge.
+        if let Some(pause) = &herd.paused {
+            let reason = pause
+                .shown_reason()
+                .map_or(String::new(), |r| format!(" — {r}"));
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(format!("⏸ paused{reason}"), theme.paused()));
         }
         spans.push(Span::raw(" "));
         Line::from(spans)

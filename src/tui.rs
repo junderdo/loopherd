@@ -1078,6 +1078,27 @@ max = 3
     }
 
     #[test]
+    fn a_long_pause_reason_leaves_the_switch_chips_in_view() {
+        let herd = "repo = \"/r\"\n[lead]\nprompt = \"lead\"\n";
+        let root = config_dir(&[("prs", herd)], None);
+        std::fs::create_dir(root.path().join("paused")).unwrap();
+        let reason = "x".repeat(80);
+        let pause = format!(r#"{{"since": "2026-11-05T09:00:00Z", "reason": "{reason}"}}"#);
+        std::fs::write(root.path().join("paused/prs"), pause).unwrap();
+        let now = Instant::now();
+
+        let app = app_in(root.path(), &herdr(), &ledger(), now);
+
+        let terminal = render_at(&app, now, 120, 30);
+        assert!(
+            title_row(&terminal, "prs")
+                .starts_with("│╭ prs  merge install rebase cards design dialogs  ⏸ paused — xxx"),
+            "{:#?}",
+            lines(&terminal)
+        );
+    }
+
+    #[test]
     fn a_herd_with_a_lead_shows_its_switches_orange_when_on_and_dim_when_off() {
         let herd = "repo = \"/r\"\n[lead]\nprompt = \"lead\"\nmerge = true\nrebase = false\n";
         let defaults = "[lead_defaults]\ninstall = true\nrebase = true\n";
