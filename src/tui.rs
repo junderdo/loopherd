@@ -15,7 +15,7 @@ use anyhow::{Result, anyhow, bail};
 use ratatui::backend::Backend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph, Widget};
@@ -42,6 +42,15 @@ const TICK: Duration = Duration::from_millis(100);
 const TIME_WIDTH: usize = 7;
 /// The narrowest terminal that shows the detail pane beside the list.
 const DETAIL_MIN_WIDTH: u16 = 100;
+/// Body rows below which the quiet herd drops its sheep for just the line.
+const QUIET_SHEEP_MIN_HEIGHT: u16 = 10;
+/// The install splash's largest sheep, grazing.
+const SHEEP: [&str; 4] = [
+    " ▄█▄█▄█▄█▄",
+    "▐█████████▌",
+    " ▀█████████▄▄",
+    "  ▌▐    ▌▐▓o▌",
+];
 /// Over a member's cells, the time's column left blank.
 const HEADINGS: [&str; 6] = ["NAME", "STATUS", "", "BRANCH", "WORKTREE", "PANE"];
 
@@ -263,9 +272,7 @@ impl App {
     }
 
     pub fn draw(&self, frame: &mut Frame, now: Instant) {
-        let window = self
-            .block()
-            .title(Span::styled(" loopherd ", self.theme.title()));
+        let window = self.block().title(self.theme.wordmark(" loopherd "));
         let inner = window.inner(frame.area());
         frame.render_widget(window, frame.area());
         let notes: Vec<Line> = self
@@ -407,6 +414,34 @@ impl App {
                 out[(body.x + x, body.y + y)] = page[(x, scroll + y)].clone();
             }
         }
+        if self.read.is_some() && self.targets().is_empty() {
+            let below = Rect {
+                y: body.y + height.min(body.height),
+                height: body.height.saturating_sub(height),
+                ..body
+            };
+            self.draw_quiet(out, below, body.height >= QUIET_SHEEP_MIN_HEIGHT);
+        }
+    }
+
+    /// A grazing sheep from the install splash over `the herd is quiet`,
+    /// centered in `area`.
+    fn draw_quiet(&self, out: &mut Buffer, area: Rect, sheep: bool) {
+        let mut lines: Vec<Line> = vec![];
+        if sheep {
+            let width = SHEEP.iter().map(|r| r.chars().count()).max().unwrap_or(0);
+            lines.extend(
+                SHEEP
+                    .iter()
+                    .map(|r| Line::styled(format!("{r:<width$}"), self.theme.sheep())),
+            );
+            lines.push(Line::default());
+        }
+        lines.push(Line::styled("the herd is quiet", self.theme.label()));
+        let [area] = Layout::vertical([Constraint::Length(lines.len() as u16)])
+            .flex(Flex::Center)
+            .areas(area);
+        Paragraph::new(lines).centered().render(area, out);
     }
 
     /// The selected agent's details in a box titled with its name.
@@ -1385,7 +1420,7 @@ mod tests {
     }
 
     #[test]
-    fn the_window_has_a_rounded_purple_border_titled_loopherd_in_bold_orange() {
+    fn the_window_has_a_rounded_purple_border_titled_loopherd_in_bold() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let terminal = render(&app(&herdr, &ledger, now), now);
         for corner in [(0, 0), (71, 0), (0, 13), (71, 13)] {
@@ -1394,9 +1429,97 @@ mod tests {
         assert_eq!(cell(&terminal, (0, 0)).symbol(), "╭");
         assert_eq!(cell(&terminal, (71, 13)).symbol(), "╯");
         assert!(lines(&terminal)[0].starts_with("╭ loopherd ─"));
-        let title = cell(&terminal, (2, 0));
-        assert_eq!(title.fg, ORANGE);
-        assert!(title.modifier.contains(Modifier::BOLD));
+        assert!(cell(&terminal, (2, 0)).modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn the_title_runs_letter_by_letter_from_purple_to_orange_or_plain_bold_without_color() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let cases = [
+            (Some("truecolor"), false, PURPLE, Color::Rgb(255, 80, 0)),
+            (None, false, Color::Indexed(93), Color::Indexed(202)),
+            (Some("truecolor"), true, Color::Reset, Color::Reset),
+        ];
+        for (colorterm, no_color, first, last) in cases {
+            let theme = Theme::from_env(colorterm, no_color);
+            let terminal = render(&themed(theme, &herdr, &ledger, now), now);
+            let case = format!("{colorterm:?} {no_color:?}");
+            let (l, d) = (cell(&terminal, (2, 0)), cell(&terminal, (9, 0)));
+            assert_eq!((l.symbol(), d.symbol()), ("l", "d"), "{case}");
+            assert_eq!((l.fg, d.fg), (first, last), "{case}");
+            assert!(l.modifier.contains(Modifier::BOLD), "{case}");
+            assert!(d.modifier.contains(Modifier::BOLD), "{case}");
+        }
+    }
+
+    /// A ledger with only a retired entry, and herdr with only a stray.
+    fn quiet() -> (FakeHerdr, MemLedger) {
+        let mut retired = entry("done-1", Some("old-herd"));
+        retired.retired = true;
+        let mut ledger = MemLedger::default();
+        ledger.0.insert(retired.name.clone(), retired);
+        let herdr = FakeHerdr::new(&[("w1", "main")]).with_raw_agent(agent(
+            None,
+            "w2:p7",
+            AgentStatus::Idle,
+        ));
+        (herdr, ledger)
+    }
+
+    const SHEEP: [&str; 4] = [
+        " ▄█▄█▄█▄█▄",
+        "▐█████████▌",
+        " ▀█████████▄▄",
+        "  ▌▐    ▌▐▓o▌",
+    ];
+
+    #[test]
+    fn with_no_members_shown_a_sheep_grazes_over_the_herd_is_quiet() {
+        let (herdr, ledger) = quiet();
+        let now = Instant::now();
+        let terminal = render(&app(&herdr, &ledger, now), now);
+        let shown = lines(&terminal);
+        let (_, top) = pos(&terminal, SHEEP[0]);
+        for (i, row) in SHEEP.iter().enumerate() {
+            assert!(shown[top as usize + i].contains(row), "{shown:#?}");
+        }
+        assert_eq!(at(&terminal, "█").fg, Color::Rgb(255, 255, 255));
+        let (x, y) = pos(&terminal, "the herd is quiet");
+        assert_eq!(y, top + 5, "{shown:#?}");
+        assert!(x.abs_diff(72 - x - 17) <= 1, "centered: {shown:#?}");
+        assert_eq!(cell(&terminal, (x, y)).fg, GREY_VIOLET);
+    }
+
+    #[test]
+    fn a_shown_member_or_stray_sends_the_sheep_away() {
+        let now = Instant::now();
+        let (herdr, ledger) = (herdr(), ledger());
+        let busy = render(&app(&herdr, &ledger, now), now);
+        assert!(!text(&busy).iter().any(|l| l.contains("the herd is quiet")));
+        let (herdr, ledger) = quiet();
+        for key in ['a', 's'] {
+            let mut app = app(&herdr, &ledger, now);
+            press(&mut app, &[KeyCode::Char(key)], &herdr, &ledger);
+            let shown = text(&render(&app, now));
+            assert!(
+                !shown.iter().any(|l| l.contains("the herd is quiet")),
+                "{key}: {shown:#?}"
+            );
+            assert!(
+                !shown.iter().any(|l| l.contains("▄█▄")),
+                "{key}: {shown:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn under_10_rows_of_body_the_sheep_leaves_only_the_line() {
+        let (herdr, ledger) = quiet();
+        let now = Instant::now();
+        let terminal = render_at(&app(&herdr, &ledger, now), now, 72, 13);
+        let shown = text(&terminal);
+        assert!(shown.iter().any(|l| l == "the herd is quiet"), "{shown:#?}");
+        assert!(!shown.iter().any(|l| l.contains("▄█▄")), "{shown:#?}");
     }
 
     #[test]
