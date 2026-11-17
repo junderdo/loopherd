@@ -1375,6 +1375,26 @@ fn tracker_names_the_doc_init_writes_when_there_is_none() {
 }
 
 #[test]
+fn the_github_and_local_tracker_docs_cover_wayfinding_blocking_and_sub_issues() {
+    for (tracker, sub_issue) in [
+        ("github", "**Make an issue a sub-issue of a parent**"),
+        ("local", "- **Child ticket**: "),
+    ] {
+        let fixture = Fixture::new(&["acme"]);
+
+        assert_ok(&fixture.init(&["--tracker", tracker]));
+
+        let doc = repo_file(&fixture, "docs/agents/issue-tracker.md");
+        assert!(
+            doc.contains("\n## Wayfinding operations\n"),
+            "{tracker}: {doc}"
+        );
+        assert!(doc.contains("\n- **Blocking**: "), "{tracker}: {doc}");
+        assert!(doc.contains(sub_issue), "{tracker}: {doc}");
+    }
+}
+
+#[test]
 fn an_existing_triage_labels_doc_is_kept_when_init_writes_the_tracker_doc() {
     let fixture = Fixture::new(&["acme"]);
     let labels = "| `ready-for-agent` | `AFK` | x |\n";

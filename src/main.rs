@@ -9,6 +9,7 @@ mod init;
 mod install_hook;
 mod lead;
 mod ledger;
+mod line_ending;
 mod lock;
 mod matching;
 mod notify;
