@@ -109,9 +109,20 @@ asks for each on a terminal, the inferred value as the default. It writes
 and, uncommitted, adds `docs/agents/loopherd.md`,
 a tracker doc if the repo has none, and a `## loopherd` section in
 `AGENTS.md`. The tracker can be GitHub issues, local markdown issue files,
-or another one you describe; `loopherd init --help` has the flags. Follow
-the steps it prints: review and commit the repo files and fill any
-`(fill in)` placeholder.
+or another one you describe; `loopherd init --help` has the flags. Then
+follow the steps it prints, in order, each only when it applies:
+
+1. Open Claude in the repo once and accept its trust dialog (below).
+2. For a tracker init has no snippets for, fill each `(fill in)` in the
+   herd file, the lead prompt and `docs/agents/loopherd.md`.
+3. Add an origin remote if the repo has none.
+4. Write by hand any repo file init left alone (a symlinked `AGENTS.md`,
+   a doc that would land outside the repo).
+5. Tailor the herd to the repo per "Setting up a project" in
+   `loopherd --skill`.
+6. Review and commit the repo files init wrote.
+7. `loopherd herds`, `loopherd feed <herd> --dry-run`, and with a lead,
+   `loopherd lead <herd>`, as above.
 
 Claude Code asks whether to trust a repo the first time it starts there,
 and members can't start past that dialog. Trust each repo once from its
