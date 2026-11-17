@@ -400,49 +400,39 @@ const MAX_TEXT: usize = 200;
 /// other mention of a key hides the next word only if it [looks like a
 /// secret](looks_like_a_secret), so a merge question naming `GITHUB_TOKEN` or "the auth
 /// flow" survives. Best-effort: a secret in a shape it doesn't know gets through.
+///
+/// The line is read twice, as written and with its non-ASCII quotes read as ASCII
+/// ones, and a word either reading hides stays hidden, so reading the quotes never
+/// shows a word the first reading hides.
 fn summary(question: &str) -> String {
     let first = question
         .lines()
         .find(|line| !line.trim().is_empty())
         .unwrap_or_default();
-    let mut next = Next::Free;
+    let words: Vec<&str> = first.split_whitespace().collect();
+    let as_written = redacted(&words);
+    let ascii_quoted: Vec<String> = words.iter().map(|word| ascii_quoted(word)).collect();
+    let ascii_quoted = redacted(&ascii_quoted.iter().map(String::as_str).collect::<Vec<_>>());
     let mut line = String::new();
-    for word in first.split_whitespace() {
-        let shown;
-        (shown, next) = match next {
-            Next::Clause => match clause_end(word) {
-                Some(end) => (Shown::Glued(end), Next::Free),
-                None => (Shown::Glued(""), Next::Clause),
-            },
-            Next::ClauseStart => clause_start(word),
-            Next::Closing(closer) => (Shown::redacted(), Next::closed_by(word, closer)),
-            Next::Value if is_separator(word) => (Shown::Word(word.to_string()), Next::ClauseStart),
-            Next::Value if FILLERS.contains(&normalized(word).as_str()) => {
-                (Shown::Word(word.to_string()), next)
-            }
-            Next::Value => (Shown::redacted(), value_then(word)),
-            Next::Key(key) if is_separator(word) => (Shown::Word(word.to_string()), key.value()),
-            Next::Key(_) if FILLERS.contains(&normalized(word).as_str()) => {
-                (Shown::Word(word.to_string()), next)
-            }
-            Next::Key(_) | Next::MaybeValue if looks_like_a_secret(word) => {
-                (Shown::redacted(), Next::after_value(word))
-            }
-            Next::Free | Next::Key(_) | Next::MaybeValue => match carried_value(word) {
-                Some((true, value)) => clause_start(value),
-                Some((false, value)) => (Shown::redacted(), value_then(value)),
-                None if token_shaped(word) => (Shown::redacted(), key_named_by(word)),
-                None => (Shown::Word(without_userinfo(word)), key_named_by(word)),
-            },
+    for ((word, written), ascii) in words.iter().zip(as_written).zip(ascii_quoted) {
+        let shown = match (written, ascii) {
+            (Shown::Word, shown) | (shown, _) => shown,
         };
         match shown {
-            Shown::Word(shown) => {
+            Shown::Word => {
                 if !line.is_empty() {
                     line.push(' ');
                 }
-                line.push_str(&shown);
+                line.push_str(&without_userinfo(word));
             }
-            Shown::Glued(end) => line.push_str(end),
+            Shown::Redacted(end) => {
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str("[redacted]");
+                line.push_str(last_chars(word, end));
+            }
+            Shown::Glued(end) => line.push_str(last_chars(word, end)),
         }
     }
     match line.char_indices().nth(MAX_TEXT) {
@@ -451,16 +441,71 @@ fn summary(question: &str) -> String {
     }
 }
 
-/// A word as [`summary`] shows it: whole, or only a clause's end glued to the
-/// `[redacted]` before it.
-enum Shown<'a> {
-    Word(String),
-    Glued(&'a str),
+/// `word` with each non-ASCII quote mark as its ASCII equivalent, one char for one.
+fn ascii_quoted(word: &str) -> String {
+    word.chars()
+        .map(|c| match c {
+            '“' | '”' | '„' | '«' | '»' => '"',
+            '‘' | '’' | '‚' => '\'',
+            c => c,
+        })
+        .collect()
 }
 
-impl Shown<'_> {
+fn last_chars(word: &str, count: usize) -> &str {
+    let start = word
+        .char_indices()
+        .rev()
+        .nth(count.wrapping_sub(1))
+        .map_or(word.len(), |(at, _)| at);
+    &word[start..]
+}
+
+/// How each of `words` is shown, by the key and value rules.
+fn redacted(words: &[&str]) -> Vec<Shown> {
+    let mut next = Next::Free;
+    let mut shown_words = Vec::with_capacity(words.len());
+    for &word in words {
+        let shown;
+        (shown, next) = match next {
+            Next::Clause => match clause_end(word) {
+                Some(end) => (Shown::Glued(end), Next::Free),
+                None => (Shown::Glued(0), Next::Clause),
+            },
+            Next::ClauseStart => clause_start(word),
+            Next::Closing(closer) => (Shown::redacted(), Next::closed_by(word, closer)),
+            Next::Value if is_separator(word) => (Shown::Word, Next::ClauseStart),
+            Next::Value if FILLERS.contains(&normalized(word).as_str()) => (Shown::Word, next),
+            Next::Value => (Shown::redacted(), value_then(word)),
+            Next::Key(key) if is_separator(word) => (Shown::Word, key.value()),
+            Next::Key(_) if FILLERS.contains(&normalized(word).as_str()) => (Shown::Word, next),
+            Next::Key(_) | Next::MaybeValue if looks_like_a_secret(word) => {
+                (Shown::redacted(), Next::after_value(word))
+            }
+            Next::Free | Next::Key(_) | Next::MaybeValue => match carried_value(word) {
+                Some((true, value)) => clause_start(value),
+                Some((false, value)) => (Shown::redacted(), value_then(value)),
+                None if token_shaped(word) => (Shown::redacted(), key_named_by(word)),
+                None => (Shown::Word, key_named_by(word)),
+            },
+        };
+        shown_words.push(shown);
+    }
+    shown_words
+}
+
+/// A word as [`summary`] shows it: whole, as `[redacted]` followed by its last `n`
+/// chars, or only its last `n` chars glued to the `[redacted]` before it.
+#[derive(Clone, Copy)]
+enum Shown {
+    Word,
+    Redacted(usize),
+    Glued(usize),
+}
+
+impl Shown {
     fn redacted() -> Self {
-        Shown::Word("[redacted]".to_string())
+        Shown::Redacted(0)
     }
 }
 
@@ -472,23 +517,23 @@ const OPENERS: [char; 12] = ['"', '\'', '“', '‘', '”', '’', '„', '‚'
 
 /// The first word of a separated strong key's value, hidden with the rest of its
 /// clause unless it opens a quote or bracket.
-fn clause_start(value: &str) -> (Shown<'_>, Next) {
+fn clause_start(value: &str) -> (Shown, Next) {
     if value.starts_with(OPENERS) {
         return (Shown::redacted(), Next::after_value(value));
     }
     match clause_end(value) {
-        Some(end) => (Shown::Word(format!("[redacted]{end}")), Next::Free),
+        Some(end) => (Shown::Redacted(end), Next::Free),
         None => (Shown::redacted(), Next::Clause),
     }
 }
 
-/// The punctuation ending `word`'s clause (`,` `;` `?` `!` `.` or a closing quote
-/// or bracket), if it ends one. A cookie's `a=b;` doesn't, so its next pair is hidden.
-fn clause_end(word: &str) -> Option<&str> {
+/// How many chars of punctuation end `word`'s clause (`,` `;` `?` `!` `.` or a closing
+/// quote or bracket), if it ends one. A cookie's `a=b;` doesn't, so its next pair is hidden.
+fn clause_end(word: &str) -> Option<usize> {
     let value = word.trim_end_matches(|c: char| ",;?!.)]}\"'“”‘’»".contains(c));
     let end = &word[value.len()..];
     let cookie_pair = end.starts_with(';') && value.contains('=');
-    (!end.is_empty() && !cookie_pair).then_some(end)
+    (!end.is_empty() && !cookie_pair).then_some(end.chars().count())
 }
 
 /// What the next word is to [`summary`].
@@ -719,6 +764,9 @@ fn token_shaped(word: &str) -> bool {
         prefixed || random
     })
 }
+
+#[cfg(test)]
+mod fuzz;
 
 #[cfg(test)]
 mod tests {
@@ -1528,6 +1576,108 @@ mod tests {
             ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
+        }
+    }
+
+    #[test]
+    fn a_key_in_any_quote_mark_is_read_like_one_in_straight_quotes() {
+        for (question, text) in [
+            (
+                "Set »TOKEN« = hunter22 then merge?",
+                "Set »TOKEN« = [redacted]?",
+            ),
+            (
+                "Set »password«: hunter22 then merge?",
+                "Set »password«: [redacted]?",
+            ),
+            ("Use »token«=abc123xyz ok?", "Use [redacted]?"),
+            (
+                "Set »auth«=Bearer abc123def456 then merge?",
+                "Set [redacted] [redacted] then merge?",
+            ),
+            ("{»password«:»hunter2«} ok?", "[redacted] ok?"),
+            (
+                "»password« hunter22 Bearer merge!",
+                "»password« [redacted] Bearer merge!",
+            ),
+            (
+                "password: ”two words” ok?",
+                "password: [redacted] [redacted] ok?",
+            ),
+        ] {
+            assert_eq!(text_sent(question), text, "{question}");
+        }
+    }
+
+    #[test]
+    fn reading_non_ascii_quotes_never_shows_a_value_hidden_without_them() {
+        for (question, text) in [
+            (
+                "TOKEN passphrase=Bearer” abc123def456 then merge?",
+                "TOKEN [redacted] [redacted] then merge?",
+            ),
+            (
+                r#"TOKEN passphrase="Bearer" abc123def456 then merge?"#,
+                "TOKEN [redacted] [redacted] then merge?",
+            ),
+            (
+                "password: „abc” then merge #107?",
+                "password: [redacted] [redacted] [redacted] [redacted]",
+            ),
+            (
+                "password: “abc123”是吗？ Then merge #107?",
+                "password: [redacted] [redacted] [redacted] [redacted]",
+            ),
+            (
+                "password passphrase=hunter22 auth=password” abc123def456 ok",
+                "password [redacted] [redacted] [redacted] ok",
+            ),
+            (
+                "«password»: ‚password‘: auth abc123; sid=abc123;",
+                "«password»: [redacted] auth [redacted] [redacted]",
+            ),
+            (
+                "--password ’password’: password=\"abc abc” abc123;",
+                "--password [redacted] [redacted] [redacted] [redacted]",
+            ),
+            (
+                "”password”= «password»: password=\"abc x] s3cr3tval",
+                "”password”= [redacted] [redacted] [redacted] [redacted]",
+            ),
+            (
+                "‚password‘: «password»: «abc «TOKEN» s3cr3tval",
+                "‚password‘: [redacted] «abc «TOKEN» [redacted]",
+            ),
+            (
+                r#"token : "Bearer" : "token"= abc hunter22;"#,
+                r#"token : [redacted] : "token"= [redacted];"#,
+            ),
+            (
+                "«token» : «Bearer» : «token»: abc hunter22;",
+                "«token» : [redacted] : «token»: [redacted];",
+            ),
+            (
+                "passphrase=Bearer’ : «password»: l’été abc123;",
+                "[redacted]’ : «password»: [redacted];",
+            ),
+            (
+                "abc’s passphrase=«Bearer» : “password”: it’s hunter22 session=abc123 Cookie:",
+                "abc’s [redacted] : “password”: [redacted]",
+            ),
+            (
+                "password: ‘п’ять hunter22’ ok?",
+                "password: [redacted] [redacted] ok?",
+            ),
+        ] {
+            assert_eq!(text_sent(question), text, "{question}");
+        }
+        for letter in ["ꭓ", "ɐ", "ﬁ", "ｂ", "ᴀ", "ấ", "ḍ"] {
+            let question = format!("password: ‘a’{letter}b hunter22 xyz’ ok?");
+            assert_eq!(
+                text_sent(&question),
+                "password: [redacted] [redacted] [redacted] ok?",
+                "{question}"
+            );
         }
     }
 

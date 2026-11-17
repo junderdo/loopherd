@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Runs notification redaction (summary() in src/notify.rs) at a base revision and at the
+# working tree on the same seeded questions, and fails if the working tree shows any word
+# the base hid. Over-redaction passes.
+#
+#   scripts/redaction-fuzz [base-ref] [count] [seed]    defaults: origin/main 1000000 1
+set -euo pipefail
+
+base=${1:-origin/main}
+count=${2:-1000000}
+seed=${3:-1}
+root=$(git rev-parse --show-toplevel)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+git -C "$root" archive "$base" | tar -x -C "$tmp"
+mkdir -p "$tmp/src/notify"
+cp "$root/src/notify/fuzz.rs" "$tmp/src/notify/fuzz.rs"
+grep -q '^mod fuzz;' "$tmp/src/notify.rs" ||
+  printf '\n#[cfg(test)]\nmod fuzz;\n' >>"$tmp/src/notify.rs"
+
+export LOOPHERD_FUZZ_SEED=$seed LOOPHERD_FUZZ_COUNT=$count
+(
+  cd "$tmp"
+  LOOPHERD_FUZZ_OUT="$tmp/base.txt" CARGO_TARGET_DIR="$root/target/redaction-fuzz-base" \
+    cargo test --release --quiet --bin loopherd notify::fuzz::write_summaries -- --ignored --exact
+)
+cd "$root"
+LOOPHERD_FUZZ_BASE="$tmp/base.txt" \
+  cargo test --release --quiet --bin loopherd notify::fuzz::shows_no_word_the_base_hid -- --ignored --exact --nocapture
