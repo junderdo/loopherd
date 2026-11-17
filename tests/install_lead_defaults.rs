@@ -2,19 +2,16 @@
 //! terminal, `--lead-defaults` and `--context`, and when `config.toml` is
 //! left alone.
 
+mod fakes;
+
+use fakes::executable;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
 const INSTALL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install");
-
-fn executable(path: &Path, script: &str) {
-    fs::write(path, script).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-}
 
 /// A temp HOME, state dir and `$LOOPHERD_CONFIG_DIR`, and a fake cargo whose
 /// "build" runs the real loopherd for `setup` and nothing else.

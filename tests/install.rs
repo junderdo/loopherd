@@ -2,20 +2,16 @@
 //! the way Claude runs it.
 
 mod common;
+mod fakes;
 
 use common::feed_stdin;
+use fakes::executable;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 const INSTALL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install");
-
-fn executable(path: &Path, script: &str) {
-    fs::write(path, script).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-}
 
 /// A temp HOME and a PATH whose `cargo` "builds" a script that logs its
 /// arguments, or fails when `build_fails`.
@@ -577,7 +573,10 @@ fn install_without_the_splash_file_still_installs() {
     let dir = tempfile::tempdir().unwrap();
     let scripts = dir.path().join("scripts");
     fs::create_dir_all(&scripts).unwrap();
-    fs::copy(INSTALL, scripts.join("install")).unwrap();
+    executable(
+        &scripts.join("install"),
+        &fs::read_to_string(INSTALL).unwrap(),
+    );
     fs::copy(
         concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install-agents.bash"),
         scripts.join("install-agents.bash"),
