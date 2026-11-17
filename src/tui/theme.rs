@@ -163,14 +163,14 @@ impl Theme {
     }
 
     /// `context` of `limit` as six cells and a percent: grey-violet below
-    /// 60%, light orange from 60%, bold red from 85%.
+    /// 60%, styled as stale from 60% and as overdue from 85%.
     pub fn gauge(&self, context: u64, limit: u64) -> Span<'static> {
         let (context, limit) = (u128::from(context), u128::from(limit.max(1)));
         let filled = ((context * 12 + limit) / (limit * 2)).min(6) as usize;
         let percent = context * 100 / limit;
         let style = match percent {
-            85.. => self.plain_fg(Color::Red).add_modifier(Modifier::BOLD),
-            60.. => self.fg(LIGHT_ORANGE),
+            85.. => self.overdue(),
+            60.. => self.stale(),
             _ => self.fg(GREY_VIOLET),
         };
         let cells = "▰".repeat(filled) + &"▱".repeat(6 - filled);
@@ -195,6 +195,16 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn without_color_a_gauge_from_60_is_underlined_and_from_85_bold() {
+        let theme = Theme::from_env(None, true);
+        assert_eq!(theme.gauge(89_999, 150_000).style, Style::new());
+        let middle = theme.gauge(90_000, 150_000).style;
+        assert!(middle.add_modifier.contains(Modifier::UNDERLINED));
+        let high = theme.gauge(127_500, 150_000).style;
+        assert!(high.add_modifier.contains(Modifier::BOLD));
+    }
 
     #[test]
     fn a_gauge_of_huge_values_does_not_overflow() {
