@@ -782,8 +782,9 @@ mod tests {
         s.write("herds/old.toml", "repo = \"/r\"\n");
         s.member("a", "old", true, false);
         s.write("state/handoffs/a.md", "the new a's\n");
-        let mut ledger = Reusing {
+        let mut ledger = Racing {
             inner: std::mem::take(&mut s.ledger),
+            race: respawn_a,
         };
         let paths = Paths::under(s.dir.path());
         let mut out = vec![];
@@ -808,13 +809,51 @@ mod tests {
     }
 
     #[test]
+    fn keep_history_fails_keeping_the_herd_file_when_an_entry_vanishes_before_the_ledger_lock() {
+        let mut s = Setup::new();
+        s.write("herds/old.toml", "repo = \"/r\"\n");
+        s.member("a", "old", true, false);
+        let mut ledger = Racing {
+            inner: std::mem::take(&mut s.ledger),
+            race: drop_a,
+        };
+        let paths = Paths::under(s.dir.path());
+        let mut out = vec![];
+        let how = Removal {
+            keep_history: true,
+            ..Removal::default()
+        };
+
+        let err = remove(
+            &paths,
+            &s.herdr,
+            &mut ledger,
+            &s.path("state"),
+            "old",
+            how,
+            &mut out,
+        )
+        .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("a is not in the ledger"),
+            "{err:#}"
+        );
+        assert!(s.path("herds/old.toml").exists());
+        s.ledger = ledger.inner;
+        s.remove("old", how).unwrap();
+        assert!(!s.path("herds/old.toml").exists());
+    }
+
+    #[test]
     fn keeps_the_files_of_a_name_reused_before_the_ledger_lock() {
         let mut s = Setup::new();
         s.write("herds/old.toml", "repo = \"/r\"\n");
         s.member("a", "old", true, false);
         s.write("state/reports/a.jsonl", "{}\n");
-        let mut ledger = Reusing {
+        let mut ledger = Racing {
             inner: std::mem::take(&mut s.ledger),
+            race: respawn_a,
         };
         let paths = Paths::under(s.dir.path());
         let mut out = vec![];
@@ -1128,21 +1167,24 @@ mod tests {
         assert_eq!(s.names(), ["a"]);
     }
 
-    /// Between the caller's read and the lock, `a` is respawned into
-    /// another herd, as a concurrent `add` could.
-    struct Reusing {
+    /// Runs `race` on the ledger as each locked change starts, standing in
+    /// for another process that got there between the snapshot and the lock.
+    struct Racing {
         inner: MemLedger,
+        race: fn(&mut MemLedger),
     }
 
-    impl Reusing {
-        fn respawn_a(&mut self) {
-            let a = self.inner.0.get_mut("a").unwrap();
-            a.herd = Some("new".into());
-            a.retired = false;
-        }
+    fn respawn_a(ledger: &mut MemLedger) {
+        let a = ledger.0.get_mut("a").unwrap();
+        a.herd = Some("new".into());
+        a.retired = false;
     }
 
-    impl Ledger for Reusing {
+    fn drop_a(ledger: &mut MemLedger) {
+        ledger.0.remove("a");
+    }
+
+    impl Ledger for Racing {
         fn entries(&self) -> Result<BTreeMap<String, AgentRecord>> {
             self.inner.entries()
         }
@@ -1154,7 +1196,7 @@ mod tests {
             name: &str,
             change: &mut dyn FnMut(&mut AgentRecord) -> Result<()>,
         ) -> Result<AgentRecord> {
-            self.respawn_a();
+            (self.race)(&mut self.inner);
             self.inner.update(name, change)
         }
         fn remove_herd(
@@ -1162,7 +1204,7 @@ mod tests {
             herd: &str,
             before: &mut dyn FnMut(&[String]) -> Result<()>,
         ) -> Result<Vec<String>> {
-            self.respawn_a();
+            (self.race)(&mut self.inner);
             self.inner.remove_herd(herd, before)
         }
         fn started(&mut self, name: &str, at: std::time::SystemTime) -> Result<()> {
