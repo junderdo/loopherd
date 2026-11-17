@@ -1516,8 +1516,8 @@ fn gh_api_writes(args: &[String]) -> bool {
     })
 }
 
-/// Whether `word` is a redirection, and if so whether it's bare (`>`, `2>`),
-/// so its target is the next word.
+/// Whether `word` is a redirection, and if so whether it's bare (`>`, `2>`,
+/// `>&`), so its target is the next word.
 fn redirection(word: &str) -> Option<bool> {
     let op = word.trim_start_matches(|c: char| c.is_ascii_digit());
     let op = op
@@ -1528,7 +1528,7 @@ fn redirection(word: &str) -> Option<bool> {
         return None;
     }
     let target = op.trim_start_matches(['>', '<', '&', '|']);
-    Some(target.is_empty() && !op.ends_with('&'))
+    Some(target.is_empty())
 }
 
 /// A GitHub API path that merges a pull request: `…/pulls/<n>/merge`.
@@ -3379,6 +3379,36 @@ mod tests {
             assert_judged(command, Switch::Merge);
         }
         assert_passes("gh pr view 1 2>&1 >/dev/null");
+    }
+
+    #[test]
+    fn the_word_after_a_bare_duplicating_redirection_is_its_target() {
+        let leads = ledger(vec![lead()]);
+        for command in [
+            "gh >& x pr merge 1",
+            ">& x gh pr merge 1",
+            "gh <& 0 pr merge 1",
+            "gh >& 2 pr merge 1",
+            "gh 2>& x pr merge 1",
+            "loopherd >& x herd set h lead.merge true",
+            "env >& x loopherd pause",
+            "git >& x rebase main",
+            "git >& x push --force origin main",
+            "cargo >& x run -- herd set h lead.merge true",
+        ] {
+            assert!(
+                run(&leads, Switches::default(), command).is_some(),
+                "{command} was allowed"
+            );
+        }
+        for command in [
+            "gh pr view 1 >&2",
+            "gh pr view 1 2>&1",
+            "gh pr view 1 >& out",
+            "git status <&0",
+        ] {
+            assert_passes(command);
+        }
     }
 
     #[test]
