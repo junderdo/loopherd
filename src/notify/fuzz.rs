@@ -59,7 +59,9 @@ const SECRETS: [&str; 7] = [
     "ghp_abcdefghijkl1234",
     "correct",
 ];
-const PLAIN: [&str; 21] = [
+const PLAIN: [&str; 23] = [
+    "https://u:pw@h/x",
+    "https://x.io/?token=abc123",
     "then",
     "merge",
     "#107",
@@ -82,7 +84,9 @@ const PLAIN: [&str; 21] = [
     "v2",
     "flow",
 ];
-const QUOTE_PAIRS: [(&str, &str); 13] = [
+const QUOTE_PAIRS: [(&str, &str); 15] = [
+    ("‹", "›"),
+    ("＂", "＂"),
     ("\"", "\""),
     ("'", "'"),
     ("“", "”"),
@@ -179,7 +183,7 @@ fn shown_words(summary: &str) -> HashMap<&str, usize> {
     let mut shown = HashMap::new();
     for word in summary
         .split_whitespace()
-        .filter(|w| !w.contains("[redacted]"))
+        .flat_map(|w| w.split("[redacted]"))
     {
         let word = word.trim_matches(|c: char| !c.is_alphanumeric());
         if !word.is_empty() {

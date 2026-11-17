@@ -445,19 +445,18 @@ fn summary(question: &str) -> String {
 fn ascii_quoted(word: &str) -> String {
     word.chars()
         .map(|c| match c {
-            '“' | '”' | '„' | '«' | '»' => '"',
-            '‘' | '’' | '‚' => '\'',
+            '“' | '”' | '„' | '‟' | '«' | '»' | '＂' => '"',
+            '‘' | '’' | '‚' | '‛' | '‹' | '›' | '＇' => '\'',
             c => c,
         })
         .collect()
 }
 
 fn last_chars(word: &str, count: usize) -> &str {
-    let start = word
-        .char_indices()
-        .rev()
-        .nth(count.wrapping_sub(1))
-        .map_or(word.len(), |(at, _)| at);
+    let start = match count {
+        0 => word.len(),
+        n => word.char_indices().rev().nth(n - 1).map_or(0, |(at, _)| at),
+    };
     &word[start..]
 }
 
@@ -1388,6 +1387,10 @@ mod tests {
                 "password: ‘two words’ ok?",
                 "password: [redacted] [redacted] ok?",
             ),
+            (
+                "password: ”two words” ok?",
+                "password: [redacted] [redacted] ok?",
+            ),
             ("Set “pwd”: hunter2 then merge?", "Set “pwd”: [redacted]?"),
             ("“--password” correct horse ok?", "“--password” [redacted]?"),
         ] {
@@ -1601,9 +1604,10 @@ mod tests {
                 "»password« [redacted] Bearer merge!",
             ),
             (
-                "password: ”two words” ok?",
-                "password: [redacted] [redacted] ok?",
+                "Set ‹password›: hunter22 then merge?",
+                "Set ‹password›: [redacted]?",
             ),
+            ("Set ＂token＂=abc123xyz ok?", "Set [redacted]?"),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
         }
