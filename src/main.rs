@@ -28,6 +28,7 @@ mod spawn;
 mod stats;
 mod status;
 mod stop_hook;
+mod subagent_view;
 mod template;
 mod tool_hook;
 mod tui;

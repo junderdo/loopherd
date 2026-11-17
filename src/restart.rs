@@ -12,6 +12,7 @@ use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::Ledger;
 use crate::report::{SinceHandoff, since_handoff};
 use crate::shell::quote;
+use crate::subagent_view::shows_subagent_view;
 
 pub struct RestartRequest<'a> {
     /// Resolves a session to the one Claude continued it in.
@@ -169,49 +170,6 @@ pub fn restart(
 
 const CLEAR_DIALOG: &str = "/clear acts on the main conversation";
 
-/// Looks only at Claude's live prompt box (between the last two rules) and the
-/// footer below it, since transcript output above can quote either. Without
-/// that box, the prompt is the lowest `❯` line and the footer is what follows.
-/// A subagent view addresses the subagent there, or its picker has an entry
-/// other than `main` selected.
-fn shows_subagent_view(screen: &str) -> bool {
-    let lines: Vec<&str> = screen.lines().map(unboxed).collect();
-    let is_rule = |line: &&str| !line.is_empty() && line.chars().all(|c| c == '─');
-    let rules = lines.iter().rposition(is_rule).and_then(|bottom| {
-        let top = lines[..bottom].iter().rposition(is_rule)?;
-        Some((top, bottom))
-    });
-    let (prompt, footer) = match rules {
-        Some((top, bottom)) => (&lines[top + 1..bottom], &lines[bottom + 1..]),
-        None => match lines.iter().rposition(|l| l.starts_with('❯')) {
-            Some(at) => (&lines[at..=at], &lines[at..]),
-            None => return false,
-        },
-    };
-    prompt.iter().any(|line| line.starts_with("❯ Message @"))
-        || footer
-            .split(|line| picker_entry(line).is_none())
-            .any(|run| {
-                let entries = || run.iter().filter_map(|line| picker_entry(line));
-                entries().any(|(_, entry)| entry == "main")
-                    && entries().any(|(selected, entry)| selected && entry != "main")
-            })
-}
-
-/// `(selected, entry)` for an agent picker line, `◯ entry` or `● entry`.
-fn picker_entry(line: &str) -> Option<(bool, &str)> {
-    let (selected, entry) = match line.strip_prefix("● ") {
-        Some(entry) => (true, entry),
-        None => (false, line.strip_prefix("◯ ")?),
-    };
-    Some((selected, entry.trim()))
-}
-
-/// A screen line without its indent or a box's `│` borders.
-fn unboxed(line: &str) -> &str {
-    line.trim_matches(|c: char| c.is_whitespace() || c == '│')
-}
-
 /// A lead stopped its watch to hand off, so it's told to re-arm it.
 fn resume_prompt(lead: bool, handoff: &Path) -> String {
     let resume = format!(
@@ -268,6 +226,7 @@ mod tests {
     use crate::herdr::fake::{FAKE_SOCKET, FakeHerdr};
     use crate::ledger::{AgentRecord, MemLedger};
     use crate::report::{Background, Body, Entry, Stop, Tally, append};
+    use crate::subagent_view::screens::{MAIN_VIEW, SUBAGENT_PICKER, SUBAGENT_PROMPT};
 
     fn record(name: &str) -> AgentRecord {
         AgentRecord {
@@ -733,25 +692,6 @@ mod tests {
 
     const PANE: &str = "w9:p9";
 
-    const SUBAGENT_PROMPT: &str = "\
-● Reviewing PR #97 against the card.
-
-────────────────────────────────────────
-❯ Message @reviewer…
-────────────────────────────────────────
-  ← 1 agent
-";
-
-    const SUBAGENT_PICKER: &str = "\
-● Reviewing PR #97 against the card.
-
-────────────────────────────────────────
-❯ 
-────────────────────────────────────────
-  ◯ main
-  ● local_agent · Review PR #97 …
-";
-
     const MAIN_VIEW_QUOTING_A_SUBAGENT_VIEW: &str = "\
 ● Bash(cat src/restart.rs)
   ⎿  ────────────────────────────────────────
@@ -824,16 +764,6 @@ mod tests {
  ❯ Cancel
    Run /clear on the main
    conversation
-";
-
-    const MAIN_VIEW: &str = "\
-● Handoff written; finished.
-
-────────────────────────────────────────
-❯ 
-────────────────────────────────────────
-  ◯ local_agent · Review PR #97 …
-  ● main
 ";
 
     const CLEAR_DIALOG: &str = "\
