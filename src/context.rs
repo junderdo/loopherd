@@ -12,6 +12,7 @@ use crate::config::{self, ConfigFile};
 use crate::continuation::{is_plain_name, live_transcript, session_in, transcript_of};
 use crate::ledger::AgentRecord;
 use crate::process::{self, Procs};
+use crate::report::{self, Body};
 
 /// The shepherd's handoff file's name; no member may take it.
 pub const SHEPHERD: &str = "shepherd";
@@ -181,7 +182,7 @@ fn ask(
     }
     // Rotate before marking, so a failed rotation leaves the ask for the next stop.
     let handoff = handoff_path(state, &member.name);
-    if handoff.exists() {
+    if handoff.exists() && !written_since_start(&handoff, state, &member.name)? {
         let prev = handoff.with_extension("prev.md");
         fs::rename(&handoff, &prev)
             .with_context(|| format!("move {} to {}", handoff.display(), prev.display()))?;
@@ -197,6 +198,24 @@ fn ask(
         Err(e) => return Err(e).with_context(|| format!("create {}", marker.display())),
     }
     Ok(Some(reason(member, tokens, limit, &handoff)))
+}
+
+/// Whether `handoff` was written since `name`'s last `start` in its mailbox,
+/// so it is this run's and not last time's. Without a start, it is last time's.
+fn written_since_start(handoff: &Path, state: &Path, name: &str) -> Result<bool> {
+    let (entries, _) = report::history(&state.join("reports"), name)?;
+    let start = entries
+        .iter()
+        .rev()
+        .find(|e| e.body == Body::Start)
+        .and_then(|e| humantime::parse_rfc3339(&e.at).ok());
+    let Some(start) = start else {
+        return Ok(false);
+    };
+    let written = fs::metadata(handoff)
+        .and_then(|m| m.modified())
+        .with_context(|| format!("read {}'s modified time", handoff.display()))?;
+    Ok(written >= start)
 }
 
 fn note_once(
@@ -737,6 +756,70 @@ mod tests {
         assert_eq!(
             fs::read_to_string(handoffs.join("lh-1.prev.md")).unwrap(),
             "first"
+        );
+    }
+
+    fn started(state: &Path, name: &str, at: &str) {
+        let at = humantime::parse_rfc3339(at).unwrap();
+        let start = crate::report::Entry::new(at, crate::report::Body::Start);
+        crate::report::append(&state.join("reports"), name, &start).unwrap();
+    }
+
+    fn written_at(path: &Path, text: &str, at: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+        let at = humantime::parse_rfc3339(at).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_handoff_written_since_the_members_last_start_is_kept_when_its_first_ask_comes() {
+        let w = World::new();
+        let lead = member("lead-loopherd-cards", Some(Role::Lead));
+        let handoffs = w.state().join("handoffs");
+        started(&w.state(), &lead.name, "2026-11-17T02:00:00Z");
+        written_at(
+            &handoffs.join("lead-loopherd-cards.md"),
+            "## State\nfresh",
+            "2026-11-17T05:01:02Z",
+        );
+        let t = w.transcript(&[assistant(1, 367, 320_000, false)]);
+        let stop = w.stop(
+            "add790dc-d78c-4aad-9c9d-929c7ca8f0ec",
+            &t,
+            r#","background_tasks":[{"type":"shell","status":"running"}],"session_crons":[]"#,
+        );
+
+        let reason = w.block(&lead, &stop, 300_000).unwrap();
+
+        assert!(reason.contains("320368 tokens"), "{reason}");
+        assert_eq!(
+            fs::read_to_string(handoffs.join("lead-loopherd-cards.md")).unwrap(),
+            "## State\nfresh"
+        );
+        assert!(!handoffs.join("lead-loopherd-cards.prev.md").exists());
+    }
+
+    #[test]
+    fn a_handoff_from_before_the_members_last_start_moves_to_prev_when_asked() {
+        let w = World::new();
+        let who = member("lh-1", None);
+        let handoffs = w.state().join("handoffs");
+        written_at(&handoffs.join("lh-1.md"), "old", "2026-11-17T01:00:00Z");
+        started(&w.state(), "lh-1", "2026-11-17T02:00:00Z");
+        let t = w.transcript(&[assistant(0, 0, 200, false)]);
+
+        w.block(&who, &w.stop("s1", &t, ""), 100).unwrap();
+
+        assert!(!handoffs.join("lh-1.md").exists());
+        assert_eq!(
+            fs::read_to_string(handoffs.join("lh-1.prev.md")).unwrap(),
+            "old"
         );
     }
 

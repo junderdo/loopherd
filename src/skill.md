@@ -207,8 +207,8 @@ task), write its handoff to `$XDG_STATE_HOME/loopherd/handoffs/<name>.md`,
 report `--kind handoff`, and end its turn. A stop with subagents still
 running isn't asked until the first later stop without them, unless the
 context is past 1.5x the limit; background shells alone don't defer it.
-The last handoff moves to
-`<name>.prev.md`. The limit is the template's or `[lead]`'s
+A handoff from before the
+member's last start moves to `<name>.prev.md`; one written since stays. The limit is the template's or `[lead]`'s
 `context_limit`, else `default_context_limit` in
 `$LOOPHERD_CONFIG_DIR/config.toml`, else 250000, never over 80% of that
 file's `context_window` (default 200000). `loopherd setup --context` asks

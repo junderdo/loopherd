@@ -68,6 +68,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D51](decisions/D51.md) | `loopherd release <name>` lets feed spawn a retired member's name again, clearing its worktree and its branch, locally and on origin, unless they hold commits not on the base (`--keep-branch`/`--drop-branch`) and making its lead's watch forget the name. |
 | [D52](decisions/D52.md) | An agent in a retired entry's recorded pane with no name and a session missing on either side is unidentified: `retire --close` keeps its tab, and `herd remove` and `release` refuse, offering to close the tab or name the agent. |
 | [D53](decisions/D53.md) | The lead hook denies an alias-variable name anywhere in a command that could set it, a heredoc feed only the lexer's own `<<` operator counts for, and a relative script operand named `stdin` or `fd/<n>`, instead of parsing positions. |
+| [D54](decisions/D54.md) | The Stop hook's ask moves a handoff to `.prev.md` only when it predates the member's last start, so a handoff the member already wrote this run stays for `loopherd restart`. |
 
 ## Emerging model
 

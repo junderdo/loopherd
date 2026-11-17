@@ -626,6 +626,36 @@ mod tests {
     }
 
     #[test]
+    fn a_handoff_written_before_the_context_ask_is_still_there_to_restart_from() {
+        let w = World::new();
+        w.put(Body::Start);
+        let transcript = w.state.path().join("t.jsonl");
+        fs::write(
+            &transcript,
+            r#"{"type":"assistant","isSidechain":false,"message":{"usage":{"input_tokens":1,"cache_read_input_tokens":200}}}"#,
+        )
+        .unwrap();
+        let stop = format!(
+            r#"{{"hook_event_name":"Stop","session_id":"old","transcript_path":"{}"}}"#,
+            transcript.display()
+        );
+        let asked = crate::context::handoff_block(
+            &record("lh-1"),
+            stop.as_bytes(),
+            Ok(100),
+            w.state.path(),
+            &|_| Ok(()),
+        );
+        assert!(matches!(asked.reason, Ok(Some(_))), "{:?}", asked.reason);
+        w.handed_off();
+
+        let (result, _) = w.restart(false, true);
+
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(fs::read_to_string(w.handoff()).unwrap(), "## State\n");
+    }
+
+    #[test]
     fn without_a_handoff_file_nothing_is_sent() {
         let w = World::new();
         w.stop(0, None);
