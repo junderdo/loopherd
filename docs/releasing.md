@@ -32,6 +32,14 @@ supported with migrations.
    - `SHA256SUMS`,
    - `install.sh`, stamped with the tag so it installs that release.
 
+4. Its last job, `site`, sends junderdo.dev a `loopherd-release`
+   repository_dispatch, and the site redeploys against the new release. It
+   authenticates with the `SITE_DISPATCH_TOKEN` Actions secret. If it fails,
+   the Release is already published and stays; fix the cause (usually an
+   expired token) and rerun that job alone with **Re-run failed jobs** on
+   the run, or `gh run rerun <run id> --failed`. Re-running all jobs would
+   fail at `publish`, since the Release exists.
+
 Release notes are GitHub's generated notes, built from the PR titles; there
 is no `CHANGELOG.md`. A tag that fails the workflow publishes nothing; fix
 on main, delete the tag, and tag again.
