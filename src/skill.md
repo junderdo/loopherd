@@ -501,6 +501,11 @@ What differs from the shepherd:
   your switches, so you can't turn your own switches on or raise your own
   handoff limit; `loopherd herd get`, `loopherd config get` and `loopherd
   lead-defaults` are fine. Ask for a change instead.
+- **Retiring a lead is the shepherd's or the human's.** The hook always
+  denies `loopherd retire` of a `lead-` name, or of a name it can't read
+  such as `"$m"`, in your pane; retire members by their spelled-out name.
+  Your gates outlast your retirement: a retired lead's pane is still
+  gated.
 - **Pausing is the human's.** The hook always denies `loopherd pause` and
   `loopherd resume` in your pane, whatever your switches. While your herd
   is paused your watch prints no `claimable` and `feed` spawns nothing;
