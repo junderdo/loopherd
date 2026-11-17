@@ -245,17 +245,21 @@ fn decide(
     Ok(Some(message))
 }
 
-/// The lead recorded for `pane`, retired or not: herdr never reuses a pane
-/// id, so a command run there comes from that lead's agent, and its gates
-/// still bind it.
+/// The lead running in `pane`. A retired lead counts while no unretired
+/// entry holds the pane, since its agent may still run there.
 pub fn lead_in(ledger: &dyn Ledger, pane: &Pane) -> Result<Option<AgentRecord>> {
     let Some(socket) = pane.socket else {
         return Ok(None);
     };
-    Ok(ledger
+    let (live, retired): (Vec<_>, Vec<_>) = ledger
         .entries()?
         .into_values()
-        .find(|e| e.is_lead() && e.pane_id == pane.id && e.socket.as_deref() == Some(socket)))
+        .filter(|e| e.pane_id == pane.id && e.socket.as_deref() == Some(socket))
+        .partition(|e| !e.retired);
+    Ok(match live.into_iter().next() {
+        Some(entry) => entry.is_lead().then_some(entry),
+        None => retired.into_iter().find(AgentRecord::is_lead),
+    })
 }
 
 /// The PreToolUse output that denies the Bash call, telling Claude `reason`.
@@ -411,7 +415,7 @@ impl Lexed {
 
 /// A word with quotes removed, and where in `text` its first `$(…)` or
 /// backtick substitution stood.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Word {
     text: String,
     substituted_at: Option<usize>,
@@ -1264,7 +1268,6 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
     let words = words.as_slice();
     let mut i = 0;
     let mut in_env = false;
-    let mut xargs_replaces: Option<String> = None;
     loop {
         let Some(word) = words.get(i) else {
             return vec![];
@@ -1312,8 +1315,26 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             in_env |= program == "env";
             let options = i + 1;
             i = skip_options(words, options, with_value);
-            if program == "xargs" {
-                xargs_replaces = xargs_replace_string(&words[options..i.min(words.len())]);
+            if program == "xargs"
+                && let Some(replace) = xargs_replace_string(&words[options..i.min(words.len())])
+            {
+                // Any word holding the replace string may become anything.
+                let rest = |unknown: Option<&str>| -> Vec<Word> {
+                    kept[i.min(kept.len())..]
+                        .iter()
+                        .map(|w| Word {
+                            text: unknown.map_or(w.text.clone(), |u| w.text.replace(&replace, u)),
+                            ..(*w).clone()
+                        })
+                        .collect()
+                };
+                let mut needs = needs_one(&rest(None), &mut aliases.clone());
+                for need in needs_one(&rest(Some("$_")), aliases) {
+                    if !needs.contains(&need) {
+                        needs.push(need);
+                    }
+                }
+                return needs;
             }
             // The duration, CPU mask or lock file before the command.
             if ["timeout", "taskset", "flock"].contains(&program) {
@@ -1368,36 +1389,26 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
         } else if GATED.contains(&program) && kept[i + 1..].iter().any(|w| w.braced()) {
             return vec![Switch::Unreadable];
         } else if program == "cargo" {
-            let args = &words[i + 1..];
-            let needs = cargo_needs(word, args, aliases);
-            return match &xargs_replaces {
-                Some(r) if needs.is_empty() => cargo_needs(word, &replaced(args, r), aliases),
-                _ => needs,
-            };
+            return cargo_needs(word, &words[i + 1..], aliases);
         } else {
-            let args = &words[i + 1..];
-            let needs = needs_program(word, args).or_else(|| {
-                xargs_replaces
-                    .as_ref()
-                    .and_then(|r| needs_program(word, &replaced(args, r)))
-            });
-            return needs.into_iter().collect();
+            return needs_program(word, &words[i + 1..]).into_iter().collect();
         }
     }
 }
 
-/// The string `xargs` replaces with each input line, given its options.
+/// The string `xargs` replaces with each input line, from its options:
+/// `-I R`, `-iR` or `--replace=R`, alone or ending a cluster like `-tI R`.
 fn xargs_replace_string(options: &[String]) -> Option<String> {
     let mut options = options.iter();
     while let Some(option) = options.next() {
-        let replace = match option.as_str() {
-            "-I" => options.next().cloned(),
-            "-i" | "--replace" => Some("{}".into()),
-            o => o
-                .strip_prefix("--replace=")
-                .or_else(|| o.strip_prefix("-I"))
-                .or_else(|| o.strip_prefix("-i"))
-                .map(str::to_string),
+        let replace = if option == "--replace" {
+            Some("{}".to_string())
+        } else if let Some(r) = option.strip_prefix("--replace=") {
+            Some(r.to_string())
+        } else if let Some(cluster) = option.strip_prefix('-').filter(|c| !c.starts_with('-')) {
+            short_replace(cluster, &mut options)
+        } else {
+            None
         };
         if let Some(replace) = replace.filter(|r| !r.is_empty()) {
             return Some(replace);
@@ -1406,14 +1417,22 @@ fn xargs_replace_string(options: &[String]) -> Option<String> {
     None
 }
 
-/// `args` with each one holding `xargs`'s replace string read as unknown.
-fn replaced(args: &[String], replace: &str) -> Vec<String> {
-    args.iter()
-        .map(|a| match a.contains(replace) {
-            true => "$".to_string(),
-            false => a.clone(),
-        })
-        .collect()
+/// The replace string a cluster of xargs's short options sets, reading
+/// `-I`'s value from the next word when the cluster ends with it.
+fn short_replace<'a>(cluster: &str, next: &mut impl Iterator<Item = &'a String>) -> Option<String> {
+    for (at, c) in cluster.char_indices() {
+        let rest = &cluster[at + c.len_utf8()..];
+        match c {
+            'I' if rest.is_empty() => return next.next().cloned(),
+            'I' => return Some(rest.to_string()),
+            'i' if rest.is_empty() => return Some("{}".to_string()),
+            'i' => return Some(rest.to_string()),
+            // The rest of the cluster is this option's value.
+            'n' | 'P' | 'L' | 'd' | 's' | 'E' | 'a' | 'e' | 'l' => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
@@ -2440,6 +2459,39 @@ mod tests {
     }
 
     #[test]
+    fn a_live_entry_on_a_retired_leads_pane_id_wins_over_the_retired_lead() {
+        let mut retired = entry("lead-a", Some(Role::Lead));
+        retired.retired = true;
+        retired.herd = Some("a".into());
+        let live = entry("lead-b", Some(Role::Lead));
+        let leads = ledger(vec![retired.clone(), live]);
+        let switches = |herd: &str| {
+            Ok(match herd {
+                "a" => all_on(),
+                _ => Switches::default(),
+            })
+        };
+        for command in ["gh pr merge 3", "git push --force"] {
+            let message = run_with(&leads, Some(SOCKET), &input(command), &switches)
+                .unwrap_or_else(|| panic!("{command} was allowed"));
+            assert!(message.contains("lead-b"), "{message}");
+        }
+
+        let with_worker = ledger(vec![retired, entry("lh-9", None)]);
+        for command in [
+            "gh pr merge 3",
+            "git push --force",
+            "loopherd retire lead-a",
+        ] {
+            assert_eq!(
+                run_with(&with_worker, Some(SOCKET), &input(command), &switches),
+                None,
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
     fn a_retired_leads_pane_keeps_the_leads_gates() {
         let mut retired = lead();
         retired.retired = true;
@@ -2639,6 +2691,13 @@ mod tests {
         "echo lead-h | xargs --replace=R loopherd retire R",
         "echo lead-h | xargs -i loopherd retire {}",
         "echo lead-h | xargs -I % cargo run -- retire %",
+        "echo lead-h | xargs -tI X loopherd retire X",
+        "echo lead-h | xargs -rIX loopherd retire X",
+        "printf lead-h | xargs -0I X loopherd retire X",
+        "echo lead-h | xargs -ti loopherd retire {}",
+        "echo lead-h | xargs -I X sh -c 'loopherd retire X'",
+        "echo lead-h | xargs -I X bash -c \"loopherd retire X\"",
+        "echo lead-h | xargs -I X env loopherd retire X",
         "cargo run --target-dir retire -- retire lead-h",
         "cargo run -q --target-dir retire -- retire lead-h",
         "cargo run --unknown retire -- retire lead-h",
