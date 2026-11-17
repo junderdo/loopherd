@@ -163,16 +163,19 @@ Init never launches an agent.
    often merges fast.
 
    A finding is blocking when it's inside the task's acceptance criteria,
-   or a correctness or safety bug the PR introduces. Blocking findings, and
+   or a correctness or safety bug the PR introduces; give the reviewer this
+   bar, so its `<b> blocking` counts only these. Blocking findings, and
    any other finding that should be fixed and fits within the task's scope,
-   go back to the member. Out-of-scope findings become new tasks (or, when
-   no task is warranted, a PR comment marked non-blocking); the PR doesn't
-   wait on them. Each round after the first checks the previous round's
-   findings and the diff since that round's head, not the whole PR, so
-   fixes don't open findings in settled code. Rounds count per PR, across
-   handoffs. After round 3, start no other round: ask the human whether to
-   merge as-is, narrow the scope, or change approach, listing the open
-   blocking findings.
+   go back to the member in the PR comment. Out-of-scope findings become
+   new tasks (or, when no task is warranted, a PR comment marked
+   non-blocking); the PR doesn't wait on them. Each round after the first
+   checks the previous round's findings and the diff since that round's
+   head, not the whole PR: hand the reviewer `review-<round - 1>.md` and
+   `git diff <its head sha>..<new head>`, so fixes don't open findings in
+   settled code. `<round>` counts per PR across handoffs; the handoff's
+   current review file carries it. After round 3, start no other round:
+   ask the human whether to merge as-is, narrow the scope, or change
+   approach, listing the open blocking findings from the last review file.
 5. **After merge** (confirm with `gh pr view <n> --json state`): close out
    the task in the project's tracker, unblock dependents, then `loopherd
    feed <herd>`, which first runs the herd file's `after_merge` (read its
