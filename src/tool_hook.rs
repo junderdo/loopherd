@@ -212,7 +212,7 @@ fn decide(
     }
     if needed == Switch::Unreadable {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like (write prose with `cat > file <<'EOF'` and no pipe, `$`, shell or other mention of the file), a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like (write prose with `cat > file <<'EOF'` beside only sinks and programs like `cargo`, with no pipe, quote or `$` in them and no other mention of the file), a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -365,8 +365,8 @@ fn runs_code(commands: &[Vec<Word>]) -> bool {
 
 /// Whether the body read before command `at` only goes to files its sink
 /// writes, in a script that can't reach them: no command reads another's
-/// output or defines a function, and every other command is a sink or a
-/// [`plain_program`] that names none of the files.
+/// output or defines a function, and every other command [`leaves_files`].
+/// Another body can run only through a program [`leaves_files`] refuses.
 fn only_written(lexed: &Lexed, at: usize) -> bool {
     let Some(feeding) = at.checked_sub(1) else {
         return false;
@@ -388,7 +388,9 @@ fn only_written(lexed: &Lexed, at: usize) -> bool {
 /// file isn't plainly named.
 fn written_files(command: &[Word]) -> Option<Vec<&str>> {
     let (kept, redirects) = split_redirects(command);
-    let program = kept.iter().position(|w| !is_assignment(&w.text))?;
+    let program = kept
+        .iter()
+        .position(|w| !is_assignment(&w.text) && !COMPOUND.contains(&w.text.as_str()))?;
     if !runs_nothing(command)
         || !SINKS.contains(&kept[program].text.as_str())
         || !writes_output_to_file(&redirects)
@@ -398,7 +400,7 @@ fn written_files(command: &[Word]) -> Option<Vec<&str>> {
     let targets = redirects
         .iter()
         .map(|&(op, target)| redirect_parts(op, target))
-        .filter(|(_, op, _)| op.contains('>'))
+        .filter(|(_, op, _)| writes_file(op))
         .map(|(_, _, target)| (target, false));
     let args = kept[program + 1..].iter().filter_map(|w| {
         let text = w.text.as_str();
@@ -413,7 +415,9 @@ fn written_files(command: &[Word]) -> Option<Vec<&str>> {
             continue;
         }
         let plain = !file.is_empty()
-            && file.chars().all(names_char)
+            && file
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._/~+@%,:-".contains(c))
             && !file_name(file).is_empty()
             && !file.starts_with("/dev/")
             && !file.starts_with("/proc/");
@@ -425,62 +429,55 @@ fn written_files(command: &[Word]) -> Option<Vec<&str>> {
     Some(files)
 }
 
+fn writes_file(operator: &str) -> bool {
+    matches!(operator, ">" | ">>" | "&>" | "&>>")
+}
+
 /// Whether the last redirection of descriptor 1 writes a file.
 fn writes_output_to_file(redirects: &[(&Word, Option<&Word>)]) -> bool {
     let mut to_file = false;
     for &(op, target) in redirects {
         let (fd, operator, _) = redirect_parts(op, target);
         if fd == 1 {
-            to_file = matches!(operator, ">" | ">>" | ">|" | "&>" | "&>>");
+            to_file = writes_file(operator);
         }
     }
     to_file
 }
 
 /// Whether `command` can't reach the `files` a heredoc body was written to:
-/// a sink that names one only to read it, without copying it on, or a
-/// [`plain_program`] with no `$`, substitution or glob that names none.
+/// a [`READERS`] sink, or an [`INERT`] program or other sink whose words
+/// hold no quote, `$`, substitution or glob character and name none of them.
 fn leaves_files(command: &[Word], files: &[&str]) -> bool {
     let (kept, redirects) = split_redirects(command);
-    let names_one = |word: &Word| {
-        word.text
-            .split(|c| !names_char(c))
-            .any(|token| files.iter().any(|f| file_name(token) == file_name(f)))
-    };
-    if runs_nothing(command) {
-        let program = kept.iter().find(|w| !is_assignment(&w.text));
-        let copies = program.is_some_and(|w| ["cp", "mv", "tee"].contains(&w.text.as_str()))
-            || writes_output_to_file(&redirects);
-        let inputs = redirects
-            .iter()
-            .filter(|(op, target)| !redirect_parts(op, *target).1.contains('>'))
-            .filter_map(|(_, target)| *target);
-        return !copies || !kept.into_iter().chain(inputs).any(names_one);
-    }
     let program = kept
         .iter()
         .find(|w| !is_assignment(&w.text) && !COMPOUND.contains(&w.text.as_str()));
-    program.is_some_and(|w| plain_program(w))
-        && !command.iter().any(|w| {
-            w.text.contains('$') || w.substituted_at.is_some() || w.pattern() || names_one(w)
-        })
+    let program = program.map(|w| w.text.as_str());
+    let reaches = |w: &Word| {
+        w.quoted
+            || w.substituted_at.is_some()
+            || w.text.contains(['$', '*', '?', '['])
+            || names_file(w, files)
+    };
+    let inputs = redirects
+        .iter()
+        .filter(|(op, target)| !writes_file(redirect_parts(op, *target).1))
+        .filter_map(|(_, target)| *target);
+    if runs_nothing(command) {
+        let reads_only =
+            program.is_none_or(|p| READERS.contains(&p)) && !writes_output_to_file(&redirects);
+        return reads_only || !kept.into_iter().chain(inputs).any(reaches);
+    }
+    program.is_some_and(|p| INERT.contains(&p)) && !command.iter().any(reaches)
 }
 
-/// Whether a program word runs only the program it names, one that neither
-/// changes what a later name runs nor runs a file or command it's handed.
-fn plain_program(word: &Word) -> bool {
-    let name = file_name(&word.text);
-    !word.text.contains('$')
-        && word.substituted_at.is_none()
-        && !word.pattern()
-        && !SHELLS.contains(&name)
-        && !WRAPPERS.iter().any(|(w, _)| *w == name)
-        && !RUNNERS.contains(&name)
-}
-
-/// Characters a plainly named file may hold.
-fn names_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || "._/~+@%,:-".contains(c)
+/// Whether a word may name one of `files`, in any case and wherever in it.
+fn names_file(word: &Word, files: &[&str]) -> bool {
+    let text = word.text.to_lowercase();
+    files
+        .iter()
+        .any(|f| text.contains(&file_name(f).to_lowercase()))
 }
 
 /// Whether a command runs only a [`SINKS`] program, or none, and sets only
@@ -1363,40 +1360,31 @@ const COMPOUND: [&str; 12] = [
 const COPROC_COMPOUND: [&str; 9] = [
     "{", "while", "until", "if", "for", "select", "case", "[[", "((",
 ];
-/// Builtins and programs that change what a later name runs, or run a file
-/// or command they're handed without naming it.
-const RUNNERS: [&str; 31] = [
-    ".",
-    "alias",
-    "builtin",
-    "case",
-    "command",
-    "coproc",
-    "declare",
-    "enable",
-    "eval",
-    "exec",
-    "export",
-    "find",
-    "for",
-    "function",
-    "getopts",
-    "hash",
-    "let",
-    "local",
-    "mapfile",
-    "parallel",
-    "printf",
-    "read",
-    "readarray",
-    "readonly",
-    "select",
-    "set",
-    "shopt",
-    "source",
-    "trap",
-    "typeset",
-    "xargs",
+/// Programs that run nothing they're handed, so a heredoc body written to a
+/// file stays data beside them.
+const INERT: [&str; 17] = [
+    "cargo",
+    "rustfmt",
+    "sort",
+    "uniq",
+    "cut",
+    "tr",
+    "date",
+    "sleep",
+    "pwd",
+    "basename",
+    "dirname",
+    "realpath",
+    "stat",
+    "du",
+    "chmod",
+    "sha256sum",
+    "nproc",
+];
+/// Sinks that only read the files they name, copying none on.
+const READERS: [&str; 17] = [
+    "cat", "echo", "gh", "ls", "rm", "touch", "mkdir", "wc", "head", "tail", "grep", "diff", "jq",
+    "true", "false", "test", "cd",
 ];
 const SHELLS: [&str; 5] = ["sh", "bash", "zsh", "dash", "ksh"];
 /// Builtins whose arguments may assign variables.
@@ -3932,6 +3920,12 @@ mod tests {
             format!("tee notes.md >/dev/null <<'EOF'\n{prose}\nEOF\ncargo clippy"),
             format!("cat > a.md <<'A'\n{prose}\nA\ncat >> a.md <<'B'\n{prose}\nB\ncargo fmt"),
             format!("RUST_LOG=x cargo test; cat > notes.md <<'EOF'\n{prose}\nEOF"),
+            format!("{{ cat > notes.md <<'EOF'\n{prose}\nEOF\n}}; cargo fmt"),
+            format!("if true; then cat > notes.md <<'EOF'\n{prose}\nEOF\nfi; cargo fmt"),
+            format!("cat > notes.md 2>&1 <<'EOF'\n{prose}\nEOF\ncargo test 2>&1"),
+            format!(
+                "cat > notes.md <<'EOF'\n{prose}\nEOF\ngh pr comment 1 --body-file notes.md; cargo fmt"
+            ),
         ] {
             assert_passes(&command);
         }
@@ -3962,6 +3956,18 @@ mod tests {
             format!("cat > o >&2 {body}\ncargo fmt"),
             format!("cat > \"$f\" {body}\ncargo fmt"),
             format!("cat > o {body}\n<o rbash"),
+            format!("{written}make -f - <<'B'\nall:\n\tbash s.sh\nB"),
+            format!("{written}python3 <<'B'\nimport os; os.system('bash s.sh')\nB"),
+            format!("{written}cargo fmt; rbash <<'B'\n. ./s.sh\nB"),
+            format!("{written}cat > Makefile <<'B'\nall:\n\tbash s.sh\nB\nmake"),
+            format!("cat > s.mk {body}\nmake -fs.mk"),
+            format!("{written}git add s.sh; git show :s.sh > t.sh; rbash t.sh"),
+            format!("{written}script -qc 'sh s*' /dev/null"),
+            format!("{written}rbash -c 'sh s\\.sh'"),
+            format!("{written}rbash -c 'sh \"s\".sh'"),
+            format!("{written}compgen -C 'sh s.s?' x"),
+            format!("{written}git add s.sh; git mv s.sh t; rbash t"),
+            format!("cat > S.sh {body}\nrbash s.sh"),
         ] {
             assert_judged(&command, Switch::Merge);
         }
