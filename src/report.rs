@@ -76,7 +76,7 @@ impl Entry {
             Body::Question { text } => Some((Kind::Question, text)),
             Body::Note { text } => Some((Kind::Note, text)),
             Body::Handoff { text } => Some((Kind::Handoff, text)),
-            Body::Stop(_) | Body::Start => None,
+            Body::Stop(_) | Body::Start { .. } => None,
         }
     }
 }
@@ -98,8 +98,12 @@ pub enum Body {
     },
     /// Claude ended a turn; written only by the Stop hook.
     Stop(Stop),
-    /// spawn or revive started the member's Claude.
-    Start,
+    /// spawn, restart or revive started the member's Claude. A revive
+    /// resumes its conversation, so its context carries over.
+    Start {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        resumed: bool,
+    },
 }
 
 impl Body {
@@ -427,7 +431,7 @@ pub fn since_handoff(dir: &Path, name: &str) -> Result<SinceHandoff> {
             Body::Handoff { .. } => {
                 return Ok(last.map_or(SinceHandoff::NotStopped, SinceHandoff::Stopped));
             }
-            Body::Start => break,
+            Body::Start { .. } => break,
             _ => {}
         }
     }
@@ -574,7 +578,7 @@ fn render(name: &str, entry: &Entry) -> Vec<String> {
             ),
             _ => ("stop", describe(stop)),
         },
-        Body::Start => return vec![format!("{name} start {when}")],
+        Body::Start { .. } => return vec![format!("{name} start {when}")],
         _ => {
             let (kind, text) = entry.report().expect("a report");
             (kind.as_str(), text.to_string())
@@ -1547,8 +1551,18 @@ mod tests {
             member("lh-1", "w1:p1", None, false),
             member("lh-2", "w1:p2", None, false),
         ]);
-        put(dir.path(), "lh-1", "2026-11-01T09:00:00Z", Body::Start);
-        put(dir.path(), "lh-2", "2026-11-01T09:01:00Z", Body::Start);
+        put(
+            dir.path(),
+            "lh-1",
+            "2026-11-01T09:00:00Z",
+            Body::Start { resumed: false },
+        );
+        put(
+            dir.path(),
+            "lh-2",
+            "2026-11-01T09:01:00Z",
+            Body::Start { resumed: false },
+        );
         send(
             &ledger,
             dir.path(),
@@ -1725,7 +1739,12 @@ mod tests {
             member("lh-2", "w1:p2", None, false),
         ]);
         let names = ["lh-1".to_string(), "lh-2".to_string()];
-        put(dir.path(), "lh-1", "2026-11-01T09:00:00Z", Body::Start);
+        put(
+            dir.path(),
+            "lh-1",
+            "2026-11-01T09:00:00Z",
+            Body::Start { resumed: false },
+        );
         send(
             &ledger,
             dir.path(),
@@ -1780,7 +1799,7 @@ mod tests {
             (lh1.name.as_str(), lh1.entries.len(), lh1.unread),
             ("lh-1", 4, 3)
         );
-        assert_eq!(lh1.entries[0].body, Body::Start);
+        assert_eq!(lh1.entries[0].body, Body::Start { resumed: false });
         send(
             &ledger,
             dir.path(),

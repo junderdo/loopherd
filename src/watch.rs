@@ -890,7 +890,7 @@ fn stop_wakes(mailbox: &Mailbox) -> Vec<String> {
     let mut wakes = vec![];
     for (i, entry) in mailbox.entries.iter().enumerate() {
         let wake = match &entry.body {
-            Body::Start => {
+            Body::Start { .. } => {
                 (paused, reported) = (false, false);
                 None
             }
@@ -1427,7 +1427,7 @@ mod tests {
     fn a_stop_with_work_in_flight_wakes_it_paused_once() {
         let dir = tempfile::tempdir().unwrap();
         let (ledger, herdr) = working_pair();
-        put(dir.path(), "lh-1", Body::Start);
+        put(dir.path(), "lh-1", Body::Start { resumed: false });
 
         let mut clock = steps(|poll| match poll {
             1 => put(dir.path(), "lh-1", stop(1, 1)),
@@ -1452,7 +1452,7 @@ mod tests {
     fn a_stop_with_nothing_in_flight_wakes_it_finished() {
         let dir = tempfile::tempdir().unwrap();
         let (ledger, herdr) = working_pair();
-        put(dir.path(), "lh-1", Body::Start);
+        put(dir.path(), "lh-1", Body::Start { resumed: false });
         put(dir.path(), "lh-1", stop(0, 0));
         assert_eq!(
             once(&herdr, &ledger, dir.path()).unwrap(),
@@ -1464,7 +1464,7 @@ mod tests {
     fn a_stops_context_use_stays_out_of_its_wake_line() {
         let dir = tempfile::tempdir().unwrap();
         let (ledger, herdr) = working_pair();
-        put(dir.path(), "lh-1", Body::Start);
+        put(dir.path(), "lh-1", Body::Start { resumed: false });
         let Body::Stop(measured) = stop(1, 0) else {
             unreachable!()
         };
@@ -1484,7 +1484,7 @@ mod tests {
     fn a_handoff_counts_as_the_report_before_a_finish() {
         let dir = tempfile::tempdir().unwrap();
         let (ledger, herdr) = working_pair();
-        put(dir.path(), "lh-1", Body::Start);
+        put(dir.path(), "lh-1", Body::Start { resumed: false });
         put(
             dir.path(),
             "lh-1",
@@ -1542,7 +1542,7 @@ mod tests {
     fn a_report_read_by_an_earlier_watch_still_counts_for_the_finish() {
         let dir = tempfile::tempdir().unwrap();
         let (ledger, herdr) = working_pair();
-        put(dir.path(), "lh-1", Body::Start);
+        put(dir.path(), "lh-1", Body::Start { resumed: false });
         send(&ledger, dir.path(), "lh-1", Kind::Done, "PR #9");
         assert_eq!(
             once(&herdr, &ledger, dir.path()).unwrap(),
@@ -1564,7 +1564,7 @@ mod tests {
         send(&ledger, dir.path(), "lh-1", Kind::Question, "which DB?");
         put(dir.path(), "lh-1", stop(0, 0));
         send(&ledger, dir.path(), "lh-2", Kind::Done, "PR #8");
-        put(dir.path(), "lh-2", Body::Start);
+        put(dir.path(), "lh-2", Body::Start { resumed: false });
         put(dir.path(), "lh-2", stop(0, 0));
         assert_eq!(
             once(&herdr, &ledger, dir.path()).unwrap(),
@@ -2765,8 +2765,8 @@ mod tests {
         ) -> anyhow::Result<Vec<String>> {
             unreachable!()
         }
-        fn started(&mut self, name: &str, at: std::time::SystemTime) -> Result<()> {
-            self.0.borrow_mut().started(name, at)
+        fn started(&mut self, name: &str, at: std::time::SystemTime, resumed: bool) -> Result<()> {
+            self.0.borrow_mut().started(name, at, resumed)
         }
     }
 

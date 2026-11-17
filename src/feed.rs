@@ -1816,7 +1816,7 @@ mod tests {
         ) -> anyhow::Result<Vec<String>> {
             unreachable!()
         }
-        fn started(&mut self, _: &str, _: std::time::SystemTime) -> Result<()> {
+        fn started(&mut self, _: &str, _: std::time::SystemTime, _resumed: bool) -> Result<()> {
             anyhow::bail!("read-only")
         }
     }

@@ -270,7 +270,7 @@ fn record_started(ledger: &mut dyn Ledger, record: AgentRecord) -> Result<Option
     let name = record.name.clone();
     ledger.record(record).context("ledger")?;
     Ok(ledger
-        .started(&name, SystemTime::now())
+        .started(&name, SystemTime::now(), false)
         .err()
         .map(|e| format!("{e:#}")))
 }
