@@ -569,6 +569,69 @@ fn a_since_without_a_zone_says_so() {
 }
 
 #[test]
+fn an_unreadable_mailbox_warns_and_its_row_keeps_the_ledger_columns() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[
+            Member::new("lh-1", "2026-11-01T00:00:00Z").retired("2026-11-01T05:00:00Z"),
+            Member::new("lh-2", "2026-11-02T00:00:00Z").retired("2026-11-02T03:00:00Z"),
+        ],
+    );
+    write_mailbox(state.path(), "lh-1", &[("2026-11-01T02:00:00Z", "done")]);
+    let unreadable = state.path().join("loopherd/reports/lh-2.jsonl");
+    fs::create_dir(&unreadable).unwrap();
+
+    let out = run(state.path(), &[]);
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        stderr,
+        format!(
+            "loopherd stats: warning: could not read {}: Is a directory (os error 21)\n",
+            unreadable.display()
+        )
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let row = |name: &str| -> Vec<String> {
+        stdout
+            .lines()
+            .find(|l| l.trim_start().starts_with(name))
+            .unwrap_or_else(|| panic!("no {name} row in:\n{stdout}"))
+            .split_whitespace()
+            .map(String::from)
+            .collect()
+    };
+    assert_eq!(
+        row("lh-1"),
+        [
+            "lh-1",
+            "card",
+            "2026-11-01",
+            "00:00",
+            "2h00m",
+            "1",
+            "3h00m",
+            "5h00m"
+        ]
+    );
+    assert_eq!(
+        row("lh-2"),
+        [
+            "lh-2",
+            "card",
+            "2026-11-02",
+            "00:00",
+            "-",
+            "-",
+            "-",
+            "3h00m"
+        ]
+    );
+}
+
+#[test]
 fn an_unknown_herd_is_refused_by_name() {
     let state = tempfile::tempdir().unwrap();
     one_retired_member(state.path());
@@ -612,4 +675,30 @@ fn a_herd_known_only_from_retired_records_is_fine() {
         &["--herd", "h", "--since", "2030-01-01"],
     ));
     assert_eq!(out, "");
+}
+
+#[test]
+fn json_gives_null_rounds_for_a_member_whose_mailbox_is_unreadable() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[Member::new("lh-1", "2026-11-01T00:00:00Z").retired("2026-11-01T05:00:00Z")],
+    );
+    fs::create_dir_all(state.path().join("loopherd/reports/lh-1.jsonl")).unwrap();
+
+    let out = run(state.path(), &["--json"]);
+
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("warning: could not read "),
+        "{out:?}"
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let retired = &json["herds"][0]["retired"][0];
+    assert_eq!(retired["name"], "lh-1");
+    assert_eq!(
+        retired.get("rounds"),
+        Some(&serde_json::Value::Null),
+        "{retired}"
+    );
 }
