@@ -189,7 +189,7 @@ impl Fixture {
 
 /// Hides the user's, system and caller's git config, whose `safe.directory = *`
 /// (set on GitHub runners) would stop git refusing a repo it is told to distrust.
-/// Config `command` sets itself is kept, so a test's own override still applies.
+/// A test's own `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS` is kept.
 fn isolate_git_config(command: &mut Command) -> &mut Command {
     for inherited in ["GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"] {
         if !command.get_envs().any(|(key, _)| key == inherited) {
