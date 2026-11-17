@@ -7,9 +7,10 @@ mod fakes;
 use common::feed_stdin;
 use fakes::executable;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 const INSTALL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install");
 
@@ -563,18 +564,42 @@ fn pty(shell: &str) -> Option<Command> {
     Some(cmd)
 }
 
-/// Runs `cmd` and types Ctrl+C into its pty after `delay`, so the whole
-/// foreground process group gets SIGINT, as from a keyboard.
-fn ctrl_c_after(cmd: &mut Command, delay: std::time::Duration) -> Output {
+/// Runs `cmd` and, once `ready` holds for its output so far, types Ctrl+C
+/// into its pty, so the whole foreground process group gets SIGINT, as from
+/// a keyboard.
+fn ctrl_c_when(cmd: &mut Command, ready: impl Fn(&[u8]) -> bool) -> Output {
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    std::thread::sleep(delay);
-    child.stdin.as_mut().unwrap().write_all(b"\x03").unwrap();
-    child.wait_with_output().unwrap()
+    let mut stdout = child.stdout.take().unwrap();
+    let mut seen = Vec::new();
+    let mut chunk = [0; 4096];
+    while !ready(&seen) {
+        match stdout.read(&mut chunk).unwrap() {
+            0 => break,
+            read => seen.extend_from_slice(&chunk[..read]),
+        }
+    }
+    child.stdin.take().unwrap().write_all(b"\x03").ok();
+    stdout.read_to_end(&mut seen).unwrap();
+    let mut out = child.wait_with_output().unwrap();
+    out.stdout = seen;
+    out
+}
+
+const ALT_SCREEN: &[u8] = b"\x1b[?1049h";
+const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// True once `out` has entered the alternate screen and drawn `bytes` more.
+fn drawn_past_alt_screen(out: &[u8], bytes: usize) -> bool {
+    find(out, ALT_SCREEN).is_some_and(|at| out.len() >= at + ALT_SCREEN.len() + bytes)
 }
 
 fn without_escapes(text: &str) -> String {
@@ -657,16 +682,17 @@ fn install_without_the_splash_file_still_installs() {
 fn an_interrupted_splash_returns_130_and_keeps_the_callers_traps() {
     let splash = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install-splash.bash");
     let shell = format!(
-        "stty cols 40 rows 10; bash -c 'trap \"echo bye\" EXIT; trap \"echo int\" INT; \
-         source {splash}; (sleep 0.3; kill -INT $$) & splash_play; echo \"returned $?\"; trap -p'"
+        "stty cols 40 rows 10; exec bash -c 'trap \"echo bye\" EXIT; trap \"echo int\" INT; \
+         source {splash}; splash_play; echo \"returned $?\"; trap -p'"
     );
     let Some(mut cmd) = pty(&shell) else {
         eprintln!("skipped: needs util-linux script");
         return;
     };
 
-    let out = without_escapes(&String::from_utf8_lossy(&cmd.output().unwrap().stdout));
+    let out = ctrl_c_when(&mut cmd, |out| find(out, HIDE_CURSOR).is_some());
 
+    let out = without_escapes(&String::from_utf8_lossy(&out.stdout));
     assert!(out.contains("returned 130"), "{out}");
     assert!(out.contains("trap -- 'echo bye' EXIT"), "{out}");
     assert!(out.contains("trap -- 'echo int' SIGINT"), "{out}");
@@ -685,7 +711,7 @@ fn ctrl_c_during_the_splash_returns_130_to_a_set_e_caller_whose_exit_trap_runs()
         return;
     };
 
-    let out = ctrl_c_after(&mut cmd, std::time::Duration::from_millis(700));
+    let out = ctrl_c_when(&mut cmd, |out| drawn_past_alt_screen(out, 0));
 
     let raw = String::from_utf8_lossy(&out.stdout);
     let entered = raw
@@ -710,7 +736,7 @@ fn ctrl_c_during_the_splash_stops_install_with_130_before_building() {
     };
     cmd.env("HOME", &sandbox.home).env("PATH", &sandbox.path);
 
-    let out = ctrl_c_after(&mut cmd, std::time::Duration::from_millis(700));
+    let out = ctrl_c_when(&mut cmd, |out| drawn_past_alt_screen(out, 0));
 
     let out = String::from_utf8_lossy(&out.stdout);
     assert!(out.contains("install exited 130"), "{out}");
@@ -1087,7 +1113,7 @@ fn sheep_are_drawn_in_block_characters_under_utf8_and_ascii_otherwise() {
 fn ctrl_c_mid_frame_writes_nothing_to_stderr() {
     let dir = tempfile::tempdir().unwrap();
     let err = dir.path().join("err");
-    for delay in [600, 900, 1200] {
+    for drawn in [0, 20_000, 60_000] {
         let Some(mut cmd) = pty(&format!(
             "stty cols 160 rows 45; bash -c 'source {SPLASH}; splash_play' 2>{}",
             err.display()
@@ -1096,10 +1122,65 @@ fn ctrl_c_mid_frame_writes_nothing_to_stderr() {
             return;
         };
 
-        ctrl_c_after(&mut cmd, std::time::Duration::from_millis(delay));
+        ctrl_c_when(&mut cmd, |out| drawn_past_alt_screen(out, drawn));
 
-        assert_eq!(fs::read_to_string(&err).unwrap(), "", "after {delay}ms");
+        assert_eq!(fs::read_to_string(&err).unwrap(), "", "{drawn} bytes in");
     }
+}
+
+#[test]
+fn the_splash_waits_without_starting_a_sleep_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let sleeps = dir.path().join("sleeps");
+    executable(
+        &dir.path().join("sleep"),
+        format!("#!/bin/sh\necho \"$@\" >> {}\n", sleeps.display()),
+    );
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+
+    // 100 frames of 50ms, or 8 letters of 0.1s: a wait that returns at once plays faster.
+    for (size, at_least) in [
+        ("cols 160 rows 45", Duration::from_millis(4500)),
+        ("cols 40 rows 10", Duration::from_millis(700)),
+    ] {
+        let Some(mut cmd) = pty(&format!(
+            "stty {size}; bash -c 'source {SPLASH}; splash_play'"
+        )) else {
+            eprintln!("skipped: needs util-linux script");
+            return;
+        };
+        let started = Instant::now();
+        let raw =
+            String::from_utf8_lossy(&cmd.env("PATH", &path).output().unwrap().stdout).into_owned();
+        let took = started.elapsed();
+
+        assert!(
+            raw.contains("\x1b[?25h"),
+            "{size}: the splash never finished: {raw:?}"
+        );
+        assert!(took >= at_least, "{size}: the splash took only {took:?}");
+    }
+
+    assert_eq!(fs::read_to_string(&sleeps).unwrap_or_default(), "");
+}
+
+#[test]
+fn the_splash_leaves_the_callers_last_background_pid_alone() {
+    let Some(mut cmd) = pty(&format!(
+        "stty cols 40 rows 10; bash -c 'source {SPLASH}; sleep 30 & job=$!; splash_play; \
+         [[ $! == \"$job\" ]] && echo kept || echo \"lost $job to $!\"; kill \"$job\"'"
+    )) else {
+        eprintln!("skipped: needs util-linux script");
+        return;
+    };
+
+    let out = String::from_utf8_lossy(&cmd.output().unwrap().stdout).into_owned();
+
+    assert!(out.contains("kept"), "{out:?}");
 }
 
 #[test]
