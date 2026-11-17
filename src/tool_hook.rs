@@ -329,7 +329,8 @@ fn runs_code(commands: &[Vec<Word>]) -> bool {
 }
 
 /// Whether a command runs only a [`SINKS`] program, or none, and sets only
-/// lower-case variables, which no program reads from the environment.
+/// lower-case variables, which no program reads from the environment, bar
+/// zsh's [`ZSH_PATHS`].
 fn runs_nothing(command: &[Word]) -> bool {
     let mut words = command.iter();
     while let Some(word) = words.next() {
@@ -340,7 +341,10 @@ fn runs_nothing(command: &[Word]) -> bool {
             }
         } else if is_assignment(text) {
             let name = text.split_once('=').map_or(text, |(n, _)| n);
-            if word.name_expands() || name.contains(|c: char| c.is_ascii_uppercase()) {
+            if word.name_expands()
+                || name.contains(|c: char| c.is_ascii_uppercase())
+                || ZSH_PATHS.contains(&name.split(['+', '[']).next().unwrap_or(name))
+            {
                 return false;
             }
         } else if !COMPOUND.contains(&text) {
@@ -1106,12 +1110,16 @@ const KEYWORDS: [&str; 10] = [
 ];
 /// Programs a brace expansion in the arguments could turn into a gated command.
 const GATED: [&str; 7] = ["gh", "git", "loopherd", "cargo", "curl", "wget", "install"];
-/// Programs that neither run their input nor run a file, so a heredoc body
-/// fed to them, or written by them, is data.
+/// Programs that don't run a heredoc body fed to them as code. A body one of
+/// them writes is data to this hook, though `git` and `gh` can later run a
+/// written hook, alias or extension (D29 Limits).
 const SINKS: [&str; 22] = [
     "cat", "tee", "echo", "gh", "git", "loopherd", "mkdir", "ls", "rm", "mv", "cp", "touch", "wc",
     "head", "tail", "grep", "diff", "jq", "true", "false", "test", "cd",
 ];
+/// zsh ties these lower-case arrays to `PATH`, `CDPATH`, `FPATH` and
+/// `MODULE_PATH`.
+const ZSH_PATHS: [&str; 4] = ["path", "cdpath", "fpath", "module_path"];
 /// Words that open or close a compound command and run nothing themselves.
 const COMPOUND: [&str; 12] = [
     "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!", "{", "}",
@@ -3409,6 +3417,24 @@ mod tests {
         ] {
             assert_passes(command);
         }
+    }
+
+    #[test]
+    fn setting_a_zsh_path_array_lets_a_heredoc_body_run() {
+        for assignment in [
+            "path=d",
+            "path+=d",
+            "path[1]=d",
+            "cdpath=d",
+            "fpath=d",
+            "module_path=d",
+        ] {
+            assert_judged(
+                &format!("{assignment} cat <<'EOF'\ngh pr merge 1\nEOF"),
+                Switch::Merge,
+            );
+        }
+        assert_passes("paths=d cat <<'EOF'\ngh pr merge 1\nEOF");
     }
 
     #[test]
