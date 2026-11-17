@@ -101,15 +101,24 @@ pub fn release(
 
 fn report_cleared(cleared: Cleared, branch: Option<&str>, out: &mut Vec<String>) -> Result<()> {
     let short = |head: &str| head[..head.len().min(12)].to_string();
+    let remote = branch.map(|b| format!("origin/{b}")).unwrap_or_default();
     match cleared {
         Cleared::Absent => {}
-        Cleared::Kept => {
-            out.push("kept its worktree and branch: the new member starts from them".into())
-        }
+        Cleared::Kept {
+            local,
+            remote: kept_remote,
+        } => out.push(match (local, kept_remote) {
+            (true, false) => "kept its worktree and branch: the new member starts from them".into(),
+            (false, _) => format!("kept {remote}: the new member starts from it"),
+            (true, true) => {
+                format!("kept its worktree, branch and {remote}: the new member starts from them")
+            }
+        }),
         Cleared::Removed {
             worktrees,
             branch: head,
-            ahead,
+            remote: remote_head,
+            dropped,
             base,
         } => {
             for (path, head) in worktrees {
@@ -118,16 +127,24 @@ fn report_cleared(cleared: Cleared, branch: Option<&str>, out: &mut Vec<String>)
             if let (Some(branch), Some(head)) = (branch, head) {
                 out.push(format!("deleted branch {branch} (was {})", short(&head)));
             }
-            if ahead > 0 {
+            if let Some(head) = remote_head {
+                out.push(format!("deleted {remote} (was {})", short(&head)));
+            }
+            if dropped > 0 {
                 out.push(format!(
-                    "dropped {ahead} commit{} not on {base}",
-                    plural(ahead)
+                    "dropped {dropped} commit{} not on {base} or another origin branch",
+                    plural(dropped)
                 ));
             }
         }
         Cleared::Ahead { count, base } => bail!(
-            "refused: its branch or worktree has {count} commit{} not on {base}; pass \
+            "refused: its worktree, branch{} hold {count} commit{} not on {base}; pass \
              --keep-branch to start the new member from them, or --drop-branch to delete them",
+            if remote.is_empty() {
+                String::new()
+            } else {
+                format!(" or {remote}")
+            },
             plural(count)
         ),
         Cleared::Dirty(reason) => {
@@ -151,7 +168,7 @@ mod tests {
     use crate::ledger::{AgentRecord, MemLedger, Role};
     use crate::report::history;
     use crate::worktree::ensure_worktree;
-    use crate::worktree::testing::{commit, has_branch, head, repo_with_origin};
+    use crate::worktree::testing::{commit, git_in, has_branch, head, push_head, repo_with_origin};
 
     fn record(name: &str, repo: PathBuf, retired: bool) -> AgentRecord {
         AgentRecord {
@@ -431,7 +448,7 @@ mod tests {
 
         assert_eq!(
             format!("{err:#}"),
-            "refused: its branch or worktree has 1 commit not on origin/main; pass \
+            "refused: its worktree, branch or origin/feat/zpr-1 hold 1 commit not on origin/main; pass \
              --keep-branch to start the new member from them, or --drop-branch to delete them"
         );
         assert!(has_branch(&s.repo, "feat/zpr-1"));
@@ -470,7 +487,7 @@ mod tests {
             out[1..3],
             [
                 format!("deleted branch feat/zpr-1 (was {})", &unpushed[..12]),
-                "dropped 1 commit not on origin/main".into(),
+                "dropped 1 commit not on origin/main or another origin branch".into(),
             ]
         );
         assert!(!has_branch(&s.repo, "feat/zpr-1"));
@@ -493,5 +510,55 @@ mod tests {
             format!("refused: {} is in use by other", wt.unwrap().display())
         );
         assert!(has_branch(&s.repo, "feat/zpr-1"));
+    }
+
+    #[test]
+    fn keep_branch_with_nothing_to_keep_says_nothing_about_keeping() {
+        let mut s = Setup::new();
+        let mut r = record("zpr-1", s.repo.clone(), true);
+        r.branch = Some("feat/zpr-1".into());
+        s.add(r);
+
+        let out = s.release("zpr-1", Fate::Keep).unwrap();
+
+        assert_eq!(out, ["released zpr-1: feed may spawn it again"]);
+    }
+
+    #[test]
+    fn drop_branch_deletes_the_branch_on_origin_too_and_says_where_it_was() {
+        let mut s = Setup::new();
+        let wt = s.retired_on("zpr-1", "feat/zpr-1");
+        commit(&wt, "pushed");
+        push_head(&wt, "feat/zpr-1");
+        let pushed = head(&wt);
+
+        let out = s.release("zpr-1", Fate::Drop).unwrap();
+
+        assert_eq!(
+            out[1..4],
+            [
+                format!("deleted branch feat/zpr-1 (was {})", &pushed[..12]),
+                format!("deleted origin/feat/zpr-1 (was {})", &pushed[..12]),
+                "dropped 1 commit not on origin/main or another origin branch".into(),
+            ]
+        );
+        assert!(!has_branch(&s.root.path().join("origin.git"), "feat/zpr-1"));
+    }
+
+    #[test]
+    fn keep_branch_with_only_an_origin_branch_says_the_new_member_starts_from_it() {
+        let mut s = Setup::new();
+        let wt = s.retired_on("zpr-1", "feat/zpr-1");
+        commit(&wt, "pushed");
+        push_head(&wt, "feat/zpr-1");
+        git_in(&s.repo, &["worktree", "remove", wt.to_str().unwrap()]);
+        git_in(&s.repo, &["branch", "--quiet", "-D", "feat/zpr-1"]);
+
+        let out = s.release("zpr-1", Fate::Keep).unwrap();
+
+        assert_eq!(
+            out[0],
+            "kept origin/feat/zpr-1: the new member starts from it"
+        );
     }
 }
