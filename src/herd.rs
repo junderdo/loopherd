@@ -229,7 +229,7 @@ impl Paths {
                 return Ok(lock);
             }
             if std::time::Instant::now() >= given_up {
-                bail!("feed already running; retry once it ends");
+                bail!("feed, add or release already running; retry once it ends");
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -1203,7 +1203,7 @@ args = ["--model", "opus"]
         let err = paths.lock_feed().unwrap_err();
         assert_eq!(
             format!("{err:#}"),
-            "feed already running; retry once it ends"
+            "feed, add or release already running; retry once it ends"
         );
         drop(first);
         paths.lock_feed().unwrap();
@@ -1238,7 +1238,10 @@ args = ["--model", "opus"]
         let config = Config::with(&[("prs", &queue_herd(5))]);
         let _feed = config.paths().lock_feed().unwrap();
         let err = add_err(&config, &request("prs", "pr", &["1"]));
-        assert_eq!(err, "feed already running; retry once it ends");
+        assert_eq!(
+            err,
+            "feed, add or release already running; retry once it ends"
+        );
     }
 
     #[test]

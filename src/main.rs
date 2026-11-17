@@ -804,7 +804,7 @@ fn run_release(name: &str, keep_branch: bool, drop_branch: bool) -> Result<i32> 
     let mut lines = vec![];
     let result = release(
         &CliHerdr,
-        &github::GhCli,
+        &github::GhCli::default(),
         &mut ledger,
         name,
         fate,

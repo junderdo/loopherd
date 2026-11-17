@@ -239,17 +239,32 @@ impl Clearing {
         Ok(())
     }
 
-    /// Deletes origin's branch, which origin refuses if it moved past
-    /// [`Clearing::remote`].
-    pub fn delete_remote(&self) -> Result<()> {
-        if let (Some(branch), Some(head)) = (&self.branch, &self.remote) {
-            // The lease makes origin refuse the delete if the branch moved since it was counted.
-            let lease = format!("--force-with-lease=refs/heads/{branch}:{head}");
-            let refspec = format!(":refs/heads/{branch}");
-            remote_git(&self.repo, &["push", "--quiet", &lease, "origin", &refspec])?;
+    /// Deletes origin's branch, unless it moved past [`Clearing::remote`].
+    pub fn delete_remote(&self) -> Result<RemoteDelete> {
+        let (Some(branch), Some(head)) = (&self.branch, &self.remote) else {
+            return Ok(RemoteDelete::Deleted);
+        };
+        let lease = format!("--force-with-lease=refs/heads/{branch}:{head}");
+        let refspec = format!(":refs/heads/{branch}");
+        match remote_git(&self.repo, &["push", "--quiet", &lease, "origin", &refspec]) {
+            Ok(_) => Ok(RemoteDelete::Deleted),
+            Err(e) if lease_refused(&e) => Ok(RemoteDelete::Moved),
+            Err(e) => Err(e),
         }
-        Ok(())
     }
+}
+
+/// What [`Clearing::delete_remote`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteDelete {
+    Deleted,
+    /// Origin kept the branch: it moved since it was counted, so the lease refused.
+    Moved,
+}
+
+fn lease_refused(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<RemoteFailed>()
+        .is_some_and(|failed| failed.message.contains("(stale info)"))
 }
 
 /// Plans clearing the worktree at `worktree`, the one at the path
@@ -325,7 +340,8 @@ pub fn plan_clear(
                 w.path
             )));
         }
-        // ensure_worktree starts from the tracking ref as last fetched, so origin needn't be asked.
+        // ensure_worktree fetches, then starts from this tracking ref; a fetch never prunes
+        // it, so it already tells whether there's one to start from.
         let remote = branch.is_some_and(|b| has_ref(repo, &format!("refs/remotes/origin/{b}")));
         return Ok(match local || remote {
             true => Plan::Kept { local, remote },

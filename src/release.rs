@@ -12,7 +12,7 @@ use crate::ledger::{AgentRecord, Ledger};
 use crate::report::{Body, Entry, append};
 use crate::retire::open_tab;
 use crate::watch::forget_member;
-use crate::worktree::{Fate, Plan, plan_clear, same_dir};
+use crate::worktree::{Fate, Plan, RemoteDelete, plan_clear, same_dir};
 
 /// Marks the retired `name` released, so the next `feed` may spawn a member
 /// by that name, after clearing its worktree and branch per `fate` so the
@@ -95,15 +95,6 @@ pub fn release(
         out.push(format!("deleted branch {branch} (was {})", short(head)));
     }
     mark_released(ledger, &record, &others, now, mailboxes, out)?;
-    if let Some(head) = &clearing.remote {
-        clearing.delete_remote().with_context(|| {
-            format!(
-                "{remote} is still on origin at {}; rerun release to delete it",
-                short(head)
-            )
-        })?;
-        out.push(format!("deleted {remote} (was {})", short(head)));
-    }
     if clearing.dropped > 0 {
         out.push(format!(
             "dropped {} commit{} not on {} or another origin branch",
@@ -111,6 +102,22 @@ pub fn release(
             plural(clearing.dropped),
             clearing.base
         ));
+    }
+    if let Some(head) = &clearing.remote {
+        let deleted = clearing.delete_remote().with_context(|| {
+            format!(
+                "couldn't delete {remote} (was {}); rerun release to retry",
+                short(head)
+            )
+        })?;
+        if deleted == RemoteDelete::Moved {
+            bail!(
+                "origin kept {remote}: someone pushed to it since release counted it at {}; \
+                 check who, or rerun with --keep-branch to start the new member from it",
+                short(head)
+            );
+        }
+        out.push(format!("deleted {remote} (was {})", short(head)));
     }
     Ok(())
 }
@@ -659,8 +666,8 @@ mod tests {
             [
                 format!("deleted branch feat/zpr-1 (was {})", &pushed[..12]),
                 "released zpr-1: feed may spawn it again".into(),
-                format!("deleted origin/feat/zpr-1 (was {})", &pushed[..12]),
                 "dropped 1 commit not on origin/main or another origin branch".into(),
+                format!("deleted origin/feat/zpr-1 (was {})", &pushed[..12]),
             ]
         );
         assert!(!has_branch(&s.root.path().join("origin.git"), "feat/zpr-1"));
@@ -841,10 +848,13 @@ mod tests {
         let err = s.release("zpr-1", Fate::Clear).unwrap_err();
 
         assert!(
-            format!("{err:#}").starts_with(&format!(
-                "origin/feat/zpr-1 is still on origin at {}; rerun release to delete it: ",
-                &counted[..12]
-            )),
+            format!("{err:#}")
+                == format!(
+                    "origin kept origin/feat/zpr-1: someone pushed to it since release counted \
+                     it at {}; check who, or rerun with --keep-branch to start the new member \
+                     from it",
+                    &counted[..12]
+                ),
             "{err:#}"
         );
         assert_eq!(head_of(&origin(&s), "feat/zpr-1"), head(&elsewhere));
