@@ -125,10 +125,10 @@ pub struct App {
     opened: Option<Instant>,
     read: Option<Read>,
     mail: Mail,
-    /// Every event read so far, by member and time; `None` before the first read.
-    seen_events: Option<HashSet<(String, String)>>,
+    /// Every event read so far, by member and mailbox index; `None` before the first read.
+    seen_events: Option<HashSet<(String, usize)>>,
     /// Events that arrived with the last read, shown bold.
-    fresh_events: HashSet<(String, String)>,
+    fresh_events: HashSet<(String, usize)>,
     outlines: Outlines,
     since: Since,
     selected: usize,
@@ -255,7 +255,7 @@ impl App {
                 let events: HashSet<_> = mail
                     .events(&read.view)
                     .into_iter()
-                    .map(|(name, e)| (name.to_string(), e.at.clone()))
+                    .map(|e| e.id())
                     .collect();
                 let seen = self.seen_events.get_or_insert_with(|| events.clone());
                 self.fresh_events = events.difference(seen).cloned().collect();
@@ -365,11 +365,9 @@ impl App {
             .events(&read.view)
             .into_iter()
             .take(2)
-            .map(|(name, entry)| {
-                let fresh = self
-                    .fresh_events
-                    .contains(&(name.to_string(), entry.at.clone()));
-                ticker::line(name, entry, fresh, text.width, self.theme)
+            .map(|e| {
+                let fresh = self.fresh_events.contains(&e.id());
+                ticker::line(e.name, e.entry, fresh, text.width, self.theme)
             })
             .collect();
         Paragraph::new(lines).render(text, out);
@@ -3387,6 +3385,41 @@ max = 3
         assert_eq!(
             ticker(&terminal),
             ["10:05 a note written second", "10:05 a note written first"]
+        );
+    }
+
+    #[test]
+    fn a_later_event_stamped_like_one_already_shown_is_bold_on_arrival() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", note("seen"));
+        let mut app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", note("arrived"));
+        refresh_with_mail(&mut app, &herdr, &ledger, mail.path(), now);
+        let terminal = render_ticker(&app, now);
+        assert_eq!(
+            ticker(&terminal),
+            ["10:05 a note arrived", "10:05 a note seen"]
+        );
+        assert!(
+            at(&terminal, "note arrived")
+                .modifier
+                .contains(Modifier::BOLD)
+        );
+        assert!(!at(&terminal, "note seen").modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn events_stamped_alike_across_members_sort_by_member_name() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(mail.path(), "b", "2026-11-16T10:04:00Z", note("earlier"));
+        post_at(mail.path(), "b", "2026-11-16T10:05:00Z", note("from b"));
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", note("from a"));
+        let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert_eq!(
+            ticker(&terminal),
+            ["10:05 a note from a", "10:05 b note from b"]
         );
     }
 
