@@ -53,6 +53,8 @@ const SHEEP: [&str; 4] = [
 ];
 /// Over a member's cells, the time's column left blank.
 const HEADINGS: [&str; 6] = ["NAME", "STATUS", "", "BRANCH", "WORKTREE", "PANE"];
+/// Where the CONTEXT column goes when any row has a gauge: after the status time.
+const GAUGE: usize = 3;
 
 /// Work for the reader thread: anything that touches herdr or the ledger,
 /// which can hang, so the input loop never does.
@@ -585,20 +587,42 @@ impl App {
         };
         let view = &read.view;
         let sections = sections(view);
-        let cells: Vec<Vec<Vec<String>>> = sections
+        let gauges: Vec<Vec<Option<Span>>> = sections
             .iter()
             .map(|(_, members)| {
                 members
                     .iter()
                     .map(|m| {
+                        let (context, limit) = self.mail.context_use(&m.name)?;
+                        Some(self.theme.gauge(context, limit))
+                    })
+                    .collect()
+            })
+            .collect();
+        let gauged = gauges.iter().flatten().any(Option::is_some);
+        let cells: Vec<Vec<Vec<String>>> = sections
+            .iter()
+            .zip(&gauges)
+            .map(|((_, members), gauges)| {
+                members
+                    .iter()
+                    .zip(gauges)
+                    .map(|(m, gauge)| {
                         let mut cells = row(m);
                         cells.insert(2, time(self.since.of(&m.name, now)));
+                        if gauged {
+                            let gauge = gauge.as_ref().map(|g| g.content.to_string());
+                            cells.insert(GAUGE, gauge.unwrap_or_default());
+                        }
                         cells
                     })
                     .collect()
             })
             .collect();
-        let headings: Vec<String> = HEADINGS.map(String::from).to_vec();
+        let mut headings: Vec<String> = HEADINGS.map(String::from).to_vec();
+        if gauged {
+            headings.insert(GAUGE, "CONTEXT".into());
+        }
         let mut widths = widths(cells.iter().flatten().chain([&headings]));
         if let Some(w) = widths.get_mut(2) {
             *w = (*w).max(TIME_WIDTH);
@@ -610,9 +634,10 @@ impl App {
         let spinner = self.opened.map_or(0, |at| {
             now.saturating_duration_since(at).as_millis() / TICK.as_millis()
         }) as usize;
+        let gauge_at = widths.iter().take(GAUGE).map(|w| w + 2).sum::<usize>();
         let mut panels = vec![];
         let mut target = 0;
-        for ((name, members), cells) in sections.iter().zip(&cells) {
+        for (((name, members), cells), gauges) in sections.iter().zip(&cells).zip(gauges) {
             let mut rows = vec![];
             if !members.is_empty() {
                 rows.push(Row {
@@ -620,19 +645,31 @@ impl App {
                     target: None,
                 });
             }
-            for (member, cells) in members.iter().zip(cells) {
+            for ((member, cells), gauge) in members.iter().zip(cells).zip(gauges) {
                 let (glyph, style) = self.theme.glyph(member.status, member.gone, spinner);
-                let text = match member.gone {
-                    true => Span::styled(aligned(cells, &widths), Modifier::DIM),
-                    false => Span::raw(aligned(cells, &widths)),
+                let text = aligned(cells, &widths);
+                let text_style = match member.gone {
+                    true => Style::new().add_modifier(Modifier::DIM),
+                    false => Style::new(),
                 };
+                let mut line = vec![Span::raw(" "), Span::styled(glyph, style), Span::raw(" ")];
+                match gauge {
+                    Some(gauge) => {
+                        let before: String = text.chars().take(gauge_at).collect();
+                        let after: String = text
+                            .chars()
+                            .skip(gauge_at + gauge.content.chars().count())
+                            .collect();
+                        line.extend([
+                            Span::styled(before, text_style),
+                            gauge.patch_style(text_style),
+                            Span::styled(after, text_style),
+                        ]);
+                    }
+                    None => line.push(Span::styled(text, text_style)),
+                }
                 rows.push(Row {
-                    line: Line::from(vec![
-                        Span::raw(" "),
-                        Span::styled(glyph, style),
-                        Span::raw(" "),
-                        text,
-                    ]),
+                    line: Line::from(line),
                     target: Some(target),
                 });
                 target += 1;
@@ -979,6 +1016,8 @@ mod tests {
             background: report::Tally::Known(report::Background::default()),
             crons: report::Tally::Known(0),
             error: None,
+            context: None,
+            limit: None,
             session: None,
         })
     }
@@ -2265,6 +2304,8 @@ mod tests {
             }),
             crons: report::Tally::Known(0),
             error: None,
+            context: None,
+            limit: None,
             session: None,
         })
     }
@@ -2336,6 +2377,61 @@ mod tests {
             assert!(x > 60, "{kind} is in the pane");
             assert_eq!(cell(&terminal, (x, y)).fg, color, "{kind}");
         }
+    }
+
+    fn measured(context: u64, limit: u64) -> Body {
+        let Body::Stop(stop) = paused(0, 0) else {
+            unreachable!()
+        };
+        Body::Stop(report::Stop {
+            context: Some(context),
+            limit: Some(limit),
+            ..stop
+        })
+    }
+
+    #[test]
+    fn each_row_gauges_its_latest_stops_context_use_violet_then_orange_from_60_then_red_from_85() {
+        let (ledger, herdr, t0) = (ledger(), herdr(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post(mail.path(), "a", measured(88_500, 150_000));
+        post(mail.path(), "c", measured(90_000, 150_000));
+        post(mail.path(), "old", measured(127_500, 150_000));
+        post(mail.path(), "b", measured(127_500, 150_000));
+        post(mail.path(), "b", paused(0, 0));
+        let app = app_with_mail(&herdr, &ledger, mail.path(), t0);
+
+        let terminal = render_at(&app, t0, 120, 30);
+
+        let violet = at(&terminal, "▰▰▰▰▱▱ 59%");
+        assert_eq!(violet.fg, GREY_VIOLET);
+        let orange = at(&terminal, "▰▰▰▰▱▱ 60%");
+        assert_eq!(orange.fg, LIGHT_ORANGE);
+        let red = at(&terminal, "▰▰▰▰▰▱ 85%");
+        assert_eq!(red.fg, Color::Red);
+        assert!(red.modifier.contains(Modifier::BOLD));
+        assert!(!violet.modifier.contains(Modifier::BOLD));
+        let gauges = lines(&terminal)
+            .iter()
+            .filter(|l| l.contains('▰') || l.contains('▱'))
+            .count();
+        assert_eq!(gauges, 3, "{:#?}", lines(&terminal));
+    }
+
+    #[test]
+    fn a_restarted_member_drops_its_last_sessions_gauge_and_a_gone_ones_is_dimmed() {
+        let (ledger, herdr, t0) = (ledger(), herdr(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post(mail.path(), "a", measured(151_000, 150_000));
+        post(mail.path(), "a", Body::Start);
+        post(mail.path(), "old", measured(75_000, 150_000));
+        let app = app_with_mail(&herdr, &ledger, mail.path(), t0);
+
+        let terminal = render_at(&app, t0, 120, 30);
+
+        assert!(at(&terminal, "▰▰▰▱▱▱ 50%").modifier.contains(Modifier::DIM));
+        let gauges = lines(&terminal).iter().filter(|l| l.contains('▰')).count();
+        assert_eq!(gauges, 1, "{:#?}", lines(&terminal));
     }
 
     #[test]

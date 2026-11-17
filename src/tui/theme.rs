@@ -144,6 +144,20 @@ impl Theme {
         style.add_modifier(Modifier::BOLD)
     }
 
+    /// `context` of `limit` as six cells and a percent: grey-violet below
+    /// 60%, light orange from 60%, bold red from 85%.
+    pub fn gauge(&self, context: u64, limit: u64) -> Span<'static> {
+        let limit = limit.max(1);
+        let filled = ((context * 12 + limit) / (limit * 2)).min(6) as usize;
+        let style = match context * 100 {
+            used if used >= 85 * limit => self.plain_fg(Color::Red).add_modifier(Modifier::BOLD),
+            used if used >= 60 * limit => self.fg(LIGHT_ORANGE),
+            _ => self.fg(GREY_VIOLET),
+        };
+        let cells = "▰".repeat(filled) + &"▱".repeat(6 - filled);
+        Span::styled(format!("{cells} {}%", context * 100 / limit), style)
+    }
+
     /// The glyph leading a member's row; `frame` picks the spinner's frame.
     pub fn glyph(&self, status: AgentStatus, gone: bool, frame: usize) -> (&'static str, Style) {
         if gone {

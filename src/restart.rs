@@ -380,6 +380,8 @@ mod tests {
                 }),
                 crons: Tally::Known(0),
                 error: error.map(str::to_string),
+                context: None,
+                limit: None,
                 session: None,
             };
             self.put(Body::Stop(stop));

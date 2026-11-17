@@ -124,6 +124,12 @@ pub struct Stop {
     /// Claude session that stopped; missing in entries written before LH-70.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+    /// Context tokens in use when Claude stopped, when the hook measured them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<u64>,
+    /// The member's context limit, set alongside `context`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -516,7 +522,13 @@ fn mailboxes(dir: &Path) -> Result<Vec<String>> {
 fn render(name: &str, entry: &Entry) -> Vec<String> {
     let when = entry.when();
     let (kind, text) = match &entry.body {
-        Body::Stop(stop) => ("stop", describe(stop)),
+        Body::Stop(stop) => match (stop.context, stop.limit) {
+            (Some(context), Some(limit)) => (
+                "stop",
+                format!("{} {}k/{}k", describe(stop), kilo(context), kilo(limit)),
+            ),
+            _ => ("stop", describe(stop)),
+        },
         Body::Start => return vec![format!("{name} start {when}")],
         _ => {
             let (kind, text) = entry.report().expect("a report");
@@ -528,6 +540,10 @@ fn render(name: &str, entry: &Entry) -> Vec<String> {
     let mut out = vec![format!("{name} {kind} {when} {first}")];
     out.extend(body.map(|l| format!("    {l}")));
     out
+}
+
+fn kilo(tokens: u64) -> u64 {
+    (tokens + 500) / 1000
 }
 
 /// `finished`, `paused: 1 shell, 2 crons`, or what's unknown, after any error.
@@ -1285,6 +1301,8 @@ mod tests {
             }),
             crons,
             error: error.map(Into::into),
+            context: None,
+            limit: None,
         })
     }
 
@@ -1343,6 +1361,40 @@ mod tests {
                 "lh-1 note 2026-11-01 09:02 hi",
                 "lh-1 stop 2026-11-01 09:03 paused: 1 shell",
                 "lh-2 question 2026-11-01 09:04 which?",
+            ]
+        );
+    }
+
+    #[test]
+    fn all_shows_a_stops_context_use_in_thousands_when_it_was_measured() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![member("lh-1", "w1:p1", None, false)]);
+        let measured = Stop {
+            context: Some(120_400),
+            limit: Some(150_000),
+            ..finished_stop()
+        };
+        put(
+            dir.path(),
+            "lh-1",
+            "2026-11-01T09:00:00Z",
+            Body::Stop(measured),
+        );
+        put(
+            dir.path(),
+            "lh-1",
+            "2026-11-01T09:01:00Z",
+            Body::Stop(finished_stop()),
+        );
+        let all = Filter {
+            all: true,
+            ..UNREAD
+        };
+        assert_eq!(
+            reports(&ledger, dir.path(), &all).unwrap().lines,
+            [
+                "lh-1 stop 2026-11-01 09:00 finished 120k/150k",
+                "lh-1 stop 2026-11-01 09:01 finished",
             ]
         );
     }
@@ -1519,6 +1571,8 @@ mod tests {
                     background: Tally::Unknown(Unknown::Unknown),
                     crons: unknown,
                     error: Some("rate_limit".into()),
+                    context: None,
+                    limit: None,
                 }),
                 "error rate_limit; background and crons unknown",
             ),
@@ -1545,6 +1599,8 @@ mod tests {
                     background: Tally::Unknown(Unknown::Unknown),
                     crons: Tally::Known(0),
                     error: None,
+                    context: None,
+                    limit: None,
                 }),
                 Some("background unknown"),
             ),
@@ -1570,6 +1626,8 @@ mod tests {
                 }),
                 crons: Tally::Unknown(Unknown::Unknown),
                 error: None,
+                context: None,
+                limit: None,
             }),
         );
         let line = serde_json::to_string(&entry).unwrap();
@@ -1579,6 +1637,46 @@ mod tests {
              \"background\":{\"shells\":1,\"subagents\":2,\"other\":3},\"crons\":\"unknown\"}"
         );
         assert_eq!(serde_json::from_str::<Entry>(&line).unwrap(), entry);
+    }
+
+    #[test]
+    fn a_stops_context_use_round_trips_and_an_old_stop_reads_without_it() {
+        let entry = Entry::new(
+            at("2026-11-01T09:00:00Z"),
+            Body::Stop(Stop {
+                context: Some(120_000),
+                limit: Some(150_000),
+                ..finished_stop()
+            }),
+        );
+        let line = serde_json::to_string(&entry).unwrap();
+        assert_eq!(
+            line,
+            "{\"at\":\"2026-11-01T09:00:00.000000000Z\",\"kind\":\"stop\",\
+             \"background\":{\"shells\":0,\"subagents\":0,\"other\":0},\"crons\":0,\
+             \"context\":120000,\"limit\":150000}"
+        );
+        assert_eq!(serde_json::from_str::<Entry>(&line).unwrap(), entry);
+
+        let old: Entry = serde_json::from_str(
+            r#"{"at":"2026-11-01T09:00:00.000000000Z","kind":"stop","background":{"shells":0,"subagents":0,"other":0},"crons":0}"#,
+        )
+        .unwrap();
+        let Body::Stop(old) = old.body else {
+            panic!("not a stop")
+        };
+        assert_eq!((old.context, old.limit), (None, None));
+    }
+
+    fn finished_stop() -> Stop {
+        Stop {
+            background: Tally::Known(Background::default()),
+            crons: Tally::Known(0),
+            error: None,
+            session: None,
+            context: None,
+            limit: None,
+        }
     }
 
     #[test]
