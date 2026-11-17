@@ -212,7 +212,7 @@ fn decide(
     }
     if needed == Switch::Unreadable {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like (write prose with `cat` or `tee` into an .md, .txt, .log, .json, .csv, .html, .diff, .out or .msg file in the working tree or /tmp, outside .git and .cargo as the call's only heredoc, beside only reading sinks and programs like `cargo` holding no pipe, `(`, quote, `$`, glob, brace or mention of the file), a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like (write prose with `cat` or `tee` into an .md, .txt, .log, .json, .csv, .html, .diff, .out or .msg file in the working tree or /tmp, outside .git and .cargo, as the call's only heredoc and its only write to a file, beside only reading sinks and programs like `cargo` holding no pipe, `(`, quote, `$`, glob, brace or mention of the file; `>/dev/null` and `2>&1` are fine), a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -443,7 +443,15 @@ fn prose_file(file: &str) -> bool {
 }
 
 fn writes_file(operator: &str) -> bool {
-    matches!(operator, ">" | ">>" | "&>" | "&>>" | "<>")
+    matches!(operator, ">" | ">>" | ">|" | "&>" | "&>>" | "<>")
+}
+
+/// Whether a redirection writes a file other than `/dev/null`; `>&word`
+/// does unless the word is a descriptor or `-`.
+fn redirects_to_file(op: &Word, target: Option<&Word>) -> bool {
+    let (_, operator, target) = redirect_parts(op, target);
+    let descriptor = target.chars().all(|c| c.is_ascii_digit() || c == '-');
+    target != "/dev/null" && (writes_file(operator) || (operator == ">&" && !descriptor))
 }
 
 /// Whether the last redirection of descriptor 1 writes a file.
@@ -459,11 +467,18 @@ fn writes_output_to_file(redirects: &[(&Word, Option<&Word>)]) -> bool {
 }
 
 /// Whether `command` can't reach the `files` a heredoc body was written to:
-/// a [`READERS`] sink that copies nothing to a file, or an [`INERT`] program
-/// with no upper-case assignment, whose words hold no quote, `$`,
-/// substitution, glob or brace and name none of them.
+/// it redirects nothing to a file, which could be a config naming them, and
+/// is a [`READERS`] sink, or an [`INERT`] program with no upper-case
+/// assignment whose words hold no quote, `$`, substitution, glob or brace
+/// and name none of them.
 fn leaves_files(command: &[Word], files: &[&str]) -> bool {
     let (kept, redirects) = split_redirects(command);
+    if redirects
+        .iter()
+        .any(|&(op, target)| redirects_to_file(op, target))
+    {
+        return false;
+    }
     let program = kept
         .iter()
         .position(|w| !is_assignment(&w.text) && !COMPOUND.contains(&w.text.as_str()));
@@ -485,12 +500,7 @@ fn leaves_files(command: &[Word], files: &[&str]) -> bool {
             && kept
                 .iter()
                 .any(|w| ["extension", "extensions", "ext", "alias"].contains(&w.text.as_str()));
-        let read = redirects
-            .iter()
-            .filter(|(op, target)| !writes_file(redirect_parts(op, *target).1))
-            .filter_map(|(_, target)| *target);
-        let copies = writes_output_to_file(&redirects) && kept.into_iter().chain(read).any(reaches);
-        return READERS.contains(&name) && !runs_gh_code && !copies;
+        return READERS.contains(&name) && !runs_gh_code;
     }
     let assigns_upper_case = kept[..program.unwrap_or(kept.len())].iter().any(|w| {
         w.text
@@ -3949,6 +3959,9 @@ mod tests {
             format!("if true; then cat > notes.md <<'EOF'\n{prose}\nEOF\nfi; cargo fmt"),
             format!("cat > notes.md 2>&1 <<'EOF'\n{prose}\nEOF\ncargo test 2>&1"),
             format!(
+                "cat > notes.md <<'EOF'\n{prose}\nEOF\ncargo test >/dev/null 2>&1; echo done >&2"
+            ),
+            format!(
                 "cat > notes.md <<'EOF'\n{prose}\nEOF\ngh pr comment 1 --body-file notes.md; cargo fmt"
             ),
         ] {
@@ -4020,6 +4033,44 @@ mod tests {
                 "cat > zq.md {merge}cat > cfg.md <<'B'\ntarget.x86_64-unknown-linux-gnu.runner = [\"sh\", \"-c\", \"sh z*\"]\nB\ncargo -Zunstable-options --config cfg.md test"
             ),
             format!("cat > a.md <<'A'\nIt's prose.\nA\ncat >> a.md {merge}cargo fmt"),
+            format!(
+                "cat > zq.md {merge}echo target.x86_64-unknown-linux-gnu.runner=\\\"sh\\ \\\\u007aq.md\\\" > cfg.md\ncargo --config cfg.md test"
+            ),
+            format!(
+                "cat > zq.md {merge}echo target.x86_64-unknown-linux-gnu.runner=\\\"sh\\ \\\\u007aq.md\\\" > cfg.json\ncargo --config cfg.json test"
+            ),
+            format!(
+                "cat > zq.md {merge}echo fsmonitor=sh \\\\u007aq.md > cfg.md; cargo --config cfg.md test"
+            ),
+            format!(
+                "cat > zq.md {merge}cat <<< target.x.runner=\\\"sh\\\" > cfg.md; cargo --config cfg.md test"
+            ),
+            format!(
+                "cat > zq.md {merge}echo target.x86_64-unknown-linux-gnu.runner=\\\"sh\\ \\\\u007aq.md\\\" >>cfg.md; cargo --config cfg.md test"
+            ),
+            format!(
+                "cat > zq.md {merge}echo target.x86_64-unknown-linux-gnu.runner=\\\"sh\\ \\\\u007aq.md\\\" >|cfg.md; cargo --config cfg.md test"
+            ),
+            format!(
+                "cat > zq.md {merge}echo target.x86_64-unknown-linux-gnu.runner=\\\"sh\\ \\\\u007aq.md\\\" &>cfg.md; cargo --config cfg.md test"
+            ),
+            format!(
+                "cat > zq.md {merge}echo target.x86_64-unknown-linux-gnu.runner=\\\"sh\\ \\\\u007aq.md\\\" 1>cfg.md; cargo --config cfg.md test"
+            ),
+            format!(
+                "cat > zq.md {merge}echo target.x86_64-unknown-linux-gnu.runner=\\\"sh\\ \\\\u007aq.md\\\" 2>cfg.md; cargo --config cfg.md test"
+            ),
+            format!(
+                "cat > zq.md {merge}echo target.x86_64-unknown-linux-gnu.runner=\\\"sh\\ \\\\u007aq.md\\\" >&cfg.md; cargo --config cfg.md test"
+            ),
+            format!(
+                "cat > zq.md {merge}echo target.x86_64-unknown-linux-gnu.runner=\\\"sh\\ \\\\u007aq.md\\\" <>cfg.md; cargo --config cfg.md test"
+            ),
+            format!(
+                "cat > zq.md {merge}echo target.x86_64-unknown-linux-gnu.runner=\\\"sh\\ \\\\u007aq.md\\\" | tee cfg.md; cargo --config cfg.md test"
+            ),
+            format!("cat > zq.md {merge}tee cfg.md < zq.md; cargo --config cfg.md test"),
+            format!("cat > zq.md {merge}cargo fmt > fmt.md; cargo --config fmt.md test"),
         ] {
             assert!(
                 run(&leads, Switches::default(), &command).is_some(),
