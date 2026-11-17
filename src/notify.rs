@@ -492,10 +492,14 @@ fn redacted(words: &[&str]) -> Vec<Shown> {
             Next::Closing(closer) => (Shown::redacted(), Next::closed_by(word, closer)),
             Next::Value if is_separator(word) => (Shown::Word, Next::ClauseStart),
             Next::Value if FILLERS.contains(&normalized(word).as_str()) => (Shown::Word, next),
-            Next::Value => (Shown::redacted(), value_then(word)),
+            Next::Value => {
+                starts = RunOn::clause_after(word);
+                (Shown::redacted(), value_then(word))
+            }
             Next::Key(key) if is_separator(word) => (Shown::Word, key.value()),
             Next::Key(_) if FILLERS.contains(&normalized(word).as_str()) => (Shown::Word, next),
             Next::Key(_) | Next::MaybeValue if looks_like_a_secret(word) => {
+                starts = RunOn::clause_after(word);
                 (Shown::redacted(), Next::after_value(word))
             }
             Next::Free | Next::Key(_) | Next::MaybeValue => match carried_value(word) {
@@ -510,6 +514,9 @@ fn redacted(words: &[&str]) -> Vec<Shown> {
         };
         let shown = match (starts, shown) {
             (Some(_), _) => Shown::redacted(),
+            (None, Shown::Word) if runs.contains(&RunOn::Clause) => {
+                Shown::Glued(clause_end(word).unwrap_or(0))
+            }
             (None, Shown::Word) if !runs.is_empty() => Shown::redacted(),
             _ => shown,
         };
@@ -522,13 +529,15 @@ fn redacted(words: &[&str]) -> Vec<Shown> {
 
 /// Words hidden on top of what the key and value rules hide, after a strong `key=value`
 /// word that opens a quote (up to its close) or ends in `;` (the next word, and on while
-/// each ends in `;`). A run inside another leaves the outer one open; a run already
-/// open isn't added twice, so the list stays short on a long line. Only adding
-/// hiding, never changing [`Next`], keeps every word those rules hide hidden.
+/// each ends in `;`), or that the rules hide as a value and whose clause runs on. A run
+/// inside another leaves the outer one open; a run already open isn't added twice, so
+/// the list stays short on a long line. Only adding hiding, never changing [`Next`],
+/// keeps every word those rules hide hidden.
 #[derive(Clone, Copy, PartialEq)]
 enum RunOn {
     Quote(char),
     Pair,
+    Clause,
 }
 
 impl RunOn {
@@ -543,6 +552,14 @@ impl RunOn {
         }
     }
 
+    /// A strong `key=value` word read as a value, so not by [`clause_start`], whose
+    /// clause runs past it.
+    fn clause_after(word: &str) -> Option<RunOn> {
+        let (strong, value) = carried_value(word)?;
+        let runs_on = strong && !value.starts_with(OPENERS) && clause_end(value).is_none();
+        runs_on.then_some(RunOn::Clause)
+    }
+
     /// What is left of the run once `word`, which it hides, is read.
     fn after(self, word: &str) -> Option<RunOn> {
         match self {
@@ -552,6 +569,7 @@ impl RunOn {
             },
             RunOn::Pair if word.ends_with(';') => Some(self),
             RunOn::Pair => None,
+            RunOn::Clause => clause_end(word).is_none().then_some(self),
         }
     }
 }
@@ -1663,6 +1681,34 @@ mod tests {
             (
                 r#"Use {"headers":{"Authorization":"Bearer correct-horse-battery"}} then merge #107?"#,
                 "Use [redacted] [redacted] then merge #107?",
+            ),
+        ] {
+            assert_eq!(text_sent(question), text, "{question}");
+        }
+    }
+
+    #[test]
+    fn a_strong_key_value_word_after_a_key_or_label_hides_to_its_clause_end() {
+        for (question, text) in [
+            (
+                "TOKEN auth passphrase=hunter22 horse battery, then merge?",
+                "TOKEN [redacted] [redacted], then merge?",
+            ),
+            (
+                "TOKEN session password=hunter22 correct horse, then merge?",
+                "TOKEN [redacted] [redacted], then merge?",
+            ),
+            (
+                "Set auth=Bearer passphrase=hunter22 horse battery, then merge?",
+                "Set [redacted] [redacted], then merge?",
+            ),
+            (
+                "Use token passphrase=hunter22 horse battery, then merge?",
+                "Use token [redacted], then merge?",
+            ),
+            (
+                "TOKEN passphrase=hunter22 horse battery, then merge?",
+                "TOKEN [redacted], then merge?",
             ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
