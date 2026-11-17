@@ -160,8 +160,22 @@ Init never launches an agent.
    Keep the files until the PR merges or closes.
    For anything that deletes or closes, have it hunt for safety gaps and
    name the test covering each rule. Report as soon as it lands; the human
-   often merges fast. Gaps inside the task's scope go back to the member;
-   the rest become new tasks.
+   often merges fast.
+
+   A finding is blocking when it's inside the task's acceptance criteria,
+   or a correctness or safety bug the PR introduces; give the reviewer this
+   bar, so its `<b> blocking` counts only these. Blocking findings, and
+   any other finding that should be fixed and fits within the task's scope,
+   go back to the member in the PR comment. Out-of-scope findings become
+   new tasks (or, when no task is warranted, a PR comment marked
+   non-blocking); the PR doesn't wait on them. Each round after the first
+   checks the previous round's findings and the diff since that round's
+   head, not the whole PR: hand the reviewer `review-<round - 1>.md` and
+   `git diff <its head sha>..<new head>`, so fixes don't open findings in
+   settled code. `<round>` counts per PR across handoffs; the handoff's
+   current review file carries it. After round 3, start no other round:
+   ask the human whether to merge as-is, narrow the scope, or change
+   approach, listing the open blocking findings from the last review file.
 5. **After merge** (confirm with `gh pr view <n> --json state`): close out
    the task in the project's tracker, unblock dependents, then `loopherd
    feed <herd>`, which first runs the herd file's `after_merge` (read its
@@ -453,6 +467,14 @@ shepherd:
   report, `loopherd report --kind question '<question with the merge
   line>'`: double quotes run any `$(...)` in it and can leak a token into
   the report.
+- **Review rounds.** Verify as the shepherd does: only blocking and
+  in-scope findings go back to the worker, and each round after the first
+  checks the last round's findings and the diff since its head. After
+  round 3 start no other round; send `loopherd report --kind question`
+  asking whether to merge as-is, narrow the scope, or change approach,
+  with the PR link and the open blocking findings, then end your turn.
+  With `new_cards` off, list out-of-scope findings in a question rather
+  than creating tasks.
 - **Heartbeat.** Keep `loopherd watch --timeout 3600` as a background task.
   Run from your pane, it's your watch: it reads your herd's workers only,
   never you, and naming any other herd is an error. It holds `watch-<your
