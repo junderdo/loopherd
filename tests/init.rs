@@ -149,11 +149,10 @@ impl Fixture {
             self.gh_dir().display(),
             std::env::var("PATH").unwrap()
         );
-        command
+        isolate_git_config(command)
             .env("PATH", path)
             .env("LOOPHERD_CONFIG_DIR", self.config())
             .env("XDG_STATE_HOME", self.state())
-            .envs(ISOLATED_GIT_CONFIG)
             .env_remove("HERDR_PANE_ID")
             .env_remove("HERDR_WORKSPACE_ID")
             .env_remove("GH_TOKEN")
@@ -188,20 +187,28 @@ impl Fixture {
     }
 }
 
-/// Hides the user's and system git config, whose `safe.directory = *` (set
-/// on GitHub runners) would stop git refusing a repo it is told to distrust.
-const ISOLATED_GIT_CONFIG: [(&str, &str); 2] = [
-    ("GIT_CONFIG_GLOBAL", "/dev/null"),
-    ("GIT_CONFIG_NOSYSTEM", "1"),
-];
+/// Hides the user's, system and caller's git config, whose `safe.directory = *`
+/// (set on GitHub runners) would stop git refusing a repo it is told to distrust.
+/// A test's own `GIT_CONFIG_COUNT`/`GIT_CONFIG_PARAMETERS` is kept.
+fn isolate_git_config(command: &mut Command) -> &mut Command {
+    for inherited in ["GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"] {
+        if !command.get_envs().any(|(key, _)| key == inherited) {
+            command.env_remove(inherited);
+        }
+    }
+    command
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+}
+
+fn git_command(dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    isolate_git_config(&mut command).current_dir(dir);
+    command
+}
 
 fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .envs(ISOLATED_GIT_CONFIG)
-        .current_dir(dir)
-        .status()
-        .unwrap();
+    let status = git_command(dir).args(args).status().unwrap();
     assert!(status.success(), "git {args:?}");
 }
 
@@ -1171,15 +1178,13 @@ fn without_a_tracker_doc_init_writes_githubs_and_the_default_labels_uncommitted(
             "missing {role} in\n{labels}"
         );
     }
-    let log = Command::new("git")
+    let log = git_command(&fixture.repo())
         .args(["rev-list", "--all", "--count"])
-        .current_dir(fixture.repo())
         .output()
         .unwrap();
     assert_eq!(text(&log.stdout), "0\n");
-    let status = Command::new("git")
+    let status = git_command(&fixture.repo())
         .args(["status", "--porcelain", "--untracked-files=all"])
-        .current_dir(fixture.repo())
         .output()
         .unwrap();
     assert_eq!(
@@ -2512,6 +2517,29 @@ fn git_refusals_are_seen_under_a_global_and_system_safe_directory_wildcard() {
         .env("GIT_CONFIG_GLOBAL", &trusting)
         .env("GIT_CONFIG_SYSTEM", &trusting)
         .env_remove("GIT_CONFIG_NOSYSTEM")
+        .output()
+        .unwrap();
+
+    let stdout = text(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("2 passed"),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        text(&out.stderr)
+    );
+}
+
+#[test]
+fn git_refusals_are_seen_under_an_inherited_command_line_safe_directory_wildcard() {
+    let out = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "a_repo_git_refuses_to_read_is_refused_with_gits_reason",
+            "on_a_terminal_a_repo_answer_git_refuses_to_read_shows_gits_reason",
+        ])
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "safe.directory")
+        .env("GIT_CONFIG_VALUE_0", "*")
+        .env("GIT_CONFIG_PARAMETERS", "'safe.directory'='*'")
         .output()
         .unwrap();
 
