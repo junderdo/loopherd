@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use crate::herd_view::{Member, View};
+use crate::herdr::AgentStatus;
 use crate::status::sections;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -47,6 +48,27 @@ impl Since {
     }
 }
 
+const WORKING_STALE: Duration = Duration::from_secs(30 * 60);
+const WORKING_OVERDUE: Duration = Duration::from_secs(60 * 60);
+const BLOCKED_OVERDUE: Duration = Duration::from_secs(5 * 60);
+
+/// How long a member has sat in its status, against how long it should.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Staleness {
+    Fresh,
+    Stale,
+    Overdue,
+}
+
+pub fn staleness(member: &Member, time: Duration) -> Staleness {
+    match (member.gone, member.status) {
+        (false, AgentStatus::Working) if time >= WORKING_OVERDUE => Staleness::Overdue,
+        (false, AgentStatus::Working) if time >= WORKING_STALE => Staleness::Stale,
+        (false, AgentStatus::Blocked) if time >= BLOCKED_OVERDUE => Staleness::Overdue,
+        _ => Staleness::Fresh,
+    }
+}
+
 /// A member's status as shown: `gone` or herdr's status.
 pub fn label(member: &Member) -> &'static str {
     match member.gone {
@@ -59,7 +81,6 @@ pub fn label(member: &Member) -> &'static str {
 mod tests {
     use super::*;
     use crate::herd_view::Strays;
-    use crate::herdr::AgentStatus;
 
     fn member(name: &str, status: AgentStatus, gone: bool) -> Member {
         Member {
@@ -102,6 +123,43 @@ mod tests {
 
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
+    }
+
+    fn mins(n: u64) -> Duration {
+        secs(n * 60)
+    }
+
+    #[test]
+    fn working_turns_stale_at_30_minutes_and_overdue_at_60() {
+        let working = member("a", AgentStatus::Working, false);
+        for (time, expected) in [
+            (mins(30) - secs(1), Staleness::Fresh),
+            (mins(30), Staleness::Stale),
+            (mins(60) - secs(1), Staleness::Stale),
+            (mins(60), Staleness::Overdue),
+        ] {
+            assert_eq!(staleness(&working, time), expected, "{time:?}");
+        }
+    }
+
+    #[test]
+    fn blocked_turns_overdue_at_5_minutes() {
+        let blocked = member("a", AgentStatus::Blocked, false);
+        assert_eq!(staleness(&blocked, mins(5) - secs(1)), Staleness::Fresh);
+        assert_eq!(staleness(&blocked, mins(5)), Staleness::Overdue);
+    }
+
+    #[test]
+    fn other_statuses_and_gone_members_never_go_stale() {
+        for m in [
+            member("a", AgentStatus::Idle, false),
+            member("a", AgentStatus::Done, false),
+            member("a", AgentStatus::Unknown, false),
+            member("a", AgentStatus::Working, true),
+            member("a", AgentStatus::Blocked, true),
+        ] {
+            assert_eq!(staleness(&m, mins(600)), Staleness::Fresh, "{m:?}");
+        }
     }
 
     #[test]
@@ -186,6 +244,7 @@ mod tests {
                 name: "prs".into(),
                 paused: None,
                 members: vec![member("h", status, false)],
+                slots: 1,
             }],
             retired: Some(vec![member("r", status, false)]),
             ..snapshot(vec![])

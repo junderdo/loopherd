@@ -34,6 +34,11 @@ impl Pause {
             None => "(time unknown)".into(),
         }
     }
+
+    /// The reason, escaped for a terminal.
+    pub fn shown_reason(&self) -> Option<String> {
+        self.reason.as_deref().map(escaped)
+    }
 }
 
 impl fmt::Display for Pause {

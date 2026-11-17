@@ -45,6 +45,9 @@ pub struct Herd {
     /// Filled by the caller, since reading it is I/O.
     pub paused: Option<Pause>,
     pub members: Vec<Member>,
+    /// Members counted against the queue's `max`, by [`crate::herd::holds_slot`].
+    #[serde(skip)]
+    pub slots: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -85,11 +88,15 @@ pub fn view(
     branch: impl Fn(&AgentRecord) -> Option<String>,
 ) -> View {
     let mut herds: BTreeMap<&str, Vec<Member>> = BTreeMap::new();
+    let mut slots: BTreeMap<&str, usize> = BTreeMap::new();
     let mut ungrouped = vec![];
     let mut retired = vec![];
     for record in entries.values() {
         let group = match &record.herd {
-            Some(herd) => herds.entry(herd).or_default(),
+            Some(herd) => {
+                *slots.entry(herd).or_default() += usize::from(crate::herd::holds_slot(record));
+                herds.entry(herd).or_default()
+            }
             None => &mut ungrouped,
         };
         match (record.retired, options.all) {
@@ -107,6 +114,7 @@ pub fn view(
                 name: name.to_string(),
                 paused: None,
                 members: sorted(members),
+                slots: slots.get(name).copied().unwrap_or(0),
             })
             .collect(),
         ungrouped: sorted(ungrouped),
