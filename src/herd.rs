@@ -308,8 +308,13 @@ pub fn members(ledger: &dyn Ledger, herd: &str) -> Result<usize> {
     let entries = ledger.entries().context("ledger")?;
     Ok(entries
         .values()
-        .filter(|e| !e.retired && !e.is_lead() && e.herd.as_deref() == Some(herd))
+        .filter(|e| holds_slot(e) && e.herd.as_deref() == Some(herd))
         .count())
+}
+
+/// Whether `record` counts against its herd's queue `max`.
+pub fn holds_slot(record: &AgentRecord) -> bool {
+    !record.retired && !record.is_lead()
 }
 
 /// What `add` would do, one `key value` line each, then the prompt.
@@ -686,6 +691,34 @@ pub fn lead_switches(paths: &Paths, herd: &str) -> Result<Switches> {
         .lead
         .with_context(|| format!("herd: {herd} has no [lead]"))?;
     Ok(lead.switches().over(&lead_defaults(paths)?))
+}
+
+/// What a herd's box in `loopherd view` shows from its herd file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outline {
+    /// The `[queue]`'s `max`, when the herd has a queue.
+    pub max: Option<usize>,
+    /// The lead's switches, when the herd has a `[lead]`.
+    pub switches: Option<Switches>,
+    /// Why `config.toml`'s `[lead_defaults]` couldn't be read; every switch
+    /// is then off, as `herds` shows and the lead's hook enforces.
+    pub defaults_problem: Option<String>,
+}
+
+pub fn outline(paths: &Paths, herd: &str) -> Result<Outline> {
+    let file = load(&paths.herds, herd)?;
+    let (switches, defaults_problem) = match &file.lead {
+        None => (None, None),
+        Some(lead) => match lead_defaults(paths) {
+            Ok(defaults) => (Some(lead.switches().over(&defaults)), None),
+            Err(e) => (Some(Switches::default()), Some(format!("{e:#}"))),
+        },
+    };
+    Ok(Outline {
+        max: file.queue.map(|q| q.max as usize),
+        switches,
+        defaults_problem,
+    })
 }
 
 fn lead_defaults(paths: &Paths) -> Result<SwitchValues> {

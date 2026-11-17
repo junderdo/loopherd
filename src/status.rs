@@ -113,6 +113,7 @@ fn add_pauses(herds: &mut Vec<Herd>, pauses: Vec<(String, pause::Reading)>) -> V
                     name,
                     paused: Some(pause),
                     members: vec![],
+                    slots: 0,
                 },
             ),
         }

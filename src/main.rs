@@ -770,6 +770,7 @@ fn run_view(all: bool, strays: bool) -> Result<i32> {
     let subscriber = SocketSubscriber::new(CliHerdr.socket());
     let dirs = tui::Dirs {
         pauses: pause::Pauses::from_env()?,
+        herds: Paths::from_env()?,
         mailboxes: ledger.reports_dir()?,
     };
     tui::run(

@@ -76,6 +76,27 @@ impl Mail {
         }
     }
 
+    /// The non-retired members' reports and stops, newest first, less
+    /// stops that left work in flight or unknown.
+    pub fn events<'a>(&'a self, view: &'a View) -> Vec<(&'a str, &'a Entry)> {
+        let mut events: Vec<_> = active(view)
+            .flat_map(|m| {
+                let entries = self.boxes.get(&m.name).map_or(&[][..], Vec::as_slice);
+                entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| (m.name.as_str(), i, e))
+            })
+            .filter(|(_, _, e)| match &e.body {
+                Body::Start => false,
+                Body::Stop(s) => s.error.is_some() || s.in_flight() == (None, None),
+                _ => true,
+            })
+            .collect();
+        events.sort_by(|(_, i, a), (_, j, b)| (&b.at, j).cmp(&(&a.at, i)));
+        events.into_iter().map(|(name, _, e)| (name, e)).collect()
+    }
+
     /// Its latest question has no `start` or `done` after it.
     fn asking(&self, name: &str) -> bool {
         let entries = self.boxes.get(name).map_or(&[][..], Vec::as_slice);

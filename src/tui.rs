@@ -4,8 +4,11 @@ mod detail;
 mod mail;
 mod since;
 pub mod theme;
+mod ticker;
+mod title;
 mod watcher;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -21,6 +24,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph, Widget};
 use ratatui::{Frame, Terminal};
 
+use crate::herd;
 use crate::herd_view::{Member, Options, Stray};
 use crate::herdr::Herdr;
 use crate::herdr::events::Subscriber;
@@ -28,8 +32,9 @@ use crate::ledger::Ledger;
 use crate::pause::Pauses;
 use crate::status::{Read, aligned, read, row, sections, stray_lines, widths};
 use mail::{Mail, Waiting, waiting};
-use since::Since;
+use since::{Since, Staleness, staleness};
 use theme::Theme;
+use title::Outlines;
 use watcher::{Signal, Watch, watch};
 
 const POLL: Duration = Duration::from_secs(2);
@@ -42,6 +47,8 @@ const TICK: Duration = Duration::from_millis(100);
 const TIME_WIDTH: usize = 7;
 /// The narrowest terminal that shows the detail pane beside the list.
 const DETAIL_MIN_WIDTH: u16 = 100;
+/// The shortest terminal that shows the event ticker.
+const TICKER_MIN_HEIGHT: u16 = 16;
 /// Body rows below which the quiet herd drops its sheep for just the line.
 const QUIET_SHEEP_MIN_HEIGHT: u16 = 10;
 /// The install splash's largest sheep, grazing.
@@ -65,7 +72,7 @@ pub enum Request {
 }
 
 pub enum Response {
-    Read(Options, Result<(Read, Mail)>),
+    Read(Options, Result<(Read, Mail, Outlines)>),
     Focus(String, Result<()>),
 }
 
@@ -73,6 +80,7 @@ pub enum Response {
 pub struct Dirs {
     pub pauses: Pauses,
     pub mailboxes: PathBuf,
+    pub herds: herd::Paths,
 }
 
 pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger, dirs: &Dirs) -> Response {
@@ -80,7 +88,8 @@ pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger, dirs: &Di
         Request::Read(options) => {
             let read = read(herdr, ledger, &dirs.pauses, options).map(|read| {
                 let mail = Mail::read(&dirs.mailboxes, &read.view);
-                (read, mail)
+                let outlines = Outlines::read(&dirs.herds, &read.view);
+                (read, mail, outlines)
             });
             Response::Read(options, read)
         }
@@ -116,6 +125,11 @@ pub struct App {
     opened: Option<Instant>,
     read: Option<Read>,
     mail: Mail,
+    /// Every event read so far, by member and time; `None` before the first read.
+    seen_events: Option<HashSet<(String, String)>>,
+    /// Events that arrived with the last read, shown bold.
+    fresh_events: HashSet<(String, String)>,
+    outlines: Outlines,
     since: Since,
     selected: usize,
     /// The selected row's identity, to keep it selected as rows re-sort.
@@ -160,7 +174,7 @@ struct Row {
 
 /// A titled box of rows: a herd, `ungrouped`, `retired` or the strays.
 struct Panel {
-    title: String,
+    title: Line<'static>,
     rows: Vec<Row>,
 }
 
@@ -178,6 +192,9 @@ impl App {
             opened: None,
             read: None,
             mail: Mail::default(),
+            seen_events: None,
+            fresh_events: HashSet::new(),
+            outlines: Outlines::default(),
             since: Since::default(),
             selected: 0,
             selected_key: None,
@@ -233,10 +250,19 @@ impl App {
             Response::Read(_, result) => {
                 self.reading = None;
                 self.polled = Some(now);
-                let (read, mail) = result?;
+                let (read, mail, outlines) = result?;
                 self.since = self.since.observe(&read.view, now);
+                let events: HashSet<_> = mail
+                    .events(&read.view)
+                    .into_iter()
+                    .map(|(name, e)| (name.to_string(), e.at.clone()))
+                    .collect();
+                let seen = self.seen_events.get_or_insert_with(|| events.clone());
+                self.fresh_events = events.difference(seen).cloned().collect();
+                seen.extend(events);
                 self.read = Some(read);
                 self.mail = mail;
+                self.outlines = outlines;
                 let kept = self
                     .selected_key
                     .as_ref()
@@ -282,13 +308,18 @@ impl App {
             .iter()
             .flat_map(|n| wrapped(n, inner.width.saturating_sub(1)))
             .collect();
+        let ticker_height = match frame.area().height >= TICKER_MIN_HEIGHT {
+            true => 4,
+            false => 0,
+        };
         // Notes keep half the space at most, and the newest when cut.
-        let room = inner.height.saturating_sub(2) / 2;
+        let room = inner.height.saturating_sub(2 + ticker_height) / 2;
         let notes_height = notes.len().min(room as usize);
-        let [banner, body, notes_area, footer] = Layout::vertical([
+        let [banner, body, notes_area, ticker_area, footer] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(0),
             Constraint::Length(notes_height as u16),
+            Constraint::Length(ticker_height),
             Constraint::Length(1),
         ])
         .areas(inner);
@@ -308,7 +339,40 @@ impl App {
         }
         let newest = notes[notes.len() - notes_height..].to_vec();
         frame.render_widget(Paragraph::new(newest), notes_area);
+        if ticker_height > 0 {
+            self.draw_ticker(frame.buffer_mut(), ticker_area);
+        }
         frame.render_widget(self.keys(), footer);
+    }
+
+    /// The two newest events in a dim box.
+    fn draw_ticker(&self, out: &mut Buffer, area: Rect) {
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Modifier::DIM);
+        let inner = block.inner(area);
+        block.render(area, out);
+        let text = Rect {
+            x: inner.x + 1,
+            width: inner.width.saturating_sub(2),
+            ..inner
+        };
+        let Some(read) = &self.read else {
+            return;
+        };
+        let lines: Vec<Line> = self
+            .mail
+            .events(&read.view)
+            .into_iter()
+            .take(2)
+            .map(|(name, entry)| {
+                let fresh = self
+                    .fresh_events
+                    .contains(&(name.to_string(), entry.at.clone()));
+                ticker::line(name, entry, fresh, text.width, self.theme)
+            })
+            .collect();
+        Paragraph::new(lines).render(text, out);
     }
 
     /// What waits on the human, naming as many as fit in `width`.
@@ -391,9 +455,7 @@ impl App {
         for panel in shown {
             let area = Rect::new(0, y, body.width, panel.height()).intersection(page.area);
             y = y.saturating_add(panel.height());
-            let block = self
-                .block()
-                .title(Span::styled(format!(" {} ", panel.title), Modifier::BOLD));
+            let block = self.block().title(panel.title);
             let inner = block.inner(area);
             block.render(area, &mut page);
             for (row, y) in panel.rows.into_iter().zip(inner.y..inner.bottom()) {
@@ -560,6 +622,7 @@ impl App {
             }
             // Before herdr's problem, since the notes keep the newest when cut.
             notes.extend(self.mail.warnings.iter().cloned());
+            notes.extend(self.outlines.problems());
             notes.extend(
                 read.problem
                     .iter()
@@ -634,10 +697,11 @@ impl App {
         let spinner = self.opened.map_or(0, |at| {
             now.saturating_duration_since(at).as_millis() / TICK.as_millis()
         }) as usize;
-        let gauge_at = widths.iter().take(GAUGE).map(|w| w + 2).sum::<usize>();
         let mut panels = vec![];
         let mut target = 0;
-        for (((name, members), cells), gauges) in sections.iter().zip(&cells).zip(gauges) {
+        for (i, (((name, members), cells), gauges)) in
+            sections.iter().zip(&cells).zip(gauges).enumerate()
+        {
             let mut rows = vec![];
             if !members.is_empty() {
                 rows.push(Row {
@@ -647,35 +711,54 @@ impl App {
             }
             for ((member, cells), gauge) in members.iter().zip(cells).zip(gauges) {
                 let (glyph, style) = self.theme.glyph(member.status, member.gone, spinner);
-                let text = aligned(cells, &widths);
-                let text_style = match member.gone {
-                    true => Style::new().add_modifier(Modifier::DIM),
-                    false => Style::new(),
-                };
-                let mut line = vec![Span::raw(" "), Span::styled(glyph, style), Span::raw(" ")];
-                match gauge {
-                    Some(gauge) => {
-                        let before: String = text.chars().take(gauge_at).collect();
-                        let after: String = text
-                            .chars()
-                            .skip(gauge_at + gauge.content.chars().count())
-                            .collect();
-                        line.extend([
-                            Span::styled(before, text_style),
-                            gauge.patch_style(text_style),
-                            Span::styled(after, text_style),
-                        ]);
+                let mut spans = vec![Span::raw(" "), Span::styled(glyph, style), Span::raw(" ")];
+                let (text_style, time_style) = match member.gone {
+                    true => (
+                        Style::new().add_modifier(Modifier::DIM),
+                        Modifier::DIM.into(),
+                    ),
+                    false => {
+                        let time = self.since.of(&member.name, now);
+                        let time_style = match time.map(|t| staleness(member, t)) {
+                            Some(Staleness::Stale) => self.theme.stale(),
+                            Some(Staleness::Overdue) => self.theme.overdue(),
+                            _ => Style::new(),
+                        };
+                        (Style::new(), time_style)
                     }
-                    None => line.push(Span::styled(text, text_style)),
-                }
+                };
+                let (before, after) = cells.split_at(2);
+                spans.extend([
+                    Span::styled(format!("{}  ", padded(before, &widths)), text_style),
+                    Span::styled(format!("{:w$}", after[0], w = widths[2]), time_style),
+                ]);
+                let rest = match gauged {
+                    true => {
+                        let cell = format!("{:w$}", after[1], w = widths[GAUGE]);
+                        let gauge_style = gauge.map_or(text_style, |g| g.style.patch(text_style));
+                        spans.extend([
+                            Span::styled("  ", text_style),
+                            Span::styled(cell, gauge_style),
+                        ]);
+                        GAUGE + 1
+                    }
+                    false => GAUGE,
+                };
+                spans.push(Span::styled(
+                    format!("  {}", aligned(&cells[rest..], &widths[rest..])),
+                    text_style,
+                ));
                 rows.push(Row {
-                    line: Line::from(line),
+                    line: Line::from(spans),
                     target: Some(target),
                 });
                 target += 1;
             }
             panels.push(Panel {
-                title: name.clone(),
+                title: match view.herds.get(i) {
+                    Some(herd) => self.outlines.title(herd, self.theme),
+                    None => Line::styled(format!(" {name} "), Modifier::BOLD),
+                },
                 rows,
             });
         }
@@ -690,7 +773,7 @@ impl App {
                 })
                 .collect();
             panels.push(Panel {
-                title: title.into(),
+                title: Line::styled(format!(" {title} "), Modifier::BOLD),
                 rows,
             });
         }
@@ -726,6 +809,16 @@ fn highlighted(line: Line<'static>, width: u16, style: Style) -> Line<'static> {
         .collect();
     spans.push(Span::styled(" ".repeat(pad), style));
     Line::from(spans)
+}
+
+/// `cells` each padded to its width, without trimming the last.
+fn padded(cells: &[String], widths: &[usize]) -> String {
+    let cells: Vec<String> = cells
+        .iter()
+        .zip(widths)
+        .map(|(cell, w)| format!("{cell:w$}"))
+        .collect();
+    cells.join("  ")
 }
 
 /// `for 3m`, in the largest whole unit; blank when no change was seen.
@@ -960,36 +1053,217 @@ mod tests {
         app
     }
 
-    #[test]
-    fn a_paused_herds_header_says_since_when_and_why() {
-        let root = tempfile::tempdir().unwrap();
+    fn paused_app(pause: &str, now: Instant) -> App {
+        let root = config_dir(&[("prs", "repo = \"/r\"\n")], None);
         std::fs::create_dir(root.path().join("paused")).unwrap();
-        let pause = r#"{"since": "2026-11-05T09:00:00Z", "reason": "freeze"}"#;
         std::fs::write(root.path().join("paused/prs"), pause).unwrap();
-        let now = Instant::now();
-        let mut app = App::new(Options::default(), truecolor());
-        let request = app.tick(now).unwrap();
-        app.apply(
-            serve(
-                request,
-                &herdr(),
-                &ledger(),
-                &Dirs {
-                    pauses: Pauses::under(root.path()),
-                    mailboxes: quiet_mail(&ledger()).path().into(),
-                },
-            ),
-            now,
-        )
-        .unwrap();
+        app_in(root.path(), &herdr(), &ledger(), now)
+    }
 
-        let shown = lines(&render(&app, now));
+    #[test]
+    fn a_paused_herds_title_adds_a_light_orange_paused_badge_and_its_reason() {
+        let now = Instant::now();
+        let app = paused_app(
+            r#"{"since": "2026-11-05T09:00:00Z", "reason": "freeze"}"#,
+            now,
+        );
+
+        let terminal = render(&app, now);
 
         assert!(
-            shown
-                .iter()
-                .any(|l| l.contains("╭ prs  paused since 2026-11-05T09:00:00Z — freeze ─")),
-            "{shown:#?}"
+            title_row(&terminal, "prs").starts_with("│╭ prs  ⏸ paused — freeze ─"),
+            "{:#?}",
+            lines(&terminal)
+        );
+        assert_eq!(at(&terminal, "⏸ paused").fg, LIGHT_ORANGE);
+        assert_eq!(at(&terminal, "freeze").fg, LIGHT_ORANGE);
+    }
+
+    #[test]
+    fn a_herd_paused_without_a_reason_shows_only_the_badge() {
+        let now = Instant::now();
+        let app = paused_app(r#"{"since": "2026-11-05T09:00:00Z"}"#, now);
+
+        let terminal = render(&app, now);
+
+        assert!(
+            title_row(&terminal, "prs").starts_with("│╭ prs  ⏸ paused ─"),
+            "{:#?}",
+            lines(&terminal)
+        );
+    }
+
+    const QUEUED_HERD: &str = r#"
+repo = "/r"
+[template.pr]
+params = ["n"]
+prompt = "go"
+[queue]
+template = "pr"
+source = "true"
+max = 3
+"#;
+
+    /// A config dir holding each herd file and, if given, `config.toml`.
+    fn config_dir(herds: &[(&str, &str)], config: Option<&str>) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("herds")).unwrap();
+        for (name, text) in herds {
+            std::fs::write(root.path().join(format!("herds/{name}.toml")), text).unwrap();
+        }
+        if let Some(config) = config {
+            std::fs::write(root.path().join("config.toml"), config).unwrap();
+        }
+        root
+    }
+
+    /// The app after one read with herd files and pauses under `root`.
+    fn app_in(root: &std::path::Path, herdr: &FakeHerdr, ledger: &MemLedger, now: Instant) -> App {
+        let mut app = App::new(Options::default(), truecolor());
+        let request = app.tick(now).unwrap();
+        let dirs = Dirs {
+            pauses: Pauses::under(root),
+            mailboxes: quiet_mail(ledger).path().into(),
+            herds: herd::Paths::under(root),
+        };
+        app.apply(serve(request, herdr, ledger, &dirs), now)
+            .unwrap();
+        app
+    }
+
+    /// The top border of the box titled `herd`.
+    fn title_row(terminal: &Terminal<TestBackend>, herd: &str) -> String {
+        let lines = lines(terminal);
+        lines
+            .iter()
+            .find(|l| l.contains(&format!("╭ {herd} ")))
+            .unwrap_or_else(|| panic!("no box {herd} in {lines:#?}"))
+            .clone()
+    }
+
+    #[test]
+    fn a_herd_title_counts_gone_members_but_not_its_lead_or_retired_ones_against_its_queue_max() {
+        let mut ledger = ledger();
+        let mut lead = entry("prs-lead", Some("prs"));
+        lead.role = Some(crate::ledger::Role::Lead);
+        let mut retired = entry("retired-1", Some("prs"));
+        retired.retired = true;
+        let gone = entry("gone-1", Some("prs"));
+        for e in [lead, retired, gone] {
+            ledger.0.insert(e.name.clone(), e);
+        }
+        let root = config_dir(&[("prs", QUEUED_HERD)], None);
+        let now = Instant::now();
+
+        let app = app_in(root.path(), &herdr(), &ledger, now);
+
+        assert!(
+            title_row(&render_tall(&app, now), "prs").starts_with("│╭ prs · 3/3 slots ─"),
+            "{:#?}",
+            lines(&render_tall(&app, now))
+        );
+    }
+
+    #[test]
+    fn a_herd_whose_file_cant_be_read_shows_unknown_slots_and_why() {
+        let root = config_dir(&[], None);
+        let now = Instant::now();
+
+        let app = app_in(root.path(), &herdr(), &ledger(), now);
+
+        let terminal = render_tall(&app, now);
+        assert!(title_row(&terminal, "prs").starts_with("│╭ prs · ? slots ─"));
+        assert!(
+            notes_from(&terminal, "prs: ").contains("prs.toml"),
+            "{:#?}",
+            lines(&terminal)
+        );
+    }
+
+    #[test]
+    fn a_broken_config_toml_keeps_slots_turns_every_chip_off_and_says_so_once() {
+        let herd = format!("{QUEUED_HERD}[lead]\nprompt = \"lead\"\nmerge = true\n");
+        let other = "repo = \"/r\"\n[lead]\nprompt = \"lead\"\n";
+        let mut ledger = ledger();
+        let e = entry("o", Some("other"));
+        ledger.0.insert(e.name.clone(), e);
+        let root = config_dir(&[("prs", &herd), ("other", other)], Some("[lead_defaults"));
+        let now = Instant::now();
+
+        let app = app_in(root.path(), &herdr(), &ledger, now);
+
+        let terminal = render_at(&app, now, 72, 40);
+        assert!(
+            title_row(&terminal, "prs").starts_with("│╭ prs · 2/3 slots  merge install"),
+            "{:#?}",
+            lines(&terminal)
+        );
+        let y = pos(&terminal, "prs · 2/3 slots").1;
+        let row = &lines(&terminal)[y as usize];
+        let x = row[..row.find("merge").unwrap()].chars().count() as u16;
+        let merge = cell(&terminal, (x, y));
+        assert!(
+            merge.modifier.contains(Modifier::DIM) && merge.fg != ORANGE,
+            "the herd file's merge = true is off, as the lead's hook enforces"
+        );
+        let problems = lines(&terminal)
+            .iter()
+            .filter(|l| l.starts_with("│ lead switches: "))
+            .count();
+        assert_eq!(problems, 1, "{:#?}", lines(&terminal));
+    }
+
+    #[test]
+    fn a_long_pause_reason_leaves_the_switch_chips_in_view() {
+        let herd = "repo = \"/r\"\n[lead]\nprompt = \"lead\"\n";
+        let root = config_dir(&[("prs", herd)], None);
+        std::fs::create_dir(root.path().join("paused")).unwrap();
+        let reason = "x".repeat(80);
+        let pause = format!(r#"{{"since": "2026-11-05T09:00:00Z", "reason": "{reason}"}}"#);
+        std::fs::write(root.path().join("paused/prs"), pause).unwrap();
+        let now = Instant::now();
+
+        let app = app_in(root.path(), &herdr(), &ledger(), now);
+
+        let terminal = render_at(&app, now, 120, 30);
+        assert!(
+            title_row(&terminal, "prs")
+                .starts_with("│╭ prs  merge install rebase cards design dialogs  ⏸ paused — xxx"),
+            "{:#?}",
+            lines(&terminal)
+        );
+    }
+
+    #[test]
+    fn a_herd_with_a_lead_shows_its_switches_orange_when_on_and_dim_when_off() {
+        let herd = "repo = \"/r\"\n[lead]\nprompt = \"lead\"\nmerge = true\nrebase = false\n";
+        let defaults = "[lead_defaults]\ninstall = true\nrebase = true\n";
+        let root = config_dir(&[("prs", herd)], Some(defaults));
+        let now = Instant::now();
+
+        let app = app_in(root.path(), &herdr(), &ledger(), now);
+
+        let terminal = render_tall(&app, now);
+        assert!(
+            title_row(&terminal, "prs")
+                .starts_with("│╭ prs  merge install rebase cards design dialogs ─"),
+            "{:#?}",
+            lines(&terminal)
+        );
+        let x = |name: &str| pos(&terminal, &format!(" {name} ")).0 + 1;
+        let y = pos(&terminal, " merge ").1;
+        let on = |name: &str| cell(&terminal, (x(name), y)).fg == ORANGE;
+        let dim = |name: &str| {
+            cell(&terminal, (x(name), y))
+                .modifier
+                .contains(Modifier::DIM)
+        };
+        assert!(on("merge"), "from the herd file");
+        assert!(on("install"), "from lead_defaults");
+        assert!(dim("rebase"), "the herd file over lead_defaults");
+        assert!(
+            dim("cards") && dim("design") && dim("dialogs"),
+            "off when neither sets it"
         );
     }
 
@@ -1030,10 +1304,19 @@ mod tests {
         Body::Done { text: text.into() }
     }
 
+    /// Herd files for the fixtures' herds, with neither a queue nor a lead.
+    fn plain_herds() -> herd::Paths {
+        herd::Paths::under(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/view"
+        )))
+    }
+
     fn dirs(mailboxes: &std::path::Path) -> Dirs {
         Dirs {
             pauses: Pauses::under(std::path::Path::new("/nonexistent")),
             mailboxes: mailboxes.into(),
+            herds: plain_herds(),
         }
     }
 
@@ -1445,11 +1728,11 @@ mod tests {
                 "│                                                                      │",
                 "│                                                                      │",
                 "│                                                                      │",
-                "│                                                                      │",
-                "│                                                                      │",
-                "│                                                                      │",
-                "│                                                                      │",
                 "│ gone: no live agent matches it; `loopherd revive` can bring it back  │",
+                "│╭────────────────────────────────────────────────────────────────────╮│",
+                "││                                                                    ││",
+                "││                                                                    ││",
+                "│╰────────────────────────────────────────────────────────────────────╯│",
                 "│ q quit  ↑↓/jk select  enter focus  s strays: off  a all: off         │",
                 "╰──────────────────────────────────────────────────────────────────────╯",
             ]
@@ -1751,7 +2034,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            text(&terminal)[27],
+            text(&terminal)[23],
             "gone: no live agent matches it; `loopherd revive` can bring it back"
         );
         assert_eq!(
@@ -1785,6 +2068,58 @@ mod tests {
             selected(&terminal),
             "⚠ b     blocked           -       wt-b      w1:tb/w1:pb"
         );
+    }
+
+    #[test]
+    fn a_member_long_in_its_status_shows_its_time_light_orange_then_bold_red() {
+        let (herdr, ledger, t0) = (herdr(), ledger(), Instant::now());
+        herdr.set_status("a", AgentStatus::Idle);
+        herdr.set_status("b", AgentStatus::Idle);
+        let mut app = app(&herdr, &ledger, t0);
+        herdr.set_status("a", AgentStatus::Working);
+        herdr.set_status("b", AgentStatus::Blocked);
+        refresh(&mut app, &herdr, &ledger, t0);
+        // Off a and b, so the selection's colors don't cover theirs.
+        press(&mut app, &[KeyCode::Down, KeyCode::Down], &herdr, &ledger);
+        let minutes = |n: u64| t0 + Duration::from_secs(n * 60);
+
+        // The first cell of `name`'s time in status.
+        let time = |terminal: &Terminal<TestBackend>, name: &str| {
+            let (x, _) = pos(terminal, "for ");
+            cell(terminal, (x, pos(terminal, &format!(" {name} ")).1))
+        };
+        let bold_red = |c: Cell| (c.fg, c.modifier.contains(Modifier::BOLD)) == (Color::Red, true);
+
+        let fresh = render(&app, minutes(4));
+        assert_eq!(time(&fresh, "a").fg, Color::Reset);
+        assert_eq!(time(&fresh, "b").fg, Color::Reset);
+
+        let stale = render(&app, minutes(30));
+        assert_eq!(time(&stale, "a").fg, LIGHT_ORANGE);
+        assert!(!time(&stale, "a").modifier.contains(Modifier::BOLD));
+        assert!(bold_red(time(&stale, "b")));
+
+        assert!(bold_red(time(&render(&app, minutes(60)), "a")));
+    }
+
+    #[test]
+    fn without_color_a_stale_time_is_underlined_and_an_overdue_one_bold() {
+        let (herdr, ledger, t0) = (herdr(), ledger(), Instant::now());
+        herdr.set_status("a", AgentStatus::Idle);
+        let mut app = themed(Theme::from_env(None, true), &herdr, &ledger, t0);
+        herdr.set_status("a", AgentStatus::Working);
+        refresh(&mut app, &herdr, &ledger, t0);
+        press(&mut app, &[KeyCode::Down, KeyCode::Down], &herdr, &ledger);
+
+        let stale = render(&app, t0 + Duration::from_secs(30 * 60));
+        let overdue = render(&app, t0 + Duration::from_secs(60 * 60));
+
+        assert!(
+            at(&stale, "for 30m")
+                .modifier
+                .contains(Modifier::UNDERLINED)
+        );
+        assert!(at(&overdue, "for 1h").modifier.contains(Modifier::BOLD));
     }
 
     #[test]
@@ -2159,6 +2494,7 @@ mod tests {
             &Dirs {
                 pauses: Pauses::under(root.path()),
                 mailboxes: quiet_mail(&ledger).path().into(),
+                herds: plain_herds(),
             },
         );
         app.apply(response, t0).unwrap();
@@ -2516,7 +2852,7 @@ mod tests {
         let words = "lorem ipsum dolor sit amet ".repeat(40);
         post(mail.path(), "b", Body::Note { text: words });
         let app = app_with_mail(&herdr, &ledger, mail.path(), now);
-        let shown = pane_text(&render_at(&app, now, 120, 16), "b");
+        let shown = pane_text(&render_at(&app, now, 120, 20), "b");
         let text: Vec<_> = shown
             .iter()
             .skip_while(|l| !l.starts_with("note "))
@@ -2688,5 +3024,309 @@ mod tests {
             shown.contains(&"title build    logs".to_string()),
             "{shown:#?}"
         );
+    }
+
+    /// The ticker's two rows, between its borders above the footer.
+    fn ticker(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        let shown = text(terminal);
+        shown[shown.len() - 5..shown.len() - 3].to_vec()
+    }
+
+    fn render_ticker(app: &App, now: Instant) -> Terminal<TestBackend> {
+        render_at(app, now, 72, 20)
+    }
+
+    #[test]
+    fn the_ticker_shows_the_two_newest_events_across_mailboxes_newest_first() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", question("old"));
+        post_at(
+            mail.path(),
+            "c",
+            "2026-11-16T10:06:00Z",
+            question("which base?\nmore"),
+        );
+        post_at(mail.path(), "a", "2026-11-16T10:07:00Z", done("shipped"));
+        let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert_eq!(
+            ticker(&terminal),
+            ["10:07 a done shipped", "10:06 c question which base?"]
+        );
+        assert_eq!(at(&terminal, "done shipped").fg, Color::Green);
+        assert_eq!(at(&terminal, "question which").fg, ORANGE);
+        assert_eq!(at(&terminal, "10:07").fg, Color::Reset);
+    }
+
+    #[test]
+    fn the_ticker_colors_handoffs_purple_notes_grey_and_stops_dim() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(
+            mail.path(),
+            "a",
+            "2026-11-16T10:05:00Z",
+            Body::Handoff {
+                text: "over".into(),
+            },
+        );
+        post_at(
+            mail.path(),
+            "c",
+            "2026-11-16T10:06:00Z",
+            Body::Note { text: "fyi".into() },
+        );
+        let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert_eq!(at(&terminal, "handoff over").fg, PURPLE);
+        assert_eq!(at(&terminal, "note fyi").fg, GREY_VIOLET);
+        post_at(mail.path(), "c", "2026-11-16T10:07:00Z", stop());
+        let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert!(
+            at(&terminal, "stop finished")
+                .modifier
+                .contains(Modifier::DIM)
+        );
+    }
+
+    #[test]
+    fn the_ticker_cuts_an_event_to_the_width_with_an_ellipsis() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(
+            mail.path(),
+            "a",
+            "2026-11-16T10:07:00Z",
+            done("abcdefghijklmnopqrstuvwxyz"),
+        );
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        assert_eq!(
+            ticker(&render_at(&app, now, 40, 20))[0],
+            "10:07 a done abcdefghijklmnopqrst…"
+        );
+    }
+
+    #[test]
+    fn the_ticker_leaves_out_starts_and_paused_stops_but_shows_finished_and_failed() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        let stopped = |shells, error: Option<&str>| {
+            Body::Stop(report::Stop {
+                background: report::Tally::Known(report::Background {
+                    shells,
+                    ..Default::default()
+                }),
+                crons: report::Tally::Known(0),
+                error: error.map(str::to_string),
+                context: None,
+                limit: None,
+                session: None,
+            })
+        };
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", stopped(0, None));
+        post_at(
+            mail.path(),
+            "c",
+            "2026-11-16T10:06:00Z",
+            stopped(0, Some("rate_limit")),
+        );
+        post_at(mail.path(), "a", "2026-11-16T10:07:00Z", stopped(1, None));
+        post_at(mail.path(), "c", "2026-11-16T10:08:00Z", Body::Start);
+        let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert_eq!(
+            ticker(&terminal),
+            ["10:06 c stop failed rate_limit", "10:05 a stop finished"]
+        );
+    }
+
+    #[test]
+    fn the_ticker_leaves_out_retired_members() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", done("mine"));
+        post_at(
+            mail.path(),
+            "done-1",
+            "2026-11-16T10:06:00Z",
+            done("left behind"),
+        );
+        let mut app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        press_with_mail(&mut app, KeyCode::Char('a'), &herdr, &ledger, mail.path());
+        assert_eq!(ticker(&render_ticker(&app, now)), ["10:05 a done mine", ""]);
+    }
+
+    fn press_with_mail(
+        app: &mut App,
+        key: KeyCode,
+        herdr: &FakeHerdr,
+        ledger: &MemLedger,
+        mailboxes: &std::path::Path,
+    ) {
+        let now = Instant::now();
+        let request = app.press(key, now).unwrap();
+        app.apply(serve(request, herdr, ledger, &dirs(mailboxes)), now)
+            .unwrap();
+    }
+
+    #[test]
+    fn an_event_arriving_while_open_is_bold_for_one_read_then_normal() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", done("before"));
+        let mut app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        let bold = |app: &App, needle| {
+            at(&render_ticker(app, now), needle)
+                .modifier
+                .contains(Modifier::BOLD)
+        };
+        assert!(!bold(&app, "10:05"), "shown on opening, so not new");
+        post_at(mail.path(), "c", "2026-11-16T10:06:00Z", note("arrived"));
+        refresh_with_mail(&mut app, &herdr, &ledger, mail.path(), now);
+        assert!(bold(&app, "10:06"));
+        assert!(bold(&app, "note arrived"));
+        assert!(!bold(&app, "10:05"));
+        refresh_with_mail(&mut app, &herdr, &ledger, mail.path(), now);
+        assert!(!bold(&app, "10:06"));
+        assert!(!bold(&app, "note arrived"));
+    }
+
+    fn note(text: &str) -> Body {
+        Body::Note { text: text.into() }
+    }
+
+    #[test]
+    fn a_report_the_ticker_has_shown_is_still_printed_by_a_later_reports() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", done("shipped"));
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        assert_eq!(ticker(&render_ticker(&app, now))[0], "10:05 a done shipped");
+        let filter = report::Filter {
+            names: &[],
+            herd: None,
+            all: false,
+        };
+        let printed = report::reports(&ledger, mail.path(), &filter).unwrap();
+        assert!(
+            printed.lines.iter().any(|l| l.contains("shipped")),
+            "{:#?}",
+            printed.lines
+        );
+    }
+
+    #[test]
+    fn below_16_rows_the_ticker_is_hidden() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", done("shipped"));
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        let shows = |height| {
+            lines(&render_at(&app, now, 72, height))
+                .iter()
+                .any(|l| l.contains("10:05 a done shipped"))
+        };
+        assert!(!shows(15));
+        assert!(shows(16));
+    }
+
+    #[test]
+    fn the_ticker_leaves_out_stops_with_unknown_background_work_or_crons() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        let unknown = report::Unknown::Unknown;
+        let stopped = |background, crons| {
+            Body::Stop(report::Stop {
+                background,
+                crons,
+                error: None,
+                context: None,
+                limit: None,
+                session: None,
+            })
+        };
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", done("before"));
+        post_at(
+            mail.path(),
+            "a",
+            "2026-11-16T10:06:00Z",
+            stopped(report::Tally::Unknown(unknown), report::Tally::Known(0)),
+        );
+        post_at(
+            mail.path(),
+            "c",
+            "2026-11-16T10:07:00Z",
+            stopped(
+                report::Tally::Known(report::Background::default()),
+                report::Tally::Unknown(unknown),
+            ),
+        );
+        let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert_eq!(ticker(&terminal), ["10:05 a done before", ""]);
+    }
+
+    #[test]
+    fn an_event_stamped_before_one_already_shown_is_still_bold_on_arrival() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(mail.path(), "c", "2026-11-16T10:08:00Z", done("first in"));
+        let mut app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        post_at(
+            mail.path(),
+            "a",
+            "2026-11-16T10:07:30Z",
+            note("landed late"),
+        );
+        refresh_with_mail(&mut app, &herdr, &ledger, mail.path(), now);
+        let terminal = render_ticker(&app, now);
+        assert_eq!(
+            ticker(&terminal),
+            ["10:08 c done first in", "10:07 a note landed late"]
+        );
+        assert!(
+            at(&terminal, "note landed")
+                .modifier
+                .contains(Modifier::BOLD)
+        );
+        assert!(
+            !at(&terminal, "done first")
+                .modifier
+                .contains(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn events_stamped_alike_put_the_later_written_on_top() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(
+            mail.path(),
+            "a",
+            "2026-11-16T10:05:00Z",
+            note("written first"),
+        );
+        post_at(
+            mail.path(),
+            "a",
+            "2026-11-16T10:05:00Z",
+            note("written second"),
+        );
+        let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert_eq!(
+            ticker(&terminal),
+            ["10:05 a note written second", "10:05 a note written first"]
+        );
+    }
+
+    #[test]
+    fn the_ticker_shows_a_reports_first_non_blank_line() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(
+            mail.path(),
+            "a",
+            "2026-11-16T10:05:00Z",
+            done("\n  \nshipped\nmore"),
+        );
+        let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert_eq!(ticker(&terminal)[0], "10:05 a done shipped");
     }
 }
