@@ -369,7 +369,8 @@ question as its own sends a second notification.
   `(released)`, its mailbox gets a `released` note, and its lead's watch
   announces it claimable again.
 - `loopherd prompt <name>` sends a member its stored prompt, e.g. after a
-  spawn exited 3 on a dialog.
+  spawn exited 3 on a dialog. Like `tell`, it refuses and sends nothing
+  while the member's pane shows a subagent's view.
 - `loopherd tell <name> "<text>"` messages a member (see Talking to
   members).
 - `loopherd restart <name>` gives a member that handed off a fresh session
@@ -412,7 +413,10 @@ question as its own sends a second notification.
   drains by itself. `resume` prints the next step. Neither prompts anyone.
 - **After a herdr restart** run `loopherd revive` (`--dry-run` first). It
   resumes non-retired members by session ID, and prompts each lead whose
-  watch isn't running to re-arm it. It never prompts workers.
+  watch isn't running to re-arm it. It never prompts workers. It skips a
+  lead whose pane shows a subagent's view and exits 1 (`--dry-run` says
+  so too): switch that pane back to the main conversation, then run
+  `loopherd revive --name <lead>`.
 
 ### Talking to members
 
@@ -420,7 +424,9 @@ question as its own sends a second notification.
   `herdr agent prompt`. It refuses, sending nothing, while the member's
   pane shows a subagent's view (text would reach the subagent instead):
   ask the human to switch that pane back to the main conversation, then
-  run it again. It says whether the member went `working`.
+  run it again. It says whether the member went `working`. Text that is
+  itself a flag (`--help`, `-h`) prints help and sends nothing; put `--`
+  before it: `loopherd tell <name> -- --help`.
 - A PR conflicting after another merged: prompt the member to merge the base
   branch into its branch and push. Members rebase and force-push only with
   the human's say.
