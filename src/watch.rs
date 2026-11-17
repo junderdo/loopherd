@@ -204,6 +204,8 @@ pub fn watch(
                     names: &names,
                     herd: None,
                     all: false,
+                    since: None,
+                    tail: None,
                 },
             )?;
             for w in read.warnings.iter().filter(|w| !warned.contains(*w)) {
@@ -812,6 +814,8 @@ fn own_questions(
         names: &names,
         herd: None,
         all: false,
+        since: None,
+        tail: None,
     };
     let (read, _unsaved) = peek_reports(ledger, dir, &filter)?;
     Ok(read

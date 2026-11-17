@@ -12,7 +12,8 @@ use crate::ledger::{AgentRecord, Ledger};
 /// Sent to a lead whose watch isn't running: after a restart nothing else wakes it (D17).
 pub const REARM_PROMPT: &str = "You were revived after a restart, so your \
 `loopherd watch` is no longer running. Run `loopherd status` and \
-`loopherd reports --all`, then re-arm your watch per the Lead section of \
+`loopherd reports --all --tail 40` (for a fuller history, `--since <time>` \
+or plain `--all`), then re-arm your watch per the Lead section of \
 `loopherd --skill`.";
 
 #[derive(Debug, Clone)]
@@ -1235,5 +1236,16 @@ mod tests {
         assert!(REARM_PROMPT.contains("Lead section of `loopherd --skill`"));
         assert!(crate::skill::SKILL.contains("\n## Lead\n"));
         assert!(!REARM_PROMPT.contains("docs/"), "{REARM_PROMPT}");
+    }
+
+    #[test]
+    fn the_rearm_prompt_reads_only_recent_reports() {
+        assert!(
+            REARM_PROMPT.contains(
+                "`loopherd reports --all --tail 40` (for a fuller history, \
+                 `--since <time>` or plain `--all`)"
+            ),
+            "{REARM_PROMPT}"
+        );
     }
 }

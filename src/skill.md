@@ -234,8 +234,8 @@ workers. Wait for its `finished` line, then `loopherd restart <name>`. It
 sends `/clear`, waits for the ledger to follow the new session, and prompts
 the member to read its handoff, which it moves to `<name>.prev.md` so no
 later restart reuses it; same pane, worktree and branch. A lead's prompt
-also tells it to re-read `loopherd status` and `loopherd reports --all` and
-re-arm its watch. Without `--force`
+also tells it to re-read `loopherd status` and `loopherd reports --all
+--tail 40` and re-arm its watch. Without `--force`
 it refuses unless the member reported a handoff since its last start, its
 last stop since is `finished` with nothing in flight, and herdr shows it
 idle or done. `--force` skips those checks; a `/clear` sent mid-turn waits
@@ -289,8 +289,9 @@ and, once per session past your limit, adds `shepherd handoff <n>k over
    and end your turn. Never `/clear` yourself.
 
 Given that prompt in a fresh session, run `loopherd --skill`, read the
-handoff, `loopherd status` and `loopherd reports --all`, then re-arm your
-watch and carry on from its next steps.
+handoff, `loopherd status` and `loopherd reports --all --tail 40` (for a
+fuller history, `--since <time>` or plain `--all`), then re-arm your watch
+and carry on from its next steps.
 
 ### Notifying the human
 
@@ -330,7 +331,9 @@ question as its own sends a second notification.
   the ledger. `loopherd view` is the same as a live TUI.
 - `loopherd reports` prints unread reports, questions first, and marks them
   read; `loopherd reports --all` prints every report and stop and marks
-  none read. Both take member names or `--herd <herd>`.
+  none read. Both take member names or `--herd <herd>`. `--all` also takes
+  `--since <date, time or span such as 2h>` and `--tail <n>` (the last n
+  entries after the other filters).
 - `loopherd stats` shows how each herd's work flowed: per retired worker,
   time to its first `done`, review rounds, merge wait and total, with
   medians per herd and open workers apart. `--herd`, `--since <date or time>`,
@@ -503,8 +506,10 @@ shepherd:
 - **After a restart** the shepherd runs `loopherd revive`, which prompts you
   to re-arm whenever nothing holds `watch-<your name>.lock`, whether herdr
   resumed you or revive did. Re-read `loopherd status` and `loopherd reports
-  --all`, then arm your watch again.
-- **On each wake** re-read `loopherd status` and `loopherd reports --all`
+  --all --tail 40` (for a fuller history, `--since <time>` or plain
+  `--all`), then arm your watch again.
+- **On each wake** re-read `loopherd status` and `loopherd reports --all
+  --tail 40` (for a fuller history, `--since <time>` or plain `--all`)
   before acting: auto-compaction drops detail, and your state lives in the
   tracker, ledger and mailbox, not in your context.
 - **Your own handoff.** Past your limit, your Stop hook asks you for a

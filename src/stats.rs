@@ -194,8 +194,15 @@ fn parse_time(at: &str) -> Option<SystemTime> {
 /// `--since`: a date, `2026-11-01`, meaning midnight UTC, or an RFC 3339 time
 /// with `Z` or a `±HH:MM` offset.
 pub fn parse_since(value: &str) -> Result<SystemTime> {
-    let invalid =
-        || anyhow!("{value:?} is not a date (2026-11-01) or RFC 3339 time (2026-11-01T12:00:00Z)");
+    parse_moment(
+        value,
+        "a date (2026-11-01) or RFC 3339 time (2026-11-01T12:00:00Z)",
+    )
+}
+
+/// [`parse_since`], erring that `value` is not `accepted`.
+pub fn parse_moment(value: &str, accepted: &str) -> Result<SystemTime> {
+    let invalid = || anyhow!("{value:?} is not {accepted}");
     if value.len() == 10 {
         return humantime::parse_rfc3339(&format!("{value}T00:00:00Z")).map_err(|_| invalid());
     }
