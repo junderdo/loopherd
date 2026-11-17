@@ -1153,7 +1153,7 @@ args = ["--model", "opus"]
     }
 
     fn herdr() -> FakeHerdr {
-        FakeHerdr::new(&[("w1", "loopherd"), ("w2", "zagops")])
+        FakeHerdr::new(&[("w1", "loopherd"), ("w2", "my-app")])
     }
 
     #[test]
@@ -1660,14 +1660,14 @@ args = ["--model", "opus"]
     fn the_workspace_is_the_herds_label_or_else_the_current_one() {
         let labeled = PR_HERD.replace(
             "args = [\"--permission",
-            "workspace = \"zagops\"\nargs = [\"--permission",
+            "workspace = \"my-app\"\nargs = [\"--permission",
         );
         let config = Config::with(&[("prs", PR_HERD), ("zag", &labeled)]);
         let (herdr, _, _) = add_ok(&config, &request("prs", "pr", &["1"]));
         assert_eq!(herdr.tabs()[0].workspace_id, "w1");
         let (herdr, ledger, _) = add_ok(&config, &request("zag", "pr", &["1"]));
         assert_eq!(herdr.tabs()[0].workspace_id, "w2");
-        assert_eq!(ledger.0["zpr-1"].workspace_label.as_deref(), Some("zagops"));
+        assert_eq!(ledger.0["zpr-1"].workspace_label.as_deref(), Some("my-app"));
     }
 
     #[test]
@@ -1743,7 +1743,7 @@ args = ["--model", "opus"]
         let root = tempfile::tempdir().unwrap();
         let repo = crate::worktree::testing::repo_with_origin(root.path());
         let herd = format!(
-            "repo = {:?}\nworkspace = \"zagops\"\nargs = [\"--model\", \"opus\"]\n\
+            "repo = {:?}\nworkspace = \"my-app\"\nargs = [\"--model\", \"opus\"]\n\
              [template.pr]\nparams = [\"n\"]\nname = \"z-{{n}}\"\nbranch = \"pr-{{n}}\"\n\
              prompt = \"{{name}} on {{branch}} in {{worktree}}, pane {{pane}}\"\n",
             repo.display().to_string()
@@ -1761,7 +1761,7 @@ args = ["--model", "opus"]
         assert_eq!(
             report,
             format!(
-                "name z-7\nbranch pr-7\nworktree {wt}\nworkspace zagops\n\
+                "name z-7\nbranch pr-7\nworktree {wt}\nworkspace my-app\n\
                  args --model opus --add-dir \"/tmp/a b\"\nprompt\n\
                  z-7 on pr-7 in {wt}, pane {{pane}}",
                 wt = wt.display()
@@ -1799,7 +1799,7 @@ args = ["--model", "opus"]
 
     #[test]
     fn herds_lists_each_herd_with_a_usage_line_per_template_sorted_by_name() {
-        let issues = "repo = \"~/src/z\"\nworkspace = \"zagops\"\n\
+        let issues = "repo = \"~/src/z\"\nworkspace = \"my-app\"\n\
                       [template.issue]\nparams = [\"key\", \"slug\"]\nprompt = \"go\"\n\
                       [template.chat]\nparams = []\nprompt = \"go\"\n";
         let config = Config::with(&[("zissues", issues), ("prs", PR_HERD)]);
@@ -1810,7 +1810,7 @@ args = ["--model", "opus"]
             report,
             "prs  repo /src/repo  workspace (current)  paused no\n\
              \x20 loopherd add prs pr <number>\n\
-             zissues  repo ~/src/z  workspace zagops  paused no\n\
+             zissues  repo ~/src/z  workspace my-app  paused no\n\
              \x20 loopherd add zissues chat\n\
              \x20 loopherd add zissues issue <key> <slug>"
         );

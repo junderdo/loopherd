@@ -493,10 +493,10 @@ mod tests {
     #[test]
     fn removes_a_herd_with_ledger_entries_but_no_herd_file() {
         let mut s = Setup::new();
-        s.member("zpr-1050", "zagops-prs", true, false);
+        s.member("zpr-1050", "my-app-prs", true, false);
         s.write("state/reports/zpr-1050.jsonl", "{}\n");
 
-        let out = s.remove("zagops-prs", Removal::default()).unwrap();
+        let out = s.remove("my-app-prs", Removal::default()).unwrap();
 
         assert!(s.names().is_empty(), "{out}");
         assert!(!s.path("state/reports/zpr-1050.jsonl").exists());
@@ -980,7 +980,7 @@ mod tests {
         let mut s = Setup::new();
         let pane = s.herdr.add_tab("w1", "1", &s.path("work"), true);
         retired_in(&mut s, &pane);
-        s.ledger.0.get_mut("a").unwrap().workspace_label = Some("zagops".into());
+        s.ledger.0.get_mut("a").unwrap().workspace_label = Some("my-app".into());
 
         s.remove("old", Removal::default()).unwrap();
 
@@ -1094,7 +1094,7 @@ mod tests {
         retired_in(&mut s, &pane);
         let a = s.ledger.0.get_mut("a").unwrap();
         a.session_id = Some("ours".into());
-        a.workspace_label = Some("zagops".into());
+        a.workspace_label = Some("my-app".into());
 
         s.remove("old", Removal::default()).unwrap();
 
