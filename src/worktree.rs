@@ -180,6 +180,77 @@ pub fn remove_if_gone(repo: &Path, path: &Path) -> Result<Option<Gone>> {
     Ok(Some(Gone::Removed { kept_branch }))
 }
 
+/// What [`clear_branch`] did with a local branch and its worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cleared {
+    /// There is no local branch by that name.
+    Absent,
+    /// Removed the branch, which was at `head` with `ahead` commits not on
+    /// `base`, and the worktree checking it out, if any.
+    Removed {
+        head: String,
+        ahead: usize,
+        base: String,
+        worktree: Option<PathBuf>,
+    },
+    /// Changed nothing: the branch has `count` commits not on `base`.
+    Ahead { count: usize, base: String },
+    /// Changed nothing, for this reason.
+    Kept(String),
+}
+
+/// Removes the local `branch` and any linked worktree checking it out, so
+/// [`ensure_worktree`] next makes it afresh. Unless `drop_ahead`, keeps a
+/// branch with commits not on origin's default branch. Never removes a
+/// worktree with changes, mid-operation, or the main checkout.
+pub fn clear_branch(repo: &Path, branch: &str, drop_ahead: bool) -> Result<Cleared> {
+    let Ok(head) = git(
+        repo,
+        &["rev-parse", "--verify", &format!("refs/heads/{branch}")],
+    ) else {
+        return Ok(Cleared::Absent);
+    };
+    let head = head.trim().to_string();
+    let worktree = find_worktree(repo, branch)?;
+    if let Some(path) = worktree.as_deref().filter(|p| p.exists()) {
+        if !is_linked_worktree(repo, path)? {
+            let main = path.display();
+            return Ok(Cleared::Kept(format!(
+                "{branch} is checked out in the main checkout {main}"
+            )));
+        }
+        if let Some(op) = operation_in_progress(path)? {
+            return Ok(Cleared::Kept(format!(
+                "{} has a {op} in progress",
+                path.display()
+            )));
+        }
+        if let Some(reason) = unclean(path)? {
+            return Ok(Cleared::Kept(format!("{} has {reason}", path.display())));
+        }
+    }
+    fetch(repo)?;
+    let base = default_branch(repo)?;
+    let ahead: usize = git(repo, &["rev-list", "--count", &format!("{base}..{head}")])?
+        .trim()
+        .parse()
+        .context("git rev-list --count")?;
+    if ahead > 0 && !drop_ahead {
+        return Ok(Cleared::Ahead { count: ahead, base });
+    }
+    if let Some(path) = &worktree {
+        let path_str = path.to_str().context("worktree path is not UTF-8")?;
+        git(repo, &["worktree", "remove", path_str])?;
+    }
+    delete_branch(repo, branch, &head)?;
+    Ok(Cleared::Removed {
+        head,
+        ahead,
+        base,
+        worktree,
+    })
+}
+
 /// Why `branch` at `head` isn't merged into origin's default branch, if it isn't.
 fn unmerged(repo: &Path, branch: &str, head: &str) -> Result<Option<String>> {
     fetch(repo)?;
@@ -918,6 +989,128 @@ mod tests {
         let base = git(&wt, &["merge-base", "HEAD", "origin/main"]).unwrap();
         let head = git(&wt, &["rev-parse", "HEAD"]).unwrap();
         assert_eq!(base, head);
+    }
+
+    #[test]
+    fn clearing_a_branch_that_was_never_made_finds_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+
+        assert_eq!(
+            clear_branch(&repo, "feat/x", false).unwrap(),
+            Cleared::Absent
+        );
+    }
+
+    #[test]
+    fn clearing_a_branch_with_nothing_new_removes_it_and_its_worktree() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+        let start = head(&wt);
+
+        let cleared = clear_branch(&repo, "feat/x", false).unwrap();
+
+        assert_eq!(
+            cleared,
+            Cleared::Removed {
+                head: start,
+                ahead: 0,
+                base: "origin/main".into(),
+                worktree: Some(wt.clone()),
+            }
+        );
+        assert!(!wt.exists());
+        assert!(!has_branch(&repo, "feat/x"));
+    }
+
+    #[test]
+    fn clearing_a_branch_with_commits_not_on_the_base_changes_nothing_unless_dropped() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+        commit(&wt, "unpushed");
+        let unpushed = head(&wt);
+
+        let kept = clear_branch(&repo, "feat/x", false).unwrap();
+
+        assert_eq!(
+            kept,
+            Cleared::Ahead {
+                count: 1,
+                base: "origin/main".into()
+            }
+        );
+        assert!(wt.exists());
+        assert!(has_branch(&repo, "feat/x"));
+
+        let dropped = clear_branch(&repo, "feat/x", true).unwrap();
+
+        assert_eq!(
+            dropped,
+            Cleared::Removed {
+                head: unpushed,
+                ahead: 1,
+                base: "origin/main".into(),
+                worktree: Some(wt.clone()),
+            }
+        );
+        assert!(!has_branch(&repo, "feat/x"));
+    }
+
+    #[test]
+    fn clearing_a_branch_whose_worktree_has_changes_changes_nothing_even_when_dropped() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+        std::fs::write(wt.join("notes"), "draft").unwrap();
+
+        let cleared = clear_branch(&repo, "feat/x", true).unwrap();
+
+        assert_eq!(
+            cleared,
+            Cleared::Kept(format!(
+                "{} has uncommitted or untracked changes",
+                wt.display()
+            ))
+        );
+        assert!(wt.join("notes").exists());
+        assert!(has_branch(&repo, "feat/x"));
+    }
+
+    #[test]
+    fn clearing_a_branch_checked_out_in_the_main_checkout_changes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        git_in(&repo, &["checkout", "--quiet", "-b", "feat/x"]);
+
+        let cleared = clear_branch(&repo, "feat/x", true).unwrap();
+
+        assert_eq!(
+            cleared,
+            Cleared::Kept(format!(
+                "feat/x is checked out in the main checkout {}",
+                repo.display()
+            ))
+        );
+        assert!(has_branch(&repo, "feat/x"));
+    }
+
+    #[test]
+    fn clearing_a_branch_whose_worktree_dir_is_gone_removes_its_record_and_the_branch() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+        std::fs::remove_dir_all(&wt).unwrap();
+
+        let cleared = clear_branch(&repo, "feat/x", false).unwrap();
+
+        assert!(
+            matches!(cleared, Cleared::Removed { ahead: 0, .. }),
+            "{cleared:?}"
+        );
+        assert!(!worktree_list(&repo).contains("feat/x"));
+        assert!(!has_branch(&repo, "feat/x"));
     }
 
     #[test]

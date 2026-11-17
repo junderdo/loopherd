@@ -94,6 +94,7 @@ mod tests {
             tab: None,
             lead: false,
             template: None,
+            released: false,
         }
     }
 

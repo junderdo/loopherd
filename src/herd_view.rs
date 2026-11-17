@@ -37,6 +37,8 @@ pub struct Member {
     pub lead: bool,
     /// The template it was spawned from, if recorded.
     pub template: Option<String>,
+    /// Retired, and released so `feed` may spawn its name again.
+    pub released: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -196,6 +198,7 @@ fn member(
         tab: live.map(|a| a.tab_id.clone()),
         lead: record.is_lead(),
         template: record.template.clone(),
+        released: record.released_at.is_some(),
     }
 }
 
@@ -220,6 +223,7 @@ mod tests {
             created: format!("2026-11-01T00:00:{n:02}Z"),
             retired: false,
             retired_at: None,
+            released_at: None,
             herd: herd.map(str::to_string),
             template: herd.map(|_| "t".to_string()),
             params: None,

@@ -41,6 +41,9 @@ pub struct AgentRecord {
     /// RFC 3339, UTC.
     #[serde(default)]
     pub retired_at: Option<String>,
+    /// RFC 3339, UTC. Set on a retired entry so `feed` may spawn its name again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released_at: Option<String>,
     /// Set by `loopherd add`; spawn leaves it empty.
     #[serde(default)]
     pub herd: Option<String>,
@@ -415,6 +418,7 @@ mod tests {
             created: "2026-10-31T00:00:00Z".into(),
             retired: false,
             retired_at: None,
+            released_at: None,
             herd: None,
             template: None,
             params: None,
