@@ -15,7 +15,8 @@ Start now:
 1. `loopherd status` and `loopherd reports --all`, to see where the herd is.
 2. `loopherd feed {herd} --dry-run`, then `loopherd feed {herd}` if it reads right.
 3. Arm `loopherd watch {herd} --timeout 3600` as a background task, and
-   re-arm after every exit. @ON_MERGED@ On `<name> claimable`, feed.
+   re-arm after every exit but `{herd} drained`: on that, report done and
+   stop. @ON_MERGED@ On `<name> claimable`, feed.
    Exit 2 is your heartbeat: check each worker's @WORK@ for a merge and run
    `loopherd feed {herd} --dry-run`.
 

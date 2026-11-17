@@ -35,8 +35,10 @@ pub mod line {
     /// After a herd's name, not a member's.
     pub const FAILING: &str = "failing";
     pub const RECOVERED: &str = "recovered";
+    /// After a herd's name, or `all` on the shepherd's watch.
+    pub const DRAINED: &str = "drained";
     #[cfg(test)]
-    pub const ALL: [&str; 10] = [
+    pub const ALL: [&str; 11] = [
         PAUSED,
         FINISHED,
         FAILED,
@@ -47,6 +49,7 @@ pub mod line {
         GONE,
         FAILING,
         RECOVERED,
+        DRAINED,
     ];
 }
 
@@ -299,6 +302,9 @@ pub fn watch(
                 marks.unblocked(dir, &member.name)?;
             }
         }
+        if lines.is_empty() {
+            lines.extend(drained(ledger, dir, req, &reader, &members)?);
+        }
         let left = req.timeout.map(|t| t.saturating_sub(clock.elapsed()));
         let exiting = !lines.is_empty() || left == Some(Duration::ZERO);
         let handoff = exiting
@@ -328,6 +334,72 @@ pub fn watch(
         }
         clock.sleep(left.map_or(req.poll, |left| left.min(req.poll)));
     }
+}
+
+/// The line ending a watch over herds paused with nothing left in flight:
+/// a lead's herd has no open worker; the shepherd reads at least one herd,
+/// each drained, and no member it reads has work in flight. Pauses are read
+/// now, so a resume since the members were read counts.
+fn drained(
+    ledger: &dyn Ledger,
+    dir: &Path,
+    req: &Request,
+    reader: &Reader,
+    members: &[Member],
+) -> Result<Option<String>> {
+    let Some(paths) = req.herd_files else {
+        return Ok(None);
+    };
+    let paused = |herd: &str| matches!(pause::read(&paths.paused, herd), pause::Reading::Paused(_));
+    if let Reader::Lead { herd, .. } = reader {
+        return Ok(
+            (members.is_empty() && paused(herd)).then(|| format!("{herd} {}", line::DRAINED))
+        );
+    }
+    let entries = ledger.entries()?;
+    let open_worker = |herd: &str| {
+        entries
+            .values()
+            .any(|e| !e.retired && !e.is_lead() && e.herd.as_deref() == Some(herd))
+    };
+    let mut herds = 0;
+    for member in members {
+        match entries.get(&member.name).and_then(|e| e.herd.as_deref()) {
+            None => {}
+            Some(herd) if member.lead && paused(herd) && !open_worker(herd) => herds += 1,
+            Some(_) => return Ok(None),
+        }
+    }
+    // Mailboxes last: most polls end above without reading them.
+    let drained = herds > 0 && !members.iter().any(|m| in_flight(m, dir));
+    Ok(drained.then(|| format!("all {}", line::DRAINED)))
+}
+
+/// Whether a live member may still work: herdr shows it busy, blocked or
+/// unknown, or its last stop since its start left work in flight. An
+/// unreadable mailbox counts as in flight.
+fn in_flight(member: &Member, dir: &Path) -> bool {
+    if member.gone {
+        return false;
+    }
+    if matches!(
+        member.status,
+        AgentStatus::Working | AgentStatus::Blocked | AgentStatus::Unknown
+    ) {
+        return true;
+    }
+    let Ok((entries, _)) = crate::report::history(dir, &member.name) else {
+        return true;
+    };
+    let mut pending = false;
+    for entry in entries {
+        match entry.body {
+            Body::Start { .. } => pending = false,
+            Body::Stop(stop) => pending = stop.pending().is_some(),
+            _ => {}
+        }
+    }
+    pending
 }
 
 /// A lead's merged and claimable checks, run every [`CHECK_EVERY`].
@@ -3297,5 +3369,180 @@ mod tests {
         world.pause();
         world.touch("resume.sh", &resume);
         assert_eq!(world.once("w9:p0").unwrap(), ["lh-2 claimable"]);
+    }
+
+    impl Checked {
+        fn retire(&mut self, name: &str) {
+            self.ledger.0.get_mut(name).unwrap().retired = true;
+        }
+    }
+
+    #[test]
+    fn a_leads_watch_over_a_paused_herd_with_no_open_worker_says_drained() {
+        let mut world = Checked::new();
+        world.retire("lh-1");
+        world.pause();
+        assert_eq!(world.once("w9:p0").unwrap(), ["cards drained"]);
+    }
+
+    #[test]
+    fn a_leads_watch_is_not_drained_with_a_worker_open_or_its_herd_unpaused() {
+        let done_not_retired = Checked::new();
+        done_not_retired.touch("done-1", "");
+        done_not_retired.pause();
+        assert_eq!(done_not_retired.once("w9:p0"), None);
+
+        let mut unpaused = Checked::new();
+        unpaused.retire("lh-1");
+        assert_eq!(unpaused.once("w9:p0"), None);
+
+        let mut unreadable = Checked::new();
+        unreadable.retire("lh-1");
+        fs::create_dir_all(&unreadable.paths.paused).unwrap();
+        fs::write(unreadable.paths.paused.join("cards"), "not json").unwrap();
+        assert_eq!(unreadable.once("w9:p0"), None);
+    }
+
+    #[test]
+    fn a_resume_between_polls_leaves_no_drained_line() {
+        let world = Checked::new();
+        let state = tempfile::tempdir().unwrap();
+        let mut file = FileLedger::new(state.path().join("ledger.json"));
+        for entry in world.ledger.0.values() {
+            file.record(entry.clone()).unwrap();
+        }
+        world.pause();
+        let dir = world.config.path().join("reports");
+        let mut clock = steps(|poll| {
+            if poll == 1 {
+                let mut ledger = FileLedger::new(state.path().join("ledger.json"));
+                ledger
+                    .update("lh-1", &mut |e| {
+                        e.retired = true;
+                        Ok(())
+                    })
+                    .unwrap();
+                world.resume();
+            }
+        });
+        let req = Request {
+            timeout: Some(Duration::from_secs(10)),
+            ..world.request("w9:p0")
+        };
+        assert_eq!(run(&world.herdr, &file, &dir, &req, &mut clock), None);
+    }
+
+    impl Checked {
+        /// One poll of a fresh shepherd's watch.
+        fn shepherd(&self) -> Option<Vec<String>> {
+            let dir = self.config.path().join("reports");
+            let req = Request {
+                herd_files: Some(&self.paths),
+                ..ONCE
+            };
+            run(&self.herdr, &self.ledger, &dir, &req, &mut steps(|_| {}))
+        }
+    }
+
+    #[test]
+    fn the_shepherds_watch_says_all_drained_once_every_herd_is_paused_and_drained() {
+        let mut world = Checked::new();
+        world.retire("lh-1");
+        world.pause();
+        world.herdr.set_status("lead-cards", AgentStatus::Idle);
+        assert_eq!(world.shepherd().unwrap(), ["all drained"]);
+    }
+
+    impl Checked {
+        /// A paused herd whose only member left is its idle lead.
+        fn drained() -> Checked {
+            let mut world = Checked::new();
+            world.retire("lh-1");
+            world.pause();
+            world.herdr.set_status("lead-cards", AgentStatus::Idle);
+            world
+        }
+
+        fn add(&mut self, record: AgentRecord, status: AgentStatus) {
+            let herdr = std::mem::replace(&mut self.herdr, FakeHerdr::new(&[]));
+            self.herdr = herdr.with_live_agent(Some(&record.name), None, &record.pane_id);
+            self.herdr.set_status(&record.name, status);
+            self.ledger.0.insert(record.name.clone(), record);
+        }
+    }
+
+    #[test]
+    fn a_member_in_no_herd_drains_with_the_herds_only_once_it_stops_working() {
+        let mut world = Checked::drained();
+        world.add(member("solo", "w9:p3", None), AgentStatus::Working);
+        assert_eq!(world.shepherd(), None);
+
+        world.herdr.set_status("solo", AgentStatus::Idle);
+        assert_eq!(world.shepherd().unwrap(), ["all drained"]);
+    }
+
+    #[test]
+    fn the_shepherds_watch_is_not_drained_while_anything_it_reads_may_still_work() {
+        let working_lead = Checked::drained();
+        working_lead
+            .herdr
+            .set_status("lead-cards", AgentStatus::Working);
+        assert_eq!(working_lead.shepherd(), None, "working lead");
+
+        let mut open_worker = Checked::drained();
+        open_worker.ledger.0.get_mut("lh-1").unwrap().retired = false;
+        assert_eq!(open_worker.shepherd(), None, "open worker");
+
+        let unpaused = Checked::drained();
+        unpaused.resume();
+        assert_eq!(unpaused.shepherd(), None, "unpaused herd");
+
+        let mut unled = Checked::drained();
+        unled.add(member("zpr-2", "w9:p2", Some("prs")), AgentStatus::Idle);
+        assert_eq!(unled.shepherd(), None, "a member of an unled herd");
+
+        let mut no_herds = Checked::new();
+        no_herds.ledger.0.clear();
+        assert_eq!(no_herds.shepherd(), None, "nothing to drain");
+
+        let shell = Checked::drained();
+        put(
+            &shell.config.path().join("reports"),
+            "lead-cards",
+            stop(1, 0),
+        );
+        assert_eq!(
+            shell.shepherd().unwrap(),
+            ["lead-cards paused  1 shell"],
+            "the stop wakes it first"
+        );
+        assert_eq!(shell.shepherd(), None, "a lead with a shell in flight");
+
+        let unreadable = Checked::drained();
+        let reports = unreadable.config.path().join("reports");
+        fs::create_dir_all(reports.join("lead-cards.jsonl")).unwrap();
+        assert_eq!(unreadable.shepherd(), None, "an unreadable mailbox");
+    }
+
+    #[test]
+    fn a_resume_between_the_shepherds_polls_leaves_no_drained_line() {
+        let world = Checked::drained();
+        world.herdr.set_status("lead-cards", AgentStatus::Working);
+        let dir = world.config.path().join("reports");
+        let mut clock = steps(|poll| {
+            if poll == 1 {
+                world.herdr.set_status("lead-cards", AgentStatus::Idle);
+                world.resume();
+            }
+        });
+        let req = Request {
+            timeout: Some(Duration::from_secs(10)),
+            herd_files: Some(&world.paths),
+            ..EVERY
+        };
+        assert_eq!(
+            run(&world.herdr, &world.ledger, &dir, &req, &mut clock),
+            None
+        );
     }
 }

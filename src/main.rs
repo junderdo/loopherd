@@ -354,6 +354,8 @@ enum Command {
     /// with loopherd's Stop, StopFailure and SessionStart hooks installed. Run
     /// from no member's pane, it adds `shepherd handoff <n>k over <limit>k`
     /// once per session when its caller's Claude is past the shepherd's limit.
+    /// It exits with `<herd> drained` (a lead's) or `all drained` (the
+    /// shepherd's) once the herds it reads are paused with nothing in flight.
     Watch {
         /// Only members of these herds; a led herd narrows the shepherd to its lead.
         herds: Vec<String>,
