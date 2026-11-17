@@ -1,9 +1,11 @@
 //! `loopherd view`: the herd view, live.
 
+mod mail;
 mod since;
 pub mod theme;
 mod watcher;
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -24,6 +26,7 @@ use crate::herdr::events::Subscriber;
 use crate::ledger::Ledger;
 use crate::pause::Pauses;
 use crate::status::{Read, aligned, read, row, sections, stray_lines, widths};
+use mail::{Mail, Waiting, waiting};
 use since::Since;
 use theme::Theme;
 use watcher::{Signal, Watch, watch};
@@ -48,18 +51,25 @@ pub enum Request {
 }
 
 pub enum Response {
-    Read(Options, Result<Read>),
+    Read(Options, Result<(Read, Mail)>),
     Focus(String, Result<()>),
 }
 
-pub fn serve(
-    request: Request,
-    herdr: &dyn Herdr,
-    ledger: &dyn Ledger,
-    pauses: &Pauses,
-) -> Response {
+/// Where the reader finds what isn't in herdr or the ledger.
+pub struct Dirs {
+    pub pauses: Pauses,
+    pub mailboxes: PathBuf,
+}
+
+pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger, dirs: &Dirs) -> Response {
     match request {
-        Request::Read(options) => Response::Read(options, read(herdr, ledger, pauses, options)),
+        Request::Read(options) => {
+            let read = read(herdr, ledger, &dirs.pauses, options).map(|read| {
+                let mail = Mail::read(&dirs.mailboxes, &read.view);
+                (read, mail)
+            });
+            Response::Read(options, read)
+        }
         Request::Focus(pane) => {
             let result = herdr.focus(&pane);
             Response::Focus(pane, result)
@@ -68,7 +78,7 @@ pub fn serve(
 }
 
 /// Serves requests in order on its own thread until the sender drops.
-fn spawn_reader<H, L>(herdr: H, ledger: L, pauses: Pauses) -> (Sender<Request>, Receiver<Response>)
+fn spawn_reader<H, L>(herdr: H, ledger: L, dirs: Dirs) -> (Sender<Request>, Receiver<Response>)
 where
     H: Herdr + Send + 'static,
     L: Ledger + Send + 'static,
@@ -77,10 +87,7 @@ where
     let (outbox, responses) = mpsc::channel();
     std::thread::spawn(move || {
         for request in inbox {
-            if outbox
-                .send(serve(request, &herdr, &ledger, &pauses))
-                .is_err()
-            {
+            if outbox.send(serve(request, &herdr, &ledger, &dirs)).is_err() {
                 break;
             }
         }
@@ -94,6 +101,7 @@ pub struct App {
     /// The first tick, from which the spinner's frame counts.
     opened: Option<Instant>,
     read: Option<Read>,
+    mail: Mail,
     since: Since,
     selected: usize,
     /// The selected row's identity, to keep it selected as rows re-sort.
@@ -155,6 +163,7 @@ impl App {
             theme,
             opened: None,
             read: None,
+            mail: Mail::default(),
             since: Since::default(),
             selected: 0,
             selected_key: None,
@@ -210,9 +219,10 @@ impl App {
             Response::Read(_, result) => {
                 self.reading = None;
                 self.polled = Some(now);
-                let read = result?;
+                let (read, mail) = result?;
                 self.since = self.since.observe(&read.view, now);
                 self.read = Some(read);
+                self.mail = mail;
                 let kept = self
                     .selected_key
                     .as_ref()
@@ -261,18 +271,61 @@ impl App {
             .flat_map(|n| wrapped(n, inner.width.saturating_sub(1)))
             .collect();
         // Notes keep half the space at most, and the newest when cut.
-        let room = inner.height.saturating_sub(1) / 2;
+        let room = inner.height.saturating_sub(2) / 2;
         let notes_height = notes.len().min(room as usize);
-        let [body, notes_area, footer] = Layout::vertical([
+        let [banner, body, notes_area, footer] = Layout::vertical([
+            Constraint::Length(1),
             Constraint::Min(0),
             Constraint::Length(notes_height as u16),
             Constraint::Length(1),
         ])
         .areas(inner);
+        frame.render_widget(self.banner(banner.width), banner);
         self.draw_panels(frame.buffer_mut(), body, now);
         let newest = notes[notes.len() - notes_height..].to_vec();
         frame.render_widget(Paragraph::new(newest), notes_area);
         frame.render_widget(self.keys(), footer);
+    }
+
+    /// What waits on the human, naming as many as fit in `width`.
+    fn banner(&self, width: u16) -> Line<'static> {
+        let Some(read) = &self.read else {
+            return Line::default();
+        };
+        let Waiting {
+            questions,
+            blocked,
+            items,
+        } = waiting(&read.view, &self.mail);
+        // Without herdr's agents every status is unknown, blocked included.
+        let statuses_read = read.code == 0;
+        if items.is_empty() && statuses_read {
+            return Line::styled(" nothing waiting on you", Modifier::DIM);
+        }
+        let blocked = match statuses_read {
+            true => blocked.to_string(),
+            false => "?".into(),
+        };
+        let plural = if questions == 1 { "" } else { "s" };
+        let mut text = format!(" ⚑ {questions} question{plural} · {blocked} blocked");
+        let width = width as usize;
+        let columns = |s: &str| Span::raw(s).width();
+        for (i, item) in items.iter().enumerate() {
+            let separator = if i == 0 { " — " } else { ", " };
+            let ellipsis = if i + 1 < items.len() {
+                columns(" …")
+            } else {
+                0
+            };
+            let wanted = [&text, separator, item].map(columns);
+            if wanted.iter().sum::<usize>() + ellipsis > width {
+                text.push_str(" …");
+                break;
+            }
+            text.push_str(separator);
+            text.push_str(item);
+        }
+        Line::styled(text, self.theme.title())
     }
 
     fn block(&self) -> Block<'static> {
@@ -427,6 +480,8 @@ impl App {
                     "gone: no live agent matches it; `loopherd revive` can bring it back".into(),
                 );
             }
+            // Before herdr's problem, since the notes keep the newest when cut.
+            notes.extend(self.mail.warnings.iter().cloned());
             notes.extend(
                 read.problem
                     .iter()
@@ -602,7 +657,7 @@ pub fn run<H, S, L>(
     herdr: H,
     subscriber: S,
     ledger: L,
-    pauses: Pauses,
+    dirs: Dirs,
     options: Options,
     theme: Theme,
 ) -> Result<i32>
@@ -612,7 +667,7 @@ where
     L: Ledger + Send + 'static,
 {
     catch_stop_signals()?;
-    let (requests, responses) = spawn_reader(herdr, ledger, pauses);
+    let (requests, responses) = spawn_reader(herdr, ledger, dirs);
     let watch = watch(subscriber);
     let mut terminal = ratatui::try_init()?;
     let result = run_loop(
@@ -712,6 +767,9 @@ mod tests {
     use crate::herdr::fake::{FakeHerdr, FakeSubscriber, Which};
     use crate::herdr::{Agent, AgentStatus};
     use crate::ledger::{AgentRecord, MemLedger};
+    use crate::report::{self, Body, Entry};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::SystemTime;
 
     fn entry(name: &str, herd: Option<&str>) -> AgentRecord {
         AgentRecord {
@@ -785,16 +843,7 @@ mod tests {
     fn themed(theme: Theme, herdr: &FakeHerdr, ledger: &MemLedger, now: Instant) -> App {
         let mut app = App::new(Options::default(), theme);
         let request = app.tick(now).expect("first read is due");
-        app.apply(
-            serve(
-                request,
-                herdr,
-                ledger,
-                &Pauses::under(std::path::Path::new("/nonexistent")),
-            ),
-            now,
-        )
-        .unwrap();
+        app.apply(serve_quiet(request, herdr, ledger), now).unwrap();
         app
     }
 
@@ -808,7 +857,15 @@ mod tests {
         let mut app = App::new(Options::default(), truecolor());
         let request = app.tick(now).unwrap();
         app.apply(
-            serve(request, &herdr(), &ledger(), &Pauses::under(root.path())),
+            serve(
+                request,
+                &herdr(),
+                &ledger(),
+                &Dirs {
+                    pauses: Pauses::under(root.path()),
+                    mailboxes: quiet_mail(&ledger()).path().into(),
+                },
+            ),
             now,
         )
         .unwrap();
@@ -824,13 +881,314 @@ mod tests {
     }
 
     fn refresh(app: &mut App, herdr: &FakeHerdr, ledger: &MemLedger, now: Instant) {
-        let response = serve(
-            Request::Read(app.options),
-            herdr,
-            ledger,
-            &Pauses::under(std::path::Path::new("/nonexistent")),
-        );
+        let response = serve_quiet(Request::Read(app.options), herdr, ledger);
         app.apply(response, now).unwrap();
+    }
+
+    /// A mailbox per ledger member holding only its `start`.
+    fn quiet_mail(ledger: &MemLedger) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ledger.0.keys() {
+            post(dir.path(), name, Body::Start);
+        }
+        dir
+    }
+
+    fn post(dir: &std::path::Path, name: &str, body: Body) {
+        report::append(dir, name, &Entry::new(SystemTime::now(), body)).unwrap();
+    }
+
+    fn stop() -> Body {
+        Body::Stop(report::Stop {
+            background: report::Tally::Known(report::Background::default()),
+            crons: report::Tally::Known(0),
+            error: None,
+            session: None,
+        })
+    }
+
+    fn question(text: &str) -> Body {
+        Body::Question { text: text.into() }
+    }
+
+    fn done(text: &str) -> Body {
+        Body::Done { text: text.into() }
+    }
+
+    fn dirs(mailboxes: &std::path::Path) -> Dirs {
+        Dirs {
+            pauses: Pauses::under(std::path::Path::new("/nonexistent")),
+            mailboxes: mailboxes.into(),
+        }
+    }
+
+    fn nowhere() -> Dirs {
+        dirs(std::path::Path::new("/nonexistent"))
+    }
+
+    fn serve_quiet(request: Request, herdr: &FakeHerdr, ledger: &MemLedger) -> Response {
+        serve(request, herdr, ledger, &dirs(quiet_mail(ledger).path()))
+    }
+
+    /// The app after one read with `mailboxes`.
+    fn app_with_mail(
+        herdr: &FakeHerdr,
+        ledger: &MemLedger,
+        mailboxes: &std::path::Path,
+        now: Instant,
+    ) -> App {
+        let mut app = App::new(Options::default(), truecolor());
+        let request = app.tick(now).unwrap();
+        app.apply(serve(request, herdr, ledger, &dirs(mailboxes)), now)
+            .unwrap();
+        app
+    }
+
+    /// The banner: the window's first row inside its border.
+    fn banner(terminal: &Terminal<TestBackend>) -> String {
+        text(terminal).swap_remove(1)
+    }
+
+    #[test]
+    fn the_banner_counts_waiting_questions_and_blocked_members_in_bold_orange() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post(mail.path(), "c", question("which base?"));
+        let terminal = render(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert_eq!(
+            banner(&terminal),
+            "⚑ 1 question · 1 blocked — c question, b blocked"
+        );
+        for x in [2, 30] {
+            let c = cell(&terminal, (x, 1));
+            assert_eq!(c.fg, ORANGE, "x {x}");
+            assert!(c.modifier.contains(Modifier::BOLD), "x {x}");
+        }
+    }
+
+    #[test]
+    fn with_herdr_unreachable_the_blocked_count_is_unknown_not_zero() {
+        let ledger = ledger();
+        let mut herdr = herdr();
+        herdr.unreachable = true;
+        let now = Instant::now();
+        let mail = quiet_mail(&ledger);
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        assert_eq!(banner(&render(&app, now)), "⚑ 0 questions · ? blocked");
+        post(mail.path(), "c", question("which base?"));
+        let mut app = app;
+        refresh_with_mail(&mut app, &herdr, &ledger, mail.path(), now);
+        assert_eq!(
+            banner(&render(&app, now)),
+            "⚑ 1 question · ? blocked — c question"
+        );
+    }
+
+    #[test]
+    fn with_herdrs_agent_list_malformed_the_blocked_count_is_unknown() {
+        let ledger = ledger();
+        let mut herdr = herdr();
+        herdr.malformed_agents = true;
+        let now = Instant::now();
+        let mail = quiet_mail(&ledger);
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        assert_eq!(banner(&render(&app, now)), "⚑ 0 questions · ? blocked");
+    }
+
+    fn refresh_with_mail(
+        app: &mut App,
+        herdr: &FakeHerdr,
+        ledger: &MemLedger,
+        mailboxes: &std::path::Path,
+        now: Instant,
+    ) {
+        let response = serve(Request::Read(app.options), herdr, ledger, &dirs(mailboxes));
+        app.apply(response, now).unwrap();
+    }
+
+    #[test]
+    fn with_nothing_waiting_the_banner_is_a_dim_nothing_waiting_on_you() {
+        let ledger = ledger();
+        let herdr = FakeHerdr::new(&[("w1", "main")])
+            .with_raw_agent(agent(Some("a"), "w1:pa", AgentStatus::Working))
+            .with_raw_agent(agent(Some("b"), "w1:pb", AgentStatus::Idle));
+        let now = Instant::now();
+        let mail = quiet_mail(&ledger);
+        let terminal = render(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert_eq!(banner(&terminal), "nothing waiting on you");
+        assert!(cell(&terminal, (2, 1)).modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn the_banner_names_members_as_far_as_the_width_allows_then_an_ellipsis() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        for name in ["a", "c", "old"] {
+            post(mail.path(), name, question("?"));
+        }
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        assert_eq!(
+            banner(&render_at(&app, now, 48, 14)),
+            "⚑ 3 questions · 1 blocked — a question …"
+        );
+        assert_eq!(
+            banner(&render_at(&app, now, 72, 14)),
+            "⚑ 3 questions · 1 blocked — a question, c question, old question …"
+        );
+        assert_eq!(
+            banner(&render_at(&app, now, 80, 14)),
+            "⚑ 3 questions · 1 blocked — a question, c question, old question, b blocked"
+        );
+    }
+
+    #[test]
+    fn the_banner_reserves_the_ellipsis_by_its_width_not_its_bytes() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        for name in ["a", "c", "old"] {
+            post(mail.path(), name, question("?"));
+        }
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        assert_eq!(
+            banner(&render_at(&app, now, 55, 14)),
+            "⚑ 3 questions · 1 blocked — a question, c question …"
+        );
+        assert_eq!(
+            banner(&render_at(&app, now, 54, 14)),
+            "⚑ 3 questions · 1 blocked — a question …"
+        );
+    }
+
+    #[test]
+    fn the_banner_measures_a_wide_name_by_the_columns_it_takes() {
+        let mut ledger = ledger();
+        let wide = entry("日本語日本語日本語", None);
+        ledger.0.insert(wide.name.clone(), wide);
+        let (herdr, now) = (herdr(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post(mail.path(), "日本語日本語日本語", question("?"));
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        assert_eq!(
+            banner(&render_at(&app, now, 52, 14)),
+            "⚑ 1 question · 1 blocked …"
+        );
+        // The test buffer shows a blank cell after each double-width glyph.
+        let wide_fits = banner(&render_at(&app, now, 64, 14)).replace(' ', "");
+        assert!(
+            wide_fits.ends_with("—日本語日本語日本語question…"),
+            "{wide_fits}"
+        );
+    }
+
+    #[test]
+    fn a_question_answered_by_a_later_start_or_followed_by_a_done_is_not_waiting() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post(mail.path(), "a", question("restarted since"));
+        post(mail.path(), "a", Body::Start);
+        post(mail.path(), "c", question("finished anyway"));
+        post(mail.path(), "c", done("PR opened"));
+        post(mail.path(), "old", question("still open"));
+        post(mail.path(), "old", Body::Note { text: "fyi".into() });
+        post(mail.path(), "old", stop());
+        let terminal = render(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert_eq!(
+            banner(&terminal),
+            "⚑ 1 question · 1 blocked — old question, b blocked"
+        );
+    }
+
+    #[test]
+    fn a_retired_members_mailbox_is_not_counted() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post(mail.path(), "done-1", question("left behind"));
+        let mut app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        assert_eq!(
+            banner(&render(&app, now)),
+            "⚑ 0 questions · 1 blocked — b blocked"
+        );
+        let request = app.press(KeyCode::Char('a'), now).unwrap();
+        app.apply(serve(request, &herdr, &ledger, &dirs(mail.path())), now)
+            .unwrap();
+        assert_eq!(
+            banner(&render(&app, now)),
+            "⚑ 0 questions · 1 blocked — b blocked",
+            "nor when `a` lists the retired"
+        );
+    }
+
+    #[test]
+    fn a_missing_or_unreadable_mailbox_warns_without_hiding_the_others_counts() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post(mail.path(), "c", question("which base?"));
+        std::fs::remove_file(mail.path().join("a.jsonl")).unwrap();
+        let locked = std::fs::Permissions::from_mode(0o000);
+        std::fs::set_permissions(mail.path().join("old.jsonl"), locked).unwrap();
+        let terminal = render_tall(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert_eq!(
+            banner(&terminal),
+            "⚑ 1 question · 1 blocked — c question, b blocked"
+        );
+        let shown = text(&terminal);
+        assert!(
+            shown.contains(&"warning: a: no mailbox".to_string()),
+            "{shown:#?}"
+        );
+        assert!(
+            shown.contains(
+                &"warning: old: unreadable mailbox: Permission denied (os error 13)".to_string()
+            ),
+            "{shown:#?}"
+        );
+    }
+
+    #[test]
+    fn mailbox_warnings_take_a_line_each_and_never_push_herdrs_problem_off_screen() {
+        let ledger = ledger();
+        let mut herdr = herdr();
+        herdr.unreachable = true;
+        let now = Instant::now();
+        let mail = quiet_mail(&ledger);
+        let mut a = std::fs::OpenOptions::new()
+            .append(true)
+            .open(mail.path().join("a.jsonl"))
+            .unwrap();
+        std::io::Write::write_all(&mut a, "not json\n".repeat(8).as_bytes()).unwrap();
+        std::fs::remove_file(mail.path().join("c.jsonl")).unwrap();
+        let terminal = render(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        let shown = text(&terminal);
+        assert!(
+            shown
+                .iter()
+                .any(|l| l.starts_with("warning: herdr unreachable")),
+            "{shown:#?}"
+        );
+        assert!(
+            shown.contains(&"warning: a: 8 bad lines in its mailbox".to_string()),
+            "{shown:#?}"
+        );
+    }
+
+    #[test]
+    fn a_report_the_view_has_shown_is_still_printed_by_a_later_reports() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post(mail.path(), "c", question("which base?"));
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        assert!(banner(&render(&app, now)).contains("c question"));
+        let filter = report::Filter {
+            names: &[],
+            herd: None,
+            all: false,
+        };
+        let printed = report::reports(&ledger, mail.path(), &filter).unwrap();
+        assert!(
+            printed.lines.iter().any(|l| l.contains("which base?")),
+            "{:#?}",
+            printed.lines
+        );
     }
 
     fn truecolor() -> Theme {
@@ -880,12 +1238,13 @@ mod tests {
             .collect()
     }
 
-    /// Where `needle` first appears on screen.
+    /// Where `needle` first appears below the banner.
     fn pos(terminal: &Terminal<TestBackend>, needle: &str) -> (u16, u16) {
         let lines = lines(terminal);
         let (y, line) = lines
             .iter()
             .enumerate()
+            .skip(2)
             .find(|(_, l)| l.contains(needle))
             .unwrap_or_else(|| panic!("no {needle:?} in {lines:#?}"));
         let x = line[..line.find(needle).unwrap()].chars().count();
@@ -949,6 +1308,7 @@ mod tests {
             lines(&terminal),
             [
                 "╭ loopherd ────────────────────────────────────────────────────────────╮",
+                "│ ⚑ 0 questions · 1 blocked — b blocked                                │",
                 "│╭ prs ───────────────────────────────────────────────────────────────╮│",
                 "││   NAME  STATUS            BRANCH  WORKTREE  PANE                   ││",
                 "││ ⚠ b     blocked           -       wt-b      w1:tb/w1:pb            ││",
@@ -961,7 +1321,6 @@ mod tests {
                 "│╰────────────────────────────────────────────────────────────────────╯│",
                 "│╭ +1 stray (live in herdr, not in loopherd's ledger) ────────────────╮│",
                 "│╰────────────────────────────────────────────────────────────────────╯│",
-                "│                                                                      │",
                 "│                                                                      │",
                 "│                                                                      │",
                 "│                                                                      │",
@@ -993,8 +1352,8 @@ mod tests {
         }
         assert_eq!(cell(&terminal, (0, 0)).symbol(), "╭");
         assert_eq!(cell(&terminal, (71, 13)).symbol(), "╯");
-        assert_eq!(pos(&terminal, " loopherd "), (1, 0));
-        let title = at(&terminal, "loopherd");
+        assert!(lines(&terminal)[0].starts_with("╭ loopherd ─"));
+        let title = cell(&terminal, (2, 0));
         assert_eq!(title.fg, ORANGE);
         assert!(title.modifier.contains(Modifier::BOLD));
     }
@@ -1147,16 +1506,8 @@ mod tests {
     fn press(app: &mut App, keys: &[KeyCode], herdr: &FakeHerdr, ledger: &MemLedger) {
         for key in keys {
             if let Some(request) = app.press(*key, Instant::now()) {
-                app.apply(
-                    serve(
-                        request,
-                        herdr,
-                        ledger,
-                        &Pauses::under(std::path::Path::new("/nonexistent")),
-                    ),
-                    Instant::now(),
-                )
-                .unwrap();
+                app.apply(serve_quiet(request, herdr, ledger), Instant::now())
+                    .unwrap();
             }
         }
     }
@@ -1173,7 +1524,7 @@ mod tests {
         );
         let terminal = render_tall(&app, now);
         assert_eq!(
-            lines(&terminal)[1..20],
+            lines(&terminal)[2..21],
             [
                 "│╭ old-herd (retired only) ───────────────────────────────────────────╮│",
                 "│╰────────────────────────────────────────────────────────────────────╯│",
@@ -1224,7 +1575,7 @@ mod tests {
         refresh(&mut app, &herdr, &ledger, t0 + Duration::from_secs(2));
         let terminal = render(&app, t0 + Duration::from_secs(182));
         assert_eq!(
-            text(&terminal)[4],
+            text(&terminal)[5],
             "✓ a     done     for 3m   -       wt-a      w1:ta/w1:pa"
         );
         assert_eq!(
@@ -1416,11 +1767,7 @@ mod tests {
     fn run_scripted(herdr: FakeHerdr, keys: Vec<Option<KeyEvent>>, stop: i32) -> Option<i32> {
         let (done, finished) = mpsc::channel();
         std::thread::spawn(move || {
-            let (requests, responses) = spawn_reader(
-                herdr,
-                ledger(),
-                Pauses::under(std::path::Path::new("/nonexistent")),
-            );
+            let (requests, responses) = spawn_reader(herdr, ledger(), nowhere());
             let watch = watch(FakeSubscriber::default());
             let mut terminal = Terminal::new(TestBackend::new(72, 14)).unwrap();
             let mut keys = keys.into_iter();
@@ -1508,28 +1855,15 @@ mod tests {
     fn a_read_for_options_since_toggled_is_ignored() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let mut app = app(&herdr, &ledger, now);
-        let stale = serve(
-            Request::Read(app.options),
-            &herdr,
-            &ledger,
-            &Pauses::under(std::path::Path::new("/nonexistent")),
-        );
+        let stale = serve_quiet(Request::Read(app.options), &herdr, &ledger);
         let toggled = app.press(KeyCode::Char('s'), now).unwrap();
         app.apply(stale, now).unwrap();
         assert!(
             !text(&render_tall(&app, now))
                 .contains(&"w2:p7  /src/elsewhere  poking around".to_string())
         );
-        app.apply(
-            serve(
-                toggled,
-                &herdr,
-                &ledger,
-                &Pauses::under(std::path::Path::new("/nonexistent")),
-            ),
-            now,
-        )
-        .unwrap();
+        app.apply(serve_quiet(toggled, &herdr, &ledger), now)
+            .unwrap();
         assert!(
             text(&render_tall(&app, now))
                 .contains(&"w2:p7  /src/elsewhere  poking around".to_string())
@@ -1563,27 +1897,11 @@ mod tests {
         app.invalidate();
         app.invalidate();
         assert_eq!(app.tick(soon), None, "one read in flight at a time");
-        app.apply(
-            serve(
-                in_flight,
-                &herdr,
-                &ledger,
-                &Pauses::under(std::path::Path::new("/nonexistent")),
-            ),
-            soon,
-        )
-        .unwrap();
+        app.apply(serve_quiet(in_flight, &herdr, &ledger), soon)
+            .unwrap();
         let follow_up = app.tick(soon).expect("one read follows the events");
-        app.apply(
-            serve(
-                follow_up,
-                &herdr,
-                &ledger,
-                &Pauses::under(std::path::Path::new("/nonexistent")),
-            ),
-            soon,
-        )
-        .unwrap();
+        app.apply(serve_quiet(follow_up, &herdr, &ledger), soon)
+            .unwrap();
         assert_eq!(app.tick(soon), None);
     }
 
@@ -1595,16 +1913,8 @@ mod tests {
         assert_eq!(app.tick(t0 + Duration::from_secs(9)), None);
         let request = app.tick(t0 + Duration::from_secs(10)).unwrap();
         let t1 = t0 + Duration::from_secs(10);
-        app.apply(
-            serve(
-                request,
-                &herdr,
-                &ledger,
-                &Pauses::under(std::path::Path::new("/nonexistent")),
-            ),
-            t1,
-        )
-        .unwrap();
+        app.apply(serve_quiet(request, &herdr, &ledger), t1)
+            .unwrap();
         app.set_live(false);
         assert_eq!(app.tick(t1 + Duration::from_secs(1)), None);
         assert!(app.tick(t1 + Duration::from_secs(2)).is_some());
@@ -1639,7 +1949,15 @@ mod tests {
         let mut app = App::new(Options::default(), truecolor());
         app.set_live(true);
         let request = app.tick(t0).unwrap();
-        let response = serve(request, &herdr, &ledger, &Pauses::under(root.path()));
+        let response = serve(
+            request,
+            &herdr,
+            &ledger,
+            &Dirs {
+                pauses: Pauses::under(root.path()),
+                mailboxes: quiet_mail(&ledger).path().into(),
+            },
+        );
         app.apply(response, t0).unwrap();
         assert!(
             text(&render(&app, t0))
@@ -1661,11 +1979,7 @@ mod tests {
         let subscriber = fake.clone();
         let (quit, quitting) = mpsc::channel::<()>();
         let looping = std::thread::spawn(move || {
-            let (requests, responses) = spawn_reader(
-                herdr,
-                ledger(),
-                Pauses::under(std::path::Path::new("/nonexistent")),
-            );
+            let (requests, responses) = spawn_reader(herdr, ledger(), nowhere());
             let watch = watch(subscriber);
             let mut terminal = Terminal::new(TestBackend::new(72, 14)).unwrap();
             run_loop(
