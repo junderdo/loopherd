@@ -504,11 +504,13 @@ shepherd:
   to re-arm whenever nothing holds `watch-<your name>.lock`, whether herdr
   resumed you or revive did. Re-read `loopherd status` and `loopherd reports
   --all --tail 40` (for a fuller history, `--since <time>` or plain
-  `--all`), then arm your watch again.
+  `--all`), and of this skill only `loopherd --skill --section lead`, then
+  arm your watch again.
 - **On each wake** re-read `loopherd status` and `loopherd reports --all
   --tail 40` (for a fuller history, `--since <time>` or plain `--all`)
   before acting: auto-compaction drops detail, and your state lives in the
-  tracker, ledger and mailbox, not in your context.
+  tracker, ledger and mailbox, not in your context. After a compaction,
+  re-read `loopherd --skill --section lead` too, not the whole skill.
 - **Your own handoff.** Past your limit, your Stop hook asks you for a
   handoff like any member's (see Handoffs): stop your own watch (TaskStop
   it, or kill it), write it, report `--kind handoff`, and end your turn. The shepherd restarts you. Restart your

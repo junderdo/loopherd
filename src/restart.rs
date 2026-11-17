@@ -226,8 +226,8 @@ fn resume_prompt(lead: bool, handoff: &Path) -> String {
 
 const LEAD_REARM: &str = "Your `loopherd watch` is no longer running: \
     run `loopherd status` and `loopherd reports --all --tail 40` (for a fuller history, \
-    `--since <time>` or plain `--all`), then re-arm your watch per the \
-    Lead section of `loopherd --skill`.";
+    `--since <time>` or plain `--all`), then re-read only \
+    `loopherd --skill --section lead` and re-arm your watch per it.";
 
 /// `old_live` is the session Claude continued `old` in before the `/clear`; a
 /// hook moving the ledger there isn't the clear.
@@ -708,8 +708,8 @@ mod tests {
     fn a_leads_resume_prompt_has_it_re_arm_its_watch_and_a_workers_doesnt() {
         let rearm = "Your `loopherd watch` is no longer running: run `loopherd status` and \
                      `loopherd reports --all --tail 40` (for a fuller history, `--since <time>` \
-                     or plain `--all`), then re-arm your watch per the Lead section of \
-                     `loopherd --skill`.";
+                     or plain `--all`), then re-read only `loopherd --skill --section lead` \
+                     and re-arm your watch per it.";
         for (lead, wants) in [(true, true), (false, false)] {
             let w = World::new();
             w.handed_off();

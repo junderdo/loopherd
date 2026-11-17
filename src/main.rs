@@ -72,8 +72,11 @@ use crate::worktree::{remote_timeout, repo_root};
 )]
 struct Cli {
     /// Print the shepherd's and lead's guide as a Claude SKILL.md.
-    #[arg(long, exclusive = true)]
+    #[arg(long)]
     skill: bool,
+    /// With --skill, print only the `## <SECTION>` section, e.g. `lead`.
+    #[arg(long, requires = "skill")]
+    section: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -511,8 +514,23 @@ struct AddArgs {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     if cli.skill {
-        print!("{}", skill::SKILL);
-        return ExitCode::SUCCESS;
+        let Some(name) = cli.section else {
+            print!("{}", skill::SKILL);
+            return ExitCode::SUCCESS;
+        };
+        return match skill::section(&name) {
+            Some(section) => {
+                print!("{section}");
+                ExitCode::SUCCESS
+            }
+            None => {
+                eprintln!(
+                    "error: the skill has no section `{name}`; try one of: {}",
+                    skill::section_names().join(", ")
+                );
+                ExitCode::from(2)
+            }
+        };
     }
     let Some(command) = cli.command else {
         Cli::command()
