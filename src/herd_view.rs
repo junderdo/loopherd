@@ -28,6 +28,9 @@ pub struct Member {
     pub branch: Option<String>,
     /// The worktree's basename; `None` when the entry has no worktree.
     pub worktree: Option<String>,
+    /// The worktree's full path, for the TUI's detail pane.
+    #[serde(skip)]
+    pub worktree_path: Option<PathBuf>,
     pub pane: String,
     pub tab: Option<String>,
     /// Its herd's lead, not a worker.
@@ -180,6 +183,7 @@ fn member(
             dir.file_name()
                 .map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into())
         }),
+        worktree_path: record.worktree.clone(),
         pane: live.map_or(&record.pane_id, |a| &a.pane_id).clone(),
         tab: live.map(|a| a.tab_id.clone()),
         lead: record.is_lead(),

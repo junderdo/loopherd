@@ -46,6 +46,16 @@ impl Mail {
         mail
     }
 
+    /// Its newest report and its newest stop.
+    pub fn latest(&self, name: &str) -> (Option<&Entry>, Option<&Entry>) {
+        let entries = self.boxes.get(name).map_or(&[][..], Vec::as_slice);
+        let newest = |is: fn(&Entry) -> bool| entries.iter().rev().find(|e| is(e));
+        (
+            newest(|e| e.report().is_some()),
+            newest(|e| matches!(e.body, Body::Stop(_))),
+        )
+    }
+
     /// Its latest question has no `start` or `done` after it.
     fn asking(&self, name: &str) -> bool {
         let entries = self.boxes.get(name).map_or(&[][..], Vec::as_slice);
