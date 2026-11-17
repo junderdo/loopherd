@@ -3005,6 +3005,20 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_may_release_a_retired_member_with_every_switch_off() {
+        let leads = ledger(vec![lead()]);
+        for command in [
+            "loopherd release lh-139",
+            "loopherd release lh-139 --keep-branch",
+            "loopherd release lh-139 --drop-branch",
+            "cargo run -- release lh-139 --drop-branch",
+        ] {
+            assert_eq!(needs(command), [], "{command}");
+            assert_eq!(run(&leads, Switches::default(), command), None, "{command}");
+        }
+    }
+
+    #[test]
     fn everyday_lead_commands_pass_with_every_switch_off() {
         let leads = ledger(vec![lead()]);
         for command in [
@@ -3014,7 +3028,6 @@ mod tests {
             "cat <<'EOF' # notes\nGreen.\nEOF",
             "gh pr view 115 --json state",
             "loopherd feed loopherd-cards",
-            "loopherd release lh-139 --drop-branch",
             "echo \"${HOME}/x\" ${arr[@]}",
             "gh pr comment 115 --body \"Fixed in \\`tool_hook.rs\\`; see \\`D17\\`.\"",
             "git commit -m \"Deny escaped backticks in \\`unreadable\\`\"",
