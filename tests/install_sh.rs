@@ -29,7 +29,7 @@ impl Release {
         fs::create_dir_all(&fake_bin).unwrap();
         executable(
             &fake_bin.join("uname"),
-            &format!(
+            format!(
                 "#!/bin/sh\ncase \"$1\" in -s) echo {os} ;; -m) echo {arch} ;; *) exit 1 ;; esac\n"
             ),
         );
@@ -64,7 +64,7 @@ impl Release {
             fs::create_dir_all(&stage).unwrap();
             executable(
                 &stage.join("loopherd"),
-                &format!("#!/bin/sh\necho \"{tag} $*\" >> '{}'\n", self.log.display()),
+                format!("#!/bin/sh\necho \"{tag} $*\" >> '{}'\n", self.log.display()),
             );
             let tarball = out.join(format!("loopherd-{target}.tar.gz"));
             run_ok(

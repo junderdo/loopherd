@@ -1,5 +1,8 @@
 //! `loopherd watch` through the binary, with herdr off PATH.
 
+mod fakes;
+
+use fakes::executable;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
@@ -439,11 +442,9 @@ impl Sandbox {
     }
 
     fn script(&self, name: &str, body: &str) -> PathBuf {
-        let source = self.path(&format!("{name}.source"));
-        fs::create_dir_all(source.parent().unwrap()).unwrap();
-        fs::write(&source, format!("#!/bin/sh\n{body}\n")).unwrap();
         let path = self.path(name);
-        executable_copy(&source, &path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        executable(&path, format!("#!/bin/sh\n{body}\n"));
         path
     }
 
@@ -456,19 +457,10 @@ impl Sandbox {
     }
 }
 
-/// Copies `from` to an executable `to` in a child process: a file this
-/// process held open for writing could leak into a sibling test's fork and
-/// make running `to` fail with ETXTBSY.
-fn executable_copy(from: &std::path::Path, to: &std::path::Path) {
+/// A copy of the loopherd under test at `to`.
+fn loopherd_copy(to: &std::path::Path) {
     fs::create_dir_all(to.parent().unwrap()).unwrap();
-    let copied = Command::new("/bin/cp").arg(from).arg(to).status().unwrap();
-    assert!(copied.success());
-    let chmod = Command::new("/bin/chmod")
-        .arg("755")
-        .arg(to)
-        .status()
-        .unwrap();
-    assert!(chmod.success());
+    executable(to, fs::read(env!("CARGO_BIN_EXE_loopherd")).unwrap());
 }
 
 /// `path`'s text once something writes it, failing after 10s.
@@ -581,7 +573,7 @@ impl Sandbox {
         self.notify_config("");
         fs::write(self.mailbox(), "").unwrap();
         let old = self.path("old/loopherd");
-        executable_copy(env!("CARGO_BIN_EXE_loopherd").as_ref(), &old);
+        loopherd_copy(&old);
         let watch = self.loopherd(&["watch", "--timeout", "10"]);
         let watch = Command::new(&old)
             .args(watch.get_args())
@@ -602,10 +594,7 @@ impl Sandbox {
 #[test]
 fn a_watch_whose_binary_was_replaced_sends_through_loopherd_on_path() {
     let sandbox = Sandbox::new();
-    executable_copy(
-        env!("CARGO_BIN_EXE_loopherd").as_ref(),
-        &sandbox.path("bin/loopherd"),
-    );
+    loopherd_copy(&sandbox.path("bin/loopherd"));
 
     let watched = sandbox.notify_watch_from_a_replaced_binary("Which way?");
 

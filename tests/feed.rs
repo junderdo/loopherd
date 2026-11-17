@@ -1,8 +1,10 @@
 //! `loopherd feed` through the binary.
 
+mod fakes;
+
+use fakes::executable;
 use std::fs::{self, File};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 fn write_herd(config: &Path, source: &str) {
@@ -115,12 +117,10 @@ fn feed_exits_4_when_malformed_source_lines_are_its_only_errors() {
     )
     .unwrap();
     let shim = bin.path().join("herdr");
-    fs::write(
+    executable(
         &shim,
         "#!/bin/sh\necho '{\"result\": {\"workspaces\": [], \"agents\": []}}'\n",
-    )
-    .unwrap();
-    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_loopherd"))
         .args(["feed", "prs", "--dry-run"])

@@ -50,7 +50,7 @@ impl Sandbox {
         fs::create_dir_all(root.join("agents")).unwrap();
         executable(
             &root.join("scripts/install"),
-            &fs::read_to_string(format!("{REPO}/scripts/install")).unwrap(),
+            fs::read_to_string(format!("{REPO}/scripts/install")).unwrap(),
         );
         for file in ["install-agents.bash", "install-skills.bash"] {
             fs::copy(
@@ -78,7 +78,7 @@ impl Sandbox {
         executable(&built, "#!/bin/sh\n");
         executable(
             &fake_bin.join("cargo"),
-            &format!(
+            format!(
                 "#!/bin/sh\necho '{{\"reason\":\"compiler-artifact\",\"target\":{{\"name\":\"loopherd\"}},\"executable\":\"{}\"}}'\n",
                 built.display()
             ),
@@ -86,7 +86,7 @@ impl Sandbox {
         let stub_dir = stub.display();
         executable(
             &fake_bin.join("claude"),
-            &format!(
+            format!(
                 r#"#!/bin/sh
 echo "claude $*" >> '{stub_dir}/log'
 [ -z "$CLAUDE_CONFIG_DIR" ] || echo "config $CLAUDE_CONFIG_DIR" >> '{stub_dir}/log'
@@ -101,7 +101,7 @@ esac
         );
         executable(
             &fake_bin.join("curl"),
-            &format!(
+            format!(
                 "#!/bin/sh\nfor a; do url=$a; done\necho \"curl $url\" >> '{stub_dir}/log'\ncat '{stub_dir}/plugin.json' 2>/dev/null || exit 22\n"
             ),
         );
