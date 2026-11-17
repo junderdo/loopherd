@@ -439,7 +439,7 @@ impl Lexed {
 
 /// A word with quotes removed, and where in `text` its first `$(…)` or
 /// backtick substitution stood.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Word {
     text: String,
     substituted_at: Option<usize>,
@@ -1387,6 +1387,23 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             }
             args.iter().for_each(|w| aliases.assign(w));
             return vec![];
+        } else if program == "watch" {
+            // getopt takes any unambiguous prefix of a long option (`--int 1`).
+            let takes_value = |w: &&str| {
+                w.len() > 2
+                    && !w.contains('=')
+                    && ["--interval", "--equexit"].iter().any(|o| o.starts_with(w))
+            };
+            let with_value: Vec<&str> = words[i + 1..]
+                .iter()
+                .map(String::as_str)
+                .filter(takes_value)
+                .chain(["-n", "-q"])
+                .collect();
+            let command = skip_options(words, i + 1, &with_value);
+            return watch_needs(&kept[command..], aliases);
+        } else if program == "find" {
+            return find_needs(&kept[i + 1..], aliases);
         } else if let Some((_, with_value)) = WRAPPERS.iter().find(|(w, _)| *w == program) {
             in_env |= program == "env";
             let options = i + 1;
@@ -1463,6 +1480,57 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             return needs_program(word, &words[i + 1..]).into_iter().collect();
         }
     }
+}
+
+/// What `watch` running `command` needs. Without `-x` it runs the words
+/// joined through `sh -c`, with it the words themselves; both readings
+/// count, so `-x` needn't be found.
+fn watch_needs(command: &[&Word], aliases: &mut Aliases) -> Vec<Switch> {
+    let mut needs = if command.iter().any(|w| w.commands_print) {
+        vec![Switch::Unreadable]
+    } else {
+        let script: Vec<&str> = command.iter().map(|w| w.text.as_str()).collect();
+        needs_with(&script.join(" "), &mut aliases.clone(), true)
+    };
+    let words: Vec<Word> = command.iter().map(|&w| w.clone()).collect();
+    add_new(&mut needs, needs_one(&words, aliases));
+    needs
+}
+
+fn add_new(needs: &mut Vec<Switch>, more: Vec<Switch>) {
+    for need in more {
+        if !needs.contains(&need) {
+            needs.push(need);
+        }
+    }
+}
+
+/// What the commands of `find`'s `-exec`, `-execdir`, `-ok` and `-okdir`
+/// need, each ended by `;`, by `+` after `{}` for `-exec` and `-execdir`
+/// only, or by the end of the words.
+fn find_needs(args: &[&Word], aliases: &mut Aliases) -> Vec<Switch> {
+    let mut needs = vec![];
+    let mut rest = args;
+    while let Some(start) = rest
+        .iter()
+        .position(|w| ["-exec", "-execdir", "-ok", "-okdir"].contains(&w.text.as_str()))
+    {
+        let batches = rest[start].text.starts_with("-exec");
+        let command = &rest[start + 1..];
+        let end = (0..command.len())
+            .find(|&at| {
+                command[at].text == ";"
+                    || (batches
+                        && command[at].text == "+"
+                        && at > 0
+                        && command[at - 1].text == "{}")
+            })
+            .unwrap_or(command.len());
+        let words: Vec<Word> = command[..end].iter().map(|&w| w.clone()).collect();
+        add_new(&mut needs, needs_one(&words, aliases));
+        rest = &command[(end + 1).min(command.len())..];
+    }
+    needs
 }
 
 /// One way a shell may read its options.
@@ -2296,6 +2364,24 @@ mod tests {
         "echo \"$(echo ')'; gh pr merge 12)\"",
         "echo $(echo \"$(echo ')')\"; gh pr merge 12)",
         "echo $(echo \"\\\")\"; gh pr merge 12)",
+        "watch -n1 gh pr merge 12",
+        "watch -n 1 -d gh pr merge 12",
+        "watch -x gh pr merge 12",
+        "watch -dx -n5 gh pr merge 12",
+        "watch --interval=1 --exec gh pr merge 12",
+        "watch 'gh pr merge 12'",
+        "watch -n1 'cd /x; gh pr merge 12'",
+        "watch -x sh -c 'gh pr merge 12'",
+        "watch --int 1 gh pr merge 12",
+        "watch --i 1 -x gh pr merge 12",
+        "find /x -exec gh pr merge 12 ';'",
+        "find /x -exec gh pr merge 12",
+        "find . -exec gh pr merge 12 \\;",
+        "find . -execdir gh pr merge {} +",
+        "find . -ok gh pr merge 12 \\;",
+        "find . -name x -okdir gh pr merge 12 \\;",
+        "find . -exec true \\; -exec gh pr merge 12 \\;",
+        "find -L . -maxdepth 1 -exec sh -c 'gh pr merge 12' \\;",
     ];
     const INSTALLS: &[&str] = &[
         "scripts/install",
@@ -2356,6 +2442,14 @@ mod tests {
         "git rebase -x --abort main",
         "echo $(echo ')'; git rebase main)",
         "echo $(echo ')'; git push --force)",
+        "watch -n1 git push --force",
+        "watch -x git push --force",
+        "watch --inter 1 git push --force",
+        "find . -ok git push origin {} + --force ';'",
+        "find . -exec git push --force \\;",
+        "find . -execdir git push -f {} +",
+        "find . -ok git push --force ';'",
+        "find . -okdir git push --force \\;",
     ];
     const ALLOWED: &[&str] = &[
         "gh pr view 12",
@@ -2418,6 +2512,13 @@ mod tests {
         "gh pr create --body \"$(cat <<'EOF'\nBody\nEOF\n)\"",
         "x=$(cat <<'EOF'\nBody\n EOF\nEOF\n); echo \"$x\"",
         "echo \"$((1 << 2))\"",
+        "watch -n5 loopherd status",
+        "watch -x -n5 loopherd status",
+        "watch -n5 'echo gh pr merge 12'",
+        "find . -name '*.rs' -exec grep -l foo {} +",
+        "find . -type f",
+        "find . -exec echo gh pr merge 12 \\;",
+        "find . -name gh -exec ls {} \\; -print",
     ];
 
     #[test]
@@ -2881,6 +2982,13 @@ mod tests {
         "cargo run --profile test -- resume h",
         "scripts/herdr-dev loopherd pause h",
         "scripts/herdr-dev cargo run -- resume h",
+        "watch -n1 loopherd pause k",
+        "watch -x -n1 loopherd pause k",
+        "watch --equ 3 loopherd pause k",
+        "find /x -exec loopherd pause k ';'",
+        "find /x -execdir loopherd pause k \\;",
+        "find /x -ok loopherd resume k \\;",
+        "find /x -okdir loopherd resume {} \\;",
     ];
 
     const LEAD_RETIRES: &[&str] = &[
@@ -2930,6 +3038,13 @@ mod tests {
         "cargo run --target-dir retire -- retire lead-h",
         "cargo run -q --target-dir retire -- retire lead-h",
         "cargo run --unknown retire -- retire lead-h",
+        "watch -n1 loopherd retire lead-k",
+        "watch -d -x loopherd retire lead-k",
+        "find /x -exec loopherd retire lead-k ';'",
+        "find /x -execdir loopherd retire lead-k \\;",
+        "find /x -ok loopherd retire lead-k \\;",
+        "find lead-h -prune -execdir loopherd retire {} +",
+        "find lead-h -prune -okdir loopherd retire {} \\;",
     ];
 
     #[test]
