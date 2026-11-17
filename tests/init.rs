@@ -734,6 +734,29 @@ fn a_dangling_symlink_at_the_herd_file_is_refused_before_any_label_is_created() 
     assert_eq!(fixture.gh_calls(), "");
 }
 
+#[test]
+fn a_dangling_herds_link_is_refused_before_any_label_is_created() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::create_dir_all(fixture.config()).unwrap();
+    std::os::unix::fs::symlink("/nonexistent", fixture.herds()).unwrap();
+
+    let out = fixture.init(&[]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        format!(
+            "loopherd init: {} is a dangling symlink; init won't write through it\n",
+            fixture.herds().display()
+        )
+    );
+    assert!(
+        !fixture.gh_calls().contains("label "),
+        "{}",
+        fixture.gh_calls()
+    );
+}
+
 fn assert_refused(fixture: &Fixture, out: &Output, stderr: &str) {
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     assert_eq!(text(&out.stderr), stderr);
