@@ -534,9 +534,20 @@ const REMOTE_TIMEOUT: Duration = Duration::from_secs(120);
 /// what `Instant` can hold, so computing it can't overflow.
 const MAX_REMOTE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Fetches origin, retrying once if another fetch in the repo won the race
+/// to update a ref; the retry finds that ref current.
 fn fetch(repo: &Path) -> Result<()> {
-    remote_git(repo, &["fetch", "--quiet", "origin"])?;
+    let args = ["fetch", "--quiet", "origin"];
+    match remote_git(repo, &args) {
+        Err(e) if lost_ref_lock_race(&e) => remote_git(repo, &args)?,
+        result => result?,
+    };
     Ok(())
+}
+
+fn lost_ref_lock_race(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<RemoteFailed>()
+        .is_some_and(|failed| failed.message.contains("cannot lock ref"))
 }
 
 fn remote_git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -1064,6 +1075,78 @@ mod tests {
 
         let env = std::fs::read_to_string(env).unwrap();
         assert!(env.lines().any(|l| l == "GIT_TERMINAL_PROMPT=0"), "{env}");
+    }
+
+    const LOST_RACE: &str = "error: cannot lock ref 'refs/remotes/origin/main': \
+                             is at 1111111 but expected 2222222";
+
+    /// Points origin at a transport that fails its first `failures` calls
+    /// with `stderr`, then serves the real origin. Returns its call log.
+    fn origin_fails_first(root: &Path, repo: &Path, failures: usize, stderr: &str) -> PathBuf {
+        let calls = root.join("calls");
+        let message = root.join("flaky-stderr");
+        std::fs::write(&message, format!("{stderr}\n")).unwrap();
+        let script = root.join("flaky-origin");
+        std::fs::write(
+            &script,
+            format!(
+                "echo call >> {calls}\n\
+                 if [ $(wc -l < {calls}) -le {failures} ]; then\n  \
+                 cat {message} >&2\n  exit 1\nfi\n\
+                 exec git upload-pack {origin}\n",
+                calls = calls.display(),
+                message = message.display(),
+                origin = root.join("origin.git").display(),
+            ),
+        )
+        .unwrap();
+        origin_runs(repo, &format!("sh {}", script.display()));
+        calls
+    }
+
+    fn call_count(calls: &Path) -> usize {
+        std::fs::read_to_string(calls).unwrap().lines().count()
+    }
+
+    #[test]
+    fn a_fetch_that_lost_a_ref_lock_race_retries_once() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let calls = origin_fails_first(root.path(), &repo, 1, LOST_RACE);
+
+        fetch(&repo).unwrap();
+
+        assert_eq!(call_count(&calls), 2);
+    }
+
+    #[test]
+    fn a_ref_lock_failure_that_lasts_fails_after_one_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let calls = origin_fails_first(root.path(), &repo, 2, LOST_RACE);
+
+        let err = fetch(&repo).unwrap_err();
+
+        assert!(format!("{err:#}").contains("cannot lock ref"), "{err:#}");
+        assert_eq!(call_count(&calls), 2);
+    }
+
+    #[test]
+    fn a_fetch_failure_that_isnt_a_lost_race_is_not_retried() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        for stderr in [
+            "fatal: repository not found",
+            "fatal: couldn't find remote ref refs/heads/nope",
+        ] {
+            let calls = origin_fails_first(root.path(), &repo, 2, stderr);
+            let _ = std::fs::remove_file(&calls);
+
+            let err = fetch(&repo).unwrap_err();
+
+            assert!(format!("{err:#}").contains(stderr), "{err:#}");
+            assert_eq!(call_count(&calls), 1, "{stderr}");
+        }
     }
 
     const CHILD_REPO: &str = "LOOPHERD_TEST_CHILD_REPO";

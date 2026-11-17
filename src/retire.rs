@@ -9,6 +9,7 @@ use anyhow::{Result, bail};
 use crate::herdr::{Agent, Herdr, Pane};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::matching::{by_name, same_session, session_conflict};
+use crate::notify::forget_marks;
 use crate::report::member_in;
 use crate::revive::find_workspace;
 use crate::worktree::{Gone, Removal, remove_if_gone, remove_if_merged, same_dir};
@@ -30,15 +31,17 @@ fn retired_since(record: &AgentRecord) -> String {
     format!("already retired (since {since})")
 }
 
-/// Retires `name` unless it already is, then closes its tab and removes its
-/// worktree when safe, so a failed or deferred close can be re-run.
-/// `own_pane` is the pane running loopherd, whose tab is never closed.
-/// Pushes one line per action to `out`, including before an error.
+/// Retires `name` unless it already is, removes its notify marks from
+/// `mailboxes`, then closes its tab and removes its worktree when safe, so a
+/// failed or deferred close can be re-run. `own_pane` is the pane running
+/// loopherd, whose tab is never closed. Pushes one line per action to `out`,
+/// including before an error; a mark left in place is a warning line.
 pub fn retire_and_close(
     herdr: &dyn Herdr,
     ledger: &mut dyn Ledger,
     name: &str,
     now: SystemTime,
+    mailboxes: &Path,
     own_pane: Option<&str>,
     out: &mut Vec<String>,
 ) -> Result<()> {
@@ -54,6 +57,7 @@ pub fn retire_and_close(
             record
         }
     };
+    out.extend(forget_marks(mailboxes, name));
     let tab_open = match agent_tab(herdr, &record, &others, own_pane)? {
         TabFate::Gone => {
             out.push("tab already gone".into());
@@ -444,7 +448,16 @@ mod tests {
 
     fn close(herdr: &FakeHerdr, ledger: &mut MemLedger) -> Vec<String> {
         let mut out = vec![];
-        retire_and_close(herdr, ledger, "a", halloween_noon(), None, &mut out).unwrap();
+        retire_and_close(
+            herdr,
+            ledger,
+            "a",
+            halloween_noon(),
+            Path::new("/nonexistent/reports"),
+            None,
+            &mut out,
+        )
+        .unwrap();
         out
     }
 
@@ -929,6 +942,91 @@ mod tests {
         FakeHerdr::new(&[("w1", "loopherd"), ("w2", "zagops")])
     }
 
+    /// Retires and closes `a`, whose tab is open in `cwd`, with `mailboxes`.
+    fn close_with_mailboxes(cwd: &Path, mailboxes: &Path) -> (MemLedger, Vec<String>) {
+        let herdr = two_workspaces();
+        let pane = herdr.add_tab("w1", "a", cwd, true);
+        let mut ledger = plain(cwd, &pane);
+        let mut out = vec![];
+        retire_and_close(
+            &herdr,
+            &mut ledger,
+            "a",
+            halloween_noon(),
+            mailboxes,
+            None,
+            &mut out,
+        )
+        .unwrap();
+        (ledger, out)
+    }
+
+    fn write_marks(mailboxes: &Path, member: &str) {
+        std::fs::create_dir_all(mailboxes).unwrap();
+        std::fs::write(
+            mailboxes.join(format!("{member}.notified")),
+            "question t1\n",
+        )
+        .unwrap();
+        std::fs::write(mailboxes.join(format!("{member}.blocked")), "").unwrap();
+    }
+
+    fn files_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn close_removes_the_members_notify_marks_and_leaves_other_files() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mailboxes = cwd.path().join("reports");
+        write_marks(&mailboxes, "a");
+        write_marks(&mailboxes, "b");
+        std::fs::write(mailboxes.join("a.jsonl"), "{}\n").unwrap();
+
+        let (ledger, out) = close_with_mailboxes(cwd.path(), &mailboxes);
+
+        assert_eq!(out, ["retired a", "closed tab w1:t1"]);
+        assert!(ledger.0["a"].retired);
+        assert_eq!(files_in(&mailboxes), ["a.jsonl", "b.blocked", "b.notified"]);
+    }
+
+    #[test]
+    fn close_without_notify_marks_retires_quietly() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mailboxes = cwd.path().join("reports");
+
+        let (ledger, out) = close_with_mailboxes(cwd.path(), &mailboxes);
+
+        assert_eq!(out, ["retired a", "closed tab w1:t1"]);
+        assert!(ledger.0["a"].retired);
+        assert!(!mailboxes.exists());
+    }
+
+    #[test]
+    fn a_mark_that_cannot_be_removed_is_a_warning_and_the_close_goes_on() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mailboxes = cwd.path().join("reports");
+        let stuck = mailboxes.join("a.notified");
+        std::fs::create_dir_all(stuck.join("inside")).unwrap();
+        std::fs::write(mailboxes.join("a.blocked"), "").unwrap();
+
+        let (ledger, out) = close_with_mailboxes(cwd.path(), &mailboxes);
+
+        assert_eq!(out.len(), 3, "{out:?}");
+        assert!(
+            out[1].starts_with(&format!("warning: remove {}: ", stuck.display())),
+            "{out:?}"
+        );
+        assert_eq!(out[2], "closed tab w1:t1");
+        assert!(ledger.0["a"].retired);
+        assert!(!mailboxes.join("a.blocked").exists());
+    }
+
     #[test]
     fn close_finds_the_tab_through_the_recorded_pane_when_the_agent_has_exited() {
         let cwd = tempfile::tempdir().unwrap();
@@ -1133,8 +1231,16 @@ mod tests {
         herdr.fail_close_tab = true;
         let mut out = vec![];
 
-        let err = retire_and_close(&herdr, &mut ledger, "a", halloween_noon(), None, &mut out)
-            .unwrap_err();
+        let err = retire_and_close(
+            &herdr,
+            &mut ledger,
+            "a",
+            halloween_noon(),
+            Path::new("/nonexistent/reports"),
+            None,
+            &mut out,
+        )
+        .unwrap_err();
 
         assert_eq!(format!("{err:#}"), "tab close refused");
         assert_eq!(out, ["retired a"]);
@@ -1153,6 +1259,7 @@ mod tests {
             &mut ledger,
             "a",
             halloween_noon(),
+            Path::new("/nonexistent/reports"),
             None,
             &mut vec![],
         )
@@ -1161,7 +1268,16 @@ mod tests {
         let later = halloween_noon() + Duration::from_secs(3600);
         let mut out = vec![];
 
-        retire_and_close(&herdr, &mut ledger, "a", later, None, &mut out).unwrap();
+        retire_and_close(
+            &herdr,
+            &mut ledger,
+            "a",
+            later,
+            Path::new("/nonexistent/reports"),
+            None,
+            &mut out,
+        )
+        .unwrap();
 
         assert_eq!(
             out,
@@ -1366,6 +1482,7 @@ mod tests {
             &mut ledger,
             "a",
             halloween_noon(),
+            Path::new("/nonexistent/reports"),
             None,
             &mut vec![],
         )
@@ -1388,6 +1505,7 @@ mod tests {
             &mut ledger,
             "a",
             halloween_noon(),
+            Path::new("/nonexistent/reports"),
             Some(&pane),
             &mut out,
         )

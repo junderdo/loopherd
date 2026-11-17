@@ -353,6 +353,21 @@ fn mark_id(path: &Path) -> Result<Option<(u64, SystemTime)>> {
     }
 }
 
+/// Removes `member`'s notify marks, for a member that will never wake a watch
+/// again. Returns a warning naming each mark that couldn't be removed.
+pub fn forget_marks(mailboxes: &Path, member: &str) -> Vec<String> {
+    ["notified", "blocked"]
+        .iter()
+        .map(|kind| mailboxes.join(format!("{member}.{kind}")))
+        .filter_map(|path| match fs::remove_file(&path) {
+            Err(e) if e.kind() != ErrorKind::NotFound => {
+                Some(format!("warning: remove {}: {e}", path.display()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Marks `member`'s question at `at` notified unless a watch already did.
 fn first_to_notify(mailboxes: &Path, member: &str, at: &str) -> Result<bool> {
     fs::create_dir_all(mailboxes).with_context(|| format!("create {}", mailboxes.display()))?;
