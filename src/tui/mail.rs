@@ -17,9 +17,15 @@ pub struct Mail {
 }
 
 impl Mail {
-    /// The mailboxes of `view`'s active members; retired ones aren't read.
+    /// The mailboxes of `view`'s members. Retired ones, listed only with
+    /// `all`, are read for the detail pane and never warned about.
     pub fn read(dir: &Path, view: &View) -> Mail {
         let mut mail = Mail::default();
+        for member in view.retired.iter().flatten() {
+            if let Ok((entries, _)) = history(dir, &member.name) {
+                mail.boxes.insert(member.name.clone(), entries);
+            }
+        }
         for member in active(view) {
             let name = &member.name;
             if !dir.join(format!("{name}.jsonl")).is_file() {
@@ -44,6 +50,16 @@ impl Mail {
             }
         }
         mail
+    }
+
+    /// Its newest report and its newest stop.
+    pub fn latest(&self, name: &str) -> (Option<&Entry>, Option<&Entry>) {
+        let entries = self.boxes.get(name).map_or(&[][..], Vec::as_slice);
+        let newest = |is: fn(&Entry) -> bool| entries.iter().rev().find(|e| is(e));
+        (
+            newest(|e| e.report().is_some()),
+            newest(|e| matches!(e.body, Body::Stop(_))),
+        )
     }
 
     /// Its latest question has no `start` or `done` after it.

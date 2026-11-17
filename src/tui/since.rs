@@ -89,6 +89,7 @@ mod tests {
             gone,
             branch: None,
             worktree: None,
+            worktree_path: None,
             pane: format!("w1:p{name}"),
             tab: None,
             lead: false,

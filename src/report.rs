@@ -27,7 +27,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Kind::Done => "done",
             Kind::Question => "question",
@@ -60,7 +60,16 @@ impl Entry {
         }
     }
 
-    fn report(&self) -> Option<(Kind, &str)> {
+    /// `2026-11-16 10:05`, in UTC like `at`; `at` itself when it won't parse.
+    pub fn when(&self) -> String {
+        match (self.at.get(..10), self.at.get(11..16)) {
+            (Some(day), Some(minute)) => format!("{day} {minute}"),
+            _ => self.at.clone(),
+        }
+    }
+
+    /// Its kind and text, unless it's a `stop` or `start`.
+    pub fn report(&self) -> Option<(Kind, &str)> {
         match &self.body {
             Body::Done { text } => Some((Kind::Done, text)),
             Body::Question { text } => Some((Kind::Question, text)),
@@ -505,10 +514,7 @@ fn mailboxes(dir: &Path) -> Result<Vec<String>> {
 }
 
 fn render(name: &str, entry: &Entry) -> Vec<String> {
-    let when = match (entry.at.get(..10), entry.at.get(11..16)) {
-        (Some(day), Some(minute)) => format!("{day} {minute}"),
-        _ => entry.at.clone(),
-    };
+    let when = entry.when();
     let (kind, text) = match &entry.body {
         Body::Stop(stop) => ("stop", describe(stop)),
         Body::Start => return vec![format!("{name} start {when}")],
@@ -552,7 +558,7 @@ impl Stop {
     }
 
     /// The counted work in flight, and what Claude didn't say.
-    fn in_flight(&self) -> (Option<String>, Option<String>) {
+    pub fn in_flight(&self) -> (Option<String>, Option<String>) {
         let mut pending = vec![];
         let mut unknown = vec![];
         match self.background {
