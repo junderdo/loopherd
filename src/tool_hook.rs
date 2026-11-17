@@ -295,8 +295,9 @@ struct Aliases {
     /// in a heredoc body that may run in this shell or a child, so any alias
     /// or `GH_CONFIG_DIR` may be set.
     unreadable_name: bool,
-    /// Whether the script defines a function or loads a builtin, which may
-    /// take a read-only program's name.
+    /// Whether the script defines a function, loads a builtin, or sets a
+    /// trap whose action may do either, so a read-only program's name may run
+    /// something else.
     redefines_programs: bool,
 }
 
@@ -354,7 +355,7 @@ fn judge(lexed: &Lexed, aliases: &mut Aliases, read_bodies: bool) -> Vec<Switch>
             .commands
             .iter()
             .flatten()
-            .any(|w| !w.quoted && ["function", "enable"].contains(&w.text.as_str()));
+            .any(|w| ["function", "enable", "trap"].contains(&w.text.as_str()));
     let mut bodies = lexed.bodies.iter().peekable();
     for at in 0..=lexed.commands.len() {
         while let Some((_, body)) = bodies.next_if(|(from, _)| *from <= at) {
@@ -1946,9 +1947,20 @@ fn expansion_names_alias_variable(script: &str) -> bool {
         if !closers.is_empty() && ALIAS_VARIABLES.iter().any(|n| rest.starts_with(n)) {
             return true;
         }
-        // A quote may hide a closer, so the expansion stays open to the end.
+        // A quoted span may hide a closer; one left open runs to the end.
         if !closers.is_empty() && matches!(c, '\'' | '"' | '\\') {
-            return names_alias_variable(rest);
+            let quoted = match c {
+                '\\' => rest.chars().nth(1).map(|e| 1 + e.len_utf8()),
+                _ => rest[1..].find(c).map(|end| end + 2),
+            };
+            let Some(len) = quoted else {
+                return names_alias_variable(rest);
+            };
+            if names_alias_variable(&rest[..len]) {
+                return true;
+            }
+            rest = &rest[len..];
+            continue;
         }
         let (step, opens) = match rest {
             _ if rest.starts_with("${") => (2, Some("}")),
@@ -4601,16 +4613,30 @@ mod tests {
             "x=$(cat() { declare -g \"$1=$2\"; }); cat GIT_CONFIG_COUNT 1",
             "bash <<'EOF'\ncat() { declare -g \"$1=$2\"; }\ncat GIT_CONFIG_COUNT 1\nEOF",
             "enable -f ./echo.so echo; echo GIT_CONFIG_COUNT=1",
+            "\"enable\" -f ./echo.so echo; echo GIT_CONFIG_COUNT=1",
+            "builtin 'enable' -f ./echo.so echo; echo GIT_CONFIG_COUNT=1",
+            "trap 'echo() { export \"$@\"; }' DEBUG; echo GIT_CONFIG_COUNT=1",
+            "trap 'echo() { export \"$@\"; }' RETURN; echo GIT_CONFIG_COUNT=1",
+            "trap -- 'echo() { export \"$@\"; }' DEBUG; echo GIT_CONFIG_COUNT=1",
         ] {
             assert_judged(command, Switch::Alias);
         }
         assert_passes("git commit -m 'only_mentions() is no function for GIT_CONFIG'");
         assert_passes("f() { :; }; gh pr view 1");
         assert_judged("f() { :; }; echo GIT_CONFIG", Switch::Alias);
+        assert_judged("git commit -m trap; rg GIT_CONFIG", Switch::Alias);
+        assert_passes("cat <<'EOF'\nf() { :; }\nEOF\necho GIT_CONFIG");
+        assert_passes("cat > notes.md <<'EOF'\nCall only_mentions() on GIT_CONFIG.\nEOF");
     }
 
     #[test]
-    fn a_quote_inside_an_expansion_keeps_it_open() {
+    fn a_quote_inside_an_expansion_is_skipped_unless_it_names_one() {
+        assert_passes("echo $((1 + \"2\" )) ; rg GIT_CONFIG");
+        assert_judged("echo $(( a[\"GIT_CONFIG_COUNT\"] ))", Switch::Alias);
+    }
+
+    #[test]
+    fn a_quoted_closer_inside_an_expansion_doesnt_close_it() {
         assert_judged(
             "declare -A A; echo $(( A[\"]))\"]=1, GIT_CONFIG_COUNT=1 ))",
             Switch::Alias,
