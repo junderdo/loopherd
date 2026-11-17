@@ -71,6 +71,8 @@ struct State {
     screens: Vec<(String, String)>,
     /// Replaces a pane's screen when its agent is next prompted.
     screen_on_prompt: Option<(String, String)>,
+    /// A prompted agent goes `working`, as Claude does on a new turn.
+    working_on_prompt: bool,
     agent_polls: u32,
     /// `agent` calls left that answer without the session.
     sessionless_gets: u32,
@@ -135,6 +137,10 @@ impl FakeHerdr {
             socket: Some(FAKE_SOCKET.into()),
             state: RefCell::default(),
         }
+    }
+
+    pub fn set_working_on_prompt(&self) {
+        self.state.borrow_mut().working_on_prompt = true;
     }
 
     /// Adds a live agent that already exists in the session.
@@ -569,6 +575,9 @@ impl Herdr for FakeHerdr {
         let next = self.state.borrow_mut().screen_on_prompt.take();
         if let Some((pane, screen)) = next {
             self.set_screen(&pane, &screen);
+        }
+        if self.state.borrow().working_on_prompt {
+            self.set_status(name, AgentStatus::Working);
         }
         Ok(())
     }

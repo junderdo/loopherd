@@ -1,6 +1,25 @@
 //! Whether a Claude pane shows a subagent's view, where typed text and
 //! `/clear` reach the subagent instead of the main conversation.
 
+use anyhow::{Context, Result, bail};
+
+use crate::herdr::Herdr;
+
+/// Refuses when `name`'s pane shows a subagent's view, saying to switch it
+/// back and then `retry`.
+pub fn ensure_main_view(herdr: &dyn Herdr, name: &str, pane: &str, retry: &str) -> Result<()> {
+    let screen = herdr
+        .visible_text(pane)
+        .with_context(|| format!("read {name}'s pane {pane} to check for a subagent view"))?;
+    if shows_subagent_view(&screen) {
+        bail!(
+            "{name}'s pane {pane} is showing a subagent's view, so text sent there would reach the \
+             subagent: switch the pane back to the main conversation, then {retry}"
+        );
+    }
+    Ok(())
+}
+
 /// Looks only at Claude's live prompt box (between the last two rules) and the
 /// footer below it, since transcript output above can quote either. Without
 /// that box, the prompt is the lowest `❯` line and the footer is what follows.
