@@ -82,12 +82,22 @@ pub fn handoff_path(state: &Path, name: &str) -> PathBuf {
 }
 
 /// What the Stop hook learned about a member's context on one stop.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Check {
-    /// Set when the stop is to be blocked to ask for a handoff.
-    pub reason: Option<String>,
+    /// `Some` when the stop is to be blocked to ask for a handoff. An error
+    /// in asking leaves `measured` intact.
+    pub reason: Result<Option<String>>,
     /// `None` when the transcript is missing or has no usage yet.
     pub measured: Option<Measured>,
+}
+
+impl Default for Check {
+    fn default() -> Self {
+        Check {
+            reason: Ok(None),
+            measured: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,9 +117,9 @@ pub fn handoff_block(
     limit: Result<u64>,
     state: &Path,
     note: &dyn Fn(String) -> Result<()>,
-) -> Result<Check> {
+) -> Check {
     let Ok(input) = serde_json::from_slice::<Value>(input) else {
-        return Ok(Check::default());
+        return Check::default();
     };
     let live = input["transcript_path"]
         .as_str()
@@ -119,10 +129,10 @@ pub fn handoff_block(
     let session = input["session_id"].as_str().filter(|s| is_plain_name(s));
     let askable = input["hook_event_name"] == "Stop" && input["stop_hook_active"] != true;
     let Some(session) = session.filter(|_| askable) else {
-        return Ok(Check {
-            reason: None,
+        return Check {
+            reason: Ok(None),
             measured: measured(*limit.as_ref().unwrap_or(&FALLBACK_LIMIT)),
-        });
+        };
     };
     let session = match &live {
         Some(live) if input["transcript_path"].as_str() != live.to_str() => session_in(live),
@@ -135,16 +145,17 @@ pub fn handoff_block(
     };
     // A failed note must not skip the check; it surfaces only when nothing is asked.
     let reason = match tokens.filter(|&t| t > limit) {
-        Some(tokens) => ask(member, tokens, session, limit, state)?,
-        None => None,
+        Some(tokens) => ask(member, tokens, session, limit, state),
+        None => Ok(None),
     };
-    if reason.is_none() {
-        noted?;
-    }
-    Ok(Check {
+    let reason = match reason {
+        Ok(None) => noted.map(|()| None),
+        reason => reason,
+    };
+    Check {
         reason,
         measured: measured(limit),
-    })
+    }
 }
 
 fn ask(
@@ -516,8 +527,8 @@ mod tests {
 
         fn block(&self, who: &AgentRecord, input: &[u8], limit: u64) -> Option<String> {
             handoff_block(who, input, Ok(limit), &self.state(), &|_| Ok(()))
-                .unwrap()
                 .reason
+                .unwrap()
         }
     }
 
@@ -704,6 +715,7 @@ mod tests {
                 &w.state(),
                 &|_| Ok(())
             )
+            .reason
             .is_err()
         );
         fs::remove_dir_all(handoffs.join("lh-1.prev.md")).unwrap();
@@ -719,8 +731,8 @@ mod tests {
         let reason = handoff_block(&who, &w.stop("s1", &t, ""), broken(), &w.state(), &|_| {
             anyhow::bail!("mailbox full")
         })
-        .unwrap()
         .reason
+        .unwrap()
         .unwrap();
         assert!(reason.contains("past your limit of 160000"), "{reason}");
 
@@ -734,8 +746,8 @@ mod tests {
             let stop = w.stop("s1", &t, "");
             assert_eq!(
                 handoff_block(&who, &stop, broken(), &w.state(), &note)
-                    .unwrap()
-                    .reason,
+                    .reason
+                    .unwrap(),
                 None
             );
         }
@@ -759,8 +771,49 @@ mod tests {
             &w.state(),
             &|_| anyhow::bail!("mailbox full"),
         )
+        .reason
         .unwrap_err();
         assert_eq!(format!("{err:#}"), "mailbox full");
+    }
+
+    #[test]
+    fn a_failing_note_or_ask_keeps_the_measurement() {
+        let w = World::new();
+        let who = member("lh-1", None);
+        let at = Some(Measured {
+            tokens: 100,
+            limit: FALLBACK_LIMIT,
+        });
+        let t = w.transcript(&[assistant(0, 0, 100, false)]);
+        let noted = handoff_block(
+            &who,
+            &w.stop("s1", &t, ""),
+            Err(anyhow::anyhow!("bad")),
+            &w.state(),
+            &|_| anyhow::bail!("mailbox full"),
+        );
+        assert!(noted.reason.is_err());
+        assert_eq!(noted.measured, at);
+
+        let handoffs = w.state().join("handoffs");
+        fs::create_dir_all(handoffs.join("lh-1.prev.md/x")).unwrap();
+        fs::write(handoffs.join("lh-1.md"), "first").unwrap();
+        let t = w.transcript(&[assistant(0, 0, 200, false)]);
+        let asked = handoff_block(
+            &who,
+            &w.stop("s2", &t, ""),
+            Ok(100),
+            &w.state(),
+            &|_| Ok(()),
+        );
+        assert!(asked.reason.is_err());
+        assert_eq!(
+            asked.measured,
+            Some(Measured {
+                tokens: 200,
+                limit: 100
+            })
+        );
     }
 
     #[test]
@@ -769,9 +822,7 @@ mod tests {
         let who = member("lh-1", None);
         let t = w.transcript(&[assistant(0, 0, 120_000, false)]);
         let measure = |input: &[u8], limit| {
-            handoff_block(&who, input, limit, &w.state(), &|_| Ok(()))
-                .unwrap()
-                .measured
+            handoff_block(&who, input, limit, &w.state(), &|_| Ok(())).measured
         };
         let at = |limit| {
             Some(Measured {
@@ -802,9 +853,8 @@ mod tests {
                 noted.borrow_mut().push(text);
                 Ok(())
             },
-        )
-        .unwrap();
-        assert_eq!(blocked.reason, None);
+        );
+        assert_eq!(blocked.reason.unwrap(), None);
         assert_eq!(noted.borrow().len(), 1);
     }
 
