@@ -58,6 +58,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D41](decisions/D41.md) | `loopherd init` for a tracker it has no snippets for runs without GitHub when origin isn't GitHub (no gh call, branch from the local `origin/HEAD` else the current one, no `merged`), names no gh in its `(fill in)` placeholders, and refuses a ready-for-agent label the queue reads as a type or skill. |
 | [D42](decisions/D42.md) | loopherd ships as GitHub Releases built by a `v*` tag workflow (musl Linux, macOS, `SHA256SUMS`, a tag-stamped `install.sh`); `curl … install.sh \| sh` installs one and runs `install-hook` and `setup`; SemVer from 0.1.0 per `docs/releasing.md`; `--version` names the commit for non-release builds. |
 | [D43](decisions/D43.md) | `loopherd herd remove <herd>` deletes a finished herd (file, pause, an unshared lead `prompt_file` in the herds dir, and its members' ledger entries under the lock, mailboxes and handoffs), refusing while any member is unretired, on another herdr session, or not confirmed closed in herdr (or herdr is unreachable) and never touching worktrees or tabs; a lead's hook denies it. |
+| [D44](decisions/D44.md) | `stats`, `reports` and `watch` label their printed wall-clock times UTC (`started (UTC)` headers, a ` UTC` suffix on report lines) rather than converting to local time; `--json` is unchanged. |
 
 ## Emerging model
 
