@@ -4003,6 +4003,46 @@ fn a_blocker_names_its_first_numbers_and_a_path_names_its_own_feature() {
 }
 
 #[test]
+fn each_blocker_path_names_its_own_feature_and_a_relative_one_names_the_issues() {
+    let fixture = Fixture::new(&["acme"]);
+    let ready = |line: &str| format!("Blocked by: {line}\nStatus: ready-for-agent\n");
+    let issues = [
+        (
+            ".scratch/auth/issues/03-a.md",
+            "Status: resolved\n".to_string(),
+        ),
+        (
+            ".scratch/auth/issues/04-node.md",
+            "Status: resolved\n".to_string(),
+        ),
+        (
+            ".scratch/billing/issues/03-x.md",
+            "Status: needs-info\n".to_string(),
+        ),
+        (
+            ".scratch/auth/issues/10-x.md",
+            ready(".scratch/auth/issues/04-node.md and .scratch/billing/issues/03-x.md"),
+        ),
+        (
+            ".scratch/auth/issues/11-x.md",
+            ready("../issues/04-node.md"),
+        ),
+        (".scratch/auth/issues/12-x.md", ready("./issues/04-node.md")),
+    ];
+    let issues: Vec<(&str, &str)> = issues.iter().map(|(p, t)| (*p, t.as_str())).collect();
+
+    let out = fixture.local_source(&issues);
+
+    assert_ok(&out);
+    assert_eq!(
+        text(&out.stdout),
+        "auth-11 feat tdd x .scratch/auth/issues/11-x.md\n\
+         auth-12 feat tdd x .scratch/auth/issues/12-x.md\n"
+    );
+    assert_eq!(text(&out.stderr), "");
+}
+
+#[test]
 fn an_issue_file_whose_path_the_queue_cant_read_is_noted_on_stderr() {
     let fixture = Fixture::new(&["acme"]);
     let ready = "Status: ready-for-agent\n";
