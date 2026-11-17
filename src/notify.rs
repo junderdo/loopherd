@@ -478,7 +478,7 @@ fn last_chars(word: &str, count: usize) -> &str {
 /// How each of `words` is shown, by the key and value rules.
 fn redacted(words: &[&str]) -> Vec<Shown> {
     let mut next = Next::Free;
-    let mut run_on: Option<RunOn> = None;
+    let mut runs: Vec<RunOn> = Vec::new();
     let mut shown_words = Vec::with_capacity(words.len());
     for &word in words {
         let mut starts = None;
@@ -508,18 +508,21 @@ fn redacted(words: &[&str]) -> Vec<Shown> {
                 None => (Shown::Word, key_named_by(word)),
             },
         };
-        let shown = match (starts, run_on, shown) {
-            (Some(_), _, _) | (None, Some(_), Shown::Word) => Shown::redacted(),
+        let shown = match (starts, shown) {
+            (Some(_), _) => Shown::redacted(),
+            (None, Shown::Word) if !runs.is_empty() => Shown::redacted(),
             _ => shown,
         };
-        run_on = starts.or_else(|| run_on.and_then(|run| run.after(word)));
+        runs = runs.into_iter().filter_map(|run| run.after(word)).collect();
+        runs.extend(starts);
         shown_words.push(shown);
     }
     shown_words
 }
 
 /// Words hidden on top of what the key and value rules hide, after a strong `key=value`
-/// word that opens a quote (up to its close) or ends in `;` (the next word). Only adding
+/// word that opens a quote (up to its close) or ends in `;` (the next word, and on while
+/// each ends in `;`). A run inside another leaves the outer one open. Only adding
 /// hiding, never changing [`Next`], keeps every word those rules hide hidden.
 #[derive(Clone, Copy)]
 enum RunOn {
@@ -546,6 +549,7 @@ impl RunOn {
                 Next::Free => None,
                 _ => Some(self),
             },
+            RunOn::Pair if word.ends_with(';') => Some(self),
             RunOn::Pair => None,
         }
     }
@@ -1578,6 +1582,26 @@ mod tests {
             (
                 r#"Set "password=abc123" then merge?"#,
                 r#"Set [redacted]" then merge?"#,
+            ),
+            (
+                r#"Set "x_token=abc, pw=def; correct horse" then merge?"#,
+                "Set [redacted] [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                r#"Set "x_token=abc, 'password=def, ghi' jkl mno" then merge?"#,
+                "Set [redacted] [redacted] [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                r#"Set "x_token=abc, (password=def, ghi) jkl mno" then merge?"#,
+                "Set [redacted] [redacted] [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                "Set password=hunter2; csrf=abc; sid=xyz then merge?",
+                "Set [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                "Set password=hunter2; ; csrf=abc then merge?",
+                "Set [redacted] [redacted] [redacted] then merge?",
             ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
