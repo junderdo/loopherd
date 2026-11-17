@@ -740,15 +740,20 @@ fn run_retire(name: &str, close: bool) -> Result<i32> {
     if !close {
         retire(&mut ledger, name, SystemTime::now())?;
         println!("retired {name}");
+        for warning in notify::forget_marks(&ledger.reports_dir()?, name) {
+            eprintln!("{warning}");
+        }
         return Ok(0);
     }
     let own_pane = std::env::var("HERDR_PANE_ID").ok();
+    let mailboxes = ledger.reports_dir()?;
     let mut lines = vec![];
     let result = retire_and_close(
         &CliHerdr,
         &mut ledger,
         name,
         SystemTime::now(),
+        &mailboxes,
         own_pane.as_deref(),
         &mut lines,
     );
