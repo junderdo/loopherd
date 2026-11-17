@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Runs notification redaction (summary() in src/notify.rs) at a base revision and at the
-# working tree on the same seeded questions, and fails if the working tree shows any word
-# the base hid. Over-redaction passes. A base on a remote (origin/main) is fetched first.
+# working tree on the same seeded questions, each also with its line cut lifted, and fails
+# if the uncut working tree shows any word more often than the uncut base does, or its cut
+# line ends on the start of a word the uncut base never shows. Over-redaction passes, and
+# so does a word the base's 200-character cut only left off. Words are counted, not placed:
+# a change that shows one copy of a word the base hid and hides another copy passes.
+# A base on a remote (origin/main) is fetched first.
 #
 #   scripts/redaction-fuzz [base-ref] [count] [seed]    defaults: origin/main 1000000 1
 set -euo pipefail
@@ -17,18 +21,45 @@ fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-git -C "$root" archive "$base" | tar -x -C "$tmp"
-mkdir -p "$tmp/src/notify"
-cp "$root/src/notify/fuzz.rs" "$tmp/src/notify/fuzz.rs"
-grep -q '^mod fuzz;' "$tmp/src/notify.rs" ||
-  printf '\n#[cfg(test)]\nmod fuzz;\n' >>"$tmp/src/notify.rs"
+mkdir "$tmp/base" "$tmp/head-uncut"
+git -C "$root" archive "$base" | tar -x -C "$tmp/base"
+mkdir -p "$tmp/base/src/notify"
+cp "$root/src/notify/fuzz.rs" "$tmp/base/src/notify/fuzz.rs"
+grep -q '^mod fuzz;' "$tmp/base/src/notify.rs" ||
+  printf '\n#[cfg(test)]\nmod fuzz;\n' >>"$tmp/base/src/notify.rs"
+cp -r "$tmp/base" "$tmp/base-uncut"
+# ls-files still lists a tracked file deleted in the working tree; skip those.
+(
+  cd "$root"
+  git ls-files -z -co --exclude-standard | while IFS= read -r -d '' path; do
+    if [[ -e $path || -L $path ]]; then printf '%s\0' "$path"; fi
+  done | xargs -0 -r cp --parents -t "$tmp/head-uncut"
+)
+
+max_text='const MAX_TEXT: usize = 200;'
+lift_cut() {
+  grep -qxF "$max_text" "$1/src/notify.rs" || {
+    echo "redaction-fuzz: $2's src/notify.rs has no line '$max_text' to lift" >&2
+    exit 1
+  }
+  sed -i "s/^$max_text\$/const MAX_TEXT: usize = usize::MAX;/" "$1/src/notify.rs"
+}
+lift_cut "$tmp/base-uncut" "$base"
+lift_cut "$tmp/head-uncut" "the working tree"
 
 export LOOPHERD_FUZZ_SEED=$seed LOOPHERD_FUZZ_COUNT=$count
-(
-  cd "$tmp"
-  LOOPHERD_FUZZ_OUT="$tmp/base.txt" CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target}/redaction-fuzz-base" \
-    cargo test --release --quiet --bin loopherd notify::fuzz::write_summaries -- --ignored --exact
-)
+target=${CARGO_TARGET_DIR:-$root/target}
+write_summaries() {
+  (
+    cd "$tmp/$1"
+    LOOPHERD_FUZZ_OUT="$tmp/$1.txt" CARGO_TARGET_DIR="$target/redaction-fuzz-$1" \
+      cargo test --release --quiet --bin loopherd notify::fuzz::write_summaries -- --ignored --exact
+  )
+}
+write_summaries base
+write_summaries base-uncut
+write_summaries head-uncut
 cd "$root"
-LOOPHERD_FUZZ_BASE="$tmp/base.txt" \
+LOOPHERD_FUZZ_BASE="$tmp/base.txt" LOOPHERD_FUZZ_BASE_UNCUT="$tmp/base-uncut.txt" \
+  LOOPHERD_FUZZ_HEAD_UNCUT="$tmp/head-uncut.txt" \
   cargo test --release --quiet --bin loopherd notify::fuzz::shows_no_word_the_base_hid -- --ignored --exact --nocapture
