@@ -153,6 +153,7 @@ impl Fixture {
             .env("PATH", path)
             .env("LOOPHERD_CONFIG_DIR", self.config())
             .env("XDG_STATE_HOME", self.state())
+            .envs(ISOLATED_GIT_CONFIG)
             .env_remove("HERDR_PANE_ID")
             .env_remove("HERDR_WORKSPACE_ID")
             .env_remove("GH_TOKEN")
@@ -187,9 +188,17 @@ impl Fixture {
     }
 }
 
+/// Hides the user's and system git config, whose `safe.directory = *` (set
+/// on GitHub runners) would stop git refusing a repo it is told to distrust.
+const ISOLATED_GIT_CONFIG: [(&str, &str); 2] = [
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+];
+
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
         .args(args)
+        .envs(ISOLATED_GIT_CONFIG)
         .current_dir(dir)
         .status()
         .unwrap();
@@ -2366,6 +2375,32 @@ fn on_a_terminal_a_repo_answer_git_refuses_to_read_shows_gits_reason() {
         "{shown}"
     );
     assert!(shown.contains("safe.directory"), "{shown}");
+}
+
+#[test]
+fn git_refusals_are_seen_under_a_global_and_system_safe_directory_wildcard() {
+    let root = tempfile::tempdir().unwrap();
+    let trusting = root.path().join("gitconfig");
+    fs::write(&trusting, "[safe]\n\tdirectory = *\n").unwrap();
+
+    let out = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "a_repo_git_refuses_to_read_is_refused_with_gits_reason",
+            "on_a_terminal_a_repo_answer_git_refuses_to_read_shows_gits_reason",
+        ])
+        .env("GIT_CONFIG_GLOBAL", &trusting)
+        .env("GIT_CONFIG_SYSTEM", &trusting)
+        .env_remove("GIT_CONFIG_NOSYSTEM")
+        .output()
+        .unwrap();
+
+    let stdout = text(&out.stdout);
+    assert!(
+        out.status.success() && stdout.contains("2 passed"),
+        "stdout:\n{stdout}\nstderr:\n{}",
+        text(&out.stderr)
+    );
 }
 
 #[test]

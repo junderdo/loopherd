@@ -344,6 +344,13 @@ mod tests {
             }
             self.ledger.update(n, c)
         }
+        fn remove_herd(
+            &mut self,
+            _: &str,
+            _: &mut dyn FnMut(&[String]) -> anyhow::Result<()>,
+        ) -> anyhow::Result<Vec<String>> {
+            unreachable!()
+        }
         fn started(&mut self, n: &str, at: SystemTime) -> Result<()> {
             self.ledger.started(n, at)
         }
