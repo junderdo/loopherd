@@ -124,3 +124,36 @@ fn the_skill_tells_the_shepherd_to_edit_herd_files_with_herd_set() {
         assert!(flat.contains(usage), "{usage}");
     }
 }
+
+fn flat_section(printed: &str, start: &str, end: &str) -> String {
+    let (_, rest) = printed.split_once(start).expect("section start");
+    let body = rest.split_once(end).map_or(rest, |(body, _)| body);
+    body.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn verify_blocks_on_in_scope_findings_rereviews_the_delta_and_caps_rounds() {
+    let home = tempfile::tempdir().unwrap();
+    let printed = String::from_utf8(skill(home.path())).unwrap();
+    let verify = flat_section(&printed, "4. **Verify**", "5. **After merge**");
+    for rule in [
+        "A finding is blocking when it's inside the task's acceptance criteria, or a correctness or safety bug the PR introduces",
+        "any other finding that should be fixed and fits within the task's scope",
+        "a PR comment marked non-blocking",
+        "the PR doesn't wait on them",
+        "the diff since that round's head, not the whole PR",
+        "After round 3, start no other round",
+        "merge as-is, narrow the scope, or change approach",
+        "the open blocking findings",
+    ] {
+        assert!(verify.contains(rule), "Verify misses {rule:?}");
+    }
+    let lead = flat_section(&printed, "\n## Lead\n", "\n## ");
+    for rule in [
+        "**Review rounds.**",
+        "After round 3",
+        "`loopherd report --kind question`",
+    ] {
+        assert!(lead.contains(rule), "Lead misses {rule:?}");
+    }
+}
