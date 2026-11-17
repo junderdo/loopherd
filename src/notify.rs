@@ -402,8 +402,9 @@ const MAX_TEXT: usize = 200;
 /// flow" survives. Best-effort: a secret in a shape it doesn't know gets through.
 ///
 /// The line is read twice, as written and with its non-ASCII quotes read as ASCII
-/// ones, and a word either reading hides stays hidden, so reading the quotes never
-/// shows a word the first reading hides.
+/// ones, and a word either reading hides stays hidden. The line stops where the
+/// as-written reading's own line is cut, so reading the quotes never shows a word,
+/// or more of one, that the first reading hides or cuts off.
 fn summary(question: &str) -> String {
     let first = question
         .lines()
@@ -413,31 +414,45 @@ fn summary(question: &str) -> String {
     let as_written = redacted(&words);
     let ascii_quoted: Vec<String> = words.iter().map(|word| ascii_quoted(word)).collect();
     let ascii_quoted = redacted(&ascii_quoted.iter().map(String::as_str).collect::<Vec<_>>());
+    let either: Vec<Shown> = as_written
+        .iter()
+        .zip(&ascii_quoted)
+        .map(|pair| match pair {
+            (Shown::Word, &shown) | (&shown, _) => shown,
+        })
+        .collect();
     let mut line = String::new();
-    for ((word, written), ascii) in words.iter().zip(as_written).zip(ascii_quoted) {
-        let shown = match (written, ascii) {
-            (Shown::Word, shown) | (shown, _) => shown,
-        };
-        match shown {
-            Shown::Word => {
-                if !line.is_empty() {
-                    line.push(' ');
-                }
-                line.push_str(&without_userinfo(word));
+    let mut room = MAX_TEXT;
+    let mut cut = false;
+    for (i, word) in words.iter().enumerate() {
+        let written = piece(i, word, as_written[i]);
+        let shown = piece(i, word, either[i]);
+        let length = written.chars().count();
+        if length > room {
+            match written == shown {
+                true => line.extend(written.chars().take(room)),
+                false => line.push_str(&shown),
             }
-            Shown::Redacted(end) => {
-                if !line.is_empty() {
-                    line.push(' ');
-                }
-                line.push_str("[redacted]");
-                line.push_str(last_chars(word, end));
-            }
-            Shown::Glued(end) => line.push_str(last_chars(word, end)),
+            cut = true;
+            break;
         }
+        room -= length;
+        line.push_str(&shown);
     }
     match line.char_indices().nth(MAX_TEXT) {
-        Some((cut, _)) => format!("{}…", &line[..cut]),
+        Some((at, _)) => format!("{}…", &line[..at]),
+        None if cut => format!("{line}…"),
         None => line,
+    }
+}
+
+/// The `i`th word as it adds to the line, with the space before it.
+fn piece(i: usize, word: &str, shown: Shown) -> String {
+    let space = if i == 0 { "" } else { " " };
+    match shown {
+        Shown::Word => format!("{space}{}", without_userinfo(word)),
+        Shown::Redacted(end) => format!("{space}[redacted]{}", last_chars(word, end)),
+        Shown::Glued(end) => last_chars(word, end).to_string(),
     }
 }
 
@@ -1683,6 +1698,30 @@ mod tests {
                 "{question}"
             );
         }
+    }
+
+    #[test]
+    fn hiding_a_long_clause_shows_nothing_past_where_the_line_as_written_is_cut() {
+        let filler = |c: &str, n| c.repeat(n);
+        let question = format!(
+            "Set »password«: {} {} {} {}, then abc123def456 hunter22 xkcdqwrtz",
+            filler("a", 40),
+            filler("b", 44),
+            filler("c", 44),
+            filler("d", 38),
+        );
+        assert_eq!(
+            text_sent(&question),
+            "Set »password«: [redacted], then abc123de…"
+        );
+        let question = format!(
+            "x »token« = {}, then the deploy key xyz123abc is live",
+            filler("a", 170)
+        );
+        assert_eq!(
+            text_sent(&question),
+            "x »token« = [redacted], then the deploy …"
+        );
     }
 
     #[test]

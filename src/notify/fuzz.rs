@@ -2,7 +2,7 @@
 //! a redaction change hides at least what the base hid. `scripts/redaction-fuzz` drives
 //! both tests; each is ignored in a plain `cargo test`.
 
-use super::summary;
+use super::{MAX_TEXT, summary};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
@@ -84,7 +84,10 @@ const PLAIN: [&str; 23] = [
     "v2",
     "flow",
 ];
-const QUOTE_PAIRS: [(&str, &str); 15] = [
+const QUOTE_PAIRS: [(&str, &str); 18] = [
+    ("‟", "”"),
+    ("‛", "’"),
+    ("＇", "＇"),
     ("‹", "›"),
     ("＂", "＂"),
     ("\"", "\""),
@@ -124,8 +127,9 @@ impl Rng {
 }
 
 fn word(rng: &mut Rng) -> String {
-    let mut word = match rng.below(10) {
+    let mut word = match rng.below(11) {
         0..=2 => rng.pick(&KEYS).to_string(),
+        10 => rng.pick(&["a", "b", "x7"]).repeat(5 + rng.below(40)),
         3 => rng.pick(&SEPARATORS).to_string(),
         4 | 5 => rng.pick(&SECRETS).to_string(),
         6 => {
@@ -155,7 +159,10 @@ fn word(rng: &mut Rng) -> String {
 fn questions(seed: u64, count: usize) -> impl Iterator<Item = String> {
     let mut rng = Rng(seed.max(1));
     let random = std::iter::repeat_with(move || {
-        let words = 3 + rng.below(9);
+        let words = match rng.chance(25) {
+            true => 15 + rng.below(30),
+            false => 3 + rng.below(9),
+        };
         let words: Vec<String> = (0..words).map(|_| word(&mut rng)).collect();
         words.join(" ")
     });
@@ -177,20 +184,48 @@ fn seed_and_count() -> (u64, usize) {
     )
 }
 
-/// Each word `summary` shows, without the punctuation a hidden value can leave glued on,
-/// counted.
-fn shown_words(summary: &str) -> HashMap<&str, usize> {
+/// Each word `summary` shows whole, without the punctuation a hidden value can leave
+/// glued on, counted; and the words in the token a cut line ends on.
+fn shown_words(summary: &str) -> (HashMap<&str, usize>, Vec<&str>) {
+    let (whole, cut) = match summary.strip_suffix('…') {
+        Some(line) => line.rsplit_once(' ').unwrap_or(("", line)),
+        None => (summary, ""),
+    };
     let mut shown = HashMap::new();
-    for word in summary
-        .split_whitespace()
-        .flat_map(|w| w.split("[redacted]"))
-    {
-        let word = word.trim_matches(|c: char| !c.is_alphanumeric());
-        if !word.is_empty() {
-            *shown.entry(word).or_default() += 1;
-        }
+    for word in words(whole) {
+        *shown.entry(word).or_default() += 1;
     }
-    shown
+    let cut = match cut.rfind('[') {
+        Some(at) if "[redacted]".starts_with(&cut[at..]) => &cut[..at],
+        _ => cut,
+    };
+    (shown, words(cut).collect())
+}
+
+fn words(text: &str) -> impl Iterator<Item = &str> {
+    text.split_whitespace()
+        .flat_map(|w| w.split("[redacted]"))
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty())
+}
+
+/// What `head` shows that `base` doesn't: a whole word shown more often, or a cut
+/// word's start that no word `base` shows begins with. `base`'s own cut token may be a
+/// whole word cut just after it, so it counts as shown.
+fn shown_only_in(head: &str, base: &str) -> Vec<String> {
+    let (mut base_whole, base_cut) = shown_words(base);
+    for &word in &base_cut {
+        *base_whole.entry(word).or_default() += 1;
+    }
+    let (head_whole, head_cut) = shown_words(head);
+    let whole = head_whole
+        .into_iter()
+        .filter(|(word, n)| base_whole.get(word).unwrap_or(&0) < n)
+        .map(|(word, _)| word);
+    let cut = head_cut
+        .into_iter()
+        .filter(|start| !base_whole.keys().any(|word| word.starts_with(start)));
+    whole.chain(cut).map(String::from).collect()
 }
 
 #[test]
@@ -209,8 +244,9 @@ fn write_summaries() {
 fn shows_no_word_the_base_hid() {
     let (seed, count) = seed_and_count();
     let base = std::fs::read_to_string(env("LOOPHERD_FUZZ_BASE")).unwrap();
-    let (mut leaks, mut changed) = (Vec::new(), 0);
+    let (mut leaks, mut changed, mut cut) = (Vec::new(), 0, 0);
     for (question, base) in questions(seed, count).zip(base.lines()) {
+        cut += usize::from(base.ends_with('…'));
         let head = summary(&question);
         if head == base {
             continue;
@@ -219,12 +255,7 @@ fn shows_no_word_the_base_hid() {
         if changed <= 20 {
             println!("{question}\n  base: {base}\n  head: {head}");
         }
-        let base_shown = shown_words(base);
-        let new: Vec<_> = shown_words(&head)
-            .into_iter()
-            .filter(|(word, n)| base_shown.get(word).unwrap_or(&0) < n)
-            .map(|(word, _)| word.to_string())
-            .collect();
+        let new = shown_only_in(&head, base);
         if !new.is_empty() {
             leaks.push(format!(
                 "{question}\n  base: {base}\n  head: {head}\n  new: {new:?}"
@@ -232,7 +263,7 @@ fn shows_no_word_the_base_hid() {
         }
     }
     println!(
-        "{count} questions, {changed} summaries changed, {} show a word the base hid",
+        "{count} questions, {cut} cut at {MAX_TEXT} chars by the base, {changed} summaries changed, {} show a word the base hid",
         leaks.len()
     );
     assert!(leaks.is_empty(), "{}", leaks.join("\n"));
