@@ -399,7 +399,9 @@ fn a_reused_name_counts_only_reports_from_its_own_life() {
 #[test]
 fn a_released_and_refed_name_gets_a_row_per_run_and_since_filters_each() {
     let state = tempfile::tempdir().unwrap();
-    let mut current = Member::new("lh-1", "2026-11-05T00:00:00Z").json();
+    let mut current = Member::new("lh-1", "2026-11-05T00:00:00Z")
+        .retired("2026-11-05T05:00:00Z")
+        .json();
     let mut earlier = Member::new("lh-1", "2026-11-01T00:00:00Z")
         .retired("2026-11-01T02:00:00Z")
         .json();
@@ -411,19 +413,45 @@ fn a_released_and_refed_name_gets_a_row_per_run_and_since_filters_each() {
         serde_json::json!({ "lh-1": current }).to_string(),
     )
     .unwrap();
+    write_mailbox(
+        state.path(),
+        "lh-1",
+        &[
+            ("2026-11-01T01:00:00Z", "done"),
+            ("2026-11-05T03:00:00Z", "done"),
+        ],
+    );
 
     let all = json(state.path(), &[]);
     let since = json(state.path(), &["--since", "2026-11-03"]);
 
-    assert_eq!(names(&all, "retired"), ["lh-1"]);
-    assert_eq!(all["herds"][0]["retired"][0]["total_secs"], 2 * 3600);
-    assert_eq!(names(&all, "open"), ["lh-1"]);
+    let rows: Vec<_> = all["herds"][0]["retired"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["started"].as_str().unwrap(),
+                r["rounds"].as_u64().unwrap(),
+                r["first_done_secs"].as_u64().unwrap(),
+                r["total_secs"].as_u64().unwrap(),
+            )
+        })
+        .collect();
     assert_eq!(
-        all["herds"][0]["open"][0]["started"],
-        "2026-11-05T00:00:00Z"
+        rows,
+        [
+            ("2026-11-01T00:00:00Z", 1, 3600, 2 * 3600),
+            ("2026-11-05T00:00:00Z", 1, 3 * 3600, 5 * 3600),
+        ]
     );
-    assert!(names(&since, "retired").is_empty());
-    assert_eq!(names(&since, "open"), ["lh-1"]);
+    let since_rows: Vec<_> = since["herds"][0]["retired"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["started"].as_str().unwrap())
+        .collect();
+    assert_eq!(since_rows, ["2026-11-05T00:00:00Z"]);
 }
 
 #[test]
