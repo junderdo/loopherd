@@ -144,7 +144,8 @@ pub fn handoff_block(
         Err(e) => (FALLBACK_LIMIT, note_once(state, session, &e, note)),
     };
     // A failed note must not skip the check; it surfaces only when nothing is asked.
-    let reason = match tokens.filter(|&t| t > limit) {
+    let deferred = |t: u64| subagents_running(&input) && t * 2 <= limit * 3;
+    let reason = match tokens.filter(|&t| t > limit && !deferred(t)) {
         Some(tokens) => ask(member, tokens, session, limit, state),
         None => Ok(None),
     };
@@ -156,6 +157,14 @@ pub fn handoff_block(
         reason,
         measured: measured(limit),
     }
+}
+
+/// A handoff kills in-flight subagents, so the ask waits for a stop without
+/// them unless the context is past 1.5x the limit (D45).
+fn subagents_running(input: &Value) -> bool {
+    input["background_tasks"]
+        .as_array()
+        .is_some_and(|tasks| tasks.iter().any(|t| t["type"] == "subagent"))
 }
 
 fn ask(
@@ -623,6 +632,37 @@ mod tests {
         let who = member("lh-1", None);
         assert_eq!(w.block(&who, &w.stop("s1", &t, ""), 100), None);
         assert!(w.block(&who, &w.stop("s1", &t, ""), 99).is_some());
+    }
+
+    const SUBAGENT: &str = r#","background_tasks":[{"type":"subagent","status":"running"}]"#;
+
+    #[test]
+    fn running_subagents_defer_the_ask_until_a_stop_without_them() {
+        let w = World::new();
+        let t = w.transcript(&[assistant(0, 0, 150, false)]);
+        let who = member("lh-1", None);
+        assert_eq!(w.block(&who, &w.stop("s1", &t, SUBAGENT), 100), None);
+        assert!(!w.state().join("handoff-asked/s1").exists());
+        assert!(w.block(&who, &w.stop("s1", &t, ""), 100).is_some());
+    }
+
+    #[test]
+    fn running_subagents_dont_defer_the_ask_past_one_and_a_half_times_the_limit() {
+        let w = World::new();
+        let who = member("lh-1", None);
+        let at = w.transcript(&[assistant(0, 0, 150, false)]);
+        assert_eq!(w.block(&who, &w.stop("s1", &at, SUBAGENT), 100), None);
+        let past = w.transcript(&[assistant(0, 0, 151, false)]);
+        assert!(w.block(&who, &w.stop("s1", &past, SUBAGENT), 100).is_some());
+    }
+
+    #[test]
+    fn background_shells_alone_dont_defer_the_ask() {
+        let w = World::new();
+        let t = w.transcript(&[assistant(0, 0, 101, false)]);
+        let shells = r#","background_tasks":[{"type":"shell","status":"running"}]"#;
+        let lead = member("lead-cards", Some(Role::Lead));
+        assert!(w.block(&lead, &w.stop("s1", &t, shells), 100).is_some());
     }
 
     #[test]
