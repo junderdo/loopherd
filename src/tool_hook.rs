@@ -543,6 +543,19 @@ fn commands(script: &str) -> Option<Lexed> {
     let mut chars = script.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
+            // Bash keeps an assignment's `name[` or an array's `[` open to its `]`.
+            ';' | '&' | '|' | '\n' | '(' | ')' | ' ' | '\t'
+                if arithmetic_from.is_none()
+                    && word.as_ref().is_some_and(|w| {
+                        (w.in_name_subscript()
+                            && words.iter().all(|w: &Word| is_assignment(&w.text)))
+                            || (w.in_subscript()
+                                && w.text.starts_with('[')
+                                && parens.last() == Some(&Paren::Data))
+                    }) =>
+            {
+                return None;
+            }
             '\'' => {
                 let w = word.get_or_insert_default();
                 w.quoted = true;
@@ -623,13 +636,6 @@ fn commands(script: &str) -> Option<Lexed> {
             '`' => {
                 word.get_or_insert_default().mark_substituted();
                 lexed.extend(self::commands(&backticked(&mut chars, false)?)?);
-            }
-            // Bash keeps an assignment's `name[` open across these to its `]`.
-            '(' | ' ' | '\t'
-                if word.as_ref().is_some_and(Word::in_name_subscript)
-                    && words.iter().all(|w: &Word| is_assignment(&w.text)) =>
-            {
-                return None;
             }
             ';' | '&' | '|' | '\n' | '(' | ')' => {
                 let doubled = chars.peek() == Some(&c) && matches!(c, '(' | ')');
@@ -1132,9 +1138,26 @@ const WRAPPERS: [(&str, &[&str]); 17] = [
     ("xargs", &["-I", "-n", "-P", "-L", "-d", "-s", "-E", "-a"]),
     ("timeout", &["-s", "-k"]),
     ("setsid", &[]),
-    ("ionice", &["-c", "-n", "-p", "-P", "-u"]),
+    (
+        "ionice",
+        &[
+            "-c",
+            "-n",
+            "-p",
+            "-P",
+            "-u",
+            "--class",
+            "--classdata",
+            "--pid",
+            "--pgid",
+            "--uid",
+        ],
+    ),
     ("taskset", &[]),
-    ("flock", &["-w", "--timeout", "-E", "--conflict-exit-code"]),
+    (
+        "flock",
+        &["-w", "--wait", "--timeout", "-E", "--conflict-exit-code"],
+    ),
     // This repo's `scripts/herdr-dev`.
     ("herdr-dev", &[]),
 ];
@@ -1157,6 +1180,10 @@ const ZSH_PATHS: [&str; 4] = ["path", "cdpath", "fpath", "module_path"];
 const COMPOUND: [&str; 12] = [
     "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "!", "{", "}",
 ];
+/// Reserved words after which `coproc`'s first word is its name.
+const COPROC_COMPOUND: [&str; 9] = [
+    "{", "while", "until", "if", "for", "select", "case", "[[", "((",
+];
 const SHELLS: [&str; 5] = ["sh", "bash", "zsh", "dash", "ksh"];
 /// Builtins whose arguments may assign variables.
 const DECLARERS: [&str; 5] = ["export", "declare", "typeset", "local", "readonly"];
@@ -1174,15 +1201,17 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             None => kept.push(word),
         }
     }
-    // A shell's script from `<(…)`, `<<<` or `< file` is out of the hook's
-    // sight; a `<<` heredoc's body is judged on its own.
-    let reads_input = command.iter().any(|w| {
-        redirection(&w.text).is_some()
-            && w.text
-                .trim_start_matches(|c: char| c.is_ascii_digit())
-                .starts_with('<')
-            && !(w.text.contains("<<") && !w.text.contains("<<<"))
+    if command.iter().any(|w| sets_alias_variable(&w.text)) {
+        return vec![Switch::Alias];
+    }
+    // A shell's script from its input is out of the hook's sight, unless a
+    // `<<` heredoc, whose body is judged on its own, feeds it.
+    let heredoc_fed = command.iter().any(|w| {
+        let op = w.text.trim_start_matches(|c: char| c.is_ascii_digit());
+        op.starts_with("<<") && !op.starts_with("<<<")
     });
+    let reads_script_from_input =
+        |script: Option<&String>| !heredoc_fed && script.is_none_or(|s| from_input(s));
     let words: Vec<String> = kept.iter().map(|w| w.text.clone()).collect();
     let words = words.as_slice();
     let mut i = 0;
@@ -1202,7 +1231,9 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
         } else if is_assignment(word) {
             aliases.assign(kept[i]);
             i += 1;
-        } else if kept[i].pattern() || ((word == "source" || word == ".") && reads_input) {
+        } else if kept[i].pattern()
+            || ((word == "source" || word == ".") && reads_script_from_input(words.get(i + 1)))
+        {
             return vec![Switch::Unreadable];
         } else if KEYWORDS.contains(&word.as_str()) || word == "." {
             i += 1;
@@ -1210,11 +1241,10 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             i += 2;
         } else if word == "coproc" {
             // `coproc NAME { … }` names the coprocess; `coproc cmd args` doesn't.
-            i += if words.get(i + 2).is_some_and(|w| w == "{") {
-                2
-            } else {
-                1
-            };
+            let opens_compound = kept
+                .get(i + 2)
+                .is_some_and(|w| !w.quoted && COPROC_COMPOUND.contains(&w.text.as_str()));
+            i += if opens_compound { 2 } else { 1 };
         } else if word == "trap" {
             let action = skip_options(words, i + 1, &[]);
             return words.get(action).map_or(vec![], |script| {
@@ -1231,18 +1261,15 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             return vec![];
         } else if let Some((_, with_value)) = WRAPPERS.iter().find(|(w, _)| *w == program) {
             in_env |= program == "env";
-            let rest = &words[i + 1..];
-            if program == "flock"
-                && let Some(at) = rest.iter().position(|w| w == "-c" || w == "--command")
-            {
-                return rest.get(at + 1).map_or(vec![], |script| {
-                    needs_with(script, &mut aliases.clone(), true)
-                });
-            }
             i = skip_options(words, i + 1, with_value);
             // The duration, CPU mask or lock file before the command.
             if ["timeout", "taskset", "flock"].contains(&program) {
                 i += 1;
+            }
+            if program == "flock" && words.get(i).is_some_and(|w| w == "-c" || w == "--command") {
+                return words.get(i + 1).map_or(vec![], |script| {
+                    needs_with(script, &mut aliases.clone(), true)
+                });
             }
         } else if program == "rustup" {
             // `rustup [-q] [+toolchain] run [--install] <toolchain> [--install] [--] <command>`
@@ -1259,6 +1286,7 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             i += 1;
             // `-o pipefail`, `-O extglob`: the next word is the option's value.
             const WITH_VALUE: [&str; 4] = ["-o", "+o", "-O", "+O"];
+            let mut stdin_script = false;
             while let Some(option) = words.get(i).filter(|w| w.starts_with(['-', '+'])) {
                 if option == "--" {
                     i += 1;
@@ -1270,13 +1298,14 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
                         needs_with(script, &mut aliases.clone(), true)
                     });
                 }
+                stdin_script |= !option.starts_with("--") && option.contains('s');
                 i += if WITH_VALUE.contains(&option.as_str()) {
                     2
                 } else {
                     1
                 };
             }
-            if reads_input {
+            if (stdin_script && !heredoc_fed) || reads_script_from_input(words.get(i)) {
                 return vec![Switch::Unreadable];
             }
         } else if program == "eval" {
@@ -1319,7 +1348,7 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
         }
         "alias" => args
             .iter()
-            .any(|a| a.contains('='))
+            .any(|a| a.contains(['=', '$']) || a.is_empty())
             .then_some(Switch::Alias),
         "curl" | "wget" => args.iter().any(|a| merges(a)).then_some(Switch::Merge),
         "git" => git_needs(args),
@@ -1578,12 +1607,15 @@ fn git_needs(args: &[String]) -> Option<Switch> {
                 .strip_prefix("--config-env=")
                 .or_else(|| option.strip_prefix("-c")),
         };
-        value.is_some_and(|v| v.to_ascii_lowercase().starts_with("alias."))
+        value.is_some_and(defines_git_alias)
     });
     if sets_alias {
         return Some(Switch::Alias);
     }
     let (subcommand, rest) = args.get(start..)?.split_first()?;
+    if subcommand == "config" && rest.iter().any(|a| defines_git_alias(a)) {
+        return Some(Switch::Alias);
+    }
     let rebases = |a: &String| {
         a == "-r" || a == "--rebase" || a.strip_prefix("--rebase=").is_some_and(|v| v != "false")
     };
@@ -1601,6 +1633,24 @@ fn git_needs(args: &[String]) -> Option<Switch> {
         _ => false,
     };
     needed.then_some(Switch::Rebase)
+}
+
+/// A git config key that defines an alias or pulls in a file that may.
+fn defines_git_alias(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    ["alias.", "include.", "includeif."]
+        .iter()
+        .any(|prefix| key.starts_with(prefix))
+}
+
+/// An assignment to a variable that sets git config or a shell alias.
+fn sets_alias_variable(word: &str) -> bool {
+    is_assignment(word) && (word.starts_with("GIT_CONFIG") || word.starts_with("BASH_ALIASES"))
+}
+
+/// A shell script operand that names the shell's input.
+fn from_input(script: &str) -> bool {
+    script == "-" || script == "/dev/stdin" || script.starts_with("/dev/fd/")
 }
 
 /// `gh api` sends a GET only with no method and no fields, in any form
@@ -1653,11 +1703,12 @@ fn skip_options(words: &[String], mut i: usize, with_value: &[&str]) -> usize {
         if !word.starts_with('-') || word == "-" {
             break;
         }
-        i += if with_value.contains(&word.as_str()) {
-            2
-        } else {
-            1
-        };
+        // `-nw 5`: a cluster of short options ending in one that takes a value.
+        let last_short = (!word.starts_with("--") && word.len() > 2)
+            .then(|| format!("-{}", &word[word.len() - 1..]));
+        let takes_value = with_value.contains(&word.as_str())
+            || last_short.is_some_and(|o| with_value.contains(&o.as_str()));
+        i += if takes_value { 2 } else { 1 };
     }
     i.min(words.len())
 }
@@ -3565,6 +3616,9 @@ mod tests {
             "coproc gh pr merge 1; wait",
             "coproc { gh pr merge 1; }; wait",
             "coproc N { gh pr merge 1; }; wait",
+            "coproc N while gh pr merge 1; do break; done; wait",
+            "coproc N if gh pr merge 1; then :; fi; wait",
+            "coproc eval \"{\" 'gh pr merge 1;' \"}\"; wait",
             "trap 'gh pr merge 1' EXIT",
             "trap -- 'gh pr merge 1' EXIT",
         ] {
@@ -3584,12 +3638,18 @@ mod tests {
             "flock /dev/null gh pr merge 1",
             "flock -w 5 /tmp/l gh pr merge 1",
             "flock /tmp/l -c 'gh pr merge 1'",
-            "flock --command 'gh pr merge 1' /tmp/l",
+            "flock /tmp/l --command 'gh pr merge 1'",
+            "flock --wait 5 /tmp/l gh pr merge 1",
+            "flock -nw 5 /tmp/l gh pr merge 1",
+            "ionice --class 3 gh pr merge 1",
+            "ionice -tc 3 gh pr merge 1",
         ] {
             assert_judged(command, Switch::Merge);
         }
         assert_judged("flock -x /tmp/l git rebase origin/main", Switch::Rebase);
+        assert_judged("flock /tmp/l git -c user.name=x rebase", Switch::Rebase);
         assert_passes("flock /tmp/l gh pr view 1");
+        assert_passes("flock /tmp/l grep -c 'gh pr merge' notes");
     }
 
     #[test]
@@ -3603,13 +3663,27 @@ mod tests {
             "git --config-env=alias.r=R r origin/main",
             "git --config-env alias.r=R r origin/main",
             "shopt -s expand_aliases\nalias g=gh\ng pr merge 1",
+            "x=g=gh; shopt -s expand_aliases\nalias $x\ng pr merge 1",
+            "shopt -s expand_aliases\nBASH_ALIASES[g]=gh\ng pr merge 1",
+            "shopt -s expand_aliases\nBASH_ALIASES=([g]=gh)\ng pr merge 1",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.r GIT_CONFIG_VALUE_0=rebase git r origin/main",
+            "GIT_CONFIG_PARAMETERS=\"'alias.r=rebase'\" git r origin/main",
+            "export GIT_CONFIG_GLOBAL=x.cfg; git r origin/main",
+            "git -c include.path=x.cfg r origin/main",
+            "git config alias.r rebase && git r origin/main",
         ] {
             assert!(needs(command).contains(&Switch::Alias), "{command}");
             let leads = ledger(vec![lead()]);
             let message = run(&leads, all_on(), command).expect(command);
             assert!(message.contains("may not set a `gh alias`"), "{message}");
         }
-        for command in ["gh alias list", "git -c user.name=x commit -m x", "alias"] {
+        for command in [
+            "gh alias list",
+            "git -c user.name=x commit -m x",
+            "git config user.name x",
+            "alias",
+            "alias -p",
+        ] {
             assert_passes(command);
         }
     }
@@ -3622,11 +3696,22 @@ mod tests {
             ". <(echo gh pr merge 1)",
             "bash <<< 'gh pr merge 1'",
             "sh < script.sh",
+            "{ bash; } <<< 'gh pr merge 1'",
+            "( source /dev/stdin ) <<< 'gh pr merge 1'",
+            "if true; then bash; fi <<< 'gh pr merge 1'",
+            "exec 0<<<'gh pr merge 1'; bash",
+            "exec 3<<<'gh pr merge 1'; bash /dev/fd/3",
+            "exec < <(echo 'gh pr merge 1'); bash",
+            "echo 'gh pr merge 1' | bash",
+            "echo 'gh pr merge 1' | sh -s x",
         ] {
             assert_unreadable(command);
         }
         assert_judged("bash <<EOF\ngh pr merge 1\nEOF", Switch::Merge);
+        assert_judged("bash -s <<EOF\ngh pr merge 1\nEOF", Switch::Merge);
         assert_passes("bash -c 'cat' < notes.md");
+        assert_passes("bash scripts/check.sh < /dev/null");
+        assert_passes("source ./env.sh < /dev/null");
         assert_passes("cat <(echo hi)");
     }
 
@@ -3650,6 +3735,11 @@ mod tests {
                 "a[(1<<2)]=x",
                 "a[ 1<<2 ]=x",
                 "x=1 a[ 1<<2 ]=x",
+                "a[1|1<<2]=x",
+                "a[1&1<<2]=x",
+                "a[1\n<<2]=x",
+                "arr=( [ 1<<2 ]=x )",
+                "arr=([1 <<2]=x)",
             ] {
                 assert_unreadable(&hidden(first, gated));
             }
@@ -3658,5 +3748,7 @@ mod tests {
         assert_passes("a[i+1]=x; echo ${a[1]}");
         assert_passes("declare a[1]=x");
         assert_passes("[ -f x ] && echo y");
+        assert_passes("(( a[ 1 ] ))");
+        assert_passes("x=( [k]=v ); a[$i]=x b=1");
     }
 }
