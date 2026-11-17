@@ -4721,7 +4721,7 @@ fn an_other_tracker_with_a_github_origin_keeps_the_github_merged_check() {
 }
 
 #[test]
-fn an_other_tracker_names_no_github_issue_gh_command_or_account_and_marks_what_to_fill() {
+fn an_other_tracker_names_no_github_issue_and_marks_what_to_fill() {
     for github in [true, false] {
         let fixture = Fixture::new(&["acme"]);
         if !github {
@@ -4756,7 +4756,13 @@ fn an_other_tracker_names_no_github_issue_gh_command_or_account_and_marks_what_t
             ("prompt", &prompt),
             ("lead", &lead),
         ] {
-            for unexpected in ["GitHub", " gh ", "`gh ", "GH_TOKEN", "acme"] {
+            // A GitHub origin's prompts name the gh account for PR commands.
+            let names_gh = github && (what == "prompt" || what == "lead");
+            let unexpected: &[&str] = match names_gh {
+                true => &["GitHub", "Closes #", "gh issue"],
+                false => &["GitHub", "Closes #", " gh ", "`gh ", "GH_TOKEN", "acme"],
+            };
+            for unexpected in unexpected {
                 assert!(
                     !text.contains(unexpected),
                     "{unexpected:?} in the {what} (github origin: {github}):\n{text}"
@@ -4886,6 +4892,70 @@ fn an_other_tracker_on_a_detached_head_without_origin_head_names_how_to_set_the_
         text(&out.stderr)
     );
     assert!(!fixture.herds().exists());
+}
+
+#[test]
+fn an_other_tracker_names_the_gh_account_for_pr_commands_only_with_a_github_origin() {
+    for github in [true, false] {
+        let fixture = Fixture::new(&["acme"]);
+        if !github {
+            git(&fixture.repo(), &["remote", "remove", "origin"]);
+            fixture.commit_on("main");
+            fixture.fail_gh();
+        }
+
+        assert_ok(&fixture.init(&OTHER));
+
+        let prompt = fixture.herd_get("template.issue.prompt");
+        let lead = fs::read_to_string(fixture.herds().join("widgets-lead.md")).unwrap();
+        let note = "Run every gh command as acme, prefixed with\n\
+                    `GH_TOKEN=$(gh auth token --user acme)`";
+        let fill_in = "Link it on task {number}, so the task closes when the PR merges. \
+                       (fill in this line only)\n6. Finish";
+        for (what, text, expected) in [
+            ("prompt", &prompt, note),
+            (
+                "prompt",
+                &prompt,
+                "`GH_TOKEN=$(gh auth token --user acme) git -c credential.helper= \
+                 -c credential.helper='!gh auth git-credential' push -u origin HEAD`",
+            ),
+            (
+                "prompt",
+                &prompt,
+                "`GH_TOKEN=$(gh auth token --user acme) gh pr create --repo acme/widgets \
+                 --base main --head {branch} --assignee acme",
+            ),
+            (
+                "prompt",
+                &prompt,
+                &format!("tracker's own commands.\n\n{note}"),
+            ),
+            ("prompt", &prompt, fill_in),
+            ("lead", &lead, note),
+            (
+                "lead",
+                &lead,
+                "`! GH_TOKEN=$(gh auth token --user acme) gh pr merge <n> --repo acme/widgets",
+            ),
+        ] {
+            assert_eq!(
+                text.contains(expected),
+                github,
+                "{expected:?} in the {what} (github origin: {github}):\n{text}"
+            );
+        }
+        if !github {
+            for (what, text) in [("prompt", &prompt), ("lead", &lead)] {
+                for unexpected in [" gh ", "`gh ", "GH_TOKEN", "acme"] {
+                    assert!(
+                        !text.contains(unexpected),
+                        "{unexpected:?} in the {what}:\n{text}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
