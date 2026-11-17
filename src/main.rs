@@ -751,6 +751,7 @@ fn run_stats(herd: Option<String>, since: Option<SystemTime>, json: bool) -> Res
         since,
         now: SystemTime::now(),
     };
+    require_known(&ledger, herd.as_deref())?;
     let (herds, warnings) = stats::stats(&ledger, &ledger.reports_dir()?, &query)?;
     match json {
         true => println!(
@@ -835,6 +836,7 @@ fn run_report(kind: Kind, as_name: Option<String>, text: &str) -> Result<i32> {
 
 fn run_reports(names: Vec<String>, herd: Option<String>, all: bool) -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    require_known(&ledger, herd.as_deref())?;
     let filter = Filter {
         names: &names,
         herd: herd.as_deref(),
@@ -848,6 +850,16 @@ fn run_reports(names: Vec<String>, herd: Option<String>, all: bool) -> Result<i3
         eprintln!("loopherd reports: warning: {warning}");
     }
     Ok(0)
+}
+
+/// Refuses a `--herd` naming no herd, so a typo isn't read as a quiet herd.
+fn require_known(ledger: &FileLedger, herd: Option<&str>) -> Result<()> {
+    match herd {
+        Some(herd) if !herd::known(&Paths::from_env()?.herds, ledger, herd)? => {
+            bail!("no herd {herd}")
+        }
+        _ => Ok(()),
+    }
 }
 
 fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) -> Result<i32> {
