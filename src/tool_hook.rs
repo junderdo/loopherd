@@ -212,7 +212,7 @@ fn decide(
     }
     if needed == Switch::Unreadable {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like, a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like, a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, a `trap`, `sh -c` or `eval` script that a substitution prints, `gh` after `GH_CONFIG_DIR` is set, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -284,14 +284,16 @@ pub fn needs(script: &str) -> Vec<Switch> {
     needs_with(script, &mut Aliases::default(), false)
 }
 
-/// The `CARGO_ALIAS_*` variables assigned so far in a script.
+/// The `CARGO_ALIAS_*` variables assigned so far in a script, and whether
+/// `GH_CONFIG_DIR` was, which points gh at aliases the hook can't see.
 #[derive(Clone, Default, PartialEq)]
 struct Aliases {
     /// Values by the alias's upper-case name; `None` when it can't be read.
     values: std::collections::HashMap<String, Option<String>>,
-    /// Whether one was assigned under a name that can't be read, or in a
-    /// heredoc body that may run in this shell or a child, so any alias may
-    /// be set.
+    gh_config_dir: bool,
+    /// Whether a variable was assigned under a name that can't be read, or
+    /// in a heredoc body that may run in this shell or a child, so any alias
+    /// or `GH_CONFIG_DIR` may be set.
     unreadable_name: bool,
 }
 
@@ -300,6 +302,14 @@ impl Aliases {
         if word.name_expands() {
             self.unreadable_name = true;
             return;
+        }
+        if word
+            .text
+            .split_once('=')
+            .map(|(name, _)| name.trim_end_matches('+'))
+            == Some("GH_CONFIG_DIR")
+        {
+            self.gh_config_dir = true;
         }
         let Some((name, value)) = word
             .text
@@ -1299,9 +1309,9 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             i += if opens_compound { 2 } else { 1 };
         } else if word == "trap" {
             let action = skip_options(words, i + 1, &[]);
-            return words.get(action).map_or(vec![], |script| {
-                needs_with(script, &mut aliases.clone(), true)
-            });
+            return kept
+                .get(action)
+                .map_or(vec![], |script| script_needs(script, aliases));
         } else if DECLARERS.contains(&program) {
             let args = &kept[i + 1..];
             let nameref = |w: &&Word| w.text.starts_with('-') && w.text.contains('n');
@@ -1329,9 +1339,9 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
                 i += 1;
             }
             if program == "flock" && words.get(i).is_some_and(|w| w == "-c" || w == "--command") {
-                return words.get(i + 1).map_or(vec![], |script| {
-                    needs_with(script, &mut aliases.clone(), true)
-                });
+                return kept
+                    .get(i + 1)
+                    .map_or(vec![], |script| script_needs(script, aliases));
             }
         } else if program == "rustup" {
             // `rustup [-q] [+toolchain] run [--install] <toolchain> [--install] [--] <command>`
@@ -1346,26 +1356,26 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             i = skip_options(words, toolchain + 1, &[]);
         } else if SHELLS.contains(&program) {
             i += 1;
-            // `-o pipefail`, `-O extglob`: the next word is the option's value.
-            const WITH_VALUE: [&str; 4] = ["-o", "+o", "-O", "+O"];
+            let mut command_script = false;
             let mut stdin_script = false;
             while let Some(option) = words.get(i).filter(|w| w.starts_with(['-', '+'])) {
-                if option == "--" {
-                    i += 1;
+                i += 1;
+                if option == "--" || option == "-" {
                     break;
                 }
-                if !option.starts_with("--") && option.contains('c') {
-                    let script = skip_options(words, i + 1, &WITH_VALUE);
-                    return words.get(script).map_or(vec![], |script| {
-                        needs_with(script, &mut aliases.clone(), true)
-                    });
+                if let Some(long) = option.strip_prefix("--") {
+                    i += usize::from(["rcfile", "init-file"].contains(&long));
+                    continue;
                 }
-                stdin_script |= !option.starts_with("--") && option.contains('s');
-                i += if WITH_VALUE.contains(&option.as_str()) {
-                    2
-                } else {
-                    1
-                };
+                command_script |= option.contains('c');
+                stdin_script |= option.contains('s');
+                // Each `o` or `O` in a cluster takes the next unused word: `-oc pipefail 'script'`.
+                i += option.matches(['o', 'O']).count();
+            }
+            if command_script {
+                return kept
+                    .get(i)
+                    .map_or(vec![], |script| script_needs(script, aliases));
             }
             if (stdin_script && !heredoc_feeds(&redirects, 0))
                 || reads_script_from_input(words.get(i))
@@ -1373,15 +1383,29 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
                 return vec![Switch::Unreadable];
             }
         } else if program == "eval" {
+            if kept[i + 1..].iter().any(|w| w.substituted_at.is_some()) {
+                return vec![Switch::Unreadable];
+            }
             return needs_with(&words[i + 1..].join(" "), aliases, true);
         } else if GATED.contains(&program) && kept[i + 1..].iter().any(|w| w.braced()) {
             return vec![Switch::Unreadable];
         } else if program == "cargo" {
             return cargo_needs(word, &words[i + 1..], aliases);
+        } else if program == "gh" && (aliases.gh_config_dir || aliases.unreadable_name) {
+            return vec![Switch::Unreadable];
         } else {
             return needs_program(word, &words[i + 1..]).into_iter().collect();
         }
     }
+}
+
+/// What the script of a `trap`, `sh -c` or `flock -c` needs. One that a
+/// substitution prints can't be read.
+fn script_needs(script: &Word, aliases: &Aliases) -> Vec<Switch> {
+    if script.substituted_at.is_some() {
+        return vec![Switch::Unreadable];
+    }
+    needs_with(&script.text, &mut aliases.clone(), true)
 }
 
 /// Whether `xargs`'s options may set a replace string: any `I` or `i` in
@@ -3999,6 +4023,67 @@ mod tests {
         }
         assert_passes("trap 'rm -f /tmp/x' EXIT");
         assert_passes("trap -p");
+    }
+
+    #[test]
+    fn a_script_that_a_substitution_prints_is_denied() {
+        for command in [
+            "trap \"$(echo gh pr merge 1)\" EXIT",
+            "trap -- \"`echo gh pr merge 1`\" EXIT",
+            "trap \"x; $(echo gh pr merge 1)\" EXIT",
+            "bash -c \"$(cat)\" <<< 'gh pr merge 1'",
+            "sh -c \"$(cat)\" <<< 'gh pr merge 1'",
+            "bash -lc \"$(cat)\" <<< 'gh pr merge 1'",
+            "flock /tmp/l -c \"$(cat)\" <<< 'gh pr merge 1'",
+            "eval \"$(cat)\" <<< 'gh pr merge 1'",
+            "eval echo hi \"$(cat)\" <<< 'gh pr merge 1'",
+        ] {
+            assert_unreadable(command);
+        }
+        assert_passes("trap 'rm -f \"$tmp\"' EXIT");
+        assert_passes("trap 'rm -f $(cat /tmp/list)' EXIT");
+        assert_passes("bash -lc 'cargo test'");
+        assert_passes("bash -c 'cd \"$(git rev-parse --show-toplevel)\" && git status'");
+        assert_passes("bash -c 'echo \"$1\"' _ \"$(date)\"");
+        assert_passes("eval 'echo hi'");
+    }
+
+    #[test]
+    fn a_shell_options_value_is_not_its_script() {
+        for command in [
+            "bash -oc pipefail 'gh pr merge 1'",
+            "bash -co pipefail 'gh pr merge 1'",
+            "bash -cO extglob 'gh pr merge 1'",
+            "bash -eoc pipefail 'gh pr merge 1'",
+            "bash -ooc pipefail errexit 'gh pr merge 1'",
+            "bash -c -eo pipefail 'gh pr merge 1'",
+            "bash +oc posix 'gh pr merge 1'",
+            "bash --rcfile /dev/null -c 'gh pr merge 1'",
+            "bash --init-file /dev/null -c 'gh pr merge 1'",
+        ] {
+            assert_judged(command, Switch::Merge);
+        }
+        assert_passes("bash -eo pipefail -c 'cargo test'");
+        assert_passes("bash -oc pipefail 'cargo test'");
+    }
+
+    #[test]
+    fn gh_with_a_changed_config_dir_is_denied() {
+        for command in [
+            "GH_CONFIG_DIR=/tmp/g gh mm 1",
+            "env GH_CONFIG_DIR=/tmp/g gh mm 1",
+            "export GH_CONFIG_DIR=/tmp/g; gh mm 1",
+            "GH_CONFIG_DIR=/tmp/g; export GH_CONFIG_DIR; gh mm 1",
+            "declare -x GH_CONFIG_DIR=/tmp/g && gh pr view 1",
+            "export GH_CONFIG_DIR=/tmp/g; bash -c 'gh mm 1'",
+            "export $N=/tmp/g; gh mm 1",
+            "GH_CONFIG_DIR+=/g; gh mm 1",
+        ] {
+            assert_unreadable(command);
+        }
+        assert_passes("gh pr view 1");
+        assert_passes("gh mm 1; GH_CONFIG_DIR=/tmp/g true");
+        assert_passes("export GH_TOKEN=x; gh pr view 1");
     }
 
     #[test]
