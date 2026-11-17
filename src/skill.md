@@ -337,8 +337,12 @@ question as its own sends a second notification.
 ### Commands
 
 - `loopherd status` lists members by herd with herdr's live status;
-  `--all` adds retired entries, `--strays` lists live agents missing from
-  the ledger. `loopherd view` is the same as a live TUI.
+  `--all` adds retired entries, each row's status reading `retired <time>`,
+  and `--strays` lists live agents missing from the ledger. `--json` gives
+  each member a `retired` field: its retirement time (`unknown` if the
+  ledger has none), or null while it's open; check that field, not
+  `status`, before calling a member open. `loopherd view` is the same as a
+  live TUI.
 - `loopherd reports` prints unread reports, questions first, and marks them
   read; `loopherd reports --all` prints every report and stop and marks
   none read. Both take member names or `--herd <herd>`. `--all` also takes
