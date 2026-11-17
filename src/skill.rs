@@ -97,6 +97,32 @@ mod tests {
         }
     }
 
+    fn section(start: &str, end: &str) -> String {
+        let (_, rest) = SKILL.split_once(start).expect("section start");
+        let (body, _) = rest.split_once(end).expect("section end");
+        body.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn reviewers_write_findings_to_a_file_forwarded_as_a_pr_comment() {
+        let verify = section("4. **Verify**", "5. **After merge**");
+        for rule in [
+            "<scratch>/pr<n>/review-<round>.md",
+            "`pass <head sha>`",
+            "`fail <head sha>: <b> blocking, <m> minor`",
+            "review-<round>-<axis>.md",
+            "gh pr comment <n> --body-file <file>",
+            "can't read your scratch dir",
+        ] {
+            assert!(verify.contains(rule), "Verify misses {rule:?}");
+        }
+        let handoffs = section("\n### Handoffs\n", "\n### Your own handoff\n");
+        assert!(
+            handoffs.contains("current review file"),
+            "Handoffs misses the review file"
+        );
+    }
+
     #[test]
     fn names_nothing_from_this_repo() {
         // init writes these into any repo, so the skill may name them.
