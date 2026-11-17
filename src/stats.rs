@@ -262,7 +262,7 @@ pub fn render(herds: &[Herd]) -> String {
             let mut rows = vec![cells(&[
                 "member",
                 "template",
-                "started",
+                "started (UTC)",
                 "first done",
                 "rounds",
                 "merge wait",
@@ -283,7 +283,7 @@ pub fn render(herds: &[Herd]) -> String {
         }
         out.push_str(&format!("  summary: {}\n", summary_line(&herd.summary)));
         if !herd.open.is_empty() {
-            let mut rows = vec![cells(&["open", "template", "started", "so far"])];
+            let mut rows = vec![cells(&["open", "template", "started (UTC)", "so far"])];
             rows.extend(herd.open.iter().map(|o| {
                 vec![
                     o.name.clone(),
