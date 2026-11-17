@@ -180,7 +180,7 @@ pub fn remove_if_gone(repo: &Path, path: &Path) -> Result<Option<Gone>> {
     Ok(Some(Gone::Removed { kept_branch }))
 }
 
-/// What [`clear_checkout`] does with a branch, and worktrees, a member leaves.
+/// What [`plan_clear`] does with a branch, and worktrees, a member leaves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fate {
     /// Remove them, unless they hold commits not on the base.
@@ -191,45 +191,96 @@ pub enum Fate {
     Drop,
 }
 
-/// What [`clear_checkout`] did.
+/// What [`plan_clear`] would do with a member's checkout.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Cleared {
-    /// There was no worktree, local branch or origin branch to clear.
+pub enum Plan {
+    /// There is no worktree, local branch or origin branch to clear.
     Absent,
-    /// Left them, as [`Fate::Keep`] asked: a worktree or local branch
-    /// when `local`, origin's branch when `remote`.
+    /// There is nothing local, and origin couldn't be asked whether it has
+    /// the branch, for this reason.
+    Unchecked(String),
+    /// Leave them, as [`Fate::Keep`] asked: a worktree or local branch
+    /// when `local`, origin's branch (as last fetched) when `remote`.
     Kept { local: bool, remote: bool },
-    /// Removed each worktree, at its head, the local branch, at its head, and
-    /// origin's branch, at its head; `dropped` counts the commits that were
-    /// on neither `base` nor any other origin branch.
-    Removed {
-        worktrees: Vec<(PathBuf, String)>,
-        branch: Option<String>,
-        remote: Option<String>,
-        dropped: usize,
-        base: String,
-    },
-    /// Changed nothing: they hold `count` commits not on `base`.
+    /// Remove them, local steps first: see [`Clearing`].
+    Clear(Clearing),
+    /// Change nothing: they hold `count` commits not on `base`.
     Ahead { count: usize, base: String },
-    /// Changed nothing: a worktree has work that isn't committed.
+    /// Change nothing: a worktree has work that isn't committed.
     Dirty(String),
-    /// Changed nothing: something else is on it or in the way.
+    /// Change nothing: something else is on it or in the way.
     Taken(String),
 }
 
-/// Clears the worktree at `worktree`, the one at the path [`ensure_worktree`]
-/// makes for `branch`, the local `branch`, and origin's `branch`, per `fate`,
-/// so [`ensure_worktree`] next makes them afresh. `in_use` names the live
-/// member using a worktree. Never removes a worktree with changes, mid-operation
-/// or locked, nor touches the main checkout, one in use, or another worktree on
-/// the branch, whatever the fate; those refuse, changing nothing.
-pub fn clear_checkout(
+/// The worktrees, local branch and origin branch [`plan_clear`] found to
+/// remove, each at the head it counted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Clearing {
+    repo: PathBuf,
+    branch: Option<String>,
+    pub worktrees: Vec<(PathBuf, String)>,
+    pub head: Option<String>,
+    pub remote: Option<String>,
+    /// Commits on neither `base` nor any other origin branch.
+    pub dropped: usize,
+    pub base: String,
+}
+
+impl Clearing {
+    /// Removes the worktrees, then the local branch, leaving origin alone.
+    pub fn remove_local(&self) -> Result<()> {
+        for (path, _) in &self.worktrees {
+            let path = path.to_str().context("worktree path is not UTF-8")?;
+            git(&self.repo, &["worktree", "remove", path])?;
+        }
+        if let (Some(branch), Some(head)) = (&self.branch, &self.head) {
+            delete_branch(&self.repo, branch, head)?;
+        }
+        Ok(())
+    }
+
+    /// Deletes origin's branch, unless it moved past [`Clearing::remote`].
+    pub fn delete_remote(&self) -> Result<RemoteDelete> {
+        let (Some(branch), Some(head)) = (&self.branch, &self.remote) else {
+            return Ok(RemoteDelete::Deleted);
+        };
+        let lease = format!("--force-with-lease=refs/heads/{branch}:{head}");
+        let refspec = format!(":refs/heads/{branch}");
+        match remote_git(&self.repo, &["push", "--quiet", &lease, "origin", &refspec]) {
+            Ok(_) => Ok(RemoteDelete::Deleted),
+            Err(e) if lease_refused(&e) => Ok(RemoteDelete::Moved),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// What [`Clearing::delete_remote`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteDelete {
+    Deleted,
+    /// Origin kept the branch: it moved since it was counted, so the lease refused.
+    Moved,
+}
+
+fn lease_refused(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<RemoteFailed>()
+        .is_some_and(|failed| failed.message.contains("(stale info)"))
+}
+
+/// Plans clearing the worktree at `worktree`, the one at the path
+/// [`ensure_worktree`] makes for `branch`, the local `branch`, and origin's
+/// `branch`, per `fate`, so [`ensure_worktree`] next makes them afresh,
+/// changing nothing. `in_use` names the live member using a worktree. Never
+/// plans removing a worktree with changes, mid-operation or locked, nor
+/// touching the main checkout, one in use, or another worktree on the
+/// branch, whatever the fate. [`Fate::Keep`] never asks origin.
+pub fn plan_clear(
     repo: &Path,
     worktree: Option<&Path>,
     branch: Option<&str>,
     fate: Fate,
     in_use: &dyn Fn(&Path) -> Option<String>,
-) -> Result<Cleared> {
+) -> Result<Plan> {
     let branch_head = match branch {
         Some(b) => git(repo, &["rev-parse", "--verify", &format!("refs/heads/{b}")])
             .ok()
@@ -248,7 +299,7 @@ pub fn clear_checkout(
         && !ours(&path)
     {
         let shown = path.display();
-        return Ok(Cleared::Taken(match listed_worktree(repo, &path)? {
+        return Ok(Plan::Taken(match listed_worktree(repo, &path)? {
             None => format!("{b} is checked out in the main checkout {shown}"),
             Some(_) => format!("{b} is checked out in {shown}, a worktree loopherd didn't make"),
         }));
@@ -261,7 +312,7 @@ pub fn clear_checkout(
         let Some(listed) = listed_worktree(repo, path)? else {
             let in_the_way = std::fs::read_dir(path).is_ok_and(|mut d| d.next().is_some());
             if Some(path) == spawn_path.as_deref() && in_the_way {
-                return Ok(Cleared::Taken(format!(
+                return Ok(Plan::Taken(format!(
                     "{} is in the way and isn't a worktree of {}",
                     path.display(),
                     repo.display()
@@ -270,34 +321,43 @@ pub fn clear_checkout(
             continue;
         };
         if let Some(user) = in_use(path) {
-            return Ok(Cleared::Taken(format!(
+            return Ok(Plan::Taken(format!(
                 "{} is in use by {user}",
                 path.display()
             )));
         }
         worktrees.push(listed);
     }
-    let remote_head = match branch {
-        Some(b) => remote_branch_head(repo, b)?,
-        None => None,
-    };
     let local = !worktrees.is_empty() || branch_head.is_some();
-    if !local && remote_head.is_none() {
-        return Ok(Cleared::Absent);
-    }
     if fate == Fate::Keep {
         let elsewhere = worktrees
             .iter()
             .find(|w| w.branch.as_deref() != branch && Path::new(&w.path).exists());
         if let (Some(b), Some(w)) = (branch, elsewhere) {
-            return Ok(Cleared::Taken(format!(
+            return Ok(Plan::Taken(format!(
                 "{} isn't on {b}, so the new member can't start there; \
                  rerun without --keep-branch to clear it",
                 w.path
             )));
         }
-        let remote = remote_head.is_some();
-        return Ok(Cleared::Kept { local, remote });
+        // ensure_worktree fetches, then starts from this tracking ref; a fetch never prunes
+        // it, so it already tells whether there's one to start from.
+        let remote = branch.is_some_and(|b| has_ref(repo, &format!("refs/remotes/origin/{b}")));
+        return Ok(match local || remote {
+            true => Plan::Kept { local, remote },
+            false => Plan::Absent,
+        });
+    }
+    let remote_head = match (branch, local) {
+        (None, _) => None,
+        (Some(b), true) => remote_branch_head(repo, b)?,
+        (Some(b), false) => match remote_branch_head(repo, b) {
+            Ok(head) => head,
+            Err(e) => return Ok(Plan::Unchecked(format!("{e:#}"))),
+        },
+    };
+    if !local && remote_head.is_none() {
+        return Ok(Plan::Absent);
     }
     for w in &worktrees {
         let path = Path::new(&w.path);
@@ -306,16 +366,16 @@ pub fn clear_checkout(
                 .as_deref()
                 .map(|r| format!(" ({r})"))
                 .unwrap_or_default();
-            return Ok(Cleared::Taken(format!("{} is locked{why}", w.path)));
+            return Ok(Plan::Taken(format!("{} is locked{why}", w.path)));
         }
         if !path.exists() {
             continue;
         }
         if let Some(op) = operation_in_progress(path)? {
-            return Ok(Cleared::Dirty(format!("{} has a {op} in progress", w.path)));
+            return Ok(Plan::Dirty(format!("{} has a {op} in progress", w.path)));
         }
         if let Some(reason) = unclean(path)? {
-            return Ok(Cleared::Dirty(format!("{} has {reason}", w.path)));
+            return Ok(Plan::Dirty(format!("{} has {reason}", w.path)));
         }
     }
     let heads: Vec<&str> = worktrees
@@ -343,7 +403,7 @@ pub fn clear_checkout(
         count(&[&base])?
     };
     if ahead > 0 && fate == Fate::Clear {
-        return Ok(Cleared::Ahead { count: ahead, base });
+        return Ok(Plan::Ahead { count: ahead, base });
     }
     let dropped = match (ahead, branch) {
         (0, _) => 0,
@@ -353,25 +413,18 @@ pub fn clear_checkout(
             count(&[&base, &exclude, "--remotes=origin"])?
         }
     };
-    if let (Some(b), Some(head)) = (branch, &remote_head) {
-        delete_remote_branch(repo, b, head)?;
-    }
-    for w in &worktrees {
-        git(repo, &["worktree", "remove", &w.path])?;
-    }
-    if let (Some(b), Some(head)) = (branch, &branch_head) {
-        delete_branch(repo, b, head)?;
-    }
-    Ok(Cleared::Removed {
+    Ok(Plan::Clear(Clearing {
+        repo: repo.to_path_buf(),
+        branch: branch.map(str::to_string),
         worktrees: worktrees
             .into_iter()
             .map(|w| (PathBuf::from(w.path), w.head))
             .collect(),
-        branch: branch_head,
+        head: branch_head,
         remote: remote_head,
         dropped,
         base,
-    })
+    }))
 }
 
 /// The head of `branch` on origin, fetched into origin/`branch`, if origin
@@ -391,14 +444,6 @@ fn remote_branch_head(repo: &Path, branch: &str) -> Result<Option<String>> {
     Ok(Some(
         git(repo, &["rev-parse", &tracking])?.trim().to_string(),
     ))
-}
-
-fn delete_remote_branch(repo: &Path, branch: &str, head: &str) -> Result<()> {
-    // The lease makes origin refuse the delete if the branch moved since it was counted.
-    let lease = format!("--force-with-lease=refs/heads/{branch}:{head}");
-    let refspec = format!(":refs/heads/{branch}");
-    remote_git(repo, &["push", "--quiet", &lease, "origin", &refspec])?;
-    Ok(())
 }
 
 /// Why `branch` at `head` isn't merged into origin's default branch, if it isn't.
@@ -1145,8 +1190,14 @@ mod tests {
         None
     }
 
-    fn clear(repo: &Path, worktree: Option<&Path>, fate: Fate) -> Cleared {
-        clear_checkout(repo, worktree, Some("feat/x"), fate, &nobody).unwrap()
+    /// Plans clearing `feat/x` and carries the plan out.
+    fn clear(repo: &Path, worktree: Option<&Path>, fate: Fate) -> Plan {
+        let plan = plan_clear(repo, worktree, Some("feat/x"), fate, &nobody).unwrap();
+        if let Plan::Clear(clearing) = &plan {
+            clearing.remove_local().unwrap();
+            clearing.delete_remote().unwrap();
+        }
+        plan
     }
 
     #[test]
@@ -1154,7 +1205,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(root.path());
 
-        assert_eq!(clear(&repo, None, Fate::Clear), Cleared::Absent);
+        assert_eq!(clear(&repo, None, Fate::Clear), Plan::Absent);
     }
 
     #[test]
@@ -1168,13 +1219,15 @@ mod tests {
 
         assert_eq!(
             cleared,
-            Cleared::Removed {
+            Plan::Clear(Clearing {
+                repo: repo.clone(),
+                branch: Some("feat/x".into()),
                 worktrees: vec![(wt.clone(), start.clone())],
-                branch: Some(start),
+                head: Some(start),
                 remote: None,
                 dropped: 0,
                 base: "origin/main".into(),
-            }
+            })
         );
         assert!(!wt.exists());
         assert!(!has_branch(&repo, "feat/x"));
@@ -1191,7 +1244,7 @@ mod tests {
 
         assert_eq!(
             kept,
-            Cleared::Ahead {
+            Plan::Ahead {
                 count: 1,
                 base: "origin/main".into()
             }
@@ -1202,7 +1255,7 @@ mod tests {
         let dropped = clear(&repo, None, Fate::Drop);
 
         assert!(
-            matches!(dropped, Cleared::Removed { dropped: 1, .. }),
+            matches!(dropped, Plan::Clear(Clearing { dropped: 1, .. })),
             "{dropped:?}"
         );
         assert!(!has_branch(&repo, "feat/x"));
@@ -1216,7 +1269,7 @@ mod tests {
 
         assert_eq!(
             clear(&repo, Some(&wt), Fate::Keep),
-            Cleared::Kept {
+            Plan::Kept {
                 local: true,
                 remote: false
             }
@@ -1236,7 +1289,7 @@ mod tests {
 
         assert_eq!(
             cleared,
-            Cleared::Dirty(format!(
+            Plan::Dirty(format!(
                 "{} has uncommitted or untracked changes",
                 wt.display()
             ))
@@ -1254,7 +1307,7 @@ mod tests {
         for fate in [Fate::Keep, Fate::Drop] {
             assert_eq!(
                 clear(&repo, None, fate),
-                Cleared::Taken(format!(
+                Plan::Taken(format!(
                     "feat/x is checked out in the main checkout {}",
                     repo.display()
                 ))
@@ -1269,14 +1322,14 @@ mod tests {
         let repo = repo_with_origin(root.path());
         let wt = ensure_worktree(&repo, "feat/x").unwrap();
 
-        let cleared = clear_checkout(&repo, None, Some("feat/x"), Fate::Drop, &|_| {
+        let cleared = plan_clear(&repo, None, Some("feat/x"), Fate::Drop, &|_| {
             Some("lh-9".into())
         })
         .unwrap();
 
         assert_eq!(
             cleared,
-            Cleared::Taken(format!("{} is in use by lh-9", wt.display()))
+            Plan::Taken(format!("{} is in use by lh-9", wt.display()))
         );
         assert!(wt.exists());
     }
@@ -1292,7 +1345,7 @@ mod tests {
         let cleared = clear(&repo, Some(&wt), Fate::Clear);
 
         assert!(
-            matches!(&cleared, Cleared::Removed { branch: None, worktrees, .. } if worktrees.len() == 1),
+            matches!(&cleared, Plan::Clear(Clearing { head: None, worktrees, .. }) if worktrees.len() == 1),
             "{cleared:?}"
         );
         assert!(!wt.exists());
@@ -1306,11 +1359,11 @@ mod tests {
         let wt = ensure_detached_worktree(&repo, "lead-x").unwrap();
         commit(&wt, "detached work");
 
-        let cleared = clear_checkout(&repo, Some(&wt), None, Fate::Clear, &nobody).unwrap();
+        let cleared = plan_clear(&repo, Some(&wt), None, Fate::Clear, &nobody).unwrap();
 
         assert_eq!(
             cleared,
-            Cleared::Ahead {
+            Plan::Ahead {
                 count: 1,
                 base: "origin/main".into()
             }
@@ -1327,7 +1380,7 @@ mod tests {
         let cleared = clear(&repo, Some(&wt), Fate::Clear);
 
         assert!(
-            matches!(cleared, Cleared::Removed { dropped: 0, .. }),
+            matches!(cleared, Plan::Clear(Clearing { dropped: 0, .. })),
             "{cleared:?}"
         );
         assert!(!worktree_list(&repo).contains("feat/x"));
@@ -1362,7 +1415,7 @@ mod tests {
 
         assert_eq!(
             clear(&repo, None, Fate::Clear),
-            Cleared::Ahead {
+            Plan::Ahead {
                 count: 1,
                 base: "origin/main".into()
             }
@@ -1373,16 +1426,18 @@ mod tests {
 
         assert_eq!(
             dropped,
-            Cleared::Removed {
+            Plan::Clear(Clearing {
+                repo: repo.clone(),
+                branch: Some("feat/x".into()),
                 worktrees: vec![],
-                branch: None,
+                head: None,
                 remote: Some(pushed),
                 dropped: 1,
                 base: "origin/main".into(),
-            }
+            })
         );
         assert!(!on_origin(root.path(), "feat/x"));
-        assert_eq!(clear(&repo, None, Fate::Clear), Cleared::Absent);
+        assert_eq!(clear(&repo, None, Fate::Clear), Plan::Absent);
     }
 
     #[test]
@@ -1393,7 +1448,7 @@ mod tests {
 
         assert_eq!(
             clear(&repo, None, Fate::Keep),
-            Cleared::Kept {
+            Plan::Kept {
                 local: false,
                 remote: true
             }
@@ -1413,11 +1468,11 @@ mod tests {
         assert!(
             matches!(
                 &cleared,
-                Cleared::Removed {
+                Plan::Clear(Clearing {
                     remote: Some(_),
                     dropped: 0,
                     ..
-                }
+                })
             ),
             "{cleared:?}"
         );
@@ -1437,7 +1492,7 @@ mod tests {
         let cleared = clear(&repo, None, Fate::Drop);
 
         assert!(
-            matches!(&cleared, Cleared::Removed { dropped: 1, .. }),
+            matches!(&cleared, Plan::Clear(Clearing { dropped: 1, .. })),
             "{cleared:?}"
         );
     }
@@ -1447,7 +1502,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(root.path());
 
-        assert_eq!(clear(&repo, None, Fate::Keep), Cleared::Absent);
+        assert_eq!(clear(&repo, None, Fate::Keep), Plan::Absent);
     }
 
     #[test]
@@ -1465,7 +1520,7 @@ mod tests {
 
         assert_eq!(
             cleared,
-            Cleared::Taken(format!("{} is locked (on a stick)", wt.display()))
+            Plan::Taken(format!("{} is locked (on a stick)", wt.display()))
         );
         assert!(recorded.exists());
         assert!(has_branch(&repo, "feat/x"));
@@ -1492,7 +1547,7 @@ mod tests {
 
         assert_eq!(
             cleared,
-            Cleared::Taken(format!(
+            Plan::Taken(format!(
                 "feat/x is checked out in {}, a worktree loopherd didn't make",
                 review.display()
             ))
@@ -1519,7 +1574,7 @@ mod tests {
         let cleared = clear(&repo, None, Fate::Clear);
 
         assert!(
-            matches!(&cleared, Cleared::Removed { worktrees, .. } if worktrees.len() == 1),
+            matches!(&cleared, Plan::Clear(Clearing { worktrees, .. }) if worktrees.len() == 1),
             "{cleared:?}"
         );
         assert!(!leftover.exists());
@@ -1546,7 +1601,7 @@ mod tests {
         for fate in [Fate::Clear, Fate::Drop] {
             assert_eq!(
                 clear(&repo, None, fate),
-                Cleared::Dirty(format!(
+                Plan::Dirty(format!(
                     "{} has uncommitted or untracked changes",
                     leftover.display()
                 ))
@@ -1574,7 +1629,7 @@ mod tests {
         let cleared = clear(&repo, None, Fate::Keep);
 
         assert!(
-            matches!(&cleared, Cleared::Taken(why) if why.contains("isn't on feat/x")),
+            matches!(&cleared, Plan::Taken(why) if why.contains("isn't on feat/x")),
             "{cleared:?}"
         );
         assert!(leftover.exists());
@@ -1591,7 +1646,7 @@ mod tests {
         for fate in [Fate::Clear, Fate::Keep, Fate::Drop] {
             assert_eq!(
                 clear(&repo, Some(&leftover), fate),
-                Cleared::Taken(format!(
+                Plan::Taken(format!(
                     "{} is in the way and isn't a worktree of {}",
                     leftover.display(),
                     repo.display()
