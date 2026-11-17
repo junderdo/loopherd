@@ -1,6 +1,6 @@
 //! `loopherd feed`: fill a herd's free slots from its queue's source (D14).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, SystemTime};
@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::herd::{AddRequest, Paths, Queue, lead_switches, members, queue, resolve};
 use crate::herdr::Herdr;
-use crate::ledger::{AfterMerge, Ledger, Process};
+use crate::ledger::{AfterMerge, AgentRecord, Ledger, Process};
 use crate::lock::Lock;
 use crate::pause;
 use crate::process::{Procs, live};
@@ -103,7 +103,7 @@ pub fn feed(
         held
     };
     let mut free = queue.max.saturating_sub(held);
-    let mut taken: HashSet<String> = ledger.entries().context("ledger")?.into_keys().collect();
+    let mut taken = taken(ledger.entries().context("ledger")?);
 
     let (mut added, mut skipped, mut line_errors) = (0, 0, 0);
     let mut code = 0;
@@ -196,6 +196,15 @@ pub fn feed(
     })
 }
 
+/// Names a task may not spawn: every ledger entry but a released one.
+fn taken(entries: BTreeMap<String, AgentRecord>) -> HashSet<String> {
+    entries
+        .into_values()
+        .filter(|r| r.released_at.is_none())
+        .map(|r| r.name)
+        .collect()
+}
+
 fn pending(queue: &Queue, members: Vec<String>) -> Option<Pending> {
     (!members.is_empty()).then(|| Pending {
         repo: queue.repo.clone(),
@@ -220,7 +229,7 @@ pub fn claimable(
     let mut free = queue
         .max
         .saturating_sub(members(ledger, herd)?.saturating_sub(freed));
-    let mut taken: HashSet<String> = entries.into_keys().collect();
+    let mut taken = taken(entries);
     let req = FeedRequest {
         herd: herd.into(),
         dry_run: true,
@@ -972,6 +981,7 @@ mod tests {
             created: "2026-11-01T00:00:00Z".into(),
             retired,
             retired_at: None,
+            released_at: None,
             herd: herd.map(str::to_string),
             template: herd.map(|_| "pr".to_string()),
             params: None,
@@ -1041,6 +1051,43 @@ mod tests {
             ]
         );
         assert_eq!(fed.code, 0);
+    }
+
+    #[test]
+    fn a_released_name_is_fed_again_as_a_fresh_member() {
+        let setup = Setup::new("printf '1\\n2\\n'", 5);
+        let herdr = herdr();
+        let mut released = member("zpr-1", Some("prs"), true);
+        released.released_at = Some("2026-11-16T12:00:00Z".into());
+        let mut ledger = ledger(&[released, member("zpr-2", Some("prs"), true)]);
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "added zpr-1",
+                "skipped: exists zpr-2",
+                "prs: 0 retired, 1 added, 1 skipped, 0 errors",
+            ]
+        );
+        let fresh = &ledger.0["zpr-1"];
+        assert!(!fresh.retired);
+        assert_eq!(fresh.released_at, None);
+    }
+
+    #[test]
+    fn claimable_counts_a_released_name_as_free() {
+        let setup = Setup::new("true", 5);
+        let mut released = member("zpr-1", Some("prs"), true);
+        released.released_at = Some("2026-11-16T12:00:00Z".into());
+        let ledger = ledger(&[released, member("zpr-2", Some("prs"), true)]);
+        let paths = setup.paths();
+        let queue = crate::herd::queue(&paths, "prs").unwrap();
+
+        let names = claimable(&ledger, &paths, &queue, "prs", 0, "1\n2\n").unwrap();
+
+        assert_eq!(names, ["zpr-1"]);
     }
 
     #[test]

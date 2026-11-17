@@ -2206,6 +2206,7 @@ mod tests {
             created: "2026-11-02T00:00:00Z".into(),
             retired: false,
             retired_at: None,
+            released_at: None,
             herd: Some("h".into()),
             template: None,
             params: None,
@@ -3000,6 +3001,20 @@ mod tests {
             "x=\"$(echo $((1))#<<EOF\n)\nEOF\ngh pr merge 1\n)\"",
         ] {
             assert_unreadable(command);
+        }
+    }
+
+    #[test]
+    fn a_lead_may_release_a_retired_member_with_every_switch_off() {
+        let leads = ledger(vec![lead()]);
+        for command in [
+            "loopherd release lh-139",
+            "loopherd release lh-139 --keep-branch",
+            "loopherd release lh-139 --drop-branch",
+            "cargo run -- release lh-139 --drop-branch",
+        ] {
+            assert_eq!(needs(command), [], "{command}");
+            assert_eq!(run(&leads, Switches::default(), command), None, "{command}");
         }
     }
 

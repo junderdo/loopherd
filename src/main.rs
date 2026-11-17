@@ -16,6 +16,7 @@ mod notify;
 mod pause;
 mod process;
 mod prompt;
+mod release;
 mod report;
 mod restart;
 mod retire;
@@ -59,12 +60,13 @@ use crate::lead::LeadRequest;
 use crate::ledger::{FileLedger, Process};
 use crate::process::Procs;
 use crate::prompt::prompt;
+use crate::release::release;
 use crate::report::{Filter, Kind, Reporter, report, reports};
 use crate::retire::{retire, retire_and_close};
 use crate::revive::{ReviveRequest, revive};
 use crate::spawn::{Checkout, Prompt, SHELL_TIMEOUT, SpawnRequest, spawn};
 use crate::status::{Format, status};
-use crate::worktree::{remote_timeout, repo_root};
+use crate::worktree::{Fate, remote_timeout, repo_root};
 
 #[derive(Parser)]
 #[command(
@@ -172,6 +174,20 @@ enum Command {
         /// Works on an already-retired entry, to finish or retry cleanup.
         #[arg(long)]
         close: bool,
+    },
+    /// Let `feed` spawn a retired member's name again, for a task it left
+    /// unfinished. Deletes its local branch and worktree so the new member
+    /// starts afresh, refusing while the branch has commits not on the base
+    /// unless told to keep or drop them. Refuses a member not retired or
+    /// whose tab may be open.
+    Release {
+        name: String,
+        /// Leave its branch and worktree; the new member starts from them.
+        #[arg(long, conflicts_with = "drop_branch")]
+        keep_branch: bool,
+        /// Delete its branch and worktree even with commits not on the base.
+        #[arg(long)]
+        drop_branch: bool,
     },
     /// Resume ledger agents after a herdr restart or a closed tab.
     Revive {
@@ -569,6 +585,11 @@ fn main() -> ExitCode {
         Command::Pause { herds, reason } => ("pause", run_pause(&herds, reason.as_deref())),
         Command::Resume { herds } => ("resume", run_resume(&herds)),
         Command::Retire { name, close } => ("retire", run_retire(&name, close)),
+        Command::Release {
+            name,
+            keep_branch,
+            drop_branch,
+        } => ("release", run_release(&name, keep_branch, drop_branch)),
         Command::Revive { dry_run, name } => ("revive", run_revive(dry_run, name)),
         Command::Prompt { name, force } => ("prompt", run_prompt(&name, force)),
         Command::Tell {
@@ -755,6 +776,32 @@ fn run_retire(name: &str, close: bool) -> Result<i32> {
         SystemTime::now(),
         &mailboxes,
         own_pane.as_deref(),
+        &mut lines,
+    );
+    for line in lines {
+        println!("{line}");
+    }
+    result.map(|()| 0)
+}
+
+fn run_release(name: &str, keep_branch: bool, drop_branch: bool) -> Result<i32> {
+    // A feed spawning this name owns its fresh worktree before the ledger says so.
+    let _feed = Paths::from_env().context("herd")?.lock_feed()?;
+    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let fate = match (keep_branch, drop_branch) {
+        (true, _) => Fate::Keep,
+        (_, true) => Fate::Drop,
+        _ => Fate::Clear,
+    };
+    let mailboxes = ledger.reports_dir()?;
+    let mut lines = vec![];
+    let result = release(
+        &CliHerdr,
+        &mut ledger,
+        name,
+        fate,
+        SystemTime::now(),
+        &mailboxes,
         &mut lines,
     );
     for line in lines {

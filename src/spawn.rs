@@ -217,6 +217,7 @@ pub fn spawn(
         created: humantime::format_rfc3339_seconds(SystemTime::now()).to_string(),
         retired: false,
         retired_at: None,
+        released_at: None,
         herd: req.member_of.as_ref().map(|m| m.herd.clone()),
         template: req.member_of.as_ref().and_then(|m| m.template.clone()),
         params: req
