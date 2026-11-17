@@ -35,7 +35,7 @@ impl Sandbox {
         fs::create_dir_all(built.parent().unwrap()).unwrap();
         executable(
             &built,
-            &format!("#!/bin/sh\necho \"new $*\" >> '{}'\n", log.display()),
+            format!("#!/bin/sh\necho \"new $*\" >> '{}'\n", log.display()),
         );
         let cargo = match build_fails {
             true => "#!/bin/sh\necho 'error: could not compile' >&2\nexit 101\n".to_string(),
@@ -619,7 +619,7 @@ fn install_without_the_splash_file_still_installs() {
     fs::create_dir_all(&scripts).unwrap();
     executable(
         &scripts.join("install"),
-        &fs::read_to_string(INSTALL).unwrap(),
+        fs::read_to_string(INSTALL).unwrap(),
     );
     fs::copy(
         concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install-agents.bash"),

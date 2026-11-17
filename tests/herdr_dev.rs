@@ -1,8 +1,10 @@
 //! `scripts/herdr-dev`, run against a stub `herdr` that reports the dev server
 //! running on the dev socket, so no test reaches a real herdr.
 
+mod fakes;
+
+use fakes::executable;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 use std::thread;
@@ -37,17 +39,7 @@ fn printed_by(script: &str, env: &[(&str, &str)], unset: &[&str]) -> String {
 fn herdr_dev(home: &Path, args: &[&str], env: &[(&str, &str)], unset: &[&str]) -> String {
     let bin = home.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    let source = home.join("herdr.source");
-    fs::write(&source, HERDR_STUB).unwrap();
-    // Copied in a child: a file this process held open for writing could leak
-    // into a sibling test's fork and make running it fail with ETXTBSY.
-    let copied = Command::new("/bin/cp")
-        .arg(&source)
-        .arg(bin.join("herdr"))
-        .status()
-        .unwrap();
-    assert!(copied.success());
-    fs::set_permissions(bin.join("herdr"), fs::Permissions::from_mode(0o755)).unwrap();
+    executable(&bin.join("herdr"), HERDR_STUB);
     let mut cmd = Command::new(format!("{REPO}/scripts/herdr-dev"));
     cmd.args(args)
         .env(

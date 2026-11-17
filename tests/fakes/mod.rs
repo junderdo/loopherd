@@ -2,10 +2,10 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// Writes `script` to an executable `path` from a child process. A file this
+/// Writes `contents` to an executable `path` from a child process. A file this
 /// process held open for writing can leak into a sibling test's fork and make
 /// running `path` fail with ETXTBSY.
-pub fn executable(path: &Path, script: &str) {
+pub fn executable(path: &Path, contents: impl AsRef<[u8]>) {
     let mut child = Command::new("/bin/sh")
         .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
         .arg(path)
@@ -13,7 +13,7 @@ pub fn executable(path: &Path, script: &str) {
         .spawn()
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(script.as_bytes()).unwrap();
+    stdin.write_all(contents.as_ref()).unwrap();
     drop(stdin);
     assert!(
         child.wait().unwrap().success(),
