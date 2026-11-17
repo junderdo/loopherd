@@ -148,6 +148,16 @@ Init never launches an agent.
    builds under one directory per PR, `<scratch>/pr<n>/`, where `<scratch>`
    is your session's own temp directory: its detached worktrees, its build
    target dirs and any copies (mutation runs), so one removal cleans up.
+   Have it write its findings to `<scratch>/pr<n>/review-<round>.md`,
+   each with severity, failure scenario and file:line, and return only
+   one line: `pass <head sha>`, or `fail <head sha>: <b> blocking, <m>
+   minor` plus the file's path. Its reply lands in your context and the
+   file doesn't, so read the file only to forward findings or to write a
+   merge question. Parallel reviews of one PR write
+   `review-<round>-<axis>.md`. Members can't read your scratch dir, so
+   forward a member's findings as a PR comment (`gh pr comment <n>
+   --body-file <file>`), then prompt the member to read that comment.
+   Keep the files until the PR merges or closes.
    For anything that deletes or closes, have it hunt for safety gaps and
    name the test covering each rule. Report as soon as it lands; the human
    often merges fast. Gaps inside the task's scope go back to the member;
@@ -184,7 +194,8 @@ per session naming the file; fix it (`loopherd herds` validates both).
 
 Before handing off, a member that verifies PRs removes the `<scratch>/pr<n>/`
 directories of PRs that already merged or closed (see After merge) and lists
-each one still in use by absolute path under State. A restart gets a new
+each one still in use by absolute path under State, naming each PR's
+current review file. A restart gets a new
 `<scratch>`, so the successor removes those listed directories the same way
 once their PRs merge or close.
 
