@@ -785,6 +785,8 @@ fn run_retire(name: &str, close: bool) -> Result<i32> {
 }
 
 fn run_release(name: &str, keep_branch: bool, drop_branch: bool) -> Result<i32> {
+    // A feed spawning this name owns its fresh worktree before the ledger says so.
+    let _feed = Paths::from_env().context("herd")?.lock_feed()?;
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let fate = match (keep_branch, drop_branch) {
         (true, _) => Fate::Keep,
