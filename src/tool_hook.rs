@@ -426,6 +426,9 @@ impl Lexed {
 struct Word {
     text: String,
     substituted_at: Option<usize>,
+    /// Whether a command substitution builds part of it, which `$((…))`
+    /// alone doesn't: arithmetic prints only a number.
+    commands_print: bool,
     /// Any part of it quoted, so it can't be a keyword.
     quoted: bool,
     /// Where in `text` its first quote or backslash stood.
@@ -626,11 +629,14 @@ fn commands(script: &str) -> Option<Lexed> {
                         '\\' => w.text.extend(chars.next()),
                         '$' if chars.peek() == Some(&'(') => {
                             chars.next();
+                            let text = substitution(&mut chars)?;
                             w.mark_substituted();
-                            lexed.extend(substituted(&substitution(&mut chars)?)?);
+                            w.commands_print |= !text.starts_with('(');
+                            lexed.extend(substituted(&text)?);
                         }
                         '`' => {
                             w.mark_substituted();
+                            w.commands_print = true;
                             lexed.extend(self::commands(&backticked(&mut chars, true)?)?);
                         }
                         c => w.text.push(c),
@@ -676,8 +682,11 @@ fn commands(script: &str) -> Option<Lexed> {
             }
             '$' if chars.peek() == Some(&'(') => {
                 chars.next();
-                word.get_or_insert_default().mark_substituted();
-                lexed.extend(substituted(&substitution(&mut chars)?)?);
+                let text = substitution(&mut chars)?;
+                let w = word.get_or_insert_default();
+                w.mark_substituted();
+                w.commands_print |= !text.starts_with('(');
+                lexed.extend(substituted(&text)?);
             }
             '$' if chars.next_if_eq(&'$').is_some() => {
                 word.get_or_insert_default().text.push_str("$$");
@@ -689,7 +698,9 @@ fn commands(script: &str) -> Option<Lexed> {
             // Bash translates `$"…"` through a message catalog the hook can't read.
             '$' if chars.peek() == Some(&'"') => return None,
             '`' => {
-                word.get_or_insert_default().mark_substituted();
+                let w = word.get_or_insert_default();
+                w.mark_substituted();
+                w.commands_print = true;
                 lexed.extend(self::commands(&backticked(&mut chars, false)?)?);
             }
             ';' | '&' | '|' | '\n' | '(' | ')' => {
@@ -1374,43 +1385,37 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             let toolchain = skip_options(words, i + 1, &[]);
             i = skip_options(words, toolchain + 1, &[]);
         } else if SHELLS.contains(&program) {
-            i += 1;
-            // Bash reads its long options first, with one dash or two: `-login`, `--rcfile f`.
-            while let Some(long) = words
-                .get(i)
-                .and_then(|w| w.strip_prefix("--").or_else(|| w.strip_prefix('-')))
-                .filter(|long| BASH_LONG_OPTIONS.contains(long))
-            {
-                i += 1 + usize::from(["rcfile", "init-file"].contains(&long));
-            }
-            let mut command_script = false;
-            let mut stdin_script = false;
-            while let Some(option) = words.get(i).filter(|w| w.starts_with(['-', '+'])) {
-                i += 1;
-                if option == "--" || option == "-" {
-                    break;
+            // Only bash reads `-login` as a long option; zsh reads it as a
+            // cluster. `sh` may be either, so it gets both readings.
+            let readings: &[bool] = match program {
+                "bash" => &[true],
+                "sh" => &[true, false],
+                _ => &[false],
+            };
+            let mut read: Vec<ShellOptions> = readings
+                .iter()
+                .map(|&long_first| shell_options(words, i + 1, long_first))
+                .collect();
+            read.dedup();
+            let mut needs = vec![];
+            for options in &read {
+                if options.command_script {
+                    needs.extend(
+                        kept.get(options.end)
+                            .map_or(vec![], |script| script_needs(script, aliases)),
+                    );
+                } else if (options.stdin_script && !heredoc_feeds(&redirects, 0))
+                    || reads_script_from_input(words.get(options.end))
+                {
+                    needs.push(Switch::Unreadable);
                 }
-                if let Some(long) = option.strip_prefix("--") {
-                    i += usize::from(["rcfile", "init-file"].contains(&long));
-                    continue;
-                }
-                command_script |= option.contains('c');
-                stdin_script |= option.contains('s');
-                // Each `o` or `O` in a cluster takes the next unused word: `-oc pipefail 'script'`.
-                i += option.matches(['o', 'O']).count();
             }
-            if command_script {
-                return kept
-                    .get(i)
-                    .map_or(vec![], |script| script_needs(script, aliases));
+            if !needs.is_empty() || read.iter().any(|options| options.command_script) {
+                return needs;
             }
-            if (stdin_script && !heredoc_feeds(&redirects, 0))
-                || reads_script_from_input(words.get(i))
-            {
-                return vec![Switch::Unreadable];
-            }
+            i = read[0].end;
         } else if program == "eval" {
-            if kept[i + 1..].iter().any(|w| w.substituted_at.is_some()) {
+            if kept[i + 1..].iter().any(|w| w.commands_print) {
                 return vec![Switch::Unreadable];
             }
             return needs_with(&words[i + 1..].join(" "), aliases, true);
@@ -1426,10 +1431,54 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
     }
 }
 
+/// A shell's options from `words[from]`, read as bash reads them when
+/// `long_first`, or as zsh, dash and ksh read them otherwise.
+#[derive(PartialEq)]
+struct ShellOptions {
+    /// The first word after the options and their values.
+    end: usize,
+    command_script: bool,
+    stdin_script: bool,
+}
+
+fn shell_options(words: &[String], from: usize, long_first: bool) -> ShellOptions {
+    let mut i = from;
+    // Bash reads its long options first, with one dash or two: `-login`, `--rcfile f`.
+    while let Some(long) = words
+        .get(i)
+        .filter(|_| long_first)
+        .and_then(|w| w.strip_prefix("--").or_else(|| w.strip_prefix('-')))
+        .filter(|long| BASH_LONG_OPTIONS.contains(long))
+    {
+        i += 1 + usize::from(["rcfile", "init-file"].contains(&long));
+    }
+    let mut options = ShellOptions {
+        end: i,
+        command_script: false,
+        stdin_script: false,
+    };
+    while let Some(option) = words.get(i).filter(|w| w.starts_with(['-', '+'])) {
+        i += 1;
+        if option == "--" || option == "-" {
+            break;
+        }
+        if let Some(long) = option.strip_prefix("--") {
+            i += usize::from(["rcfile", "init-file"].contains(&long));
+            continue;
+        }
+        options.command_script |= option.contains('c');
+        options.stdin_script |= option.contains('s');
+        // Each `o` or `O` in a cluster takes the next unused word: `-oc pipefail 'script'`.
+        i += option.matches(['o', 'O']).count();
+    }
+    options.end = i;
+    options
+}
+
 /// What the script of a `trap`, `sh -c` or `flock -c` needs. One that a
 /// substitution prints can't be read.
 fn script_needs(script: &Word, aliases: &Aliases) -> Vec<Switch> {
-    if script.substituted_at.is_some() {
+    if script.commands_print {
         return vec![Switch::Unreadable];
     }
     needs_with(&script.text, &mut aliases.clone(), true)
@@ -4073,6 +4122,9 @@ mod tests {
         assert_passes("bash -c 'cd \"$(git rev-parse --show-toplevel)\" && git status'");
         assert_passes("bash -c 'echo \"$1\"' _ \"$(date)\"");
         assert_passes("eval 'echo hi'");
+        assert_passes("bash -c \"echo $((1+2))\"");
+        assert_passes("trap \"echo $((1+2))\" EXIT");
+        assert_passes("eval \"x=$((i+1))\"");
     }
 
     #[test]
@@ -4092,6 +4144,16 @@ mod tests {
             "bash -login -c 'gh pr merge 1'",
             "bash -noediting -noprofile -c 'gh pr merge 1'",
             "bash --login -oc pipefail 'gh pr merge 1'",
+        ] {
+            assert_judged(command, Switch::Merge);
+        }
+        for command in [
+            "zsh -restricted 'gh pr merge 1'",
+            "zsh -restricted 'gh pr merge 1' x",
+            "zsh -rcfile 'gh pr merge 1' x",
+            "ksh -restricted 'gh pr merge 1' x",
+            "sh -restricted 'gh pr merge 1' x",
+            "sh -login -c 'gh pr merge 1'",
         ] {
             assert_judged(command, Switch::Merge);
         }
