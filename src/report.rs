@@ -259,9 +259,11 @@ pub struct Filter<'a> {
     pub herd: Option<&'a str>,
     /// Full history, `stop` and `start` entries included, leaving the cursor alone.
     pub all: bool,
-    /// With `all`, only entries at or after this time.
+    /// With `all`, only entries at or after this time; ignored without it,
+    /// since unread reports it hid would still be marked read.
     pub since: Option<SystemTime>,
-    /// With `all`, only the last this many entries after the other filters.
+    /// With `all`, only the last this many entries after the other filters;
+    /// ignored without it.
     pub tail: Option<NonZeroUsize>,
 }
 
@@ -290,25 +292,26 @@ pub fn peek_reports(ledger: &dyn Ledger, dir: &Path, filter: &Filter) -> Result<
 /// `reports --since`: anything `stats --since` takes, or a span such as `30m`,
 /// `2h` or `1d` back from `now`.
 pub fn parse_since(value: &str, now: SystemTime) -> Result<SystemTime> {
-    let span = value
+    const ACCEPTED: &str = "a date (2026-11-01), RFC 3339 time (2026-11-01T12:00:00Z) \
+                            or span back from now (30m, 2h, 1d)";
+    let Some((count, unit)) = value
         .strip_suffix(['m', 'h', 'd'])
         .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-        .and_then(|n| n.parse::<u64>().ok())
-        .map(|n| match value.as_bytes()[value.len() - 1] {
-            b'm' => n * 60,
-            b'h' => n * 3600,
-            _ => n * 86_400,
-        });
-    match span {
-        Some(secs) => now
-            .checked_sub(Duration::from_secs(secs))
-            .ok_or_else(|| anyhow!("{value:?} reaches back past the epoch")),
-        None => crate::stats::parse_moment(
-            value,
-            "a date (2026-11-01), RFC 3339 time (2026-11-01T12:00:00Z) \
-             or span back from now (30m, 2h, 1d)",
-        ),
-    }
+        .map(|n| (n, &value[n.len()..]))
+    else {
+        return crate::stats::parse_moment(value, ACCEPTED);
+    };
+    let unit_secs = match unit {
+        "m" => 60,
+        "h" => 3600,
+        _ => 86_400,
+    };
+    count
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(unit_secs))
+        .and_then(|secs| now.checked_sub(Duration::from_secs(secs)))
+        .ok_or_else(|| anyhow!("{value:?} is not {ACCEPTED}"))
 }
 
 /// Whether the caller already holds the cursor's lock.
@@ -343,13 +346,14 @@ fn reports_with(
         ),
         false => Cursor::Reports.read(dir, &names, locked, |e| e.report().is_some())?,
     };
-    if let Some(since) = filter.since {
-        found.retain(|(_, e)| humantime::parse_rfc3339_weak(&e.at).is_ok_and(|at| at >= since));
-    }
-    if let Some(tail) = filter.tail {
-        found.drain(..found.len().saturating_sub(tail.get()));
-    }
-    if !filter.all {
+    if filter.all {
+        if let Some(since) = filter.since {
+            found.retain(|(_, e)| humantime::parse_rfc3339_weak(&e.at).is_ok_and(|at| at >= since));
+        }
+        if let Some(tail) = filter.tail {
+            found.drain(..found.len().saturating_sub(tail.get()));
+        }
+    } else {
         found.sort_by(|(_, a), (_, b)| {
             let question = |e: &Entry| e.report().is_some_and(|(k, _)| k == Kind::Question);
             (!question(a), &a.at).cmp(&(!question(b), &b.at))
@@ -1077,6 +1081,22 @@ mod tests {
     }
 
     #[test]
+    fn unread_reports_ignore_since_and_tail_so_none_is_marked_read_unseen() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = two_herds_mail(dir.path());
+        let filtered = Filter {
+            since: Some(at("2026-11-01T12:00:00Z")),
+            tail: tail(1),
+            ..UNREAD
+        };
+
+        assert_eq!(
+            reports(&ledger, dir.path(), &filtered).unwrap().lines.len(),
+            4
+        );
+    }
+
+    #[test]
     fn since_takes_a_date_a_time_or_a_span_back_from_now() {
         let now = at("2026-11-16T15:00:00Z");
         for (value, expected) in [
@@ -1094,7 +1114,15 @@ mod tests {
     #[test]
     fn a_bad_since_names_every_accepted_form() {
         let now = at("2026-11-16T15:00:00Z");
-        for value in ["yesterday", "30", "2w", "m", "-1h"] {
+        for value in [
+            "yesterday",
+            "30",
+            "2w",
+            "m",
+            "-1h",
+            "213503982334602d",
+            "200000000000000000m",
+        ] {
             let error = parse_since(value, now).unwrap_err().to_string();
             assert_eq!(
                 error,
