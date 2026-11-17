@@ -2484,6 +2484,7 @@ args = ["--model", "opus"]
             created: "2026-11-01T00:00:00Z".into(),
             retired: false,
             retired_at: None,
+            released_at: None,
             herd: herd.map(str::to_string),
             template: template.map(str::to_string),
             params: None,

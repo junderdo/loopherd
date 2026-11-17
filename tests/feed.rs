@@ -174,3 +174,30 @@ fn add_into_a_queue_herd_is_refused_while_feed_holds_the_lock() {
     assert!(out.stdout.is_empty());
     assert_eq!(out.status.code(), Some(1));
 }
+
+#[test]
+fn release_is_refused_while_a_feed_holds_the_lock() {
+    let state = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    fs::create_dir(state.path().join("loopherd")).unwrap();
+    let held = File::create(state.path().join("loopherd/feed.lock")).unwrap();
+    assert_eq!(
+        unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .args(["release", "zpr-1"])
+        .env("XDG_STATE_HOME", state.path())
+        .env("LOOPHERD_CONFIG_DIR", config.path())
+        .env("PATH", "")
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "loopherd release: feed already running\n"
+    );
+    assert!(out.stdout.is_empty());
+    assert_eq!(out.status.code(), Some(1));
+}
