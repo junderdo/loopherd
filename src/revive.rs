@@ -96,7 +96,7 @@ pub fn revive(
                                 .into(),
                         );
                     }
-                    if let Err(e) = ledger.started(&record.name, SystemTime::now()) {
+                    if let Err(e) = ledger.started(&record.name, SystemTime::now(), true) {
                         warnings.push(format!("no start entry in its mailbox: {e:#}"));
                     }
                 }

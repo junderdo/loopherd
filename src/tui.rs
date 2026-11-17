@@ -1294,7 +1294,7 @@ max = 3
     fn quiet_mail(ledger: &MemLedger) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         for name in ledger.0.keys() {
-            post(dir.path(), name, Body::Start);
+            post(dir.path(), name, Body::Start { resumed: false });
         }
         dir
     }
@@ -1501,7 +1501,7 @@ max = 3
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let mail = quiet_mail(&ledger);
         post(mail.path(), "a", question("restarted since"));
-        post(mail.path(), "a", Body::Start);
+        post(mail.path(), "a", Body::Start { resumed: false });
         post(mail.path(), "c", question("finished anyway"));
         post(mail.path(), "c", done("PR opened"));
         post(mail.path(), "old", question("still open"));
@@ -2827,7 +2827,7 @@ max = 3
         let (ledger, herdr, t0) = (ledger(), herdr(), Instant::now());
         let mail = quiet_mail(&ledger);
         post(mail.path(), "a", measured(151_000, 150_000));
-        post(mail.path(), "a", Body::Start);
+        post(mail.path(), "a", Body::Start { resumed: false });
         post(mail.path(), "old", measured(75_000, 150_000));
         let app = app_with_mail(&herdr, &ledger, mail.path(), t0);
 
@@ -3200,7 +3200,12 @@ max = 3
             stopped(0, Some("rate_limit")),
         );
         post_at(mail.path(), "a", "2026-11-16T10:07:00Z", stopped(1, None));
-        post_at(mail.path(), "c", "2026-11-16T10:08:00Z", Body::Start);
+        post_at(
+            mail.path(),
+            "c",
+            "2026-11-16T10:08:00Z",
+            Body::Start { resumed: false },
+        );
         let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
         assert_eq!(
             ticker(&terminal),
@@ -3416,7 +3421,7 @@ max = 3
         post_at(mail.path(), "a", "2026-11-16T10:05:00Z", note("old"));
         let mut app = app_with_mail(&herdr, &ledger, mail.path(), now);
         std::fs::remove_file(mail.path().join("a.jsonl")).unwrap();
-        post(mail.path(), "a", Body::Start);
+        post(mail.path(), "a", Body::Start { resumed: false });
         post_at(mail.path(), "a", "2026-11-16T11:00:00Z", note("brand new"));
         refresh_with_mail(&mut app, &herdr, &ledger, mail.path(), now);
         let terminal = render_ticker(&app, now);
