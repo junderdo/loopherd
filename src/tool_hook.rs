@@ -212,7 +212,7 @@ fn decide(
     }
     if needed == Switch::Unreadable {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like (write prose with `cat` or `tee` into an .md, .txt, .log, .json, .csv, .html, .diff, .out or .msg file in the working tree or /tmp, outside .git and .cargo, with any other heredoc in the call written the same way, beside only reading sinks and programs like `cargo` holding no pipe, `(`, quote, `$`, glob, brace or mention of the file), a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like (write prose with `cat` or `tee` into an .md, .txt, .log, .json, .csv, .html, .diff, .out or .msg file in the working tree or /tmp, outside .git and .cargo as the call's only heredoc, beside only reading sinks and programs like `cargo` holding no pipe, `(`, quote, `$`, glob, brace or mention of the file), a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -364,9 +364,9 @@ fn runs_code(commands: &[Vec<Word>]) -> bool {
 }
 
 /// Whether the body read before command `at` only goes to files its sink
-/// writes, in a script that can't reach them: no command reads another's
-/// output or defines a function, every other command [`leaves_files`], and
-/// every other body is such a write too, so none lands in a config file.
+/// writes, in a script that can't reach them: it is the call's one heredoc,
+/// no command reads another's output or defines a function, and every other
+/// command [`leaves_files`].
 fn only_written(lexed: &Lexed, at: usize) -> bool {
     let Some(feeding) = at.checked_sub(1) else {
         return false;
@@ -374,23 +374,14 @@ fn only_written(lexed: &Lexed, at: usize) -> bool {
     let Some(files) = written_files(&lexed.commands[feeding]) else {
         return false;
     };
-    !lexed.output_read
+    lexed.bodies.len() == 1
+        && !lexed.output_read
         && !lexed.defines_function
-        && lexed
-            .bodies
-            .iter()
-            .all(|(from, _)| *from == at || writes_prose(lexed, *from))
         && lexed
             .commands
             .iter()
             .enumerate()
             .all(|(i, command)| i == feeding || leaves_files(command, &files))
-}
-
-/// Whether the body read before command `at` goes to a [`written_files`] write.
-fn writes_prose(lexed: &Lexed, at: usize) -> bool {
-    at.checked_sub(1)
-        .is_some_and(|feeding| written_files(&lexed.commands[feeding]).is_some())
 }
 
 /// The files `cat` or `tee` writes when its output goes only to files: its
@@ -3954,7 +3945,6 @@ mod tests {
             format!("cat > notes.md <<'EOF'\n{prose}\nEOF\nwc -l notes.md; cargo fmt"),
             format!("cat >> notes.md <<EOF\n{prose}\nEOF\ncargo test 2>&1; cat notes.md"),
             format!("tee notes.md >/dev/null <<'EOF'\n{prose}\nEOF\ncargo clippy"),
-            format!("cat > a.md <<'A'\n{prose}\nA\ncat >> a.md <<'B'\n{prose}\nB\ncargo fmt"),
             format!("{{ cat > notes.md <<'EOF'\n{prose}\nEOF\n}}; cargo fmt"),
             format!("if true; then cat > notes.md <<'EOF'\n{prose}\nEOF\nfi; cargo fmt"),
             format!("cat > notes.md 2>&1 <<'EOF'\n{prose}\nEOF\ncargo test 2>&1"),
@@ -4014,6 +4004,22 @@ mod tests {
             ),
             format!("cat > build.rs <<'EOF'\nfn f<'a>(x: &str) {{ let _ = x; }}\nEOF\ncargo build"),
             format!("git apply > out.md <<'EOF'\n{patch}EOF\nPATH=d:/usr/bin cargo zz"),
+            format!(
+                "cat > zq.md {merge}cat > cfg.md <<'B'\ntarget.x86_64-unknown-linux-gnu.runner = [\"sh\", \"-c\", \"sh z*\"]\nB\ncargo --config cfg.md test"
+            ),
+            format!(
+                "cat > zq.md {merge}cat > cfg.json <<'B'\ntarget.x86_64-unknown-linux-gnu.runner = [\"sh\", \"-c\", \"sh z*\"]\nB\ncargo --config cfg.json test"
+            ),
+            format!(
+                "cat > zq.md <<'A'; cat > cfg.md <<'B'\ngh pr merge 1\nA\ntarget.x86_64-unknown-linux-gnu.runner = [\"sh\", \"-c\", \"sh z*\"]\nB\ncargo --config cfg.md test"
+            ),
+            format!(
+                "cat > zq.md {merge}cat > cfg.md <<'B'\ntarget.x86_64-unknown-linux-gnu.runner = [\"sh\", \"-c\", \"sh z*\"]\nB\ncargo --config cfg.md fmt"
+            ),
+            format!(
+                "cat > zq.md {merge}cat > cfg.md <<'B'\ntarget.x86_64-unknown-linux-gnu.runner = [\"sh\", \"-c\", \"sh z*\"]\nB\ncargo -Zunstable-options --config cfg.md test"
+            ),
+            format!("cat > a.md <<'A'\nIt's prose.\nA\ncat >> a.md {merge}cargo fmt"),
         ] {
             assert!(
                 run(&leads, Switches::default(), &command).is_some(),
