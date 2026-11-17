@@ -1385,35 +1385,33 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             let toolchain = skip_options(words, i + 1, &[]);
             i = skip_options(words, toolchain + 1, &[]);
         } else if SHELLS.contains(&program) {
-            // Only bash reads `-login` as a long option; zsh reads it as a
-            // cluster. `sh` may be either, so it gets both readings.
-            let readings: &[bool] = match program {
-                "bash" => &[true],
-                "sh" => &[true, false],
-                _ => &[false],
-            };
-            let mut read: Vec<ShellOptions> = readings
+            let read: Vec<ShellOptions> = shell_readings(program)
                 .iter()
-                .map(|&long_first| shell_options(words, i + 1, long_first))
+                .map(|&reading| shell_options(words, i + 1, reading))
                 .collect();
-            read.dedup();
-            let mut needs = vec![];
-            for options in &read {
-                if options.command_script {
-                    needs.extend(
-                        kept.get(options.end)
-                            .map_or(vec![], |script| script_needs(script, aliases)),
-                    );
-                } else if (options.stdin_script && !heredoc_feeds(&redirects, 0))
+            let scripts: std::collections::BTreeSet<usize> = read
+                .iter()
+                .filter(|options| options.command_script)
+                .map(|options| options.end)
+                .collect();
+            if !scripts.is_empty() {
+                return scripts
+                    .into_iter()
+                    .filter_map(|at| kept.get(at))
+                    .flat_map(|script| script_needs(script, aliases))
+                    .collect();
+            }
+            if read.iter().any(|options| {
+                (options.stdin_script && !heredoc_feeds(&redirects, 0))
                     || reads_script_from_input(words.get(options.end))
-                {
-                    needs.push(Switch::Unreadable);
-                }
+            }) {
+                return vec![Switch::Unreadable];
             }
-            if !needs.is_empty() || read.iter().any(|options| options.command_script) {
-                return needs;
-            }
-            i = read[0].end;
+            i = read
+                .iter()
+                .map(|options| options.end)
+                .min()
+                .unwrap_or(i + 1);
         } else if program == "eval" {
             if kept[i + 1..].iter().any(|w| w.commands_print) {
                 return vec![Switch::Unreadable];
@@ -1431,9 +1429,36 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
     }
 }
 
-/// A shell's options from `words[from]`, read as bash reads them when
-/// `long_first`, or as zsh, dash and ksh read them otherwise.
-#[derive(PartialEq)]
+/// One way a shell may read its options.
+#[derive(Clone, Copy)]
+struct ShellReading {
+    /// Bash's long options first, with one dash or two: `-login`, `-rcfile f`.
+    long_first: bool,
+    /// zsh's `o` in a cluster takes the rest of it as the option's name
+    /// (`-conoclobber`); bash's takes the next word (`-oc pipefail`).
+    o_takes_rest: bool,
+}
+
+/// The readings to judge `shell` by: bash's own, or for any other shell,
+/// which may be bash under another name, every one, so a `-c` script that
+/// any of them finds counts.
+fn shell_readings(shell: &str) -> Vec<ShellReading> {
+    let bash = ShellReading {
+        long_first: true,
+        o_takes_rest: false,
+    };
+    if shell == "bash" {
+        return vec![bash];
+    }
+    [(true, false), (true, true), (false, false), (false, true)]
+        .into_iter()
+        .map(|(long_first, o_takes_rest)| ShellReading {
+            long_first,
+            o_takes_rest,
+        })
+        .collect()
+}
+
 struct ShellOptions {
     /// The first word after the options and their values.
     end: usize,
@@ -1441,12 +1466,12 @@ struct ShellOptions {
     stdin_script: bool,
 }
 
-fn shell_options(words: &[String], from: usize, long_first: bool) -> ShellOptions {
+/// A shell's options from `words[from]`, read the way `reading` says.
+fn shell_options(words: &[String], from: usize, reading: ShellReading) -> ShellOptions {
     let mut i = from;
-    // Bash reads its long options first, with one dash or two: `-login`, `--rcfile f`.
     while let Some(long) = words
         .get(i)
-        .filter(|_| long_first)
+        .filter(|_| reading.long_first)
         .and_then(|w| w.strip_prefix("--").or_else(|| w.strip_prefix('-')))
         .filter(|long| BASH_LONG_OPTIONS.contains(long))
     {
@@ -1466,10 +1491,17 @@ fn shell_options(words: &[String], from: usize, long_first: bool) -> ShellOption
             i += usize::from(["rcfile", "init-file"].contains(&long));
             continue;
         }
-        options.command_script |= option.contains('c');
-        options.stdin_script |= option.contains('s');
-        // Each `o` or `O` in a cluster takes the next unused word: `-oc pipefail 'script'`.
-        i += option.matches(['o', 'O']).count();
+        let mut shorts = option[1..].chars();
+        while let Some(short) = shorts.next() {
+            options.command_script |= short == 'c';
+            options.stdin_script |= short == 's';
+            if matches!(short, 'o' | 'O') {
+                if reading.o_takes_rest && !shorts.as_str().is_empty() {
+                    break;
+                }
+                i += 1;
+            }
+        }
     }
     options.end = i;
     options
@@ -4113,6 +4145,11 @@ mod tests {
             "flock /tmp/l -c \"$(cat)\" <<< 'gh pr merge 1'",
             "eval \"$(cat)\" <<< 'gh pr merge 1'",
             "eval echo hi \"$(cat)\" <<< 'gh pr merge 1'",
+            // Bash reads `$((` as a command substitution when what follows
+            // isn't arithmetic; the lexer must not take it for `$((…))`.
+            "trap \"$((echo gh pr merge 1) )\" EXIT",
+            "bash -c \"$((echo gh pr merge 1) )\"",
+            "eval \"$((echo gh pr merge 1) )\"",
         ] {
             assert_unreadable(command);
         }
@@ -4154,10 +4191,18 @@ mod tests {
             "ksh -restricted 'gh pr merge 1' x",
             "sh -restricted 'gh pr merge 1' x",
             "sh -login -c 'gh pr merge 1'",
+            "zsh -conoclobber 'gh pr merge 1'",
+            "zsh -cono 'gh pr merge 1'",
+            "ksh -conoclobber 'gh pr merge 1'",
+            "sh -conoclobber 'gh pr merge 1'",
+            "zsh -oc pipefail 'gh pr merge 1'",
         ] {
             assert_judged(command, Switch::Merge);
         }
         assert_passes("bash -eo pipefail -c 'cargo test'");
+        assert_passes("sh -noprofile -c 'cargo test'");
+        assert_passes("zsh -noprofile -c 'cargo test'");
+        assert_passes("sh -o pipefail -c 'cargo test'");
         assert_passes("bash -oc pipefail 'cargo test'");
     }
 
