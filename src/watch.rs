@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use crate::context::ShepherdHandoff;
-use crate::feed::{claimable, run_check};
+use crate::feed::{claimable, run_check, run_source};
 use crate::herd::{MemberCheck, MemberChecks, Paths, lead_checks};
 use crate::herd_view::{Member, Options, View};
 use crate::herdr::{AgentStatus, Herdr};
@@ -32,8 +32,11 @@ pub mod line {
     pub const INTERRUPTED: &str = "interrupted";
     pub const BLOCKED: &str = "blocked";
     pub const GONE: &str = "gone";
+    /// After a herd's name, not a member's.
+    pub const FAILING: &str = "failing";
+    pub const RECOVERED: &str = "recovered";
     #[cfg(test)]
-    pub const ALL: [&str; 8] = [
+    pub const ALL: [&str; 10] = [
         PAUSED,
         FINISHED,
         FAILED,
@@ -42,6 +45,8 @@ pub mod line {
         INTERRUPTED,
         BLOCKED,
         GONE,
+        FAILING,
+        RECOVERED,
     ];
 }
 
@@ -233,8 +238,8 @@ pub fn watch(
             let events = checks.run(ledger, warn)?;
             checks.next = clock.elapsed() + CHECK_EVERY;
             if !events.is_empty() {
-                lines.extend(events.iter().cloned());
-                fired = Some(checks.fired.with(events));
+                lines.extend(events.iter().map(|e| e.line.clone()));
+                fired = Some(checks.fired.with(&events));
             }
         }
         if !agents_read {
@@ -341,10 +346,11 @@ struct Checks<'a> {
 }
 
 impl Checks<'_> {
-    /// One line per event not fired before. A check or source that fails,
-    /// or runs out of the round's [`CHECK_EVERY`], is no event. A paused
+    /// Each event not fired before. A check or the source failing starts a
+    /// streak, one `failing` event, and its next pass a `recovered` one; one
+    /// that runs out of the round's [`CHECK_EVERY`] is no event. A paused
     /// herd has no claimable events (D23).
-    fn run(&mut self, ledger: &dyn Ledger, warn: &mut dyn FnMut(&str)) -> Result<Vec<String>> {
+    fn run(&mut self, ledger: &dyn Ledger, warn: &mut dyn FnMut(&str)) -> Result<Vec<Event>> {
         let loaded = lead_checks(self.paths, &self.herd);
         let problem = loaded
             .as_ref()
@@ -363,10 +369,20 @@ impl Checks<'_> {
         });
         let after_merge = queue.as_ref().is_some_and(|q| !q.after_merge.is_empty());
         let mut events = vec![];
+        let mut failing = vec![];
+        let mut passing = vec![];
         let mut freed = 0;
         for worker in workers {
             let done = run_member_check(&checks.done, &checks, &worker, &budget);
             let merged = run_member_check(&checks.merged, &checks, &worker, &budget);
+            for (kind, check) in [("done", &done), ("merged", &merged)] {
+                let what = format!("{} {kind}", worker.name);
+                match check {
+                    Some(Ok(_)) => passing.push(what),
+                    Some(Err(Unchecked::Failed(why))) => failing.push((what, why.clone())),
+                    Some(Err(Unchecked::OutOfTime)) | None => {}
+                }
+            }
             let due = after_merge && worker.after_merge.is_none();
             // Feed keeps, done or not, a member whose after_merge is due or unnoted.
             let kept = match worker.after_merge {
@@ -374,7 +390,7 @@ impl Checks<'_> {
                     if live(self.procs, Some(owner)).is_none()
                         && still_pending(ledger, &worker.name, owner)?
                     {
-                        events.push(format!("{} {}", worker.name, line::INTERRUPTED));
+                        events.push(Event::new(format!("{} {}", worker.name, line::INTERRUPTED)));
                     }
                     true
                 }
@@ -383,7 +399,7 @@ impl Checks<'_> {
             };
             freed += usize::from(done == Some(Ok(true)) && !kept);
             if merged == Some(Ok(true)) && (due || matches!(done, None | Some(Ok(false)))) {
-                events.push(format!("{} {}", worker.name, line::MERGED));
+                events.push(Event::new(format!("{} {}", worker.name, line::MERGED)));
             }
         }
         // Read last, so a pause during the member checks counts.
@@ -394,20 +410,87 @@ impl Checks<'_> {
         // After the pause, so a resume during the member checks counts now.
         self.fired.reload()?;
         if let (false, Some(queue), Some(timeout)) = (paused, queue, budget.left()) {
-            let names = claimable(ledger, self.paths, &queue, &self.herd, freed, timeout);
-            // A running feed may be spawning these before it records them.
-            if let (Ok(names), false) = (names, feeding(self.paths)?) {
-                events.extend(
-                    names
-                        .into_iter()
-                        .map(|name| format!("{name} {}", line::CLAIMABLE)),
-                );
+            match run_source(&queue, timeout) {
+                Ok((tasks, _)) => {
+                    passing.push("source".into());
+                    let names = claimable(ledger, self.paths, &queue, &self.herd, freed, &tasks)?;
+                    // A running feed may be spawning these before it records them.
+                    if !feeding(self.paths)? {
+                        events.extend(
+                            names
+                                .into_iter()
+                                .map(|name| Event::new(format!("{name} {}", line::CLAIMABLE))),
+                        );
+                    }
+                }
+                Err(_) if budget.cut(timeout) => {}
+                Err(e) => failing.push(("source".into(), why(&queue.source, &format!("{e:#}")))),
             }
         }
-        Ok(events
+        let herd = &self.herd;
+        let failed = failing.into_iter().map(|(what, why)| Event {
+            key: format!("{herd} {} {what}", line::FAILING),
+            line: format!("{herd} {}  {what} {why}", line::FAILING),
+        });
+        let recovered = passing
             .into_iter()
-            .filter(|e| !self.fired.keys.contains(e))
+            .filter(|what| {
+                let key = format!("{herd} {} {what}", line::FAILING);
+                self.fired.keys.contains(&key)
+            })
+            .map(|what| Event {
+                key: format!("{herd} {} {what}", line::RECOVERED),
+                line: format!("{herd} {}  {what}", line::RECOVERED),
+            });
+        Ok(failed
+            .chain(recovered)
+            .chain(events)
+            .filter(|e| !self.fired.keys.contains(&e.key))
             .collect())
+    }
+}
+
+/// A line a lead's watch prints, and the key in `watch-<lead>.fired` that
+/// stops it printing again.
+struct Event {
+    key: String,
+    line: String,
+}
+
+impl Event {
+    /// One keyed by its own line.
+    fn new(line: String) -> Event {
+        Event {
+            key: line.clone(),
+            line,
+        }
+    }
+}
+
+/// `command` and the last line of `error`, which may start with `command` too.
+fn why(command: &str, error: &str) -> String {
+    let last = error.trim().lines().last().unwrap_or_default();
+    let last = last.strip_prefix(&format!("{command:?} ")).unwrap_or(last);
+    format!("{command:?}: {}", printable(last))
+}
+
+/// The most of a command's stderr line a watch line shows.
+const WHY_MAX: usize = 200;
+
+/// `text` without ANSI escapes or other control characters, cut to [`WHY_MAX`].
+fn printable(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.next_if_eq(&'[').is_some() {
+            chars.find(|c| ('@'..='~').contains(c));
+        } else if !c.is_control() {
+            out.push(c);
+        }
+    }
+    match out.char_indices().nth(WHY_MAX) {
+        Some((at, _)) => format!("{}…", &out[..at]),
+        None => out,
     }
 }
 
@@ -437,29 +520,51 @@ impl Budget {
         let left = self.deadline.saturating_duration_since(Instant::now());
         (!left.is_zero()).then(|| left.min(self.each))
     }
+
+    /// Whether a command given `timeout` and failing now was cut off by
+    /// the deadline rather than failing in its own right.
+    fn cut(&self, timeout: Duration) -> bool {
+        timeout < self.each && self.left().is_none()
+    }
+}
+
+/// Why a member check has no answer.
+#[derive(PartialEq)]
+enum Unchecked {
+    /// The round's [`CHECK_EVERY`] ran out before or while it ran.
+    OutOfTime,
+    Failed(String),
 }
 
 /// `worker`'s check from `checks` for its template: `None` without one,
-/// else whether it passed, or why it failed or wasn't run.
+/// else whether it passed, or why it has no answer.
 fn run_member_check(
     checks: &BTreeMap<String, MemberCheck>,
     herd: &MemberChecks,
     worker: &AgentRecord,
     budget: &Budget,
-) -> Option<Result<bool, String>> {
+) -> Option<Result<bool, Unchecked>> {
     let check = checks.get(worker.template.as_ref()?)?;
     let Some(params) = &worker.params else {
-        return Some(Err("no recorded params".into()));
+        return Some(Err(Unchecked::Failed(why(
+            check.text(),
+            "no recorded params",
+        ))));
     };
     let Some(timeout) = budget.left() else {
-        return Some(Err("out of time".into()));
+        return Some(Err(Unchecked::OutOfTime));
     };
-    Some(
-        check
-            .render(worker, params)
-            .map_err(|e| e.to_string())
-            .and_then(|command| run_check(&command, &herd.repo, timeout)),
-    )
+    let command = match check.render(worker, params) {
+        Ok(command) => command,
+        Err(e) => return Some(Err(Unchecked::Failed(why(check.text(), &e.to_string())))),
+    };
+    Some(run_check(&command, &herd.repo, timeout).map_err(|e| {
+        if budget.cut(timeout) {
+            Unchecked::OutOfTime
+        } else {
+            Unchecked::Failed(why(&command, &e))
+        }
+    }))
 }
 
 /// Whether a feed holds the feed lock, probed without waiting.
@@ -478,7 +583,8 @@ fn feeding(paths: &Paths) -> Result<bool> {
 /// `watch-<lead>.fired`, so a re-armed watch doesn't wake on them again.
 /// Its first line names the lead's spawn, so a re-created lead starts afresh.
 /// A [`RESUMED`] line forgets the claimable keys above it, so a card announced
-/// before a pause is announced again after resume.
+/// before a pause is announced again after resume, and a `recovered` key
+/// forgets its `failing` one, so the next failure is announced again.
 struct Fired {
     path: PathBuf,
     header: String,
@@ -516,6 +622,8 @@ impl Fired {
         for line in lines {
             if line == RESUMED {
                 self.keys.retain(|k| !is_claimable(k));
+            } else if let Some(failing) = failing_key(line) {
+                self.keys.remove(&failing);
             } else {
                 self.keys.insert(line.to_string());
             }
@@ -524,12 +632,12 @@ impl Fired {
     }
 
     /// The keys to append once `events` print.
-    fn with(&self, events: Vec<String>) -> Fired {
+    fn with(&self, events: &[Event]) -> Fired {
         Fired {
             path: self.path.clone(),
             header: self.header.clone(),
             keys: HashSet::new(),
-            new: events,
+            new: events.iter().map(|e| e.key.clone()).collect(),
         }
     }
 
@@ -558,6 +666,13 @@ pub fn forget_claimable(dir: &Path, lead: &str) -> Result<()> {
             .and_then(|mut file| file.write_all(format!("{RESUMED}\n").as_bytes()))
             .with_context(|| format!("write {}", path.display())),
     }
+}
+
+/// The `failing` key a `recovered` key ends.
+fn failing_key(key: &str) -> Option<String> {
+    let (herd, rest) = key.split_once(' ')?;
+    let what = rest.strip_prefix(line::RECOVERED)?.strip_prefix(' ')?;
+    Some(format!("{herd} {} {what}", line::FAILING))
 }
 
 fn is_claimable(key: &str) -> bool {
@@ -2381,6 +2496,7 @@ mod tests {
                 repo.path().display().to_string(),
             );
             fs::write(config.path().join("herds/cards.toml"), herd).unwrap();
+            fs::write(repo.path().join("tasks"), "").unwrap();
             let paths = crate::herd::Paths {
                 herds: config.path().join("herds"),
                 home: PathBuf::from("/home/me"),
@@ -2453,18 +2569,24 @@ mod tests {
     }
 
     #[test]
-    fn a_merged_worker_already_done_or_a_failing_check_is_no_event() {
+    fn a_merged_worker_already_done_is_no_event_and_a_failing_check_is_no_merge() {
         let done = Checked::new();
         done.touch("merged-1", "");
         done.touch("done-1", "");
         assert_eq!(done.once("w9:p0"), None, "woke on a done worker");
 
-        for checks in [
-            "done = \"exit 1\"\nmerged = \"exit 3\"\n",
-            "done = \"exit 2\"\nmerged = \"exit 0\"\n",
+        for (checks, failing) in [
+            (
+                "done = \"exit 1\"\nmerged = \"exit 3\"\n",
+                "cards failing  lh-1 merged \"exit 3\": exit 3",
+            ),
+            (
+                "done = \"exit 2\"\nmerged = \"exit 0\"\n",
+                "cards failing  lh-1 done \"exit 2\": exit 2",
+            ),
         ] {
             let world = Checked::with_template(checks);
-            assert_eq!(world.once("w9:p0"), None, "{checks}");
+            assert_eq!(world.once("w9:p0").unwrap(), [failing], "{checks}");
         }
 
         let no_done = Checked::with_template("merged = \"exit 0\"\n");
@@ -2534,26 +2656,36 @@ mod tests {
     fn a_done_worker_frees_its_slot_unless_its_after_merge_is_due_or_its_merged_check_errors() {
         let none = None;
         let noted = Some(AfterMerge::Noted);
-        // (case, herd's after_merge, merged check, ledger's after_merge, frees its slot)
+        let frees = Some(vec!["lh-2 claimable".to_string()]);
+        let errors = Some(vec![
+            "cards failing  lh-1 merged \"exit 3\": exit 3".to_string(),
+        ]);
+        // (case, herd's after_merge, merged check, ledger's after_merge, what it wakes on)
         let cases = [
-            ("no after_merge, merged", "", "exit 0", none, true),
-            ("after_merge, unmerged", "[\"true\"]", "exit 1", none, true),
+            ("no after_merge, merged", "", "exit 0", none, frees.clone()),
+            (
+                "after_merge, unmerged",
+                "[\"true\"]",
+                "exit 1",
+                none,
+                frees.clone(),
+            ),
             (
                 "after_merge, merged check errors",
                 "[\"true\"]",
                 "exit 3",
                 none,
-                false,
+                errors,
             ),
             (
                 "after_merge noted, merged",
                 "[\"true\"]",
                 "exit 0",
                 noted,
-                true,
+                frees,
             ),
         ];
-        for (case, after_merge, merged, recorded, frees) in cases {
+        for (case, after_merge, merged, recorded, woke) in cases {
             let mut world =
                 Checked::with_template(&format!("done = \"exit 0\"\nmerged = \"{merged}\"\n"));
             world.edit_herd(|herd| {
@@ -2565,7 +2697,6 @@ mod tests {
             });
             world.ledger.0.get_mut("lh-1").unwrap().after_merge = recorded;
             world.touch("tasks", "1\n2\n3\n");
-            let woke = frees.then(|| vec!["lh-2 claimable".to_string()]);
             assert_eq!(world.once("w9:p0"), woke, "{case}");
         }
     }
@@ -2665,17 +2796,68 @@ mod tests {
     }
 
     #[test]
-    fn a_failing_source_is_no_claimable_event() {
+    fn a_failing_source_wakes_the_lead_once_per_streak_and_again_after_it_recovers() {
         let world = Checked::new();
         world.touch("tasks", "1\n2\n");
-        fs::write(
-            world.paths.herds.join("cards.toml"),
-            fs::read_to_string(world.paths.herds.join("cards.toml"))
-                .unwrap()
-                .replace("cat tasks", "cat tasks; exit 1"),
-        )
-        .unwrap();
-        assert_eq!(world.once("w9:p0"), None);
+        let source = "cat tasks; echo first >&2; echo origin unreachable >&2; exit 2";
+        let failing = format!("cards failing  source {source:?}: origin unreachable");
+        world.edit_herd(|h| h.replace("\"cat tasks\"", &format!("{source:?}")));
+        assert_eq!(world.once("w9:p0").unwrap(), std::slice::from_ref(&failing));
+        assert_eq!(world.once("w9:p0"), None, "woke twice in one streak");
+
+        world.edit_herd(|h| h.replace(&format!("{source:?}"), "\"cat tasks\""));
+        assert_eq!(
+            world.once("w9:p0").unwrap(),
+            ["cards recovered  source", "lh-2 claimable"]
+        );
+        assert_eq!(world.once("w9:p0"), None, "woke twice on one recovery");
+
+        world.edit_herd(|h| h.replace("\"cat tasks\"", &format!("{source:?}")));
+        assert_eq!(world.once("w9:p0").unwrap(), [failing]);
+    }
+
+    #[test]
+    fn a_failing_member_check_wakes_the_lead_once_per_streak_with_its_last_stderr_line() {
+        let check =
+            "test -f done-{n} && exit 0; echo checking >&2; echo gh: rate limited >&2; exit 4";
+        let world = Checked::with_template(&format!("done = {check:?}\n"));
+        let rendered = check.replace("{n}", "'1'");
+        assert_eq!(
+            world.once("w9:p0").unwrap(),
+            [format!(
+                "cards failing  lh-1 done {rendered:?}: gh: rate limited"
+            )]
+        );
+        assert_eq!(world.once("w9:p0"), None, "woke twice in one streak");
+
+        world.touch("done-1", "");
+        assert_eq!(world.once("w9:p0").unwrap(), ["cards recovered  lh-1 done"]);
+        assert_eq!(world.once("w9:p0"), None, "woke twice on one recovery");
+    }
+
+    #[test]
+    fn a_check_with_no_recorded_params_names_the_check_as_the_herd_file_writes_it() {
+        let mut world = Checked::new();
+        world.ledger.0.get_mut("lh-1").unwrap().params = None;
+        assert_eq!(
+            world.once("w9:p0").unwrap(),
+            [
+                "cards failing  lh-1 done \"test -f done-{n}\": no recorded params",
+                "cards failing  lh-1 merged \"test -f merged-{n}\": no recorded params",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failing_line_drops_escapes_and_control_characters_and_cuts_a_long_stderr_line() {
+        let check = "printf '\\033[31mred\\033[0m \\a%0300d\\n' 0 >&2; exit 2";
+        let world = Checked::with_template(&format!("done = {check:?}\n"));
+        let woke = world.once("w9:p0").unwrap();
+        let shown = format!("exit 2: red {}…", "0".repeat(WHY_MAX - 12));
+        assert_eq!(
+            woke,
+            [format!("cards failing  lh-1 done {check:?}: {shown}")]
+        );
     }
 
     #[test]
@@ -2819,8 +3001,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let first = Fired::load(dir.path(), "lead-cards", "t0").unwrap();
         let second = Fired::load(dir.path(), "lead-cards", "t0").unwrap();
-        first.with(vec!["lh-1 merged".into()]).save().unwrap();
-        second.with(vec!["lh-2 claimable".into()]).save().unwrap();
+        first
+            .with(&[Event::new("lh-1 merged".into())])
+            .save()
+            .unwrap();
+        second
+            .with(&[Event::new("lh-2 claimable".into())])
+            .save()
+            .unwrap();
         let keys = Fired::load(dir.path(), "lead-cards", "t0").unwrap().keys;
         assert_eq!(
             keys,
@@ -2842,12 +3030,31 @@ mod tests {
         let cut = run_member_check(&checks.done, &checks, worker, &budget);
         let after = run_member_check(&checks.done, &checks, worker, &budget);
 
-        assert!(cut.unwrap().unwrap_err().contains("timed out"));
-        assert_eq!(after, Some(Err("out of time".into())));
+        assert!(matches!(cut, Some(Err(Unchecked::OutOfTime))));
+        assert!(matches!(after, Some(Err(Unchecked::OutOfTime))));
         assert!(started.elapsed() < Duration::from_secs(2));
         // Past the check's own `sleep 2`, so a check left running would have touched it.
         std::thread::sleep(Duration::from_millis(2200).saturating_sub(started.elapsed()));
         assert!(!world.repo.path().join("ran-1").exists());
+    }
+
+    #[test]
+    fn a_check_that_outruns_its_own_timeout_before_the_deadline_is_failing() {
+        let world = Checked::with_template("done = \"sleep 3\"\n");
+        let (checks, _) = lead_checks(&world.paths, "cards").unwrap();
+        let worker = &world.ledger.0["lh-1"];
+        let budget = Budget {
+            deadline: Instant::now() + Duration::from_secs(30),
+            each: Duration::from_millis(300),
+        };
+
+        let timed_out = run_member_check(&checks.done, &checks, worker, &budget);
+
+        assert!(
+            matches!(&timed_out, Some(Err(Unchecked::Failed(why))) if why.contains("timed out")),
+            "{:?}",
+            timed_out.map(|r| r.map_err(|e| matches!(e, Unchecked::OutOfTime)))
+        );
     }
 
     #[test]

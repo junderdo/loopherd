@@ -110,8 +110,9 @@ Init never launches an agent.
    block yours), or when the hooks aren't in Claude's settings (run
    `loopherd install-hook`). Lines come in this order: reports, questions
    first then by time; then stop lines grouped by member in name order,
-   oldest first within a member; then a lead's `interrupted` and `merged`,
-   by member in name order, then its `claimable`; then `blocked` and
+   oldest first within a member; then a lead's `failing` and `recovered`,
+   then its `interrupted` and `merged`, by member in name order, then its
+   `claimable`; then `blocked` and
    `gone`. The first watch after an install, or over members a herd-scoped
    watch skipped, prints every unread stop change since; judge each against
    `reports --all`.
@@ -131,6 +132,8 @@ Init never launches an agent.
    | `<member> failed  rate_limit` | Turn ended on an API error; it may need a nudge once that clears. |
    | `<member> merged` | Lead's watch only: the worker's template `merged` check passes and its `done` doesn't, or its herd's after_merge is still due. Run the after-merge steps. |
    | `<name> claimable` | Lead's watch only: feed would spawn this member. Feed. |
+   | `<herd> failing  source "<command>": <stderr line>` | Lead's watch only: the herd's source failed (also `<herd> failing  <member> done "<command>": …` for a member's `done` or `merged` check), with its last stderr line. Once per streak; one cut off by the 60s round is no event. Fix the cause, or tell the shepherd. |
+   | `<herd> recovered  source` | Lead's watch only: what last printed `failing` passes again (also `<herd> recovered  <member> done`). A later failure prints `failing` again. A member that retires mid-streak gets none. |
    | `<member> interrupted` | Lead's watch only: the feed running the worker's `after_merge` died before noting it. Feed, which notes it, then read the note. |
    | `<member> blocked` | A dialog only the human answers: tell them. loopherd never answers it. |
    | `<member> gone` | No agent in its pane for two polls in a row; it was live earlier in this watch. |

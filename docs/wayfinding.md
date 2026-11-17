@@ -63,6 +63,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D46](decisions/D46.md) | Re-verify rounds after a PR's first review run the reviewer on Sonnet, and reviewers tail or grep gate output instead of Reading saved `tool-results/` files whole. |
 | [D47](decisions/D47.md) | Members are messaged with `loopherd tell`, which, like `prompt`, `restart` and revive's lead re-arm, refuses while the pane shows a subagent's view, then says whether the member went `working`. |
 | [D48](decisions/D48.md) | The lead hook keeps its fail-closed hand lexer over a bash parser crate, since every crate tried silently missed a command bash runs; LH-165's indirection forms are patched or named in D29's Limits. |
+| [D49](decisions/D49.md) | A lead's watch prints `<herd> failing` once per streak when its source or a worker's check fails, and `<herd> recovered` when it passes again. |
 
 ## Emerging model
 
