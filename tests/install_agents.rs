@@ -1,6 +1,9 @@
 //! `scripts/install`'s optional agent types (D26): `--with-agents`, the
 //! question on a terminal, and the per-file hash rules.
 
+mod fakes;
+
+use fakes::executable;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -9,11 +12,6 @@ use std::process::{Command, Output, Stdio};
 
 const REPO: &str = env!("CARGO_MANIFEST_DIR");
 const AGENTS: [&str; 4] = ["builder", "reviewer", "researcher", "scout"];
-
-fn executable(path: &Path, script: &str) {
-    fs::write(path, script).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-}
 
 /// A copy of the installer and `agents/` under a temp root, so a test can
 /// change loopherd's version of an agent, with a temp HOME and state dir and
@@ -42,11 +40,10 @@ impl Sandbox {
             root.join("scripts/install-skills.bash"),
         )
         .unwrap();
-        fs::copy(
-            format!("{REPO}/scripts/install"),
-            root.join("scripts/install"),
-        )
-        .unwrap();
+        executable(
+            &root.join("scripts/install"),
+            &fs::read_to_string(format!("{REPO}/scripts/install")).unwrap(),
+        );
         for name in AGENTS {
             fs::copy(
                 format!("{REPO}/agents/{name}.md"),
