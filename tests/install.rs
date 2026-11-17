@@ -566,7 +566,7 @@ fn pty(shell: &str) -> Option<Command> {
 
 /// Runs `cmd` and, once `ready` holds for its output so far, types Ctrl+C
 /// into its pty, so the whole foreground process group gets SIGINT, as from
-/// a keyboard. Stdin closes after it, so a lost Ctrl+C fails rather than hangs.
+/// a keyboard.
 fn ctrl_c_when(cmd: &mut Command, ready: impl Fn(&[u8]) -> bool) -> Output {
     let mut child = cmd
         .stdin(Stdio::piped())
