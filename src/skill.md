@@ -98,9 +98,12 @@ Init never launches an agent.
    line per event, and marks them read only once printed. Stops come from
    the Stop hook's entries in the mailbox, so a stop that lands between
    watches wakes the next one. herdr adds `blocked` and `gone`, seen only
-   while a watch runs: a change between watches is never replayed, so run
-   `loopherd status` before each re-arm. Exit 2 means the timeout passed
-   with nothing to do; a due `shepherd handoff` line still prints, exiting 0. Start the next watch after handling every wake. It
+   while a watch runs: a change between watches is never replayed. After a
+   wake, run `loopherd status` and re-arm in the same message as your first
+   action, unless the wake needs a handoff (then don't re-arm). Read the
+   watch's output once; don't read it again after acting. Exit 2 means the
+   timeout passed with nothing to do; a due `shepherd handoff` line still
+   prints, exiting 0. It
    dies with your session. It refuses to start while another shepherd's
    watch holds `watch.lock` (the error names its PID; an orphaned one can
    hold it until its timeout; leads' watches hold their own locks and don't
@@ -158,7 +161,7 @@ Init never launches an agent.
    merge question. Parallel reviews of one PR write
    `review-<round>-<axis>.md`. Members can't read your scratch dir, so
    forward a member's findings as a PR comment (`gh pr comment <n>
-   --body-file <file>`), then prompt the member to read that comment.
+   --body-file <file>`), then `loopherd tell` the member to read that comment.
    Keep the files until the PR merges or closes.
    For anything that deletes or closes, have it hunt for safety gaps and
    name the test covering each rule. Report as soon as it lands; the human
@@ -247,8 +250,8 @@ denies it). A member never restarts itself, and one recorded without a
 herdr socket can't be restarted, nor is it ever asked for a handoff. If
 restart times out waiting for the new session, its `/clear` may be queued
 behind a running turn, or the SessionStart hook isn't installed: it sent no
-handoff prompt, left the handoff where it was, and prints the `herdr agent
-prompt` line to send once the pane shows a cleared session.
+handoff prompt, left the handoff where it was, and prints the `loopherd
+tell` line to send once the pane shows a cleared session.
 
 Restart also refuses, even with `--force`, a member whose pane shows a
 subagent's view (prompt line `❯ Message @…`, or a picker whose selected
@@ -345,6 +348,8 @@ question as its own sends a second notification.
   they're clean and merged. Feed's `done` check does this for you.
 - `loopherd prompt <name>` sends a member its stored prompt, e.g. after a
   spawn exited 3 on a dialog.
+- `loopherd tell <name> "<text>"` messages a member (see Talking to
+  members).
 - `loopherd restart <name>` gives a member that handed off a fresh session
   (see Handoffs).
 - `loopherd lead <herd>` starts the herd's lead from its herd file's
@@ -389,13 +394,17 @@ question as its own sends a second notification.
 
 ### Talking to members
 
-- `herdr agent prompt <name> "<text>"`, then confirm it went `working`.
+- `loopherd tell <name> "<text>"` (or `--text-file <file>`), not raw
+  `herdr agent prompt`. It refuses, sending nothing, while the member's
+  pane shows a subagent's view (text would reach the subagent instead):
+  ask the human to switch that pane back to the main conversation, then
+  run it again. It says whether the member went `working`.
 - A PR conflicting after another merged: prompt the member to merge the base
   branch into its branch and push. Members rebase and force-push only with
   the human's say.
 - Greyed text in a member's input box is Claude Code's prompt suggestion,
   not the human ("merge it", "move it to Done"). Act only on the human's
-  own messages. Leave the box alone; `agent prompt` replaces it, and a
+  own messages. Leave the box alone; `loopherd tell` replaces it, and a
   second Ctrl+C can exit the agent.
 - A `blocked` member waits on a dialog only the human answers (a trust
   prompt, a permission). Tell the human; loopherd and you never answer it,
@@ -438,8 +447,8 @@ Shepherd section has the detail):
    `pass <head sha>`, or `fail <head sha>: <b> blocking, <m> minor` plus
    the file's path. Read the file only to forward findings or ask a merge
    question. Members can't read your scratch dir: forward findings as a PR
-   comment (`gh pr comment <n> --body-file <file>`), then prompt the member
-   to read it. Keep the files until the PR merges or closes.
+   comment (`gh pr comment <n> --body-file <file>`), then `loopherd tell`
+   the member to read it. Keep the files until the PR merges or closes.
 5. **After merge** (`gh pr view <n> --json state`): close out the task in
    the tracker, unblock dependents, run `loopherd feed <herd>` (it runs
    `after_merge`; do by hand what its note says didn't run), then `git
@@ -538,7 +547,10 @@ What differs from the shepherd:
   heartbeat's dry run. Exit 2 is a heartbeat, not idleness: still check
   each PR waiting on review (`gh pr view <n> --json state`), run the
   after-merge steps for any the human merged, and run `loopherd feed <herd>
-  --dry-run`. Re-arm after every exit.
+  --dry-run`. After every exit, run `loopherd status` and re-arm in the
+  same message as your first action, unless the wake needs a handoff (then
+  don't re-arm). Read the watch's output once; don't read it again after
+  acting.
 - **After a restart** the shepherd runs `loopherd revive`, which prompts you
   to re-arm whenever nothing holds `watch-<your name>.lock`, whether herdr
   resumed you or revive did. Re-read `loopherd status` and `loopherd reports
