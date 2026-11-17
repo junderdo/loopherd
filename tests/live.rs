@@ -139,13 +139,25 @@ impl Drop for CloseTab {
     }
 }
 
-fn spawn(state: &Path, args: &[&str]) -> Output {
+/// Every real Claude the suite starts runs on Haiku, to keep live runs cheap.
+const MODEL: [&str; 2] = ["--model", "haiku"];
+
+/// `claude_args` go to the member's Claude after [`MODEL`].
+fn spawn(state: &Path, args: &[&str], claude_args: &[&str]) -> Output {
     dev(env!("CARGO_BIN_EXE_loopherd"))
         .env("XDG_STATE_HOME", state)
         .arg("spawn")
         .args(args)
+        .arg("--")
+        .args(MODEL)
+        .args(claude_args)
         .output()
         .unwrap()
+}
+
+/// The head of a temp herd file, running its members on [`MODEL`].
+fn herd_head(repo: &str, workspace: &str) -> String {
+    format!("repo = {repo:?}\nworkspace = {workspace:?}\nargs = {MODEL:?}\n")
 }
 
 fn add(state: &Path, config: &Path, args: &[&str]) -> Output {
@@ -258,6 +270,7 @@ fn spawns_a_ready_agent_and_submits_its_prompt() {
             "--prompt",
             "Reply with just the word ok.",
         ],
+        &[],
     );
 
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -301,6 +314,7 @@ fn leaves_an_agent_blocked_at_a_dialog_and_records_it_unprompted() {
             "--ready-timeout",
             "5",
         ],
+        &[],
     );
 
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -335,6 +349,7 @@ fn revives_an_agent_whose_tab_was_closed_under_its_name_and_session() {
             "--workspace",
             &workspace,
         ],
+        &[],
     );
     assert_eq!(
         out.status.code(),
@@ -405,10 +420,9 @@ fn adds_a_member_from_a_temp_herd_file() {
     std::fs::write(
         herds.join(format!("{herd}.toml")),
         format!(
-            "repo = {:?}\nworkspace = {workspace:?}\n\
-             [template.echo]\nparams = [\"n\"]\nname = \"lh-live-add-{{n}}\"\n\
+            "{}[template.echo]\nparams = [\"n\"]\nname = \"lh-live-add-{{n}}\"\n\
              prompt = \"You're {{name}} in {{herd}}. Reply with just the word ok.\"\n",
-            env!("CARGO_MANIFEST_DIR")
+            herd_head(env!("CARGO_MANIFEST_DIR"), &workspace)
         ),
     )
     .unwrap();
@@ -466,6 +480,7 @@ fn retire_close_closes_the_tab_and_removes_a_clean_merged_worktree() {
             "--ready-timeout",
             "5",
         ],
+        &[],
     );
     assert!(
         matches!(out.status.code(), Some(0 | 3)),
@@ -556,11 +571,10 @@ fn feed_fills_a_slot_then_reaps_the_member_once_its_done_check_passes() {
     std::fs::write(
         herds.join(format!("{herd}.toml")),
         format!(
-            "repo = {:?}\nworkspace = {workspace:?}\n\
-             [template.echo]\nparams = [\"n\"]\nname = \"{{herd}}-{{n}}\"\n\
+            "{}[template.echo]\nparams = [\"n\"]\nname = \"{{herd}}-{{n}}\"\n\
              prompt = \"Reply with just the word ok.\"\ndone = \"test -f {}-{{n}}\"\n\
              [queue]\ntemplate = \"echo\"\nsource = \"cat {}\"\nmax = 1\n",
-            env!("CARGO_MANIFEST_DIR"),
+            herd_head(env!("CARGO_MANIFEST_DIR"), &workspace),
             done.display(),
             tasks.display()
         ),
@@ -671,12 +685,11 @@ fn feed_a_branch_member(kind: &str) -> BranchMember {
     std::fs::write(
         herds.join(format!("{herd}.toml")),
         format!(
-            "repo = {:?}\nworkspace = {workspace:?}\n\
-             [template.echo]\nparams = [\"n\"]\nname = \"{{herd}}-{{n}}\"\n\
+            "{}[template.echo]\nparams = [\"n\"]\nname = \"{{herd}}-{{n}}\"\n\
              branch = \"feat/{{name}}\"\nprompt = \"Reply with just the word ok.\"\n\
              done = \"test -f {}/done-{{n}}\"\n\
              [queue]\ntemplate = \"echo\"\nsource = \"cat {}\"\nmax = 1\n",
-            repo.display().to_string(),
+            herd_head(repo.to_str().unwrap(), &workspace),
             root.path().display(),
             tasks.display()
         ),
@@ -1022,13 +1035,8 @@ fn spawn_hooked_with(tag: &str, prompt: &str, claude_args: &[&str]) -> Hooked {
             &workspace,
             "--prompt",
             prompt,
-            "--",
-            "--settings",
-            settings.to_str().unwrap(),
-        ]
-        .into_iter()
-        .chain(claude_args.iter().copied())
-        .collect::<Vec<_>>(),
+        ],
+        &[&["--settings", settings.to_str().unwrap()], claude_args].concat(),
     );
     assert_eq!(
         out.status.code(),
@@ -1160,11 +1168,7 @@ fn only_the_members_own_stops_are_filed_across_a_nested_claude_and_a_branch() {
     if !live_enabled() {
         return;
     }
-    let member = spawn_hooked_with(
-        "branch",
-        "Reply with just the word zero.",
-        &["--model", "haiku"],
-    );
+    let member = spawn_hooked_with("branch", "Reply with just the word zero.", &[]);
     let state = member.state.path();
     let settings = state.join("settings.json");
 
@@ -1179,8 +1183,9 @@ fn only_the_members_own_stops_are_filed_across_a_nested_claude_and_a_branch() {
     say(
         &member.name,
         &format!(
-            "Run `claude -p --model haiku --resume {} --settings {} 'Reply with just ok.' > {}` \
+            "Run `claude -p {} --resume {} --settings {} 'Reply with just ok.' > {}` \
              with the Bash tool and wait for it. Then reply with just the word one.",
+            MODEL.join(" "),
             session.as_str().unwrap(),
             settings.display(),
             nested_out.display()

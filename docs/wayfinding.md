@@ -60,6 +60,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D43](decisions/D43.md) | `loopherd herd remove <herd>` deletes a finished herd (file, pause, an unshared lead `prompt_file` in the herds dir, and its members' ledger entries under the lock, mailboxes and handoffs), refusing while any member is unretired, on another herdr session, or not confirmed closed in herdr (or herdr is unreachable) and never touching worktrees or tabs; a lead's hook denies it. |
 | [D44](decisions/D44.md) | `stats`, `reports` and `watch` label their printed wall-clock times UTC (`started (UTC)` headers, a ` UTC` suffix on report lines) rather than converting to local time; `--json` is unchanged. |
 | [D45](decisions/D45.md) | The Stop hook defers a member's handoff ask while its stop shows subagents running, until a stop without them or until its context passes 1.5x its limit; background shells alone don't defer it. |
+| [D46](decisions/D46.md) | Re-verify rounds after a PR's first review run the reviewer on Sonnet, and reviewers tail or grep gate output instead of Reading saved `tool-results/` files whole. |
 
 ## Emerging model
 

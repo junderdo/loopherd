@@ -9,6 +9,39 @@ use anyhow::{Context, Result};
 
 pub const SKILL: &str = include_str!("skill.md");
 
+/// The `## <name>` section, matched case-insensitively, up to the next `## `.
+pub fn section(name: &str) -> Option<&'static str> {
+    let starts = section_starts();
+    let i = starts
+        .iter()
+        .position(|&(_, title)| title.eq_ignore_ascii_case(name))?;
+    let end = starts.get(i + 1).map_or(SKILL.len(), |&(at, _)| at);
+    Some(&SKILL[starts[i].0..end])
+}
+
+/// Each section's name, lowercased, as `section` takes it.
+pub fn section_names() -> Vec<String> {
+    section_starts()
+        .into_iter()
+        .map(|(_, title)| title.to_lowercase())
+        .collect()
+}
+
+fn section_starts() -> Vec<(usize, &'static str)> {
+    let mut at = 0;
+    let mut fenced = false;
+    let mut starts = Vec::new();
+    for line in SKILL.split_inclusive('\n') {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+        } else if let Some(title) = line.strip_prefix("## ").filter(|_| !fenced) {
+            starts.push((at, title.trim_end()));
+        }
+        at += line.len();
+    }
+    starts
+}
+
 /// Where the skill goes under a Claude skills directory.
 pub fn path(skills_dir: &Path) -> PathBuf {
     skills_dir.join("loopherd").join("SKILL.md")
@@ -104,6 +137,58 @@ mod tests {
     }
 
     #[test]
+    fn the_leads_restart_and_wake_advice_reads_its_section_and_recent_reports() {
+        let lead = super::section("lead").unwrap();
+        let bullet = |name: &str| {
+            let start = lead.find(&format!("- **{name}**")).unwrap();
+            let rest = &lead[start + 2..];
+            rest[..rest.find("\n- **").unwrap_or(rest.len())].replace("\n  ", " ")
+        };
+        for name in ["After a restart", "On each wake"] {
+            let advice = bullet(name);
+            assert!(advice.contains("`loopherd status`"), "{advice}");
+            assert!(
+                advice.contains("`loopherd reports --all --tail 40`"),
+                "{advice}"
+            );
+            assert!(
+                advice.contains("`loopherd --skill --section lead`"),
+                "{advice}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_lead_section_carries_the_task_life_a_restarted_lead_needs() {
+        let lead = super::section("lead")
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for step in [
+            "**Task life, in brief**",
+            "`loopherd feed <herd> --dry-run`",
+            "read-only reviewer subagent",
+            "`gh pr view <n> --json state`",
+            "close out the task in the tracker",
+            "`git worktree remove --force`",
+            "`$XDG_STATE_HOME/loopherd/handoffs/<your name>.md`",
+            "`## State`",
+            "`<scratch>/pr<n>/review-<round>.md`",
+            "`pass <head sha>`",
+            "`fail <head sha>: <b> blocking, <m> minor`",
+            "`gh pr comment <n> --body-file <file>`",
+            "until the PR merges or closes",
+            "current review file",
+            "`review-<round - 1>.md`",
+            "`git diff <its head sha>..<new head>`",
+            "later rounds pass `model: sonnet`",
+        ] {
+            assert!(lead.contains(step), "missing {step}:\n{lead}");
+        }
+    }
+
+    #[test]
     fn reviewers_write_findings_to_a_file_forwarded_as_a_pr_comment() {
         let verify = section("4. **Verify**", "5. **After merge**");
         for rule in [
@@ -121,6 +206,32 @@ mod tests {
             handoffs.contains("current review file"),
             "Handoffs misses the review file"
         );
+    }
+
+    #[test]
+    fn later_review_rounds_run_the_reviewer_on_sonnet() {
+        let verify = section("4. **Verify**", "5. **After merge**");
+        assert!(
+            verify.contains(
+                "A first review uses the reviewer as defined; later rounds pass `model: sonnet`"
+            ),
+            "{verify}"
+        );
+    }
+
+    #[test]
+    fn a_wake_re_arms_with_its_first_action_and_reads_the_output_once() {
+        let watch = section("2. **Watch.**", "3. **On wake,**");
+        let heartbeat = section("- **Heartbeat.**", "- **After a restart**");
+        for (name, text) in [("Watch", watch), ("Heartbeat", heartbeat)] {
+            for rule in [
+                "run `loopherd status` and re-arm in the same message as your first action",
+                "unless the wake needs a handoff",
+                "Read the watch's output once",
+            ] {
+                assert!(text.contains(rule), "{name} misses {rule:?}");
+            }
+        }
     }
 
     #[test]
