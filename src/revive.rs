@@ -516,6 +516,7 @@ mod tests {
             process: None,
             role: None,
             after_merge: None,
+            earlier: vec![],
         }
     }
 
@@ -1061,6 +1062,7 @@ mod tests {
         AgentRecord {
             role: Some(crate::ledger::Role::Lead),
             after_merge: None,
+            earlier: vec![],
             herd: Some("h".into()),
             ..record(name, cwd)
         }

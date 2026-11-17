@@ -391,6 +391,7 @@ mod tests {
             herd: Some("b".into()),
             role: None,
             after_merge: None,
+            earlier: vec![],
             ..ledger.0["lead-a"].clone()
         };
         ledger.0.insert(worker.name.clone(), worker);
@@ -421,6 +422,7 @@ mod tests {
             herd: None,
             role: None,
             after_merge: None,
+            earlier: vec![],
             prompt: Some("a plain spawn".into()),
             ..ledger.0["lead-h"].clone()
         };
