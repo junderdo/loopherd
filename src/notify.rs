@@ -529,9 +529,10 @@ fn redacted(words: &[&str]) -> Vec<Shown> {
 
 /// Words hidden on top of what the key and value rules hide, after a strong `key=value`
 /// word that opens a quote (up to its close) or ends in `;` (the next word, and on while
-/// each ends in `;`), or that the rules hide as a value and whose clause runs on. A run inside another leaves the outer one open; a run already
-/// open isn't added twice, so the list stays short on a long line. Only adding
-/// hiding, never changing [`Next`], keeps every word those rules hide hidden.
+/// each ends in `;`), or that the rules hide as a value and whose clause runs on. A run
+/// inside another leaves the outer one open; a run already open isn't added twice, so
+/// the list stays short on a long line. Only adding hiding, never changing [`Next`],
+/// keeps every word those rules hide hidden.
 #[derive(Clone, Copy, PartialEq)]
 enum RunOn {
     Quote(char),
