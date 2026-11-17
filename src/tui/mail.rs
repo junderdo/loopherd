@@ -77,24 +77,26 @@ impl Mail {
     }
 
     /// The non-retired members' reports and stops, newest first, less
-    /// stops that left work in flight or unknown.
-    pub fn events<'a>(&'a self, view: &'a View) -> Vec<(&'a str, &'a Entry)> {
+    /// stops that left work in flight or unknown. Equal stamps sort by
+    /// member name, then newest-written first within a member.
+    pub fn events<'a>(&'a self, view: &'a View) -> Vec<Event<'a>> {
         let mut events: Vec<_> = active(view)
             .flat_map(|m| {
                 let entries = self.boxes.get(&m.name).map_or(&[][..], Vec::as_slice);
-                entries
-                    .iter()
-                    .enumerate()
-                    .map(|(i, e)| (m.name.as_str(), i, e))
+                entries.iter().enumerate().map(|(index, entry)| Event {
+                    name: m.name.as_str(),
+                    index,
+                    entry,
+                })
             })
-            .filter(|(_, _, e)| match &e.body {
+            .filter(|e| match &e.entry.body {
                 Body::Start => false,
                 Body::Stop(s) => s.error.is_some() || s.in_flight() == (None, None),
                 _ => true,
             })
             .collect();
-        events.sort_by(|(_, i, a), (_, j, b)| (&b.at, j).cmp(&(&a.at, i)));
-        events.into_iter().map(|(name, _, e)| (name, e)).collect()
+        events.sort_by(|a, b| (&b.entry.at, a.name, b.index).cmp(&(&a.entry.at, b.name, a.index)));
+        events
     }
 
     /// Its latest question has no `start` or `done` after it.
@@ -108,6 +110,22 @@ impl Mail {
             }
         }
         false
+    }
+}
+
+/// A mailbox entry as the ticker shows it.
+pub struct Event<'a> {
+    pub name: &'a str,
+    /// Its place in the member's mailbox, which tells apart entries with equal stamps.
+    pub index: usize,
+    pub entry: &'a Entry,
+}
+
+impl Event<'_> {
+    /// Unique across reads even when stamps tie; the stamp tells apart a
+    /// recreated mailbox's entries from the old file's at the same index.
+    pub fn id(&self) -> (String, usize, String) {
+        (self.name.to_string(), self.index, self.entry.at.clone())
     }
 }
 
