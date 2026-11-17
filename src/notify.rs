@@ -400,17 +400,22 @@ fn summary(question: &str) -> String {
                 None => (Shown::Glued(""), Next::Clause),
             },
             Next::ClauseStart => clause_start(word),
-            Next::Closing(closer) => (Shown::redacted(), Next::closed_by(word, closer)),
+            Next::Closing(closers) => (Shown::redacted(), Next::closed_by(word, closers)),
             Next::Value if is_separator(word) => (Shown::Word(word.to_string()), Next::ClauseStart),
             Next::Value if FILLERS.contains(&normalized(word).as_str()) => {
                 (Shown::Word(word.to_string()), next)
             }
-            Next::Value => (Shown::redacted(), value_then(word)),
+            Next::Value => match carried_value(word) {
+                Some((true, value)) => clause_start(value),
+                _ => (Shown::redacted(), value_then(word)),
+            },
             Next::Key(key) if is_separator(word) => (Shown::Word(word.to_string()), key.value()),
             Next::Key(_) if FILLERS.contains(&normalized(word).as_str()) => {
                 (Shown::Word(word.to_string()), next)
             }
-            Next::Key(_) | Next::MaybeValue if looks_like_a_secret(word) => {
+            Next::Key(_) | Next::MaybeValue
+                if looks_like_a_secret(word) && carried_value(word).is_none() =>
+            {
                 (Shown::redacted(), Next::after_value(word))
             }
             Next::Free | Next::Key(_) | Next::MaybeValue => match carried_value(word) {
@@ -490,8 +495,8 @@ enum Next {
     MaybeValue,
     /// After a key with no separator yet: `password`, `the token is`.
     Key(Key),
-    /// Inside a quoted or bracketed value, until the word that closes it.
-    Closing(char),
+    /// Inside a quoted or bracketed value, until the word holding one of these.
+    Closing(&'static [char]),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -517,35 +522,38 @@ impl Next {
     /// next `a=b;` pair.
     fn after_value(value: &str) -> Next {
         let opener = value.chars().next().unwrap_or_default();
-        let closer = match opener {
-            '"' => Some('"'),
-            '\'' => Some('\''),
-            '“' => Some('”'),
-            '‘' | '’' => Some('’'),
-            '”' => Some('”'),
-            '„' => Some('“'),
-            '‚' => Some('‘'),
-            '«' => Some('»'),
-            '[' => Some(']'),
-            '(' => Some(')'),
-            '{' => Some('}'),
+        let closers: Option<&'static [char]> = match opener {
+            '"' => Some(&['"']),
+            '\'' => Some(&['\'']),
+            '“' | '”' => Some(&['”']),
+            '‘' | '’' => Some(&['’']),
+            '„' => Some(&['“', '”']),
+            '‚' => Some(&['‘', '’']),
+            '«' => Some(&['»']),
+            '[' => Some(&[']']),
+            '(' => Some(&[')']),
+            '{' => Some(&['}']),
             _ => None,
         };
-        match closer {
-            Some(closer) => Next::closed_by(&value[opener.len_utf8()..], closer),
+        match closers {
+            Some(closers) => Next::closed_by(&value[opener.len_utf8()..], closers),
             None if value.ends_with(';') => Next::Value,
             None => Next::Free,
         }
     }
 
-    /// A closer followed by a letter or digit is an apostrophe (`it’s`), not a close.
-    fn closed_by(word: &str, closer: char) -> Next {
-        let closes = word.match_indices(closer).any(|(at, _)| {
-            !word[at + closer.len_utf8()..].starts_with(|c: char| c.is_alphanumeric())
+    /// A `'` or `’` followed by a Latin letter or a digit is an apostrophe (`it’s`,
+    /// `l’été`), not a close; any other closer closes whatever follows it.
+    fn closed_by(word: &str, closers: &'static [char]) -> Next {
+        let latin = |c: char| c.is_ascii_alphanumeric() || (c.is_alphabetic() && c < '\u{250}');
+        let closes = word.match_indices(closers).any(|(at, closer)| {
+            let apostrophe =
+                ["'", "’"].contains(&closer) && word[at + closer.len()..].starts_with(latin);
+            !apostrophe
         });
         match closes {
             true => Next::Free,
-            false => Next::Closing(closer),
+            false => Next::Closing(closers),
         }
     }
 }
@@ -1177,6 +1185,10 @@ mod tests {
                 r#"password: "two words" ok?"#,
                 "password: [redacted] [redacted] ok?",
             ),
+            (
+                "password: ”two words” ok?",
+                "password: [redacted] [redacted] ok?",
+            ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
         }
@@ -1510,6 +1522,87 @@ mod tests {
             (
                 r#"{"token":"abc","x":1} then merge?"#,
                 "[redacted] then merge?",
+            ),
+            ("pw: ‘l’été passe’ ok?", "pw: [redacted] [redacted] ok?"),
+        ] {
+            assert_eq!(text_sent(question), text, "{question}");
+        }
+    }
+
+    #[test]
+    fn a_low_quote_closes_on_either_high_quote() {
+        for (question, text) in [
+            (
+                "password: „abc” then merge #107?",
+                "password: [redacted] then merge #107?",
+            ),
+            (
+                "password: „abc“ then merge #107?",
+                "password: [redacted] then merge #107?",
+            ),
+            (
+                "password: ‚abc’ then merge #107?",
+                "password: [redacted] then merge #107?",
+            ),
+            (
+                "password: ‚abc‘ then merge #107?",
+                "password: [redacted] then merge #107?",
+            ),
+        ] {
+            assert_eq!(text_sent(question), text, "{question}");
+        }
+    }
+
+    #[test]
+    fn a_closer_before_a_non_latin_letter_or_a_superscript_still_closes() {
+        for (question, text) in [
+            (
+                "password: “abc123”是吗？ Then merge #107?",
+                "password: [redacted] Then merge #107?",
+            ),
+            (
+                "password: “abc123”да Then merge #107?",
+                "password: [redacted] Then merge #107?",
+            ),
+            (
+                "password: ‘abc123’да Then merge #107?",
+                "password: [redacted] Then merge #107?",
+            ),
+            (
+                "password: “abc123”² Then merge #107?",
+                "password: [redacted] Then merge #107?",
+            ),
+            (
+                "password: «abc123»s Then merge #107?",
+                "password: [redacted] Then merge #107?",
+            ),
+        ] {
+            assert_eq!(text_sent(question), text, "{question}");
+        }
+    }
+
+    #[test]
+    fn a_key_value_word_after_a_key_or_a_label_hides_its_clause() {
+        for (question, text) in [
+            (
+                "TOKEN auth passphrase=hunter22 horse battery, then merge?",
+                "TOKEN [redacted] [redacted], then merge?",
+            ),
+            (
+                "TOKEN session password=hunter22 correct horse, then merge?",
+                "TOKEN [redacted] [redacted], then merge?",
+            ),
+            (
+                "Set auth=Bearer passphrase=hunter22 horse battery, then merge?",
+                "Set [redacted] [redacted], then merge?",
+            ),
+            (
+                "Use token passphrase=hunter22 horse battery, then merge?",
+                "Use token [redacted], then merge?",
+            ),
+            (
+                "TOKEN passphrase=hunter22 horse battery, then merge?",
+                "TOKEN [redacted], then merge?",
             ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
