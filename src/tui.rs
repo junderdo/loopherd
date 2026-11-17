@@ -412,20 +412,19 @@ impl App {
     /// The selected agent's details in a box titled with its name.
     fn draw_detail(&self, out: &mut Buffer, area: Rect, now: Instant) {
         let targets = self.targets();
-        let Some(target) = targets.get(self.selected) else {
-            return;
-        };
-        let (title, lines) = match target {
-            Target::Member(m) => {
+        let (title, lines) = match targets.get(self.selected) {
+            Some(Target::Member(m)) => {
                 let time = time(self.since.of(&m.name, now));
                 let lines = detail::member(m, &self.mail, &time, self.theme);
                 (m.name.as_str(), lines)
             }
-            Target::Stray(s) => ("stray", detail::stray(s)),
+            Some(Target::Stray(s)) => ("stray", detail::stray(s)),
+            None => ("", vec![]),
         };
-        let block = self
-            .block()
-            .title(Span::styled(format!(" {title} "), self.theme.title()));
+        let mut block = self.block();
+        if !title.is_empty() {
+            block = block.title(Span::styled(format!(" {title} "), self.theme.title()));
+        }
         let inner = block.inner(area);
         block.render(area, out);
         let text = Rect {
@@ -2179,12 +2178,13 @@ mod tests {
         let shown = pane_text(&terminal, "b");
         let worktree = format!("worktree {}", worktree.path().display());
         assert_eq!(
-            shown[..8],
+            shown[..9],
             [
                 "done for 3m",
                 "feat · worker",
                 "branch feat/x",
                 worktree.as_str(),
+                "pane w1:tb/w1:pb",
                 "stop 2026-11-16 10:05 paused 1 shell, 2 subagents",
                 "",
                 "question 2026-11-16 10:06",
@@ -2222,14 +2222,20 @@ mod tests {
         let app = app_with_mail(&herdr, &ledger, mail.path(), now);
         let shown = pane_text(&render_at(&app, now, 120, 24), "b");
         assert_eq!(
-            shown.iter().filter(|l| !l.is_empty()).collect::<Vec<_>>(),
-            ["blocked", "worker", "worktree /nonexistent/wt-b"],
+            shown[..4],
+            [
+                "blocked",
+                "worker",
+                "worktree /nonexistent/wt-b",
+                "pane w1:tb/w1:pb"
+            ],
             "{shown:#?}"
         );
+        assert!(shown[4..].iter().all(String::is_empty), "{shown:#?}");
     }
 
     #[test]
-    fn a_stop_that_failed_or_finished_says_so() {
+    fn a_stop_says_finished_failed_or_what_is_unknown_without_claiming_a_pause() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let failed = Body::Stop(report::Stop {
             error: Some("rate_limit".into()),
@@ -2238,7 +2244,18 @@ mod tests {
                 _ => unreachable!(),
             }
         });
-        for (body, line) in [(stop(), "finished"), (failed, "failed rate_limit")] {
+        let unknown = Body::Stop(report::Stop {
+            background: report::Tally::Unknown(report::Unknown::Unknown),
+            ..match stop() {
+                Body::Stop(s) => s,
+                _ => unreachable!(),
+            }
+        });
+        for (body, line) in [
+            (stop(), "finished"),
+            (failed, "failed rate_limit"),
+            (unknown, "background unknown"),
+        ] {
             let mail = quiet_mail(&ledger);
             post_at(mail.path(), "b", "2026-11-16T10:05:00Z", body);
             let app = app_with_mail(&herdr, &ledger, mail.path(), now);
@@ -2306,7 +2323,7 @@ mod tests {
         }
         let shown = pane_text(&render_at(&app, now, 120, 24), "stray");
         assert_eq!(
-            shown.iter().filter(|l| !l.is_empty()).collect::<Vec<_>>(),
+            shown[..4],
             [
                 "pane w2:p7",
                 "tab w2:t7",
@@ -2314,6 +2331,7 @@ mod tests {
                 "title poking around"
             ],
         );
+        assert!(shown[4..].iter().all(String::is_empty), "{shown:#?}");
     }
 
     #[test]
@@ -2349,6 +2367,46 @@ mod tests {
             printed.lines.iter().any(|l| l.contains("shipped it")),
             "{:#?}",
             printed.lines
+        );
+    }
+
+    #[test]
+    fn a_url_in_brackets_is_underlined_without_its_closing_punctuation() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post(mail.path(), "b", done("see (https://x.y/z)."));
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        let terminal = render_at(&app, now, 120, 24);
+        let (x, y) = pos(&terminal, "https://x.y/z");
+        let underlined = |x| {
+            cell(&terminal, (x, y))
+                .modifier
+                .contains(Modifier::UNDERLINED)
+        };
+        assert!((x..x + 13).all(underlined));
+        assert!(!underlined(x - 1), "(");
+        assert!(!underlined(x + 13), ")");
+    }
+
+    #[test]
+    fn tabs_in_a_report_draw_as_spaces() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post(mail.path(), "b", done("key\tvalue"));
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        let shown = pane_text(&render_at(&app, now, 120, 24), "b");
+        assert!(shown.contains(&"key    value".to_string()), "{shown:#?}");
+    }
+
+    #[test]
+    fn before_anything_is_selected_the_pane_is_an_empty_box() {
+        let app = App::new(Options::default(), truecolor());
+        let now = Instant::now();
+        let terminal = render_at(&app, now, 120, 20);
+        assert!(
+            lines(&terminal)[2].contains("╭─"),
+            "{:#?}",
+            lines(&terminal)
         );
     }
 }

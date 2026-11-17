@@ -35,6 +35,10 @@ pub fn member(member: &Member, mail: &Mail, time: &str, theme: Theme) -> Vec<Lin
             .iter()
             .map(|w| Line::raw(format!("worktree {}", w.display()))),
     );
+    lines.push(Line::raw(match &member.tab {
+        Some(tab) => format!("pane {tab}/{}", member.pane),
+        None => format!("pane {}", member.pane),
+    }));
     let (report, stop) = mail.latest(&member.name);
     if let Some(entry) = stop
         && let Body::Stop(s) = &entry.body
@@ -67,31 +71,40 @@ pub fn stray(stray: &Stray) -> Vec<Line<'static>> {
     lines
 }
 
-/// `finished`, `paused 1 shell, 2 subagents`, or `failed rate_limit`.
+/// `finished`, `paused 1 shell, 2 subagents`, `background unknown`, or
+/// `failed rate_limit`.
 fn stopped(stop: &Stop) -> String {
-    match (&stop.error, stop.pending()) {
-        (Some(error), _) => format!("failed {error}"),
-        (None, Some(pending)) => format!("paused {pending}"),
+    if let Some(error) = &stop.error {
+        return format!("failed {error}");
+    }
+    match stop.in_flight() {
         (None, None) => "finished".into(),
+        (pending, unknown) => pending
+            .map(|p| format!("paused {p}"))
+            .into_iter()
+            .chain(unknown)
+            .collect::<Vec<_>>()
+            .join("; "),
     }
 }
 
-/// `text` with its URLs underlined.
+/// `text` with its URLs underlined, less any punctuation closing them, and
+/// tabs as spaces since a tab draws as nothing.
 fn linked(text: &str) -> Line<'static> {
-    let spans = text.split_inclusive(' ').map(|word| {
-        let url = word.starts_with("https://") || word.starts_with("http://");
-        match url {
-            true => {
-                let bare = word.trim_end();
-                Line::from(vec![
-                    Span::styled(bare.to_string(), Modifier::UNDERLINED),
-                    Span::raw(word[bare.len()..].to_string()),
-                ])
-            }
-            false => Line::raw(word.to_string()),
-        }
-    });
-    Line::from(spans.flat_map(|l| l.spans).collect::<Vec<_>>())
+    let text = text.replace('\t', "    ");
+    let mut spans = vec![];
+    for word in text.split_inclusive(' ') {
+        let Some(start) = word.find("https://").or_else(|| word.find("http://")) else {
+            spans.push(Span::raw(word.to_string()));
+            continue;
+        };
+        let rest = &word[start..];
+        let url = rest.trim_end_matches(|c: char| c.is_whitespace() || ".,;:!?)]}>'\"".contains(c));
+        spans.push(Span::raw(word[..start].to_string()));
+        spans.push(Span::styled(url.to_string(), Modifier::UNDERLINED));
+        spans.push(Span::raw(rest[url.len()..].to_string()));
+    }
+    Line::from(spans)
 }
 
 /// `lines` word-wrapped to `width` columns and cut to `height`, the last

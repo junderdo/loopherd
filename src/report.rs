@@ -558,7 +558,7 @@ impl Stop {
     }
 
     /// The counted work in flight, and what Claude didn't say.
-    fn in_flight(&self) -> (Option<String>, Option<String>) {
+    pub fn in_flight(&self) -> (Option<String>, Option<String>) {
         let mut pending = vec![];
         let mut unknown = vec![];
         match self.background {
