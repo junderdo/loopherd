@@ -468,18 +468,21 @@ const OPENERS: [char; 12] = ['"', '\'', '“', '‘', '”', '’', '„', '‚'
 
 /// The first word of a separated strong key's value, hidden with the rest of its
 /// clause unless it opens a quote or bracket. A value that ends there and is itself a
-/// key (`«Bearer»`, `Bearer”`) is read as one.
+/// key is read as one: `Bearer”` with its clause ended, and a quoted one (`«Bearer»`,
+/// `‚password‘:`) as if no separator followed, so the next word is tried as a value.
 fn clause_start(value: &str) -> (Shown<'_>, Next) {
-    let (shown, next) = match () {
-        _ if value.starts_with(OPENERS) => (Shown::redacted(), Next::after_value(value)),
-        _ => match clause_end(value) {
-            Some(end) => (Shown::Word(format!("[redacted]{end}")), Next::Free),
-            None => (Shown::redacted(), Next::Clause),
-        },
-    };
-    match next {
-        Next::Free => (shown, key_named_by(value)),
-        next => (shown, next),
+    if value.starts_with(OPENERS) {
+        let next = match (Next::after_value(value), key_named_by(value)) {
+            (Next::Free, Next::ClauseStart) => Next::Key(Key::Strong),
+            (Next::Free, Next::MaybeValue) => Next::Key(Key::Weak),
+            (Next::Free, key) => key,
+            (next, _) => next,
+        };
+        return (Shown::redacted(), next);
+    }
+    match clause_end(value) {
+        Some(end) => (Shown::Word(format!("[redacted]{end}")), key_named_by(value)),
+        None => (Shown::redacted(), Next::Clause),
     }
 }
 
@@ -1773,6 +1776,22 @@ mod tests {
             (
                 "PASSWORD : Bearer ‘a’ɐb ’² hunter22 Bearer",
                 "PASSWORD : [redacted]",
+            ),
+            (
+                "«password»: ‚password‘: auth abc123; sid=abc123;",
+                "«password»: [redacted] auth [redacted] [redacted]",
+            ),
+            (
+                "--password ’password’: password=\"abc abc” abc123;",
+                "--password [redacted] [redacted] [redacted] [redacted]",
+            ),
+            (
+                "”password”= «password»: password=\"abc x] s3cr3tval",
+                "”password”= [redacted] [redacted] [redacted] [redacted]",
+            ),
+            (
+                "‚password‘: «password»: «abc «TOKEN» s3cr3tval",
+                "‚password‘: [redacted] «abc «TOKEN» [redacted]",
             ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
