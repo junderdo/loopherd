@@ -4,6 +4,7 @@ mod detail;
 mod mail;
 mod since;
 pub mod theme;
+mod ticker;
 mod watcher;
 
 use std::path::PathBuf;
@@ -42,6 +43,8 @@ const TICK: Duration = Duration::from_millis(100);
 const TIME_WIDTH: usize = 7;
 /// The narrowest terminal that shows the detail pane beside the list.
 const DETAIL_MIN_WIDTH: u16 = 100;
+/// The shortest terminal that shows the event ticker.
+const TICKER_MIN_HEIGHT: u16 = 16;
 /// Over a member's cells, the time's column left blank.
 const HEADINGS: [&str; 6] = ["NAME", "STATUS", "", "BRANCH", "WORKTREE", "PANE"];
 
@@ -105,6 +108,10 @@ pub struct App {
     opened: Option<Instant>,
     read: Option<Read>,
     mail: Mail,
+    /// The newest event's time as of the last read; `None` before the first.
+    newest_event: Option<String>,
+    /// Events newer than this arrived with the last read and show bold.
+    seen_event: Option<String>,
     since: Since,
     selected: usize,
     /// The selected row's identity, to keep it selected as rows re-sort.
@@ -167,6 +174,8 @@ impl App {
             opened: None,
             read: None,
             mail: Mail::default(),
+            newest_event: None,
+            seen_event: None,
             since: Since::default(),
             selected: 0,
             selected_key: None,
@@ -224,6 +233,13 @@ impl App {
                 self.polled = Some(now);
                 let (read, mail) = result?;
                 self.since = self.since.observe(&read.view, now);
+                let newest = mail.events(&read.view).first().map(|(_, e)| e.at.clone());
+                self.seen_event = self.newest_event.take();
+                self.newest_event = Some(
+                    newest
+                        .unwrap_or_default()
+                        .max(self.seen_event.clone().unwrap_or_default()),
+                );
                 self.read = Some(read);
                 self.mail = mail;
                 let kept = self
@@ -273,13 +289,18 @@ impl App {
             .iter()
             .flat_map(|n| wrapped(n, inner.width.saturating_sub(1)))
             .collect();
+        let ticker_height = match frame.area().height >= TICKER_MIN_HEIGHT {
+            true => 4,
+            false => 0,
+        };
         // Notes keep half the space at most, and the newest when cut.
-        let room = inner.height.saturating_sub(2) / 2;
+        let room = inner.height.saturating_sub(2 + ticker_height) / 2;
         let notes_height = notes.len().min(room as usize);
-        let [banner, body, notes_area, footer] = Layout::vertical([
+        let [banner, body, notes_area, ticker_area, footer] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(0),
             Constraint::Length(notes_height as u16),
+            Constraint::Length(ticker_height),
             Constraint::Length(1),
         ])
         .areas(inner);
@@ -299,7 +320,38 @@ impl App {
         }
         let newest = notes[notes.len() - notes_height..].to_vec();
         frame.render_widget(Paragraph::new(newest), notes_area);
+        if ticker_height > 0 {
+            self.draw_ticker(frame.buffer_mut(), ticker_area);
+        }
         frame.render_widget(self.keys(), footer);
+    }
+
+    /// The two newest events in a dim box.
+    fn draw_ticker(&self, out: &mut Buffer, area: Rect) {
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Modifier::DIM);
+        let inner = block.inner(area);
+        block.render(area, out);
+        let text = Rect {
+            x: inner.x + 1,
+            width: inner.width.saturating_sub(2),
+            ..inner
+        };
+        let Some(read) = &self.read else {
+            return;
+        };
+        let lines: Vec<Line> = self
+            .mail
+            .events(&read.view)
+            .into_iter()
+            .take(2)
+            .map(|(name, entry)| {
+                let seen = self.seen_event.as_deref();
+                ticker::line(name, entry, seen, text.width, self.theme)
+            })
+            .collect();
+        Paragraph::new(lines).render(text, out);
     }
 
     /// What waits on the human, naming as many as fit in `width`.
@@ -1371,11 +1423,11 @@ mod tests {
                 "│                                                                      │",
                 "│                                                                      │",
                 "│                                                                      │",
-                "│                                                                      │",
-                "│                                                                      │",
-                "│                                                                      │",
-                "│                                                                      │",
                 "│ gone: no live agent matches it; `loopherd revive` can bring it back  │",
+                "│╭────────────────────────────────────────────────────────────────────╮│",
+                "││                                                                    ││",
+                "││                                                                    ││",
+                "│╰────────────────────────────────────────────────────────────────────╯│",
                 "│ q quit  ↑↓/jk select  enter focus  s strays: off  a all: off         │",
                 "╰──────────────────────────────────────────────────────────────────────╯",
             ]
@@ -1589,7 +1641,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            text(&terminal)[27],
+            text(&terminal)[23],
             "gone: no live agent matches it; `loopherd revive` can bring it back"
         );
         assert_eq!(
@@ -2297,7 +2349,7 @@ mod tests {
         let words = "lorem ipsum dolor sit amet ".repeat(40);
         post(mail.path(), "b", Body::Note { text: words });
         let app = app_with_mail(&herdr, &ledger, mail.path(), now);
-        let shown = pane_text(&render_at(&app, now, 120, 16), "b");
+        let shown = pane_text(&render_at(&app, now, 120, 20), "b");
         let text: Vec<_> = shown
             .iter()
             .skip_while(|l| !l.starts_with("note "))
@@ -2469,5 +2521,205 @@ mod tests {
             shown.contains(&"title build    logs".to_string()),
             "{shown:#?}"
         );
+    }
+
+    /// The ticker's two rows, between its borders above the footer.
+    fn ticker(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        let shown = text(terminal);
+        shown[shown.len() - 5..shown.len() - 3].to_vec()
+    }
+
+    fn render_ticker(app: &App, now: Instant) -> Terminal<TestBackend> {
+        render_at(app, now, 72, 20)
+    }
+
+    #[test]
+    fn the_ticker_shows_the_two_newest_events_across_mailboxes_newest_first() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", question("old"));
+        post_at(
+            mail.path(),
+            "c",
+            "2026-11-16T10:06:00Z",
+            question("which base?\nmore"),
+        );
+        post_at(mail.path(), "a", "2026-11-16T10:07:00Z", done("shipped"));
+        let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert_eq!(
+            ticker(&terminal),
+            ["10:07 a done shipped", "10:06 c question which base?"]
+        );
+        assert_eq!(at(&terminal, "done shipped").fg, Color::Green);
+        assert_eq!(at(&terminal, "question which").fg, ORANGE);
+        assert_eq!(at(&terminal, "10:07").fg, Color::Reset);
+    }
+
+    #[test]
+    fn the_ticker_colors_handoffs_purple_notes_grey_and_stops_dim() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(
+            mail.path(),
+            "a",
+            "2026-11-16T10:05:00Z",
+            Body::Handoff {
+                text: "over".into(),
+            },
+        );
+        post_at(
+            mail.path(),
+            "c",
+            "2026-11-16T10:06:00Z",
+            Body::Note { text: "fyi".into() },
+        );
+        let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert_eq!(at(&terminal, "handoff over").fg, PURPLE);
+        assert_eq!(at(&terminal, "note fyi").fg, GREY_VIOLET);
+        post_at(mail.path(), "c", "2026-11-16T10:07:00Z", stop());
+        let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert!(
+            at(&terminal, "stop finished")
+                .modifier
+                .contains(Modifier::DIM)
+        );
+    }
+
+    #[test]
+    fn the_ticker_cuts_an_event_to_the_width_with_an_ellipsis() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(
+            mail.path(),
+            "a",
+            "2026-11-16T10:07:00Z",
+            done("abcdefghijklmnopqrstuvwxyz"),
+        );
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        assert_eq!(
+            ticker(&render_at(&app, now, 40, 20))[0],
+            "10:07 a done abcdefghijklmnopqrst…"
+        );
+    }
+
+    #[test]
+    fn the_ticker_leaves_out_starts_and_paused_stops_but_shows_finished_and_failed() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        let stopped = |shells, error: Option<&str>| {
+            Body::Stop(report::Stop {
+                background: report::Tally::Known(report::Background {
+                    shells,
+                    ..Default::default()
+                }),
+                crons: report::Tally::Known(0),
+                error: error.map(str::to_string),
+                session: None,
+            })
+        };
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", stopped(0, None));
+        post_at(
+            mail.path(),
+            "c",
+            "2026-11-16T10:06:00Z",
+            stopped(0, Some("rate_limit")),
+        );
+        post_at(mail.path(), "a", "2026-11-16T10:07:00Z", stopped(1, None));
+        post_at(mail.path(), "c", "2026-11-16T10:08:00Z", Body::Start);
+        let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert_eq!(
+            ticker(&terminal),
+            ["10:06 c stop failed rate_limit", "10:05 a stop finished"]
+        );
+    }
+
+    #[test]
+    fn the_ticker_leaves_out_retired_members() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", done("mine"));
+        post_at(
+            mail.path(),
+            "done-1",
+            "2026-11-16T10:06:00Z",
+            done("left behind"),
+        );
+        let mut app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        press_with_mail(&mut app, KeyCode::Char('a'), &herdr, &ledger, mail.path());
+        assert_eq!(ticker(&render_ticker(&app, now)), ["10:05 a done mine", ""]);
+    }
+
+    fn press_with_mail(
+        app: &mut App,
+        key: KeyCode,
+        herdr: &FakeHerdr,
+        ledger: &MemLedger,
+        mailboxes: &std::path::Path,
+    ) {
+        let now = Instant::now();
+        let request = app.press(key, now).unwrap();
+        app.apply(serve(request, herdr, ledger, &dirs(mailboxes)), now)
+            .unwrap();
+    }
+
+    #[test]
+    fn an_event_arriving_while_open_is_bold_for_one_read_then_normal() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", done("before"));
+        let mut app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        let bold = |app: &App, needle| {
+            at(&render_ticker(app, now), needle)
+                .modifier
+                .contains(Modifier::BOLD)
+        };
+        assert!(!bold(&app, "10:05"), "shown on opening, so not new");
+        post_at(mail.path(), "c", "2026-11-16T10:06:00Z", note("arrived"));
+        refresh_with_mail(&mut app, &herdr, &ledger, mail.path(), now);
+        assert!(bold(&app, "10:06"));
+        assert!(bold(&app, "note arrived"));
+        assert!(!bold(&app, "10:05"));
+        refresh_with_mail(&mut app, &herdr, &ledger, mail.path(), now);
+        assert!(!bold(&app, "10:06"));
+        assert!(!bold(&app, "note arrived"));
+    }
+
+    fn note(text: &str) -> Body {
+        Body::Note { text: text.into() }
+    }
+
+    #[test]
+    fn a_report_the_ticker_has_shown_is_still_printed_by_a_later_reports() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", done("shipped"));
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        assert_eq!(ticker(&render_ticker(&app, now))[0], "10:05 a done shipped");
+        let filter = report::Filter {
+            names: &[],
+            herd: None,
+            all: false,
+        };
+        let printed = report::reports(&ledger, mail.path(), &filter).unwrap();
+        assert!(
+            printed.lines.iter().any(|l| l.contains("shipped")),
+            "{:#?}",
+            printed.lines
+        );
+    }
+
+    #[test]
+    fn below_16_rows_the_ticker_is_hidden() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", done("shipped"));
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        let shows = |height| {
+            lines(&render_at(&app, now, 72, height))
+                .iter()
+                .any(|l| l.contains("10:05 a done shipped"))
+        };
+        assert!(!shows(15));
+        assert!(shows(16));
     }
 }

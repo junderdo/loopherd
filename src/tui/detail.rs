@@ -73,7 +73,7 @@ pub fn stray(stray: &Stray) -> Vec<Line<'static>> {
 
 /// `finished`, `paused 1 shell, 2 subagents`, `background unknown`, or
 /// `failed rate_limit`.
-fn stopped(stop: &Stop) -> String {
+pub fn stopped(stop: &Stop) -> String {
     if let Some(error) = &stop.error {
         return format!("failed {error}");
     }
@@ -190,7 +190,7 @@ fn push(row: &mut Vec<Span<'static>>, c: char, style: Style) {
     }
 }
 
-fn ellipsized(line: Line<'static>, width: usize) -> Line<'static> {
+pub fn ellipsized(line: Line<'static>, width: usize) -> Line<'static> {
     let mut row = vec![];
     let mut used = 0;
     'cut: for span in line.spans {
