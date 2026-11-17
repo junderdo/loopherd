@@ -122,9 +122,10 @@ pub struct Event<'a> {
 }
 
 impl Event<'_> {
-    /// Unique across reads, unlike the stamp.
-    pub fn id(&self) -> (String, usize) {
-        (self.name.to_string(), self.index)
+    /// Unique across reads even when stamps tie; the stamp tells apart a
+    /// recreated mailbox's entries from the old file's at the same index.
+    pub fn id(&self) -> (String, usize, String) {
+        (self.name.to_string(), self.index, self.entry.at.clone())
     }
 }
 

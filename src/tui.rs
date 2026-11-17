@@ -125,10 +125,10 @@ pub struct App {
     opened: Option<Instant>,
     read: Option<Read>,
     mail: Mail,
-    /// Every event read so far, by member and mailbox index; `None` before the first read.
-    seen_events: Option<HashSet<(String, usize)>>,
+    /// Every event read so far, by `Event::id`; `None` before the first read.
+    seen_events: Option<HashSet<(String, usize, String)>>,
     /// Events that arrived with the last read, shown bold.
-    fresh_events: HashSet<(String, usize)>,
+    fresh_events: HashSet<(String, usize, String)>,
     outlines: Outlines,
     since: Since,
     selected: usize,
@@ -3407,6 +3407,25 @@ max = 3
                 .contains(Modifier::BOLD)
         );
         assert!(!at(&terminal, "note seen").modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn a_recreated_mailboxs_new_events_are_bold_on_arrival() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", note("old"));
+        let mut app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        std::fs::remove_file(mail.path().join("a.jsonl")).unwrap();
+        post(mail.path(), "a", Body::Start);
+        post_at(mail.path(), "a", "2026-11-16T11:00:00Z", note("brand new"));
+        refresh_with_mail(&mut app, &herdr, &ledger, mail.path(), now);
+        let terminal = render_ticker(&app, now);
+        assert_eq!(ticker(&terminal)[0], "11:00 a note brand new");
+        assert!(
+            at(&terminal, "note brand new")
+                .modifier
+                .contains(Modifier::BOLD)
+        );
     }
 
     #[test]
