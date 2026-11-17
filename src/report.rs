@@ -1406,9 +1406,9 @@ mod tests {
         assert_eq!(
             reports(&ledger, dir.path(), &all).unwrap().lines,
             [
-                "lh-1 stop 2026-11-01 09:00 finished 120k/150k",
-                "lh-1 stop 2026-11-01 09:01 finished",
-                "lh-1 stop 2026-11-01 09:02 finished 149k/150k",
+                "lh-1 stop 2026-11-01 09:00 UTC finished 120k/150k",
+                "lh-1 stop 2026-11-01 09:01 UTC finished",
+                "lh-1 stop 2026-11-01 09:02 UTC finished 149k/150k",
             ]
         );
     }
