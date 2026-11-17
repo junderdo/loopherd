@@ -349,8 +349,8 @@ question as its own sends a second notification.
   none read. Both take member names or `--herd <herd>`. `--all` also takes
   `--since <date, time or span such as 2h>` and `--tail <n>` (the last n
   entries after the other filters).
-- `loopherd stats` shows how each herd's work flowed: per retired worker,
-  time to its first `done`, review rounds, merge wait and total, with
+- `loopherd stats` shows how each herd's work flowed: per retired worker
+  (a released and re-fed name gets a row per run), time to its first `done`, review rounds, merge wait and total, with
   medians per herd and open workers apart. `--herd`, `--since <date or time>`,
   `--json`; it marks nothing read.
 - `loopherd retire <name>` marks a member finished in the ledger only;
