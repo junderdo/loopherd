@@ -452,6 +452,12 @@ struct Word {
     quoted_at: Option<usize>,
     /// Whether it holds a `<<` heredoc operator the lexer read as one.
     heredoc: bool,
+    /// Whether a `$` or a substitution stands outside quotes, so its value
+    /// may split into more words.
+    bare_expansion: bool,
+    /// Whether a backslash or a `$'…'` stood in it, whose escapes the lexer
+    /// may undo where bash keeps them.
+    escaped: bool,
     /// Its unquoted `*?[]{},` characters, a `.` for each `..`, and each `$`
     /// that opens a `${` or `$[`, in order.
     globs: String,
@@ -678,7 +684,10 @@ fn commands(script: &str) -> Option<Lexed> {
                 loop {
                     match chars.next()? {
                         '"' => break,
-                        '\\' => w.text.extend(chars.next()),
+                        '\\' => {
+                            w.escaped = true;
+                            w.text.extend(chars.next());
+                        }
                         '$' if chars.peek() == Some(&'(') => {
                             chars.next();
                             let text = substitution(&mut chars)?;
@@ -699,6 +708,7 @@ fn commands(script: &str) -> Option<Lexed> {
             '\\' => {
                 let w = word.get_or_insert_default();
                 w.quoted_at.get_or_insert(w.text.len());
+                w.escaped = true;
                 w.text.extend(chars.next());
             }
             // `2>&1`, `<&3` and `&>file` are redirections, not `&`.
@@ -737,16 +747,20 @@ fn commands(script: &str) -> Option<Lexed> {
                 chars.next();
                 let text = substitution(&mut chars)?;
                 let w = word.get_or_insert_default();
+                w.bare_expansion = true;
                 w.mark_substituted();
                 w.commands_print |= !text.starts_with('(');
                 lexed.extend(substituted(&text)?);
             }
             '$' if chars.next_if_eq(&'$').is_some() => {
-                word.get_or_insert_default().text.push_str("$$");
+                let w = word.get_or_insert_default();
+                w.bare_expansion = true;
+                w.text.push_str("$$");
             }
             '$' if chars.next_if_eq(&'\'').is_some() => {
                 let decoded = ansi_c(&mut chars)?;
                 let w = word.get_or_insert_default();
+                w.escaped = true;
                 w.quoted = true;
                 w.quoted_at.get_or_insert(w.text.len());
                 w.text.push_str(&decoded);
@@ -755,6 +769,7 @@ fn commands(script: &str) -> Option<Lexed> {
             '$' if chars.peek() == Some(&'"') => return None,
             '`' => {
                 let w = word.get_or_insert_default();
+                w.bare_expansion = true;
                 w.mark_substituted();
                 w.commands_print = true;
                 lexed.extend(self::commands(&backticked(&mut chars, false)?)?);
@@ -853,6 +868,7 @@ fn commands(script: &str) -> Option<Lexed> {
                     '$' => matches!(chars.peek(), Some('{' | '[')),
                     _ => "*?[]{},".contains(c),
                 };
+                w.bare_expansion |= c == '$';
                 w.text.push(c);
                 if records {
                     w.globs.push(c);
@@ -1531,8 +1547,8 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
 }
 
 /// Whether a `$` or a command substitution may build gh's command, the
-/// subcommand after `pr`, or a word before them other than the quoted value
-/// of a literal `-R` or `--repo`; or, on a `gh api` merge path, any word but
+/// subcommand after `pr`, or a word before them other than a value of a
+/// literal `-R` or `--repo` whose every `$` and substitution is quoted; or, on a `gh api` merge path, any word but
 /// the path, since it may be the method or a field.
 fn gh_command_built(args: &[&Word]) -> bool {
     let words: Vec<String> = args.iter().map(|w| w.text.clone()).collect();
@@ -1551,7 +1567,7 @@ fn gh_command_built(args: &[&Word]) -> bool {
         let inline = w.text.starts_with("--repo=")
             && w.text.find('$').is_none_or(|p| p >= "--repo=".len())
             && w.substituted_at.is_none_or(|p| p >= "--repo=".len());
-        w.quoted && at != command && at != last && (after_flag || inline)
+        !w.bare_expansion && at != command && at != last && (after_flag || inline)
     };
     args.iter()
         .take(last + 1)
@@ -1699,10 +1715,14 @@ fn script_needs(script: &Word, aliases: &Aliases) -> Vec<Switch> {
 
 /// What a word that may be a shell's `-c` script, when a `$` prints the
 /// `-c`, needs. A single line left inside a quote runs nothing, since bash
-/// parses the whole line before running any of it.
+/// parses the whole line before running any of it; only without escapes,
+/// which the lexer may undo where bash keeps them.
 fn guessed_script_needs(script: &Word, aliases: &Aliases) -> Vec<Switch> {
     let text = &script.text;
-    let quote_left_open = !text.contains('\n')
+    let quote_left_open = !script.escaped
+        && !text.contains(['\n', '\\'])
+        && !text.contains("$'")
+        && !text.contains("$\"")
         && commands(text).is_none()
         && ['\'', '"', '`']
             .iter()
@@ -4553,6 +4573,24 @@ mod tests {
         assert_unreadable("bash $C \"$(cat f)\"");
         assert_unreadable("bash \"$f\" \"gh pr merge 1\nit's\"");
         assert_passes("bash \"$script\" one two");
+        for command in [
+            "bash $C \"gh pr merge 1; echo it\\'s\"",
+            "bash $C \"gh pr merge 1; echo \\'\"",
+            "bash $C \"gh pr merge 1; echo a\\'b\"",
+            "bash $C \"gh pr merge 1; echo $' it\\'s'\"",
+            "bash $C 'gh pr merge 1; echo it\\'\\''s'",
+        ] {
+            assert!(
+                !needs(command).is_empty(),
+                "{command} needs nothing: {:?}",
+                needs(command)
+            );
+            assert!(
+                run(&ledger(vec![lead()]), Switches::default(), command).is_some(),
+                "{command} was allowed"
+            );
+        }
+        assert_passes("C=-c; bash $C \"gh pr merge 1; echo it's\"");
         assert_passes("bash \"$f\" \"don't stop\"");
         assert_passes("bash \"$SCRIPT\" --message \"it's done\"");
         assert_passes("bash \"$f.sh\" \"can't\"");
@@ -4579,6 +4617,15 @@ mod tests {
             "gh \"--$(echo repo)\" o/r pr merge 1",
             "gh pr \"--$(echo repo)\" o/r merge 1",
             "gh pr -R\"$X\" o/r merge 1",
+            "gh pr -R \"a\"$X 1",
+            "gh pr -R 'a'$X 1",
+            "gh pr --repo \"a\"$X 1",
+            "gh pr --repo=\"a\"$X 1",
+            "gh pr -R \"a\"$(echo ' merge') 1",
+            "gh -R \"a\"$X pr 1",
+            "gh pr -R \"$X\"$Y 1",
+            "gh api repos/o/r/pulls/1/merge -X PUT -f \"title=$T\"",
+            "gh api repos/o/r/pulls/1/merge -X PUT --jq \"$J\"",
             "gh api \"$(echo -X)\" PUT repos/o/r/pulls/1/merge",
             "gh api -$M PUT repos/o/r/pulls/1/merge",
             "gh api repos/o/r/pulls/1/merge $F",
