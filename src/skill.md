@@ -117,7 +117,9 @@ Init never launches an agent.
    watch skipped, prints every unread stop change since; judge each against
    `reports --all`.
 3. **On wake,** read the watch's lines and the task (`loopherd reports
-   --all` for the timeline, stops included). The lines:
+   --all --tail 40` for the timeline, stops included; for a fuller
+   history, `--since <time>` or plain `--all`, or `--all <name>` for one
+   member). The lines:
 
    | Line | Means |
    |---|---|
