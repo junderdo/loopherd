@@ -220,6 +220,21 @@ mod tests {
     }
 
     #[test]
+    fn a_wake_re_arms_with_its_first_action_and_reads_the_output_once() {
+        let watch = section("2. **Watch.**", "3. **On wake,**");
+        let heartbeat = section("- **Heartbeat.**", "- **After a restart**");
+        for (name, text) in [("Watch", watch), ("Heartbeat", heartbeat)] {
+            for rule in [
+                "run `loopherd status` and re-arm in the same message as your first action",
+                "unless the wake needs a handoff",
+                "Read the watch's output once",
+            ] {
+                assert!(text.contains(rule), "{name} misses {rule:?}");
+            }
+        }
+    }
+
+    #[test]
     fn names_nothing_from_this_repo() {
         // init writes these into any repo, so the skill may name them.
         let skill = ["docs/agents/issue-tracker.md", "docs/agents/loopherd.md"]

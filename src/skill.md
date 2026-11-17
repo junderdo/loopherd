@@ -98,9 +98,12 @@ Init never launches an agent.
    line per event, and marks them read only once printed. Stops come from
    the Stop hook's entries in the mailbox, so a stop that lands between
    watches wakes the next one. herdr adds `blocked` and `gone`, seen only
-   while a watch runs: a change between watches is never replayed, so run
-   `loopherd status` before each re-arm. Exit 2 means the timeout passed
-   with nothing to do; a due `shepherd handoff` line still prints, exiting 0. Start the next watch after handling every wake. It
+   while a watch runs: a change between watches is never replayed. After a
+   wake, run `loopherd status` and re-arm in the same message as your first
+   action, unless the wake needs a handoff (then don't re-arm). Read the
+   watch's output once; don't read it again after acting. Exit 2 means the
+   timeout passed with nothing to do; a due `shepherd handoff` line still
+   prints, exiting 0. It
    dies with your session. It refuses to start while another shepherd's
    watch holds `watch.lock` (the error names its PID; an orphaned one can
    hold it until its timeout; leads' watches hold their own locks and don't
@@ -538,7 +541,10 @@ What differs from the shepherd:
   heartbeat's dry run. Exit 2 is a heartbeat, not idleness: still check
   each PR waiting on review (`gh pr view <n> --json state`), run the
   after-merge steps for any the human merged, and run `loopherd feed <herd>
-  --dry-run`. Re-arm after every exit.
+  --dry-run`. After every exit, run `loopherd status` and re-arm in the
+  same message as your first action, unless the wake needs a handoff (then
+  don't re-arm). Read the watch's output once; don't read it again after
+  acting.
 - **After a restart** the shepherd runs `loopherd revive`, which prompts you
   to re-arm whenever nothing holds `watch-<your name>.lock`, whether herdr
   resumed you or revive did. Re-read `loopherd status` and `loopherd reports
