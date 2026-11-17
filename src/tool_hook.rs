@@ -212,7 +212,7 @@ fn decide(
     }
     if needed == Switch::Unreadable {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like (write prose with `cat` or `tee` into an .md, .txt, .log, .json, .csv, .html, .diff, .out or .msg file in the working tree or /tmp, outside .git and .cargo, as the call's only heredoc and its only write to a file, beside only reading sinks and programs like `cargo` holding no pipe, `(`, quote, `$`, glob, brace or mention of the file; `>/dev/null` and `2>&1` are fine), a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like (write prose with `cat` or `tee` into an .md, .txt, .log, .json, .csv, .html, .diff, .out or .msg file in the working tree or /tmp, outside .git and .cargo, as the call's only heredoc and its only write to a file, beside only reading sinks and programs like `cargo` holding no pipe, `(`, quote, `$`, glob, brace or mention of the file; `>/dev/null` and `2>&1` are fine), a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, a `trap`, `sh -c` or `eval` script that a substitution prints, `gh` after `GH_CONFIG_DIR` is set, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -284,14 +284,16 @@ pub fn needs(script: &str) -> Vec<Switch> {
     needs_with(script, &mut Aliases::default(), false)
 }
 
-/// The `CARGO_ALIAS_*` variables assigned so far in a script.
+/// The `CARGO_ALIAS_*` variables assigned so far in a script, and whether
+/// `GH_CONFIG_DIR` was, which points gh at aliases the hook can't see.
 #[derive(Clone, Default, PartialEq)]
 struct Aliases {
     /// Values by the alias's upper-case name; `None` when it can't be read.
     values: std::collections::HashMap<String, Option<String>>,
-    /// Whether one was assigned under a name that can't be read, or in a
-    /// heredoc body that may run in this shell or a child, so any alias may
-    /// be set.
+    gh_config_dir: bool,
+    /// Whether a variable was assigned under a name that can't be read, or
+    /// in a heredoc body that may run in this shell or a child, so any alias
+    /// or `GH_CONFIG_DIR` may be set.
     unreadable_name: bool,
 }
 
@@ -300,6 +302,11 @@ impl Aliases {
         if word.name_expands() {
             self.unreadable_name = true;
             return;
+        }
+        // A bare `export GH_CONFIG_DIR` counts: `${GH_CONFIG_DIR:=…}` or `for` may have set it.
+        let name = word.text.split_once('=').map_or(&*word.text, |(n, _)| n);
+        if name.trim_end_matches('+') == "GH_CONFIG_DIR" {
+            self.gh_config_dir = true;
         }
         let Some((name, value)) = word
             .text
@@ -582,6 +589,9 @@ impl Lexed {
 struct Word {
     text: String,
     substituted_at: Option<usize>,
+    /// Whether a command substitution builds part of it, which `$((…))`
+    /// alone doesn't: arithmetic prints only a number.
+    commands_print: bool,
     /// Any part of it quoted, so it can't be a keyword.
     quoted: bool,
     /// Where in `text` its first quote or backslash stood.
@@ -639,8 +649,10 @@ impl Word {
 
     /// Whether a `$` or a substitution may build the part before the first
     /// `=`, or the whole word when it has none.
+    /// A subscript (`a[$i]=x`) doesn't count: bash exports no arrays.
     fn name_expands(&self) -> bool {
         let name = self.text.split_once('=').map_or(&*self.text, |(n, _)| n);
+        let name = name.split_once('[').map_or(name, |(n, _)| n);
         name.contains('$') || self.substituted_at.is_some_and(|at| at <= name.len())
     }
 
@@ -780,11 +792,14 @@ fn commands(script: &str) -> Option<Lexed> {
                         '\\' => w.text.extend(chars.next()),
                         '$' if chars.peek() == Some(&'(') => {
                             chars.next();
+                            let text = substitution(&mut chars)?;
                             w.mark_substituted();
-                            lexed.extend(substituted(&substitution(&mut chars)?)?);
+                            w.commands_print |= !text.starts_with('(');
+                            lexed.extend(substituted(&text)?);
                         }
                         '`' => {
                             w.mark_substituted();
+                            w.commands_print = true;
                             lexed.extend(self::commands(&backticked(&mut chars, true)?)?);
                         }
                         c => w.text.push(c),
@@ -830,8 +845,11 @@ fn commands(script: &str) -> Option<Lexed> {
             }
             '$' if chars.peek() == Some(&'(') => {
                 chars.next();
-                word.get_or_insert_default().mark_substituted();
-                lexed.extend(substituted(&substitution(&mut chars)?)?);
+                let text = substitution(&mut chars)?;
+                let w = word.get_or_insert_default();
+                w.mark_substituted();
+                w.commands_print |= !text.starts_with('(');
+                lexed.extend(substituted(&text)?);
             }
             '$' if chars.next_if_eq(&'$').is_some() => {
                 word.get_or_insert_default().text.push_str("$$");
@@ -843,7 +861,9 @@ fn commands(script: &str) -> Option<Lexed> {
             // Bash translates `$"…"` through a message catalog the hook can't read.
             '$' if chars.peek() == Some(&'"') => return None,
             '`' => {
-                word.get_or_insert_default().mark_substituted();
+                let w = word.get_or_insert_default();
+                w.mark_substituted();
+                w.commands_print = true;
                 lexed.extend(self::commands(&backticked(&mut chars, false)?)?);
             }
             ';' | '&' | '|' | '\n' | '(' | ')' => {
@@ -1423,6 +1443,26 @@ const READERS: [&str; 17] = [
     "cat", "echo", "gh", "ls", "rm", "touch", "mkdir", "wc", "head", "tail", "grep", "diff", "jq",
     "true", "false", "test", "cd",
 ];
+const BASH_LONG_OPTIONS: [&str; 18] = [
+    "debug",
+    "debugger",
+    "dump-po-strings",
+    "dump-strings",
+    "help",
+    "init-file",
+    "login",
+    "noediting",
+    "noprofile",
+    "norc",
+    "posix",
+    "pretty-print",
+    "protected",
+    "rcfile",
+    "restricted",
+    "verbose",
+    "version",
+    "wordexp",
+];
 const SHELLS: [&str; 5] = ["sh", "bash", "zsh", "dash", "ksh"];
 /// Builtins whose arguments may assign variables.
 const DECLARERS: [&str; 5] = ["export", "declare", "typeset", "local", "readonly"];
@@ -1495,9 +1535,9 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             i += if opens_compound { 2 } else { 1 };
         } else if word == "trap" {
             let action = skip_options(words, i + 1, &[]);
-            return words.get(action).map_or(vec![], |script| {
-                needs_with(script, &mut aliases.clone(), true)
-            });
+            return kept
+                .get(action)
+                .map_or(vec![], |script| script_needs(script, aliases));
         } else if DECLARERS.contains(&program) {
             let args = &kept[i + 1..];
             let nameref = |w: &&Word| w.text.starts_with('-') && w.text.contains('n');
@@ -1525,9 +1565,9 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
                 i += 1;
             }
             if program == "flock" && words.get(i).is_some_and(|w| w == "-c" || w == "--command") {
-                return words.get(i + 1).map_or(vec![], |script| {
-                    needs_with(script, &mut aliases.clone(), true)
-                });
+                return kept
+                    .get(i + 1)
+                    .map_or(vec![], |script| script_needs(script, aliases));
             }
         } else if program == "rustup" {
             // `rustup [-q] [+toolchain] run [--install] <toolchain> [--install] [--] <command>`
@@ -1541,43 +1581,135 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             let toolchain = skip_options(words, i + 1, &[]);
             i = skip_options(words, toolchain + 1, &[]);
         } else if SHELLS.contains(&program) {
-            i += 1;
-            // `-o pipefail`, `-O extglob`: the next word is the option's value.
-            const WITH_VALUE: [&str; 4] = ["-o", "+o", "-O", "+O"];
-            let mut stdin_script = false;
-            while let Some(option) = words.get(i).filter(|w| w.starts_with(['-', '+'])) {
-                if option == "--" {
-                    i += 1;
-                    break;
-                }
-                if !option.starts_with("--") && option.contains('c') {
-                    let script = skip_options(words, i + 1, &WITH_VALUE);
-                    return words.get(script).map_or(vec![], |script| {
-                        needs_with(script, &mut aliases.clone(), true)
-                    });
-                }
-                stdin_script |= !option.starts_with("--") && option.contains('s');
-                i += if WITH_VALUE.contains(&option.as_str()) {
-                    2
-                } else {
-                    1
-                };
+            let read: Vec<ShellOptions> = shell_readings(program)
+                .iter()
+                .map(|&reading| shell_options(words, i + 1, reading))
+                .collect();
+            let scripts: std::collections::BTreeSet<usize> = read
+                .iter()
+                .filter(|options| options.command_script)
+                .map(|options| options.end)
+                .collect();
+            if !scripts.is_empty() {
+                return scripts
+                    .into_iter()
+                    .filter_map(|at| kept.get(at))
+                    .flat_map(|script| script_needs(script, aliases))
+                    .collect();
             }
-            if (stdin_script && !heredoc_feeds(&redirects, 0))
-                || reads_script_from_input(words.get(i))
-            {
+            if read.iter().any(|options| {
+                (options.stdin_script && !heredoc_feeds(&redirects, 0))
+                    || reads_script_from_input(words.get(options.end))
+            }) {
                 return vec![Switch::Unreadable];
             }
+            i = read
+                .iter()
+                .map(|options| options.end)
+                .min()
+                .unwrap_or(i + 1);
         } else if program == "eval" {
+            if kept[i + 1..].iter().any(|w| w.commands_print) {
+                return vec![Switch::Unreadable];
+            }
             return needs_with(&words[i + 1..].join(" "), aliases, true);
         } else if GATED.contains(&program) && kept[i + 1..].iter().any(|w| w.braced()) {
             return vec![Switch::Unreadable];
         } else if program == "cargo" {
             return cargo_needs(word, &words[i + 1..], aliases);
+        } else if program == "gh" && (aliases.gh_config_dir || aliases.unreadable_name) {
+            return vec![Switch::Unreadable];
         } else {
             return needs_program(word, &words[i + 1..]).into_iter().collect();
         }
     }
+}
+
+/// One way a shell may read its options.
+#[derive(Clone, Copy)]
+struct ShellReading {
+    /// Bash's long options first, with one dash or two: `-login`, `-rcfile f`.
+    long_first: bool,
+    /// zsh's `o` in a cluster takes the rest of it as the option's name
+    /// (`-conoclobber`); bash's takes the next word (`-oc pipefail`).
+    o_takes_rest: bool,
+}
+
+/// The readings to judge `shell` by: bash's own, or for any other shell,
+/// which may be bash under another name, every one, so a `-c` script that
+/// any of them finds counts.
+fn shell_readings(shell: &str) -> Vec<ShellReading> {
+    let bash = ShellReading {
+        long_first: true,
+        o_takes_rest: false,
+    };
+    if shell == "bash" {
+        return vec![bash];
+    }
+    [(true, false), (true, true), (false, false), (false, true)]
+        .into_iter()
+        .map(|(long_first, o_takes_rest)| ShellReading {
+            long_first,
+            o_takes_rest,
+        })
+        .collect()
+}
+
+struct ShellOptions {
+    /// The first word after the options and their values.
+    end: usize,
+    command_script: bool,
+    stdin_script: bool,
+}
+
+/// A shell's options from `words[from]`, read the way `reading` says.
+fn shell_options(words: &[String], from: usize, reading: ShellReading) -> ShellOptions {
+    let mut i = from;
+    while let Some(long) = words
+        .get(i)
+        .filter(|_| reading.long_first)
+        .and_then(|w| w.strip_prefix("--").or_else(|| w.strip_prefix('-')))
+        .filter(|long| BASH_LONG_OPTIONS.contains(long))
+    {
+        i += 1 + usize::from(["rcfile", "init-file"].contains(&long));
+    }
+    let mut options = ShellOptions {
+        end: i,
+        command_script: false,
+        stdin_script: false,
+    };
+    while let Some(option) = words.get(i).filter(|w| w.starts_with(['-', '+'])) {
+        i += 1;
+        if option == "--" || option == "-" {
+            break;
+        }
+        if let Some(long) = option.strip_prefix("--") {
+            i += usize::from(["rcfile", "init-file"].contains(&long));
+            continue;
+        }
+        let mut shorts = option[1..].chars();
+        while let Some(short) = shorts.next() {
+            options.command_script |= short == 'c';
+            options.stdin_script |= short == 's';
+            if matches!(short, 'o' | 'O') {
+                if reading.o_takes_rest && !shorts.as_str().is_empty() {
+                    break;
+                }
+                i += 1;
+            }
+        }
+    }
+    options.end = i;
+    options
+}
+
+/// What the script of a `trap`, `sh -c` or `flock -c` needs. One that a
+/// substitution prints can't be read.
+fn script_needs(script: &Word, aliases: &Aliases) -> Vec<Switch> {
+    if script.commands_print {
+        return vec![Switch::Unreadable];
+    }
+    needs_with(&script.text, &mut aliases.clone(), true)
 }
 
 /// Whether `xargs`'s options may set a replace string: any `I` or `i` in
@@ -4377,6 +4509,101 @@ mod tests {
         }
         assert_passes("trap 'rm -f /tmp/x' EXIT");
         assert_passes("trap -p");
+    }
+
+    #[test]
+    fn a_script_that_a_substitution_prints_is_denied() {
+        for command in [
+            "trap \"$(echo gh pr merge 1)\" EXIT",
+            "trap -- \"`echo gh pr merge 1`\" EXIT",
+            "trap \"x; $(echo gh pr merge 1)\" EXIT",
+            "bash -c \"$(cat)\" <<< 'gh pr merge 1'",
+            "sh -c \"$(cat)\" <<< 'gh pr merge 1'",
+            "bash -lc \"$(cat)\" <<< 'gh pr merge 1'",
+            "flock /tmp/l -c \"$(cat)\" <<< 'gh pr merge 1'",
+            "eval \"$(cat)\" <<< 'gh pr merge 1'",
+            "eval echo hi \"$(cat)\" <<< 'gh pr merge 1'",
+            // Bash reads `$((` as a command substitution when what follows
+            // isn't arithmetic; the lexer must not take it for `$((…))`.
+            "trap \"$((echo gh pr merge 1) )\" EXIT",
+            "bash -c \"$((echo gh pr merge 1) )\"",
+            "eval \"$((echo gh pr merge 1) )\"",
+        ] {
+            assert_unreadable(command);
+        }
+        assert_passes("trap 'rm -f \"$tmp\"' EXIT");
+        assert_passes("trap 'rm -f $(cat /tmp/list)' EXIT");
+        assert_passes("bash -lc 'cargo test'");
+        assert_passes("bash -c 'cd \"$(git rev-parse --show-toplevel)\" && git status'");
+        assert_passes("bash -c 'echo \"$1\"' _ \"$(date)\"");
+        assert_passes("eval 'echo hi'");
+        assert_passes("bash -c \"echo $((1+2))\"");
+        assert_passes("trap \"echo $((1+2))\" EXIT");
+        assert_passes("eval \"x=$((i+1))\"");
+    }
+
+    #[test]
+    fn a_shell_options_value_is_not_its_script() {
+        for command in [
+            "bash -oc pipefail 'gh pr merge 1'",
+            "bash -co pipefail 'gh pr merge 1'",
+            "bash -cO extglob 'gh pr merge 1'",
+            "bash -eoc pipefail 'gh pr merge 1'",
+            "bash -ooc pipefail errexit 'gh pr merge 1'",
+            "bash -c -eo pipefail 'gh pr merge 1'",
+            "bash +oc posix 'gh pr merge 1'",
+            "bash --rcfile /dev/null -c 'gh pr merge 1'",
+            "bash --init-file /dev/null -c 'gh pr merge 1'",
+            "bash -rcfile /dev/null -c 'gh pr merge 1'",
+            "bash -init-file /dev/null -c 'gh pr merge 1'",
+            "bash -login -c 'gh pr merge 1'",
+            "bash -noediting -noprofile -c 'gh pr merge 1'",
+            "bash --login -oc pipefail 'gh pr merge 1'",
+        ] {
+            assert_judged(command, Switch::Merge);
+        }
+        for command in [
+            "zsh -restricted 'gh pr merge 1'",
+            "zsh -restricted 'gh pr merge 1' x",
+            "zsh -rcfile 'gh pr merge 1' x",
+            "ksh -restricted 'gh pr merge 1' x",
+            "sh -restricted 'gh pr merge 1' x",
+            "sh -login -c 'gh pr merge 1'",
+            "zsh -conoclobber 'gh pr merge 1'",
+            "zsh -cono 'gh pr merge 1'",
+            "ksh -conoclobber 'gh pr merge 1'",
+            "sh -conoclobber 'gh pr merge 1'",
+            "zsh -oc pipefail 'gh pr merge 1'",
+        ] {
+            assert_judged(command, Switch::Merge);
+        }
+        assert_passes("bash -eo pipefail -c 'cargo test'");
+        assert_passes("sh -noprofile -c 'cargo test'");
+        assert_passes("zsh -noprofile -c 'cargo test'");
+        assert_passes("sh -o pipefail -c 'cargo test'");
+        assert_passes("bash -oc pipefail 'cargo test'");
+    }
+
+    #[test]
+    fn gh_with_a_changed_config_dir_is_denied() {
+        for command in [
+            "GH_CONFIG_DIR=/tmp/g gh mm 1",
+            "env GH_CONFIG_DIR=/tmp/g gh mm 1",
+            "export GH_CONFIG_DIR=/tmp/g; gh mm 1",
+            "GH_CONFIG_DIR=/tmp/g; export GH_CONFIG_DIR; gh mm 1",
+            "declare -x GH_CONFIG_DIR=/tmp/g && gh pr view 1",
+            "export GH_CONFIG_DIR=/tmp/g; bash -c 'gh mm 1'",
+            "export $N=/tmp/g; gh mm 1",
+            "GH_CONFIG_DIR+=/g; gh mm 1",
+            ": ${GH_CONFIG_DIR:=/tmp/g}; export GH_CONFIG_DIR; gh mm 1",
+            "for GH_CONFIG_DIR in /tmp/g; do export GH_CONFIG_DIR; gh mm 1; done",
+        ] {
+            assert_unreadable(command);
+        }
+        assert_passes("gh pr view 1");
+        assert_passes("gh mm 1; GH_CONFIG_DIR=/tmp/g true");
+        assert_passes("export GH_TOKEN=x; gh pr view 1");
+        assert_passes("arr[$i]=x; gh pr view 1");
     }
 
     #[test]
