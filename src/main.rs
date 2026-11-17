@@ -768,11 +768,15 @@ fn run_stats(herd: Option<String>, since: Option<SystemTime>, json: bool) -> Res
 fn run_view(all: bool, strays: bool) -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let subscriber = SocketSubscriber::new(CliHerdr.socket());
+    let dirs = tui::Dirs {
+        pauses: pause::Pauses::from_env()?,
+        mailboxes: ledger.reports_dir()?,
+    };
     tui::run(
         CliHerdr,
         subscriber,
         ledger,
-        pause::Pauses::from_env()?,
+        dirs,
         Options { all, strays },
         tui::theme::Theme::from_env(
             std::env::var("COLORTERM").ok().as_deref(),

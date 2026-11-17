@@ -1,0 +1,93 @@
+//! The members' mailboxes as the view reads them: through `report::history`,
+//! with no cursor and no lock, so the view never consumes a report that
+//! `loopherd reports` or the watch would print.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use crate::herd_view::{Member, View};
+use crate::herdr::AgentStatus;
+use crate::report::{Body, Entry, history};
+
+#[derive(Debug, Default)]
+pub struct Mail {
+    boxes: BTreeMap<String, Vec<Entry>>,
+    /// One per mailbox that is missing or unreadable, or per bad line.
+    pub warnings: Vec<String>,
+}
+
+impl Mail {
+    /// The mailboxes of `view`'s active members; retired ones aren't read.
+    pub fn read(dir: &Path, view: &View) -> Mail {
+        let mut mail = Mail::default();
+        for member in active(view) {
+            let name = &member.name;
+            if !dir.join(format!("{name}.jsonl")).is_file() {
+                mail.warnings.push(format!(
+                    "warning: {name} has no mailbox in {}",
+                    dir.display()
+                ));
+                continue;
+            }
+            match history(dir, name) {
+                Ok((entries, bad)) => {
+                    mail.warnings
+                        .extend(bad.into_iter().map(|w| format!("warning: {w}")));
+                    mail.boxes.insert(name.clone(), entries);
+                }
+                Err(e) => mail
+                    .warnings
+                    .push(format!("warning: can't read {name}'s mailbox: {e:#}")),
+            }
+        }
+        mail
+    }
+
+    /// Its latest question has no `start` or `done` after it.
+    fn asking(&self, name: &str) -> bool {
+        let entries = self.boxes.get(name).map_or(&[][..], Vec::as_slice);
+        for entry in entries.iter().rev() {
+            match entry.body {
+                Body::Question { .. } => return true,
+                Body::Done { .. } | Body::Start => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+}
+
+/// What waits on the human: questions, then blocked members, each in
+/// display order.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Waiting {
+    pub questions: usize,
+    pub blocked: usize,
+    /// `<name> question` or `<name> blocked`, one per thing waiting.
+    pub items: Vec<String>,
+}
+
+pub fn waiting(view: &View, mail: &Mail) -> Waiting {
+    let asking: Vec<_> = active(view)
+        .filter(|m| mail.asking(&m.name))
+        .map(|m| format!("{} question", m.name))
+        .collect();
+    let blocked: Vec<_> = active(view)
+        .filter(|m| m.status == AgentStatus::Blocked && !m.gone)
+        .map(|m| format!("{} blocked", m.name))
+        .collect();
+    Waiting {
+        questions: asking.len(),
+        blocked: blocked.len(),
+        items: [asking, blocked].concat(),
+    }
+}
+
+/// Members of the herds, then `ungrouped`, as the view shows them; never
+/// the retired.
+fn active(view: &View) -> impl Iterator<Item = &Member> {
+    view.herds
+        .iter()
+        .flat_map(|h| &h.members)
+        .chain(&view.ungrouped)
+}
