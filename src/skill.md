@@ -194,7 +194,10 @@ A member's Stop hook measures its context after each turn. Past its limit,
 it blocks that stop once per session and tells the member to save its work
 (a worker commits and pushes its branch and comments its progress on its
 task), write its handoff to `$XDG_STATE_HOME/loopherd/handoffs/<name>.md`,
-report `--kind handoff`, and end its turn. The last handoff moves to
+report `--kind handoff`, and end its turn. A stop with subagents still
+running isn't asked until the first later stop without them, unless the
+context is past 1.5x the limit; background shells alone don't defer it.
+The last handoff moves to
 `<name>.prev.md`. The limit is the template's or `[lead]`'s
 `context_limit`, else `default_context_limit` in
 `$LOOPHERD_CONFIG_DIR/config.toml`, else 250000, never over 80% of that
