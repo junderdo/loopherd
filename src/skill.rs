@@ -208,6 +208,17 @@ mod tests {
     }
 
     #[test]
+    fn later_review_rounds_run_the_reviewer_on_sonnet() {
+        let verify = section("4. **Verify**", "5. **After merge**");
+        assert!(
+            verify.contains(
+                "A first review uses the reviewer as defined; later rounds pass `model: sonnet`"
+            ),
+            "{verify}"
+        );
+    }
+
+    #[test]
     fn names_nothing_from_this_repo() {
         // init writes these into any repo, so the skill may name them.
         let skill = ["docs/agents/issue-tracker.md", "docs/agents/loopherd.md"]

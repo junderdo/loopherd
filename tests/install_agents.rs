@@ -219,6 +219,17 @@ fn the_repo_ships_four_agent_types_with_frontmatter() {
 }
 
 #[test]
+fn the_reviewer_keeps_gate_output_out_of_its_context() {
+    let text = fs::read_to_string(format!("{REPO}/agents/reviewer.md")).unwrap();
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("through `tail`"), "{flat}");
+    assert!(
+        flat.contains("never Read a saved `tool-results/` file whole"),
+        "{flat}"
+    );
+}
+
+#[test]
 fn with_agents_installs_each_into_the_claude_agents_dir() {
     let sandbox = Sandbox::new();
 

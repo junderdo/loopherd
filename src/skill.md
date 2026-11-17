@@ -142,9 +142,11 @@ Init never launches an agent.
 4. **Verify** a finished member's output with a read-only reviewer
    subagent against the task's acceptance criteria. Ask for it by role:
    the `reviewer` agent type, else `loopherd-reviewer`, else a
-   general-purpose subagent told to stay read-only. Give it no loopherd
-   or mutating herdr commands, and a temp `XDG_STATE_HOME` and
-   `LOOPHERD_CONFIG_DIR`. Put everything it
+   general-purpose subagent told to stay read-only. A first review uses
+   the reviewer as defined; later rounds pass `model: sonnet` to the
+   subagent, since they only recheck findings and a small diff. Give it
+   no loopherd or mutating herdr commands, and a temp `XDG_STATE_HOME`
+   and `LOOPHERD_CONFIG_DIR`. Put everything it
    builds under one directory per PR, `<scratch>/pr<n>/`, where `<scratch>`
    is your session's own temp directory: its detached worktrees, its build
    target dirs and any copies (mutation runs), so one removal cleans up.
