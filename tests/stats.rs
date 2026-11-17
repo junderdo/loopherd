@@ -676,3 +676,29 @@ fn a_herd_known_only_from_retired_records_is_fine() {
     ));
     assert_eq!(out, "");
 }
+
+#[test]
+fn json_gives_null_rounds_for_a_member_whose_mailbox_is_unreadable() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[Member::new("lh-1", "2026-11-01T00:00:00Z").retired("2026-11-01T05:00:00Z")],
+    );
+    fs::create_dir_all(state.path().join("loopherd/reports/lh-1.jsonl")).unwrap();
+
+    let out = run(state.path(), &["--json"]);
+
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("warning: could not read "),
+        "{out:?}"
+    );
+    assert_eq!(out.status.code(), Some(0));
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let retired = &json["herds"][0]["retired"][0];
+    assert_eq!(retired["name"], "lh-1");
+    assert_eq!(
+        retired.get("rounds"),
+        Some(&serde_json::Value::Null),
+        "{retired}"
+    );
+}
