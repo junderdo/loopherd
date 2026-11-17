@@ -504,6 +504,34 @@ impl Word {
         self.commands_print || self.text.contains('$')
     }
 
+    /// Whether the word may expand to a run of short options: it is
+    /// [`Word::built`] and the rest of it is only `-`, `+` and letters.
+    fn may_print_option(&self) -> bool {
+        let mut literal = String::new();
+        let mut chars = self.text.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '$' {
+                literal.push(c);
+            } else if chars.next_if_eq(&'{').is_some() {
+                while chars.next().is_some_and(|c| c != '}') {}
+            } else if chars
+                .next_if(|c| c.is_ascii_alphabetic() || *c == '_')
+                .is_some()
+            {
+                while chars
+                    .next_if(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .is_some()
+                {}
+            } else {
+                chars.next_if(|c| c.is_ascii_digit() || "@*#?-$!".contains(*c));
+            }
+        }
+        self.built()
+            && literal
+                .chars()
+                .all(|c| c == '-' || c == '+' || c.is_ascii_alphabetic())
+    }
+
     fn mark_substituted(&mut self) {
         self.substituted_at.get_or_insert(self.text.len());
     }
@@ -1447,27 +1475,28 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
                 .iter()
                 .map(|&reading| shell_options(words, i + 1, reading))
                 .collect();
-            let mut scripts: std::collections::BTreeSet<usize> = read
+            let scripts: std::collections::BTreeSet<usize> = read
                 .iter()
                 .filter(|options| options.command_script)
                 .map(|options| options.end)
                 .collect();
             // A `$` or substitution among the options, or as the operand where
             // no `-c` was read, may print `-c`.
-            let built = read
+            let may_print_c = read
                 .iter()
                 .flat_map(|options| i + 1..options.end + usize::from(!options.command_script))
-                .filter(|&at| kept.get(at).is_some_and(|w| w.built()))
+                .filter(|&at| kept.get(at).is_some_and(|w| w.may_print_option()))
                 .min();
-            if let Some(built) = built {
-                scripts.extend(built + 1..kept.len());
-            }
-            if !scripts.is_empty() {
-                return scripts
-                    .into_iter()
-                    .filter_map(|at| kept.get(at))
-                    .flat_map(|script| script_needs(script, aliases))
-                    .collect();
+            let guessed = may_print_c.map_or(kept.len(), |at| at + 1);
+            if !scripts.is_empty() || guessed < kept.len() {
+                let mut needs = vec![];
+                for script in scripts.into_iter().filter_map(|at| kept.get(at)) {
+                    add_new(&mut needs, script_needs(script, aliases));
+                }
+                for script in &kept[guessed..] {
+                    add_new(&mut needs, guessed_script_needs(script, aliases));
+                }
+                return needs;
             }
             if read.iter().any(|options| {
                 (options.stdin_script && !heredoc_feeds(&redirects, 0))
@@ -1501,21 +1530,33 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
     }
 }
 
-/// Whether a `$` or a command substitution may build gh's command, or the
-/// subcommand after `pr`, or an unquoted word before them that may split
-/// into either. Words after them, such as a PR number, may be built.
+/// Whether a `$` or a command substitution may build gh's command, the
+/// subcommand after `pr`, or a word before them other than the quoted value
+/// of a literal `-R` or `--repo`; or, on a `gh api` merge path, any word but
+/// the path, since it may be the method or a field.
 fn gh_command_built(args: &[&Word]) -> bool {
     let words: Vec<String> = args.iter().map(|w| w.text.clone()).collect();
     let with_value = ["-R", "--repo"];
     let command = skip_options(&words, 0, &with_value);
+    if words.get(command).is_some_and(|api| api == "api") && words.iter().any(|w| merges(w)) {
+        return args.iter().any(|w| w.built() && !merges(&w.text));
+    }
     let last = match words.get(command) {
         Some(pr) if pr == "pr" => skip_options(&words, command + 1, &with_value),
         _ => command,
     };
+    let repo_value = |at: usize, w: &Word| {
+        let after_flag =
+            at > 0 && with_value.contains(&words[at - 1].as_str()) && !args[at - 1].built();
+        let inline = w.text.starts_with("--repo=")
+            && w.text.find('$').is_none_or(|p| p >= "--repo=".len())
+            && w.substituted_at.is_none_or(|p| p >= "--repo=".len());
+        w.quoted && at != command && at != last && (after_flag || inline)
+    };
     args.iter()
         .take(last + 1)
         .enumerate()
-        .any(|(at, w)| w.built() && (at == command || at == last || !w.quoted))
+        .any(|(at, w)| w.built() && !repo_value(at, w))
 }
 
 /// What `watch` running `command` needs. Without `-x` it runs the words
@@ -1654,6 +1695,22 @@ fn script_needs(script: &Word, aliases: &Aliases) -> Vec<Switch> {
         return vec![Switch::Unreadable];
     }
     needs_with(&script.text, &mut aliases.clone(), true)
+}
+
+/// What a word that may be a shell's `-c` script, when a `$` prints the
+/// `-c`, needs. A single line left inside a quote runs nothing, since bash
+/// parses the whole line before running any of it.
+fn guessed_script_needs(script: &Word, aliases: &Aliases) -> Vec<Switch> {
+    let text = &script.text;
+    let quote_left_open = !text.contains('\n')
+        && commands(text).is_none()
+        && ['\'', '"', '`']
+            .iter()
+            .any(|quote| commands(&format!("{text}{quote}")).is_some());
+    if quote_left_open && !script.commands_print {
+        return vec![];
+    }
+    script_needs(script, aliases)
 }
 
 /// Whether `xargs`'s options may set a replace string: any `I` or `i` in
@@ -4494,7 +4551,14 @@ mod tests {
             assert_judged(command, Switch::Merge);
         }
         assert_unreadable("bash $C \"$(cat f)\"");
+        assert_unreadable("bash \"$f\" \"gh pr merge 1\nit's\"");
         assert_passes("bash \"$script\" one two");
+        assert_passes("bash \"$f\" \"don't stop\"");
+        assert_passes("bash \"$SCRIPT\" --message \"it's done\"");
+        assert_passes("bash \"$f.sh\" \"can't\"");
+        assert_passes("bash \"$f\" '`'");
+        assert_passes("bash \"$HOME/bin/x.sh\" \"$(date)\"");
+        assert_passes("bash \"${f}\"/x.sh \"$(date)\"");
         assert_passes("bash --rcfile \"$f\" -c 'cargo test'");
         assert_passes("bash -c 'cargo test' \"$(pwd)\"");
     }
@@ -4510,6 +4574,14 @@ mod tests {
             "gh pr $M 1",
             "gh $P merge 1",
             "gh pr -R $(echo 'o/r merge') 1",
+            "X=R; gh pr \"-$X\" o/r merge 1",
+            "gh \"-$X\" o/r pr merge 1",
+            "gh \"--$(echo repo)\" o/r pr merge 1",
+            "gh pr \"--$(echo repo)\" o/r merge 1",
+            "gh pr -R\"$X\" o/r merge 1",
+            "gh api \"$(echo -X)\" PUT repos/o/r/pulls/1/merge",
+            "gh api -$M PUT repos/o/r/pulls/1/merge",
+            "gh api repos/o/r/pulls/1/merge $F",
             "eval 'gh pr $(echo merge) 1'",
             "trap 'gh pr $(echo merge) 1' EXIT",
             "bash -c 'gh pr $(echo merge) 1'",
@@ -4522,6 +4594,9 @@ mod tests {
             "gh pr checks \"$PR\"",
             "gh pr -R \"$REPO\" view 1",
             "gh -R \"$(git remote get-url origin)\" pr view 1",
+            "gh pr --repo \"$REPO\" view 1",
+            "gh pr --repo=\"$REPO\" view 1",
+            "gh api \"repos/$O/r/pulls/1\" -X PATCH -f title=x",
             "gh api \"repos/$OWNER/r/pulls\"",
             "gh issue view \"$N\"",
             "gh run view $(gh run list -L1 --json databaseId -q '.[0].databaseId')",
