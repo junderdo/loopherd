@@ -17,9 +17,15 @@ pub struct Mail {
 }
 
 impl Mail {
-    /// The mailboxes of `view`'s active members; retired ones aren't read.
+    /// The mailboxes of `view`'s members. Retired ones, listed only with
+    /// `all`, are read for the detail pane and never warned about.
     pub fn read(dir: &Path, view: &View) -> Mail {
         let mut mail = Mail::default();
+        for member in view.retired.iter().flatten() {
+            if let Ok((entries, _)) = history(dir, &member.name) {
+                mail.boxes.insert(member.name.clone(), entries);
+            }
+        }
         for member in active(view) {
             let name = &member.name;
             if !dir.join(format!("{name}.jsonl")).is_file() {

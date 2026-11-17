@@ -88,10 +88,8 @@ fn stopped(stop: &Stop) -> String {
     }
 }
 
-/// `text` with its URLs underlined, less any punctuation closing them, and
-/// tabs as spaces since a tab draws as nothing.
+/// `text` with its URLs underlined, less any punctuation closing them.
 fn linked(text: &str) -> Line<'static> {
-    let text = text.replace('\t', "    ");
     let mut spans = vec![];
     for word in text.split_inclusive(' ') {
         let Some(start) = word.find("https://").or_else(|| word.find("http://")) else {
@@ -99,7 +97,7 @@ fn linked(text: &str) -> Line<'static> {
             continue;
         };
         let rest = &word[start..];
-        let url = rest.trim_end_matches(|c: char| c.is_whitespace() || ".,;:!?)]}>'\"".contains(c));
+        let url = without_closing_punctuation(rest);
         spans.push(Span::raw(word[..start].to_string()));
         spans.push(Span::styled(url.to_string(), Modifier::UNDERLINED));
         spans.push(Span::raw(rest[url.len()..].to_string()));
@@ -107,11 +105,33 @@ fn linked(text: &str) -> Line<'static> {
     Line::from(spans)
 }
 
+/// `url` without trailing punctuation, keeping a `)` that closes a `(`
+/// inside it.
+fn without_closing_punctuation(url: &str) -> &str {
+    let mut url = url.trim_end();
+    while let Some(last) = url.chars().last() {
+        let unmatched = url.matches('(').count() < url.matches(')').count();
+        let closing = match last {
+            ')' => unmatched,
+            c => ".,;:!?]}>'\"".contains(c),
+        };
+        if !closing {
+            break;
+        }
+        url = &url[..url.len() - 1];
+    }
+    url
+}
+
 /// `lines` word-wrapped to `width` columns and cut to `height`, the last
 /// kept line ending in `…` when any were cut.
 pub fn fit(lines: Vec<Line<'static>>, width: u16, height: u16) -> Vec<Line<'static>> {
     let width = (width as usize).max(1);
-    let mut rows: Vec<Line<'static>> = lines.into_iter().flat_map(|l| wrap(l, width)).collect();
+    let mut rows: Vec<Line<'static>> = lines
+        .into_iter()
+        .map(tabs_as_spaces)
+        .flat_map(|l| wrap(l, width))
+        .collect();
     let height = height as usize;
     if rows.len() > height {
         rows.truncate(height);
@@ -120,6 +140,16 @@ pub fn fit(lines: Vec<Line<'static>>, width: u16, height: u16) -> Vec<Line<'stat
         }
     }
     rows
+}
+
+/// A tab draws as nothing, running the words around it together.
+fn tabs_as_spaces(mut line: Line<'static>) -> Line<'static> {
+    for span in &mut line.spans {
+        if span.content.contains('\t') {
+            span.content = span.content.replace('\t', "    ").into();
+        }
+    }
+    line
 }
 
 fn wrap(line: Line<'static>, width: usize) -> Vec<Line<'static>> {

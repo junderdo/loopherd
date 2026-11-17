@@ -2409,4 +2409,65 @@ mod tests {
             lines(&terminal)
         );
     }
+
+    #[test]
+    fn a_selected_retired_member_shows_its_report_and_stop() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(mail.path(), "done-1", "2026-11-16T10:05:00Z", stop());
+        post_at(
+            mail.path(),
+            "done-1",
+            "2026-11-16T10:06:00Z",
+            done("merged #120"),
+        );
+        let mut app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        let request = app.press(KeyCode::Char('a'), now).unwrap();
+        app.apply(serve(request, &herdr, &ledger, &dirs(mail.path())), now)
+            .unwrap();
+        for _ in 0..4 {
+            app.press(KeyCode::Down, now);
+        }
+        let shown = pane_text(&render_at(&app, now, 120, 24), "done-1");
+        assert!(
+            shown.contains(&"stop 2026-11-16 10:05 finished".to_string()),
+            "{shown:#?}"
+        );
+        assert!(shown.contains(&"merged #120".to_string()), "{shown:#?}");
+    }
+
+    #[test]
+    fn a_url_keeps_a_closing_paren_it_opened() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post(mail.path(), "b", done("(see https://w.org/Foo_(bar))"));
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        let terminal = render_at(&app, now, 120, 24);
+        let (x, y) = pos(&terminal, "https://w.org/Foo_(bar)");
+        let underlined = |x| {
+            cell(&terminal, (x, y))
+                .modifier
+                .contains(Modifier::UNDERLINED)
+        };
+        assert!((x..x + 23).all(underlined));
+        assert!(!underlined(x + 23), "the outer )");
+    }
+
+    #[test]
+    fn tabs_draw_as_spaces_on_every_pane_line() {
+        let (mut herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mut stray = agent(None, "w2:p8", AgentStatus::Idle);
+        stray.title = Some("build\tlogs".into());
+        herdr = herdr.with_raw_agent(stray);
+        let mut app = app(&herdr, &ledger, now);
+        press(&mut app, &[KeyCode::Char('s')], &herdr, &ledger);
+        for _ in 0..5 {
+            app.press(KeyCode::Down, now);
+        }
+        let shown = pane_text(&render_at(&app, now, 120, 24), "stray");
+        assert!(
+            shown.contains(&"title build    logs".to_string()),
+            "{shown:#?}"
+        );
+    }
 }
