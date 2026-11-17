@@ -473,7 +473,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
             Ok(branch.to_string())
         },
     )?;
-    let mut docs: Vec<agents::Doc> = tracker
+    let tracker_docs = tracker
         .writes
         .drain(..)
         .map(|(path, text)| agents::Doc::new(path, text))
@@ -485,8 +485,8 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         needs_info: &tracker.labels.needs_info,
         tracker: tracker.kind,
     };
-    let plan = agents::missing(&repo, &agents_herd)?;
-    docs.extend(plan.docs);
+    let plan = agents::missing(&repo, &agents_herd, tracker_docs)?;
+    let mut docs = plan.docs;
     match mode {
         Mode::Write => {
             for doc in docs.iter().filter(|doc| doc.append) {
