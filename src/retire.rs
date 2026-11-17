@@ -12,7 +12,25 @@ use crate::matching::{by_name, same_session, session_conflict};
 use crate::notify::forget_marks;
 use crate::report::member_in;
 use crate::revive::find_workspace;
+use crate::tool_hook::Pane as OwnPane;
 use crate::worktree::{Gone, Removal, remove_if_gone, remove_if_merged, same_dir};
+
+/// Fails when `name` is a lead recorded in `pane`, the pane running loopherd:
+/// a lead that retired itself would drop its own gates (D50).
+pub fn refuse_own_lead(ledger: &dyn Ledger, name: &str, pane: &OwnPane) -> Result<()> {
+    let Some(socket) = pane.socket else {
+        return Ok(());
+    };
+    let own = ledger.entries()?.remove(name).is_some_and(|e| {
+        e.is_lead() && e.pane_id == pane.id && e.socket.as_deref() == Some(socket)
+    });
+    if own {
+        bail!(
+            "{name} is the lead in this pane; retiring a lead is the shepherd's or the human's job"
+        );
+    }
+    Ok(())
+}
 
 /// Marks `name` retired at `now`. Touches only the ledger.
 pub fn retire(ledger: &mut dyn Ledger, name: &str, now: SystemTime) -> Result<AgentRecord> {

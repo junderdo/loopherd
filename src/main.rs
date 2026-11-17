@@ -62,7 +62,7 @@ use crate::process::Procs;
 use crate::prompt::prompt;
 use crate::release::release;
 use crate::report::{Filter, Kind, Reporter, report, reports};
-use crate::retire::{retire, retire_and_close};
+use crate::retire::{refuse_own_lead, retire, retire_and_close};
 use crate::revive::{ReviveRequest, revive};
 use crate::spawn::{Checkout, Prompt, SHELL_TIMEOUT, SpawnRequest, spawn};
 use crate::status::{Format, status};
@@ -762,6 +762,14 @@ fn run_resume(herds: &HerdsArg) -> Result<i32> {
 
 fn run_retire(name: &str, close: bool) -> Result<i32> {
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    if let Ok(pane) = std::env::var("HERDR_PANE_ID") {
+        let socket = socket_from_env();
+        let pane = tool_hook::Pane {
+            id: &pane,
+            socket: socket.as_deref(),
+        };
+        refuse_own_lead(&ledger, name, &pane)?;
+    }
     if !close {
         retire(&mut ledger, name, SystemTime::now())?;
         println!("retired {name}");
