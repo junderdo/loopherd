@@ -1,25 +1,31 @@
 //! `loopherd release`: let `feed` spawn a retired member's name again.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 
+use crate::github::{PrLookup, PullRequests};
 use crate::herdr::Herdr;
-use crate::ledger::Ledger;
+use crate::ledger::{AgentRecord, Ledger};
 use crate::report::{Body, Entry, append};
 use crate::retire::open_tab;
 use crate::watch::forget_member;
-use crate::worktree::{Cleared, Fate, clear_checkout, same_dir};
+use crate::worktree::{Fate, Plan, RemoteDelete, plan_clear, same_dir};
 
 /// Marks the retired `name` released, so the next `feed` may spawn a member
 /// by that name, after clearing its worktree and branch per `fate` so the
 /// new member starts afresh. Refuses, changing nothing, a live entry, a
-/// lead, one whose tab may still be open, or a checkout it would lose work
-/// from. Rerunning it on a released entry clears and forgets again. Pushes
-/// one line per action to `out`.
+/// lead, one whose tab may still be open, a checkout it would lose work
+/// from, or (unless dropping) an origin branch an open PR is on. Deletes
+/// origin's branch last, after the ledger says released. Rerunning it on a
+/// released entry clears and forgets again. Pushes one line per action to
+/// `out`.
+#[allow(clippy::too_many_arguments)]
 pub fn release(
     herdr: &dyn Herdr,
+    prs: &dyn PullRequests,
     ledger: &mut dyn Ledger,
     name: &str,
     fate: Fate,
@@ -62,14 +68,101 @@ pub fn release(
             .map(|r| r.name.clone())
     };
     let branch = record.branch.as_deref().filter(|b| !b.is_empty());
-    let cleared = clear_checkout(
+    let remote = branch.map(|b| format!("origin/{b}")).unwrap_or_default();
+    let plan = plan_clear(
         &record.repo,
         record.worktree.as_deref(),
         branch,
         fate,
         &in_use,
     )?;
-    report_cleared(cleared, branch, out)?;
+    let clearing = match plan {
+        Plan::Clear(clearing) => clearing,
+        other => {
+            report_unchanged(other, &remote, out)?;
+            return mark_released(ledger, &record, &others, now, mailboxes, out);
+        }
+    };
+    if let (Some(branch), Some(_)) = (branch, &clearing.remote) {
+        check_open_pr(prs, &record.repo, branch, fate, out)?;
+    }
+    clearing.remove_local()?;
+    let short = |head: &str| head[..head.len().min(12)].to_string();
+    for (path, head) in &clearing.worktrees {
+        out.push(format!("removed {} (at {})", path.display(), short(head)));
+    }
+    if let (Some(branch), Some(head)) = (branch, &clearing.head) {
+        out.push(format!("deleted branch {branch} (was {})", short(head)));
+    }
+    mark_released(ledger, &record, &others, now, mailboxes, out)?;
+    if clearing.dropped > 0 {
+        out.push(format!(
+            "dropped {} commit{} not on {} or another origin branch",
+            clearing.dropped,
+            plural(clearing.dropped),
+            clearing.base
+        ));
+    }
+    if let Some(head) = &clearing.remote {
+        let deleted = clearing.delete_remote().with_context(|| {
+            format!(
+                "couldn't delete {remote} (was {}); rerun release to retry",
+                short(head)
+            )
+        })?;
+        if deleted == RemoteDelete::Moved {
+            bail!(
+                "origin kept {remote}: someone pushed to it since release counted it at {}; \
+                 check who, or rerun with --keep-branch to start the new member from it",
+                short(head)
+            );
+        }
+        out.push(format!("deleted {remote} (was {})", short(head)));
+    }
+    Ok(())
+}
+
+/// Refuses deleting `branch` on origin while an open PR is on it, unless
+/// dropping it, which names the PR it closes.
+fn check_open_pr(
+    prs: &dyn PullRequests,
+    repo: &Path,
+    branch: &str,
+    fate: Fate,
+    out: &mut Vec<String>,
+) -> Result<()> {
+    let lookup = prs
+        .open_on(repo, branch)
+        .with_context(|| format!("refused: can't ask GitHub for an open PR on {branch}"))?;
+    match lookup {
+        PrLookup::None => {}
+        PrLookup::Open(pr) if fate == Fate::Drop => out.push(format!(
+            "origin/{branch} is the head of open PR #{} ({}); deleting it closes the PR",
+            pr.number, pr.url
+        )),
+        PrLookup::Open(pr) => bail!(
+            "refused: origin/{branch} is the head of open PR #{} ({}); deleting it would \
+             close the PR. Pass --keep-branch to start the new member from it, or \
+             --drop-branch to delete it anyway",
+            pr.number,
+            pr.url
+        ),
+        PrLookup::Unknown(why) => out.push(format!(
+            "warning: can't check for an open PR on origin/{branch}: {why}"
+        )),
+    }
+    Ok(())
+}
+
+fn mark_released(
+    ledger: &mut dyn Ledger,
+    record: &AgentRecord,
+    others: &BTreeMap<String, AgentRecord>,
+    now: SystemTime,
+    mailboxes: &Path,
+    out: &mut Vec<String>,
+) -> Result<()> {
+    let name = &record.name;
     ledger.update(name, &mut |r| {
         if !r.retired {
             bail!("refused: {name} is no longer retired");
@@ -104,12 +197,16 @@ pub fn release(
     Ok(())
 }
 
-fn report_cleared(cleared: Cleared, branch: Option<&str>, out: &mut Vec<String>) -> Result<()> {
-    let short = |head: &str| head[..head.len().min(12)].to_string();
-    let remote = branch.map(|b| format!("origin/{b}")).unwrap_or_default();
-    match cleared {
-        Cleared::Absent => {}
-        Cleared::Kept {
+/// Reports a plan that leaves the checkout as it is, refusing the ones that
+/// would lose work.
+fn report_unchanged(plan: Plan, remote: &str, out: &mut Vec<String>) -> Result<()> {
+    match plan {
+        Plan::Absent | Plan::Clear(_) => {}
+        Plan::Unchecked(why) => out.push(format!(
+            "warning: couldn't ask origin for {remote} ({why}); \
+             if it's there, rerun release once origin answers"
+        )),
+        Plan::Kept {
             local,
             remote: kept_remote,
         } => out.push(match (local, kept_remote) {
@@ -119,30 +216,7 @@ fn report_cleared(cleared: Cleared, branch: Option<&str>, out: &mut Vec<String>)
                 format!("kept its worktree, branch and {remote}: the new member starts from them")
             }
         }),
-        Cleared::Removed {
-            worktrees,
-            branch: head,
-            remote: remote_head,
-            dropped,
-            base,
-        } => {
-            for (path, head) in worktrees {
-                out.push(format!("removed {} (at {})", path.display(), short(&head)));
-            }
-            if let (Some(branch), Some(head)) = (branch, head) {
-                out.push(format!("deleted branch {branch} (was {})", short(&head)));
-            }
-            if let Some(head) = remote_head {
-                out.push(format!("deleted {remote} (was {})", short(&head)));
-            }
-            if dropped > 0 {
-                out.push(format!(
-                    "dropped {dropped} commit{} not on {base} or another origin branch",
-                    plural(dropped)
-                ));
-            }
-        }
-        Cleared::Ahead { count, base } => bail!(
+        Plan::Ahead { count, base } => bail!(
             "refused: its worktree, branch{} hold {count} commit{} not on {base}; pass \
              --keep-branch to start the new member from them, or --drop-branch to delete them",
             if remote.is_empty() {
@@ -152,10 +226,10 @@ fn report_cleared(cleared: Cleared, branch: Option<&str>, out: &mut Vec<String>)
             },
             plural(count)
         ),
-        Cleared::Dirty(reason) => {
+        Plan::Dirty(reason) => {
             bail!("refused: {reason}; clean it up, or pass --keep-branch to start from it")
         }
-        Cleared::Taken(reason) => bail!("refused: {reason}"),
+        Plan::Taken(reason) => bail!("refused: {reason}"),
     }
     Ok(())
 }
@@ -169,11 +243,15 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::github::Pr;
+    use crate::github::fake::FakePrs;
     use crate::herdr::fake::FakeHerdr;
     use crate::ledger::{AgentRecord, MemLedger, Role};
     use crate::report::history;
     use crate::worktree::ensure_worktree;
-    use crate::worktree::testing::{commit, git_in, has_branch, head, push_head, repo_with_origin};
+    use crate::worktree::testing::{
+        commit, git_in, has_branch, head, head_of, push_head, repo_with_origin,
+    };
 
     fn record(name: &str, repo: PathBuf, retired: bool) -> AgentRecord {
         AgentRecord {
@@ -207,6 +285,7 @@ mod tests {
         root: tempfile::TempDir,
         repo: PathBuf,
         herdr: FakeHerdr,
+        prs: Box<dyn PullRequests>,
         ledger: MemLedger,
     }
 
@@ -218,6 +297,7 @@ mod tests {
                 root,
                 repo,
                 herdr: FakeHerdr::new(&[("w1", "loopherd")]),
+                prs: Box::new(FakePrs(Ok(PrLookup::None))),
                 ledger: MemLedger::default(),
             }
         }
@@ -246,6 +326,7 @@ mod tests {
             let mailboxes = self.mailboxes();
             release(
                 &self.herdr,
+                self.prs.as_ref(),
                 &mut self.ledger,
                 name,
                 fate,
@@ -351,9 +432,9 @@ mod tests {
 
         let out = s.release("zpr-1", Fate::Drop).unwrap();
 
-        assert_eq!(
-            out.last().unwrap(),
-            "zpr-1 is already released (since 2026-11-17T12:00:00Z)"
+        assert!(
+            out.contains(&"zpr-1 is already released (since 2026-11-17T12:00:00Z)".into()),
+            "{out:?}"
         );
         assert!(!wt.exists());
         assert!(!has_branch(&s.repo, "feat/zpr-1"));
@@ -530,9 +611,10 @@ mod tests {
         let out = s.release("zpr-1", Fate::Drop).unwrap();
 
         assert_eq!(
-            out[1..3],
+            out[1..],
             [
                 format!("deleted branch feat/zpr-1 (was {})", &unpushed[..12]),
+                "released zpr-1: feed may spawn it again".into(),
                 "dropped 1 commit not on origin/main or another origin branch".into(),
             ]
         );
@@ -581,11 +663,12 @@ mod tests {
         let out = s.release("zpr-1", Fate::Drop).unwrap();
 
         assert_eq!(
-            out[1..4],
+            out[1..],
             [
                 format!("deleted branch feat/zpr-1 (was {})", &pushed[..12]),
-                format!("deleted origin/feat/zpr-1 (was {})", &pushed[..12]),
+                "released zpr-1: feed may spawn it again".into(),
                 "dropped 1 commit not on origin/main or another origin branch".into(),
+                format!("deleted origin/feat/zpr-1 (was {})", &pushed[..12]),
             ]
         );
         assert!(!has_branch(&s.root.path().join("origin.git"), "feat/zpr-1"));
@@ -606,5 +689,220 @@ mod tests {
             out[0],
             "kept origin/feat/zpr-1: the new member starts from it"
         );
+    }
+
+    fn origin(s: &Setup) -> PathBuf {
+        s.root.path().join("origin.git")
+    }
+
+    /// A retired `zpr-1` on `feat/zpr-1`, pushed with nothing new, so a
+    /// plain release deletes it on origin.
+    fn pushed_on_the_base(s: &mut Setup) -> PathBuf {
+        let wt = s.retired_on("zpr-1", "feat/zpr-1");
+        push_head(&wt, "feat/zpr-1");
+        wt
+    }
+
+    fn pr_7() -> PrLookup {
+        PrLookup::Open(Pr {
+            number: 7,
+            url: "https://github.com/o/r/pull/7".into(),
+        })
+    }
+
+    #[test]
+    fn refuses_to_delete_the_head_of_an_open_pr_and_names_it() {
+        let mut s = Setup::new();
+        let wt = pushed_on_the_base(&mut s);
+        s.prs = Box::new(FakePrs(Ok(pr_7())));
+
+        let err = s.release("zpr-1", Fate::Clear).unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "refused: origin/feat/zpr-1 is the head of open PR #7 \
+             (https://github.com/o/r/pull/7); deleting it would close the PR. Pass \
+             --keep-branch to start the new member from it, or --drop-branch to delete it anyway"
+        );
+        assert!(wt.exists());
+        assert!(has_branch(&s.repo, "feat/zpr-1"));
+        assert!(has_branch(&origin(&s), "feat/zpr-1"));
+        assert_eq!(s.ledger.0["zpr-1"].released_at, None);
+    }
+
+    #[test]
+    fn drop_branch_deletes_an_open_prs_head_and_names_the_pr() {
+        let mut s = Setup::new();
+        pushed_on_the_base(&mut s);
+        s.prs = Box::new(FakePrs(Ok(pr_7())));
+
+        let out = s.release("zpr-1", Fate::Drop).unwrap();
+
+        assert_eq!(
+            out[0],
+            "origin/feat/zpr-1 is the head of open PR #7 (https://github.com/o/r/pull/7); \
+             deleting it closes the PR"
+        );
+        assert!(!has_branch(&origin(&s), "feat/zpr-1"));
+    }
+
+    #[test]
+    fn without_a_github_cli_or_account_it_says_so_and_goes_on() {
+        let mut s = Setup::new();
+        pushed_on_the_base(&mut s);
+        s.prs = Box::new(FakePrs(Ok(PrLookup::Unknown(
+            "no GitHub CLI (gh) on PATH".into(),
+        ))));
+
+        let out = s.release("zpr-1", Fate::Clear).unwrap();
+
+        assert_eq!(
+            out[0],
+            "warning: can't check for an open PR on origin/feat/zpr-1: no GitHub CLI (gh) on PATH"
+        );
+        assert!(!has_branch(&origin(&s), "feat/zpr-1"));
+    }
+
+    #[test]
+    fn refuses_when_github_fails_to_answer_and_changes_nothing() {
+        let mut s = Setup::new();
+        let wt = pushed_on_the_base(&mut s);
+        s.prs = Box::new(FakePrs(Err("gh pr list: HTTP 502".into())));
+
+        let err = s.release("zpr-1", Fate::Clear).unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "refused: can't ask GitHub for an open PR on feat/zpr-1: gh pr list: HTTP 502"
+        );
+        assert!(wt.exists());
+        assert!(has_branch(&origin(&s), "feat/zpr-1"));
+    }
+
+    #[test]
+    fn asks_github_only_when_it_would_delete_an_origin_branch() {
+        let mut s = Setup::new();
+        s.retired_on("zpr-1", "feat/zpr-1");
+        s.prs = Box::new(FakePrs(Err("gh must not be asked".into())));
+
+        s.release("zpr-1", Fate::Clear).unwrap();
+    }
+
+    #[test]
+    fn a_failed_local_step_leaves_origin_and_the_ledger_untouched() {
+        let mut s = Setup::new();
+        let wt = s.retired_on("zpr-1", "feat/zpr-1");
+        let sub = origin(&s);
+        git_in(
+            &wt,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--quiet",
+                sub.to_str().unwrap(),
+                "sub",
+            ],
+        );
+        commit(&wt, "add a submodule");
+        push_head(&wt, "feat/zpr-1");
+
+        let err = s.release("zpr-1", Fate::Drop).unwrap_err();
+
+        assert!(format!("{err:#}").contains("submodule"), "{err:#}");
+        assert!(has_branch(&origin(&s), "feat/zpr-1"));
+        assert_eq!(s.ledger.0["zpr-1"].released_at, None);
+    }
+
+    /// Answers no open PR, after pushing a new commit to origin's branch,
+    /// as a member still running elsewhere might.
+    struct MovesTheBranch(PathBuf);
+
+    impl PullRequests for MovesTheBranch {
+        fn open_on(&self, _repo: &Path, branch: &str) -> Result<PrLookup> {
+            commit(&self.0, "pushed meanwhile");
+            push_head(&self.0, branch);
+            Ok(PrLookup::None)
+        }
+    }
+
+    #[test]
+    fn leaves_an_origin_branch_that_moved_since_it_was_counted_and_says_to_rerun() {
+        let mut s = Setup::new();
+        let wt = pushed_on_the_base(&mut s);
+        let counted = head(&wt);
+        let elsewhere = s.root.path().join("elsewhere");
+        git_in(
+            s.root.path(),
+            &[
+                "clone",
+                "--quiet",
+                "--branch",
+                "feat/zpr-1",
+                origin(&s).to_str().unwrap(),
+                elsewhere.to_str().unwrap(),
+            ],
+        );
+        s.prs = Box::new(MovesTheBranch(elsewhere.clone()));
+
+        let err = s.release("zpr-1", Fate::Clear).unwrap_err();
+
+        assert!(
+            format!("{err:#}")
+                == format!(
+                    "origin kept origin/feat/zpr-1: someone pushed to it since release counted \
+                     it at {}; check who, or rerun with --keep-branch to start the new member \
+                     from it",
+                    &counted[..12]
+                ),
+            "{err:#}"
+        );
+        assert_eq!(head_of(&origin(&s), "feat/zpr-1"), head(&elsewhere));
+        assert!(!wt.exists());
+        assert!(s.ledger.0["zpr-1"].released_at.is_some());
+    }
+
+    fn cut_off_origin(s: &Setup) {
+        git_in(
+            &s.repo,
+            &["remote", "set-url", "origin", "/nonexistent/origin.git"],
+        );
+    }
+
+    #[test]
+    fn keep_branch_works_offline() {
+        let mut s = Setup::new();
+        let wt = pushed_on_the_base(&mut s);
+        commit(&wt, "unpushed");
+        cut_off_origin(&s);
+
+        let out = s.release("zpr-1", Fate::Keep).unwrap();
+
+        assert_eq!(
+            out[0],
+            "kept its worktree, branch and origin/feat/zpr-1: the new member starts from them"
+        );
+    }
+
+    #[test]
+    fn with_nothing_to_clear_it_works_offline_and_says_what_it_couldnt_check() {
+        let mut s = Setup::new();
+        let mut r = record("zpr-1", s.repo.clone(), true);
+        r.branch = Some("feat/zpr-1".into());
+        s.add(r);
+        cut_off_origin(&s);
+
+        let out = s.release("zpr-1", Fate::Clear).unwrap();
+
+        assert!(
+            out[0].starts_with("warning: couldn't ask origin for origin/feat/zpr-1 ("),
+            "{out:?}"
+        );
+        assert!(
+            out[0].ends_with("; if it's there, rerun release once origin answers"),
+            "{out:?}"
+        );
+        assert_eq!(out[1], "released zpr-1: feed may spawn it again");
     }
 }
