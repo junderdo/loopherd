@@ -76,6 +76,10 @@ pub fn retire_and_close(
             out.push(format!("kept tab {tab_id}: {BUSY}"));
             Some("its tab was kept")
         }
+        TabFate::NameHeld(tab_id) => {
+            out.push(format!("kept tab {tab_id}: {NAME_HELD}"));
+            Some("its tab was kept")
+        }
         TabFate::Unmatched { line, .. } | TabFate::NoWorkspace { line, .. } => {
             out.push(line);
             Some("tab not confirmed closed")
@@ -131,36 +135,57 @@ pub fn open_tab(
     others: &BTreeMap<String, AgentRecord>,
 ) -> Result<Option<String>> {
     let name = &record.name;
-    let retire = |why: String| Some(format!("loopherd retire --close {name}  # {why}"));
+    // Every tab but `Ours` is one `retire --close` keeps, so it is closed by hand.
+    let close = |tab_id: &str, why: String, unless: Option<String>| {
+        let unless = unless.map(|u| format!("; if {u}")).unwrap_or_default();
+        Some(format!("herdr tab close {tab_id}  # {name}: {why}{unless}"))
+    };
+    let relabel = |tab_id: &str| {
+        Some(format!(
+            "that tab isn't {name}'s, label it otherwise: herdr tab rename {tab_id} <label>"
+        ))
+    };
     Ok(match agent_tab(herdr, record, others, None)? {
         TabFate::Gone | TabFate::Taken { .. } | TabFate::NoWorkspace { tab: None, .. } => None,
-        TabFate::Ours(tab_id) => retire(format!("tab {tab_id} is open")),
-        TabFate::Kept { tab_id, reason } => retire(format!("tab {tab_id} is open: {reason}")),
-        TabFate::Busy(tab_id) => retire(format!("tab {tab_id} is open: {BUSY}")),
-        TabFate::Unmatched { line, tab_id } => Some(close_by_hand(name, &line, &tab_id)),
+        TabFate::Ours(tab_id) => Some(format!(
+            "loopherd retire --close {name}  # tab {tab_id} is open"
+        )),
+        TabFate::Kept { tab_id, reason } => {
+            close(&tab_id, format!("tab {tab_id} is open: {reason}"), None)
+        }
+        TabFate::Busy(tab_id) => close(
+            &tab_id,
+            format!("tab {tab_id} is open: {BUSY}"),
+            relabel(&tab_id),
+        ),
+        TabFate::NameHeld(tab_id) => close(
+            &tab_id,
+            format!("tab {tab_id} is open: {NAME_HELD}"),
+            Some(format!(
+                "that agent isn't {name}, unname it: herdr agent rename {name} --clear"
+            )),
+        ),
+        TabFate::Unmatched { line, tab_id } => close(
+            &tab_id,
+            format!("not confirmed closed: {line}"),
+            relabel(&tab_id),
+        ),
         TabFate::NoWorkspace {
             line,
             tab: Some((label, tab_id)),
-        } => {
-            let line = format!(
-                "{line}, but pane {} is in workspace {label}",
+        } => close(
+            &tab_id,
+            format!(
+                "not confirmed closed: {line}, but pane {} is in workspace {label}",
                 record.pane_id
-            );
-            Some(close_by_hand(name, &line, &tab_id))
-        }
+            ),
+            relabel(&tab_id),
+        ),
     })
 }
 
-/// `retire --close` leaves an unmatched tab open, and renaming it marks it
-/// as not `name`'s.
-fn close_by_hand(name: &str, line: &str, tab_id: &str) -> String {
-    format!(
-        "herdr tab close {tab_id}  # {name}: not confirmed closed: {line}; \
-         if that tab isn't {name}'s, label it otherwise: herdr tab rename {tab_id} <label>"
-    )
-}
-
 const BUSY: &str = "pane is running a command";
+const NAME_HELD: &str = "the name is held by another session";
 
 /// An active entry other than `name` whose worktree is `path`.
 fn other_user(ledger: &dyn Ledger, name: &str, path: &Path) -> Result<Option<String>> {
@@ -187,6 +212,8 @@ enum TabFate {
     },
     /// The recorded pane is open with no agent, running a command.
     Busy(String),
+    /// An agent from another session goes by the entry's name.
+    NameHeld(String),
     /// The recorded pane is open but no tab matched, and it may still be the
     /// entry's; holds the line to print.
     Unmatched {
@@ -221,7 +248,7 @@ fn agent_tab(
     if let Some(live) = live
         && session_conflict(live, record)
     {
-        return kept(&live.tab_id, "the name is held by another session".into());
+        return Ok(TabFate::NameHeld(live.tab_id.clone()));
     }
     let pane_id = live.map_or(&record.pane_id, |a| &a.pane_id);
     let workspace = match &record.workspace_label {
@@ -256,7 +283,8 @@ fn agent_tab(
         && let Some(pane) = &pane
     {
         let tab_id = pane.tab_id.clone();
-        match pane_use(herdr, record, &pane.id, &agents, others)? {
+        let ws_id = &workspace.as_ref().expect("panes came from it").id;
+        match pane_use(herdr, record, ws_id, pane, &agents, others)? {
             PaneUse::Free => {}
             PaneUse::Held(reason) => return Ok(TabFate::Taken { tab_id, reason }),
             PaneUse::Busy => return Ok(TabFate::Busy(tab_id)),
@@ -280,25 +308,14 @@ fn agent_tab(
                 n => kept(&pane.tab_id, format!("it has {n} panes")),
             }
         }
-        (Some(pane), None) => {
-            let ws_id = &workspace.as_ref().expect("panes came from it").id;
-            Ok(
-                match not_its(herdr, record, ws_id, &pane, &agents, others)? {
-                    Some(reason) => TabFate::Taken {
-                        tab_id: pane.tab_id,
-                        reason,
-                    },
-                    None => TabFate::Unmatched {
-                        line: format!(
-                            "no matching tab (pane {} is in {})",
-                            pane.id,
-                            shown_cwd(&pane)
-                        ),
-                        tab_id: pane.tab_id,
-                    },
-                },
-            )
-        }
+        (Some(pane), None) => Ok(TabFate::Unmatched {
+            line: format!(
+                "no matching tab (pane {} is in {})",
+                pane.id,
+                shown_cwd(&pane)
+            ),
+            tab_id: pane.tab_id,
+        }),
         (Some(pane), Some(_)) => {
             let actual = shown_cwd(&pane);
             kept(
@@ -329,9 +346,9 @@ fn pane_elsewhere(
         };
         let tab_id = pane.tab_id.clone();
         return Ok(
-            match not_its(herdr, record, &ws.id, pane, agents, others)? {
-                Some(reason) => Elsewhere::NotIts { tab_id, reason },
-                None => Elsewhere::Maybe {
+            match pane_use(herdr, record, &ws.id, pane, agents, others)? {
+                PaneUse::Held(reason) => Elsewhere::NotIts { tab_id, reason },
+                PaneUse::Free | PaneUse::Busy => Elsewhere::Maybe {
                     label: ws.label,
                     tab_id,
                 },
@@ -339,32 +356,6 @@ fn pane_elsewhere(
         );
     }
     Ok(Elsewhere::Nowhere)
-}
-
-/// Why the open `pane` in workspace `ws_id` is provably not `record`'s, as
-/// when a restart reused its id: spawn and revive label its tab with the
-/// entry's name, and another entry or session can't hold it.
-fn not_its(
-    herdr: &dyn Herdr,
-    record: &AgentRecord,
-    ws_id: &str,
-    pane: &Pane,
-    agents: &[Agent],
-    others: &BTreeMap<String, AgentRecord>,
-) -> Result<Option<String>> {
-    let tabs = herdr.tabs_in(ws_id)?;
-    if let Some(tab) = tabs.iter().find(|t| t.id == pane.tab_id)
-        && tab.label != record.name
-    {
-        return Ok(Some(format!(
-            "it is labeled {}, not {}",
-            tab.label, record.name
-        )));
-    }
-    Ok(match pane_use(herdr, record, &pane.id, agents, others)? {
-        PaneUse::Held(reason) => Some(reason),
-        PaneUse::Free | PaneUse::Busy => None,
-    })
 }
 
 fn shown_cwd(pane: &Pane) -> String {
@@ -378,19 +369,24 @@ fn shown_cwd(pane: &Pane) -> String {
 enum PaneUse {
     /// Safe to treat as the entry's.
     Free,
-    /// Another entry recorded it, or it runs an agent from another session.
+    /// Another entry recorded it, it runs an agent from another session, or
+    /// its tab isn't labeled with the entry's name as spawn and revive label it.
     Held(String),
     /// Its shell is running a command.
     Busy,
 }
 
+/// Checks `pane` in workspace `ws_id`. The entry's own session vetoes the
+/// label check, so a renamed tab it still runs in stays its.
 fn pane_use(
     herdr: &dyn Herdr,
     record: &AgentRecord,
-    pane_id: &str,
+    ws_id: &str,
+    pane: &Pane,
     agents: &[Agent],
     others: &BTreeMap<String, AgentRecord>,
 ) -> Result<PaneUse> {
+    let pane_id = pane.id.as_str();
     if let Some(other) = member_in(others, pane_id, herdr.socket().as_deref()) {
         return Ok(PaneUse::Held(format!("pane belongs to {}", other.name)));
     }
@@ -401,6 +397,15 @@ fn pane_use(
             (false, Some(name)) => PaneUse::Held(format!("pane hosts agent {name}")),
             (false, None) => PaneUse::Held("pane hosts another agent".into()),
         });
+    }
+    let tabs = herdr.tabs_in(ws_id)?;
+    if let Some(tab) = tabs.iter().find(|t| t.id == pane.tab_id)
+        && tab.label != record.name
+    {
+        return Ok(PaneUse::Held(format!(
+            "it is labeled {}, not {}",
+            tab.label, record.name
+        )));
     }
     Ok(match herdr.at_shell_prompt(pane_id)? {
         true => PaneUse::Free,
@@ -1694,7 +1699,7 @@ mod tests {
         at_prompt: bool,
     ) -> String {
         herdr.close_tab("w1:t1").unwrap();
-        let pane = herdr.add_tab("w1", "b", wt, at_prompt);
+        let pane = herdr.add_tab("w1", "a", wt, at_prompt);
         ledger.0.get_mut("a").unwrap().pane_id = pane.clone();
         pane
     }
@@ -1891,5 +1896,18 @@ mod tests {
             ]
         );
         assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
+    fn close_leaves_another_tab_alone_that_reused_the_pane_id_at_the_entrys_cwd() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        herdr.close_tab("w1:t1").unwrap();
+        let pane = herdr.add_tab("w1", "1", &wt, true);
+        ledger.0.get_mut("a").unwrap().pane_id = pane;
+
+        kept_reused(&close(&herdr, &mut ledger), &wt, "it is labeled 1, not a");
+        assert_eq!(herdr.tabs().len(), 1);
     }
 }
