@@ -4503,6 +4503,30 @@ fn diff_reads_back_the_repo_passed_to_init_over_an_origin_that_isnt_github() {
 }
 
 #[test]
+fn diff_reads_no_repo_back_from_a_merged_that_isnt_the_gh_check() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
+    fixture.fail_gh();
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+    let herd_file = fixture.herds().join("widgets.toml");
+    let merged = "merged = \"glab mr list --repo group/widgets --source-branch {branch} --merged | grep -q .\"";
+    let tailored = fs::read_to_string(&herd_file)
+        .unwrap()
+        .replace("\nprompt = ", &format!("\n{merged}\nprompt = "));
+    fs::write(&herd_file, tailored).unwrap();
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains(&format!("-{merged}\n")),
+        "{}",
+        text(&out.stdout)
+    );
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
 fn diff_shows_drift_in_each_file_a_local_init_wrote() {
     let fixture = Fixture::new(&["acme"]);
     fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
