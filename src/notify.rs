@@ -406,7 +406,10 @@ fn summary(question: &str) -> String {
                 (Shown::Word(word.to_string()), next)
             }
             Next::Value => match clause_carried_by(word) {
-                Some(value) => clause_start(value),
+                Some(value) => match clause_start(value) {
+                    (shown, Next::Free) => (shown, key_named_by(value)),
+                    started => started,
+                },
                 None => (Shown::redacted(), value_then(word)),
             },
             Next::Key(key) if is_separator(word) => (Shown::Word(word.to_string()), key.value()),
@@ -545,7 +548,11 @@ impl Next {
     /// A `'` or `’` followed by a Latin letter or a digit is an apostrophe (`it’s`,
     /// `l’été`), not a close; any other closer closes whatever follows it.
     fn closed_by(word: &str, closers: &'static [char]) -> Next {
-        let latin = |c: char| c.is_ascii_alphanumeric() || (c.is_alphabetic() && c < '\u{250}');
+        let latin_block = |c: char| {
+            matches!(c, '\0'..='\u{24F}' | '\u{1E00}'..='\u{1EFF}')
+                || matches!(c, '\u{2C60}'..='\u{2C7F}' | '\u{A720}'..='\u{A7FF}')
+        };
+        let latin = |c: char| c.is_ascii_alphanumeric() || c.is_alphabetic() && latin_block(c);
         let closes = word.match_indices(closers).any(|(at, closer)| {
             let apostrophe =
                 ["'", "’"].contains(&closer) && word[at + closer.len()..].starts_with(latin);
@@ -1533,6 +1540,22 @@ mod tests {
                 "[redacted] then merge?",
             ),
             ("pw: ‘l’été passe’ ok?", "pw: [redacted] [redacted] ok?"),
+            (
+                "password: ‘d’ấy hunter22 xyz’ ok?",
+                "password: [redacted] [redacted] [redacted] ok?",
+            ),
+            (
+                "password: ‘ḍ’ḍa hunter22 xyz’ ok?",
+                "password: [redacted] [redacted] [redacted] ok?",
+            ),
+            (
+                "password: ‘a’ⱡb hunter22 xyz’ ok?",
+                "password: [redacted] [redacted] [redacted] ok?",
+            ),
+            (
+                "password: ‘a’ꝁb hunter22 xyz’ ok?",
+                "password: [redacted] [redacted] [redacted] ok?",
+            ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
         }
@@ -1648,6 +1671,22 @@ mod tests {
             (
                 r#"TOKEN "password=abc, def123 ghi456" then merge?"#,
                 "TOKEN [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                "TOKEN passphrase=Bearer” abc123def456 then merge?",
+                "TOKEN [redacted]” [redacted] then merge?",
+            ),
+            (
+                r#"TOKEN passphrase="Bearer" abc123def456 then merge?"#,
+                "TOKEN [redacted] [redacted] then merge?",
+            ),
+            (
+                "TOKEN passphrase=”Bearer” abc123def456 then merge?",
+                "TOKEN [redacted] [redacted] then merge?",
+            ),
+            (
+                r#"TOKEN authorization=Bearer" abc123def456 then merge?"#,
+                r#"TOKEN [redacted]" [redacted] then merge?"#,
             ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
