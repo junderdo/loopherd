@@ -62,6 +62,20 @@ impl Mail {
         )
     }
 
+    /// The context use and limit its newest stop recorded, unless a
+    /// `start` since then began a fresh session.
+    pub fn context_use(&self, name: &str) -> Option<(u64, u64)> {
+        let entries = self.boxes.get(name)?;
+        let newest = entries
+            .iter()
+            .rev()
+            .find(|e| matches!(e.body, Body::Stop(_) | Body::Start))?;
+        match &newest.body {
+            Body::Stop(stop) => stop.context.zip(stop.limit),
+            _ => None,
+        }
+    }
+
     /// The non-retired members' reports and stops, newest first, less
     /// stops that left work in flight or unknown.
     pub fn events<'a>(&'a self, view: &'a View) -> Vec<(&'a str, &'a Entry)> {

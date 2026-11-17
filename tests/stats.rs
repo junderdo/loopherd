@@ -94,6 +94,7 @@ fn run(state: &Path, args: &[&str]) -> Output {
         .arg("stats")
         .args(args)
         .env("XDG_STATE_HOME", state)
+        .env("LOOPHERD_CONFIG_DIR", state.join("config"))
         .env("CLAUDE_CONFIG_DIR", state.join("claude"))
         .env("PATH", "")
         // Printed times are UTC whatever the local zone.
@@ -628,4 +629,50 @@ fn an_unreadable_mailbox_warns_and_its_row_keeps_the_ledger_columns() {
             "3h00m"
         ]
     );
+}
+
+#[test]
+fn an_unknown_herd_is_refused_by_name() {
+    let state = tempfile::tempdir().unwrap();
+    one_retired_member(state.path());
+
+    for args in [&["--herd", "nope"][..], &["--herd", "nope", "--json"]] {
+        let out = run(state.path(), args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{args:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "loopherd stats: no herd nope\n"
+        );
+    }
+}
+
+#[test]
+fn a_herd_with_a_file_but_no_members_is_empty() {
+    let state = tempfile::tempdir().unwrap();
+    one_retired_member(state.path());
+    fs::create_dir_all(state.path().join("config/herds")).unwrap();
+    fs::write(state.path().join("config/herds/quiet.toml"), "").unwrap();
+
+    assert_eq!(stdout(&run(state.path(), &["--herd", "quiet"])), "");
+    assert_eq!(
+        json(state.path(), &["--herd", "quiet"]),
+        serde_json::json!({ "herds": [] })
+    );
+}
+
+#[test]
+fn a_herd_known_only_from_retired_records_is_fine() {
+    let state = tempfile::tempdir().unwrap();
+    one_retired_member(state.path());
+
+    assert_eq!(
+        names(&json(state.path(), &["--herd", "h"]), "retired"),
+        ["lh-1"]
+    );
+    let out = stdout(&run(
+        state.path(),
+        &["--herd", "h", "--since", "2030-01-01"],
+    ));
+    assert_eq!(out, "");
 }

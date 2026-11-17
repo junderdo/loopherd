@@ -9,6 +9,7 @@ use std::time::SystemTime;
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::context::Check;
 use crate::continuation::{follow_recorded, live_for};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::process::{self, Claim, Procs};
@@ -50,7 +51,7 @@ pub fn stop_hook(
     input: &[u8],
     now: SystemTime,
     live: &dyn Fn(&str) -> String,
-    handoff: &dyn Fn(&AgentRecord) -> Result<Option<String>>,
+    handoff: &dyn Fn(&AgentRecord) -> Check,
     warn: &mut dyn FnMut(String),
 ) -> Result<Option<Stopped>> {
     let entries = ledger.entries()?;
@@ -149,24 +150,31 @@ fn follow_session(
 }
 
 /// Blocks the stop if `handoff` says to; otherwise files it. A failing
-/// `handoff` files the stop with a warning. Only a member recorded in this
+/// `handoff` files the stop with a warning and whatever it measured. Only a member recorded in this
 /// pane's herdr is asked, never a socketless one.
 fn settle(
     dir: &Path,
     pane: &Pane,
     member: &AgentRecord,
-    stop: Stop,
+    mut stop: Stop,
     now: SystemTime,
-    handoff: &dyn Fn(&AgentRecord) -> Result<Option<String>>,
+    handoff: &dyn Fn(&AgentRecord) -> Check,
     warn: &mut dyn FnMut(String),
 ) -> Result<Option<Stopped>> {
     let name = member.name.clone();
     let ours = pane.socket.is_some() && member.socket.as_deref() == pane.socket;
-    match if ours { handoff(member) } else { Ok(None) } {
+    let check = if ours {
+        handoff(member)
+    } else {
+        Check::default()
+    };
+    match check.reason {
         Ok(Some(reason)) => return Ok(Some(Stopped::Blocked { name, reason })),
         Ok(None) => {}
         Err(e) => warn(format!("could not check {name}'s context: {e:#}")),
     }
+    stop.context = check.measured.map(|m| m.tokens);
+    stop.limit = check.measured.map(|m| m.limit);
     append(dir, &name, &Entry::new(now, Body::Stop(stop)))?;
     Ok(Some(Stopped::Filed(name)))
 }
@@ -204,6 +212,8 @@ fn parse(input: &[u8]) -> Stop {
         background,
         crons,
         error,
+        context: None,
+        limit: None,
         session,
     }
 }
@@ -299,7 +309,7 @@ mod tests {
             input.as_bytes(),
             at(),
             &|s| s.to_string(),
-            &|_| Ok(None),
+            &|_| Check::default(),
             warn,
         )
         .unwrap();
@@ -699,7 +709,7 @@ mod tests {
             input.as_bytes(),
             at(),
             &continued,
-            &|_| Ok(None),
+            &|_| Check::default(),
             warn,
         )
         .unwrap();
@@ -835,7 +845,7 @@ mod tests {
             stop_from("branched").as_bytes(),
             at(),
             &|s| s.to_string(),
-            &|_| Ok(None),
+            &|_| Check::default(),
             &mut |w| warnings.push(w),
         )
         .unwrap();
@@ -896,7 +906,7 @@ mod tests {
         pane: &str,
         pid: Option<u32>,
         input: &str,
-        handoff: &dyn Fn(&AgentRecord) -> anyhow::Result<Option<String>>,
+        handoff: &dyn Fn(&AgentRecord) -> Check,
         warnings: &mut Vec<String>,
     ) -> Option<Stopped> {
         let pane = Pane {
@@ -967,7 +977,49 @@ mod tests {
             &mut vec![],
         );
         assert_eq!(second, Some(Stopped::Filed("lh-1".into())));
-        assert!(mailbox(dir.path(), "lh-1").contains(r#""kind":"stop""#));
+        let filed = mailbox(dir.path(), "lh-1");
+        assert!(filed.contains(r#""kind":"stop""#), "{filed}");
+        assert!(filed.contains(r#""context":151,"limit":100"#), "{filed}");
+    }
+
+    #[test]
+    fn a_failing_ask_still_files_the_stops_context_and_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let handoffs = state.join("handoffs");
+        std::fs::create_dir_all(handoffs.join("lh-1.prev.md/x")).unwrap();
+        std::fs::write(handoffs.join("lh-1.md"), "first").unwrap();
+        let transcript = dir.path().join("t.jsonl");
+        std::fs::write(
+            &transcript,
+            r#"{"type":"assistant","isSidechain":false,"message":{"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":150}}}"#,
+        )
+        .unwrap();
+        let input = format!(
+            r#"{{"hook_event_name":"Stop","session_id":"sess-a","transcript_path":"{}","background_tasks":[],"session_crons":[]}}"#,
+            transcript.display()
+        );
+        let handoff = |m: &AgentRecord| {
+            crate::context::handoff_block(m, input.as_bytes(), Ok(100), &state, &|_| Ok(()))
+        };
+        let mut l = claimed(Some("sess-a"), 30, 300);
+        let mut warnings = vec![];
+
+        let stopped = hook_with(
+            &mut l,
+            dir.path(),
+            "w1:p1",
+            Some(30),
+            &input,
+            &handoff,
+            &mut warnings,
+        );
+
+        assert_eq!(stopped, Some(Stopped::Filed("lh-1".into())));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("could not check lh-1's context: move"));
+        let filed = mailbox(dir.path(), "lh-1");
+        assert!(filed.contains(r#""context":151,"limit":100"#), "{filed}");
     }
 
     #[test]
@@ -975,7 +1027,10 @@ mod tests {
         let asked = std::cell::RefCell::new(vec![]);
         let handoff = |m: &AgentRecord| {
             asked.borrow_mut().push(m.name.clone());
-            Ok(Some("hand off".into()))
+            Check {
+                reason: Ok(Some("hand off".into())),
+                measured: None,
+            }
         };
         let dir = tempfile::tempdir().unwrap();
         let mut l = claimed(Some("sess-a"), 30, 300);
@@ -1054,13 +1109,21 @@ mod tests {
             "w1:p1",
             Some(30),
             &stop_from("sess-a"),
-            &|_| anyhow::bail!("config.toml: bad"),
+            &|_| Check {
+                reason: Err(anyhow::anyhow!("config.toml: bad")),
+                measured: None,
+            },
             &mut warnings,
         );
         assert_eq!(stopped, Some(Stopped::Filed("lh-1".into())));
         assert_eq!(
             warnings,
             ["could not check lh-1's context: config.toml: bad"]
+        );
+        let filed = mailbox(dir.path(), "lh-1");
+        assert!(
+            !filed.contains("context") && !filed.contains("limit"),
+            "{filed}"
         );
     }
 }

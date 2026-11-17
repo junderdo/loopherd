@@ -598,3 +598,55 @@ fn watch_warns_about_an_unreadable_mailbox_and_wakes_on_another_members_report()
     assert!(stdout.starts_with("lh-1 note 20"), "{stdout}");
     assert_eq!(out.status.code(), Some(0));
 }
+
+/// lh-1 retired from herd `old`, which has no herd file.
+fn write_herd_ledger(state: &Path) {
+    fs::create_dir_all(state.join("loopherd")).unwrap();
+    fs::write(
+        state.join("loopherd/ledger.json"),
+        r#"{"lh-1": {"name": "lh-1", "pane_id": "w1:p1", "session_id": null,
+            "repo": "/", "worktree": null, "workspace": "w1", "prompt": null,
+            "prompt_sent": true, "created": "2026-11-01T00:00:00Z",
+            "retired": true, "herd": "old"}}"#,
+    )
+    .unwrap();
+}
+
+fn reports_of(state: &Path, config: &Path, herd: &str) -> Output {
+    loopherd(state, None, &["reports", "--herd", herd, "--all"])
+        .env("LOOPHERD_CONFIG_DIR", config)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn reports_refuses_an_unknown_herd_by_name() {
+    let state = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    write_herd_ledger(state.path());
+
+    let out = reports_of(state.path(), config.path(), "nope");
+
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "loopherd reports: no herd nope\n"
+    );
+}
+
+#[test]
+fn reports_of_a_herd_with_a_file_or_only_retired_records_are_empty_not_refused() {
+    let state = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    write_herd_ledger(state.path());
+    fs::create_dir_all(config.path().join("herds")).unwrap();
+    fs::write(config.path().join("herds/quiet.toml"), "").unwrap();
+
+    for herd in ["quiet", "old"] {
+        let out = reports_of(state.path(), config.path(), herd);
+        assert_eq!(out.status.code(), Some(0), "{herd}: {out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "", "{herd}");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "", "{herd}");
+    }
+}
