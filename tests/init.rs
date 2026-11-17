@@ -2882,6 +2882,72 @@ fn a_loopherd_doc_that_would_land_outside_the_repo_is_left_to_a_step() {
 }
 
 #[test]
+fn tracker_docs_that_would_land_outside_the_repo_are_left_to_steps() {
+    for (link, target) in [("docs", "outside_docs"), ("docs/agents", "outside_agents")] {
+        let fixture = Fixture::new(&["acme"]);
+        let outside = fixture.root.path().join(target);
+        fs::create_dir_all(&outside).unwrap();
+        let link_path = fixture.repo().join(link);
+        fs::create_dir_all(link_path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &link_path).unwrap();
+
+        let out = fixture.init(&[]);
+
+        assert_ok(&out);
+        let stdout = text(&out.stdout);
+        for doc in ["issue-tracker.md", "triage-labels.md"] {
+            let found = walkdir(&outside);
+            assert!(!found.iter().any(|f| f.ends_with(doc)), "{link}: {found:?}");
+            assert!(
+                stdout.contains(&format!(
+                    "docs/agents/{doc} would land outside the repo through a symlink, so \
+                     init didn't write it; write it in the repo by hand."
+                )),
+                "{link}: {stdout}"
+            );
+            assert!(
+                !stdout.contains(&format!("wrote docs/agents/{doc}")),
+                "{link}: {stdout}"
+            );
+        }
+    }
+}
+
+#[test]
+fn repo_docs_that_would_land_in_the_git_dir_are_left_to_steps() {
+    let fixture = Fixture::new(&["acme"]);
+    let info = fixture.repo().join(".git/info");
+    fs::create_dir_all(&info).unwrap();
+    fs::create_dir_all(fixture.repo().join("docs")).unwrap();
+    std::os::unix::fs::symlink(&info, fixture.repo().join("docs/agents")).unwrap();
+
+    let out = fixture.init(&[]);
+
+    assert_ok(&out);
+    let stdout = text(&out.stdout);
+    for doc in ["issue-tracker.md", "triage-labels.md", "loopherd.md"] {
+        assert!(!info.join(doc).exists(), "{doc}");
+        assert!(
+            stdout.contains(&format!("docs/agents/{doc} would land outside the repo")),
+            "{stdout}"
+        );
+    }
+}
+
+/// Every file under `dir`, recursively.
+fn walkdir(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = vec![];
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        match path.is_dir() {
+            true => files.extend(walkdir(&path)),
+            false => files.push(path),
+        }
+    }
+    files
+}
+
+#[test]
 fn a_setext_heading_naming_loopherd_is_a_loopherd_section() {
     for agents in [
         "# Widgets\n\nLoopherd\n========\n\nOurs.\n",

@@ -92,18 +92,32 @@ pub struct Plan {
     pub steps: Vec<String>,
 }
 
-/// The docs the repo lacks.
-pub fn missing(repo: &Path, herd: &Herd) -> Result<Plan> {
-    let mut docs = vec![];
-    let mut steps = vec![];
-    if fs::symlink_metadata(repo.join(LOOPHERD_DOC)).is_err() {
-        match lands_inside(repo, LOOPHERD_DOC)? {
-            true => docs.push(loopherd_doc(herd)),
-            false => steps.push(format!(
-                "{LOOPHERD_DOC} would land outside the repo through a symlink, so init \
-                 didn't write it; write it in the repo by hand."
+impl Plan {
+    /// Adds `doc` to write, or a step to write it by hand when it would land outside the repo.
+    fn place(&mut self, repo: &Path, doc: Doc) -> Result<()> {
+        match lands_inside(repo, doc.path)? {
+            true => self.docs.push(doc),
+            false => self.steps.push(format!(
+                "{} would land outside the repo through a symlink, so init didn't write \
+                 it; write it in the repo by hand.",
+                doc.path
             )),
         }
+        Ok(())
+    }
+}
+
+/// The docs the repo lacks, `tracker_docs` among them.
+pub fn missing(repo: &Path, herd: &Herd, tracker_docs: Vec<Doc>) -> Result<Plan> {
+    let mut plan = Plan {
+        docs: vec![],
+        steps: vec![],
+    };
+    for doc in tracker_docs {
+        plan.place(repo, doc)?;
+    }
+    if fs::symlink_metadata(repo.join(LOOPHERD_DOC)).is_err() {
+        plan.place(repo, loopherd_doc(herd))?;
     }
     let agents_md = repo.join(AGENTS_MD);
     let linked = fs::symlink_metadata(&agents_md).is_ok_and(|m| m.file_type().is_symlink());
@@ -112,28 +126,28 @@ pub fn missing(repo: &Path, herd: &Herd) -> Result<Plan> {
         let has_section = fs::read(&agents_md)
             .is_ok_and(|bytes| has_loopherd_section(&String::from_utf8_lossy(&bytes)));
         if !has_section {
-            steps.push(format!(
+            plan.steps.push(format!(
                 "{AGENTS_MD} is a symlink, so init left it alone; add a loopherd section \
                  pointing at {LOOPHERD_DOC} and docs/agents/issue-tracker.md to it by hand."
             ));
         }
-        return Ok(Plan { docs, steps });
+        return Ok(plan);
     }
     match read(&agents_md)? {
-        None => docs.push(Doc::new(
+        None => plan.docs.push(Doc::new(
             AGENTS_MD,
             format!("# Agent instructions\n\n{SECTION}"),
         )),
         Some(agents) if has_loopherd_section(&agents) => {}
         Some(agents) => {
-            docs.push(Doc {
+            plan.docs.push(Doc {
                 path: AGENTS_MD,
                 text: appended(&agents),
                 append: true,
             });
         }
     }
-    Ok(Plan { docs, steps })
+    Ok(plan)
 }
 
 /// Today's `docs/agents/loopherd.md` when the repo has one, for `--diff`.
@@ -199,7 +213,7 @@ fn appended(existing: &str) -> String {
 }
 
 /// Whether `rel`'s directory, or its nearest existing ancestor, resolves
-/// inside the repo.
+/// inside the repo's work tree, outside its `.git`.
 fn lands_inside(repo: &Path, rel: &str) -> Result<bool> {
     let root = repo
         .canonicalize()
@@ -207,7 +221,7 @@ fn lands_inside(repo: &Path, rel: &str) -> Result<bool> {
     let mut dir = repo.join(rel);
     while dir.pop() {
         match dir.canonicalize() {
-            Ok(dir) => return Ok(dir.starts_with(&root)),
+            Ok(dir) => return Ok(dir.starts_with(&root) && !dir.starts_with(root.join(".git"))),
             // A dangling link may yet be created outside.
             Err(_) if fs::symlink_metadata(&dir).is_ok() => return Ok(false),
             Err(_) => {}
