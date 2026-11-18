@@ -536,7 +536,7 @@ struct SpawnArgs {
     /// Run in a worktree for this branch, created if needed.
     #[arg(long)]
     worktree: Option<String>,
-    /// Workspace label; defaults to $HERDR_WORKSPACE_ID.
+    /// Workspace label; defaults to this pane's workspace.
     #[arg(long)]
     workspace: Option<String>,
     #[arg(long, conflicts_with = "prompt_file")]
@@ -1715,7 +1715,7 @@ fn run_spawn(args: SpawnArgs) -> Result<i32> {
         member_of: None,
     };
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    let inherited = inherited_workspace();
+    let inherited = inherited_workspace(&ledger)?;
     let spawned = spawn(&CliHerdr, &mut ledger, &req, inherited.as_deref())?;
     let (message, code) = spawned.report(&req.name);
     println!("{message}");
@@ -1731,7 +1731,8 @@ fn run_add(args: AddArgs) -> Result<i32> {
         claude_args: args.claude_args,
         ready_timeout: Duration::from_secs(args.ready_timeout),
     };
-    let inherited = inherited_workspace();
+    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let inherited = inherited_workspace(&ledger)?;
     if args.dry_run {
         println!(
             "{}",
@@ -1739,7 +1740,6 @@ fn run_add(args: AddArgs) -> Result<i32> {
         );
         return Ok(0);
     }
-    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let added = add(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
     let (message, code) = added.spawned.report(&added.name);
     println!("{message}");
@@ -1757,7 +1757,7 @@ fn run_lead(args: LeadArgs) -> Result<i32> {
         ready_timeout: Duration::from_secs(args.ready_timeout),
     };
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    let inherited = inherited_workspace();
+    let inherited = inherited_workspace(&ledger)?;
     let (message, code) = lead::run(
         &CliHerdr,
         &mut ledger,
@@ -1791,7 +1791,7 @@ fn run_feed(herd: String, dry_run: bool, ready_timeout: u64) -> Result<i32> {
         owner: own_process()?,
         procs: &process::ProcFs,
     };
-    let inherited = inherited_workspace();
+    let inherited = inherited_workspace(&ledger)?;
     let mut fed = feed(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
     drop(lock);
     for line in &fed.lines {
@@ -1874,10 +1874,16 @@ fn run_herds(settings: Option<PathBuf>) -> Result<i32> {
     Ok(code)
 }
 
-fn inherited_workspace() -> Option<String> {
-    std::env::var("HERDR_WORKSPACE_ID")
+fn inherited_workspace(ledger: &dyn Ledger) -> Result<Option<String>> {
+    let env = std::env::var("HERDR_WORKSPACE_ID")
         .ok()
-        .filter(|v| !v.is_empty())
+        .filter(|v| !v.is_empty());
+    Ok(spawn::inherited_workspace(
+        &ledger.entries().context("ledger")?,
+        own_pane().as_deref(),
+        socket_from_env().as_deref(),
+        env,
+    ))
 }
 
 #[cfg(test)]
