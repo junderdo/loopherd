@@ -1216,12 +1216,7 @@ fn github_path(url: &str) -> Option<&str> {
         None => url.split_once(':')?,
     };
     let host = authority.rsplit('@').next()?.split(':').next()?;
-    let host = host.to_ascii_lowercase();
-    matches!(
-        host.as_str(),
-        "github.com" | "www.github.com" | "ssh.github.com"
-    )
-    .then_some(path)
+    crate::github::is_github_com(host).then_some(path)
 }
 
 /// Safe to put unquoted in the herd's shell commands and prompts, and not
