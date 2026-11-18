@@ -594,6 +594,7 @@ mod tests {
             name: name.into(),
             pane_id: "w1:p1".into(),
             env_pane_id: None,
+            env_pane_shell: None,
             tab_id: None,
             session_id: Some(format!("sess-{name}")),
             repo: cwd.into(),
@@ -680,8 +681,8 @@ mod tests {
         let (out, _) = run(&herdr, &mut ledger, &request());
 
         assert_eq!(out, "resumed a w1:p1");
-        assert!(ledger.0["a"].is_own_pane("w1:p1"));
-        assert!(!ledger.0["a"].is_own_pane("w2:p1"));
+        assert!(ledger.0["a"].is_own_pane("w1:p1", &[]));
+        assert_eq!(ledger.0["a"].env_pane_id, None);
     }
 
     #[test]

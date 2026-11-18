@@ -281,6 +281,7 @@ mod tests {
             name: name.into(),
             pane_id: format!("w1:p{name}"),
             env_pane_id: None,
+            env_pane_shell: None,
             tab_id: None,
             session_id: Some(format!("sess-{name}")),
             repo: "/src/repo".into(),

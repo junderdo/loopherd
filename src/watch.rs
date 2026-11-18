@@ -94,6 +94,8 @@ pub struct Request<'a> {
     /// The caller's pane and herdr socket, which make it a lead's watch
     /// when they match a lead as `loopherd report` matches.
     pub own_pane: Option<&'a str>,
+    /// The caller and its ancestors, which carry a moved member's old pane id.
+    pub own_lineage: &'a [Process],
     pub own_socket: Option<&'a Path>,
     /// Where a lead's watch finds its herd file for its merged and
     /// claimable checks; `None` runs no checks.
@@ -381,7 +383,8 @@ pub fn watch(
             // A lead relays its workers' questions as its own reports, which label its pane.
             if let (true, Reader::Shepherd, Some(pane), Some(first)) =
                 (req.pane_label, &reader, req.own_pane, waiting.first())
-                && member_of_own_pane(&ledger.entries()?, pane, req.own_socket).is_none()
+                && member_of_own_pane(&ledger.entries()?, pane, req.own_lineage, req.own_socket)
+                    .is_none()
                 && let Err(e) = crate::pane_label::set(herdr, dir, pane, first)
             {
                 warn(&format!("warning: label pane {pane}: {e:#}"));
@@ -1208,12 +1211,14 @@ fn reader(ledger: &dyn Ledger, req: &Request, warn: &mut dyn FnMut(&str)) -> Res
         return Ok(Reader::Shepherd);
     };
     let entries = ledger.entries()?;
-    let lead = match member_of_own_pane(&entries, pane, req.own_socket) {
+    let lead = match member_of_own_pane(&entries, pane, req.own_lineage, req.own_socket) {
         Some(entry) if entry.is_lead() => entry,
         Some(_) => return Ok(Reader::Shepherd),
         None => {
             // Pane ids repeat across herdrs, but this may be a lead whose recorded socket is stale.
-            let on_pane = |e: &&AgentRecord| !e.retired && e.is_lead() && e.is_own_pane(pane);
+            let on_pane = |e: &&AgentRecord| {
+                !e.retired && e.is_lead() && e.is_own_pane(pane, req.own_lineage)
+            };
             if let Some(lead) = entries.values().find(on_pane) {
                 warn(&format!(
                     "warning: pane {pane} holds lead {} on socket {}, \
@@ -1253,10 +1258,9 @@ fn shepherd_handoff(
         return None;
     }
     let entries = ledger.entries().ok()?;
-    if req
-        .own_pane
-        .is_some_and(|pane| member_of_own_pane(&entries, pane, req.own_socket).is_some())
-    {
+    if req.own_pane.is_some_and(|pane| {
+        member_of_own_pane(&entries, pane, req.own_lineage, req.own_socket).is_some()
+    }) {
         return None;
     }
     let handoff = (req.shepherd_handoff?)()?;
@@ -1457,6 +1461,7 @@ mod tests {
             name: name.into(),
             pane_id: pane.into(),
             env_pane_id: None,
+            env_pane_shell: None,
             tab_id: None,
             session_id: None,
             repo: "/src/repo".into(),
@@ -1494,6 +1499,7 @@ mod tests {
             own_pane: None,
             own_socket: None,
             as_name: Some(name),
+            own_lineage: &[],
         };
         let at = humantime::parse_rfc3339("2026-11-01T09:00:00Z").unwrap();
         report(ledger, dir, &who, kind, text, at).unwrap();
@@ -1539,6 +1545,7 @@ mod tests {
         shepherd_handoff: None,
         notify_own: None,
         pane_label: false,
+        own_lineage: &[],
     };
 
     fn run(
@@ -1880,6 +1887,7 @@ mod tests {
         shepherd_handoff: None,
         notify_own: None,
         pane_label: false,
+        own_lineage: &[],
     };
 
     /// One poll of a fresh watch.
@@ -2547,7 +2555,8 @@ mod tests {
         let at = humantime::parse_rfc3339("2026-11-01T09:00:00Z").unwrap();
         // Only pane.moved writes the ledger, and these tests send none.
         let mut snapshot = MemLedger(ledger.entries().unwrap(), vec![]);
-        crate::pane_event::event_hook(&mut snapshot, dir, event, &json, None, at).unwrap();
+        crate::pane_event::event_hook(&mut snapshot, dir, event, &json, None, at, &|_| Ok(None))
+            .unwrap();
     }
 
     fn blocked_hook(ledger: &dyn Ledger, dir: &Path, pane: &str) {

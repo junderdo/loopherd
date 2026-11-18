@@ -886,9 +886,11 @@ fn run_retire(name: &str, close: bool, force: bool) -> Result<i32> {
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let pane_id = std::env::var("HERDR_PANE_ID").ok();
     let socket = socket_from_env();
+    let lineage = own_lineage();
     let pane = pane_id.as_deref().map(|id| tool_hook::Pane {
         id,
         socket: socket.as_deref(),
+        lineage: &lineage,
     });
     refuse_own_lead(
         &ledger,
@@ -908,7 +910,6 @@ fn run_retire(name: &str, close: bool, force: bool) -> Result<i32> {
         }
         return Ok(0);
     }
-    let own_pane = std::env::var("HERDR_PANE_ID").ok();
     let mailboxes = ledger.reports_dir()?;
     let mut lines = vec![];
     let result = retire_and_close(
@@ -917,7 +918,7 @@ fn run_retire(name: &str, close: bool, force: bool) -> Result<i32> {
         name,
         SystemTime::now(),
         &mailboxes,
-        own_pane.as_deref(),
+        pane.as_ref(),
         &mut lines,
     );
     for line in lines {
@@ -1174,6 +1175,8 @@ fn run_restart(name: &str, force: bool) -> Result<i32> {
         name,
         force,
         own_pane: own_pane.as_deref(),
+        own_lineage: &own_lineage(),
+        pane_shell: &pane_shell,
         state: &state,
         paths: &paths,
         settle_timeout: Duration::from_secs(30),
@@ -1192,7 +1195,13 @@ const WAITER_FD: &str = "LOOPHERD_RESTART_WAITER_FD";
 fn run_restart_self() -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let state = ledger.dir()?;
-    let scheduled = restart::schedule_self(&CliHerdr, &ledger, own_pane().as_deref(), &state)?;
+    let scheduled = restart::schedule_self(
+        &CliHerdr,
+        &ledger,
+        own_pane().as_deref(),
+        &own_lineage(),
+        &state,
+    )?;
     let fd = scheduled.waiter.as_raw_fd();
     // The waiter inherits the lock's open file, so the claim lasts as long as it runs.
     // SAFETY: fcntl only clears close-on-exec on a descriptor the lock keeps open.
@@ -1242,6 +1251,8 @@ fn run_restart_wait(name: &str) -> Result<i32> {
         name,
         force: false,
         own_pane: None,
+        own_lineage: &[],
+        pane_shell: &pane_shell,
         state: &state,
         paths: &paths,
         settle_timeout: Duration::from_secs(30),
@@ -1264,6 +1275,7 @@ fn run_report(kind: Kind, as_name: Option<String>, text: &str) -> Result<i32> {
     let own_socket = socket_from_env();
     let who = Reporter {
         own_pane: own_pane.as_deref(),
+        own_lineage: &own_lineage(),
         own_socket: own_socket.as_deref(),
         as_name: as_name.as_deref(),
     };
@@ -1357,6 +1369,7 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         timeout: timeout.map(Duration::from_secs),
         poll: Duration::from_secs(2),
         own_pane: own_pane.as_deref(),
+        own_lineage: &own_lineage(),
         own_socket: own_socket.as_deref(),
         herd_files: Some(&herd_paths),
         check_timeout: remote_timeout,
@@ -1501,6 +1514,7 @@ fn run_stop_hook() -> Result<i32> {
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let pane = stop_hook::Pane {
         id: &pane,
+        lineage: &own_lineage(),
         socket: socket.as_deref(),
         claude_pid: process::claude_pid_from_env(&process::ProcFs),
     };
@@ -1550,6 +1564,7 @@ fn run_herdr_event_hook() -> Result<i32> {
             &json,
             socket_from_env().as_deref(),
             SystemTime::now(),
+            &pane_shell,
         )
     };
     if let Err(e) = record() {
@@ -1570,6 +1585,7 @@ fn run_session_hook() -> Result<i32> {
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let pane = session_hook::Pane {
         id: &pane,
+        lineage: &own_lineage(),
         socket: socket.as_deref(),
         claude_pid: process::claude_pid_from_env(&process::ProcFs),
     };
@@ -1618,6 +1634,7 @@ fn run_tool_hook() -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let pane = tool_hook::Pane {
         id: &pane,
+        lineage: &own_lineage(),
         socket: Some(&socket),
     };
     let switches = |herd: &str| herd::lead_switches(&Paths::from_env()?, herd);
@@ -1745,6 +1762,20 @@ fn run_install_hook(
     Ok(0)
 }
 
+/// The shell herdr started in `pane`, which a moved member's old pane id is kept for.
+fn pane_shell(pane: &str) -> Result<Option<Process>> {
+    let pid = CliHerdr.shell_pid(pane)?;
+    Ok(pid.and_then(|pid| {
+        let start = process::ProcFs.start(pid)?;
+        Some(Process { pid, start })
+    }))
+}
+
+/// loopherd and its ancestors, which carry a moved member's old pane id.
+fn own_lineage() -> Vec<ledger::Process> {
+    process::lineage(&process::ProcFs, std::process::id())
+}
+
 fn own_pane() -> Option<String> {
     std::env::var("HERDR_PANE_ID")
         .ok()
@@ -1851,6 +1882,7 @@ fn run_feed(herd: String, dry_run: bool, ready_timeout: u64) -> Result<i32> {
         ready_timeout: Duration::from_secs(ready_timeout),
         command_timeout: remote_timeout()?,
         own_pane: std::env::var("HERDR_PANE_ID").ok(),
+        own_lineage: own_lineage(),
         own_socket: socket_from_env(),
         mailboxes: ledger.reports_dir()?,
         after_merge_timeout: AFTER_MERGE_TIMEOUT,
@@ -1947,6 +1979,7 @@ fn inherited_workspace(ledger: &dyn Ledger) -> Result<Option<String>> {
     Ok(spawn::inherited_workspace(
         &ledger.entries().context("ledger")?,
         own_pane().as_deref(),
+        &own_lineage(),
         socket_from_env().as_deref(),
         env,
     ))
