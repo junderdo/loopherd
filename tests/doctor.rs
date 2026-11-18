@@ -45,6 +45,12 @@ fn sandbox_with(status: &str) -> Sandbox {
             dir = dir.path().display()
         ),
     );
+    fs::create_dir_all(dir.path().join("config")).unwrap();
+    fs::write(
+        dir.path().join("config/config.toml"),
+        "context_window = 200000\n[lead_defaults]\nmerge = false\n",
+    )
+    .unwrap();
     let sandbox = Sandbox {
         settings: dir.path().join("settings.json"),
         dir,
@@ -126,7 +132,7 @@ fn a_sound_install_prints_one_line_and_exits_0() {
     let s = sandbox(Some("0.9.5"));
     s.install_hooks();
     let out = s.doctor(&[]);
-    assert_eq!(stdout(&out), "doctor: 10 ok, 0 warnings, 0 failures\n");
+    assert_eq!(stdout(&out), "doctor: 14 ok, 0 warnings, 0 failures\n");
     assert_eq!(out.status.code(), Some(0));
 }
 
@@ -147,7 +153,7 @@ fn missing_hooks_in_the_given_settings_fail_naming_install_hook_and_exit_1() {
         "{text}"
     );
     assert!(
-        text.ends_with("doctor: 5 ok, 1 warnings, 4 failures\n"),
+        text.ends_with("doctor: 9 ok, 1 warnings, 4 failures\n"),
         "{text}"
     );
     assert_eq!(out.status.code(), Some(1));
@@ -169,7 +175,8 @@ fn pane_label_on_makes_a_missing_prompt_hook_fail() {
     fs::create_dir_all(&config).unwrap();
     fs::write(
         config.join("config.toml"),
-        "[notify]\nenabled = true\npane_label = true\n",
+        "context_window = 200000\n[lead_defaults]\nmerge = false\n\
+         [notify]\nenabled = true\npane_label = true\n",
     )
     .unwrap();
     let out = s.doctor(&[]);
@@ -262,7 +269,12 @@ fn settings_given_doctor_runs_without_home_or_a_config_dir() {
         .env("PATH", format!("{}:/usr/bin:/bin", s.bin.display()))
         .output()
         .unwrap();
-    assert_eq!(stdout(&out), "doctor: 10 ok, 0 warnings, 0 failures\n");
+    assert_eq!(
+        stdout(&out),
+        "warning config and state: not checked: HOME is not set; \
+         fix: set HOME\n\
+         doctor: 10 ok, 1 warnings, 0 failures\n"
+    );
     assert_eq!(out.status.code(), Some(0));
 }
 
@@ -271,7 +283,7 @@ fn running_a_binary_other_than_paths_warns_and_exits_0() {
     let s = sandbox(Some("0.9.5"));
     s.install_hooks();
     let other = s.dir.path().join("other");
-    fs::create_dir_all(&other).unwrap();
+    fs::create_dir_all(other.join(".git")).unwrap();
     executable(&other.join("loopherd"), fs::read(LOOPHERD).unwrap());
     let out = Command::new(other.join("loopherd"))
         .args(["doctor", "--settings", s.settings.to_str().unwrap()])
@@ -294,11 +306,11 @@ fn verbose_lists_every_check_and_json_gives_them_as_data() {
     let s = sandbox(Some("0.9.5"));
     s.install_hooks();
     let verbose = stdout(&s.doctor(&["--verbose"]));
-    assert_eq!(verbose.lines().count(), 11, "{verbose}");
+    assert_eq!(verbose.lines().count(), 15, "{verbose}");
     assert!(verbose.contains("ok herdr version: 0.9.5\n"), "{verbose}");
     let out = s.doctor(&["--json"]);
     let data: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(data["ok"], 10);
+    assert_eq!(data["ok"], 14);
     assert_eq!(data["checks"][8]["name"], "herdr version");
     assert_eq!(out.status.code(), Some(0));
 }
@@ -333,7 +345,7 @@ fn the_herdr_plugin_only_ever_warns() {
         let out = s.doctor(&[]);
         assert_eq!(
             stdout(&out),
-            format!("{line}doctor: 9 ok, 1 warnings, 0 failures\n")
+            format!("{line}doctor: 13 ok, 1 warnings, 0 failures\n")
         );
         assert_eq!(out.status.code(), Some(0));
     }
@@ -401,13 +413,72 @@ fn doctor_exits_2_when_it_cannot_run() {
 }
 
 #[test]
+fn a_herd_narrows_the_herd_checks_and_an_unknown_one_exits_2() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    let herds = s.dir.path().join("config/herds");
+    let repo = s.dir.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::create_dir_all(&herds).unwrap();
+    fs::write(
+        herds.join("h.toml"),
+        format!("repo = {:?}\n", repo.to_str().unwrap()),
+    )
+    .unwrap();
+    fs::write(herds.join("broken.toml"), "colour = 1\n").unwrap();
+    assert_eq!(s.doctor(&[]).status.code(), Some(1));
+    let out = s.doctor(&["h"]);
+    assert_eq!(stdout(&out), "doctor: 16 ok, 0 warnings, 0 failures\n");
+    assert_eq!(out.status.code(), Some(0));
+    let out = s.doctor(&["nope"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).starts_with("loopherd doctor: herd: read "),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn a_herdr_that_wedges_listing_agents_fails_after_the_deadline_instead_of_hanging() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    executable(
+        &s.bin.join("herdr"),
+        "#!/bin/sh\n\
+         [ \"$*\" = 'status server --json' ] && \
+         echo '{\"running\":true,\"version\":\"0.9.5\",\"socket\":\"/run/stub/herdr.sock\"}' && exit 0\n\
+         sleep 60\n",
+    );
+    let state = s.dir.path().join("state/loopherd");
+    fs::create_dir_all(&state).unwrap();
+    let member = serde_json::json!({"a": {
+        "name": "a", "pane_id": "w1:p1", "session_id": null, "repo": "/r",
+        "worktree": null, "workspace": "w1", "prompt": null, "prompt_sent": true,
+        "created": "2026-11-01T00:00:00Z", "herd": "h",
+    }});
+    fs::write(state.join("ledger.json"), member.to_string()).unwrap();
+    let started = std::time::Instant::now();
+    let out = s.doctor(&[]);
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    assert_eq!(
+        stdout(&out),
+        "warning herdr plugin: can't list herdr's plugins: \
+         herdr didn't answer plugin list within 5s; \
+         fix: run `herdr plugin list --plugin loopherd` to see why\n\
+         failure members: herdr didn't list its agents within 5s; fix: restart herdr's server\n\
+         doctor: 13 ok, 1 warnings, 1 failures\n"
+    );
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
 fn doctor_help_documents_its_flags() {
     let out = Command::new(LOOPHERD)
         .args(["doctor", "--help"])
         .output()
         .unwrap();
     let help = stdout(&out);
-    for flag in ["--verbose", "--json", "--settings", "--trackers"] {
+    for flag in ["--verbose", "--json", "--settings", "--trackers", "[HERD]"] {
         assert!(help.contains(flag), "{help}");
     }
     let top = stdout(&Command::new(LOOPHERD).arg("--help").output().unwrap());
@@ -418,7 +489,7 @@ fn doctor_help_documents_its_flags() {
 fn herd_with_a_source(s: &Sandbox) -> PathBuf {
     let repo = s.dir.path().join("repo");
     let herds = s.dir.path().join("config/herds");
-    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(repo.join(".git")).unwrap();
     fs::create_dir_all(&herds).unwrap();
     fs::write(
         herds.join("h.toml"),
@@ -445,6 +516,30 @@ fn trackers_runs_each_herds_source_and_counts_its_tasks() {
 }
 
 #[test]
+fn a_herd_narrows_trackers_to_that_herd() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    let ran = herd_with_a_source(&s);
+    let other = s.dir.path().join("other");
+    fs::create_dir_all(other.join(".git")).unwrap();
+    fs::write(
+        s.dir.path().join("config/herds/o.toml"),
+        format!(
+            "repo = {other:?}\n[template.t]\nparams = [\"n\"]\nprompt = \"go\"\n\
+             [queue]\ntemplate = \"t\"\nsource = \"touch ran\"\nmax = 1\n"
+        ),
+    )
+    .unwrap();
+    let out = s.doctor(&["o", "--trackers", "--verbose"]);
+    let text = stdout(&out);
+    assert!(text.contains("ok o source: exit 0, 0 tasks\n"), "{text}");
+    assert!(!text.contains("h source"), "{text}");
+    assert!(other.join("ran").exists());
+    assert!(!ran.exists());
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
 fn without_trackers_no_herd_command_runs() {
     let s = sandbox(Some("0.9.5"));
     s.install_hooks();
@@ -452,4 +547,35 @@ fn without_trackers_no_herd_command_runs() {
     let out = s.doctor(&["--verbose"]);
     assert!(!stdout(&out).contains("h source"), "{}", stdout(&out));
     assert!(!ran.exists());
+}
+
+#[test]
+fn an_unknown_herd_with_trackers_exits_2_and_runs_no_source() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    let ran = herd_with_a_source(&s);
+    let out = s.doctor(&["nope", "--trackers"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(!ran.exists());
+}
+
+#[test]
+fn a_missing_repo_fails_once_under_trackers() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    let ran = herd_with_a_source(&s);
+    let repo = ran.parent().unwrap();
+    fs::remove_dir_all(repo).unwrap();
+    let out = s.doctor(&["--trackers"]);
+    let text = stdout(&out);
+    let failures: Vec<_> = text.lines().filter(|l| l.starts_with("failure")).collect();
+    assert_eq!(
+        failures,
+        [format!(
+            "failure herd h repo: {} is missing; fix: loopherd herd set h repo '\"<path>\"'",
+            repo.display()
+        )],
+        "{text}"
+    );
+    assert_eq!(out.status.code(), Some(1));
 }

@@ -114,6 +114,8 @@ pub enum WaitOutcome {
 pub trait Herdr {
     fn workspaces(&self) -> Result<Vec<Workspace>>;
     fn agents(&self) -> Result<Vec<Agent>>;
+    /// [`Herdr::agents`], or `None` once `timeout` passes, as with a wedged server.
+    fn agents_within(&self, timeout: Duration) -> Result<Option<Vec<Agent>>>;
     fn agent(&self, name: &str) -> Result<Agent>;
     fn tabs_in(&self, workspace_id: &str) -> Result<Vec<Tab>>;
     fn panes_in(&self, workspace_id: &str) -> Result<Vec<Pane>>;
@@ -213,7 +215,7 @@ impl CliHerdr {
     }
 
     fn call_ok(&self, args: &[&str]) -> Result<Value> {
-        api_ok(args, self.call(args)?)
+        ok_reply(args, self.call(args)?)
     }
 
     fn call_ok_within(&self, args: &[&str], timeout: Duration) -> Result<Value> {
@@ -226,8 +228,12 @@ impl CliHerdr {
                 humantime::format_duration(timeout)
             );
         };
-        api_ok(args, reply(args, out)?)
+        ok_reply(args, reply(args, out)?)
     }
+}
+
+fn ok_reply(args: &[&str], reply: std::result::Result<Value, ApiError>) -> Result<Value> {
+    reply.map_err(|e| anyhow!("herdr {}: {} ({})", args[..2].join(" "), e.message, e.code))
 }
 
 fn reply(args: &[&str], out: std::process::Output) -> Result<std::result::Result<Value, ApiError>> {
@@ -247,10 +253,6 @@ fn reply(args: &[&str], out: std::process::Output) -> Result<std::result::Result
             String::from_utf8_lossy(&out.stderr).trim()
         ),
     }
-}
-
-fn api_ok(args: &[&str], reply: std::result::Result<Value, ApiError>) -> Result<Value> {
-    reply.map_err(|e| anyhow!("herdr {}: {} ({})", args[..2].join(" "), e.message, e.code))
 }
 
 #[derive(Debug, Deserialize)]
@@ -360,6 +362,19 @@ impl Herdr for CliHerdr {
         let result = self.call_ok(&["agent", "list"])?;
         let list: Vec<AgentJson> = parse(&result["agents"], "agent list")?;
         Ok(list.into_iter().map(Agent::from).collect())
+    }
+
+    fn agents_within(&self, timeout: Duration) -> Result<Option<Vec<Agent>>> {
+        let args = ["agent", "list"];
+        let mut command = self.command(&args);
+        let Some(out) =
+            crate::shell::run_within(&mut command, timeout).context("run herdr agent list")?
+        else {
+            return Ok(None);
+        };
+        let result = ok_reply(&args, reply(&args, out)?)?;
+        let list: Vec<AgentJson> = parse(&result["agents"], "agent list")?;
+        Ok(Some(list.into_iter().map(Agent::from).collect()))
     }
 
     fn agent(&self, name: &str) -> Result<Agent> {

@@ -823,7 +823,7 @@ fn read_prompt(
 }
 
 /// Whether `config` reads as TOML; a missing or unreadable file doesn't.
-fn parses_as_toml(config: &Path) -> bool {
+pub fn parses_as_toml(config: &Path) -> bool {
     std::fs::read_to_string(config).is_ok_and(|text| text.parse::<toml::Table>().is_ok())
 }
 
@@ -876,10 +876,7 @@ pub fn herds(paths: &Paths, settings: &Path) -> Result<(String, i32)> {
     let mut valid = Vec::new();
     for file in &files {
         let herd = file.file_stem().unwrap_or_default().to_string_lossy();
-        match std::fs::read_to_string(file)
-            .map_err(anyhow::Error::from)
-            .and_then(|text| check(&text, paths))
-        {
+        match checked(file, paths) {
             Ok(parsed) => {
                 let reading = crate::pause::read(&paths.paused, &herd);
                 let paused = match reading.pause() {
@@ -890,9 +887,8 @@ pub fn herds(paths: &Paths, settings: &Path) -> Result<(String, i32)> {
                 lines.extend(reading.warning(&herd).map(|w| format!("  {w}")));
                 valid.push(herd.into_owned());
             }
-            Err(e) => {
-                let name = file.file_name().unwrap_or_default().to_string_lossy();
-                lines.push(format!("invalid {name}: {}", format!("{e:#}").trim_end()));
+            Err(invalid) => {
+                lines.push(invalid);
                 code = 1;
             }
         }
@@ -928,6 +924,24 @@ fn prompt_hook_warning(config: &Path, settings: &Path, herds: &[String]) -> Opti
          or pass herds --settings <file> if you installed into another file",
         config.display(),
     ))
+}
+
+/// `herd`'s repo, with a leading `~` expanded, once its file passes the checks
+/// `herds` runs; otherwise the line `herds` prints for it.
+pub fn checked_repo(paths: &Paths, herd: &str) -> std::result::Result<PathBuf, String> {
+    let file = file_of(&paths.herds, herd).map_err(|e| format!("{e:#}"))?;
+    checked(&file, paths).map(|parsed| expand_home(&parsed.repo, &paths.home))
+}
+
+/// `file` read and checked, or `herds`' line calling it invalid.
+fn checked(file: &Path, paths: &Paths) -> std::result::Result<HerdFile, String> {
+    std::fs::read_to_string(file)
+        .map_err(anyhow::Error::from)
+        .and_then(|text| check(&text, paths))
+        .map_err(|e| {
+            let name = file.file_name().unwrap_or_default().to_string_lossy();
+            format!("invalid {name}: {}", format!("{e:#}").trim_end())
+        })
 }
 
 /// `text` parsed as a herd file and checked as far as `add` and `lead` would
