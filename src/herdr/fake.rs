@@ -1,6 +1,5 @@
 //! In-memory herdr for tests.
 
-use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -110,11 +109,11 @@ pub struct FakeHerdr {
     /// `agents()` fails as herdr answering in a shape loopherd can't parse.
     pub malformed_agents: bool,
     /// `agents()` blocks until a value arrives or the sender drops, like a hung herdr.
-    pub agents_gate: Option<Receiver<()>>,
+    pub agents_gate: Option<Mutex<Receiver<()>>>,
     /// Runs inside every `agents()` call, before it answers.
-    pub on_agents: Option<Box<dyn Fn() + Send>>,
+    pub on_agents: Option<Box<dyn Fn() + Send + Sync>>,
     pub socket: Option<PathBuf>,
-    state: RefCell<State>,
+    state: Mutex<State>,
 }
 
 impl FakeHerdr {
@@ -142,12 +141,12 @@ impl FakeHerdr {
             agents_gate: None,
             on_agents: None,
             socket: Some(FAKE_SOCKET.into()),
-            state: RefCell::default(),
+            state: Mutex::default(),
         }
     }
 
     pub fn set_working_on_prompt(&self) {
-        self.state.borrow_mut().working_on_prompt = true;
+        self.state.lock().unwrap().working_on_prompt = true;
     }
 
     /// Adds a live agent that already exists in the session.
@@ -157,7 +156,7 @@ impl FakeHerdr {
 
     pub fn with_agent_in(self, name: &str, status: AgentStatus) -> Self {
         self.push_agent(Some(name), None, "w9:p9", false);
-        self.state.borrow_mut().agents.last_mut().unwrap().status = status;
+        self.state.lock().unwrap().agents.last_mut().unwrap().status = status;
         self
     }
 
@@ -167,17 +166,17 @@ impl FakeHerdr {
     }
 
     pub fn with_raw_agent(self, agent: Agent) -> Self {
-        self.state.borrow_mut().agents.push(agent);
+        self.state.lock().unwrap().agents.push(agent);
         self
     }
 
     /// Calls that create, close, start or prompt anything.
     pub fn mutations(&self) -> u32 {
-        self.state.borrow().mutations
+        self.state.lock().unwrap().mutations
     }
 
     fn mutating(&self) {
-        self.state.borrow_mut().mutations += 1;
+        self.state.lock().unwrap().mutations += 1;
     }
 
     /// An agent herdr is still resuming after a restart.
@@ -190,7 +189,8 @@ impl FakeHerdr {
     pub fn add_tab(&self, workspace_id: &str, label: &str, cwd: &Path, at_prompt: bool) -> String {
         let tab = self.new_tab(workspace_id, cwd, label);
         self.state
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .panes
             .iter_mut()
             .find(|p| p.id == tab.pane_id)
@@ -201,7 +201,7 @@ impl FakeHerdr {
 
     /// Splits a new shell pane into `tab_id`. Returns the pane ID.
     pub fn split(&self, tab_id: &str, cwd: &Path) -> String {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state.lock().unwrap();
         state.next_id += 1;
         let workspace_id = tab_id.split_once(':').expect("fake tab id").0.to_string();
         let id = format!("{workspace_id}:p{}", state.next_id);
@@ -217,36 +217,36 @@ impl FakeHerdr {
     }
 
     pub fn tabs(&self) -> Vec<FakeTab> {
-        self.state.borrow().tabs.clone()
+        self.state.lock().unwrap().tabs.clone()
     }
 
     pub fn started(&self) -> Vec<Started> {
-        self.state.borrow().started.clone()
+        self.state.lock().unwrap().started.clone()
     }
 
     pub fn prompts(&self) -> Vec<(String, String)> {
-        self.state.borrow().prompts.clone()
+        self.state.lock().unwrap().prompts.clone()
     }
 
     /// Panes passed to `focus`, in order. Focusing isn't a mutation.
     pub fn focused(&self) -> Vec<String> {
-        self.state.borrow().focused.clone()
+        self.state.lock().unwrap().focused.clone()
     }
 
     /// The label `label_pane` last left on `pane_id`. Labelling isn't a mutation.
     pub fn label(&self, pane_id: &str) -> Option<String> {
-        let state = self.state.borrow();
+        let state = self.state.lock().unwrap();
         let found = state.labels.iter().find(|(p, _)| p == pane_id);
         found.map(|(_, label)| label.clone())
     }
 
     pub fn label_calls(&self) -> u32 {
-        self.state.borrow().label_calls
+        self.state.lock().unwrap().label_calls
     }
 
     fn push_agent(&self, name: Option<&str>, session: Option<&str>, pane_id: &str, pending: bool) {
         let (ws, n) = pane_id.split_once(":p").expect("fake pane id");
-        self.state.borrow_mut().agents.push(Agent {
+        self.state.lock().unwrap().agents.push(Agent {
             name: name.map(str::to_string),
             pane_id: pane_id.into(),
             tab_id: format!("{ws}:t{n}"),
@@ -260,7 +260,7 @@ impl FakeHerdr {
     }
 
     fn new_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> NewTab {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state.lock().unwrap();
         state.next_id += 1;
         let n = state.next_id;
         let tab = NewTab {
@@ -285,7 +285,7 @@ impl FakeHerdr {
     }
 
     pub fn set_screen(&self, pane_id: &str, text: &str) {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state.lock().unwrap();
         state.screens.retain(|(p, _)| p != pane_id);
         state.screens.push((pane_id.to_string(), text.to_string()));
     }
@@ -293,23 +293,24 @@ impl FakeHerdr {
     /// The pane shows `text` once its agent is next prompted, as a dialog
     /// that a prompt opens does.
     pub fn set_screen_on_prompt(&self, pane_id: &str, text: &str) {
-        self.state.borrow_mut().screen_on_prompt = Some((pane_id.to_string(), text.to_string()));
+        self.state.lock().unwrap().screen_on_prompt = Some((pane_id.to_string(), text.to_string()));
     }
 
     /// The agent's pane closes outside loopherd.
     pub fn remove_agent(&self, name: &str) {
         self.state
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .agents
             .retain(|a| a.name.as_deref() != Some(name));
     }
 
     pub fn set_unreachable(&self, down: bool) {
-        self.state.borrow_mut().down = down;
+        self.state.lock().unwrap().down = down;
     }
 
     pub fn set_malformed(&self, malformed: bool) {
-        self.state.borrow_mut().malformed = malformed;
+        self.state.lock().unwrap().malformed = malformed;
     }
 
     /// Puts `name` back in `pane_id` as a restart's resume does, pending
@@ -320,19 +321,21 @@ impl FakeHerdr {
 
     pub fn settle(&self) {
         self.state
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .agents
             .iter_mut()
             .for_each(|a| a.launch_pending = false);
     }
 
     fn is_down(&self) -> bool {
-        self.unreachable || self.state.borrow().down
+        self.unreachable || self.state.lock().unwrap().down
     }
 
     fn find(&self, name: &str) -> Result<Agent> {
         self.state
-            .borrow()
+            .lock()
+            .unwrap()
             .agents
             .iter()
             .find(|a| a.name.as_deref() == Some(name))
@@ -341,7 +344,7 @@ impl FakeHerdr {
     }
 
     pub fn set_status(&self, name: &str, status: AgentStatus) {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state.lock().unwrap();
         if let Some(a) = state
             .agents
             .iter_mut()
@@ -365,7 +368,7 @@ impl Herdr for FakeHerdr {
 
     fn agents(&self) -> Result<Vec<Agent>> {
         if let Some(gate) = &self.agents_gate {
-            let _ = gate.recv();
+            let _ = gate.lock().unwrap().recv();
         }
         if let Some(on_agents) = &self.on_agents {
             on_agents();
@@ -373,10 +376,10 @@ impl Herdr for FakeHerdr {
         if self.is_down() {
             bail!("herdr server not running");
         }
-        if self.malformed_agents || self.state.borrow().malformed {
+        if self.malformed_agents || self.state.lock().unwrap().malformed {
             return Err(anyhow!("expected an array").context(MalformedReply("agent list".into())));
         }
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state.lock().unwrap();
         state.agent_polls += 1;
         let settled = self
             .resume_settles_after
@@ -402,11 +405,11 @@ impl Herdr for FakeHerdr {
     }
 
     fn agent(&self, name: &str) -> Result<Agent> {
-        if self.state.borrow().agent_unreadable {
+        if self.state.lock().unwrap().agent_unreadable {
             bail!("herdr agent get {name} failed");
         }
         let mut agent = self.find(name)?;
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state.lock().unwrap();
         if state.sessionless_gets > 0 {
             state.sessionless_gets -= 1;
             agent.session_id = None;
@@ -417,7 +420,8 @@ impl Herdr for FakeHerdr {
     fn tabs_in(&self, workspace_id: &str) -> Result<Vec<Tab>> {
         Ok(self
             .state
-            .borrow()
+            .lock()
+            .unwrap()
             .tabs
             .iter()
             .filter(|t| t.workspace_id == workspace_id)
@@ -431,7 +435,8 @@ impl Herdr for FakeHerdr {
     fn panes_in(&self, workspace_id: &str) -> Result<Vec<Pane>> {
         Ok(self
             .state
-            .borrow()
+            .lock()
+            .unwrap()
             .panes
             .iter()
             .filter(|p| p.workspace_id == workspace_id)
@@ -444,7 +449,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn at_shell_prompt(&self, pane_id: &str) -> Result<bool> {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state.lock().unwrap();
         let pane = state
             .panes
             .iter_mut()
@@ -467,7 +472,8 @@ impl Herdr for FakeHerdr {
         }
         Ok(self
             .state
-            .borrow()
+            .lock()
+            .unwrap()
             .screens
             .iter()
             .find(|(p, _)| p == pane_id)
@@ -484,7 +490,7 @@ impl Herdr for FakeHerdr {
             bail!("workspace {workspace_id} not found");
         }
         let tab = self.new_tab(workspace_id, cwd, label);
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state.lock().unwrap();
         let pane = state.panes.last_mut().unwrap();
         pane.polls_until_prompt = self.new_tab_prompt_after;
         Ok(tab)
@@ -495,7 +501,7 @@ impl Herdr for FakeHerdr {
         if self.fail_close_tab {
             bail!("tab close refused");
         }
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state.lock().unwrap();
         state.tabs.retain(|t| t.id != tab_id);
         state.panes.retain(|p| p.tab_id != tab_id);
         state.agents.retain(|a| a.tab_id != tab_id);
@@ -514,7 +520,7 @@ impl Herdr for FakeHerdr {
             bail!("claude exited during startup");
         }
         {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.state.lock().unwrap();
             let pane = state
                 .panes
                 .iter_mut()
@@ -548,7 +554,7 @@ impl Herdr for FakeHerdr {
             });
         }
         {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.state.lock().unwrap();
             state.sessionless_gets = self.session_after_gets;
             state.agent_unreadable = self.agent_get_fails_after_start;
         }
@@ -595,14 +601,15 @@ impl Herdr for FakeHerdr {
             bail!("prompt refused");
         }
         self.state
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .prompts
             .push((name.to_string(), text.to_string()));
-        let next = self.state.borrow_mut().screen_on_prompt.take();
+        let next = self.state.lock().unwrap().screen_on_prompt.take();
         if let Some((pane, screen)) = next {
             self.set_screen(&pane, &screen);
         }
-        if self.state.borrow().working_on_prompt {
+        if self.state.lock().unwrap().working_on_prompt {
             self.set_status(name, AgentStatus::Working);
         }
         Ok(())
@@ -614,14 +621,15 @@ impl Herdr for FakeHerdr {
         }
         if !self
             .state
-            .borrow()
+            .lock()
+            .unwrap()
             .agents
             .iter()
             .any(|a| a.pane_id == pane_id)
         {
             bail!("no agent in pane {pane_id}");
         }
-        self.state.borrow_mut().focused.push(pane_id.to_string());
+        self.state.lock().unwrap().focused.push(pane_id.to_string());
         Ok(())
     }
 
@@ -629,7 +637,7 @@ impl Herdr for FakeHerdr {
         if self.is_down() {
             bail!("herdr server not running");
         }
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state.lock().unwrap();
         state.label_calls += 1;
         state.labels.retain(|(p, _)| p != pane_id);
         if let Some(label) = label {

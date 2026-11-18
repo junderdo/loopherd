@@ -78,6 +78,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D61](decisions/D61.md) | The claimable count `status` shows and `running low` compares with `max` is every task feed would take with no cap on slots, not capped by free slots. |
 | [D62](decisions/D62.md) | loopherd ships as a herdr plugin from `herdr-plugin/` that needs `loopherd` already installed and never installs it or its hooks; its commands run through `loopherd.sh`. |
 | [D63](decisions/D63.md) | `loopherd doctor` only reads and names a fix per finding: install (hooks, PATH binary), herdr (reachable, `MIN_HERDR`), config and herd files, and state, with `--trackers` running sources; only problems print, exit 0/1/2, and the herdr plugin stays optional and unchecked. |
+| [D64](decisions/D64.md) | The herdr plugin's startup hook runs `loopherd revive --startup`, off unless `[herdr_plugin] revive_on_startup = true`, reviving only members on the starting server's socket under a lock every revive holds, and noting what it did to each lead whose watch isn't running. |
 
 ## Emerging model
 

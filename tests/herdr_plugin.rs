@@ -29,7 +29,7 @@ fn manifest_names_the_loopherd_plugin_at_the_crate_version() {
     assert_eq!(m["id"].as_str(), Some("loopherd"));
     assert_eq!(m["name"].as_str(), Some("loopherd"));
     assert_eq!(m["version"].as_str(), Some(env!("CARGO_PKG_VERSION")));
-    assert_eq!(m["min_herdr_version"].as_str(), Some("0.7.0"));
+    assert_eq!(m["min_herdr_version"].as_str(), Some("0.7.5"));
     assert_eq!(strings(&m["platforms"]), ["linux", "macos"]);
 }
 
@@ -50,6 +50,19 @@ fn every_manifest_command_runs_through_the_wrapper() {
         }
     }
     assert!(commands > 0, "the manifest declares no commands");
+}
+
+#[test]
+fn the_startup_hook_runs_the_startup_revive_and_nothing_else() {
+    let m = manifest();
+    let hooks = m["startup"].as_array().unwrap();
+    let [hook] = hooks.as_slice() else {
+        panic!("expected one startup hook: {hooks:?}");
+    };
+    assert_eq!(
+        strings(&hook["command"]),
+        ["sh", "loopherd.sh", "revive", "--startup"]
+    );
 }
 
 /// Runs the wrapper as herdr does, from the plugin dir, with only `bin` on
@@ -119,4 +132,100 @@ fn wrapper_fails_with_how_to_install_when_loopherd_is_missing() {
             && stderr.contains("https://github.com/junderdo/loopherd#install"),
         "{stderr}"
     );
+}
+
+/// `loopherd revive --startup` with only `config` as its config dir and no
+/// herdr on `PATH`, so any herdr call fails.
+fn startup_revive(config: &Path) -> Output {
+    startup_revive_without_socket(config)
+        .env("HERDR_SOCKET_PATH", config.join("herdr.sock"))
+        .output()
+        .unwrap()
+}
+
+fn startup_revive_without_socket(config: &Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_loopherd"));
+    cmd.args(["revive", "--startup"])
+        .env_clear()
+        .env("PATH", config)
+        .env("HOME", config)
+        .env("LOOPHERD_CONFIG_DIR", config)
+        .env("XDG_STATE_HOME", config.join("state"));
+    cmd
+}
+
+#[test]
+fn the_startup_revive_does_nothing_until_config_turns_it_on() {
+    let config = tempfile::tempdir().unwrap();
+    let file = config.path().join("config.toml");
+    for text in [None, Some("[herdr_plugin]\nrevive_on_startup = false\n")] {
+        if let Some(text) = text {
+            fs::write(&file, text).unwrap();
+        }
+
+        let out = startup_revive(config.path());
+
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!(
+                "revive on startup is off; set [herdr_plugin] revive_on_startup = true in {} to turn it on\n",
+                file.display()
+            )
+        );
+        assert!(!config.path().join("state").exists(), "{out:?}");
+    }
+
+    fs::write(&file, "[herdr_plugin]\nrevive_on_startup = true\n").unwrap();
+    let out = startup_revive(config.path());
+    assert!(
+        !out.status.success(),
+        "it ran without reaching herdr: {out:?}"
+    );
+    assert!(
+        config
+            .path()
+            .join("state/loopherd/reports/revive.lock")
+            .exists()
+    );
+}
+
+#[test]
+fn the_startup_revive_refuses_an_invalid_config() {
+    let config = tempfile::tempdir().unwrap();
+    fs::write(
+        config.path().join("config.toml"),
+        "[herdr_plugin]\nrevive_on_startup = \"yes\"\n",
+    )
+    .unwrap();
+
+    let out = startup_revive(config.path());
+
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("revive_on_startup"),
+        "{out:?}"
+    );
+    assert!(!config.path().join("state").exists(), "{out:?}");
+}
+
+#[test]
+fn the_startup_revive_refuses_without_the_hooks_socket() {
+    let config = tempfile::tempdir().unwrap();
+    fs::write(
+        config.path().join("config.toml"),
+        "[herdr_plugin]\nrevive_on_startup = true\n",
+    )
+    .unwrap();
+
+    let out = startup_revive_without_socket(config.path())
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("HERDR_SOCKET_PATH is unset"),
+        "{out:?}"
+    );
+    assert!(!config.path().join("state").exists(), "{out:?}");
 }
