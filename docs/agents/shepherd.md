@@ -6,6 +6,12 @@ herd (D19). This file adds only what's specific to this repo's herd,
 [issue-tracker.md](issue-tracker.md). Setting up a herd in another repo
 after `loopherd init` is the skill's "Setting up a project".
 
+## Each session
+
+Start with `loopherd doctor`, as the skill's Shepherd section says, and relay
+any failure to the human with the fix it names. `scripts/install` also runs it
+last, so a failure there is the same report.
+
 ## Feed
 
 From the main checkout, `git pull --ff-only`, then refresh the `loopherd` on
