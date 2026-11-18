@@ -60,7 +60,7 @@ use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
 use crate::feed::{FeedRequest, feed, run_after_merge};
-use crate::herd::{AddRequest, Paths, add, dry_run, herds};
+use crate::herd::{AddRequest, Paths, SwitchValues, add, dry_run, herds};
 use crate::herd_view::Options;
 use crate::herdr::events::SocketSubscriber;
 use crate::herdr::{CliHerdr, Herdr, socket_from_env};
@@ -135,9 +135,10 @@ enum Command {
         #[arg(long, value_name = "SWITCHES")]
         set: Option<String>,
     },
-    /// Read or edit one of config.toml's handoff settings, keeping its comments
-    /// and layout: `context_window`, `default_context_limit` or
-    /// `shepherd.context_limit`, each a number of tokens.
+    /// Read or edit one of config.toml's settings, keeping its comments and
+    /// layout: `context_window`, `default_context_limit` or
+    /// `shepherd.context_limit`, each a number of tokens, or
+    /// `lead_defaults.review_rounds`, each lead's review-round limit.
     Config {
         #[command(subcommand)]
         action: ConfigAction,
@@ -372,8 +373,9 @@ enum Command {
     },
     /// Check this machine's loopherd setup: loopherd's hooks in Claude's
     /// settings, the binary they call against the `loopherd` on PATH, herdr's
-    /// server and version, config.toml, herd files and their repos, and the
-    /// ledger, pause files, mailboxes and members' panes. Only reads. Prints each warning and
+    /// server and version, config.toml, herd files and their repos, the
+    /// ledger, pause files, mailboxes and members' panes, and with
+    /// `--trackers` each herd's `source` and `backlog`. Only reads. Prints each warning and
     /// failure with the command that fixes it, then `doctor: <n> ok, <n>
     /// warnings, <n> failures`. Exits 0 when clean or only warnings, 1 on any
     /// failure, 2 when it couldn't run.
@@ -387,7 +389,14 @@ enum Command {
         /// Check this file instead of $CLAUDE_CONFIG_DIR/settings.json or ~/.claude/settings.json.
         #[arg(long)]
         settings: Option<PathBuf>,
-        /// Check only this herd's file, repo and state; the install, herdr and config checks still run.
+        /// Also run each herd's `source` and `backlog` from its repo, paused
+        /// herds included, 30s each; a nonzero exit or timeout fails. With
+        /// `--verbose` or `--json`, shows each exit status and task count, never
+        /// task lines.
+        #[arg(long)]
+        trackers: bool,
+        /// Check only this herd's file, repo, state and trackers; the install,
+        /// herdr and config checks still run.
         herd: Option<String>,
     },
     /// Add loopherd's Stop, StopFailure, SessionStart, PreToolUse and UserPromptSubmit hooks to Claude's
@@ -713,8 +722,12 @@ fn main() -> ExitCode {
             verbose,
             json,
             settings,
+            trackers,
             herd,
-        } => ("doctor", run_doctor(verbose, json, settings, herd)),
+        } => (
+            "doctor",
+            run_doctor(verbose, json, settings, trackers, herd),
+        ),
         Command::InstallHook {
             remove,
             settings,
@@ -823,7 +836,7 @@ fn run_lead_defaults(set: Option<String>) -> Result<i32> {
     if let Some(list) = set {
         config::set_lead_defaults(&config, &list)?;
     }
-    if let Some(defaults) = config::lead_defaults(&config)? {
+    if let Some(defaults) = config::lead_defaults(&config)?.filter(SwitchValues::sets_a_switch) {
         println!("{}", defaults.over(&Default::default()).lines());
     }
     Ok(0)
@@ -1517,6 +1530,7 @@ fn run_doctor(
     verbose: bool,
     json: bool,
     settings: Option<PathBuf>,
+    trackers: bool,
     herd: Option<String>,
 ) -> Result<i32> {
     let setup = || -> Result<doctor::Setup> {
@@ -1525,8 +1539,19 @@ fn run_doctor(
             ledger: FileLedger::new(FileLedger::default_path()?),
         })
     };
-    let checks = doctor_install(settings)
-        .and_then(|install| doctor::checks(&install, &setup(), herd.as_deref(), &CliHerdr));
+    let checks = doctor_install(settings).and_then(|install| {
+        let mut checks = doctor::checks(&install, &setup(), herd.as_deref(), &CliHerdr)?;
+        if trackers {
+            let paths = Paths::from_env()?;
+            let only = herd.as_deref();
+            checks.extend(doctor::tracker_checks(
+                &paths,
+                only,
+                doctor::TRACKER_TIMEOUT,
+            ));
+        }
+        Ok(checks)
+    });
     let checks = match checks {
         Ok(checks) => checks,
         Err(e) => {

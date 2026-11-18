@@ -11,6 +11,8 @@ read-only general-purpose one), send in-scope gaps back to the member, and the a
 Your switches (off means the human does it; ask with a question report):
 {switches}
 
+Your review-round limit: {review_rounds}.
+
 Grilling is always the human's.
 
 Start now:

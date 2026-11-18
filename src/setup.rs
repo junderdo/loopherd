@@ -59,7 +59,11 @@ pub fn setup(req: Request, tty: Option<Tty>) -> Result<Vec<String>> {
     let context_unset = file.context_window.is_none()
         && file.default_context_limit.is_none()
         && shepherd(&file).is_none();
-    let ask_lead = wants(&req.lead_defaults, file.lead_defaults.is_none());
+    let switches_unset = !file
+        .lead_defaults
+        .as_ref()
+        .is_some_and(SwitchValues::sets_a_switch);
+    let ask_lead = wants(&req.lead_defaults, switches_unset);
     let ask_context = wants(&req.context, context_unset);
 
     let context = match &req.context {
@@ -77,7 +81,7 @@ pub fn setup(req: Request, tty: Option<Tty>) -> Result<Vec<String>> {
 
     let Some(tty) = tty else {
         let mut flags = vec![];
-        if file.lead_defaults.is_none() && !matches!(req.lead_defaults, Some(Some(_))) {
+        if switches_unset && !matches!(req.lead_defaults, Some(Some(_))) {
             flags.push(LEAD_FLAG);
         }
         if context_unset && !matches!(req.context, Some(Some(_))) {

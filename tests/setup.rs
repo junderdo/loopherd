@@ -271,6 +271,10 @@ fn without_a_terminal_setup_asks_nothing_and_names_the_flags_for_whats_unset() {
         "{out}"
     );
 
+    let config = Config::new(Some("[lead_defaults]\nreview_rounds = 5\n"));
+    let out = succeeded(&config.setup(&["--context=limit=100000"]));
+    assert!(out.contains("--lead-defaults <switches|none>"), "{out}");
+
     let config = Config::new(Some("[shepherd]\ncontext_limit = 100000\n"));
     let out = succeeded(&config.setup(&[]));
     assert!(
@@ -339,4 +343,13 @@ fn an_invalid_config_fails_setup() {
         "{out:?}"
     );
     assert_eq!(config.text().unwrap(), text);
+}
+
+#[test]
+fn lead_defaults_prints_nothing_while_the_table_sets_only_review_rounds() {
+    let config = Config::new(Some("[lead_defaults]\nreview_rounds = 5\n"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_loopherd"));
+    cmd.arg("lead-defaults");
+    config.env(&mut cmd);
+    assert_eq!(succeeded(&cmd.output().unwrap()), "");
 }

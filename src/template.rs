@@ -48,6 +48,10 @@ impl Template {
         Ok(())
     }
 
+    pub fn uses(&self, key: &str) -> bool {
+        self.keys().any(|k| k == key)
+    }
+
     fn keys(&self) -> impl Iterator<Item = &str> {
         self.parts.iter().filter_map(|part| match part {
             Part::Key(key) => Some(key.as_str()),

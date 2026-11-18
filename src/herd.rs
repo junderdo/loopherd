@@ -1,6 +1,7 @@
 //! Herd files (D7, D9) and `loopherd add`.
 
 use std::collections::{BTreeMap, HashMap};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -50,6 +51,7 @@ struct LeadFile {
     new_cards: Option<bool>,
     design_escalation: Option<bool>,
     blocked_dialogs: Option<bool>,
+    review_rounds: Option<NonZeroU32>,
     context_limit: Option<u64>,
 }
 
@@ -88,8 +90,9 @@ fn on_off(on: bool) -> &'static str {
     if on { "on" } else { "off" }
 }
 
-/// The switches one layer sets: a herd file's `[lead]`, or `config.toml`'s
-/// `[lead_defaults]`. A switch neither sets is off.
+/// The switches and review-round limit one layer sets: a herd file's
+/// `[lead]`, or `config.toml`'s `[lead_defaults]`. A switch neither sets is
+/// off, and the limit is [`DEFAULT_REVIEW_ROUNDS`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SwitchValues {
@@ -99,7 +102,11 @@ pub struct SwitchValues {
     pub new_cards: Option<bool>,
     pub design_escalation: Option<bool>,
     pub blocked_dialogs: Option<bool>,
+    pub review_rounds: Option<NonZeroU32>,
 }
+
+/// How many review rounds a lead runs on a PR before asking the human.
+const DEFAULT_REVIEW_ROUNDS: u32 = 3;
 
 impl SwitchValues {
     pub const NAMES: [&str; 6] = [
@@ -110,6 +117,11 @@ impl SwitchValues {
         "design_escalation",
         "blocked_dialogs",
     ];
+
+    /// Whether this layer sets any switch; `review_rounds` alone doesn't count.
+    pub fn sets_a_switch(&self) -> bool {
+        self.values().iter().any(Option::is_some)
+    }
 
     fn values(&self) -> [Option<bool>; 6] {
         [
@@ -132,6 +144,16 @@ impl SwitchValues {
             new_cards: on(self.new_cards, defaults.new_cards),
             design_escalation: on(self.design_escalation, defaults.design_escalation),
             blocked_dialogs: on(self.blocked_dialogs, defaults.blocked_dialogs),
+        }
+    }
+
+    /// The review-round limit from `self`, else from `defaults`, else
+    /// built-in, with which of the three it came from.
+    fn review_rounds_over(&self, defaults: &SwitchValues) -> (u32, &'static str) {
+        match (self.review_rounds, defaults.review_rounds) {
+            (Some(rounds), _) => (rounds.get(), "herd file"),
+            (None, Some(rounds)) => (rounds.get(), "lead_defaults"),
+            (None, None) => (DEFAULT_REVIEW_ROUNDS, "built-in"),
         }
     }
 }
@@ -658,10 +680,11 @@ pub struct LeadConfig {
     /// `[lead].args`, else the herd's `args`.
     pub args: Vec<String>,
     pub switches: Switches,
+    pub review_rounds: u32,
 }
 
 /// Placeholders a lead's prompt may use.
-pub const LEAD_KEYS: [&str; 4] = ["name", "herd", "worktree", "switches"];
+pub const LEAD_KEYS: [&str; 5] = ["name", "herd", "worktree", "switches", "review_rounds"];
 
 pub fn lead_config(paths: &Paths, herd: &str) -> Result<LeadConfig> {
     let file = load(&paths.herds, herd).context("herd")?;
@@ -670,11 +693,13 @@ pub fn lead_config(paths: &Paths, herd: &str) -> Result<LeadConfig> {
         .with_context(|| format!("herd: {herd} has no [lead]"))?;
     let prompt = read_prompt(&lead.prompt, &lead.prompt_file, paths).context("lead")?;
     check_lead_prompt(&prompt).context("lead")?;
+    let defaults = lead_defaults(paths)?;
     Ok(LeadConfig {
         repo: expand_home(&file.repo, &paths.home),
         workspace: file.workspace,
         prompt,
-        switches: lead.switches().over(&lead_defaults(paths)?),
+        switches: lead.switches().over(&defaults),
+        review_rounds: lead.switches().review_rounds_over(&defaults).0,
         args: lead.args.unwrap_or(file.args),
     })
 }
@@ -761,6 +786,7 @@ impl LeadFile {
             new_cards: self.new_cards,
             design_escalation: self.design_escalation,
             blocked_dialogs: self.blocked_dialogs,
+            review_rounds: self.review_rounds,
         }
     }
 }
@@ -990,6 +1016,10 @@ fn describe(
         [
             format!("  loopherd lead {herd}"),
             format!("  switches: {}", switch_sources(&lead.switches(), defaults)),
+            format!(
+                "  review_rounds: {}",
+                review_rounds_source(&lead.switches(), defaults)
+            ),
         ]
     });
     let after_merge = (!parsed.after_merge.is_empty())
@@ -1029,6 +1059,14 @@ fn switch_sources(own: &SwitchValues, defaults: Option<&SwitchValues>) -> String
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn review_rounds_source(own: &SwitchValues, defaults: Option<&SwitchValues>) -> String {
+    let Some(defaults) = defaults else {
+        return "unknown until config.toml is fixed".into();
+    };
+    let (rounds, source) = own.review_rounds_over(defaults);
+    format!("{rounds} ({source})")
 }
 
 /// `text` parsed, failing on a placeholder that is neither a param nor in `built_ins`.
@@ -2524,6 +2562,79 @@ args = ["--model", "opus"]
     }
 
     #[test]
+    fn review_rounds_come_from_the_herd_file_else_lead_defaults_else_three() {
+        let config = Config::with(&[
+            (
+                "own",
+                &format!("{LEAD_HERD}[lead]\nprompt = \"go\"\nreview_rounds = 5\n"),
+            ),
+            ("unset", &format!("{LEAD_HERD}[lead]\nprompt = \"go\"\n")),
+        ]);
+        let rounds = |herd: &str| lead_config(&config.paths(), herd).unwrap().review_rounds;
+        assert_eq!((rounds("own"), rounds("unset")), (5, 3));
+
+        fs::write(
+            config.path().join("config.toml"),
+            "[lead_defaults]\nreview_rounds = 2\n",
+        )
+        .unwrap();
+        assert_eq!((rounds("own"), rounds("unset")), (5, 2));
+    }
+
+    #[test]
+    fn herds_shows_each_leads_review_rounds_and_where_they_came_from() {
+        let lead = |rounds: &str| format!("{LEAD_HERD}[lead]\nprompt = \"go\"\n{rounds}");
+        let config = Config::with(&[("own", &lead("review_rounds = 5\n")), ("unset", &lead(""))]);
+        let shown = |herd: &str| {
+            let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+            assert_eq!(code, 0, "{report}");
+            let (_, rest) = report
+                .split_once(&format!("  loopherd lead {herd}\n"))
+                .unwrap();
+            rest.lines()
+                .find_map(|l| l.strip_prefix("  review_rounds: "))
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(shown("own"), "5 (herd file)");
+        assert_eq!(shown("unset"), "3 (built-in)");
+
+        fs::write(
+            config.path().join("config.toml"),
+            "[lead_defaults]\nreview_rounds = 2\n",
+        )
+        .unwrap();
+        assert_eq!(shown("own"), "5 (herd file)");
+        assert_eq!(shown("unset"), "2 (lead_defaults)");
+    }
+
+    #[test]
+    fn herds_reports_review_rounds_that_are_not_a_positive_integer_as_invalid() {
+        for bad in ["0", "-1", "2.5", "\"3\""] {
+            let herd = format!("{LEAD_HERD}[lead]\nprompt = \"go\"\nreview_rounds = {bad}\n");
+            let config = Config::with(&[("h", &herd)]);
+
+            let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+
+            assert_eq!(code, 1, "{bad}: {report}");
+            assert!(report.contains("review_rounds"), "{bad}: {report}");
+
+            let config = Config::with(&[("h", &format!("{LEAD_HERD}[lead]\nprompt = \"go\"\n"))]);
+            fs::write(
+                config.path().join("config.toml"),
+                format!("[lead_defaults]\nreview_rounds = {bad}\n"),
+            )
+            .unwrap();
+
+            let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+
+            assert_eq!(code, 1, "{bad}: {report}");
+            assert!(report.starts_with("invalid "), "{bad}: {report}");
+            assert!(report.contains("review_rounds"), "{bad}: {report}");
+        }
+    }
+
+    #[test]
     fn herds_shows_each_leads_switches_and_where_each_came_from() {
         let herd = format!("{LEAD_HERD}[lead]\nprompt = \"go\"\nmerge = false\nrebase = true\n");
         let config = Config::with(&[("h", &herd), ("unled", LEAD_HERD)]);
@@ -2564,7 +2675,8 @@ args = ["--model", "opus"]
         assert!(report.contains("merj"), "{report}");
         assert!(
             report.contains(
-                "  loopherd lead h\n  switches: every switch off until config.toml is fixed"
+                "  loopherd lead h\n  switches: every switch off until config.toml is fixed\n  \
+                 review_rounds: unknown until config.toml is fixed"
             ),
             "{report}"
         );
@@ -2654,6 +2766,7 @@ args = ["--model", "opus"]
              \x20 loopherd lead a\n\
              \x20 switches: merge off (built-in), install off (built-in), rebase off (built-in), \
              new_cards off (built-in), design_escalation off (built-in), blocked_dialogs off (built-in)\n\
+             \x20 review_rounds: 3 (built-in)\n\
              invalid b.toml: lead: prompt: unknown placeholder {pane}"
         );
         assert_eq!(code, 1);
