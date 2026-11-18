@@ -285,7 +285,9 @@ fn blocked_and_gone_events_run_loopherds_event_hook() {
         [
             ("pane.agent_status_changed", hook.clone()),
             ("pane.exited", hook.clone()),
-            ("pane.closed", hook),
+            ("pane.closed", hook.clone()),
+            ("tab.closed", hook.clone()),
+            ("workspace.closed", hook),
         ]
     );
 }
