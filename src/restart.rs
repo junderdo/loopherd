@@ -515,6 +515,19 @@ mod tests {
     }
 
     #[test]
+    fn a_restart_in_the_recorded_pane_sets_no_env_pane_id() {
+        let w = World::new();
+        w.handed_off();
+        let (result, ledger) = w.restart_as(false, true, None, &|r| r.pane_id = "w9:p9".into());
+        result.unwrap();
+        let lh1 = &ledger.0["lh-1"];
+        assert_eq!(
+            (lh1.pane_id.as_str(), lh1.env_pane_id.as_deref()),
+            ("w9:p9", None)
+        );
+    }
+
+    #[test]
     fn a_restart_keeps_the_pane_id_the_agent_was_started_with() {
         let w = World::new();
         w.handed_off();
