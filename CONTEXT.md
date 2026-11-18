@@ -94,8 +94,8 @@ human.
 ## Communication
 
 **Mailbox**:
-Each member's record of what it has said and what has happened to it: its reports
-and its stops. Messages go up only, to the lead or the shepherd. Nothing is
+Each member's record of what it has said and what has happened to it: its reports,
+its stops, and herdr seeing it blocked or gone. Messages go up only, to the lead or the shepherd. Nothing is
 deleted; each reader keeps its place instead, so the history survives handoffs
 and retirement. Messages down to a member are typed into its session, not mailed.
 _Avoid_: inbox

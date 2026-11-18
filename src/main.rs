@@ -14,6 +14,7 @@ mod line_ending;
 mod lock;
 mod matching;
 mod notify;
+mod pane_event;
 mod pane_label;
 mod pause;
 mod process;
@@ -314,6 +315,11 @@ enum Command {
     /// session past the member's context limit, it blocks the stop instead and asks
     /// for a handoff. Outside a member's pane it records nothing. Set up by install-hook.
     StopHook,
+    /// The herdr plugin's hook on pane.agent_status_changed, pane.exited and
+    /// pane.closed: records a member going blocked, or its pane going, in its
+    /// mailbox for the next watch. Reads HERDR_PLUGIN_EVENT and
+    /// HERDR_PLUGIN_EVENT_JSON; any other pane records nothing.
+    HerdrEventHook,
     /// Claude's SessionStart hook: when a member's Claude is cleared or resumed,
     /// points its ledger entry at the new session, read from the hook input on
     /// stdin. Outside a member's pane it changes nothing. Set up by install-hook.
@@ -649,6 +655,7 @@ fn main() -> ExitCode {
             settings,
         } => ("watch", run_watch(&herds, timeout, settings)),
         Command::StopHook => ("stop-hook", run_stop_hook()),
+        Command::HerdrEventHook => ("herdr-event-hook", run_herdr_event_hook()),
         Command::SessionHook => ("session-hook", run_session_hook()),
         Command::PromptHook => ("prompt-hook", run_prompt_hook()),
         Command::ToolHook => ("tool-hook", run_tool_hook()),
@@ -1263,6 +1270,21 @@ fn run_stop_hook() -> Result<i32> {
             serde_json::json!({"decision": "block", "reason": reason})
         );
     }
+    Ok(0)
+}
+
+fn run_herdr_event_hook() -> Result<i32> {
+    let event = std::env::var("HERDR_PLUGIN_EVENT").context("no HERDR_PLUGIN_EVENT")?;
+    let json = std::env::var("HERDR_PLUGIN_EVENT_JSON").context("no HERDR_PLUGIN_EVENT_JSON")?;
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    pane_event::event_hook(
+        &ledger,
+        &ledger.reports_dir()?,
+        &event,
+        &json,
+        socket_from_env().as_deref(),
+        SystemTime::now(),
+    )?;
     Ok(0)
 }
 

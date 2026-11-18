@@ -1,11 +1,12 @@
 //! `loopherd watch`: block until a member needs the shepherd. Stops come
-//! from the Stop hook's mailbox entries; herdr adds `blocked` and `gone`.
+//! from the Stop hook's mailbox entries; herdr's `blocked` and `gone` from
+//! entries the herdr plugin's event hook or this watch's poll records.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 
@@ -17,9 +18,10 @@ use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::{AfterMerge, AgentRecord, Ledger, Process};
 use crate::lock::Lock;
 use crate::notify::{self, Waiting};
+use crate::pane_event::{record_blocked, record_gone};
 use crate::pause;
 use crate::process::{Procs, live};
-use crate::report::{Body, Filter, Mailbox, Pending, Stop, member_in, peek_reports, unread_stops};
+use crate::report::{Body, Filter, Mailbox, Pending, Stop, member_in, peek_reports, unread_wakes};
 use crate::status;
 
 /// The kinds of line a watch prints after a member's name, besides report kinds.
@@ -210,11 +212,38 @@ pub fn watch(
         let mut lines = vec![];
         let mut waiting = vec![];
         let mut pending = vec![];
+        let mut wakes = vec![];
+        if !agents_read {
+            gone = Gone::default();
+        }
+        for member in &members {
+            if member.gone {
+                if gone.confirm(member, &occupied) {
+                    record_gone(dir, &member.name, SystemTime::now())?;
+                }
+                continue;
+            }
+            gone.seen(member, agents_read);
+            if agents_read {
+                seen_live.insert(member.name.clone());
+            }
+            let was = last.get(&member.name).copied();
+            // Only on change: one blocked at start would re-wake every re-armed watch.
+            if member.status == AgentStatus::Blocked
+                && was.is_some_and(|w| w != AgentStatus::Blocked)
+            {
+                record_blocked(dir, &member.name, SystemTime::now())?;
+            }
+            if member.status != AgentStatus::Unknown {
+                last.insert(member.name.clone(), member.status);
+            }
+        }
         // An empty filter means every mailbox.
         if !names.is_empty() {
             // Stops first: a stop is appended after its report, so any stop
             // read here has its report visible to the read after it.
-            let (stops, stops_read) = unread_stops(dir, &names)?;
+            let wakes_read;
+            (wakes, wakes_read) = unread_wakes(dir, &names)?;
             let (read, reports_read) = peek_reports(
                 ledger,
                 dir,
@@ -243,8 +272,8 @@ pub fn watch(
                     at: Some(entry.at),
                 })
             }));
-            lines.extend(stops.iter().flat_map(stop_wakes));
-            pending.extend([stops_read, reports_read]);
+            lines.extend(wakes.iter().flat_map(stop_wakes));
+            pending.extend([wakes_read, reports_read]);
         }
         let mut fired = None;
         if let Some(checks) = checks.as_mut().filter(|c| clock.elapsed() >= c.next) {
@@ -255,37 +284,8 @@ pub fn watch(
                 fired = Some(checks.fired.with(&events));
             }
         }
-        if !agents_read {
-            gone = Gone::default();
-        }
-        for member in &members {
-            if member.gone {
-                if gone.confirm(member, &occupied) {
-                    lines.push(format!("{} {}", member.name, line::GONE));
-                }
-                continue;
-            }
-            gone.seen(member, agents_read);
-            if agents_read {
-                seen_live.insert(member.name.clone());
-            }
-            let was = last.get(&member.name).copied();
-            // Only on change: one blocked at start would re-wake every re-armed watch.
-            if member.status == AgentStatus::Blocked
-                && was.is_some_and(|w| w != AgentStatus::Blocked)
-            {
-                lines.push(format!("{} {}", member.name, line::BLOCKED));
-                waiting.push(Waiting {
-                    herd: None,
-                    member: member.name.clone(),
-                    kind: notify::Kind::Blocked,
-                    text: String::new(),
-                    at: None,
-                });
-            }
-            if member.status != AgentStatus::Unknown {
-                last.insert(member.name.clone(), member.status);
-            }
+        for mailbox in &wakes {
+            herdr_wakes(mailbox, &mut lines, &mut waiting);
         }
         if let (Some(notify_own), Some(own), Reader::Lead { herd, .. }) =
             (req.notify_own, &own, &reader)
@@ -1074,7 +1074,7 @@ fn stop_wakes(mailbox: &Mailbox) -> Vec<String> {
                 reported = true;
                 None
             }
-            Body::Note { .. } => None,
+            Body::Note { .. } | Body::Blocked {} | Body::Gone {} => None,
             Body::Stop(Stop {
                 error: Some(error), ..
             }) => {
@@ -1096,6 +1096,27 @@ fn stop_wakes(mailbox: &Mailbox) -> Vec<String> {
         }
     }
     wakes
+}
+
+/// A wake line for each unread `blocked` or `gone`, and each `blocked` as
+/// waiting on the human.
+fn herdr_wakes(mailbox: &Mailbox, lines: &mut Vec<String>, waiting: &mut Vec<Waiting>) {
+    for entry in &mailbox.entries[mailbox.unread..] {
+        match entry.body {
+            Body::Blocked {} => {
+                lines.push(format!("{} {}", mailbox.name, line::BLOCKED));
+                waiting.push(Waiting {
+                    herd: None,
+                    member: mailbox.name.clone(),
+                    kind: notify::Kind::Blocked,
+                    text: String::new(),
+                    at: None,
+                });
+            }
+            Body::Gone {} => lines.push(format!("{} {}", mailbox.name, line::GONE)),
+            _ => {}
+        }
+    }
 }
 
 /// The view's non-retired members `reader` owns, narrowed to `req.herds`,
@@ -2229,6 +2250,163 @@ mod tests {
         assert!(notifier.sent().is_empty());
     }
 
+    /// The herdr plugin's event hook, as herdr runs it for `pane`.
+    fn hook(ledger: &dyn Ledger, dir: &Path, event: &str, pane: &str, status: Option<&str>) {
+        let status = status.map_or(String::new(), |s| format!(r#","agent_status":"{s}""#));
+        let json = format!(r#"{{"event":"x","data":{{"pane_id":"{pane}"{status}}}}}"#);
+        let at = humantime::parse_rfc3339("2026-11-01T09:00:00Z").unwrap();
+        crate::pane_event::event_hook(ledger, dir, event, &json, None, at).unwrap();
+    }
+
+    fn blocked_hook(ledger: &dyn Ledger, dir: &Path, pane: &str) {
+        hook(
+            ledger,
+            dir,
+            "pane.agent_status_changed",
+            pane,
+            Some("blocked"),
+        );
+    }
+
+    #[test]
+    fn a_gone_recorded_while_no_watch_ran_wakes_the_next_watch_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![member("lh-1", "w9:p1", None)]);
+        let herdr = FakeHerdr::new(&[]);
+
+        hook(&ledger, dir.path(), "pane.exited", "w9:p1", None);
+        hook(&ledger, dir.path(), "pane.closed", "w9:p1", None);
+
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &ONCE, &mut steps(|_| {})).unwrap(),
+            ["lh-1 gone"]
+        );
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &ONCE, &mut steps(|_| {})),
+            None
+        );
+    }
+
+    #[test]
+    fn a_block_recorded_while_no_watch_ran_wakes_the_next_watch_once_as_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![member("lh-1", "w9:p1", None)]);
+        let herdr = FakeHerdr::new(&[]).with_live_agent(Some("lh-1"), None, "w9:p1");
+        herdr.set_status("lh-1", AgentStatus::Blocked);
+
+        blocked_hook(&ledger, dir.path(), "w9:p1");
+
+        let wake = watch(
+            &herdr,
+            &ledger,
+            dir.path(),
+            &ONCE,
+            &mut steps(|_| {}),
+            &mut |_| {},
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            waiting(&wake),
+            [(None, "lh-1", notify::Kind::Blocked, "", false)]
+        );
+        assert_eq!(printed(wake), ["lh-1 blocked"]);
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &ONCE, &mut steps(|_| {})),
+            None
+        );
+    }
+
+    #[test]
+    fn a_block_both_the_hook_and_the_poll_saw_prints_once_whichever_came_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![member("lh-1", "w9:p1", None)]);
+        let herdr = FakeHerdr::new(&[]).with_live_agent(Some("lh-1"), None, "w9:p1");
+        herdr.set_status("lh-1", AgentStatus::Working);
+
+        let hook_first = steps(|poll| match poll {
+            1 => {
+                herdr.set_status("lh-1", AgentStatus::Blocked);
+                blocked_hook(&ledger, dir.path(), "w9:p1");
+            }
+            _ => panic!("slept past the wake"),
+        });
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut { hook_first }).unwrap(),
+            ["lh-1 blocked"]
+        );
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &ONCE, &mut steps(|_| {})),
+            None
+        );
+
+        hook(
+            &ledger,
+            dir.path(),
+            "pane.agent_status_changed",
+            "w9:p1",
+            Some("working"),
+        );
+        herdr.set_status("lh-1", AgentStatus::Working);
+        let poll_first = steps(|poll| match poll {
+            1 => herdr.set_status("lh-1", AgentStatus::Blocked),
+            _ => panic!("slept past the wake"),
+        });
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut { poll_first }).unwrap(),
+            ["lh-1 blocked"]
+        );
+        blocked_hook(&ledger, dir.path(), "w9:p1");
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &ONCE, &mut steps(|_| {})),
+            None
+        );
+    }
+
+    #[test]
+    fn a_gone_the_poll_saw_before_the_hook_prints_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![member("lh-1", "w9:p1", None)]);
+        let herdr = FakeHerdr::new(&[]).with_live_agent(Some("lh-1"), None, "w9:p1");
+        herdr.set_status("lh-1", AgentStatus::Idle);
+
+        let mut clock = steps(|poll| match poll {
+            1 => herdr.remove_agent("lh-1"),
+            2 => {}
+            _ => panic!("slept past the wake"),
+        });
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
+            ["lh-1 gone"]
+        );
+        hook(&ledger, dir.path(), "pane.closed", "w9:p1", None);
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &ONCE, &mut steps(|_| {})),
+            None
+        );
+    }
+
+    #[test]
+    fn a_leads_watch_reads_its_workers_hook_events_and_the_shepherds_the_leads() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = quiet_led_world();
+        hook(&ledger, dir.path(), "pane.closed", "w9:p1", None);
+        blocked_hook(&ledger, dir.path(), "w9:p0");
+
+        let lead_once = Request {
+            timeout: Some(Duration::ZERO),
+            ..from_pane("w9:p0")
+        };
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &lead_once, &mut steps(|_| {})).unwrap(),
+            ["lh-1 gone"]
+        );
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &ONCE, &mut steps(|_| {})).unwrap(),
+            ["lead-cards blocked"]
+        );
+    }
+
     #[test]
     fn a_leads_watch_reads_only_its_own_herds_workers() {
         let dir = tempfile::tempdir().unwrap();
@@ -3289,7 +3467,7 @@ mod tests {
     impl Checked {
         fn pause(&self) {
             let herds = crate::pause::Herds::One("cards");
-            crate::pause::pause(&self.paths, herds, None, std::time::SystemTime::now()).unwrap();
+            crate::pause::pause(&self.paths, herds, None, SystemTime::now()).unwrap();
         }
 
         fn resume(&self) {

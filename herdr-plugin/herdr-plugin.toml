@@ -10,3 +10,15 @@ id = "status"
 title = "loopherd: herd status"
 contexts = ["workspace"]
 command = ["sh", "loopherd.sh", "status"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["sh", "loopherd.sh", "herdr-event-hook"]
+
+[[events]]
+on = "pane.exited"
+command = ["sh", "loopherd.sh", "herdr-event-hook"]
+
+[[events]]
+on = "pane.closed"
+command = ["sh", "loopherd.sh", "herdr-event-hook"]

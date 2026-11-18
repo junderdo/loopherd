@@ -77,6 +77,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D60](decisions/D60.md) | An optional `[queue] backlog` command counts unready tasks; `status` shows claimable and unready counts, a lead's watch prints `running low` once per streak when claimable is at or below `max`, and the lead triages the unready tasks for the human, who alone approves marking them ready. |
 | [D61](decisions/D61.md) | The claimable count `status` shows and `running low` compares with `max` is every task feed would take with no cap on slots, not capped by free slots. |
 | [D62](decisions/D62.md) | loopherd ships as a herdr plugin from `herdr-plugin/` that needs `loopherd` already installed and never installs it or its hooks; its commands run through `loopherd.sh`. |
+| [D63](decisions/D63.md) | The herdr plugin's event hooks record a member's `blocked` and `gone` in its mailbox, as a watch's poll does; a watch prints both only from the mailbox, so each prints once. |
 
 ## Emerging model
 

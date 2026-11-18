@@ -120,3 +120,23 @@ fn wrapper_fails_with_how_to_install_when_loopherd_is_missing() {
         "{stderr}"
     );
 }
+
+#[test]
+fn blocked_and_gone_events_run_loopherds_event_hook() {
+    let m = manifest();
+    let hooks: Vec<(&str, Vec<&str>)> = m["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| (e["on"].as_str().unwrap(), strings(&e["command"])))
+        .collect();
+    let hook = vec!["sh", "loopherd.sh", "herdr-event-hook"];
+    assert_eq!(
+        hooks,
+        [
+            ("pane.agent_status_changed", hook.clone()),
+            ("pane.exited", hook.clone()),
+            ("pane.closed", hook),
+        ]
+    );
+}
