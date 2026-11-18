@@ -12,6 +12,7 @@ use crate::ledger::{AgentRecord, Ledger};
 use crate::lock::Lock;
 use crate::report::{Body, Entry, append};
 use crate::subagent_view::{ShowsSubagentView, TEXT_REACHES_SUBAGENT, ensure_main_view};
+use crate::worktree::same_dir;
 
 /// Sent to a lead whose watch isn't running: after a restart nothing else wakes it (D17).
 pub const REARM_PROMPT: &str = "You were revived after a restart, so your \
@@ -99,10 +100,11 @@ pub fn revive(
                     .or(current.session_id.take())
                     .map(|s| live(&s));
                 if let (Some(here), Some(there)) = (&here, &current.socket)
-                    && here != there
+                    && !same_dir(here, there)
                 {
                     bail!(
-                        "recorded on {} since revive read the ledger",
+                        "recorded on {} since revive read the ledger; \
+                         its resumed session is left running in pane {pane_id}",
                         there.display()
                     );
                 }
@@ -401,7 +403,7 @@ fn revive_one(
         return Outcome::Skipped("retired".into());
     }
     if let (Some(here), Some(there)) = (here, &record.socket)
-        && here != there
+        && !same_dir(here, there)
     {
         return Outcome::Skipped(format!("recorded on {}", there.display()));
     }
@@ -1558,11 +1560,34 @@ mod tests {
         assert_eq!(
             (out.as_str(), code),
             (
-                "failed a: ledger: recorded on /run/live.sock since revive read the ledger",
+                "failed a: ledger: recorded on /run/live.sock since revive read the ledger; \
+                 its resumed session is left running in pane w1:p1",
                 1
             )
         );
         assert_eq!(ledger.current.0, before);
+    }
+
+    #[test]
+    fn a_socket_recorded_through_a_symlinked_dir_is_the_same_server() {
+        let cwd = tempfile::tempdir().unwrap();
+        let dirs = tempfile::tempdir().unwrap();
+        let real = dirs.path().join("real");
+        let link = dirs.path().join("link");
+        fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let recorded = link.join("herdr.sock");
+        let mut herdr = herdr();
+        herdr.socket = Some(real.join("herdr.sock"));
+        let mut ledger = ledger([AgentRecord {
+            socket: Some(recorded.clone()),
+            ..record("a", cwd.path())
+        }]);
+
+        let (out, _) = run(&herdr, &mut ledger, &request());
+
+        assert_eq!(out, "resumed a w1:p1");
+        assert_eq!(ledger.0["a"].socket, Some(recorded));
     }
 
     #[test]

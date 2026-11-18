@@ -489,7 +489,8 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   recorded on <socket>` for the rest and still exiting 0, so a revive in
   the dev session never starts the live session's members, and the other
   way round; run it in the member's own session. Members with no recorded
-  socket are revived and take that server's.
+  socket are revived and take that server's. Neither holds when herdr
+  can't name its socket: then nothing is skipped or filled in (D68).
 - **herdr plugin.** `herdr plugin install <owner>/loopherd/herdr-plugin`
   (loopherd's README names the repo) adds plugin `loopherd`,
   whose `status` action runs `loopherd status`; its output and errors go
