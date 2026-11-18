@@ -2,15 +2,16 @@
 //! hook records them as they happen, and a watch's poll records what it sees
 //! first; a watch prints them only from the mailbox, so each prints once.
 
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::ErrorKind;
 use std::path::Path;
 use std::time::SystemTime;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 
-use crate::ledger::Ledger;
+use crate::ledger::{AgentRecord, Ledger};
 use crate::notify;
 use crate::report::{self, Body, Entry, member_in};
 
@@ -19,8 +20,9 @@ use crate::report::{self, Body, Entry, member_in};
 pub const BLOCK_RECORDED: &str = "block-recorded";
 
 /// Records the herdr event `event`, as `HERDR_PLUGIN_EVENT` names it, with
-/// `json` from `HERDR_PLUGIN_EVENT_JSON`, for the non-retired member in its
-/// pane of the herdr at `socket`. Any other pane records nothing.
+/// `json` from `HERDR_PLUGIN_EVENT_JSON`, for the non-retired members of the
+/// herdr at `socket` in its pane, tab or workspace. Anything else records
+/// nothing.
 pub fn event_hook(
     ledger: &dyn Ledger,
     dir: &Path,
@@ -31,11 +33,40 @@ pub fn event_hook(
 ) -> Result<()> {
     let envelope: Value = serde_json::from_str(json).context("parse HERDR_PLUGIN_EVENT_JSON")?;
     let data = &envelope["data"];
+    let entries = ledger.entries()?;
+    let (key, held_in): (_, fn(&AgentRecord) -> Option<&str>) = match event {
+        "tab.closed" => ("tab_id", |m| m.tab_id.as_deref()),
+        "workspace.closed" => ("workspace_id", |m| Some(&m.workspace)),
+        _ => return pane_event(&entries, dir, event, data, socket, now),
+    };
+    let Some(id) = data[key].as_str() else {
+        return Ok(());
+    };
+    let members = entries
+        .values()
+        .filter(|m| !m.retired && m.socket.as_deref() == socket && held_in(m) == Some(id));
+    let failed: Vec<String> = members
+        .filter_map(|m| record_gone(dir, &m.name, now).err())
+        .map(|e| format!("{e:#}"))
+        .collect();
+    match failed.is_empty() {
+        true => Ok(()),
+        false => Err(anyhow!(failed.join("; "))),
+    }
+}
+
+fn pane_event(
+    entries: &BTreeMap<String, AgentRecord>,
+    dir: &Path,
+    event: &str,
+    data: &Value,
+    socket: Option<&Path>,
+    now: SystemTime,
+) -> Result<()> {
     let Some(pane) = data["pane_id"].as_str() else {
         return Ok(());
     };
-    let entries = ledger.entries()?;
-    let Some(member) = member_in(&entries, pane, socket) else {
+    let Some(member) = member_in(entries, pane, socket) else {
         return Ok(());
     };
     match (event, data["agent_status"].as_str()) {

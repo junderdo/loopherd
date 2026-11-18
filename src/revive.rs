@@ -7,7 +7,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::herdr::{Agent, AgentStatus, Herdr, StartOutcome, Workspace, wait_for_shell_prompt};
+use crate::herdr::{
+    Agent, AgentStatus, Herdr, Pane, StartOutcome, Workspace, wait_for_shell_prompt,
+};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::lock::Lock;
 use crate::report::{Body, Entry, append};
@@ -89,16 +91,13 @@ pub fn revive(
         let mut outcome = revive_one(herdr, req, here.as_deref(), &agents, &record, &mut warnings);
         if let Outcome::Started {
             pane_id,
+            tab_id,
+            workspace_id,
             session_id,
             ..
         } = &outcome
         {
             let restarted = ledger.update(&record.name, &mut |current| {
-                current.pane_id = pane_id.clone();
-                current.session_id = session_id
-                    .clone()
-                    .or(current.session_id.take())
-                    .map(|s| live(&s));
                 if let (Some(here), Some(there)) = (&here, &current.socket)
                     && !same_dir(here, there)
                 {
@@ -108,6 +107,13 @@ pub fn revive(
                         there.display()
                     );
                 }
+                current.pane_id = pane_id.clone();
+                current.tab_id = Some(tab_id.clone());
+                current.workspace = workspace_id.clone();
+                current.session_id = session_id
+                    .clone()
+                    .or(current.session_id.take())
+                    .map(|s| live(&s));
                 current.socket = current.socket.take().or_else(|| here.clone());
                 current.process = None;
                 Ok(())
@@ -295,6 +301,8 @@ enum Outcome {
     },
     Started {
         pane_id: String,
+        tab_id: String,
+        workspace_id: String,
         session_id: Option<String>,
         blocked: bool,
         rearm: Rearm,
@@ -466,40 +474,44 @@ fn revive_one(
     };
     if req.dry_run {
         return Outcome::WouldResume {
-            pane_id: reusable,
+            pane_id: reusable.map(|p| p.id),
             workspace: workspace.label,
             rearm: Rearm::NotSent,
         };
     }
-    let (pane_id, new_tab) = match reusable {
-        Some(pane_id) => (pane_id, None),
+    let (pane_id, tab_id, new_tab) = match reusable {
+        Some(pane) => (pane.id, pane.tab_id, false),
         None => match herdr.create_tab(&workspace.id, cwd, &record.name) {
-            Ok(tab) => (tab.pane_id, Some(tab.tab_id)),
+            Ok(tab) => (tab.pane_id, tab.tab_id, true),
             Err(error) => return Outcome::Failed { step: "tab", error },
         },
     };
     let mut args = vec!["--resume".to_string(), session.clone()];
     args.extend(record.claude_args.iter().cloned());
     let started = match new_tab {
-        Some(_) => wait_for_shell_prompt(herdr, &pane_id, req.start_timeout, req.poll_interval),
-        None => Ok(()),
+        true => wait_for_shell_prompt(herdr, &pane_id, req.start_timeout, req.poll_interval),
+        false => Ok(()),
     }
     .and_then(|()| herdr.start_claude(&record.name, &pane_id, req.start_timeout, &args));
     match started {
         Ok(StartOutcome::Ready(agent)) => Outcome::Started {
             pane_id,
+            tab_id,
+            workspace_id: workspace.id,
             session_id: agent.session_id,
             blocked: false,
             rearm: Rearm::NotSent,
         },
         Ok(StartOutcome::Blocked) => Outcome::Started {
             pane_id,
+            tab_id,
+            workspace_id: workspace.id,
             session_id: None,
             blocked: true,
             rearm: Rearm::NotSent,
         },
         Err(error) => {
-            let error = match new_tab.map(|tab| herdr.close_tab(&tab)) {
+            let error = match new_tab.then(|| herdr.close_tab(&tab_id)) {
                 Some(Err(close)) => {
                     error.context(format!("also failed to close its tab: {close:#}"))
                 }
@@ -531,7 +543,7 @@ fn shell_pane(
     workspace_id: &str,
     name: &str,
     cwd: &Path,
-) -> Result<Option<String>> {
+) -> Result<Option<Pane>> {
     let tabs: Vec<_> = herdr
         .tabs_in(workspace_id)?
         .into_iter()
@@ -540,7 +552,7 @@ fn shell_pane(
         .collect();
     for pane in herdr.panes_in(workspace_id)? {
         if tabs.contains(&pane.tab_id) && pane.is_in(cwd) && herdr.at_shell_prompt(&pane.id)? {
-            return Ok(Some(pane.id));
+            return Ok(Some(pane));
         }
     }
     Ok(None)
@@ -578,6 +590,7 @@ mod tests {
         AgentRecord {
             name: name.into(),
             pane_id: "w1:p1".into(),
+            tab_id: None,
             session_id: Some(format!("sess-{name}")),
             repo: cwd.into(),
             worktree: None,
@@ -838,10 +851,12 @@ mod tests {
         let herdr = herdr();
         let mut ledger = ledger([AgentRecord {
             pane_id: "w1:p7".into(),
+            tab_id: Some("w1:t7".into()),
             ..record("a", cwd.path())
         }]);
         let (out, code) = run(&herdr, &mut ledger, &request());
         assert_eq!((out.as_str(), code), ("resumed a w1:p1", 0));
+        assert_eq!(ledger.0["a"].tab_id.as_deref(), Some("w1:t1"));
         let tabs = herdr.tabs();
         assert_eq!(tabs.len(), 1);
         assert_eq!(
@@ -964,6 +979,18 @@ mod tests {
         assert_eq!(herdr.tabs().len(), 1);
         assert_eq!(herdr.started()[0].pane_id, pane);
         assert_eq!(ledger.0["a"].pane_id, pane);
+        assert_eq!(ledger.0["a"].tab_id, Some(herdr.tabs()[0].id.clone()));
+    }
+
+    #[test]
+    fn records_the_workspace_id_its_label_has_now() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = FakeHerdr::new(&[("w3", "loopherd")]);
+        let mut ledger = ledger([record("a", cwd.path())]);
+        let (out, _) = run(&herdr, &mut ledger, &request());
+        assert_eq!(out, "resumed a w3:p1");
+        assert_eq!(ledger.0["a"].workspace, "w3");
+        assert_eq!(ledger.0["a"].tab_id.as_deref(), Some("w3:t1"));
     }
 
     #[test]

@@ -7,16 +7,21 @@ use std::process::{Command, Output};
 
 const SOCKET: &str = "/run/herdr/herdr.sock";
 
-/// lh-1 in pane w1:p1 and the retired old-1 in w1:p9, both of the herdr at
-/// [`SOCKET`].
+/// Members of the herdr at [`SOCKET`]: lh-1 in pane w1:p1 of tab w1:t1, the
+/// retired old-1 in w1:p9 of the same tab, lh-0 in w1:p5 with no tab recorded,
+/// and lh-2 in w2:p1 of tab w2:t1.
 fn sandbox() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("state/loopherd");
     fs::create_dir_all(&state).unwrap();
-    let entry = |name: &str, pane: &str, retired: bool| {
+    let entry = |name: &str, pane: &str, tab: Option<&str>, retired: bool| {
+        let workspace = pane.split(':').next().unwrap();
+        let tab = tab
+            .map(|t| format!(r#""tab_id": "{t}","#))
+            .unwrap_or_default();
         format!(
-            r#""{name}": {{"name": "{name}", "pane_id": "{pane}", "session_id": null,
-                "repo": "/", "worktree": null, "workspace": "w1", "prompt": null,
+            r#""{name}": {{"name": "{name}", "pane_id": "{pane}", {tab} "session_id": null,
+                "repo": "/", "worktree": null, "workspace": "{workspace}", "prompt": null,
                 "prompt_sent": true, "created": "2026-11-01T00:00:00Z",
                 "socket": "{SOCKET}", "retired": {retired}}}"#
         )
@@ -24,9 +29,11 @@ fn sandbox() -> tempfile::TempDir {
     fs::write(
         state.join("ledger.json"),
         format!(
-            "{{{}, {}}}",
-            entry("lh-1", "w1:p1", false),
-            entry("old-1", "w1:p9", true)
+            "{{{}, {}, {}, {}}}",
+            entry("lh-1", "w1:p1", Some("w1:t1"), false),
+            entry("old-1", "w1:p9", Some("w1:t1"), true),
+            entry("lh-0", "w1:p5", None, false),
+            entry("lh-2", "w2:p1", Some("w2:t1"), false)
         ),
     )
     .unwrap();
@@ -74,6 +81,23 @@ fn closed(dir: &Path, event_name: &str, pane: &str) -> Output {
     )
 }
 
+fn tab_closed(dir: &Path, tab: &str) -> Output {
+    let workspace = tab.split(':').next().unwrap();
+    event(
+        dir,
+        "tab.closed",
+        &format!(r#"{{"tab_id":"{tab}","workspace_id":"{workspace}"}}"#),
+    )
+}
+
+fn workspace_closed(dir: &Path, workspace: &str) -> Output {
+    event(
+        dir,
+        "workspace.closed",
+        &format!(r#"{{"workspace_id":"{workspace}"}}"#),
+    )
+}
+
 /// `reports --all`, each line cut to its member and kind.
 fn recorded(dir: &Path) -> Vec<String> {
     let out = loopherd(dir, &["reports", "--all"]).output().unwrap();
@@ -111,6 +135,53 @@ fn a_members_pane_exiting_and_closing_records_one_gone() {
     quiet_success(&closed(dir.path(), "pane.closed", "w1:p1"));
 
     assert_eq!(recorded(dir.path()), ["lh-1 gone"]);
+}
+
+#[test]
+fn a_members_tab_closing_records_gone_for_the_open_members_in_it() {
+    let dir = sandbox();
+
+    quiet_success(&tab_closed(dir.path(), "w1:t1"));
+    quiet_success(&tab_closed(dir.path(), "w1:t1"));
+
+    assert_eq!(recorded(dir.path()), ["lh-1 gone"]);
+}
+
+#[test]
+fn a_workspace_closing_records_gone_for_every_open_member_in_it() {
+    let dir = sandbox();
+
+    quiet_success(&workspace_closed(dir.path(), "w1"));
+    quiet_success(&tab_closed(dir.path(), "w1:t1"));
+
+    let mut gone = recorded(dir.path());
+    gone.sort();
+    assert_eq!(gone, ["lh-0 gone", "lh-1 gone"]);
+}
+
+#[test]
+fn a_tab_or_workspace_of_another_herdr_records_nothing() {
+    let dir = sandbox();
+
+    for (event, data) in [
+        ("tab.closed", r#"{"tab_id":"w1:t1","workspace_id":"w1"}"#),
+        ("workspace.closed", r#"{"workspace_id":"w1"}"#),
+    ] {
+        let other_herdr = loopherd(dir.path(), &["herdr-event-hook"])
+            .env("HERDR_SOCKET_PATH", "/run/other/herdr.sock")
+            .env("HERDR_PLUGIN_EVENT", event)
+            .env(
+                "HERDR_PLUGIN_EVENT_JSON",
+                format!(r#"{{"event":"{}","data":{data}}}"#, event.replace('.', "_")),
+            )
+            .output()
+            .unwrap();
+        quiet_success(&other_herdr);
+    }
+    quiet_success(&tab_closed(dir.path(), "w1:t7"));
+    quiet_success(&workspace_closed(dir.path(), "w9"));
+
+    assert!(recorded(dir.path()).is_empty());
 }
 
 #[test]
@@ -175,6 +246,18 @@ fn a_mailbox_it_cannot_write_exits_0_with_the_error() {
         .path()
         .join("state/loopherd/reports/lh-1.block-recorded");
     assert!(!mark.exists(), "the failed block left its mark");
+}
+
+#[test]
+fn a_closed_workspace_records_every_member_it_can_and_names_the_ones_it_cannot() {
+    let dir = sandbox();
+    let reports = dir.path().join("state/loopherd/reports");
+    fs::create_dir_all(reports.join("lh-0.jsonl")).unwrap();
+
+    failed_quietly(&workspace_closed(dir.path(), "w1"), "lh-0.jsonl");
+
+    let lh1 = fs::read_to_string(reports.join("lh-1.jsonl")).unwrap();
+    assert!(lh1.contains(r#""kind":"gone""#), "{lh1}");
 }
 
 #[test]

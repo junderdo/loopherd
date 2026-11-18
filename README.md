@@ -116,8 +116,8 @@ description = "loopherd herd view"
 pick another if your config uses it. A popup that closes as soon as it
 opens means the view couldn't start; run `loopherd view` in a pane to see
 why. Its event hooks record a member going blocked, or its pane exiting
-or closing, so the next `loopherd watch` reports it even when none was
-running.
+or closing, or its tab or workspace closing, so the next `loopherd watch`
+reports it even when none was running.
 
 A Ctrl-click on a GitHub PR link in any pane shows the member that owns
 the PR in a popup (herd, live status, template, review round, last
