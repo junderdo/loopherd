@@ -145,8 +145,8 @@ pub trait Herdr {
     /// process. Refused while another herdr modal is open.
     fn open_plugin_pane(&self, entrypoint: &str, env: &[(&str, &str)]) -> Result<()>;
     /// The plugin `id` in the reached herdr's registry; `None` when neither
-    /// installed nor linked.
-    fn plugin(&self, id: &str) -> Result<Option<Plugin>>;
+    /// installed nor linked. Gives up after `timeout`.
+    fn plugin(&self, id: &str, timeout: Duration) -> Result<Option<Plugin>>;
     /// The socket of the herdr these calls reach; `None` when herdr can't say.
     fn socket(&self) -> Option<PathBuf>;
     /// The server as `herdr status server` reports it, giving up after `timeout`.
@@ -209,28 +209,48 @@ impl CliHerdr {
             .command(args)
             .output()
             .with_context(|| format!("run herdr {}", args.join(" ")))?;
-        if out.status.success() {
-            let json: Value = serde_json::from_slice(&out.stdout)
-                .with_context(|| MalformedReply(args.join(" ")))?;
-            return Ok(Ok(json["result"].clone()));
-        }
-        let parsed = [&out.stderr, &out.stdout]
-            .into_iter()
-            .find_map(|bytes| serde_json::from_slice::<ErrorEnvelope>(bytes).ok());
-        match parsed {
-            Some(env) => Ok(Err(env.error)),
-            None => bail!(
-                "herdr {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&out.stderr).trim()
-            ),
-        }
+        reply(args, out)
     }
 
     fn call_ok(&self, args: &[&str]) -> Result<Value> {
-        self.call(args)?
-            .map_err(|e| anyhow!("herdr {}: {} ({})", args[..2].join(" "), e.message, e.code))
+        api_ok(args, self.call(args)?)
     }
+
+    fn call_ok_within(&self, args: &[&str], timeout: Duration) -> Result<Value> {
+        let ran = crate::shell::run_within(&mut self.command(args), timeout)
+            .with_context(|| format!("run herdr {}", args.join(" ")))?;
+        let Some(out) = ran else {
+            bail!(
+                "herdr didn't answer {} within {}",
+                args[..2].join(" "),
+                humantime::format_duration(timeout)
+            );
+        };
+        api_ok(args, reply(args, out)?)
+    }
+}
+
+fn reply(args: &[&str], out: std::process::Output) -> Result<std::result::Result<Value, ApiError>> {
+    if out.status.success() {
+        let json: Value =
+            serde_json::from_slice(&out.stdout).with_context(|| MalformedReply(args.join(" ")))?;
+        return Ok(Ok(json["result"].clone()));
+    }
+    let parsed = [&out.stderr, &out.stdout]
+        .into_iter()
+        .find_map(|bytes| serde_json::from_slice::<ErrorEnvelope>(bytes).ok());
+    match parsed {
+        Some(env) => Ok(Err(env.error)),
+        None => bail!(
+            "herdr {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+    }
+}
+
+fn api_ok(args: &[&str], reply: std::result::Result<Value, ApiError>) -> Result<Value> {
+    reply.map_err(|e| anyhow!("herdr {}: {} ({})", args[..2].join(" "), e.message, e.code))
 }
 
 #[derive(Debug, Deserialize)]
@@ -569,9 +589,9 @@ impl Herdr for CliHerdr {
         }
     }
 
-    fn plugin(&self, id: &str) -> Result<Option<Plugin>> {
+    fn plugin(&self, id: &str, timeout: Duration) -> Result<Option<Plugin>> {
         let args = ["plugin", "list", "--plugin", id, "--json"];
-        let listed = self.call_ok(&args)?;
+        let listed = self.call_ok_within(&args, timeout)?;
         let plugins: Vec<PluginJson> = parse(&listed["plugins"], &args.join(" "))?;
         Ok(plugins
             .into_iter()

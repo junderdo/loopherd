@@ -35,15 +35,14 @@ fn sandbox_with(status: &str) -> Sandbox {
     let bin = dir.path().join("bin");
     fs::create_dir_all(&bin).unwrap();
     std::os::unix::fs::symlink(LOOPHERD, bin.join("loopherd")).unwrap();
-    let plugins = dir.path().join("plugins.json");
     executable(
         &bin.join("herdr"),
         format!(
             "#!/bin/sh\ncase \"$*\" in\n\
              'status server --json') {status} ;;\n\
-             'plugin list --plugin loopherd --json') cat '{}' ;;\n\
+             'plugin list --plugin loopherd --json') [ -e '{dir}/stall' ] && sleep 60; cat '{dir}/plugins.json' ;;\n\
              *) exit 64 ;;\nesac\n",
-            plugins.display()
+            dir = dir.path().display()
         ),
     );
     let sandbox = Sandbox {
@@ -348,6 +347,37 @@ fn a_plugin_list_herdr_refuses_warns() {
     let out = s.doctor(&[]);
     assert!(
         stdout(&out).starts_with("warning herdr plugin: can't list herdr's plugins: "),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn a_plugin_list_failure_warns_with_a_diagnostic_not_a_retry() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    fs::remove_file(s.dir.path().join("plugins.json")).unwrap();
+    let text = stdout(&s.doctor(&[]));
+    assert!(
+        text.contains("; fix: run `herdr plugin list --plugin loopherd` to see why\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_stalled_plugin_list_warns_after_the_deadline_instead_of_hanging() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    fs::write(s.dir.path().join("stall"), "").unwrap();
+    let started = std::time::Instant::now();
+    let out = s.doctor(&[]);
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    assert!(
+        stdout(&out).starts_with(
+            "warning herdr plugin: can't list herdr's plugins: \
+             herdr didn't answer plugin list within 5s; "
+        ),
         "{}",
         stdout(&out)
     );

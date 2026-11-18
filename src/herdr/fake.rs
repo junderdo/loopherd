@@ -691,7 +691,7 @@ impl Herdr for FakeHerdr {
         Ok(())
     }
 
-    fn plugin(&self, id: &str) -> Result<Option<Plugin>> {
+    fn plugin(&self, id: &str, _timeout: Duration) -> Result<Option<Plugin>> {
         if self.is_down() {
             bail!("herdr server not running");
         }

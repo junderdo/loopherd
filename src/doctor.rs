@@ -187,7 +187,7 @@ fn herdr_checks(herdr: &dyn Herdr) -> Vec<Check> {
 fn plugin_check(herdr: &dyn Herdr) -> Check {
     let ours = env!("CARGO_PKG_VERSION");
     let unavailable = "so its actions, popups and event hooks are unavailable";
-    let plugin = match herdr.plugin("loopherd") {
+    let plugin = match herdr.plugin("loopherd", HERDR_TIMEOUT) {
         Ok(Some(plugin)) => plugin,
         Ok(None) => {
             return warning(
@@ -198,7 +198,7 @@ fn plugin_check(herdr: &dyn Herdr) -> Check {
         }
         Err(e) => {
             let detail = format!("can't list herdr's plugins: {e:#}");
-            let fix = "herdr plugin list --plugin loopherd".into();
+            let fix = "run `herdr plugin list --plugin loopherd` to see why".into();
             return warning("herdr plugin", detail.trim_end().into(), fix);
         }
     };
@@ -210,7 +210,11 @@ fn plugin_check(herdr: &dyn Herdr) -> Check {
         );
     }
     if plugin.version != ours {
+        let newer = numbers(&plugin.version)
+            .zip(numbers(ours))
+            .is_some_and(|(plugin, ours)| plugin > ours);
         let fix = match &plugin.linked {
+            _ if newer => format!("update loopherd to {}", plugin.version),
             Some(dir) => format!(
                 "bring the linked plugin at {} to loopherd {ours}",
                 dir.display()
@@ -873,6 +877,22 @@ mod tests {
             )),
             "{out}"
         );
+    }
+
+    #[test]
+    fn a_plugin_newer_than_loopherd_names_updating_loopherd() {
+        for linked in [None, Some("/src/herdr-plugin")] {
+            let (out, code) = with_plugin(plugin(true, "999.0.0", linked), false);
+            assert_eq!(
+                out,
+                format!(
+                    "warning herdr plugin: plugin 999.0.0 differs from loopherd {VERSION}; \
+                     fix: update loopherd to 999.0.0\n\
+                     doctor: 9 ok, 1 warnings, 0 failures\n"
+                )
+            );
+            assert_eq!(code, 0);
+        }
     }
 
     #[test]
