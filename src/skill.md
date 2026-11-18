@@ -424,8 +424,10 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
 - **Remove a finished herd** with `loopherd herd remove <herd>` once the
   human says so: it deletes the herd file, its pause, its `[lead]`
   `prompt_file` (when that lies in the herds dir and no other herd file
-  names it), and every member's ledger entry, mailbox and handoffs, so the
-  herd leaves `herds`, `status --all` and `stats`. It refuses while any
+  names it), and every run of the herd in the ledger, archived ones
+  included, with each member's mailbox and handoffs, so the herd leaves
+  `herds`, `status --all` and `stats`. A name that still holds another
+  herd's run keeps that run as its entry, and its mailbox and handoffs. It refuses while any
   member, lead included, isn't retired, ran on another herdr session, or
   may still be open (its agent or pane shows, even busy or moved), and
   while herdr can't be reached; `loopherd retire --close <name>` each
