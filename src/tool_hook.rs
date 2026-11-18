@@ -1571,11 +1571,12 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             if ["timeout", "taskset", "flock"].contains(&program) {
                 i += 1;
             }
-            // chrt's priority is optional for policies that don't use it.
+            // chrt's priority is optional for policies that don't use it; a
+            // word that may expand is skipped, since it may be the priority.
             if program == "chrt"
-                && words
+                && kept
                     .get(i)
-                    .is_some_and(|w| w.trim_start().parse::<i64>().is_ok())
+                    .is_some_and(|w| w.built() || w.text.trim_start().parse::<i64>().is_ok())
             {
                 i += 1;
             }
@@ -5072,6 +5073,13 @@ mod tests {
             "chrt -o -U 512 0 gh pr merge 1",
             "chrt --clamp-max 512 -O -G 0 gh pr merge 1",
             "chrt --clamp-mi 512 0 gh pr merge 1",
+            "chrt $P gh pr merge 1",
+            "chrt -f \"$P\" gh pr merge 1",
+            "chrt -f ${P} gh pr merge 1",
+            "chrt -f 1$P gh pr merge 1",
+            "chrt -f $(echo 10) gh pr merge 1",
+            "P=10; chrt $P gh pr merge 1",
+            "env chrt $P gh pr merge 1",
         ] {
             assert_judged(command, Switch::Merge);
         }
