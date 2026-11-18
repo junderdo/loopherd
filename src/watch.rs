@@ -2540,7 +2540,9 @@ mod tests {
         let status = status.map_or(String::new(), |s| format!(r#","agent_status":"{s}""#));
         let json = format!(r#"{{"event":"x","data":{{"pane_id":"{pane}"{status}}}}}"#);
         let at = humantime::parse_rfc3339("2026-11-01T09:00:00Z").unwrap();
-        crate::pane_event::event_hook(ledger, dir, event, &json, None, at).unwrap();
+        // Only pane.moved writes the ledger, and these tests send none.
+        let mut snapshot = MemLedger(ledger.entries().unwrap(), vec![]);
+        crate::pane_event::event_hook(&mut snapshot, dir, event, &json, None, at).unwrap();
     }
 
     fn blocked_hook(ledger: &dyn Ledger, dir: &Path, pane: &str) {

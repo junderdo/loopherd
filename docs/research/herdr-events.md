@@ -107,6 +107,41 @@ Pane lifecycle events from a second run (split, then close):
 {"data":{"pane_id":"w1:p3","type":"pane_closed","workspace_id":"w1"},"event":"pane_closed"}
 ```
 
+### `pane.moved`
+
+Probed 2026-11-18 on the `loopherd-dev` session (herdr 0.9.5) with a raw
+`events.subscribe` to `pane.moved`, `tab.closed`, `workspace.closed` and the
+pane close events, while `herdr pane move` moved a shell pane. No plugin was
+linked (D62).
+
+- `data.pane` is the pane record after the move, with `pane_id`, `tab_id`
+  and `workspace_id`. `previous_pane_id`, `previous_tab_id` and
+  `previous_workspace_id` are where it was.
+- A move within a workspace (`--new-tab`, `--tab <id> --split …`) keeps
+  the pane id. A move to another workspace (`--new-workspace`,
+  `--new-tab --workspace <id>`) gives it a new one: `w2:p2` became `w3:p1`.
+  The `terminal_id` stays.
+- `created_tab` and `created_workspace` are present when the move made
+  them. `closed_tab_id` and `closed_workspace_id` are present when the
+  move emptied them, and herdr then emits `tab.closed` and
+  `workspace.closed` for those right after `pane.moved`.
+- No `pane.closed` or `pane.exited` fires for the old pane id.
+- `--tab` needs `--split right|down`; `--workspace` alone is not a move.
+
+Moved to a new tab in the same workspace (`scroll` cut):
+
+```json
+{"data":{"created_tab":{"agent_status":"unknown","focused":true,"label":"2","number":2,"pane_count":1,"tab_id":"w2:t2","workspace_id":"w2"},"pane":{"agent_status":"unknown","cwd":"/tmp","focused":true,"foreground_cwd":"/tmp","pane_id":"w2:p2","revision":1,"tab_id":"w2:t2","terminal_id":"term_66091452e852712","terminal_title":"…","terminal_title_stripped":"…","workspace_id":"w2"},"previous_pane_id":"w2:p2","previous_tab_id":"w2:t1","previous_workspace_id":"w2","type":"pane_moved"},"event":"pane_moved"}
+```
+
+Moved from workspace `w3`, where it was alone, to a new tab of `w2`:
+
+```json
+{"data":{"closed_tab_id":"w3:t1","closed_workspace_id":"w3","created_tab":{"agent_status":"unknown","focused":true,"label":"2","number":3,"pane_count":1,"tab_id":"w2:t3","workspace_id":"w2"},"pane":{"agent_status":"unknown","cwd":"/tmp","focused":true,"foreground_cwd":"/tmp","pane_id":"w2:p3","revision":1,"tab_id":"w2:t3","terminal_id":"term_66091452e852712","terminal_title":"…","terminal_title_stripped":"…","workspace_id":"w2"},"previous_pane_id":"w3:p1","previous_tab_id":"w3:t1","previous_workspace_id":"w3","type":"pane_moved"},"event":"pane_moved"}
+{"data":{"tab_id":"w3:t1","type":"tab_closed","workspace_id":"w3"},"event":"tab_closed"}
+{"data":{"type":"workspace_closed","workspace_id":"w3"},"event":"workspace_closed"}
+```
+
 ## Delivery guarantees
 
 These come from the [Socket API, "Event subscriptions"](#sources) section:

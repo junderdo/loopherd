@@ -87,7 +87,8 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D70](decisions/D70.md) | A lead's `review_rounds`, a positive integer, resolves from its herd file's `[lead]`, else `[lead_defaults]`, else 3; the lead's prompt gets it as `{review_rounds}` and `loopherd herds` shows it with its source. Amends D31's `[lead_defaults]` keys. |
 | [D71](decisions/D71.md) | A restarted lead's resume prompt carries its switches and `review_rounds`, resolved at restart; a herd file or `config.toml` that can't be read, or a lead with no herd or `[lead]`, refuses the restart before the `/clear`. |
 | [D72](decisions/D72.md) | A watch says `<herd> out of work`, once per streak, for an unpaused herd with no claimable or unready work and no open worker: a lead's for its herd, the shepherd's for unled herds. Amends D60's no herd checks in the shepherd's watch. |
-| [D73](decisions/D73.md) | No cap on running agents across herds; each herd's `max` stays the only limit. Reopen when two herds run unpaused at once or a usage-limit or `rate_limit` stop hits more than one herd; a future limit starts from reacting to those stops, not a fixed agent count. |
+| [D73](decisions/D73.md) | The plugin hooks `pane.moved`, and on a move within a workspace the hook points a member's `tab_id` at its pane's new tab; a move to another workspace changes nothing (LH-265), and the move can race its old tab's close into a false `gone` (LH-266). Amends D69's move limit. |
+| [D74](decisions/D74.md) | No cap on running agents across herds; each herd's `max` stays the only limit. Reopen when two herds run unpaused at once or a usage-limit or `rate_limit` stop hits more than one herd; a future limit starts from reacting to those stops, not a fixed agent count. |
 
 ## Emerging model
 

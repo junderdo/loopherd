@@ -21,10 +21,11 @@ pub const BLOCK_RECORDED: &str = "block-recorded";
 
 /// Records the herdr event `event`, as `HERDR_PLUGIN_EVENT` names it, with
 /// `json` from `HERDR_PLUGIN_EVENT_JSON`, for the non-retired members of the
-/// herdr at `socket` in its pane, tab or workspace. Anything else records
-/// nothing.
+/// herdr at `socket` in its pane, tab or workspace, and follows such a
+/// member's pane moved to another tab of its workspace in the ledger. Anything
+/// else records nothing.
 pub fn event_hook(
-    ledger: &dyn Ledger,
+    ledger: &mut dyn Ledger,
     dir: &Path,
     event: &str,
     json: &str,
@@ -37,6 +38,7 @@ pub fn event_hook(
     let (key, held_in): (_, fn(&AgentRecord) -> Option<&str>) = match event {
         "tab.closed" => ("tab_id", |m| m.tab_id.as_deref()),
         "workspace.closed" => ("workspace_id", |m| Some(&m.workspace)),
+        "pane.moved" => return follow_move(ledger, &entries, data, socket),
         _ => return pane_event(&entries, dir, event, data, socket, now),
     };
     let Some(id) = data[key].as_str() else {
@@ -53,6 +55,40 @@ pub fn event_hook(
         true => Ok(()),
         false => Err(anyhow!(failed.join("; "))),
     }
+}
+
+/// Follows a move within the member's workspace only: a move to another
+/// gives the pane a new id, while the agent keeps the old `HERDR_PANE_ID`
+/// that its own hooks look it up by.
+fn follow_move(
+    ledger: &mut dyn Ledger,
+    entries: &BTreeMap<String, AgentRecord>,
+    data: &Value,
+    socket: Option<&Path>,
+) -> Result<()> {
+    let (Some(pane), Some(previous_tab), Some(tab)) = (
+        data["previous_pane_id"].as_str(),
+        data["previous_tab_id"].as_str(),
+        data["pane"]["tab_id"].as_str(),
+    ) else {
+        return Ok(());
+    };
+    if data["pane"]["pane_id"].as_str() != Some(pane) {
+        return Ok(());
+    }
+    let Some(member) = member_in(entries, pane, socket) else {
+        return Ok(());
+    };
+    // Hooks run unordered, so a late event for a tab the member already left is skipped.
+    ledger.update(&member.name, &mut |m| {
+        let still_there =
+            m.pane_id == pane && m.tab_id.as_deref().is_none_or(|t| t == previous_tab);
+        if !m.retired && still_there {
+            m.tab_id = Some(tab.into());
+        }
+        Ok(())
+    })?;
+    Ok(())
 }
 
 fn pane_event(
