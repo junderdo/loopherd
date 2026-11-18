@@ -212,23 +212,21 @@ fn ok_reply(args: &[&str], reply: std::result::Result<Value, ApiError>) -> Resul
 }
 
 fn reply(args: &[&str], out: std::process::Output) -> Result<std::result::Result<Value, ApiError>> {
-    {
-        if out.status.success() {
-            let json: Value = serde_json::from_slice(&out.stdout)
-                .with_context(|| MalformedReply(args.join(" ")))?;
-            return Ok(Ok(json["result"].clone()));
-        }
-        let parsed = [&out.stderr, &out.stdout]
-            .into_iter()
-            .find_map(|bytes| serde_json::from_slice::<ErrorEnvelope>(bytes).ok());
-        match parsed {
-            Some(env) => Ok(Err(env.error)),
-            None => bail!(
-                "herdr {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&out.stderr).trim()
-            ),
-        }
+    if out.status.success() {
+        let json: Value =
+            serde_json::from_slice(&out.stdout).with_context(|| MalformedReply(args.join(" ")))?;
+        return Ok(Ok(json["result"].clone()));
+    }
+    let parsed = [&out.stderr, &out.stdout]
+        .into_iter()
+        .find_map(|bytes| serde_json::from_slice::<ErrorEnvelope>(bytes).ok());
+    match parsed {
+        Some(env) => Ok(Err(env.error)),
+        None => bail!(
+            "herdr {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
     }
 }
 

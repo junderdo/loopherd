@@ -519,13 +519,8 @@ pub fn tracker_checks(
                 continue;
             }
         };
+        // The herd checks already report a repo that isn't a directory.
         if !queue.repo.is_dir() {
-            let repo = queue.repo.display();
-            checks.push(failure(
-                &format!("{herd} repo"),
-                format!("{repo} isn't a directory, so its trackers can't run"),
-                format!("loopherd herd set {herd} repo <path>"),
-            ));
             continue;
         }
         let commands = [
@@ -1904,19 +1899,11 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_repo_fails_once_naming_herd_set_repo_and_runs_nothing() {
+    fn a_missing_repo_reports_nothing_and_runs_nothing() {
         let herds = Herds::with(&[("a", &queue("echo x", Some("echo y")))]);
         std::fs::remove_dir(herds.dir.path().join("repo")).unwrap();
         let (out, code) = herds.run(TRACKER_TIMEOUT);
-        assert_eq!(
-            out,
-            format!(
-                "failure a repo: {} isn't a directory, so its trackers can't run; \
-                 fix: loopherd herd set a repo <path>\n\
-                 doctor: 0 ok, 0 warnings, 1 failures\n",
-                herds.dir.path().join("repo").display()
-            )
-        );
-        assert_eq!(code, 1);
+        assert_eq!(out, "doctor: 0 ok, 0 warnings, 0 failures\n");
+        assert_eq!(code, 0);
     }
 }

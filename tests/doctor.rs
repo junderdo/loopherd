@@ -429,3 +429,34 @@ fn without_trackers_no_herd_command_runs() {
     assert!(!stdout(&out).contains("h source"), "{}", stdout(&out));
     assert!(!ran.exists());
 }
+
+#[test]
+fn an_unknown_herd_with_trackers_exits_2_and_runs_no_source() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    let ran = herd_with_a_source(&s);
+    let out = s.doctor(&["nope", "--trackers"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(!ran.exists());
+}
+
+#[test]
+fn a_missing_repo_fails_once_under_trackers() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    let ran = herd_with_a_source(&s);
+    let repo = ran.parent().unwrap();
+    fs::remove_dir_all(repo).unwrap();
+    let out = s.doctor(&["--trackers"]);
+    let text = stdout(&out);
+    let failures: Vec<_> = text.lines().filter(|l| l.starts_with("failure")).collect();
+    assert_eq!(
+        failures,
+        [format!(
+            "failure herd h repo: {} is missing; fix: loopherd herd set h repo '\"<path>\"'",
+            repo.display()
+        )],
+        "{text}"
+    );
+    assert_eq!(out.status.code(), Some(1));
+}
