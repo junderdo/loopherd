@@ -41,6 +41,14 @@ command = ["sh", "loopherd.sh", "herdr-event-hook"]
 on = "pane.closed"
 command = ["sh", "loopherd.sh", "herdr-event-hook"]
 
+[[events]]
+on = "tab.closed"
+command = ["sh", "loopherd.sh", "herdr-event-hook"]
+
+[[events]]
+on = "workspace.closed"
+command = ["sh", "loopherd.sh", "herdr-event-hook"]
+
 # Needs herdr's ui.mouse_capture on; without it the terminal handles the click.
 [[link_handlers]]
 id = "github-pr"
