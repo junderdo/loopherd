@@ -492,3 +492,73 @@ fn a_member_moved_to_another_workspace_drops_its_old_workspace_label() {
     assert_eq!(ledger["lh-2"]["workspace"], "w3");
     assert_eq!(ledger["lh-2"]["workspace_label"], serde_json::Value::Null);
 }
+
+#[test]
+fn a_move_out_of_a_tab_that_then_closes_records_no_gone_in_either_hook_order() {
+    let move_first = sandbox();
+    quiet_success(&moved(
+        move_first.path(),
+        ("w1:p1", "w1:t1"),
+        ("w1:p1", "w1:t4"),
+    ));
+    quiet_success(&tab_closed(move_first.path(), "w1:t1"));
+    assert!(recorded(move_first.path()).is_empty());
+
+    let close_first = sandbox();
+    quiet_success(&tab_closed(close_first.path(), "w1:t1"));
+    quiet_success(&moved(
+        close_first.path(),
+        ("w1:p1", "w1:t1"),
+        ("w1:p1", "w1:t4"),
+    ));
+    assert_eq!(recorded(close_first.path()), ["lh-1 gone", "lh-1 moved"]);
+
+    quiet_success(&tab_closed(close_first.path(), "w1:t4"));
+    assert_eq!(
+        recorded(close_first.path()),
+        ["lh-1 gone", "lh-1 moved", "lh-1 gone"]
+    );
+}
+
+#[test]
+fn a_move_retracts_no_gone_but_one_its_old_tab_closing_recorded() {
+    let dir = sandbox();
+
+    quiet_success(&closed(dir.path(), "pane.exited", "w1:p1"));
+    quiet_success(&moved(dir.path(), ("w1:p1", "w1:t1"), ("w1:p1", "w1:t4")));
+
+    assert_eq!(recorded(dir.path()), ["lh-1 gone"]);
+}
+
+#[test]
+fn a_move_that_empties_its_workspace_records_no_gone_in_any_hook_order() {
+    let run = |dir: &Path, step: &str| match step {
+        "move" => quiet_success(&moved(dir, ("w2:p1", "w2:t1"), ("w3:p2", "w3:t1"))),
+        "tab" => quiet_success(&tab_closed(dir, "w2:t1")),
+        _ => quiet_success(&workspace_closed(dir, "w2")),
+    };
+    let orders = [
+        ["move", "tab", "workspace"],
+        ["move", "workspace", "tab"],
+        ["tab", "move", "workspace"],
+        ["workspace", "move", "tab"],
+        ["tab", "workspace", "move"],
+        ["workspace", "tab", "move"],
+    ];
+    for order in orders {
+        let dir = sandbox();
+        order.iter().for_each(|step| run(dir.path(), step));
+        let before = recorded(dir.path());
+        assert!(
+            before.is_empty() || before == ["lh-2 gone", "lh-2 moved"],
+            "{order:?}: {before:?}"
+        );
+
+        workspace_closed(dir.path(), "w3");
+        assert_eq!(
+            recorded(dir.path()).last().map(String::as_str),
+            Some("lh-2 gone"),
+            "{order:?}"
+        );
+    }
+}

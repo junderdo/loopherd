@@ -158,6 +158,71 @@ fn a_tab_closed_while_no_watch_ran_wakes_the_next_watch_gone_once() {
     assert!(again.stdout.is_empty(), "{again:?}");
 }
 
+impl Sandbox {
+    fn herdr_event(&self, event: &str, data: &str) {
+        let kind = event.replace('.', "_");
+        let out = self
+            .loopherd(&["herdr-event-hook"])
+            .env("HERDR_PLUGIN_EVENT", event)
+            .env(
+                "HERDR_PLUGIN_EVENT_JSON",
+                format!(r#"{{"event":"{kind}","data":{data}}}"#),
+            )
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+    }
+
+    fn tab_closed(&self, tab: &str) {
+        self.herdr_event(
+            "tab.closed",
+            &format!(r#"{{"tab_id":"{tab}","workspace_id":"w1"}}"#),
+        );
+    }
+
+    /// lh-1's pane moved from tab w1:t1, which the move emptied, to w1:t4.
+    fn moved_out_of_its_tab(&self) {
+        self.herdr_event(
+            "pane.moved",
+            r#"{"pane":{"pane_id":"w1:p1","tab_id":"w1:t4","workspace_id":"w1"},
+                "previous_pane_id":"w1:p1","previous_tab_id":"w1:t1",
+                "previous_workspace_id":"w1","closed_tab_id":"w1:t1","type":"pane_moved"}"#,
+        );
+    }
+}
+
+#[test]
+fn a_pane_moved_out_of_its_tab_wakes_no_gone_whichever_hook_runs_first() {
+    for close_first in [false, true] {
+        let sandbox = Sandbox::new();
+        sandbox.install_hook();
+        if close_first {
+            sandbox.tab_closed("w1:t1");
+            sandbox.moved_out_of_its_tab();
+        } else {
+            sandbox.moved_out_of_its_tab();
+            sandbox.tab_closed("w1:t1");
+        }
+
+        let out = sandbox.watch(&["--timeout", "0"]);
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "lh-1 paused  1 shell\n",
+            "close first: {close_first}"
+        );
+
+        sandbox.tab_closed("w1:t4");
+        let out = sandbox.watch(&["--timeout", "0"]);
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "lh-1 gone\n",
+            "close first: {close_first}"
+        );
+    }
+}
+
 #[test]
 fn settings_names_the_file_to_check() {
     let sandbox = Sandbox::new();
