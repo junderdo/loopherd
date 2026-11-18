@@ -222,10 +222,11 @@ fn a_lead_can_retire_its_own_workers() {
 fn a_lead_can_be_retired_from_its_pane_id_on_another_socket() {
     let state = tempfile::tempdir().unwrap();
     write_herd_ledger(state.path());
+    // --force: from another session retire refuses the lead for that alone.
     let out = shell_in(
         state.path(),
         Some(LEAD_PANE),
-        "HERDR_SOCKET_PATH=/other.sock loopherd retire lead-k",
+        "HERDR_SOCKET_PATH=/other.sock loopherd retire --force lead-k",
     );
     assert!(out.status.success(), "{out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "retired lead-k\n");

@@ -66,16 +66,16 @@ pub fn refuse_unfinished(
     let force = "pass --force to retire it anyway";
     let unknown =
         |why: String| anyhow!("{why}, so whether {name} is still at work is unknown; {force}");
-    let here = match herdr.server(HERDR_TIMEOUT) {
-        // No server means no live panes, so nothing is at work.
-        Ok(Server::Missing | Server::NotRunning { .. }) => return Ok(()),
+    let (here, running) = match herdr.server(HERDR_TIMEOUT) {
+        Ok(Server::Missing) => (herdr.socket(), false),
+        Ok(Server::NotRunning { socket }) => (socket, false),
         Ok(Server::NoAnswer { .. }) => {
             return Err(unknown(format!(
                 "herdr didn't answer within {}",
                 humantime::format_duration(HERDR_TIMEOUT)
             )));
         }
-        Ok(Server::Running { socket, .. }) => socket,
+        Ok(Server::Running { socket, .. }) => (socket, true),
         Err(e) => {
             return Err(e.context(format!(
                 "can't tell whether {name} is still at work; {force}"
@@ -90,12 +90,20 @@ pub fn refuse_unfinished(
                 theirs.display(),
                 here.display()
             ),
-            None => {
+            None if running => {
                 return Err(unknown(
                     "herdr didn't say which session it runs".to_string(),
                 ));
             }
+            None => bail!(
+                "{name} is on herdr session {}, and no herdr here runs it; run retire there, or {force}",
+                theirs.display()
+            ),
         }
+    }
+    // A session that isn't running has no live panes, so nothing is at work.
+    if !running {
+        return Ok(());
     }
     let agents = match herdr.agents_within(HERDR_TIMEOUT) {
         Ok(Some(agents)) => agents,
@@ -2417,6 +2425,42 @@ mod tests {
             err.to_string(),
             format!(
                 "a is on herdr session {FAKE_SOCKET}, not this one (/run/other.sock); run retire there, or pass --force to retire it anyway"
+            )
+        );
+    }
+
+    #[test]
+    fn a_member_on_another_session_is_refused_while_this_herdr_is_down() {
+        let root = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let (mut herdr, ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        herdr.socket = Some("/run/other.sock".into());
+        herdr.set_unreachable(true);
+
+        let err = refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "a is on herdr session {FAKE_SOCKET}, not this one (/run/other.sock); run retire there, or pass --force to retire it anyway"
+            )
+        );
+    }
+
+    #[test]
+    fn a_member_on_a_session_is_refused_where_herdr_is_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let (mut herdr, ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        herdr.server = Some(crate::herdr::Server::Missing);
+        herdr.socket = None;
+
+        let err = refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "a is on herdr session {FAKE_SOCKET}, and no herdr here runs it; run retire there, or pass --force to retire it anyway"
             )
         );
     }
