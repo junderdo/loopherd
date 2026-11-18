@@ -98,6 +98,8 @@ fn follow_move(
             m.env_pane_id.get_or_insert_with(|| previous_pane.into());
             m.pane_id = pane.into();
             m.workspace = workspace.into();
+            // The payload has no label, and the old one would send a revive back.
+            m.workspace_label = None;
         }
         m.tab_id = Some(tab.into());
         Ok(())

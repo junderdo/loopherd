@@ -256,7 +256,7 @@ pub fn lead_in(ledger: &dyn Ledger, pane: &Pane) -> Result<Option<AgentRecord>> 
     let (live, retired): (Vec<_>, Vec<_>) = ledger
         .entries()?
         .into_values()
-        .filter(|e| e.own_pane_id() == pane.id && e.socket.as_deref() == Some(socket))
+        .filter(|e| e.is_own_pane(pane.id) && e.socket.as_deref() == Some(socket))
         .partition(|e| !e.retired);
     Ok(match live.into_iter().next() {
         Some(entry) => entry.is_lead().then_some(entry),

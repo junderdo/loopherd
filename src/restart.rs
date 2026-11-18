@@ -65,7 +65,7 @@ pub fn restart(
         ),
         Some(_) => {}
     }
-    if req.own_pane == Some(record.own_pane_id()) {
+    if req.own_pane.is_some_and(|pane| record.is_own_pane(pane)) {
         bail!("{name} can't restart itself; whoever reads its handoff line restarts it");
     }
     let handoff = handoff_path(req.state, name);

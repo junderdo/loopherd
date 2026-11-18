@@ -26,7 +26,8 @@ fn sandbox() -> tempfile::TempDir {
             .unwrap_or_default();
         format!(
             r#""{name}": {{"name": "{name}", "pane_id": "{pane}", {tab} {role} "session_id": null,
-                "repo": "/", "worktree": null, "workspace": "{workspace}", "prompt": null,
+                "repo": "/", "worktree": null, "workspace": "{workspace}",
+                "workspace_label": "label-{workspace}", "prompt": null,
                 "prompt_sent": true, "created": "2026-11-01T00:00:00Z",
                 "socket": "{SOCKET}", "retired": {retired}}}"#
         )
@@ -412,17 +413,23 @@ fn a_member_with_no_recorded_tab_takes_the_tab_it_was_moved_to() {
 }
 
 #[test]
-fn a_member_moved_to_another_workspace_still_reports_from_its_pane() {
+fn a_member_moved_to_another_workspace_reports_from_its_old_or_new_pane_id() {
     let dir = sandbox();
 
     quiet_success(&moved(dir.path(), ("w2:p1", "w2:t1"), ("w3:p2", "w3:t1")));
-    let out = loopherd(dir.path(), &["report", "--kind", "done", "shipped"])
-        .env("HERDR_PANE_ID", "w2:p1")
-        .output()
-        .unwrap();
+    for own_pane in ["w2:p1", "w3:p2"] {
+        let out = loopherd(dir.path(), &["report", "--kind", "done", own_pane])
+            .env("HERDR_PANE_ID", own_pane)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+    quiet_success(&workspace_closed(dir.path(), "w3"));
 
-    assert!(out.status.success(), "{out:?}");
-    assert_eq!(recorded(dir.path()), ["lh-2 done"]);
+    assert_eq!(
+        recorded(dir.path()),
+        ["lh-2 done", "lh-2 done", "lh-2 gone"]
+    );
 }
 
 /// The PreToolUse hook's output for a Bash `command` run in `pane`.
@@ -448,6 +455,10 @@ fn a_lead_moved_to_another_workspace_keeps_its_guardrails() {
     quiet_success(&moved(dir.path(), ("w4:p1", "w4:t1"), ("w5:p3", "w5:t2")));
 
     assert!(tool_hook(dir.path(), "w4:p1", "loopherd pause h").contains("deny"));
+    // A restored herdr gives the pane's new shell its current id.
+    assert!(tool_hook(dir.path(), "w5:p3", "loopherd pause h").contains("deny"));
+    quiet_success(&workspace_closed(dir.path(), "w5"));
+    assert_eq!(recorded(dir.path()), ["lead-1 gone"]);
 }
 
 #[test]
@@ -467,4 +478,17 @@ fn a_member_moved_twice_keeps_its_first_pane_and_skips_a_late_first_move() {
 
     quiet_success(&workspace_closed(dir.path(), "w5"));
     assert_eq!(recorded(dir.path()), ["lh-2 done", "lh-2 gone"]);
+}
+
+#[test]
+fn a_member_moved_to_another_workspace_drops_its_old_workspace_label() {
+    let dir = sandbox();
+    let ledger = dir.path().join("state/loopherd/ledger.json");
+
+    quiet_success(&moved(dir.path(), ("w2:p1", "w2:t1"), ("w3:p2", "w3:t1")));
+
+    let ledger: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(ledger).unwrap()).unwrap();
+    assert_eq!(ledger["lh-2"]["workspace"], "w3");
+    assert_eq!(ledger["lh-2"]["workspace_label"], serde_json::Value::Null);
 }

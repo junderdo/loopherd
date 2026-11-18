@@ -680,7 +680,8 @@ mod tests {
         let (out, _) = run(&herdr, &mut ledger, &request());
 
         assert_eq!(out, "resumed a w1:p1");
-        assert_eq!(ledger.0["a"].own_pane_id(), "w1:p1");
+        assert!(ledger.0["a"].is_own_pane("w1:p1"));
+        assert!(!ledger.0["a"].is_own_pane("w2:p1"));
     }
 
     #[test]

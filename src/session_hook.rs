@@ -42,7 +42,7 @@ pub fn session_hook(
     let entries = ledger.entries()?;
     let live = || entries.values().filter(|e| !e.retired);
     let Some(member) =
-        live().find(|e| e.own_pane_id() == pane.id && e.socket.as_deref() == Some(socket))
+        live().find(|e| e.is_own_pane(pane.id) && e.socket.as_deref() == Some(socket))
     else {
         return Ok(None);
     };

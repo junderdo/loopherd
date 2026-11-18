@@ -32,7 +32,7 @@ pub fn refuse_own_lead(
     };
     let in_pane = pane.is_some_and(|pane| {
         pane.socket.is_some()
-            && entry.own_pane_id() == pane.id
+            && entry.is_own_pane(pane.id)
             && entry.socket.as_deref() == pane.socket
     });
     if in_pane {

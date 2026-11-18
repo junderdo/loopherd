@@ -96,9 +96,11 @@ pub enum Role {
 }
 
 impl AgentRecord {
-    /// The pane id the agent's own processes see as `$HERDR_PANE_ID`.
-    pub fn own_pane_id(&self) -> &str {
-        self.env_pane_id.as_deref().unwrap_or(&self.pane_id)
+    /// Whether a process with `$HERDR_PANE_ID` set to `pane` runs in this
+    /// member's pane: its agent keeps the id from before a move to another
+    /// workspace, and a restored herdr gives a new shell the current one.
+    pub fn is_own_pane(&self, pane: &str) -> bool {
+        self.pane_id == pane || self.env_pane_id.as_deref() == Some(pane)
     }
 
     pub fn is_lead(&self) -> bool {

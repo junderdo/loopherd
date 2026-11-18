@@ -1213,7 +1213,7 @@ fn reader(ledger: &dyn Ledger, req: &Request, warn: &mut dyn FnMut(&str)) -> Res
         Some(_) => return Ok(Reader::Shepherd),
         None => {
             // Pane ids repeat across herdrs, but this may be a lead whose recorded socket is stale.
-            let on_pane = |e: &&AgentRecord| !e.retired && e.is_lead() && e.own_pane_id() == pane;
+            let on_pane = |e: &&AgentRecord| !e.retired && e.is_lead() && e.is_own_pane(pane);
             if let Some(lead) = entries.values().find(on_pane) {
                 warn(&format!(
                     "warning: pane {pane} holds lead {} on socket {}, \

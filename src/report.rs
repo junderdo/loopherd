@@ -249,8 +249,8 @@ fn ends_in_newline(file: &mut fs::File) -> std::io::Result<bool> {
     Ok(last[0] == b'\n')
 }
 
-/// The non-retired member of the herdr at `socket` whose agent runs with
-/// `$HERDR_PANE_ID` set to `own_pane`. Pane ids repeat across herdr sessions,
+/// The non-retired member of the herdr at `socket` that a process with
+/// `$HERDR_PANE_ID` set to `own_pane` runs in. Pane ids repeat across herdr sessions,
 /// so an entry recorded without a socket matches only a caller that has none
 /// either.
 pub fn member_of_own_pane<'a>(
@@ -260,7 +260,7 @@ pub fn member_of_own_pane<'a>(
 ) -> Option<&'a AgentRecord> {
     entries
         .values()
-        .find(|e| !e.retired && e.own_pane_id() == own_pane && e.socket.as_deref() == socket)
+        .find(|e| !e.retired && e.is_own_pane(own_pane) && e.socket.as_deref() == socket)
 }
 
 /// The non-retired member of the herdr at `socket` in the pane herdr now
