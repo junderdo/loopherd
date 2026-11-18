@@ -10,23 +10,37 @@ use crate::herdr::{Agent, Herdr, Pane};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::matching::{by_name, same_session, session_conflict};
 use crate::notify::forget_marks;
+use crate::process::{Procs, is_ancestor, live};
 use crate::report::member_in;
 use crate::revive::find_workspace;
 use crate::tool_hook::Pane as OwnPane;
 use crate::worktree::{Gone, Removal, remove_if_gone, remove_if_merged, same_dir};
 
-/// Fails when `name` is a lead recorded in `pane`, the pane running loopherd:
-/// a lead that retired itself would drop its own gates (D50).
-pub fn refuse_own_lead(ledger: &dyn Ledger, name: &str, pane: &OwnPane) -> Result<()> {
-    let Some(socket) = pane.socket else {
+/// Fails when `name` is a lead recorded in `pane`, the pane running loopherd,
+/// or whose live recorded process is an ancestor of `me`, which no
+/// environment can hide: a lead that retired itself would drop its own gates
+/// (D50, D58).
+pub fn refuse_own_lead(
+    ledger: &dyn Ledger,
+    name: &str,
+    pane: Option<&OwnPane>,
+    procs: &dyn Procs,
+    me: u32,
+) -> Result<()> {
+    let Some(entry) = ledger.entries()?.remove(name).filter(|e| e.is_lead()) else {
         return Ok(());
     };
-    let own = ledger.entries()?.remove(name).is_some_and(|e| {
-        e.is_lead() && e.pane_id == pane.id && e.socket.as_deref() == Some(socket)
+    let in_pane = pane.is_some_and(|pane| {
+        pane.socket.is_some() && entry.pane_id == pane.id && entry.socket.as_deref() == pane.socket
     });
-    if own {
+    if in_pane {
         bail!(
             "{name} is the lead in this pane; retiring a lead is the shepherd's or the human's job"
+        );
+    }
+    if live(procs, entry.process).is_some_and(|lead| is_ancestor(procs, lead.pid, me)) {
+        bail!(
+            "{name} is the lead running this loopherd; retiring a lead is the shepherd's or the human's job"
         );
     }
     Ok(())
@@ -480,6 +494,7 @@ mod tests {
     use super::*;
     use crate::herdr::fake::{FAKE_SOCKET, FakeHerdr};
     use crate::ledger::MemLedger;
+    use crate::process::{CLAUDE, FakeProcs};
     use crate::spawn::{SpawnRequest, spawn};
     use crate::worktree::testing::{
         commit, current_branch, git_in, has_branch, head, head_of, merge_on_origin,
@@ -523,6 +538,159 @@ mod tests {
 
     fn halloween_noon() -> SystemTime {
         humantime::parse_rfc3339("2026-10-31T12:00:00Z").unwrap()
+    }
+
+    fn lead_running_as(pid: u32, start: u64) -> MemLedger {
+        let mut ledger = ledger_with(&["lead-k"]);
+        let lead = ledger.0.get_mut("lead-k").unwrap();
+        lead.role = Some(crate::ledger::Role::Lead);
+        lead.socket = Some(FAKE_SOCKET.into());
+        lead.process = Some(crate::ledger::Process { pid, start });
+        ledger
+    }
+
+    /// The pane's Claude 30 → shell 35 → loopherd 40.
+    fn loopherd_under_the_pane_claude() -> FakeProcs {
+        let mut procs = FakeProcs::pane();
+        procs.add(35, "/bin/bash", 30, 350);
+        procs.add(40, "/usr/bin/loopherd", 35, 400);
+        procs
+    }
+
+    const LOOPHERD: u32 = 40;
+
+    #[test]
+    fn a_lead_retiring_itself_with_the_pane_env_unset_is_refused() {
+        let ledger = lead_running_as(30, 300);
+
+        let err = refuse_own_lead(
+            &ledger,
+            "lead-k",
+            None,
+            &loopherd_under_the_pane_claude(),
+            LOOPHERD,
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("lead-k is the lead running this loopherd"));
+    }
+
+    fn another_pane() -> OwnPane<'static> {
+        OwnPane {
+            id: "w9:p9",
+            socket: Some(Path::new(FAKE_SOCKET)),
+        }
+    }
+
+    #[test]
+    fn a_lead_retiring_itself_with_the_pane_env_naming_another_pane_is_refused() {
+        let ledger = lead_running_as(30, 300);
+
+        let err = refuse_own_lead(
+            &ledger,
+            "lead-k",
+            Some(&another_pane()),
+            &loopherd_under_the_pane_claude(),
+            LOOPHERD,
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("lead-k is the lead running this loopherd"));
+    }
+
+    /// The shepherd's Claude 50 → shell 55 → loopherd 60, beside the lead's.
+    fn loopherd_under_the_shepherd() -> FakeProcs {
+        let mut procs = FakeProcs::pane();
+        procs.add(50, CLAUDE, 20, 500);
+        procs.add(55, "/bin/bash", 50, 550);
+        procs.add(60, "/usr/bin/loopherd", 55, 600);
+        procs
+    }
+
+    fn the_lead_pane() -> OwnPane<'static> {
+        OwnPane {
+            id: "w1:p1",
+            socket: Some(Path::new(FAKE_SOCKET)),
+        }
+    }
+
+    #[test]
+    fn the_shepherd_may_retire_a_live_lead_it_does_not_run_under() {
+        let ledger = lead_running_as(30, 300);
+
+        let shepherd = refuse_own_lead(
+            &ledger,
+            "lead-k",
+            Some(&another_pane()),
+            &loopherd_under_the_shepherd(),
+            60,
+        );
+
+        assert!(shepherd.is_ok());
+    }
+
+    #[test]
+    fn a_reused_pid_with_another_start_time_is_not_the_lead() {
+        let ledger = lead_running_as(30, 299);
+
+        let reused = refuse_own_lead(
+            &ledger,
+            "lead-k",
+            None,
+            &loopherd_under_the_pane_claude(),
+            LOOPHERD,
+        );
+
+        assert!(reused.is_ok());
+    }
+
+    #[test]
+    fn a_lead_with_no_recorded_process_is_refused_only_by_its_pane() {
+        let mut ledger = lead_running_as(30, 300);
+        ledger.0.get_mut("lead-k").unwrap().process = None;
+        let procs = loopherd_under_the_pane_claude();
+
+        let err = refuse_own_lead(&ledger, "lead-k", Some(&the_lead_pane()), &procs, LOOPHERD)
+            .unwrap_err();
+        let env_unset = refuse_own_lead(&ledger, "lead-k", None, &procs, LOOPHERD);
+        let other_pane =
+            refuse_own_lead(&ledger, "lead-k", Some(&another_pane()), &procs, LOOPHERD);
+
+        assert!(format!("{err:#}").contains("lead-k is the lead in this pane"));
+        assert!(env_unset.is_ok());
+        assert!(other_pane.is_ok());
+    }
+
+    #[test]
+    fn a_live_lead_detached_from_loopherd_is_still_refused_by_its_pane() {
+        let ledger = lead_running_as(30, 300);
+
+        let err = refuse_own_lead(
+            &ledger,
+            "lead-k",
+            Some(&the_lead_pane()),
+            &loopherd_under_the_shepherd(),
+            60,
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("lead-k is the lead in this pane"));
+    }
+
+    #[test]
+    fn a_worker_running_loopherd_may_be_retired_by_it() {
+        let mut ledger = lead_running_as(30, 300);
+        ledger.0.get_mut("lead-k").unwrap().role = None;
+
+        let worker = refuse_own_lead(
+            &ledger,
+            "lead-k",
+            Some(&the_lead_pane()),
+            &loopherd_under_the_pane_claude(),
+            LOOPHERD,
+        );
+
+        assert!(worker.is_ok());
     }
 
     #[test]
