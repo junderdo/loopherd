@@ -16,6 +16,7 @@ mod matching;
 mod notify;
 mod pane_label;
 mod pause;
+mod pr_link;
 mod process;
 mod prompt;
 mod release;
@@ -61,7 +62,7 @@ use crate::herd_view::Options;
 use crate::herdr::events::SocketSubscriber;
 use crate::herdr::{CliHerdr, Herdr, socket_from_env};
 use crate::lead::LeadRequest;
-use crate::ledger::{FileLedger, Process};
+use crate::ledger::{FileLedger, Ledger, Process};
 use crate::process::Procs;
 use crate::prompt::prompt;
 use crate::release::release;
@@ -254,6 +255,17 @@ enum Command {
         /// Start with strays listed (toggle with `s`).
         #[arg(long)]
         strays: bool,
+    },
+    /// herdr's link handler for a Ctrl-clicked GitHub PR: shows the open member
+    /// that owns it in the plugin's popup, found by a report naming the PR or
+    /// by the PR's head branch, and opens any other link in the browser.
+    Pr {
+        /// The clicked link; defaults to $HERDR_PLUGIN_CLICKED_URL.
+        url: Option<String>,
+        /// Be the popup: print $LOOPHERD_PR_MEMBER's card for the PR at
+        /// $LOOPHERD_PR_URL and wait for q or Escape.
+        #[arg(long, conflicts_with = "url")]
+        popup: bool,
     },
     /// Send a ledger entry's stored prompt to its live agent, e.g. after spawn exited 3.
     Prompt {
@@ -640,6 +652,7 @@ fn main() -> ExitCode {
         Command::Status { all, strays, json } => ("status", run_status(all, strays, json)),
         Command::Stats { herd, since, json } => ("stats", run_stats(herd, since, json)),
         Command::View { all, strays } => ("view", run_view(all, strays)),
+        Command::Pr { url, popup } => ("pr", run_pr(url, popup)),
         Command::Report {
             kind,
             as_name,
@@ -974,6 +987,63 @@ fn run_view(all: bool, strays: bool) -> Result<i32> {
             std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
         ),
     )
+}
+
+fn run_pr(url: Option<String>, popup: bool) -> Result<i32> {
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let entries = ledger.entries()?;
+    let reports = ledger.reports_dir()?;
+    if popup {
+        let var = |name: &str| std::env::var(name).with_context(|| format!("{name} is not set"));
+        let card = pr_link::card(
+            &var("LOOPHERD_PR_MEMBER")?,
+            &var("LOOPHERD_PR_URL")?,
+            &entries,
+            &reports,
+            &CliHerdr,
+        )?;
+        print!("{card}");
+        std::io::stdout().flush()?;
+        ratatui::crossterm::terminal::enable_raw_mode()?;
+        let closed = pr_link::wait_to_close(&mut ratatui::crossterm::event::read);
+        ratatui::crossterm::terminal::disable_raw_mode()?;
+        closed?;
+        return Ok(0);
+    }
+    let url = match url {
+        Some(url) => url,
+        None => std::env::var("HERDR_PLUGIN_CLICKED_URL")
+            .context("no link given and HERDR_PLUGIN_CLICKED_URL is not set")?,
+    };
+    let shown = pr_link::click(
+        &url,
+        &entries,
+        &reports,
+        &CliHerdr,
+        &github::GhCli::default(),
+        &mut open_in_browser,
+    )?;
+    match shown {
+        pr_link::Shown::Popup { member } => println!("showed {member} for {url}"),
+        pr_link::Shown::Browser => println!("opened {url} in the browser"),
+    }
+    Ok(0)
+}
+
+fn open_in_browser(url: &str) -> Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let status = std::process::Command::new(opener)
+        .arg(url)
+        .status()
+        .with_context(|| format!("run {opener}"))?;
+    if !status.success() {
+        bail!("{opener} {url}: {status}");
+    }
+    Ok(())
 }
 
 fn run_prompt(name: &str, force: bool) -> Result<i32> {

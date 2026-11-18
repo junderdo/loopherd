@@ -14,3 +14,23 @@ id = "status"
 title = "loopherd: herd status"
 contexts = ["workspace"]
 command = ["sh", "loopherd.sh", "status"]
+
+# Needs herdr's ui.mouse_capture on; without it the terminal handles the click.
+[[link_handlers]]
+id = "github-pr"
+title = "loopherd: PR's member"
+pattern = "^https://github\\.com/[^/]+/[^/]+/pull/[0-9]+"
+action = "pr-member"
+
+[[actions]]
+id = "pr-member"
+title = "loopherd: PR's member"
+command = ["sh", "loopherd.sh", "pr"]
+
+[[panes]]
+id = "pr-member"
+title = "loopherd: PR's member"
+placement = "popup"
+width = "80%"
+height = 20
+command = ["sh", "loopherd.sh", "pr", "--popup"]
