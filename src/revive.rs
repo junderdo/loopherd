@@ -68,6 +68,7 @@ pub fn revive(
     for agent in &mut agents {
         agent.session_id = agent.session_id.take().map(|s| live(&s));
     }
+    let here = req.startup.clone().or_else(|| herdr.socket());
     let mut revived = Revived::default();
     let mut entries = ledger.entries()?;
     if let Some(name) = &req.name {
@@ -84,7 +85,7 @@ pub fn revive(
             record.session_id = record.session_id.map(|s| live(&s));
         }
         let mut warnings = vec![];
-        let mut outcome = revive_one(herdr, req, &agents, &record, &mut warnings);
+        let mut outcome = revive_one(herdr, req, here.as_deref(), &agents, &record, &mut warnings);
         if let Outcome::Started {
             pane_id,
             session_id,
@@ -97,7 +98,15 @@ pub fn revive(
                     .clone()
                     .or(current.session_id.take())
                     .map(|s| live(&s));
-                current.socket = herdr.socket().or(current.socket.take());
+                if let (Some(here), Some(there)) = (&here, &current.socket)
+                    && here != there
+                {
+                    bail!(
+                        "recorded on {} since revive read the ledger",
+                        there.display()
+                    );
+                }
+                current.socket = current.socket.take().or_else(|| here.clone());
                 current.process = None;
                 Ok(())
             });
@@ -383,12 +392,18 @@ impl Outcome {
 fn revive_one(
     herdr: &dyn Herdr,
     req: &ReviveRequest,
+    here: Option<&Path>,
     agents: &[Agent],
     record: &AgentRecord,
     warnings: &mut Vec<String>,
 ) -> Outcome {
     if record.retired {
         return Outcome::Skipped("retired".into());
+    }
+    if let (Some(here), Some(there)) = (here, &record.socket)
+        && here != there
+    {
+        return Outcome::Skipped(format!("recorded on {}", there.display()));
     }
     let cwd = record.worktree.as_ref().unwrap_or(&record.repo);
     if !cwd.is_dir() {
@@ -1427,6 +1442,141 @@ mod tests {
             assert_eq!(ledger.0[other], before[other], "{here}");
             assert_eq!(ledger.0["unknown"], before["unknown"], "{here}");
         }
+    }
+
+    #[test]
+    fn a_manual_revive_skips_entries_recorded_on_another_servers_socket() {
+        for (here, touched, other) in [
+            ("/run/dev.sock", "dev", "live"),
+            ("/run/live.sock", "live", "dev"),
+        ] {
+            let cwd = tempfile::tempdir().unwrap();
+            let mut herdr = herdr();
+            herdr.socket = Some(here.into());
+            let mut ledger = ledger([
+                on_socket(record("dev", cwd.path()), Some("/run/dev.sock")),
+                on_socket(record("live", cwd.path()), Some("/run/live.sock")),
+            ]);
+            let before = ledger.0.clone();
+
+            let (out, code) = run(&herdr, &mut ledger, &request());
+
+            let skipped = format!("skipped {other}: recorded on /run/{other}.sock");
+            let mut lines: Vec<_> = out.lines().collect();
+            lines.sort_unstable();
+            assert_eq!(
+                lines,
+                [format!("resumed {touched} w1:p1"), skipped],
+                "{here}"
+            );
+            assert_eq!(code, 0, "{here}");
+            let started: Vec<_> = herdr.started().into_iter().map(|s| s.name).collect();
+            assert_eq!(started, [touched], "{here}");
+            assert_eq!(ledger.0[other], before[other], "{here}");
+            assert_eq!(
+                ledger.0[touched].socket.as_deref(),
+                Some(Path::new(here)),
+                "{here}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_manual_dry_run_and_a_named_revive_also_skip_another_servers_entry() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut herdr = herdr();
+        herdr.socket = Some("/run/dev.sock".into());
+        for req in [
+            ReviveRequest {
+                dry_run: true,
+                ..request()
+            },
+            ReviveRequest {
+                name: Some("live".into()),
+                ..request()
+            },
+        ] {
+            let mut ledger = ledger([on_socket(
+                record("live", cwd.path()),
+                Some("/run/live.sock"),
+            )]);
+            let (out, _) = run(&herdr, &mut ledger, &req);
+            assert_eq!(out, "skipped live: recorded on /run/live.sock");
+        }
+        assert!(herdr.started().is_empty());
+        assert!(herdr.tabs().is_empty());
+    }
+
+    /// Lists `stale` while `update` sees `current`, as when another
+    /// command writes the ledger mid-revive.
+    struct StaleLedger {
+        stale: MemLedger,
+        current: MemLedger,
+    }
+
+    impl Ledger for StaleLedger {
+        fn entries(&self) -> Result<BTreeMap<String, AgentRecord>> {
+            self.stale.entries()
+        }
+        fn record(&mut self, record: AgentRecord) -> Result<()> {
+            self.current.record(record)
+        }
+        fn update(
+            &mut self,
+            name: &str,
+            change: &mut dyn FnMut(&mut AgentRecord) -> Result<()>,
+        ) -> Result<AgentRecord> {
+            self.current.update(name, change)
+        }
+        fn remove_herd(
+            &mut self,
+            herd: &str,
+            before: &mut dyn FnMut(&[String]) -> Result<()>,
+        ) -> Result<crate::ledger::RemovedHerd> {
+            self.current.remove_herd(herd, before)
+        }
+        fn started(&mut self, name: &str, at: SystemTime, resumed: bool) -> Result<()> {
+            self.current.started(name, at, resumed)
+        }
+    }
+
+    #[test]
+    fn a_socket_recorded_since_revive_read_the_ledger_fails_the_entry_and_saves_nothing() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut herdr = herdr();
+        herdr.socket = Some("/run/dev.sock".into());
+        let mut ledger = StaleLedger {
+            stale: ledger([on_socket(record("a", cwd.path()), None)]),
+            current: ledger([on_socket(record("a", cwd.path()), Some("/run/live.sock"))]),
+        };
+        let before = ledger.current.0.clone();
+
+        let (out, code) = revive(&herdr, &mut ledger, &request(), &|s| s.to_string())
+            .unwrap()
+            .report();
+
+        assert_eq!(
+            (out.as_str(), code),
+            (
+                "failed a: ledger: recorded on /run/live.sock since revive read the ledger",
+                1
+            )
+        );
+        assert_eq!(ledger.current.0, before);
+    }
+
+    #[test]
+    fn a_manual_revive_records_the_reached_socket_for_an_entry_with_none() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut herdr = herdr();
+        herdr.socket = Some("/run/dev.sock".into());
+        let mut ledger = ledger([on_socket(record("a", cwd.path()), None)]);
+        let (out, _) = run(&herdr, &mut ledger, &request());
+        assert_eq!(out, "resumed a w1:p1");
+        assert_eq!(
+            ledger.0["a"].socket.as_deref(),
+            Some(Path::new("/run/dev.sock"))
+        );
     }
 
     #[test]
