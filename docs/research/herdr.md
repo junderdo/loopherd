@@ -230,9 +230,9 @@ start and `run_handoff_import_server`).
 
 **Shell parent pid.** The simplest test needs no clocks. herdr spawns
 every shell it starts itself, so after a restart a pane's shell has the
-server as its parent. A handoff's new server is spawned by the old one, not
-by the panes' parent, so the surviving shells are orphaned and reparented
-(to pid 1 here). Probe on the dev server, `shell_pid` from
+server as its parent. A handoff's new server is spawned by the old one and is
+not the panes' parent, so once the old server exits the surviving shells are
+orphaned and reparented (to pid 1 here). Probe on the dev server, `shell_pid` from
 `herdr pane process-info --pane <id>`, `ps -o ppid= -p <shell_pid>`:
 
 | moment | server pid | shell pid | shell's ppid |
@@ -283,8 +283,8 @@ documented, so use it only as a cross-check.
 
 **Not settled.** The hook's `$PPID` being the server (a plain
 `Command::spawn` from a server thread) is read from the source and needs
-checking in the first real hook run. macOS (`ps -o lstart=` instead of
-`/proc`), a client-autostarted server and a failed handoff re-running hooks
+checking in the first real hook run. macOS (the ppid test is its choice, via `ps -o ppid=`, which
+was not probed; there is no `/proc`), a client-autostarted server and a failed handoff re-running hooks
 were not tried; handoff is unsupported on Windows, where a startup hook is
 always a restart.
 
