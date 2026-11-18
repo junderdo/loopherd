@@ -267,13 +267,13 @@ mod tests {
         }
     }
 
-    /// The second word of each `| \`<member> <kind> …\` |` row in the line table.
+    /// What follows the first word of each `| \`<member> <kind> …\` |` row in the line table.
     fn table_kinds() -> Vec<&'static str> {
         SKILL
             .lines()
             .filter_map(|l| l.trim().strip_prefix("| `"))
             .filter_map(|l| l.split_once('`').map(|(cell, _)| cell))
-            .filter_map(|cell| cell.split_whitespace().nth(1))
+            .filter_map(|cell| cell.split_once(' ').map(|(_, kind)| kind))
             .collect()
     }
 
@@ -285,7 +285,11 @@ mod tests {
         let others = crate::watch::line::ALL.map(String::from);
         let table = table_kinds();
         for kind in reports.chain(others) {
-            assert!(table.contains(&kind.as_str()), "no {kind} row in {table:?}");
+            let row = |cell: &&str| {
+                cell.strip_prefix(kind.as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+            };
+            assert!(table.iter().any(row), "no {kind} row in {table:?}");
         }
     }
 
