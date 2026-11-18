@@ -9,7 +9,7 @@ Usage: scripts/install [--no-splash]
                        [--settings <file>] [install-hook args...]
 
 Build loopherd, install it as ~/.local/bin/loopherd, and add its Claude
-Stop/StopFailure/SessionStart/PreToolUse hooks and the loopherd skill.
+Stop/StopFailure/SessionStart/PreToolUse/UserPromptSubmit hooks and the loopherd skill.
 On a terminal it then offers loopherd's agent types (builder, reviewer,
 researcher, scout) and the mattpocock-skills plugin, each default no, then
 runs `loopherd setup`, which asks, while config.toml leaves them unset,

@@ -235,7 +235,7 @@ that file.
 
 ### Hooks
 
-`stop-hook`, `session-hook` and `tool-hook` are the Claude hooks
+`stop-hook`, `session-hook`, `tool-hook` and `prompt-hook` are the Claude hooks
 `install-hook` sets up. Claude runs them; you don't.
 
 ## Where it's going

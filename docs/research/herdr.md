@@ -71,7 +71,7 @@ All commands return JSON over the socket API.
 | Synchronize | `agent wait <name> --until <states>` |
 | Subscribe | socket `events.subscribe` (no CLI wrapper), see [herdr-events.md](herdr-events.md) |
 | Remote | global `--machine <label>` prefix; IDs are per-server |
-| Display metadata | `workspace report-metadata` |
+| Display metadata | `workspace report-metadata`, `pane report-metadata` (see below) |
 
 Gotchas from the bundled skill (`herdr --skill`):
 - `agent prompt` refuses a `blocked` agent (`agent_blocked`); `--wait` can
@@ -79,6 +79,83 @@ Gotchas from the bundled skill (`herdr --skill`):
 - `idle`/`done` don't prove an unrecognized dialog isn't showing.
 - A pane moved between workspaces gets a new ID — track agents by name.
 - Remote connection failures don't prove a mutation wasn't applied.
+
+## Labelling a Claude pane (0.9.5, LH-206)
+
+Tried on `scripts/herdr-dev` against a Haiku Claude started with
+`agent start`, with herdr's Claude integration installed.
+
+**Lifecycle state is herdr's alone.** `pane report-agent --state blocked`
+from any source other than the pane's owner exits 0 and changes nothing:
+`agent_status` and `state_change_seq` stay put, with or without `--seq`,
+for `--agent claude` or `loopherd`, and for every `--state`. Once
+`herdr:claude` reports the session it owns the pane's lifecycle, and herdr
+accepts a takeover only from an official `herdr:*` source. herdr closed the
+request to change that as not planned
+([#2824](https://github.com/herdrdev/herdr/issues/2824)); the opt-in idea is
+[discussion #3625](https://github.com/herdrdev/herdr/discussions/3625).
+
+**Display metadata is stored.** `pane report-metadata` is accepted on the
+same pane and never touches `agent_status`, `name` or waits:
+
+- The pane ID must come before the options, despite the usage line:
+  `herdr pane report-metadata <pane> --source loopherd ...`. With the pane
+  last, 0.9.5 fails with `unknown option: loopherd`.
+- Metadata is kept per `--source`; each report replaces that source's
+  presentation fields (`--title`, `--display-agent`, `--state-label`), and
+  another source's `--clear-*` leaves them alone.
+- `--agent claude` guards the fields to a pane whose agent is Claude.
+- Text is trimmed, stripped of control characters and cut to 80 characters.
+- `--ttl-ms` expires the fields; without it they stay until cleared or the
+  pane closes.
+- Success prints nothing (no JSON envelope); a missing pane fails with
+  `pane_not_found`.
+
+How each field shows, with herdr's default sidebar
+(`ui.sidebar.agents.rows = [["state_icon", "machine", "workspace", "tab"], ["agent"]]`):
+
+| Field | Sidebar | `agent list` / `pane get` |
+|---|---|---|
+| `--display-agent` | replaces the agent's name on its second row | `display_agent`; `name` unchanged |
+| `--title` | not shown: no row token reads it | `title` |
+| `--state-label idle=...` | only where a layout uses `state_text` | `state_labels` |
+| `--token name=...` | only where a layout uses `$name` | `tokens` |
+
+The state icon stays herdr's own throughout, so a label can't show the
+`blocked` icon.
+
+The right-hand column for `--display-agent` is asserted live by
+`a_leads_question_labels_its_claude_pane_until_a_typed_prompt`, through
+both `pane get` and `agent list`. The sidebar column comes from herdr's
+sidebar docs and its default `rows`; no test reads the rendered sidebar.
+
+**Clearing on the human's answer.** Claude Code fires `UserPromptSubmit` for
+a finished background task too, not only for a typed prompt: its `prompt`
+is the `<task-notification>...</task-notification>` block Claude hands the
+model. A shepherd's `loopherd watch` runs as such a task, so a hook that
+clears on any prompt would clear the label the moment the watch that set it
+exits.
+
+What the hook receives, captured on Claude Code 2.1.327 with a logging
+`UserPromptSubmit` hook in a dev pane (pinned as
+`tests/fixtures/prompt-hook/`):
+
+- A finished background task's `prompt` is exactly one
+  `<task-notification>...</task-notification>` block, with nothing before or
+  after it. The input's keys are the same as a typed prompt's, so the text is
+  the only way to tell them apart.
+- A typed prompt queued while a background task finished mid-turn fired its
+  own hook call, apart from the notification's. Claude didn't batch them.
+- Transcripts also show notifications with text around the block: a
+  `<system-reminder>` wrapper, or a harness nudge such as "The user hasn't
+  heard from you in a while" after it. Those are `api-request-blob` entries,
+  the request sent to the model. Each one matched to its task's queued `user`
+  entry (6 of 6 in a lead's transcripts) held the bare block, so the extra
+  text is added after the hook runs.
+
+loopherd keeps the label only for a prompt whose trimmed text starts with
+`<task-notification>` and ends with `</task-notification>`; anything else
+clears it.
 
 ## Known gaps (our opportunity)
 
@@ -100,3 +177,5 @@ vendor its source.
 - https://www.bitdoze.com/herdr-agent-multiplexer/
 - https://betterstack.com/community/guides/ai/herdr-ai-agent/
 - `herdr --help`, `herdr --skill`, `herdr agent start --help` (0.9.5)
+- herdr 0.9.5 docs: CLI reference (panes), socket API (`pane.report_metadata`),
+  configuration (agent sidebar rows), https://herdr.dev/llms.txt

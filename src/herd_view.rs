@@ -253,6 +253,7 @@ mod tests {
             launch_pending: false,
             cwd: None,
             title: None,
+            display_agent: None,
         }
     }
 

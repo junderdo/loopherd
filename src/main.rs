@@ -14,6 +14,7 @@ mod line_ending;
 mod lock;
 mod matching;
 mod notify;
+mod pane_label;
 mod pause;
 mod process;
 mod prompt;
@@ -311,6 +312,11 @@ enum Command {
     /// points its ledger entry at the new session, read from the hook input on
     /// stdin. Outside a member's pane it changes nothing. Set up by install-hook.
     SessionHook,
+    /// Claude's UserPromptSubmit hook: clears the label a watch or a lead's
+    /// question left on this pane's herdr sidebar row, as the human is answering;
+    /// a background task's notification keeps it. Elsewhere it does nothing.
+    /// Set up by install-hook.
+    PromptHook,
     /// Claude's PreToolUse hook on Bash: in a lead's pane, denies a merge, install,
     /// rebase or force-push its switches leave to the human, and any
     /// `loopherd restart --force`, `pause`, `resume`, `herd set`, `herd unset`,
@@ -332,7 +338,7 @@ enum Command {
         #[arg(last = true, required = true)]
         args: Vec<String>,
     },
-    /// Add loopherd's Stop, StopFailure, SessionStart and PreToolUse hooks to Claude's
+    /// Add loopherd's Stop, StopFailure, SessionStart, PreToolUse and UserPromptSubmit hooks to Claude's
     /// user settings, calling this binary, and write the `--skill` guide as the loopherd
     /// skill; safe to re-run. Backs the settings file up before changing it.
     InstallHook {
@@ -635,6 +641,7 @@ fn main() -> ExitCode {
         } => ("watch", run_watch(&herds, timeout, settings)),
         Command::StopHook => ("stop-hook", run_stop_hook()),
         Command::SessionHook => ("session-hook", run_session_hook()),
+        Command::PromptHook => ("prompt-hook", run_prompt_hook()),
         Command::ToolHook => ("tool-hook", run_tool_hook()),
         Command::NotifyRun {
             member,
@@ -963,15 +970,21 @@ fn run_report(kind: Kind, as_name: Option<String>, text: &str) -> Result<i32> {
         own_socket: own_socket.as_deref(),
         as_name: as_name.as_deref(),
     };
-    report(
-        &ledger,
-        &ledger.reports_dir()?,
-        &who,
-        kind,
-        text,
-        SystemTime::now(),
-    )?;
+    let mailboxes = ledger.reports_dir()?;
+    let name = report(&ledger, &mailboxes, &who, kind, text, SystemTime::now())?;
+    let config = Paths::from_env().map(|p| p.herds.with_file_name("config.toml"));
+    if let (Kind::Question, Some(pane), Ok(config)) = (kind, &own_pane, config)
+        && labels_panes(&config)
+        && let Err(e) = pane_label::lead_asked(&CliHerdr, &ledger, &mailboxes, pane, &name, text)
+    {
+        eprintln!("loopherd report: warning: label pane {pane}: {e:#}");
+    }
     Ok(0)
+}
+
+/// `[notify] pane_label`; a broken table labels nothing, as it sends nothing.
+fn labels_panes(config: &Path) -> bool {
+    notify::load(config).is_ok_and(|c| c.is_some_and(|c| c.labels_panes()))
 }
 
 fn since_now(value: &str) -> Result<SystemTime> {
@@ -1053,6 +1066,7 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         shepherd_handoff: None,
         procs: &process::ProcFs,
         notify_own: None,
+        pane_label: false,
     };
     let state = ledger.dir()?;
     let handoff = || shepherd_handoff(&herd_paths, &state);
@@ -1062,6 +1076,7 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
     let req = watch::Request {
         shepherd_handoff: Some(&handoff),
         notify_own: Some(&notify_own),
+        pane_label: labels_panes(&config),
         ..req
     };
     let woke = watch::watch(
@@ -1237,6 +1252,13 @@ fn run_session_hook() -> Result<i32> {
         socket: socket.as_deref(),
         claude_pid: process::claude_pid_from_env(&process::ProcFs),
     };
+    if let Err(e) = pane_label::session_started(&CliHerdr, &ledger.reports_dir()?, pane.id, &input)
+    {
+        eprintln!(
+            "loopherd session-hook: warning: clear pane {}'s label: {e:#}",
+            pane.id
+        );
+    }
     session_hook::session_hook(
         &mut ledger,
         &process::ProcFs,
@@ -1245,6 +1267,19 @@ fn run_session_hook() -> Result<i32> {
         &live_session,
         &mut |warning| eprintln!("loopherd session-hook: {warning}"),
     )?;
+    Ok(0)
+}
+
+fn run_prompt_hook() -> Result<i32> {
+    let Some(pane) = own_pane() else {
+        return Ok(0);
+    };
+    let mut input = vec![];
+    std::io::stdin()
+        .read_to_end(&mut input)
+        .context("read hook input")?;
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    pane_label::prompted(&CliHerdr, &ledger.reports_dir()?, &pane, &input)?;
     Ok(0)
 }
 
@@ -1300,8 +1335,12 @@ fn run_install_hook(
         }
     };
     let done = match remove {
-        true => "removed loopherd's Stop, StopFailure, SessionStart and PreToolUse hooks from",
-        false => "installed loopherd's Stop, StopFailure, SessionStart and PreToolUse hooks in",
+        true => {
+            "removed loopherd's Stop, StopFailure, SessionStart, PreToolUse and UserPromptSubmit hooks from"
+        }
+        false => {
+            "installed loopherd's Stop, StopFailure, SessionStart, PreToolUse and UserPromptSubmit hooks in"
+        }
     };
     match outcome {
         install_hook::Outcome::Unchanged => println!("{} already up to date", settings.display()),
