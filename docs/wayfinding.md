@@ -76,6 +76,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D59](decisions/D59.md) | `loopherd release` runs the repo's pre-push hooks on the origin delete; a refusal leaves the branch and the entry unreleased, prints the hook's output, and a rerun retries and releases. |
 | [D60](decisions/D60.md) | An optional `[queue] backlog` command counts unready tasks; `status` shows claimable and unready counts, a lead's watch prints `running low` once per streak when claimable is at or below `max`, and the lead triages the unready tasks for the human, who alone approves marking them ready. |
 | [D61](decisions/D61.md) | The claimable count `status` shows and `running low` compares with `max` is every task feed would take with no cap on slots, not capped by free slots. |
+| [D62](decisions/D62.md) | loopherd ships as a herdr plugin from `herdr-plugin/` that needs `loopherd` already installed and never installs it or its hooks; its commands run through `loopherd.sh`. |
 
 ## Emerging model
 

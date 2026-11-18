@@ -90,6 +90,19 @@ mailbox, keep its session current across `/clear` and resume, and deny a
 lead the commands its switches leave to you. `install-hook` backs up
 `settings.json` before changing it.
 
+### herdr plugin
+
+Optional, once loopherd is installed (above). Needs herdr 0.7.0 or later.
+
+```bash
+herdr plugin install junderdo/loopherd/herdr-plugin
+```
+
+It adds a `loopherd: herd status` action. The plugin runs the `loopherd` on
+`PATH`, else `~/.local/bin/loopherd`, and never installs loopherd or its
+hooks; without one, its commands fail with a pointer here. Remove it with
+`herdr plugin uninstall loopherd`.
+
 ## Set up a repo
 
 Start with loopherd installed (above), herdr running, and the repo cloned

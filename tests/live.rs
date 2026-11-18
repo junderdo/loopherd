@@ -1,5 +1,5 @@
 //! End-to-end runs of `loopherd spawn`, `add`, `revive`, `retire --close`, `feed`, the Stop hook, `watch` and the herd view's event subscriber against the real `loopherd-dev` herdr
-//! session. Skipped unless `LOOPHERD_LIVE=1`; start the session first with
+//! session, and `herdr plugin link` of `herdr-plugin/` into a throwaway herdr home. Skipped unless `LOOPHERD_LIVE=1`; start the session first with
 //! `scripts/herdr-dev --start`, then run through it:
 //! `LOOPHERD_LIVE=1 scripts/herdr-dev cargo test --test live`.
 
@@ -905,6 +905,54 @@ fn a_status_change_and_a_split_on_a_dev_pane_reach_the_event_subscriber() {
         "--no-focus",
     ]);
     assert_eq!(within(5), Ok(Pushed::Event), "no pane.created event");
+}
+
+/// herdr with a throwaway home and a socket nothing listens on. Plugins
+/// register per user, and a reachable server, the dev one included, would
+/// register a link in its own home: the human's.
+fn isolated_herdr(home: &Path) -> Command {
+    let socket = home.join("no-server.sock");
+    assert!(!socket.exists());
+    let mut cmd = Command::new("herdr");
+    cmd.env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("HERDR_SOCKET_PATH", socket);
+    for var in HERDR_IDS {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
+#[test]
+fn plugin_links_enabled_into_an_isolated_herdr_home() {
+    if !live_enabled() {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("herdr-plugin");
+
+    let linked = isolated_herdr(home.path())
+        .args(["plugin", "link"])
+        .arg(&plugin)
+        .output()
+        .unwrap();
+    assert!(linked.status.success(), "{linked:?}");
+    assert!(home.path().join(".config/herdr/plugins.json").exists());
+
+    let list = isolated_herdr(home.path())
+        .args(["plugin", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(list.status.success(), "{list:?}");
+    let plugins = json(&list)["result"]["plugins"].clone();
+    let [entry] = plugins.as_array().unwrap().as_slice() else {
+        panic!("expected one plugin: {plugins}");
+    };
+    assert_eq!(entry["plugin_id"], "loopherd");
+    assert_eq!(entry["enabled"], true);
+    assert_eq!(entry["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(entry["plugin_root"], plugin.to_str().unwrap());
 }
 
 const LIVE: &str = "/home/u/.config/herdr/herdr.sock";
