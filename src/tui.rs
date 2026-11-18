@@ -914,14 +914,23 @@ fn exit_on_hangup() -> Result<()> {
         .map_or(std::io::stdin().as_raw_fd(), |f| f.as_raw_fd());
     std::thread::spawn(move || {
         let _tty = tty;
-        // POLLHUP, POLLERR and POLLNVAL are reported even when not asked for.
+        // macOS watches only the bits in `events`; Linux ignores POLLHUP there
+        // and reports it regardless.
         let mut pollfd = libc::pollfd {
             fd,
-            events: 0,
+            events: libc::POLLHUP,
             revents: 0,
         };
-        // SAFETY: pollfd is a valid, live pollfd for the duration of the call.
-        while unsafe { libc::poll(&mut pollfd, 1, -1) } <= 0 {}
+        let hung_up = libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
+        loop {
+            // SAFETY: pollfd is a valid, live pollfd for the duration of the call.
+            let ready = unsafe { libc::poll(&mut pollfd, 1, -1) };
+            if ready > 0 && pollfd.revents & hung_up != 0 {
+                break;
+            }
+            // macOS can wake on unread input; crossterm drains it meanwhile.
+            std::thread::sleep(TICK);
+        }
         // SAFETY: _exit takes no pointers.
         unsafe { libc::_exit(128 + libc::SIGHUP) };
     });

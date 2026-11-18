@@ -105,8 +105,8 @@ fn exit_code_after(child: &mut Child, keys: &[u8], within: Duration) -> Option<i
     None
 }
 
-/// Ends the view itself before `script`, so a test sees its exit code rather
-/// than its hangup exit. SIGKILLs a view that outlives SIGTERM.
+/// SIGTERMs the view before `script`, so it restores the terminal and leaves
+/// no orphan. SIGKILLs a view that outlives SIGTERM.
 fn end(script: &mut Child) {
     let views = children(script);
     let alive = |pid: i32| Path::new(&format!("/proc/{pid}")).exists();
