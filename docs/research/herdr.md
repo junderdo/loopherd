@@ -204,6 +204,63 @@ for what 0.7.0 already had, and the changelog.
   `popup_not_open`. No API sends input to a popup, and keys typed into a
   client attached under `script` didn't reach it.
 
+## Handoff or restart in a startup hook (0.9.5, LH-263)
+
+Checked 2026-11-18 against herdr 0.9.5, the latest release, with its source
+at tag `v0.9.5` (read only) and probes on the `loopherd-dev` server through
+`scripts/herdr-dev`. No plugin was linked, so no real hook ran (D62); what a
+hook receives comes from the docs and source. Unreleased `master`
+(`ee5bfb50`) calls the hook the same way, and the changelog has no entry
+about telling the cases apart.
+
+herdr runs `[[startup]]` hooks after a restart and again when a new server
+takes over a live handoff ([plugins docs](https://raw.githubusercontent.com/herdrdev/herdr/v0.9.5/docs/next/website/src/content/docs/plugins.mdx),
+"Startup hooks"). Both paths call one argument-less
+`run_plugin_startup_hooks()` (`src/server/headless/bootstrap.rs`, normal
+start and `run_handoff_import_server`).
+
+| Candidate | Source or probe | Signal? |
+|---|---|---|
+| Env vars, argv, `HERDR_PLUGIN_CONTEXT_JSON` | `src/app/api/plugins/runtime.rs` builds them with no reason; the context has `invocation_source = "startup"` and `correlation_id = "plugin.startup"` on both paths, and the struct (`src/api/schema/plugins.rs`) has no restored, handoff or start-time field | No |
+| herdr event, CLI or socket field | `status server --json`, `ping`, `PaneInfo` and the event kinds have no start time, generation or handoff flag. `capabilities.live_handoff` only says the server can hand off. `detached_server_daemon` flipped false, true, false across a handoff and a restart, but only means the server is a session leader | No |
+| Session or pane field that changes only on restart | `terminal_id` changes on both. `pane_id`, `workspace_id` and `tab_id` are stable on both. `session.json` was identical across a handoff. `revision` went 1, 0, 1, mechanism unread | No |
+| Pane shell older than the server | Probe below | **Yes** |
+| `--handoff-import` in the server's argv | Internal flag, below | Fallback |
+
+**Process start times.** `herdr pane process-info --pane <id>` gives a
+pane's `shell_pid`. In the probe (Linux, `/proc/<pid>/stat` field 22):
+
+| moment | server start | pane shell start |
+|---|---|---|
+| after a live handoff | 1436203 | 1433130 (same pid as before, `sleep` child alive) |
+| after `server stop` and a restart | 1440157 | 1440158 (new shell, `sleep` gone) |
+
+A handoff leaves the shell about 30 s older than the new server. A restart
+spawns every restored pane inside `App::try_new`, before the hook runs, so
+its shell starts at or after the server. This held with no client attached.
+The rule: a pane shell started before the server means a handoff; every
+shell at or after it, no panes, or a `restore_error` means a restart. Ticks
+are 10 ms, so a tie counts as a restart. Use the shell, not the agent: herdr
+resumes agents only after a client attaches, and a user may start one later
+in a surviving pane.
+
+**`--handoff-import`.** A handoff-imported server keeps
+`--handoff-import <socket> <token>` in its `/proc/<pid>/cmdline` for its
+whole life; a restarted one does not. It is an internal flag, not
+documented, so use it only as a cross-check.
+
+**Not settled.** The hook's `$PPID` being the server (a plain
+`Command::spawn` from a server thread) is read from the source and needs
+checking in the first real hook run. macOS (`ps -o lstart=` instead of
+`/proc`), a client-autostarted server and a failed handoff re-running hooks
+were not tried; handoff is unsupported on Windows, where a startup hook is
+always a restart.
+
+**Verdict.** herdr passes the hook no handoff flag and none can be read
+elsewhere, so LH-246 derives it: the hook compares each pane's `shell_pid`
+start time with its parent server's, and `revive --startup` skips the re-arm
+prompt when a shell predates the server.
+
 ## Oldest supported herdr (LH-247)
 
 Still unknown. `loopherd doctor` fails below `MIN_HERDR` in
