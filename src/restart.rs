@@ -8,8 +8,9 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::context::handoff_path;
 use crate::continuation::follow_recorded;
-use crate::herd::{Paths, Switches, lead_settings};
+use crate::herd::Paths;
 use crate::herdr::{AgentStatus, Herdr};
+use crate::lead::{LeadPrompt, rendered};
 use crate::ledger::{Ledger, Process};
 use crate::lock::Lock;
 use crate::report::{Body, Entry, SinceHandoff, append, member_of_own_pane, since_handoff};
@@ -115,10 +116,13 @@ pub fn restart(
     let lead = match (record.is_lead(), &record.herd) {
         (false, _) => None,
         (true, None) => bail!("{name} is a lead with no herd recorded"),
-        (true, Some(herd)) => Some(
-            lead_settings(req.paths, herd)
-                .with_context(|| format!("{name}'s switches, from herd {herd}"))?,
-        ),
+        (true, Some(herd)) => {
+            let worktree = record.worktree.as_ref().unwrap_or(&record.repo);
+            Some(
+                rendered(req.paths, herd, name, worktree)
+                    .with_context(|| format!("{name}'s prompt, from herd {herd}"))?,
+            )
+        }
     };
     let pane = &agent.pane_id;
     ensure_main_view(
@@ -474,16 +478,19 @@ fn take(state: &Path, name: &str, kind: &str) -> Result<Option<Lock>> {
 const CLEAR_DIALOG: &str = "/clear acts on the main conversation";
 
 /// A lead stopped its watch to hand off, so it's told to re-arm it. `/clear`
-/// dropped its original prompt, so its switches and limit are given again.
-fn resume_prompt(lead: Option<&(Switches, u32)>, handoff: &Path) -> String {
+/// dropped its original prompt, so that is given again, then its switches and
+/// limit, which the prompt may not place.
+fn resume_prompt(lead: Option<&LeadPrompt>, handoff: &Path) -> String {
     let resume = format!(
         "Read your handoff at {}, then continue from it.",
         handoff.display()
     );
     match lead {
-        Some((switches, rounds)) => format!(
-            "{resume} Your switches: {}. Your review-round limit: {rounds}. {LEAD_REARM}",
-            switches.lines().replace('\n', ", ")
+        Some(lead) => format!(
+            "{}\n\n{resume} Your switches: {}. Your review-round limit: {}. {LEAD_REARM}",
+            lead.text,
+            lead.switches.lines().replace('\n', ", "),
+            lead.review_rounds
         ),
         None => resume,
     }
@@ -1216,7 +1223,7 @@ mod tests {
             result.unwrap();
             let resume = &w.herdr.prompts()[1].1;
             assert!(
-                resume.starts_with(&format!(
+                resume.contains(&format!(
                     "Read your handoff at {}, then continue from it.",
                     w.handoff()
                 )),
@@ -1251,6 +1258,62 @@ mod tests {
     }
 
     #[test]
+    fn a_leads_resume_prompt_re_renders_its_prompt_file_ahead_of_the_handoff_line() {
+        let w = World::new();
+        w.handed_off();
+        let herds = w.paths().herds;
+        fs::write(
+            herds.join("lead.md"),
+            "{name} leads {herd} in {worktree}.\n\
+             Merge with GH_TOKEN=$(gh auth token --user me) gh pr merge.\n\
+             {switches}\n",
+        )
+        .unwrap();
+        fs::write(
+            herds.join("h.toml"),
+            "repo = \"/src/repo\"\n[lead]\nprompt_file = \"lead.md\"\nmerge = true\nreview_rounds = 5\n",
+        )
+        .unwrap();
+        let (result, _) = w.restart_as(false, true, None, &|r| {
+            r.role = Some(crate::ledger::Role::Lead);
+            r.herd = Some("h".into());
+            r.worktree = Some("/src/worktrees/lead-h".into());
+        });
+        result.unwrap();
+        let resume = &w.herdr.prompts()[1].1;
+        let prompt = "lh-1 leads h in /src/worktrees/lead-h.\n\
+                      Merge with GH_TOKEN=$(gh auth token --user me) gh pr merge.\n\
+                      merge on\ninstall off\nrebase off\nnew_cards off\n\
+                      design_escalation off\nblocked_dialogs off\n\n\
+                      Your review-round limit: 5.";
+        assert!(
+            resume.starts_with(&format!(
+                "{prompt}\n\nRead your handoff at {}, then continue from it.",
+                w.handoff()
+            )),
+            "{resume}"
+        );
+    }
+
+    #[test]
+    fn a_lead_whose_prompt_file_is_gone_is_not_cleared() {
+        let w = World::new();
+        w.handed_off();
+        fs::write(
+            w.paths().herds.join("h.toml"),
+            "repo = \"/src/repo\"\n[lead]\nprompt_file = \"gone.md\"\n",
+        )
+        .unwrap();
+        let (result, _) = w.restart_as(false, true, None, &|r| {
+            r.role = Some(crate::ledger::Role::Lead);
+            r.herd = Some("h".into());
+        });
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(err.contains("gone.md"), "{err}");
+        assert!(w.herdr.prompts().is_empty());
+    }
+
+    #[test]
     fn a_lead_whose_herd_file_cant_be_read_is_not_cleared() {
         let w = World::new();
         w.handed_off();
@@ -1259,7 +1322,7 @@ mod tests {
             r.herd = Some("gone".into());
         });
         let err = format!("{:#}", result.unwrap_err());
-        assert!(err.contains("lh-1's switches"), "{err}");
+        assert!(err.contains("lh-1's prompt"), "{err}");
         assert!(w.herdr.prompts().is_empty());
     }
 
