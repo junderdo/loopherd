@@ -117,7 +117,15 @@ pick another if your config uses it. A popup that closes as soon as it
 opens means the view couldn't start; run `loopherd view` in a pane to see
 why. Its event hooks record a member going blocked, or its pane exiting
 or closing, so the next `loopherd watch` reports it even when none was
-running. The plugin runs the `loopherd` on `PATH`, else
+running.
+
+A Ctrl-click on a GitHub PR link in any pane shows the member that owns
+the PR in a popup (herd, live status, template, review round, last
+reports; q or Esc closes it). A PR no open member owns opens in the
+browser. Clicks reach the plugin only while herdr's `ui.mouse_capture`
+is on; with it off, the terminal handles them.
+
+The plugin runs the `loopherd` on `PATH`, else
 `~/.local/bin/loopherd`, and never installs loopherd or its hooks;
 without one, its commands fail with a pointer here. herdr shows no
 action output on screen: read it, errors included, with
@@ -259,6 +267,7 @@ table and the rest are what `init` writes; start from its output or from
 | `reports` | Print unread reports, questions first, and mark them read (`--herd`, `--all`). |
 | `status` | Members by herd with herdr's live status (`--all`, `--strays`, `--json`). |
 | `view` | The same as a live TUI; Enter focuses the member's pane. |
+| `pr [url]` | The herdr plugin's PR link handler: the member that owns the PR in a popup, else the browser. |
 | `stats` | How each herd's work flowed: time to done, review rounds, time waiting on merge (`--herd`, `--since`, `--json`). |
 
 `watch` can also notify you outside your pane on a question or a blocked
