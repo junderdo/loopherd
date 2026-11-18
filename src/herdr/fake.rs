@@ -375,18 +375,9 @@ impl FakeHerdr {
     }
 }
 
-impl Herdr for FakeHerdr {
-    fn workspaces(&self) -> Result<Vec<Workspace>> {
-        if self.is_down() {
-            bail!("herdr server not running");
-        }
-        Ok(self.workspaces.clone())
-    }
-
-    fn agents(&self) -> Result<Vec<Agent>> {
-        if let Some(gate) = &self.agents_gate {
-            let _ = gate.lock().unwrap().recv();
-        }
+impl FakeHerdr {
+    /// `agents` once its gate, if any, has opened.
+    fn agents_now(&self) -> Result<Vec<Agent>> {
         if let Some(on_agents) = &self.on_agents {
             on_agents();
         }
@@ -419,6 +410,32 @@ impl Herdr for FakeHerdr {
                 false => a.clone(),
             })
             .collect())
+    }
+}
+
+impl Herdr for FakeHerdr {
+    fn workspaces(&self) -> Result<Vec<Workspace>> {
+        if self.is_down() {
+            bail!("herdr server not running");
+        }
+        Ok(self.workspaces.clone())
+    }
+
+    fn agents_within(&self, timeout: Duration) -> Result<Option<Vec<Agent>>> {
+        if let Some(gate) = &self.agents_gate {
+            let opened = gate.lock().unwrap().recv_timeout(timeout);
+            if opened == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                return Ok(None);
+            }
+        }
+        self.agents_now().map(Some)
+    }
+
+    fn agents(&self) -> Result<Vec<Agent>> {
+        if let Some(gate) = &self.agents_gate {
+            let _ = gate.lock().unwrap().recv();
+        }
+        self.agents_now()
     }
 
     fn agent(&self, name: &str) -> Result<Agent> {

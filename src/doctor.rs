@@ -97,13 +97,13 @@ fn config_checks(paths: &Paths) -> Vec<Check> {
             Some(file)
         }
         Err(e) => {
-            checks.push(failure("config", one_line(&e), by_hand.clone()));
+            checks.push(failure("config", message(&e), by_hand.clone()));
             None
         }
     };
     if crate::herd::parses_as_toml(&config) {
         match crate::notify::load(&config) {
-            Err(e) => checks.push(failure("notify", one_line(&e), by_hand)),
+            Err(e) => checks.push(failure("notify", message(&e), by_hand)),
             Ok(Some(notify)) if notify.sends_nothing() => checks.push(Check {
                 name: "notify".into(),
                 status: Status::Warning,
@@ -146,7 +146,7 @@ fn herd_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
             Ok(names) => names,
             Err(e) => {
                 let fix = format!("fix {} by hand", paths.herds.display());
-                return vec![failure("herd files", one_line(&e), fix)];
+                return vec![failure("herd files", message(&e), fix)];
             }
         },
     };
@@ -197,7 +197,7 @@ fn state_checks(
         Err(e) => {
             checks.insert(
                 0,
-                failure("ledger", one_line(&e), "fix the ledger by hand".into()),
+                failure("ledger", message(&e), "fix the ledger by hand".into()),
             );
             return checks;
         }
@@ -227,7 +227,7 @@ fn pause_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
             Ok(readings) => readings,
             Err(e) => {
                 let fix = format!("fix {} by hand", dir.display());
-                return vec![failure("pause files", one_line(&e), fix)];
+                return vec![failure("pause files", message(&e), fix)];
             }
         },
     };
@@ -237,12 +237,12 @@ fn pause_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
             Reading::Unreadable(e) => {
                 // `pause` needs the herd file; `resume` deletes an orphaned pause too.
                 let fix = match crate::herd::require(paths, &herd) {
-                    Ok(()) => {
-                        format!("loopherd resume {herd}, or loopherd pause {herd} to rewrite it")
-                    }
+                    Ok(()) => format!(
+                        "loopherd pause {herd} to rewrite it, or loopherd resume {herd} to lift it"
+                    ),
                     Err(_) => format!("loopherd resume {herd}"),
                 };
-                Some(failure(&format!("pause {herd}"), one_line(&e), fix))
+                Some(failure(&format!("pause {herd}"), message(&e), fix))
             }
             _ => None,
         })
@@ -251,15 +251,23 @@ fn pause_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
 
 /// A failure when `name`'s mailbox can't be read or has a line that doesn't parse.
 fn mailbox_check(dir: &Path, name: &str) -> Option<Check> {
-    let detail = match crate::report::history(dir, name) {
-        Err(e) => one_line(&e),
-        Ok((_, warnings)) => match warnings.as_slice() {
-            [] => return None,
-            [one] => one.clone(),
-            [first, rest @ ..] => format!("{first} (and {} more bad lines)", rest.len()),
-        },
+    let (detail, fix) = match crate::report::history(dir, name) {
+        Err(e) => {
+            let path = dir.join(format!("{name}.jsonl"));
+            (
+                message(&e),
+                format!("make {} a readable file", path.display()),
+            )
+        }
+        Ok((_, warnings)) => {
+            let detail = match warnings.as_slice() {
+                [] => return None,
+                [one] => one.clone(),
+                [first, rest @ ..] => format!("{first} (and {} more bad lines)", rest.len()),
+            };
+            (detail, "fix the mailbox's bad lines by hand".into())
+        }
     };
-    let fix = "fix the mailbox's bad lines by hand".into();
     Some(failure(&format!("mailbox {name}"), detail, fix))
 }
 
@@ -273,12 +281,19 @@ fn pane_checks(
     if members.is_empty() {
         return vec![];
     }
-    let agents = match herdr.agents() {
-        Ok(agents) => agents,
+    let agents = match herdr.agents_within(HERDR_TIMEOUT) {
+        Ok(Some(agents)) => agents,
+        Ok(None) => {
+            let detail = format!(
+                "herdr didn't list its agents within {}",
+                humantime::format_duration(HERDR_TIMEOUT)
+            );
+            return vec![failure("members", detail, "restart herdr's server".into())];
+        }
         Err(e) => {
             return vec![failure(
                 "members",
-                one_line(&e),
+                message(&e),
                 "restart herdr's server".into(),
             )];
         }
@@ -317,7 +332,8 @@ fn pane_checks(
     checks
 }
 
-fn one_line(e: &anyhow::Error) -> String {
+/// `e` with its causes, as the command that failed would print it.
+fn message(e: &anyhow::Error) -> String {
     format!("{e:#}").trim_end().to_string()
 }
 
@@ -435,7 +451,7 @@ fn unreached(server: Result<Server>) -> Check {
             failure("herdr", detail, "restart herdr's server".into())
         }
         Ok(Server::Missing) => failure("herdr", "no herdr on PATH".into(), "install herdr".into()),
-        Err(e) => failure("herdr", one_line(&e), "restart herdr's server".into()),
+        Err(e) => failure("herdr", message(&e), "restart herdr's server".into()),
     }
 }
 
@@ -502,7 +518,8 @@ fn count(checks: &[Check], status: Status) -> usize {
     checks.iter().filter(|c| c.status == status).count()
 }
 
-/// Problems with their fixes, or every check when `verbose`, then the summary line.
+/// Problems with their fixes, one line each, or every check when `verbose`,
+/// then the summary line.
 pub fn text(checks: &[Check], verbose: bool) -> String {
     let mut out = String::new();
     for check in checks.iter().filter(|c| verbose || c.status != Status::Ok) {
@@ -511,7 +528,14 @@ pub fn text(checks: &[Check], verbose: bool) -> String {
             Status::Warning => "warning",
             Status::Failure => "failure",
         };
-        out += &format!("{status} {}: {}", check.name, check.detail);
+        // A TOML error's caret diagram spans lines; one check stays one line.
+        let detail: Vec<&str> = check
+            .detail
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        out += &format!("{status} {}: {}", check.name, detail.join(" "));
         if let Some(fix) = &check.fix {
             out += &format!("; fix: {fix}");
         }
@@ -1149,16 +1173,30 @@ mod tests {
         m.herd_file("bad", "repo = \"/r\"\ncolour = 1\n");
         let (herds, _) = crate::herd::herds(m.paths(), &m.install.settings).unwrap();
         let file = m.paths().herds.join("bad.toml");
+        let checks = m.checks(None, &herdr()).unwrap();
+        let bad = checks.iter().find(|c| c.name == "herd bad").unwrap();
+        assert_eq!(bad.status, Status::Failure);
+        assert!(
+            bad.detail.starts_with("invalid bad.toml: "),
+            "{}",
+            bad.detail
+        );
+        assert!(
+            bad.detail.contains("unknown field `colour`"),
+            "{}",
+            bad.detail
+        );
+        assert!(bad.detail.contains('\n'), "a TOML error spans lines");
+        assert!(herds.contains(&format!("{}\n", bad.detail)), "{herds}");
         let (out, code) = run(&m, &herdr());
-        let fix = format!("; fix: fix {} by hand\n", file.display());
-        let detail = out
-            .strip_prefix("failure herd bad: ")
-            .and_then(|rest| rest.split_once(&fix))
-            .map(|(detail, _)| detail)
-            .unwrap_or_else(|| panic!("{out}"));
-        assert!(detail.starts_with("invalid bad.toml: "), "{out}");
-        assert!(detail.contains("unknown field `colour`"), "{out}");
-        assert!(herds.contains(&format!("{detail}\n")), "{herds}");
+        let fix = format!("; fix: fix {} by hand", file.display());
+        let line = out.lines().next().unwrap();
+        assert!(
+            line.starts_with("failure herd bad: invalid bad.toml: TOML parse error"),
+            "{out}"
+        );
+        assert!(line.ends_with(&fix), "{out}");
+        assert_eq!(out.lines().count(), 2, "{out}");
         assert_eq!(code, 1);
     }
 
@@ -1251,7 +1289,8 @@ mod tests {
             "{problems:?}"
         );
         assert!(
-            problems[0].ends_with("fix: loopherd resume h, or loopherd pause h to rewrite it"),
+            problems[0]
+                .ends_with("fix: loopherd pause h to rewrite it, or loopherd resume h to lift it"),
             "{problems:?}"
         );
     }
@@ -1461,5 +1500,132 @@ mod tests {
             )),
             "{problems:?}"
         );
+    }
+
+    #[test]
+    fn a_herds_dir_that_cannot_be_read_fails() {
+        let m = machine(&ALL);
+        std::fs::write(&m.paths().herds, "").unwrap();
+        let problems = problems(&m, &herdr());
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].starts_with(&format!(
+                "failure herd files: read {}: ",
+                m.paths().herds.display()
+            )),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_pause_dir_that_cannot_be_read_fails() {
+        let m = machine(&ALL);
+        std::fs::create_dir_all(m.state()).unwrap();
+        std::fs::write(&m.paths().paused, "").unwrap();
+        let problems = problems(&m, &herdr());
+        let paused = m.paths().paused.display();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].starts_with(&format!("failure pause files: read {paused}: ")),
+            "{problems:?}"
+        );
+        assert!(
+            problems[0].ends_with(&format!("; fix: fix {paused} by hand")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_mailbox_that_cannot_be_read_fails_asking_for_a_readable_file() {
+        let m = machine(&ALL);
+        let herdr = herdr().with_live_agent(Some("a"), None, "w1:p1");
+        m.ledger(&[member("a", "h", "w1:p1", None)]);
+        let mailbox = m.state().join("reports/a.jsonl");
+        std::fs::create_dir_all(&mailbox).unwrap();
+        let problems = problems(&m, &herdr);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].starts_with("failure mailbox a: "),
+            "{problems:?}"
+        );
+        assert!(
+            problems[0].ends_with(&format!(
+                "; fix: make {} a readable file",
+                mailbox.display()
+            )),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_mailbox_with_one_bad_line_names_it_without_a_count() {
+        let m = machine(&ALL);
+        let herdr = herdr().with_live_agent(Some("a"), None, "w1:p1");
+        m.ledger(&[member("a", "h", "w1:p1", None)]);
+        let reports = m.state().join("reports");
+        std::fs::create_dir_all(&reports).unwrap();
+        std::fs::write(reports.join("a.jsonl"), "nope\n").unwrap();
+        let problems = problems(&m, &herdr);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].starts_with(&format!(
+                "failure mailbox a: skipped a bad line in {}: ",
+                reports.join("a.jsonl").display()
+            )),
+            "{problems:?}"
+        );
+        assert!(!problems[0].contains("more bad lines"), "{problems:?}");
+        assert!(
+            problems[0].ends_with("; fix: fix the mailbox's bad lines by hand"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_herdr_whose_agent_list_fails_fails_the_members_check() {
+        let m = machine(&ALL);
+        m.ledger(&[member("a", "h", "w1:p1", None)]);
+        let herdr = herdr();
+        herdr.set_malformed(true);
+        let problems = problems(&m, &herdr);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].starts_with("failure members: "), "{problems:?}");
+        assert!(problems[0].contains("agent list"), "{problems:?}");
+        assert!(
+            problems[0].ends_with("; fix: restart herdr's server"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_herdr_that_wedges_listing_agents_fails_after_the_deadline() {
+        let m = machine(&ALL);
+        m.ledger(&[member("a", "h", "w1:p1", None)]);
+        let mut herdr = herdr();
+        let (_held, gate) = std::sync::mpsc::channel::<()>();
+        herdr.agents_gate = Some(gate.into());
+        let started = std::time::Instant::now();
+        let problems = problems(&m, &herdr);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(
+            problems,
+            [
+                "failure members: herdr didn't list its agents within 5s; fix: restart herdr's server"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unparseable_ledger_still_reports_an_unparseable_pause() {
+        let m = machine(&ALL);
+        m.herd("h");
+        std::fs::create_dir_all(&m.paths().paused).unwrap();
+        std::fs::write(m.paths().paused.join("h"), "{ nope").unwrap();
+        std::fs::write(m.state().join("ledger.json"), "{ nope").unwrap();
+        let names: Vec<String> = problems(&m, &herdr())
+            .iter()
+            .map(|p| p.split(':').next().unwrap().to_string())
+            .collect();
+        assert_eq!(names, ["failure ledger", "failure pause h"]);
     }
 }

@@ -384,9 +384,9 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   `config.toml` or `[notify]` that doesn't load fails; unset lead
   defaults or limits warn, naming `loopherd setup`. An invalid herd file,
   or a herd `repo` missing or not a git repo, fails. An unparseable
-  ledger, pause file or mailbox fails; an unretired member whose pane is
-  gone warns, naming `revive` or `retire`, and members on another herdr
-  socket are counted, not checked. `<herd>` limits the herd, repo and
+  ledger, pause file or member's mailbox fails; an unretired member with
+  no live agent warns, naming `revive` or `retire`, and members on
+  another herdr socket are counted, not checked. `<herd>` limits the herd, repo and
   state checks to that herd. It prints only problems, each with its fix,
   then `doctor: <n> ok, <n> warnings, <n> failures`; `--verbose` lists
   every check, `--json` gives them as data, `--settings <file>` checks

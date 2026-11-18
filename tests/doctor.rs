@@ -323,6 +323,36 @@ fn a_herd_narrows_the_herd_checks_and_an_unknown_one_exits_2() {
 }
 
 #[test]
+fn a_herdr_that_wedges_listing_agents_fails_after_the_deadline_instead_of_hanging() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    executable(
+        &s.bin.join("herdr"),
+        "#!/bin/sh\n\
+         [ \"$*\" = 'status server --json' ] && \
+         echo '{\"running\":true,\"version\":\"0.9.5\",\"socket\":\"/run/stub/herdr.sock\"}' && exit 0\n\
+         sleep 60\n",
+    );
+    let state = s.dir.path().join("state/loopherd");
+    fs::create_dir_all(&state).unwrap();
+    let member = serde_json::json!({"a": {
+        "name": "a", "pane_id": "w1:p1", "session_id": null, "repo": "/r",
+        "worktree": null, "workspace": "w1", "prompt": null, "prompt_sent": true,
+        "created": "2026-11-01T00:00:00Z", "herd": "h",
+    }});
+    fs::write(state.join("ledger.json"), member.to_string()).unwrap();
+    let started = std::time::Instant::now();
+    let out = s.doctor(&[]);
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    assert_eq!(
+        stdout(&out),
+        "failure members: herdr didn't list its agents within 5s; fix: restart herdr's server\n\
+         doctor: 13 ok, 0 warnings, 1 failures\n"
+    );
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
 fn doctor_help_documents_its_flags() {
     let out = Command::new(LOOPHERD)
         .args(["doctor", "--help"])
