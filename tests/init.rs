@@ -3887,6 +3887,10 @@ fn no_github_refuses_another_tracker_a_repo_and_an_account() {
             "--no-github goes with --tracker local",
         ),
         (
+            &["--no-github"][..],
+            "--no-github goes with --tracker local",
+        ),
+        (
             &[
                 "--tracker",
                 "local",

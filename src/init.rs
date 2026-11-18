@@ -224,7 +224,6 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         Mode::Diff => Recorded::read(&herd_file),
         Mode::Write => None,
     };
-    let choice_given = req.tracker.is_some();
     let choice = match req.tracker {
         None if mode == Mode::Diff
             && tracker::read(&repo.join(tracker::TRACKER_DOC))?.is_none() =>
@@ -250,9 +249,10 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
     };
     let recorded_github = recorded.as_ref().and_then(|r| r.github.as_deref());
     if req.no_github && tracker.kind != tracker::Kind::Local {
-        bail!(match choice_given {
-            true => "--no-github goes with --tracker local".to_string(),
-            false => format!(
+        // A tracker read from the repo's doc writes no doc of its own.
+        bail!(match tracker.writes.is_empty() {
+            false => "--no-github goes with --tracker local".to_string(),
+            true => format!(
                 "--no-github needs a local tracker, and {} names another",
                 tracker::TRACKER_DOC
             ),
