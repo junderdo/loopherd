@@ -293,6 +293,7 @@ or field carries one; an internal argv marker (`--handoff-import`) exists. So
 LH-246 derives it: for each pane with a `shell_pid`, the hook checks that
 shell's parent pid and start time against the server's, and `revive
 --startup` skips the re-arm prompt when the shells survived.
+LH-246 built it (D81) against herdr 0.9.5.
 
 ## Oldest supported herdr (LH-247)
 

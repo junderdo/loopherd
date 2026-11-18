@@ -453,7 +453,9 @@ pub fn adopt_claim(state: &Path, name: &str, fd: std::os::fd::RawFd) -> Result<L
     }
     let path = state.join("restarts").join(format!("{name}.waiter.lock"));
     let lock = std::fs::metadata(&path).map_err(|_| not_held())?;
-    if (lock.dev(), lock.ino()) != (stat.st_dev, stat.st_ino) {
+    #[allow(clippy::unnecessary_cast)] // st_dev is i32 on macOS
+    let held = (stat.st_dev as u64, stat.st_ino);
+    if (lock.dev(), lock.ino()) != held {
         return Err(not_held());
     }
     // SAFETY: fstat showed `fd` open, and nothing else in this process owns it.

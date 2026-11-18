@@ -10,7 +10,8 @@ use crate::ledger::{AgentRecord, Ledger, Process};
 pub trait Procs {
     fn exe(&self, pid: u32) -> Option<PathBuf>;
     fn parent(&self, pid: u32) -> Option<u32>;
-    /// Clock ticks since boot at which `pid` started.
+    /// When `pid` started: clock ticks since boot on Linux, microseconds since
+    /// the epoch on macOS, so only comparable with another start on this machine.
     fn start(&self, pid: u32) -> Option<u64>;
     fn cmdline(&self, pid: u32) -> Option<Vec<String>>;
     /// `path` as `pid` would open it: relative to its cwd, symlinks followed.
@@ -21,15 +22,15 @@ pub struct ProcFs;
 
 impl Procs for ProcFs {
     fn exe(&self, pid: u32) -> Option<PathBuf> {
-        std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+        os::exe(pid)
     }
 
     fn parent(&self, pid: u32) -> Option<u32> {
-        stat_field(pid, 1)?.parse().ok()
+        os::parent(pid)
     }
 
     fn start(&self, pid: u32) -> Option<u64> {
-        stat_field(pid, 19)?.parse().ok()
+        os::start(pid)
     }
 
     fn cmdline(&self, pid: u32) -> Option<Vec<String>> {
@@ -47,12 +48,72 @@ impl Procs for ProcFs {
     }
 }
 
-/// Field `index` of `/proc/<pid>/stat` counted from the state (0); the command name
-/// before it may hold spaces and parentheses.
-fn stat_field(pid: u32, index: usize) -> Option<String> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let after_comm = &stat[stat.rfind(')')? + 1..];
-    after_comm.split_whitespace().nth(index).map(str::to_string)
+#[cfg(not(target_os = "macos"))]
+mod os {
+    use std::path::PathBuf;
+
+    pub fn exe(pid: u32) -> Option<PathBuf> {
+        std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+    }
+
+    pub fn parent(pid: u32) -> Option<u32> {
+        stat_field(pid, 1)?.parse().ok()
+    }
+
+    pub fn start(pid: u32) -> Option<u64> {
+        stat_field(pid, 19)?.parse().ok()
+    }
+
+    /// Field `index` of `/proc/<pid>/stat` counted from the state (0); the command name
+    /// before it may hold spaces and parentheses.
+    fn stat_field(pid: u32, index: usize) -> Option<String> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let after_comm = &stat[stat.rfind(')')? + 1..];
+        after_comm.split_whitespace().nth(index).map(str::to_string)
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod os {
+    use std::ffi::{OsStr, c_int, c_void};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::PathBuf;
+
+    pub fn exe(pid: u32) -> Option<PathBuf> {
+        let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        let len = unsafe {
+            libc::proc_pidpath(
+                pid as c_int,
+                buf.as_mut_ptr().cast::<c_void>(),
+                buf.len() as u32,
+            )
+        };
+        let len = usize::try_from(len).ok().filter(|n| *n > 0)?;
+        Some(OsStr::from_bytes(&buf[..len]).into())
+    }
+
+    pub fn parent(pid: u32) -> Option<u32> {
+        bsd_info(pid).map(|info| info.pbi_ppid)
+    }
+
+    pub fn start(pid: u32) -> Option<u64> {
+        bsd_info(pid).map(|info| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+    }
+
+    fn bsd_info(pid: u32) -> Option<libc::proc_bsdinfo> {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as c_int;
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid as c_int,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&raw mut info).cast::<c_void>(),
+                size,
+            )
+        };
+        (read == size).then_some(info)
+    }
 }
 
 /// `$CLAUDE_PID` as the hook sees it: only a PID that is an ancestor of this
@@ -177,7 +238,7 @@ pub fn claim(
     })
 }
 
-fn is_herdr(exe: &Path) -> bool {
+pub fn is_herdr(exe: &Path) -> bool {
     let name = exe.file_name().and_then(|n| n.to_str());
     name.is_some_and(|n| n.strip_suffix(" (deleted)").unwrap_or(n) == "herdr")
 }

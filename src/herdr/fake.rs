@@ -44,6 +44,7 @@ struct FakePane {
     at_prompt: bool,
     /// `at_shell_prompt` polls left before the shell reaches its prompt; `None` is never.
     polls_until_prompt: Option<u32>,
+    shell_pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +97,7 @@ pub struct FakeHerdr {
     pub fail_prompt: bool,
     pub fail_wait: bool,
     pub fail_visible_text: bool,
+    pub fail_shell_pid: bool,
     /// After `start_claude`, this many `agent` calls answer without the
     /// session, as herdr does before it has read it; a ready start's reply too.
     pub session_after_gets: u32,
@@ -140,6 +142,7 @@ impl FakeHerdr {
             fail_prompt: false,
             fail_wait: false,
             fail_visible_text: false,
+            fail_shell_pid: false,
             session_after_gets: 0,
             agent_get_fails_after_start: false,
             new_tab_prompt_after: Some(0),
@@ -227,6 +230,7 @@ impl FakeHerdr {
             cwd: cwd.to_path_buf(),
             at_prompt: true,
             polls_until_prompt: Some(0),
+            shell_pid: None,
         });
         id
     }
@@ -304,8 +308,15 @@ impl FakeHerdr {
             cwd: cwd.to_path_buf(),
             at_prompt: true,
             polls_until_prompt: Some(0),
+            shell_pid: None,
         });
         tab
+    }
+
+    pub fn set_shell_pid(&self, pane_id: &str, pid: Option<u32>) {
+        let mut state = self.state.lock().unwrap();
+        let pane = state.panes.iter_mut().find(|p| p.id == pane_id);
+        pane.expect("fake pane").shell_pid = pid;
     }
 
     pub fn set_screen(&self, pane_id: &str, text: &str) {
@@ -502,6 +513,17 @@ impl Herdr for FakeHerdr {
             None => return Ok(false),
         }
         Ok(pane.at_prompt && pane.polls_until_prompt == Some(0))
+    }
+
+    fn shell_pid(&self, pane_id: &str) -> Result<Option<u32>> {
+        if self.fail_shell_pid {
+            bail!("herdr pane process-info failed");
+        }
+        let state = self.state.lock().unwrap();
+        let pane = state.panes.iter().find(|p| p.id == pane_id);
+        Ok(pane
+            .ok_or_else(|| anyhow!("pane {pane_id} not found"))?
+            .shell_pid)
     }
 
     fn visible_text(&self, pane_id: &str) -> Result<String> {
