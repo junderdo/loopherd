@@ -580,7 +580,7 @@ impl Checks<'_> {
                     let entries = ledger.entries()?;
                     let no_worker = !open(&entries, &self.herd, |e| !e.is_lead());
                     if queue.backlog.is_none() {
-                        self.end_low_streak()?;
+                        low = self.running_low(&entries, claimable, 0, queue.max)?;
                         out = (self.fired).out_of_work(
                             &self.herd,
                             &entries,
@@ -595,7 +595,7 @@ impl Checks<'_> {
                                 passing.push("backlog".into());
                                 let unready = unready.lines().filter(|l| !l.trim().is_empty());
                                 let unready = unready.count();
-                                low = self.running_low(claimable, unready, queue.max)?;
+                                low = self.running_low(&entries, claimable, unready, queue.max)?;
                                 out = self.fired.out_of_work(
                                     &self.herd,
                                     &entries,
@@ -625,6 +625,7 @@ impl Checks<'_> {
         let failed = failing.into_iter().map(|(what, why)| Event {
             key: format!("{herd} {} {what}", line::FAILING),
             line: format!("{herd} {}  {what} {why}", line::FAILING),
+            covers: None,
         });
         let recovered = passing
             .into_iter()
@@ -635,6 +636,7 @@ impl Checks<'_> {
             .map(|what| Event {
                 key: format!("{herd} {} {what}", line::RECOVERED),
                 line: format!("{herd} {}  {what}", line::RECOVERED),
+                covers: None,
             });
         Ok(failed
             .chain(recovered)
@@ -649,28 +651,40 @@ impl Checks<'_> {
 impl Checks<'_> {
     /// The `running low` event while claimable is at or below `max` with
     /// unready tasks waiting. Its key leaves out the counts, so it prints once
-    /// per streak; a round that isn't low ends the streak.
+    /// per streak; a round that isn't low ends the streak. A herd with no work
+    /// and no open worker has a streak of its own, keyed like `out of work`,
+    /// whose line stands in for the plain one.
     fn running_low(
         &mut self,
+        entries: &BTreeMap<String, AgentRecord>,
         claimable: usize,
         unready: usize,
         max: usize,
     ) -> Result<Option<Event>> {
-        let key = self.low_key();
-        let line = format!("{key}  {claimable} claimable, {unready} unready");
-        self.fired
-            .streak(key, line, claimable <= max && unready > 0)
-    }
-
-    fn end_low_streak(&mut self) -> Result<()> {
-        let key = self.low_key();
-        self.fired.end(&key)
-    }
-
-    fn low_key(&self) -> String {
-        format!("{} {}", self.herd, line::RUNNING_LOW)
+        let herd = &self.herd;
+        let key = format!("{herd} {}", line::RUNNING_LOW);
+        let counts = format!("{key}  {claimable} claimable, {unready} unready");
+        let no_worker = !open(entries, herd, |e| !e.is_lead());
+        let starved = self.fired.since_newest_member(
+            format!("{key}, {NO_WORKERS}"),
+            format!("{counts}, {NO_WORKERS}"),
+            herd,
+            entries,
+            claimable == 0 && unready > 0 && no_worker,
+        )?;
+        let low = (self.fired).streak(key, counts, claimable <= max && unready > 0)?;
+        match (starved, low) {
+            (Some(starved), Some(low)) => Ok(Some(Event {
+                covers: Some(low.key),
+                ..starved
+            })),
+            (starved, low) => Ok(starved.or(low)),
+        }
     }
 }
+
+/// The tail of a `running low` line for a herd with no open worker.
+const NO_WORKERS: &str = "no workers open";
 
 /// The shepherd's check, every [`CHECK_EVERY`], of each herd it reads that
 /// has a herd file and no open lead: whether it is out of work.
@@ -800,6 +814,8 @@ impl Unled<'_> {
 struct Event {
     key: String,
     line: String,
+    /// Another key saved with this one, whose own line this one stands in for.
+    covers: Option<String>,
 }
 
 impl Event {
@@ -808,6 +824,7 @@ impl Event {
         Event {
             key: line.clone(),
             line,
+            covers: None,
         }
     }
 }
@@ -931,7 +948,7 @@ fn feeding(paths: &Paths) -> Result<bool> {
 /// A [`RESUMED`] line forgets the claimable keys above it, so a card announced
 /// before a pause is announced again after resume, and a `recovered` key
 /// forgets its `failing` one, so the next failure is announced again. A
-/// `<herd> running low ended` or `<herd> out of work ended` line forgets its streak.
+/// `<key> ended` line forgets the `running low` or `out of work` streak keyed `<key>`.
 struct Fired {
     path: PathBuf,
     header: String,
@@ -998,7 +1015,11 @@ impl Fired {
             path: self.path.clone(),
             header: self.header.clone(),
             keys: HashSet::new(),
-            new: events.iter().map(|e| e.key.clone()).collect(),
+            new: (events.iter())
+                .flat_map(|e| [Some(&e.key), e.covers.as_ref()])
+                .flatten()
+                .cloned()
+                .collect(),
         }
     }
 
@@ -1009,7 +1030,11 @@ impl Fired {
             self.end(&key)?;
             return Ok(None);
         }
-        Ok(Some(Event { key, line }))
+        Ok(Some(Event {
+            key,
+            line,
+            covers: None,
+        }))
     }
 
     fn end(&mut self, key: &str) -> Result<()> {
@@ -1019,8 +1044,6 @@ impl Fired {
         Ok(())
     }
 
-    /// Keyed by the newest of `herd`'s members in `entries`, so a worker that
-    /// opened and retired between watches starts a new streak.
     fn out_of_work(
         &mut self,
         herd: &str,
@@ -1028,16 +1051,33 @@ impl Fired {
         out: bool,
     ) -> Result<Option<Event>> {
         let line = format!("{herd} {}", line::OUT_OF_WORK);
-        let key = out_of_work_key(herd, entries);
+        self.since_newest_member(line.clone(), line, herd, entries, out)
+    }
+
+    /// A streak keyed `base` and the newest of `herd`'s members in `entries`,
+    /// so a worker that opened and retired between watches starts a new one.
+    fn since_newest_member(
+        &mut self,
+        base: String,
+        line: String,
+        herd: &str,
+        entries: &BTreeMap<String, AgentRecord>,
+        on: bool,
+    ) -> Result<Option<Event>> {
+        let key = since_newest_member(&base, herd, entries);
         let ended: Vec<String> = (self.keys.iter())
-            .filter(|k| **k != key || !out)
-            .filter(|k| *k == &line || k.starts_with(&format!("{line} since ")))
+            .filter(|k| **k != key || !on)
+            .filter(|k| *k == &base || k.starts_with(&format!("{base} since ")))
             .cloned()
             .collect();
         for old in ended {
             self.end(&old)?;
         }
-        Ok(out.then_some(Event { key, line }))
+        Ok(on.then_some(Event {
+            key,
+            line,
+            covers: None,
+        }))
     }
 
     /// Appends, so keys another watch saved meanwhile survive.
@@ -1081,14 +1121,14 @@ fn keys_under(text: &str, header: &str) -> Option<HashSet<String>> {
     Some(keys)
 }
 
-fn out_of_work_key(herd: &str, entries: &BTreeMap<String, AgentRecord>) -> String {
+fn since_newest_member(base: &str, herd: &str, entries: &BTreeMap<String, AgentRecord>) -> String {
     let newest = (entries.values())
         .filter(|e| e.herd.as_deref() == Some(herd))
         .map(|e| e.created.as_str())
         .max();
     match newest {
-        Some(created) => format!("{herd} {} since {created}", line::OUT_OF_WORK),
-        None => format!("{herd} {}", line::OUT_OF_WORK),
+        Some(created) => format!("{base} since {created}"),
+        None => base.to_string(),
     }
 }
 
@@ -4155,6 +4195,119 @@ mod tests {
         assert_eq!(world.once("w9:p1"), None);
     }
 
+    const STARVED: &str = "cards running low  0 claimable, 1 unready, no workers open";
+
+    #[test]
+    fn a_herd_that_empties_mid_streak_says_running_low_again_once() {
+        let mut world = Checked::with_backlog("7 needs spec\n");
+        assert_eq!(
+            world.once("w9:p0").unwrap(),
+            ["cards running low  0 claimable, 1 unready"]
+        );
+        world.retire("lh-1");
+        assert_eq!(world.once("w9:p0").unwrap(), [STARVED]);
+        assert_eq!(world.once("w9:p0"), None, "woke twice in one streak");
+    }
+
+    #[test]
+    fn a_herd_starved_from_the_start_says_one_line_and_keeps_the_plain_streak() {
+        let mut world = Checked::with_backlog("7 needs spec\n");
+        world.retire("lh-1");
+        assert_eq!(world.once("w9:p0").unwrap(), [STARVED]);
+        world.ledger.0.get_mut("lh-1").unwrap().retired = false;
+        assert_eq!(world.once("w9:p0"), None, "the plain streak re-announced");
+    }
+
+    #[test]
+    fn the_starved_streak_ends_when_a_worker_opens_claimable_rises_or_unready_empties() {
+        let mut world = Checked::with_backlog("7 needs spec\n");
+        world.retire("lh-1");
+        assert_eq!(world.once("w9:p0").unwrap(), [STARVED]);
+
+        world.ledger.0.get_mut("lh-1").unwrap().retired = false;
+        assert_eq!(world.once("w9:p0"), None);
+        world.retire("lh-1");
+        assert_eq!(world.once("w9:p0").unwrap(), [STARVED]);
+
+        world.spawn_and_retire("lh-3");
+        assert_eq!(world.once("w9:p0").unwrap(), [STARVED]);
+
+        world.touch("tasks", "2\n");
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-2 claimable"]);
+        world.touch("tasks", "");
+        assert_eq!(world.once("w9:p0").unwrap(), [STARVED]);
+
+        world.touch("unready", "");
+        assert_eq!(world.once("w9:p0").unwrap(), ["cards out of work"]);
+        world.touch("unready", "7 needs spec\n");
+        assert_eq!(world.once("w9:p0").unwrap(), [STARVED]);
+    }
+
+    #[test]
+    fn dropping_the_backlog_ends_the_starved_streak() {
+        let mut world = Checked::with_backlog("7 needs spec\n");
+        world.retire("lh-1");
+        assert_eq!(world.once("w9:p0").unwrap(), [STARVED]);
+        world.edit_herd(|h| h.replace("backlog = \"cat unready\"\n", ""));
+        assert_eq!(world.once("w9:p0").unwrap(), ["cards out of work"]);
+        world.edit_herd(|h| h.replace("max = 2", "backlog = \"cat unready\"\nmax = 2"));
+        assert_eq!(world.once("w9:p0").unwrap(), [STARVED]);
+    }
+
+    impl Checked {
+        /// One poll from `pane` whose wake is lost before it's marked read.
+        fn lose(&self, pane: &'static str) {
+            let dir = self.config.path().join("reports");
+            let req = self.request(pane);
+            let woke = watch(
+                &self.herdr,
+                &self.ledger,
+                &dir,
+                &req,
+                &mut steps(|_| {}),
+                &mut |_| {},
+            );
+            assert!(woke.unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn a_lost_starved_wake_leaves_the_plain_line_to_print() {
+        let mut world = Checked::with_backlog("7 needs spec\n");
+        world.retire("lh-1");
+        world.lose("w9:p0");
+        world.ledger.0.get_mut("lh-1").unwrap().retired = false;
+        assert_eq!(
+            world.once("w9:p0").unwrap(),
+            ["cards running low  0 claimable, 1 unready"]
+        );
+    }
+
+    #[test]
+    fn a_paused_starved_herd_says_neither_and_keeps_its_streaks() {
+        let mut mid_streak = Checked::with_backlog("7 needs spec\n");
+        mid_streak.retire("lh-1");
+        assert_eq!(mid_streak.once("w9:p0").unwrap(), [STARVED]);
+        mid_streak.pause();
+        assert_eq!(mid_streak.once("w9:p0").unwrap(), ["cards drained"]);
+        mid_streak.resume();
+        assert_eq!(mid_streak.once("w9:p0"), None, "resume re-announced it");
+
+        let mut paused_first = Checked::with_backlog("7 needs spec\n");
+        paused_first.retire("lh-1");
+        paused_first.pause();
+        assert_eq!(paused_first.once("w9:p0").unwrap(), ["cards drained"]);
+        paused_first.resume();
+        assert_eq!(paused_first.once("w9:p0").unwrap(), [STARVED]);
+    }
+
+    #[test]
+    fn the_shepherds_watch_never_says_a_starved_herd_is_running_low() {
+        let mut world = Checked::with_backlog("7 needs spec\n");
+        world.retire("lh-1");
+        assert_eq!(world.shepherd(), None);
+    }
+
     #[test]
     fn a_failing_backlog_wakes_the_lead_once_per_streak_and_says_nothing_low() {
         let world = Checked::with_backlog("7 needs spec\n");
@@ -4204,10 +4357,7 @@ mod tests {
         assert_eq!(world.once("w9:p0").unwrap(), ["cards out of work"]);
 
         world.touch("unready", "7 needs spec\n");
-        assert_eq!(
-            world.once("w9:p0").unwrap(),
-            ["cards running low  0 claimable, 1 unready"]
-        );
+        assert_eq!(world.once("w9:p0").unwrap(), [STARVED]);
         world.touch("unready", "");
         assert_eq!(world.once("w9:p0").unwrap(), ["cards out of work"]);
 

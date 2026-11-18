@@ -124,9 +124,9 @@ Init never launches an agent.
    `loopherd install-hook`). Lines come in this order: reports, questions
    first then by time; then stop lines grouped by member in name order,
    oldest first within a member; then a lead's `failing` and `recovered`,
-   then its `running low` and `out of work`, then its `interrupted` and
-   `merged`, by member in name order, then its `claimable`; then `blocked`
-   and `gone`. The shepherd's own `out of work` lines for unled herds, and
+   then its `running low` (either form) and `out of work`, then its
+   `interrupted` and `merged`, by member in name order, then its
+   `claimable`; then `blocked` and `gone`. The shepherd's own `out of work` lines for unled herds, and
    a `drained` line, print only on a poll nothing else woke, alone but for
    a due `shepherd handoff`. The
    first watch after an install, or over members a herd-scoped watch
@@ -153,6 +153,7 @@ Init never launches an agent.
    | `<herd> failing  source "<command>": <stderr line>` | Lead's watch only: the herd's source failed (also `<herd> failing  backlog "<command>": …` for its `backlog`, and `<herd> failing  <member> done "<command>": …` for a member's `done` or `merged` check), with its last stderr line. Once per streak; one cut off by the 60s round is no event. Fix the cause, or tell the shepherd. |
    | `<herd> recovered  source` | Lead's watch only: what last printed `failing` passes again (also `<herd> recovered  backlog` and `<herd> recovered  <member> done`). A later failure prints `failing` again. A member that retires mid-streak gets none. |
    | `<herd> running low  <n> claimable, <m> unready` | Lead's watch only: the herd's `backlog` lists unready tasks and claimable (as `status` counts it) is at or below `max`. Once per streak: it prints again only after claimable rises above `max` or unready reaches 0. A paused herd prints none and keeps its streak. Triage (see Lead). |
+   | `<herd> running low  0 claimable, <m> unready, no workers open` | Lead's watch only: as above, but claimable is 0 and no worker is open, so nothing runs (D80). Prints even mid-streak of the plain form, and in its place when both start together. Once per streak: it prints again only after a worker opens (even one that opened and retired while no watch ran), claimable rises above 0, or unready reaches 0. A paused herd prints none and keeps its streak. Triage (see Lead). |
    | `<herd> out of work` | The herd isn't paused, claimable is 0, its `backlog` lists nothing unready (or it has none), and no worker is open. A lead's watch prints it for its herd; the shepherd's, every 60s, for each unled herd with a herd file it reads. Once per streak: it prints again only after claimable or unready rises above 0 or a worker opens, even one that opened and retired while no watch ran. The shepherd's doesn't repeat what a retired lead's watch already said. A paused herd prints none and keeps its streak. A lead reports it (see Lead); the shepherd tells the human, who pauses the herd or files and approves work. |
    | `<member> interrupted` | Lead's watch only: the feed running the worker's `after_merge` died before noting it. Feed, which notes it, then read the note. |
    | `<member> blocked` | A dialog only the human answers: tell them. loopherd never answers it. |
@@ -737,8 +738,9 @@ What differs from the shepherd:
   run your herd's `backlog` and sort each task into ready, needs a
   decision (naming it), needs spec (saying what's missing), or stale
   (saying why). Report the result as one `loopherd report --kind question`
-  and end your turn. Never mark a task ready yourself, whatever your
-  switches; the shepherd does it once the human approves.
+  and end your turn. After the `no workers open` form, the question says
+  the herd has no work running. Never mark a task ready yourself, whatever
+  your switches; the shepherd does it once the human approves.
 - **Out of work.** On `<herd> out of work`, send one `loopherd report
   --kind question` asking the human what's next: pause the herd, or file
   and approve work. Then end your turn.
