@@ -45,6 +45,26 @@ Backlog cards into members `lh-<n>` on `<type>/LH-<n>-<slug>`.
   notes the after_merge as interrupted, with no outcome; check what ran and
   finish the steps by hand.
 
+- **Triage** (the skill's Triage, D60): the herd file's `[queue] backlog`
+  (see [examples/loopherd-cards-routed.toml](../examples/loopherd-cards-routed.toml))
+  lists the unready cards. Once the human approves the lead's triage:
+
+  ```bash
+  scripts/trello label LH-<n> +ready-for-agent      # each ready card
+  scripts/trello comment LH-<n> "<what's missing>"  # each needs-spec card
+  ```
+
+  `scripts/trello` can't archive, so archive each stale card the human
+  confirms through the API:
+
+  ```bash
+  set -a; . "${XDG_CONFIG_HOME:-$HOME/.config}/loopherd/trello.env"; set +a
+  curl -fsS -X PUT "https://api.trello.com/1/cards/<shortLink>?closed=true" \
+    -H "Authorization: OAuth oauth_consumer_key=\"$TRELLO_API_KEY\", oauth_token=\"$TRELLO_TOKEN\""
+  ```
+
+  `<shortLink>` is the last part of the card's URL in `scripts/trello show`.
+
 ## Lead
 
 [examples/loopherd-cards-lead.toml](../examples/loopherd-cards-lead.toml) is
