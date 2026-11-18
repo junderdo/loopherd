@@ -11,8 +11,8 @@ use anyhow::{Result, anyhow, bail};
 
 use super::events::{Connection, OnPush, PaneNotFound, Pushed, Subscriber, Subscription};
 use super::{
-    Agent, AgentStatus, Herdr, MalformedReply, NewTab, Pane, StartOutcome, Tab, WaitOutcome,
-    Workspace,
+    Agent, AgentStatus, Herdr, MalformedReply, NewTab, Pane, Server, StartOutcome, Tab,
+    WaitOutcome, Workspace,
 };
 
 /// How a Claude agent started by the fake behaves.
@@ -114,6 +114,8 @@ pub struct FakeHerdr {
     pub on_agents: Option<Box<dyn Fn() + Send + Sync>>,
     pub socket: Option<PathBuf>,
     pub version: String,
+    /// Answers `server` in place of a running server at `version`.
+    pub server: Option<Server>,
     state: Mutex<State>,
 }
 
@@ -143,6 +145,7 @@ impl FakeHerdr {
             on_agents: None,
             socket: Some(FAKE_SOCKET.into()),
             version: "0.9.5".into(),
+            server: None,
             state: Mutex::default(),
         }
     }
@@ -656,8 +659,16 @@ impl Herdr for FakeHerdr {
         self.socket.clone()
     }
 
-    fn version(&self) -> Result<Option<String>> {
-        Ok((!self.is_down()).then(|| self.version.clone()))
+    fn server(&self, _timeout: Duration) -> Result<Server> {
+        let socket = self.socket.clone();
+        Ok(match (&self.server, self.is_down()) {
+            (Some(server), _) => server.clone(),
+            (None, true) => Server::NotRunning { socket },
+            (None, false) => Server::Running {
+                socket,
+                version: Some(self.version.clone()),
+            },
+        })
     }
 }
 

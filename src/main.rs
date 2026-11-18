@@ -899,9 +899,7 @@ fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32>
     let startup = match startup {
         false => None,
         true => {
-            let config = herd::herds_dir()
-                .context("HOME is not set")?
-                .with_file_name("config.toml");
+            let config = herd::config_file(&Paths::from_env().context("config")?);
             if !config::revive_on_startup(&config)? {
                 println!(
                     "revive on startup is off; set [herdr_plugin] revive_on_startup = true in {} to turn it on",
@@ -1441,11 +1439,11 @@ fn doctor_install(settings: Option<PathBuf>) -> Result<doctor::Install> {
         Some(path) => path,
         None => install_hook::default_settings()?,
     };
-    let config = herd::herds_dir()
-        .context("HOME is not set")?
-        .with_file_name("config.toml");
-    // A [notify] that doesn't load leaves pane labels off.
-    let pane_label = notify::load(&config).is_ok_and(|n| n.is_some_and(|n| n.labels_panes()));
+    // No config dir, or a [notify] that doesn't load, leaves pane labels off.
+    let pane_label = herd::herds_dir().is_some_and(|herds| {
+        notify::load(&herds.with_file_name("config.toml"))
+            .is_ok_and(|n| n.is_some_and(|n| n.labels_panes()))
+    });
     Ok(doctor::Install {
         settings,
         settings_given,

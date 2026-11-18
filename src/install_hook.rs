@@ -194,7 +194,7 @@ pub fn hooks(settings: &Path) -> Result<Vec<Installed>> {
         .iter()
         .map(|hook| Installed {
             event: hook.event,
-            binaries: our_hooks(&root, hook.event)
+            binaries: our_hooks(&root, hook.event, hook.matcher)
                 .filter_map(|h| our_binary(h, hook.subcommand))
                 .collect(),
         })
@@ -214,14 +214,20 @@ fn read_settings(settings: &Path) -> Result<Option<Value>> {
 }
 
 fn has_ours(root: &Value, event: &str, subcommand: &str) -> bool {
-    our_hooks(root, event).any(|hook| is_ours(hook, subcommand))
+    our_hooks(root, event, None).any(|hook| is_ours(hook, subcommand))
 }
 
-fn our_hooks<'a>(root: &'a Value, event: &str) -> impl Iterator<Item = &'a Value> {
+/// The hooks under `event`, only from groups with `matcher` when it is given.
+fn our_hooks<'a>(
+    root: &'a Value,
+    event: &str,
+    matcher: Option<&'a str>,
+) -> impl Iterator<Item = &'a Value> {
     root.pointer(&format!("/hooks/{event}"))
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
+        .filter(move |group| matcher.is_none_or(|m| matcher_of(group) == Some(m)))
         .filter_map(|group| group.get("hooks").and_then(Value::as_array))
         .flatten()
 }

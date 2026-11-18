@@ -134,8 +134,25 @@ pub trait Herdr {
     fn label_pane(&self, pane_id: &str, label: Option<&str>) -> Result<()>;
     /// The socket of the herdr these calls reach; `None` when herdr can't say.
     fn socket(&self) -> Option<PathBuf>;
-    /// The running server's version; `None` when no server answers on the socket.
-    fn version(&self) -> Result<Option<String>>;
+    /// The server as `herdr status server` reports it, giving up after `timeout`.
+    fn server(&self, timeout: Duration) -> Result<Server>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Server {
+    /// No `herdr` on PATH.
+    Missing,
+    /// The status probe outlived its deadline, as with a wedged server.
+    NoAnswer {
+        socket: Option<PathBuf>,
+    },
+    NotRunning {
+        socket: Option<PathBuf>,
+    },
+    Running {
+        socket: Option<PathBuf>,
+        version: Option<String>,
+    },
 }
 
 /// Polls until `pane_id`'s shell is at its prompt. A new tab's shell takes a
@@ -497,11 +514,23 @@ impl Herdr for CliHerdr {
         })
     }
 
-    fn version(&self) -> Result<Option<String>> {
-        let out = self
-            .command(&["status", "server", "--json"])
-            .output()
-            .context("run herdr status server --json")?;
+    fn server(&self, timeout: Duration) -> Result<Server> {
+        let mut probe = self.command(&["status", "server", "--json"]);
+        let out = match crate::shell::run_within(&mut probe, timeout) {
+            Err(e)
+                if e.downcast_ref::<std::io::Error>().map(std::io::Error::kind)
+                    == Some(std::io::ErrorKind::NotFound) =>
+            {
+                return Ok(Server::Missing);
+            }
+            Err(e) => return Err(e.context("run herdr status server --json")),
+            Ok(None) => {
+                return Ok(Server::NoAnswer {
+                    socket: socket_from_env(),
+                });
+            }
+            Ok(Some(out)) => out,
+        };
         if !out.status.success() {
             bail!(
                 "herdr status server --json failed: {}",
@@ -510,9 +539,16 @@ impl Herdr for CliHerdr {
         }
         let status: Value = serde_json::from_slice(&out.stdout)
             .with_context(|| MalformedReply("status server --json".into()))?;
+        let socket = status["socket"]
+            .as_str()
+            .map(PathBuf::from)
+            .or_else(socket_from_env);
         Ok(match status["running"].as_bool() {
-            Some(true) => status["version"].as_str().map(str::to_string),
-            _ => None,
+            Some(true) => Server::Running {
+                socket,
+                version: status["version"].as_str().map(str::to_string),
+            },
+            _ => Server::NotRunning { socket },
         })
     }
 }

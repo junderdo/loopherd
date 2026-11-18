@@ -2,10 +2,11 @@
 //! sound. It only reads, and names the command that fixes each problem.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::herdr::Herdr;
+use crate::herdr::{Herdr, Server};
 
 /// What the install checks read, gathered by the caller.
 pub struct Install {
@@ -47,7 +48,10 @@ pub fn checks(install: &Install, herdr: &dyn Herdr) -> Vec<Check> {
 fn hook_checks(install: &Install) -> Vec<Check> {
     let settings = install.settings.display();
     let install_hook = match install.settings_given {
-        true => format!("loopherd install-hook --settings {settings}"),
+        true => format!(
+            "loopherd install-hook --settings {}",
+            crate::shell::quote(&install.settings.to_string_lossy())
+        ),
         false => "loopherd install-hook".to_string(),
     };
     let hooks = match crate::install_hook::hooks(&install.settings) {
@@ -81,7 +85,11 @@ fn hook_checks(install: &Install) -> Vec<Check> {
             "no loopherd on PATH".into(),
             format!("install loopherd on PATH, then {install_hook}"),
         ),
-        Some(on_path) => match called.iter().find(|b| !same_file(b, on_path)) {
+        // A relative path resolves against whatever cwd Claude runs the hook in.
+        Some(on_path) => match called
+            .iter()
+            .find(|b| !b.is_absolute() || !same_file(b, on_path))
+        {
             Some(other) => failure(
                 "hook binary",
                 format!(
@@ -114,41 +122,60 @@ fn running_binary(install: &Install) -> Check {
     }
 }
 
+/// How long herdr's status probe may take; a wedged server never answers.
+const HERDR_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn herdr_checks(herdr: &dyn Herdr) -> Vec<Check> {
-    let socket = match herdr.socket() {
+    let on = |socket: Option<PathBuf>| match socket {
         Some(socket) => socket.display().to_string(),
         None => "herdr's default socket".into(),
     };
-    let version = match herdr.version() {
-        Ok(Some(version)) => version,
-        Ok(None) => {
+    let (socket, version) = match herdr.server(HERDR_TIMEOUT) {
+        Ok(Server::Running { socket, version }) => (on(socket), version),
+        Ok(Server::NotRunning { socket }) => {
+            let detail = format!("no herdr server answers on {}", on(socket));
+            return vec![failure("herdr", detail, "herdr".into())];
+        }
+        Ok(Server::NoAnswer { socket }) => {
+            let detail = format!(
+                "herdr didn't answer on {} within {}",
+                on(socket),
+                humantime::format_duration(HERDR_TIMEOUT)
+            );
+            return vec![failure("herdr", detail, "restart herdr's server".into())];
+        }
+        Ok(Server::Missing) => {
             return vec![failure(
                 "herdr",
-                format!("no herdr server answers on {socket}"),
-                "herdr".into(),
+                "no herdr on PATH".into(),
+                "install herdr".into(),
             )];
         }
         Err(e) => {
-            return vec![failure(
-                "herdr",
-                format!("{e:#}").trim_end().to_string(),
-                "install herdr, then herdr".into(),
-            )];
+            let detail = format!("{e:#}").trim_end().to_string();
+            return vec![failure("herdr", detail, "restart herdr's server".into())];
         }
     };
-    let upgrade = format!("upgrade herdr to {MIN_HERDR} or later");
-    let check = match numbers(&version) {
+    let upgrade = format!("upgrade herdr to {MIN_HERDR} or later and restart its server");
+    let check = match version {
         None => failure(
             "herdr version",
-            format!("can't read herdr's version {version:?}"),
+            "herdr's server didn't report a version".into(),
             upgrade,
         ),
-        Some(v) if Some(v) < numbers(MIN_HERDR) => failure(
-            "herdr version",
-            format!("{version} is older than {MIN_HERDR}"),
-            upgrade,
-        ),
-        Some(_) => ok("herdr version", version),
+        Some(version) => match numbers(&version) {
+            None => failure(
+                "herdr version",
+                format!("can't read herdr's version {version:?}"),
+                upgrade,
+            ),
+            Some(v) if Some(v) < numbers(MIN_HERDR) => failure(
+                "herdr version",
+                format!("{version} is older than {MIN_HERDR}"),
+                upgrade,
+            ),
+            Some(_) => ok("herdr version", version),
+        },
     };
     vec![ok("herdr", format!("answers on {socket}")), check]
 }
@@ -273,13 +300,19 @@ mod tests {
         let mut hooks = serde_json::Map::new();
         for (event, subcommand) in EVENTS.iter().filter(|(e, _)| events.contains(e)) {
             let command = crate::install_hook::hook_command(exe, subcommand).unwrap();
-            hooks.insert(
-                event.to_string(),
-                json!([{"hooks": [{"type": "command", "command": command}]}]),
-            );
+            hooks.insert(event.to_string(), group(event, &command));
         }
         let root = json!({ "hooks": hooks });
         std::fs::write(settings, serde_json::to_vec(&root).unwrap()).unwrap();
+    }
+
+    /// A settings group holding one hook running `command`, under Bash for PreToolUse.
+    fn group(event: &str, command: &str) -> Value {
+        let hooks = json!([{"type": "command", "command": command}]);
+        match event {
+            "PreToolUse" => json!([{"matcher": "Bash", "hooks": hooks}]),
+            _ => json!([{ "hooks": hooks }]),
+        }
     }
 
     const ALL: [&str; 5] = [
@@ -357,7 +390,7 @@ mod tests {
         let (out, _) = run(&m.install, &herdr());
         assert!(
             out.contains(&format!(
-                "fix: loopherd install-hook --settings {}\n",
+                "fix: loopherd install-hook --settings '{}'\n",
                 m.install.settings.display()
             )),
             "{out}"
@@ -406,8 +439,7 @@ mod tests {
         let path_exe = m.install.on_path.clone().unwrap();
         let ours = |sub: &str| crate::install_hook::hook_command(&path_exe, sub).unwrap();
         for (event, sub) in &EVENTS[1..] {
-            settings["hooks"][event] =
-                json!([{"hooks": [{"type": "command", "command": ours(sub)}]}]);
+            settings["hooks"][event] = group(event, &ours(sub));
         }
         std::fs::write(&m.install.settings, settings.to_string()).unwrap();
         let (out, code) = run(&m.install, &herdr());
@@ -504,7 +536,7 @@ mod tests {
                     out,
                     format!(
                         "failure herdr version: {version} is older than {MIN_HERDR}; \
-                         fix: upgrade herdr to {MIN_HERDR} or later\n\
+                         fix: upgrade herdr to {MIN_HERDR} or later and restart its server\n\
                          doctor: 8 ok, 0 warnings, 1 failures\n"
                     )
                 ),
@@ -555,5 +587,110 @@ mod tests {
             })
         );
         assert_eq!(data["checks"][0]["fix"], Value::Null);
+    }
+
+    #[test]
+    fn a_settings_path_with_spaces_and_quotes_is_quoted_in_the_fix() {
+        let mut m = machine(&ALL[..3]);
+        m.install.settings = m.dir.path().join("a dir/it's.json");
+        m.install.settings_given = true;
+        let (out, _) = run(&m.install, &herdr());
+        let quoted = format!("'{}/a dir/it'\\''s.json'", m.dir.path().display());
+        assert!(
+            out.contains(&format!("fix: loopherd install-hook --settings {quoted}\n")),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_tool_hook_under_another_matcher_than_bash_is_missing() {
+        let m = machine(&ALL);
+        let mut settings: Value =
+            serde_json::from_slice(&std::fs::read(&m.install.settings).unwrap()).unwrap();
+        settings["hooks"]["PreToolUse"][0]["matcher"] = json!("Edit");
+        std::fs::write(&m.install.settings, settings.to_string()).unwrap();
+        let (out, code) = run(&m.install, &herdr());
+        assert!(out.starts_with("failure PreToolUse hook: not in "), "{out}");
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn the_users_own_hooks_are_neither_ours_nor_a_binary_to_check() {
+        let m = machine(&ALL[1..]);
+        let mut settings: Value =
+            serde_json::from_slice(&std::fs::read(&m.install.settings).unwrap()).unwrap();
+        let theirs = json!({"type": "command", "command": "'/usr/bin/notify-send' done"});
+        settings["hooks"]["Stop"] = json!([{"hooks": [theirs]}]);
+        settings["hooks"]["StopFailure"][0]["hooks"]
+            .as_array_mut()
+            .unwrap()
+            .push(theirs);
+        std::fs::write(&m.install.settings, settings.to_string()).unwrap();
+        let (out, code) = run(&m.install, &herdr());
+        assert_eq!(
+            out,
+            format!(
+                "failure Stop hook: not in {}; fix: loopherd install-hook\n\
+                 doctor: 8 ok, 0 warnings, 1 failures\n",
+                m.install.settings.display()
+            )
+        );
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn a_hook_calling_a_relative_loopherd_fails() {
+        let m = machine(&ALL);
+        let mut settings: Value =
+            serde_json::from_slice(&std::fs::read(&m.install.settings).unwrap()).unwrap();
+        settings["hooks"]["Stop"][0]["hooks"][0]["command"] = json!("'loopherd' stop-hook || true");
+        std::fs::write(&m.install.settings, settings.to_string()).unwrap();
+        let (out, code) = run(&m.install, &herdr());
+        assert!(
+            out.starts_with("failure hook binary: hooks call loopherd, not the loopherd on PATH"),
+            "{out}"
+        );
+        assert_eq!(code, 1);
+    }
+
+    fn herdr_failure(server: Server) -> String {
+        let m = machine(&ALL);
+        let mut herdr = herdr();
+        herdr.server = Some(server);
+        let (out, code) = run(&m.install, &herdr);
+        assert_eq!(code, 1, "{out}");
+        out.lines().next().unwrap().to_string()
+    }
+
+    #[test]
+    fn a_herdr_that_does_not_answer_in_time_fails_naming_the_deadline() {
+        let socket = Some(PathBuf::from("/run/wedged.sock"));
+        assert_eq!(
+            herdr_failure(Server::NoAnswer { socket }),
+            "failure herdr: herdr didn't answer on /run/wedged.sock within 5s; \
+             fix: restart herdr's server"
+        );
+        assert_eq!(
+            herdr_failure(Server::NoAnswer { socket: None }),
+            "failure herdr: herdr didn't answer on herdr's default socket within 5s; \
+             fix: restart herdr's server"
+        );
+    }
+
+    #[test]
+    fn a_missing_herdr_or_one_without_a_version_fails_saying_which() {
+        assert_eq!(
+            herdr_failure(Server::Missing),
+            "failure herdr: no herdr on PATH; fix: install herdr"
+        );
+        let socket = Some(PathBuf::from("/run/s.sock"));
+        assert_eq!(
+            herdr_failure(Server::Running {
+                socket,
+                version: None
+            }),
+            "failure herdr version: herdr's server didn't report a version; \
+             fix: upgrade herdr to 0.9.5 or later and restart its server"
+        );
     }
 }

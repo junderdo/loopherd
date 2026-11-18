@@ -379,8 +379,8 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   SessionStart or PreToolUse hook fails; a missing UserPromptSubmit hook
   fails while `[notify] pane_label` is on, else warns), hooks calling a
   binary other than the `loopherd` on PATH (fails), running a binary other
-  than PATH's (warns), herdr unreachable on its socket or older than 0.9.5
-  (fails). It prints only problems, each with its fix, then `doctor: <n> ok,
+  than PATH's (warns), herdr unreachable on its socket, silent for 5s, or
+  older than 0.9.5 (fails). It prints only problems, each with its fix, then `doctor: <n> ok,
   <n> warnings, <n> failures`; `--verbose` lists every check, `--json` gives
   them as data, `--settings <file>` checks another settings file. Exits 0
   clean or warnings only, 1 on any failure, 2 when it couldn't run (D63).

@@ -19,17 +19,23 @@ struct Sandbox {
 /// A PATH holding the binary under test and a herdr whose server runs
 /// `version`, or none when `None`.
 fn sandbox(version: Option<&str>) -> Sandbox {
-    let dir = tempfile::tempdir().unwrap();
-    let bin = dir.path().join("bin");
-    fs::create_dir_all(&bin).unwrap();
-    std::os::unix::fs::symlink(LOOPHERD, bin.join("loopherd")).unwrap();
     let status = match version {
         Some(v) => format!(r#"{{"running":true,"version":"{v}","socket":"/run/stub/herdr.sock"}}"#),
         None => r#"{"running":false,"version":null,"socket":"/run/stub/herdr.sock"}"#.into(),
     };
+    sandbox_with(&format!("echo '{status}'"))
+}
+
+/// A PATH holding the binary under test and a herdr that answers
+/// `status server --json` by running `status`.
+fn sandbox_with(status: &str) -> Sandbox {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(LOOPHERD, bin.join("loopherd")).unwrap();
     executable(
         &bin.join("herdr"),
-        format!("#!/bin/sh\n[ \"$*\" = 'status server --json' ] && echo '{status}'\n"),
+        format!("#!/bin/sh\n[ \"$*\" = 'status server --json' ] || exit 64\n{status}\n"),
     );
     let settings = dir.path().join("settings.json");
     Sandbox { dir, bin, settings }
@@ -37,14 +43,27 @@ fn sandbox(version: Option<&str>) -> Sandbox {
 
 impl Sandbox {
     fn loopherd(&self, args: &[&str]) -> Output {
-        Command::new(self.bin.join("loopherd"))
+        self.command(args).output().unwrap()
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(self.bin.join("loopherd"));
+        command
             .args(args)
             .env("HOME", self.dir.path())
             .env("XDG_STATE_HOME", self.dir.path().join("state"))
             .env("LOOPHERD_CONFIG_DIR", self.dir.path().join("config"))
             .env("CLAUDE_CONFIG_DIR", self.dir.path().join("claude"))
             .env_remove("HERDR_SOCKET_PATH")
-            .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
+            .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()));
+        command
+    }
+
+    /// `doctor` with `HERDR_SOCKET_PATH` set, as in a herdr pane.
+    fn doctor_on(&self, socket: &str) -> Output {
+        let settings = self.settings.to_str().unwrap();
+        self.command(&["doctor", "--settings", settings])
+            .env("HERDR_SOCKET_PATH", socket)
             .output()
             .unwrap()
     }
@@ -81,7 +100,7 @@ fn missing_hooks_in_the_given_settings_fail_naming_install_hook_and_exit_1() {
     let s = sandbox(Some("0.9.5"));
     let out = s.doctor(&[]);
     let fix = format!(
-        "fix: loopherd install-hook --settings {}",
+        "fix: loopherd install-hook --settings '{}'",
         s.settings.display()
     );
     let text = stdout(&out);
@@ -136,7 +155,7 @@ fn a_herdr_not_running_or_too_old_fails() {
         ),
         (
             Some("0.9.4"),
-            "failure herdr version: 0.9.4 is older than 0.9.5; fix: upgrade herdr to 0.9.5 or later\n",
+            "failure herdr version: 0.9.4 is older than 0.9.5; fix: upgrade herdr to 0.9.5 or later and restart its server\n",
         ),
     ] {
         let s = sandbox(version);
@@ -145,6 +164,71 @@ fn a_herdr_not_running_or_too_old_fails() {
         assert!(stdout(&out).starts_with(line), "{}", stdout(&out));
         assert_eq!(out.status.code(), Some(1));
     }
+}
+
+#[test]
+fn a_wedged_herdr_fails_after_the_deadline_instead_of_hanging() {
+    let s = sandbox_with("sleep 60");
+    s.install_hooks();
+    let started = std::time::Instant::now();
+    let out = s.doctor_on("/run/wedged.sock");
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    assert!(
+        stdout(&out).starts_with(
+            "failure herdr: herdr didn't answer on /run/wedged.sock within 5s; \
+             fix: restart herdr's server\n"
+        ),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn herdr_is_asked_about_the_panes_socket() {
+    let s = sandbox_with(
+        r#"echo "{\"running\":false,\"version\":null,\"socket\":\"$HERDR_SOCKET_PATH\"}""#,
+    );
+    s.install_hooks();
+    let out = s.doctor_on("/run/pane/herdr.sock");
+    assert!(
+        stdout(&out).starts_with(
+            "failure herdr: no herdr server answers on /run/pane/herdr.sock; fix: herdr\n"
+        ),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn a_failing_herdr_status_is_reported_without_install_advice() {
+    let s = sandbox_with("echo 'protocol mismatch' >&2; exit 3");
+    s.install_hooks();
+    let out = s.doctor(&[]);
+    assert!(
+        stdout(&out).starts_with(
+            "failure herdr: herdr status server --json failed: protocol mismatch; \
+             fix: restart herdr's server\n"
+        ),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn settings_given_doctor_runs_without_home_or_a_config_dir() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    let out = Command::new(s.bin.join("loopherd"))
+        .args(["doctor", "--settings", s.settings.to_str().unwrap()])
+        .env_clear()
+        .env("PATH", format!("{}:/usr/bin:/bin", s.bin.display()))
+        .output()
+        .unwrap();
+    assert_eq!(stdout(&out), "doctor: 9 ok, 0 warnings, 0 failures\n");
+    assert_eq!(out.status.code(), Some(0));
 }
 
 #[test]
