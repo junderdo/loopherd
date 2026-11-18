@@ -194,8 +194,8 @@ for what 0.7.0 already had, and the changelog.
   So an isolated link also points `HERDR_SOCKET_PATH` at a socket nothing
   listens on.
 - **Popups** (LH-226). Plugin panes with `placement = "popup"` came in
-  0.7.4. A `herdr server` started with a temp `HOME`, `XDG_*` dirs and
-  `HERDR_SOCKET_PATH` keeps its own registry, so a plugin linked through it
+  0.7.4. A `herdr server` started with a temp `HOME`, `XDG_CONFIG_HOME`,
+  `XDG_STATE_HOME` and `HERDR_SOCKET_PATH` keeps its own registry, so a plugin linked through it
   never reaches the human's. Opening a pane needs a workspace (else
   `no active workspace`), but no attached client. The popup's command gets
   `HERDR_SOCKET_PATH`, `HERDR_BIN_PATH` and `HERDR_PLUGIN_ENTRYPOINT_ID`,

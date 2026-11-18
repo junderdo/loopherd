@@ -12,9 +12,9 @@ if [ ! -x "$bin" ]; then
   exit 127
 fi
 
-# loopherd calls `herdr`; make that the herdr that ran this command.
+# loopherd calls `herdr`, which herdr's server may not have on PATH either.
 if [ -n "${HERDR_BIN_PATH:-}" ]; then
-  PATH="${HERDR_BIN_PATH%/*}:$PATH"
+  PATH="$PATH:${HERDR_BIN_PATH%/*}"
   export PATH
 fi
 exec "$bin" "$@"

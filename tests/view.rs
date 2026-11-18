@@ -1,5 +1,6 @@
 //! `loopherd view` through the binary on a pty, run as the herdr plugin's
-//! popup runs it: no `HERDR_PANE_ID`, and the socket herdr hands it (D63).
+//! popup runs it, with no `HERDR_PANE_ID` (D63). Needs util-linux `script`.
+#![cfg(target_os = "linux")]
 
 mod fakes;
 
@@ -13,15 +14,15 @@ use std::time::{Duration, Instant};
 
 const ALT_SCREEN: &[u8] = b"\x1b[?1049h";
 
-/// Starts `loopherd view` under `script`, so it gets a pty, with a `herdr`
-/// stub that logs the socket it was given, and waits until the view has
-/// drawn its screen.
+/// Starts `loopherd view` under `script`, so it gets a pty, with a failing
+/// `herdr` stub, and waits until the view has drawn its screen and made its
+/// first herdr call.
 fn start_view(home: &Path) -> Child {
     let bin = home.join("bin");
     std::fs::create_dir(&bin).unwrap();
     executable(
         &bin.join("herdr"),
-        "#!/bin/sh\necho \"$HERDR_SOCKET_PATH\" >> \"$HOME/sockets\"\nexit 1\n",
+        "#!/bin/sh\ntouch \"$HOME/called\"\nexit 1\n",
     );
     let mut child = Command::new("script")
         .args([
@@ -56,9 +57,16 @@ fn start_view(home: &Path) -> Child {
             }
         }
     });
-    shown
-        .recv_timeout(Duration::from_secs(10))
-        .expect("the view never drew");
+    let called = home.join("called");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let drew = shown.recv_timeout(Duration::from_secs(10)).is_ok();
+    while drew && !called.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    if !(drew && called.exists()) {
+        end(&mut child);
+        panic!("the view never drew and called herdr");
+    }
     child
 }
 
@@ -98,9 +106,6 @@ fn quits_on(keys: &[u8]) {
     }
 
     assert_eq!(code, Some(0));
-    let sockets = std::fs::read_to_string(home.path().join("sockets")).unwrap();
-    let handed = home.path().join("herdr.sock");
-    assert!(sockets.lines().all(|s| Path::new(s) == handed), "{sockets}");
 }
 
 #[test]

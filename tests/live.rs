@@ -1087,6 +1087,11 @@ impl IsolatedServer {
 
 impl Drop for IsolatedServer {
     fn drop(&mut self) {
+        // A view whose pty hangs up spins instead of exiting, so end it first.
+        for (pid, _) in self.loopherds() {
+            // SAFETY: kill takes no pointers.
+            unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        }
         let _ = self.herdr().args(["server", "stop"]).output();
         let _ = self.server.kill();
         let _ = self.server.wait();

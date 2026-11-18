@@ -202,11 +202,10 @@ fn wrapper_fails_with_how_to_install_when_loopherd_is_missing() {
 }
 
 #[test]
-fn wrapper_puts_the_herdr_that_ran_it_first_on_path() {
+fn wrapper_falls_back_to_the_herdr_that_ran_it_when_path_has_none() {
     let tmp = tempfile::tempdir().unwrap();
     let bin = tmp.path().join("bin");
     fs::create_dir(&bin).unwrap();
-    executable(&bin.join("herdr"), "#!/bin/sh\necho path-herdr\n");
     executable(&bin.join("loopherd"), "#!/bin/sh\nherdr\n");
     let herdr_dir = tmp.path().join("herdr dir");
     fs::create_dir(&herdr_dir).unwrap();
@@ -222,7 +221,27 @@ fn wrapper_puts_the_herdr_that_ran_it_first_on_path() {
 }
 
 #[test]
-fn wrapper_finds_loopherd_before_putting_herdrs_dir_on_path() {
+fn wrapper_keeps_paths_order_ahead_of_herdrs_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    executable(&bin.join("herdr"), "#!/bin/sh\necho path-herdr\n");
+    executable(&bin.join("loopherd"), "#!/bin/sh\nherdr\n");
+    let herdr_dir = tmp.path().join("herdr dir");
+    fs::create_dir(&herdr_dir).unwrap();
+    executable(&herdr_dir.join("herdr"), "#!/bin/sh\necho herdr-bin-path\n");
+
+    let out = wrapper_command(&bin, tmp.path(), &["view"])
+        .env("HERDR_BIN_PATH", herdr_dir.join("herdr"))
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "path-herdr\n");
+}
+
+#[test]
+fn wrapper_finds_loopherd_on_path_before_herdrs_dir() {
     let tmp = tempfile::tempdir().unwrap();
     let bin = tmp.path().join("bin");
     fake_loopherd(&bin, "on-path");

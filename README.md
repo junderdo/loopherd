@@ -106,14 +106,16 @@ add a binding to your herdr `config.toml` and run
 
 ```toml
 [[keys.command]]
-key = "prefix+o"
+key = "prefix+m"
 type = "plugin_action"
 command = "loopherd.view"
 description = "loopherd herd view"
 ```
 
-`prefix+o` is free in herdr's defaults; pick another if your config uses
-it. The plugin runs the `loopherd` on `PATH`, else `~/.local/bin/loopherd`, and never installs loopherd or its
+`prefix+m` is unbound in herdr 0.9.5's defaults (`herdr --default-config`);
+pick another if your config uses it. A popup that closes as soon as it
+opens means the view couldn't start; run `loopherd view` in a pane to see
+why. The plugin runs the `loopherd` on `PATH`, else `~/.local/bin/loopherd`, and never installs loopherd or its
 hooks; without one, its commands fail with a pointer here. herdr shows no
 action output on screen: read it, errors included, with
 `herdr plugin log list --plugin loopherd`. Remove the plugin with
