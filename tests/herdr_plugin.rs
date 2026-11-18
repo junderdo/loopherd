@@ -1,0 +1,122 @@
+//! The herdr plugin in `herdr-plugin/`: its manifest and the wrapper its
+//! commands run loopherd through (D62).
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+fn plugin_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("herdr-plugin")
+}
+
+fn manifest() -> toml::Table {
+    let text = fs::read_to_string(plugin_dir().join("herdr-plugin.toml")).unwrap();
+    text.parse().unwrap()
+}
+
+fn strings(value: &toml::Value) -> Vec<&str> {
+    value
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect()
+}
+
+#[test]
+fn manifest_names_the_loopherd_plugin_at_the_crate_version() {
+    let m = manifest();
+    assert_eq!(m["id"].as_str(), Some("loopherd"));
+    assert_eq!(m["name"].as_str(), Some("loopherd"));
+    assert_eq!(m["version"].as_str(), Some(env!("CARGO_PKG_VERSION")));
+    assert_eq!(m["min_herdr_version"].as_str(), Some("0.7.0"));
+    assert_eq!(strings(&m["platforms"]), ["linux", "macos"]);
+}
+
+#[test]
+fn every_manifest_command_runs_through_the_wrapper() {
+    let m = manifest();
+    let mut commands = 0;
+    for (key, value) in &m {
+        let Some(items) = value.as_array() else {
+            continue;
+        };
+        for item in items.iter().filter_map(|i| i.as_table()) {
+            let Some(command) = item.get("command") else {
+                continue;
+            };
+            assert_eq!(strings(command)[..2], ["sh", "loopherd.sh"], "[[{key}]]");
+            commands += 1;
+        }
+    }
+    assert!(commands > 0, "the manifest declares no commands");
+}
+
+/// Runs the wrapper as herdr does, from the plugin dir, with only `bin` on
+/// `PATH` and `home` as `HOME`.
+fn wrapper(bin: &Path, home: &Path, args: &[&str]) -> Output {
+    Command::new("/bin/sh")
+        .arg("loopherd.sh")
+        .args(args)
+        .current_dir(plugin_dir())
+        .env_clear()
+        .env("PATH", bin)
+        .env("HOME", home)
+        .output()
+        .unwrap()
+}
+
+fn fake_loopherd(dir: &Path, says: &str) {
+    fs::create_dir_all(dir).unwrap();
+    let path = dir.join("loopherd");
+    fs::write(&path, format!("#!/bin/sh\necho \"{says} $*\"\n")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn wrapper_runs_the_loopherd_on_path_with_its_arguments() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    fake_loopherd(&bin, "on-path");
+    fake_loopherd(&tmp.path().join(".local/bin"), "local-bin");
+
+    let out = wrapper(&bin, tmp.path(), &["status", "--json"]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "on-path status --json\n"
+    );
+}
+
+#[test]
+fn wrapper_falls_back_to_local_bin_when_path_has_no_loopherd() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    fake_loopherd(&tmp.path().join(".local/bin"), "local-bin");
+
+    let out = wrapper(&bin, tmp.path(), &["status"]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "local-bin status\n");
+}
+
+#[test]
+fn wrapper_fails_with_how_to_install_when_loopherd_is_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+
+    let out = wrapper(&bin, tmp.path(), &["status"]);
+
+    assert_eq!(out.status.code(), Some(127), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("loopherd plugin: loopherd not found on PATH or in ~/.local/bin")
+            && stderr.contains("https://github.com/junderdo/loopherd#install"),
+        "{stderr}"
+    );
+}
