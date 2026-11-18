@@ -155,6 +155,7 @@ impl Fixture {
             .env("PATH", path)
             .env("LOOPHERD_CONFIG_DIR", self.config())
             .env("XDG_STATE_HOME", self.state())
+            .env("CLAUDE_CONFIG_DIR", self.config().join("claude"))
             .env_remove("HERDR_PANE_ID")
             .env_remove("HERDR_WORKSPACE_ID")
             .env_remove("GH_TOKEN")
