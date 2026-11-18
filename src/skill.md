@@ -534,7 +534,8 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   closes; the README gives the `[[keys.command]]` snippet that binds it to
   a key. Never edit the human's herdr config to add it. Its event hooks
   run `loopherd herdr-event-hook`, recording a member going `blocked` or
-  `gone` in its mailbox for the next watch. It needs the
+  `gone` in its mailbox for the next watch, and following a member's pane
+  moved to another tab or workspace in the ledger. It needs the
   `loopherd` on PATH or in `~/.local/bin` and never installs loopherd or
   its hooks; installing stays as above. It needs herdr 0.7.5+.
   Its startup hook runs `loopherd revive --startup` each time herdr

@@ -21,10 +21,11 @@ pub const BLOCK_RECORDED: &str = "block-recorded";
 
 /// Records the herdr event `event`, as `HERDR_PLUGIN_EVENT` names it, with
 /// `json` from `HERDR_PLUGIN_EVENT_JSON`, for the non-retired members of the
-/// herdr at `socket` in its pane, tab or workspace. Anything else records
-/// nothing.
+/// herdr at `socket` in its pane, tab or workspace, and follows such a
+/// member's pane moved to another tab or workspace in the ledger. Anything
+/// else records nothing.
 pub fn event_hook(
-    ledger: &dyn Ledger,
+    ledger: &mut dyn Ledger,
     dir: &Path,
     event: &str,
     json: &str,
@@ -37,6 +38,7 @@ pub fn event_hook(
     let (key, held_in): (_, fn(&AgentRecord) -> Option<&str>) = match event {
         "tab.closed" => ("tab_id", |m| m.tab_id.as_deref()),
         "workspace.closed" => ("workspace_id", |m| Some(&m.workspace)),
+        "pane.moved" => return follow_move(ledger, &entries, data, socket),
         _ => return pane_event(&entries, dir, event, data, socket, now),
     };
     let Some(id) = data[key].as_str() else {
@@ -53,6 +55,35 @@ pub fn event_hook(
         true => Ok(()),
         false => Err(anyhow!(failed.join("; "))),
     }
+}
+
+/// A move to another workspace gives the pane a new id; herdr's payload
+/// names the old one `previous_pane_id`.
+fn follow_move(
+    ledger: &mut dyn Ledger,
+    entries: &BTreeMap<String, AgentRecord>,
+    data: &Value,
+    socket: Option<&Path>,
+) -> Result<()> {
+    let pane = &data["pane"];
+    let (Some(previous), Some(pane_id), Some(tab_id), Some(workspace)) = (
+        data["previous_pane_id"].as_str(),
+        pane["pane_id"].as_str(),
+        pane["tab_id"].as_str(),
+        pane["workspace_id"].as_str(),
+    ) else {
+        return Ok(());
+    };
+    let Some(member) = member_in(entries, previous, socket) else {
+        return Ok(());
+    };
+    ledger.update(&member.name, &mut |m| {
+        m.pane_id = pane_id.into();
+        m.tab_id = Some(tab_id.into());
+        m.workspace = workspace.into();
+        Ok(())
+    })?;
+    Ok(())
 }
 
 fn pane_event(

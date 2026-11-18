@@ -98,6 +98,23 @@ fn workspace_closed(dir: &Path, workspace: &str) -> Output {
     )
 }
 
+/// herdr's `pane.moved` for a pane moved from `from` in tab `from_tab` to
+/// `to` in tab `to_tab`; a move to another workspace gives the pane a new id.
+fn moved(dir: &Path, (from, from_tab): (&str, &str), (to, to_tab): (&str, &str)) -> Output {
+    let workspace = |id: &str| id.split(':').next().unwrap().to_string();
+    event(
+        dir,
+        "pane.moved",
+        &format!(
+            r#"{{"pane":{{"pane_id":"{to}","tab_id":"{to_tab}","workspace_id":"{}"}},
+                "previous_pane_id":"{from}","previous_tab_id":"{from_tab}",
+                "previous_workspace_id":"{}","type":"pane_moved"}}"#,
+            workspace(to),
+            workspace(from)
+        ),
+    )
+}
+
 /// `reports --all`, each line cut to its member and kind.
 fn recorded(dir: &Path) -> Vec<String> {
     let out = loopherd(dir, &["reports", "--all"]).output().unwrap();
@@ -292,4 +309,53 @@ fn a_note_after_a_gone_does_not_record_gone_again() {
     quiet_success(&closed(dir.path(), "pane.closed", "w1:p1"));
 
     assert_eq!(recorded(dir.path()), ["lh-1 gone", "lh-1 note"]);
+}
+
+#[test]
+fn a_member_moved_to_another_tab_goes_with_its_new_tab_not_its_old_one() {
+    let dir = sandbox();
+
+    quiet_success(&moved(dir.path(), ("w1:p1", "w1:t1"), ("w1:p1", "w1:t4")));
+    quiet_success(&tab_closed(dir.path(), "w1:t1"));
+    assert!(recorded(dir.path()).is_empty());
+
+    quiet_success(&tab_closed(dir.path(), "w1:t4"));
+    assert_eq!(recorded(dir.path()), ["lh-1 gone"]);
+}
+
+#[test]
+fn a_member_moved_to_another_workspace_is_followed_under_its_new_pane_id() {
+    let dir = sandbox();
+
+    quiet_success(&moved(dir.path(), ("w2:p1", "w2:t1"), ("w3:p2", "w3:t1")));
+    quiet_success(&workspace_closed(dir.path(), "w2"));
+    quiet_success(&tab_closed(dir.path(), "w2:t1"));
+    assert!(recorded(dir.path()).is_empty());
+
+    quiet_success(&status(dir.path(), "w3:p2", "blocked"));
+    quiet_success(&workspace_closed(dir.path(), "w3"));
+    assert_eq!(recorded(dir.path()), ["lh-2 blocked", "lh-2 gone"]);
+}
+
+#[test]
+fn a_move_of_a_pane_loopherd_does_not_follow_changes_nothing() {
+    let dir = sandbox();
+    let ledger = dir.path().join("state/loopherd/ledger.json");
+    let before = fs::read_to_string(&ledger).unwrap();
+
+    quiet_success(&moved(dir.path(), ("w1:p9", "w1:t1"), ("w1:p9", "w1:t4")));
+    quiet_success(&moved(dir.path(), ("w1:p7", "w1:t1"), ("w1:p7", "w1:t4")));
+    let other_herdr = loopherd(dir.path(), &["herdr-event-hook"])
+        .env("HERDR_SOCKET_PATH", "/run/other/herdr.sock")
+        .env("HERDR_PLUGIN_EVENT", "pane.moved")
+        .env(
+            "HERDR_PLUGIN_EVENT_JSON",
+            r#"{"event":"pane_moved","data":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t4",
+                "workspace_id":"w1"},"previous_pane_id":"w1:p1"}}"#,
+        )
+        .output()
+        .unwrap();
+    quiet_success(&other_herdr);
+
+    assert_eq!(fs::read_to_string(&ledger).unwrap(), before);
 }
