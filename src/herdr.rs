@@ -445,7 +445,6 @@ impl Herdr for CliHerdr {
         Ok(shell_alone && !self.visible_text(pane_id)?.trim().is_empty())
     }
 
-    // `pane read` prints plain text, not a JSON envelope.
     fn shell_pid(&self, pane_id: &str) -> Result<Option<u32>> {
         let result = self.call_ok(&["pane", "process-info", "--pane", pane_id])?;
         Ok(result["process_info"]["shell_pid"]
@@ -453,6 +452,7 @@ impl Herdr for CliHerdr {
             .and_then(|p| p.try_into().ok()))
     }
 
+    // `pane read` prints plain text, not a JSON envelope.
     fn visible_text(&self, pane_id: &str) -> Result<String> {
         let args = [
             "pane", "read", pane_id, "--source", "visible", "--format", "text",

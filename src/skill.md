@@ -607,9 +607,9 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   again then. A live handoff runs it too, where nothing was lost: it
   tells one from a restart by the panes' shells outliving the server, and
   then prompts no alive lead and leaves it no note. Where it can't tell
-  (no `/proc`, as on macOS) it treats it as a restart, so a lead between
-  watches gets the re-arm prompt; tell one that handed off or drained to
-  ignore it.
+  it treats it as a restart, and notes a `herdr's startup revive:
+  warning:` line saying why; a lead between watches then gets the re-arm
+  prompt, so tell one that handed off or drained to ignore it.
   Plugins are global to the user, so never link or install one from a test
   or a dev session.
 

@@ -97,6 +97,7 @@ pub struct FakeHerdr {
     pub fail_prompt: bool,
     pub fail_wait: bool,
     pub fail_visible_text: bool,
+    pub fail_shell_pid: bool,
     /// After `start_claude`, this many `agent` calls answer without the
     /// session, as herdr does before it has read it; a ready start's reply too.
     pub session_after_gets: u32,
@@ -141,6 +142,7 @@ impl FakeHerdr {
             fail_prompt: false,
             fail_wait: false,
             fail_visible_text: false,
+            fail_shell_pid: false,
             session_after_gets: 0,
             agent_get_fails_after_start: false,
             new_tab_prompt_after: Some(0),
@@ -514,6 +516,9 @@ impl Herdr for FakeHerdr {
     }
 
     fn shell_pid(&self, pane_id: &str) -> Result<Option<u32>> {
+        if self.fail_shell_pid {
+            bail!("herdr pane process-info failed");
+        }
         let state = self.state.lock().unwrap();
         let pane = state.panes.iter().find(|p| p.id == pane_id);
         Ok(pane
