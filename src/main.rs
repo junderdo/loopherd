@@ -1230,11 +1230,9 @@ fn run_restart_wait(name: &str) -> Result<i32> {
         .ok()
         .and_then(|v| v.parse::<i32>().ok())
         .context("restart-wait runs only from `loopherd restart --self`, which holds its claim")?;
-    // Kept open here, but not passed on to the herdr calls it makes.
-    // SAFETY: fcntl only sets close-on-exec on an inherited descriptor.
-    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let state = ledger.dir()?;
+    let _claim = restart::adopt_claim(&state, name, fd)?;
     let paths = Paths::from_env().inspect_err(|e| {
         let text = format!("self-restart failed: {e:#}");
         let note = report::Entry::new(SystemTime::now(), report::Body::Note { text });

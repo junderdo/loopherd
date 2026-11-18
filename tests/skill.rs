@@ -262,6 +262,13 @@ fn a_lead_restarts_itself_after_its_handoff() {
         ),
         "{lead}"
     );
+    assert!(!lead.contains("The shepherd restarts you"), "{lead}");
+    let whole = flat_section(&printed, "\n## Lead\n", "\n## NO SUCH SECTION\n");
+    assert!(
+        whole.contains("report `--kind handoff`, run `loopherd restart --self`, and end your turn"),
+        "{whole}"
+    );
+    assert!(!whole.contains("The shepherd restarts you"), "{whole}");
     let handoffs = flat_section(&printed, "\n### Handoffs\n", "\n### Your own handoff\n");
     assert!(
         handoffs.contains("**A lead restarts itself.**"),

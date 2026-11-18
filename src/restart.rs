@@ -66,31 +66,44 @@ pub fn restart(
         ),
         Some(_) => {}
     }
-    let _running = take(req.state, name, "restart")?.ok_or_else(|| Busy(name.to_string()))?;
+    let _running = take(req.state, name, "restart")?
+        .ok_or_else(|| Refusal::Busy(format!("a restart of {name} is already running")))?;
     if req.own_pane.is_some_and(|pane| record.is_own_pane(pane)) {
-        bail!(
-            "{name} can't restart itself mid-turn; run `loopherd restart --self` to restart once this turn ends"
-        );
+        match record.is_lead() {
+            true => bail!(
+                "{name} can't restart itself mid-turn; run `loopherd restart --self` to restart once this turn ends"
+            ),
+            false => {
+                bail!("{name} can't restart itself; whoever reads its handoff line restarts it")
+            }
+        }
     }
     let handoff = handoff_path(req.state, name);
     if !handoff.is_file() {
-        bail!("{name} has no handoff at {}", handoff.display());
+        return Err(
+            Refusal::NoHandoff(format!("{name} has no handoff at {}", handoff.display())).into(),
+        );
     }
     let agent = herdr
         .agents()?
         .into_iter()
         .find(|a| a.name.as_deref() == Some(name))
-        .ok_or_else(|| anyhow!("no live agent is named {name}; run loopherd revive first"))?;
+        .ok_or_else(|| {
+            Refusal::NotReady(format!(
+                "no live agent is named {name}; run loopherd revive first"
+            ))
+        })?;
     if agent.status == AgentStatus::Blocked {
-        bail!(
+        return Err(Refusal::NotReady(format!(
             "{name} is blocked: answer it in pane {} first",
             agent.pane_id
-        );
+        ))
+        .into());
     }
     if !req.force
         && let Some(why) = unfinished(req.state, name, agent.status)?
     {
-        bail!("{why}; pass --force to restart it anyway");
+        return Err(Refusal::NotReady(format!("{why}; pass --force to restart it anyway")).into());
     }
     let lead = match (record.is_lead(), &record.herd) {
         (false, _) => None,
@@ -193,16 +206,24 @@ fn unfinished(state: &Path, name: &str, status: AgentStatus) -> Result<Option<St
     })
 }
 
+/// A restart that sent nothing, for a reason a waiter acts on.
 #[derive(Debug)]
-struct Busy(String);
+enum Refusal {
+    /// Another restart of the member holds its lock.
+    Busy(String),
+    NoHandoff(String),
+    /// Blocked, unfinished or missing in herdr: may pass on a later try.
+    NotReady(String),
+}
 
-impl std::fmt::Display for Busy {
+impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "a restart of {} is already running", self.0)
+        let (Refusal::Busy(why) | Refusal::NoHandoff(why) | Refusal::NotReady(why)) = self;
+        f.write_str(why)
     }
 }
 
-impl std::error::Error for Busy {}
+impl std::error::Error for Refusal {}
 
 #[derive(Debug)]
 pub enum Waited {
@@ -247,7 +268,38 @@ fn poll_then_restart(
     let name = req.name;
     let handoff = handoff_path(req.state, name);
     let deadline = Instant::now() + give_up;
+    // Room for a running restart to settle before the waiter stops on it.
+    let busy_deadline = deadline + 2 * req.settle_timeout;
+    let mut saw_busy = false;
+    let gave_up = |waiting: &str| {
+        format!(
+            "self-restart gave up after {}: {waiting}. Its handoff is still in place; run loopherd restart {name} once it's finished.",
+            humantime::format_duration(give_up)
+        )
+    };
     loop {
+        if saw_busy {
+            // Locked, so the handoff check can't race the other restart's rename.
+            match take(req.state, name, "restart")? {
+                Some(_free) if handoff.is_file() => {
+                    return Ok(Err(format!(
+                        "self-restart stopped: another restart of {name} ended without using its handoff, \
+                         and may have sent /clear. Check its pane, then run loopherd restart {name} or \
+                         send the resume prompt it printed."
+                    )));
+                }
+                Some(_free) => return Ok(Ok(Waited::RestartedElsewhere)),
+                None if Instant::now() >= busy_deadline => {
+                    return Ok(Err(gave_up(&format!(
+                        "a restart of {name} is already running"
+                    ))));
+                }
+                None => {
+                    std::thread::sleep(every);
+                    continue;
+                }
+            }
+        }
         if !handoff.is_file() {
             return Ok(Ok(Waited::RestartedElsewhere));
         }
@@ -258,23 +310,24 @@ fn poll_then_restart(
                 handoff.display()
             )));
         }
-        let (waiting, busy) = match waiting_on(herdr, req) {
-            Ok(Some(why)) => (why, false),
+        let waiting = match waiting_on(herdr, req) {
+            Ok(Some(why)) => why,
             Ok(None) => match restart(herdr, ledger, req, SystemTime::now()) {
                 Ok(_) => return Ok(Ok(Waited::Restarted)),
-                Err(e) if e.is::<Busy>() => (format!("{e}"), true),
-                // Another restart used the handoff between our checks and its lock.
-                Err(_) if !handoff.is_file() => return Ok(Ok(Waited::RestartedElsewhere)),
-                Err(e) => return Ok(Err(format!("self-restart failed: {e:#}"))),
+                Err(e) => match e.downcast_ref::<Refusal>() {
+                    Some(Refusal::Busy(_)) => {
+                        saw_busy = true;
+                        continue;
+                    }
+                    Some(Refusal::NoHandoff(_)) => return Ok(Ok(Waited::RestartedElsewhere)),
+                    Some(Refusal::NotReady(why)) => why.clone(),
+                    None => return Ok(Err(format!("self-restart failed: {e:#}"))),
+                },
             },
-            Err(e) => (format!("{e:#}"), false),
+            Err(e) => format!("{e:#}"),
         };
-        // A running restart either uses the handoff or fails; wait for which.
-        if Instant::now() >= deadline && !busy {
-            return Ok(Err(format!(
-                "self-restart gave up after {}: {waiting}. Its handoff is still in place; run loopherd restart {name} once it's finished.",
-                humantime::format_duration(give_up)
-            )));
+        if Instant::now() >= deadline {
+            return Ok(Err(gave_up(&waiting)));
         }
         std::thread::sleep(every);
     }
@@ -326,10 +379,12 @@ pub fn schedule_self(
         )
     })?;
     let entries = ledger.entries()?;
-    let name = member_of_own_pane(&entries, pane, herdr.socket().as_deref())
-        .ok_or_else(|| anyhow!("no member runs in pane {pane} of this herdr"))?
-        .name
-        .clone();
+    let member = member_of_own_pane(&entries, pane, herdr.socket().as_deref())
+        .ok_or_else(|| anyhow!("no member runs in pane {pane} of this herdr"))?;
+    let name = member.name.clone();
+    if !member.is_lead() {
+        bail!("{name} isn't a lead; whoever reads its handoff line restarts it");
+    }
     let handoff = handoff_path(state, &name);
     if !handoff.is_file() {
         bail!("{name} has no handoff at {}", handoff.display());
@@ -356,6 +411,32 @@ pub fn schedule_self(
         waiter,
         message,
     })
+}
+
+/// Takes over the self-restart claim for `name` that `restart --self` passed
+/// down as `fd`, refusing any descriptor that isn't that held lock file.
+pub fn adopt_claim(state: &Path, name: &str, fd: std::os::fd::RawFd) -> Result<Lock> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::fs::MetadataExt;
+    let not_held = || anyhow!("this process doesn't hold {name}'s self-restart claim");
+    // SAFETY: fstat only reads the descriptor's metadata; a closed one fails.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        return Err(not_held());
+    }
+    let path = state.join("restarts").join(format!("{name}.waiter.lock"));
+    let lock = std::fs::metadata(&path).map_err(|_| not_held())?;
+    if (lock.dev(), lock.ino()) != (stat.st_dev, stat.st_ino) {
+        return Err(not_held());
+    }
+    // SAFETY: fstat showed `fd` open, and nothing else in this process owns it.
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    // Re-locking through the shared open file succeeds only for the holder.
+    let claim = Lock::try_take(file)?.ok_or_else(not_held)?;
+    // Kept here, but not passed on to the herdr calls the waiter makes.
+    // SAFETY: fcntl only sets close-on-exec on a descriptor `claim` owns.
+    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    Ok(claim)
 }
 
 /// `name`'s `kind` lock under the state dir, or `None` while another holds it.
@@ -472,10 +553,16 @@ mod tests {
         /// when no new session follows.
         continued: Option<&'static str>,
         recorded: Option<String>,
+        fails_start: bool,
+        /// Runs at restart's first ledger read, after a waiter's own checks.
+        before_restart: std::cell::Cell<Option<&'a dyn Fn()>>,
     }
 
     impl Ledger for Clearing<'_> {
         fn entries(&self) -> Result<BTreeMap<String, AgentRecord>> {
+            if let Some(hook) = self.before_restart.take() {
+                hook();
+            }
             let mut entries = self.ledger.entries()?;
             let clears = self
                 .herdr
@@ -520,6 +607,9 @@ mod tests {
             unreachable!()
         }
         fn started(&mut self, n: &str, at: SystemTime, resumed: bool) -> Result<()> {
+            if self.fails_start {
+                bail!("the ledger is read-only");
+            }
             self.ledger.started(n, at, resumed)
         }
     }
@@ -614,6 +704,8 @@ mod tests {
                 herdr: &self.herdr,
                 follows,
                 continued,
+                fails_start: false,
+                before_restart: Default::default(),
                 clears_before: self
                     .herdr
                     .prompts()
@@ -639,6 +731,15 @@ mod tests {
 
         /// Runs a self-restart's waiter for lh-1, polling every millisecond.
         fn wait(&self, give_up: Duration) -> Result<Waited> {
+            self.wait_with(give_up, false, None)
+        }
+
+        fn wait_with(
+            &self,
+            give_up: Duration,
+            fails_start: bool,
+            before_restart: Option<&dyn Fn()>,
+        ) -> Result<Waited> {
             let member = record("lh-1");
             let mut ledger = Clearing {
                 recorded: member.session_id.clone(),
@@ -647,6 +748,8 @@ mod tests {
                 follows: true,
                 continued: None,
                 clears_before: 0,
+                fails_start,
+                before_restart: before_restart.into(),
             };
             let req = RestartRequest {
                 name: "lh-1",
@@ -1302,7 +1405,10 @@ mod tests {
     }
 
     fn schedule(w: &World, own_pane: Option<&str>) -> Result<Scheduled> {
-        let ledger = MemLedger([("lh-1".to_string(), record("lh-1"))].into(), vec![]);
+        let mut lead = record("lh-1");
+        lead.role = Some(crate::ledger::Role::Lead);
+        lead.herd = Some("h".into());
+        let ledger = MemLedger([("lh-1".to_string(), lead)].into(), vec![]);
         schedule_self(&w.herdr, &ledger, own_pane, w.state.path())
     }
 
@@ -1498,13 +1604,20 @@ mod tests {
     fn a_restart_refuses_while_another_restart_of_the_same_member_runs() {
         let w = World::new();
         w.handed_off();
-        let running = take(w.state.path(), "lh-1", "restart").unwrap().unwrap();
+        let _running = take(w.state.path(), "lh-1", "restart").unwrap().unwrap();
         let (result, _) = w.restart(true, true);
         assert_eq!(
             format!("{:#}", result.unwrap_err()),
             "a restart of lh-1 is already running"
         );
         assert!(w.herdr.prompts().is_empty());
+    }
+
+    #[test]
+    fn a_self_restart_that_saw_another_restart_leave_the_handoff_stops_with_a_note() {
+        let w = World::new();
+        w.handed_off();
+        let running = take(w.state.path(), "lh-1", "restart").unwrap().unwrap();
         let waited = std::thread::scope(|s| {
             s.spawn(|| {
                 std::thread::sleep(Duration::from_millis(20));
@@ -1512,7 +1625,116 @@ mod tests {
             });
             w.wait(Duration::from_secs(5))
         });
+        assert!(matches!(waited.unwrap(), Waited::GaveUp));
+        assert!(w.herdr.prompts().is_empty());
+        let notes = w.notes();
+        assert!(
+            notes[0].starts_with(
+                "self-restart stopped: another restart of lh-1 ended without using its handoff"
+            ),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn a_self_restart_stops_waiting_on_a_restart_that_never_ends() {
+        let w = World::new();
+        w.handed_off();
+        let _running = take(w.state.path(), "lh-1", "restart").unwrap().unwrap();
+        let started = Instant::now();
+        let waited = w.wait(Duration::from_millis(10)).unwrap();
+        assert!(matches!(waited, Waited::GaveUp));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let notes = w.notes();
+        assert!(
+            notes[0].starts_with(
+                "self-restart gave up after 10ms: a restart of lh-1 is already running"
+            ),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn a_self_restart_whose_restart_fails_after_using_the_handoff_leaves_a_note() {
+        let w = World::new();
+        w.handed_off();
+        let waited = w.wait_with(Duration::from_secs(5), true, None).unwrap();
+        assert!(matches!(waited, Waited::GaveUp));
+        assert!(!w.state.path().join("handoffs/lh-1.md").exists());
+        assert_eq!(w.notes(), ["self-restart failed: the ledger is read-only"]);
+    }
+
+    #[test]
+    fn a_self_restart_keeps_waiting_when_the_restart_finds_the_member_busy_again() {
+        let w = World::new();
+        w.handed_off();
+        let woken = || w.herdr.set_status("lh-1", AgentStatus::Working);
+        let waited = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(30));
+                assert!(w.herdr.prompts().is_empty(), "restarted while working");
+                w.herdr.set_status("lh-1", AgentStatus::Idle);
+            });
+            w.wait_with(Duration::from_secs(5), false, Some(&woken))
+        });
         assert!(matches!(waited.unwrap(), Waited::Restarted));
-        assert_eq!(w.herdr.prompts().len(), 2);
+        assert!(w.notes().is_empty());
+    }
+
+    #[test]
+    fn only_a_lead_schedules_its_own_restart() {
+        let w = World::new();
+        w.put(Body::Handoff { text: "x".into() });
+        let ledger = MemLedger([("lh-1".to_string(), record("lh-1"))].into(), vec![]);
+        let err = format!(
+            "{:#}",
+            schedule_self(&w.herdr, &ledger, Some("w1:p1"), w.state.path())
+                .err()
+                .unwrap()
+        );
+        assert_eq!(
+            err,
+            "lh-1 isn't a lead; whoever reads its handoff line restarts it"
+        );
+    }
+
+    #[test]
+    fn a_waiter_adopts_only_the_claim_its_self_restart_took() {
+        use std::os::fd::IntoRawFd;
+        let w = World::new();
+        w.put(Body::Handoff { text: "x".into() });
+        let scheduled = schedule(&w, Some("w1:p1")).unwrap();
+        let shared = scheduled.waiter.try_clone().unwrap().into_raw_fd();
+        assert!(adopt_claim(w.state.path(), "lh-1", shared).is_ok());
+        let other = fs::File::create(w.state.path().join("other"))
+            .unwrap()
+            .into_raw_fd();
+        let err = format!(
+            "{:#}",
+            adopt_claim(w.state.path(), "lh-1", other).unwrap_err()
+        );
+        assert!(
+            err.starts_with("this process doesn't hold lh-1's self-restart claim"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_own_pane_refusal_points_only_a_lead_at_self() {
+        let w = World::new();
+        w.handed_off();
+        let (worker, _) = w.restart_as(false, true, Some("w1:p1"), &|_| {});
+        assert_eq!(
+            format!("{:#}", worker.unwrap_err()),
+            "lh-1 can't restart itself; whoever reads its handoff line restarts it"
+        );
+        let (lead, _) = w.restart_as(false, true, Some("w1:p1"), &|r| {
+            r.role = Some(crate::ledger::Role::Lead);
+            r.herd = Some("h".into());
+        });
+        assert_eq!(
+            format!("{:#}", lead.unwrap_err()),
+            "lh-1 can't restart itself mid-turn; run `loopherd restart --self` to restart once this turn ends"
+        );
     }
 }

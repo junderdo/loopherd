@@ -16,7 +16,8 @@ fn write_member(state: &Path) {
         format!(
             r#"{{"lh-1": {{"name": "lh-1", "pane_id": "w1:p1", "session_id": null,
                 "repo": "/", "worktree": null, "workspace": "w1", "prompt": null,
-                "prompt_sent": true, "created": "2026-11-01T00:00:00Z", "socket": "{SOCKET}"}}}}"#
+                "prompt_sent": true, "created": "2026-11-01T00:00:00Z", "socket": "{SOCKET}",
+                "role": "lead", "herd": "h"}}}}"#
         ),
     )
     .unwrap();
@@ -72,4 +73,22 @@ fn self_restart_returns_at_once_and_leaves_a_detached_waiter_holding_the_claim()
         assert!(Instant::now() < deadline, "the waiter never exited");
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+#[test]
+fn restart_wait_refuses_without_the_claim_self_restart_hands_it() {
+    let state = tempfile::tempdir().unwrap();
+    write_member(state.path());
+    let out = Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .args(["restart-wait", "lh-1"])
+        .env("XDG_STATE_HOME", state.path())
+        .env("LOOPHERD_RESTART_WAITER_FD", "0")
+        .env("PATH", "")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("doesn't hold lh-1's self-restart claim"),
+        "{out:?}"
+    );
 }

@@ -272,9 +272,12 @@ What would bite whoever picks this up.
 
 **Restart** whoever's `handoff` line you read: a lead restarts its own
 workers, and the shepherd restarts workers of unled herds and members in no
-herd. A lead restarts itself (below), so its `handoff` line needs nothing
-from the shepherd unless a `self-restart` note follows. Wait for its
-`finished` line, then `loopherd restart <name>`. It
+herd. A lead restarts itself (below): after its `handoff` and `finished`
+lines, a `start` from it should follow within a few watch polls. If none
+does (it forgot `--self`, or `--self` refused), or a `self-restart` note
+arrives, restart the lead yourself; the locks make that safe beside a
+waiter. For anyone else, wait for its `finished` line, then `loopherd
+restart <name>`. It
 sends `/clear`, waits for the ledger to follow the new session, and prompts
 the member to read its handoff, which it moves to `<name>.prev.md` so no
 later restart reuses it; same pane, worktree and branch. A lead's prompt
@@ -309,21 +312,22 @@ fix the herd, then run restart again.
 
 **A lead restarts itself.** After reporting `--kind handoff` and stopping its
 watch, it runs `loopherd restart --self` from its own pane and ends its
-turn. That checks it is a member with a handoff file and a `handoff` report
+turn. That checks it is a lead with a handoff file and a `handoff` report
 since its last start with no stop since (so run it in the handoff turn),
 starts a detached waiter, and returns at once. The
 waiter runs the plain restart, with every check `--force` skips, once the
 stop after the handoff reads `finished` and herdr shows it idle or done:
 same pane, worktree and ledger entry. One waiter per member: a second
 `--self` refuses while one waits, and a plain `loopherd restart` and the
-waiter never both send `/clear`; the waiter exits quietly once another
-restart used the handoff. After 30 minutes, on a revive's start, or on any
-failure, the waiter leaves a `self-restart …` note in the member's mailbox
+waiter never both send `/clear`: the waiter exits quietly once another
+restart used the handoff, and stops with a note if one ended without using
+it, since that one may have sent `/clear`. After 30 minutes, on a revive's
+start, or on any failure, the waiter leaves a `self-restart …` note in the member's mailbox
 naming why: act on it as on the `handoff` line. Unless the note says the
 restart failed after its `/clear`, the handoff is still in place, so a plain
 `loopherd restart <name>` works once the member is finished (after a
-revive, the human forces it). Any member may run `--self`, but workers in a led herd leave
-their restart to their lead.
+revive, the human forces it). Only a lead runs `--self`; for any other
+member it refuses, and whoever reads its `handoff` line restarts it.
 
 A lead's `loopherd watch` is a background shell, so a lead stops its own
 watch before ending its handoff turn; otherwise its stop reads `paused`
@@ -513,7 +517,7 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
 - `loopherd tell <name> "<text>"` messages a member (see Talking to
   members).
 - `loopherd restart <name>` gives a member that handed off a fresh session
-  (see Handoffs); `loopherd restart --self`, from a member's own pane,
+  (see Handoffs); `loopherd restart --self`, from a lead's own pane,
   schedules that for itself once its turn ends.
 - `loopherd lead <herd>` starts the herd's lead from its herd file's
   `[lead]` table.
@@ -802,8 +806,9 @@ What differs from the shepherd:
   whole skill).
 - **Your own handoff.** Past your limit, your Stop hook asks you for a
   handoff like any member's (see Handoffs): stop your own watch (TaskStop
-  it, or kill it), write it, report `--kind handoff`, and end your turn. The shepherd restarts you. Restart your
-  workers when they hand off; never with `--force`.
+  it, or kill it), write it, report `--kind handoff`, run `loopherd restart
+  --self`, and end your turn; you restart in this pane once that turn
+  stops. Restart your workers when they hand off; never with `--force`.
 - **Your checkout** is detached; refresh it with `git fetch origin && git
   checkout --detach origin/<default branch>` rather than `git pull`, and
   never commit in it.
