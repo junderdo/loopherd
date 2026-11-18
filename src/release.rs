@@ -106,7 +106,9 @@ pub fn release(
     if let Some(head) = &clearing.remote {
         let deleted = clearing.delete_remote().with_context(|| {
             format!(
-                "couldn't delete {remote} (was {}); rerun release to retry",
+                "couldn't delete {remote} (was {}); fix the cause and rerun release to retry. \
+                 {name} is already released, so until that rerun deletes it, a feed may \
+                 start a new {name} from the leftover branch",
                 short(head)
             )
         })?;
@@ -861,6 +863,103 @@ mod tests {
         assert_eq!(head_of(&origin(&s), "feat/zpr-1"), head(&elsewhere));
         assert!(!wt.exists());
         assert!(s.ledger.0["zpr-1"].released_at.is_some());
+    }
+
+    /// Installs a pre-push hook in the member's repo that prints `say` on
+    /// stderr and `say (stdout)` on stdout, touches `ran`, and exits `code`.
+    fn pre_push_hook(s: &Setup, say: &str, code: i32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let hooks = s.root.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-push");
+        let ran = s.root.path().join("ran");
+        let _ = std::fs::remove_file(&ran);
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\necho '{say}' >&2\necho '{say} (stdout)'\ntouch '{}'\nexit {code}\n",
+                ran.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git_in(
+            &s.repo,
+            &["config", "core.hooksPath", hooks.to_str().unwrap()],
+        );
+        ran
+    }
+
+    #[test]
+    fn a_pre_push_hook_that_refuses_keeps_the_origin_branch_and_says_why_after_the_rest() {
+        let mut s = Setup::new();
+        let wt = pushed_on_the_base(&mut s);
+        pre_push_hook(&s, "no deletes on fridays", 1);
+
+        let err = s.release("zpr-1", Fate::Clear).unwrap_err();
+
+        let shown = format!("{err:#}");
+        assert!(
+            shown.starts_with(&format!(
+                "couldn't delete origin/feat/zpr-1 (was {}); fix the cause and rerun release \
+                 to retry. zpr-1 is already released, so until that rerun deletes it, a feed \
+                 may start a new zpr-1 from the leftover branch: the push was refused, \
+                 perhaps by a pre-push hook: ",
+                &head(&s.repo)[..12]
+            )),
+            "{shown}"
+        );
+        assert!(shown.contains("no deletes on fridays\n"), "{shown}");
+        assert!(
+            shown.contains("stdout: no deletes on fridays (stdout)"),
+            "{shown}"
+        );
+        assert!(has_branch(&origin(&s), "feat/zpr-1"));
+        assert!(!wt.exists());
+        assert!(!has_branch(&s.repo, "feat/zpr-1"));
+        assert!(s.ledger.0["zpr-1"].released_at.is_some());
+    }
+
+    #[test]
+    fn a_rerun_after_the_pre_push_hook_is_fixed_deletes_the_origin_branch() {
+        let mut s = Setup::new();
+        pushed_on_the_base(&mut s);
+        pre_push_hook(&s, "no deletes on fridays", 1);
+        let err = s.release("zpr-1", Fate::Clear).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no deletes on fridays"),
+            "{err:#}"
+        );
+        let ran = pre_push_hook(&s, "ok", 0);
+
+        let out = s.release("zpr-1", Fate::Clear).unwrap();
+
+        assert!(
+            out.last()
+                .unwrap()
+                .starts_with("deleted origin/feat/zpr-1 (was "),
+            "{out:?}"
+        );
+        assert!(!has_branch(&origin(&s), "feat/zpr-1"));
+        assert!(ran.exists());
+    }
+
+    #[test]
+    fn a_pre_push_hook_that_passes_lets_release_delete_the_origin_branch() {
+        let mut s = Setup::new();
+        pushed_on_the_base(&mut s);
+        let ran = pre_push_hook(&s, "ok", 0);
+
+        let out = s.release("zpr-1", Fate::Clear).unwrap();
+
+        assert!(
+            out.last()
+                .unwrap()
+                .starts_with("deleted origin/feat/zpr-1 (was "),
+            "{out:?}"
+        );
+        assert!(!has_branch(&origin(&s), "feat/zpr-1"));
+        assert!(ran.exists());
     }
 
     fn cut_off_origin(s: &Setup) {

@@ -73,6 +73,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D56](decisions/D56.md) | `loopherd init` can write a local-tracker herd without GitHub on a GitHub origin: on a terminal the GitHub question takes Enter for none, and `--no-github` does it for scripts; off a terminal without the flag, a GitHub origin keeps its merged check. |
 | [D57](decisions/D57.md) | `[notify] pane_label` labels the pane that must relay or answer a waiting question (the shepherd's on its watch's `question` or `blocked` line, a lead's on its own question) through herdr's display-only `--display-agent`, cleared by a UserPromptSubmit or SessionStart in that pane. |
 | [D58](decisions/D58.md) | `loopherd retire` also refuses a lead whose live recorded process (PID and start time) is an ancestor of the running loopherd, so unsetting or overriding the pane environment no longer lets a lead retire itself; D50's pane check still runs. |
+| [D59](decisions/D59.md) | `loopherd release` runs the repo's pre-push hooks on the origin delete; a refusal leaves the branch, prints the hook's output, and a rerun retries. |
 
 ## Emerging model
 
