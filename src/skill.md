@@ -117,9 +117,10 @@ Init never launches an agent.
    `loopherd install-hook`). Lines come in this order: reports, questions
    first then by time; then stop lines grouped by member in name order,
    oldest first within a member; then a lead's `failing` and `recovered`,
-   then its `interrupted` and `merged`, by member in name order, then its
-   `claimable`; then `blocked` and `gone`. A `drained` line prints only on
-   a poll nothing else woke, alone but for a due `shepherd handoff`. The
+   then its `running low`, then its `interrupted` and `merged`, by member
+   in name order, then its `claimable`; then `blocked` and `gone`. A
+   `drained` line prints only on a poll nothing else woke, alone but for a
+   due `shepherd handoff`. The
    first watch after an install, or over members a herd-scoped watch
    skipped, prints every unread stop change since; judge each against
    `reports --all`.
@@ -143,6 +144,7 @@ Init never launches an agent.
    | `<name> claimable` | Lead's watch only: feed would spawn this member. Feed. |
    | `<herd> failing  source "<command>": <stderr line>` | Lead's watch only: the herd's source failed (also `<herd> failing  <member> done "<command>": …` for a member's `done` or `merged` check), with its last stderr line. Once per streak; one cut off by the 60s round is no event. Fix the cause, or tell the shepherd. |
    | `<herd> recovered  source` | Lead's watch only: what last printed `failing` passes again (also `<herd> recovered  <member> done`). A later failure prints `failing` again. A member that retires mid-streak gets none. |
+   | `<herd> running low  <n> claimable, <m> unready` | Lead's watch only: the herd's `backlog` lists unready tasks and claimable (as `status` counts it) is at or below `max`. Once per streak: it prints again only after claimable rises above `max` or unready reaches 0. A paused herd prints none and keeps its streak. Triage (see Lead). |
    | `<member> interrupted` | Lead's watch only: the feed running the worker's `after_merge` died before noting it. Feed, which notes it, then read the note. |
    | `<member> blocked` | A dialog only the human answers: tell them. loopherd never answers it. |
    | `<member> gone` | No agent in its pane for two polls in a row; it was live earlier in this watch. |
@@ -206,6 +208,13 @@ Init never launches an agent.
    done: `git worktree remove --force` each verify worktree under
    `<scratch>/pr<n>/`, then delete that directory. Same for a PR closed
    unmerged.
+6. **Triage** a herd running low on ready work (D60). A lead's triage
+   arrives as its `question`: relay it to the human. Once the human
+   approves, mark the ready tasks ready in the tracker, archive the stale
+   ones the human confirms, and comment what's missing on each needs-spec
+   task. In an unled herd, triage yourself when `status` shows claimable at
+   or below `max` with unready above 0: run the herd's `backlog` and sort
+   each task the same way.
 
 ### Handoffs
 
@@ -591,6 +600,12 @@ What differs from the shepherd:
   `merged`, reports, stops, `blocked` and `gone` wake you as before, so
   keep verifying and running after-merge steps. On resume your watch
   announces the claimable tasks again within 60s.
+- **Running low.** On `<herd> running low`, have a read-only subagent
+  run your herd's `backlog` and sort each task into ready, needs a
+  decision (naming it), needs spec (saying what's missing), or stale
+  (saying why). Report the result as one `loopherd report --kind question`
+  and end your turn. Never mark a task ready yourself, whatever your
+  switches; the shepherd does it once the human approves.
 - **Asking to merge.** With `merge` off, the question carries the PR link
   and a ready-to-paste line pinned to the full head SHA your reviewer
   verified, `! gh pr merge <n> --merge --match-head-commit <full sha>`, in

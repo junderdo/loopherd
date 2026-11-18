@@ -10,6 +10,14 @@
 # runs the routine after-merge steps once per merged member (D28). Feed run
 # from the lead's pane runs none of it while `install` below is off:
 # after_merge = ["git pull --ff-only", "scripts/install --no-extras", "scripts/trello unblock"]
+#
+# With a [queue] backlog (see loopherd-cards-routed.toml), the lead's watch
+# wakes it with `loopherd-cards running low` and it reports its triage as a
+# question (D60). It never marks a card ready; once the human approves, the
+# shepherd runs, per docs/agents/shepherd.md's Triage:
+#   scripts/trello label LH-<n> +ready-for-agent      # each ready card
+#   scripts/trello comment LH-<n> "<what's missing>"  # each needs-spec card
+#   curl -X PUT ".../1/cards/<shortLink>?closed=true"  # archive each stale card the human confirms
 [lead]
 prompt_file = "loopherd-cards-lead.md"
 # args defaults to the herd's args. Every switch is off until the human turns it on.

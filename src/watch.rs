@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use crate::context::ShepherdHandoff;
-use crate::feed::{claimable, run_check, run_source};
+use crate::feed::{claimable, claimable_count, run_check, run_in_repo, run_source};
 use crate::herd::{MemberCheck, MemberChecks, Paths, lead_checks};
 use crate::herd_view::{Member, Options, View};
 use crate::herdr::{AgentStatus, Herdr};
@@ -35,10 +35,12 @@ pub mod line {
     /// After a herd's name, not a member's.
     pub const FAILING: &str = "failing";
     pub const RECOVERED: &str = "recovered";
+    /// After a herd's name.
+    pub const RUNNING_LOW: &str = "running low";
     /// After a herd's name, or `all` on the shepherd's watch.
     pub const DRAINED: &str = "drained";
     #[cfg(test)]
-    pub const ALL: [&str; 11] = [
+    pub const ALL: [&str; 12] = [
         PAUSED,
         FINISHED,
         FAILED,
@@ -49,6 +51,7 @@ pub mod line {
         GONE,
         FAILING,
         RECOVERED,
+        RUNNING_LOW,
         DRAINED,
     ];
 }
@@ -456,7 +459,7 @@ struct Checks<'a> {
 }
 
 impl Checks<'_> {
-    /// Each event not fired before. A check or the source failing starts a
+    /// Each event not fired before. A check, the source or the backlog failing starts a
     /// streak, one `failing` event, and its next pass a `recovered` one; one
     /// that runs out of the round's [`CHECK_EVERY`] is no event. A paused
     /// herd has no claimable events (D23).
@@ -482,6 +485,7 @@ impl Checks<'_> {
         let mut failing = vec![];
         let mut passing = vec![];
         let mut freed = 0;
+        let mut low = None;
         for worker in workers {
             let done = run_member_check(&checks.done, &checks, &worker, &budget);
             let merged = run_member_check(&checks.merged, &checks, &worker, &budget);
@@ -524,6 +528,24 @@ impl Checks<'_> {
                 Ok((tasks, _)) => {
                     passing.push("source".into());
                     let names = claimable(ledger, self.paths, &queue, &self.herd, freed, &tasks)?;
+                    if let Some(backlog) = &queue.backlog
+                        && let Some(timeout) = budget.left()
+                    {
+                        match run_in_repo(backlog, &queue.repo, timeout) {
+                            Ok((unready, _)) => {
+                                passing.push("backlog".into());
+                                let unready = unready.lines().filter(|l| !l.trim().is_empty());
+                                let claimable = claimable_count(
+                                    ledger, self.paths, &queue, &self.herd, &tasks,
+                                )?;
+                                low = self.running_low(claimable, unready.count(), queue.max)?;
+                            }
+                            Err(_) if budget.cut(timeout) => {}
+                            Err(e) => {
+                                failing.push(("backlog".into(), why(backlog, &format!("{e:#}"))))
+                            }
+                        }
+                    }
                     // A running feed may be spawning these before it records them.
                     if !feeding(self.paths)? {
                         events.extend(
@@ -554,9 +576,34 @@ impl Checks<'_> {
             });
         Ok(failed
             .chain(recovered)
+            .chain(low)
             .chain(events)
             .filter(|e| !self.fired.keys.contains(&e.key))
             .collect())
+    }
+}
+
+impl Checks<'_> {
+    /// The `running low` event while claimable is at or below `max` with
+    /// unready tasks waiting. Its key leaves out the counts, so it prints once
+    /// per streak; a round that isn't low ends the streak.
+    fn running_low(
+        &mut self,
+        claimable: usize,
+        unready: usize,
+        max: usize,
+    ) -> Result<Option<Event>> {
+        let key = format!("{} {}", self.herd, line::RUNNING_LOW);
+        if claimable > max || unready == 0 {
+            if self.fired.keys.remove(&key) {
+                append(&self.fired.path, &format!("{key}{LOW_ENDED}\n"))?;
+            }
+            return Ok(None);
+        }
+        Ok(Some(Event {
+            line: format!("{key}  {claimable} claimable, {unready} unready"),
+            key,
+        }))
     }
 }
 
@@ -694,7 +741,8 @@ fn feeding(paths: &Paths) -> Result<bool> {
 /// Its first line names the lead's spawn, so a re-created lead starts afresh.
 /// A [`RESUMED`] line forgets the claimable keys above it, so a card announced
 /// before a pause is announced again after resume, and a `recovered` key
-/// forgets its `failing` one, so the next failure is announced again.
+/// forgets its `failing` one, so the next failure is announced again. A
+/// `<herd> running low ended` line forgets its streak.
 struct Fired {
     path: PathBuf,
     header: String,
@@ -734,6 +782,8 @@ impl Fired {
                 self.keys.retain(|k| !is_claimable(k));
             } else if let Some(name) = line.strip_prefix(RELEASED) {
                 self.keys.retain(|k| !is_about(k, name));
+            } else if let Some(low) = line.strip_suffix(LOW_ENDED) {
+                self.keys.remove(low);
             } else if let Some(failing) = failing_key(line) {
                 self.keys.remove(&failing);
             } else {
@@ -763,6 +813,9 @@ impl Fired {
 /// The line `resume` appends to `watch-<lead>.fired`. Every key has a space
 /// in it, so no key reads as this.
 const RESUMED: &str = "resumed";
+
+/// Ends the `running low` key it follows in `watch-<lead>.fired`.
+const LOW_ENDED: &str = " ended";
 
 fn fired_path(dir: &Path, lead: &str) -> PathBuf {
     dir.join(format!("watch-{lead}.fired"))
@@ -3415,6 +3468,116 @@ mod tests {
         fn retire(&mut self, name: &str) {
             self.ledger.0.get_mut(name).unwrap().retired = true;
         }
+    }
+
+    impl Checked {
+        /// The herd's queue gains `backlog = "cat unready"`, listing `unready`.
+        fn with_backlog(unready: &str) -> Checked {
+            let world = Checked::new();
+            world.edit_herd(|h| h.replace("max = 2", "backlog = \"cat unready\"\nmax = 2"));
+            world.touch("unready", unready);
+            world
+        }
+    }
+
+    #[test]
+    fn a_herd_low_on_claimable_tasks_with_unready_ones_wakes_its_lead_once_per_streak() {
+        let world = Checked::with_backlog("7 needs spec\n8 stale\n");
+        world.touch("tasks", "1\n2\n");
+        assert_eq!(
+            world.once("w9:p0").unwrap(),
+            [
+                "cards running low  1 claimable, 2 unready",
+                "lh-2 claimable"
+            ]
+        );
+
+        world.touch("unready", "7 needs spec\n");
+        assert_eq!(world.once("w9:p0"), None, "woke twice in one streak");
+    }
+
+    #[test]
+    fn the_streak_ends_when_claimable_rises_above_max_or_unready_reaches_zero() {
+        let world = Checked::with_backlog("7 needs spec\n");
+        assert_eq!(
+            world.once("w9:p0").unwrap(),
+            ["cards running low  0 claimable, 1 unready"]
+        );
+
+        world.touch("tasks", "2\n3\n4\n");
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-2 claimable"]);
+        world.touch("tasks", "");
+        assert_eq!(
+            world.once("w9:p0").unwrap(),
+            ["cards running low  0 claimable, 1 unready"]
+        );
+
+        world.touch("unready", "");
+        assert_eq!(world.once("w9:p0"), None);
+        world.touch("unready", "9 stale\n");
+        assert_eq!(
+            world.once("w9:p0").unwrap(),
+            ["cards running low  0 claimable, 1 unready"]
+        );
+    }
+
+    #[test]
+    fn a_herd_at_max_claimable_is_low_and_one_with_no_backlog_or_unready_is_not() {
+        let at_max = Checked::with_backlog("7 needs spec\n");
+        at_max.touch("tasks", "2\n3\n");
+        assert_eq!(
+            at_max.once("w9:p0").unwrap(),
+            [
+                "cards running low  2 claimable, 1 unready",
+                "lh-2 claimable"
+            ]
+        );
+
+        assert_eq!(Checked::with_backlog("").once("w9:p0"), None);
+        assert_eq!(Checked::new().once("w9:p0"), None);
+    }
+
+    #[test]
+    fn a_paused_herd_says_nothing_and_keeps_its_streak_through_resume() {
+        let mid_streak = Checked::with_backlog("7 needs spec\n");
+        assert!(mid_streak.once("w9:p0").is_some());
+        mid_streak.pause();
+        assert_eq!(mid_streak.once("w9:p0"), None);
+        mid_streak.resume();
+        assert_eq!(mid_streak.once("w9:p0"), None, "resume re-announced it");
+
+        let paused_first = Checked::with_backlog("7 needs spec\n");
+        paused_first.pause();
+        assert_eq!(paused_first.once("w9:p0"), None);
+        paused_first.resume();
+        assert_eq!(
+            paused_first.once("w9:p0").unwrap(),
+            ["cards running low  0 claimable, 1 unready"]
+        );
+    }
+
+    #[test]
+    fn the_shepherds_watch_never_says_running_low() {
+        let world = Checked::with_backlog("7 needs spec\n");
+        assert_eq!(world.once("w9:p1"), None);
+    }
+
+    #[test]
+    fn a_failing_backlog_wakes_the_lead_once_per_streak_and_says_nothing_low() {
+        let world = Checked::with_backlog("7 needs spec\n");
+        world.edit_herd(|h| h.replace("\"cat unready\"", "\"echo gone >&2; exit 3\""));
+        assert_eq!(
+            world.once("w9:p0").unwrap(),
+            ["cards failing  backlog \"echo gone >&2; exit 3\": failed (exit status: 3): gone"]
+        );
+        world.edit_herd(|h| h.replace("\"echo gone >&2; exit 3\"", "\"cat unready\""));
+        assert_eq!(
+            world.once("w9:p0").unwrap(),
+            [
+                "cards recovered  backlog",
+                "cards running low  0 claimable, 1 unready"
+            ]
+        );
     }
 
     #[test]
