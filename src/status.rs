@@ -241,15 +241,19 @@ fn text(view: &View, color: bool) -> String {
     out
 }
 
-/// A member's cells; a retired entry's status names its retirement so a grepped
-/// row can't pass for an open member.
-pub fn row(member: &Member) -> Vec<String> {
-    let status = match (member.retired.as_deref(), member.gone) {
+/// A member's status: a retired entry's names its retirement so a grepped row
+/// can't pass for an open member, whatever herdr says of its pane.
+pub fn label(member: &Member) -> String {
+    match (member.retired.as_deref(), member.gone) {
         (Some("unknown"), _) => "retired".into(),
         (Some(at), _) => format!("retired {at}"),
         (None, true) => "gone".into(),
         (None, false) => member.status.as_str().into(),
-    };
+    }
+}
+
+/// A member's cells.
+pub fn row(member: &Member) -> Vec<String> {
     let place = match &member.tab {
         Some(tab) => format!("{tab}/{}", member.pane),
         None => member.pane.clone(),
@@ -261,7 +265,7 @@ pub fn row(member: &Member) -> Vec<String> {
     };
     vec![
         name,
-        status,
+        label(member),
         member.branch.clone().unwrap_or_else(|| "-".into()),
         member.worktree.clone().unwrap_or_else(|| "-".into()),
         place,
