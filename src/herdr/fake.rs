@@ -67,6 +67,9 @@ struct State {
     started: Vec<Started>,
     prompts: Vec<(String, String)>,
     focused: Vec<String>,
+    /// Sidebar labels by pane.
+    labels: Vec<(String, String)>,
+    label_calls: u32,
     /// Visible text by pane; a pane without one reads as empty.
     screens: Vec<(String, String)>,
     /// Replaces a pane's screen when its agent is next prompted.
@@ -228,6 +231,17 @@ impl FakeHerdr {
     /// Panes passed to `focus`, in order. Focusing isn't a mutation.
     pub fn focused(&self) -> Vec<String> {
         self.state.borrow().focused.clone()
+    }
+
+    /// The label `label_pane` last left on `pane_id`. Labelling isn't a mutation.
+    pub fn label(&self, pane_id: &str) -> Option<String> {
+        let state = self.state.borrow();
+        let found = state.labels.iter().find(|(p, _)| p == pane_id);
+        found.map(|(_, label)| label.clone())
+    }
+
+    pub fn label_calls(&self) -> u32 {
+        self.state.borrow().label_calls
     }
 
     fn push_agent(&self, name: Option<&str>, session: Option<&str>, pane_id: &str, pending: bool) {
@@ -606,6 +620,19 @@ impl Herdr for FakeHerdr {
             bail!("no agent in pane {pane_id}");
         }
         self.state.borrow_mut().focused.push(pane_id.to_string());
+        Ok(())
+    }
+
+    fn label_pane(&self, pane_id: &str, label: Option<&str>) -> Result<()> {
+        if self.is_down() {
+            bail!("herdr server not running");
+        }
+        let mut state = self.state.borrow_mut();
+        state.label_calls += 1;
+        state.labels.retain(|(p, _)| p != pane_id);
+        if let Some(label) = label {
+            state.labels.push((pane_id.to_string(), label.to_string()));
+        }
         Ok(())
     }
 

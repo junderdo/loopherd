@@ -59,10 +59,10 @@ Init never launches an agent.
 
 1. **Feed.** Keep the `loopherd` on PATH current, since members call it for
    `loopherd report` and Claude calls it from its hooks. `loopherd
-   install-hook` adds the Stop, StopFailure, SessionStart and PreToolUse
-   hooks to Claude's user settings (backed up first; re-running changes
-   nothing) and installs this skill. `watch` needs the first three, not the
-   PreToolUse one. Running Claude sessions pick up a newly added hook without
+   install-hook` adds the Stop, StopFailure, SessionStart, PreToolUse and
+   UserPromptSubmit hooks to Claude's user settings (backed up first;
+   re-running changes nothing) and installs this skill. `watch` needs the
+   first three, not the last two. Running Claude sessions pick up a newly added hook without
    a restart. Then `loopherd feed <herd> --dry-run` and, if it reads right,
    `loopherd feed <herd>`. The herd file (`<herd>.toml` in
    `$LOOPHERD_CONFIG_DIR/herds`, else `${XDG_CONFIG_HOME:-~/.config}/loopherd/herds`) turns each task its
@@ -323,6 +323,7 @@ enabled = true                    # default false: nothing is sent
 kinds = ["question", "blocked"]   # the default
 herdr = true                      # herdr's toast on the watched socket; default true
 command = "notify-send {herd}/{member} {text}"
+pane_label = true                 # label the relaying pane in herdr; default false
 ```
 
 `command` is optional: words split on whitespace (no quotes; use an array
@@ -333,11 +334,22 @@ and URL passwords `[redacted]` (best-effort: a secret in an unknown shape
 gets through), or `blocked`. Each send runs detached within 30s; a failing
 one leaves a `note` in the member's mailbox, once until it next succeeds.
 `loopherd herds` reports a broken table, which sends nothing, and warns of
-an enabled one with `herdr = false` and no `command`. Notifying doesn't
-replace relaying: still tell the human in your pane. Not sent: a
-question you read with `loopherd reports` before a watch saw it, and a
-member already blocked when every watch started. A lead relaying a worker's
+an enabled one with `herdr = false`, no `command` and no `pane_label`.
+Notifying doesn't replace relaying: still tell the human in your pane. Not
+sent: a question you read with `loopherd reports` before a watch saw it, and
+a member already blocked when every watch started. A lead relaying a worker's
 question as its own sends a second notification.
+
+`pane_label = true` (default false) also labels, in herdr's sidebar, the
+pane that must relay or answer: yours when your watch prints a `question`
+(`<member> asks: <text>`) or `blocked` line, whatever `kinds` says, and a
+lead's own when it reports `--kind question`. The label takes the place of
+the agent's name and is display-only: herdr still shows the pane's own
+status, never `blocked`, so no watch reads it as a dialog. The human's next
+prompt in that pane, or a new, resumed or cleared session there, clears it;
+a background task finishing, such as your watch, or a compaction doesn't.
+A lead's watch never labels for its workers. Clearing needs the
+UserPromptSubmit hook from `install-hook`.
 
 ### Commands
 

@@ -100,6 +100,9 @@ pub struct Request<'a> {
     /// Given a lead's own questions and blocks as its watch first sees them,
     /// which wake only the shepherd's watch.
     pub notify_own: Option<NotifyOwn<'a>>,
+    /// Labels the caller's pane with what wakes the shepherd's watch waiting
+    /// on the human, until the human next prompts there.
+    pub pane_label: bool,
 }
 
 pub type NotifyOwn<'a> = &'a dyn Fn(&[Waiting]);
@@ -329,6 +332,17 @@ pub fn watch(
                 for event in &mut waiting {
                     event.herd = entries.get(&event.member).and_then(|e| e.herd.clone());
                 }
+            }
+            // A lead relays its workers' questions as its own reports, which label its pane.
+            if let (true, Reader::Shepherd, Some(pane), Some(first)) =
+                (req.pane_label, &reader, req.own_pane, waiting.first())
+                && !ledger
+                    .entries()?
+                    .values()
+                    .any(|e| !e.retired && e.pane_id == pane)
+                && let Err(e) = crate::pane_label::set(herdr, dir, pane, first)
+            {
+                warn(&format!("warning: label pane {pane}: {e:#}"));
             }
             return Ok(Some(Wake {
                 lines,
@@ -1175,6 +1189,7 @@ mod tests {
         check_timeout: || bail!("only a lead's watch reads the check timeout"),
         shepherd_handoff: None,
         notify_own: None,
+        pane_label: false,
     };
 
     fn run(
@@ -1515,6 +1530,7 @@ mod tests {
         check_timeout: || bail!("only a lead's watch reads the check timeout"),
         shepherd_handoff: None,
         notify_own: None,
+        pane_label: false,
     };
 
     /// One poll of a fresh watch.
@@ -3697,5 +3713,178 @@ mod tests {
         });
         assert_eq!(woke.unwrap(), ["all drained"]);
         assert_eq!(polls, 1);
+    }
+
+    /// The shepherd's watch from pane w1:p7, which holds no member.
+    fn labelling_shepherd(pane_label: bool) -> Request<'static> {
+        Request {
+            own_pane: Some("w1:p7"),
+            pane_label,
+            ..ONCE
+        }
+    }
+
+    #[test]
+    fn the_shepherds_watch_labels_its_pane_with_the_question_it_prints_redacted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = quiet_led_world();
+        send(
+            &ledger,
+            dir.path(),
+            "lead-cards",
+            Kind::Question,
+            "\nauth=q ok?\nsecond line",
+        );
+
+        let req = labelling_shepherd(true);
+        run(&herdr, &ledger, dir.path(), &req, &mut steps(|_| {})).unwrap();
+
+        assert_eq!(
+            herdr.label("w1:p7").as_deref(),
+            Some("lead-cards asks: [redacted] ok?")
+        );
+        assert_eq!(herdr.label("w9:p0"), None);
+    }
+
+    #[test]
+    fn the_shepherds_watch_labels_its_pane_with_a_member_gone_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![member("solo", "w9:p3", None)]);
+        let herdr = FakeHerdr::new(&[]).with_live_agent(Some("solo"), None, "w9:p3");
+        herdr.set_status("solo", AgentStatus::Working);
+        let req = Request {
+            timeout: None,
+            ..labelling_shepherd(true)
+        };
+
+        let mut clock = steps(|_| herdr.set_status("solo", AgentStatus::Blocked));
+        run(&herdr, &ledger, dir.path(), &req, &mut clock).unwrap();
+
+        assert_eq!(herdr.label("w1:p7").as_deref(), Some("solo is blocked"));
+    }
+
+    #[test]
+    fn no_watch_labels_a_pane_unless_asked_or_for_a_wake_with_nothing_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = quiet_led_world();
+        send(
+            &ledger,
+            dir.path(),
+            "lead-cards",
+            Kind::Question,
+            "which DB?",
+        );
+        run(
+            &herdr,
+            &ledger,
+            dir.path(),
+            &labelling_shepherd(false),
+            &mut steps(|_| {}),
+        );
+        send(&ledger, dir.path(), "lead-cards", Kind::Note, "hi");
+        run(
+            &herdr,
+            &ledger,
+            dir.path(),
+            &labelling_shepherd(true),
+            &mut steps(|_| {}),
+        );
+
+        assert_eq!(herdr.label_calls(), 0);
+    }
+
+    #[test]
+    fn a_leads_watch_leaves_its_pane_unlabelled_for_a_workers_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = quiet_led_world();
+        send(&ledger, dir.path(), "lh-1", Kind::Question, "which DB?");
+        let req = Request {
+            pane_label: true,
+            ..from_pane("w9:p0")
+        };
+
+        let woke = run(&herdr, &ledger, dir.path(), &req, &mut steps(|_| {}));
+
+        assert_eq!(
+            woke.unwrap(),
+            ["lh-1 question 2026-11-01 09:00 UTC which DB?"]
+        );
+        assert_eq!(herdr.label_calls(), 0);
+    }
+
+    #[test]
+    fn neither_watch_reads_a_leads_labelled_pane_as_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = quiet_led_world();
+        let notifier = Notifier::new(dir.path());
+        let mut clock = steps(|poll| {
+            if poll == 1 {
+                send(
+                    &ledger,
+                    dir.path(),
+                    "lead-cards",
+                    Kind::Question,
+                    "which DB?",
+                );
+                let asked = "which DB?";
+                crate::pane_label::lead_asked(
+                    &herdr,
+                    &ledger,
+                    dir.path(),
+                    "w9:p0",
+                    "lead-cards",
+                    asked,
+                )
+                .unwrap();
+                herdr.set_status("lead-cards", AgentStatus::Idle);
+            }
+        });
+        let own = |events: &[Waiting]| notifier.send(events);
+        let lead = Request {
+            timeout: Some(Duration::from_secs(4)),
+            notify_own: Some(&own),
+            pane_label: true,
+            ..from_pane("w9:p0")
+        };
+
+        assert_eq!(run(&herdr, &ledger, dir.path(), &lead, &mut clock), None);
+        assert_eq!(
+            herdr.label("w9:p0").as_deref(),
+            Some("lead-cards asks: which DB?")
+        );
+        assert_eq!(notifier.sent(), [sent_for("lead-cards", "question")]);
+        assert_eq!(
+            run(
+                &herdr,
+                &ledger,
+                dir.path(),
+                &labelling_shepherd(true),
+                &mut steps(|_| {})
+            )
+            .unwrap(),
+            ["lead-cards question 2026-11-01 09:00 UTC which DB?"]
+        );
+    }
+
+    #[test]
+    fn a_watch_from_a_members_pane_labels_nothing_even_when_it_reads_as_the_shepherds() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = quiet_led_world();
+        send(
+            &ledger,
+            dir.path(),
+            "lead-cards",
+            Kind::Question,
+            "which DB?",
+        );
+        let req = Request {
+            own_pane: Some("w9:p1"),
+            pane_label: true,
+            ..ONCE
+        };
+
+        run(&herdr, &ledger, dir.path(), &req, &mut steps(|_| {})).unwrap();
+
+        assert_eq!(herdr.label_calls(), 0);
     }
 }

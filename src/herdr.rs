@@ -127,6 +127,9 @@ pub trait Herdr {
     fn prompt(&self, name: &str, text: &str) -> Result<()>;
     /// Brings the agent in `pane_id` to the front of the human's herdr client.
     fn focus(&self, pane_id: &str) -> Result<()>;
+    /// Shows `label` in place of the Claude's name in `pane_id`'s sidebar row,
+    /// or clears it. Display-only: herdr's status for the pane is unchanged.
+    fn label_pane(&self, pane_id: &str, label: Option<&str>) -> Result<()>;
     /// The socket of the herdr these calls reach; `None` when herdr can't say.
     fn socket(&self) -> Option<PathBuf>;
 }
@@ -444,6 +447,36 @@ impl Herdr for CliHerdr {
 
     fn focus(&self, pane_id: &str) -> Result<()> {
         self.call_ok(&["agent", "focus", pane_id]).map(drop)
+    }
+
+    // herdr 0.9.5 reads `--source` as an unknown option unless the pane comes
+    // first, and prints nothing on success.
+    fn label_pane(&self, pane_id: &str, label: Option<&str>) -> Result<()> {
+        let mut argv = vec!["pane", "report-metadata", pane_id, "--source", "loopherd"];
+        match label {
+            Some(label) => argv.extend(["--agent", "claude", "--display-agent", label]),
+            None => argv.push("--clear-display-agent"),
+        }
+        let out = self
+            .command(&argv)
+            .output()
+            .with_context(|| format!("run herdr {}", argv.join(" ")))?;
+        if out.status.success() {
+            return Ok(());
+        }
+        match serde_json::from_slice::<ErrorEnvelope>(&out.stdout)
+            .or_else(|_| serde_json::from_slice::<ErrorEnvelope>(&out.stderr))
+        {
+            Ok(env) => bail!(
+                "herdr pane report-metadata: {} ({})",
+                env.error.message,
+                env.error.code
+            ),
+            Err(_) => bail!(
+                "herdr pane report-metadata failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        }
     }
 
     fn socket(&self) -> Option<PathBuf> {

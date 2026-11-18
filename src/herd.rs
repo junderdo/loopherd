@@ -826,7 +826,7 @@ pub fn herds(paths: &Paths) -> Result<(String, i32)> {
                 code = 1;
             }
             Ok(Some(notify)) if notify.sends_nothing() => lines.push(format!(
-                "warning: {}: [notify] is enabled with herdr = false and no command, so nothing is sent",
+                "warning: {}: [notify] is enabled with herdr = false, no command and no pane_label, so nothing is sent",
                 config.display()
             )),
             Ok(_) => {}
@@ -2076,12 +2076,35 @@ args = ["--model", "opus"]
 
         assert!(
             report.starts_with(&format!(
-                "warning: {}: [notify] is enabled with herdr = false and no command",
+                "warning: {}: [notify] is enabled with herdr = false, no command and no pane_label",
                 file.display()
             )),
             "{report}"
         );
         assert_eq!(code, 0, "{report}");
+    }
+
+    #[test]
+    fn herds_takes_a_notify_table_that_only_labels_panes_and_refuses_a_non_bool_pane_label() {
+        let config = Config::with(&[("prs", PR_HERD)]);
+        let file = config.path().join("config.toml");
+        fs::write(
+            &file,
+            "[notify]\nenabled = true\nherdr = false\npane_label = true\n",
+        )
+        .unwrap();
+        let (report, code) = herds(&config.paths()).unwrap();
+        assert!(!report.contains("warning"), "{report}");
+        assert_eq!(code, 0, "{report}");
+
+        fs::write(&file, "[notify]\nenabled = true\npane_label = 1\n").unwrap();
+        let (report, code) = herds(&config.paths()).unwrap();
+        assert!(
+            report.starts_with(&format!("invalid {}: [notify]", file.display())),
+            "{report}"
+        );
+        assert!(report.contains("pane_label"), "{report}");
+        assert_eq!(code, 1, "{report}");
     }
 
     #[test]

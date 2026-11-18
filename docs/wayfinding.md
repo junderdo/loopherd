@@ -70,6 +70,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D53](decisions/D53.md) | The lead hook denies an alias-variable name anywhere in a command that could set it, a heredoc feed only the lexer's own `<<` operator counts for, and a relative script operand named `stdin` or `fd/<n>`, instead of parsing positions. |
 | [D54](decisions/D54.md) | The Stop hook's ask moves a handoff to `.prev.md` only when it predates the member's last fresh start (spawn or restart, not revive) or `handoff` report, and says so; a handoff the member already wrote this run stays for `loopherd restart`. |
 | [D55](decisions/D55.md) | A watch over a paused herd with nothing in flight exits instead of re-arming: a lead's prints `<herd> drained` once no worker is open; the shepherd's prints `all drained` once every herd it reads is drained and no member it reads has work in flight. |
+| [D56](decisions/D56.md) | `[notify] pane_label` labels the pane that must relay or answer a waiting question (the shepherd's on its watch's `question` or `blocked` line, a lead's on its own question) through herdr's display-only `--display-agent`, cleared by a UserPromptSubmit or SessionStart in that pane. |
 
 ## Emerging model
 

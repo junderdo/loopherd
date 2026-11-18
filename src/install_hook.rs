@@ -1,6 +1,6 @@
-//! `loopherd install-hook`: merge loopherd's Stop, StopFailure, SessionStart
-//! and PreToolUse hooks into Claude's user settings, or take them out with
-//! `--remove`.
+//! `loopherd install-hook`: merge loopherd's Stop, StopFailure, SessionStart,
+//! PreToolUse and UserPromptSubmit hooks into Claude's user settings, or take
+//! them out with `--remove`.
 
 use std::fs;
 use std::io::Write;
@@ -20,7 +20,7 @@ struct Hook {
     watched: bool,
 }
 
-const HOOKS: [Hook; 4] = [
+const HOOKS: [Hook; 5] = [
     Hook {
         event: "Stop",
         subcommand: "stop-hook",
@@ -47,6 +47,14 @@ const HOOKS: [Hook; 4] = [
         event: "PreToolUse",
         subcommand: "tool-hook",
         matcher: Some("Bash"),
+        timeout: 5,
+        watched: false,
+    },
+    // Runs on every prompt in every session, so it must stay quick too.
+    Hook {
+        event: "UserPromptSubmit",
+        subcommand: "prompt-hook",
+        matcher: None,
         timeout: 5,
         watched: false,
     },
@@ -79,8 +87,9 @@ pub fn claude_dir() -> Result<PathBuf> {
 }
 
 /// The hook's shell command. `|| true` because exit 2 blocks: a Stop hook
-/// keeps Claude from stopping, a PreToolUse hook the tool call, and a missing
-/// or old binary must never do that. tool-hook blocks with JSON instead.
+/// keeps Claude from stopping, a PreToolUse hook the tool call, a
+/// UserPromptSubmit hook the prompt, and a missing or old binary must never
+/// do that. tool-hook blocks with JSON instead.
 pub fn hook_command(exe: &Path, subcommand: &str) -> Result<String> {
     let path = exe
         .to_str()
@@ -152,7 +161,8 @@ pub fn remove(settings: &Path, now: SystemTime) -> Result<Outcome> {
 }
 
 /// Whether `settings` has the hooks `watch` needs: Stop, StopFailure and
-/// SessionStart. The PreToolUse hook only guards leads.
+/// SessionStart. The PreToolUse hook only guards leads, and the
+/// UserPromptSubmit hook only clears pane labels.
 pub fn installed(settings: &Path) -> Result<bool> {
     let bytes = match fs::read(settings) {
         Ok(bytes) => bytes,
@@ -608,6 +618,28 @@ mod tests {
     }
 
     #[test]
+    fn installs_a_quick_user_prompt_submit_hook_that_watch_does_not_need() {
+        let (_dir, path) = settings_with(USER_SETTINGS);
+        install(&path, Path::new(EXE), now()).unwrap();
+        let prompt_hook = json!({"type": "command", "command": format!("'{EXE}' prompt-hook || true"), "timeout": 5});
+        assert_eq!(
+            read(&path)["hooks"]["UserPromptSubmit"],
+            json!([{"hooks": [prompt_hook]}])
+        );
+
+        let mut no_prompt_hook = read(&path);
+        no_prompt_hook["hooks"]
+            .as_object_mut()
+            .unwrap()
+            .remove("UserPromptSubmit");
+        fs::write(&path, no_prompt_hook.to_string()).unwrap();
+        assert!(installed(&path).unwrap());
+
+        remove(&path, later()).unwrap();
+        assert!(read(&path)["hooks"].get("UserPromptSubmit").is_none());
+    }
+
+    #[test]
     fn installed_needs_ours_on_the_three_watched_events() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
@@ -704,6 +736,9 @@ mod tests {
                 "StopFailure": [{"hooks": [ours()]}],
                 "SessionStart": [{"hooks": [ours_running("session-hook")]}],
                 "PreToolUse": [{"matcher": "Bash", "hooks": [tool_hook()]}],
+                "UserPromptSubmit": [{"hooks": [
+                    json!({"type": "command", "command": format!("'{EXE}' prompt-hook || true"), "timeout": 5})
+                ]}],
             }})
         );
         assert_eq!(files(dir.path()), ["settings.json"]);
