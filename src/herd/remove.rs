@@ -19,8 +19,9 @@ pub struct Removal {
     pub keep_history: bool,
 }
 
-/// Removes `herd`'s file, lead prompt and pause, and its members' ledger
-/// entries, mailboxes and handoffs in loopherd's `state` dir, pushing a line
+/// Removes `herd`'s file, lead prompt and pause, every run of it in the
+/// ledger, archived ones included, and the mailboxes and handoffs of names
+/// left with no run in loopherd's `state` dir, pushing a line
 /// per thing removed or kept to `out`, including before an error. Refuses,
 /// changing nothing, while any member is not retired, ran on another herdr
 /// session, or herdr may still show its agent or pane, or herdr can't say.
@@ -113,6 +114,10 @@ pub fn remove(
                 .map(|n| format!("{verb} ledger entry {n}")),
         );
         out.extend(removed.trimmed.iter().map(trim_line));
+    }
+    if how.keep_history {
+        let kept = |n: &String| format!("kept {herd}'s runs in ledger entry {n}");
+        out.extend(trimmed.iter().map(kept));
     }
     delete_all(&own, verb, how, out)
 }
@@ -608,6 +613,22 @@ mod tests {
         assert_eq!(a.earlier.len(), 1);
         assert!(s.path("state/reports/a.jsonl").exists());
         assert!(!out.contains("ledger entry a\n"), "{out}");
+    }
+
+    #[test]
+    fn keep_history_names_an_entry_holding_an_archived_run() {
+        let mut s = Setup::new();
+        spawn(&mut s, "a", Some("h"), "2026-11-01T00:00:00Z", true);
+        spawn(&mut s, "a", None, "2026-11-03T00:00:00Z", false);
+        let how = Removal {
+            keep_history: true,
+            ..Removal::default()
+        };
+
+        let out = s.remove("h", how).unwrap();
+
+        assert_eq!(out, "kept h's runs in ledger entry a\n");
+        assert_eq!(s.ledger.0["a"].earlier.len(), 1);
     }
 
     #[test]
