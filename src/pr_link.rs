@@ -29,10 +29,21 @@ pub enum Shown {
     Browser,
 }
 
-/// Which branch a pull request is from.
+/// Where a pull request is from: its head repo and branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrHead {
+    /// `owner/name` on github.com.
+    pub repo: String,
+    pub branch: String,
+}
+
+/// Which repo and branch a pull request is from, and which repo a checkout's
+/// origin is.
 pub trait PrHeads {
-    /// `None` when GitHub has no such PR.
-    fn head_of(&self, pr: &str) -> Result<Option<String>>;
+    /// `None` when GitHub has no such PR, or can't name its head repo.
+    fn head_of(&self, pr: &str) -> Result<Option<PrHead>>;
+    /// The `owner/name` of `dir`'s origin on github.com, if it has one.
+    fn repo_at(&self, dir: &Path) -> Option<String>;
 }
 
 /// Shows `url`'s owner in the popup, or opens `url` as clicked.
@@ -73,7 +84,10 @@ fn owner(
         None
     });
     if let Some(head) = head {
-        let on_head: Vec<&AgentRecord> = entries.values().filter(|r| on_branch(r, &head)).collect();
+        let on_head: Vec<&AgentRecord> = entries
+            .values()
+            .filter(|r| on_branch(r, &head.branch) && in_repo(r, &head.repo, heads))
+            .collect();
         if !on_head.is_empty() {
             return on_head.iter().find(|r| !r.retired).map(|r| r.name.clone());
         }
@@ -88,6 +102,17 @@ fn on_branch(record: &AgentRecord, branch: &str) -> bool {
         Some(recorded) if !recorded.is_empty() => recorded == branch,
         _ => !record.retired && status::branch(record).is_some_and(|now| now == branch),
     }
+}
+
+/// `record`'s worktree's origin is `repo` on github.com, or, when that can't
+/// be read (a removed worktree), the origin of the repo it was spawned from.
+fn in_repo(record: &AgentRecord, repo: &str, heads: &dyn PrHeads) -> bool {
+    record
+        .worktree
+        .as_deref()
+        .and_then(|wt| heads.repo_at(wt))
+        .or_else(|| heads.repo_at(&record.repo))
+        .is_some_and(|own| own.eq_ignore_ascii_case(repo))
 }
 
 /// `https://github.com/<owner>/<repo>/pull/<n>` at the start of `url`.
@@ -258,6 +283,7 @@ mod tests {
     use crate::herdr::fake::FakeHerdr;
     use crate::report::Body;
     use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+    use std::path::PathBuf;
     use std::time::Duration;
 
     const PR: &str = "https://github.com/o/r/pull/12";
@@ -311,21 +337,71 @@ mod tests {
         opened: Vec<String>,
     }
 
-    /// GitHub's answer to which branch a PR is from.
-    struct Heads(Result<Option<&'static str>, &'static str>);
+    /// GitHub's answer to which branch and repo a PR is from, and which repo
+    /// each checkout's origin is: `o/r` unless `origins` says otherwise.
+    struct Heads {
+        head: Result<Option<PrHead>, &'static str>,
+        origins: Vec<(PathBuf, Option<&'static str>)>,
+    }
+
+    impl Heads {
+        fn on(branch: &str) -> Heads {
+            let head = PrHead {
+                repo: "o/r".into(),
+                branch: branch.into(),
+            };
+            Heads {
+                head: Ok(Some(head)),
+                origins: vec![],
+            }
+        }
+
+        fn none() -> Heads {
+            Heads {
+                head: Ok(None),
+                origins: vec![],
+            }
+        }
+
+        fn failing(err: &'static str) -> Heads {
+            Heads {
+                head: Err(err),
+                origins: vec![],
+            }
+        }
+
+        fn in_repo(mut self, repo: &str) -> Heads {
+            if let Ok(Some(head)) = &mut self.head {
+                head.repo = repo.into();
+            }
+            self
+        }
+
+        fn origin(mut self, dir: impl Into<PathBuf>, repo: Option<&'static str>) -> Heads {
+            self.origins.push((dir.into(), repo));
+            self
+        }
+    }
 
     impl PrHeads for Heads {
-        fn head_of(&self, pr: &str) -> Result<Option<String>> {
+        fn head_of(&self, pr: &str) -> Result<Option<PrHead>> {
             assert_eq!(pr, PR, "asked about another PR");
-            match &self.0 {
-                Ok(head) => Ok(head.map(str::to_string)),
+            match &self.head {
+                Ok(head) => Ok(head.clone()),
                 Err(e) => Err(anyhow::anyhow!("{e}")),
+            }
+        }
+
+        fn repo_at(&self, dir: &Path) -> Option<String> {
+            match self.origins.iter().find(|(d, _)| d == dir) {
+                Some((_, repo)) => repo.map(str::to_string),
+                None => Some("o/r".into()),
             }
         }
     }
 
     fn click_on(url: &str, records: Vec<AgentRecord>, dir: &Path) -> Clicked {
-        click_with(url, records, dir, Heads(Ok(None)), FakeHerdr::new(&[]))
+        click_with(url, records, dir, Heads::none(), FakeHerdr::new(&[]))
     }
 
     fn click_with(
@@ -464,7 +540,7 @@ mod tests {
             PR,
             vec![record("lh-1"), record("lh-2")],
             dir.path(),
-            Heads(Ok(Some("feat/lh-2"))),
+            Heads::on("feat/lh-2"),
             FakeHerdr::new(&[]),
         );
 
@@ -485,7 +561,7 @@ mod tests {
             PR,
             vec![record("lh-1"), retired("lh-2")],
             dir.path(),
-            Heads(Ok(Some("feat/lh-2"))),
+            Heads::on("feat/lh-2"),
             FakeHerdr::new(&[]),
         );
 
@@ -502,7 +578,7 @@ mod tests {
             PR,
             vec![retired("lh-227"), successor],
             dir.path(),
-            Heads(Ok(Some("feat/lh-227"))),
+            Heads::on("feat/lh-227"),
             FakeHerdr::new(&[]),
         );
 
@@ -523,7 +599,7 @@ mod tests {
             PR,
             vec![record("lh-1")],
             dir.path(),
-            Heads(Err("gh: offline")),
+            Heads::failing("gh: offline"),
             FakeHerdr::new(&[]),
         );
 
@@ -586,7 +662,7 @@ mod tests {
             PR,
             vec![detached],
             dir.path(),
-            Heads(Ok(Some("feat/own-branch"))),
+            Heads::on("feat/own-branch"),
             FakeHerdr::new(&[]),
         );
 
@@ -606,7 +682,7 @@ mod tests {
             PR,
             vec![record("lh-1"), record("lh-2")],
             dir.path(),
-            Heads(Ok(Some("feat/lh-2"))),
+            Heads::on("feat/lh-2"),
             FakeHerdr::new(&[]),
         );
 
@@ -619,6 +695,128 @@ mod tests {
     }
 
     #[test]
+    fn a_pr_from_another_repo_on_a_members_branch_name_opens_in_the_browser() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let c = click_with(
+            PR,
+            vec![record("lh-1")],
+            dir.path(),
+            Heads::on("feat/lh-1").in_repo("someone/fork"),
+            FakeHerdr::new(&[]),
+        );
+
+        assert_browser(&c, PR);
+    }
+
+    #[test]
+    fn a_pr_from_another_repo_leaves_the_pr_to_the_worker_that_reported_it() {
+        let dir = tempfile::tempdir().unwrap();
+        done(dir.path(), "lh-1", 5, &format!("opened {PR}"));
+
+        let c = click_with(
+            PR,
+            vec![record("lh-1"), record("lh-2")],
+            dir.path(),
+            Heads::on("feat/lh-2").origin("/src/repo", Some("someone/else")),
+            FakeHerdr::new(&[]),
+        );
+
+        assert_eq!(
+            c.shown,
+            Shown::Popup {
+                member: "lh-1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn the_repo_is_compared_ignoring_case() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let c = click_with(
+            PR,
+            vec![record("lh-1")],
+            dir.path(),
+            Heads::on("feat/lh-1").in_repo("O/R"),
+            FakeHerdr::new(&[]),
+        );
+
+        assert_eq!(
+            c.shown,
+            Shown::Popup {
+                member: "lh-1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_members_repo_is_its_worktrees_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let in_worktree = AgentRecord {
+            worktree: Some("/wt/lh-1".into()),
+            ..record("lh-1")
+        };
+
+        let c = click_with(
+            PR,
+            vec![in_worktree],
+            dir.path(),
+            Heads::on("feat/lh-1")
+                .origin("/wt/lh-1", Some("someone/fork"))
+                .origin("/src/repo", Some("o/r")),
+            FakeHerdr::new(&[]),
+        );
+
+        assert_browser(&c, PR);
+    }
+
+    #[test]
+    fn a_worktree_without_an_origin_falls_back_to_the_members_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = AgentRecord {
+            worktree: Some("/wt/lh-1".into()),
+            ..record("lh-1")
+        };
+
+        let c = click_with(
+            PR,
+            vec![gone],
+            dir.path(),
+            Heads::on("feat/lh-1").origin("/wt/lh-1", None),
+            FakeHerdr::new(&[]),
+        );
+
+        assert_eq!(
+            c.shown,
+            Shown::Popup {
+                member: "lh-1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_member_whose_origin_cant_be_read_never_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let unreadable = AgentRecord {
+            worktree: Some("/wt/lh-1".into()),
+            ..record("lh-1")
+        };
+
+        let c = click_with(
+            PR,
+            vec![unreadable],
+            dir.path(),
+            Heads::on("feat/lh-1")
+                .origin("/wt/lh-1", None)
+                .origin("/src/repo", None),
+            FakeHerdr::new(&[]),
+        );
+
+        assert_browser(&c, PR);
+    }
+
+    #[test]
     fn a_retired_member_on_the_head_branch_leaves_it_to_the_browser() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -626,7 +824,7 @@ mod tests {
             PR,
             vec![retired("lh-2")],
             dir.path(),
-            Heads(Ok(Some("feat/lh-2"))),
+            Heads::on("feat/lh-2"),
             FakeHerdr::new(&[]),
         );
 
@@ -641,7 +839,7 @@ mod tests {
             PR,
             vec![record("lh-1")],
             dir.path(),
-            Heads(Err("gh: not logged in")),
+            Heads::failing("gh: not logged in"),
             FakeHerdr::new(&[]),
         );
 
@@ -692,7 +890,7 @@ mod tests {
             &link,
             vec![record("lh-1")],
             dir.path(),
-            Heads(Ok(None)),
+            Heads::none(),
             herdr,
         );
 
