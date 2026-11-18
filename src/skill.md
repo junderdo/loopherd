@@ -479,8 +479,12 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   `loopherd setup --lead-defaults` asks again and `--lead-defaults
   merge,install` (or `none`) sets them without asking, as do the same
   flags on `scripts/install`.
-  `loopherd lead-defaults` prints them. Change them only when the human
-  says so.
+  `loopherd lead-defaults` prints them. `review_rounds`, how many review
+  rounds a lead runs on a PR before asking the human (a positive integer,
+  default 3), resolves the same way: `lead.review_rounds` in the herd
+  file, else `loopherd config set lead_defaults.review_rounds <n>`.
+  `loopherd herds` shows each lead's value and its source. Change them only
+  when the human says so.
 - **When the human asks to pause or resume a herd**, run `loopherd pause
   <herd> [--reason <text>]` or `loopherd resume <herd>` (`--all` for every
   herd), not a prose prompt to its lead. A paused herd's `feed` retires
@@ -637,7 +641,7 @@ What differs from the shepherd:
   lead-defaults --set`, `loopherd config set` and `unset`, `loopherd
   setup`, and `scripts/install --lead-defaults` or `--context`, whatever
   your switches, so you can't turn your own switches on or raise your own
-  handoff limit; `loopherd herd get`, `loopherd config get` and `loopherd
+  handoff or review-round limit; `loopherd herd get`, `loopherd config get` and `loopherd
   lead-defaults` are fine. Ask for a change instead.
 - **Retiring a lead is the shepherd's or the human's.** `loopherd retire`
   refuses to retire you from your own pane, and the hook also denies
@@ -673,8 +677,9 @@ What differs from the shepherd:
   hand the reviewer `review-<round - 1>.md` and `git diff <its head
   sha>..<new head>`. A first review uses the reviewer as defined; later
   rounds pass `model: sonnet` to the subagent. `<round>` counts per PR across handoffs; your
-  handoff's current review file carries it. After round 3 start no other
-  round; send `loopherd report --kind question`
+  handoff's current review file carries it. After your herd's
+  review-round limit (in your prompt; 3 when unset) start no other round;
+  send `loopherd report --kind question`
   asking whether to merge as-is, narrow the scope, or change approach,
   with the PR link and the open blocking findings, then end your turn.
   With `new_cards` off, list out-of-scope findings in a question rather

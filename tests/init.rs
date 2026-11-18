@@ -389,6 +389,10 @@ fn the_lead_takes_its_switches_from_lead_defaults_and_a_prompt_file_beside_the_h
     let lead = fs::read_to_string(fixture.herds().join("widgets-lead.md")).unwrap();
     assert!(lead.contains("{switches}"), "{lead}");
     assert!(
+        lead.contains("Your review-round limit: {review_rounds}."),
+        "{lead}"
+    );
+    assert!(
         lead.contains(
             "re-arm after every exit but `{herd} drained`: on that, report done and\n   \
              stop. On `<member> merged`, run `loopherd feed {herd}`,\n   \

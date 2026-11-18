@@ -7,7 +7,8 @@ use anyhow::{Context, Result, bail};
 use crate::herd::{Paths, lead_config, plan};
 use crate::herdr::Herdr;
 use crate::ledger::{Ledger, Role};
-use crate::spawn::{Checkout, MemberOf, SHELL_TIMEOUT, SpawnRequest, Spawned, spawn};
+use crate::spawn::{Checkout, MemberOf, Prompt, SHELL_TIMEOUT, SpawnRequest, Spawned, spawn};
+use crate::template::Template;
 
 pub struct LeadRequest {
     pub herd: String,
@@ -83,7 +84,7 @@ fn resolve(ledger: &dyn Ledger, paths: &Paths, req: &LeadRequest) -> Result<Spaw
         worktree: Some(Checkout::Detached(name.clone())),
         name,
         workspace: config.workspace,
-        prompt: Some(config.prompt),
+        prompt: Some(with_review_rounds(config.prompt)?),
         ready_timeout: req.ready_timeout,
         shell_timeout: SHELL_TIMEOUT,
         claude_args: [config.args, req.claude_args.clone()].concat(),
@@ -91,10 +92,25 @@ fn resolve(ledger: &dyn Ledger, paths: &Paths, req: &LeadRequest) -> Result<Spaw
             herd: req.herd.clone(),
             template: None,
             params: vec![],
-            values: vec![("switches".into(), config.switches.lines())],
+            values: vec![
+                ("switches".into(), config.switches.lines()),
+                ("review_rounds".into(), config.review_rounds.to_string()),
+            ],
             role: Some(Role::Lead),
         }),
     })
+}
+
+/// `prompt`, ending with the review-round limit when it doesn't place it,
+/// since the skill tells a lead the limit is in its prompt.
+fn with_review_rounds(mut prompt: Prompt) -> Result<Prompt> {
+    if !Template::parse(&prompt.text)?.uses("review_rounds") {
+        prompt.text = format!(
+            "{}\n\nYour review-round limit: {{review_rounds}}.",
+            prompt.text.trim_end()
+        );
+    }
+    Ok(prompt)
 }
 
 /// `lead-<herd>`, failing unless that is a valid member name.
@@ -223,7 +239,8 @@ mod tests {
             herdr.prompts()[0].1,
             format!(
                 "lead-h leads h in {}:\nmerge on\ninstall off\nrebase off\n\
-                 new_cards off\ndesign_escalation off\nblocked_dialogs off",
+                 new_cards off\ndesign_escalation off\nblocked_dialogs off\n\n\
+                 Your review-round limit: 3.",
                 wt.display()
             )
         );
@@ -233,6 +250,37 @@ mod tests {
         assert_eq!(rec.template, None);
         assert_eq!(rec.worktree.as_deref(), Some(wt.as_path()));
         assert_eq!(rec.claude_args, ["--model", "opus", "--effort", "max"]);
+    }
+
+    #[test]
+    fn the_leads_prompt_gets_its_review_round_limit() {
+        let setup =
+            Setup::with_lead("prompt = \"stop after round {review_rounds}\"\nreview_rounds = 4");
+        let herdr = herdr();
+        lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+        assert_eq!(herdr.prompts()[0].1, "stop after round 4");
+    }
+
+    #[test]
+    fn a_prompt_without_the_review_round_placeholder_gets_the_limit_appended() {
+        let setup = Setup::with_lead("prompt = \"go\\n\"\nreview_rounds = 4");
+        let herdr = herdr();
+        lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+        assert_eq!(herdr.prompts()[0].1, "go\n\nYour review-round limit: 4.");
     }
 
     #[test]
@@ -318,7 +366,8 @@ mod tests {
                 "name lead-h\nbranch none\nworktree {wt}\nworkspace loopherd\n\
                  args --model opus\nrole lead\nprompt\n\
                  lead-h leads h in {wt}:\nmerge on\ninstall off\nrebase off\n\
-                 new_cards off\ndesign_escalation off\nblocked_dialogs off",
+                 new_cards off\ndesign_escalation off\nblocked_dialogs off\n\n\
+                 Your review-round limit: 3.",
                 wt = wt.display()
             )
         );
