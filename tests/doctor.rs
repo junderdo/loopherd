@@ -27,21 +27,57 @@ fn sandbox(version: Option<&str>) -> Sandbox {
 }
 
 /// A PATH holding the binary under test and a herdr that answers
-/// `status server --json` by running `status`.
+/// `status server --json` by running `status`, and lists its plugins from
+/// `plugins.json` in the sandbox, which starts with the loopherd plugin
+/// installed at this crate's version.
 fn sandbox_with(status: &str) -> Sandbox {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
     fs::create_dir_all(&bin).unwrap();
     std::os::unix::fs::symlink(LOOPHERD, bin.join("loopherd")).unwrap();
+    let plugins = dir.path().join("plugins.json");
     executable(
         &bin.join("herdr"),
-        format!("#!/bin/sh\n[ \"$*\" = 'status server --json' ] || exit 64\n{status}\n"),
+        format!(
+            "#!/bin/sh\ncase \"$*\" in\n\
+             'status server --json') {status} ;;\n\
+             'plugin list --plugin loopherd --json') cat '{}' ;;\n\
+             *) exit 64 ;;\nesac\n",
+            plugins.display()
+        ),
     );
-    let settings = dir.path().join("settings.json");
-    Sandbox { dir, bin, settings }
+    let sandbox = Sandbox {
+        settings: dir.path().join("settings.json"),
+        dir,
+        bin,
+    };
+    sandbox.list_plugins(&[plugin(true, VERSION, "github")]);
+    sandbox
+}
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// A plugin as `herdr plugin list --json` lists it, with `source.kind` `kind`.
+fn plugin(enabled: bool, version: &str, kind: &str) -> serde_json::Value {
+    serde_json::json!({
+        "plugin_id": "loopherd",
+        "name": "loopherd",
+        "enabled": enabled,
+        "version": version,
+        "plugin_root": "/src/loopherd/herdr-plugin",
+        "source": {"kind": kind},
+    })
 }
 
 impl Sandbox {
+    fn list_plugins(&self, plugins: &[serde_json::Value]) {
+        let reply = serde_json::json!({
+            "id": "cli:plugin",
+            "result": {"plugins": plugins, "type": "plugin_list"},
+        });
+        fs::write(self.dir.path().join("plugins.json"), reply.to_string()).unwrap();
+    }
+
     fn loopherd(&self, args: &[&str]) -> Output {
         self.command(args).output().unwrap()
     }
@@ -91,7 +127,7 @@ fn a_sound_install_prints_one_line_and_exits_0() {
     let s = sandbox(Some("0.9.5"));
     s.install_hooks();
     let out = s.doctor(&[]);
-    assert_eq!(stdout(&out), "doctor: 9 ok, 0 warnings, 0 failures\n");
+    assert_eq!(stdout(&out), "doctor: 10 ok, 0 warnings, 0 failures\n");
     assert_eq!(out.status.code(), Some(0));
 }
 
@@ -112,7 +148,7 @@ fn missing_hooks_in_the_given_settings_fail_naming_install_hook_and_exit_1() {
         "{text}"
     );
     assert!(
-        text.ends_with("doctor: 4 ok, 1 warnings, 4 failures\n"),
+        text.ends_with("doctor: 5 ok, 1 warnings, 4 failures\n"),
         "{text}"
     );
     assert_eq!(out.status.code(), Some(1));
@@ -227,7 +263,7 @@ fn settings_given_doctor_runs_without_home_or_a_config_dir() {
         .env("PATH", format!("{}:/usr/bin:/bin", s.bin.display()))
         .output()
         .unwrap();
-    assert_eq!(stdout(&out), "doctor: 9 ok, 0 warnings, 0 failures\n");
+    assert_eq!(stdout(&out), "doctor: 10 ok, 0 warnings, 0 failures\n");
     assert_eq!(out.status.code(), Some(0));
 }
 
@@ -259,12 +295,62 @@ fn verbose_lists_every_check_and_json_gives_them_as_data() {
     let s = sandbox(Some("0.9.5"));
     s.install_hooks();
     let verbose = stdout(&s.doctor(&["--verbose"]));
-    assert_eq!(verbose.lines().count(), 10, "{verbose}");
+    assert_eq!(verbose.lines().count(), 11, "{verbose}");
     assert!(verbose.contains("ok herdr version: 0.9.5\n"), "{verbose}");
     let out = s.doctor(&["--json"]);
     let data: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(data["ok"], 9);
+    assert_eq!(data["ok"], 10);
     assert_eq!(data["checks"][8]["name"], "herdr version");
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn the_herdr_plugin_only_ever_warns() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    for (plugins, line) in [
+        (
+            vec![],
+            "warning herdr plugin: loopherd's herdr plugin isn't installed, so its actions, \
+             popups and event hooks are unavailable; \
+             fix: herdr plugin install junderdo/loopherd/herdr-plugin\n"
+                .to_string(),
+        ),
+        (
+            vec![plugin(false, VERSION, "github")],
+            "warning herdr plugin: loopherd's herdr plugin is disabled, so its actions, \
+             popups and event hooks are unavailable; fix: herdr plugin enable loopherd\n"
+                .to_string(),
+        ),
+        (
+            vec![plugin(true, "0.0.1", "local")],
+            format!(
+                "warning herdr plugin: plugin 0.0.1 differs from loopherd {VERSION}; \
+                 fix: bring the linked plugin at /src/loopherd/herdr-plugin to loopherd {VERSION}\n"
+            ),
+        ),
+    ] {
+        s.list_plugins(&plugins);
+        let out = s.doctor(&[]);
+        assert_eq!(
+            stdout(&out),
+            format!("{line}doctor: 9 ok, 1 warnings, 0 failures\n")
+        );
+        assert_eq!(out.status.code(), Some(0));
+    }
+}
+
+#[test]
+fn a_plugin_list_herdr_refuses_warns() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    fs::remove_file(s.dir.path().join("plugins.json")).unwrap();
+    let out = s.doctor(&[]);
+    assert!(
+        stdout(&out).starts_with("warning herdr plugin: can't list herdr's plugins: "),
+        "{}",
+        stdout(&out)
+    );
     assert_eq!(out.status.code(), Some(0));
 }
 

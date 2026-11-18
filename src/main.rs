@@ -373,7 +373,9 @@ enum Command {
     },
     /// Check this machine's loopherd install and herdr: loopherd's hooks in
     /// Claude's settings, the binary they call against the `loopherd` on PATH,
-    /// and herdr's server and version, and with `--trackers` each herd's
+    /// herdr's server and version, whether loopherd's herdr plugin is
+    /// installed, enabled and at loopherd's version (warnings only), and with
+    /// `--trackers` each herd's
     /// `source` and `backlog`. Only reads. Prints each warning and
     /// failure with the command that fixes it, then `doctor: <n> ok, <n>
     /// warnings, <n> failures`. Exits 0 when clean or only warnings, 1 on any

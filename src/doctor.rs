@@ -71,10 +71,9 @@ fn hook_checks(install: &Install) -> Vec<Check> {
             let name = format!("{} hook", hook.event);
             match (hook.binaries.is_empty(), hook.event) {
                 (false, _) => ok(&name, format!("in {settings}")),
-                (true, "UserPromptSubmit") if !install.pane_label => Check {
-                    status: Status::Warning,
-                    ..failure(&name, format!("not in {settings}"), install_hook.clone())
-                },
+                (true, "UserPromptSubmit") if !install.pane_label => {
+                    warning(&name, format!("not in {settings}"), install_hook.clone())
+                }
                 (true, _) => failure(&name, format!("not in {settings}"), install_hook.clone()),
             }
         })
@@ -110,15 +109,14 @@ fn hook_checks(install: &Install) -> Vec<Check> {
 fn running_binary(install: &Install) -> Check {
     let running = install.running.display();
     match &install.on_path {
-        Some(on_path) if !same_file(&install.running, on_path) => Check {
-            name: "running binary".into(),
-            status: Status::Warning,
-            detail: format!(
+        Some(on_path) if !same_file(&install.running, on_path) => warning(
+            "running binary",
+            format!(
                 "this is {running}, not the loopherd on PATH ({})",
                 on_path.display()
             ),
-            fix: Some("run the loopherd on PATH".into()),
-        },
+            "run the loopherd on PATH".into(),
+        ),
         _ => ok("running binary", running.to_string()),
     }
 }
@@ -178,7 +176,55 @@ fn herdr_checks(herdr: &dyn Herdr) -> Vec<Check> {
             Some(_) => ok("herdr version", version),
         },
     };
-    vec![ok("herdr", format!("answers on {socket}")), check]
+    vec![
+        ok("herdr", format!("answers on {socket}")),
+        check,
+        plugin_check(herdr),
+    ]
+}
+
+/// Only ever warns: loopherd works without its herdr plugin.
+fn plugin_check(herdr: &dyn Herdr) -> Check {
+    let ours = env!("CARGO_PKG_VERSION");
+    let unavailable = "so its actions, popups and event hooks are unavailable";
+    let plugin = match herdr.plugin("loopherd") {
+        Ok(Some(plugin)) => plugin,
+        Ok(None) => {
+            return warning(
+                "herdr plugin",
+                format!("loopherd's herdr plugin isn't installed, {unavailable}"),
+                "herdr plugin install junderdo/loopherd/herdr-plugin".into(),
+            );
+        }
+        Err(e) => {
+            let detail = format!("can't list herdr's plugins: {e:#}");
+            let fix = "herdr plugin list --plugin loopherd".into();
+            return warning("herdr plugin", detail.trim_end().into(), fix);
+        }
+    };
+    if !plugin.enabled {
+        return warning(
+            "herdr plugin",
+            format!("loopherd's herdr plugin is disabled, {unavailable}"),
+            "herdr plugin enable loopherd".into(),
+        );
+    }
+    if plugin.version != ours {
+        let fix = match &plugin.linked {
+            Some(dir) => format!(
+                "bring the linked plugin at {} to loopherd {ours}",
+                dir.display()
+            ),
+            None => "herdr plugin update loopherd".into(),
+        };
+        let detail = format!("plugin {} differs from loopherd {ours}", plugin.version);
+        return warning("herdr plugin", detail, fix);
+    }
+    let detail = match &plugin.linked {
+        Some(dir) => format!("{ours}, enabled, linked from {}", dir.display()),
+        None => format!("{ours}, enabled"),
+    };
+    ok("herdr plugin", detail)
 }
 
 /// How long each herd's `source` or `backlog` may run under `--trackers`.
@@ -301,6 +347,13 @@ fn ok(name: &str, detail: String) -> Check {
     }
 }
 
+fn warning(name: &str, detail: String, fix: String) -> Check {
+    Check {
+        status: Status::Warning,
+        ..failure(name, detail, fix)
+    }
+}
+
 fn failure(name: &str, detail: String, fix: String) -> Check {
     Check {
         name: name.into(),
@@ -358,6 +411,7 @@ pub fn exit_code(checks: &[Check]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::herdr::Plugin;
     use crate::herdr::fake::FakeHerdr;
     use serde_json::{Value, json};
 
@@ -434,7 +488,7 @@ mod tests {
         let m = machine(&ALL);
         assert_eq!(
             run(&m.install, &herdr()),
-            ("doctor: 9 ok, 0 warnings, 0 failures\n".into(), 0)
+            ("doctor: 10 ok, 0 warnings, 0 failures\n".into(), 0)
         );
     }
 
@@ -448,7 +502,7 @@ mod tests {
                 out,
                 format!(
                     "failure {missing} hook: not in {}; fix: loopherd install-hook\n\
-                     doctor: 8 ok, 0 warnings, 1 failures\n",
+                     doctor: 9 ok, 0 warnings, 1 failures\n",
                     m.install.settings.display()
                 ),
             );
@@ -466,7 +520,7 @@ mod tests {
         assert_eq!(
             run(&m.install, &herdr()),
             (
-                format!("warning {line}doctor: 8 ok, 1 warnings, 0 failures\n"),
+                format!("warning {line}doctor: 9 ok, 1 warnings, 0 failures\n"),
                 0
             )
         );
@@ -474,7 +528,7 @@ mod tests {
         assert_eq!(
             run(&m.install, &herdr()),
             (
-                format!("failure {line}doctor: 8 ok, 0 warnings, 1 failures\n"),
+                format!("failure {line}doctor: 9 ok, 0 warnings, 1 failures\n"),
                 1
             )
         );
@@ -500,7 +554,7 @@ mod tests {
         m.install.settings = m.dir.path().join("absent.json");
         let (out, code) = run(&m.install, &herdr());
         assert!(
-            out.ends_with("doctor: 4 ok, 1 warnings, 4 failures\n"),
+            out.ends_with("doctor: 5 ok, 1 warnings, 4 failures\n"),
             "{out}"
         );
         assert_eq!(code, 1);
@@ -520,7 +574,7 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.ends_with("doctor: 3 ok, 0 warnings, 1 failures\n"),
+            out.ends_with("doctor: 4 ok, 0 warnings, 1 failures\n"),
             "{out}"
         );
         assert_eq!(code, 1);
@@ -545,7 +599,7 @@ mod tests {
             format!(
                 "failure hook binary: hooks call {}, not the loopherd on PATH ({}); \
                  fix: loopherd install-hook\n\
-                 doctor: 8 ok, 0 warnings, 1 failures\n",
+                 doctor: 9 ok, 0 warnings, 1 failures\n",
                 old.display(),
                 path_exe.display()
             )
@@ -579,7 +633,7 @@ mod tests {
             format!(
                 "warning running binary: this is {}, not the loopherd on PATH ({}); \
                  fix: run the loopherd on PATH\n\
-                 doctor: 8 ok, 1 warnings, 0 failures\n",
+                 doctor: 9 ok, 1 warnings, 0 failures\n",
                 dev.display(),
                 m.install.on_path.as_ref().unwrap().display()
             )
@@ -597,7 +651,7 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         m.install.on_path = Some(link);
         assert_eq!(run(&m.install, &herdr()).1, 0);
-        assert!(run(&m.install, &herdr()).0.starts_with("doctor: 9 ok"));
+        assert!(run(&m.install, &herdr()).0.starts_with("doctor: 10 ok"));
     }
 
     #[test]
@@ -634,7 +688,7 @@ mod tests {
                     format!(
                         "failure herdr version: {version} is older than {MIN_HERDR}; \
                          fix: upgrade herdr to {MIN_HERDR} or later and restart its server\n\
-                         doctor: 8 ok, 0 warnings, 1 failures\n"
+                         doctor: 9 ok, 0 warnings, 1 failures\n"
                     )
                 ),
             }
@@ -659,7 +713,8 @@ mod tests {
                  ok running binary: {exe}\n\
                  ok herdr: answers on /run/fake/herdr.sock\n\
                  ok herdr version: 0.9.5\n\
-                 doctor: 9 ok, 0 warnings, 0 failures\n"
+                 ok herdr plugin: {VERSION}, enabled\n\
+                 doctor: 10 ok, 0 warnings, 0 failures\n"
             )
         );
     }
@@ -671,9 +726,9 @@ mod tests {
         let data: Value = serde_json::from_str(&json(&checks)).unwrap();
         assert_eq!(
             (&data["ok"], &data["warnings"], &data["failures"]),
-            (&json!(8), &json!(1), &json!(0))
+            (&json!(9), &json!(1), &json!(0))
         );
-        assert_eq!(data["checks"].as_array().unwrap().len(), 9);
+        assert_eq!(data["checks"].as_array().unwrap().len(), 10);
         assert_eq!(
             data["checks"][4],
             json!({
@@ -728,7 +783,7 @@ mod tests {
             out,
             format!(
                 "failure Stop hook: not in {}; fix: loopherd install-hook\n\
-                 doctor: 8 ok, 0 warnings, 1 failures\n",
+                 doctor: 9 ok, 0 warnings, 1 failures\n",
                 m.install.settings.display()
             )
         );
@@ -748,6 +803,92 @@ mod tests {
             "{out}"
         );
         assert_eq!(code, 1);
+    }
+
+    const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+    fn plugin(enabled: bool, version: &str, linked: Option<&str>) -> Option<Plugin> {
+        Some(Plugin {
+            enabled,
+            version: version.into(),
+            linked: linked.map(PathBuf::from),
+        })
+    }
+
+    fn with_plugin(plugin: Option<Plugin>, verbose: bool) -> (String, i32) {
+        let m = machine(&ALL);
+        let mut herdr = herdr();
+        herdr.loopherd_plugin = plugin;
+        let checks = checks(&m.install, &herdr);
+        (text(&checks, verbose), exit_code(&checks))
+    }
+
+    #[test]
+    fn a_missing_plugin_warns_naming_plugin_install_and_exits_0() {
+        assert_eq!(
+            with_plugin(None, false),
+            (
+                "warning herdr plugin: loopherd's herdr plugin isn't installed, so its \
+                 actions, popups and event hooks are unavailable; \
+                 fix: herdr plugin install junderdo/loopherd/herdr-plugin\n\
+                 doctor: 9 ok, 1 warnings, 0 failures\n"
+                    .into(),
+                0
+            )
+        );
+    }
+
+    #[test]
+    fn a_disabled_plugin_warns_naming_plugin_enable() {
+        assert_eq!(
+            with_plugin(plugin(false, VERSION, None), false),
+            (
+                "warning herdr plugin: loopherd's herdr plugin is disabled, so its \
+                 actions, popups and event hooks are unavailable; \
+                 fix: herdr plugin enable loopherd\n\
+                 doctor: 9 ok, 1 warnings, 0 failures\n"
+                    .into(),
+                0
+            )
+        );
+    }
+
+    #[test]
+    fn a_plugin_at_another_version_than_loopherd_warns() {
+        let (out, code) = with_plugin(plugin(true, "0.0.1", None), false);
+        assert_eq!(
+            out,
+            format!(
+                "warning herdr plugin: plugin 0.0.1 differs from loopherd {VERSION}; \
+                 fix: herdr plugin update loopherd\n\
+                 doctor: 9 ok, 1 warnings, 0 failures\n"
+            )
+        );
+        assert_eq!(code, 0);
+        let (out, _) = with_plugin(plugin(true, "0.0.1", Some("/src/herdr-plugin")), false);
+        assert!(
+            out.starts_with(&format!(
+                "warning herdr plugin: plugin 0.0.1 differs from loopherd {VERSION}; \
+                 fix: bring the linked plugin at /src/herdr-plugin to loopherd {VERSION}\n"
+            )),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_sound_plugin_is_listed_only_with_verbose() {
+        let (out, _) = with_plugin(plugin(true, VERSION, None), true);
+        assert!(
+            out.contains(&format!("ok herdr plugin: {VERSION}, enabled\n")),
+            "{out}"
+        );
+        let (out, _) = with_plugin(plugin(true, VERSION, Some("/src/herdr-plugin")), true);
+        assert!(
+            out.contains(&format!(
+                "ok herdr plugin: {VERSION}, enabled, linked from /src/herdr-plugin\n"
+            )),
+            "{out}"
+        );
     }
 
     fn herdr_failure(server: Server) -> String {
