@@ -2434,6 +2434,15 @@ max = 3
     }
 
     #[test]
+    fn escape_quits_while_a_herdr_read_hangs() {
+        let (_release, gate) = mpsc::channel();
+        let mut herdr = herdr();
+        herdr.agents_gate = Some(gate);
+        let keys = vec![None, Some(key(KeyCode::Esc))];
+        assert_eq!(run_scripted(herdr, keys, 0), Some(0));
+    }
+
+    #[test]
     fn ctrl_c_quits_while_a_herdr_read_hangs() {
         let (_release, gate) = mpsc::channel();
         let mut herdr = herdr();

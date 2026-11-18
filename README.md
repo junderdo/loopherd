@@ -92,14 +92,28 @@ lead the commands its switches leave to you. `install-hook` backs up
 
 ### herdr plugin
 
-Optional, once loopherd is installed (above). Needs herdr 0.7.0 or later.
+Optional, once loopherd is installed (above). Needs herdr 0.7.4 or later.
 
 ```bash
 herdr plugin install junderdo/loopherd/herdr-plugin
 ```
 
-It adds a `loopherd: herd status` action. The plugin runs the `loopherd` on
-`PATH`, else `~/.local/bin/loopherd`, and never installs loopherd or its
+It adds a `loopherd: herd status` action and a `loopherd: open herd view`
+action, which opens `loopherd view` in a popup over most of the screen;
+`q` or Escape quits the view and closes the popup. To open it with a key,
+add a binding to your herdr `config.toml` and run
+`herdr server reload-config`:
+
+```toml
+[[keys.command]]
+key = "prefix+o"
+type = "plugin_action"
+command = "loopherd.view"
+description = "loopherd herd view"
+```
+
+`prefix+o` is free in herdr's defaults; pick another if your config uses
+it. The plugin runs the `loopherd` on `PATH`, else `~/.local/bin/loopherd`, and never installs loopherd or its
 hooks; without one, its commands fail with a pointer here. herdr shows no
 action output on screen: read it, errors included, with
 `herdr plugin log list --plugin loopherd`. Remove the plugin with

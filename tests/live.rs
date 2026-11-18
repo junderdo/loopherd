@@ -1,5 +1,5 @@
 //! End-to-end runs of `loopherd spawn`, `add`, `revive`, `retire --close`, `feed`, the Stop hook, `watch` and the herd view's event subscriber against the real `loopherd-dev` herdr
-//! session, and `herdr plugin link` of `herdr-plugin/` into a throwaway herdr home. Skipped unless `LOOPHERD_LIVE=1`; start the session first with
+//! session, `herdr plugin link` of `herdr-plugin/` into a throwaway herdr home, and its view popup on a throwaway herdr server. Skipped unless `LOOPHERD_LIVE=1`; start the session first with
 //! `scripts/herdr-dev --start`, then run through it:
 //! `LOOPHERD_LIVE=1 scripts/herdr-dev cargo test --test live`.
 
@@ -913,6 +913,11 @@ fn a_status_change_and_a_split_on_a_dev_pane_reach_the_event_subscriber() {
 fn isolated_herdr(home: &Path) -> Command {
     let socket = home.join("no-server.sock");
     assert!(!socket.exists());
+    herdr_in(home, &socket)
+}
+
+/// herdr with `home` as its whole home and `socket` as its server.
+fn herdr_in(home: &Path, socket: &Path) -> Command {
     let mut cmd = Command::new("herdr");
     cmd.env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -961,6 +966,188 @@ fn plugin_links_enabled_into_an_isolated_herdr_home() {
         entry["plugin_root"],
         plugin.canonicalize().unwrap().to_str().unwrap()
     );
+}
+
+/// A herdr server of its own, run with a throwaway home so a plugin linked
+/// through it registers there, unlike through the dev server, which runs as
+/// the human. Its panes find the built `loopherd` first on `PATH`. Stopped on drop.
+struct IsolatedServer {
+    home: tempfile::TempDir,
+    socket: PathBuf,
+    server: std::process::Child,
+}
+
+impl IsolatedServer {
+    fn start() -> Self {
+        // Short, so the socket path fits in sun_path.
+        let home = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+        let socket = home.path().join("herdr.sock");
+        let bin = home.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_loopherd"), bin.join("loopherd")).unwrap();
+        let path = std::env::join_paths(
+            std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        let server = herdr_in(home.path(), &socket)
+            .arg("server")
+            .env("PATH", path)
+            .env("LOOPHERD_CONFIG_DIR", home.path().join("loopherd-config"))
+            .env_remove("CLAUDE_PID")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let isolated = IsolatedServer {
+            home,
+            socket,
+            server,
+        };
+        let up = (0..50).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            isolated
+                .herdr()
+                .args(["workspace", "list"])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        });
+        assert!(up, "isolated herdr server did not start");
+        isolated
+    }
+
+    fn herdr(&self) -> Command {
+        herdr_in(self.home.path(), &self.socket)
+    }
+
+    fn ok(&self, args: &[&str]) {
+        let out = self.herdr().args(args).output().unwrap();
+        assert!(out.status.success(), "herdr {args:?}: {out:?}");
+    }
+
+    /// Sends one raw socket request; herdr's CLI has no `popup.close`.
+    fn request(&self, method: &str) -> Value {
+        use std::io::{BufRead, BufReader, Write};
+        let mut stream = std::os::unix::net::UnixStream::connect(&self.socket).unwrap();
+        let request = serde_json::json!({"id": "live", "method": method, "params": {}});
+        writeln!(stream, "{request}").unwrap();
+        let mut reply = String::new();
+        BufReader::new(stream).read_line(&mut reply).unwrap();
+        serde_json::from_str(&reply).unwrap()
+    }
+
+    /// The pids of built `loopherd` processes this server started, and their
+    /// environment.
+    fn loopherds(&self) -> Vec<(u32, Vec<(String, String)>)> {
+        let built = Path::new(env!("CARGO_BIN_EXE_loopherd"))
+            .canonicalize()
+            .unwrap();
+        let socket = self.socket.to_str().unwrap();
+        let mut found = vec![];
+        for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            if std::fs::read_link(entry.path().join("exe")).ok().as_deref() != Some(&built) {
+                continue;
+            }
+            let Ok(environ) = std::fs::read(entry.path().join("environ")) else {
+                continue;
+            };
+            let env: Vec<(String, String)> = String::from_utf8_lossy(&environ)
+                .split('\0')
+                .filter_map(|kv| kv.split_once('='))
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            if env
+                .iter()
+                .any(|(k, v)| k == "HERDR_SOCKET_PATH" && v == socket)
+            {
+                found.push((pid, env));
+            }
+        }
+        found
+    }
+
+    fn wait_for_loopherds(&self, count: usize) -> Vec<(u32, Vec<(String, String)>)> {
+        for _ in 0..50 {
+            let found = self.loopherds();
+            if found.len() == count {
+                return found;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!(
+            "expected {count} loopherd processes: {:?}",
+            self.loopherds()
+        );
+    }
+}
+
+impl Drop for IsolatedServer {
+    fn drop(&mut self) {
+        let _ = self.herdr().args(["server", "stop"]).output();
+        let _ = self.server.kill();
+        let _ = self.server.wait();
+    }
+}
+
+/// Opens the view popup with `open`, checks it runs the view as a popup
+/// does, then closes it as herdr would and waits for loopherd to be gone.
+fn view_popup_opens_and_closes(open: &[&str]) {
+    let server = IsolatedServer::start();
+    let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("herdr-plugin");
+    server.ok(&["plugin", "link", plugin.to_str().unwrap()]);
+    server.ok(&[
+        "workspace",
+        "create",
+        "--cwd",
+        server.home.path().to_str().unwrap(),
+    ]);
+
+    server.ok(open);
+
+    let [(pid, env)] = server.wait_for_loopherds(1).try_into().unwrap();
+    let var = |name: &str| env.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+    assert_eq!(var("HERDR_PANE_ID"), None);
+    assert_eq!(var("HERDR_PLUGIN_ENTRYPOINT_ID"), Some("view"));
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap();
+    assert!(cmdline.ends_with(b"\0view\0"), "{cmdline:?}");
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    assert_eq!(server.loopherds().len(), 1, "the view exited on its own");
+
+    assert_eq!(server.request("popup.close")["result"]["type"], "ok");
+
+    server.wait_for_loopherds(0);
+    assert_eq!(
+        server.request("popup.close")["error"]["code"],
+        "popup_not_open"
+    );
+}
+
+#[test]
+fn the_view_pane_opens_as_a_popup_and_leaves_no_loopherd_once_closed() {
+    if !live_enabled() {
+        return;
+    }
+    view_popup_opens_and_closes(&[
+        "plugin",
+        "pane",
+        "open",
+        "--plugin",
+        "loopherd",
+        "--entrypoint",
+        "view",
+    ]);
+}
+
+#[test]
+fn the_view_action_opens_the_view_popup() {
+    if !live_enabled() {
+        return;
+    }
+    view_popup_opens_and_closes(&["plugin", "action", "invoke", "loopherd.view"]);
 }
 
 const LIVE: &str = "/home/u/.config/herdr/herdr.sock";

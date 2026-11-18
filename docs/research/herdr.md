@@ -193,6 +193,16 @@ for what 0.7.0 already had, and the changelog.
   `~/.config/herdr/plugins.json`, because the dev server runs as the human.
   So an isolated link also points `HERDR_SOCKET_PATH` at a socket nothing
   listens on.
+- **Popups** (LH-226). Plugin panes with `placement = "popup"` came in
+  0.7.4. A `herdr server` started with a temp `HOME`, `XDG_*` dirs and
+  `HERDR_SOCKET_PATH` keeps its own registry, so a plugin linked through it
+  never reaches the human's. Opening a pane needs a workspace (else
+  `no active workspace`), but no attached client. The popup's command gets
+  `HERDR_SOCKET_PATH`, `HERDR_BIN_PATH` and `HERDR_PLUGIN_ENTRYPOINT_ID`,
+  not `HERDR_PANE_ID`. It closes when the command exits, and the socket's
+  `popup.close` ends the command; then `popup.close` answers
+  `popup_not_open`. No API sends input to a popup, and keys typed into a
+  client attached under `script` didn't reach it.
 
 ## Known gaps (our opportunity)
 
