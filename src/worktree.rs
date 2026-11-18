@@ -196,8 +196,8 @@ pub enum Fate {
 pub enum Plan {
     /// There is no worktree, local branch or origin branch to clear.
     Absent,
-    /// There is nothing local, and origin couldn't be asked whether it has
-    /// the branch, for this reason.
+    /// There is nothing local, no tracking ref says origin has the branch,
+    /// and origin couldn't be asked, for this reason.
     Unchecked(String),
     /// Leave them, as [`Fate::Keep`] asked: a worktree or local branch
     /// when `local`, origin's branch (as last fetched) when `remote`.
@@ -367,6 +367,14 @@ pub fn plan_clear(
         (Some(b), true) => remote_branch_head(repo, b)?,
         (Some(b), false) => match remote_branch_head(repo, b) {
             Ok(head) => head,
+            // A refused delete leaves this tracking ref, so its branch may still be on origin.
+            Err(e) if has_ref(repo, &format!("refs/remotes/origin/{b}")) => {
+                return Ok(Plan::Taken(format!(
+                    "can't ask origin for origin/{b} ({e:#}), and it was there when last \
+                     fetched; rerun once origin answers, or pass --keep-branch to start the \
+                     new member from it"
+                )));
+            }
             Err(e) => return Ok(Plan::Unchecked(format!("{e:#}"))),
         },
     };
