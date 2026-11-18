@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use super::{Paths, expand_home, file_of, herd_files};
 use crate::context::handoff_path;
 use crate::herdr::Herdr;
-use crate::ledger::{AgentRecord, Ledger};
+use crate::ledger::{AgentRecord, Ledger, herd_runs};
 use crate::retire::open_tab;
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -19,8 +19,9 @@ pub struct Removal {
     pub keep_history: bool,
 }
 
-/// Removes `herd`'s file, lead prompt and pause, and its members' ledger
-/// entries, mailboxes and handoffs in loopherd's `state` dir, pushing a line
+/// Removes `herd`'s file, lead prompt and pause, every run of it in the
+/// ledger, archived ones included, and the mailboxes and handoffs of names
+/// left with no run in loopherd's `state` dir, pushing a line
 /// per thing removed or kept to `out`, including before an error. Refuses,
 /// changing nothing, while any member is not retired, ran on another herdr
 /// session, or herdr may still show its agent or pane, or herdr can't say.
@@ -41,8 +42,10 @@ pub fn remove(
         .values()
         .filter(|r| r.herd.as_deref() == Some(herd))
         .collect();
+    let runs = herd_runs(&entries, herd);
+    let trimmed = runs.trimmed;
     let has_file = present(&file)?;
-    if !has_file && members.is_empty() {
+    if !has_file && runs.gone.is_empty() && trimmed.is_empty() {
         bail!(
             "no herd {herd}: no {} and no ledger entries",
             file.display()
@@ -64,8 +67,15 @@ pub fn remove(
         }
         own.push(file);
     }
-    let names: Vec<String> = members.iter().map(|r| r.name.clone()).collect();
     let mailboxes = !how.keep_history;
+    let names = match mailboxes {
+        true => runs.gone,
+        false => members
+            .iter()
+            .filter(|r| !holds_another_run(r, herd))
+            .map(|r| r.name.clone())
+            .collect(),
+    };
     for path in member_files(state, &names, mailboxes).iter().chain(&own) {
         present(path)?;
     }
@@ -75,16 +85,22 @@ pub fn remove(
     } else {
         "removed"
     };
-    if how.dry_run || names.is_empty() {
+    let trim_line =
+        |n: &String| format!("{verb} {herd}'s runs from ledger entry {n}; its other runs stay");
+    if how.dry_run || (names.is_empty() && trimmed.is_empty()) {
         delete_all(&member_files(state, &names, mailboxes), verb, how, out)?;
         if mailboxes {
             out.extend(names.iter().map(|n| format!("{verb} ledger entry {n}")));
+            out.extend(trimmed.iter().map(trim_line));
         }
     } else if how.keep_history {
         for name in &names {
             ledger
                 .update(name, &mut |record| {
-                    if record.herd.as_deref() != Some(herd) || !record.retired {
+                    if record.herd.as_deref() != Some(herd)
+                        || !record.retired
+                        || holds_another_run(record, herd)
+                    {
                         return Ok(());
                     }
                     let files = member_files(state, std::slice::from_ref(name), false);
@@ -98,9 +114,27 @@ pub fn remove(
                 delete_all(&member_files(state, names, true), verb, how, out)
             })
             .context("ledger")?;
-        out.extend(removed.iter().map(|n| format!("{verb} ledger entry {n}")));
+        out.extend(
+            removed
+                .gone
+                .iter()
+                .map(|n| format!("{verb} ledger entry {n}")),
+        );
+        out.extend(removed.trimmed.iter().map(trim_line));
+    }
+    if how.keep_history {
+        let kept = |n: &String| format!("kept {herd}'s runs in ledger entry {n}");
+        out.extend(trimmed.iter().map(kept));
     }
     delete_all(&own, verb, how, out)
+}
+
+/// Whether `record` keeps a run when `herd`'s go, so its name keeps its files.
+fn holds_another_run(record: &AgentRecord, herd: &str) -> bool {
+    record
+        .earlier
+        .iter()
+        .any(|r| r.herd.as_deref() != Some(herd))
 }
 
 /// Fails naming each member that is not retired or that herdr shows open,
@@ -528,6 +562,128 @@ mod tests {
             format!("no herd nope: no {} and no ledger entries", file.display())
         );
         assert_eq!(s.names(), ["other"]);
+    }
+
+    /// Records a run of `name`, as a spawn over its last one does.
+    fn spawn(s: &mut Setup, name: &str, herd: Option<&str>, created: &str, retired: bool) {
+        let record: AgentRecord = serde_json::from_value(serde_json::json!({
+            "name": name, "pane_id": "w1:p1", "session_id": null, "repo": "/r",
+            "worktree": null, "workspace": "w1", "prompt": null, "prompt_sent": true,
+            "created": created, "herd": herd, "retired": retired,
+            "retired_at": if retired { Some(created) } else { None },
+        }))
+        .unwrap();
+        s.ledger.record(record).unwrap();
+    }
+
+    fn herds_in_stats(s: &Setup) -> Vec<(String, Vec<String>)> {
+        let query = crate::stats::Query {
+            herd: None,
+            since: None,
+            now: std::time::SystemTime::now(),
+        };
+        let (herds, _) = crate::stats::stats(&s.ledger, &s.path("state/reports"), &query).unwrap();
+        herds
+            .into_iter()
+            .map(|h| (h.herd, h.retired.into_iter().map(|r| r.started).collect()))
+            .collect()
+    }
+
+    #[test]
+    fn removes_a_herds_run_archived_under_an_entry_of_no_herd() {
+        let mut s = Setup::new();
+        s.write("herds/h.toml", "repo = \"/r\"\n");
+        spawn(&mut s, "a", Some("h"), "2026-11-01T00:00:00Z", true);
+        spawn(&mut s, "a", None, "2026-11-03T00:00:00Z", false);
+        s.write("state/reports/a.jsonl", "{}\n");
+
+        let out = s.remove("h", Removal::default()).unwrap();
+
+        assert_eq!(herds_in_stats(&s), [], "{out}");
+        assert_eq!(s.ledger.0["a"].herd, None);
+        assert_eq!(s.ledger.0["a"].earlier, []);
+        assert!(s.path("state/reports/a.jsonl").exists());
+        assert!(
+            out.contains("removed h's runs from ledger entry a; its other runs stay\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn keeps_another_herds_runs_archived_under_a_removed_entry_as_their_own_entry() {
+        let mut s = Setup::new();
+        spawn(&mut s, "a", Some("h"), "2026-11-01T00:00:00Z", true);
+        spawn(&mut s, "a", Some("h"), "2026-11-02T00:00:00Z", true);
+        spawn(&mut s, "a", Some("g"), "2026-11-03T00:00:00Z", true);
+        s.write("state/reports/a.jsonl", "{}\n");
+
+        let out = s.remove("g", Removal::default()).unwrap();
+
+        let h_runs = vec!["2026-11-01T00:00:00Z".into(), "2026-11-02T00:00:00Z".into()];
+        assert_eq!(herds_in_stats(&s), [("h".to_string(), h_runs)], "{out}");
+        let a = &s.ledger.0["a"];
+        assert_eq!(a.herd.as_deref(), Some("h"));
+        assert!(a.retired);
+        assert_eq!(a.created, "2026-11-02T00:00:00Z");
+        assert_eq!(a.earlier.len(), 1);
+        assert!(s.path("state/reports/a.jsonl").exists());
+        assert!(!out.contains("ledger entry a\n"), "{out}");
+    }
+
+    #[test]
+    fn keep_history_keeps_the_handoffs_of_a_member_holding_another_herds_run() {
+        let mut s = Setup::new();
+        spawn(&mut s, "a", Some("g"), "2026-11-01T00:00:00Z", true);
+        spawn(&mut s, "a", Some("h"), "2026-11-03T00:00:00Z", true);
+        spawn(&mut s, "b", Some("h"), "2026-11-03T00:00:00Z", true);
+        for name in ["a", "b"] {
+            s.write(&format!("state/handoffs/{name}.md"), "now\n");
+        }
+        let how = Removal {
+            keep_history: true,
+            ..Removal::default()
+        };
+
+        let out = s.remove("h", how).unwrap();
+
+        assert!(s.path("state/handoffs/a.md").exists(), "{out}");
+        assert!(!s.path("state/handoffs/b.md").exists(), "{out}");
+        assert!(out.contains("kept h's runs in ledger entry a\n"), "{out}");
+    }
+
+    #[test]
+    fn keep_history_names_an_entry_holding_an_archived_run() {
+        let mut s = Setup::new();
+        spawn(&mut s, "a", Some("h"), "2026-11-01T00:00:00Z", true);
+        spawn(&mut s, "a", None, "2026-11-03T00:00:00Z", false);
+        let how = Removal {
+            keep_history: true,
+            ..Removal::default()
+        };
+
+        let out = s.remove("h", how).unwrap();
+
+        assert_eq!(out, "kept h's runs in ledger entry a\n");
+        assert_eq!(s.ledger.0["a"].earlier.len(), 1);
+    }
+
+    #[test]
+    fn dry_run_names_an_entry_it_would_only_trim() {
+        let mut s = Setup::new();
+        spawn(&mut s, "a", Some("h"), "2026-11-01T00:00:00Z", true);
+        spawn(&mut s, "a", Some("g"), "2026-11-03T00:00:00Z", true);
+        let how = Removal {
+            dry_run: true,
+            ..Removal::default()
+        };
+
+        let out = s.remove("g", how).unwrap();
+
+        assert_eq!(
+            out,
+            "would remove g's runs from ledger entry a; its other runs stay\n"
+        );
+        assert_eq!(s.ledger.0["a"].herd.as_deref(), Some("g"));
     }
 
     #[test]
@@ -1264,7 +1420,7 @@ mod tests {
             &mut self,
             herd: &str,
             before: &mut dyn FnMut(&[String]) -> Result<()>,
-        ) -> Result<Vec<String>> {
+        ) -> Result<crate::ledger::RemovedHerd> {
             (self.race)(&mut self.inner);
             self.inner.remove_herd(herd, before)
         }
