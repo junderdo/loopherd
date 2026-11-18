@@ -171,6 +171,11 @@ pub fn restart(
     std::fs::rename(&handoff, &read)
         .with_context(|| format!("move {} to {}", handoff.display(), read.display()))?;
     ledger.update(name, &mut |current| {
+        // Its agent keeps the recorded id in `$HERDR_PANE_ID`, as after a missed move hook.
+        if current.pane_id != agent.pane_id {
+            let recorded = std::mem::take(&mut current.pane_id);
+            current.env_pane_id.get_or_insert(recorded);
+        }
         current.pane_id = agent.pane_id.clone();
         current.tab_id = Some(agent.tab_id.clone());
         Ok(())
@@ -505,7 +510,24 @@ mod tests {
             ),
             ("w9:p9", Some("w9:t9"))
         );
+        assert_eq!(ledger.0["lh-1"].env_pane_id.as_deref(), Some("w1:p1"));
         assert_eq!(ledger.1, ["lh-1"]);
+    }
+
+    #[test]
+    fn a_restart_keeps_the_pane_id_the_agent_was_started_with() {
+        let w = World::new();
+        w.handed_off();
+        let (result, ledger) = w.restart_as(false, true, None, &|r| {
+            r.env_pane_id = Some("w1:p1".into());
+            r.pane_id = "w3:p2".into();
+        });
+        result.unwrap();
+        let lh1 = &ledger.0["lh-1"];
+        assert_eq!(
+            (lh1.pane_id.as_str(), lh1.env_pane_id.as_deref()),
+            ("w9:p9", Some("w1:p1"))
+        );
     }
 
     fn continued(session: &str) -> String {
