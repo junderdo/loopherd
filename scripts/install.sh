@@ -2,8 +2,9 @@
 # curl -fsSL https://github.com/junderdo/loopherd/releases/latest/download/install.sh | sh
 #
 # Installs a released loopherd as ~/.local/bin/loopherd, its Claude hooks and
-# skill, then runs `loopherd setup`. LOOPHERD_VERSION=vX.Y.Z pins a release;
-# LOOPHERD_RELEASE_BASE replaces https://github.com/junderdo/loopherd/releases.
+# skill, then runs `loopherd setup` and, last, `loopherd doctor`.
+# LOOPHERD_VERSION=vX.Y.Z pins a release; LOOPHERD_RELEASE_BASE replaces
+# https://github.com/junderdo/loopherd/releases.
 set -eu
 
 # A release's copy carries its tag, so it installs that release, not the latest.
@@ -114,6 +115,8 @@ main() {
 
   warn_missing
   say "next: loopherd herds"
+  # herdr may not be started yet, so a doctor failure is shown but doesn't fail the install.
+  "$bin_dir/loopherd" doctor </dev/null || true
 }
 
 main

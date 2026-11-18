@@ -209,3 +209,16 @@ fn section_needs_skill() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("--skill"), "{err}");
 }
+
+#[test]
+fn the_shepherd_runs_doctor_at_session_start_and_relays_failures() {
+    let home = tempfile::tempdir().unwrap();
+    let printed = String::from_utf8(skill(home.path())).unwrap();
+    let start = flat_section(&printed, "\n## Shepherd\n", "\n### Setting up a project\n");
+    for rule in [
+        "At the start of each session, run `loopherd doctor`",
+        "relay each failure to the human with the fix it names",
+    ] {
+        assert!(start.contains(rule), "{start}");
+    }
+}

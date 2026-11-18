@@ -14,8 +14,10 @@ On a terminal it then offers loopherd's agent types (builder, reviewer,
 researcher, scout) and the mattpocock-skills plugin, each default no, then
 runs `loopherd setup`, which asks, while config.toml leaves them unset,
 which lead switches are on wherever a herd file's [lead] doesn't set them,
-and the context window and handoff limits. Other arguments go to
-`loopherd install-hook`.
+and the context window and handoff limits. Last, unless --remove, it runs
+`loopherd doctor` (against --settings when given), whose failures don't
+fail the install.
+Other arguments go to `loopherd install-hook`.
 
   scripts/install                      hooks in ~/.claude/settings.json, skill in ~/.claude/skills
   scripts/install --settings <file>    hooks in <file>, skill in skills/ beside it
@@ -157,3 +159,5 @@ else
   offer_skills "$skills" "$claude_dir"
 fi
 [[ "$setup" != ask ]] || "$bin_dir/loopherd" setup || echo "install: setup failed; run loopherd setup once config.toml is fixed" >&2
+# herdr may not be started yet, so a doctor failure is shown but doesn't fail the install.
+[[ -n "$removing" ]] || "$bin_dir/loopherd" doctor ${settings:+--settings "$settings"} || true
