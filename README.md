@@ -98,11 +98,28 @@ Optional, once loopherd is installed (above). Needs herdr 0.7.5 or later.
 herdr plugin install junderdo/loopherd/herdr-plugin
 ```
 
-It adds a `loopherd: herd status` action, and event hooks that record a
-member going blocked, or its pane exiting or closing, so the next
-`loopherd watch` reports it even when none was running. The plugin runs
-the `loopherd` on `PATH`, else `~/.local/bin/loopherd`, and never installs
-loopherd or its hooks; without one, its commands fail with a pointer here. herdr shows no
+It adds a `loopherd: herd status` action and a `loopherd: open herd view`
+action, which opens `loopherd view` in a popup over most of the screen;
+`q` or Escape quits the view and closes the popup. To open it with a key,
+add a binding to your herdr `config.toml` and run
+`herdr server reload-config`:
+
+```toml
+[[keys.command]]
+key = "prefix+m"
+type = "plugin_action"
+command = "loopherd.view"
+description = "loopherd herd view"
+```
+
+`prefix+m` is unbound in herdr 0.9.5's defaults (`herdr --default-config`);
+pick another if your config uses it. A popup that closes as soon as it
+opens means the view couldn't start; run `loopherd view` in a pane to see
+why. Its event hooks record a member going blocked, or its pane exiting
+or closing, so the next `loopherd watch` reports it even when none was
+running. The plugin runs the `loopherd` on `PATH`, else
+`~/.local/bin/loopherd`, and never installs loopherd or its hooks;
+without one, its commands fail with a pointer here. herdr shows no
 action output on screen: read it, errors included, with
 `herdr plugin log list --plugin loopherd`.
 

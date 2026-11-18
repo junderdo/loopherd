@@ -15,6 +15,20 @@ title = "loopherd: herd status"
 contexts = ["workspace"]
 command = ["sh", "loopherd.sh", "status"]
 
+[[actions]]
+id = "view"
+title = "loopherd: open herd view"
+contexts = ["workspace"]
+command = ["sh", "open-view.sh"]
+
+[[panes]]
+id = "view"
+title = "loopherd view"
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["sh", "loopherd.sh", "view"]
+
 [[events]]
 on = "pane.agent_status_changed"
 command = ["sh", "loopherd.sh", "herdr-event-hook"]

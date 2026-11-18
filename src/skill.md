@@ -488,8 +488,11 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
 - **herdr plugin.** `herdr plugin install <owner>/loopherd/herdr-plugin`
   (loopherd's README names the repo) adds plugin `loopherd`,
   whose `status` action runs `loopherd status`; its output and errors go
-  only to `herdr plugin log list --plugin loopherd`. Its event hooks run
-  `loopherd herdr-event-hook`, recording a member going `blocked` or
+  only to `herdr plugin log list --plugin loopherd`. Its `view` action
+  (`loopherd.view`) opens `loopherd view` in a popup that `q` or Escape
+  closes; the README gives the `[[keys.command]]` snippet that binds it to
+  a key. Never edit the human's herdr config to add it. Its event hooks
+  run `loopherd herdr-event-hook`, recording a member going `blocked` or
   `gone` in its mailbox for the next watch. It needs the
   `loopherd` on PATH or in `~/.local/bin` and never installs loopherd or
   its hooks; installing stays as above. It needs herdr 0.7.5+.
