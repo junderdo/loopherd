@@ -339,7 +339,7 @@ enum Command {
     /// pane.closed, tab.closed, workspace.closed and pane.moved: records a
     /// member going blocked, or its pane, tab or workspace going, in its
     /// mailbox for the next watch, and follows a member's pane moved to
-    /// another tab of its workspace in the ledger. Reads HERDR_PLUGIN_EVENT
+    /// another tab or workspace in the ledger. Reads HERDR_PLUGIN_EVENT
     /// and HERDR_PLUGIN_EVENT_JSON; any other pane, tab or workspace records
     /// nothing.
     HerdrEventHook,

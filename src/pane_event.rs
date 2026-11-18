@@ -22,7 +22,7 @@ pub const BLOCK_RECORDED: &str = "block-recorded";
 /// Records the herdr event `event`, as `HERDR_PLUGIN_EVENT` names it, with
 /// `json` from `HERDR_PLUGIN_EVENT_JSON`, for the non-retired members of the
 /// herdr at `socket` in its pane, tab or workspace, and follows such a
-/// member's pane moved to another tab of its workspace in the ledger. Anything
+/// member's pane moved to another tab or workspace in the ledger. Anything
 /// else records nothing.
 pub fn event_hook(
     ledger: &mut dyn Ledger,
@@ -44,14 +44,14 @@ pub fn event_hook(
     let Some(id) = data[key].as_str() else {
         return Ok(());
     };
-    let record = |name: &str| match event {
-        "tab.closed" => record_tab_gone(&*ledger, dir, name, id, now),
-        _ => record_gone(dir, name, now),
+    let closed = match event {
+        "tab.closed" => Closed::Tab(id),
+        _ => Closed::Workspace(id),
     };
     let failed: Vec<String> = entries
         .values()
         .filter(|m| !m.retired && m.socket.as_deref() == socket && held_in(m) == Some(id))
-        .filter_map(|m| record(&m.name).err())
+        .filter_map(|m| record_closed_gone(&*ledger, dir, &m.name, closed, now).err())
         .map(|e| format!("{e:#}"))
         .collect();
     match failed.is_empty() {
@@ -60,10 +60,10 @@ pub fn event_hook(
     }
 }
 
-/// Follows a move within the member's workspace only: a move to another
-/// gives the pane a new id, while the agent keeps the old `HERDR_PANE_ID`
-/// that its own hooks look it up by. Retracts a `gone` that closing the tab
-/// it left recorded first.
+/// Points the member at its pane's new pane, tab and workspace. A move to
+/// another workspace gives the pane a new id, while the agent keeps the old
+/// one in `$HERDR_PANE_ID`, so that one is kept as `env_pane_id`. Retracts a
+/// `gone` that closing the tab or workspace it left recorded first.
 fn follow_move(
     ledger: &mut dyn Ledger,
     entries: &BTreeMap<String, AgentRecord>,
@@ -72,43 +72,70 @@ fn follow_move(
     socket: Option<&Path>,
     now: SystemTime,
 ) -> Result<()> {
-    let (Some(pane), Some(previous_tab), Some(tab)) = (
+    let (Some(previous_pane), Some(previous_tab), Some(pane), Some(tab)) = (
         data["previous_pane_id"].as_str(),
         data["previous_tab_id"].as_str(),
+        data["pane"]["pane_id"].as_str(),
         data["pane"]["tab_id"].as_str(),
     ) else {
         return Ok(());
     };
-    if data["pane"]["pane_id"].as_str() != Some(pane) {
-        return Ok(());
-    }
-    let Some(member) = member_in(entries, pane, socket) else {
+    let workspaces = (
+        data["previous_workspace_id"].as_str(),
+        data["pane"]["workspace_id"].as_str(),
+    );
+    let workspace = match workspaces {
+        _ if pane == previous_pane => None,
+        (Some(previous), Some(workspace)) => Some((previous, workspace)),
+        _ => return Ok(()),
+    };
+    let Some(member) = member_in(entries, previous_pane, socket) else {
         return Ok(());
     };
+    let previous_workspace = data["previous_workspace_id"].as_str();
     let mut followed = false;
-    // Hooks run unordered, so a late event for a tab the member already left is skipped.
+    // Hooks run unordered, so a late event for a place the member already left is skipped.
     ledger.update(&member.name, &mut |m| {
-        let still_there =
-            m.pane_id == pane && m.tab_id.as_deref().is_none_or(|t| t == previous_tab);
+        let still_there = m.pane_id == previous_pane
+            && m.tab_id.as_deref().is_none_or(|t| t == previous_tab)
+            && workspace.is_none_or(|(previous, _)| m.workspace == previous);
         followed = !m.retired && still_there;
-        if followed {
-            m.tab_id = Some(tab.into());
+        if !followed {
+            return Ok(());
         }
+        if let Some((_, workspace)) = workspace {
+            m.env_pane_id.get_or_insert_with(|| previous_pane.into());
+            m.pane_id = pane.into();
+            m.workspace = workspace.into();
+            // The payload has no label, and the old one would send a revive back.
+            m.workspace_label = None;
+        }
+        m.tab_id = Some(tab.into());
         Ok(())
     })?;
-    if followed {
-        let moved = Entry::new(now, Body::Moved {});
-        report::append_unless(dir, &member.name, &moved, |entries| {
-            // A gone for a tab this live pane left is false whatever came after it.
+    if !followed {
+        return Ok(());
+    }
+    let left = |body: &Body| match body {
+        Body::Gone { tab: Some(t), .. } => t == previous_tab,
+        Body::Gone {
+            workspace: Some(w), ..
+        } => Some(w.as_str()) == previous_workspace,
+        _ => false,
+    };
+    report::append_unless(
+        dir,
+        &member.name,
+        &Entry::new(now, Body::Moved {}),
+        |entries| {
+            // A gone for a place this live pane left is false whatever came after it.
             let last = entries
                 .iter()
                 .rev()
                 .find(|e| matches!(e.body, Body::Gone { .. } | Body::Moved {}));
-            !last.is_some_and(
-                |e| matches!(&e.body, Body::Gone { tab: Some(t) } if t == previous_tab),
-            )
-        })?;
-    }
+            !last.is_some_and(|e| left(&e.body))
+        },
+    )?;
     Ok(())
 }
 
@@ -162,30 +189,52 @@ pub fn record_blocked(dir: &Path, name: &str, now: SystemTime) -> Result<bool> {
 /// Appends a `gone` entry to `name`'s mailbox unless one is there with no
 /// sign of life after it. Returns whether it appended.
 pub fn record_gone(dir: &Path, name: &str, now: SystemTime) -> Result<bool> {
-    let gone = Entry::new(now, Body::Gone { tab: None });
-    report::append_unless(dir, name, &gone, already_gone)
-}
-
-/// [`record_gone`] for `name` found in the closed `tab`, unless the ledger,
-/// read under the mailbox lock, no longer holds it there.
-fn record_tab_gone(
-    ledger: &dyn Ledger,
-    dir: &Path,
-    name: &str,
-    tab: &str,
-    now: SystemTime,
-) -> Result<bool> {
     let gone = Entry::new(
         now,
         Body::Gone {
-            tab: Some(tab.into()),
+            tab: None,
+            workspace: None,
         },
     );
-    report::append_unless(dir, name, &gone, |entries| {
-        let moved_out = ledger.entries().is_ok_and(|e| {
-            e.get(name)
-                .is_some_and(|m| m.tab_id.as_deref() != Some(tab))
-        });
+    report::append_unless(dir, name, &gone, already_gone)
+}
+
+#[derive(Clone, Copy)]
+enum Closed<'a> {
+    Tab(&'a str),
+    Workspace(&'a str),
+}
+
+/// [`record_gone`] for `name` found in the `closed` tab or workspace, unless
+/// the ledger, read under the mailbox lock, no longer holds it there.
+fn record_closed_gone(
+    ledger: &dyn Ledger,
+    dir: &Path,
+    name: &str,
+    closed: Closed,
+    now: SystemTime,
+) -> Result<bool> {
+    let (body, still_in): (_, fn(&AgentRecord, &str) -> bool) = match closed {
+        Closed::Tab(tab) => (
+            Body::Gone {
+                tab: Some(tab.into()),
+                workspace: None,
+            },
+            |m, tab| m.tab_id.as_deref() == Some(tab),
+        ),
+        Closed::Workspace(workspace) => (
+            Body::Gone {
+                tab: None,
+                workspace: Some(workspace.into()),
+            },
+            |m, workspace| m.workspace == workspace,
+        ),
+    };
+    let (Closed::Tab(id) | Closed::Workspace(id)) = closed;
+    report::append_unless(dir, name, &Entry::new(now, body), |entries| {
+        let moved_out = ledger
+            .entries()
+            .is_ok_and(|e| e.get(name).is_some_and(|m| !still_in(m, id)));
         moved_out || already_gone(entries)
     })
 }
@@ -232,7 +281,13 @@ pub fn record_gone_after(
     now: SystemTime,
     seen_live: SystemTime,
 ) -> Result<bool> {
-    let gone = Entry::new(now, Body::Gone { tab: None });
+    let gone = Entry::new(
+        now,
+        Body::Gone {
+            tab: None,
+            workspace: None,
+        },
+    );
     report::append_unless(dir, name, &gone, |entries| {
         entries.iter().enumerate().any(|(i, e)| {
             matches!(e.body, Body::Gone { .. })
@@ -241,7 +296,6 @@ pub fn record_gone_after(
         })
     })
 }
-
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;

@@ -16,6 +16,10 @@ use crate::report::{self, Body, Entry};
 pub struct AgentRecord {
     pub name: String,
     pub pane_id: String,
+    /// The agent's `$HERDR_PANE_ID`, kept when a move to another workspace
+    /// gave its pane the new id in `pane_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_pane_id: Option<String>,
     /// The herdr tab holding `pane_id`. Missing in ledgers written before
     /// spawn, revive and restart recorded it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,6 +96,13 @@ pub enum Role {
 }
 
 impl AgentRecord {
+    /// Whether a process with `$HERDR_PANE_ID` set to `pane` runs in this
+    /// member's pane: its agent keeps the id from before a move to another
+    /// workspace, and a restored herdr gives a new shell the current one.
+    pub fn is_own_pane(&self, pane: &str) -> bool {
+        self.pane_id == pane || self.env_pane_id.as_deref() == Some(pane)
+    }
+
     pub fn is_lead(&self) -> bool {
         self.role == Some(Role::Lead)
     }
@@ -474,6 +485,7 @@ mod tests {
         AgentRecord {
             name: name.into(),
             pane_id: "w1:p1".into(),
+            env_pane_id: None,
             tab_id: None,
             session_id: Some("abc".into()),
             repo: "/src/repo".into(),

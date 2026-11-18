@@ -13,7 +13,7 @@ use crate::context::Check;
 use crate::continuation::{follow_recorded, live_for};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::process::{self, Claim, Procs};
-use crate::report::{Background, Body, Entry, Stop, Tally, Unknown, append, member_in};
+use crate::report::{Background, Body, Entry, Stop, Tally, Unknown, append, member_of_own_pane};
 
 /// Where the hook runs: `$HERDR_PANE_ID`, `$HERDR_SOCKET_PATH` and `$CLAUDE_PID`.
 pub struct Pane<'a> {
@@ -55,7 +55,7 @@ pub fn stop_hook(
     warn: &mut dyn FnMut(String),
 ) -> Result<Option<Stopped>> {
     let entries = ledger.entries()?;
-    let Some(member) = member_in(&entries, pane.id, pane.socket) else {
+    let Some(member) = member_of_own_pane(&entries, pane.id, pane.socket) else {
         return Ok(None);
     };
     let member = match follow_recorded(ledger, &entries, member, live) {
@@ -232,6 +232,7 @@ mod tests {
         AgentRecord {
             name: name.into(),
             pane_id: pane.into(),
+            env_pane_id: None,
             tab_id: None,
             session_id: None,
             repo: "/src/repo".into(),
@@ -368,6 +369,25 @@ mod tests {
             mailbox(dir.path(), "lh-1")
                 .contains(r#""background":{"shells":0,"subagents":0,"other":0},"crons":0}"#)
         );
+    }
+
+    #[test]
+    fn a_member_moved_to_another_workspace_records_its_stop_from_its_own_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut moved = member("lh-1", "w3:p2", Some(SOCKET));
+        moved.env_pane_id = Some("w1:p1".into());
+        let ledger = ledger(vec![moved]);
+
+        let filed = run(
+            &ledger,
+            dir.path(),
+            "w1:p1",
+            Some(SOCKET),
+            r#"{"hook_event_name":"Stop","background_tasks":[],"session_crons":[]}"#,
+        );
+
+        assert_eq!(filed.as_deref(), Some("lh-1"));
+        assert!(mailbox(dir.path(), "lh-1").contains(r#""crons":0"#));
     }
 
     #[test]

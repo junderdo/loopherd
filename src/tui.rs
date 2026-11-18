@@ -1063,6 +1063,7 @@ mod tests {
         AgentRecord {
             name: name.into(),
             pane_id: format!("w1:p{name}"),
+            env_pane_id: None,
             tab_id: None,
             session_id: Some(format!("sess-{name}")),
             repo: "/nonexistent/repo".into(),
@@ -3399,7 +3400,10 @@ max = 3
             mail.path(),
             "c",
             "2026-11-16T10:06:00Z",
-            Body::Gone { tab: None },
+            Body::Gone {
+                tab: None,
+                workspace: None,
+            },
         );
         let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
         assert_eq!(ticker(&terminal), ["10:06 c gone", "10:05 a blocked"]);
@@ -3411,6 +3415,7 @@ max = 3
         let mail = quiet_mail(&ledger);
         let gone = || Body::Gone {
             tab: Some("w1:t1".into()),
+            workspace: None,
         };
         post_at(mail.path(), "a", "2026-11-16T10:05:00Z", gone());
         post_at(mail.path(), "a", "2026-11-16T10:05:00Z", Body::Moved {});
