@@ -3075,9 +3075,13 @@ max = 3
                 .unwrap_or_else(|| panic!("{name} in {shown:#?}"))
                 .clone()
         };
-        assert!(
-            row("done-1").contains("done-1  retired 2026-11-17T08:00:00Z  "),
-            "{shown:#?}"
+        let retired = shown.iter().position(|l| l.contains(" done-1 ")).unwrap();
+        assert_eq!(
+            shown[retired - 1..=retired],
+            [
+                "││   NAME    STATUS                                 BRANCH  WORKT││                                                   ││",
+                "││ ? done-1  retired 2026-11-17T08:00:00Z           -       wt-do││                                                   ││",
+            ]
         );
         assert!(
             row("⚠ b").contains("⚠ b       blocked           -       wt-b"),
