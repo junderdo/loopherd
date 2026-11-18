@@ -338,8 +338,8 @@ enum Command {
     /// The herdr plugin's hook on pane.agent_status_changed, pane.exited,
     /// pane.closed, tab.closed, workspace.closed and pane.moved: records a
     /// member going blocked, or its pane, tab or workspace going, in its
-    /// mailbox for the next watch, and follows a member's moved pane in the
-    /// ledger. Reads HERDR_PLUGIN_EVENT and HERDR_PLUGIN_EVENT_JSON; any
+    /// mailbox for the next watch, and follows a member's pane moved to
+    /// another tab of its workspace in the ledger. Reads HERDR_PLUGIN_EVENT and HERDR_PLUGIN_EVENT_JSON; any
     /// other pane, tab or workspace records nothing.
     HerdrEventHook,
     /// Claude's SessionStart hook: when a member's Claude is cleared or resumed,
@@ -1437,7 +1437,7 @@ fn run_stop_hook() -> Result<i32> {
 }
 
 /// Exits 0 on every error, after printing it: a running watch's poll
-/// still covers what the hook missed.
+/// still covers a missed `blocked` or `gone`, though not a missed move.
 fn run_herdr_event_hook() -> Result<i32> {
     let record = || -> Result<()> {
         let event = std::env::var("HERDR_PLUGIN_EVENT").context("no HERDR_PLUGIN_EVENT")?;

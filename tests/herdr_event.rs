@@ -324,17 +324,27 @@ fn a_member_moved_to_another_tab_goes_with_its_new_tab_not_its_old_one() {
 }
 
 #[test]
-fn a_member_moved_to_another_workspace_is_followed_under_its_new_pane_id() {
+fn a_member_moved_to_another_workspace_keeps_its_recorded_pane() {
     let dir = sandbox();
+    let ledger = dir.path().join("state/loopherd/ledger.json");
+    let before = fs::read_to_string(&ledger).unwrap();
 
     quiet_success(&moved(dir.path(), ("w2:p1", "w2:t1"), ("w3:p2", "w3:t1")));
-    quiet_success(&workspace_closed(dir.path(), "w2"));
-    quiet_success(&tab_closed(dir.path(), "w2:t1"));
+
+    assert_eq!(fs::read_to_string(&ledger).unwrap(), before);
+}
+
+#[test]
+fn a_move_from_a_tab_the_member_already_left_changes_nothing() {
+    let dir = sandbox();
+
+    quiet_success(&moved(dir.path(), ("w1:p1", "w1:t1"), ("w1:p1", "w1:t4")));
+    quiet_success(&moved(dir.path(), ("w1:p1", "w1:t1"), ("w1:p1", "w1:t2")));
+    quiet_success(&tab_closed(dir.path(), "w1:t2"));
     assert!(recorded(dir.path()).is_empty());
 
-    quiet_success(&status(dir.path(), "w3:p2", "blocked"));
-    quiet_success(&workspace_closed(dir.path(), "w3"));
-    assert_eq!(recorded(dir.path()), ["lh-2 blocked", "lh-2 gone"]);
+    quiet_success(&tab_closed(dir.path(), "w1:t4"));
+    assert_eq!(recorded(dir.path()), ["lh-1 gone"]);
 }
 
 #[test]

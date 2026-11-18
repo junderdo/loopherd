@@ -85,7 +85,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D68](decisions/D68.md) | A manual `loopherd revive` skips members recorded on another herdr server's socket, says so per member, and never rewrites a recorded socket; members with none are revived as before. |
 | [D69](decisions/D69.md) | The ledger records each member's herdr tab, and the plugin hooks `tab.closed` and `workspace.closed`, so a member whose tab or workspace closed between watches shows up `gone`. |
 | [D70](decisions/D70.md) | A lead's `review_rounds`, a positive integer, resolves from its herd file's `[lead]`, else `[lead_defaults]`, else 3; the lead's prompt gets it as `{review_rounds}` and `loopherd herds` shows it with its source. Amends D31's `[lead_defaults]` keys. |
-| [D71](decisions/D71.md) | The plugin hooks `pane.moved`, and the hook points a member's ledger entry at its pane's new pane id, tab and workspace, so closing the old tab records no `gone` and closing the new one does. |
+| [D71](decisions/D71.md) | The plugin hooks `pane.moved`, and on a move within a workspace the hook points a member's `tab_id` at its pane's new tab; a move to another workspace changes nothing (LH-265). |
 
 ## Emerging model
 
