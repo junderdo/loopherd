@@ -164,26 +164,42 @@ pub fn remove(settings: &Path, now: SystemTime) -> Result<Outcome> {
 /// SessionStart. The PreToolUse hook only guards leads, and the
 /// UserPromptSubmit hook only clears pane labels.
 pub fn installed(settings: &Path) -> Result<bool> {
-    let bytes = match fs::read(settings) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e).with_context(|| format!("read {}", settings.display())),
-    };
-    let root: Value =
-        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", settings.display()))?;
-    let has_ours = |event: &str, subcommand: &str| {
-        root.pointer(&format!("/hooks/{event}"))
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|group| group.get("hooks").and_then(Value::as_array))
-            .flatten()
-            .any(|hook| is_ours(hook, subcommand))
+    let Some(root) = read_settings(settings)? else {
+        return Ok(false);
     };
     Ok(HOOKS
         .iter()
         .filter(|h| h.watched)
-        .all(|h| has_ours(h.event, h.subcommand)))
+        .all(|h| has_ours(&root, h.event, h.subcommand)))
+}
+
+/// Whether `settings` holds loopherd's UserPromptSubmit hook, which clears a
+/// pane label once the pane is prompted; false if the file is missing.
+pub fn prompt_hook_installed(settings: &Path) -> Result<bool> {
+    Ok(read_settings(settings)?
+        .is_some_and(|root| has_ours(&root, "UserPromptSubmit", "prompt-hook")))
+}
+
+/// `settings` parsed; `None` if it is missing.
+fn read_settings(settings: &Path) -> Result<Option<Value>> {
+    let bytes = match fs::read(settings) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("read {}", settings.display())),
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .with_context(|| format!("parse {}", settings.display()))
+}
+
+fn has_ours(root: &Value, event: &str, subcommand: &str) -> bool {
+    root.pointer(&format!("/hooks/{event}"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .any(|hook| is_ours(hook, subcommand))
 }
 
 /// Applies `change` to the settings object and writes it back only if it
@@ -621,6 +637,7 @@ mod tests {
     fn installs_a_quick_user_prompt_submit_hook_that_watch_does_not_need() {
         let (_dir, path) = settings_with(USER_SETTINGS);
         install(&path, Path::new(EXE), now()).unwrap();
+        assert!(prompt_hook_installed(&path).unwrap());
         let prompt_hook = json!({"type": "command", "command": format!("'{EXE}' prompt-hook || true"), "timeout": 5});
         assert_eq!(
             read(&path)["hooks"]["UserPromptSubmit"],
@@ -634,6 +651,7 @@ mod tests {
             .remove("UserPromptSubmit");
         fs::write(&path, no_prompt_hook.to_string()).unwrap();
         assert!(installed(&path).unwrap());
+        assert!(!prompt_hook_installed(&path).unwrap());
 
         remove(&path, later()).unwrap();
         assert!(read(&path)["hooks"].get("UserPromptSubmit").is_none());

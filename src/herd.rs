@@ -806,8 +806,10 @@ fn expand_home(path: &str, home: &Path) -> PathBuf {
 }
 
 /// Every herd file in `paths.herds`, sorted by herd name, with a usage line
-/// per template. Exits 1 if `config.toml` or any herd file is invalid.
-pub fn herds(paths: &Paths) -> Result<(String, i32)> {
+/// per template. Exits 1 if `config.toml` or any herd file is invalid; warns,
+/// without changing the exit, when panes are labelled but Claude's `settings`
+/// lack the prompt hook that clears a label.
+pub fn herds(paths: &Paths, settings: &Path) -> Result<(String, i32)> {
     let mut lines = Vec::new();
     let mut code = 0;
     let defaults = match crate::config::read(&config_file(paths)) {
@@ -819,6 +821,7 @@ pub fn herds(paths: &Paths) -> Result<(String, i32)> {
         }
     };
     let config = config_file(paths);
+    let mut hook_warning_at = None;
     if parses_as_toml(&config) {
         match crate::notify::load(&config) {
             Err(e) => {
@@ -829,6 +832,7 @@ pub fn herds(paths: &Paths) -> Result<(String, i32)> {
                 "warning: {}: [notify] is enabled with herdr = false, no command and no pane_label, so nothing is sent",
                 config.display()
             )),
+            Ok(Some(notify)) if notify.labels_panes() => hook_warning_at = Some(lines.len()),
             Ok(_) => {}
         }
     }
@@ -838,8 +842,8 @@ pub fn herds(paths: &Paths) -> Result<(String, i32)> {
             "no herds: add a herd file at {}/<herd>.toml",
             paths.herds.display()
         ));
-        return Ok((lines.join("\n"), code));
     }
+    let mut valid = Vec::new();
     for file in &files {
         let herd = file.file_stem().unwrap_or_default().to_string_lossy();
         match std::fs::read_to_string(file)
@@ -854,6 +858,7 @@ pub fn herds(paths: &Paths) -> Result<(String, i32)> {
                 };
                 lines.extend(describe(&herd, &parsed, &paused, defaults.as_ref()));
                 lines.extend(reading.warning(&herd).map(|w| format!("  {w}")));
+                valid.push(herd.into_owned());
             }
             Err(e) => {
                 let name = file.file_name().unwrap_or_default().to_string_lossy();
@@ -862,7 +867,37 @@ pub fn herds(paths: &Paths) -> Result<(String, i32)> {
             }
         }
     }
+    if let Some(at) = hook_warning_at
+        && let Some(warning) = prompt_hook_warning(&config, settings, &valid)
+    {
+        lines.insert(at, warning);
+    }
     Ok((lines.join("\n"), code))
+}
+
+/// A warning when `settings` lacks loopherd's prompt hook, or can't be read,
+/// without which a question's pane label stays until the pane's next session start.
+fn prompt_hook_warning(config: &Path, settings: &Path, herds: &[String]) -> Option<String> {
+    let problem = match crate::install_hook::prompt_hook_installed(settings) {
+        Ok(true) => return None,
+        Ok(false) => format!("loopherd's prompt hook is not in {}", settings.display()),
+        Err(e) => format!(
+            "loopherd's prompt hook can't be checked ({})",
+            format!("{e:#}").trim_end()
+        ),
+    };
+    let affected = match herds {
+        [] => String::new(),
+        [herd] => format!(" in herd {herd}"),
+        _ => format!(" in herds {}", herds.join(", ")),
+    };
+    Some(format!(
+        "warning: {}: [notify] pane_label is on but {problem}, \
+         so a pane label{affected} stays until its pane's next session; \
+         run scripts/install or loopherd install-hook, \
+         or pass herds --settings <file> if you installed into another file",
+        config.display(),
+    ))
 }
 
 /// `text` parsed as a herd file and checked as far as `add` and `lead` would
@@ -1097,7 +1132,7 @@ fn validate(template: &TemplateFile) -> Result<()> {
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::time::Duration;
+    use std::time::{Duration, UNIX_EPOCH};
 
     use super::*;
     use crate::herdr::fake::FakeHerdr;
@@ -1139,6 +1174,11 @@ args = ["--model", "opus"]
 
         fn path(&self) -> &Path {
             self.dir.path()
+        }
+
+        /// Claude's settings for this config; missing until a test writes it.
+        fn settings(&self) -> PathBuf {
+            self.dir.path().join("settings.json")
         }
     }
 
@@ -1810,7 +1850,7 @@ args = ["--model", "opus"]
                       [template.chat]\nparams = []\nprompt = \"go\"\n";
         let config = Config::with(&[("zissues", issues), ("prs", PR_HERD)]);
 
-        let (report, code) = herds(&config.paths()).unwrap();
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
 
         assert_eq!(
             report,
@@ -1830,7 +1870,7 @@ args = ["--model", "opus"]
                     [template.chat]\nparams = []\nprompt = \"go\"\n";
         let config = Config::with(&[("prs", herd)]);
 
-        let (report, code) = herds(&config.paths()).unwrap();
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
 
         let lines: Vec<&str> = report.lines().skip(3).collect();
         assert_eq!(
@@ -1849,7 +1889,7 @@ args = ["--model", "opus"]
         fs::create_dir(config.path().join("paused")).unwrap();
         fs::write(config.path().join("paused/prs"), "").unwrap();
 
-        let (report, code) = herds(&config.paths()).unwrap();
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
 
         let lines: Vec<&str> = report.lines().collect();
         assert_eq!(
@@ -1865,7 +1905,7 @@ args = ["--model", "opus"]
     #[test]
     fn herds_sorts_by_herd_name_not_file_name() {
         let config = Config::with(&[("prs-old", PR_HERD), ("prs", PR_HERD)]);
-        let (report, _) = herds(&config.paths()).unwrap();
+        let (report, _) = herds(&config.paths(), &config.settings()).unwrap();
         let headers: Vec<&str> = report.lines().filter(|l| !l.starts_with(' ')).collect();
         assert_eq!(
             headers[0],
@@ -1882,7 +1922,7 @@ args = ["--model", "opus"]
             ("z-bad", "repo = \"/r\"\n[template.t]\nparams = []\n"),
         ]);
 
-        let (report, code) = herds(&config.paths()).unwrap();
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
 
         let lines: Vec<&str> = report.lines().collect();
         assert!(
@@ -1907,7 +1947,7 @@ args = ["--model", "opus"]
         for (name, text) in files {
             fs::write(config.path().join("herds").join(name), text).unwrap();
         }
-        let (report, code) = herds(&config.paths()).unwrap();
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
         let report = report.replace(&config.path().display().to_string(), "CONFIG");
         (report, code)
     }
@@ -2031,7 +2071,7 @@ args = ["--model", "opus"]
             ..config.paths()
         };
         for paths in [config.paths(), missing] {
-            let (report, code) = herds(&paths).unwrap();
+            let (report, code) = herds(&paths, &config.settings()).unwrap();
             assert_eq!(
                 report,
                 format!(
@@ -2050,7 +2090,7 @@ args = ["--model", "opus"]
             let file = config.path().join("config.toml");
             fs::write(&file, "context_windw = 1000000\n").unwrap();
 
-            let (report, code) = herds(&config.paths()).unwrap();
+            let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
 
             let first = report.lines().next().unwrap();
             assert!(
@@ -2061,7 +2101,7 @@ args = ["--model", "opus"]
             assert_eq!(code, 1, "{report}");
         }
         let config = Config::with(&[("prs", PR_HERD)]);
-        let (report, code) = herds(&config.paths()).unwrap();
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
         assert!(!report.contains("invalid"), "{report}");
         assert_eq!(code, 0);
     }
@@ -2072,13 +2112,108 @@ args = ["--model", "opus"]
         let file = config.path().join("config.toml");
         fs::write(&file, "[notify]\nenabled = true\nherdr = false\n").unwrap();
 
-        let (report, code) = herds(&config.paths()).unwrap();
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
 
         assert!(
             report.starts_with(&format!(
                 "warning: {}: [notify] is enabled with herdr = false, no command and no pane_label",
                 file.display()
             )),
+            "{report}"
+        );
+        assert_eq!(code, 0, "{report}");
+    }
+
+    #[test]
+    fn herds_warns_when_pane_label_is_on_without_the_prompt_hook_and_still_exits_0() {
+        let config = Config::with(&[("prs", PR_HERD)]);
+        let file = config.path().join("config.toml");
+        fs::write(&file, "[notify]\nenabled = true\npane_label = true\n").unwrap();
+
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+
+        let warning = report.lines().next().unwrap();
+        assert!(
+            warning.starts_with(&format!(
+                "warning: {}: [notify] pane_label is on but loopherd's prompt hook is not in {}",
+                file.display(),
+                config.settings().display()
+            )),
+            "{report}"
+        );
+        assert!(warning.contains(" in herd prs "), "{report}");
+        assert!(
+            warning.contains(
+                "run scripts/install or loopherd install-hook, or pass herds --settings <file>"
+            ),
+            "{report}"
+        );
+        assert!(report.contains("loopherd add prs"), "{report}");
+        assert_eq!(code, 0, "{report}");
+    }
+
+    #[test]
+    fn herds_names_only_valid_herds_in_the_prompt_hook_warning() {
+        let config = Config::with(&[("a", PR_HERD), ("b", PR_HERD), ("bad", "repo = ")]);
+        fs::write(
+            config.path().join("config.toml"),
+            "[notify]\nenabled = true\npane_label = true\n",
+        )
+        .unwrap();
+
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+
+        let warning = report.lines().next().unwrap();
+        assert!(warning.contains(" in herds a, b stays "), "{report}");
+        assert!(report.contains("invalid bad.toml"), "{report}");
+        assert_eq!(code, 1, "{report}");
+    }
+
+    #[test]
+    fn herds_says_nothing_of_the_prompt_hook_once_it_is_installed_or_when_nothing_labels_panes() {
+        let config = Config::with(&[("prs", PR_HERD)]);
+        let file = config.path().join("config.toml");
+        for notify in [
+            "[notify]\nenabled = true\n",
+            "[notify]\nenabled = false\npane_label = true\n",
+        ] {
+            fs::write(&file, notify).unwrap();
+            let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+            assert!(!report.contains("prompt hook"), "{notify}: {report}");
+            assert_eq!(code, 0, "{report}");
+        }
+
+        fs::write(&file, "[notify]\nenabled = true\npane_label = true\n").unwrap();
+        crate::install_hook::install(&config.settings(), Path::new("/bin/loopherd"), UNIX_EPOCH)
+            .unwrap();
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+        assert!(!report.contains("warning"), "{report}");
+        assert_eq!(code, 0, "{report}");
+    }
+
+    #[test]
+    fn herds_warns_and_still_exits_0_when_claudes_settings_cannot_be_read() {
+        let config = Config::with(&[("prs", PR_HERD)]);
+        fs::write(
+            config.path().join("config.toml"),
+            "[notify]\nenabled = true\npane_label = true\n",
+        )
+        .unwrap();
+        fs::write(config.settings(), "{ not json").unwrap();
+
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+
+        let warning = report.lines().next().unwrap();
+        assert!(
+            warning.contains(&format!(
+                "[notify] pane_label is on but loopherd's prompt hook can't be checked (parse {}",
+                config.settings().display()
+            )),
+            "{report}"
+        );
+        assert!(warning.contains(" in herd prs "), "{report}");
+        assert!(
+            warning.contains("run scripts/install or loopherd install-hook"),
             "{report}"
         );
         assert_eq!(code, 0, "{report}");
@@ -2093,12 +2228,14 @@ args = ["--model", "opus"]
             "[notify]\nenabled = true\nherdr = false\npane_label = true\n",
         )
         .unwrap();
-        let (report, code) = herds(&config.paths()).unwrap();
+        crate::install_hook::install(&config.settings(), Path::new("/bin/loopherd"), UNIX_EPOCH)
+            .unwrap();
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
         assert!(!report.contains("warning"), "{report}");
         assert_eq!(code, 0, "{report}");
 
         fs::write(&file, "[notify]\nenabled = true\npane_label = 1\n").unwrap();
-        let (report, code) = herds(&config.paths()).unwrap();
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
         assert!(
             report.starts_with(&format!("invalid {}: [notify]", file.display())),
             "{report}"
@@ -2113,7 +2250,7 @@ args = ["--model", "opus"]
         let file = config.path().join("config.toml");
         fs::write(&file, "context_window = 0\n[notify]\nkinds = [\"done\"]\n").unwrap();
 
-        let (report, code) = herds(&config.paths()).unwrap();
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
 
         assert_eq!(report.matches("invalid").count(), 2, "{report}");
         assert!(report.contains("[notify]"), "{report}");
@@ -2130,7 +2267,7 @@ args = ["--model", "opus"]
         )
         .unwrap();
 
-        let (report, code) = herds(&config.paths()).unwrap();
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
 
         let first = report.lines().next().unwrap();
         assert!(
@@ -2309,7 +2446,7 @@ args = ["--model", "opus"]
         )
         .unwrap();
 
-        let (report, code) = herds(&config.paths()).unwrap();
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
 
         assert_eq!(code, 0, "{report}");
         assert!(
@@ -2333,7 +2470,7 @@ args = ["--model", "opus"]
         )
         .unwrap();
 
-        let (report, code) = herds(&config.paths()).unwrap();
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
 
         assert_eq!(code, 1, "{report}");
         assert!(report.starts_with("invalid "), "{report}");
@@ -2421,7 +2558,7 @@ args = ["--model", "opus"]
         let bad = format!("{LEAD_HERD}[lead]\nprompt = \"{{pane}}\"\n");
         let config = Config::with(&[("a", &ok), ("b", &bad)]);
 
-        let (report, code) = herds(&config.paths()).unwrap();
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
 
         assert_eq!(
             report,
