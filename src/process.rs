@@ -67,15 +67,22 @@ pub fn claude_pid_from_env(procs: &dyn Procs) -> Option<u32> {
 
 pub fn claude_pid(procs: &dyn Procs, env: Option<&str>, me: u32) -> Option<u32> {
     let pid: u32 = env?.parse().ok()?;
+    is_ancestor(procs, pid, me).then_some(pid)
+}
+
+/// `pid` is a parent of `me`, or a parent of one, up to 64 steps.
+pub fn is_ancestor(procs: &dyn Procs, pid: u32, me: u32) -> bool {
     let mut at = procs.parent(me);
     for _ in 0..64 {
-        let current = at.filter(|p| *p > 1)?;
+        let Some(current) = at.filter(|p| *p > 1) else {
+            return false;
+        };
         if current == pid {
-            return Some(pid);
+            return true;
         }
         at = procs.parent(current);
     }
-    None
+    false
 }
 
 /// The member's recorded process, if it is still that process.
