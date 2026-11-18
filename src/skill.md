@@ -391,8 +391,9 @@ UserPromptSubmit hook from `install-hook`.
   the PR. It deletes the origin branch last. If origin kept it because
   someone pushed to it meanwhile, check who before anything else: rerun
   with `--keep-branch`, never `--drop-branch`, unless those commits should
-  go. Any other failed delete leaves the rest done, and a rerun retries
-  it. `--keep-branch` never contacts origin. A lead
+  go. The delete runs the repo's pre-push hooks; if one refuses, release
+  prints its output. Any other failed delete leaves the rest done, and a
+  rerun retries it once the cause is fixed. `--keep-branch` never contacts origin. A lead
   may run it; it's part of feeding. `status --all` marks the entry
   `(released)`, its mailbox gets a `released` note, and its lead's watch
   announces it claimable again.

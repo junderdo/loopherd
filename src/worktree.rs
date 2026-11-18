@@ -246,6 +246,7 @@ impl Clearing {
         };
         let lease = format!("--force-with-lease=refs/heads/{branch}:{head}");
         let refspec = format!(":refs/heads/{branch}");
+        // No --no-verify: the repo's pre-push hooks get a say in deletes too.
         match remote_git(&self.repo, &["push", "--quiet", &lease, "origin", &refspec]) {
             Ok(_) => Ok(RemoteDelete::Deleted),
             Err(e) if lease_refused(&e) => Ok(RemoteDelete::Moved),
