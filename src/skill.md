@@ -443,23 +443,25 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
 - `loopherd retire <name>` marks a member finished in the ledger only;
   `--close` also closes its tab and removes its worktree and branch if
   they're clean and merged. Feed's `done` check does this for you. Retire
-  refuses an entry not yet retired while herdr still shows its agent and it
-  has no `done`, `question` or `handoff` report since its last start, so a
-  retire meant for an earlier run of the name can't kill a fresh one;
-  `--force` retires it anyway. A report before a revive still counts, a
-  member herdr no longer shows retires without a report, and an
-  already-retired entry takes `--close` as before. It also refuses, naming
+  refuses an entry not yet retired that herdr shows `working` or
+  `blocked`, whatever it reported, or shows idle (or done, or unknown)
+  with no `done`, `question` or `handoff` report since its last start, so a
+  retire meant for an earlier run of the name can't kill a fresh one. The
+  error says which; `--force` retires it anyway. A report before a revive
+  still counts, a member herdr doesn't list retires without a report, and
+  an already-retired entry takes `--close` as before. It also refuses, naming
   `--force`, when herdr doesn't answer within 5s, answers with an error or
   a reply loopherd can't parse, or runs another session than the member's;
   only no herdr server at all lets it through. A live lead rarely reports
-  `done`, so retiring one with no report since its start takes `--force`.
+  `done` and is often working, so retiring one usually takes `--force`.
 - **Re-feed a retired task** (its member was retired before it finished,
   e.g. a tab closed by accident or a rescoped card) with `loopherd release
   <name>`, then `loopherd feed <herd>`. Feed skips every name in the
   ledger until it's released, so a merged task isn't spawned again while
   its card is still open. Release refuses a member not retired, a lead, or
   one whose tab may be open (`loopherd retire --close <name>` first, with
-  `--force` if it's live with no report since its start). It
+  `--force` if herdr shows it working, blocked, or idle with no report
+  since its start). It
   removes the member's worktree, any leftover at the path the new member
   spawns into, its local branch and its branch on origin, so the new member
   starts afresh; when they hold commits not on the base (pushed or not) it
@@ -511,7 +513,8 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   member, lead included, isn't retired, ran on another herdr session, or
   may still be open (its agent or pane shows, even busy or moved), and
   while herdr can't be reached; `loopherd retire --close <name>` each
-  first (`--force` for one still live with no report since its start),
+  first (`--force` for one herdr shows working, blocked, or idle with no
+  report since its start),
   which also cleans up tabs, worktrees and branches that `herd remove`
   never touches. `--dry-run` lists what would go;
   `--keep-history` keeps the ledger entries and mailboxes for `stats`.
@@ -691,8 +694,8 @@ What differs from the shepherd:
   refuses to retire you from your own pane, and the hook also denies
   `loopherd retire` of a `lead-` name, or of a name it can't read such as
   `"$m"`, there; retire members by their spelled-out name. It always
-  denies `loopherd retire --force` there too: retire a member once it
-  reports, or once herdr shows it gone.
+  denies `loopherd retire --force` there too: retire a member once it is
+  idle and has reported, or once herdr no longer lists it.
   Your gates outlast your retirement: a retired lead's pane is still
   gated.
 - **Pausing is the human's.** The hook always denies `loopherd pause` and
