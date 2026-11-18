@@ -1111,7 +1111,7 @@ impl Drop for IsolatedServer {
 
 /// How a test ends the view popup.
 enum Close {
-    /// The view exits by itself, as on q: SIGTERM takes the same clean path.
+    /// The view exits by itself: on SIGTERM it restores the terminal and exits 143.
     ViewQuits,
     /// herdr closes the popup.
     PopupClose,
