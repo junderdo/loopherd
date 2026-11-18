@@ -1,0 +1,10 @@
+{
+  "session_id": "dcba7188-07a5-47eb-a4a4-f3c000b9514d",
+  "transcript_path": "/home/user/.claude/projects/-tmp-project/dcba7188-07a5-47eb-a4a4-f3c000b9514d.jsonl",
+  "cwd": "/tmp/project",
+  "scratchpad_dir": "/tmp/claude-1000/-tmp-project/dcba7188-07a5-47eb-a4a4-f3c000b9514d/scratchpad",
+  "prompt_id": "c5e54cb9-a259-4253-86e8-195d1d42bae3",
+  "permission_mode": "auto",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "typed answer: use postgres"
+}

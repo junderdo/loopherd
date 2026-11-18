@@ -1226,3 +1226,86 @@ fn only_the_members_own_stops_are_filed_across_a_nested_claude_and_a_branch() {
     assert_eq!(all[2]["session"], branched, "{all:?}");
     member.assert_live_state_untouched();
 }
+
+#[test]
+fn a_leads_question_labels_its_claude_pane_until_a_typed_prompt() {
+    if !live_enabled() {
+        return;
+    }
+    let workspace = assert_dev_session();
+    let state = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let name = format!("lh-live-label-{}", std::process::id());
+    let _cleanup = CloseTab(name.clone());
+    let out = spawn(
+        state.path(),
+        &[
+            "--repo",
+            env!("CARGO_MANIFEST_DIR"),
+            "--name",
+            &name,
+            "--workspace",
+            &workspace,
+        ],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let ledger = state.path().join("loopherd/ledger.json");
+    let mut entries: Value = serde_json::from_slice(&std::fs::read(&ledger).unwrap()).unwrap();
+    entries[&name]["role"] = "lead".into();
+    entries[&name]["herd"] = "cards".into();
+    std::fs::write(&ledger, entries.to_string()).unwrap();
+    std::fs::write(
+        config.path().join("config.toml"),
+        "[notify]\nenabled = true\nherdr = false\npane_label = true\n",
+    )
+    .unwrap();
+    let pane = entries[&name]["pane_id"].as_str().unwrap().to_string();
+    let in_pane = |args: &[&str]| {
+        let mut cmd = dev(env!("CARGO_BIN_EXE_loopherd"));
+        cmd.env("XDG_STATE_HOME", state.path())
+            .env("LOOPHERD_CONFIG_DIR", config.path())
+            .env("HERDR_PANE_ID", &pane)
+            .args(args);
+        cmd
+    };
+    let prompt_hook = |prompt: &str| {
+        let input = serde_json::json!({"hook_event_name": "UserPromptSubmit", "prompt": prompt});
+        let mut child = in_pane(&["prompt-hook"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.to_string().as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+    };
+    let shown = || herdr_ok(&["pane", "get", &pane])["result"]["pane"].clone();
+
+    let out = in_pane(&["report", "--kind", "question", "which DB?"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    let labelled = shown();
+    assert_eq!(labelled["display_agent"], format!("{name} asks: which DB?"));
+    assert_ne!(labelled["agent_status"], "blocked");
+    let listed = herdr_ok(&["agent", "list"])["result"]["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["pane_id"] == pane.as_str())
+        .cloned()
+        .unwrap();
+    assert_eq!(listed["display_agent"], format!("{name} asks: which DB?"));
+    assert_eq!(listed["name"], name.as_str());
+    assert_ne!(listed["agent_status"], "blocked");
+
+    prompt_hook("<task-notification>\n<status>completed</status>\n</task-notification>");
+    assert_eq!(shown()["display_agent"], format!("{name} asks: which DB?"));
+    prompt_hook("use postgres");
+    assert!(shown()["display_agent"].is_null(), "{}", shown());
+}
