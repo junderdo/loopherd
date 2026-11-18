@@ -231,17 +231,27 @@ fn a_lead_can_be_retired_from_its_pane_id_on_another_socket() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "retired lead-k\n");
 }
 
-/// Runs `loopherd retire <args> lh-1` with a `herdr` on PATH that shows `lh-1`
-/// working in pane `w1:p1`.
+/// Runs `loopherd retire <args> lh-1` with a running `herdr` on PATH that
+/// shows `lh-1` working in pane `w1:p1` and logs each call to `bin/calls`.
 fn retire_while_herdr_shows_it_working(state: &Path, args: &[&str]) -> Output {
     let bin = state.join("bin");
     fs::create_dir_all(&bin).unwrap();
     let herdr = bin.join("herdr");
+    let agents = r#"{"result": {"agents": [{"name": "lh-1", "pane_id": "w1:p1", "tab_id": "w1:t1", "agent_status": "working", "agent_session": null}]}}"#;
     fs::write(
         &herdr,
-        r#"#!/bin/sh
-echo '{"result": {"agents": [{"name": "lh-1", "pane_id": "w1:p1", "tab_id": "w1:t1", "agent_status": "working", "agent_session": null}]}}'
+        format!(
+            r#"#!/bin/sh
+echo "$@" >> {calls}
+case "$1 $2" in
+  "status server") echo '{{"running": true}}' ;;
+  "agent list") echo '{agents}' ;;
+  "workspace list") echo '{{"result": {{"workspaces": []}}}}' ;;
+  *) echo '{{"result": {{}}}}' ;;
+esac
 "#,
+            calls = bin.join("calls").display()
+        ),
     )
     .unwrap();
     use std::os::unix::fs::PermissionsExt;
@@ -260,21 +270,67 @@ echo '{"result": {"agents": [{"name": "lh-1", "pane_id": "w1:p1", "tab_id": "w1:
         .unwrap()
 }
 
+fn write_mailbox(state: &Path, lines: &[&str]) {
+    let reports = state.join("loopherd/reports");
+    fs::create_dir_all(&reports).unwrap();
+    fs::write(reports.join("lh-1.jsonl"), lines.join("\n") + "\n").unwrap();
+}
+
+const STARTED: &str = r#"{"at": "2026-11-01T09:00:00Z", "kind": "start"}"#;
+const DONE: &str = r#"{"at": "2026-11-01T10:00:00Z", "kind": "done", "text": "PR #9"}"#;
+
 #[test]
-fn a_member_at_work_without_a_report_is_refused_unless_forced() {
+fn a_member_at_work_without_a_report_is_refused_and_left_alone() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    write_mailbox(state.path(), &[DONE, STARTED]);
+
+    for args in [&[][..], &["--close"]] {
+        let out = retire_while_herdr_shows_it_working(state.path(), args);
+
+        assert!(!out.status.success(), "{args:?}: {out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "loopherd retire: herdr still shows lh-1 (working) and it has no done, question or handoff report since its last start; pass --force to retire it anyway\n"
+        );
+        assert!(!ledger_text(state.path()).contains("\"retired\": true"));
+    }
+}
+
+#[test]
+fn force_retires_a_member_at_work_without_a_report() {
     let state = tempfile::tempdir().unwrap();
     write_ledger(state.path());
 
-    let out = retire_while_herdr_shows_it_working(state.path(), &[]);
-
-    assert!(!out.status.success(), "{out:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        "loopherd retire: herdr still shows lh-1 (working) and it has no done, question or handoff report since its last start; pass --force to retire it anyway\n"
-    );
-    assert!(!ledger_text(state.path()).contains("\"retired\": true"));
-
     let out = retire_while_herdr_shows_it_working(state.path(), &["--force"]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "retired lh-1\n");
+    assert!(ledger_text(state.path()).contains("\"retired\": true"));
+}
+
+#[test]
+fn force_with_close_retires_a_member_at_work_and_looks_for_its_tab() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+
+    let out = retire_while_herdr_shows_it_working(state.path(), &["--force", "--close"]);
+
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.starts_with("retired lh-1\n"), "{stdout}");
+    assert!(ledger_text(state.path()).contains("\"retired\": true"));
+    let calls = fs::read_to_string(state.path().join("bin/calls")).unwrap();
+    assert!(calls.contains("workspace list"), "{calls}");
+}
+
+#[test]
+fn a_member_at_work_that_reported_done_since_its_start_retires_without_force() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    write_mailbox(state.path(), &[STARTED, DONE]);
+
+    let out = retire_while_herdr_shows_it_working(state.path(), &[]);
 
     assert!(out.status.success(), "{out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "retired lh-1\n");

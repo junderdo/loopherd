@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 
-use crate::herdr::{Agent, Herdr, MalformedReply, Pane};
+use crate::herdr::{Agent, Herdr, Pane, Server};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::matching::{by_name, live_agent, same_session, session_conflict};
 use crate::notify::forget_marks;
@@ -63,19 +63,52 @@ pub fn refuse_unfinished(
         return Ok(());
     };
     let force = "pass --force to retire it anyway";
-    // A herdr that can't be reached has no live panes, so nothing is at work.
-    let agents = match herdr.agents_within(HERDR_TIMEOUT) {
-        Ok(Some(agents)) => agents,
-        Ok(None) => bail!(
-            "herdr didn't list its agents within {}, so whether {name} is still at work is unknown; {force}",
-            humantime::format_duration(HERDR_TIMEOUT)
-        ),
-        Err(e) if e.downcast_ref::<MalformedReply>().is_some() => {
+    let unknown =
+        |why: String| anyhow!("{why}, so whether {name} is still at work is unknown; {force}");
+    let here = match herdr.server(HERDR_TIMEOUT) {
+        // No server means no live panes, so nothing is at work.
+        Ok(Server::Missing | Server::NotRunning { .. }) => return Ok(()),
+        Ok(Server::NoAnswer { .. }) => {
+            return Err(unknown(format!(
+                "herdr didn't answer within {}",
+                humantime::format_duration(HERDR_TIMEOUT)
+            )));
+        }
+        Ok(Server::Running { socket, .. }) => socket,
+        Err(e) => {
             return Err(e.context(format!(
                 "can't tell whether {name} is still at work; {force}"
             )));
         }
-        Err(_) => return Ok(()),
+    };
+    if let Some(theirs) = &record.socket {
+        match &here {
+            Some(here) if here == theirs => {}
+            Some(here) => bail!(
+                "{name} is on herdr session {}, not this one ({}); run retire there, or {force}",
+                theirs.display(),
+                here.display()
+            ),
+            None => {
+                return Err(unknown(
+                    "herdr didn't say which session it runs".to_string(),
+                ));
+            }
+        }
+    }
+    let agents = match herdr.agents_within(HERDR_TIMEOUT) {
+        Ok(Some(agents)) => agents,
+        Ok(None) => {
+            return Err(unknown(format!(
+                "herdr didn't list its agents within {}",
+                humantime::format_duration(HERDR_TIMEOUT)
+            )));
+        }
+        Err(e) => {
+            return Err(e.context(format!(
+                "can't tell whether {name} is still at work; {force}"
+            )));
+        }
     };
     let Some(agent) = live_agent(&record, &agents) else {
         return Ok(());
@@ -2240,20 +2273,6 @@ mod tests {
     }
 
     #[test]
-    fn forcing_past_the_refusal_retires_and_closes_it_as_before() {
-        let root = tempfile::tempdir().unwrap();
-        let reports = tempfile::tempdir().unwrap();
-        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
-        herdr.set_status("a", crate::herdr::AgentStatus::Working);
-        assert!(refuse_unfinished(&herdr, &ledger, "a", reports.path()).is_err());
-
-        close(&herdr, &mut ledger);
-
-        assert!(ledger.0["a"].retired);
-        assert!(herdr.tabs().is_empty());
-    }
-
-    #[test]
     fn a_live_member_that_reported_since_its_start_retires_without_force() {
         let root = tempfile::tempdir().unwrap();
         let reports = tempfile::tempdir().unwrap();
@@ -2311,18 +2330,54 @@ mod tests {
     }
 
     #[test]
-    fn a_herdr_that_never_answers_refuses_and_names_force() {
+    fn a_herdr_server_that_never_answers_refuses_and_names_force() {
         let root = tempfile::tempdir().unwrap();
         let reports = tempfile::tempdir().unwrap();
         let (mut herdr, ledger, _) = spawned_in_worktree(root.path(), "feat/new");
-        let (_never_opened, gate) = std::sync::mpsc::channel();
-        herdr.agents_gate = Some(std::sync::Mutex::new(gate));
+        herdr.server = Some(crate::herdr::Server::NoAnswer { socket: None });
 
         let err = refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap_err();
 
         assert_eq!(
             err.to_string(),
-            "herdr didn't list its agents within 5s, so whether a is still at work is unknown; pass --force to retire it anyway"
+            "herdr didn't answer within 5s, so whether a is still at work is unknown; pass --force to retire it anyway"
+        );
+    }
+
+    #[test]
+    fn an_agent_list_error_from_a_running_herdr_refuses_and_names_force() {
+        let root = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let (mut herdr, ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        herdr.server = Some(crate::herdr::Server::Running {
+            socket: Some(FAKE_SOCKET.into()),
+            version: None,
+        });
+        herdr.set_unreachable(true);
+
+        let err = refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .starts_with("can't tell whether a is still at work; pass --force"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_member_on_another_herdr_session_is_refused_and_named_there() {
+        let root = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let (mut herdr, ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        herdr.socket = Some("/run/other.sock".into());
+
+        let err = refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "a is on herdr session {FAKE_SOCKET}, not this one (/run/other.sock); run retire there, or pass --force to retire it anyway"
+            )
         );
     }
 
