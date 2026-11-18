@@ -18,8 +18,9 @@ use crate::worktree::{Fate, Plan, RemoteDelete, plan_clear, same_dir};
 /// by that name, after clearing its worktree and branch per `fate` so the
 /// new member starts afresh. Refuses, changing nothing, a live entry, a
 /// lead, one whose tab may still be open, a checkout it would lose work
-/// from, or (unless dropping) an origin branch an open PR is on. Deletes
-/// origin's branch last, after the ledger says released. Rerunning it on a
+/// from, or (unless dropping) an origin branch an open PR is on. Marks the
+/// entry released last, only once origin's branch is gone, so a failed
+/// delete leaves it unreleased for a rerun to finish. Rerunning it on a
 /// released entry clears and forgets again. Pushes one line per action to
 /// `out`.
 #[allow(clippy::too_many_arguments)]
@@ -94,7 +95,6 @@ pub fn release(
     if let (Some(branch), Some(head)) = (branch, &clearing.head) {
         out.push(format!("deleted branch {branch} (was {})", short(head)));
     }
-    mark_released(ledger, &record, &others, now, mailboxes, out)?;
     if clearing.dropped > 0 {
         out.push(format!(
             "dropped {} commit{} not on {} or another origin branch",
@@ -107,8 +107,7 @@ pub fn release(
         let deleted = clearing.delete_remote().with_context(|| {
             format!(
                 "couldn't delete {remote} (was {}); fix the cause and rerun release to retry. \
-                 {name} is already released, so until that rerun deletes it, a feed may \
-                 start a new {name} from the leftover branch",
+                 {name} stays unreleased, so feed won't spawn it, until that rerun deletes it",
                 short(head)
             )
         })?;
@@ -121,7 +120,7 @@ pub fn release(
         }
         out.push(format!("deleted {remote} (was {})", short(head)));
     }
-    Ok(())
+    mark_released(ledger, &record, &others, now, mailboxes, out)
 }
 
 /// Refuses deleting `branch` on origin while an open PR is on it, unless
@@ -616,8 +615,8 @@ mod tests {
             out[1..],
             [
                 format!("deleted branch feat/zpr-1 (was {})", &unpushed[..12]),
-                "released zpr-1: feed may spawn it again".into(),
                 "dropped 1 commit not on origin/main or another origin branch".into(),
+                "released zpr-1: feed may spawn it again".into(),
             ]
         );
         assert!(!has_branch(&s.repo, "feat/zpr-1"));
@@ -668,9 +667,9 @@ mod tests {
             out[1..],
             [
                 format!("deleted branch feat/zpr-1 (was {})", &pushed[..12]),
-                "released zpr-1: feed may spawn it again".into(),
                 "dropped 1 commit not on origin/main or another origin branch".into(),
                 format!("deleted origin/feat/zpr-1 (was {})", &pushed[..12]),
+                "released zpr-1: feed may spawn it again".into(),
             ]
         );
         assert!(!has_branch(&s.root.path().join("origin.git"), "feat/zpr-1"));
@@ -862,7 +861,7 @@ mod tests {
         );
         assert_eq!(head_of(&origin(&s), "feat/zpr-1"), head(&elsewhere));
         assert!(!wt.exists());
-        assert!(s.ledger.0["zpr-1"].released_at.is_some());
+        assert_eq!(s.ledger.0["zpr-1"].released_at, None);
     }
 
     /// Installs a pre-push hook in the member's repo that prints `say` on
@@ -902,9 +901,8 @@ mod tests {
         assert!(
             shown.starts_with(&format!(
                 "couldn't delete origin/feat/zpr-1 (was {}); fix the cause and rerun release \
-                 to retry. zpr-1 is already released, so until that rerun deletes it, a feed \
-                 may start a new zpr-1 from the leftover branch: the push was refused, \
-                 perhaps by a pre-push hook: ",
+                 to retry. zpr-1 stays unreleased, so feed won't spawn it, until that rerun \
+                 deletes it: the push was refused, perhaps by a pre-push hook: ",
                 &head(&s.repo)[..12]
             )),
             "{shown}"
@@ -917,31 +915,57 @@ mod tests {
         assert!(has_branch(&origin(&s), "feat/zpr-1"));
         assert!(!wt.exists());
         assert!(!has_branch(&s.repo, "feat/zpr-1"));
-        assert!(s.ledger.0["zpr-1"].released_at.is_some());
+        assert_eq!(s.ledger.0["zpr-1"].released_at, None);
+    }
+
+    /// The names feed would spawn now for task `1` of herd `prs` on `s.repo`.
+    fn feed_would_spawn(s: &Setup) -> Vec<String> {
+        let herds = s.root.path().join("herds");
+        std::fs::create_dir_all(&herds).unwrap();
+        std::fs::write(
+            herds.join("prs.toml"),
+            format!(
+                "repo = {:?}\n[template.pr]\nparams = [\"n\"]\nname = \"zpr-{{n}}\"\n\
+                 prompt = \"go\"\n[queue]\ntemplate = \"pr\"\nsource = \"true\"\nmax = 1\n",
+                s.repo.display().to_string()
+            ),
+        )
+        .unwrap();
+        let paths = crate::herd::Paths {
+            herds,
+            home: PathBuf::from("/home/me"),
+            feed_lock: s.root.path().join("feed.lock"),
+            paused: s.root.path().join("paused"),
+        };
+        let queue = crate::herd::queue(&paths, "prs").unwrap();
+        crate::feed::claimable(&s.ledger, &paths, &queue, "prs", 0, "1\n").unwrap()
     }
 
     #[test]
-    fn a_rerun_after_the_pre_push_hook_is_fixed_deletes_the_origin_branch() {
+    fn a_refused_origin_delete_leaves_the_name_unclaimable_until_a_rerun_deletes_it() {
         let mut s = Setup::new();
         pushed_on_the_base(&mut s);
         pre_push_hook(&s, "no deletes on fridays", 1);
-        let err = s.release("zpr-1", Fate::Clear).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("no deletes on fridays"),
-            "{err:#}"
-        );
-        let ran = pre_push_hook(&s, "ok", 0);
 
-        let out = s.release("zpr-1", Fate::Clear).unwrap();
+        s.release("zpr-1", Fate::Drop).unwrap_err();
+
+        assert!(has_branch(&origin(&s), "feat/zpr-1"));
+        assert_eq!(feed_would_spawn(&s), Vec::<String>::new());
+        assert_eq!(s.ledger.0["zpr-1"].released_at, None);
+
+        pre_push_hook(&s, "ok", 0);
+        let out = s.release("zpr-1", Fate::Drop).unwrap();
 
         assert!(
-            out.last()
-                .unwrap()
-                .starts_with("deleted origin/feat/zpr-1 (was "),
+            out[out.len() - 2].starts_with("deleted origin/feat/zpr-1 (was "),
             "{out:?}"
         );
+        assert_eq!(
+            out.last().unwrap(),
+            "released zpr-1: feed may spawn it again"
+        );
         assert!(!has_branch(&origin(&s), "feat/zpr-1"));
-        assert!(ran.exists());
+        assert_eq!(feed_would_spawn(&s), ["zpr-1"]);
     }
 
     #[test]
@@ -953,9 +977,7 @@ mod tests {
         let out = s.release("zpr-1", Fate::Clear).unwrap();
 
         assert!(
-            out.last()
-                .unwrap()
-                .starts_with("deleted origin/feat/zpr-1 (was "),
+            out[out.len() - 2].starts_with("deleted origin/feat/zpr-1 (was "),
             "{out:?}"
         );
         assert!(!has_branch(&origin(&s), "feat/zpr-1"));
