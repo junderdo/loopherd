@@ -1,5 +1,5 @@
 //! `loopherd view` through the binary on a pty, run as the herdr plugin's
-//! popup runs it, with no `HERDR_PANE_ID` (D63). Needs util-linux `script`.
+//! popup runs it, with no `HERDR_PANE_ID` (D65). Needs util-linux `script`.
 #![cfg(target_os = "linux")]
 
 mod fakes;

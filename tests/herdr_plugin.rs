@@ -1,5 +1,5 @@
 //! The herdr plugin in `herdr-plugin/`: its manifest, the wrapper its
-//! commands run loopherd through (D62), and the herd view popup (D63).
+//! commands run loopherd through (D62), and the herd view popup (D65).
 
 mod fakes;
 
