@@ -49,6 +49,7 @@ mod worktree;
 
 use std::io::{Read, Write};
 use std::num::NonZeroUsize;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -70,7 +71,7 @@ use crate::process::Procs;
 use crate::prompt::prompt;
 use crate::release::release;
 use crate::report::{Filter, Kind, Reporter, report, reports};
-use crate::retire::{refuse_own_lead, retire, retire_and_close};
+use crate::retire::{refuse_own_lead, refuse_unfinished, retire, retire_and_close};
 use crate::revive::{ReviveRequest, revive};
 use crate::spawn::{Checkout, Prompt, SHELL_TIMEOUT, SpawnRequest, spawn};
 use crate::status::{Format, Queues};
@@ -181,12 +182,17 @@ enum Command {
         herds: HerdsArg,
     },
     /// Mark a ledger entry finished so revive leaves it alone. Without --close, changes only the ledger.
+    /// Refuses a member herdr shows working or blocked, or shows idle with no
+    /// done, question or handoff report since its last start, unless --force.
     Retire {
         name: String,
         /// Also close its tab, and remove its worktree and branch if clean and merged.
         /// Works on an already-retired entry, to finish or retry cleanup.
         #[arg(long)]
         close: bool,
+        /// Retire it even if it may still be at work.
+        #[arg(long)]
+        force: bool,
     },
     /// Let `feed` spawn a retired member's name again, for a task it left
     /// unfinished. Deletes its local branch and worktree so the new member
@@ -295,13 +301,22 @@ enum Command {
     /// sends it /clear, waits for the ledger to follow the new session, then
     /// prompts it to read its handoff. Refuses unless its last stop is finished.
     Restart {
-        name: String,
+        #[arg(required_unless_present = "own")]
+        name: Option<String>,
         /// Skip the checks that it handed off and is finished since. A /clear sent
         /// mid-turn waits for that turn, then drops whatever the handoff doesn't
         /// record: that turn's work, background tasks and crons.
         #[arg(long)]
         force: bool,
+        /// Restart the member in this pane once its turn ends: starts a detached
+        /// waiter that runs the plain restart after its stop since the handoff
+        /// reads finished, giving up after 30 minutes with a note.
+        #[arg(long = "self", id = "own", conflicts_with_all = ["name", "force"])]
+        own: bool,
     },
+    /// The detached waiter `restart --self` starts.
+    #[command(hide = true)]
+    RestartWait { name: String },
     /// Leave a report for the shepherd from the member running in this pane.
     /// The one command members run against the real state dir.
     Report {
@@ -339,7 +354,7 @@ enum Command {
     /// pane.closed, tab.closed, workspace.closed and pane.moved: records a
     /// member going blocked, or its pane, tab or workspace going, in its
     /// mailbox for the next watch, and follows a member's pane moved to
-    /// another tab of its workspace in the ledger. Reads HERDR_PLUGIN_EVENT
+    /// another tab or workspace in the ledger. Reads HERDR_PLUGIN_EVENT
     /// and HERDR_PLUGIN_EVENT_JSON; any other pane, tab or workspace records
     /// nothing.
     HerdrEventHook,
@@ -531,7 +546,7 @@ struct SpawnArgs {
     /// Run in a worktree for this branch, created if needed.
     #[arg(long)]
     worktree: Option<String>,
-    /// Workspace label; defaults to $HERDR_WORKSPACE_ID.
+    /// Workspace label; defaults to this pane's workspace.
     #[arg(long)]
     workspace: Option<String>,
     #[arg(long, conflicts_with = "prompt_file")]
@@ -672,7 +687,7 @@ fn main() -> ExitCode {
         } => ("feed", run_feed(herd, dry_run, ready_timeout)),
         Command::Pause { herds, reason } => ("pause", run_pause(&herds, reason.as_deref())),
         Command::Resume { herds } => ("resume", run_resume(&herds)),
-        Command::Retire { name, close } => ("retire", run_retire(&name, close)),
+        Command::Retire { name, close, force } => ("retire", run_retire(&name, close, force)),
         Command::Release {
             name,
             keep_branch,
@@ -689,7 +704,13 @@ fn main() -> ExitCode {
             text,
             text_file,
         } => ("tell", run_tell(&name, text, text_file)),
-        Command::Restart { name, force } => ("restart", run_restart(&name, force)),
+        Command::Restart {
+            name: Some(name),
+            force,
+            own: false,
+        } => ("restart", run_restart(&name, force)),
+        Command::Restart { .. } => ("restart", run_restart_self()),
+        Command::RestartWait { name } => ("restart-wait", run_restart_wait(&name)),
         Command::Status { all, strays, json } => ("status", run_status(all, strays, json)),
         Command::Stats { herd, since, json } => ("stats", run_stats(herd, since, json)),
         Command::View { all, strays } => ("view", run_view(all, strays)),
@@ -861,13 +882,15 @@ fn run_resume(herds: &HerdsArg) -> Result<i32> {
     Ok(done.code)
 }
 
-fn run_retire(name: &str, close: bool) -> Result<i32> {
+fn run_retire(name: &str, close: bool, force: bool) -> Result<i32> {
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let pane_id = std::env::var("HERDR_PANE_ID").ok();
     let socket = socket_from_env();
+    let lineage = own_lineage();
     let pane = pane_id.as_deref().map(|id| tool_hook::Pane {
         id,
         socket: socket.as_deref(),
+        lineage: &lineage,
     });
     refuse_own_lead(
         &ledger,
@@ -876,6 +899,9 @@ fn run_retire(name: &str, close: bool) -> Result<i32> {
         &process::ProcFs,
         std::process::id(),
     )?;
+    if !force {
+        refuse_unfinished(&CliHerdr, &ledger, name, &ledger.reports_dir()?)?;
+    }
     if !close {
         retire(&mut ledger, name, SystemTime::now())?;
         println!("retired {name}");
@@ -884,7 +910,6 @@ fn run_retire(name: &str, close: bool) -> Result<i32> {
         }
         return Ok(0);
     }
-    let own_pane = std::env::var("HERDR_PANE_ID").ok();
     let mailboxes = ledger.reports_dir()?;
     let mut lines = vec![];
     let result = retire_and_close(
@@ -893,7 +918,7 @@ fn run_retire(name: &str, close: bool) -> Result<i32> {
         name,
         SystemTime::now(),
         &mailboxes,
-        own_pane.as_deref(),
+        pane.as_ref(),
         &mut lines,
     );
     for line in lines {
@@ -1150,6 +1175,8 @@ fn run_restart(name: &str, force: bool) -> Result<i32> {
         name,
         force,
         own_pane: own_pane.as_deref(),
+        own_lineage: &own_lineage(),
+        pane_shell: &pane_shell,
         state: &state,
         paths: &paths,
         settle_timeout: Duration::from_secs(30),
@@ -1163,12 +1190,92 @@ fn run_restart(name: &str, force: bool) -> Result<i32> {
     Ok(0)
 }
 
+const WAITER_FD: &str = "LOOPHERD_RESTART_WAITER_FD";
+
+fn run_restart_self() -> Result<i32> {
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let state = ledger.dir()?;
+    let scheduled = restart::schedule_self(
+        &CliHerdr,
+        &ledger,
+        own_pane().as_deref(),
+        &own_lineage(),
+        &state,
+    )?;
+    let fd = scheduled.waiter.as_raw_fd();
+    // The waiter inherits the lock's open file, so the claim lasts as long as it runs.
+    // SAFETY: fcntl only clears close-on-exec on a descriptor the lock keeps open.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, 0) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("pass the waiter its lock");
+    }
+    let exe = std::env::current_exe().context("find the loopherd binary")?;
+    let mut waiter = std::process::Command::new(&exe);
+    waiter
+        .args(["restart-wait", &scheduled.name])
+        .env(WAITER_FD, fd.to_string())
+        .env_remove("HERDR_PANE_ID")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // SAFETY: setsid is async-signal-safe. A session of its own outlives the
+    // calling Claude's shells and their hangups.
+    unsafe {
+        waiter.pre_exec(|| match libc::setsid() {
+            -1 => Err(std::io::Error::last_os_error()),
+            _ => Ok(()),
+        });
+    }
+    waiter
+        .spawn()
+        .with_context(|| format!("start {} restart-wait", exe.display()))?;
+    // Dropping unlocks the open file the waiter shares; exiting only closes ours.
+    std::mem::forget(scheduled.waiter);
+    println!("{}", scheduled.message);
+    Ok(0)
+}
+
+fn run_restart_wait(name: &str) -> Result<i32> {
+    let fd = std::env::var(WAITER_FD)
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+        .context("restart-wait runs only from `loopherd restart --self`, which holds its claim")?;
+    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let state = ledger.dir()?;
+    let _claim = restart::adopt_claim(&state, name, fd)?;
+    let paths = Paths::from_env().inspect_err(|e| {
+        let text = format!("self-restart failed: {e:#}");
+        let note = report::Entry::new(SystemTime::now(), report::Body::Note { text });
+        let _ = report::append(&state.join("reports"), name, &note);
+    })?;
+    let req = restart::RestartRequest {
+        name,
+        force: false,
+        own_pane: None,
+        own_lineage: &[],
+        pane_shell: &pane_shell,
+        state: &state,
+        paths: &paths,
+        settle_timeout: Duration::from_secs(30),
+        poll: Duration::from_millis(250),
+        live: &live_session,
+    };
+    restart::wait_then_restart(
+        &CliHerdr,
+        &mut ledger,
+        &req,
+        restart::SELF_RESTART_TIMEOUT,
+        Duration::from_secs(2),
+    )?;
+    Ok(0)
+}
+
 fn run_report(kind: Kind, as_name: Option<String>, text: &str) -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let own_pane = own_pane();
     let own_socket = socket_from_env();
     let who = Reporter {
         own_pane: own_pane.as_deref(),
+        own_lineage: &own_lineage(),
         own_socket: own_socket.as_deref(),
         as_name: as_name.as_deref(),
     };
@@ -1262,6 +1369,7 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         timeout: timeout.map(Duration::from_secs),
         poll: Duration::from_secs(2),
         own_pane: own_pane.as_deref(),
+        own_lineage: &own_lineage(),
         own_socket: own_socket.as_deref(),
         herd_files: Some(&herd_paths),
         check_timeout: remote_timeout,
@@ -1406,6 +1514,7 @@ fn run_stop_hook() -> Result<i32> {
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let pane = stop_hook::Pane {
         id: &pane,
+        lineage: &own_lineage(),
         socket: socket.as_deref(),
         claude_pid: process::claude_pid_from_env(&process::ProcFs),
     };
@@ -1455,6 +1564,7 @@ fn run_herdr_event_hook() -> Result<i32> {
             &json,
             socket_from_env().as_deref(),
             SystemTime::now(),
+            &pane_shell,
         )
     };
     if let Err(e) = record() {
@@ -1475,6 +1585,7 @@ fn run_session_hook() -> Result<i32> {
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let pane = session_hook::Pane {
         id: &pane,
+        lineage: &own_lineage(),
         socket: socket.as_deref(),
         claude_pid: process::claude_pid_from_env(&process::ProcFs),
     };
@@ -1523,6 +1634,7 @@ fn run_tool_hook() -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let pane = tool_hook::Pane {
         id: &pane,
+        lineage: &own_lineage(),
         socket: Some(&socket),
     };
     let switches = |herd: &str| herd::lead_switches(&Paths::from_env()?, herd);
@@ -1650,6 +1762,20 @@ fn run_install_hook(
     Ok(0)
 }
 
+/// The shell herdr started in `pane`, which a moved member's old pane id is kept for.
+fn pane_shell(pane: &str) -> Result<Option<Process>> {
+    let pid = CliHerdr.shell_pid(pane)?;
+    Ok(pid.and_then(|pid| {
+        let start = process::ProcFs.start(pid)?;
+        Some(Process { pid, start })
+    }))
+}
+
+/// loopherd and its ancestors, which carry a moved member's old pane id.
+fn own_lineage() -> Vec<ledger::Process> {
+    process::lineage(&process::ProcFs, std::process::id())
+}
+
 fn own_pane() -> Option<String> {
     std::env::var("HERDR_PANE_ID")
         .ok()
@@ -1687,7 +1813,7 @@ fn run_spawn(args: SpawnArgs) -> Result<i32> {
         member_of: None,
     };
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    let inherited = inherited_workspace();
+    let inherited = inherited_workspace(&ledger)?;
     let spawned = spawn(&CliHerdr, &mut ledger, &req, inherited.as_deref())?;
     let (message, code) = spawned.report(&req.name);
     println!("{message}");
@@ -1703,7 +1829,8 @@ fn run_add(args: AddArgs) -> Result<i32> {
         claude_args: args.claude_args,
         ready_timeout: Duration::from_secs(args.ready_timeout),
     };
-    let inherited = inherited_workspace();
+    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let inherited = inherited_workspace(&ledger)?;
     if args.dry_run {
         println!(
             "{}",
@@ -1711,7 +1838,6 @@ fn run_add(args: AddArgs) -> Result<i32> {
         );
         return Ok(0);
     }
-    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let added = add(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
     let (message, code) = added.spawned.report(&added.name);
     println!("{message}");
@@ -1729,7 +1855,7 @@ fn run_lead(args: LeadArgs) -> Result<i32> {
         ready_timeout: Duration::from_secs(args.ready_timeout),
     };
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    let inherited = inherited_workspace();
+    let inherited = inherited_workspace(&ledger)?;
     let (message, code) = lead::run(
         &CliHerdr,
         &mut ledger,
@@ -1756,13 +1882,14 @@ fn run_feed(herd: String, dry_run: bool, ready_timeout: u64) -> Result<i32> {
         ready_timeout: Duration::from_secs(ready_timeout),
         command_timeout: remote_timeout()?,
         own_pane: std::env::var("HERDR_PANE_ID").ok(),
+        own_lineage: own_lineage(),
         own_socket: socket_from_env(),
         mailboxes: ledger.reports_dir()?,
         after_merge_timeout: AFTER_MERGE_TIMEOUT,
         owner: own_process()?,
         procs: &process::ProcFs,
     };
-    let inherited = inherited_workspace();
+    let inherited = inherited_workspace(&ledger)?;
     let mut fed = feed(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
     drop(lock);
     for line in &fed.lines {
@@ -1845,10 +1972,17 @@ fn run_herds(settings: Option<PathBuf>) -> Result<i32> {
     Ok(code)
 }
 
-fn inherited_workspace() -> Option<String> {
-    std::env::var("HERDR_WORKSPACE_ID")
+fn inherited_workspace(ledger: &dyn Ledger) -> Result<Option<String>> {
+    let env = std::env::var("HERDR_WORKSPACE_ID")
         .ok()
-        .filter(|v| !v.is_empty())
+        .filter(|v| !v.is_empty());
+    Ok(spawn::inherited_workspace(
+        &ledger.entries().context("ledger")?,
+        own_pane().as_deref(),
+        &own_lineage(),
+        socket_from_env().as_deref(),
+        env,
+    ))
 }
 
 #[cfg(test)]

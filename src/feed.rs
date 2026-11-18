@@ -31,6 +31,8 @@ pub struct FeedRequest<'a> {
     pub command_timeout: Duration,
     /// The pane running loopherd, whose tab retire never closes.
     pub own_pane: Option<String>,
+    /// loopherd and its ancestors, which carry a moved member's old pane id.
+    pub own_lineage: Vec<Process>,
     /// `$HERDR_SOCKET_PATH`: which herdr `own_pane` is in.
     pub own_socket: Option<PathBuf>,
     /// Where members' mailboxes live, for after_merge's notes.
@@ -258,6 +260,7 @@ fn unclaimed(
         ready_timeout: Duration::ZERO,
         command_timeout: Duration::ZERO,
         own_pane: None,
+        own_lineage: vec![],
         own_socket: None,
         mailboxes: PathBuf::new(),
         after_merge_timeout: Duration::ZERO,
@@ -390,10 +393,21 @@ fn reap(
             }
             Ok(true) => {
                 let mut out = vec![];
-                let own_pane = req.own_pane.as_deref();
+                let own_pane = req.own_pane.as_deref().map(|id| Pane {
+                    id,
+                    socket: req.own_socket.as_deref(),
+                    lineage: &req.own_lineage,
+                });
                 let now = SystemTime::now();
-                match retire_and_close(herdr, ledger, name, now, &req.mailboxes, own_pane, &mut out)
-                {
+                match retire_and_close(
+                    herdr,
+                    ledger,
+                    name,
+                    now,
+                    &req.mailboxes,
+                    own_pane.as_ref(),
+                    &mut out,
+                ) {
                     Ok(()) => {
                         lines.push(out.join("; "));
                         reaped.retired += 1;
@@ -426,7 +440,7 @@ impl HeldBack {
     fn note(&self) -> String {
         let command = &self.command;
         let mut why = match self.switch {
-            Switch::Pause | Switch::ForceRestart => format!(
+            Switch::Pause | Switch::ForceRestart | Switch::ForceRetire => format!(
                 "`{command}` is `loopherd {}`, which a lead can never run",
                 self.switch.name()
             ),
@@ -446,7 +460,9 @@ impl HeldBack {
 
     fn hint(&self) -> String {
         match self.switch {
-            Switch::Pause | Switch::ForceRestart => "run its commands by hand".into(),
+            Switch::Pause | Switch::ForceRestart | Switch::ForceRetire => {
+                "run its commands by hand".into()
+            }
             switch => format!("run its commands by hand, or turn {} on", switch.name()),
         }
     }
@@ -463,6 +479,7 @@ fn gate(
     let pane = req.own_pane.as_deref().map(|id| Pane {
         id,
         socket: req.own_socket.as_deref(),
+        lineage: &req.own_lineage,
     });
     let Some(lead) = pane.map(|p| lead_in(ledger, &p)).transpose()?.flatten() else {
         return Ok(None);
@@ -940,6 +957,7 @@ mod tests {
                 after_merge_timeout: Duration::from_secs(2),
                 owner: OWNER,
                 procs: &*LIVE,
+                own_lineage: vec![],
             }
         }
 
@@ -995,6 +1013,8 @@ mod tests {
         AgentRecord {
             name: name.into(),
             pane_id: "w1:p9".into(),
+            env_pane_id: None,
+            env_pane_shell: None,
             tab_id: None,
             session_id: None,
             repo: "/src/repo".into(),
@@ -1707,6 +1727,7 @@ mod tests {
             ready_timeout: Duration::from_secs(60),
             command_timeout: Duration::from_secs(1),
             own_pane: None,
+            own_lineage: vec![],
             own_socket: None,
             mailboxes: config.path().join("reports"),
             after_merge_timeout: Duration::from_secs(5),
@@ -1805,6 +1826,7 @@ mod tests {
             after_merge_timeout: Duration::from_secs(5),
             owner: OWNER,
             procs: &*LIVE,
+            own_lineage: vec![],
         };
 
         let fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
@@ -1859,6 +1881,7 @@ mod tests {
             ready_timeout: Duration::from_secs(60),
             command_timeout: Duration::from_secs(1),
             own_pane: None,
+            own_lineage: vec![],
             own_socket: None,
             mailboxes: PathBuf::from("/nonexistent/reports"),
             after_merge_timeout: Duration::from_secs(5),
@@ -1992,6 +2015,7 @@ mod tests {
             ready_timeout: Duration::from_secs(60),
             command_timeout: Duration::from_secs(1),
             own_pane: None,
+            own_lineage: vec![],
             own_socket: None,
             mailboxes: PathBuf::from("/nonexistent/reports"),
             after_merge_timeout: Duration::from_secs(5),
@@ -2293,6 +2317,7 @@ mod tests {
                     ready_timeout: Duration::ZERO,
                     command_timeout: Duration::from_secs(1),
                     own_pane: None,
+                    own_lineage: vec![],
                     own_socket: None,
                     mailboxes: PathBuf::from("/nonexistent/reports"),
                     after_merge_timeout: Duration::from_secs(5),

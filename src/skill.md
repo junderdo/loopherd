@@ -141,8 +141,8 @@ Init never launches an agent.
    |---|---|
    | `<member> done <time> <text>` | A finished member's report, usually with its output's link. Verify it. |
    | `<member> question <time> <text>` | It stopped on a question. Relay it to the human; a lead relays it with its own question report, unless it's a design question and `design_escalation` is on. |
-   | `<member> note <time> <text>` | Information only; nothing waits on it. |
-   | `<member> handoff <time> <text>` | It passed its context limit and wrote its handoff. Restart it (see Handoffs) if you read it. |
+   | `<member> note <time> <text>` | Information only, except a `self-restart …` note: that member's handoff is still waiting on a restart (see Handoffs). |
+   | `<member> handoff <time> <text>` | It passed its context limit and wrote its handoff. Restart it (see Handoffs) if you read it; a lead restarts itself. |
    | `<member> paused  1 shell, 1 cron` | Turn ended with work in flight that can wake it again. Another paused stop is quiet. |
    | `<member> paused  background unknown` | Turn ended and Claude didn't say what's in flight (also `crons unknown`, or `1 shell; crons unknown`). |
    | `<member> finished` | Turn ended with nothing in flight, after a `done` or `question`. |
@@ -156,7 +156,7 @@ Init never launches an agent.
    | `<herd> out of work` | The herd isn't paused, claimable is 0, its `backlog` lists nothing unready (or it has none), and no worker is open. A lead's watch prints it for its herd; the shepherd's, every 60s, for each unled herd with a herd file it reads. Once per streak: it prints again only after claimable or unready rises above 0 or a worker opens, even one that opened and retired while no watch ran. The shepherd's doesn't repeat what a retired lead's watch already said. A paused herd prints none and keeps its streak. A lead reports it (see Lead); the shepherd tells the human, who pauses the herd or files and approves work. |
    | `<member> interrupted` | Lead's watch only: the feed running the worker's `after_merge` died before noting it. Feed, which notes it, then read the note. |
    | `<member> blocked` | A dialog only the human answers: tell them. loopherd never answers it. |
-   | `<member> gone` | Its pane exited or closed, its tab or workspace closed, or it had no agent for two polls in a row after this watch saw it live. |
+   | `<member> gone` | Its pane exited or closed, its tab or workspace closed with it inside, or it had no agent for two polls in a row after this watch saw it live. A `gone` recorded when a tab or workspace closed, and then retracted because the member's pane had moved out of it, prints nothing; `reports --all` shows it followed by `moved`. |
    | `<herd> drained` | Lead's watch only: your herd is paused and has no open (non-retired) worker. Report done, stop, and don't re-arm. |
    | `all drained` | Every herd your watch reads is paused with no open worker, and no member it reads may still work: none is working, blocked or unknown (now or on the poll before), died since the watch started without its `gone` line yet, or last stopped failed or with work in flight. Tell the human; don't re-arm. |
    | `shepherd handoff 171k over 160k` | Your own watch only, once per session: your context is past your limit. Hand off (see Your own handoff). |
@@ -270,9 +270,14 @@ The plan, in order.
 What would bite whoever picks this up.
 ```
 
-**Restart** whoever's `handoff` line you read: the shepherd restarts leads,
-workers of unled herds and members in no herd; a lead restarts its own
-workers. Wait for its `finished` line, then `loopherd restart <name>`. It
+**Restart** whoever's `handoff` line you read: a lead restarts its own
+workers, and the shepherd restarts workers of unled herds and members in no
+herd. A lead restarts itself (below): after its `handoff` and `finished`
+lines, a `start` from it should follow within a few watch polls. If none
+does (it forgot `--self`, or `--self` refused), or a `self-restart` note
+arrives, restart the lead yourself; the locks make that safe beside a
+waiter. For anyone else, wait for its `finished` line, then `loopherd
+restart <name>`. It
 sends `/clear`, waits for the ledger to follow the new session, and prompts
 the member to read its handoff, which it moves to `<name>.prev.md` so no
 later restart reuses it; same pane, worktree and branch. A lead's prompt
@@ -285,7 +290,8 @@ idle or done. `--force` skips those checks; a `/clear` sent mid-turn waits
 for that turn, then drops whatever the handoff doesn't record (that turn's
 work, background tasks, crons). Forcing is the human's call (a lead's
 PreToolUse hook denies it); a plain restart is not, so run it as soon as the
-`finished` line arrives. A member never restarts itself, and one recorded without a
+`finished` line arrives. A member never runs `loopherd restart <its own
+name>`, since its `/clear` would land mid-turn; one recorded without a
 herdr socket can't be restarted, nor is it ever asked for a handoff. If
 restart times out waiting for the new session, its `/clear` may be queued
 behind a running turn, or the SessionStart hook isn't installed: it sent no
@@ -303,6 +309,25 @@ Cancel, switch back to main, and rerun it.
 It also refuses, even with `--force` and before any `/clear`, a lead whose
 herd file or `config.toml` can't be read, or that has no herd or `[lead]`:
 fix the herd, then run restart again.
+
+**A lead restarts itself.** After reporting `--kind handoff` and stopping its
+watch, it runs `loopherd restart --self` from its own pane and ends its
+turn. That checks it is a lead with a handoff file and a `handoff` report
+since its last start with no stop since (so run it in the handoff turn),
+starts a detached waiter, and returns at once. The
+waiter runs the plain restart, with every check `--force` skips, once the
+stop after the handoff reads `finished` and herdr shows it idle or done:
+same pane, worktree and ledger entry. One waiter per member: a second
+`--self` refuses while one waits, and a plain `loopherd restart` and the
+waiter never both send `/clear`: the waiter exits quietly once another
+restart used the handoff, and stops with a note if one ended without using
+it, since that one may have sent `/clear`. After 30 minutes, on a revive's
+start, or on any failure, the waiter leaves a `self-restart …` note in the member's mailbox
+naming why: act on it as on the `handoff` line. Unless the note says the
+restart failed after its `/clear`, the handoff is still in place, so a plain
+`loopherd restart <name>` works once the member is finished (after a
+revive, the human forces it). Only a lead runs `--self`; for any other
+member it refuses, and whoever reads its `handoff` line restarts it.
 
 A lead's `loopherd watch` is a background shell, so a lead stops its own
 watch before ending its handoff turn; otherwise its stop reads `paused`
@@ -327,9 +352,9 @@ and, once per session past your limit, adds `shepherd handoff <n>k over
 
 1. Handle the other lines it came with, but feed nothing new and don't
    re-arm the watch. Members and leads keep working; what they report
-   waits in the mailbox for the next watch. First restart any lead whose
-   `handoff` and `finished` lines you've already read, so the herd doesn't
-   wait on the next shepherd.
+   waits in the mailbox for the next watch. First restart any member
+   whose `handoff` and `finished` lines you've already read and that is
+   yours to restart, so the herd doesn't wait on the next shepherd.
 2. Write your handoff to `$XDG_STATE_HOME/loopherd/handoffs/shepherd.md`
    (`~/.local/state` when it's unset; no member may be named `shepherd`), in the outline above: what each
    member is doing and what you owe it (verifications running, PRs to
@@ -442,13 +467,27 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   `--json`; it marks nothing read.
 - `loopherd retire <name>` marks a member finished in the ledger only;
   `--close` also closes its tab and removes its worktree and branch if
-  they're clean and merged. Feed's `done` check does this for you.
+  they're clean and merged. Feed's `done` check does this for you. Retire
+  refuses an entry not yet retired that herdr shows `working` or
+  `blocked`, whatever it reported, or shows idle (or done, or unknown)
+  with no `done`, `question` or `handoff` report since its last start, so a
+  retire meant for an earlier run of the name can't kill a fresh one. The
+  error says which; `--force` retires it anyway. A report before a revive
+  still counts, a member herdr doesn't list retires without a report, and
+  an already-retired entry takes `--close` as before. It also refuses, naming
+  `--force`, when herdr doesn't answer within 5s, answers with an error or
+  a reply loopherd can't parse, or runs another session than the member's
+  (even while this session's herdr is down); otherwise no herdr server at
+  all lets it through. A live lead rarely reports
+  `done` and is often working, so retiring one usually takes `--force`.
 - **Re-feed a retired task** (its member was retired before it finished,
   e.g. a tab closed by accident or a rescoped card) with `loopherd release
   <name>`, then `loopherd feed <herd>`. Feed skips every name in the
   ledger until it's released, so a merged task isn't spawned again while
   its card is still open. Release refuses a member not retired, a lead, or
-  one whose tab may be open (`loopherd retire --close <name>` first). It
+  one whose tab may be open (`loopherd retire --close <name>` first, with
+  `--force` if herdr shows it working, blocked, or idle with no report
+  since its start). It
   removes the member's worktree, any leftover at the path the new member
   spawns into, its local branch and its branch on origin, so the new member
   starts afresh; when they hold commits not on the base (pushed or not) it
@@ -478,7 +517,8 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
 - `loopherd tell <name> "<text>"` messages a member (see Talking to
   members).
 - `loopherd restart <name>` gives a member that handed off a fresh session
-  (see Handoffs).
+  (see Handoffs); `loopherd restart --self`, from a lead's own pane,
+  schedules that for itself once its turn ends.
 - `loopherd lead <herd>` starts the herd's lead from its herd file's
   `[lead]` table.
 - **Change a herd file's values** with `loopherd herd set <herd> <key>
@@ -500,8 +540,10 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   member, lead included, isn't retired, ran on another herdr session, or
   may still be open (its agent or pane shows, even busy or moved), and
   while herdr can't be reached; `loopherd retire --close <name>` each
-  first, which also cleans up tabs, worktrees and branches that
-  `herd remove` never touches. `--dry-run` lists what would go;
+  first (`--force` for one herdr shows working, blocked, or idle with no
+  report since its start),
+  which also cleans up tabs, worktrees and branches that `herd remove`
+  never touches. `--dry-run` lists what would go;
   `--keep-history` keeps the ledger entries and mailboxes for `stats`.
 - **Lead defaults** are `[lead_defaults]` in
   `$LOOPHERD_CONFIG_DIR/config.toml`: each lead's switches wherever its herd
@@ -546,7 +588,7 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   a key. Never edit the human's herdr config to add it. Its event hooks
   run `loopherd herdr-event-hook`, recording a member going `blocked` or
   `gone` in its mailbox for the next watch, and following a member's pane
-  moved to another tab of its workspace in the ledger. It needs the
+  moved to another tab or workspace in the ledger. It needs the
   `loopherd` on PATH or in `~/.local/bin` and never installs loopherd or
   its hooks; installing stays as above. It needs herdr 0.7.5+.
   Its startup hook runs `loopherd revive --startup` each time herdr
@@ -634,7 +676,9 @@ Shepherd section has the detail):
 6. **Handoff:** write `$XDG_STATE_HOME/loopherd/handoffs/<your name>.md` in
    the outline under Handoffs (`## State`, `## Next steps`, `## Gotchas`),
    listing each `<scratch>/pr<n>/` still in use and naming each PR's
-   current review file.
+   current review file. Then report `--kind handoff`, stop your watch, run
+   `loopherd restart --self`, and end your turn: you restart in this pane
+   once your stop reads finished, with no shepherd needed (see Handoffs).
 
 What differs from the shepherd:
 
@@ -678,7 +722,9 @@ What differs from the shepherd:
 - **Retiring a lead is the shepherd's or the human's.** `loopherd retire`
   refuses to retire you from your own pane, and the hook also denies
   `loopherd retire` of a `lead-` name, or of a name it can't read such as
-  `"$m"`, there; retire members by their spelled-out name.
+  `"$m"`, there; retire members by their spelled-out name. It always
+  denies `loopherd retire --force` there too: retire a member once it is
+  idle and has reported, or once herdr no longer lists it.
   Your gates outlast your retirement: a retired lead's pane is still
   gated.
 - **Pausing is the human's.** The hook always denies `loopherd pause` and
@@ -760,8 +806,9 @@ What differs from the shepherd:
   whole skill).
 - **Your own handoff.** Past your limit, your Stop hook asks you for a
   handoff like any member's (see Handoffs): stop your own watch (TaskStop
-  it, or kill it), write it, report `--kind handoff`, and end your turn. The shepherd restarts you. Restart your
-  workers when they hand off; never with `--force`.
+  it, or kill it), write it, report `--kind handoff`, run `loopherd restart
+  --self`, and end your turn; you restart in this pane once that turn
+  stops. Restart your workers when they hand off; never with `--force`.
 - **Your checkout** is detached; refresh it with `git fetch origin && git
   checkout --detach origin/<default branch>` rather than `git pull`, and
   never commit in it.

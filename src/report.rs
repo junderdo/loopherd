@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::ledger::{AgentRecord, Ledger};
+use crate::ledger::{AgentRecord, Ledger, Process};
 use crate::lock::Lock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -41,6 +41,8 @@ impl Kind {
 
 pub struct Reporter<'a> {
     pub own_pane: Option<&'a str>,
+    /// The caller and its ancestors, which carry a moved member's old pane id.
+    pub own_lineage: &'a [Process],
     /// `$HERDR_SOCKET_PATH`: which herdr the pane belongs to.
     pub own_socket: Option<&'a Path>,
     pub as_name: Option<&'a str>,
@@ -70,14 +72,19 @@ impl Entry {
         }
     }
 
-    /// Its kind and text, unless it's a `stop`, `start`, `blocked` or `gone`.
+    /// Its kind and text, unless it's a `stop`, `start`, `blocked`, `gone` or
+    /// `moved`.
     pub fn report(&self) -> Option<(Kind, &str)> {
         match &self.body {
             Body::Done { text } => Some((Kind::Done, text)),
             Body::Question { text } => Some((Kind::Question, text)),
             Body::Note { text } => Some((Kind::Note, text)),
             Body::Handoff { text } => Some((Kind::Handoff, text)),
-            Body::Stop(_) | Body::Start { .. } | Body::Blocked {} | Body::Gone {} => None,
+            Body::Stop(_)
+            | Body::Start { .. }
+            | Body::Blocked {}
+            | Body::Gone { .. }
+            | Body::Moved {} => None,
         }
     }
 }
@@ -107,8 +114,17 @@ pub enum Body {
     },
     /// herdr showed the member waiting on a dialog.
     Blocked {},
-    /// herdr lost the member's pane.
-    Gone {},
+    /// herdr lost the member's pane; `tab` or `workspace` when it was found
+    /// by that closing.
+    Gone {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<String>,
+    },
+    /// herdr moved the member's pane out of the tab or workspace whose close
+    /// recorded the `gone` before it, retracting that `gone`.
+    Moved {},
 }
 
 impl Body {
@@ -249,9 +265,23 @@ fn ends_in_newline(file: &mut fs::File) -> std::io::Result<bool> {
     Ok(last[0] == b'\n')
 }
 
-/// The non-retired member running in `pane` of the herdr at `socket`. Pane
-/// ids repeat across herdr sessions, so an entry recorded without a socket
-/// matches only a caller that has none either.
+/// The non-retired member of the herdr at `socket` that a process with
+/// `$HERDR_PANE_ID` set to `own_pane` and `lineage` as itself and its ancestors runs in. Pane ids repeat across herdr sessions,
+/// so an entry recorded without a socket matches only a caller that has none
+/// either.
+pub fn member_of_own_pane<'a>(
+    entries: &'a BTreeMap<String, AgentRecord>,
+    own_pane: &str,
+    lineage: &[Process],
+    socket: Option<&Path>,
+) -> Option<&'a AgentRecord> {
+    entries
+        .values()
+        .find(|e| !e.retired && e.is_own_pane(own_pane, lineage) && e.socket.as_deref() == socket)
+}
+
+/// The non-retired member of the herdr at `socket` in the pane herdr now
+/// calls `pane`, which a move to another workspace changes.
 pub fn member_in<'a>(
     entries: &'a BTreeMap<String, AgentRecord>,
     pane: &str,
@@ -274,7 +304,7 @@ fn reporter(ledger: &dyn Ledger, who: &Reporter) -> Result<String> {
         return Ok(entry.name.clone());
     }
     let pane = who.own_pane.context("no HERDR_PANE_ID; pass --as <name>")?;
-    member_in(&entries, pane, who.own_socket)
+    member_of_own_pane(&entries, pane, who.own_lineage, who.own_socket)
         .map(|e| e.name.clone())
         .ok_or_else(|| match who.own_socket {
             Some(socket) => anyhow!("pane {pane} of {} is not a member", socket.display()),
@@ -421,7 +451,8 @@ pub fn unread_wakes(dir: &Path, names: &[String]) -> Result<(Vec<Mailbox>, Pendi
     let (pending, _) = Cursor::Watch.peek(dir, &names, Locked::Take, |name, read, unread| {
         let mut entries = vec![];
         parse(dir, name, unread, &mut entries, &mut vec![]);
-        let wakes = |e: &Entry| matches!(e.body, Body::Stop(_) | Body::Blocked {} | Body::Gone {});
+        let wakes =
+            |e: &Entry| matches!(e.body, Body::Stop(_) | Body::Blocked {} | Body::Gone { .. });
         if !entries.iter().any(|(_, e)| wakes(e)) {
             return;
         }
@@ -614,7 +645,8 @@ fn render(name: &str, entry: &Entry) -> Vec<String> {
         },
         Body::Start { .. } => return vec![format!("{name} start {when}")],
         Body::Blocked {} => return vec![format!("{name} blocked {when}")],
-        Body::Gone {} => return vec![format!("{name} gone {when}")],
+        Body::Gone { .. } => return vec![format!("{name} gone {when}")],
+        Body::Moved {} => return vec![format!("{name} moved {when}")],
         _ => {
             let (kind, text) = entry.report().expect("a report");
             (kind.as_str(), text.to_string())
@@ -815,6 +847,8 @@ mod tests {
         AgentRecord {
             name: name.into(),
             pane_id: pane.into(),
+            env_pane_id: None,
+            env_pane_shell: None,
             tab_id: None,
             session_id: None,
             repo: "/src/repo".into(),
@@ -856,6 +890,7 @@ mod tests {
             own_pane: Some(pane),
             own_socket: None,
             as_name: None,
+            own_lineage: &[],
         }
     }
 
@@ -923,6 +958,7 @@ mod tests {
             own_pane: Some("w1:p2"),
             own_socket: None,
             as_name: Some("lh-1"),
+            own_lineage: &[],
         };
 
         let name = report(
@@ -973,6 +1009,7 @@ mod tests {
                 own_pane,
                 own_socket: None,
                 as_name,
+                own_lineage: &[],
             };
             let err = report(
                 &ledger,
@@ -993,6 +1030,7 @@ mod tests {
             own_pane: None,
             own_socket: None,
             as_name: Some(name),
+            own_lineage: &[],
         };
         report(ledger, dir, &who, kind, text, at(time)).unwrap();
     }
@@ -1986,6 +2024,7 @@ mod tests {
             own_pane: Some("w1:p3"),
             own_socket: Some(Path::new("/run/live.sock")),
             as_name: None,
+            own_lineage: &[],
         };
         let name = report(
             &ledger,

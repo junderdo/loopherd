@@ -171,7 +171,7 @@ pub fn view(
             })
             .collect(),
         ungrouped: sorted(ungrouped),
-        retired: options.all.then(|| sorted(retired)),
+        retired: options.all.then(|| newest_retirement_first(retired)),
         strays: strays(entries, agents, options),
     }
 }
@@ -213,6 +213,18 @@ fn strays(
 /// The lead, then what needs the human first.
 fn sorted(mut members: Vec<Member>) -> Vec<Member> {
     members.sort_by_key(|m| (!m.lead, rank(m), m.name.clone()));
+    members
+}
+
+/// Entries with no readable retirement time go last.
+fn newest_retirement_first(mut members: Vec<Member>) -> Vec<Member> {
+    members.sort_by_cached_key(|m| {
+        let at = m
+            .retired
+            .as_deref()
+            .and_then(|at| humantime::parse_rfc3339_weak(at).ok());
+        (std::cmp::Reverse(at), m.name.clone())
+    });
     members
 }
 
@@ -268,6 +280,8 @@ mod tests {
         AgentRecord {
             name: name.into(),
             pane_id: format!("w1:p{name}"),
+            env_pane_id: None,
+            env_pane_shell: None,
             tab_id: None,
             session_id: Some(format!("sess-{name}")),
             repo: "/src/repo".into(),
@@ -460,8 +474,33 @@ mod tests {
         let all = view(&entries, Some(&agents), ALL, no_branch);
         assert_eq!(names(&all.herds[0].members), ["a"]);
         let retired = all.retired.unwrap();
-        assert_eq!(names(&retired), ["c", "b"]);
+        assert_eq!(names(&retired), ["b", "c"]);
         assert!(!retired[1].gone, "a retired entry is never gone");
+    }
+
+    #[test]
+    fn lists_retired_entries_newest_retirement_first_then_unknown_then_by_name() {
+        let retired_at = |name: &str, at: Option<&str>| AgentRecord {
+            retired_at: at.map(str::to_string),
+            ..retired(name, None)
+        };
+        let entries = ledger(vec![
+            retired_at("a-unknown", None),
+            retired_at("b-oldest", Some("2026-11-01T09:00:00Z")),
+            retired_at("c-newest", Some("2026-11-17T08:00:00Z")),
+            retired_at("d-middle", Some("2026-11-10T12:00:00Z")),
+            retired_at("e-middle", Some("2026-11-10T12:00:00Z")),
+        ]);
+        let agents = [named("b-oldest", AgentStatus::Blocked)];
+
+        let retired = view(&entries, Some(&agents), ALL, no_branch)
+            .retired
+            .unwrap();
+
+        assert_eq!(
+            names(&retired),
+            ["c-newest", "d-middle", "e-middle", "b-oldest", "a-unknown"]
+        );
     }
 
     #[test]

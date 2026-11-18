@@ -8,7 +8,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::continuation::{follow_recorded, live_for};
-use crate::ledger::Ledger;
+use crate::ledger::{Ledger, Process};
 use crate::process::{self, Claim, Procs};
 
 /// Where the hook runs: `$HERDR_PANE_ID`, `$HERDR_SOCKET_PATH` and `$CLAUDE_PID`.
@@ -16,6 +16,8 @@ pub struct Pane<'a> {
     pub id: &'a str,
     pub socket: Option<&'a Path>,
     pub claude_pid: Option<u32>,
+    /// The caller and its ancestors, which carry a moved member's old pane id.
+    pub lineage: &'a [Process],
 }
 
 /// Points the member in `pane` at the session `input` starts; returns the
@@ -41,7 +43,8 @@ pub fn session_hook(
     };
     let entries = ledger.entries()?;
     let live = || entries.values().filter(|e| !e.retired);
-    let Some(member) = live().find(|e| e.pane_id == pane.id && e.socket.as_deref() == Some(socket))
+    let Some(member) = live()
+        .find(|e| e.is_own_pane(pane.id, pane.lineage) && e.socket.as_deref() == Some(socket))
     else {
         return Ok(None);
     };
@@ -100,7 +103,7 @@ mod tests {
 
     use super::*;
     use crate::ledger::{AgentRecord, FileLedger, MemLedger, Process};
-    use crate::process::{CLAUDE, FakeProcs};
+    use crate::process::{CLAUDE, FakeProcs, PANE_SHELL};
 
     const SOCKET: &str = "/run/herdr/herdr.sock";
 
@@ -108,6 +111,8 @@ mod tests {
         AgentRecord {
             name: name.into(),
             pane_id: pane.into(),
+            env_pane_id: None,
+            env_pane_shell: None,
             tab_id: None,
             session_id: Some(session.into()),
             repo: "/src/repo".into(),
@@ -155,6 +160,7 @@ mod tests {
             id: "w1:p1",
             socket: socket.map(Path::new),
             claude_pid,
+            lineage: &crate::process::lineage(procs, 30),
         };
         session_hook(
             ledger,
@@ -179,6 +185,7 @@ mod tests {
             id: "w1:p1",
             socket: Some(Path::new(SOCKET)),
             claude_pid: None,
+            lineage: &[],
         };
         let procs = FakeProcs::default();
         session_hook(
@@ -250,6 +257,46 @@ mod tests {
 
     fn session_of(ledger: &MemLedger, name: &str) -> Option<String> {
         ledger.0[name].session_id.clone()
+    }
+
+    #[test]
+    fn a_member_moved_to_another_workspace_adopts_its_new_session_by_its_own_pane() {
+        let mut ledger = ledger(vec![moved_from_w1_p1()]);
+
+        let named = run_as(
+            &mut ledger,
+            &FakeProcs::pane(),
+            None,
+            Some(SOCKET),
+            &start("clear", "new"),
+        );
+
+        assert_eq!(named.as_deref(), Some("lh-1"));
+        assert_eq!(session_of(&ledger, "lh-1").as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn a_stranger_in_a_pane_that_took_a_moved_members_old_id_after_a_restart_is_not_adopted() {
+        let mut ledger = ledger(vec![moved_from_w1_p1()]);
+
+        let named = run_as(
+            &mut ledger,
+            &FakeProcs::restarted_pane(),
+            Some(30),
+            Some(SOCKET),
+            &start("clear", "theirs"),
+        );
+
+        assert_eq!(named, None);
+        assert_eq!(session_of(&ledger, "lh-1").as_deref(), Some("old"));
+        assert_eq!(ledger.0["lh-1"].process, None);
+    }
+
+    fn moved_from_w1_p1() -> AgentRecord {
+        let mut moved = member("lh-1", "w3:p2", Some(SOCKET), "old");
+        moved.env_pane_id = Some("w1:p1".into());
+        moved.env_pane_shell = Some(PANE_SHELL);
+        moved
     }
 
     #[test]
@@ -525,6 +572,7 @@ mod tests {
             id: "w1:p1",
             socket: Some(Path::new(SOCKET)),
             claude_pid: Some(50),
+            lineage: &[],
         };
         let mut l = ledger(vec![claimed(
             member("lh-1", "w1:p1", Some(SOCKET), "s"),

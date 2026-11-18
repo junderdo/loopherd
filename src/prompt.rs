@@ -58,6 +58,8 @@ mod tests {
         AgentRecord {
             name: name.into(),
             pane_id: "w9:p9".into(),
+            env_pane_id: None,
+            env_pane_shell: None,
             tab_id: None,
             session_id: None,
             repo: "/src/repo".into(),
