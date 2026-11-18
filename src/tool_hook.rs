@@ -299,6 +299,9 @@ struct Aliases {
     /// trap whose action may do either, so a read-only program's name may run
     /// something else.
     redefines_programs: bool,
+    /// Replace strings of an `xargs` that runs this script, which it fills
+    /// anywhere in the script's text.
+    xargs_replace: Vec<String>,
 }
 
 impl Aliases {
@@ -327,6 +330,20 @@ impl Aliases {
             !value.trim().is_empty() && !value.contains('$') && word.substituted_at.is_none();
         self.values
             .insert(name.to_uppercase(), readable.then(|| value.to_string()));
+    }
+
+    /// [`Aliases::assign`] for an assignment that xargs may fill where
+    /// `filled` says it holds a replace string, as a `$` would.
+    fn assign_filled(&mut self, word: &Word, filled: impl Fn(&str) -> bool) {
+        let (name, value) = word.text.split_once('=').unwrap_or((&word.text, ""));
+        if filled(name) {
+            self.unreadable_name = true;
+            return;
+        }
+        self.assign(word);
+        if let Some(alias) = name.strip_prefix("CARGO_ALIAS_").filter(|_| filled(value)) {
+            self.values.insert(alias.to_uppercase(), None);
+        }
     }
 }
 
@@ -1488,7 +1505,22 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
     let mut i = 0;
     let mut in_env = false;
     let mut xargs_appends = false;
-    let mut replace_strings: Vec<String> = vec![];
+    // Each replace string with the index of the command word of the xargs
+    // that set it, which that xargs doesn't fill.
+    let mut replace_strings: Vec<(String, usize)> = aliases
+        .xargs_replace
+        .iter()
+        .map(|r| (r.clone(), usize::MAX))
+        .collect();
+    let fills = |replace_strings: &[(String, usize)], at: usize, text: &str| {
+        replace_strings
+            .iter()
+            .any(|(r, own)| *own != at && !r.is_empty() && text.contains(r.as_str()))
+    };
+    let in_xargs = |aliases: &Aliases, replace_strings: &[(String, usize)]| Aliases {
+        xargs_replace: replace_strings.iter().map(|(r, _)| r.clone()).collect(),
+        ..aliases.clone()
+    };
     // A wrapper under an appending `xargs` may get its whole command from stdin.
     let mut wraps_appended = false;
     loop {
@@ -1502,23 +1534,20 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
         let program = file_name(word);
         if in_env && (word.contains('=') || word.is_empty()) && kept[i].name_expands() {
             // `env` may get an assignment whose name the hook can't read.
-            aliases.assign(kept[i]);
+            aliases.assign_filled(kept[i], |t| fills(&replace_strings, i, t));
             i += 1;
         } else if word.is_empty() && kept[i].substituted_at.is_some() {
             // An unquoted substitution that prints nothing leaves no word.
             i += 1;
         } else if is_assignment(word) {
-            aliases.assign(kept[i]);
+            aliases.assign_filled(kept[i], |t| fills(&replace_strings, i, t));
             i += 1;
         } else if kept[i].pattern()
             || ((word == "source" || word == ".")
                 && reads_script_from_input(words.get(skip_options(words, i + 1, &[]))))
         {
             return vec![Switch::Unreadable];
-        } else if replace_strings
-            .iter()
-            .any(|r| !r.is_empty() && word.contains(r))
-        {
+        } else if fills(&replace_strings, i, word) {
             // xargs may fill a wrapper's program word.
             return vec![Switch::Unreadable];
         } else if KEYWORDS.contains(&word.as_str()) || word == "." {
@@ -1574,7 +1603,7 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             }
             if program == "xargs" {
                 let (replace, appends) = xargs_fill(&words[options..i.min(words.len())]);
-                replace_strings.extend(replace);
+                replace_strings.extend(replace.map(|r| (r, i)));
                 xargs_appends |= appends;
             }
             // The duration, CPU mask or lock file before the command.
@@ -1597,7 +1626,7 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
                     } else {
                         vec![]
                     },
-                    |script| script_needs(script, aliases),
+                    |script| script_needs(script, &in_xargs(aliases, &replace_strings)),
                 );
             }
         } else if program == "rustup" {
@@ -1653,10 +1682,16 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             if !scripts.is_empty() || guessed < kept.len() {
                 let mut needs = vec![];
                 for script in scripts.into_iter().filter_map(|at| kept.get(at)) {
-                    add_new(&mut needs, script_needs(script, aliases));
+                    add_new(
+                        &mut needs,
+                        script_needs(script, &in_xargs(aliases, &replace_strings)),
+                    );
                 }
                 for script in &kept[guessed..] {
-                    add_new(&mut needs, guessed_script_needs(script, aliases));
+                    add_new(
+                        &mut needs,
+                        guessed_script_needs(script, &in_xargs(aliases, &replace_strings)),
+                    );
                 }
                 return needs;
             }
@@ -1691,7 +1726,7 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
                 || (xargs_appends && gh_command_open(&words[i + 1..]))
                 || replace_strings
                     .iter()
-                    .any(|r| gh_command_replaced(&words[i + 1..], r)))
+                    .any(|(r, _)| gh_command_replaced(&words[i + 1..], r)))
         {
             return vec![Switch::Unreadable];
         } else {
@@ -5047,6 +5082,9 @@ mod tests {
             "echo gh | xargs -I X env X pr merge 1",
             "echo gh | xargs -I X timeout 5 X pr merge 1",
             "echo gh | xargs -I X xargs X pr merge 1",
+            "echo 'gh pr merge 1' | xargs -I X bash -c X",
+            "echo merge | xargs -I X bash -c 'gh pr X 1'",
+            "echo GH_CONFIG_DIR | xargs -I N env N=/tmp/d gh pr view 1",
         ] {
             assert_unreadable(command);
         }
@@ -5056,6 +5094,18 @@ mod tests {
         assert_passes("echo o/r | xargs -I R gh pr --repo=R view 1");
         assert_passes("echo 1 | xargs -I X gh issue view X");
         assert_judged("echo 1 | xargs -I X gh pr merge X", Switch::Merge);
+        for command in [
+            "echo run | xargs -I V env CARGO_ALIAS_Y=V cargo y -- herd set h lead.merge true",
+            "echo CARGO_ALIAS_Y | xargs -I N env N=run cargo y -- herd set h k v",
+        ] {
+            assert_judged(command, Switch::OpaqueCargoAlias);
+        }
+        assert_passes("echo f | xargs -I t git log -1 t");
+        assert_passes("echo f | xargs -I s sed -i s/a/b/ s");
+        assert_passes("echo f | xargs -I c echo c");
+        assert_passes("echo f | xargs -I {} bash -c 'wc -l {}'");
+        assert_passes("echo f | xargs -I V env FOO=V cargo test");
+        assert_passes("xargs -I X echo X; gh pr view X");
     }
 
     #[test]
