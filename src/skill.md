@@ -451,8 +451,9 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   still counts, a member herdr doesn't list retires without a report, and
   an already-retired entry takes `--close` as before. It also refuses, naming
   `--force`, when herdr doesn't answer within 5s, answers with an error or
-  a reply loopherd can't parse, or runs another session than the member's;
-  only no herdr server at all lets it through. A live lead rarely reports
+  a reply loopherd can't parse, or runs another session than the member's
+  (even while this session's herdr is down); otherwise no herdr server at
+  all lets it through. A live lead rarely reports
   `done` and is often working, so retiring one usually takes `--force`.
 - **Re-feed a retired task** (its member was retired before it finished,
   e.g. a tab closed by accident or a rescoped card) with `loopherd release

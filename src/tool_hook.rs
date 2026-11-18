@@ -29,7 +29,7 @@ pub enum Switch {
     Rebase,
     /// Not a switch: always the human's.
     ForceRestart,
-    /// `loopherd retire --force`, which skips the check that the member has
+    /// `loopherd retire --force`, which skips the checks that the member has
     /// finished. Not a switch: always the human's.
     ForceRetire,
     /// `loopherd pause` or `resume`. Not a switch: always the human's.
