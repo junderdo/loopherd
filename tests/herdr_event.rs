@@ -249,6 +249,18 @@ fn a_mailbox_it_cannot_write_exits_0_with_the_error() {
 }
 
 #[test]
+fn a_closed_workspace_records_every_member_it_can_and_names_the_ones_it_cannot() {
+    let dir = sandbox();
+    let reports = dir.path().join("state/loopherd/reports");
+    fs::create_dir_all(reports.join("lh-0.jsonl")).unwrap();
+
+    failed_quietly(&workspace_closed(dir.path(), "w1"), "lh-0.jsonl");
+
+    let lh1 = fs::read_to_string(reports.join("lh-1.jsonl")).unwrap();
+    assert!(lh1.contains(r#""kind":"gone""#), "{lh1}");
+}
+
+#[test]
 fn a_member_that_shows_life_after_its_gone_records_gone_again() {
     let dir = sandbox();
 

@@ -8,7 +8,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::time::SystemTime;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 
 use crate::ledger::{AgentRecord, Ledger};
@@ -45,10 +45,14 @@ pub fn event_hook(
     let members = entries
         .values()
         .filter(|m| !m.retired && m.socket.as_deref() == socket && held_in(m) == Some(id));
-    for member in members {
-        record_gone(dir, &member.name, now)?;
+    let failed: Vec<String> = members
+        .filter_map(|m| record_gone(dir, &m.name, now).err())
+        .map(|e| format!("{e:#}"))
+        .collect();
+    match failed.is_empty() {
+        true => Ok(()),
+        false => Err(anyhow!(failed.join("; "))),
     }
-    Ok(())
 }
 
 fn pane_event(
