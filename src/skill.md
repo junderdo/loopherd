@@ -293,7 +293,9 @@ watch before ending its handoff turn; otherwise its stop reads `paused`
 and restart refuses it. After a herdr restart, `revive`'s start makes
 restart refuse a member that handed off before it: check `loopherd reports
 --all <name>` for its `handoff`, and with the handoff file still there, the
-human runs `loopherd restart <name> --force`. A member that was asked but
+human runs `loopherd restart <name> --force`. With the plugin's startup
+revive on, this follows every herdr restart without anyone running
+`revive`, so check for a `handoff` before any restart that refuses. A member that was asked but
 crashed before writing its handoff isn't asked again in that session;
 prompt it to write one and report `--kind handoff`.
 
@@ -481,15 +483,32 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   watch isn't running to re-arm it. It never prompts workers. It skips a
   lead whose pane shows a subagent's view and exits 1 (`--dry-run` says
   so too): switch that pane back to the main conversation, then run
-  `loopherd revive --name <lead>`.
+  `loopherd revive --name <lead>`. Two revives never overlap: one waits
+  for the other, then finds its members alive.
 - **herdr plugin.** `herdr plugin install <owner>/loopherd/herdr-plugin`
-  (herdr 0.7.0+; loopherd's README names the repo) adds plugin `loopherd`,
+  (loopherd's README names the repo) adds plugin `loopherd`,
   whose `status` action runs `loopherd status`; its output and errors go
   only to `herdr plugin log list --plugin loopherd`. Its event hooks run
   `loopherd herdr-event-hook`, recording a member going `blocked` or
   `gone` in its mailbox for the next watch. It needs the
   `loopherd` on PATH or in `~/.local/bin` and never installs loopherd or
-  its hooks; installing stays as above.
+  its hooks; installing stays as above. It needs herdr 0.7.5+.
+  Its startup hook runs `loopherd revive --startup` each time herdr
+  restores a session or a new server takes over, which does nothing
+  unless `config.toml` sets `[herdr_plugin] revive_on_startup = true`
+  (set it only when the human says so; `loopherd herds` validates it).
+  On, it revives only members recorded on the socket herdr gives the
+  hook (`HERDR_SOCKET_PATH`, never one recorded without a socket), so a
+  dev server's startup never touches the live session's members, and
+  the other way round. A manual `revive` still walks every entry. herdr
+  shows you nothing of the hook's run, so it copies each lead's line,
+  unless that lead's watch is running, into the lead's mailbox as a
+  `note` starting `herdr's startup revive:`; your next watch surfaces
+  them. A second revive waits for a running one, saying so on stderr,
+  and gives up after 10 minutes and says so; run it again then. A live
+  handoff runs it too, where nothing was lost: a lead between watches
+  then gets the re-arm prompt anyway, and its note says so. Tell a lead
+  that handed off or drained to ignore it.
   Plugins are global to the user, so never link or install one from a test
   or a dev session.
 
@@ -667,7 +686,8 @@ What differs from the shepherd:
   `loopherd status` and re-arm in the same message as your first action,
   unless the wake needs a handoff or says `<herd> drained` (then don't
   re-arm). Read the watch's output once; don't read it again after acting.
-- **After a restart** the shepherd runs `loopherd revive`, which prompts you
+- **After a restart** the shepherd, or the herdr plugin's startup hook,
+  runs `loopherd revive`, which prompts you
   to re-arm whenever nothing holds `watch-<your name>.lock`, whether herdr
   resumed you or revive did. Re-read `loopherd status` and `loopherd reports
   --all --tail 40` (for a fuller history, `--since <time>` or plain

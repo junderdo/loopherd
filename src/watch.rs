@@ -2261,11 +2261,11 @@ mod tests {
         let (ledger, mut herdr) = quiet_led_world();
         let notifier = Notifier::new(dir.path());
         let mark = dir.path().join("lead-cards.blocked");
-        let marked = std::cell::Cell::new(false);
+        let marked = std::sync::atomic::AtomicBool::new(false);
         // Another watch sees the lead blocked and marks it while this one reads it as working.
         let other_watch = mark.clone();
         herdr.on_agents = Some(Box::new(move || {
-            if !marked.replace(true) {
+            if !marked.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 fs::write(&other_watch, "").unwrap();
             }
         }));

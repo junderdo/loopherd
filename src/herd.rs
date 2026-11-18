@@ -695,7 +695,7 @@ pub fn context_limit(paths: &Paths, member: &AgentRecord) -> Result<u64> {
     crate::context::effective_limit(own, &config_file(paths))
 }
 
-fn config_file(paths: &Paths) -> PathBuf {
+pub fn config_file(paths: &Paths) -> PathBuf {
     paths.herds.with_file_name("config.toml")
 }
 
@@ -2121,6 +2121,27 @@ args = ["--model", "opus"]
         let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
         assert!(!report.contains("invalid"), "{report}");
         assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn herds_checks_the_herdr_plugin_table() {
+        let config = Config::with(&[("prs", PR_HERD)]);
+        let file = config.path().join("config.toml");
+        fs::write(&file, "[herdr_plugin]\nrevive_on_startup = 1\n").unwrap();
+
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+
+        assert!(
+            report.starts_with(&format!("invalid {}: ", file.display())),
+            "{report}"
+        );
+        assert!(report.contains("revive_on_startup"), "{report}");
+        assert_eq!(code, 1, "{report}");
+
+        fs::write(&file, "[herdr_plugin]\nrevive_on_startup = true\n").unwrap();
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+        assert!(!report.contains("invalid"), "{report}");
+        assert_eq!(code, 0, "{report}");
     }
 
     #[test]

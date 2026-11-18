@@ -92,7 +92,7 @@ lead the commands its switches leave to you. `install-hook` backs up
 
 ### herdr plugin
 
-Optional, once loopherd is installed (above). Needs herdr 0.7.0 or later.
+Optional, once loopherd is installed (above). Needs herdr 0.7.5 or later.
 
 ```bash
 herdr plugin install junderdo/loopherd/herdr-plugin
@@ -100,12 +100,24 @@ herdr plugin install junderdo/loopherd/herdr-plugin
 
 It adds a `loopherd: herd status` action, and event hooks that record a
 member going blocked, or its pane exiting or closing, so the next
-`loopherd watch` reports it even when none was running. The plugin runs the `loopherd` on
-`PATH`, else `~/.local/bin/loopherd`, and never installs loopherd or its
-hooks; without one, its commands fail with a pointer here. herdr shows no
+`loopherd watch` reports it even when none was running. The plugin runs
+the `loopherd` on `PATH`, else `~/.local/bin/loopherd`, and never installs
+loopherd or its hooks; without one, its commands fail with a pointer here. herdr shows no
 action output on screen: read it, errors included, with
-`herdr plugin log list --plugin loopherd`. Remove the plugin with
-`herdr plugin uninstall loopherd`.
+`herdr plugin log list --plugin loopherd`.
+
+To have herdr run `loopherd revive` by itself after it restores a session,
+add this to `config.toml` in loopherd's config dir:
+
+```toml
+[herdr_plugin]
+revive_on_startup = true
+```
+
+It revives only the members recorded on the herdr server that started,
+and is off without that key. herdr shows nothing of its run; it leaves a
+`note` in each lead's mailbox instead, which the shepherd's watch shows.
+Remove the plugin with `herdr plugin uninstall loopherd`.
 
 ## Set up a repo
 
@@ -240,7 +252,7 @@ options.
 
 | Command | What it does |
 |---|---|
-| `revive` | Resume members after a herdr restart or a closed tab, by Claude session (`--dry-run`, `--name`). |
+| `revive` | Resume members after a herdr restart or a closed tab, by Claude session (`--dry-run`, `--name`, `--startup` for the herdr plugin's startup hook). |
 | `restart <name>` | Give a member that wrote its handoff a fresh session in the same pane. |
 | `prompt <name>` | Send a member's stored prompt again, e.g. after a trust dialog blocked its spawn. |
 | `retire <name>` | Mark a member finished; `--close` also closes its tab and removes its merged worktree. |
