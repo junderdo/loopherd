@@ -23,6 +23,8 @@ pub fn line(name: &str, entry: &Entry, fresh: bool, width: u16, theme: Theme) ->
             Style::new().add_modifier(Modifier::DIM),
             stopped(stop),
         ),
+        (Body::Blocked {}, None) => ("blocked", Style::new(), String::new()),
+        (Body::Gone {}, None) => ("gone", Style::new(), String::new()),
         _ => ("", Style::new(), String::new()),
     };
     let minute = entry.at.get(11..16).unwrap_or(&entry.at);

@@ -29,6 +29,18 @@ width = "80%"
 height = "80%"
 command = ["sh", "loopherd.sh", "view"]
 
+[[events]]
+on = "pane.agent_status_changed"
+command = ["sh", "loopherd.sh", "herdr-event-hook"]
+
+[[events]]
+on = "pane.exited"
+command = ["sh", "loopherd.sh", "herdr-event-hook"]
+
+[[events]]
+on = "pane.closed"
+command = ["sh", "loopherd.sh", "herdr-event-hook"]
+
 # Needs herdr's ui.mouse_capture on; without it the terminal handles the click.
 [[link_handlers]]
 id = "github-pr"

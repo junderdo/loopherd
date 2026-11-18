@@ -13,6 +13,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::lock::Lock;
+use crate::pane_event::BLOCK_RECORDED;
 use crate::report::{self, Body, Entry};
 use crate::shell;
 use crate::template::Template;
@@ -304,9 +305,12 @@ fn first_to_notify_blocked(mailboxes: &Path, member: &str) -> Result<bool> {
     }
 }
 
-/// The `<member>.blocked` marks in a mailboxes directory as they stood
-/// before a watch read statuses.
+/// The marks a block leaves in a mailboxes directory, as they stood before a
+/// watch read statuses: `<member>.blocked` once it is notified, and
+/// `<member>.block-recorded` once its mailbox has its `blocked` entry.
 pub struct BlockMarks(HashMap<String, (u64, SystemTime)>);
+
+const BLOCK_MARKS: [&str; 2] = ["blocked", BLOCK_RECORDED];
 
 impl BlockMarks {
     pub fn read(mailboxes: &Path) -> Result<BlockMarks> {
@@ -318,34 +322,56 @@ impl BlockMarks {
         for entry in entries {
             let entry = entry.with_context(|| format!("read {}", mailboxes.display()))?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(member) = name.strip_suffix(".blocked") else {
+            let is_mark = BLOCK_MARKS
+                .iter()
+                .any(|kind| name.strip_suffix(kind).is_some_and(|n| n.ends_with('.')));
+            if !is_mark {
                 continue;
-            };
+            }
             if let Some(id) = mark_id(&entry.path())? {
-                marks.insert(member.to_string(), id);
+                marks.insert(name, id);
             }
         }
         Ok(BlockMarks(marks))
     }
 
-    /// Clears `member`'s blocked mark, as a watch saw it not blocked, so its
-    /// next block is sent. A mark made since [`BlockMarks::read`] stays: it
-    /// is for a block that status read predates.
+    /// Clears `member`'s block marks, as a watch saw it not blocked, so its
+    /// next block is sent and recorded. A mark made since
+    /// [`BlockMarks::read`] stays: it is for a block that status read predates.
     pub fn unblocked(&self, mailboxes: &Path, member: &str) -> Result<()> {
-        let path = mailboxes.join(format!("{member}.blocked"));
-        let Some(seen) = self.0.get(member) else {
-            return Ok(());
-        };
-        if mark_id(&path)?.as_ref() != Some(seen) {
-            return Ok(());
+        for kind in BLOCK_MARKS {
+            let file = format!("{member}.{kind}");
+            let path = mailboxes.join(&file);
+            let Some(seen) = self.0.get(&file) else {
+                continue;
+            };
+            if mark_id(&path)?.as_ref() != Some(seen) {
+                continue;
+            }
+            match fs::remove_file(&path) {
+                Err(e) if e.kind() != ErrorKind::NotFound => {
+                    return Err(e).with_context(|| format!("remove {}", path.display()));
+                }
+                _ => {}
+            }
         }
+        Ok(())
+    }
+}
+
+/// Removes `member`'s block marks, as herdr reported it not blocked, so its
+/// next block is recorded and sent.
+pub fn forget_block(mailboxes: &Path, member: &str) -> Result<()> {
+    for kind in BLOCK_MARKS {
+        let path = mailboxes.join(format!("{member}.{kind}"));
         match fs::remove_file(&path) {
             Err(e) if e.kind() != ErrorKind::NotFound => {
-                Err(e).with_context(|| format!("remove {}", path.display()))
+                return Err(e).with_context(|| format!("remove {}", path.display()));
             }
-            _ => Ok(()),
+            _ => {}
         }
     }
+    Ok(())
 }
 
 /// A mark's inode and mtime, so a mark removed and made again reads as new.
@@ -365,7 +391,7 @@ fn mark_id(path: &Path) -> Result<Option<(u64, SystemTime)>> {
 /// Removes `member`'s notify marks, for a member that will never wake a watch
 /// again. Returns a warning naming each mark that couldn't be removed.
 pub fn forget_marks(mailboxes: &Path, member: &str) -> Vec<String> {
-    ["notified", "blocked"]
+    ["notified", "blocked", BLOCK_RECORDED]
         .iter()
         .map(|kind| mailboxes.join(format!("{member}.{kind}")))
         .filter_map(|path| match fs::remove_file(&path) {
