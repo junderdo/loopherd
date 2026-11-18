@@ -108,11 +108,7 @@ fn config_checks(paths: &Paths) -> Vec<Check> {
             Ok(Some(notify)) if notify.sends_nothing() => checks.push(Check {
                 name: "notify".into(),
                 status: Status::Warning,
-                detail: format!(
-                    "{}: [notify] is enabled with herdr = false, no command and no pane_label, \
-                     so nothing is sent",
-                    config.display()
-                ),
+                detail: crate::herd::sends_nothing_warning(&config),
                 fix: Some(format!(
                     "turn on one of them, or [notify] enabled = false, {by_hand}"
                 )),
