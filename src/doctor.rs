@@ -1,5 +1,6 @@
-//! `loopherd doctor`: whether this machine's loopherd install and herdr are
-//! sound. It only reads, and names the command that fixes each problem.
+//! `loopherd doctor`: whether this machine's loopherd install, herdr, config,
+//! herd files and state are sound. It only reads, and names the command that
+//! fixes each problem.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -7,7 +8,12 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+use anyhow::{Result, bail};
+
+use crate::herd::Paths;
 use crate::herdr::{Herdr, Server};
+use crate::ledger::{FileLedger, Ledger};
+use crate::pause::Reading;
 
 /// What the install checks read, gathered by the caller.
 pub struct Install {
@@ -39,11 +45,297 @@ pub struct Check {
 /// The oldest herdr loopherd is tested against.
 pub const MIN_HERDR: &str = "0.9.5";
 
-pub fn checks(install: &Install, herdr: &dyn Herdr) -> Vec<Check> {
+/// Where the config, herd and state checks read, gathered by the caller.
+pub struct Setup {
+    pub paths: Paths,
+    pub ledger: FileLedger,
+}
+
+/// Every check, the herd, repo and state ones only for `herd` when given.
+/// `setup` is `Err` when config and state can't be found; then they warn.
+/// Fails when `herd` has no herd file.
+pub fn checks(
+    install: &Install,
+    setup: &Result<Setup>,
+    herd: Option<&str>,
+    herdr: &dyn Herdr,
+) -> Result<Vec<Check>> {
+    if let (Some(herd), Ok(setup)) = (herd, setup) {
+        crate::herd::require(&setup.paths, herd)?;
+    }
     let mut checks = hook_checks(install);
     checks.push(running_binary(install));
-    checks.extend(herdr_checks(herdr));
+    let (herdr_checks, reached) = herdr_checks(herdr);
+    checks.extend(herdr_checks);
+    match setup {
+        Ok(setup) => {
+            checks.extend(config_checks(&setup.paths));
+            checks.extend(herd_checks(&setup.paths, herd));
+            checks.extend(state_checks(
+                setup,
+                herd,
+                reached.map(|socket| (herdr, socket)),
+            ));
+        }
+        Err(e) if herd.is_some() => bail!("can't find herd files: {e:#}"),
+        Err(e) => checks.push(Check {
+            name: "config and state".into(),
+            status: Status::Warning,
+            detail: format!("not checked: {e:#}"),
+            fix: Some("set HOME".into()),
+        }),
+    }
+    Ok(checks)
+}
+
+fn config_checks(paths: &Paths) -> Vec<Check> {
+    let config = crate::herd::config_file(paths);
+    let by_hand = format!("fix {} by hand", config.display());
+    let mut checks = vec![];
+    let file = match crate::config::read(&config) {
+        Ok(file) => {
+            checks.push(ok("config", config.display().to_string()));
+            Some(file)
+        }
+        Err(e) => {
+            checks.push(failure("config", message(&e), by_hand.clone()));
+            None
+        }
+    };
+    if crate::herd::parses_as_toml(&config) {
+        match crate::notify::load(&config) {
+            Err(e) => checks.push(failure("notify", message(&e), by_hand)),
+            Ok(Some(notify)) if notify.sends_nothing() => checks.push(Check {
+                name: "notify".into(),
+                status: Status::Warning,
+                detail: format!(
+                    "{}: [notify] is enabled with herdr = false, no command and no pane_label, \
+                     so nothing is sent",
+                    config.display()
+                ),
+                fix: Some(format!(
+                    "turn on one of them, or [notify] enabled = false, {by_hand}"
+                )),
+            }),
+            Ok(_) => {}
+        }
+    }
+    let Some(file) = file else {
+        return checks;
+    };
+    let unset = |name: &str, is_unset: bool| match is_unset {
+        true => Check {
+            name: name.into(),
+            status: Status::Warning,
+            detail: format!("unset in {}", config.display()),
+            fix: Some("loopherd setup".into()),
+        },
+        false => ok(name, format!("set in {}", config.display())),
+    };
+    let shepherd = file.shepherd.as_ref().and_then(|s| s.context_limit);
+    let limits_unset =
+        file.context_window.is_none() && file.default_context_limit.is_none() && shepherd.is_none();
+    checks.push(unset("lead defaults", file.lead_defaults.is_none()));
+    checks.push(unset("context limits", limits_unset));
     checks
+}
+
+fn herd_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
+    let herds = match only {
+        Some(herd) => vec![herd.to_string()],
+        None => match crate::herd::names(&paths.herds) {
+            Ok(names) => names,
+            Err(e) => {
+                let fix = format!("fix {} by hand", paths.herds.display());
+                return vec![failure("herd files", message(&e), fix)];
+            }
+        },
+    };
+    let mut checks = vec![];
+    for herd in herds {
+        let file = paths.herds.join(format!("{herd}.toml"));
+        let name = format!("herd {herd}");
+        let repo = match crate::herd::checked_repo(paths, &herd) {
+            Ok(repo) => repo,
+            Err(invalid) => {
+                let fix = format!("fix {} by hand", file.display());
+                checks.push(failure(&name, invalid, fix));
+                continue;
+            }
+        };
+        checks.push(ok(&name, file.display().to_string()));
+        let name = format!("herd {herd} repo");
+        let set_repo = format!("loopherd herd set {herd} repo '\"<path>\"'");
+        checks.push(match repo.exists() {
+            false => failure(&name, format!("{} is missing", repo.display()), set_repo),
+            true if !repo.is_dir() => failure(
+                &name,
+                format!("{} is not a directory", repo.display()),
+                set_repo,
+            ),
+            // A worktree's `.git` is a file.
+            true if !repo.join(".git").exists() => failure(
+                &name,
+                format!("{} is not a git repo", repo.display()),
+                set_repo,
+            ),
+            true => ok(&name, repo.display().to_string()),
+        });
+    }
+    checks
+}
+
+/// The ledger, pause files and mailboxes, and, when herdr was reached, each
+/// unretired member's pane on its socket.
+fn state_checks(
+    setup: &Setup,
+    only: Option<&str>,
+    reached: Option<(&dyn Herdr, Option<PathBuf>)>,
+) -> Vec<Check> {
+    let mut checks = pause_checks(&setup.paths, only);
+    let entries = match setup.ledger.entries() {
+        Ok(entries) => entries,
+        Err(e) => {
+            checks.insert(
+                0,
+                failure("ledger", message(&e), "fix the ledger by hand".into()),
+            );
+            return checks;
+        }
+    };
+    checks.insert(0, ok("ledger", format!("{} entries", entries.len())));
+    let members: Vec<_> = entries
+        .into_values()
+        .filter(|r| only.is_none_or(|herd| r.herd.as_deref() == Some(herd)))
+        .collect();
+    if let Ok(dir) = setup.ledger.reports_dir() {
+        for member in &members {
+            checks.extend(mailbox_check(&dir, &member.name));
+        }
+    }
+    if let Some((herdr, socket)) = reached {
+        let unretired: Vec<_> = members.iter().filter(|r| !r.retired).collect();
+        checks.extend(pane_checks(herdr, socket.as_deref(), &unretired));
+    }
+    checks
+}
+
+fn pause_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
+    let dir = &paths.paused;
+    let readings = match only {
+        Some(herd) => vec![(herd.to_string(), crate::pause::read(dir, herd))],
+        None => match crate::pause::all(dir) {
+            Ok(readings) => readings,
+            Err(e) => {
+                let fix = format!("fix {} by hand", dir.display());
+                return vec![failure("pause files", message(&e), fix)];
+            }
+        },
+    };
+    readings
+        .into_iter()
+        .filter_map(|(herd, reading)| match reading {
+            Reading::Unreadable(e) => {
+                // `pause` needs the herd file; `resume` deletes an orphaned pause too.
+                let fix = match crate::herd::require(paths, &herd) {
+                    Ok(()) => format!(
+                        "loopherd pause {herd} to rewrite it, or loopherd resume {herd} to lift it"
+                    ),
+                    Err(_) => format!("loopherd resume {herd}"),
+                };
+                Some(failure(&format!("pause {herd}"), message(&e), fix))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A failure when `name`'s mailbox can't be read or has a line that doesn't parse.
+fn mailbox_check(dir: &Path, name: &str) -> Option<Check> {
+    let (detail, fix) = match crate::report::history(dir, name) {
+        Err(e) => {
+            let path = dir.join(format!("{name}.jsonl"));
+            (
+                message(&e),
+                format!("make {} a readable file", path.display()),
+            )
+        }
+        Ok((_, warnings)) => {
+            let detail = match warnings.as_slice() {
+                [] => return None,
+                [one] => one.clone(),
+                [first, rest @ ..] => format!("{first} (and {} more bad lines)", rest.len()),
+            };
+            (detail, "fix the mailbox's bad lines by hand".into())
+        }
+    };
+    Some(failure(&format!("mailbox {name}"), detail, fix))
+}
+
+/// Each member on `here`'s herdr whose pane is gone warns; those on another
+/// socket are counted, not checked.
+fn pane_checks(
+    herdr: &dyn Herdr,
+    here: Option<&Path>,
+    members: &[&crate::ledger::AgentRecord],
+) -> Vec<Check> {
+    if members.is_empty() {
+        return vec![];
+    }
+    let agents = match herdr.agents_within(HERDR_TIMEOUT) {
+        Ok(Some(agents)) => agents,
+        Ok(None) => {
+            let detail = format!(
+                "herdr didn't list its agents within {}",
+                humantime::format_duration(HERDR_TIMEOUT)
+            );
+            return vec![failure("members", detail, "restart herdr's server".into())];
+        }
+        Err(e) => {
+            return vec![failure(
+                "members",
+                message(&e),
+                "restart herdr's server".into(),
+            )];
+        }
+    };
+    let on = here.map_or("herdr's default socket".into(), |s| s.display().to_string());
+    // With herdr's socket unknown, a recorded one can't be shown to be this herdr's.
+    let elsewhere = |r: &&crate::ledger::AgentRecord| match (here, &r.socket) {
+        (Some(here), Some(there)) => !same_file(here, there),
+        (None, Some(_)) => true,
+        (_, None) => false,
+    };
+    let (other, local): (Vec<_>, Vec<_>) = members.iter().copied().partition(elsewhere);
+    let mut checks: Vec<Check> = local
+        .iter()
+        .filter(|r| crate::matching::live_agent(r, &agents).is_none())
+        .map(|r| Check {
+            name: format!("member {}", r.name),
+            status: Status::Warning,
+            detail: format!("no live agent matches it (pane {}) on {on}", r.pane_id),
+            fix: Some(format!(
+                "loopherd revive --name {0}, or loopherd retire {0}",
+                r.name
+            )),
+        })
+        .collect();
+    let live = local.len() - checks.len();
+    if live > 0 {
+        checks.push(ok("members", format!("{live} live on {on}")));
+    }
+    if !other.is_empty() {
+        checks.push(ok(
+            "members elsewhere",
+            format!("{} on another herdr socket, not checked", other.len()),
+        ));
+    }
+    checks
+}
+
+/// `e` with its causes, as the command that failed would print it.
+fn message(e: &anyhow::Error) -> String {
+    format!("{e:#}").trim_end().to_string()
 }
 
 fn hook_checks(install: &Install) -> Vec<Check> {
@@ -126,16 +418,30 @@ fn running_binary(install: &Install) -> Check {
 /// How long herdr's status probe may take; a wedged server never answers.
 const HERDR_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn herdr_checks(herdr: &dyn Herdr) -> Vec<Check> {
-    let on = |socket: Option<PathBuf>| match socket {
+/// The herdr checks, and the socket of the herdr they reached, if any.
+fn herdr_checks(herdr: &dyn Herdr) -> (Vec<Check>, Option<Option<PathBuf>>) {
+    let (checks, reached) = match herdr.server(HERDR_TIMEOUT) {
+        Ok(Server::Running { socket, version }) => {
+            (running_checks(socket.clone(), version), Some(socket))
+        }
+        not_running => (vec![unreached(not_running)], None),
+    };
+    (checks, reached)
+}
+
+fn on(socket: Option<PathBuf>) -> String {
+    match socket {
         Some(socket) => socket.display().to_string(),
         None => "herdr's default socket".into(),
-    };
-    let (socket, version) = match herdr.server(HERDR_TIMEOUT) {
-        Ok(Server::Running { socket, version }) => (on(socket), version),
+    }
+}
+
+fn unreached(server: Result<Server>) -> Check {
+    match server {
+        Ok(Server::Running { .. }) => unreachable!("a running server is reached"),
         Ok(Server::NotRunning { socket }) => {
             let detail = format!("no herdr server answers on {}", on(socket));
-            return vec![failure("herdr", detail, "herdr".into())];
+            failure("herdr", detail, "herdr".into())
         }
         Ok(Server::NoAnswer { socket }) => {
             let detail = format!(
@@ -143,20 +449,15 @@ fn herdr_checks(herdr: &dyn Herdr) -> Vec<Check> {
                 on(socket),
                 humantime::format_duration(HERDR_TIMEOUT)
             );
-            return vec![failure("herdr", detail, "restart herdr's server".into())];
+            failure("herdr", detail, "restart herdr's server".into())
         }
-        Ok(Server::Missing) => {
-            return vec![failure(
-                "herdr",
-                "no herdr on PATH".into(),
-                "install herdr".into(),
-            )];
-        }
-        Err(e) => {
-            let detail = format!("{e:#}").trim_end().to_string();
-            return vec![failure("herdr", detail, "restart herdr's server".into())];
-        }
-    };
+        Ok(Server::Missing) => failure("herdr", "no herdr on PATH".into(), "install herdr".into()),
+        Err(e) => failure("herdr", message(&e), "restart herdr's server".into()),
+    }
+}
+
+fn running_checks(socket: Option<PathBuf>, version: Option<String>) -> Vec<Check> {
+    let socket = on(socket);
     let upgrade = format!("upgrade herdr to {MIN_HERDR} or later and restart its server");
     let check = match version {
         None => failure(
@@ -184,10 +485,19 @@ fn herdr_checks(herdr: &dyn Herdr) -> Vec<Check> {
 /// How long each herd's `source` or `backlog` may run under `--trackers`.
 pub const TRACKER_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Runs every herd's `source`, and `backlog` when set, from the herd's repo,
-/// paused herds included. Reports each exit and task count, never the tasks.
-pub fn tracker_checks(paths: &crate::herd::Paths, timeout: Duration) -> Vec<Check> {
-    let names = match crate::herd::names(&paths.herds) {
+/// Runs every herd's `source`, or only `only`'s, and `backlog` when set, from
+/// the herd's repo, paused herds included. Reports each exit and task count,
+/// never the tasks.
+pub fn tracker_checks(
+    paths: &crate::herd::Paths,
+    only: Option<&str>,
+    timeout: Duration,
+) -> Vec<Check> {
+    let names = match only {
+        Some(herd) => Ok(vec![herd.to_string()]),
+        None => crate::herd::names(&paths.herds),
+    };
+    let names = match names {
         Ok(names) => names,
         Err(e) => {
             let detail = format!("{e:#}").trim_end().to_string();
@@ -209,13 +519,8 @@ pub fn tracker_checks(paths: &crate::herd::Paths, timeout: Duration) -> Vec<Chec
                 continue;
             }
         };
+        // The herd checks already report a repo that isn't a directory.
         if !queue.repo.is_dir() {
-            let repo = queue.repo.display();
-            checks.push(failure(
-                &format!("{herd} repo"),
-                format!("{repo} isn't a directory, so its trackers can't run"),
-                format!("loopherd herd set {herd} repo <path>"),
-            ));
             continue;
         }
         let commands = [
@@ -314,7 +619,8 @@ fn count(checks: &[Check], status: Status) -> usize {
     checks.iter().filter(|c| c.status == status).count()
 }
 
-/// Problems with their fixes, or every check when `verbose`, then the summary line.
+/// Problems with their fixes, one line each, or every check when `verbose`,
+/// then the summary line.
 pub fn text(checks: &[Check], verbose: bool) -> String {
     let mut out = String::new();
     for check in checks.iter().filter(|c| verbose || c.status != Status::Ok) {
@@ -323,7 +629,14 @@ pub fn text(checks: &[Check], verbose: bool) -> String {
             Status::Warning => "warning",
             Status::Failure => "failure",
         };
-        out += &format!("{status} {}: {}", check.name, check.detail);
+        // A TOML error's caret diagram spans lines; one check stays one line.
+        let detail: Vec<&str> = check
+            .detail
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        out += &format!("{status} {}: {}", check.name, detail.join(" "));
         if let Some(fix) = &check.fix {
             out += &format!("; fix: {fix}");
         }
@@ -359,6 +672,7 @@ pub fn exit_code(checks: &[Check]) -> i32 {
 mod tests {
     use super::*;
     use crate::herdr::fake::FakeHerdr;
+    use crate::ledger::AgentRecord;
     use serde_json::{Value, json};
 
     const EVENTS: [(&str, &str); 5] = [
@@ -372,7 +686,48 @@ mod tests {
     struct Machine {
         dir: tempfile::TempDir,
         install: Install,
+        setup: Result<Setup>,
     }
+
+    impl Machine {
+        fn paths(&self) -> &Paths {
+            &self.setup.as_ref().unwrap().paths
+        }
+
+        fn config(&self) -> PathBuf {
+            crate::herd::config_file(self.paths())
+        }
+
+        fn herd_file(&self, herd: &str, text: &str) {
+            std::fs::create_dir_all(&self.paths().herds).unwrap();
+            std::fs::write(self.paths().herds.join(format!("{herd}.toml")), text).unwrap();
+        }
+
+        /// A herd file for `herd` whose repo is a fresh git repo.
+        fn herd(&self, herd: &str) -> PathBuf {
+            let repo = self.dir.path().join(format!("repos/{herd}"));
+            std::fs::create_dir_all(repo.join(".git")).unwrap();
+            self.herd_file(herd, &format!("repo = {:?}\n", repo.to_str().unwrap()));
+            repo
+        }
+
+        fn state(&self) -> PathBuf {
+            self.dir.path().join("state")
+        }
+
+        fn ledger(&self, records: &[AgentRecord]) {
+            let mut ledger = FileLedger::new(self.state().join("ledger.json"));
+            for record in records {
+                ledger.record(record.clone()).unwrap();
+            }
+        }
+
+        fn checks(&self, herd: Option<&str>, herdr: &FakeHerdr) -> Result<Vec<Check>> {
+            checks(&self.install, &self.setup, herd, herdr)
+        }
+    }
+
+    const CONFIG: &str = "context_window = 200000\n[lead_defaults]\nmerge = false\n";
 
     /// A settings file whose hooks for `events` call `exe`, with `exe` both
     /// on PATH and running.
@@ -381,6 +736,17 @@ mod tests {
         let exe = dir.path().join("bin/loopherd");
         let settings = dir.path().join("settings.json");
         write_hooks(&settings, &exe, events);
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        std::fs::write(dir.path().join("config/config.toml"), CONFIG).unwrap();
+        let setup = Setup {
+            paths: Paths {
+                herds: dir.path().join("config/herds"),
+                home: dir.path().to_path_buf(),
+                feed_lock: dir.path().join("state/feed.lock"),
+                paused: dir.path().join("state/paused"),
+            },
+            ledger: FileLedger::new(dir.path().join("state/ledger.json")),
+        };
         Machine {
             install: Install {
                 settings,
@@ -389,6 +755,7 @@ mod tests {
                 on_path: Some(exe.clone()),
                 running: exe,
             },
+            setup: Ok(setup),
             dir,
         }
     }
@@ -424,8 +791,12 @@ mod tests {
         FakeHerdr::new(&[])
     }
 
-    fn run(install: &Install, herdr: &FakeHerdr) -> (String, i32) {
-        let checks = checks(install, herdr);
+    fn run(m: &Machine, herdr: &FakeHerdr) -> (String, i32) {
+        run_on(m, None, herdr)
+    }
+
+    fn run_on(m: &Machine, herd: Option<&str>, herdr: &FakeHerdr) -> (String, i32) {
+        let checks = m.checks(herd, herdr).unwrap();
         (text(&checks, false), exit_code(&checks))
     }
 
@@ -433,8 +804,8 @@ mod tests {
     fn a_sound_install_prints_only_the_summary_and_exits_0() {
         let m = machine(&ALL);
         assert_eq!(
-            run(&m.install, &herdr()),
-            ("doctor: 9 ok, 0 warnings, 0 failures\n".into(), 0)
+            run(&m, &herdr()),
+            ("doctor: 13 ok, 0 warnings, 0 failures\n".into(), 0)
         );
     }
 
@@ -443,12 +814,12 @@ mod tests {
         for missing in ["Stop", "StopFailure", "SessionStart", "PreToolUse"] {
             let events: Vec<&str> = ALL.into_iter().filter(|e| *e != missing).collect();
             let m = machine(&events);
-            let (out, code) = run(&m.install, &herdr());
+            let (out, code) = run(&m, &herdr());
             assert_eq!(
                 out,
                 format!(
                     "failure {missing} hook: not in {}; fix: loopherd install-hook\n\
-                     doctor: 8 ok, 0 warnings, 1 failures\n",
+                     doctor: 12 ok, 0 warnings, 1 failures\n",
                     m.install.settings.display()
                 ),
             );
@@ -464,17 +835,17 @@ mod tests {
             m.install.settings.display()
         );
         assert_eq!(
-            run(&m.install, &herdr()),
+            run(&m, &herdr()),
             (
-                format!("warning {line}doctor: 8 ok, 1 warnings, 0 failures\n"),
+                format!("warning {line}doctor: 12 ok, 1 warnings, 0 failures\n"),
                 0
             )
         );
         m.install.pane_label = true;
         assert_eq!(
-            run(&m.install, &herdr()),
+            run(&m, &herdr()),
             (
-                format!("failure {line}doctor: 8 ok, 0 warnings, 1 failures\n"),
+                format!("failure {line}doctor: 12 ok, 0 warnings, 1 failures\n"),
                 1
             )
         );
@@ -484,7 +855,7 @@ mod tests {
     fn a_settings_flag_is_repeated_in_the_fix() {
         let mut m = machine(&ALL[..3]);
         m.install.settings_given = true;
-        let (out, _) = run(&m.install, &herdr());
+        let (out, _) = run(&m, &herdr());
         assert!(
             out.contains(&format!(
                 "fix: loopherd install-hook --settings '{}'\n",
@@ -498,9 +869,9 @@ mod tests {
     fn a_missing_settings_file_fails_every_hook() {
         let mut m = machine(&ALL);
         m.install.settings = m.dir.path().join("absent.json");
-        let (out, code) = run(&m.install, &herdr());
+        let (out, code) = run(&m, &herdr());
         assert!(
-            out.ends_with("doctor: 4 ok, 1 warnings, 4 failures\n"),
+            out.ends_with("doctor: 8 ok, 1 warnings, 4 failures\n"),
             "{out}"
         );
         assert_eq!(code, 1);
@@ -510,7 +881,7 @@ mod tests {
     fn unparseable_settings_fail_once_naming_the_file() {
         let m = machine(&ALL);
         std::fs::write(&m.install.settings, "{ not json").unwrap();
-        let (out, code) = run(&m.install, &herdr());
+        let (out, code) = run(&m, &herdr());
         let first = out.lines().next().unwrap();
         assert!(
             first.starts_with(&format!(
@@ -520,7 +891,7 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.ends_with("doctor: 3 ok, 0 warnings, 1 failures\n"),
+            out.ends_with("doctor: 7 ok, 0 warnings, 1 failures\n"),
             "{out}"
         );
         assert_eq!(code, 1);
@@ -539,13 +910,13 @@ mod tests {
             settings["hooks"][event] = group(event, &ours(sub));
         }
         std::fs::write(&m.install.settings, settings.to_string()).unwrap();
-        let (out, code) = run(&m.install, &herdr());
+        let (out, code) = run(&m, &herdr());
         assert_eq!(
             out,
             format!(
                 "failure hook binary: hooks call {}, not the loopherd on PATH ({}); \
                  fix: loopherd install-hook\n\
-                 doctor: 8 ok, 0 warnings, 1 failures\n",
+                 doctor: 12 ok, 0 warnings, 1 failures\n",
                 old.display(),
                 path_exe.display()
             )
@@ -557,7 +928,7 @@ mod tests {
     fn no_loopherd_on_path_fails() {
         let mut m = machine(&ALL);
         m.install.on_path = None;
-        let (out, code) = run(&m.install, &herdr());
+        let (out, code) = run(&m, &herdr());
         assert!(
             out.starts_with(
                 "failure hook binary: no loopherd on PATH; \
@@ -573,13 +944,13 @@ mod tests {
         let mut m = machine(&ALL);
         let dev = m.dir.path().join("target/debug/loopherd");
         m.install.running = dev.clone();
-        let (out, code) = run(&m.install, &herdr());
+        let (out, code) = run(&m, &herdr());
         assert_eq!(
             out,
             format!(
                 "warning running binary: this is {}, not the loopherd on PATH ({}); \
                  fix: run the loopherd on PATH\n\
-                 doctor: 8 ok, 1 warnings, 0 failures\n",
+                 doctor: 12 ok, 1 warnings, 0 failures\n",
                 dev.display(),
                 m.install.on_path.as_ref().unwrap().display()
             )
@@ -596,8 +967,8 @@ mod tests {
         let link = m.dir.path().join("loopherd");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         m.install.on_path = Some(link);
-        assert_eq!(run(&m.install, &herdr()).1, 0);
-        assert!(run(&m.install, &herdr()).0.starts_with("doctor: 9 ok"));
+        assert_eq!(run(&m, &herdr()).1, 0);
+        assert!(run(&m, &herdr()).0.starts_with("doctor: 13 ok"));
     }
 
     #[test]
@@ -605,11 +976,11 @@ mod tests {
         let m = machine(&ALL);
         let herdr = herdr();
         herdr.set_unreachable(true);
-        let (out, code) = run(&m.install, &herdr);
+        let (out, code) = run(&m, &herdr);
         assert_eq!(
             out,
             "failure herdr: no herdr server answers on /run/fake/herdr.sock; fix: herdr\n\
-             doctor: 7 ok, 0 warnings, 1 failures\n"
+             doctor: 11 ok, 0 warnings, 1 failures\n"
         );
         assert_eq!(code, 1);
     }
@@ -626,7 +997,7 @@ mod tests {
         ] {
             let mut herdr = herdr();
             herdr.version = version.into();
-            let (out, code) = run(&m.install, &herdr);
+            let (out, code) = run(&m, &herdr);
             match ok {
                 true => assert_eq!(code, 0, "{version}: {out}"),
                 false => assert_eq!(
@@ -634,7 +1005,7 @@ mod tests {
                     format!(
                         "failure herdr version: {version} is older than {MIN_HERDR}; \
                          fix: upgrade herdr to {MIN_HERDR} or later and restart its server\n\
-                         doctor: 8 ok, 0 warnings, 1 failures\n"
+                         doctor: 12 ok, 0 warnings, 1 failures\n"
                     )
                 ),
             }
@@ -644,9 +1015,10 @@ mod tests {
     #[test]
     fn verbose_lists_every_check() {
         let m = machine(&ALL);
-        let checks = checks(&m.install, &herdr());
+        let checks = checks(&m.install, &m.setup, None, &herdr()).unwrap();
         let exe = m.install.running.display();
         let settings = m.install.settings.display();
+        let config = m.config().display().to_string();
         assert_eq!(
             text(&checks, true),
             format!(
@@ -659,7 +1031,11 @@ mod tests {
                  ok running binary: {exe}\n\
                  ok herdr: answers on /run/fake/herdr.sock\n\
                  ok herdr version: 0.9.5\n\
-                 doctor: 9 ok, 0 warnings, 0 failures\n"
+                 ok config: {config}\n\
+                 ok lead defaults: set in {config}\n\
+                 ok context limits: set in {config}\n\
+                 ok ledger: 0 entries\n\
+                 doctor: 13 ok, 0 warnings, 0 failures\n"
             )
         );
     }
@@ -667,13 +1043,13 @@ mod tests {
     #[test]
     fn json_gives_every_check_and_the_counts() {
         let m = machine(&ALL[..4]);
-        let checks = checks(&m.install, &herdr());
+        let checks = checks(&m.install, &m.setup, None, &herdr()).unwrap();
         let data: Value = serde_json::from_str(&json(&checks)).unwrap();
         assert_eq!(
             (&data["ok"], &data["warnings"], &data["failures"]),
-            (&json!(8), &json!(1), &json!(0))
+            (&json!(12), &json!(1), &json!(0))
         );
-        assert_eq!(data["checks"].as_array().unwrap().len(), 9);
+        assert_eq!(data["checks"].as_array().unwrap().len(), 13);
         assert_eq!(
             data["checks"][4],
             json!({
@@ -691,7 +1067,7 @@ mod tests {
         let mut m = machine(&ALL[..3]);
         m.install.settings = m.dir.path().join("a dir/it's.json");
         m.install.settings_given = true;
-        let (out, _) = run(&m.install, &herdr());
+        let (out, _) = run(&m, &herdr());
         let quoted = format!("'{}/a dir/it'\\''s.json'", m.dir.path().display());
         assert!(
             out.contains(&format!("fix: loopherd install-hook --settings {quoted}\n")),
@@ -706,7 +1082,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&m.install.settings).unwrap()).unwrap();
         settings["hooks"]["PreToolUse"][0]["matcher"] = json!("Edit");
         std::fs::write(&m.install.settings, settings.to_string()).unwrap();
-        let (out, code) = run(&m.install, &herdr());
+        let (out, code) = run(&m, &herdr());
         assert!(out.starts_with("failure PreToolUse hook: not in "), "{out}");
         assert_eq!(code, 1);
     }
@@ -723,12 +1099,12 @@ mod tests {
             .unwrap()
             .push(theirs);
         std::fs::write(&m.install.settings, settings.to_string()).unwrap();
-        let (out, code) = run(&m.install, &herdr());
+        let (out, code) = run(&m, &herdr());
         assert_eq!(
             out,
             format!(
                 "failure Stop hook: not in {}; fix: loopherd install-hook\n\
-                 doctor: 8 ok, 0 warnings, 1 failures\n",
+                 doctor: 12 ok, 0 warnings, 1 failures\n",
                 m.install.settings.display()
             )
         );
@@ -742,7 +1118,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&m.install.settings).unwrap()).unwrap();
         settings["hooks"]["Stop"][0]["hooks"][0]["command"] = json!("'loopherd' stop-hook || true");
         std::fs::write(&m.install.settings, settings.to_string()).unwrap();
-        let (out, code) = run(&m.install, &herdr());
+        let (out, code) = run(&m, &herdr());
         assert!(
             out.starts_with("failure hook binary: hooks call loopherd, not the loopherd on PATH"),
             "{out}"
@@ -754,7 +1130,7 @@ mod tests {
         let m = machine(&ALL);
         let mut herdr = herdr();
         herdr.server = Some(server);
-        let (out, code) = run(&m.install, &herdr);
+        let (out, code) = run(&m, &herdr);
         assert_eq!(code, 1, "{out}");
         out.lines().next().unwrap().to_string()
     }
@@ -791,6 +1167,569 @@ mod tests {
         );
     }
 
+    fn problems(m: &Machine, herdr: &FakeHerdr) -> Vec<String> {
+        problems_on(m, None, herdr)
+    }
+
+    /// Each warning and failure line, without the summary.
+    fn problems_on(m: &Machine, herd: Option<&str>, herdr: &FakeHerdr) -> Vec<String> {
+        let (out, _) = run_on(m, herd, herdr);
+        out.lines()
+            .filter(|l| !l.starts_with("doctor: "))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn member(name: &str, herd: &str, pane: &str, socket: Option<&str>) -> AgentRecord {
+        serde_json::from_value(json!({
+            "name": name, "pane_id": pane, "session_id": null, "repo": "/r",
+            "worktree": null, "workspace": "w1", "prompt": null, "prompt_sent": true,
+            "created": "2026-11-01T00:00:00Z", "herd": herd, "socket": socket,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_config_that_does_not_load_fails_naming_the_file_and_error() {
+        let m = machine(&ALL);
+        let config = m.config();
+        for (text, error) in [
+            ("context_window = [", "TOML parse error"),
+            ("colour = 1\n", "unknown field `colour`"),
+            (
+                "context_window = 5\n",
+                "context_window must be at least 10000, got 5",
+            ),
+        ] {
+            std::fs::write(&config, text).unwrap();
+            let (out, code) = run(&m, &herdr());
+            assert!(
+                out.starts_with(&format!("failure config: {}: ", config.display())),
+                "{out}"
+            );
+            assert!(out.contains(error), "{out}");
+            let fix = format!("; fix: fix {} by hand\ndoctor: ", config.display());
+            assert!(out.contains(&fix), "{out}");
+            assert_eq!(code, 1);
+        }
+    }
+
+    #[test]
+    fn a_notify_table_that_does_not_load_fails_naming_the_file() {
+        let m = machine(&ALL);
+        let config = m.config();
+        std::fs::write(
+            &config,
+            format!("{CONFIG}[notify]\nenabled = true\nloud = 1\n"),
+        )
+        .unwrap();
+        let (out, code) = run(&m, &herdr());
+        let line = out.lines().next().unwrap();
+        assert!(
+            line.starts_with(&format!("failure notify: {}: [notify]: ", config.display())),
+            "{out}"
+        );
+        assert!(line.contains("unknown field `loud`"), "{out}");
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn a_missing_config_is_fine_but_its_unset_settings_warn_naming_setup() {
+        let m = machine(&ALL);
+        std::fs::remove_file(m.config()).unwrap();
+        let config = m.config().display().to_string();
+        assert_eq!(
+            run(&m, &herdr()),
+            (
+                format!(
+                    "warning lead defaults: unset in {config}; fix: loopherd setup\n\
+                     warning context limits: unset in {config}; fix: loopherd setup\n\
+                     doctor: 11 ok, 2 warnings, 0 failures\n"
+                ),
+                0
+            )
+        );
+    }
+
+    #[test]
+    fn any_one_limit_set_counts_as_set() {
+        let m = machine(&ALL);
+        for limit in [
+            "default_context_limit = 100000",
+            "shepherd.context_limit = 100000",
+        ] {
+            std::fs::write(
+                m.config(),
+                format!("{limit}\n[lead_defaults]\nmerge = true\n"),
+            )
+            .unwrap();
+            assert_eq!(problems(&m, &herdr()), Vec::<String>::new());
+        }
+    }
+
+    #[test]
+    fn an_invalid_herd_file_fails_with_the_line_herds_gives() {
+        let m = machine(&ALL);
+        m.herd("good");
+        m.herd_file("bad", "repo = \"/r\"\ncolour = 1\n");
+        let (herds, _) = crate::herd::herds(m.paths(), &m.install.settings).unwrap();
+        let file = m.paths().herds.join("bad.toml");
+        let checks = m.checks(None, &herdr()).unwrap();
+        let bad = checks.iter().find(|c| c.name == "herd bad").unwrap();
+        assert_eq!(bad.status, Status::Failure);
+        assert!(
+            bad.detail.starts_with("invalid bad.toml: "),
+            "{}",
+            bad.detail
+        );
+        assert!(
+            bad.detail.contains("unknown field `colour`"),
+            "{}",
+            bad.detail
+        );
+        assert!(bad.detail.contains('\n'), "a TOML error spans lines");
+        assert!(herds.contains(&format!("{}\n", bad.detail)), "{herds}");
+        let (out, code) = run(&m, &herdr());
+        let fix = format!("; fix: fix {} by hand", file.display());
+        let line = out.lines().next().unwrap();
+        assert!(
+            line.starts_with("failure herd bad: invalid bad.toml: TOML parse error"),
+            "{out}"
+        );
+        assert!(line.ends_with(&fix), "{out}");
+        assert_eq!(out.lines().count(), 2, "{out}");
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn a_herd_file_is_checked_without_running_its_commands() {
+        let m = machine(&ALL);
+        let repo = m.herd("q");
+        let ran = m.dir.path().join("ran");
+        m.herd_file(
+            "q",
+            &format!(
+                "repo = {:?}\n[template.w]\nparams = []\nprompt = \"go\"\n[queue]\nmax = 1\ntemplate = \"w\"\nsource = \"touch {}\"\nbacklog = \"touch {}\"\n",
+                repo.to_str().unwrap(),
+                ran.display(),
+                ran.display()
+            ),
+        );
+        let (_, code) = run(&m, &herdr());
+        assert!(!ran.exists());
+        assert_eq!(code, 0, "{:?}", problems(&m, &herdr()));
+    }
+
+    #[test]
+    fn a_herd_repo_that_is_missing_or_not_a_git_repo_fails() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        std::fs::remove_dir(repo.join(".git")).unwrap();
+        let fix = "fix: loopherd herd set h repo '\"<path>\"'";
+        assert_eq!(
+            problems(&m, &herdr()),
+            [format!(
+                "failure herd h repo: {} is not a git repo; {fix}",
+                repo.display()
+            )]
+        );
+        std::fs::remove_dir(&repo).unwrap();
+        assert_eq!(
+            problems(&m, &herdr()),
+            [format!(
+                "failure herd h repo: {} is missing; {fix}",
+                repo.display()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_repo_given_from_home_is_expanded() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        std::fs::write(m.paths().herds.join("h.toml"), "repo = \"~/repos/h\"\n").unwrap();
+        let checks = m.checks(None, &herdr()).unwrap();
+        let check = checks.iter().find(|c| c.name == "herd h repo").unwrap();
+        assert_eq!(
+            (check.status, &check.detail),
+            (Status::Ok, &repo.display().to_string())
+        );
+    }
+
+    #[test]
+    fn an_unparseable_ledger_fails_naming_it() {
+        let m = machine(&ALL);
+        std::fs::create_dir_all(m.state()).unwrap();
+        std::fs::write(m.state().join("ledger.json"), "{ nope").unwrap();
+        let problems = problems(&m, &herdr());
+        let ledger = m.state().join("ledger.json");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].starts_with(&format!(
+                "failure ledger: parse ledger {}: ",
+                ledger.display()
+            )),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_pause_file_fails_naming_it() {
+        let m = machine(&ALL);
+        m.herd("h");
+        let paused = &m.paths().paused;
+        std::fs::create_dir_all(paused).unwrap();
+        std::fs::write(paused.join("h"), "{ nope").unwrap();
+        let problems = problems(&m, &herdr());
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].starts_with(&format!(
+                "failure pause h: parse {}: ",
+                paused.join("h").display()
+            )),
+            "{problems:?}"
+        );
+        assert!(
+            problems[0]
+                .ends_with("fix: loopherd pause h to rewrite it, or loopherd resume h to lift it"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_mailbox_with_a_bad_line_fails_naming_it() {
+        let m = machine(&ALL);
+        let herdr = herdr().with_live_agent(Some("a"), None, "w1:p1");
+        m.ledger(&[member("a", "h", "w1:p1", None)]);
+        let reports = m.state().join("reports");
+        std::fs::create_dir_all(&reports).unwrap();
+        std::fs::write(reports.join("a.jsonl"), "nope\nnope either\n").unwrap();
+        let problems = problems(&m, &herdr);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        let mailbox = reports.join("a.jsonl");
+        assert!(
+            problems[0].starts_with(&format!(
+                "failure mailbox a: skipped a bad line in {}: ",
+                mailbox.display()
+            )),
+            "{problems:?}"
+        );
+        assert!(
+            problems[0].contains("(and 1 more bad lines)"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_member_whose_pane_is_gone_warns_naming_revive_or_retire() {
+        let m = machine(&ALL);
+        let herdr = herdr().with_live_agent(Some("live"), None, "w1:p1");
+        let mut retired = member("old", "h", "w1:p3", None);
+        retired.retired = true;
+        m.ledger(&[
+            member("live", "h", "w1:p1", None),
+            member("gone", "h", "w1:p2", None),
+            retired,
+        ]);
+        assert_eq!(
+            run(&m, &herdr),
+            (
+                "warning member gone: no live agent matches it (pane w1:p2) on /run/fake/herdr.sock; \
+                 fix: loopherd revive --name gone, or loopherd retire gone\n\
+                 doctor: 14 ok, 1 warnings, 0 failures\n"
+                    .into(),
+                0
+            )
+        );
+    }
+
+    #[test]
+    fn members_on_another_socket_are_counted_in_one_line_not_checked() {
+        let m = machine(&ALL);
+        m.ledger(&[
+            member("here", "h", "w1:p1", Some("/run/fake/herdr.sock")),
+            member("dev1", "h", "w1:p2", Some("/run/dev.sock")),
+            member("dev2", "h", "w1:p3", Some("/run/dev.sock")),
+        ]);
+        let checks = m.checks(None, &herdr()).unwrap();
+        let lines = text(&checks, true);
+        assert!(
+            lines.contains("ok members elsewhere: 2 on another herdr socket, not checked\n"),
+            "{lines}"
+        );
+        assert!(!lines.contains("member dev"), "{lines}");
+        assert!(lines.contains("warning member here: "), "{lines}");
+    }
+
+    #[test]
+    fn strays_are_not_reported() {
+        let m = machine(&ALL);
+        let herdr = herdr().with_live_agent(Some("stray"), None, "w1:p9");
+        assert_eq!(run(&m, &herdr).0, "doctor: 13 ok, 0 warnings, 0 failures\n");
+    }
+
+    #[test]
+    fn an_unreached_herdr_skips_the_pane_checks() {
+        let m = machine(&ALL);
+        m.ledger(&[member("gone", "h", "w1:p2", None)]);
+        let herdr = herdr();
+        herdr.set_unreachable(true);
+        assert_eq!(
+            problems(&m, &herdr),
+            ["failure herdr: no herdr server answers on /run/fake/herdr.sock; fix: herdr"]
+        );
+    }
+
+    #[test]
+    fn a_herd_limits_herd_file_repo_and_state_checks_to_it() {
+        let m = machine(&ALL);
+        m.herd("h");
+        m.herd_file("other", "colour = 1\n");
+        m.ledger(&[
+            member("a", "h", "w1:p1", None),
+            member("b", "other", "w1:p2", None),
+        ]);
+        let paused = &m.paths().paused;
+        std::fs::create_dir_all(paused).unwrap();
+        std::fs::write(paused.join("other"), "{ nope").unwrap();
+        std::fs::write(m.config(), "colour = 1\n").unwrap();
+        let names = |herd| -> Vec<String> {
+            problems_on(&m, Some(herd), &herdr())
+                .iter()
+                .filter(|p| p.starts_with("failure ") || p.starts_with("warning "))
+                .map(|p| p.split(':').next().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(names("h"), ["failure config", "warning member a"]);
+        std::fs::write(m.config(), CONFIG).unwrap();
+        assert_eq!(
+            names("other"),
+            [
+                "failure herd other",
+                "failure pause other",
+                "warning member b"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unknown_herd_is_an_error() {
+        let m = machine(&ALL);
+        m.herd("h");
+        let err = m.checks(Some("nope"), &herdr()).unwrap_err();
+        assert!(format!("{err:#}").contains("nope.toml"), "{err:#}");
+    }
+
+    #[test]
+    fn config_and_state_that_cannot_be_found_warn_and_the_rest_still_runs() {
+        let mut m = machine(&ALL);
+        m.setup = Err(anyhow::anyhow!("HOME is not set"));
+        assert_eq!(
+            run(&m, &herdr()),
+            (
+                "warning config and state: not checked: HOME is not set; \
+                 fix: set HOME\n\
+                 doctor: 9 ok, 1 warnings, 0 failures\n"
+                    .into(),
+                0
+            )
+        );
+        assert!(m.checks(Some("h"), &herdr()).is_err());
+    }
+
+    #[test]
+    fn an_unparseable_pause_of_a_herd_without_a_file_names_only_resume() {
+        let m = machine(&ALL);
+        let paused = &m.paths().paused;
+        std::fs::create_dir_all(paused).unwrap();
+        std::fs::write(paused.join("ghost"), "{ nope").unwrap();
+        let problems = problems(&m, &herdr());
+        assert!(
+            problems[0].ends_with("; fix: loopherd resume ghost"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_herd_repo_that_is_a_file_fails() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        std::fs::remove_dir_all(&repo).unwrap();
+        std::fs::write(&repo, "").unwrap();
+        assert_eq!(
+            problems(&m, &herdr()),
+            [format!(
+                "failure herd h repo: {} is not a directory; fix: loopherd herd set h repo '\"<path>\"'",
+                repo.display()
+            )]
+        );
+    }
+
+    #[test]
+    fn with_herdrs_socket_unknown_members_recorded_on_a_socket_are_counted_not_checked() {
+        let m = machine(&ALL);
+        m.ledger(&[member("dev", "h", "w1:p2", Some("/run/dev.sock"))]);
+        let mut herdr = herdr();
+        herdr.server = Some(Server::Running {
+            socket: None,
+            version: Some(MIN_HERDR.into()),
+        });
+        let checks = m.checks(None, &herdr).unwrap();
+        let lines = text(&checks, true);
+        assert!(
+            lines.contains("ok members elsewhere: 1 on another herdr socket, not checked\n"),
+            "{lines}"
+        );
+        assert!(!lines.contains("warning member"), "{lines}");
+    }
+
+    #[test]
+    fn a_notify_table_that_sends_nothing_warns_as_herds_does() {
+        let m = machine(&ALL);
+        let config = m.config();
+        std::fs::write(
+            &config,
+            format!("{CONFIG}[notify]\nenabled = true\nherdr = false\n"),
+        )
+        .unwrap();
+        let problems = problems(&m, &herdr());
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].starts_with(&format!(
+                "warning notify: {}: [notify] is enabled with herdr = false, no command and no pane_label, so nothing is sent; ",
+                config.display()
+            )),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_herds_dir_that_cannot_be_read_fails() {
+        let m = machine(&ALL);
+        std::fs::write(&m.paths().herds, "").unwrap();
+        let problems = problems(&m, &herdr());
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].starts_with(&format!(
+                "failure herd files: read {}: ",
+                m.paths().herds.display()
+            )),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_pause_dir_that_cannot_be_read_fails() {
+        let m = machine(&ALL);
+        std::fs::create_dir_all(m.state()).unwrap();
+        std::fs::write(&m.paths().paused, "").unwrap();
+        let problems = problems(&m, &herdr());
+        let paused = m.paths().paused.display();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].starts_with(&format!("failure pause files: read {paused}: ")),
+            "{problems:?}"
+        );
+        assert!(
+            problems[0].ends_with(&format!("; fix: fix {paused} by hand")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_mailbox_that_cannot_be_read_fails_asking_for_a_readable_file() {
+        let m = machine(&ALL);
+        let herdr = herdr().with_live_agent(Some("a"), None, "w1:p1");
+        m.ledger(&[member("a", "h", "w1:p1", None)]);
+        let mailbox = m.state().join("reports/a.jsonl");
+        std::fs::create_dir_all(&mailbox).unwrap();
+        let problems = problems(&m, &herdr);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].starts_with("failure mailbox a: "),
+            "{problems:?}"
+        );
+        assert!(
+            problems[0].ends_with(&format!(
+                "; fix: make {} a readable file",
+                mailbox.display()
+            )),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_mailbox_with_one_bad_line_names_it_without_a_count() {
+        let m = machine(&ALL);
+        let herdr = herdr().with_live_agent(Some("a"), None, "w1:p1");
+        m.ledger(&[member("a", "h", "w1:p1", None)]);
+        let reports = m.state().join("reports");
+        std::fs::create_dir_all(&reports).unwrap();
+        std::fs::write(reports.join("a.jsonl"), "nope\n").unwrap();
+        let problems = problems(&m, &herdr);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].starts_with(&format!(
+                "failure mailbox a: skipped a bad line in {}: ",
+                reports.join("a.jsonl").display()
+            )),
+            "{problems:?}"
+        );
+        assert!(!problems[0].contains("more bad lines"), "{problems:?}");
+        assert!(
+            problems[0].ends_with("; fix: fix the mailbox's bad lines by hand"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_herdr_whose_agent_list_fails_fails_the_members_check() {
+        let m = machine(&ALL);
+        m.ledger(&[member("a", "h", "w1:p1", None)]);
+        let herdr = herdr();
+        herdr.set_malformed(true);
+        let problems = problems(&m, &herdr);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].starts_with("failure members: "), "{problems:?}");
+        assert!(problems[0].contains("agent list"), "{problems:?}");
+        assert!(
+            problems[0].ends_with("; fix: restart herdr's server"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_herdr_that_wedges_listing_agents_fails_after_the_deadline() {
+        let m = machine(&ALL);
+        m.ledger(&[member("a", "h", "w1:p1", None)]);
+        let mut herdr = herdr();
+        let (_held, gate) = std::sync::mpsc::channel::<()>();
+        herdr.agents_gate = Some(gate.into());
+        let started = std::time::Instant::now();
+        let problems = problems(&m, &herdr);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(
+            problems,
+            [
+                "failure members: herdr didn't list its agents within 5s; fix: restart herdr's server"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unparseable_ledger_still_reports_an_unparseable_pause() {
+        let m = machine(&ALL);
+        m.herd("h");
+        std::fs::create_dir_all(&m.paths().paused).unwrap();
+        std::fs::write(m.paths().paused.join("h"), "{ nope").unwrap();
+        std::fs::write(m.state().join("ledger.json"), "{ nope").unwrap();
+        let names: Vec<String> = problems(&m, &herdr())
+            .iter()
+            .map(|p| p.split(':').next().unwrap().to_string())
+            .collect();
+        assert_eq!(names, ["failure ledger", "failure pause h"]);
+    }
+
     struct Herds {
         dir: tempfile::TempDir,
     }
@@ -821,7 +1760,11 @@ mod tests {
         }
 
         fn run(&self, timeout: Duration) -> (String, i32) {
-            let checks = tracker_checks(&self.paths(), timeout);
+            self.run_on(None, timeout)
+        }
+
+        fn run_on(&self, herd: Option<&str>, timeout: Duration) -> (String, i32) {
+            let checks = tracker_checks(&self.paths(), herd, timeout);
             (text(&checks, true), exit_code(&checks))
         }
     }
@@ -829,6 +1772,29 @@ mod tests {
     fn queue(source: &str, backlog: Option<&str>) -> String {
         let backlog = backlog.map_or(String::new(), |b| format!("backlog = {b:?}\n"));
         format!("[queue]\ntemplate = \"t\"\nsource = {source:?}\n{backlog}max = 1")
+    }
+
+    #[test]
+    fn a_herd_narrows_the_trackers_run_to_that_herd() {
+        let ran = tempfile::tempdir().unwrap();
+        let touch = |name: &str| format!("touch {}", ran.path().join(name).display());
+        let herds = Herds::with(&[
+            ("a", &queue(&touch("a-source"), Some(&touch("a-backlog")))),
+            ("b", &queue(&touch("b-source"), Some(&touch("b-backlog")))),
+        ]);
+        assert_eq!(
+            herds.run_on(Some("b"), TRACKER_TIMEOUT),
+            (
+                "ok b source: exit 0, 0 tasks\n\
+                 ok b backlog: exit 0, 0 tasks\n\
+                 doctor: 2 ok, 0 warnings, 0 failures\n"
+                    .into(),
+                0
+            )
+        );
+        assert!(!ran.path().join("a-source").exists());
+        assert!(!ran.path().join("a-backlog").exists());
+        assert!(ran.path().join("b-backlog").exists());
     }
 
     #[test]
@@ -933,19 +1899,11 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_repo_fails_once_naming_herd_set_repo_and_runs_nothing() {
+    fn a_missing_repo_reports_nothing_and_runs_nothing() {
         let herds = Herds::with(&[("a", &queue("echo x", Some("echo y")))]);
         std::fs::remove_dir(herds.dir.path().join("repo")).unwrap();
         let (out, code) = herds.run(TRACKER_TIMEOUT);
-        assert_eq!(
-            out,
-            format!(
-                "failure a repo: {} isn't a directory, so its trackers can't run; \
-                 fix: loopherd herd set a repo <path>\n\
-                 doctor: 0 ok, 0 warnings, 1 failures\n",
-                herds.dir.path().join("repo").display()
-            )
-        );
-        assert_eq!(code, 1);
+        assert_eq!(out, "doctor: 0 ok, 0 warnings, 0 failures\n");
+        assert_eq!(code, 0);
     }
 }

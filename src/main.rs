@@ -371,10 +371,11 @@ enum Command {
         #[arg(last = true, required = true)]
         args: Vec<String>,
     },
-    /// Check this machine's loopherd install and herdr: loopherd's hooks in
-    /// Claude's settings, the binary they call against the `loopherd` on PATH,
-    /// and herdr's server and version, and with `--trackers` each herd's
-    /// `source` and `backlog`. Only reads. Prints each warning and
+    /// Check this machine's loopherd setup: loopherd's hooks in Claude's
+    /// settings, the binary they call against the `loopherd` on PATH, herdr's
+    /// server and version, config.toml, herd files and their repos, the
+    /// ledger, pause files, mailboxes and members' panes, and with
+    /// `--trackers` each herd's `source` and `backlog`. Only reads. Prints each warning and
     /// failure with the command that fixes it, then `doctor: <n> ok, <n>
     /// warnings, <n> failures`. Exits 0 when clean or only warnings, 1 on any
     /// failure, 2 when it couldn't run.
@@ -394,6 +395,9 @@ enum Command {
         /// task lines.
         #[arg(long)]
         trackers: bool,
+        /// Check only this herd's file, repo, state and trackers; the install,
+        /// herdr and config checks still run.
+        herd: Option<String>,
     },
     /// Add loopherd's Stop, StopFailure, SessionStart, PreToolUse and UserPromptSubmit hooks to Claude's
     /// user settings, calling this binary, and write the `--skill` guide as the loopherd
@@ -719,7 +723,11 @@ fn main() -> ExitCode {
             json,
             settings,
             trackers,
-        } => ("doctor", run_doctor(verbose, json, settings, trackers)),
+            herd,
+        } => (
+            "doctor",
+            run_doctor(verbose, json, settings, trackers, herd),
+        ),
         Command::InstallHook {
             remove,
             settings,
@@ -1518,22 +1526,39 @@ fn run_tool_hook() -> Result<i32> {
     Ok(0)
 }
 
-fn run_doctor(verbose: bool, json: bool, settings: Option<PathBuf>, trackers: bool) -> Result<i32> {
-    let ran = doctor_install(settings).and_then(|install| {
-        let paths = trackers.then(Paths::from_env).transpose()?;
-        Ok((install, paths))
+fn run_doctor(
+    verbose: bool,
+    json: bool,
+    settings: Option<PathBuf>,
+    trackers: bool,
+    herd: Option<String>,
+) -> Result<i32> {
+    let setup = || -> Result<doctor::Setup> {
+        Ok(doctor::Setup {
+            paths: herd::Paths::from_env()?,
+            ledger: FileLedger::new(FileLedger::default_path()?),
+        })
+    };
+    let checks = doctor_install(settings).and_then(|install| {
+        let mut checks = doctor::checks(&install, &setup(), herd.as_deref(), &CliHerdr)?;
+        if trackers {
+            let paths = Paths::from_env()?;
+            let only = herd.as_deref();
+            checks.extend(doctor::tracker_checks(
+                &paths,
+                only,
+                doctor::TRACKER_TIMEOUT,
+            ));
+        }
+        Ok(checks)
     });
-    let (install, paths) = match ran {
-        Ok(ran) => ran,
+    let checks = match checks {
+        Ok(checks) => checks,
         Err(e) => {
             eprintln!("loopherd doctor: {e:#}");
             return Ok(2);
         }
     };
-    let mut checks = doctor::checks(&install, &CliHerdr);
-    if let Some(paths) = paths {
-        checks.extend(doctor::tracker_checks(&paths, doctor::TRACKER_TIMEOUT));
-    }
     match json {
         true => println!("{}", doctor::json(&checks)),
         false => print!("{}", doctor::text(&checks, verbose)),

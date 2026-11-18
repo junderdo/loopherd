@@ -105,6 +105,8 @@ pub enum WaitOutcome {
 pub trait Herdr {
     fn workspaces(&self) -> Result<Vec<Workspace>>;
     fn agents(&self) -> Result<Vec<Agent>>;
+    /// [`Herdr::agents`], or `None` once `timeout` passes, as with a wedged server.
+    fn agents_within(&self, timeout: Duration) -> Result<Option<Vec<Agent>>>;
     fn agent(&self, name: &str) -> Result<Agent>;
     fn tabs_in(&self, workspace_id: &str) -> Result<Vec<Tab>>;
     fn panes_in(&self, workspace_id: &str) -> Result<Vec<Pane>>;
@@ -197,27 +199,34 @@ impl CliHerdr {
             .command(args)
             .output()
             .with_context(|| format!("run herdr {}", args.join(" ")))?;
-        if out.status.success() {
-            let json: Value = serde_json::from_slice(&out.stdout)
-                .with_context(|| MalformedReply(args.join(" ")))?;
-            return Ok(Ok(json["result"].clone()));
-        }
-        let parsed = [&out.stderr, &out.stdout]
-            .into_iter()
-            .find_map(|bytes| serde_json::from_slice::<ErrorEnvelope>(bytes).ok());
-        match parsed {
-            Some(env) => Ok(Err(env.error)),
-            None => bail!(
-                "herdr {} failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&out.stderr).trim()
-            ),
-        }
+        reply(args, out)
     }
 
     fn call_ok(&self, args: &[&str]) -> Result<Value> {
-        self.call(args)?
-            .map_err(|e| anyhow!("herdr {}: {} ({})", args[..2].join(" "), e.message, e.code))
+        ok_reply(args, self.call(args)?)
+    }
+}
+
+fn ok_reply(args: &[&str], reply: std::result::Result<Value, ApiError>) -> Result<Value> {
+    reply.map_err(|e| anyhow!("herdr {}: {} ({})", args[..2].join(" "), e.message, e.code))
+}
+
+fn reply(args: &[&str], out: std::process::Output) -> Result<std::result::Result<Value, ApiError>> {
+    if out.status.success() {
+        let json: Value =
+            serde_json::from_slice(&out.stdout).with_context(|| MalformedReply(args.join(" ")))?;
+        return Ok(Ok(json["result"].clone()));
+    }
+    let parsed = [&out.stderr, &out.stdout]
+        .into_iter()
+        .find_map(|bytes| serde_json::from_slice::<ErrorEnvelope>(bytes).ok());
+    match parsed {
+        Some(env) => Ok(Err(env.error)),
+        None => bail!(
+            "herdr {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
     }
 }
 
@@ -314,6 +323,19 @@ impl Herdr for CliHerdr {
         let result = self.call_ok(&["agent", "list"])?;
         let list: Vec<AgentJson> = parse(&result["agents"], "agent list")?;
         Ok(list.into_iter().map(Agent::from).collect())
+    }
+
+    fn agents_within(&self, timeout: Duration) -> Result<Option<Vec<Agent>>> {
+        let args = ["agent", "list"];
+        let mut command = self.command(&args);
+        let Some(out) =
+            crate::shell::run_within(&mut command, timeout).context("run herdr agent list")?
+        else {
+            return Ok(None);
+        };
+        let result = ok_reply(&args, reply(&args, out)?)?;
+        let list: Vec<AgentJson> = parse(&result["agents"], "agent list")?;
+        Ok(Some(list.into_iter().map(Agent::from).collect()))
     }
 
     fn agent(&self, name: &str) -> Result<Agent> {

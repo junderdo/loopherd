@@ -378,21 +378,28 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
 
 ### Commands
 
-- `loopherd doctor` checks the install and herdr, changing nothing: each
-  loopherd hook in Claude's settings (a missing Stop, StopFailure,
-  SessionStart or PreToolUse hook fails; a missing UserPromptSubmit hook
-  fails while `[notify] pane_label` is on, else warns), hooks calling a
-  binary other than the `loopherd` on PATH (fails), running a binary other
-  than PATH's (warns), herdr unreachable on its socket, silent for 5s, or
-  older than 0.9.5 (fails). It prints only problems, each with its fix,
-  then `doctor: <n> ok, <n> warnings, <n> failures`; `--verbose` lists
-  every check, `--json` gives them as data, `--settings <file>` checks
-  another settings file, and `--trackers` also runs each herd's `source`
-  and `backlog` from its repo (paused herds too, 30s each), failing on a
-  nonzero exit or timeout; `--verbose` or `--json` shows each command's
-  exit status and task count, never the tasks.
-  Exits 0 clean or warnings only, 1 on any failure,
-  2 when it couldn't run (D63).
+- `loopherd doctor [<herd>]` checks the install, herdr, config and state,
+  changing nothing: each loopherd hook in Claude's settings (a missing
+  Stop, StopFailure, SessionStart or PreToolUse hook fails; a missing
+  UserPromptSubmit hook fails while `[notify] pane_label` is on, else
+  warns), hooks calling a binary other than the `loopherd` on PATH
+  (fails), running a binary other than PATH's (warns), herdr unreachable
+  on its socket, silent for 5s, or older than 0.9.5 (fails). A
+  `config.toml` or `[notify]` that doesn't load fails; unset lead
+  defaults or limits warn, naming `loopherd setup`. An invalid herd file,
+  or a herd `repo` missing or not a git repo, fails. An unparseable
+  ledger, pause file or member's mailbox fails; an unretired member with
+  no live agent warns, naming `revive` or `retire`, and members on
+  another herdr socket are counted, not checked. `--trackers` also runs
+  each herd's `source` and `backlog` from its repo (paused herds too, 30s
+  each), failing on a nonzero exit or timeout; `--verbose` or `--json`
+  shows each command's exit status and task count, never the tasks.
+  `<herd>` limits the herd, repo, state and tracker checks to that herd.
+  It prints only problems, each with its fix, then `doctor: <n> ok, <n>
+  warnings, <n> failures`; `--verbose` lists every check, `--json` gives
+  them as data, `--settings <file>` checks another settings file. Exits 0
+  clean or warnings only, 1 on any failure, 2 when it couldn't run or
+  `<herd>` is unknown (D63).
 - `loopherd status` lists members by herd with herdr's live status;
   `--all` adds retired entries, each row's status reading `retired <time>`
   (a bare `retired` when the ledger has no time), and `--strays` lists live agents missing from the ledger. `--json` gives
