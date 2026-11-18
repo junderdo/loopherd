@@ -271,7 +271,7 @@ fn wrapper_finds_loopherd_on_path_before_herdrs_dir() {
 }
 
 #[test]
-fn blocked_and_gone_events_run_loopherds_event_hook() {
+fn blocked_gone_and_moved_events_run_loopherds_event_hook() {
     let m = manifest();
     let hooks: Vec<(&str, Vec<&str>)> = m["events"]
         .as_array()
@@ -287,7 +287,8 @@ fn blocked_and_gone_events_run_loopherds_event_hook() {
             ("pane.exited", hook.clone()),
             ("pane.closed", hook.clone()),
             ("tab.closed", hook.clone()),
-            ("workspace.closed", hook),
+            ("workspace.closed", hook.clone()),
+            ("pane.moved", hook),
         ]
     );
 }

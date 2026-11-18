@@ -336,10 +336,12 @@ enum Command {
     /// for a handoff. Outside a member's pane it records nothing. Set up by install-hook.
     StopHook,
     /// The herdr plugin's hook on pane.agent_status_changed, pane.exited,
-    /// pane.closed, tab.closed and workspace.closed: records a member going
-    /// blocked, or its pane, tab or workspace going, in its mailbox for the
-    /// next watch. Reads HERDR_PLUGIN_EVENT and HERDR_PLUGIN_EVENT_JSON; any
-    /// other pane, tab or workspace records nothing.
+    /// pane.closed, tab.closed, workspace.closed and pane.moved: records a
+    /// member going blocked, or its pane, tab or workspace going, in its
+    /// mailbox for the next watch, and follows a member's pane moved to
+    /// another tab of its workspace in the ledger. Reads HERDR_PLUGIN_EVENT
+    /// and HERDR_PLUGIN_EVENT_JSON; any other pane, tab or workspace records
+    /// nothing.
     HerdrEventHook,
     /// Claude's SessionStart hook: when a member's Claude is cleared or resumed,
     /// points its ledger entry at the new session, read from the hook input on
@@ -1438,16 +1440,17 @@ fn run_stop_hook() -> Result<i32> {
 }
 
 /// Exits 0 on every error, after printing it: a running watch's poll
-/// still covers what the hook missed.
+/// still covers a missed `blocked` or `gone`, though not a missed move.
 fn run_herdr_event_hook() -> Result<i32> {
     let record = || -> Result<()> {
         let event = std::env::var("HERDR_PLUGIN_EVENT").context("no HERDR_PLUGIN_EVENT")?;
         let json =
             std::env::var("HERDR_PLUGIN_EVENT_JSON").context("no HERDR_PLUGIN_EVENT_JSON")?;
-        let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+        let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+        let reports = ledger.reports_dir()?;
         pane_event::event_hook(
-            &ledger,
-            &ledger.reports_dir()?,
+            &mut ledger,
+            &reports,
             &event,
             &json,
             socket_from_env().as_deref(),
