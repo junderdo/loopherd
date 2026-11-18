@@ -60,8 +60,8 @@ pub fn click(
     Ok(Shown::Browser)
 }
 
-/// The open member on `pr`'s head branch when GitHub names one of ours,
-/// else the worker that reported `pr` first.
+/// The open member on `pr`'s head branch when GitHub names one of ours (none
+/// when only retired ones are on it), else the worker that reported `pr` first.
 fn owner(
     pr: &str,
     entries: &BTreeMap<String, AgentRecord>,
@@ -73,9 +73,9 @@ fn owner(
         None
     });
     if let Some(head) = head {
-        let on_head = entries.values().find(|r| on_branch(r, &head));
-        if let Some(record) = on_head {
-            return (!record.retired).then(|| record.name.clone());
+        let on_head: Vec<&AgentRecord> = entries.values().filter(|r| on_branch(r, &head)).collect();
+        if !on_head.is_empty() {
+            return on_head.iter().find(|r| !r.retired).map(|r| r.name.clone());
         }
     }
     named_in_reports(pr, entries, reports_dir)
@@ -489,6 +489,49 @@ mod tests {
         );
 
         assert_browser(&c, PR);
+    }
+
+    #[test]
+    fn an_open_member_that_took_over_a_retired_members_branch_gets_the_popup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut successor = record("lh-227b");
+        successor.branch = Some("feat/lh-227".into());
+
+        let c = click_with(
+            PR,
+            vec![retired("lh-227"), successor],
+            dir.path(),
+            Heads(Ok(Some("feat/lh-227"))),
+            FakeHerdr::new(&[]),
+        );
+
+        assert_eq!(
+            c.shown,
+            Shown::Popup {
+                member: "lh-227b".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_worker_that_reported_the_pr_owns_it_when_github_cant_be_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        done(dir.path(), "lh-1", 5, &format!("opened {PR}"));
+
+        let c = click_with(
+            PR,
+            vec![record("lh-1")],
+            dir.path(),
+            Heads(Err("gh: offline")),
+            FakeHerdr::new(&[]),
+        );
+
+        assert_eq!(
+            c.shown,
+            Shown::Popup {
+                member: "lh-1".into()
+            }
+        );
     }
 
     #[test]

@@ -2,12 +2,16 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
 use crate::pr_link::PrHeads;
 use crate::shell::run_within;
 use crate::worktree::remote_timeout;
+
+/// A click waits on this lookup, so it gets a short deadline of its own.
+const HEAD_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// An open pull request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,7 +56,12 @@ impl PullRequests for GhCli {
             return Ok(PrLookup::Unknown("origin isn't on GitHub".into()));
         };
         if host != "github.com" {
-            let Some(status) = self.run(repo, &["auth", "status", "--hostname", &host])? else {
+            let Some(status) = self.run(
+                repo,
+                &["auth", "status", "--hostname", &host],
+                remote_timeout()?,
+            )?
+            else {
                 return Ok(no_gh());
             };
             if !status.status.success() {
@@ -77,7 +86,7 @@ impl PullRequests for GhCli {
             "--head",
             branch,
         ];
-        match self.run(repo, &args)? {
+        match self.run(repo, &args, remote_timeout()?)? {
             Some(output) => lookup_from(&output),
             None => Ok(no_gh()),
         }
@@ -95,7 +104,7 @@ impl PrHeads for GhCli {
             "--jq",
             ".headRefName",
         ];
-        let Some(output) = self.run(Path::new("."), &args)? else {
+        let Some(output) = self.run(Path::new("."), &args, HEAD_TIMEOUT)? else {
             bail!("no GitHub CLI (gh) on PATH");
         };
         let said = String::from_utf8_lossy(&output.stderr);
@@ -111,14 +120,14 @@ impl PrHeads for GhCli {
 }
 
 impl GhCli {
-    /// Runs gh with `args`; `None` when there's no gh to run.
-    fn run(&self, repo: &Path, args: &[&str]) -> Result<Option<Output>> {
+    /// Runs gh with `args` for up to `deadline`; `None` when there's no gh to run.
+    fn run(&self, repo: &Path, args: &[&str], deadline: Duration) -> Result<Option<Output>> {
         let mut gh = Command::new(&self.program);
         gh.args(args)
             .current_dir(repo)
             .env("GH_PROMPT_DISABLED", "1");
         let shown = format!("gh {}", args[..2].join(" "));
-        match run_within(&mut gh, remote_timeout()?) {
+        match run_within(&mut gh, deadline) {
             Err(e) if is_not_found(&e) => Ok(None),
             Err(e) => Err(e.context(format!("run {shown}"))),
             Ok(None) => bail!("{shown} didn't answer in time"),

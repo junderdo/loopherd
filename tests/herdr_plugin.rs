@@ -489,7 +489,9 @@ fn a_pr_no_member_owns_opens_in_the_browser() {
     };
     // loopherd doesn't wait for the opener.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while stub_args(&bin, opener).is_none() && std::time::Instant::now() < deadline {
+    while stub_args(&bin, opener).is_none_or(|a| a.is_empty())
+        && std::time::Instant::now() < deadline
+    {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert_eq!(
