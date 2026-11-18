@@ -231,7 +231,7 @@ pub fn claimable(
     unclaimed(ledger, paths, queue, herd, tasks, free)
 }
 
-/// How many tasks [`claimable`] would name were every slot free.
+/// How many tasks [`claimable`] would name with no cap on slots.
 pub fn claimable_count(
     ledger: &dyn Ledger,
     paths: &Paths,

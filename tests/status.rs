@@ -382,3 +382,40 @@ fn a_bad_git_timeout_warns_and_status_still_counts() {
     );
     assert_eq!(out.status.code(), Some(0));
 }
+
+#[test]
+fn a_task_a_parked_member_holds_is_neither_claimable_nor_unready_but_a_released_ones_is_claimable()
+{
+    let state = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    let path = state.path().join("loopherd/ledger.json");
+    let mut ledger: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    for (name, released_at) in [("lh-2", None), ("lh-3", Some("2026-11-02T00:00:00Z"))] {
+        let mut entry = ledger["lh-1"].clone();
+        entry["name"] = name.into();
+        entry["pane_id"] = format!("w1:{name}").into();
+        entry["retired"] = true.into();
+        entry["retired_at"] = "2026-11-01T12:00:00Z".into();
+        entry["released_at"] = released_at.into();
+        ledger[name] = entry;
+    }
+    fs::write(&path, ledger.to_string()).unwrap();
+    stub_herdr(bin.path(), Some(ONE_BLOCKED));
+    write_herd(
+        state.path(),
+        "prs",
+        repo.path(),
+        "source = \"printf '1\\\\n2\\\\n3\\\\n4\\\\n'\"\nbacklog = \"echo LH-9 Spec me\"\nmax = 1\n",
+    );
+
+    let out = run_status(state.path(), bin.path(), &["--json"]);
+
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["herds"][0]["name"], "prs");
+    assert_eq!(json["herds"][0]["claimable"], 2, "only 3 (released) and 4");
+    assert_eq!(json["herds"][0]["unready"], 1);
+    assert_eq!(out.status.code(), Some(0));
+}
