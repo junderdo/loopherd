@@ -1784,6 +1784,18 @@ mod tests {
                 "TOKEN key=(hunter22 horse battery), then merge?",
                 "TOKEN [redacted] [redacted] [redacted] then merge?",
             ),
+            (
+                "Use auth key=[hunter22 horse battery], then merge?",
+                "Use auth [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                "Use auth key='hunter22 horse battery', then merge?",
+                "Use auth [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                r#"Use token x.passphrase="hunter22 horse battery", then merge?"#,
+                "Use token [redacted] [redacted] [redacted] then merge?",
+            ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
         }
