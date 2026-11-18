@@ -109,7 +109,11 @@ enum Command {
     /// repo another herd runs.
     Init(InitArgs),
     /// List herd files with a usage line per template; exits 1 if any is invalid.
-    Herds,
+    Herds {
+        /// Check for the prompt hook in this file instead of $CLAUDE_CONFIG_DIR/settings.json or ~/.claude/settings.json.
+        #[arg(long)]
+        settings: Option<PathBuf>,
+    },
     /// Read or edit one value in a herd file, keeping its comments and layout.
     /// Keys are dotted paths such as `queue.max`, `lead.merge` or
     /// `template.card.args`.
@@ -592,7 +596,7 @@ fn main() -> ExitCode {
         Command::Spawn(args) => ("spawn", run_spawn(args)),
         Command::Add(args) => ("add", run_add(args)),
         Command::Init(args) => ("init", run_init(args)),
-        Command::Herds => ("herds", run_herds()),
+        Command::Herds { settings } => ("herds", run_herds(settings)),
         Command::Herd { action } => ("herd", run_herd(action)),
         Command::LeadDefaults { set } => ("lead-defaults", run_lead_defaults(set)),
         Command::Config { action } => ("config", run_config(action)),
@@ -1544,8 +1548,12 @@ fn init_or_diff(args: InitArgs) -> Result<i32> {
     Ok(0)
 }
 
-fn run_herds() -> Result<i32> {
-    let (report, code) = herds(&Paths::from_env().context("herd")?)?;
+fn run_herds(settings: Option<PathBuf>) -> Result<i32> {
+    let settings = match settings {
+        Some(settings) => settings,
+        None => install_hook::default_settings()?,
+    };
+    let (report, code) = herds(&Paths::from_env().context("herd")?, &settings)?;
     println!("{report}");
     Ok(code)
 }
