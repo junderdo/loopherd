@@ -499,11 +499,11 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   shows you nothing of the hook's run, so it copies each lead's line,
   unless that lead's watch is running, into the lead's mailbox as a
   `note` starting `herdr's startup revive:`; your next watch surfaces
-  them. A second revive waits for a running one (it says so on stderr)
-  and gives up after 10 minutes. A live handoff runs it too,
-  where nothing was lost: a lead between watches then gets the re-arm
-  prompt anyway, and its note says so. Tell a lead that handed off or
-  drained to ignore it.
+  them. A second revive waits for a running one, saying so on stderr,
+  and gives up after 10 minutes and says so; run it again then. A live
+  handoff runs it too, where nothing was lost: a lead between watches
+  then gets the re-arm prompt anyway, and its note says so. Tell a lead
+  that handed off or drained to ignore it.
   Plugins are global to the user, so never link or install one from a test
   or a dev session.
 

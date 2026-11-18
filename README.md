@@ -114,8 +114,8 @@ revive_on_startup = true
 
 It revives only the members recorded on the herdr server that started,
 and is off without that key. herdr shows nothing of its run; it leaves a
-`note` in each lead's mailbox instead, which the shepherd's watch shows. Remove the plugin with
-`herdr plugin uninstall loopherd`.
+`note` in each lead's mailbox instead, which the shepherd's watch shows.
+Remove the plugin with `herdr plugin uninstall loopherd`.
 
 ## Set up a repo
 
