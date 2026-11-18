@@ -403,6 +403,13 @@ fn agent_tab(
     {
         return Ok(TabFate::NameHeld(live.tab_id.clone()));
     }
+    // Feed may be spawning the released name before it records the new run.
+    if let Some(live) = live
+        && record.released_at.is_some()
+        && !same_session(live, record)
+    {
+        return kept(&live.tab_id, "a new member holds the released name".into());
+    }
     let pane_id = live.map_or(&record.pane_id, |a| &a.pane_id);
     let workspace = match &record.workspace_label {
         Some(label) => find_workspace(herdr, |w| &w.label == label)?,
@@ -2621,5 +2628,32 @@ mod tests {
         close(&herdr, &mut ledger);
 
         assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
+    fn close_on_a_released_name_keeps_a_new_member_mid_spawn_and_its_worktree() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        let old = ledger.0.get_mut("a").unwrap();
+        old.pane_id = "w1:p99".into();
+        old.tab_id = Some("w1:t99".into());
+        old.session_id = None;
+        old.retired = true;
+        old.retired_at = Some("2026-11-01T00:00:00Z".into());
+        old.released_at = Some("2026-11-02T00:00:00Z".into());
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(
+            out,
+            [
+                "a is already retired (since 2026-11-01T00:00:00Z)".to_string(),
+                "kept tab w1:t1: a new member holds the released name".into(),
+                format!("kept {}: its tab was kept", wt.display()),
+            ]
+        );
+        assert_eq!(herdr.tabs().len(), 1);
+        assert!(wt.is_dir());
     }
 }
