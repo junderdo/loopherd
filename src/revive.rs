@@ -12,6 +12,7 @@ use crate::herdr::{
 };
 use crate::ledger::{AgentRecord, Ledger};
 use crate::lock::Lock;
+use crate::process::{self, Procs};
 use crate::report::{Body, Entry, append};
 use crate::subagent_view::{ShowsSubagentView, TEXT_REACHES_SUBAGENT, ensure_main_view};
 use crate::worktree::same_dir;
@@ -59,6 +60,7 @@ impl Revived {
 /// so a session Claude continued elsewhere is matched and resumed there.
 pub fn revive(
     herdr: &dyn Herdr,
+    procs: &dyn Procs,
     ledger: &mut dyn Ledger,
     req: &ReviveRequest,
     live: &dyn Fn(&str) -> String,
@@ -107,9 +109,7 @@ pub fn revive(
                         there.display()
                     );
                 }
-                if current.pane_id != *pane_id {
-                    current.env_pane_id = None;
-                }
+                current.env_pane_id = None;
                 current.pane_id = pane_id.clone();
                 current.tab_id = Some(tab_id.clone());
                 current.workspace = workspace_id.clone();
@@ -142,6 +142,12 @@ pub fn revive(
                 }
             }
         }
+        if matches!(outcome, Outcome::Alive { .. })
+            && !req.dry_run
+            && let Err(e) = forget_dead_env_pane(ledger, procs, &record)
+        {
+            warnings.push(format!("its old pane id is kept: {e:#}"));
+        }
         rearm_lead(herdr, req, &record, &mut outcome);
         let line = outcome.line(&record);
         // Nobody reads a startup hook's output, so a lead's line goes to the
@@ -167,6 +173,28 @@ pub fn revive(
         revived.lines.push(line);
     }
     Ok(revived)
+}
+
+/// A live agent whose recorded process is gone was started again, so its
+/// `$HERDR_PANE_ID` is its pane's current id, not the one kept from before a move.
+fn forget_dead_env_pane(
+    ledger: &mut dyn Ledger,
+    procs: &dyn Procs,
+    record: &AgentRecord,
+) -> Result<()> {
+    if record.env_pane_id.is_none()
+        || record.process.is_none()
+        || process::live(procs, record.process).is_some()
+    {
+        return Ok(());
+    }
+    ledger.update(&record.name, &mut |current| {
+        if current.process == record.process {
+            current.env_pane_id = None;
+        }
+        Ok(())
+    })?;
+    Ok(())
 }
 
 fn only_revive(dir: &Path, timeout: Duration) -> Result<Lock> {
@@ -566,6 +594,7 @@ mod tests {
     use super::*;
     use crate::herdr::fake::{FakeHerdr, Startup};
     use crate::ledger::{AgentRecord, MemLedger};
+    use crate::process::{CLAUDE, FakeProcs};
     use crate::subagent_view::screens::{SUBAGENT_PICKER, SUBAGENT_PROMPT};
 
     fn request() -> ReviveRequest {
@@ -631,9 +660,11 @@ mod tests {
     }
 
     fn run(herdr: &FakeHerdr, ledger: &mut MemLedger, req: &ReviveRequest) -> (String, i32) {
-        revive(herdr, ledger, req, &|s| s.to_string())
-            .unwrap()
-            .report()
+        revive(herdr, &FakeProcs::default(), ledger, req, &|s| {
+            s.to_string()
+        })
+        .unwrap()
+        .report()
     }
 
     fn continued(session: &str) -> String {
@@ -655,9 +686,15 @@ mod tests {
         let cwd = tempfile::tempdir().unwrap();
         let herdr = herdr();
         let mut ledger = ledger([stub("a", cwd.path())]);
-        let (out, _) = revive(&herdr, &mut ledger, &request(), &continued)
-            .unwrap()
-            .report();
+        let (out, _) = revive(
+            &herdr,
+            &FakeProcs::default(),
+            &mut ledger,
+            &request(),
+            &continued,
+        )
+        .unwrap()
+        .report();
         assert_eq!(out, "resumed a w1:p1");
         assert_eq!(
             herdr.started()[0].args,
@@ -689,9 +726,15 @@ mod tests {
         let cwd = tempfile::tempdir().unwrap();
         let herdr = herdr().with_live_agent(Some("a"), Some("live"), "w1:p4");
         let mut ledger = ledger([stub("a", cwd.path())]);
-        let (out, _) = revive(&herdr, &mut ledger, &request(), &continued)
-            .unwrap()
-            .report();
+        let (out, _) = revive(
+            &herdr,
+            &FakeProcs::default(),
+            &mut ledger,
+            &request(),
+            &continued,
+        )
+        .unwrap()
+        .report();
         assert_eq!(out, "alive a w1:p4");
         assert!(herdr.started().is_empty());
     }
@@ -701,9 +744,15 @@ mod tests {
         let cwd = tempfile::tempdir().unwrap();
         let herdr = herdr().with_live_agent(Some("a"), Some("stub"), "w1:p4");
         let mut ledger = ledger([stub("a", cwd.path())]);
-        let (out, _) = revive(&herdr, &mut ledger, &request(), &continued)
-            .unwrap()
-            .report();
+        let (out, _) = revive(
+            &herdr,
+            &FakeProcs::default(),
+            &mut ledger,
+            &request(),
+            &continued,
+        )
+        .unwrap()
+        .report();
         assert_eq!(out, "alive a w1:p4");
         assert!(herdr.started().is_empty());
     }
@@ -721,9 +770,15 @@ mod tests {
             "stub" => panic!("resolved a retired entry's session"),
             other => other.to_string(),
         };
-        let (out, _) = revive(&herdr, &mut ledger, &request(), &live)
-            .unwrap()
-            .report();
+        let (out, _) = revive(
+            &herdr,
+            &FakeProcs::default(),
+            &mut ledger,
+            &request(),
+            &live,
+        )
+        .unwrap()
+        .report();
         assert_eq!(out, "skipped a: retired");
     }
 
@@ -733,9 +788,15 @@ mod tests {
         let mut herdr = herdr();
         herdr.startup = Startup::BlockedThenIdle;
         let mut ledger = ledger([stub("a", cwd.path())]);
-        let (out, _) = revive(&herdr, &mut ledger, &request(), &continued)
-            .unwrap()
-            .report();
+        let (out, _) = revive(
+            &herdr,
+            &FakeProcs::default(),
+            &mut ledger,
+            &request(),
+            &continued,
+        )
+        .unwrap()
+        .report();
         assert_eq!(out, "blocked a w1:p1");
         assert_eq!(ledger.0["a"].session_id.as_deref(), Some("live"));
     }
@@ -778,7 +839,10 @@ mod tests {
             settle_timeout: Duration::from_millis(20),
             ..request()
         };
-        let err = revive(&herdr, &mut ledger, &req, &|s| s.to_string()).unwrap_err();
+        let err = revive(&herdr, &FakeProcs::default(), &mut ledger, &req, &|s| {
+            s.to_string()
+        })
+        .unwrap_err();
         assert_eq!(
             format!("{err:#}"),
             "settle: herdr is still launching 1 agent(s) after 20ms"
@@ -936,14 +1000,77 @@ mod tests {
         assert_eq!(ledger.0["a"].process, Some(OLD_PROCESS));
     }
 
+    fn moved(cwd: &Path) -> AgentRecord {
+        AgentRecord {
+            pane_id: "w3:p2".into(),
+            env_pane_id: Some("w2:p1".into()),
+            process: Some(OLD_PROCESS),
+            ..record("a", cwd)
+        }
+    }
+
+    #[test]
+    fn a_moved_member_herdr_resumed_after_a_restart_no_longer_owns_its_old_pane_id() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr().with_live_agent(Some("a"), Some("sess-a"), "w3:p2");
+        let mut ledger = ledger([moved(cwd.path())]);
+
+        let (out, _) = run(&herdr, &mut ledger, &request());
+
+        assert_eq!(out, "alive a w3:p2");
+        let entries = ledger.entries().unwrap();
+        assert_eq!(
+            crate::report::member_of_own_pane(&entries, "w2:p1", None),
+            None
+        );
+        assert!(entries["a"].is_own_pane("w3:p2"));
+    }
+
+    #[test]
+    fn a_moved_member_whose_process_survives_keeps_its_old_pane_id() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr().with_live_agent(Some("a"), Some("sess-a"), "w3:p2");
+        let mut ledger = ledger([moved(cwd.path())]);
+        let mut procs = FakeProcs::default();
+        procs.add(OLD_PROCESS.pid, CLAUDE, 1, OLD_PROCESS.start);
+
+        let (out, _) = revive(&herdr, &procs, &mut ledger, &request(), &|s| s.to_string())
+            .unwrap()
+            .report();
+
+        assert_eq!(out, "alive a w3:p2");
+        assert!(ledger.0["a"].is_own_pane("w2:p1"));
+    }
+
+    #[test]
+    fn a_moved_member_resumed_in_its_own_pane_no_longer_owns_its_old_pane_id() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut ledger = ledger([AgentRecord {
+            pane_id: "w1:p1".into(),
+            ..moved(cwd.path())
+        }]);
+
+        let (out, _) = run(&herdr, &mut ledger, &request());
+
+        assert_eq!(out, "resumed a w1:p1");
+        assert!(!ledger.0["a"].is_own_pane("w2:p1"));
+    }
+
     #[test]
     fn a_start_the_mailbox_cannot_take_is_a_warning_not_a_failure() {
         let cwd = tempfile::tempdir().unwrap();
         let herdr = herdr();
         let mut ledger = crate::ledger::NoMailbox(ledger([record("a", cwd.path())]));
-        let (out, code) = revive(&herdr, &mut ledger, &request(), &|s| s.to_string())
-            .unwrap()
-            .report();
+        let (out, code) = revive(
+            &herdr,
+            &FakeProcs::default(),
+            &mut ledger,
+            &request(),
+            &|s| s.to_string(),
+        )
+        .unwrap()
+        .report();
         assert_eq!(
             (out.as_str(), code),
             (
@@ -1185,7 +1312,10 @@ mod tests {
             name: Some("ghost".into()),
             ..request()
         };
-        let err = revive(&herdr, &mut ledger, &req, &|s| s.to_string()).unwrap_err();
+        let err = revive(&herdr, &FakeProcs::default(), &mut ledger, &req, &|s| {
+            s.to_string()
+        })
+        .unwrap_err();
         assert_eq!(format!("{err:#}"), "ghost is not in the ledger");
     }
 
@@ -1602,9 +1732,15 @@ mod tests {
         };
         let before = ledger.current.0.clone();
 
-        let (out, code) = revive(&herdr, &mut ledger, &request(), &|s| s.to_string())
-            .unwrap()
-            .report();
+        let (out, code) = revive(
+            &herdr,
+            &FakeProcs::default(),
+            &mut ledger,
+            &request(),
+            &|s| s.to_string(),
+        )
+        .unwrap()
+        .report();
 
         assert_eq!(
             (out.as_str(), code),
@@ -1843,7 +1979,10 @@ mod tests {
         };
         let run_on = |req: &ReviveRequest| {
             let mut ledger = crate::ledger::FileLedger::new(path.clone());
-            revive(&herdr, &mut ledger, req, &|s| s.to_string()).unwrap()
+            revive(&herdr, &FakeProcs::default(), &mut ledger, req, &|s| {
+                s.to_string()
+            })
+            .unwrap()
         };
 
         let (first, manual) = std::thread::scope(|scope| {
@@ -1874,7 +2013,14 @@ mod tests {
             ..startup(state.path())
         };
 
-        let err = revive(&dev_herdr(), &mut ledger([]), &req, &|s| s.to_string()).unwrap_err();
+        let err = revive(
+            &dev_herdr(),
+            &FakeProcs::default(),
+            &mut ledger([]),
+            &req,
+            &|s| s.to_string(),
+        )
+        .unwrap_err();
 
         assert!(
             format!("{err:#}").starts_with("another revive is still running after 100ms"),

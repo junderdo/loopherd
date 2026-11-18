@@ -65,17 +65,19 @@ pub fn session_hook(
             }
             true
         }
-        Some(pid) => match process::claim(ledger, procs, member, true, pid, Some(&session))? {
-            Claim::Claimed => true,
-            Claim::Nested => {
-                warn(format!(
-                    "ignored a session start from process {pid} in {}'s pane; it is not the pane's top-level Claude",
-                    member.name
-                ));
-                return Ok(None);
+        Some(pid) => {
+            match process::claim(ledger, procs, member, pane.id, true, pid, Some(&session))? {
+                Claim::Claimed => true,
+                Claim::Nested => {
+                    warn(format!(
+                        "ignored a session start from process {pid} in {}'s pane; it is not the pane's top-level Claude",
+                        member.name
+                    ));
+                    return Ok(None);
+                }
+                Claim::Declined => from_clear_or_resume,
             }
-            Claim::Declined => from_clear_or_resume,
-        },
+        }
         None => from_clear_or_resume,
     };
     if !adopt || member.session_id.as_deref() == Some(session.as_str()) {
@@ -384,6 +386,42 @@ mod tests {
             })
         );
         assert_eq!(session_of(&l, "lh-1").as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn a_new_claude_claimed_from_a_moved_members_current_pane_drops_its_old_pane_id() {
+        let mut m = claimed(member("lh-1", "w1:p1", Some(SOCKET), "s1"), 4242, 99);
+        m.env_pane_id = Some("w2:p1".into());
+        let mut l = ledger(vec![m]);
+
+        let who = run_as(
+            &mut l,
+            &FakeProcs::pane(),
+            Some(30),
+            Some(SOCKET),
+            &start("resume", "s1"),
+        );
+
+        assert_eq!(who.as_deref(), Some("lh-1"));
+        assert!(!l.0["lh-1"].is_own_pane("w2:p1"));
+    }
+
+    #[test]
+    fn a_new_claude_claimed_from_a_moved_members_old_pane_id_keeps_it() {
+        let mut m = claimed(member("lh-1", "w3:p2", Some(SOCKET), "s1"), 4242, 99);
+        m.env_pane_id = Some("w1:p1".into());
+        let mut l = ledger(vec![m]);
+
+        let who = run_as(
+            &mut l,
+            &FakeProcs::pane(),
+            Some(30),
+            Some(SOCKET),
+            &start("resume", "s1"),
+        );
+
+        assert_eq!(who.as_deref(), Some("lh-1"));
+        assert!(l.0["lh-1"].is_own_pane("w1:p1"));
     }
 
     #[test]

@@ -119,14 +119,18 @@ pub enum Claim {
     Declined,
 }
 
-/// Records `pid` as `member`'s Claude when it is the pane's top-level Claude
-/// in the member's own session (or the member has none yet), and the member has
-/// no live process; a `pid` that isn't top-level is `Nested`. `socket_exact` is whether the pane matched on its socket.
-/// Writes only the process (and the session, if the member had none).
+/// Records `pid`, running in `pane`, as `member`'s Claude when it is the pane's
+/// top-level Claude in the member's own session (or the member has none yet),
+/// and the member has no live process; a `pid` that isn't top-level is `Nested`.
+/// `socket_exact` is whether the pane matched on its socket. Writes only the
+/// process, the session if the member had none, and drops the pane id kept
+/// from before a move when `pane` is the current one: only a restored herdr
+/// gives a process there that id.
 pub fn claim(
     ledger: &mut dyn Ledger,
     procs: &dyn Procs,
     member: &AgentRecord,
+    pane: &str,
     socket_exact: bool,
     pid: u32,
     session: Option<&str>,
@@ -152,6 +156,9 @@ pub fn claim(
             return Ok(());
         }
         record.process = Some(Process { pid, start });
+        if record.pane_id == pane {
+            record.env_pane_id = None;
+        }
         if record.session_id.is_none() {
             record.session_id = session.map(str::to_string);
         }

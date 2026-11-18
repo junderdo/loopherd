@@ -92,12 +92,19 @@ pub fn stop_hook(
                 return Ok(None);
             }
             None => {
-                let claim =
-                    process::claim(ledger, procs, member, exact, pid, stop.session.as_deref())
-                        .unwrap_or_else(|e| {
-                            warn(format!("could not claim {}'s process: {e:#}", member.name));
-                            Claim::Declined
-                        });
+                let claim = process::claim(
+                    ledger,
+                    procs,
+                    member,
+                    pane.id,
+                    exact,
+                    pid,
+                    stop.session.as_deref(),
+                )
+                .unwrap_or_else(|e| {
+                    warn(format!("could not claim {}'s process: {e:#}", member.name));
+                    Claim::Declined
+                });
                 match claim {
                     Claim::Claimed => return settle(dir, pane, member, stop, now, handoff, warn),
                     Claim::Nested => {
