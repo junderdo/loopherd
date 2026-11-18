@@ -21,7 +21,9 @@ use crate::notify::{self, Waiting};
 use crate::pane_event::{record_blocked, record_gone_after};
 use crate::pause;
 use crate::process::{Procs, live};
-use crate::report::{Body, Filter, Mailbox, Pending, Stop, member_in, peek_reports, unread_wakes};
+use crate::report::{
+    Body, Filter, Mailbox, Pending, Stop, member_of_own_pane, peek_reports, unread_wakes,
+};
 use crate::status;
 
 /// The kinds of line a watch prints after a member's name, besides report kinds.
@@ -379,7 +381,7 @@ pub fn watch(
             // A lead relays its workers' questions as its own reports, which label its pane.
             if let (true, Reader::Shepherd, Some(pane), Some(first)) =
                 (req.pane_label, &reader, req.own_pane, waiting.first())
-                && member_in(&ledger.entries()?, pane, req.own_socket).is_none()
+                && member_of_own_pane(&ledger.entries()?, pane, req.own_socket).is_none()
                 && let Err(e) = crate::pane_label::set(herdr, dir, pane, first)
             {
                 warn(&format!("warning: label pane {pane}: {e:#}"));
@@ -1206,12 +1208,12 @@ fn reader(ledger: &dyn Ledger, req: &Request, warn: &mut dyn FnMut(&str)) -> Res
         return Ok(Reader::Shepherd);
     };
     let entries = ledger.entries()?;
-    let lead = match member_in(&entries, pane, req.own_socket) {
+    let lead = match member_of_own_pane(&entries, pane, req.own_socket) {
         Some(entry) if entry.is_lead() => entry,
         Some(_) => return Ok(Reader::Shepherd),
         None => {
             // Pane ids repeat across herdrs, but this may be a lead whose recorded socket is stale.
-            let on_pane = |e: &&AgentRecord| !e.retired && e.is_lead() && e.pane_id == pane;
+            let on_pane = |e: &&AgentRecord| !e.retired && e.is_lead() && e.is_own_pane(pane);
             if let Some(lead) = entries.values().find(on_pane) {
                 warn(&format!(
                     "warning: pane {pane} holds lead {} on socket {}, \
@@ -1253,7 +1255,7 @@ fn shepherd_handoff(
     let entries = ledger.entries().ok()?;
     if req
         .own_pane
-        .is_some_and(|pane| member_in(&entries, pane, req.own_socket).is_some())
+        .is_some_and(|pane| member_of_own_pane(&entries, pane, req.own_socket).is_some())
     {
         return None;
     }
@@ -1452,6 +1454,7 @@ mod tests {
         AgentRecord {
             name: name.into(),
             pane_id: pane.into(),
+            env_pane_id: None,
             tab_id: None,
             session_id: None,
             repo: "/src/repo".into(),

@@ -65,7 +65,7 @@ pub fn restart(
         ),
         Some(_) => {}
     }
-    if req.own_pane == Some(record.pane_id.as_str()) {
+    if req.own_pane.is_some_and(|pane| record.is_own_pane(pane)) {
         bail!("{name} can't restart itself; whoever reads its handoff line restarts it");
     }
     let handoff = handoff_path(req.state, name);
@@ -251,6 +251,7 @@ mod tests {
         AgentRecord {
             name: name.into(),
             pane_id: "w1:p1".into(),
+            env_pane_id: None,
             tab_id: None,
             session_id: Some("old".into()),
             repo: "/src/repo".into(),
@@ -643,7 +644,7 @@ mod tests {
     #[test]
     fn a_member_it_cant_follow_or_its_own_pane_is_refused_even_with_force() {
         type Edit<'a> = &'a dyn Fn(&mut AgentRecord);
-        let cases: [(Option<&str>, Edit, &str); 3] = [
+        let cases: [(Option<&str>, Edit, &str); 4] = [
             (
                 None,
                 &|r| r.socket = None,
@@ -655,6 +656,14 @@ mod tests {
                 "lh-1 is in the herdr at /run/other.sock, not this one",
             ),
             (Some("w1:p1"), &|_| {}, "lh-1 can't restart itself"),
+            (
+                Some("w1:p1"),
+                &|r| {
+                    r.env_pane_id = Some("w1:p1".into());
+                    r.pane_id = "w3:p2".into();
+                },
+                "lh-1 can't restart itself",
+            ),
         ];
         for (own_pane, edit, message) in cases {
             let w = World::new();

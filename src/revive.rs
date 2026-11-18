@@ -107,6 +107,9 @@ pub fn revive(
                         there.display()
                     );
                 }
+                if current.pane_id != *pane_id {
+                    current.env_pane_id = None;
+                }
                 current.pane_id = pane_id.clone();
                 current.tab_id = Some(tab_id.clone());
                 current.workspace = workspace_id.clone();
@@ -590,6 +593,7 @@ mod tests {
         AgentRecord {
             name: name.into(),
             pane_id: "w1:p1".into(),
+            env_pane_id: None,
             tab_id: None,
             session_id: Some(format!("sess-{name}")),
             repo: cwd.into(),
@@ -660,6 +664,24 @@ mod tests {
             vec!["--resume", "live", "--model", "opus"]
         );
         assert_eq!(ledger.0["a"].session_id.as_deref(), Some("live"));
+    }
+
+    #[test]
+    fn a_member_moved_to_another_workspace_resumed_in_a_new_pane_takes_that_pane_as_its_own() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let moved = AgentRecord {
+            pane_id: "w3:p2".into(),
+            env_pane_id: Some("w2:p1".into()),
+            ..record("a", cwd.path())
+        };
+        let mut ledger = ledger([moved]);
+
+        let (out, _) = run(&herdr, &mut ledger, &request());
+
+        assert_eq!(out, "resumed a w1:p1");
+        assert!(ledger.0["a"].is_own_pane("w1:p1"));
+        assert!(!ledger.0["a"].is_own_pane("w2:p1"));
     }
 
     #[test]

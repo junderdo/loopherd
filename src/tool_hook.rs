@@ -1,6 +1,6 @@
 //! `loopherd tool-hook`: Claude's PreToolUse hook on Bash. Blocks a command
 //! from a lead's pane that needs a switch its herd file leaves off (D17), or
-//! a `loopherd restart --force` (D20) or `retire --force` (D74), a `loopherd pause` or `resume`
+//! a `loopherd restart --force` (D20) or `retire --force` (D75), a `loopherd pause` or `resume`
 //! (D23), a `loopherd herd set`, `unset` (D29) or `remove` (D43), a `loopherd
 //! retire` of a lead (D50), a write of the lead
 //! defaults (D31), a `loopherd config set`, `unset` or `setup` (D39), cargo
@@ -270,7 +270,7 @@ pub fn lead_in(ledger: &dyn Ledger, pane: &Pane) -> Result<Option<AgentRecord>> 
     let (live, retired): (Vec<_>, Vec<_>) = ledger
         .entries()?
         .into_values()
-        .filter(|e| e.pane_id == pane.id && e.socket.as_deref() == Some(socket))
+        .filter(|e| e.is_own_pane(pane.id) && e.socket.as_deref() == Some(socket))
         .partition(|e| !e.retired);
     Ok(match live.into_iter().next() {
         Some(entry) => entry.is_lead().then_some(entry),
@@ -3141,6 +3141,7 @@ mod tests {
         AgentRecord {
             name: name.into(),
             pane_id: PANE.into(),
+            env_pane_id: None,
             tab_id: None,
             session_id: Some("s1".into()),
             repo: "/src/repo".into(),

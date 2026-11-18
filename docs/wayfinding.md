@@ -87,8 +87,9 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D70](decisions/D70.md) | A lead's `review_rounds`, a positive integer, resolves from its herd file's `[lead]`, else `[lead_defaults]`, else 3; the lead's prompt gets it as `{review_rounds}` and `loopherd herds` shows it with its source. Amends D31's `[lead_defaults]` keys. |
 | [D71](decisions/D71.md) | A restarted lead's resume prompt carries its switches and `review_rounds`, resolved at restart; a herd file or `config.toml` that can't be read, or a lead with no herd or `[lead]`, refuses the restart before the `/clear`. |
 | [D72](decisions/D72.md) | A watch says `<herd> out of work`, once per streak, for an unpaused herd with no claimable or unready work and no open worker: a lead's for its herd, the shepherd's for unled herds. Amends D60's no herd checks in the shepherd's watch. |
-| [D73](decisions/D73.md) | The plugin hooks `pane.moved`, and on a move within a workspace the hook points a member's `tab_id` at its pane's new tab; a move to another workspace changes nothing (LH-265), and the move can race its old tab's close into a false `gone` (LH-266). Amends D69's move limit. |
-| [D74](decisions/D74.md) | `retire` refuses an unretired member herdr still shows with no `done`, `question` or `handoff` report since its last start, unless `--force`; a lead's hook denies `retire --force`. |
+| [D73](decisions/D73.md) | The plugin hooks `pane.moved`, and on a move within a workspace the hook points a member's `tab_id` at its pane's new tab (D74 follows moves to another workspace), and the move can race its old tab's close into a false `gone` (LH-266). Amends D69's move limit. |
+| [D74](decisions/D74.md) | The `pane.moved` hook also follows a move to another workspace, rewriting `pane_id`, `tab_id` and `workspace` and keeping the agent's `$HERDR_PANE_ID` as `env_pane_id`; own-pane lookups in report, the Stop, SessionStart and PreToolUse hooks, restart, retire's lead refusal and watch accept either id, while a lead's question label and `retire --close`'s own-tab check don't (D74's limits). Amends D73's limits. |
+| [D75](decisions/D75.md) | `retire` refuses an unretired member herdr still shows with no `done`, `question` or `handoff` report since its last start, unless `--force`; a lead's hook denies `retire --force`. |
 
 ## Emerging model
 
