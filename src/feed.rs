@@ -1813,7 +1813,7 @@ mod tests {
             &mut self,
             _: &str,
             _: &mut dyn FnMut(&[String]) -> anyhow::Result<()>,
-        ) -> anyhow::Result<Vec<String>> {
+        ) -> anyhow::Result<crate::ledger::RemovedHerd> {
             unreachable!()
         }
         fn started(&mut self, _: &str, _: std::time::SystemTime, _resumed: bool) -> Result<()> {

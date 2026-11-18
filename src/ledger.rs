@@ -114,18 +114,54 @@ pub trait Ledger {
         name: &str,
         change: &mut dyn FnMut(&mut AgentRecord) -> Result<()>,
     ) -> Result<AgentRecord>;
-    /// Removes every entry of `herd`, read fresh under the ledger lock;
-    /// refuses, removing nothing, while any of them is not retired. Runs
-    /// `before` with their names while holding the lock, and saves nothing
-    /// when it fails. Returns the removed names.
+    /// Removes every run of `herd`, current or in an entry's `earlier`, read
+    /// fresh under the ledger lock; refuses, removing nothing, while any
+    /// entry of `herd` is not retired. An entry left with other runs keeps
+    /// them, the newest becoming the entry. Runs `before` with the names
+    /// left with no run while holding the lock, and saves nothing when it
+    /// fails.
     fn remove_herd(
         &mut self,
         herd: &str,
         before: &mut dyn FnMut(&[String]) -> Result<()>,
-    ) -> Result<Vec<String>>;
+    ) -> Result<RemovedHerd>;
     /// Appends a `start` boundary to `name`'s mailbox; `resumed` when the
     /// conversation carried over, as on a revive.
     fn started(&mut self, name: &str, at: SystemTime, resumed: bool) -> Result<()>;
+}
+
+/// The ledger entries `remove_herd` changed, by name.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct RemovedHerd {
+    /// Entries removed: every run was the herd's.
+    pub gone: Vec<String>,
+    /// Entries that lost the herd's runs and kept others.
+    pub trimmed: Vec<String>,
+}
+
+/// The entries holding a run of `herd`, split by whether removing those runs
+/// leaves any.
+pub fn herd_runs(entries: &BTreeMap<String, AgentRecord>, herd: &str) -> RemovedHerd {
+    let mut runs = RemovedHerd::default();
+    for (name, record) in entries {
+        match without_herd(record.clone(), herd) {
+            None => runs.gone.push(name.clone()),
+            Some(left) if left != *record => runs.trimmed.push(name.clone()),
+            Some(_) => {}
+        }
+    }
+    runs
+}
+
+/// `record`'s runs not of `herd`: the newest as the entry, the rest as its
+/// `earlier`, oldest first. `None` when every run was `herd`'s.
+fn without_herd(mut record: AgentRecord, herd: &str) -> Option<AgentRecord> {
+    let mut runs = std::mem::take(&mut record.earlier);
+    runs.push(record);
+    runs.retain(|r| r.herd.as_deref() != Some(herd));
+    let mut newest = runs.pop()?;
+    newest.earlier = runs;
+    Some(newest)
 }
 
 fn insert(entries: &mut BTreeMap<String, AgentRecord>, mut record: AgentRecord) {
@@ -162,17 +198,21 @@ fn remove_herd_from(
     entries: &mut BTreeMap<String, AgentRecord>,
     herd: &str,
     before: &mut dyn FnMut(&[String]) -> Result<()>,
-) -> Result<Vec<String>> {
+) -> Result<RemovedHerd> {
     let live = live_in_herd(entries, herd);
     if !live.is_empty() {
         anyhow::bail!("not retired: {}", live.join(", "));
     }
-    let names: Vec<String> = in_herd(entries, herd).map(|r| r.name.clone()).collect();
-    before(&names)?;
-    for name in &names {
+    let removed = herd_runs(entries, herd);
+    before(&removed.gone)?;
+    for name in &removed.gone {
         entries.remove(name);
     }
-    Ok(names)
+    for name in &removed.trimmed {
+        let record = entries.remove(name).expect("trimmed entry exists");
+        entries.extend(without_herd(record, herd).map(|r| (name.clone(), r)));
+    }
+    Ok(removed)
 }
 
 /// A JSON file of entries keyed by agent name.
@@ -289,11 +329,11 @@ impl Ledger for FileLedger {
         &mut self,
         herd: &str,
         before: &mut dyn FnMut(&[String]) -> Result<()>,
-    ) -> Result<Vec<String>> {
+    ) -> Result<RemovedHerd> {
         let _lock = self.lock()?;
         let mut entries = self.load()?;
         let removed = remove_herd_from(&mut entries, herd, before)?;
-        if !removed.is_empty() {
+        if removed != RemovedHerd::default() {
             self.save(&entries)?;
         }
         Ok(removed)
@@ -341,7 +381,7 @@ impl Ledger for MemLedger {
         &mut self,
         herd: &str,
         before: &mut dyn FnMut(&[String]) -> Result<()>,
-    ) -> Result<Vec<String>> {
+    ) -> Result<RemovedHerd> {
         remove_herd_from(&mut self.0, herd, before)
     }
 
@@ -378,7 +418,7 @@ impl Ledger for NoMailbox {
         &mut self,
         herd: &str,
         before: &mut dyn FnMut(&[String]) -> Result<()>,
-    ) -> Result<Vec<String>> {
+    ) -> Result<RemovedHerd> {
         self.0.remove_herd(herd, before)
     }
 
@@ -413,7 +453,7 @@ impl Ledger for NoUpdate {
         &mut self,
         herd: &str,
         before: &mut dyn FnMut(&[String]) -> Result<()>,
-    ) -> Result<Vec<String>> {
+    ) -> Result<RemovedHerd> {
         self.0.remove_herd(herd, before)
     }
 
@@ -686,10 +726,31 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(removed, ["a", "b"]);
+        assert_eq!(removed.gone, ["a", "b"]);
+        assert!(removed.trimmed.is_empty());
         assert_eq!(seen, ["a", "b"]);
         let left: Vec<_> = remover.entries().unwrap().into_keys().collect();
         assert_eq!(left, ["c", "d"]);
+    }
+
+    #[test]
+    fn remove_herd_saves_an_entry_that_only_lost_an_earlier_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = FileLedger::new(dir.path().join("ledger.json"));
+        ledger.record(member("a", "old", true)).unwrap();
+        ledger
+            .record(AgentRecord {
+                created: "later".into(),
+                ..member("a", "live", false)
+            })
+            .unwrap();
+        assert_eq!(ledger.entries().unwrap()["a"].earlier.len(), 1);
+
+        let removed = ledger.remove_herd("old", &mut |_| Ok(())).unwrap();
+
+        assert_eq!(removed.trimmed, ["a"]);
+        let a = &ledger.entries().unwrap()["a"];
+        assert_eq!((a.herd.as_deref(), a.earlier.len()), (Some("live"), 0));
     }
 
     #[test]
