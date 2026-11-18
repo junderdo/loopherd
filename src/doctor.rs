@@ -2,6 +2,7 @@
 //! sound. It only reads, and names the command that fixes each problem.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -178,6 +179,102 @@ fn herdr_checks(herdr: &dyn Herdr) -> Vec<Check> {
         },
     };
     vec![ok("herdr", format!("answers on {socket}")), check]
+}
+
+/// How long each herd's `source` or `backlog` may run under `--trackers`.
+pub const TRACKER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Runs every herd's `source`, and `backlog` when set, from the herd's repo,
+/// paused herds included. Reports each exit and task count, never the tasks.
+pub fn tracker_checks(paths: &crate::herd::Paths, timeout: Duration) -> Vec<Check> {
+    let names = match crate::herd::names(&paths.herds) {
+        Ok(names) => names,
+        Err(e) => {
+            let detail = format!("{e:#}").trim_end().to_string();
+            return vec![failure("trackers", detail, "loopherd herds".into())];
+        }
+    };
+    let mut checks = Vec::new();
+    for herd in names {
+        let queue = match crate::herd::lead_checks(paths, &herd) {
+            Ok((_, Some(queue))) => queue,
+            Ok((_, None)) => continue,
+            Err(e) => {
+                let detail = format!("{e:#}").trim_end().to_string();
+                checks.push(failure(
+                    &format!("{herd} trackers"),
+                    detail,
+                    "loopherd herds".into(),
+                ));
+                continue;
+            }
+        };
+        if !queue.repo.is_dir() {
+            let repo = queue.repo.display();
+            checks.push(failure(
+                &format!("{herd} repo"),
+                format!("{repo} isn't a directory, so its trackers can't run"),
+                format!("loopherd herd set {herd} repo <path>"),
+            ));
+            continue;
+        }
+        let commands = [
+            ("source", Some(&queue.source)),
+            ("backlog", queue.backlog.as_ref()),
+        ];
+        for (key, command) in commands {
+            if let Some(command) = command {
+                checks.push(tracker(&herd, key, command, &queue.repo, timeout));
+            }
+        }
+    }
+    checks
+}
+
+fn tracker(herd: &str, key: &str, command: &str, repo: &Path, timeout: Duration) -> Check {
+    let name = format!("{herd} {key}");
+    let shown = match command.trim().split_once('\n') {
+        Some((first, _)) => format!("{first} …"),
+        None => command.trim().to_string(),
+    };
+    let fix =
+        format!("fix {herd}'s queue.{key}, e.g. loopherd herd set {herd} queue.{key} <command>");
+    let ran = crate::shell::run_within(
+        Command::new("sh").arg("-c").arg(command).current_dir(repo),
+        timeout,
+    );
+    let output = match ran {
+        Ok(Some(output)) => output,
+        Ok(None) => {
+            let after = humantime::format_duration(timeout);
+            return failure(&name, format!("{shown:?} timed out after {after}"), fix);
+        }
+        Err(e) => {
+            let detail = format!("{shown:?} didn't run in {}: {e:#}", repo.display());
+            return failure(&name, detail, fix);
+        }
+    };
+    let exit = match output.status.code() {
+        Some(code) => format!("exit {code}"),
+        None => output.status.to_string(),
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = match stderr.trim().lines().last() {
+            None => format!("{shown:?} failed ({exit})"),
+            Some(last) => format!(
+                "{shown:?} failed ({exit}): {}",
+                crate::watch::printable(last)
+            ),
+        };
+        return failure(&name, detail, fix);
+    }
+    let tasks = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .count();
+    ok(&name, format!("{exit}, {tasks} tasks"))
 }
 
 /// `major.minor.patch` as numbers, ignoring any pre-release or build suffix.
@@ -692,5 +789,163 @@ mod tests {
             "failure herdr version: herdr's server didn't report a version; \
              fix: upgrade herdr to 0.9.5 or later and restart its server"
         );
+    }
+
+    struct Herds {
+        dir: tempfile::TempDir,
+    }
+
+    impl Herds {
+        /// Herd files whose `[queue]` holds `queue`'s lines, each herd's repo a temp dir.
+        fn with(herds: &[(&str, &str)]) -> Herds {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join("herds")).unwrap();
+            std::fs::create_dir_all(dir.path().join("repo")).unwrap();
+            for (name, queue) in herds {
+                let text = format!(
+                    "repo = {:?}\n[template.t]\nparams = [\"n\"]\nprompt = \"go\"\n{queue}\n",
+                    dir.path().join("repo")
+                );
+                std::fs::write(dir.path().join(format!("herds/{name}.toml")), text).unwrap();
+            }
+            Herds { dir }
+        }
+
+        fn paths(&self) -> crate::herd::Paths {
+            crate::herd::Paths {
+                herds: self.dir.path().join("herds"),
+                home: self.dir.path().to_path_buf(),
+                feed_lock: self.dir.path().join("feed.lock"),
+                paused: self.dir.path().join("paused"),
+            }
+        }
+
+        fn run(&self, timeout: Duration) -> (String, i32) {
+            let checks = tracker_checks(&self.paths(), timeout);
+            (text(&checks, true), exit_code(&checks))
+        }
+    }
+
+    fn queue(source: &str, backlog: Option<&str>) -> String {
+        let backlog = backlog.map_or(String::new(), |b| format!("backlog = {b:?}\n"));
+        format!("[queue]\ntemplate = \"t\"\nsource = {source:?}\n{backlog}max = 1")
+    }
+
+    #[test]
+    fn trackers_report_each_exit_and_task_count_but_never_a_task() {
+        let herds = Herds::with(&[
+            (
+                "a",
+                &queue("printf 'LH-1\\n\\nLH-2\\n# note\\n'", Some("echo LH-3")),
+            ),
+            ("b", &queue("true", None)),
+        ]);
+        assert_eq!(
+            herds.run(TRACKER_TIMEOUT),
+            (
+                "ok a source: exit 0, 2 tasks\n\
+                 ok a backlog: exit 0, 1 tasks\n\
+                 ok b source: exit 0, 0 tasks\n\
+                 doctor: 3 ok, 0 warnings, 0 failures\n"
+                    .into(),
+                0
+            )
+        );
+    }
+
+    #[test]
+    fn trackers_run_in_the_herds_repo() {
+        let herds = Herds::with(&[("a", &queue("test -d ../herds && ls", None))]);
+        std::fs::write(herds.dir.path().join("repo/task"), "").unwrap();
+        assert_eq!(
+            herds.run(TRACKER_TIMEOUT).0,
+            "ok a source: exit 0, 1 tasks\ndoctor: 1 ok, 0 warnings, 0 failures\n"
+        );
+    }
+
+    #[test]
+    fn a_failing_tracker_fails_naming_the_herd_and_command() {
+        let herds = Herds::with(&[(
+            "a",
+            &queue("echo LH-1; echo nope >&2; exit 3", Some("exit 4")),
+        )]);
+        let (out, code) = herds.run(TRACKER_TIMEOUT);
+        assert_eq!(
+            out,
+            "failure a source: \"echo LH-1; echo nope >&2; exit 3\" failed (exit 3): nope; \
+             fix: fix a's queue.source, e.g. loopherd herd set a queue.source <command>\n\
+             failure a backlog: \"exit 4\" failed (exit 4); \
+             fix: fix a's queue.backlog, e.g. loopherd herd set a queue.backlog <command>\n\
+             doctor: 0 ok, 0 warnings, 2 failures\n"
+        );
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn a_tracker_outliving_its_timeout_fails() {
+        let herds = Herds::with(&[("a", &queue("sleep 5", None))]);
+        let (out, code) = herds.run(Duration::from_millis(200));
+        assert!(
+            out.starts_with("failure a source: \"sleep 5\" timed out after 200ms; "),
+            "{out}"
+        );
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn a_paused_herd_runs_and_a_herd_without_a_queue_has_nothing_to_run() {
+        let herds = Herds::with(&[("a", &queue("echo x", None)), ("b", "")]);
+        let paths = herds.paths();
+        std::fs::create_dir_all(&paths.paused).unwrap();
+        std::fs::write(
+            paths.paused.join("a"),
+            r#"{"since":"2026-01-01T00:00:00Z","reason":null}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            crate::pause::read(&paths.paused, "a"),
+            crate::pause::Reading::Paused(_)
+        ));
+        assert_eq!(
+            herds.run(TRACKER_TIMEOUT).0,
+            "ok a source: exit 0, 1 tasks\ndoctor: 1 ok, 0 warnings, 0 failures\n"
+        );
+    }
+
+    #[test]
+    fn a_herd_file_that_does_not_load_fails_its_trackers() {
+        let herds = Herds::with(&[("a", &queue("echo x", None))]);
+        std::fs::write(herds.dir.path().join("herds/a.toml"), "repo = ").unwrap();
+        let (out, code) = herds.run(TRACKER_TIMEOUT);
+        assert!(out.starts_with("failure a trackers: herd: "), "{out}");
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn a_failing_trackers_stderr_shows_only_its_last_line_printable_and_cut() {
+        let long = "x".repeat(300);
+        let source = format!("printf 'first\\n\\033[31mred\\033[0m {long}\\n' >&2; exit 1");
+        let herds = Herds::with(&[("a", &queue(&source, None))]);
+        let (out, _) = herds.run(TRACKER_TIMEOUT);
+        let (_, stderr) = out.split_once("failed (exit 1): ").unwrap();
+        let (stderr, _) = stderr.split_once("; fix: ").unwrap();
+        assert_eq!(stderr, format!("red {}…", "x".repeat(196)));
+    }
+
+    #[test]
+    fn a_missing_repo_fails_once_naming_herd_set_repo_and_runs_nothing() {
+        let herds = Herds::with(&[("a", &queue("echo x", Some("echo y")))]);
+        std::fs::remove_dir(herds.dir.path().join("repo")).unwrap();
+        let (out, code) = herds.run(TRACKER_TIMEOUT);
+        assert_eq!(
+            out,
+            format!(
+                "failure a repo: {} isn't a directory, so its trackers can't run; \
+                 fix: loopherd herd set a repo <path>\n\
+                 doctor: 0 ok, 0 warnings, 1 failures\n",
+                herds.dir.path().join("repo").display()
+            )
+        );
+        assert_eq!(code, 1);
     }
 }

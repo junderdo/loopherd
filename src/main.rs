@@ -373,7 +373,8 @@ enum Command {
     },
     /// Check this machine's loopherd install and herdr: loopherd's hooks in
     /// Claude's settings, the binary they call against the `loopherd` on PATH,
-    /// and herdr's server and version. Only reads. Prints each warning and
+    /// and herdr's server and version, and with `--trackers` each herd's
+    /// `source` and `backlog`. Only reads. Prints each warning and
     /// failure with the command that fixes it, then `doctor: <n> ok, <n>
     /// warnings, <n> failures`. Exits 0 when clean or only warnings, 1 on any
     /// failure, 2 when it couldn't run.
@@ -387,6 +388,12 @@ enum Command {
         /// Check this file instead of $CLAUDE_CONFIG_DIR/settings.json or ~/.claude/settings.json.
         #[arg(long)]
         settings: Option<PathBuf>,
+        /// Also run each herd's `source` and `backlog` from its repo, paused
+        /// herds included, 30s each; a nonzero exit or timeout fails. With
+        /// `--verbose` or `--json`, shows each exit status and task count, never
+        /// task lines.
+        #[arg(long)]
+        trackers: bool,
     },
     /// Add loopherd's Stop, StopFailure, SessionStart, PreToolUse and UserPromptSubmit hooks to Claude's
     /// user settings, calling this binary, and write the `--skill` guide as the loopherd
@@ -711,7 +718,8 @@ fn main() -> ExitCode {
             verbose,
             json,
             settings,
-        } => ("doctor", run_doctor(verbose, json, settings)),
+            trackers,
+        } => ("doctor", run_doctor(verbose, json, settings, trackers)),
         Command::InstallHook {
             remove,
             settings,
@@ -1510,15 +1518,22 @@ fn run_tool_hook() -> Result<i32> {
     Ok(0)
 }
 
-fn run_doctor(verbose: bool, json: bool, settings: Option<PathBuf>) -> Result<i32> {
-    let install = match doctor_install(settings) {
-        Ok(install) => install,
+fn run_doctor(verbose: bool, json: bool, settings: Option<PathBuf>, trackers: bool) -> Result<i32> {
+    let ran = doctor_install(settings).and_then(|install| {
+        let paths = trackers.then(Paths::from_env).transpose()?;
+        Ok((install, paths))
+    });
+    let (install, paths) = match ran {
+        Ok(ran) => ran,
         Err(e) => {
             eprintln!("loopherd doctor: {e:#}");
             return Ok(2);
         }
     };
-    let checks = doctor::checks(&install, &CliHerdr);
+    let mut checks = doctor::checks(&install, &CliHerdr);
+    if let Some(paths) = paths {
+        checks.extend(doctor::tracker_checks(&paths, doctor::TRACKER_TIMEOUT));
+    }
     match json {
         true => println!("{}", doctor::json(&checks)),
         false => print!("{}", doctor::text(&checks, verbose)),
