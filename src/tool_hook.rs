@@ -1720,9 +1720,7 @@ fn script_needs(script: &Word, aliases: &Aliases) -> Vec<Switch> {
 fn guessed_script_needs(script: &Word, aliases: &Aliases) -> Vec<Switch> {
     let text = &script.text;
     let quote_left_open = !script.escaped
-        && !text.contains(['\n', '\\'])
-        && !text.contains("$'")
-        && !text.contains("$\"")
+        && !text.contains(['\n', '\\', '$'])
         && commands(text).is_none()
         && ['\'', '"', '`']
             .iter()
@@ -4579,6 +4577,8 @@ mod tests {
             "bash $C \"gh pr merge 1; echo a\\'b\"",
             "bash $C \"gh pr merge 1; echo $' it\\'s'\"",
             "bash $C 'gh pr merge 1; echo it\\'\\''s'",
+            "bash $C \"gh pr merge 1; echo it's$X\"",
+            "bash $C \"gh pr merge 1; echo it's${X}\"",
         ] {
             assert!(
                 !needs(command).is_empty(),
