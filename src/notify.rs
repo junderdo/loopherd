@@ -359,6 +359,21 @@ impl BlockMarks {
     }
 }
 
+/// Removes `member`'s block marks, as herdr reported it not blocked, so its
+/// next block is recorded and sent.
+pub fn forget_block(mailboxes: &Path, member: &str) -> Result<()> {
+    for kind in BLOCK_MARKS {
+        let path = mailboxes.join(format!("{member}.{kind}"));
+        match fs::remove_file(&path) {
+            Err(e) if e.kind() != ErrorKind::NotFound => {
+                return Err(e).with_context(|| format!("remove {}", path.display()));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// A mark's inode and mtime, so a mark removed and made again reads as new.
 fn mark_id(path: &Path) -> Result<Option<(u64, SystemTime)>> {
     use std::os::unix::fs::MetadataExt;

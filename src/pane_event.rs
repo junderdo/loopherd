@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::ledger::Ledger;
+use crate::notify;
 use crate::report::{self, Body, Entry, member_in};
 
 /// The suffix of the mark `<member>.block-recorded`, present while the
@@ -42,7 +43,7 @@ pub fn event_hook(
             record_blocked(dir, &member.name, now)?;
         }
         ("pane.agent_status_changed", Some("working" | "idle" | "done")) => {
-            remove_block_mark(dir, &member.name)?;
+            notify::forget_block(dir, &member.name)?;
         }
         ("pane.exited" | "pane.closed", _) => {
             record_gone(dir, &member.name, now)?;
@@ -70,16 +71,6 @@ pub fn record_blocked(dir: &Path, name: &str, now: SystemTime) -> Result<bool> {
     Ok(true)
 }
 
-fn remove_block_mark(dir: &Path, name: &str) -> Result<()> {
-    let mark = dir.join(format!("{name}.{BLOCK_RECORDED}"));
-    match fs::remove_file(&mark) {
-        Err(e) if e.kind() != ErrorKind::NotFound => {
-            Err(e).with_context(|| format!("remove {}", mark.display()))
-        }
-        _ => Ok(()),
-    }
-}
-
 /// Appends a `gone` entry to `name`'s mailbox unless one is there since its
 /// last start. Returns whether it appended.
 pub fn record_gone(dir: &Path, name: &str, now: SystemTime) -> Result<bool> {
@@ -89,5 +80,22 @@ pub fn record_gone(dir: &Path, name: &str, now: SystemTime) -> Result<bool> {
             .rev()
             .take_while(|e| !matches!(e.body, Body::Start { .. }))
             .any(|e| matches!(e.body, Body::Gone {}))
+    })
+}
+
+/// Appends a `gone` entry to `name`'s mailbox unless one is there from
+/// `seen_live` on, when a watch last saw the member live: a member back
+/// in its pane without a start can go again.
+pub fn record_gone_after(
+    dir: &Path,
+    name: &str,
+    now: SystemTime,
+    seen_live: SystemTime,
+) -> Result<bool> {
+    report::append_unless(dir, name, &Entry::new(now, Body::Gone {}), |entries| {
+        entries.iter().any(|e| {
+            matches!(e.body, Body::Gone {})
+                && humantime::parse_rfc3339_weak(&e.at).is_ok_and(|at| at >= seen_live)
+        })
     })
 }

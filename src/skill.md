@@ -150,7 +150,7 @@ Init never launches an agent.
    | `<herd> running low  <n> claimable, <m> unready` | Lead's watch only: the herd's `backlog` lists unready tasks and claimable (as `status` counts it) is at or below `max`. Once per streak: it prints again only after claimable rises above `max` or unready reaches 0. A paused herd prints none and keeps its streak. Triage (see Lead). |
    | `<member> interrupted` | Lead's watch only: the feed running the worker's `after_merge` died before noting it. Feed, which notes it, then read the note. |
    | `<member> blocked` | A dialog only the human answers: tell them. loopherd never answers it. |
-   | `<member> gone` | Its pane exited or closed, or had no agent for two polls in a row after this watch saw it live. |
+   | `<member> gone` | Its pane exited or closed, or had no agent for two polls in a row after this watch saw it live. A closed tab is seen only by a running watch. |
    | `<herd> drained` | Lead's watch only: your herd is paused and has no open (non-retired) worker. Report done, stop, and don't re-arm. |
    | `all drained` | Every herd your watch reads is paused with no open worker, and no member it reads may still work: none is working, blocked or unknown (now or on the poll before), died since the watch started without its `gone` line yet, or last stopped failed or with work in flight. Tell the human; don't re-arm. |
    | `shepherd handoff 171k over 160k` | Your own watch only, once per session: your context is past your limit. Hand off (see Your own handoff). |
