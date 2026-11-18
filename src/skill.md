@@ -126,12 +126,12 @@ Init never launches an agent.
    oldest first within a member; then a lead's `failing` and `recovered`,
    then its `running low` (either form) and `out of work`, then its
    `interrupted` and `merged`, by member in name order, then its
-   `claimable`; then `blocked` and `gone`. The shepherd's own `out of work` lines for unled herds, and
-   a `drained` line, print only on a poll nothing else woke, alone but for
-   a due `shepherd handoff`. The
-   first watch after an install, or over members a herd-scoped watch
-   skipped, prints every unread stop change since; judge each against
-   `reports --all`.
+   `claimable`; then `blocked` and `gone`. The shepherd's own `out of
+   work` lines for unled herds, and a `drained` line, print only on a poll
+   nothing else woke, alone but for a due `shepherd handoff`. The first
+   watch after an install, or over members a herd-scoped watch skipped,
+   prints every unread stop change since; judge each against `reports
+   --all`.
 3. **On wake,** read the watch's lines and the task (`loopherd reports
    --all --tail 40` for the timeline, stops included; for a fuller
    history, `--since <time>` or plain `--all`, or `--all <name>` for one
