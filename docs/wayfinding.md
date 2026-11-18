@@ -85,6 +85,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D68](decisions/D68.md) | A manual `loopherd revive` skips members recorded on another herdr server's socket, says so per member, and never rewrites a recorded socket; members with none are revived as before. |
 | [D69](decisions/D69.md) | The ledger records each member's herdr tab, and the plugin hooks `tab.closed` and `workspace.closed`, so a member whose tab or workspace closed between watches shows up `gone`. |
 | [D70](decisions/D70.md) | A lead's `review_rounds`, a positive integer, resolves from its herd file's `[lead]`, else `[lead_defaults]`, else 3; the lead's prompt gets it as `{review_rounds}` and `loopherd herds` shows it with its source. Amends D31's `[lead_defaults]` keys. |
+| [D71](decisions/D71.md) | A restarted lead's resume prompt carries its switches and `review_rounds`, resolved at restart; an unreadable herd file or `config.toml` refuses the restart before the `/clear`. |
 
 ## Emerging model
 

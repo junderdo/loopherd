@@ -1142,12 +1142,14 @@ fn run_tell(name: &str, text: Option<String>, text_file: Option<PathBuf>) -> Res
 fn run_restart(name: &str, force: bool) -> Result<i32> {
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let state = ledger.dir()?;
+    let paths = Paths::from_env()?;
     let own_pane = own_pane();
     let req = restart::RestartRequest {
         name,
         force,
         own_pane: own_pane.as_deref(),
         state: &state,
+        paths: &paths,
         settle_timeout: Duration::from_secs(30),
         poll: Duration::from_millis(250),
         live: &live_session,

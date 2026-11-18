@@ -737,11 +737,18 @@ pub fn repo(paths: &Paths, herd: &str) -> Result<PathBuf> {
 
 /// A herd's lead's switches, without reading its prompt.
 pub fn lead_switches(paths: &Paths, herd: &str) -> Result<Switches> {
+    Ok(lead_settings(paths, herd)?.0)
+}
+
+/// The lead's switches and review-round limit, resolved over `[lead_defaults]`.
+pub fn lead_settings(paths: &Paths, herd: &str) -> Result<(Switches, u32)> {
     let file = load(&paths.herds, herd).context("herd")?;
     let lead = file
         .lead
         .with_context(|| format!("herd: {herd} has no [lead]"))?;
-    Ok(lead.switches().over(&lead_defaults(paths)?))
+    let defaults = lead_defaults(paths)?;
+    let own = lead.switches();
+    Ok((own.over(&defaults), own.review_rounds_over(&defaults).0))
 }
 
 /// What a herd's box in `loopherd view` shows from its herd file.
