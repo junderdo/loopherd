@@ -91,6 +91,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D74](decisions/D74.md) | The `pane.moved` hook also follows a move to another workspace, rewriting `pane_id`, `tab_id` and `workspace` and keeping the agent's `$HERDR_PANE_ID` as `env_pane_id`; own-pane lookups in report, the Stop, SessionStart and PreToolUse hooks, restart, retire's lead refusal and watch accept either id, while a lead's question label and `retire --close`'s own-tab check don't (D74's limits). Amends D73's limits. |
 | [D75](decisions/D75.md) | `retire` refuses an unretired member herdr shows working or blocked, or shows otherwise with no `done`, `question` or `handoff` report since its last start, unless `--force`; one herdr doesn't list retires; a lead's hook denies `retire --force`. |
 | [D76](decisions/D76.md) | A `gone` from a tab or workspace closing carries it; the move hook appends `moved` to retract one for the tab or workspace its pane left, and the close hooks re-read the ledger under the mailbox lock, so a move never leaves a false `gone` in any hook order. Drops D73's and D74's race limits; amends D66's gone rules and D69's close hooks. |
+| [D77](decisions/D77.md) | `loopherd restart --self` from a member's own pane starts a detached waiter that runs the plain restart once its stop since the handoff reads finished, gives up after 30 minutes with a mailbox note, and flocks keep it to one waiter and one restart per member. Leads restart themselves; amends D20. |
 
 ## Emerging model
 

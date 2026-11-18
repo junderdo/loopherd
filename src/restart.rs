@@ -11,7 +11,8 @@ use crate::continuation::follow_recorded;
 use crate::herd::{Paths, Switches, lead_settings};
 use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::Ledger;
-use crate::report::{SinceHandoff, since_handoff};
+use crate::lock::Lock;
+use crate::report::{Body, Entry, SinceHandoff, append, member_of_own_pane, since_handoff};
 use crate::shell::quote;
 use crate::subagent_view::ensure_main_view;
 
@@ -21,7 +22,7 @@ pub struct RestartRequest<'a> {
     pub name: &'a str,
     /// Restart even if the member isn't finished since its handoff.
     pub force: bool,
-    /// `$HERDR_PANE_ID` of the caller; a member can't restart itself.
+    /// `$HERDR_PANE_ID` of the caller; a member can't restart itself mid-turn.
     pub own_pane: Option<&'a str>,
     /// loopherd's state dir, holding `reports/` and `handoffs/`.
     pub state: &'a Path,
@@ -65,8 +66,11 @@ pub fn restart(
         ),
         Some(_) => {}
     }
+    let _running = take(req.state, name, "restart")?.ok_or_else(|| Busy(name.to_string()))?;
     if req.own_pane.is_some_and(|pane| record.is_own_pane(pane)) {
-        bail!("{name} can't restart itself; whoever reads its handoff line restarts it");
+        bail!(
+            "{name} can't restart itself mid-turn; run `loopherd restart --self` to restart once this turn ends"
+        );
     }
     let handoff = handoff_path(req.state, name);
     if !handoff.is_file() {
@@ -83,31 +87,10 @@ pub fn restart(
             agent.pane_id
         );
     }
-    if !req.force {
-        let refuse = |why: String| anyhow!("{why}; pass --force to restart it anyway");
-        match since_handoff(&req.state.join("reports"), name)? {
-            SinceHandoff::None => {
-                return Err(refuse(format!(
-                    "{name} hasn't handed off since it started (after a revive, check `loopherd reports --all {name}` for its handoff)"
-                )));
-            }
-            SinceHandoff::NotStopped => {
-                return Err(refuse(format!("{name} hasn't stopped since its handoff")));
-            }
-            SinceHandoff::Stopped(stop) if stop.error.is_some() || stop.pending().is_some() => {
-                return Err(refuse(format!(
-                    "{name} isn't finished: its last stop reads `{}`",
-                    stop.describe()
-                )));
-            }
-            SinceHandoff::Stopped(_) => {}
-        }
-        if !matches!(agent.status, AgentStatus::Idle | AgentStatus::Done) {
-            return Err(refuse(format!(
-                "{name} is {} in herdr",
-                agent.status.as_str()
-            )));
-        }
+    if !req.force
+        && let Some(why) = unfinished(req.state, name, agent.status)?
+    {
+        bail!("{why}; pass --force to restart it anyway");
     }
     let lead = match (record.is_lead(), &record.herd) {
         (false, _) => None,
@@ -181,6 +164,176 @@ pub fn restart(
         "restarted {name} in session {live}; prompted it to read {}",
         read.display()
     ))
+}
+
+/// Why `name` can't be restarted without `--force` yet, if anything: it must
+/// have reported a handoff since its last start, stopped finished with nothing
+/// in flight since, and show idle or done in herdr.
+fn unfinished(state: &Path, name: &str, status: AgentStatus) -> Result<Option<String>> {
+    Ok(match since_handoff(&state.join("reports"), name)? {
+        SinceHandoff::None => Some(format!(
+            "{name} hasn't handed off since it started (after a revive, check `loopherd reports --all {name}` for its handoff)"
+        )),
+        SinceHandoff::NotStopped => Some(format!("{name} hasn't stopped since its handoff")),
+        SinceHandoff::Stopped(stop) if stop.error.is_some() || stop.pending().is_some() => {
+            Some(format!(
+                "{name} isn't finished: its last stop reads `{}`",
+                stop.describe()
+            ))
+        }
+        SinceHandoff::Stopped(_) if !matches!(status, AgentStatus::Idle | AgentStatus::Done) => {
+            Some(format!("{name} is {} in herdr", status.as_str()))
+        }
+        SinceHandoff::Stopped(_) => None,
+    })
+}
+
+#[derive(Debug)]
+struct Busy(String);
+
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "a restart of {} is already running", self.0)
+    }
+}
+
+impl std::error::Error for Busy {}
+
+#[derive(Debug)]
+pub enum Waited {
+    Restarted,
+    /// Another restart got there first.
+    RestartedElsewhere,
+    /// Left a note in the member's mailbox naming why.
+    GaveUp,
+}
+
+/// A self-restart's waiter: polls every `every` until `req.name` is finished
+/// since its handoff, then runs the restart with every non-forced check. Gives
+/// up after `give_up`, or on a failed restart, with a note in its mailbox.
+pub fn wait_then_restart(
+    herdr: &dyn Herdr,
+    ledger: &mut dyn Ledger,
+    req: &RestartRequest,
+    give_up: Duration,
+    every: Duration,
+) -> Result<Waited> {
+    let req = RestartRequest {
+        force: false,
+        own_pane: None,
+        ..*req
+    };
+    let name = req.name;
+    let deadline = Instant::now() + give_up;
+    loop {
+        let handoff = handoff_path(req.state, name);
+        if !handoff.is_file()
+            || since_handoff(&req.state.join("reports"), name)? == SinceHandoff::None
+        {
+            return Ok(Waited::RestartedElsewhere);
+        }
+        let waiting = match waiting_on(herdr, &req) {
+            Ok(Some(why)) => why,
+            Ok(None) => match restart(herdr, ledger, &req, SystemTime::now()) {
+                Ok(_) => return Ok(Waited::Restarted),
+                Err(e) if e.is::<Busy>() => format!("{e}"),
+                Err(e) => return gave_up(&req, format!("self-restart failed: {e:#}")),
+            },
+            Err(e) => format!("{e:#}"),
+        };
+        if Instant::now() >= deadline {
+            return gave_up(
+                &req,
+                format!(
+                    "self-restart gave up after {}: {waiting}. Its handoff is still in place; run loopherd restart {name} once it's finished.",
+                    humantime::format_duration(give_up)
+                ),
+            );
+        }
+        std::thread::sleep(every);
+    }
+}
+
+fn waiting_on(herdr: &dyn Herdr, req: &RestartRequest) -> Result<Option<String>> {
+    let name = req.name;
+    let Some(agent) = herdr
+        .agents()?
+        .into_iter()
+        .find(|a| a.name.as_deref() == Some(name))
+    else {
+        return Ok(Some(format!("no live agent is named {name}")));
+    };
+    if agent.status == AgentStatus::Blocked {
+        return Ok(Some(format!("{name} is blocked in pane {}", agent.pane_id)));
+    }
+    unfinished(req.state, name, agent.status)
+}
+
+fn gave_up(req: &RestartRequest, text: String) -> Result<Waited> {
+    let note = Entry::new(SystemTime::now(), Body::Note { text });
+    append(&req.state.join("reports"), req.name, &note)?;
+    Ok(Waited::GaveUp)
+}
+
+/// A self-restart claimed for a member, held until its waiter exits.
+pub struct Scheduled {
+    pub name: String,
+    pub waiter: Lock,
+    pub message: String,
+}
+
+/// How long a self-restart waits for the member's `finished` stop.
+pub const SELF_RESTART_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// Claims a self-restart for the member in `own_pane`, which must have a
+/// handoff file and a `handoff` report since its last start. Only one waiter
+/// per member holds the claim; the caller hands `waiter` to it.
+pub fn schedule_self(
+    herdr: &dyn Herdr,
+    ledger: &dyn Ledger,
+    own_pane: Option<&str>,
+    state: &Path,
+) -> Result<Scheduled> {
+    let pane = own_pane.ok_or_else(|| {
+        anyhow!(
+            "loopherd restart --self runs only in a member's own pane ($HERDR_PANE_ID is unset)"
+        )
+    })?;
+    let entries = ledger.entries()?;
+    let name = member_of_own_pane(&entries, pane, herdr.socket().as_deref())
+        .ok_or_else(|| anyhow!("no member runs in pane {pane} of this herdr"))?
+        .name
+        .clone();
+    let handoff = handoff_path(state, &name);
+    if !handoff.is_file() {
+        bail!("{name} has no handoff at {}", handoff.display());
+    }
+    if since_handoff(&state.join("reports"), &name)? == SinceHandoff::None {
+        bail!(
+            "{name} hasn't reported --kind handoff since it started; write its handoff, report it, then run this"
+        );
+    }
+    let waiter = take(state, &name, "waiter")?
+        .ok_or_else(|| anyhow!("{name} already has a restart waiting for its stop"))?;
+    let message = format!(
+        "{name} restarts in this pane once its stop after the handoff reads finished and herdr shows it idle or done, \
+         giving up after {} minutes with a note in its mailbox. End your turn now.",
+        SELF_RESTART_TIMEOUT.as_secs() / 60
+    );
+    Ok(Scheduled {
+        name,
+        waiter,
+        message,
+    })
+}
+
+/// `name`'s `kind` lock under the state dir, or `None` while another holds it.
+fn take(state: &Path, name: &str, kind: &str) -> Result<Option<Lock>> {
+    let dir = state.join("restarts");
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join(format!("{name}.{kind}.lock"));
+    let file = std::fs::File::create(&path).with_context(|| format!("open {}", path.display()))?;
+    Lock::try_take(file).with_context(|| format!("lock {}", path.display()))
 }
 
 const CLEAR_DIALOG: &str = "/clear acts on the main conversation";
@@ -451,6 +604,48 @@ mod tests {
             let mut after = ledger.ledger.clone();
             after.0 = ledger.entries().unwrap();
             (result, after)
+        }
+
+        /// Runs a self-restart's waiter for lh-1, polling every millisecond.
+        fn wait(&self, give_up: Duration) -> Result<Waited> {
+            let member = record("lh-1");
+            let mut ledger = Clearing {
+                recorded: member.session_id.clone(),
+                ledger: MemLedger([("lh-1".to_string(), member)].into(), vec![]),
+                herdr: &self.herdr,
+                follows: true,
+                continued: None,
+                clears_before: 0,
+            };
+            let req = RestartRequest {
+                name: "lh-1",
+                force: false,
+                own_pane: None,
+                state: self.state.path(),
+                paths: &self.paths(),
+                settle_timeout: Duration::from_millis(50),
+                poll: Duration::from_millis(1),
+                live: &|s| s.to_string(),
+            };
+            wait_then_restart(
+                &self.herdr,
+                &mut ledger,
+                &req,
+                give_up,
+                Duration::from_millis(1),
+            )
+        }
+
+        fn notes(&self) -> Vec<String> {
+            crate::report::history(&self.state.path().join("reports"), "lh-1")
+                .unwrap()
+                .0
+                .into_iter()
+                .filter_map(|e| match e.body {
+                    Body::Note { text } => Some(text),
+                    _ => None,
+                })
+                .collect()
         }
 
         fn paths(&self) -> Paths {
@@ -1043,5 +1238,183 @@ mod tests {
         let (result, _) = w.restart(false, true);
         assert!(format!("{:#}", result.unwrap_err()).starts_with("no live agent is named lh-1"));
         assert!(w.herdr.prompts().is_empty());
+    }
+
+    fn schedule(w: &World, own_pane: Option<&str>) -> Result<Scheduled> {
+        let ledger = MemLedger([("lh-1".to_string(), record("lh-1"))].into(), vec![]);
+        schedule_self(&w.herdr, &ledger, own_pane, w.state.path())
+    }
+
+    #[test]
+    fn a_member_that_reported_its_handoff_schedules_its_own_restart() {
+        let w = World::new();
+        w.put(Body::Handoff {
+            text: "at step 3".into(),
+        });
+        let scheduled = schedule(&w, Some("w1:p1")).unwrap();
+        assert_eq!(scheduled.name, "lh-1");
+        assert!(
+            scheduled
+                .message
+                .starts_with("lh-1 restarts in this pane once"),
+            "{}",
+            scheduled.message
+        );
+    }
+
+    #[test]
+    fn self_restart_is_refused_with_nothing_scheduled() {
+        type Setup<'a> = &'a dyn Fn(&World);
+        let cases: [(Option<&str>, Setup, &str); 5] = [
+            (
+                None,
+                &|w| w.put(Body::Handoff { text: "x".into() }),
+                "loopherd restart --self runs only in a member's own pane",
+            ),
+            (
+                Some("w7:p7"),
+                &|w| w.put(Body::Handoff { text: "x".into() }),
+                "no member runs in pane w7:p7",
+            ),
+            (
+                Some("w1:p1"),
+                &|w| {
+                    w.put(Body::Handoff { text: "x".into() });
+                    fs::remove_file(w.state.path().join("handoffs/lh-1.md")).unwrap();
+                },
+                "lh-1 has no handoff at ",
+            ),
+            (
+                Some("w1:p1"),
+                &|_| {},
+                "lh-1 hasn't reported --kind handoff since it started",
+            ),
+            (
+                Some("w1:p1"),
+                &|w| {
+                    w.put(Body::Handoff { text: "x".into() });
+                    w.put(Body::Start { resumed: false });
+                },
+                "lh-1 hasn't reported --kind handoff since it started",
+            ),
+        ];
+        for (own_pane, setup, message) in cases {
+            let w = World::new();
+            setup(&w);
+            let err = format!("{:#}", schedule(&w, own_pane).err().expect(message));
+            assert!(err.starts_with(message), "{err}");
+            w.put(Body::Handoff { text: "x".into() });
+            if fs::write(w.state.path().join("handoffs/lh-1.md"), "## State\n").is_ok() {
+                assert!(
+                    schedule(&w, Some("w1:p1")).is_ok(),
+                    "{message}: a waiter was left behind"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_second_self_restart_is_refused_while_the_first_waits() {
+        let w = World::new();
+        w.put(Body::Handoff { text: "x".into() });
+        let first = schedule(&w, Some("w1:p1")).unwrap();
+        let err = format!("{:#}", schedule(&w, Some("w1:p1")).err().unwrap());
+        assert_eq!(err, "lh-1 already has a restart waiting for its stop");
+        drop(first);
+        assert!(schedule(&w, Some("w1:p1")).is_ok());
+    }
+
+    #[test]
+    fn a_waiting_self_restart_restarts_once_the_stop_after_its_handoff_is_finished() {
+        let w = World::new();
+        w.put(Body::Handoff { text: "x".into() });
+        let waited = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(30));
+                assert!(w.herdr.prompts().is_empty(), "restarted before its stop");
+                w.stop(0, None);
+            });
+            w.wait(Duration::from_secs(5))
+        });
+        assert!(matches!(waited.unwrap(), Waited::Restarted));
+        let prompts = w.herdr.prompts();
+        assert_eq!(prompts.len(), 2);
+        assert_eq!(prompts[0].1, "/clear");
+        assert!(w.notes().is_empty());
+    }
+
+    #[test]
+    fn a_self_restart_waits_for_a_stop_with_nothing_in_flight_and_herdr_idle() {
+        let w = World::new();
+        w.put(Body::Handoff { text: "x".into() });
+        w.stop(1, None);
+        w.herdr.set_status("lh-1", AgentStatus::Working);
+        let waited = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(20));
+                w.stop(0, None);
+                std::thread::sleep(Duration::from_millis(20));
+                assert!(w.herdr.prompts().is_empty(), "restarted while working");
+                w.herdr.set_status("lh-1", AgentStatus::Idle);
+            });
+            w.wait(Duration::from_secs(5))
+        });
+        assert!(matches!(waited.unwrap(), Waited::Restarted));
+    }
+
+    #[test]
+    fn a_self_restart_that_times_out_leaves_the_handoff_and_a_note_naming_why() {
+        let w = World::new();
+        w.put(Body::Handoff { text: "x".into() });
+        w.stop(1, None);
+        let waited = w.wait(Duration::from_millis(30)).unwrap();
+        assert!(matches!(waited, Waited::GaveUp));
+        assert!(w.herdr.prompts().is_empty());
+        assert!(w.state.path().join("handoffs/lh-1.md").is_file());
+        assert_eq!(
+            w.notes(),
+            [
+                "self-restart gave up after 30ms: lh-1 isn't finished: its last stop reads \
+              `paused: 1 shell`. Its handoff is still in place; run loopherd restart lh-1 once it's finished."
+            ]
+        );
+    }
+
+    #[test]
+    fn a_self_restart_overtaken_by_another_restart_exits_without_clearing() {
+        let w = World::new();
+        w.put(Body::Handoff { text: "x".into() });
+        let waited = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(20));
+                w.put(Body::Start { resumed: false });
+            });
+            w.wait(Duration::from_secs(5))
+        });
+        assert!(matches!(waited.unwrap(), Waited::RestartedElsewhere));
+        assert!(w.herdr.prompts().is_empty());
+        assert!(w.notes().is_empty());
+    }
+
+    #[test]
+    fn a_restart_refuses_while_another_restart_of_the_same_member_runs() {
+        let w = World::new();
+        w.handed_off();
+        let running = take(w.state.path(), "lh-1", "restart").unwrap().unwrap();
+        let (result, _) = w.restart(true, true);
+        assert_eq!(
+            format!("{:#}", result.unwrap_err()),
+            "a restart of lh-1 is already running"
+        );
+        assert!(w.herdr.prompts().is_empty());
+        let waited = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(20));
+                drop(running);
+            });
+            w.wait(Duration::from_secs(5))
+        });
+        assert!(matches!(waited.unwrap(), Waited::Restarted));
+        assert_eq!(w.herdr.prompts().len(), 2);
     }
 }

@@ -142,7 +142,7 @@ Init never launches an agent.
    | `<member> done <time> <text>` | A finished member's report, usually with its output's link. Verify it. |
    | `<member> question <time> <text>` | It stopped on a question. Relay it to the human; a lead relays it with its own question report, unless it's a design question and `design_escalation` is on. |
    | `<member> note <time> <text>` | Information only; nothing waits on it. |
-   | `<member> handoff <time> <text>` | It passed its context limit and wrote its handoff. Restart it (see Handoffs) if you read it. |
+   | `<member> handoff <time> <text>` | It passed its context limit and wrote its handoff. Restart it (see Handoffs) if you read it; a lead restarts itself. |
    | `<member> paused  1 shell, 1 cron` | Turn ended with work in flight that can wake it again. Another paused stop is quiet. |
    | `<member> paused  background unknown` | Turn ended and Claude didn't say what's in flight (also `crons unknown`, or `1 shell; crons unknown`). |
    | `<member> finished` | Turn ended with nothing in flight, after a `done` or `question`. |
@@ -270,9 +270,11 @@ The plan, in order.
 What would bite whoever picks this up.
 ```
 
-**Restart** whoever's `handoff` line you read: the shepherd restarts leads,
-workers of unled herds and members in no herd; a lead restarts its own
-workers. Wait for its `finished` line, then `loopherd restart <name>`. It
+**Restart** whoever's `handoff` line you read: a lead restarts its own
+workers, and the shepherd restarts workers of unled herds and members in no
+herd. A lead restarts itself (below), so its `handoff` line needs nothing
+from the shepherd unless a `self-restart` note follows. Wait for its
+`finished` line, then `loopherd restart <name>`. It
 sends `/clear`, waits for the ledger to follow the new session, and prompts
 the member to read its handoff, which it moves to `<name>.prev.md` so no
 later restart reuses it; same pane, worktree and branch. A lead's prompt
@@ -285,7 +287,8 @@ idle or done. `--force` skips those checks; a `/clear` sent mid-turn waits
 for that turn, then drops whatever the handoff doesn't record (that turn's
 work, background tasks, crons). Forcing is the human's call (a lead's
 PreToolUse hook denies it); a plain restart is not, so run it as soon as the
-`finished` line arrives. A member never restarts itself, and one recorded without a
+`finished` line arrives. A member never runs `loopherd restart <its own
+name>`, since its `/clear` would land mid-turn; one recorded without a
 herdr socket can't be restarted, nor is it ever asked for a handoff. If
 restart times out waiting for the new session, its `/clear` may be queued
 behind a running turn, or the SessionStart hook isn't installed: it sent no
@@ -303,6 +306,21 @@ Cancel, switch back to main, and rerun it.
 It also refuses, even with `--force` and before any `/clear`, a lead whose
 herd file or `config.toml` can't be read, or that has no herd or `[lead]`:
 fix the herd, then run restart again.
+
+**A lead restarts itself.** After reporting `--kind handoff` and stopping its
+watch, it runs `loopherd restart --self` from its own pane and ends its
+turn. That checks it is a member with a handoff file and a `handoff` report
+since its last start, starts a detached waiter, and returns at once. The
+waiter runs the plain restart, with every check `--force` skips, once the
+stop after the handoff reads `finished` and herdr shows it idle or done:
+same pane, worktree and ledger entry. One waiter per member: a second
+`--self` refuses while one waits, and a plain `loopherd restart` and the
+waiter never both send `/clear`, since whichever runs second finds the
+handoff used. After 30 minutes, or if the restart fails, the waiter leaves a
+`self-restart …` note in the member's mailbox naming why and keeps the
+handoff, so a plain `loopherd restart <name>` still works once the member is
+finished. Any member may run `--self`, but workers in a led herd leave
+their restart to their lead.
 
 A lead's `loopherd watch` is a background shell, so a lead stops its own
 watch before ending its handoff turn; otherwise its stop reads `paused`
@@ -327,9 +345,9 @@ and, once per session past your limit, adds `shepherd handoff <n>k over
 
 1. Handle the other lines it came with, but feed nothing new and don't
    re-arm the watch. Members and leads keep working; what they report
-   waits in the mailbox for the next watch. First restart any lead whose
-   `handoff` and `finished` lines you've already read, so the herd doesn't
-   wait on the next shepherd.
+   waits in the mailbox for the next watch. First restart any member
+   whose `handoff` and `finished` lines you've already read and that is
+   yours to restart, so the herd doesn't wait on the next shepherd.
 2. Write your handoff to `$XDG_STATE_HOME/loopherd/handoffs/shepherd.md`
    (`~/.local/state` when it's unset; no member may be named `shepherd`), in the outline above: what each
    member is doing and what you owe it (verifications running, PRs to
@@ -492,7 +510,8 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
 - `loopherd tell <name> "<text>"` messages a member (see Talking to
   members).
 - `loopherd restart <name>` gives a member that handed off a fresh session
-  (see Handoffs).
+  (see Handoffs); `loopherd restart --self`, from a member's own pane,
+  schedules that for itself once its turn ends.
 - `loopherd lead <herd>` starts the herd's lead from its herd file's
   `[lead]` table.
 - **Change a herd file's values** with `loopherd herd set <herd> <key>
@@ -650,7 +669,9 @@ Shepherd section has the detail):
 6. **Handoff:** write `$XDG_STATE_HOME/loopherd/handoffs/<your name>.md` in
    the outline under Handoffs (`## State`, `## Next steps`, `## Gotchas`),
    listing each `<scratch>/pr<n>/` still in use and naming each PR's
-   current review file.
+   current review file. Then report `--kind handoff`, stop your watch, run
+   `loopherd restart --self`, and end your turn: you restart in this pane
+   once your stop reads finished, with no shepherd needed (see Handoffs).
 
 What differs from the shepherd:
 
