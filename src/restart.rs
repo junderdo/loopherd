@@ -10,7 +10,7 @@ use crate::context::handoff_path;
 use crate::continuation::follow_recorded;
 use crate::herd::{Paths, Switches, lead_settings};
 use crate::herdr::{AgentStatus, Herdr};
-use crate::ledger::Ledger;
+use crate::ledger::{Ledger, Process};
 use crate::report::{SinceHandoff, since_handoff};
 use crate::shell::quote;
 use crate::subagent_view::ensure_main_view;
@@ -23,6 +23,10 @@ pub struct RestartRequest<'a> {
     pub force: bool,
     /// `$HERDR_PANE_ID` of the caller; a member can't restart itself.
     pub own_pane: Option<&'a str>,
+    /// The caller and its ancestors, which carry a moved member's old pane id.
+    pub own_lineage: &'a [Process],
+    /// Reads a pane's shell process from herdr.
+    pub pane_shell: &'a dyn Fn(&str) -> Result<Option<Process>>,
     /// loopherd's state dir, holding `reports/` and `handoffs/`.
     pub state: &'a Path,
     /// Where a lead's switches and review-round limit are read from.
@@ -65,7 +69,10 @@ pub fn restart(
         ),
         Some(_) => {}
     }
-    if req.own_pane.is_some_and(|pane| record.is_own_pane(pane)) {
+    if req
+        .own_pane
+        .is_some_and(|pane| record.is_own_pane(pane, req.own_lineage))
+    {
         bail!("{name} can't restart itself; whoever reads its handoff line restarts it");
     }
     let handoff = handoff_path(req.state, name);
@@ -170,11 +177,16 @@ pub fn restart(
     let read = handoff.with_extension("prev.md");
     std::fs::rename(&handoff, &read)
         .with_context(|| format!("move {} to {}", handoff.display(), read.display()))?;
+    let shell = (current.pane_id != agent.pane_id && current.env_pane_id.is_none())
+        .then(|| (req.pane_shell)(&agent.pane_id));
     ledger.update(name, &mut |current| {
         // Its agent keeps the recorded id in `$HERDR_PANE_ID`, as after a missed move hook.
         if current.pane_id != agent.pane_id {
             let recorded = std::mem::take(&mut current.pane_id);
-            current.env_pane_id.get_or_insert(recorded);
+            if current.env_pane_id.is_none() {
+                current.env_pane_id = Some(recorded);
+                current.env_pane_shell = shell.as_ref().and_then(|s| *s.as_ref().ok()?);
+            }
         }
         current.pane_id = agent.pane_id.clone();
         current.tab_id = Some(agent.tab_id.clone());
@@ -182,8 +194,17 @@ pub fn restart(
     })?;
     ledger.started(name, now, false)?;
     herdr.prompt(name, &resume_prompt(lead, &read))?;
+    let unread = match shell {
+        Some(Err(e)) => {
+            format!("; its shell couldn't be read ({e:#}), so its old pane id matches no process")
+        }
+        Some(Ok(None)) => {
+            "; herdr reports no shell for its pane, so its old pane id matches no process".into()
+        }
+        _ => String::new(),
+    };
     Ok(format!(
-        "restarted {name} in session {live}; prompted it to read {}",
+        "restarted {name} in session {live}; prompted it to read {}{unread}",
         read.display()
     ))
 }
@@ -257,6 +278,7 @@ mod tests {
             name: name.into(),
             pane_id: "w1:p1".into(),
             env_pane_id: None,
+            env_pane_shell: None,
             tab_id: None,
             session_id: Some("old".into()),
             repo: "/src/repo".into(),
@@ -443,6 +465,8 @@ mod tests {
                     .count(),
             };
             let req = RestartRequest {
+                own_lineage: &[crate::process::PANE_SHELL],
+                pane_shell: &|_| Ok(Some(crate::process::PANE_SHELL)),
                 name: "lh-1",
                 force,
                 own_pane,
@@ -511,6 +535,10 @@ mod tests {
             ("w9:p9", Some("w9:t9"))
         );
         assert_eq!(ledger.0["lh-1"].env_pane_id.as_deref(), Some("w1:p1"));
+        assert_eq!(
+            ledger.0["lh-1"].env_pane_shell,
+            Some(crate::process::PANE_SHELL)
+        );
         assert_eq!(ledger.1, ["lh-1"]);
     }
 
@@ -695,6 +723,7 @@ mod tests {
                 Some("w1:p1"),
                 &|r| {
                     r.env_pane_id = Some("w1:p1".into());
+                    r.env_pane_shell = Some(crate::process::PANE_SHELL);
                     r.pane_id = "w3:p2".into();
                 },
                 "lh-1 can't restart itself",

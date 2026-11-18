@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::context::Check;
 use crate::continuation::{follow_recorded, live_for};
-use crate::ledger::{AgentRecord, Ledger};
+use crate::ledger::{AgentRecord, Ledger, Process};
 use crate::process::{self, Claim, Procs};
 use crate::report::{Background, Body, Entry, Stop, Tally, Unknown, append, member_of_own_pane};
 
@@ -20,6 +20,8 @@ pub struct Pane<'a> {
     pub id: &'a str,
     pub socket: Option<&'a Path>,
     pub claude_pid: Option<u32>,
+    /// The caller and its ancestors, which carry a moved member's old pane id.
+    pub lineage: &'a [Process],
 }
 
 /// What the hook did with a member's stop.
@@ -55,7 +57,7 @@ pub fn stop_hook(
     warn: &mut dyn FnMut(String),
 ) -> Result<Option<Stopped>> {
     let entries = ledger.entries()?;
-    let Some(member) = member_of_own_pane(&entries, pane.id, pane.socket) else {
+    let Some(member) = member_of_own_pane(&entries, pane.id, pane.lineage, pane.socket) else {
         return Ok(None);
     };
     let member = match follow_recorded(ledger, &entries, member, live) {
@@ -224,7 +226,7 @@ mod tests {
 
     use super::*;
     use crate::ledger::{AgentRecord, MemLedger, NoUpdate, Process};
-    use crate::process::{CLAUDE, FakeProcs};
+    use crate::process::{CLAUDE, FakeProcs, PANE_SHELL};
 
     const SOCKET: &str = "/run/herdr/herdr.sock";
 
@@ -233,6 +235,7 @@ mod tests {
             name: name.into(),
             pane_id: pane.into(),
             env_pane_id: None,
+            env_pane_shell: None,
             tab_id: None,
             session_id: None,
             repo: "/src/repo".into(),
@@ -304,6 +307,7 @@ mod tests {
             id: pane,
             socket: socket.map(Path::new),
             claude_pid,
+            lineage: &crate::process::lineage(procs, 30),
         };
         let filed = stop_hook(
             ledger,
@@ -374,20 +378,48 @@ mod tests {
     #[test]
     fn a_member_moved_to_another_workspace_records_its_stop_from_its_own_pane() {
         let dir = tempfile::tempdir().unwrap();
-        let mut moved = member("lh-1", "w3:p2", Some(SOCKET));
-        moved.env_pane_id = Some("w1:p1".into());
-        let ledger = ledger(vec![moved]);
+        let mut ledger = ledger(vec![moved_from_w1_p1()]);
 
-        let filed = run(
-            &ledger,
+        let filed = run_as(
+            &mut ledger,
+            &FakeProcs::pane(),
+            None,
             dir.path(),
             "w1:p1",
             Some(SOCKET),
             r#"{"hook_event_name":"Stop","background_tasks":[],"session_crons":[]}"#,
+            &mut |_| {},
         );
 
         assert_eq!(filed.as_deref(), Some("lh-1"));
         assert!(mailbox(dir.path(), "lh-1").contains(r#""crons":0"#));
+    }
+
+    #[test]
+    fn a_stranger_in_a_pane_that_took_a_moved_members_old_id_after_a_restart_is_no_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ledger = ledger(vec![moved_from_w1_p1()]);
+
+        let filed = run_as(
+            &mut ledger,
+            &FakeProcs::restarted_pane(),
+            Some(30),
+            dir.path(),
+            "w1:p1",
+            Some(SOCKET),
+            r#"{"hook_event_name":"Stop","background_tasks":[],"session_crons":[]}"#,
+            &mut |_| {},
+        );
+
+        assert_eq!(filed, None);
+        assert_eq!(ledger.0["lh-1"].process, None);
+    }
+
+    fn moved_from_w1_p1() -> AgentRecord {
+        let mut moved = member("lh-1", "w3:p2", Some(SOCKET));
+        moved.env_pane_id = Some("w1:p1".into());
+        moved.env_pane_shell = Some(PANE_SHELL);
+        moved
     }
 
     #[test]
@@ -723,6 +755,7 @@ mod tests {
             id: "w1:p1",
             socket: Some(Path::new(SOCKET)),
             claude_pid: None,
+            lineage: &[],
         };
         let stopped = stop_hook(
             ledger,
@@ -859,6 +892,7 @@ mod tests {
             id: "w1:p1",
             socket: Some(Path::new(SOCKET)),
             claude_pid: Some(30),
+            lineage: &[],
         };
         let who = stop_hook(
             &mut l,
@@ -936,6 +970,7 @@ mod tests {
             id: pane,
             socket: Some(Path::new(SOCKET)),
             claude_pid: pid,
+            lineage: &[],
         };
         stop_hook(
             ledger,
@@ -1105,6 +1140,7 @@ mod tests {
             id: "w1:p1",
             socket: None,
             claude_pid: None,
+            lineage: &[],
         };
         let stopped = stop_hook(
             &mut l,

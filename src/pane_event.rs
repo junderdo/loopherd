@@ -11,7 +11,7 @@ use std::time::SystemTime;
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 
-use crate::ledger::{AgentRecord, Ledger};
+use crate::ledger::{AgentRecord, Ledger, Process};
 use crate::notify;
 use crate::report::{self, Body, Entry, member_in};
 
@@ -23,7 +23,7 @@ pub const BLOCK_RECORDED: &str = "block-recorded";
 /// `json` from `HERDR_PLUGIN_EVENT_JSON`, for the non-retired members of the
 /// herdr at `socket` in its pane, tab or workspace, and follows such a
 /// member's pane moved to another tab or workspace in the ledger. Anything
-/// else records nothing.
+/// else records nothing. `pane_shell` reads a pane's shell process from herdr.
 pub fn event_hook(
     ledger: &mut dyn Ledger,
     dir: &Path,
@@ -31,6 +31,7 @@ pub fn event_hook(
     json: &str,
     socket: Option<&Path>,
     now: SystemTime,
+    pane_shell: &dyn Fn(&str) -> Result<Option<Process>>,
 ) -> Result<()> {
     let envelope: Value = serde_json::from_str(json).context("parse HERDR_PLUGIN_EVENT_JSON")?;
     let data = &envelope["data"];
@@ -38,7 +39,7 @@ pub fn event_hook(
     let (key, held_in): (_, fn(&AgentRecord) -> Option<&str>) = match event {
         "tab.closed" => ("tab_id", |m| m.tab_id.as_deref()),
         "workspace.closed" => ("workspace_id", |m| Some(&m.workspace)),
-        "pane.moved" => return follow_move(ledger, &entries, dir, data, socket, now),
+        "pane.moved" => return follow_move(ledger, &entries, dir, data, socket, now, pane_shell),
         _ => return pane_event(&entries, dir, event, data, socket, now),
     };
     let Some(id) = data[key].as_str() else {
@@ -62,8 +63,9 @@ pub fn event_hook(
 
 /// Points the member at its pane's new pane, tab and workspace. A move to
 /// another workspace gives the pane a new id, while the agent keeps the old
-/// one in `$HERDR_PANE_ID`, so that one is kept as `env_pane_id`. Retracts a
-/// `gone` that closing the tab or workspace it left recorded first.
+/// one in `$HERDR_PANE_ID`, so that one is kept as `env_pane_id` with the
+/// pane's shell, whose descendants alone carry it. Retracts a `gone` that
+/// closing the tab or workspace it left recorded first.
 fn follow_move(
     ledger: &mut dyn Ledger,
     entries: &BTreeMap<String, AgentRecord>,
@@ -71,6 +73,7 @@ fn follow_move(
     data: &Value,
     socket: Option<&Path>,
     now: SystemTime,
+    pane_shell: &dyn Fn(&str) -> Result<Option<Process>>,
 ) -> Result<()> {
     let (Some(previous_pane), Some(previous_tab), Some(pane), Some(tab)) = (
         data["previous_pane_id"].as_str(),
@@ -93,6 +96,7 @@ fn follow_move(
         return Ok(());
     };
     let previous_workspace = data["previous_workspace_id"].as_str();
+    let shell = (workspace.is_some() && member.env_pane_id.is_none()).then(|| pane_shell(pane));
     let mut followed = false;
     // Hooks run unordered, so a late event for a place the member already left is skipped.
     ledger.update(&member.name, &mut |m| {
@@ -104,7 +108,10 @@ fn follow_move(
             return Ok(());
         }
         if let Some((_, workspace)) = workspace {
-            m.env_pane_id.get_or_insert_with(|| previous_pane.into());
+            if m.env_pane_id.is_none() {
+                m.env_pane_id = Some(previous_pane.into());
+                m.env_pane_shell = shell.as_ref().and_then(|s| *s.as_ref().ok()?);
+            }
             m.pane_id = pane.into();
             m.workspace = workspace.into();
             // The payload has no label, and the old one would send a revive back.
@@ -136,7 +143,17 @@ fn follow_move(
             !last.is_some_and(|e| left(&e.body))
         },
     )?;
-    Ok(())
+    let unread = |why: String| {
+        anyhow!(
+            "{} followed to {pane}, but {why}, so its old pane id {previous_pane} matches no process",
+            member.name
+        )
+    };
+    match shell {
+        Some(Err(e)) => Err(unread(format!("its shell couldn't be read: {e:#}"))),
+        Some(Ok(None)) => Err(unread("herdr reports no shell for it".into())),
+        _ => Ok(()),
+    }
 }
 
 fn pane_event(
@@ -306,6 +323,79 @@ mod tests {
 
     const SOCKET: &str = "/run/herdr/herdr.sock";
 
+    fn no_shell(_: &str) -> Result<Option<Process>> {
+        Ok(None)
+    }
+
+    const SHELL: Process = Process {
+        pid: 20,
+        start: 200,
+    };
+
+    fn moved_to_w2(
+        ledger: &mut MemLedger,
+        pane_shell: &dyn Fn(&str) -> Result<Option<Process>>,
+    ) -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let moved = r#"{"event":"pane_moved","data":{"pane":{"pane_id":"w2:p3",
+            "tab_id":"w2:t1","workspace_id":"w2"},"previous_pane_id":"w1:p1",
+            "previous_tab_id":"w1:t1","previous_workspace_id":"w1"}}"#;
+        let socket = Some(Path::new(SOCKET));
+        event_hook(
+            ledger,
+            dir.path(),
+            "pane.moved",
+            moved,
+            socket,
+            SystemTime::now(),
+            pane_shell,
+        )
+    }
+
+    #[test]
+    fn a_move_to_another_workspace_keeps_the_old_pane_id_for_the_panes_shell_alone() {
+        let mut ledger = lh_1_in("w1:t1");
+        let asked = std::cell::RefCell::new(vec![]);
+
+        moved_to_w2(&mut ledger, &|pane| {
+            asked.borrow_mut().push(pane.to_string());
+            Ok(Some(SHELL))
+        })
+        .unwrap();
+
+        assert_eq!(*asked.borrow(), ["w2:p3"]);
+        let lh_1 = &ledger.0["lh-1"];
+        assert!(lh_1.is_own_pane(
+            "w1:p1",
+            &[
+                Process {
+                    pid: 30,
+                    start: 300
+                },
+                SHELL
+            ]
+        ));
+        assert!(!lh_1.is_own_pane(
+            "w1:p1",
+            &[Process {
+                pid: 20,
+                start: 910
+            }]
+        ));
+    }
+
+    #[test]
+    fn a_move_whose_shell_cant_be_read_is_followed_and_its_old_id_matches_nothing() {
+        let mut ledger = lh_1_in("w1:t1");
+
+        let err = moved_to_w2(&mut ledger, &|_| Err(anyhow!("herdr is down"))).unwrap_err();
+
+        assert!(format!("{err:#}").contains("herdr is down"), "{err:#}");
+        let lh_1 = &ledger.0["lh-1"];
+        assert_eq!(lh_1.pane_id, "w2:p3");
+        assert!(!lh_1.is_own_pane("w1:p1", &[SHELL]));
+    }
+
     fn lh_1_in(tab: &str) -> MemLedger {
         let record: AgentRecord = serde_json::from_value(serde_json::json!({
             "name": "lh-1", "pane_id": "w1:p1", "tab_id": tab, "session_id": null,
@@ -380,6 +470,7 @@ mod tests {
             closed,
             socket,
             SystemTime::now(),
+            &no_shell,
         )
         .unwrap();
 
@@ -397,8 +488,26 @@ mod tests {
         let moved = r#"{"event":"pane_moved","data":{"pane":{"pane_id":"w1:p1",
             "tab_id":"w1:t4","workspace_id":"w1"},"previous_pane_id":"w1:p1",
             "previous_tab_id":"w1:t1","previous_workspace_id":"w1"}}"#;
-        event_hook(&mut ledger, dir.path(), "tab.closed", closed, socket, then).unwrap();
-        event_hook(&mut ledger, dir.path(), "pane.moved", moved, socket, then).unwrap();
+        event_hook(
+            &mut ledger,
+            dir.path(),
+            "tab.closed",
+            closed,
+            socket,
+            then,
+            &no_shell,
+        )
+        .unwrap();
+        event_hook(
+            &mut ledger,
+            dir.path(),
+            "pane.moved",
+            moved,
+            socket,
+            then,
+            &no_shell,
+        )
+        .unwrap();
 
         let recorded = record_gone_after(dir.path(), "lh-1", then, seen_live).unwrap();
 

@@ -14,12 +14,14 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::herd::Switches;
-use crate::ledger::{AgentRecord, Ledger};
+use crate::ledger::{AgentRecord, Ledger, Process};
 
 /// Where the hook runs: `$HERDR_PANE_ID` and `$HERDR_SOCKET_PATH`.
 pub struct Pane<'a> {
     pub id: &'a str,
     pub socket: Option<&'a Path>,
+    /// The caller and its ancestors, which carry a moved member's old pane id.
+    pub lineage: &'a [Process],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,7 +272,7 @@ pub fn lead_in(ledger: &dyn Ledger, pane: &Pane) -> Result<Option<AgentRecord>> 
     let (live, retired): (Vec<_>, Vec<_>) = ledger
         .entries()?
         .into_values()
-        .filter(|e| e.is_own_pane(pane.id) && e.socket.as_deref() == Some(socket))
+        .filter(|e| e.is_own_pane(pane.id, pane.lineage) && e.socket.as_deref() == Some(socket))
         .partition(|e| !e.retired);
     Ok(match live.into_iter().next() {
         Some(entry) => entry.is_lead().then_some(entry),
@@ -3069,6 +3071,7 @@ mod tests {
         let pane = Pane {
             id: PANE,
             socket: Some(Path::new(SOCKET)),
+            lineage: &[],
         };
         let lead_ledger = ledger(vec![lead()]);
         let denied = decide(
@@ -3142,6 +3145,7 @@ mod tests {
             name: name.into(),
             pane_id: PANE.into(),
             env_pane_id: None,
+            env_pane_shell: None,
             tab_id: None,
             session_id: Some("s1".into()),
             repo: "/src/repo".into(),
@@ -3196,6 +3200,7 @@ mod tests {
         let pane = Pane {
             id: PANE,
             socket: socket.map(Path::new),
+            lineage: &[],
         };
         tool_hook(ledger, &pane, input.as_bytes(), switches).unwrap()
     }
@@ -3333,6 +3338,36 @@ mod tests {
                 "{command}"
             );
         }
+    }
+
+    #[test]
+    fn a_retired_moved_leads_old_pane_id_is_its_only_under_its_old_shell() {
+        let mut retired = lead();
+        retired.retired = true;
+        retired.pane_id = "w5:p3".into();
+        retired.env_pane_id = Some(PANE.into());
+        retired.env_pane_shell = Some(crate::process::PANE_SHELL);
+        let leads = ledger(vec![retired]);
+        let in_pane = |lineage: &[Process]| {
+            let pane = Pane {
+                id: PANE,
+                socket: Some(Path::new(SOCKET)),
+                lineage,
+            };
+            lead_in(&leads, &pane).unwrap().map(|l| l.name)
+        };
+
+        assert_eq!(
+            in_pane(&[crate::process::PANE_SHELL]).as_deref(),
+            Some("lead-h")
+        );
+        assert_eq!(
+            in_pane(&[Process {
+                pid: 20,
+                start: 910
+            }]),
+            None
+        );
     }
 
     #[test]

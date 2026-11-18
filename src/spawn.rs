@@ -10,7 +10,7 @@ use crate::context::SHEPHERD;
 use crate::herdr::{
     Agent, AgentStatus, Herdr, NewTab, StartOutcome, WaitOutcome, Workspace, wait_for_shell_prompt,
 };
-use crate::ledger::{AgentRecord, Ledger, Role};
+use crate::ledger::{AgentRecord, Ledger, Process, Role};
 use crate::report::member_of_own_pane;
 use crate::template::Template;
 use crate::worktree::{ensure_detached_worktree, ensure_worktree, planned_worktree, worktree_path};
@@ -207,6 +207,7 @@ pub fn spawn(
         name: req.name.clone(),
         pane_id: tab.pane_id.clone(),
         env_pane_id: None,
+        env_pane_shell: None,
         tab_id: Some(tab.tab_id.clone()),
         session_id: None,
         repo: req.repo.clone(),
@@ -410,18 +411,20 @@ fn ensure_name_free(herdr: &dyn Herdr, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// The workspace a spawn from the pane `own_pane` of the herdr at `socket`
-/// defaults to: `env_workspace`, `$HERDR_WORKSPACE_ID`, unless the caller is a
-/// member moved to another workspace, whose agent inherited its old one.
+/// The workspace a spawn from the pane `own_pane` of the herdr at `socket`,
+/// by a process with `own_lineage` as itself and its ancestors, defaults to:
+/// `env_workspace`, `$HERDR_WORKSPACE_ID`, unless the caller is a member
+/// moved to another workspace, whose agent inherited its old one.
 pub fn inherited_workspace(
     entries: &BTreeMap<String, AgentRecord>,
     own_pane: Option<&str>,
+    own_lineage: &[Process],
     socket: Option<&Path>,
     env_workspace: Option<String>,
 ) -> Option<String> {
     let moved = |m: &&AgentRecord| own_pane != Some(m.pane_id.as_str());
     own_pane
-        .and_then(|pane| member_of_own_pane(entries, pane, socket))
+        .and_then(|pane| member_of_own_pane(entries, pane, own_lineage, socket))
         .filter(moved)
         .map(|member| member.workspace.clone())
         .or(env_workspace)
@@ -517,6 +520,7 @@ mod tests {
     use super::*;
     use crate::herdr::fake::{FAKE_SOCKET, FakeHerdr, Startup};
     use crate::ledger::MemLedger;
+    use crate::process::PANE_SHELL;
     use crate::worktree::testing::{current_branch, repo_with_origin};
 
     fn request(name: &str) -> SpawnRequest {
@@ -613,13 +617,18 @@ mod tests {
         let herdr = herdr();
         let mut ledger = MemLedger::default();
         let lead = spawn(&herdr, &mut ledger, &request("lead-a"), Some("w1")).unwrap();
+        let inherited_under =
+            |lineage: &[Process], ledger: &MemLedger, pane: &str, env: &str, socket: &str| {
+                inherited_workspace(
+                    &ledger.0,
+                    Some(pane),
+                    lineage,
+                    Some(Path::new(socket)),
+                    Some(env.into()),
+                )
+            };
         let inherited = |ledger: &MemLedger, pane: &str, env: &str, socket: &str| {
-            inherited_workspace(
-                &ledger.0,
-                Some(pane),
-                Some(Path::new(socket)),
-                Some(env.into()),
-            )
+            inherited_under(&[PANE_SHELL], ledger, pane, env, socket)
         };
         assert_eq!(
             inherited(&ledger, &lead.pane_id, "w1", FAKE_SOCKET).as_deref(),
@@ -628,6 +637,7 @@ mod tests {
 
         let moved = ledger.0.get_mut("lead-a").unwrap();
         moved.env_pane_id = Some(lead.pane_id.clone());
+        moved.env_pane_shell = Some(PANE_SHELL);
         moved.pane_id = "w2:p9".into();
         moved.workspace = "w2".into();
         let workspace = inherited(&ledger, &lead.pane_id, "w1", FAKE_SOCKET);
@@ -646,6 +656,14 @@ mod tests {
                 "{pane} on {socket}"
             );
         }
+        let stranger = [Process {
+            pid: 20,
+            start: 910,
+        }];
+        assert_eq!(
+            inherited_under(&stranger, &ledger, &lead.pane_id, "w1", FAKE_SOCKET).as_deref(),
+            Some("w1")
+        );
     }
 
     #[test]

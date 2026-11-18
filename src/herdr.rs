@@ -218,6 +218,14 @@ impl CliHerdr {
         ok_reply(args, self.call(args)?)
     }
 
+    /// The pid of the shell herdr started in `pane_id`, if it has one.
+    pub fn shell_pid(&self, pane_id: &str) -> Result<Option<u32>> {
+        let result = self.call_ok(&["pane", "process-info", "--pane", pane_id])?;
+        Ok(result["process_info"]["shell_pid"]
+            .as_u64()
+            .and_then(|p| p.try_into().ok()))
+    }
+
     fn call_ok_within(&self, args: &[&str], timeout: Duration) -> Result<Value> {
         let ran = crate::shell::run_within(&mut self.command(args), timeout)
             .with_context(|| format!("run herdr {}", args.join(" ")))?;
