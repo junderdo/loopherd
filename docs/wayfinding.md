@@ -95,6 +95,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D78](decisions/D78.md) | `loopherd restart --self` from a lead's own pane starts a detached waiter that runs the plain restart once its stop since the handoff reads finished, gives up after 30 minutes with a mailbox note, and flocks keep it to one waiter and one restart per member. Leads restart themselves; amends D20. |
 | [D79](decisions/D79.md) | No cap on running agents across herds; each herd's `max` stays the only limit. Reopen when two herds run unpaused at once or a usage-limit or `rate_limit` stop hits more than one herd; a future limit starts from reacting to those stops, not a fixed agent count. |
 | [D80](decisions/D80.md) | A lead's watch prints `<herd> running low  0 claimable, <m> unready, no workers open` once per streak of its own, keyed like `out of work`, when its unpaused herd has no claimable work, unready tasks, and no open worker, even mid-way through D60's streak; it replaces the plain line when both start together. Amends D60. |
+| [D82](decisions/D82.md) | After the shepherd's handoff the human runs `/clear` and sends any message: the watch that printed `shepherd handoff` records the pane, socket, Claude process and time in `shepherd.json`, and the first matching `clear` SessionStart after a newer `handoffs/shepherd.md` moves it to `.prev.md`, marks the record used and adds the resume as `additionalContext`. The paste line stays as a fallback. Amends D20. |
 
 ## Emerging model
 

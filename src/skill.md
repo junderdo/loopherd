@@ -361,15 +361,23 @@ and, once per session past your limit, adds `shepherd handoff <n>k over
    member is doing and what you owe it (verifications running, PRs to
    check after merge), then next steps, then gotchas.
 3. Tell the human, with the path spelled out in full:
-   > I'm past my context limit and wrote my handoff. Run `/clear`, then paste:
+   > I'm past my context limit and wrote my handoff.
+   > Run `/clear`, then send any message (e.g. `go`), and I resume from it.
+   >
+   > If I don't, paste this after the `/clear` instead:
    > `continue as the loopherd shepherd from /home/<you>/.local/state/loopherd/handoffs/shepherd.md`
 
-   and end your turn. Never `/clear` yourself.
+   and end your turn. Never `/clear` yourself. The watch that told you
+   recorded your pane and Claude, so the first `/clear` there after your
+   handoff is written moves it to `handoffs/shepherd.prev.md` and adds the
+   resume to the new session's context.
 
-Given that prompt in a fresh session, run `loopherd --skill`, read the
-handoff, `loopherd status` and `loopherd reports --all --tail 40` (for a
-fuller history, `--since <time>` or plain `--all`), then re-arm your watch
-and carry on from its next steps.
+In a fresh session, given that resume (naming the `.prev.md` path) or the
+pasted line, run `loopherd --skill`, read the handoff at the path it names
+(or `shepherd.prev.md` beside it, if a resume already moved it there),
+`loopherd status` and `loopherd reports --all --tail 40` (for a fuller
+history, `--since <time>` or plain `--all`), then re-arm your watch and
+carry on from its next steps.
 
 ### Notifying the human
 

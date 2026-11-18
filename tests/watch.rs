@@ -405,6 +405,138 @@ fn the_shepherds_watch_tells_it_to_hand_off_once_per_session_over_its_limit() {
     assert!(again.stdout.is_empty());
 }
 
+impl Sandbox {
+    /// Runs `session-hook` with `input` on stdin, as Claude does.
+    fn session_hook(&self, pane: &str, claude_pid: &str, input: &str) -> Output {
+        let mut child = self
+            .loopherd(&["session-hook"])
+            .env("HERDR_PANE_ID", pane)
+            .env("HERDR_SOCKET_PATH", "/run/live.sock")
+            .env("CLAUDE_PID", claude_pid)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        out
+    }
+}
+
+fn session_start(source: &str, session: &str) -> String {
+    format!(r#"{{"hook_event_name":"SessionStart","source":"{source}","session_id":"{session}"}}"#)
+}
+
+#[test]
+fn a_clear_after_the_shepherds_handoff_resumes_it_once() {
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+    let pid = as_shepherds_claude(&sandbox, "s1", 170_000);
+    let state = sandbox.dir.path().join("state/loopherd");
+    let told = sandbox
+        .loopherd(&["watch", "--timeout", "0"])
+        .env("CLAUDE_PID", &pid)
+        .env("HERDR_PANE_ID", "w9:p1")
+        .env("HERDR_SOCKET_PATH", "/run/live.sock")
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&told.stdout).contains("shepherd handoff 170k over 160k"),
+        "{told:?}"
+    );
+    std::thread::sleep(Duration::from_millis(20));
+    fs::create_dir_all(state.join("handoffs")).unwrap();
+    fs::write(state.join("handoffs/shepherd.md"), "## State\n").unwrap();
+
+    let compact = sandbox.session_hook("w9:p1", &pid, &session_start("compact", "s1"));
+    assert!(compact.stdout.is_empty(), "{compact:?}");
+
+    let out = sandbox.session_hook("w9:p1", &pid, &session_start("clear", "s2"));
+    let added: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(added["hookSpecificOutput"]["hookEventName"], "SessionStart");
+    let context = added["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    let prev = state.join("handoffs/shepherd.prev.md");
+    assert!(context.contains(&prev.display().to_string()), "{context}");
+    assert!(prev.is_file());
+
+    fs::write(state.join("handoffs/shepherd.md"), "## State\n").unwrap();
+    let again = sandbox.session_hook("w9:p1", &pid, &session_start("clear", "s3"));
+    assert!(again.stdout.is_empty(), "{again:?}");
+    assert_eq!(stderr(&again), "");
+}
+
+#[test]
+fn an_unreadable_shepherd_record_warns_and_the_hook_still_succeeds() {
+    let sandbox = Sandbox::new();
+    let state = sandbox.dir.path().join("state/loopherd");
+    let ledger = fs::read_to_string(state.join("ledger.json"))
+        .unwrap()
+        .replace(
+            r#""session_id": null,"#,
+            r#""session_id": "old", "socket": "/run/live.sock","#,
+        );
+    fs::write(state.join("ledger.json"), ledger).unwrap();
+    fs::write(state.join("shepherd.json"), "not json").unwrap();
+    let pid = as_shepherds_claude(&sandbox, "s1", 1_000);
+
+    let shepherd = sandbox.session_hook("w9:p1", &pid, &session_start("clear", "s2"));
+    assert!(shepherd.stdout.is_empty(), "{shepherd:?}");
+    assert!(
+        stderr(&shepherd).contains("warning: shepherd resume: parse"),
+        "{}",
+        stderr(&shepherd)
+    );
+
+    let member = sandbox.session_hook("w1:p1", "", &session_start("clear", "new"));
+    assert!(member.stdout.is_empty(), "{member:?}");
+    let ledger: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(state.join("ledger.json")).unwrap()).unwrap();
+    assert_eq!(ledger["lh-1"]["session_id"], "new");
+}
+
+#[test]
+fn a_members_clear_is_unchanged_by_a_shepherd_record() {
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+    let state = sandbox.dir.path().join("state/loopherd");
+    let ledger = fs::read_to_string(state.join("ledger.json"))
+        .unwrap()
+        .replace(
+            r#""session_id": null,"#,
+            r#""session_id": "old", "socket": "/run/live.sock","#,
+        );
+    fs::write(state.join("ledger.json"), ledger).unwrap();
+    let pid = as_shepherds_claude(&sandbox, "s1", 170_000);
+    sandbox
+        .loopherd(&["watch", "--timeout", "0"])
+        .env("CLAUDE_PID", &pid)
+        .env("HERDR_PANE_ID", "w9:p1")
+        .env("HERDR_SOCKET_PATH", "/run/live.sock")
+        .output()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    fs::create_dir_all(state.join("handoffs")).unwrap();
+    fs::write(state.join("handoffs/shepherd.md"), "## State\n").unwrap();
+
+    let out = sandbox.session_hook("w1:p1", "", &session_start("clear", "new"));
+
+    assert!(out.stdout.is_empty(), "{out:?}");
+    let ledger: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(state.join("ledger.json")).unwrap()).unwrap();
+    assert_eq!(ledger["lh-1"]["session_id"], "new");
+    assert!(state.join("handoffs/shepherd.md").is_file());
+}
+
 #[test]
 fn a_timed_out_watch_still_tells_the_shepherd() {
     let sandbox = Sandbox::new();

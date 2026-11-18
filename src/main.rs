@@ -29,6 +29,7 @@ mod revive;
 mod session_hook;
 mod setup;
 mod shell;
+mod shepherd_resume;
 mod skill;
 mod spawn;
 mod stats;
@@ -1490,6 +1491,8 @@ fn shepherd_handoff(paths: &Paths, state: &Path) -> Option<context::ShepherdHand
         claude_dir: &claude_dir,
         state,
         limit,
+        pane: own_pane().as_deref(),
+        socket: socket_from_env().as_deref(),
     })
 }
 
@@ -1589,6 +1592,17 @@ fn run_session_hook() -> Result<i32> {
         socket: socket.as_deref(),
         claude_pid: process::claude_pid_from_env(&process::ProcFs),
     };
+    match shepherd_resume(&ledger, &pane, &input) {
+        Ok(None) => {}
+        Ok(Some(context)) => println!(
+            "{}",
+            serde_json::json!({"hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": context,
+            }})
+        ),
+        Err(e) => eprintln!("loopherd session-hook: warning: shepherd resume: {e:#}"),
+    }
     if let Err(e) = pane_label::session_started(&CliHerdr, &ledger.reports_dir()?, pane.id, &input)
     {
         eprintln!(
@@ -1605,6 +1619,27 @@ fn run_session_hook() -> Result<i32> {
         &mut |warning| eprintln!("loopherd session-hook: {warning}"),
     )?;
     Ok(0)
+}
+
+/// The shepherd's resume context when `pane`'s Claude is where its last
+/// handoff was recorded.
+fn shepherd_resume(
+    ledger: &FileLedger,
+    pane: &session_hook::Pane,
+    input: &[u8],
+) -> Result<Option<String>> {
+    let (Some(socket), Some(pid)) = (pane.socket, pane.claude_pid) else {
+        return Ok(None);
+    };
+    let Some(start) = process::ProcFs.start(pid) else {
+        return Ok(None);
+    };
+    let place = shepherd_resume::Place {
+        pane: pane.id.to_string(),
+        socket: socket.to_path_buf(),
+        process: ledger::Process { pid, start },
+    };
+    shepherd_resume::resume(&ledger.dir()?, &place, input)
 }
 
 fn run_prompt_hook() -> Result<i32> {

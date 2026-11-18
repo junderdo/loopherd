@@ -4,15 +4,17 @@
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::config::{self, ConfigFile};
 use crate::continuation::{is_plain_name, live_transcript, session_in, transcript_of};
-use crate::ledger::AgentRecord;
+use crate::ledger::{AgentRecord, Process};
 use crate::process::{self, Procs};
 use crate::report::{self, Body};
+use crate::shepherd_resume;
 
 /// The shepherd's handoff file's name; no member may take it.
 pub const SHEPHERD: &str = "shepherd";
@@ -326,6 +328,10 @@ pub struct ShepherdCheck<'a> {
     pub claude_dir: &'a Path,
     pub state: &'a Path,
     pub limit: u64,
+    /// `$HERDR_PANE_ID` and `$HERDR_SOCKET_PATH`, recorded with the handoff
+    /// so a `/clear` there resumes the shepherd.
+    pub pane: Option<&'a str>,
+    pub socket: Option<&'a Path>,
 }
 
 /// The line telling the shepherd to hand off, due until [`Self::mark`].
@@ -334,6 +340,7 @@ pub struct ShepherdHandoff {
     /// The Claude session measured.
     pub session: String,
     marker: PathBuf,
+    resume: Option<(PathBuf, shepherd_resume::Place)>,
 }
 
 impl ShepherdHandoff {
@@ -343,11 +350,16 @@ impl ShepherdHandoff {
             line: line.into(),
             session: session.into(),
             marker,
+            resume: None,
         }
     }
 
-    /// Remembers the session was told, so no later watch tells it again.
+    /// Records where the shepherd runs for its resume, then remembers the
+    /// session was told, so no later watch tells it again.
     pub fn mark(self) -> Result<()> {
+        if let Some((state, place)) = &self.resume {
+            shepherd_resume::record(state, place, &self.session, SystemTime::now())?;
+        }
         let dir = self.marker.parent().expect("a marker is in handoff-asked");
         fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
         fs::write(&self.marker, "").with_context(|| format!("create {}", self.marker.display()))
@@ -365,6 +377,16 @@ pub fn shepherd_handoff(check: &ShepherdCheck) -> Option<ShepherdHandoff> {
         return None;
     }
     let tokens = tokens_in(&transcript_of(check.claude_dir, &session)?)?;
+    let place = || {
+        Some(shepherd_resume::Place {
+            pane: check.pane?.to_string(),
+            socket: check.socket?.to_path_buf(),
+            process: Process {
+                pid,
+                start: check.procs.start(pid)?,
+            },
+        })
+    };
     (tokens > check.limit).then(|| ShepherdHandoff {
         line: format!(
             "shepherd handoff {}k over {}k",
@@ -373,6 +395,7 @@ pub fn shepherd_handoff(check: &ShepherdCheck) -> Option<ShepherdHandoff> {
         ),
         session,
         marker,
+        resume: place().map(|place| (check.state.to_path_buf(), place)),
     })
 }
 
@@ -1166,6 +1189,8 @@ mod shepherd_tests {
                 claude_dir: &self.claude(),
                 state: &self.state(),
                 limit,
+                pane: Some("w1:p1"),
+                socket: Some(Path::new("/run/herdr.sock")),
             })?;
             let line = handoff.line.clone();
             handoff.mark().unwrap();
@@ -1191,6 +1216,48 @@ mod shepherd_tests {
     }
 
     #[test]
+    fn telling_the_shepherd_records_its_pane_socket_session_and_claude() {
+        let s = Shepherd::new(171_400);
+        assert!(s.check(160_000).is_some());
+        let record: Value =
+            serde_json::from_str(&fs::read_to_string(s.state().join("shepherd.json")).unwrap())
+                .unwrap();
+        assert_eq!(record["pane"], "w1:p1");
+        assert_eq!(record["socket"], "/run/herdr.sock");
+        assert_eq!(record["session"], SESSION);
+        assert_eq!(
+            record["process"],
+            serde_json::json!({"pid": 30, "start": 300})
+        );
+        assert_eq!(record["used"], false);
+        assert!(humantime::parse_rfc3339(record["at"].as_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn without_a_pane_or_socket_there_is_no_record() {
+        let s = Shepherd::new(171_400);
+        let (claude, state) = (s.claude(), s.state());
+        for (pane, socket) in [
+            (None, Some(Path::new("/run/herdr.sock"))),
+            (Some("w1:p1"), None),
+        ] {
+            let check = ShepherdCheck {
+                procs: &s.procs,
+                claude_pid: Some("30"),
+                me: 36,
+                claude_dir: &claude,
+                state: &state,
+                limit: 100_000,
+                pane,
+                socket,
+            };
+            shepherd_handoff(&check).unwrap().mark().unwrap();
+            assert!(!state.join("shepherd.json").exists());
+            fs::remove_dir_all(state.join("handoff-asked")).unwrap();
+        }
+    }
+
+    #[test]
     fn at_or_under_the_limit_it_says_nothing_and_remembers_nothing() {
         let s = Shepherd::new(160_000);
         assert_eq!(s.check(160_000), None);
@@ -1208,6 +1275,8 @@ mod shepherd_tests {
             claude_dir: &claude,
             state: &state,
             limit: 100_000,
+            pane: None,
+            socket: None,
         };
         assert!(shepherd_handoff(&check).is_some());
         assert!(shepherd_handoff(&check).is_some());
