@@ -243,9 +243,35 @@ fn only_a_forced_restart_is_the_humans_call() {
     );
     assert!(
         own.contains(
-            "First restart any lead whose `handoff` and `finished` lines you've already read, \
-             so the herd doesn't wait on the next shepherd."
+            "First restart any member whose `handoff` and `finished` lines you've already read \
+             and that is yours to restart, so the herd doesn't wait on the next shepherd."
         ),
         "{own}"
+    );
+}
+
+#[test]
+fn a_lead_restarts_itself_after_its_handoff() {
+    let home = tempfile::tempdir().unwrap();
+    let printed = String::from_utf8(skill(home.path())).unwrap();
+    let lead = flat_section(&printed, "\n## Lead\n", "\n### ");
+    assert!(
+        lead.contains(
+            "Then report `--kind handoff`, stop your watch, run `loopherd restart --self`, \
+             and end your turn"
+        ),
+        "{lead}"
+    );
+    assert!(!lead.contains("The shepherd restarts you"), "{lead}");
+    let whole = flat_section(&printed, "\n## Lead\n", "\n## NO SUCH SECTION\n");
+    assert!(
+        whole.contains("report `--kind handoff`, run `loopherd restart --self`, and end your turn"),
+        "{whole}"
+    );
+    assert!(!whole.contains("The shepherd restarts you"), "{whole}");
+    let handoffs = flat_section(&printed, "\n### Handoffs\n", "\n### Your own handoff\n");
+    assert!(
+        handoffs.contains("**A lead restarts itself.**"),
+        "{handoffs}"
     );
 }

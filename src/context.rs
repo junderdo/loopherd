@@ -284,14 +284,18 @@ fn reason(
 ) -> String {
     // A lead's watch is a background shell; left running, its stop reads
     // paused and restart refuses it.
-    let (save, plan) = match member.is_lead() {
+    let (save, plan, restart) = match member.is_lead() {
         true => (
             "stop your own `loopherd watch` (TaskStop it, or kill it) so your stop reads finished, then ",
             "your plan as next steps, re-arming your watch first",
+            ", then `loopherd restart --self`, and end your turn. It restarts you fresh from that file \
+             in this pane once this turn ends.",
         ),
         false => (
             "commit and push your branch, comment your progress on your task in the project's tracker, then ",
             "your plan as next steps",
+            ", and end your turn. Whoever reads your reports restarts you fresh from that file; \
+             don't restart yourself.",
         ),
     };
     let moved = moved
@@ -307,8 +311,7 @@ fn reason(
         "loopherd: your context is at {tokens} tokens, past your limit of {limit}. \
          Stop your current work: {save}write your handoff to {} (your state, {plan}, \
          gotchas; nothing already in the tracker or the ledger), run \
-         `loopherd report --kind handoff \"<one line on where you are>\"`, and end your turn. \
-         Whoever reads your reports restarts you fresh from that file; don't restart yourself.{moved}",
+         `loopherd report --kind handoff \"<one line on where you are>\"`{restart}{moved}",
         handoff.display()
     )
 }
@@ -667,6 +670,14 @@ mod tests {
         assert!(!reason.contains("branch"), "{reason}");
         assert!(
             reason.contains("your plan as next steps, re-arming your watch first"),
+            "{reason}"
+        );
+        assert!(
+            reason.ends_with(
+                "run `loopherd report --kind handoff \"<one line on where you are>\"`, then \
+                 `loopherd restart --self`, and end your turn. It restarts you fresh from that \
+                 file in this pane once this turn ends."
+            ),
             "{reason}"
         );
     }

@@ -3521,6 +3521,10 @@ mod tests {
             run(&leads, Switches::default(), "loopherd restart lh-1"),
             None
         );
+        assert_eq!(
+            run(&leads, Switches::default(), "loopherd restart --self"),
+            None
+        );
         let workers = ledger(vec![entry("lh-1", None)]);
         assert_eq!(
             run(

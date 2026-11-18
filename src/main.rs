@@ -49,6 +49,7 @@ mod worktree;
 
 use std::io::{Read, Write};
 use std::num::NonZeroUsize;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -300,13 +301,22 @@ enum Command {
     /// sends it /clear, waits for the ledger to follow the new session, then
     /// prompts it to read its handoff. Refuses unless its last stop is finished.
     Restart {
-        name: String,
+        #[arg(required_unless_present = "own")]
+        name: Option<String>,
         /// Skip the checks that it handed off and is finished since. A /clear sent
         /// mid-turn waits for that turn, then drops whatever the handoff doesn't
         /// record: that turn's work, background tasks and crons.
         #[arg(long)]
         force: bool,
+        /// Restart the member in this pane once its turn ends: starts a detached
+        /// waiter that runs the plain restart after its stop since the handoff
+        /// reads finished, giving up after 30 minutes with a note.
+        #[arg(long = "self", id = "own", conflicts_with_all = ["name", "force"])]
+        own: bool,
     },
+    /// The detached waiter `restart --self` starts.
+    #[command(hide = true)]
+    RestartWait { name: String },
     /// Leave a report for the shepherd from the member running in this pane.
     /// The one command members run against the real state dir.
     Report {
@@ -694,7 +704,13 @@ fn main() -> ExitCode {
             text,
             text_file,
         } => ("tell", run_tell(&name, text, text_file)),
-        Command::Restart { name, force } => ("restart", run_restart(&name, force)),
+        Command::Restart {
+            name: Some(name),
+            force,
+            own: false,
+        } => ("restart", run_restart(&name, force)),
+        Command::Restart { .. } => ("restart", run_restart_self()),
+        Command::RestartWait { name } => ("restart-wait", run_restart_wait(&name)),
         Command::Status { all, strays, json } => ("status", run_status(all, strays, json)),
         Command::Stats { herd, since, json } => ("stats", run_stats(herd, since, json)),
         Command::View { all, strays } => ("view", run_view(all, strays)),
@@ -1171,6 +1187,85 @@ fn run_restart(name: &str, force: bool) -> Result<i32> {
         "{}",
         restart::restart(&CliHerdr, &mut ledger, &req, SystemTime::now())?
     );
+    Ok(0)
+}
+
+const WAITER_FD: &str = "LOOPHERD_RESTART_WAITER_FD";
+
+fn run_restart_self() -> Result<i32> {
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let state = ledger.dir()?;
+    let scheduled = restart::schedule_self(
+        &CliHerdr,
+        &ledger,
+        own_pane().as_deref(),
+        &own_lineage(),
+        &state,
+    )?;
+    let fd = scheduled.waiter.as_raw_fd();
+    // The waiter inherits the lock's open file, so the claim lasts as long as it runs.
+    // SAFETY: fcntl only clears close-on-exec on a descriptor the lock keeps open.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, 0) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("pass the waiter its lock");
+    }
+    let exe = std::env::current_exe().context("find the loopherd binary")?;
+    let mut waiter = std::process::Command::new(&exe);
+    waiter
+        .args(["restart-wait", &scheduled.name])
+        .env(WAITER_FD, fd.to_string())
+        .env_remove("HERDR_PANE_ID")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // SAFETY: setsid is async-signal-safe. A session of its own outlives the
+    // calling Claude's shells and their hangups.
+    unsafe {
+        waiter.pre_exec(|| match libc::setsid() {
+            -1 => Err(std::io::Error::last_os_error()),
+            _ => Ok(()),
+        });
+    }
+    waiter
+        .spawn()
+        .with_context(|| format!("start {} restart-wait", exe.display()))?;
+    // Dropping unlocks the open file the waiter shares; exiting only closes ours.
+    std::mem::forget(scheduled.waiter);
+    println!("{}", scheduled.message);
+    Ok(0)
+}
+
+fn run_restart_wait(name: &str) -> Result<i32> {
+    let fd = std::env::var(WAITER_FD)
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+        .context("restart-wait runs only from `loopherd restart --self`, which holds its claim")?;
+    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let state = ledger.dir()?;
+    let _claim = restart::adopt_claim(&state, name, fd)?;
+    let paths = Paths::from_env().inspect_err(|e| {
+        let text = format!("self-restart failed: {e:#}");
+        let note = report::Entry::new(SystemTime::now(), report::Body::Note { text });
+        let _ = report::append(&state.join("reports"), name, &note);
+    })?;
+    let req = restart::RestartRequest {
+        name,
+        force: false,
+        own_pane: None,
+        own_lineage: &[],
+        pane_shell: &pane_shell,
+        state: &state,
+        paths: &paths,
+        settle_timeout: Duration::from_secs(30),
+        poll: Duration::from_millis(250),
+        live: &live_session,
+    };
+    restart::wait_then_restart(
+        &CliHerdr,
+        &mut ledger,
+        &req,
+        restart::SELF_RESTART_TIMEOUT,
+        Duration::from_secs(2),
+    )?;
     Ok(0)
 }
 
