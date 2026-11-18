@@ -2223,16 +2223,13 @@ mod tests {
         let setup = Setup::new("true", 1);
         let scripts = setup.repo.path().join("scripts");
         fs::create_dir(&scripts).unwrap();
-        fs::write(
-            scripts.join("trello"),
+        crate::test_fakes::executable(
+            &scripts.join("trello"),
             "#!/bin/sh\nprintf 'LH-7\\tBacklog\\tready-for-agent,impl:feat\\tA feature\\n\
              LH-8\\tBacklog\\tready-for-agent,wayfinding:research\\tA question\\n\
              LH-9\\tBacklog\\tready-for-agent,wayfinding:grilling\\tA grilling\\n\
              LH-10\\tBacklog\\tready-for-agent,impl:fix,need-human\\tStuck\\n'\n",
-        )
-        .unwrap();
-        let executable = std::os::unix::fs::PermissionsExt::from_mode(0o755);
-        fs::set_permissions(scripts.join("trello"), executable).unwrap();
+        );
         fs::write(
             setup.config.path().join("herds/prs.toml"),
             format!(
@@ -2836,12 +2833,7 @@ mod tests {
             let setup = Setup::after_merge(commands, lead);
             let install = setup.repo.path().join("scripts/install");
             fs::create_dir(install.parent().unwrap()).unwrap();
-            fs::write(&install, "#!/bin/sh\necho installed \"$@\" >> log\n").unwrap();
-            fs::set_permissions(
-                &install,
-                std::os::unix::fs::PermissionsExt::from_mode(0o755),
-            )
-            .unwrap();
+            crate::test_fakes::executable(&install, "#!/bin/sh\necho installed \"$@\" >> log\n");
             let herdr = herdr();
             let mut ledger = with_lead(fed_one(&setup, &herdr), "prs");
             setup.touch("merged-1");

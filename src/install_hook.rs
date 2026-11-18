@@ -848,8 +848,7 @@ mod tests {
         let bin = dir.path().join("a dir's/bin");
         fs::create_dir_all(&bin).unwrap();
         let failing = bin.join("loopherd");
-        fs::write(&failing, "#!/bin/sh\necho \"usage: $*\" >&2\nexit 2\n").unwrap();
-        fs::set_permissions(&failing, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_fakes::executable(&failing, "#!/bin/sh\necho \"usage: $*\" >&2\nexit 2\n");
 
         assert_eq!(run_hook(&failing).code(), Some(0), "usage error");
         assert_eq!(
