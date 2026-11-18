@@ -25,6 +25,10 @@ that pane. Read `herdr --skill` before controlling herdr.
 
 ## Shepherd
 
+At the start of each session, run `loopherd doctor` (with `--settings
+<file>` if you installed with it). It prints only problems; relay each
+failure to the human with the fix it names (D63).
+
 ### Setting up a project
 
 `loopherd init` writes a herd's structure; you tailor its prose to the repo.

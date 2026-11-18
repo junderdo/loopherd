@@ -25,7 +25,9 @@ runs the terminals and knows whether each agent is working, blocked, or done.
 Pick one. Both need [herdr](https://herdr.dev/) and
 [Claude Code](https://code.claude.com/docs/en/overview) (`claude`), install
 `~/.local/bin/loopherd` (put `~/.local/bin` on `PATH`), add loopherd's
-Claude hooks and skill, and finish by running `loopherd setup`.
+Claude hooks and skill, run `loopherd setup`, and finish with `loopherd
+doctor`, whose failures (say, herdr not started yet) are printed but don't
+fail the install.
 
 <table>
 <tr><th>From junderdo.dev</th><th>From the repo</th></tr>
