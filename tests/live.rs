@@ -183,7 +183,8 @@ fn retire_close(state: &Path, config: &Path, name: &str) -> Output {
     dev(env!("CARGO_BIN_EXE_loopherd"))
         .env("XDG_STATE_HOME", state)
         .env("LOOPHERD_CONFIG_DIR", config)
-        .args(["retire", name, "--close"])
+        // The member never reports, so only --force gets it past retire's check.
+        .args(["retire", name, "--close", "--force"])
         .output()
         .unwrap()
 }
