@@ -98,13 +98,34 @@ Optional, once loopherd is installed (above). Needs herdr 0.7.5 or later.
 herdr plugin install junderdo/loopherd/herdr-plugin
 ```
 
-It adds a `loopherd: herd status` action, and a Ctrl-click on a GitHub PR
-link in any pane shows the member that owns the PR in a popup (herd, live
-status, template, review round, last reports; q or Esc closes it). A PR no
-open member owns opens in the browser. Clicks reach the plugin only while
-herdr's `ui.mouse_capture` is on; with it off, the terminal handles them. The plugin runs the `loopherd` on
-`PATH`, else `~/.local/bin/loopherd`, and never installs loopherd or its
-hooks; without one, its commands fail with a pointer here. herdr shows no
+It adds a `loopherd: herd status` action and a `loopherd: open herd view`
+action, which opens `loopherd view` in a popup over most of the screen;
+`q` or Escape quits the view and closes the popup. To open it with a key,
+add a binding to your herdr `config.toml` and run
+`herdr server reload-config`:
+
+```toml
+[[keys.command]]
+key = "prefix+m"
+type = "plugin_action"
+command = "loopherd.view"
+description = "loopherd herd view"
+```
+
+`prefix+m` is unbound in herdr 0.9.5's defaults (`herdr --default-config`);
+pick another if your config uses it. A popup that closes as soon as it
+opens means the view couldn't start; run `loopherd view` in a pane to see
+why.
+
+A Ctrl-click on a GitHub PR link in any pane shows the member that owns
+the PR in a popup (herd, live status, template, review round, last
+reports; q or Esc closes it). A PR no open member owns opens in the
+browser. Clicks reach the plugin only while herdr's `ui.mouse_capture`
+is on; with it off, the terminal handles them.
+
+The plugin runs the `loopherd` on `PATH`, else
+`~/.local/bin/loopherd`, and never installs loopherd or its hooks;
+without one, its commands fail with a pointer here. herdr shows no
 action output on screen: read it, errors included, with
 `herdr plugin log list --plugin loopherd`.
 
