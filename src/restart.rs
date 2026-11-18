@@ -30,7 +30,8 @@ pub struct RestartRequest<'a> {
 }
 
 /// Sends `/clear` to the member, waits for its ledger entry to move to the
-/// new session, records the session Claude continued that one in, marks a
+/// new session, records the session Claude continued that one in and the
+/// pane and tab it runs in, marks a
 /// start in its mailbox, then prompts it to read its handoff. Refuses a pane
 /// showing a subagent's view, where `/clear` opens a dialog instead. Refuses,
 /// without `force`, unless it reported a handoff since its last start, its
@@ -158,6 +159,11 @@ pub fn restart(
     let read = handoff.with_extension("prev.md");
     std::fs::rename(&handoff, &read)
         .with_context(|| format!("move {} to {}", handoff.display(), read.display()))?;
+    ledger.update(name, &mut |current| {
+        current.pane_id = agent.pane_id.clone();
+        current.tab_id = Some(agent.tab_id.clone());
+        Ok(())
+    })?;
     ledger.started(name, now, false)?;
     herdr.prompt(name, &resume_prompt(lead, &read))?;
     Ok(format!(
@@ -230,6 +236,7 @@ mod tests {
         AgentRecord {
             name: name.into(),
             pane_id: "w1:p1".into(),
+            tab_id: None,
             session_id: Some("old".into()),
             repo: "/src/repo".into(),
             worktree: None,
@@ -458,6 +465,13 @@ mod tests {
             ]
         );
         assert_eq!(ledger.0["lh-1"].session_id.as_deref(), Some("new"));
+        assert_eq!(
+            (
+                ledger.0["lh-1"].pane_id.as_str(),
+                ledger.0["lh-1"].tab_id.as_deref()
+            ),
+            ("w9:p9", Some("w9:t9"))
+        );
         assert_eq!(ledger.1, ["lh-1"]);
     }
 

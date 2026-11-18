@@ -3127,6 +3127,7 @@ mod tests {
         AgentRecord {
             name: name.into(),
             pane_id: PANE.into(),
+            tab_id: None,
             session_id: Some("s1".into()),
             repo: "/src/repo".into(),
             worktree: None,

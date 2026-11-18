@@ -13,14 +13,14 @@ struct Sandbox {
 }
 
 impl Sandbox {
-    /// lh-1 in the ledger, with a paused stop in its mailbox.
+    /// lh-1 in pane w1:p1 of tab w1:t1, with a paused stop in its mailbox.
     fn new() -> Sandbox {
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("state/loopherd");
         fs::create_dir_all(state.join("reports")).unwrap();
         fs::write(
             state.join("ledger.json"),
-            r#"{"lh-1": {"name": "lh-1", "pane_id": "w1:p1", "session_id": null,
+            r#"{"lh-1": {"name": "lh-1", "pane_id": "w1:p1", "tab_id": "w1:t1", "session_id": null,
                 "repo": "/", "worktree": null, "workspace": "w1", "prompt": null,
                 "prompt_sent": true, "created": "2026-11-01T00:00:00Z"}}"#,
         )
@@ -114,6 +114,33 @@ fn a_pane_closed_while_no_watch_ran_wakes_the_next_watch_gone_once() {
         .env(
             "HERDR_PLUGIN_EVENT_JSON",
             r#"{"event":"pane_closed","data":{"pane_id":"w1:p1","workspace_id":"w1"}}"#,
+        )
+        .output()
+        .unwrap();
+    assert_eq!(closed.status.code(), Some(0), "{closed:?}");
+
+    let out = sandbox.watch(&["--timeout", "0"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "lh-1 paused  1 shell\nlh-1 gone\n"
+    );
+
+    let again = sandbox.watch(&["--timeout", "0"]);
+    assert_eq!(again.status.code(), Some(2), "{}", stderr(&again));
+    assert!(again.stdout.is_empty(), "{again:?}");
+}
+
+#[test]
+fn a_tab_closed_while_no_watch_ran_wakes_the_next_watch_gone_once() {
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+    let closed = sandbox
+        .loopherd(&["herdr-event-hook"])
+        .env("HERDR_PLUGIN_EVENT", "tab.closed")
+        .env(
+            "HERDR_PLUGIN_EVENT_JSON",
+            r#"{"event":"tab_closed","data":{"tab_id":"w1:t1","workspace_id":"w1"}}"#,
         )
         .output()
         .unwrap();

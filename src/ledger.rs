@@ -16,6 +16,10 @@ use crate::report::{self, Body, Entry};
 pub struct AgentRecord {
     pub name: String,
     pub pane_id: String,
+    /// The herdr tab holding `pane_id`. Missing in ledgers written before
+    /// spawn, revive and restart recorded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
     pub session_id: Option<String>,
     pub repo: PathBuf,
     pub worktree: Option<PathBuf>,
@@ -23,7 +27,7 @@ pub struct AgentRecord {
     /// worktree. Missing in ledgers written before spawn recorded it.
     #[serde(default)]
     pub branch: Option<String>,
-    /// Workspace ID at spawn time; IDs can be reused after a restart.
+    /// Workspace ID at spawn or the last revive; IDs can be reused after a restart.
     pub workspace: String,
     /// Missing in ledgers written before revive existed.
     #[serde(default)]
@@ -470,6 +474,7 @@ mod tests {
         AgentRecord {
             name: name.into(),
             pane_id: "w1:p1".into(),
+            tab_id: None,
             session_id: Some("abc".into()),
             repo: "/src/repo".into(),
             worktree: None,

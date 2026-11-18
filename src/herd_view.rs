@@ -268,6 +268,7 @@ mod tests {
         AgentRecord {
             name: name.into(),
             pane_id: format!("w1:p{name}"),
+            tab_id: None,
             session_id: Some(format!("sess-{name}")),
             repo: "/src/repo".into(),
             worktree: Some(format!("/src/wt/{name}").into()),

@@ -335,10 +335,11 @@ enum Command {
     /// session past the member's context limit, it blocks the stop instead and asks
     /// for a handoff. Outside a member's pane it records nothing. Set up by install-hook.
     StopHook,
-    /// The herdr plugin's hook on pane.agent_status_changed, pane.exited and
-    /// pane.closed: records a member going blocked, or its pane going, in its
-    /// mailbox for the next watch. Reads HERDR_PLUGIN_EVENT and
-    /// HERDR_PLUGIN_EVENT_JSON; any other pane records nothing.
+    /// The herdr plugin's hook on pane.agent_status_changed, pane.exited,
+    /// pane.closed, tab.closed and workspace.closed: records a member going
+    /// blocked, or its pane, tab or workspace going, in its mailbox for the
+    /// next watch. Reads HERDR_PLUGIN_EVENT and HERDR_PLUGIN_EVENT_JSON; any
+    /// other pane, tab or workspace records nothing.
     HerdrEventHook,
     /// Claude's SessionStart hook: when a member's Claude is cleared or resumed,
     /// points its ledger entry at the new session, read from the hook input on

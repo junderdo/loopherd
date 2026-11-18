@@ -205,6 +205,7 @@ pub fn spawn(
     let mut record = AgentRecord {
         name: req.name.clone(),
         pane_id: tab.pane_id.clone(),
+        tab_id: Some(tab.tab_id.clone()),
         session_id: None,
         repo: req.repo.clone(),
         worktree: worktree.clone(),
@@ -705,6 +706,7 @@ mod tests {
         assert_eq!(herdr.prompts(), vec![("a".into(), "start work".into())]);
         let rec = &ledger.0["a"];
         assert_eq!(rec.pane_id, "w1:p1");
+        assert_eq!(rec.tab_id.as_deref(), Some("w1:t1"));
         assert_eq!(rec.session_id.as_deref(), Some("session-a"));
         assert_eq!(rec.workspace, "w1");
         assert_eq!(rec.prompt.as_deref(), Some("start work"));
@@ -873,6 +875,7 @@ mod tests {
         assert_eq!(herdr.tabs().len(), 1);
         let rec = &ledger.0["a"];
         assert!(!rec.prompt_sent);
+        assert_eq!(rec.tab_id.as_deref(), Some("w1:t1"));
         assert_eq!(rec.prompt.as_deref(), Some("start work"));
     }
 
