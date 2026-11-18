@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::herd_view::{Member, View};
 use crate::herdr::AgentStatus;
+use crate::pane_event::retracted;
 use crate::report::{Body, Entry, history};
 
 #[derive(Debug, Default)]
@@ -77,22 +78,27 @@ impl Mail {
     }
 
     /// The non-retired members' reports and stops, newest first, less
-    /// stops that left work in flight or unknown. Equal stamps sort by
+    /// stops that left work in flight or unknown, and retracted `gone`s. Equal stamps sort by
     /// member name, then newest-written first within a member.
     pub fn events<'a>(&'a self, view: &'a View) -> Vec<Event<'a>> {
         let mut events: Vec<_> = active(view)
             .flat_map(|m| {
                 let entries = self.boxes.get(&m.name).map_or(&[][..], Vec::as_slice);
-                entries.iter().enumerate().map(|(index, entry)| Event {
-                    name: m.name.as_str(),
-                    index,
-                    entry,
-                })
-            })
-            .filter(|e| match &e.entry.body {
-                Body::Start { .. } => false,
-                Body::Stop(s) => s.error.is_some() || s.in_flight() == (None, None),
-                _ => true,
+                let shown = |index: usize, entry: &Entry| match &entry.body {
+                    Body::Start { .. } | Body::Moved {} => false,
+                    Body::Stop(s) => s.error.is_some() || s.in_flight() == (None, None),
+                    Body::Gone { .. } => !retracted(&entries[index + 1..]),
+                    _ => true,
+                };
+                entries
+                    .iter()
+                    .enumerate()
+                    .filter(move |&(index, entry)| shown(index, entry))
+                    .map(|(index, entry)| Event {
+                        name: m.name.as_str(),
+                        index,
+                        entry,
+                    })
             })
             .collect();
         events.sort_by(|a, b| (&b.entry.at, a.name, b.index).cmp(&(&a.entry.at, b.name, a.index)));

@@ -3396,9 +3396,32 @@ max = 3
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let mail = quiet_mail(&ledger);
         post_at(mail.path(), "a", "2026-11-16T10:05:00Z", Body::Blocked {});
-        post_at(mail.path(), "c", "2026-11-16T10:06:00Z", Body::Gone {});
+        post_at(
+            mail.path(),
+            "c",
+            "2026-11-16T10:06:00Z",
+            Body::Gone {
+                tab: None,
+                workspace: None,
+            },
+        );
         let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
         assert_eq!(ticker(&terminal), ["10:06 c gone", "10:05 a blocked"]);
+    }
+
+    #[test]
+    fn the_ticker_leaves_out_a_gone_a_move_retracted() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        let gone = || Body::Gone {
+            tab: Some("w1:t1".into()),
+            workspace: None,
+        };
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", gone());
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", Body::Moved {});
+        post_at(mail.path(), "c", "2026-11-16T10:06:00Z", gone());
+        let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert_eq!(ticker(&terminal), ["10:06 c gone", ""]);
     }
 
     #[test]
