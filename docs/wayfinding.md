@@ -94,6 +94,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D77](decisions/D77.md) | A moved member's `env_pane_id` is pinned to its pane's shell, recorded by the move hook or restart; every own-pane lookup matches it only for a caller descended from that shell, which a handoff keeps and a restart ends. Drops D74's limit on a reused workspace id. |
 | [D78](decisions/D78.md) | `loopherd restart --self` from a lead's own pane starts a detached waiter that runs the plain restart once its stop since the handoff reads finished, gives up after 30 minutes with a mailbox note, and flocks keep it to one waiter and one restart per member. Leads restart themselves; amends D20. |
 | [D79](decisions/D79.md) | No cap on running agents across herds; each herd's `max` stays the only limit. Reopen when two herds run unpaused at once or a usage-limit or `rate_limit` stop hits more than one herd; a future limit starts from reacting to those stops, not a fixed agent count. |
+| [D80](decisions/D80.md) | A lead's watch prints `<herd> running low  0 claimable, <m> unready, no workers open` once per streak of its own, keyed like `out of work`, when its unpaused herd has no claimable work, unready tasks, and no open worker, even mid-way through D60's streak; it replaces the plain line when both start together. Amends D60. |
 
 ## Emerging model
 
