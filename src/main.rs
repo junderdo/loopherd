@@ -536,7 +536,7 @@ struct SpawnArgs {
     /// Run in a worktree for this branch, created if needed.
     #[arg(long)]
     worktree: Option<String>,
-    /// Workspace label; defaults to $HERDR_WORKSPACE_ID.
+    /// Workspace label; defaults to this pane's workspace.
     #[arg(long)]
     workspace: Option<String>,
     #[arg(long, conflicts_with = "prompt_file")]

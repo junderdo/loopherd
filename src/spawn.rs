@@ -171,7 +171,7 @@ enum Readiness {
     Blocked,
 }
 
-/// Runs the spawn. `inherited_workspace` is `$HERDR_WORKSPACE_ID`, if set.
+/// Runs the spawn. `inherited_workspace` is the caller's, from [`inherited_workspace`].
 ///
 /// Errors are prefixed with the step that failed.
 pub fn spawn(
@@ -419,9 +419,10 @@ pub fn inherited_workspace(
     socket: Option<&Path>,
     env_workspace: Option<String>,
 ) -> Option<String> {
+    let moved = |m: &&AgentRecord| own_pane != Some(m.pane_id.as_str());
     own_pane
         .and_then(|pane| member_of_own_pane(entries, pane, socket))
-        .filter(|member| member.env_pane_id.is_some())
+        .filter(moved)
         .map(|member| member.workspace.clone())
         .or(env_workspace)
 }
@@ -612,22 +613,39 @@ mod tests {
         let herdr = herdr();
         let mut ledger = MemLedger::default();
         let lead = spawn(&herdr, &mut ledger, &request("lead-a"), Some("w1")).unwrap();
-        let socket = Some(Path::new(FAKE_SOCKET));
-        let inherited = |ledger: &MemLedger, pane: &str| {
-            inherited_workspace(&ledger.0, Some(pane), socket, Some("w1".into()))
+        let inherited = |ledger: &MemLedger, pane: &str, env: &str, socket: &str| {
+            inherited_workspace(
+                &ledger.0,
+                Some(pane),
+                Some(Path::new(socket)),
+                Some(env.into()),
+            )
         };
-        assert_eq!(inherited(&ledger, &lead.pane_id).as_deref(), Some("w1"));
+        assert_eq!(
+            inherited(&ledger, &lead.pane_id, "w1", FAKE_SOCKET).as_deref(),
+            Some("w1")
+        );
 
         let moved = ledger.0.get_mut("lead-a").unwrap();
         moved.env_pane_id = Some(lead.pane_id.clone());
         moved.pane_id = "w2:p9".into();
         moved.workspace = "w2".into();
-        let workspace = inherited(&ledger, &lead.pane_id);
+        let workspace = inherited(&ledger, &lead.pane_id, "w1", FAKE_SOCKET);
         spawn(&herdr, &mut ledger, &request("b"), workspace.as_deref()).unwrap();
 
         assert_eq!(herdr.tabs()[1].workspace_id, "w2");
-        assert_eq!(inherited(&ledger, "w2:p9").as_deref(), Some("w2"));
-        assert_eq!(inherited(&ledger, "w1:p77").as_deref(), Some("w1"));
+        let cases = [
+            (lead.pane_id.as_str(), "/run/other.sock", "w1"),
+            ("w2:p9", FAKE_SOCKET, "w3"),
+            ("w1:p77", FAKE_SOCKET, "w1"),
+        ];
+        for (pane, socket, env) in cases {
+            assert_eq!(
+                inherited(&ledger, pane, env, socket).as_deref(),
+                Some(env),
+                "{pane} on {socket}"
+            );
+        }
     }
 
     #[test]
