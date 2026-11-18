@@ -32,7 +32,7 @@ pub fn refuse_own_lead(
     };
     let in_pane = pane.is_some_and(|pane| {
         pane.socket.is_some()
-            && entry.is_own_pane(pane.id)
+            && entry.is_own_pane(pane.id, pane.lineage)
             && entry.socket.as_deref() == pane.socket
     });
     if in_pane {
@@ -611,6 +611,7 @@ mod tests {
             name: name.into(),
             pane_id: "w1:p1".into(),
             env_pane_id: None,
+            env_pane_shell: None,
             tab_id: None,
             session_id: Some("abc".into()),
             repo: "/src/repo".into(),
@@ -684,6 +685,7 @@ mod tests {
 
     fn another_pane() -> OwnPane<'static> {
         OwnPane {
+            lineage: &[],
             id: "w9:p9",
             socket: Some(Path::new(FAKE_SOCKET)),
         }
@@ -716,6 +718,7 @@ mod tests {
 
     fn the_lead_pane() -> OwnPane<'static> {
         OwnPane {
+            lineage: &[],
             id: "w1:p1",
             socket: Some(Path::new(FAKE_SOCKET)),
         }

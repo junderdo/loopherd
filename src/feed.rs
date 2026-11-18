@@ -31,6 +31,8 @@ pub struct FeedRequest<'a> {
     pub command_timeout: Duration,
     /// The pane running loopherd, whose tab retire never closes.
     pub own_pane: Option<String>,
+    /// loopherd and its ancestors, which carry a moved member's old pane id.
+    pub own_lineage: Vec<Process>,
     /// `$HERDR_SOCKET_PATH`: which herdr `own_pane` is in.
     pub own_socket: Option<PathBuf>,
     /// Where members' mailboxes live, for after_merge's notes.
@@ -258,6 +260,7 @@ fn unclaimed(
         ready_timeout: Duration::ZERO,
         command_timeout: Duration::ZERO,
         own_pane: None,
+        own_lineage: vec![],
         own_socket: None,
         mailboxes: PathBuf::new(),
         after_merge_timeout: Duration::ZERO,
@@ -465,6 +468,7 @@ fn gate(
     let pane = req.own_pane.as_deref().map(|id| Pane {
         id,
         socket: req.own_socket.as_deref(),
+        lineage: &req.own_lineage,
     });
     let Some(lead) = pane.map(|p| lead_in(ledger, &p)).transpose()?.flatten() else {
         return Ok(None);
@@ -932,6 +936,7 @@ mod tests {
 
         fn request(&self, dry_run: bool, pane: Option<&str>) -> FeedRequest<'static> {
             FeedRequest {
+                own_lineage: vec![],
                 herd: "prs".into(),
                 dry_run,
                 ready_timeout: Duration::from_secs(60),
@@ -998,6 +1003,7 @@ mod tests {
             name: name.into(),
             pane_id: "w1:p9".into(),
             env_pane_id: None,
+            env_pane_shell: None,
             tab_id: None,
             session_id: None,
             repo: "/src/repo".into(),
@@ -1710,6 +1716,7 @@ mod tests {
             ready_timeout: Duration::from_secs(60),
             command_timeout: Duration::from_secs(1),
             own_pane: None,
+            own_lineage: vec![],
             own_socket: None,
             mailboxes: config.path().join("reports"),
             after_merge_timeout: Duration::from_secs(5),
@@ -1798,6 +1805,7 @@ mod tests {
         let mut ledger = fed_one(&setup, &herdr);
         let tab = herdr.tabs()[0].id.clone();
         let req = FeedRequest {
+            own_lineage: vec![],
             herd: "prs".into(),
             dry_run: false,
             ready_timeout: Duration::from_secs(60),
@@ -1862,6 +1870,7 @@ mod tests {
             ready_timeout: Duration::from_secs(60),
             command_timeout: Duration::from_secs(1),
             own_pane: None,
+            own_lineage: vec![],
             own_socket: None,
             mailboxes: PathBuf::from("/nonexistent/reports"),
             after_merge_timeout: Duration::from_secs(5),
@@ -1995,6 +2004,7 @@ mod tests {
             ready_timeout: Duration::from_secs(60),
             command_timeout: Duration::from_secs(1),
             own_pane: None,
+            own_lineage: vec![],
             own_socket: None,
             mailboxes: PathBuf::from("/nonexistent/reports"),
             after_merge_timeout: Duration::from_secs(5),
@@ -2296,6 +2306,7 @@ mod tests {
                     ready_timeout: Duration::ZERO,
                     command_timeout: Duration::from_secs(1),
                     own_pane: None,
+                    own_lineage: vec![],
                     own_socket: None,
                     mailboxes: PathBuf::from("/nonexistent/reports"),
                     after_merge_timeout: Duration::from_secs(5),

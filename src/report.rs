@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::ledger::{AgentRecord, Ledger};
+use crate::ledger::{AgentRecord, Ledger, Process};
 use crate::lock::Lock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -41,6 +41,8 @@ impl Kind {
 
 pub struct Reporter<'a> {
     pub own_pane: Option<&'a str>,
+    /// The caller and its ancestors, which carry a moved member's old pane id.
+    pub own_lineage: &'a [Process],
     /// `$HERDR_SOCKET_PATH`: which herdr the pane belongs to.
     pub own_socket: Option<&'a Path>,
     pub as_name: Option<&'a str>,
@@ -264,17 +266,18 @@ fn ends_in_newline(file: &mut fs::File) -> std::io::Result<bool> {
 }
 
 /// The non-retired member of the herdr at `socket` that a process with
-/// `$HERDR_PANE_ID` set to `own_pane` runs in. Pane ids repeat across herdr sessions,
+/// `$HERDR_PANE_ID` set to `own_pane` and `lineage` as itself and its ancestors runs in. Pane ids repeat across herdr sessions,
 /// so an entry recorded without a socket matches only a caller that has none
 /// either.
 pub fn member_of_own_pane<'a>(
     entries: &'a BTreeMap<String, AgentRecord>,
     own_pane: &str,
+    lineage: &[Process],
     socket: Option<&Path>,
 ) -> Option<&'a AgentRecord> {
     entries
         .values()
-        .find(|e| !e.retired && e.is_own_pane(own_pane) && e.socket.as_deref() == socket)
+        .find(|e| !e.retired && e.is_own_pane(own_pane, lineage) && e.socket.as_deref() == socket)
 }
 
 /// The non-retired member of the herdr at `socket` in the pane herdr now
@@ -301,7 +304,7 @@ fn reporter(ledger: &dyn Ledger, who: &Reporter) -> Result<String> {
         return Ok(entry.name.clone());
     }
     let pane = who.own_pane.context("no HERDR_PANE_ID; pass --as <name>")?;
-    member_of_own_pane(&entries, pane, who.own_socket)
+    member_of_own_pane(&entries, pane, who.own_lineage, who.own_socket)
         .map(|e| e.name.clone())
         .ok_or_else(|| match who.own_socket {
             Some(socket) => anyhow!("pane {pane} of {} is not a member", socket.display()),
@@ -845,6 +848,7 @@ mod tests {
             name: name.into(),
             pane_id: pane.into(),
             env_pane_id: None,
+            env_pane_shell: None,
             tab_id: None,
             session_id: None,
             repo: "/src/repo".into(),
@@ -883,6 +887,7 @@ mod tests {
 
     fn from_pane(pane: &str) -> Reporter<'_> {
         Reporter {
+            own_lineage: &[],
             own_pane: Some(pane),
             own_socket: None,
             as_name: None,
@@ -950,6 +955,7 @@ mod tests {
             member("lh-2", "w1:p2", None, false),
         ]);
         let who = Reporter {
+            own_lineage: &[],
             own_pane: Some("w1:p2"),
             own_socket: None,
             as_name: Some("lh-1"),
@@ -1000,6 +1006,7 @@ mod tests {
         for (case, own_pane, as_name, error) in refused {
             let dir = tempfile::tempdir().unwrap();
             let who = Reporter {
+                own_lineage: &[],
                 own_pane,
                 own_socket: None,
                 as_name,
@@ -1020,6 +1027,7 @@ mod tests {
 
     fn send(ledger: &MemLedger, dir: &Path, name: &str, kind: Kind, text: &str, time: &str) {
         let who = Reporter {
+            own_lineage: &[],
             own_pane: None,
             own_socket: None,
             as_name: Some(name),
@@ -2013,6 +2021,7 @@ mod tests {
         live.socket = Some("/run/live.sock".into());
         let ledger = ledger(vec![member("aaa-old", "w1:p3", None, false), live]);
         let who = Reporter {
+            own_lineage: &[],
             own_pane: Some("w1:p3"),
             own_socket: Some(Path::new("/run/live.sock")),
             as_name: None,

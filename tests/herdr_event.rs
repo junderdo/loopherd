@@ -1,5 +1,7 @@
 //! `loopherd herdr-event-hook`, as the herdr plugin's event hooks run it,
-//! with herdr off PATH.
+//! with herdr off PATH except a fake that answers a move's shell lookup.
+
+mod fakes;
 
 use std::fs;
 use std::path::Path;
@@ -44,6 +46,11 @@ fn sandbox() -> tempfile::TempDir {
         ),
     )
     .unwrap();
+    fs::create_dir(dir.path().join("bin")).unwrap();
+    fakes::executable(
+        &dir.path().join("bin/herdr"),
+        "#!/bin/sh\nprintf '{\"result\":{\"process_info\":{\"shell_pid\":%s}}}' \"$FAKE_SHELL_PID\"\n",
+    );
     dir
 }
 
@@ -107,19 +114,36 @@ fn workspace_closed(dir: &Path, workspace: &str) -> Output {
 
 /// herdr's `pane.moved` for a pane moved from `from` in tab `from_tab` to
 /// `to` in tab `to_tab`; a move to another workspace gives the pane a new id.
-fn moved(dir: &Path, (from, from_tab): (&str, &str), (to, to_tab): (&str, &str)) -> Output {
+/// The pane's shell is this test process, so every command it runs is under it.
+fn moved(dir: &Path, from: (&str, &str), to: (&str, &str)) -> Output {
+    moved_under(dir, std::process::id(), from, to)
+}
+
+/// [`moved`] with herdr naming `shell` as the pane's shell.
+fn moved_under(
+    dir: &Path,
+    shell: u32,
+    (from, from_tab): (&str, &str),
+    (to, to_tab): (&str, &str),
+) -> Output {
     let workspace = |id: &str| id.split(':').next().unwrap().to_string();
-    event(
-        dir,
-        "pane.moved",
-        &format!(
-            r#"{{"pane":{{"pane_id":"{to}","tab_id":"{to_tab}","workspace_id":"{}"}},
+    let data = format!(
+        r#"{{"pane":{{"pane_id":"{to}","tab_id":"{to_tab}","workspace_id":"{}"}},
                 "previous_pane_id":"{from}","previous_tab_id":"{from_tab}",
                 "previous_workspace_id":"{}","type":"pane_moved"}}"#,
-            workspace(to),
-            workspace(from)
-        ),
-    )
+        workspace(to),
+        workspace(from)
+    );
+    loopherd(dir, &["herdr-event-hook"])
+        .env("PATH", dir.join("bin"))
+        .env("FAKE_SHELL_PID", shell.to_string())
+        .env("HERDR_PLUGIN_EVENT", "pane.moved")
+        .env(
+            "HERDR_PLUGIN_EVENT_JSON",
+            format!(r#"{{"event":"pane_moved","data":{data}}}"#),
+        )
+        .output()
+        .unwrap()
 }
 
 /// `reports --all`, each line cut to its member and kind.
@@ -561,4 +585,38 @@ fn a_move_that_empties_its_workspace_records_no_gone_in_any_hook_order() {
             "{order:?}"
         );
     }
+}
+
+/// A moved member's old pane id after herdr restarts and a reused workspace id
+/// hands it to a new pane: the shell it was kept for is no ancestor of the
+/// caller there.
+#[test]
+fn a_stranger_in_a_pane_that_took_a_moved_members_old_id_is_no_member() {
+    let dir = sandbox();
+    let mut old_shell = Command::new("sleep").arg("60").spawn().unwrap();
+
+    quiet_success(&moved_under(
+        dir.path(),
+        old_shell.id(),
+        ("w2:p1", "w2:t1"),
+        ("w3:p2", "w3:t1"),
+    ));
+    quiet_success(&moved_under(
+        dir.path(),
+        old_shell.id(),
+        ("w4:p1", "w4:t1"),
+        ("w5:p3", "w5:t2"),
+    ));
+    let report = loopherd(dir.path(), &["report", "--kind", "done", "not mine"])
+        .env("HERDR_PANE_ID", "w2:p1")
+        .output()
+        .unwrap();
+    let guarded = tool_hook(dir.path(), "w4:p1", "loopherd pause h");
+    let _ = old_shell.kill();
+    let _ = old_shell.wait();
+
+    assert!(!report.status.success(), "{report:?}");
+    assert!(recorded(dir.path()).is_empty());
+    assert!(!guarded.contains("deny"), "{guarded}");
+    assert!(tool_hook(dir.path(), "w5:p3", "loopherd pause h").contains("deny"));
 }

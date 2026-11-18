@@ -85,6 +85,18 @@ pub fn is_ancestor(procs: &dyn Procs, pid: u32, me: u32) -> bool {
     false
 }
 
+/// `me` and each of its ancestors, nearest first, up to 64 steps.
+pub fn lineage(procs: &dyn Procs, me: u32) -> Vec<Process> {
+    let mut lineage = vec![];
+    let mut at = Some(me);
+    while let Some(pid) = at.filter(|p| *p > 1 && lineage.len() < 64) {
+        let Some(start) = procs.start(pid) else { break };
+        lineage.push(Process { pid, start });
+        at = procs.parent(pid);
+    }
+    lineage
+}
+
 /// The member's recorded process, if it is still that process.
 pub fn live(procs: &dyn Procs, recorded: Option<Process>) -> Option<Process> {
     let recorded = recorded?;
@@ -119,18 +131,14 @@ pub enum Claim {
     Declined,
 }
 
-/// Records `pid`, running in `pane`, as `member`'s Claude when it is the pane's
-/// top-level Claude in the member's own session (or the member has none yet),
-/// and the member has no live process; a `pid` that isn't top-level is `Nested`.
-/// `socket_exact` is whether the pane matched on its socket. Writes only the
-/// process, the session if the member had none, and drops the pane id kept
-/// from before a move when `pane` is the current one: only a restored herdr
-/// gives a process there that id.
+/// Records `pid` as `member`'s Claude when it is the pane's top-level Claude
+/// in the member's own session (or the member has none yet), and the member has
+/// no live process; a `pid` that isn't top-level is `Nested`. `socket_exact` is whether the pane matched on its socket.
+/// Writes only the process (and the session, if the member had none).
 pub fn claim(
     ledger: &mut dyn Ledger,
     procs: &dyn Procs,
     member: &AgentRecord,
-    pane: &str,
     socket_exact: bool,
     pid: u32,
     session: Option<&str>,
@@ -156,9 +164,6 @@ pub fn claim(
             return Ok(());
         }
         record.process = Some(Process { pid, start });
-        if record.pane_id == pane {
-            record.env_pane_id = None;
-        }
         if record.session_id.is_none() {
             record.session_id = session.map(str::to_string);
         }
@@ -206,7 +211,7 @@ fn is_claude(procs: &dyn Procs, pid: u32, exe: &Path) -> bool {
 }
 
 #[cfg(test)]
-pub use fake::{CLAUDE, FakeProcs, NODE, NPM_CLI};
+pub use fake::{CLAUDE, FakeProcs, NODE, NPM_CLI, PANE_SHELL};
 
 #[cfg(test)]
 mod fake {
@@ -221,6 +226,12 @@ mod fake {
         pub BTreeMap<u32, Vec<String>>,
         pub BTreeMap<String, PathBuf>,
     );
+
+    /// The shell of [`FakeProcs::pane`].
+    pub const PANE_SHELL: Process = Process {
+        pid: 20,
+        start: 200,
+    };
 
     pub const CLAUDE: &str = "/home/u/.local/share/claude/versions/2.1.316";
     pub const NODE: &str = "/usr/bin/node";
@@ -251,6 +262,15 @@ mod fake {
             p.add(10, "/usr/bin/herdr", 1, 100);
             p.add(20, "/bin/bash", 10, 200);
             p.add(30, CLAUDE, 20, 300);
+            p
+        }
+
+        /// [`FakeProcs::pane`] after a herdr restart: the same pids, started anew.
+        pub fn restarted_pane() -> Self {
+            let mut p = FakeProcs::default();
+            p.add(10, "/usr/bin/herdr", 1, 900);
+            p.add(20, "/bin/bash", 10, 910);
+            p.add(30, CLAUDE, 20, 920);
             p
         }
     }

@@ -10,7 +10,7 @@ use crate::context::handoff_path;
 use crate::continuation::follow_recorded;
 use crate::herd::{Paths, Switches, lead_settings};
 use crate::herdr::{AgentStatus, Herdr};
-use crate::ledger::Ledger;
+use crate::ledger::{Ledger, Process};
 use crate::report::{SinceHandoff, since_handoff};
 use crate::shell::quote;
 use crate::subagent_view::ensure_main_view;
@@ -23,6 +23,8 @@ pub struct RestartRequest<'a> {
     pub force: bool,
     /// `$HERDR_PANE_ID` of the caller; a member can't restart itself.
     pub own_pane: Option<&'a str>,
+    /// The caller and its ancestors, which carry a moved member's old pane id.
+    pub own_lineage: &'a [Process],
     /// loopherd's state dir, holding `reports/` and `handoffs/`.
     pub state: &'a Path,
     /// Where a lead's switches and review-round limit are read from.
@@ -65,7 +67,10 @@ pub fn restart(
         ),
         Some(_) => {}
     }
-    if req.own_pane.is_some_and(|pane| record.is_own_pane(pane)) {
+    if req
+        .own_pane
+        .is_some_and(|pane| record.is_own_pane(pane, req.own_lineage))
+    {
         bail!("{name} can't restart itself; whoever reads its handoff line restarts it");
     }
     let handoff = handoff_path(req.state, name);
@@ -252,6 +257,7 @@ mod tests {
             name: name.into(),
             pane_id: "w1:p1".into(),
             env_pane_id: None,
+            env_pane_shell: None,
             tab_id: None,
             session_id: Some("old".into()),
             repo: "/src/repo".into(),
@@ -438,6 +444,7 @@ mod tests {
                     .count(),
             };
             let req = RestartRequest {
+                own_lineage: &[crate::process::PANE_SHELL],
                 name: "lh-1",
                 force,
                 own_pane,
@@ -660,6 +667,7 @@ mod tests {
                 Some("w1:p1"),
                 &|r| {
                     r.env_pane_id = Some("w1:p1".into());
+                    r.env_pane_shell = Some(crate::process::PANE_SHELL);
                     r.pane_id = "w3:p2".into();
                 },
                 "lh-1 can't restart itself",
