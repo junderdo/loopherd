@@ -4305,7 +4305,14 @@ mod tests {
     fn the_shepherds_watch_never_says_a_starved_herd_is_running_low() {
         let mut world = Checked::with_backlog("7 needs spec\n");
         world.retire("lh-1");
+        world.retire("lead-cards");
         assert_eq!(world.shepherd(), None);
+        world.touch("unready", "");
+        assert_eq!(
+            world.shepherd().unwrap(),
+            ["cards out of work"],
+            "herd unchecked"
+        );
     }
 
     #[test]
