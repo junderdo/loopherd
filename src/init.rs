@@ -224,6 +224,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         Mode::Diff => Recorded::read(&herd_file),
         Mode::Write => None,
     };
+    let choice_given = req.tracker.is_some();
     let choice = match req.tracker {
         None if mode == Mode::Diff
             && tracker::read(&repo.join(tracker::TRACKER_DOC))?.is_none() =>
@@ -249,15 +250,23 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
     };
     let recorded_github = recorded.as_ref().and_then(|r| r.github.as_deref());
     if req.no_github && tracker.kind != tracker::Kind::Local {
-        bail!("--no-github goes with --tracker local");
+        bail!(match choice_given {
+            true => "--no-github goes with --tracker local".to_string(),
+            false => format!(
+                "--no-github needs a local tracker, and {} names another",
+                tracker::TRACKER_DOC
+            ),
+        });
     }
+    let recorded_no_github =
+        tracker.kind == tracker::Kind::Local && recorded.as_ref().is_some_and(|r| !r.has_merged);
     let slug_or_none = |slug: &str| match slug {
         "" => Ok(None),
         slug => parse_slug(slug).map(Some),
     };
     // Only a GitHub tracker needs GitHub; the others use it only for PRs.
     let github = match (&origin, tracker.kind) {
-        _ if req.no_github => None,
+        _ if req.no_github || (recorded_no_github && req.github.is_none()) => None,
         (Err(_), tracker::Kind::Local | tracker::Kind::Other) => ask.value(
             "GitHub repo (owner/name); Enter for none",
             req.github,
@@ -265,14 +274,15 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
             "",
             slug_or_none,
         )?,
+        (Ok(origin), tracker::Kind::Local) if ask.terminal && req.gh_account.is_none() => ask
+            .value(
+                &format!("GitHub repo (owner/name, origin is {origin}); Enter for none"),
+                req.github,
+                Some(""),
+                "",
+                slug_or_none,
+            )?,
         // Off a terminal, a GitHub origin keeps its merged check unless --no-github.
-        (Ok(origin), tracker::Kind::Local) if ask.terminal => ask.value(
-            &format!("GitHub repo (owner/name, origin is {origin}); Enter for none"),
-            req.github,
-            Some(""),
-            "",
-            slug_or_none,
-        )?,
         _ => Some(
             ask.value(
                 "GitHub repo (owner/name)",
@@ -1085,6 +1095,7 @@ struct Recorded {
     branch: Option<String>,
     /// The `owner/name` that `merged` checks PRs on.
     github: Option<String>,
+    has_merged: bool,
 }
 
 impl Recorded {
@@ -1127,6 +1138,7 @@ impl Recorded {
                 .and_then(|merged| merged.split_once(" gh pr list --repo "))
                 .and_then(|(_, rest)| rest.split_whitespace().next())
                 .map(String::from),
+            has_merged: issue.is_some_and(|t| t.contains_key("merged")),
         })
     }
 }

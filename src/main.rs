@@ -487,7 +487,7 @@ struct InitArgs {
     /// The GitHub repo, for an origin init can't read as one (an ssh host alias).
     #[arg(long, value_name = "OWNER/NAME")]
     repo: Option<String>,
-    /// With --tracker local, write the herd without GitHub even when origin
+    /// With a local tracker, write the herd without GitHub even when origin
     /// is GitHub: no gh calls and no merged check.
     #[arg(long, conflicts_with_all = ["repo", "gh_account"])]
     no_github: bool,

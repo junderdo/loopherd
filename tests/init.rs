@@ -1680,8 +1680,9 @@ fn a_github_title_in_any_case_after_other_text_or_a_bom_gets_the_github_snippets
 }
 
 impl Fixture {
-    /// `loopherd init --check 'cargo test'` on a terminal, typing Enter up to
-    /// the tracker question, then `input`, then Enter for the rest.
+    /// `loopherd init --check 'cargo test'` on a terminal, typing Enter for the
+    /// repo and herd name, then `input`, then Enter for the rest. `input`
+    /// answers the tracker question, or the GitHub one when a flag skips it.
     fn init_on_terminal(&self, extra: &[&str], input: &str) -> Output {
         let mut args = vec!["--check", "cargo test"];
         args.extend(extra);
@@ -3815,6 +3816,46 @@ fn no_github_gives_a_github_origin_a_local_herd_without_gh() {
 }
 
 #[test]
+fn diff_reads_no_github_back_from_a_herd_init_wrote_without_it() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.commit_local_issues_under_github_origin(LOCAL_ISSUES);
+    fixture.fail_gh();
+    let mut args = vec!["init", "--tracker", "local", "--no-github"];
+    args.extend(Fixture::CHECKS);
+    assert_ok(&fixture.loopherd_with(&env, &args));
+
+    let out = fixture.loopherd_with(&env, &["init", "--diff"]);
+
+    assert_ok(&out);
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn on_a_terminal_a_gh_account_keeps_a_github_origins_local_herd_on_github() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.on_terminal(
+        &[
+            "--check",
+            "cargo test",
+            "--tracker",
+            "local",
+            "--gh-account",
+            "acme",
+        ],
+        "\n\n\n\n\n\n\n\n\n\n",
+    );
+
+    assert_ok(&out);
+    assert!(
+        fixture
+            .herd_get("template.issue.merged")
+            .contains("--repo acme/widgets")
+    );
+}
+
+#[test]
 fn on_a_terminal_a_github_origins_local_herd_takes_enter_for_no_github() {
     let fixture = Fixture::new(&["acme"]);
     let env = fixture.commit_local_issues_under_github_origin(LOCAL_ISSUES);
@@ -3837,7 +3878,7 @@ fn on_a_terminal_a_github_origins_local_herd_takes_enter_for_no_github() {
 }
 
 #[test]
-fn no_github_refuses_a_github_tracker_and_a_repo() {
+fn no_github_refuses_another_tracker_a_repo_and_an_account() {
     let fixture = Fixture::new(&["acme"]);
 
     for (args, refusal) in [
@@ -3855,12 +3896,31 @@ fn no_github_refuses_a_github_tracker_and_a_repo() {
             ][..],
             "cannot be used with",
         ),
+        (
+            &["--tracker", "local", "--no-github", "--gh-account", "acme"][..],
+            "cannot be used with",
+        ),
     ] {
         let out = fixture.init(args);
         assert!(!out.status.success(), "{args:?}");
         assert!(text(&out.stderr).contains(refusal), "{}", text(&out.stderr));
     }
     assert_eq!(fixture.gh_calls(), "");
+
+    fs::create_dir_all(fixture.repo().join("docs/agents")).unwrap();
+    fs::write(
+        fixture.repo().join("docs/agents/issue-tracker.md"),
+        "# Issue tracker: GitHub\n",
+    )
+    .unwrap();
+    let out = fixture.init(&["--no-github"]);
+    assert!(
+        text(&out.stderr).contains(
+            "--no-github needs a local tracker, and docs/agents/issue-tracker.md names another"
+        ),
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 #[test]
