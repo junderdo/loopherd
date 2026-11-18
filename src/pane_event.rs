@@ -98,6 +98,7 @@ fn follow_move(
     let previous_workspace = data["previous_workspace_id"].as_str();
     let shell = (workspace.is_some() && member.env_pane_id.is_none()).then(|| pane_shell(pane));
     let mut followed = false;
+    let mut kept_old_id = false;
     // Hooks run unordered, so a late event for a place the member already left is skipped.
     ledger.update(&member.name, &mut |m| {
         let still_there = m.pane_id == previous_pane
@@ -109,6 +110,7 @@ fn follow_move(
         }
         if let Some((_, workspace)) = workspace {
             if m.env_pane_id.is_none() {
+                kept_old_id = true;
                 m.env_pane_id = Some(previous_pane.into());
                 m.env_pane_shell = shell.as_ref().and_then(|s| *s.as_ref().ok()?);
             }
@@ -149,7 +151,7 @@ fn follow_move(
             member.name
         )
     };
-    match shell {
+    match shell.filter(|_| kept_old_id) {
         Some(Err(e)) => Err(unread(format!("its shell couldn't be read: {e:#}"))),
         Some(Ok(None)) => Err(unread("herdr reports no shell for it".into())),
         _ => Ok(()),
@@ -333,7 +335,7 @@ mod tests {
     };
 
     fn moved_to_w2(
-        ledger: &mut MemLedger,
+        ledger: &mut dyn Ledger,
         pane_shell: &dyn Fn(&str) -> Result<Option<Process>>,
     ) -> Result<()> {
         let dir = tempfile::tempdir().unwrap();
@@ -396,6 +398,25 @@ mod tests {
         assert!(!lh_1.is_own_pane("w1:p1", &[SHELL]));
     }
 
+    #[test]
+    fn a_move_that_finds_the_old_id_already_kept_reports_no_shell_error() {
+        let mut now = lh_1_in("w1:t1");
+        let kept = now.0.get_mut("lh-1").unwrap();
+        kept.env_pane_id = Some("w0:p9".into());
+        kept.env_pane_shell = Some(SHELL);
+        let mut ledger = Moving {
+            stale: lh_1_in("w1:t1"),
+            now,
+            read: Cell::new(false),
+        };
+
+        moved_to_w2(&mut ledger, &|_| Err(anyhow!("herdr is down"))).unwrap();
+
+        let lh_1 = &ledger.now.0["lh-1"];
+        assert_eq!(lh_1.pane_id, "w2:p3");
+        assert!(lh_1.is_own_pane("w0:p9", &[SHELL]));
+    }
+
     fn lh_1_in(tab: &str) -> MemLedger {
         let record: AgentRecord = serde_json::from_value(serde_json::json!({
             "name": "lh-1", "pane_id": "w1:p1", "tab_id": tab, "session_id": null,
@@ -426,10 +447,10 @@ mod tests {
         }
         fn update(
             &mut self,
-            _: &str,
-            _: &mut dyn FnMut(&mut AgentRecord) -> Result<()>,
+            name: &str,
+            change: &mut dyn FnMut(&mut AgentRecord) -> Result<()>,
         ) -> Result<AgentRecord> {
-            unreachable!()
+            self.now.update(name, change)
         }
         fn remove_herd(
             &mut self,

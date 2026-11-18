@@ -1,10 +1,11 @@
 //! `loopherd lead`: start a herd's lead member (D17).
 
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::herd::{Paths, lead_config, plan};
+use crate::herd::{Paths, Switches, lead_config, plan};
 use crate::herdr::Herdr;
 use crate::ledger::{Ledger, Role};
 use crate::spawn::{Checkout, MemberOf, Prompt, SHELL_TIMEOUT, SpawnRequest, Spawned, spawn};
@@ -98,6 +99,38 @@ fn resolve(ledger: &dyn Ledger, paths: &Paths, req: &LeadRequest) -> Result<Spaw
             ],
             role: Some(Role::Lead),
         }),
+    })
+}
+
+/// A lead's prompt as `lead` renders it, read from its herd file now.
+pub struct LeadPrompt {
+    pub text: String,
+    pub switches: Switches,
+    pub review_rounds: u32,
+}
+
+/// The prompt `lead` would start `name` in `worktree` with, so a restart can
+/// give it again after `/clear` drops it.
+pub fn rendered(paths: &Paths, herd: &str, name: &str, worktree: &Path) -> Result<LeadPrompt> {
+    let config = lead_config(paths, herd)?;
+    let prompt = with_review_rounds(config.prompt)?;
+    let switches = config.switches.lines();
+    let review_rounds = config.review_rounds.to_string();
+    let worktree = worktree.display().to_string();
+    let values = [
+        ("name", name),
+        ("herd", herd),
+        ("worktree", worktree.as_str()),
+        ("switches", switches.as_str()),
+        ("review_rounds", review_rounds.as_str()),
+    ];
+    let text = Template::parse(&prompt.text)?
+        .render(&values.into_iter().collect())
+        .with_context(|| prompt.source.clone())?;
+    Ok(LeadPrompt {
+        text: text.trim_end().to_string(),
+        switches: config.switches,
+        review_rounds: config.review_rounds,
     })
 }
 

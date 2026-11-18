@@ -122,6 +122,7 @@ pub fn revive(
                 }
                 if current.pane_id != *pane_id {
                     current.env_pane_id = None;
+                    current.env_pane_shell = None;
                 }
                 current.pane_id = pane_id.clone();
                 current.tab_id = Some(tab_id.clone());
@@ -690,7 +691,7 @@ fn shell_pane(
 mod tests {
     use super::*;
     use crate::herdr::fake::{FakeHerdr, Startup};
-    use crate::ledger::{AgentRecord, MemLedger};
+    use crate::ledger::{AgentRecord, MemLedger, Process};
     use crate::process::FakeProcs;
     use crate::subagent_view::screens::{SUBAGENT_PICKER, SUBAGENT_PROMPT};
 
@@ -801,6 +802,10 @@ mod tests {
         let moved = AgentRecord {
             pane_id: "w3:p2".into(),
             env_pane_id: Some("w2:p1".into()),
+            env_pane_shell: Some(Process {
+                pid: 20,
+                start: 200,
+            }),
             ..record("a", cwd.path())
         };
         let mut ledger = ledger([moved]);
@@ -810,6 +815,7 @@ mod tests {
         assert_eq!(out, "resumed a w1:p1");
         assert!(ledger.0["a"].is_own_pane("w1:p1", &[]));
         assert_eq!(ledger.0["a"].env_pane_id, None);
+        assert_eq!(ledger.0["a"].env_pane_shell, None);
     }
 
     #[test]
@@ -1036,7 +1042,7 @@ mod tests {
         assert_eq!(ledger.1, ["a"]);
     }
 
-    const OLD_PROCESS: crate::ledger::Process = crate::ledger::Process {
+    const OLD_PROCESS: Process = Process {
         pid: 4242,
         start: 99,
     };
