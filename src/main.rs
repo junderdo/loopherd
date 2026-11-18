@@ -400,7 +400,10 @@ enum HerdAction {
     Unset { herd: String, key: String },
     /// Delete a finished herd: its herd file, its pause, its `[lead]`
     /// `prompt_file` when that lies in the herds dir and no other herd file
-    /// names it, and its members' ledger entries, mailboxes and handoffs.
+    /// names it, and every run of the herd in the ledger, archived ones
+    /// included. A member's mailbox and handoffs go with its entry, unless the
+    /// entry still holds another herd's run: then the newest such run becomes
+    /// the entry and the name keeps its files.
     /// Refuses, changing nothing, while any member (lead included) is not
     /// retired, ran on another herdr session, or herdr may still show its
     /// agent or pane, or herdr can't be reached. Never touches worktrees, branches or tabs; `retire --close`
