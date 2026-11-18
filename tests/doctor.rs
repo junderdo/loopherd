@@ -291,9 +291,49 @@ fn doctor_help_documents_its_flags() {
         .output()
         .unwrap();
     let help = stdout(&out);
-    for flag in ["--verbose", "--json", "--settings"] {
+    for flag in ["--verbose", "--json", "--settings", "--trackers"] {
         assert!(help.contains(flag), "{help}");
     }
     let top = stdout(&Command::new(LOOPHERD).arg("--help").output().unwrap());
     assert!(top.contains("doctor"), "{top}");
+}
+
+/// A herd whose `source` touches `ran` in its repo and prints two tasks.
+fn herd_with_a_source(s: &Sandbox) -> PathBuf {
+    let repo = s.dir.path().join("repo");
+    let herds = s.dir.path().join("config/herds");
+    fs::create_dir_all(&repo).unwrap();
+    fs::create_dir_all(&herds).unwrap();
+    fs::write(
+        herds.join("h.toml"),
+        format!(
+            "repo = {repo:?}\n[template.t]\nparams = [\"n\"]\nprompt = \"go\"\n\
+             [queue]\ntemplate = \"t\"\nsource = \"touch ran; echo LH-1; echo LH-2\"\nmax = 1\n"
+        ),
+    )
+    .unwrap();
+    repo.join("ran")
+}
+
+#[test]
+fn trackers_runs_each_herds_source_and_counts_its_tasks() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    let ran = herd_with_a_source(&s);
+    let out = s.doctor(&["--trackers", "--verbose"]);
+    let text = stdout(&out);
+    assert!(text.contains("ok h source: exit 0, 2 tasks\n"), "{text}");
+    assert!(!text.contains("LH-1"), "{text}");
+    assert!(ran.exists());
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn without_trackers_no_herd_command_runs() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    let ran = herd_with_a_source(&s);
+    let out = s.doctor(&["--verbose"]);
+    assert!(!stdout(&out).contains("h source"), "{}", stdout(&out));
+    assert!(!ran.exists());
 }

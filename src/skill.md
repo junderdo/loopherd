@@ -383,7 +383,10 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   older than 0.9.5 (fails). It prints only problems, each with its fix,
   then `doctor: <n> ok, <n> warnings, <n> failures`; `--verbose` lists
   every check, `--json` gives them as data, `--settings <file>` checks
-  another settings file. Exits 0 clean or warnings only, 1 on any failure,
+  another settings file, and `--trackers` also runs each herd's `source`
+  and `backlog` from its repo (paused herds too, 30s each), failing on a
+  nonzero exit or timeout and printing the task count, never the tasks.
+  Exits 0 clean or warnings only, 1 on any failure,
   2 when it couldn't run (D63).
 - `loopherd status` lists members by herd with herdr's live status;
   `--all` adds retired entries, each row's status reading `retired <time>`
