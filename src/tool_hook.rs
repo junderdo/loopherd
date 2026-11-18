@@ -1266,18 +1266,75 @@ fn heredoc_body(
 
 /// Words that run the command after them, with their options that take a value.
 const WRAPPERS: [(&str, &[&str]); 17] = [
-    ("env", &["-u", "-C", "-S"]),
-    ("sudo", &["-u", "-g", "-C", "-D"]),
+    (
+        "env",
+        &[
+            "-u",
+            "-C",
+            "-S",
+            "-a",
+            "--unset",
+            "--chdir",
+            "--split-string",
+            "--argv0",
+        ],
+    ),
+    (
+        "sudo",
+        &[
+            "-u",
+            "-g",
+            "-C",
+            "-D",
+            "-p",
+            "-r",
+            "-t",
+            "-T",
+            "-U",
+            "-R",
+            "--user",
+            "--group",
+            "--close-from",
+            "--chdir",
+            "--prompt",
+            "--role",
+            "--type",
+            "--command-timeout",
+            "--other-user",
+            "--chroot",
+        ],
+    ),
     ("exec", &["-a"]),
     ("command", &[]),
     ("builtin", &[]),
     ("nohup", &[]),
-    ("time", &["-f", "-o"]),
-    ("nice", &["-n"]),
-    ("stdbuf", &["-i", "-o", "-e"]),
+    ("time", &["-f", "-o", "--format", "--output"]),
+    ("nice", &["-n", "--adjustment"]),
+    (
+        "stdbuf",
+        &["-i", "-o", "-e", "--input", "--output", "--error"],
+    ),
     ("noglob", &[]),
-    ("xargs", &["-I", "-n", "-P", "-L", "-d", "-s", "-E", "-a"]),
-    ("timeout", &["-s", "-k"]),
+    (
+        "xargs",
+        &[
+            "-I",
+            "-n",
+            "-P",
+            "-L",
+            "-d",
+            "-s",
+            "-E",
+            "-a",
+            "--max-args",
+            "--max-procs",
+            "--max-chars",
+            "--delimiter",
+            "--arg-file",
+            "--process-slot-var",
+        ],
+    ),
+    ("timeout", &["-s", "-k", "--signal", "--kill-after"]),
     ("setsid", &[]),
     (
         "ionice",
@@ -1437,18 +1494,8 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             args.iter().for_each(|w| aliases.assign(w));
             return vec![];
         } else if program == "watch" {
-            // getopt takes any unambiguous prefix of a long option (`--int 1`).
-            let takes_value = |w: &&str| {
-                w.len() > 2
-                    && !w.contains('=')
-                    && ["--interval", "--equexit"].iter().any(|o| o.starts_with(w))
-            };
-            let with_value: Vec<&str> = words[i + 1..]
-                .iter()
-                .map(String::as_str)
-                .filter(takes_value)
-                .chain(["-n", "-q"])
-                .collect();
+            let with_value =
+                with_abbreviations(&words[i + 1..], &["-n", "-q", "--interval", "--equexit"]);
             let command = skip_options(words, i + 1, &with_value);
             return watch_needs(&kept[command..], aliases);
         } else if program == "find" {
@@ -1456,7 +1503,11 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
         } else if let Some((_, with_value)) = WRAPPERS.iter().find(|(w, _)| *w == program) {
             in_env |= program == "env";
             let options = i + 1;
-            i = skip_options(words, options, with_value);
+            i = skip_options(
+                words,
+                options,
+                &with_abbreviations(&words[options..], with_value),
+            );
             // Any word under a replace string may become a lead's name.
             if program == "xargs"
                 && xargs_may_replace(&words[options..i.min(words.len())])
@@ -2316,6 +2367,24 @@ fn skip_options(words: &[String], mut i: usize, with_value: &[&str]) -> usize {
         };
     }
     i.min(words.len())
+}
+
+/// `with_value` and each of `words` that abbreviates one of its long options,
+/// as getopt_long takes any unambiguous prefix (`--sig` for `--signal`).
+fn with_abbreviations<'a>(words: &'a [String], with_value: &[&'a str]) -> Vec<&'a str> {
+    let abbreviates = |w: &&str| {
+        w.len() > 2
+            && !w.contains('=')
+            && with_value
+                .iter()
+                .any(|o| o.starts_with("--") && o.starts_with(w))
+    };
+    words
+        .iter()
+        .map(String::as_str)
+        .filter(abbreviates)
+        .chain(with_value.iter().copied())
+        .collect()
 }
 
 /// Whether option word `word` takes the next word as its value. In a cluster
@@ -4697,6 +4766,66 @@ mod tests {
         assert_judged("flock /tmp/l git -c user.name=x rebase", Switch::Rebase);
         assert_passes("flock /tmp/l gh pr view 1");
         assert_passes("flock /tmp/l grep -c 'gh pr merge' notes");
+    }
+
+    #[test]
+    fn a_wrappers_long_options_take_their_value_abbreviated_or_not() {
+        for command in [
+            "timeout --signal KILL 5 gh pr merge 1",
+            "timeout --sig KILL 5 gh pr merge 1",
+            "timeout --kill-after 1 5 gh pr merge 1",
+            "timeout --k 1 5 gh pr merge 1",
+            "timeout --signal=KILL 5 gh pr merge 1",
+            "env --unset GH_TOKEN gh pr merge 1",
+            "env --un GH_TOKEN gh pr merge 1",
+            "env --chdir /tmp gh pr merge 1",
+            "env -a x gh pr merge 1",
+            "env --argv0 x gh pr merge 1",
+            "env --a x gh pr merge 1",
+            "env --split-string '' gh pr merge 1",
+            "env -S '' gh pr merge 1",
+            "sudo --user root gh pr merge 1",
+            "sudo --us root gh pr merge 1",
+            "sudo --group wheel gh pr merge 1",
+            "sudo --close-from 3 gh pr merge 1",
+            "sudo --chdir /tmp gh pr merge 1",
+            "sudo --prompt x gh pr merge 1",
+            "sudo -p x gh pr merge 1",
+            "sudo --role r gh pr merge 1",
+            "sudo --type t gh pr merge 1",
+            "sudo --command-timeout 5 gh pr merge 1",
+            "sudo -T 5 gh pr merge 1",
+            "sudo --other-user u gh pr merge 1",
+            "sudo --chroot / gh pr merge 1",
+            "sudo -R / gh pr merge 1",
+            "time --format %e gh pr merge 1",
+            "time --output /tmp/t gh pr merge 1",
+            "time --o /tmp/t gh pr merge 1",
+            "nice --adjustment 5 gh pr merge 1",
+            "nice --adj 5 gh pr merge 1",
+            "stdbuf --output L gh pr merge 1",
+            "stdbuf --i 0 gh pr merge 1",
+            "stdbuf --error L gh pr merge 1",
+            "echo 1 | xargs --max-args 1 gh pr merge",
+            "echo 1 | xargs --max-a 1 gh pr merge",
+            "echo 1 | xargs --max-procs 2 gh pr merge",
+            "echo 1 | xargs --max-chars 99 gh pr merge",
+            "echo 1 | xargs --delimiter x gh pr merge",
+            "echo 1 | xargs --d x gh pr merge",
+            "xargs --arg-file f gh pr merge",
+            "echo 1 | xargs --process-slot-var V gh pr merge",
+            "ionice --cl 3 gh pr merge 1",
+            "ionice --classdata 1 gh pr merge 1",
+            "ionice --classd 1 gh pr merge 1",
+            "flock --wa 5 /tmp/l gh pr merge 1",
+            "flock --timeout 5 /tmp/l gh pr merge 1",
+            "flock --conflict-exit-code 3 /tmp/l gh pr merge 1",
+            "flock --conf 3 /tmp/l gh pr merge 1",
+        ] {
+            assert_judged(command, Switch::Merge);
+        }
+        assert_passes("timeout --signal KILL 5 gh pr view 1");
+        assert_passes("timeout --foreground 5 gh pr view 1");
     }
 
     #[test]
