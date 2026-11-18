@@ -81,7 +81,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D64](decisions/D64.md) | The herdr plugin's startup hook runs `loopherd revive --startup`, off unless `[herdr_plugin] revive_on_startup = true`, reviving only members on the starting server's socket under a lock every revive holds, and noting what it did to each lead whose watch isn't running. |
 | [D65](decisions/D65.md) | The plugin's `view` action opens `loopherd view` in an 80% popup, a placement herdr added in 0.7.4; its live test runs a herdr server of its own in a throwaway home. |
 | [D66](decisions/D66.md) | The herdr plugin's event hooks record a member's `blocked` and `gone` in its mailbox, as a watch's poll does; a watch prints both only from the mailbox, so each prints once. |
-| [D67](decisions/D67.md) | A manual `loopherd revive` skips members recorded on another herdr server's socket, says so per member, and never rewrites a recorded socket; members with none are revived as before. |
+| [D68](decisions/D68.md) | A manual `loopherd revive` skips members recorded on another herdr server's socket, says so per member, and never rewrites a recorded socket; members with none are revived as before. |
 
 ## Emerging model
 
