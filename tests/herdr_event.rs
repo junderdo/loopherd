@@ -171,6 +171,10 @@ fn a_mailbox_it_cannot_write_exits_0_with_the_error() {
 
     failed_quietly(&closed(dir.path(), "pane.closed", "w1:p1"), "lh-1.jsonl");
     failed_quietly(&status(dir.path(), "w1:p1", "blocked"), "lh-1.jsonl");
+    let mark = dir
+        .path()
+        .join("state/loopherd/reports/lh-1.block-recorded");
+    assert!(!mark.exists(), "the failed block left its mark");
 }
 
 #[test]
@@ -191,4 +195,18 @@ fn a_member_that_shows_life_after_its_gone_records_gone_again() {
         recorded(dir.path()),
         ["lh-1 gone", "lh-1 question", "lh-1 gone"]
     );
+}
+
+#[test]
+fn a_note_after_a_gone_does_not_record_gone_again() {
+    let dir = sandbox();
+
+    quiet_success(&closed(dir.path(), "pane.exited", "w1:p1"));
+    let note = loopherd(dir.path(), &["report", "--as", "lh-1", "revived"])
+        .output()
+        .unwrap();
+    assert!(note.status.success(), "{note:?}");
+    quiet_success(&closed(dir.path(), "pane.closed", "w1:p1"));
+
+    assert_eq!(recorded(dir.path()), ["lh-1 gone", "lh-1 note"]);
 }
