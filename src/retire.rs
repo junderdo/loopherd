@@ -630,18 +630,17 @@ mod tests {
     }
 
     #[test]
-    fn a_reused_pid_with_another_start_time_is_not_the_lead() {
+    fn a_reused_pid_with_another_start_time_leaves_only_the_pane_check() {
         let ledger = lead_running_as(30, 299);
 
-        let reused = refuse_own_lead(
-            &ledger,
-            "lead-k",
-            None,
-            &loopherd_under_the_pane_claude(),
-            LOOPHERD,
-        );
+        let procs = loopherd_under_the_pane_claude();
+
+        let reused = refuse_own_lead(&ledger, "lead-k", None, &procs, LOOPHERD);
+        let err = refuse_own_lead(&ledger, "lead-k", Some(&the_lead_pane()), &procs, LOOPHERD)
+            .unwrap_err();
 
         assert!(reused.is_ok());
+        assert!(format!("{err:#}").contains("lead-k is the lead in this pane"));
     }
 
     #[test]
