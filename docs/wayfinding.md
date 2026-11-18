@@ -70,6 +70,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D53](decisions/D53.md) | The lead hook denies an alias-variable name anywhere in a command that could set it, a heredoc feed only the lexer's own `<<` operator counts for, and a relative script operand named `stdin` or `fd/<n>`, instead of parsing positions. |
 | [D54](decisions/D54.md) | The Stop hook's ask moves a handoff to `.prev.md` only when it predates the member's last fresh start (spawn or restart, not revive) or `handoff` report, and says so; a handoff the member already wrote this run stays for `loopherd restart`. |
 | [D55](decisions/D55.md) | A watch over a paused herd with nothing in flight exits instead of re-arming: a lead's prints `<herd> drained` once no worker is open; the shepherd's prints `all drained` once every herd it reads is drained and no member it reads has work in flight. |
+| [D56](decisions/D56.md) | `loopherd init` can write a local-tracker herd without GitHub on a GitHub origin: on a terminal the GitHub question takes Enter for none, and `--no-github` does it for scripts; off a terminal without the flag, a GitHub origin keeps its merged check. |
 
 ## Emerging model
 
