@@ -211,7 +211,7 @@ enum Command {
         name: Option<String>,
         /// As herdr's startup hook: nothing unless config.toml sets
         /// [herdr_plugin] revive_on_startup = true, then only entries recorded
-        /// on this herdr's socket, leaving a note for each lead revived or not re-armed.
+        /// on this herdr's socket, noting what it did to each lead whose watch isn't running.
         #[arg(long, conflicts_with = "name")]
         startup: bool,
     },

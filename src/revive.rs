@@ -33,7 +33,7 @@ pub struct ReviveRequest {
     /// Members' mailboxes, where watches also hold their locks.
     pub reports_dir: PathBuf,
     /// Run by herdr's startup hook: only entries recorded on herdr's own
-    /// socket, and a note in the mailbox of each lead revived or not re-armed.
+    /// socket, and a note of its line in each lead's mailbox unless its watch runs.
     pub startup: bool,
 }
 
@@ -125,10 +125,10 @@ pub fn revive(
         }
         rearm_lead(herdr, req, &record, &mut outcome);
         let line = outcome.line(&record);
-        // Nobody reads a startup hook's output, so these leads go to the next watch.
-        let unseen = matches!(outcome, Outcome::Started { .. })
-            || matches!(outcome.rearm(), Some(Rearm::SubagentView));
-        if req.startup && record.is_lead() && unseen {
+        // Nobody reads a startup hook's output, so a lead's line goes to the
+        // shepherd's next watch unless its own watch already runs.
+        let noted = req.startup && !req.dry_run && record.is_lead() && !record.retired;
+        if noted && !matches!(outcome.rearm(), Some(Rearm::WatchRunning)) {
             let text = format!("herdr's startup revive: {line}");
             let note = Entry::new(SystemTime::now(), Body::Note { text });
             if let Err(e) = append(&req.reports_dir, &record.name, &note) {
@@ -1494,6 +1494,55 @@ mod tests {
     }
 
     #[test]
+    fn a_startup_revive_leaves_a_note_for_a_lead_it_fails_to_start() {
+        let cwd = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let mut herdr = dev_herdr();
+        herdr.startup = Startup::Fails;
+        let mut ledger = ledger([dev(lead("lead-h", cwd.path()))]);
+
+        let (out, code) = run(&herdr, &mut ledger, &startup(state.path()));
+
+        assert_eq!(code, 1, "{out}");
+        assert_eq!(
+            notes(state.path(), "lead-h"),
+            ["herdr's startup revive: failed lead-h: start: claude exited during startup"]
+        );
+    }
+
+    #[test]
+    fn a_startup_revive_leaves_a_note_for_an_alive_lead_it_prompts() {
+        let cwd = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let herdr = dev_herdr().with_live_agent(Some("lead-h"), Some("sess-lead-h"), "w1:p4");
+        let mut ledger = ledger([dev(lead("lead-h", cwd.path()))]);
+
+        run(&herdr, &mut ledger, &startup(state.path()));
+
+        assert_eq!(
+            notes(state.path(), "lead-h"),
+            ["herdr's startup revive: alive lead-h w1:p4 (prompted to re-arm its watch)"]
+        );
+    }
+
+    #[test]
+    fn a_startup_dry_run_leaves_no_notes() {
+        let cwd = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let herdr = dev_herdr().with_live_agent(Some("lead-h"), Some("sess-lead-h"), "w1:p4");
+        herdr.set_screen("w1:p4", SUBAGENT_PROMPT);
+        let mut ledger = ledger([dev(lead("lead-h", cwd.path()))]);
+        let req = ReviveRequest {
+            dry_run: true,
+            ..startup(state.path())
+        };
+
+        run(&herdr, &mut ledger, &req);
+
+        assert!(notes(state.path(), "lead-h").is_empty());
+    }
+
+    #[test]
     fn a_startup_revive_leaves_no_note_for_a_lead_already_running_its_watch() {
         let cwd = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
@@ -1547,8 +1596,18 @@ mod tests {
         });
         entered.recv().unwrap();
 
+        let released_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = released_flag.clone();
         let manual = std::thread::spawn(move || {
-            revive(&herdr(), &mut ledger([]), &manual_req, &|s| s.to_string()).unwrap()
+            let mut herdr = herdr();
+            herdr.on_agents = Some(Box::new(move || {
+                let released = seen.load(std::sync::atomic::Ordering::SeqCst);
+                assert!(
+                    released,
+                    "the manual revive listed agents mid startup revive"
+                );
+            }));
+            revive(&herdr, &mut ledger([]), &manual_req, &|s| s.to_string()).unwrap()
         });
         std::thread::sleep(Duration::from_millis(200));
         assert!(
@@ -1556,6 +1615,7 @@ mod tests {
             "the manual revive ran during the startup one"
         );
 
+        released_flag.store(true, std::sync::atomic::Ordering::SeqCst);
         drop(release);
         first_run.join().unwrap();
         manual.join().unwrap();
