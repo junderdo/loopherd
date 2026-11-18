@@ -1,4 +1,5 @@
 //! `loopherd retire` without `--close`, through the binary.
+//! Without a stub `herdr` on PATH, herdr can't be reached and no member is at work.
 
 use std::fs;
 use std::path::Path;
@@ -228,4 +229,54 @@ fn a_lead_can_be_retired_from_its_pane_id_on_another_socket() {
     );
     assert!(out.status.success(), "{out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "retired lead-k\n");
+}
+
+/// Runs `loopherd retire <args> lh-1` with a `herdr` on PATH that shows `lh-1`
+/// working in pane `w1:p1`.
+fn retire_while_herdr_shows_it_working(state: &Path, args: &[&str]) -> Output {
+    let bin = state.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let herdr = bin.join("herdr");
+    fs::write(
+        &herdr,
+        r#"#!/bin/sh
+echo '{"result": {"agents": [{"name": "lh-1", "pane_id": "w1:p1", "tab_id": "w1:t1", "agent_status": "working", "agent_session": null}]}}'
+"#,
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o755)).unwrap();
+    Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .arg("retire")
+        .args(args)
+        .arg("lh-1")
+        .env("XDG_STATE_HOME", state)
+        .env("LOOPHERD_CONFIG_DIR", state.join("config"))
+        .env("CLAUDE_CONFIG_DIR", state.join("claude"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("HERDR_SOCKET_PATH")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn a_member_at_work_without_a_report_is_refused_unless_forced() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+
+    let out = retire_while_herdr_shows_it_working(state.path(), &[]);
+
+    assert!(!out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "loopherd retire: herdr still shows lh-1 (working) and it has no done, question or handoff report since its last start; pass --force to retire it anyway\n"
+    );
+    assert!(!ledger_text(state.path()).contains("\"retired\": true"));
+
+    let out = retire_while_herdr_shows_it_working(state.path(), &["--force"]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "retired lh-1\n");
+    assert!(ledger_text(state.path()).contains("\"retired\": true"));
 }

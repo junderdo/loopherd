@@ -442,7 +442,14 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   `--json`; it marks nothing read.
 - `loopherd retire <name>` marks a member finished in the ledger only;
   `--close` also closes its tab and removes its worktree and branch if
-  they're clean and merged. Feed's `done` check does this for you.
+  they're clean and merged. Feed's `done` check does this for you. Retire
+  refuses an entry not yet retired while herdr still shows its agent and it
+  has no `done`, `question` or `handoff` report since its last start, so a
+  retire meant for an earlier run of the name can't kill a fresh one;
+  `--force` retires it anyway. A report before a revive still counts, a
+  member herdr no longer shows retires without a report, and an
+  already-retired entry takes `--close` as before. It also refuses when
+  herdr doesn't list its agents within 5s.
 - **Re-feed a retired task** (its member was retired before it finished,
   e.g. a tab closed by accident or a rescoped card) with `loopherd release
   <name>`, then `loopherd feed <herd>`. Feed skips every name in the
@@ -500,8 +507,9 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   member, lead included, isn't retired, ran on another herdr session, or
   may still be open (its agent or pane shows, even busy or moved), and
   while herdr can't be reached; `loopherd retire --close <name>` each
-  first, which also cleans up tabs, worktrees and branches that
-  `herd remove` never touches. `--dry-run` lists what would go;
+  first (`--force` for one still live with no report since its start),
+  which also cleans up tabs, worktrees and branches that `herd remove`
+  never touches. `--dry-run` lists what would go;
   `--keep-history` keeps the ledger entries and mailboxes for `stats`.
 - **Lead defaults** are `[lead_defaults]` in
   `$LOOPHERD_CONFIG_DIR/config.toml`: each lead's switches wherever its herd
@@ -678,7 +686,9 @@ What differs from the shepherd:
 - **Retiring a lead is the shepherd's or the human's.** `loopherd retire`
   refuses to retire you from your own pane, and the hook also denies
   `loopherd retire` of a `lead-` name, or of a name it can't read such as
-  `"$m"`, there; retire members by their spelled-out name.
+  `"$m"`, there; retire members by their spelled-out name. It always
+  denies `loopherd retire --force` there too: retire a member once it
+  reports, or once herdr shows it gone.
   Your gates outlast your retirement: a retired lead's pane is still
   gated.
 - **Pausing is the human's.** The hook always denies `loopherd pause` and

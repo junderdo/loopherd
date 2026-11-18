@@ -426,7 +426,7 @@ impl HeldBack {
     fn note(&self) -> String {
         let command = &self.command;
         let mut why = match self.switch {
-            Switch::Pause | Switch::ForceRestart => format!(
+            Switch::Pause | Switch::ForceRestart | Switch::ForceRetire => format!(
                 "`{command}` is `loopherd {}`, which a lead can never run",
                 self.switch.name()
             ),
@@ -446,7 +446,9 @@ impl HeldBack {
 
     fn hint(&self) -> String {
         match self.switch {
-            Switch::Pause | Switch::ForceRestart => "run its commands by hand".into(),
+            Switch::Pause | Switch::ForceRestart | Switch::ForceRetire => {
+                "run its commands by hand".into()
+            }
             switch => format!("run its commands by hand, or turn {} on", switch.name()),
         }
     }
