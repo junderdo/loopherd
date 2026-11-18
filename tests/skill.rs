@@ -222,3 +222,30 @@ fn the_shepherd_runs_doctor_at_session_start_and_relays_failures() {
         assert!(start.contains(rule), "{start}");
     }
 }
+
+#[test]
+fn only_a_forced_restart_is_the_humans_call() {
+    let home = tempfile::tempdir().unwrap();
+    let printed = String::from_utf8(skill(home.path())).unwrap();
+    let handoffs = flat_section(&printed, "\n### Handoffs\n", "\n### Your own handoff\n");
+    assert!(
+        handoffs.contains(
+            "Forcing is the human's call (a lead's PreToolUse hook denies it); \
+             a plain restart is not, so run it as soon as the `finished` line arrives."
+        ),
+        "{handoffs}"
+    );
+    assert!(!handoffs.contains("It's the human's call"), "{handoffs}");
+    let own = flat_section(
+        &printed,
+        "\n### Your own handoff\n",
+        "\n### Notifying the human\n",
+    );
+    assert!(
+        own.contains(
+            "First restart any lead whose `handoff` and `finished` lines you've already read, \
+             so the herd doesn't wait on the next shepherd."
+        ),
+        "{own}"
+    );
+}
