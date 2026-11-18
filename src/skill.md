@@ -276,8 +276,9 @@ it refuses unless the member reported a handoff since its last start, its
 last stop since is `finished` with nothing in flight, and herdr shows it
 idle or done. `--force` skips those checks; a `/clear` sent mid-turn waits
 for that turn, then drops whatever the handoff doesn't record (that turn's
-work, background tasks, crons). It's the human's call (a lead's PreToolUse hook
-denies it). A member never restarts itself, and one recorded without a
+work, background tasks, crons). Forcing is the human's call (a lead's
+PreToolUse hook denies it); a plain restart is not, so run it as soon as the
+`finished` line arrives. A member never restarts itself, and one recorded without a
 herdr socket can't be restarted, nor is it ever asked for a handoff. If
 restart times out waiting for the new session, its `/clear` may be queued
 behind a running turn, or the SessionStart hook isn't installed: it sent no
@@ -315,7 +316,9 @@ and, once per session past your limit, adds `shepherd handoff <n>k over
 
 1. Handle the other lines it came with, but feed nothing new and don't
    re-arm the watch. Members and leads keep working; what they report
-   waits in the mailbox for the next watch.
+   waits in the mailbox for the next watch. First restart any lead whose
+   `handoff` and `finished` lines you've already read, so the herd doesn't
+   wait on the next shepherd.
 2. Write your handoff to `$XDG_STATE_HOME/loopherd/handoffs/shepherd.md`
    (`~/.local/state` when it's unset; no member may be named `shepherd`), in the outline above: what each
    member is doing and what you owe it (verifications running, PRs to
