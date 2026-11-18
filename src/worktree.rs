@@ -390,7 +390,10 @@ pub fn plan_clear(
     if let Some(b) = branch
         && base.strip_prefix("origin/") == Some(b)
     {
-        return Ok(Plan::Taken(format!("{b} is origin's default branch")));
+        return Ok(Plan::Taken(format!(
+            "{b} is origin's default branch, which release never deletes; \
+             pass --keep-branch to release it without clearing"
+        )));
     }
     let count = |not: &[&str]| -> Result<usize> {
         let mut args = vec!["rev-list", "--count"];
@@ -1486,22 +1489,29 @@ mod tests {
     }
 
     #[test]
-    fn origins_default_branch_is_taken_and_left_whatever_the_fate() {
+    fn origins_default_branch_is_taken_whatever_the_fate_and_by_its_name_on_origin() {
         let root = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(root.path());
+        let origin = root.path().join("origin.git");
+        git_in(&origin, &["branch", "trunk", "main"]);
+        git_in(&origin, &["symbolic-ref", "HEAD", "refs/heads/trunk"]);
         git_in(&repo, &["switch", "--quiet", "-c", "elsewhere"]);
 
         for fate in [Fate::Clear, Fate::Drop] {
-            let plan = plan_clear(&repo, None, Some("main"), fate, &nobody).unwrap();
+            let plan = plan_clear(&repo, None, Some("trunk"), fate, &nobody).unwrap();
 
             assert_eq!(
                 plan,
-                Plan::Taken("main is origin's default branch".into()),
+                Plan::Taken(
+                    "trunk is origin's default branch, which release never deletes; \
+                     pass --keep-branch to release it without clearing"
+                        .into()
+                ),
                 "{fate:?}"
             );
         }
-        assert!(on_origin(root.path(), "main"));
-        assert!(has_branch(&repo, "main"));
+        let main = plan_clear(&repo, None, Some("main"), Fate::Clear, &nobody).unwrap();
+        assert!(matches!(main, Plan::Clear(_)), "{main:?}");
     }
 
     #[test]
