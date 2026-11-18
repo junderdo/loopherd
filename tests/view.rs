@@ -105,8 +105,8 @@ fn exit_code_after(child: &mut Child, keys: &[u8], within: Duration) -> Option<i
     None
 }
 
-/// Ends the view itself before `script`: hanging up its pty first leaves it
-/// spinning on the dead tty. SIGKILLs a view that outlives SIGTERM.
+/// Ends the view itself before `script`, so a test sees its exit code rather
+/// than its hangup exit. SIGKILLs a view that outlives SIGTERM.
 fn end(script: &mut Child) {
     let views = children(script);
     let alive = |pid: i32| Path::new(&format!("/proc/{pid}")).exists();
@@ -159,4 +159,31 @@ fn other_keys_leave_the_view_running() {
     }
 
     assert_eq!((after_x, after_q), (None, Some(0)));
+}
+
+#[test]
+fn a_hung_up_pty_ends_the_view() {
+    let home = tempfile::tempdir().unwrap();
+    let mut script = start_view(home.path());
+    let views = children(&script);
+
+    // SAFETY: kill takes no pointers.
+    unsafe { libc::kill(script.id() as i32, libc::SIGKILL) };
+    let _ = script.wait();
+    // The orphaned view is reparented, so it can linger as a zombie once gone.
+    let running = |pid: i32| {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .is_ok_and(|stat| !stat.contains(") Z "))
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while views.iter().any(|&pid| running(pid)) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    let left: Vec<_> = views.iter().copied().filter(|&pid| running(pid)).collect();
+    for &pid in &left {
+        // SAFETY: kill takes no pointers.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+
+    assert_eq!(left, Vec::<i32>::new());
 }

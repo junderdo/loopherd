@@ -897,9 +897,40 @@ fn catch_stop_signals() -> Result<()> {
     Ok(())
 }
 
+/// Exits the process 128 + SIGHUP once the terminal hangs up. crossterm's
+/// reader spins on a hung-up tty and never returns to the loop, and a dead
+/// terminal has nothing to restore.
+fn exit_on_hangup() -> Result<()> {
+    use std::io::IsTerminal;
+    use std::os::fd::AsRawFd;
+
+    let tty = if std::io::stdin().is_terminal() {
+        None
+    } else {
+        Some(std::fs::File::open("/dev/tty")?)
+    };
+    let fd = tty
+        .as_ref()
+        .map_or(std::io::stdin().as_raw_fd(), |f| f.as_raw_fd());
+    std::thread::spawn(move || {
+        let _tty = tty;
+        // POLLHUP, POLLERR and POLLNVAL are reported even when not asked for.
+        let mut pollfd = libc::pollfd {
+            fd,
+            events: 0,
+            revents: 0,
+        };
+        // SAFETY: pollfd is a valid, live pollfd for the duration of the call.
+        while unsafe { libc::poll(&mut pollfd, 1, -1) } <= 0 {}
+        // SAFETY: _exit takes no pointers.
+        unsafe { libc::_exit(128 + libc::SIGHUP) };
+    });
+    Ok(())
+}
+
 /// Runs the TUI until `q`, Ctrl+C, SIGTERM or SIGHUP, reading again on each
 /// herdr event and polling as a fallback. Exits 128 + the signal's number when
-/// a signal stopped it.
+/// a signal stopped it, and 128 + SIGHUP when the terminal hangs up.
 pub fn run<H, S, L>(
     herdr: H,
     subscriber: S,
@@ -914,6 +945,7 @@ where
     L: Ledger + Send + 'static,
 {
     catch_stop_signals()?;
+    exit_on_hangup()?;
     let (requests, responses) = spawn_reader(herdr, ledger, dirs);
     let watch = watch(subscriber);
     let mut terminal = ratatui::try_init()?;
