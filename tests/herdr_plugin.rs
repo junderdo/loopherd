@@ -439,17 +439,19 @@ fn stub_args(bin: &Path, name: &str) -> Option<String> {
     fs::read_to_string(bin.join(format!("{name}.args"))).ok()
 }
 
-/// A ledger with one open member, `lh-1` on branch `feat/lh-1`.
+/// A ledger with one open member, `lh-1` on branch `feat/lh-1`, spawned
+/// from a repo at `state`.
 fn ledger_with_lh_1(state: &Path) {
     let dir = state.join("loopherd");
     fs::create_dir_all(&dir).unwrap();
     let ledger = r#"{"lh-1": {
         "name": "lh-1", "pane_id": "w1:p1", "session_id": "abc",
-        "repo": "/src/repo", "worktree": null, "branch": "feat/lh-1",
+        "repo": "STATE", "worktree": null, "branch": "feat/lh-1",
         "workspace": "w1", "claude_args": [], "prompt": null,
         "prompt_sent": true, "created": "2026-10-31T00:00:00Z",
         "retired": false, "herd": "loopherd"
-    }}"#;
+    }}"#
+    .replace("STATE", &state.display().to_string());
     fs::write(dir.join("ledger.json"), ledger).unwrap();
 }
 
@@ -475,7 +477,8 @@ fn a_pr_no_member_owns_opens_in_the_browser() {
     let tmp = tempfile::tempdir().unwrap();
     let bin = tmp.path().join("bin");
     ledger_with_lh_1(&tmp.path().join("state"));
-    stub(&bin, "gh", "echo feat/someone-else");
+    stub(&bin, "gh", "echo o/r feat/someone-else");
+    stub(&bin, "git", "echo https://github.com/o/r.git");
     stub(&bin, "xdg-open", "");
     stub(&bin, "open", "");
     stub(&bin, "herdr", "exit 1");
@@ -509,7 +512,8 @@ fn a_pr_on_a_members_branch_opens_the_popup() {
     let tmp = tempfile::tempdir().unwrap();
     let bin = tmp.path().join("bin");
     ledger_with_lh_1(&tmp.path().join("state"));
-    stub(&bin, "gh", "echo feat/lh-1");
+    stub(&bin, "gh", "echo o/r feat/lh-1");
+    stub(&bin, "git", "echo git@github.com:o/r.git");
     stub(&bin, "xdg-open", "");
     stub(&bin, "open", "");
     stub(&bin, "herdr", "");
@@ -526,6 +530,27 @@ fn a_pr_on_a_members_branch_opens_the_popup() {
     );
     assert_eq!(stub_args(&bin, "xdg-open"), None);
     assert_eq!(stub_args(&bin, "open"), None);
+}
+
+#[test]
+fn a_pr_from_another_repo_on_a_members_branch_name_opens_in_the_browser() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    ledger_with_lh_1(&tmp.path().join("state"));
+    stub(&bin, "gh", "echo someone/fork feat/lh-1");
+    stub(&bin, "git", "echo https://github.com/o/r.git");
+    stub(&bin, "xdg-open", "");
+    stub(&bin, "open", "");
+    stub(&bin, "herdr", "");
+
+    let out = clicked(tmp.path(), &bin, PR);
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("opened {PR} in the browser\n")
+    );
+    assert_eq!(stub_args(&bin, "herdr"), None);
 }
 
 #[test]

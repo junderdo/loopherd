@@ -124,10 +124,11 @@ Init never launches an agent.
    `loopherd install-hook`). Lines come in this order: reports, questions
    first then by time; then stop lines grouped by member in name order,
    oldest first within a member; then a lead's `failing` and `recovered`,
-   then its `running low`, then its `interrupted` and `merged`, by member
-   in name order, then its `claimable`; then `blocked` and `gone`. A
-   `drained` line prints only on a poll nothing else woke, alone but for a
-   due `shepherd handoff`. The
+   then its `running low` and `out of work`, then its `interrupted` and
+   `merged`, by member in name order, then its `claimable`; then `blocked`
+   and `gone`. The shepherd's own `out of work` lines for unled herds, and
+   a `drained` line, print only on a poll nothing else woke, alone but for
+   a due `shepherd handoff`. The
    first watch after an install, or over members a herd-scoped watch
    skipped, prints every unread stop change since; judge each against
    `reports --all`.
@@ -152,6 +153,7 @@ Init never launches an agent.
    | `<herd> failing  source "<command>": <stderr line>` | Lead's watch only: the herd's source failed (also `<herd> failing  backlog "<command>": …` for its `backlog`, and `<herd> failing  <member> done "<command>": …` for a member's `done` or `merged` check), with its last stderr line. Once per streak; one cut off by the 60s round is no event. Fix the cause, or tell the shepherd. |
    | `<herd> recovered  source` | Lead's watch only: what last printed `failing` passes again (also `<herd> recovered  backlog` and `<herd> recovered  <member> done`). A later failure prints `failing` again. A member that retires mid-streak gets none. |
    | `<herd> running low  <n> claimable, <m> unready` | Lead's watch only: the herd's `backlog` lists unready tasks and claimable (as `status` counts it) is at or below `max`. Once per streak: it prints again only after claimable rises above `max` or unready reaches 0. A paused herd prints none and keeps its streak. Triage (see Lead). |
+   | `<herd> out of work` | The herd isn't paused, claimable is 0, its `backlog` lists nothing unready (or it has none), and no worker is open. A lead's watch prints it for its herd; the shepherd's, every 60s, for each unled herd with a herd file it reads. Once per streak: it prints again only after claimable or unready rises above 0 or a worker opens, even one that opened and retired while no watch ran. The shepherd's doesn't repeat what a retired lead's watch already said. A paused herd prints none and keeps its streak. A lead reports it (see Lead); the shepherd tells the human, who pauses the herd or files and approves work. |
    | `<member> interrupted` | Lead's watch only: the feed running the worker's `after_merge` died before noting it. Feed, which notes it, then read the note. |
    | `<member> blocked` | A dialog only the human answers: tell them. loopherd never answers it. |
    | `<member> gone` | Its pane exited or closed, its tab or workspace closed, or it had no agent for two polls in a row after this watch saw it live. |
@@ -222,6 +224,10 @@ Init never launches an agent.
    task. In an unled herd, triage yourself when `status` shows claimable at
    or below `max` with unready above 0: run the herd's `backlog` and sort
    each task the same way.
+7. **Out of work.** A lead's `<herd> out of work` arrives as its
+   `question`, and your own watch prints the line for an unled herd (D72):
+   either way, tell the human the herd has nothing left and ask whether to
+   pause it or file and approve work. Don't pause it yourself.
 
 ### Handoffs
 
@@ -270,7 +276,8 @@ workers. Wait for its `finished` line, then `loopherd restart <name>`. It
 sends `/clear`, waits for the ledger to follow the new session, and prompts
 the member to read its handoff, which it moves to `<name>.prev.md` so no
 later restart reuses it; same pane, worktree and branch. A lead's prompt
-also tells it to re-read `loopherd status` and `loopherd reports --all
+also carries its switches and review-round limit, resolved from its herd
+file and `[lead_defaults]` at restart, and tells it to re-read `loopherd status` and `loopherd reports --all
 --tail 40` and re-arm its watch. Without `--force`
 it refuses unless the member reported a handoff since its last start, its
 last stop since is `finished` with nothing in flight, and herdr shows it
@@ -292,6 +299,10 @@ conversation" dialog instead. It sends nothing and keeps the handoff: switch
 the pane back to the main conversation, then run restart again. If that
 dialog shows up anyway when restart times out, restart says so: pick
 Cancel, switch back to main, and rerun it.
+
+It also refuses, even with `--force` and before any `/clear`, a lead whose
+herd file or `config.toml` can't be read, or that has no herd or `[lead]`:
+fix the herd, then run restart again.
 
 A lead's `loopherd watch` is a background shell, so a lead stops its own
 watch before ending its handoff turn; otherwise its stop reads `paused`
@@ -682,6 +693,9 @@ What differs from the shepherd:
   (saying why). Report the result as one `loopherd report --kind question`
   and end your turn. Never mark a task ready yourself, whatever your
   switches; the shepherd does it once the human approves.
+- **Out of work.** On `<herd> out of work`, send one `loopherd report
+  --kind question` asking the human what's next: pause the herd, or file
+  and approve work. Then end your turn.
 - **Asking to merge.** With `merge` off, the question carries the PR link
   and a ready-to-paste line pinned to the full head SHA your reviewer
   verified, `! gh pr merge <n> --merge --match-head-commit <full sha>`, in
