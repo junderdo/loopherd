@@ -297,7 +297,6 @@ mod tests {
     /// A repo whose origin is `url`, and a fake gh that records its
     /// arguments and lists `stdout`.
     fn fake_gh(url: &str, stdout: &str) -> (tempfile::TempDir, GhCli) {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
             let ok = Command::new("git")
@@ -316,8 +315,7 @@ mod tests {
             "#!/bin/sh\necho \"$@\" >> '{}'\necho '{stdout}'\n",
             args.display()
         );
-        std::fs::write(&program, script).unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_fakes::executable(&program, script);
         (dir, GhCli { program })
     }
 
