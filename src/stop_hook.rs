@@ -629,6 +629,30 @@ mod tests {
     }
 
     #[test]
+    fn a_new_claude_claimed_from_a_moved_members_current_pane_drops_its_old_pane_id() {
+        let mut l = claimed(Some("sess-a"), 4242, 99);
+        l.0.get_mut("lh-1").unwrap().env_pane_id = Some("w2:p1".into());
+
+        let (who, _, _) = from_pid(&mut l, Some(30), &stop_from("sess-a"));
+
+        assert_eq!(who.as_deref(), Some("lh-1"));
+        assert!(!l.0["lh-1"].is_own_pane("w2:p1"));
+    }
+
+    #[test]
+    fn a_new_claude_claimed_from_a_moved_members_old_pane_id_keeps_it() {
+        let mut l = claimed(Some("sess-a"), 4242, 99);
+        let m = l.0.get_mut("lh-1").unwrap();
+        m.pane_id = "w3:p2".into();
+        m.env_pane_id = Some("w1:p1".into());
+
+        let (who, _, _) = from_pid(&mut l, Some(30), &stop_from("sess-a"));
+
+        assert_eq!(who.as_deref(), Some("lh-1"));
+        assert!(l.0["lh-1"].is_own_pane("w1:p1"));
+    }
+
+    #[test]
     fn the_top_level_claude_claims_on_its_first_stop() {
         let mut l = in_session(Some("sess-a"));
         let (who, _, mailbox) = from_pid(&mut l, Some(30), &stop_from("sess-a"));

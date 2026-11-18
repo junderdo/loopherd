@@ -958,14 +958,7 @@ fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32>
         lock_timeout: Duration::from_secs(600),
         startup,
     };
-    let (message, code) = revive(
-        &CliHerdr,
-        &process::ProcFs,
-        &mut ledger,
-        &req,
-        &live_session,
-    )?
-    .report();
+    let (message, code) = revive(&CliHerdr, &mut ledger, &req, &live_session)?.report();
     if !message.is_empty() {
         println!("{message}");
     }

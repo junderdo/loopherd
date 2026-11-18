@@ -90,7 +90,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D73](decisions/D73.md) | The plugin hooks `pane.moved`, and on a move within a workspace the hook points a member's `tab_id` at its pane's new tab (D74 follows moves to another workspace). Amends D69's move limit. |
 | [D74](decisions/D74.md) | The `pane.moved` hook also follows a move to another workspace, rewriting `pane_id`, `tab_id` and `workspace` and keeping the agent's `$HERDR_PANE_ID` as `env_pane_id`; own-pane lookups in report, the Stop, SessionStart and PreToolUse hooks, restart, retire's lead refusal and watch accept either id, while a lead's question label and `retire --close`'s own-tab check don't (D74's limits). Amends D73's limits. |
 | [D76](decisions/D76.md) | A `gone` from a tab or workspace closing carries it; the move hook appends `moved` to retract one for the tab or workspace its pane left, and the close hooks re-read the ledger under the mailbox lock, so a move never leaves a false `gone` in any hook order. Drops D73's and D74's race limits; amends D66's gone rules and D69's close hooks. |
-| [D77](decisions/D77.md) | A moved member's `env_pane_id` is dropped once its process is replaced: when revive starts it again, when revive finds it alive with its recorded process gone, or when a hook claims a new process from its current pane id. Drops D74's limit on a reused workspace id. |
+| [D77](decisions/D77.md) | A moved member's `env_pane_id` is dropped when the Stop or SessionStart hook claims a new process for it from its current pane id, which only a restored herdr gives a process in that pane. Drops D74's limit on a reused workspace id. |
 
 ## Emerging model
 
