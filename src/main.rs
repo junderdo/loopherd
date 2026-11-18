@@ -780,14 +780,19 @@ fn run_resume(herds: &HerdsArg) -> Result<i32> {
 
 fn run_retire(name: &str, close: bool) -> Result<i32> {
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    if let Ok(pane) = std::env::var("HERDR_PANE_ID") {
-        let socket = socket_from_env();
-        let pane = tool_hook::Pane {
-            id: &pane,
-            socket: socket.as_deref(),
-        };
-        refuse_own_lead(&ledger, name, &pane)?;
-    }
+    let pane_id = std::env::var("HERDR_PANE_ID").ok();
+    let socket = socket_from_env();
+    let pane = pane_id.as_deref().map(|id| tool_hook::Pane {
+        id,
+        socket: socket.as_deref(),
+    });
+    refuse_own_lead(
+        &ledger,
+        name,
+        pane.as_ref(),
+        &process::ProcFs,
+        std::process::id(),
+    )?;
     if !close {
         retire(&mut ledger, name, SystemTime::now())?;
         println!("retired {name}");
