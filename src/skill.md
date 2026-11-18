@@ -270,7 +270,8 @@ workers. Wait for its `finished` line, then `loopherd restart <name>`. It
 sends `/clear`, waits for the ledger to follow the new session, and prompts
 the member to read its handoff, which it moves to `<name>.prev.md` so no
 later restart reuses it; same pane, worktree and branch. A lead's prompt
-also tells it to re-read `loopherd status` and `loopherd reports --all
+also carries its switches and review-round limit, resolved from its herd
+file and `[lead_defaults]` at restart, and tells it to re-read `loopherd status` and `loopherd reports --all
 --tail 40` and re-arm its watch. Without `--force`
 it refuses unless the member reported a handoff since its last start, its
 last stop since is `finished` with nothing in flight, and herdr shows it
@@ -292,6 +293,10 @@ conversation" dialog instead. It sends nothing and keeps the handoff: switch
 the pane back to the main conversation, then run restart again. If that
 dialog shows up anyway when restart times out, restart says so: pick
 Cancel, switch back to main, and rerun it.
+
+It also refuses, even with `--force` and before any `/clear`, a lead whose
+herd file or `config.toml` can't be read, or that has no herd or `[lead]`:
+fix the herd, then run restart again.
 
 A lead's `loopherd watch` is a background shell, so a lead stops its own
 watch before ending its handoff turn; otherwise its stop reads `paused`
