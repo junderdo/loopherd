@@ -250,6 +250,9 @@ impl Clearing {
         match remote_git(&self.repo, &["push", "--quiet", &lease, "origin", &refspec]) {
             Ok(_) => Ok(RemoteDelete::Deleted),
             Err(e) if lease_refused(&e) => Ok(RemoteDelete::Moved),
+            Err(e) if push_refused(&e) => {
+                Err(e.context("the push was refused, perhaps by a pre-push hook"))
+            }
             Err(e) => Err(e),
         }
     }
@@ -261,6 +264,13 @@ pub enum RemoteDelete {
     Deleted,
     /// Origin kept the branch: it moved since it was counted, so the lease refused.
     Moved,
+}
+
+/// Whether git got as far as refusing the ref update, as a pre-push hook or
+/// origin's own rules do, rather than failing to reach origin.
+fn push_refused(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<RemoteFailed>()
+        .is_some_and(|failed| failed.message.contains("failed to push some refs"))
 }
 
 fn lease_refused(err: &anyhow::Error) -> bool {
@@ -883,7 +893,12 @@ fn remote_git_within(repo: &Path, args: &[&str], timeout: Duration) -> Result<St
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stderr = stderr.trim();
         let hint = (batch_mode && ssh_refused(stderr)).then_some(SSH_PROMPT_HINT);
-        let message = format!("git {}: {stderr}", args.join(" "));
+        let mut message = format!("git {}: {stderr}", args.join(" "));
+        // A pre-push hook's stdout lands on git's stdout.
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if !stdout.trim().is_empty() {
+            message = format!("{message}\n{}", stdout.trim());
+        }
         return Err(RemoteFailed { message, hint }.into());
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
