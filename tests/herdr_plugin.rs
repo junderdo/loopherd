@@ -385,3 +385,164 @@ fn the_startup_revive_refuses_without_the_hooks_socket() {
     );
     assert!(!config.path().join("state").exists(), "{out:?}");
 }
+
+fn one<'a>(m: &'a toml::Table, key: &str, id: &str) -> &'a toml::Value {
+    m[key]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"].as_str() == Some(id))
+        .unwrap_or_else(|| panic!("no [[{key}]] with id {id}"))
+}
+
+#[test]
+fn a_ctrl_clicked_github_pr_link_runs_loopherd_pr() {
+    let m = manifest();
+    let handlers = m["link_handlers"].as_array().unwrap();
+    let [handler] = handlers.as_slice() else {
+        panic!("expected one link handler: {handlers:?}");
+    };
+    assert_eq!(
+        handler["pattern"].as_str(),
+        Some("^https://github\\.com/[^/]+/[^/]+/pull/[0-9]+")
+    );
+    let action = one(&m, "actions", handler["action"].as_str().unwrap());
+    assert_eq!(strings(&action["command"]), ["sh", "loopherd.sh", "pr"]);
+}
+
+#[test]
+fn the_pr_popup_pane_runs_loopherd_pr_as_the_popup() {
+    let m = manifest();
+    let pane = one(&m, "panes", "pr-member");
+    assert_eq!(pane["placement"].as_str(), Some("popup"));
+    assert_eq!(
+        strings(&pane["command"]),
+        ["sh", "loopherd.sh", "pr", "--popup"]
+    );
+}
+
+/// A stub on `bin` that appends its arguments to `<name>.args` and runs `then`.
+fn stub(bin: &Path, name: &str, then: &str) {
+    fs::create_dir_all(bin).unwrap();
+    let path = bin.join(name);
+    let log = bin.join(format!("{name}.args"));
+    let script = format!("#!/bin/sh\necho \"$@\" >> '{}'\n{then}\n", log.display());
+    fs::write(&path, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn stub_args(bin: &Path, name: &str) -> Option<String> {
+    fs::read_to_string(bin.join(format!("{name}.args"))).ok()
+}
+
+/// A ledger with one open member, `lh-1` on branch `feat/lh-1`.
+fn ledger_with_lh_1(state: &Path) {
+    let dir = state.join("loopherd");
+    fs::create_dir_all(&dir).unwrap();
+    let ledger = r#"{"lh-1": {
+        "name": "lh-1", "pane_id": "w1:p1", "session_id": "abc",
+        "repo": "/src/repo", "worktree": null, "branch": "feat/lh-1",
+        "workspace": "w1", "claude_args": [], "prompt": null,
+        "prompt_sent": true, "created": "2026-10-31T00:00:00Z",
+        "retired": false, "herd": "loopherd"
+    }}"#;
+    fs::write(dir.join("ledger.json"), ledger).unwrap();
+}
+
+/// `loopherd pr` as the link handler runs it, on a click of `url`, with only
+/// `bin` on `PATH`.
+fn clicked(tmp: &Path, bin: &Path, url: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .arg("pr")
+        .env_clear()
+        .env("PATH", bin)
+        .env("HOME", tmp)
+        .env("XDG_STATE_HOME", tmp.join("state"))
+        .env("LOOPHERD_CONFIG_DIR", tmp.join("config"))
+        .env("HERDR_PLUGIN_CLICKED_URL", url)
+        .output()
+        .unwrap()
+}
+
+const PR: &str = "https://github.com/o/r/pull/12";
+
+#[test]
+fn a_pr_no_member_owns_opens_in_the_browser() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    ledger_with_lh_1(&tmp.path().join("state"));
+    stub(&bin, "gh", "echo feat/someone-else");
+    stub(&bin, "xdg-open", "");
+    stub(&bin, "open", "");
+    stub(&bin, "herdr", "exit 1");
+
+    let link = format!("{PR}/files#diff-abc");
+
+    let out = clicked(tmp.path(), &bin, &link);
+
+    assert!(out.status.success(), "{out:?}");
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    // loopherd doesn't wait for the opener.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while stub_args(&bin, opener).is_none_or(|a| a.is_empty())
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        stub_args(&bin, opener).as_deref(),
+        Some(&*format!("{link}\n"))
+    );
+    assert_eq!(stub_args(&bin, "herdr"), None);
+}
+
+#[test]
+fn a_pr_on_a_members_branch_opens_the_popup() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    ledger_with_lh_1(&tmp.path().join("state"));
+    stub(&bin, "gh", "echo feat/lh-1");
+    stub(&bin, "xdg-open", "");
+    stub(&bin, "open", "");
+    stub(&bin, "herdr", "");
+
+    let out = clicked(tmp.path(), &bin, &format!("{PR}/files"));
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        stub_args(&bin, "herdr").as_deref(),
+        Some(&*format!(
+            "plugin pane open --plugin loopherd --entrypoint pr-member \
+             --env LOOPHERD_PR_MEMBER=lh-1 --env LOOPHERD_PR_URL={PR}\n"
+        ))
+    );
+    assert_eq!(stub_args(&bin, "xdg-open"), None);
+    assert_eq!(stub_args(&bin, "open"), None);
+}
+
+#[test]
+fn a_popup_that_cant_show_its_card_says_why() {
+    let tmp = tempfile::tempdir().unwrap();
+    ledger_with_lh_1(&tmp.path().join("state"));
+
+    let out = Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .args(["pr", "--popup"])
+        .env_clear()
+        .env("PATH", tmp.path())
+        .env("HOME", tmp.path())
+        .env("XDG_STATE_HOME", tmp.path().join("state"))
+        .env("LOOPHERD_PR_URL", PR)
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "loopherd pr: LOOPHERD_PR_MEMBER is not set\n\nq or Esc to close\n"
+    );
+}

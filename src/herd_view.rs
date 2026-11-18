@@ -229,7 +229,7 @@ fn rank(member: &Member) -> u8 {
     }
 }
 
-fn member(
+pub(crate) fn member(
     record: &AgentRecord,
     agents: Option<&[Agent]>,
     branch: impl Fn(&AgentRecord) -> Option<String>,

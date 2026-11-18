@@ -132,6 +132,9 @@ pub trait Herdr {
     /// Shows `label` in place of the Claude's name in `pane_id`'s sidebar row,
     /// or clears it. Display-only: herdr's status for the pane is unchanged.
     fn label_pane(&self, pane_id: &str, label: Option<&str>) -> Result<()>;
+    /// Opens the loopherd plugin's pane `entrypoint` with `env` set for its
+    /// process. Refused while another herdr modal is open.
+    fn open_plugin_pane(&self, entrypoint: &str, env: &[(&str, &str)]) -> Result<()>;
     /// The socket of the herdr these calls reach; `None` when herdr can't say.
     fn socket(&self) -> Option<PathBuf>;
     /// The server as `herdr status server` reports it, giving up after `timeout`.
@@ -498,6 +501,43 @@ impl Herdr for CliHerdr {
             ),
             Err(_) => bail!(
                 "herdr pane report-metadata failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        }
+    }
+
+    fn open_plugin_pane(&self, entrypoint: &str, env: &[(&str, &str)]) -> Result<()> {
+        let env: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let mut argv = vec![
+            "plugin",
+            "pane",
+            "open",
+            "--plugin",
+            "loopherd",
+            "--entrypoint",
+            entrypoint,
+        ];
+        for pair in &env {
+            argv.extend(["--env", pair]);
+        }
+        let out = self
+            .command(&argv)
+            .output()
+            .with_context(|| format!("run herdr {}", argv[..3].join(" ")))?;
+        if out.status.success() {
+            return Ok(());
+        }
+        match [&out.stdout, &out.stderr]
+            .into_iter()
+            .find_map(|bytes| serde_json::from_slice::<ErrorEnvelope>(bytes).ok())
+        {
+            Some(env) => bail!(
+                "herdr plugin pane open: {} ({})",
+                env.error.message,
+                env.error.code
+            ),
+            None => bail!(
+                "herdr plugin pane open failed: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
             ),
         }

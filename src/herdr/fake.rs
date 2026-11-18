@@ -66,6 +66,9 @@ struct State {
     started: Vec<Started>,
     prompts: Vec<(String, String)>,
     focused: Vec<String>,
+    /// Each opened plugin pane's entrypoint and env, sorted by key.
+    popups: Vec<(String, Vec<(String, String)>)>,
+    refuse_popup: bool,
     /// Sidebar labels by pane.
     labels: Vec<(String, String)>,
     label_calls: u32,
@@ -236,6 +239,15 @@ impl FakeHerdr {
     /// Panes passed to `focus`, in order. Focusing isn't a mutation.
     pub fn focused(&self) -> Vec<String> {
         self.state.lock().unwrap().focused.clone()
+    }
+
+    pub fn popups(&self) -> Vec<(String, Vec<(String, String)>)> {
+        self.state.lock().unwrap().popups.clone()
+    }
+
+    /// The next plugin panes are refused, as herdr does while another modal is open.
+    pub fn refuse_popups(&self) {
+        self.state.lock().unwrap().refuse_popup = true;
     }
 
     /// The label `label_pane` last left on `pane_id`. Labelling isn't a mutation.
@@ -635,6 +647,23 @@ impl Herdr for FakeHerdr {
             bail!("no agent in pane {pane_id}");
         }
         self.state.lock().unwrap().focused.push(pane_id.to_string());
+        Ok(())
+    }
+
+    fn open_plugin_pane(&self, entrypoint: &str, env: &[(&str, &str)]) -> Result<()> {
+        if self.is_down() {
+            bail!("herdr server not running");
+        }
+        let mut state = self.state.lock().unwrap();
+        if state.refuse_popup {
+            bail!("herdr plugin pane open: another modal is open (ui_busy)");
+        }
+        let mut env: Vec<(String, String)> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        env.sort();
+        state.popups.push((entrypoint.to_string(), env));
         Ok(())
     }
 
