@@ -822,6 +822,16 @@ fn read_prompt(
     })
 }
 
+/// The warning for an enabled `[notify]` table in `config` that sends nothing,
+/// shared by `herds` and `doctor`.
+pub fn sends_nothing_warning(config: &Path) -> String {
+    format!(
+        "{}: [notify] is enabled with herdr = false, no command and no pane_label, \
+         so nothing is sent",
+        config.display()
+    )
+}
+
 /// Whether `config` reads as TOML; a missing or unreadable file doesn't.
 pub fn parses_as_toml(config: &Path) -> bool {
     std::fs::read_to_string(config).is_ok_and(|text| text.parse::<toml::Table>().is_ok())
@@ -858,10 +868,9 @@ pub fn herds(paths: &Paths, settings: &Path) -> Result<(String, i32)> {
                 lines.push(format!("invalid {}", format!("{e:#}").trim_end()));
                 code = 1;
             }
-            Ok(Some(notify)) if notify.sends_nothing() => lines.push(format!(
-                "warning: {}: [notify] is enabled with herdr = false, no command and no pane_label, so nothing is sent",
-                config.display()
-            )),
+            Ok(Some(notify)) if notify.sends_nothing() => {
+                lines.push(format!("warning: {}", sends_nothing_warning(&config)))
+            }
             Ok(Some(notify)) if notify.labels_panes() => hook_warning_at = Some(lines.len()),
             Ok(_) => {}
         }
