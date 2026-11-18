@@ -392,7 +392,9 @@ UserPromptSubmit hook from `install-hook`.
   someone pushed to it meanwhile, check who before anything else: rerun
   with `--keep-branch`, never `--drop-branch`, unless those commits should
   go. Any other failed delete leaves the rest done, and a rerun retries
-  it. `--keep-branch` never contacts origin. A lead
+  it once the cause is fixed. The delete runs the repo's pre-push hooks,
+  within `LOOPHERD_GIT_TIMEOUT`; when one refuses, release prints its
+  output. `--keep-branch` never contacts origin. A lead
   may run it; it's part of feeding. `status --all` marks the entry
   `(released)`, its mailbox gets a `released` note, and its lead's watch
   announces it claimable again.
