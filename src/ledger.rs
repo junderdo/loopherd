@@ -64,7 +64,7 @@ pub struct AgentRecord {
     /// How far `feed` has got with its herd's `after_merge` for this member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_merge: Option<AfterMerge>,
-    /// Earlier runs of this name, oldest first: each released record that a
+    /// Earlier runs of this name, oldest first: each retired record that a
     /// new one replaced, kept for `stats`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub earlier: Vec<AgentRecord>,
@@ -103,7 +103,7 @@ pub struct Process {
 pub trait Ledger {
     fn entries(&self) -> Result<BTreeMap<String, AgentRecord>>;
     /// Inserts or replaces the entry for `record.name`. An empty `earlier`
-    /// inherits the replaced entry's; a released entry of a different run
+    /// inherits the replaced entry's; a retired entry of a different run
     /// (another `created`) is then appended to it.
     fn record(&mut self, record: AgentRecord) -> Result<()>;
     /// Applies `change` to the current entry for `name`, read fresh under the
@@ -134,7 +134,7 @@ fn insert(entries: &mut BTreeMap<String, AgentRecord>, mut record: AgentRecord) 
         if record.earlier.is_empty() {
             record.earlier = kept;
         }
-        if old.released_at.is_some() && old.created != record.created {
+        if old.retired && old.created != record.created {
             record.earlier.push(old);
         }
     }
@@ -536,6 +536,42 @@ mod tests {
             released_at: Some("2026-11-10T00:00:00Z".into()),
             ..record(name, true)
         }
+    }
+
+    #[test]
+    fn recording_a_new_run_over_a_retired_unreleased_entry_keeps_it_as_an_earlier_run() {
+        let mut ledger = MemLedger::default();
+        let retired = AgentRecord {
+            retired: true,
+            retired_at: Some("2026-11-02T00:00:00Z".into()),
+            ..record("a", true)
+        };
+        ledger.record(retired.clone()).unwrap();
+
+        ledger
+            .record(AgentRecord {
+                created: "2026-11-03T00:00:00Z".into(),
+                ..record("a", false)
+            })
+            .unwrap();
+
+        let entry = &ledger.entries().unwrap()["a"];
+        assert_eq!(entry.earlier, [retired]);
+        assert_eq!(entry.created, "2026-11-03T00:00:00Z");
+    }
+
+    #[test]
+    fn re_recording_a_retired_entry_of_the_same_run_keeps_no_copy_of_it() {
+        let mut ledger = MemLedger::default();
+        let retired = AgentRecord {
+            retired: true,
+            ..record("a", true)
+        };
+        ledger.record(retired.clone()).unwrap();
+
+        ledger.record(record("a", true)).unwrap();
+
+        assert_eq!(ledger.entries().unwrap()["a"].earlier, []);
     }
 
     #[test]

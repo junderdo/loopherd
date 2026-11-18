@@ -1044,6 +1044,38 @@ mod tests {
     }
 
     #[test]
+    fn stats_shows_both_runs_of_a_name_spawned_over_while_retired_but_unreleased() {
+        let mut ledger = MemLedger::default();
+        let req = SpawnRequest {
+            member_of: Some(member_of()),
+            ..request("a")
+        };
+        run(&herdr(), &mut ledger, &req).unwrap();
+        let first = ledger.0.get_mut("a").unwrap();
+        first.created = "2026-11-01T00:00:00Z".into();
+        first.retired = true;
+        first.retired_at = Some("2026-11-02T00:00:00Z".into());
+
+        run(&herdr(), &mut ledger, &req).unwrap();
+
+        let reports = tempfile::tempdir().unwrap();
+        let query = crate::stats::Query {
+            herd: None,
+            since: None,
+            now: SystemTime::now(),
+        };
+        let (herds, _) = crate::stats::stats(&ledger, reports.path(), &query).unwrap();
+        let retired: Vec<_> = herds[0]
+            .retired
+            .iter()
+            .map(|r| (r.name.as_str(), r.started.as_str(), r.total_secs))
+            .collect();
+        assert_eq!(retired, [("a", "2026-11-01T00:00:00Z", Some(86_400))]);
+        let open: Vec<_> = herds[0].open.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(open, ["a"]);
+    }
+
+    #[test]
     fn params_are_not_placeholders_outside_a_herd() {
         let req = SpawnRequest {
             prompt: Some("{herd} {number}".into()),
