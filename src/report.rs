@@ -1,7 +1,8 @@
 //! `loopherd report` and `loopherd reports`: a mailbox members write and the
 //! shepherd reads, kept as one JSON-lines file per member. Besides reports it
-//! holds `stop` entries from the Stop hook and `start` boundaries from spawn
-//! and revive, which `reports` shows only with `--all`.
+//! holds `stop` entries from the Stop hook, `start` boundaries from spawn
+//! and revive, and herdr's `blocked` and `gone`, which `reports` shows only
+//! with `--all`.
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -69,14 +70,14 @@ impl Entry {
         }
     }
 
-    /// Its kind and text, unless it's a `stop` or `start`.
+    /// Its kind and text, unless it's a `stop`, `start`, `blocked` or `gone`.
     pub fn report(&self) -> Option<(Kind, &str)> {
         match &self.body {
             Body::Done { text } => Some((Kind::Done, text)),
             Body::Question { text } => Some((Kind::Question, text)),
             Body::Note { text } => Some((Kind::Note, text)),
             Body::Handoff { text } => Some((Kind::Handoff, text)),
-            Body::Stop(_) | Body::Start { .. } => None,
+            Body::Stop(_) | Body::Start { .. } | Body::Blocked {} | Body::Gone {} => None,
         }
     }
 }
@@ -104,6 +105,10 @@ pub enum Body {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         resumed: bool,
     },
+    /// herdr showed the member waiting on a dialog.
+    Blocked {},
+    /// herdr lost the member's pane.
+    Gone {},
 }
 
 impl Body {
@@ -176,10 +181,37 @@ pub fn report(
 pub fn append(dir: &Path, name: &str, entry: &Entry) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join(format!("{name}.jsonl"));
+    append_locked(&mut *lock_mailbox(&path)?, &path, entry)
+}
+
+/// Appends `entry` to `name`'s mailbox in `dir` unless `already` holds for
+/// the entries there, read under the same lock. Returns whether it appended.
+pub fn append_unless(
+    dir: &Path,
+    name: &str,
+    entry: &Entry,
+    already: impl Fn(&[Entry]) -> bool,
+) -> Result<bool> {
+    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join(format!("{name}.jsonl"));
     let mut file = lock_mailbox(&path)?;
     let mut bytes = vec![];
+    std::io::Read::read_to_end(&mut *file, &mut bytes)
+        .with_context(|| format!("read {}", path.display()))?;
+    let mut found = vec![];
+    parse(dir, name, &bytes, &mut found, &mut vec![]);
+    let entries: Vec<Entry> = found.into_iter().map(|(_, e)| e).collect();
+    if already(&entries) {
+        return Ok(false);
+    }
+    append_locked(&mut file, &path, entry)?;
+    Ok(true)
+}
+
+fn append_locked(file: &mut fs::File, path: &Path, entry: &Entry) -> Result<()> {
+    let mut bytes = vec![];
     // A torn last line would swallow this entry; start it on a line of its own.
-    if !ends_in_newline(&mut file).with_context(|| format!("read {}", path.display()))? {
+    if !ends_in_newline(file).with_context(|| format!("read {}", path.display()))? {
         bytes.push(b'\n');
     }
     serde_json::to_writer(&mut bytes, entry)?;
@@ -374,10 +406,11 @@ fn reports_with(
     Ok((read, pending))
 }
 
-/// Each of `names` with an unread `stop` entry, with its whole mailbox so a
-/// stop can be judged against what came before. Saving `Pending` marks
-/// everything read on the watch cursor, which `reports` never moves.
-pub fn unread_stops(dir: &Path, names: &[String]) -> Result<(Vec<Mailbox>, Pending)> {
+/// Each of `names` with an unread `stop`, `blocked` or `gone` entry, with its
+/// whole mailbox so a stop can be judged against what came before. Saving
+/// `Pending` marks everything read on the watch cursor, which `reports` never
+/// moves.
+pub fn unread_wakes(dir: &Path, names: &[String]) -> Result<(Vec<Mailbox>, Pending)> {
     let names: Vec<String> = mailboxes(dir)?
         .into_iter()
         .filter(|n| names.contains(n))
@@ -388,7 +421,8 @@ pub fn unread_stops(dir: &Path, names: &[String]) -> Result<(Vec<Mailbox>, Pendi
     let (pending, _) = Cursor::Watch.peek(dir, &names, Locked::Take, |name, read, unread| {
         let mut entries = vec![];
         parse(dir, name, unread, &mut entries, &mut vec![]);
-        if !entries.iter().any(|(_, e)| matches!(e.body, Body::Stop(_))) {
+        let wakes = |e: &Entry| matches!(e.body, Body::Stop(_) | Body::Blocked {} | Body::Gone {});
+        if !entries.iter().any(|(_, e)| wakes(e)) {
             return;
         }
         // Already warned about when it was unread.
@@ -579,6 +613,8 @@ fn render(name: &str, entry: &Entry) -> Vec<String> {
             _ => ("stop", describe(stop)),
         },
         Body::Start { .. } => return vec![format!("{name} start {when}")],
+        Body::Blocked {} => return vec![format!("{name} blocked {when}")],
+        Body::Gone {} => return vec![format!("{name} gone {when}")],
         _ => {
             let (kind, text) = entry.report().expect("a report");
             (kind.as_str(), text.to_string())
@@ -1680,7 +1716,7 @@ mod tests {
     }
 
     fn read_stops(dir: &Path, names: &[String]) -> Vec<Mailbox> {
-        let (stops, pending) = unread_stops(dir, names).unwrap();
+        let (stops, pending) = unread_wakes(dir, names).unwrap();
         pending.save().unwrap();
         stops
     }
@@ -1705,7 +1741,7 @@ mod tests {
             "2026-11-01T09:01:00Z",
         );
 
-        let (stops, _unsaved) = unread_stops(dir.path(), &names).unwrap();
+        let (stops, _unsaved) = unread_wakes(dir.path(), &names).unwrap();
         assert_eq!(stops.len(), 1);
         let (_, pending) = peek_reports(&ledger, dir.path(), &UNREAD).unwrap();
         drop(pending);

@@ -105,6 +105,33 @@ fn with_the_hook_a_paused_stop_wakes_it() {
 }
 
 #[test]
+fn a_pane_closed_while_no_watch_ran_wakes_the_next_watch_gone_once() {
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+    let closed = sandbox
+        .loopherd(&["herdr-event-hook"])
+        .env("HERDR_PLUGIN_EVENT", "pane.closed")
+        .env(
+            "HERDR_PLUGIN_EVENT_JSON",
+            r#"{"event":"pane_closed","data":{"pane_id":"w1:p1","workspace_id":"w1"}}"#,
+        )
+        .output()
+        .unwrap();
+    assert_eq!(closed.status.code(), Some(0), "{closed:?}");
+
+    let out = sandbox.watch(&["--timeout", "0"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "lh-1 paused  1 shell\nlh-1 gone\n"
+    );
+
+    let again = sandbox.watch(&["--timeout", "0"]);
+    assert_eq!(again.status.code(), Some(2), "{}", stderr(&again));
+    assert!(again.stdout.is_empty(), "{again:?}");
+}
+
+#[test]
 fn settings_names_the_file_to_check() {
     let sandbox = Sandbox::new();
     sandbox.install_hook();

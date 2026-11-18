@@ -3390,6 +3390,16 @@ max = 3
     }
 
     #[test]
+    fn the_ticker_names_herdrs_blocked_and_gone() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", Body::Blocked {});
+        post_at(mail.path(), "c", "2026-11-16T10:06:00Z", Body::Gone {});
+        let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert_eq!(ticker(&terminal), ["10:06 c gone", "10:05 a blocked"]);
+    }
+
+    #[test]
     fn the_ticker_leaves_out_retired_members() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let mail = quiet_mail(&ledger);

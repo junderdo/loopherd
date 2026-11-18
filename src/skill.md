@@ -102,8 +102,11 @@ Init never launches an agent.
    member leaves a report or its Claude stops in a new state, printing a
    line per event, and marks them read only once printed. Stops come from
    the Stop hook's entries in the mailbox, so a stop that lands between
-   watches wakes the next one. herdr adds `blocked` and `gone`, seen only
-   while a watch runs: a change between watches is never replayed. After a
+   watches wakes the next one. herdr adds `blocked` and `gone`, which
+   the herdr plugin's event hooks also record in the mailbox, so with the
+   plugin installed a change between watches wakes the next one too; each
+   prints once, whether a hook or a watch's poll saw it first. Without the
+   plugin they're seen only while a watch runs. After a
    wake, run `loopherd status` and re-arm in the same message as your first
    action, unless the wake needs a handoff or says `all drained` (then
    don't re-arm). Read the
@@ -147,7 +150,7 @@ Init never launches an agent.
    | `<herd> running low  <n> claimable, <m> unready` | Lead's watch only: the herd's `backlog` lists unready tasks and claimable (as `status` counts it) is at or below `max`. Once per streak: it prints again only after claimable rises above `max` or unready reaches 0. A paused herd prints none and keeps its streak. Triage (see Lead). |
    | `<member> interrupted` | Lead's watch only: the feed running the worker's `after_merge` died before noting it. Feed, which notes it, then read the note. |
    | `<member> blocked` | A dialog only the human answers: tell them. loopherd never answers it. |
-   | `<member> gone` | No agent in its pane for two polls in a row; it was live earlier in this watch. |
+   | `<member> gone` | Its pane exited or closed, or had no agent for two polls in a row after this watch saw it live. A closed tab is seen only by a running watch. |
    | `<herd> drained` | Lead's watch only: your herd is paused and has no open (non-retired) worker. Report done, stop, and don't re-arm. |
    | `all drained` | Every herd your watch reads is paused with no open worker, and no member it reads may still work: none is working, blocked or unknown (now or on the poll before), died since the watch started without its `gone` line yet, or last stopped failed or with work in flight. Tell the human; don't re-arm. |
    | `shepherd handoff 171k over 160k` | Your own watch only, once per session: your context is past your limit. Hand off (see Your own handoff). |
@@ -498,7 +501,9 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   only to `herdr plugin log list --plugin loopherd`. Its `view` action
   (`loopherd.view`) opens `loopherd view` in a popup that `q` or Escape
   closes; the README gives the `[[keys.command]]` snippet that binds it to
-  a key. Never edit the human's herdr config to add it. It needs the
+  a key. Never edit the human's herdr config to add it. Its event hooks
+  run `loopherd herdr-event-hook`, recording a member going `blocked` or
+  `gone` in its mailbox for the next watch. It needs the
   `loopherd` on PATH or in `~/.local/bin` and never installs loopherd or
   its hooks; installing stays as above. It needs herdr 0.7.5+.
   Its startup hook runs `loopherd revive --startup` each time herdr
