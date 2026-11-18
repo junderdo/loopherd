@@ -17,7 +17,7 @@
 # shepherd runs, per docs/agents/shepherd.md's Triage:
 #   scripts/trello label LH-<n> +ready-for-agent      # each ready card
 #   scripts/trello comment LH-<n> "<what's missing>"  # each needs-spec card
-#   curl -X PUT ".../1/cards/<shortLink>?closed=true"  # archive each stale card the human confirms
+#   curl -fsS -X PUT ".../1/cards/<shortLink>?closed=true"  # archive each stale card the human confirms
 [lead]
 prompt_file = "loopherd-cards-lead.md"
 # args defaults to the herd's args. Every switch is off until the human turns it on.

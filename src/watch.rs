@@ -528,6 +528,9 @@ impl Checks<'_> {
                 Ok((tasks, _)) => {
                     passing.push("source".into());
                     let names = claimable(ledger, self.paths, &queue, &self.herd, freed, &tasks)?;
+                    if queue.backlog.is_none() {
+                        self.end_low_streak()?;
+                    }
                     if let Some(backlog) = &queue.backlog
                         && let Some(timeout) = budget.left()
                     {
@@ -593,17 +596,27 @@ impl Checks<'_> {
         unready: usize,
         max: usize,
     ) -> Result<Option<Event>> {
-        let key = format!("{} {}", self.herd, line::RUNNING_LOW);
         if claimable > max || unready == 0 {
-            if self.fired.keys.remove(&key) {
-                append(&self.fired.path, &format!("{key}{LOW_ENDED}\n"))?;
-            }
+            self.end_low_streak()?;
             return Ok(None);
         }
+        let key = self.low_key();
         Ok(Some(Event {
             line: format!("{key}  {claimable} claimable, {unready} unready"),
             key,
         }))
+    }
+
+    fn end_low_streak(&mut self) -> Result<()> {
+        let key = self.low_key();
+        if self.fired.keys.remove(&key) {
+            append(&self.fired.path, &format!("{key}{LOW_ENDED}\n"))?;
+        }
+        Ok(())
+    }
+
+    fn low_key(&self) -> String {
+        format!("{} {}", self.herd, line::RUNNING_LOW)
     }
 }
 
@@ -3535,6 +3548,20 @@ mod tests {
 
         assert_eq!(Checked::with_backlog("").once("w9:p0"), None);
         assert_eq!(Checked::new().once("w9:p0"), None);
+    }
+
+    #[test]
+    fn dropping_the_backlog_ends_the_streak() {
+        let world = Checked::with_backlog("7 needs spec\n");
+        assert!(world.once("w9:p0").is_some());
+        world.edit_herd(|h| h.replace("backlog = \"cat unready\"\n", ""));
+        assert_eq!(world.once("w9:p0"), None);
+
+        world.edit_herd(|h| h.replace("max = 2", "backlog = \"cat unready\"\nmax = 2"));
+        assert_eq!(
+            world.once("w9:p0").unwrap(),
+            ["cards running low  0 claimable, 1 unready"]
+        );
     }
 
     #[test]

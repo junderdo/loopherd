@@ -58,8 +58,8 @@ Backlog cards into members `lh-<n>` on `<type>/LH-<n>-<slug>`.
   confirms through the API:
 
   ```bash
-  set -a; . ~/.config/loopherd/trello.env; set +a
-  curl -sS -X PUT "https://api.trello.com/1/cards/<shortLink>?closed=true" \
+  set -a; . "${XDG_CONFIG_HOME:-$HOME/.config}/loopherd/trello.env"; set +a
+  curl -fsS -X PUT "https://api.trello.com/1/cards/<shortLink>?closed=true" \
     -H "Authorization: OAuth oauth_consumer_key=\"$TRELLO_API_KEY\", oauth_token=\"$TRELLO_TOKEN\""
   ```
 
