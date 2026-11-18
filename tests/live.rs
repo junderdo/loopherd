@@ -1188,6 +1188,63 @@ fn the_view_action_opens_the_popup_and_popup_close_ends_the_view() {
     );
 }
 
+/// herdr can't read a popup's screen, so this checks the card's process:
+/// it runs with the member and PR herdr passed, waits for a key, and goes
+/// when the popup closes. `pr_link`'s tests check the card's text.
+#[test]
+fn the_pr_popup_opens_with_the_member_and_waits_until_closed() {
+    if !live_enabled() {
+        return;
+    }
+    let server = IsolatedServer::start();
+    let state = server.home.path().join(".local/state/loopherd");
+    std::fs::create_dir_all(&state).unwrap();
+    let ledger = r#"{"lh-1": {
+        "name": "lh-1", "pane_id": "w1:p1", "session_id": "abc",
+        "repo": "/src/repo", "worktree": null, "branch": "feat/lh-1",
+        "workspace": "w1", "claude_args": [], "prompt": null,
+        "prompt_sent": true, "created": "2026-10-31T00:00:00Z",
+        "retired": false, "herd": "loopherd"
+    }}"#;
+    std::fs::write(state.join("ledger.json"), ledger).unwrap();
+    let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("herdr-plugin");
+    server.ok(&["plugin", "link", plugin.to_str().unwrap()]);
+    server.ok(&[
+        "workspace",
+        "create",
+        "--cwd",
+        server.home.path().to_str().unwrap(),
+    ]);
+    let pr = "https://github.com/o/r/pull/12";
+
+    server.ok(&[
+        "plugin",
+        "pane",
+        "open",
+        "--plugin",
+        "loopherd",
+        "--entrypoint",
+        "pr-member",
+        "--env",
+        "LOOPHERD_PR_MEMBER=lh-1",
+        "--env",
+        &format!("LOOPHERD_PR_URL={pr}"),
+    ]);
+
+    let [(pid, env)] = server.wait_for_loopherds(1).try_into().unwrap();
+    let var = |name: &str| env.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+    assert_eq!(var("HERDR_PLUGIN_ENTRYPOINT_ID"), Some("pr-member"));
+    assert_eq!(var("LOOPHERD_PR_MEMBER"), Some("lh-1"));
+    assert_eq!(var("LOOPHERD_PR_URL"), Some(pr));
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap();
+    assert!(cmdline.ends_with(b"\0pr\0--popup\0"), "{cmdline:?}");
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    assert_eq!(server.loopherds().len(), 1, "the popup closed on its own");
+
+    assert_eq!(server.request("popup.close")["result"]["type"], "ok");
+    server.wait_for_loopherds(0);
+}
+
 const LIVE: &str = "/home/u/.config/herdr/herdr.sock";
 
 #[test]

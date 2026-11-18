@@ -2,11 +2,16 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+use crate::pr_link::PrHeads;
 use crate::shell::run_within;
 use crate::worktree::remote_timeout;
+
+/// A click waits on this lookup, so it gets a short deadline of its own.
+const HEAD_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// An open pull request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +56,12 @@ impl PullRequests for GhCli {
             return Ok(PrLookup::Unknown("origin isn't on GitHub".into()));
         };
         if host != "github.com" {
-            let Some(status) = self.run(repo, &["auth", "status", "--hostname", &host])? else {
+            let Some(status) = self.run(
+                repo,
+                &["auth", "status", "--hostname", &host],
+                remote_timeout()?,
+            )?
+            else {
                 return Ok(no_gh());
             };
             if !status.status.success() {
@@ -76,22 +86,48 @@ impl PullRequests for GhCli {
             "--head",
             branch,
         ];
-        match self.run(repo, &args)? {
+        match self.run(repo, &args, remote_timeout()?)? {
             Some(output) => lookup_from(&output),
             None => Ok(no_gh()),
         }
     }
 }
 
+impl PrHeads for GhCli {
+    fn head_of(&self, pr: &str) -> Result<Option<String>> {
+        let args = [
+            "pr",
+            "view",
+            pr,
+            "--json",
+            "headRefName",
+            "--jq",
+            ".headRefName",
+        ];
+        let Some(output) = self.run(Path::new("."), &args, HEAD_TIMEOUT)? else {
+            bail!("no GitHub CLI (gh) on PATH");
+        };
+        let said = String::from_utf8_lossy(&output.stderr);
+        if output.status.success() {
+            let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            return Ok((!head.is_empty()).then_some(head));
+        }
+        if said.contains("Could not resolve to a PullRequest") {
+            return Ok(None);
+        }
+        bail!("gh pr view: {}", said.trim())
+    }
+}
+
 impl GhCli {
-    /// Runs gh with `args`; `None` when there's no gh to run.
-    fn run(&self, repo: &Path, args: &[&str]) -> Result<Option<Output>> {
+    /// Runs gh with `args` for up to `deadline`; `None` when there's no gh to run.
+    fn run(&self, repo: &Path, args: &[&str], deadline: Duration) -> Result<Option<Output>> {
         let mut gh = Command::new(&self.program);
         gh.args(args)
             .current_dir(repo)
             .env("GH_PROMPT_DISABLED", "1");
         let shown = format!("gh {}", args[..2].join(" "));
-        match run_within(&mut gh, remote_timeout()?) {
+        match run_within(&mut gh, deadline) {
             Err(e) if is_not_found(&e) => Ok(None),
             Err(e) => Err(e.context(format!("run {shown}"))),
             Ok(None) => bail!("{shown} didn't answer in time"),
@@ -348,5 +384,67 @@ mod tests {
         gh.program = dir.path().join("no-such-gh");
 
         assert_eq!(gh.open_on(dir.path(), "feat/x").unwrap(), no_gh());
+    }
+
+    /// A fake gh that records its arguments and answers `pr view` with
+    /// `stdout`, or fails with `stderr`.
+    fn fake_gh_view(answer: Result<&str, &str>) -> (tempfile::TempDir, GhCli) {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("gh");
+        let args = dir.path().join("args");
+        let say = match answer {
+            Ok(stdout) => format!("echo '{stdout}'"),
+            Err(stderr) => format!("echo '{stderr}' >&2; exit 1"),
+        };
+        let script = format!("#!/bin/sh\necho \"$@\" >> '{}'\n{say}\n", args.display());
+        crate::test_fakes::executable(&program, script);
+        (dir, GhCli { program })
+    }
+
+    const PR: &str = "https://github.com/o/r/pull/12";
+
+    #[test]
+    fn asks_gh_for_a_prs_head_branch() {
+        let (dir, gh) = fake_gh_view(Ok("feat/LH-1-x"));
+
+        assert_eq!(gh.head_of(PR).unwrap(), Some("feat/LH-1-x".into()));
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("args")).unwrap(),
+            format!("pr view {PR} --json headRefName --jq .headRefName\n")
+        );
+    }
+
+    #[test]
+    fn a_pr_github_doesnt_have_has_no_head() {
+        let (_dir, gh) = fake_gh_view(Err(
+            "GraphQL: Could not resolve to a PullRequest with the number of 12. (repository.pullRequest)",
+        ));
+
+        assert_eq!(gh.head_of(PR).unwrap(), None);
+    }
+
+    #[test]
+    fn a_gh_that_fails_otherwise_is_an_error() {
+        let (_dir, gh) = fake_gh_view(Err(
+            "To get started with GitHub CLI, please run:  gh auth login",
+        ));
+
+        let err = gh.head_of(PR).unwrap_err();
+
+        assert!(format!("{err:#}").contains("gh auth login"), "{err:#}");
+    }
+
+    #[test]
+    fn no_gh_to_ask_is_an_error() {
+        let (dir, mut gh) = fake_gh_view(Ok("feat/x"));
+        gh.program = dir.path().join("no-such-gh");
+
+        let err = gh.head_of(PR).unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("no GitHub CLI (gh) on PATH"),
+            "{err:#}"
+        );
     }
 }
