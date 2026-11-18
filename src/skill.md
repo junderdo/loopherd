@@ -384,7 +384,9 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   UserPromptSubmit hook fails while `[notify] pane_label` is on, else
   warns), hooks calling a binary other than the `loopherd` on PATH
   (fails), running a binary other than PATH's (warns), herdr unreachable
-  on its socket, silent for 5s, or older than 0.9.5 (fails). A
+  on its socket, silent for 5s, or older than 0.9.5 (fails). The loopherd
+  herdr plugin missing, disabled, or at another version than loopherd
+  warns only. A
   `config.toml` or `[notify]` that doesn't load fails; unset lead
   defaults or limits warn, naming `loopherd setup`. An invalid herd file,
   or a herd `repo` missing or not a git repo, fails. An unparseable

@@ -11,7 +11,7 @@ use anyhow::{Result, anyhow, bail};
 
 use super::events::{Connection, OnPush, PaneNotFound, Pushed, Subscriber, Subscription};
 use super::{
-    Agent, AgentStatus, Herdr, MalformedReply, NewTab, Pane, Server, StartOutcome, Tab,
+    Agent, AgentStatus, Herdr, MalformedReply, NewTab, Pane, Plugin, Server, StartOutcome, Tab,
     WaitOutcome, Workspace,
 };
 
@@ -119,6 +119,8 @@ pub struct FakeHerdr {
     pub version: String,
     /// Answers `server` in place of a running server at `version`.
     pub server: Option<Server>,
+    /// The loopherd plugin; installed, enabled and at the crate's version by default.
+    pub loopherd_plugin: Option<Plugin>,
     state: Mutex<State>,
 }
 
@@ -149,6 +151,11 @@ impl FakeHerdr {
             socket: Some(FAKE_SOCKET.into()),
             version: "0.9.5".into(),
             server: None,
+            loopherd_plugin: Some(Plugin {
+                enabled: true,
+                version: env!("CARGO_PKG_VERSION").into(),
+                linked: None,
+            }),
             state: Mutex::default(),
         }
     }
@@ -699,6 +706,13 @@ impl Herdr for FakeHerdr {
             agent.display_agent = label.map(str::to_string);
         }
         Ok(())
+    }
+
+    fn plugin(&self, id: &str, _timeout: Duration) -> Result<Option<Plugin>> {
+        if self.is_down() {
+            bail!("herdr server not running");
+        }
+        Ok(self.loopherd_plugin.clone().filter(|_| id == "loopherd"))
     }
 
     fn socket(&self) -> Option<PathBuf> {

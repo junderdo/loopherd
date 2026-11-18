@@ -27,7 +27,9 @@ fn sandbox(version: Option<&str>) -> Sandbox {
 }
 
 /// A PATH holding the binary under test and a herdr that answers
-/// `status server --json` by running `status`.
+/// `status server --json` by running `status`, and lists its plugins from
+/// `plugins.json` in the sandbox, which starts with the loopherd plugin
+/// installed at this crate's version.
 fn sandbox_with(status: &str) -> Sandbox {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
@@ -35,19 +37,52 @@ fn sandbox_with(status: &str) -> Sandbox {
     std::os::unix::fs::symlink(LOOPHERD, bin.join("loopherd")).unwrap();
     executable(
         &bin.join("herdr"),
-        format!("#!/bin/sh\n[ \"$*\" = 'status server --json' ] || exit 64\n{status}\n"),
+        format!(
+            "#!/bin/sh\ncase \"$*\" in\n\
+             'status server --json') {status} ;;\n\
+             'plugin list --plugin loopherd --json') [ -e '{dir}/stall' ] && sleep 60; cat '{dir}/plugins.json' ;;\n\
+             *) exit 64 ;;\nesac\n",
+            dir = dir.path().display()
+        ),
     );
-    let settings = dir.path().join("settings.json");
     fs::create_dir_all(dir.path().join("config")).unwrap();
     fs::write(
         dir.path().join("config/config.toml"),
         "context_window = 200000\n[lead_defaults]\nmerge = false\n",
     )
     .unwrap();
-    Sandbox { dir, bin, settings }
+    let sandbox = Sandbox {
+        settings: dir.path().join("settings.json"),
+        dir,
+        bin,
+    };
+    sandbox.list_plugins(&[plugin(true, VERSION, "github")]);
+    sandbox
+}
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// A plugin as `herdr plugin list --json` lists it, with `source.kind` `kind`.
+fn plugin(enabled: bool, version: &str, kind: &str) -> serde_json::Value {
+    serde_json::json!({
+        "plugin_id": "loopherd",
+        "name": "loopherd",
+        "enabled": enabled,
+        "version": version,
+        "plugin_root": "/src/loopherd/herdr-plugin",
+        "source": {"kind": kind},
+    })
 }
 
 impl Sandbox {
+    fn list_plugins(&self, plugins: &[serde_json::Value]) {
+        let reply = serde_json::json!({
+            "id": "cli:plugin",
+            "result": {"plugins": plugins, "type": "plugin_list"},
+        });
+        fs::write(self.dir.path().join("plugins.json"), reply.to_string()).unwrap();
+    }
+
     fn loopherd(&self, args: &[&str]) -> Output {
         self.command(args).output().unwrap()
     }
@@ -97,7 +132,7 @@ fn a_sound_install_prints_one_line_and_exits_0() {
     let s = sandbox(Some("0.9.5"));
     s.install_hooks();
     let out = s.doctor(&[]);
-    assert_eq!(stdout(&out), "doctor: 13 ok, 0 warnings, 0 failures\n");
+    assert_eq!(stdout(&out), "doctor: 14 ok, 0 warnings, 0 failures\n");
     assert_eq!(out.status.code(), Some(0));
 }
 
@@ -118,7 +153,7 @@ fn missing_hooks_in_the_given_settings_fail_naming_install_hook_and_exit_1() {
         "{text}"
     );
     assert!(
-        text.ends_with("doctor: 8 ok, 1 warnings, 4 failures\n"),
+        text.ends_with("doctor: 9 ok, 1 warnings, 4 failures\n"),
         "{text}"
     );
     assert_eq!(out.status.code(), Some(1));
@@ -238,7 +273,7 @@ fn settings_given_doctor_runs_without_home_or_a_config_dir() {
         stdout(&out),
         "warning config and state: not checked: HOME is not set; \
          fix: set HOME\n\
-         doctor: 9 ok, 1 warnings, 0 failures\n"
+         doctor: 10 ok, 1 warnings, 0 failures\n"
     );
     assert_eq!(out.status.code(), Some(0));
 }
@@ -271,12 +306,93 @@ fn verbose_lists_every_check_and_json_gives_them_as_data() {
     let s = sandbox(Some("0.9.5"));
     s.install_hooks();
     let verbose = stdout(&s.doctor(&["--verbose"]));
-    assert_eq!(verbose.lines().count(), 14, "{verbose}");
+    assert_eq!(verbose.lines().count(), 15, "{verbose}");
     assert!(verbose.contains("ok herdr version: 0.9.5\n"), "{verbose}");
     let out = s.doctor(&["--json"]);
     let data: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(data["ok"], 13);
+    assert_eq!(data["ok"], 14);
     assert_eq!(data["checks"][8]["name"], "herdr version");
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn the_herdr_plugin_only_ever_warns() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    for (plugins, line) in [
+        (
+            vec![],
+            "warning herdr plugin: loopherd's herdr plugin isn't installed, so its actions, \
+             popups and event hooks are unavailable; \
+             fix: herdr plugin install junderdo/loopherd/herdr-plugin\n"
+                .to_string(),
+        ),
+        (
+            vec![plugin(false, VERSION, "github")],
+            "warning herdr plugin: loopherd's herdr plugin is disabled, so its actions, \
+             popups and event hooks are unavailable; fix: herdr plugin enable loopherd\n"
+                .to_string(),
+        ),
+        (
+            vec![plugin(true, "0.0.1", "local")],
+            format!(
+                "warning herdr plugin: plugin 0.0.1 differs from loopherd {VERSION}; \
+                 fix: bring the linked plugin at /src/loopherd/herdr-plugin to loopherd {VERSION}\n"
+            ),
+        ),
+    ] {
+        s.list_plugins(&plugins);
+        let out = s.doctor(&[]);
+        assert_eq!(
+            stdout(&out),
+            format!("{line}doctor: 13 ok, 1 warnings, 0 failures\n")
+        );
+        assert_eq!(out.status.code(), Some(0));
+    }
+}
+
+#[test]
+fn a_plugin_list_herdr_refuses_warns() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    fs::remove_file(s.dir.path().join("plugins.json")).unwrap();
+    let out = s.doctor(&[]);
+    assert!(
+        stdout(&out).starts_with("warning herdr plugin: can't list herdr's plugins: "),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn a_plugin_list_failure_warns_with_a_diagnostic_not_a_retry() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    fs::remove_file(s.dir.path().join("plugins.json")).unwrap();
+    let text = stdout(&s.doctor(&[]));
+    assert!(
+        text.contains("; fix: run `herdr plugin list --plugin loopherd` to see why\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_stalled_plugin_list_warns_after_the_deadline_instead_of_hanging() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    fs::write(s.dir.path().join("stall"), "").unwrap();
+    let started = std::time::Instant::now();
+    let out = s.doctor(&[]);
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    assert!(
+        stdout(&out).starts_with(
+            "warning herdr plugin: can't list herdr's plugins: \
+             herdr didn't answer plugin list within 5s; "
+        ),
+        "{}",
+        stdout(&out)
+    );
     assert_eq!(out.status.code(), Some(0));
 }
 
@@ -312,7 +428,7 @@ fn a_herd_narrows_the_herd_checks_and_an_unknown_one_exits_2() {
     fs::write(herds.join("broken.toml"), "colour = 1\n").unwrap();
     assert_eq!(s.doctor(&[]).status.code(), Some(1));
     let out = s.doctor(&["h"]);
-    assert_eq!(stdout(&out), "doctor: 15 ok, 0 warnings, 0 failures\n");
+    assert_eq!(stdout(&out), "doctor: 16 ok, 0 warnings, 0 failures\n");
     assert_eq!(out.status.code(), Some(0));
     let out = s.doctor(&["nope"]);
     assert_eq!(out.status.code(), Some(2), "{out:?}");
@@ -346,8 +462,11 @@ fn a_herdr_that_wedges_listing_agents_fails_after_the_deadline_instead_of_hangin
     assert!(started.elapsed() < std::time::Duration::from_secs(20));
     assert_eq!(
         stdout(&out),
-        "failure members: herdr didn't list its agents within 5s; fix: restart herdr's server\n\
-         doctor: 13 ok, 0 warnings, 1 failures\n"
+        "warning herdr plugin: can't list herdr's plugins: \
+         herdr didn't answer plugin list within 5s; \
+         fix: run `herdr plugin list --plugin loopherd` to see why\n\
+         failure members: herdr didn't list its agents within 5s; fix: restart herdr's server\n\
+         doctor: 13 ok, 1 warnings, 1 failures\n"
     );
     assert_eq!(out.status.code(), Some(1));
 }

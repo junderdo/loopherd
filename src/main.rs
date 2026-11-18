@@ -373,12 +373,13 @@ enum Command {
     },
     /// Check this machine's loopherd setup: loopherd's hooks in Claude's
     /// settings, the binary they call against the `loopherd` on PATH, herdr's
-    /// server and version, config.toml, herd files and their repos, the
-    /// ledger, pause files, mailboxes and members' panes, and with
-    /// `--trackers` each herd's `source` and `backlog`. Only reads. Prints each warning and
-    /// failure with the command that fixes it, then `doctor: <n> ok, <n>
-    /// warnings, <n> failures`. Exits 0 when clean or only warnings, 1 on any
-    /// failure, 2 when it couldn't run.
+    /// server and version, whether loopherd's herdr plugin is installed,
+    /// enabled and at loopherd's version (warnings only), config.toml, herd
+    /// files and their repos, the ledger, pause files, mailboxes and members'
+    /// panes, and with `--trackers` each herd's `source` and `backlog`. Only
+    /// reads. Prints each warning and failure with the command that fixes
+    /// it, then `doctor: <n> ok, <n> warnings, <n> failures`. Exits 0 when
+    /// clean or only warnings, 1 on any failure, 2 when it couldn't run.
     Doctor {
         /// List every check, not only the problems.
         #[arg(long)]

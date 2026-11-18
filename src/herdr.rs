@@ -89,6 +89,15 @@ pub struct NewTab {
     pub pane_id: String,
 }
 
+/// A herdr plugin as `herdr plugin list` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Plugin {
+    pub enabled: bool,
+    pub version: String,
+    /// The directory `herdr plugin link` registered; `None` when installed.
+    pub linked: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartOutcome {
     Ready(Agent),
@@ -137,6 +146,9 @@ pub trait Herdr {
     /// Opens the loopherd plugin's pane `entrypoint` with `env` set for its
     /// process. Refused while another herdr modal is open.
     fn open_plugin_pane(&self, entrypoint: &str, env: &[(&str, &str)]) -> Result<()>;
+    /// The plugin `id` in the reached herdr's registry; `None` when neither
+    /// installed nor linked. Gives up after `timeout`.
+    fn plugin(&self, id: &str, timeout: Duration) -> Result<Option<Plugin>>;
     /// The socket of the herdr these calls reach; `None` when herdr can't say.
     fn socket(&self) -> Option<PathBuf>;
     /// The server as `herdr status server` reports it, giving up after `timeout`.
@@ -205,6 +217,19 @@ impl CliHerdr {
     fn call_ok(&self, args: &[&str]) -> Result<Value> {
         ok_reply(args, self.call(args)?)
     }
+
+    fn call_ok_within(&self, args: &[&str], timeout: Duration) -> Result<Value> {
+        let ran = crate::shell::run_within(&mut self.command(args), timeout)
+            .with_context(|| format!("run herdr {}", args.join(" ")))?;
+        let Some(out) = ran else {
+            bail!(
+                "herdr didn't answer {} within {}",
+                args[..2].join(" "),
+                humantime::format_duration(timeout)
+            );
+        };
+        ok_reply(args, reply(args, out)?)
+    }
 }
 
 fn ok_reply(args: &[&str], reply: std::result::Result<Value, ApiError>) -> Result<Value> {
@@ -258,6 +283,20 @@ struct AgentJson {
     terminal_title_stripped: Option<String>,
     #[serde(default)]
     display_agent: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PluginJson {
+    plugin_id: String,
+    enabled: bool,
+    version: String,
+    plugin_root: PathBuf,
+    source: PluginSourceJson,
+}
+
+#[derive(Deserialize)]
+struct PluginSourceJson {
+    kind: String,
 }
 
 #[derive(Deserialize)]
@@ -563,6 +602,20 @@ impl Herdr for CliHerdr {
                 String::from_utf8_lossy(&out.stderr).trim()
             ),
         }
+    }
+
+    fn plugin(&self, id: &str, timeout: Duration) -> Result<Option<Plugin>> {
+        let args = ["plugin", "list", "--plugin", id, "--json"];
+        let listed = self.call_ok_within(&args, timeout)?;
+        let plugins: Vec<PluginJson> = parse(&listed["plugins"], &args.join(" "))?;
+        Ok(plugins
+            .into_iter()
+            .find(|p| p.plugin_id == id)
+            .map(|p| Plugin {
+                enabled: p.enabled,
+                version: p.version,
+                linked: (p.source.kind == "local").then_some(p.plugin_root),
+            }))
     }
 
     fn socket(&self) -> Option<PathBuf> {
