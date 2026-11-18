@@ -1,6 +1,7 @@
 //! `loopherd revive`: bring ledger agents back after a restart or closed tab.
 
 use std::collections::BTreeMap;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -8,6 +9,8 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::herdr::{Agent, AgentStatus, Herdr, StartOutcome, Workspace, wait_for_shell_prompt};
 use crate::ledger::{AgentRecord, Ledger};
+use crate::lock::Lock;
+use crate::report::{Body, Entry, append};
 use crate::subagent_view::{ShowsSubagentView, TEXT_REACHES_SUBAGENT, ensure_main_view};
 
 /// Sent to a lead whose watch isn't running: after a restart nothing else wakes it (D17).
@@ -27,8 +30,11 @@ pub struct ReviveRequest {
     pub settle_timeout: Duration,
     pub poll_interval: Duration,
     pub start_timeout: Duration,
-    /// Where watches hold their locks, to tell whether a lead's is running.
-    pub watch_dir: PathBuf,
+    /// Members' mailboxes, where watches also hold their locks.
+    pub reports_dir: PathBuf,
+    /// Run by herdr's startup hook: only entries recorded on herdr's own
+    /// socket, and a note in the mailbox of each lead revived or not re-armed.
+    pub startup: bool,
 }
 
 /// One line per entry, and whether any entry failed.
@@ -52,6 +58,9 @@ pub fn revive(
     req: &ReviveRequest,
     live: &dyn Fn(&str) -> String,
 ) -> Result<Revived> {
+    // A second revive, such as herdr's startup hook beside a manual one, waits,
+    // then finds what the first started alive.
+    let _only_revive = only_revive(&req.reports_dir)?;
     let mut agents = settled_agents(herdr, req).context("settle")?;
     // herdr may still list a continued session under its old id.
     for agent in &mut agents {
@@ -64,6 +73,12 @@ pub fn revive(
             .remove(name)
             .ok_or_else(|| anyhow!("{name} is not in the ledger"))?;
         entries = BTreeMap::from([(name.clone(), only)]);
+    }
+    if req.startup {
+        let here = herdr
+            .socket()
+            .context("herdr didn't say which socket it serves, so no entry can be matched to it")?;
+        entries.retain(|_, r| r.socket.as_ref() == Some(&here));
     }
     for mut record in entries.into_values() {
         if !record.retired {
@@ -109,6 +124,17 @@ pub fn revive(
             }
         }
         rearm_lead(herdr, req, &record, &mut outcome);
+        let line = outcome.line(&record);
+        // Nobody reads a startup hook's output, so these leads go to the next watch.
+        let unseen = matches!(outcome, Outcome::Started { .. })
+            || matches!(outcome.rearm(), Some(Rearm::SubagentView));
+        if req.startup && record.is_lead() && unseen {
+            let text = format!("herdr's startup revive: {line}");
+            let note = Entry::new(SystemTime::now(), Body::Note { text });
+            if let Err(e) = append(&req.reports_dir, &record.name, &note) {
+                warnings.push(format!("no note in its mailbox: {e:#}"));
+            }
+        }
         revived.lines.extend(
             warnings
                 .iter()
@@ -119,9 +145,16 @@ pub fn revive(
                 outcome.rearm(),
                 Some(Rearm::Failed(_) | Rearm::Unchecked(_) | Rearm::SubagentView)
             );
-        revived.lines.push(outcome.line(&record));
+        revived.lines.push(line);
     }
     Ok(revived)
+}
+
+fn only_revive(dir: &Path) -> Result<Lock> {
+    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join("revive.lock");
+    let file = File::create(&path).with_context(|| format!("open {}", path.display()))?;
+    Lock::wait(file).with_context(|| format!("lock {}", path.display()))
 }
 
 /// Prompts a lead that is alive or just started, unless its watch is running
@@ -143,7 +176,7 @@ fn rearm_lead(herdr: &dyn Herdr, req: &ReviveRequest, record: &AgentRecord, outc
         let retry = format!("run loopherd revive --name {name}");
         ensure_main_view(herdr, name, pane, TEXT_REACHES_SUBAGENT, &retry)
     };
-    *rearm = match crate::watch::lead_watch_running(&req.watch_dir, name) {
+    *rearm = match crate::watch::lead_watch_running(&req.reports_dir, name) {
         Ok(true) => Rearm::WatchRunning,
         Ok(false) => match pane.map(main_view).transpose() {
             Err(error) if error.is::<ShowsSubagentView>() => Rearm::SubagentView,
@@ -488,8 +521,15 @@ mod tests {
             settle_timeout: Duration::from_secs(5),
             poll_interval: Duration::ZERO,
             start_timeout: Duration::from_secs(60),
-            watch_dir: "/nonexistent/loopherd-test/reports".into(),
+            reports_dir: shared_reports_dir().into(),
+            startup: false,
         }
+    }
+
+    /// Holds no watch locks or mailboxes; each test needing one makes its own.
+    fn shared_reports_dir() -> &'static Path {
+        static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        DIR.get_or_init(|| tempfile::tempdir().unwrap()).path()
     }
 
     fn record(name: &str, cwd: &Path) -> AgentRecord {
@@ -1166,7 +1206,7 @@ mod tests {
         let herdr = herdr().with_live_agent(Some("lead-h"), Some("sess-lead-h"), "w1:p4");
         let mut ledger = ledger([lead("lead-h", cwd.path())]);
         let req = ReviveRequest {
-            watch_dir: state.path().into(),
+            reports_dir: state.path().into(),
             ..request()
         };
         let (out, code) = run(&herdr, &mut ledger, &req);
@@ -1185,7 +1225,7 @@ mod tests {
         let herdr = herdr().with_live_agent(Some("lead-h"), Some("sess-lead-h"), "w1:p4");
         let mut ledger = ledger([lead("lead-h", cwd.path())]);
         let req = ReviveRequest {
-            watch_dir: state.path().into(),
+            reports_dir: state.path().into(),
             ..request()
         };
         run(&herdr, &mut ledger, &req);
@@ -1302,7 +1342,7 @@ mod tests {
         ]);
         let req = ReviveRequest {
             dry_run: true,
-            watch_dir: state.path().into(),
+            reports_dir: state.path().into(),
             ..request()
         };
         let (out, _) = run(&herdr, &mut ledger, &req);
@@ -1316,6 +1356,209 @@ mod tests {
             )
         );
         assert!(herdr.prompts().is_empty());
+    }
+
+    fn on_socket(record: AgentRecord, socket: Option<&str>) -> AgentRecord {
+        AgentRecord {
+            socket: socket.map(PathBuf::from),
+            ..record
+        }
+    }
+
+    fn startup(reports_dir: &Path) -> ReviveRequest {
+        ReviveRequest {
+            reports_dir: reports_dir.into(),
+            startup: true,
+            ..request()
+        }
+    }
+
+    #[test]
+    fn a_startup_revive_touches_only_entries_recorded_on_herdrs_own_socket() {
+        let cwd = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let herdr = dev_herdr();
+        let mut ledger = ledger([
+            on_socket(record("dev", cwd.path()), Some("/run/dev.sock")),
+            on_socket(record("live", cwd.path()), Some("/run/live.sock")),
+            on_socket(record("unknown", cwd.path()), None),
+        ]);
+
+        let (out, code) = run(&herdr, &mut ledger, &startup(state.path()));
+
+        assert_eq!((out.as_str(), code), ("resumed dev w1:p1", 0));
+        let started: Vec<_> = herdr.started().into_iter().map(|s| s.name).collect();
+        assert_eq!(started, ["dev"]);
+        assert_eq!(ledger.0["live"].pane_id, "w1:p1");
+        assert_eq!(
+            ledger.0["live"].socket.as_deref(),
+            Some(Path::new("/run/live.sock"))
+        );
+    }
+
+    #[test]
+    fn a_startup_revive_refuses_when_herdr_names_no_socket() {
+        let cwd = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let mut herdr = herdr();
+        herdr.socket = None;
+        let mut ledger = ledger([on_socket(record("a", cwd.path()), None)]);
+
+        let err = revive(&herdr, &mut ledger, &startup(state.path()), &|s| {
+            s.to_string()
+        })
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("which socket"), "{err:#}");
+        assert!(herdr.started().is_empty());
+    }
+
+    #[test]
+    fn a_startup_revive_with_nothing_to_revive_starts_nothing() {
+        let cwd = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let mut herdr = herdr().with_live_agent(Some("a"), Some("sess-a"), "w1:p4");
+        herdr.socket = Some("/run/dev.sock".into());
+        for records in [
+            vec![],
+            vec![on_socket(record("a", cwd.path()), Some("/run/dev.sock"))],
+        ] {
+            let mut ledger = ledger(records);
+            let (out, code) = run(&herdr, &mut ledger, &startup(state.path()));
+            assert!(out.is_empty() || out == "alive a w1:p4", "{out}");
+            assert_eq!(code, 0, "{out}");
+        }
+        assert!(herdr.started().is_empty());
+        assert!(herdr.tabs().is_empty());
+    }
+
+    fn notes(dir: &Path, name: &str) -> Vec<String> {
+        let (entries, warnings) = crate::report::history(dir, name).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        entries
+            .iter()
+            .filter_map(|e| match &e.body {
+                crate::report::Body::Note { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn dev_herdr() -> FakeHerdr {
+        let mut herdr = herdr();
+        herdr.socket = Some("/run/dev.sock".into());
+        herdr
+    }
+
+    fn dev(record: AgentRecord) -> AgentRecord {
+        on_socket(record, Some("/run/dev.sock"))
+    }
+
+    #[test]
+    fn a_startup_revive_leaves_a_note_for_each_lead_it_revives() {
+        let cwd = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let herdr = dev_herdr();
+        let mut ledger = ledger([
+            dev(lead("lead-h", cwd.path())),
+            dev(record("w", cwd.path())),
+        ]);
+
+        let (out, code) = run(&herdr, &mut ledger, &startup(state.path()));
+
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(
+            notes(state.path(), "lead-h"),
+            ["herdr's startup revive: resumed lead-h w1:p1 (prompted to re-arm its watch)"]
+        );
+        assert!(notes(state.path(), "w").is_empty());
+    }
+
+    #[test]
+    fn a_startup_revive_leaves_a_note_for_a_lead_it_skips_for_a_subagent_view() {
+        let cwd = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let herdr = dev_herdr().with_live_agent(Some("lead-h"), Some("sess-lead-h"), "w1:p4");
+        herdr.set_screen("w1:p4", SUBAGENT_PROMPT);
+        let mut ledger = ledger([dev(lead("lead-h", cwd.path()))]);
+
+        let (out, code) = run(&herdr, &mut ledger, &startup(state.path()));
+
+        assert_eq!(code, 1, "{out}");
+        assert_eq!(
+            notes(state.path(), "lead-h"),
+            [format!(
+                "herdr's startup revive: alive lead-h w1:p4{SKIPPED_REARM}"
+            )]
+        );
+    }
+
+    #[test]
+    fn a_startup_revive_leaves_no_note_for_a_lead_already_running_its_watch() {
+        let cwd = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let _watch = hold_watch(state.path(), "lead-h");
+        let herdr = dev_herdr().with_live_agent(Some("lead-h"), Some("sess-lead-h"), "w1:p4");
+        let mut ledger = ledger([dev(lead("lead-h", cwd.path()))]);
+
+        let (out, code) = run(&herdr, &mut ledger, &startup(state.path()));
+
+        assert_eq!(
+            (out.as_str(), code),
+            ("alive lead-h w1:p4 (watch running)", 0)
+        );
+        assert!(notes(state.path(), "lead-h").is_empty());
+    }
+
+    #[test]
+    fn a_manual_revive_leaves_no_notes() {
+        let cwd = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut ledger = ledger([lead("lead-h", cwd.path())]);
+        let req = ReviveRequest {
+            reports_dir: state.path().into(),
+            ..request()
+        };
+
+        let (out, _) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(out, "resumed lead-h w1:p1 (prompted to re-arm its watch)");
+        assert!(notes(state.path(), "lead-h").is_empty());
+    }
+
+    #[test]
+    fn a_revive_waits_while_another_is_running() {
+        let state = tempfile::tempdir().unwrap();
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let mut first = dev_herdr();
+        first.on_agents = Some(Box::new(move || {
+            let _ = entered_tx.send(());
+            let _ = released.recv();
+        }));
+        let first_req = startup(state.path());
+        let manual_req = ReviveRequest {
+            startup: false,
+            ..startup(state.path())
+        };
+        let first_run = std::thread::spawn(move || {
+            revive(&first, &mut ledger([]), &first_req, &|s| s.to_string()).unwrap()
+        });
+        entered.recv().unwrap();
+
+        let manual = std::thread::spawn(move || {
+            revive(&herdr(), &mut ledger([]), &manual_req, &|s| s.to_string()).unwrap()
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !manual.is_finished(),
+            "the manual revive ran during the startup one"
+        );
+
+        drop(release);
+        first_run.join().unwrap();
+        manual.join().unwrap();
     }
 
     #[test]
