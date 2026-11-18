@@ -13,9 +13,10 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 const INSTALL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install");
+const DOCTOR_FAILS: &str = "doctor: 8 ok, 0 warnings, 1 failures";
 
 /// A temp HOME and a PATH whose `cargo` "builds" a script that logs its
-/// arguments, or fails when `build_fails`.
+/// arguments, or fails when `build_fails`. Its `doctor` reports a failure.
 struct Sandbox {
     _dir: tempfile::TempDir,
     home: PathBuf,
@@ -36,7 +37,10 @@ impl Sandbox {
         fs::create_dir_all(built.parent().unwrap()).unwrap();
         executable(
             &built,
-            format!("#!/bin/sh\necho \"new $*\" >> '{}'\n", log.display()),
+            format!(
+                "#!/bin/sh\necho \"new $*\" >> '{}'\n[ \"$1\" != doctor ] || {{ echo '{DOCTOR_FAILS}'; exit 1; }}\n",
+                log.display()
+            ),
         );
         let cargo = match build_fails {
             true => "#!/bin/sh\necho 'error: could not compile' >&2\nexit 101\n".to_string(),
@@ -122,9 +126,33 @@ fn install_copies_the_build_into_place_then_runs_install_hook() {
     );
     assert_eq!(
         fs::read_to_string(&sandbox.log).unwrap(),
-        "new install-hook --settings /tmp/s.json\nnew setup\n"
+        "new install-hook --settings /tmp/s.json\nnew setup\nnew doctor --settings /tmp/s.json\n"
     );
     assert_eq!(sandbox.bin_dir_entries(), ["loopherd"]);
+}
+
+#[test]
+fn install_prints_a_failing_doctor_last_and_still_succeeds() {
+    let sandbox = Sandbox::new(false);
+
+    let out = sandbox.install(&["--no-extras", "--settings", "/tmp/s.json"]);
+
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.trim_end().ends_with(DOCTOR_FAILS), "{stdout}");
+}
+
+#[test]
+fn install_remove_runs_no_doctor() {
+    let sandbox = Sandbox::new(false);
+
+    let out = sandbox.install(&["--remove", "--settings", "/tmp/s.json"]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        fs::read_to_string(&sandbox.log).unwrap(),
+        "new install-hook --remove --settings /tmp/s.json\n"
+    );
 }
 
 #[test]
@@ -511,7 +539,7 @@ fn a_lead_defaults_list_is_consumed_and_not_passed_to_install_hook() {
         assert!(out.status.success(), "{args:?}: {out:?}");
         assert_eq!(
             fs::read_to_string(&sandbox.log).unwrap(),
-            "new setup --lead-defaults=merge,install\nnew install-hook --settings /tmp/s.json\n",
+            "new setup --lead-defaults=merge,install\nnew install-hook --settings /tmp/s.json\nnew doctor --settings /tmp/s.json\n",
             "{args:?}"
         );
     }
@@ -530,7 +558,7 @@ fn no_splash_is_consumed_and_not_passed_to_install_hook() {
     );
     assert_eq!(
         fs::read_to_string(&sandbox.log).unwrap(),
-        "new install-hook --settings /tmp/s.json\nnew setup\n"
+        "new install-hook --settings /tmp/s.json\nnew setup\nnew doctor --settings /tmp/s.json\n"
     );
 }
 
@@ -674,7 +702,7 @@ fn install_without_the_splash_file_still_installs() {
     );
     assert_eq!(
         fs::read_to_string(&sandbox.log).unwrap(),
-        "new install-hook --settings /tmp/s.json\nnew setup\n"
+        "new install-hook --settings /tmp/s.json\nnew setup\nnew doctor --settings /tmp/s.json\n"
     );
 }
 

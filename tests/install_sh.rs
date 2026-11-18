@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
 const INSTALL_SH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install.sh");
+const DOCTOR_FAILS: &str = "doctor: 8 ok, 0 warnings, 1 failures";
 
 /// A temp HOME, a fake `uname`, and a release directory laid out like
 /// GitHub's: `latest/download/<file>` and `download/<tag>/<file>`.
@@ -50,7 +51,8 @@ impl Release {
         self.dir.path().join("releases")
     }
 
-    /// One tarball per target, each holding a `loopherd` that logs `<tag> <args>`.
+    /// One tarball per target, each holding a `loopherd` that logs `<tag> <args>`
+    /// and whose `doctor` reports a failure.
     fn publish(&self, path: &str, tag: &str) {
         let out = self.base().join(path);
         fs::create_dir_all(&out).unwrap();
@@ -64,7 +66,10 @@ impl Release {
             fs::create_dir_all(&stage).unwrap();
             executable(
                 &stage.join("loopherd"),
-                format!("#!/bin/sh\necho \"{tag} $*\" >> '{}'\n", self.log.display()),
+                format!(
+                    "#!/bin/sh\necho \"{tag} $*\" >> '{}'\n[ \"$1\" != doctor ] || {{ echo '{DOCTOR_FAILS}'; exit 1; }}\n",
+                    self.log.display()
+                ),
             );
             let tarball = out.join(format!("loopherd-{target}.tar.gz"));
             run_ok(
@@ -149,8 +154,20 @@ fn installs_the_latest_release_then_its_hooks_and_setup() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o755);
-    assert_eq!(release.log(), "v0.2.0 install-hook\nv0.2.0 setup\n");
+    assert_eq!(
+        release.log(),
+        "v0.2.0 install-hook\nv0.2.0 setup\nv0.2.0 doctor\n"
+    );
     assert!(text(&out).contains("loopherd herds"), "{}", text(&out));
+}
+
+#[test]
+fn prints_a_failing_doctor_last_and_still_succeeds() {
+    let release = Release::new("Linux", "x86_64");
+    let out = release.install(&[]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.trim_end().ends_with(DOCTOR_FAILS), "{stdout}");
 }
 
 #[test]
@@ -171,7 +188,7 @@ fn rerunning_installs_again() {
     assert!(release.install(&[]).status.success());
     let out = release.install(&[]);
     assert!(out.status.success(), "{}", text(&out));
-    assert_eq!(release.log().lines().count(), 4);
+    assert_eq!(release.log().lines().count(), 6);
 }
 
 #[test]
@@ -224,7 +241,10 @@ fn loopherd_version_pins_a_release() {
     let release = Release::new("Linux", "x86_64");
     let out = release.install(&[("LOOPHERD_VERSION", "v0.1.0")]);
     assert!(out.status.success(), "{}", text(&out));
-    assert_eq!(release.log(), "v0.1.0 install-hook\nv0.1.0 setup\n");
+    assert_eq!(
+        release.log(),
+        "v0.1.0 install-hook\nv0.1.0 setup\nv0.1.0 doctor\n"
+    );
 }
 
 #[test]
@@ -240,7 +260,10 @@ fn a_script_stamped_by_a_release_installs_that_release() {
     .unwrap();
     let out = release.run(stamped.to_str().unwrap(), &release.path(), &[]);
     assert!(out.status.success(), "{}", text(&out));
-    assert_eq!(release.log(), "v0.1.0 install-hook\nv0.1.0 setup\n");
+    assert_eq!(
+        release.log(),
+        "v0.1.0 install-hook\nv0.1.0 setup\nv0.1.0 doctor\n"
+    );
 }
 
 #[test]
