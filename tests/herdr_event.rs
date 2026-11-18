@@ -9,18 +9,23 @@ const SOCKET: &str = "/run/herdr/herdr.sock";
 
 /// Members of the herdr at [`SOCKET`]: lh-1 in pane w1:p1 of tab w1:t1, the
 /// retired old-1 in w1:p9 of the same tab, lh-0 in w1:p5 with no tab recorded,
-/// and lh-2 in w2:p1 of tab w2:t1.
+/// lh-2 in w2:p1 of tab w2:t1, and lead-1, the lead of herd h with no herd
+/// file, so every switch off, in w4:p1 of tab w4:t1.
 fn sandbox() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("state/loopherd");
     fs::create_dir_all(&state).unwrap();
     let entry = |name: &str, pane: &str, tab: Option<&str>, retired: bool| {
+        let role = match name.starts_with("lead") {
+            true => r#""role": "lead", "herd": "h","#,
+            false => "",
+        };
         let workspace = pane.split(':').next().unwrap();
         let tab = tab
             .map(|t| format!(r#""tab_id": "{t}","#))
             .unwrap_or_default();
         format!(
-            r#""{name}": {{"name": "{name}", "pane_id": "{pane}", {tab} "session_id": null,
+            r#""{name}": {{"name": "{name}", "pane_id": "{pane}", {tab} {role} "session_id": null,
                 "repo": "/", "worktree": null, "workspace": "{workspace}", "prompt": null,
                 "prompt_sent": true, "created": "2026-11-01T00:00:00Z",
                 "socket": "{SOCKET}", "retired": {retired}}}"#
@@ -29,11 +34,12 @@ fn sandbox() -> tempfile::TempDir {
     fs::write(
         state.join("ledger.json"),
         format!(
-            "{{{}, {}, {}, {}}}",
+            "{{{}, {}, {}, {}, {}}}",
             entry("lh-1", "w1:p1", Some("w1:t1"), false),
             entry("old-1", "w1:p9", Some("w1:t1"), true),
             entry("lh-0", "w1:p5", None, false),
-            entry("lh-2", "w2:p1", Some("w2:t1"), false)
+            entry("lh-2", "w2:p1", Some("w2:t1"), false),
+            entry("lead-1", "w4:p1", Some("w4:t1"), false)
         ),
     )
     .unwrap();
@@ -324,14 +330,32 @@ fn a_member_moved_to_another_tab_goes_with_its_new_tab_not_its_old_one() {
 }
 
 #[test]
-fn a_member_moved_to_another_workspace_keeps_its_recorded_pane() {
+fn a_member_moved_to_another_workspace_goes_with_its_new_workspace_not_its_old_one() {
     let dir = sandbox();
-    let ledger = dir.path().join("state/loopherd/ledger.json");
-    let before = fs::read_to_string(&ledger).unwrap();
 
     quiet_success(&moved(dir.path(), ("w2:p1", "w2:t1"), ("w3:p2", "w3:t1")));
+    quiet_success(&workspace_closed(dir.path(), "w2"));
+    quiet_success(&tab_closed(dir.path(), "w2:t1"));
+    quiet_success(&closed(dir.path(), "pane.closed", "w2:p1"));
+    assert!(recorded(dir.path()).is_empty());
 
-    assert_eq!(fs::read_to_string(&ledger).unwrap(), before);
+    quiet_success(&workspace_closed(dir.path(), "w3"));
+    assert_eq!(recorded(dir.path()), ["lh-2 gone"]);
+}
+
+#[test]
+fn a_member_moved_to_another_workspace_goes_with_its_new_tab_and_pane() {
+    for close in [
+        |dir: &Path| tab_closed(dir, "w3:t1"),
+        |dir: &Path| closed(dir, "pane.closed", "w3:p2"),
+    ] {
+        let dir = sandbox();
+
+        quiet_success(&moved(dir.path(), ("w2:p1", "w2:t1"), ("w3:p2", "w3:t1")));
+        quiet_success(&close(dir.path()));
+
+        assert_eq!(recorded(dir.path()), ["lh-2 gone"]);
+    }
 }
 
 #[test]
@@ -385,4 +409,62 @@ fn a_member_with_no_recorded_tab_takes_the_tab_it_was_moved_to() {
     quiet_success(&tab_closed(dir.path(), "w1:t4"));
 
     assert_eq!(recorded(dir.path()), ["lh-0 gone"]);
+}
+
+#[test]
+fn a_member_moved_to_another_workspace_still_reports_from_its_pane() {
+    let dir = sandbox();
+
+    quiet_success(&moved(dir.path(), ("w2:p1", "w2:t1"), ("w3:p2", "w3:t1")));
+    let out = loopherd(dir.path(), &["report", "--kind", "done", "shipped"])
+        .env("HERDR_PANE_ID", "w2:p1")
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(recorded(dir.path()), ["lh-2 done"]);
+}
+
+/// The PreToolUse hook's output for a Bash `command` run in `pane`.
+fn tool_hook(dir: &Path, pane: &str, command: &str) -> String {
+    let mut child = loopherd(dir, &["tool-hook"])
+        .env("HERDR_PANE_ID", pane)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let input = serde_json::json!({"tool_name": "Bash", "tool_input": {"command": command}});
+    std::io::Write::write_all(child.stdin.as_mut().unwrap(), input.to_string().as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn a_lead_moved_to_another_workspace_keeps_its_guardrails() {
+    let dir = sandbox();
+    assert!(tool_hook(dir.path(), "w4:p1", "loopherd pause h").contains("deny"));
+
+    quiet_success(&moved(dir.path(), ("w4:p1", "w4:t1"), ("w5:p3", "w5:t2")));
+
+    assert!(tool_hook(dir.path(), "w4:p1", "loopherd pause h").contains("deny"));
+}
+
+#[test]
+fn a_member_moved_twice_keeps_its_first_pane_and_skips_a_late_first_move() {
+    let dir = sandbox();
+
+    quiet_success(&moved(dir.path(), ("w2:p1", "w2:t1"), ("w3:p2", "w3:t1")));
+    quiet_success(&moved(dir.path(), ("w3:p2", "w3:t1"), ("w5:p1", "w5:t1")));
+    quiet_success(&moved(dir.path(), ("w2:p1", "w2:t1"), ("w3:p2", "w3:t1")));
+    quiet_success(&workspace_closed(dir.path(), "w3"));
+    let out = loopherd(dir.path(), &["report", "--kind", "done", "shipped"])
+        .env("HERDR_PANE_ID", "w2:p1")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(recorded(dir.path()), ["lh-2 done"]);
+
+    quiet_success(&workspace_closed(dir.path(), "w5"));
+    assert_eq!(recorded(dir.path()), ["lh-2 done", "lh-2 gone"]);
 }

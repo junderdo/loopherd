@@ -31,7 +31,9 @@ pub fn refuse_own_lead(
         return Ok(());
     };
     let in_pane = pane.is_some_and(|pane| {
-        pane.socket.is_some() && entry.pane_id == pane.id && entry.socket.as_deref() == pane.socket
+        pane.socket.is_some()
+            && entry.own_pane_id() == pane.id
+            && entry.socket.as_deref() == pane.socket
     });
     if in_pane {
         bail!(
@@ -505,6 +507,7 @@ mod tests {
         AgentRecord {
             name: name.into(),
             pane_id: "w1:p1".into(),
+            env_pane_id: None,
             tab_id: None,
             session_id: Some("abc".into()),
             repo: "/src/repo".into(),

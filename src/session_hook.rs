@@ -41,7 +41,8 @@ pub fn session_hook(
     };
     let entries = ledger.entries()?;
     let live = || entries.values().filter(|e| !e.retired);
-    let Some(member) = live().find(|e| e.pane_id == pane.id && e.socket.as_deref() == Some(socket))
+    let Some(member) =
+        live().find(|e| e.own_pane_id() == pane.id && e.socket.as_deref() == Some(socket))
     else {
         return Ok(None);
     };
@@ -108,6 +109,7 @@ mod tests {
         AgentRecord {
             name: name.into(),
             pane_id: pane.into(),
+            env_pane_id: None,
             tab_id: None,
             session_id: Some(session.into()),
             repo: "/src/repo".into(),
@@ -250,6 +252,18 @@ mod tests {
 
     fn session_of(ledger: &MemLedger, name: &str) -> Option<String> {
         ledger.0[name].session_id.clone()
+    }
+
+    #[test]
+    fn a_member_moved_to_another_workspace_adopts_its_new_session_by_its_own_pane() {
+        let mut moved = member("lh-1", "w3:p2", Some(SOCKET), "old");
+        moved.env_pane_id = Some("w1:p1".into());
+        let mut ledger = ledger(vec![moved]);
+
+        let named = run(&mut ledger, Some(SOCKET), &start("clear", "new"));
+
+        assert_eq!(named.as_deref(), Some("lh-1"));
+        assert_eq!(session_of(&ledger, "lh-1").as_deref(), Some("new"));
     }
 
     #[test]

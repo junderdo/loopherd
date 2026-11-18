@@ -22,7 +22,7 @@ pub const BLOCK_RECORDED: &str = "block-recorded";
 /// Records the herdr event `event`, as `HERDR_PLUGIN_EVENT` names it, with
 /// `json` from `HERDR_PLUGIN_EVENT_JSON`, for the non-retired members of the
 /// herdr at `socket` in its pane, tab or workspace, and follows such a
-/// member's pane moved to another tab of its workspace in the ledger. Anything
+/// member's pane moved to another tab or workspace in the ledger. Anything
 /// else records nothing.
 pub fn event_hook(
     ledger: &mut dyn Ledger,
@@ -57,35 +57,49 @@ pub fn event_hook(
     }
 }
 
-/// Follows a move within the member's workspace only: a move to another
-/// gives the pane a new id, while the agent keeps the old `HERDR_PANE_ID`
-/// that its own hooks look it up by.
+/// Points the member at its pane's new pane, tab and workspace. A move to
+/// another workspace gives the pane a new id, while the agent keeps the old
+/// one in `$HERDR_PANE_ID`, so that one is kept as `env_pane_id`.
 fn follow_move(
     ledger: &mut dyn Ledger,
     entries: &BTreeMap<String, AgentRecord>,
     data: &Value,
     socket: Option<&Path>,
 ) -> Result<()> {
-    let (Some(pane), Some(previous_tab), Some(tab)) = (
+    let (Some(previous_pane), Some(previous_tab), Some(pane), Some(tab)) = (
         data["previous_pane_id"].as_str(),
         data["previous_tab_id"].as_str(),
+        data["pane"]["pane_id"].as_str(),
         data["pane"]["tab_id"].as_str(),
     ) else {
         return Ok(());
     };
-    if data["pane"]["pane_id"].as_str() != Some(pane) {
-        return Ok(());
-    }
-    let Some(member) = member_in(entries, pane, socket) else {
+    let workspaces = (
+        data["previous_workspace_id"].as_str(),
+        data["pane"]["workspace_id"].as_str(),
+    );
+    let workspace = match workspaces {
+        _ if pane == previous_pane => None,
+        (Some(previous), Some(workspace)) => Some((previous, workspace)),
+        _ => return Ok(()),
+    };
+    let Some(member) = member_in(entries, previous_pane, socket) else {
         return Ok(());
     };
-    // Hooks run unordered, so a late event for a tab the member already left is skipped.
+    // Hooks run unordered, so a late event for a place the member already left is skipped.
     ledger.update(&member.name, &mut |m| {
-        let still_there =
-            m.pane_id == pane && m.tab_id.as_deref().is_none_or(|t| t == previous_tab);
-        if !m.retired && still_there {
-            m.tab_id = Some(tab.into());
+        let still_there = m.pane_id == previous_pane
+            && m.tab_id.as_deref().is_none_or(|t| t == previous_tab)
+            && workspace.is_none_or(|(previous, _)| m.workspace == previous);
+        if m.retired || !still_there {
+            return Ok(());
         }
+        if let Some((_, workspace)) = workspace {
+            m.env_pane_id.get_or_insert_with(|| previous_pane.into());
+            m.pane_id = pane.into();
+            m.workspace = workspace.into();
+        }
+        m.tab_id = Some(tab.into());
         Ok(())
     })?;
     Ok(())
