@@ -212,7 +212,7 @@ fn decide(
     }
     if needed == Switch::Unreadable {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like, a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, or from a relative `stdin`, `fd/<n>` or all-digit path, a `trap`, `sh -c` or `eval` script that a substitution prints, `gh` after `GH_CONFIG_DIR` is set, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like, a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, or from a relative `stdin`, `fd/<n>` or all-digit path, a `trap`, `sh -c` or `eval` script that a substitution prints, `gh` after `GH_CONFIG_DIR` is set or with a command or `pr` subcommand that a `$` or substitution builds, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -452,6 +452,12 @@ struct Word {
     quoted_at: Option<usize>,
     /// Whether it holds a `<<` heredoc operator the lexer read as one.
     heredoc: bool,
+    /// Whether a `$` or a substitution stands outside quotes, so its value
+    /// may split into more words.
+    bare_expansion: bool,
+    /// Whether a backslash or a `$'…'` stood in it, whose escapes the lexer
+    /// may undo where bash keeps them.
+    escaped: bool,
     /// Its unquoted `*?[]{},` characters, a `.` for each `..`, and each `$`
     /// that opens a `${` or `$[`, in order.
     globs: String,
@@ -497,6 +503,39 @@ impl Word {
         self.quoted_at
             .is_none_or(|at| at >= operator)
             .then_some(bare)
+    }
+
+    /// Whether a `$` or a command substitution may build any of the word.
+    fn built(&self) -> bool {
+        self.commands_print || self.text.contains('$')
+    }
+
+    /// Whether the word may expand to a run of short options: it is
+    /// [`Word::built`] and the rest of it is only `-`, `+` and letters.
+    fn may_print_option(&self) -> bool {
+        let mut literal = String::new();
+        let mut chars = self.text.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '$' {
+                literal.push(c);
+            } else if chars.next_if_eq(&'{').is_some() {
+                while chars.next().is_some_and(|c| c != '}') {}
+            } else if chars
+                .next_if(|c| c.is_ascii_alphabetic() || *c == '_')
+                .is_some()
+            {
+                while chars
+                    .next_if(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .is_some()
+                {}
+            } else {
+                chars.next_if(|c| c.is_ascii_digit() || "@*#?-$!".contains(*c));
+            }
+        }
+        self.built()
+            && literal
+                .chars()
+                .all(|c| c == '-' || c == '+' || c.is_ascii_alphabetic())
     }
 
     fn mark_substituted(&mut self) {
@@ -645,7 +684,10 @@ fn commands(script: &str) -> Option<Lexed> {
                 loop {
                     match chars.next()? {
                         '"' => break,
-                        '\\' => w.text.extend(chars.next()),
+                        '\\' => {
+                            w.escaped = true;
+                            w.text.extend(chars.next());
+                        }
                         '$' if chars.peek() == Some(&'(') => {
                             chars.next();
                             let text = substitution(&mut chars)?;
@@ -666,6 +708,7 @@ fn commands(script: &str) -> Option<Lexed> {
             '\\' => {
                 let w = word.get_or_insert_default();
                 w.quoted_at.get_or_insert(w.text.len());
+                w.escaped = true;
                 w.text.extend(chars.next());
             }
             // `2>&1`, `<&3` and `&>file` are redirections, not `&`.
@@ -704,16 +747,20 @@ fn commands(script: &str) -> Option<Lexed> {
                 chars.next();
                 let text = substitution(&mut chars)?;
                 let w = word.get_or_insert_default();
+                w.bare_expansion = true;
                 w.mark_substituted();
                 w.commands_print |= !text.starts_with('(');
                 lexed.extend(substituted(&text)?);
             }
             '$' if chars.next_if_eq(&'$').is_some() => {
-                word.get_or_insert_default().text.push_str("$$");
+                let w = word.get_or_insert_default();
+                w.bare_expansion = true;
+                w.text.push_str("$$");
             }
             '$' if chars.next_if_eq(&'\'').is_some() => {
                 let decoded = ansi_c(&mut chars)?;
                 let w = word.get_or_insert_default();
+                w.escaped = true;
                 w.quoted = true;
                 w.quoted_at.get_or_insert(w.text.len());
                 w.text.push_str(&decoded);
@@ -722,6 +769,7 @@ fn commands(script: &str) -> Option<Lexed> {
             '$' if chars.peek() == Some(&'"') => return None,
             '`' => {
                 let w = word.get_or_insert_default();
+                w.bare_expansion = true;
                 w.mark_substituted();
                 w.commands_print = true;
                 lexed.extend(self::commands(&backticked(&mut chars, false)?)?);
@@ -820,6 +868,7 @@ fn commands(script: &str) -> Option<Lexed> {
                     '$' => matches!(chars.peek(), Some('{' | '[')),
                     _ => "*?[]{},".contains(c),
                 };
+                w.bare_expansion |= c == '$';
                 w.text.push(c);
                 if records {
                     w.globs.push(c);
@@ -1447,12 +1496,23 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
                 .filter(|options| options.command_script)
                 .map(|options| options.end)
                 .collect();
-            if !scripts.is_empty() {
-                return scripts
-                    .into_iter()
-                    .filter_map(|at| kept.get(at))
-                    .flat_map(|script| script_needs(script, aliases))
-                    .collect();
+            // A `$` or substitution among the options, or as the operand where
+            // no `-c` was read, may print `-c`.
+            let may_print_c = read
+                .iter()
+                .flat_map(|options| i + 1..options.end + usize::from(!options.command_script))
+                .filter(|&at| kept.get(at).is_some_and(|w| w.may_print_option()))
+                .min();
+            let guessed = may_print_c.map_or(kept.len(), |at| at + 1);
+            if !scripts.is_empty() || guessed < kept.len() {
+                let mut needs = vec![];
+                for script in scripts.into_iter().filter_map(|at| kept.get(at)) {
+                    add_new(&mut needs, script_needs(script, aliases));
+                }
+                for script in &kept[guessed..] {
+                    add_new(&mut needs, guessed_script_needs(script, aliases));
+                }
+                return needs;
             }
             if read.iter().any(|options| {
                 (options.stdin_script && !heredoc_feeds(&redirects, 0))
@@ -1474,12 +1534,45 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             return vec![Switch::Unreadable];
         } else if program == "cargo" {
             return cargo_needs(word, &words[i + 1..], aliases);
-        } else if program == "gh" && (aliases.gh_config_dir || aliases.unreadable_name) {
+        } else if program == "gh"
+            && (aliases.gh_config_dir
+                || aliases.unreadable_name
+                || gh_command_built(&kept[i + 1..]))
+        {
             return vec![Switch::Unreadable];
         } else {
             return needs_program(word, &words[i + 1..]).into_iter().collect();
         }
     }
+}
+
+/// Whether a `$` or a command substitution may build gh's command, the
+/// subcommand after `pr`, or a word before them other than a value of a
+/// literal `-R` or `--repo` whose every `$` and substitution is quoted; or, on a `gh api` merge path, any word but
+/// the path, since it may be the method or a field.
+fn gh_command_built(args: &[&Word]) -> bool {
+    let words: Vec<String> = args.iter().map(|w| w.text.clone()).collect();
+    let with_value = ["-R", "--repo"];
+    let command = skip_options(&words, 0, &with_value);
+    if words.get(command).is_some_and(|api| api == "api") && words.iter().any(|w| merges(w)) {
+        return args.iter().any(|w| w.built() && !merges(&w.text));
+    }
+    let last = match words.get(command) {
+        Some(pr) if pr == "pr" => skip_options(&words, command + 1, &with_value),
+        _ => command,
+    };
+    let repo_value = |at: usize, w: &Word| {
+        let after_flag =
+            at > 0 && with_value.contains(&words[at - 1].as_str()) && !args[at - 1].built();
+        let inline = w.text.starts_with("--repo=")
+            && w.text.find('$').is_none_or(|p| p >= "--repo=".len())
+            && w.substituted_at.is_none_or(|p| p >= "--repo=".len());
+        !w.bare_expansion && at != command && at != last && (after_flag || inline)
+    };
+    args.iter()
+        .take(last + 1)
+        .enumerate()
+        .any(|(at, w)| w.built() && !repo_value(at, w))
 }
 
 /// What `watch` running `command` needs. Without `-x` it runs the words
@@ -1592,7 +1685,7 @@ fn shell_options(words: &[String], from: usize, reading: ShellReading) -> ShellO
             break;
         }
         if let Some(long) = option.strip_prefix("--") {
-            i += usize::from(["rcfile", "init-file"].contains(&long));
+            i += usize::from(["rcfile", "init-file", "emulate"].contains(&long));
             continue;
         }
         let mut shorts = option[1..].chars();
@@ -1618,6 +1711,24 @@ fn script_needs(script: &Word, aliases: &Aliases) -> Vec<Switch> {
         return vec![Switch::Unreadable];
     }
     needs_with(&script.text, &mut aliases.clone(), true)
+}
+
+/// What a word that may be a shell's `-c` script, when a `$` prints the
+/// `-c`, needs. A single line left inside a quote runs nothing, since bash
+/// parses the whole line before running any of it; only without escapes,
+/// which the lexer may undo where bash keeps them.
+fn guessed_script_needs(script: &Word, aliases: &Aliases) -> Vec<Switch> {
+    let text = &script.text;
+    let quote_left_open = !script.escaped
+        && !text.contains(['\n', '\\', '$'])
+        && commands(text).is_none()
+        && ['\'', '"', '`']
+            .iter()
+            .any(|quote| commands(&format!("{text}{quote}")).is_some());
+    if quote_left_open && !script.commands_print {
+        return vec![];
+    }
+    script_needs(script, aliases)
 }
 
 /// Whether `xargs`'s options may set a replace string: any `I` or `i` in
@@ -4435,6 +4546,111 @@ mod tests {
         assert_passes("zsh -noprofile -c 'cargo test'");
         assert_passes("sh -o pipefail -c 'cargo test'");
         assert_passes("bash -oc pipefail 'cargo test'");
+    }
+
+    #[test]
+    fn zshs_emulate_takes_the_next_word() {
+        assert_judged("zsh --emulate csh -c 'gh pr merge 1'", Switch::Merge);
+        assert_judged("sh --emulate sh -c 'gh pr merge 1'", Switch::Merge);
+        assert_passes("zsh --emulate sh -c 'cargo test'");
+    }
+
+    #[test]
+    fn a_shell_option_or_operand_a_substitution_or_variable_builds_may_be_its_c() {
+        for command in [
+            "bash $(echo -c) 'gh pr merge 1'",
+            "bash -$(printf c) 'gh pr merge 1'",
+            "bash `echo -c` 'gh pr merge 1'",
+            "C=-c; bash $C 'gh pr merge 1'",
+            "bash \"$C\" 'gh pr merge 1'",
+            "zsh -o pipefail $C 'gh pr merge 1'",
+            "bash -$C 'gh pr merge 1'",
+        ] {
+            assert_judged(command, Switch::Merge);
+        }
+        assert_unreadable("bash $C \"$(cat f)\"");
+        assert_unreadable("bash \"$f\" \"gh pr merge 1\nit's\"");
+        assert_passes("bash \"$script\" one two");
+        for command in [
+            "bash $C \"gh pr merge 1; echo it\\'s\"",
+            "bash $C \"gh pr merge 1; echo \\'\"",
+            "bash $C \"gh pr merge 1; echo a\\'b\"",
+            "bash $C \"gh pr merge 1; echo $' it\\'s'\"",
+            "bash $C 'gh pr merge 1; echo it\\'\\''s'",
+            "bash $C \"gh pr merge 1; echo it's$X\"",
+            "bash $C \"gh pr merge 1; echo it's${X}\"",
+        ] {
+            assert!(
+                !needs(command).is_empty(),
+                "{command} needs nothing: {:?}",
+                needs(command)
+            );
+            assert!(
+                run(&ledger(vec![lead()]), Switches::default(), command).is_some(),
+                "{command} was allowed"
+            );
+        }
+        assert_passes("C=-c; bash $C \"gh pr merge 1; echo it's\"");
+        assert_passes("bash \"$f\" \"don't stop\"");
+        assert_passes("bash \"$SCRIPT\" --message \"it's done\"");
+        assert_passes("bash \"$f.sh\" \"can't\"");
+        assert_passes("bash \"$f\" '`'");
+        assert_passes("bash \"$HOME/bin/x.sh\" \"$(date)\"");
+        assert_passes("bash \"${f}\"/x.sh \"$(date)\"");
+        assert_passes("bash --rcfile \"$f\" -c 'cargo test'");
+        assert_passes("bash -c 'cargo test' \"$(pwd)\"");
+    }
+
+    #[test]
+    fn gh_whose_command_words_a_substitution_or_variable_builds_is_denied() {
+        for command in [
+            "gh pr \"$(echo merge)\" 1",
+            "gh pr $(echo merge) 1",
+            "gh pr `echo merge` 1",
+            "gh \"$(echo pr)\" merge 1",
+            "gh $(true) pr merge 1",
+            "gh pr $M 1",
+            "gh $P merge 1",
+            "gh pr -R $(echo 'o/r merge') 1",
+            "X=R; gh pr \"-$X\" o/r merge 1",
+            "gh \"-$X\" o/r pr merge 1",
+            "gh \"--$(echo repo)\" o/r pr merge 1",
+            "gh pr \"--$(echo repo)\" o/r merge 1",
+            "gh pr -R\"$X\" o/r merge 1",
+            "gh pr -R \"a\"$X 1",
+            "gh pr -R 'a'$X 1",
+            "gh pr --repo \"a\"$X 1",
+            "gh pr --repo=\"a\"$X 1",
+            "gh pr -R \"a\"$(echo ' merge') 1",
+            "gh -R \"a\"$X pr 1",
+            "gh pr -R \"$X\"$Y 1",
+            "gh api repos/o/r/pulls/1/merge -X PUT -f \"title=$T\"",
+            "gh api repos/o/r/pulls/1/merge -X PUT --jq \"$J\"",
+            "gh api \"$(echo -X)\" PUT repos/o/r/pulls/1/merge",
+            "gh api -$M PUT repos/o/r/pulls/1/merge",
+            "gh api repos/o/r/pulls/1/merge $F",
+            "eval 'gh pr $(echo merge) 1'",
+            "trap 'gh pr $(echo merge) 1' EXIT",
+            "bash -c 'gh pr $(echo merge) 1'",
+        ] {
+            assert_unreadable(command);
+        }
+        for command in [
+            "gh pr view \"$(git branch --show-current)\"",
+            "gh pr view $(git branch --show-current) --json state",
+            "gh pr checks \"$PR\"",
+            "gh pr -R \"$REPO\" view 1",
+            "gh -R \"$(git remote get-url origin)\" pr view 1",
+            "gh pr --repo \"$REPO\" view 1",
+            "gh pr --repo=\"$REPO\" view 1",
+            "gh api \"repos/$O/r/pulls/1\" -X PATCH -f title=x",
+            "gh api \"repos/$OWNER/r/pulls\"",
+            "gh issue view \"$N\"",
+            "gh run view $(gh run list -L1 --json databaseId -q '.[0].databaseId')",
+            "trap 'gh pr view \"$(git branch --show-current)\"' EXIT",
+        ] {
+            assert_passes(command);
+        }
     }
 
     #[test]
