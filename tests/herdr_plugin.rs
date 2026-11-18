@@ -270,6 +270,26 @@ fn wrapper_finds_loopherd_on_path_before_herdrs_dir() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "on-path view\n");
 }
 
+#[test]
+fn blocked_and_gone_events_run_loopherds_event_hook() {
+    let m = manifest();
+    let hooks: Vec<(&str, Vec<&str>)> = m["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| (e["on"].as_str().unwrap(), strings(&e["command"])))
+        .collect();
+    let hook = vec!["sh", "loopherd.sh", "herdr-event-hook"];
+    assert_eq!(
+        hooks,
+        [
+            ("pane.agent_status_changed", hook.clone()),
+            ("pane.exited", hook.clone()),
+            ("pane.closed", hook),
+        ]
+    );
+}
+
 /// `loopherd revive --startup` with only `config` as its config dir and no
 /// herdr on `PATH`, so any herdr call fails.
 fn startup_revive(config: &Path) -> Output {
