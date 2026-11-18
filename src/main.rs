@@ -1301,18 +1301,26 @@ fn run_stop_hook() -> Result<i32> {
     Ok(0)
 }
 
+/// Exits 0 on every error, after printing it: a running watch's poll
+/// still covers what the hook missed.
 fn run_herdr_event_hook() -> Result<i32> {
-    let event = std::env::var("HERDR_PLUGIN_EVENT").context("no HERDR_PLUGIN_EVENT")?;
-    let json = std::env::var("HERDR_PLUGIN_EVENT_JSON").context("no HERDR_PLUGIN_EVENT_JSON")?;
-    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    pane_event::event_hook(
-        &ledger,
-        &ledger.reports_dir()?,
-        &event,
-        &json,
-        socket_from_env().as_deref(),
-        SystemTime::now(),
-    )?;
+    let record = || -> Result<()> {
+        let event = std::env::var("HERDR_PLUGIN_EVENT").context("no HERDR_PLUGIN_EVENT")?;
+        let json =
+            std::env::var("HERDR_PLUGIN_EVENT_JSON").context("no HERDR_PLUGIN_EVENT_JSON")?;
+        let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+        pane_event::event_hook(
+            &ledger,
+            &ledger.reports_dir()?,
+            &event,
+            &json,
+            socket_from_env().as_deref(),
+            SystemTime::now(),
+        )
+    };
+    if let Err(e) = record() {
+        eprintln!("loopherd herdr-event-hook: {e:#}");
+    }
     Ok(0)
 }
 

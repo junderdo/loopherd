@@ -71,16 +71,30 @@ pub fn record_blocked(dir: &Path, name: &str, now: SystemTime) -> Result<bool> {
     Ok(true)
 }
 
-/// Appends a `gone` entry to `name`'s mailbox unless one is there since its
-/// last start. Returns whether it appended.
+/// Appends a `gone` entry to `name`'s mailbox unless one is there with no
+/// sign of life after it. Returns whether it appended.
 pub fn record_gone(dir: &Path, name: &str, now: SystemTime) -> Result<bool> {
     report::append_unless(dir, name, &Entry::new(now, Body::Gone {}), |entries| {
         entries
             .iter()
             .rev()
-            .take_while(|e| !matches!(e.body, Body::Start { .. }))
-            .any(|e| matches!(e.body, Body::Gone {}))
+            .find(|e| matches!(e.body, Body::Gone {}) || shows_alive(&e.body))
+            .is_some_and(|e| matches!(e.body, Body::Gone {}))
     })
+}
+
+/// Whether the member itself, or a start of its Claude, wrote `body`. A
+/// note may come from loopherd, as a revive's to a lead does.
+fn shows_alive(body: &Body) -> bool {
+    match body {
+        Body::Start { .. }
+        | Body::Stop(_)
+        | Body::Blocked {}
+        | Body::Done { .. }
+        | Body::Question { .. }
+        | Body::Handoff { .. } => true,
+        Body::Note { .. } | Body::Gone {} => false,
+    }
 }
 
 /// Appends a `gone` entry to `name`'s mailbox unless one is there from

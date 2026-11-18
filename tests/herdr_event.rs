@@ -132,3 +132,63 @@ fn panes_loopherd_does_not_know_record_nothing() {
 
     assert!(recorded(dir.path()).is_empty());
 }
+
+fn failed_quietly(out: &Output, error: &str) {
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with("loopherd herdr-event-hook: ") && stderr.contains(error),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn a_malformed_or_missing_event_exits_0_with_the_error() {
+    let dir = sandbox();
+
+    let malformed = loopherd(dir.path(), &["herdr-event-hook"])
+        .env("HERDR_PLUGIN_EVENT", "pane.closed")
+        .env("HERDR_PLUGIN_EVENT_JSON", "{not json")
+        .output()
+        .unwrap();
+    failed_quietly(&malformed, "parse HERDR_PLUGIN_EVENT_JSON");
+
+    let missing = loopherd(dir.path(), &["herdr-event-hook"])
+        .env_remove("HERDR_PLUGIN_EVENT")
+        .env_remove("HERDR_PLUGIN_EVENT_JSON")
+        .output()
+        .unwrap();
+    failed_quietly(&missing, "no HERDR_PLUGIN_EVENT");
+
+    assert!(recorded(dir.path()).is_empty());
+}
+
+#[test]
+fn a_mailbox_it_cannot_write_exits_0_with_the_error() {
+    let dir = sandbox();
+    fs::create_dir_all(dir.path().join("state/loopherd/reports/lh-1.jsonl")).unwrap();
+
+    failed_quietly(&closed(dir.path(), "pane.closed", "w1:p1"), "lh-1.jsonl");
+    failed_quietly(&status(dir.path(), "w1:p1", "blocked"), "lh-1.jsonl");
+}
+
+#[test]
+fn a_member_that_shows_life_after_its_gone_records_gone_again() {
+    let dir = sandbox();
+
+    quiet_success(&closed(dir.path(), "pane.exited", "w1:p1"));
+    let report = loopherd(
+        dir.path(),
+        &["report", "--as", "lh-1", "--kind", "question", "which DB?"],
+    )
+    .output()
+    .unwrap();
+    assert!(report.status.success(), "{report:?}");
+    quiet_success(&closed(dir.path(), "pane.closed", "w1:p1"));
+
+    assert_eq!(
+        recorded(dir.path()),
+        ["lh-1 gone", "lh-1 question", "lh-1 gone"]
+    );
+}

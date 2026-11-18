@@ -181,6 +181,8 @@ pub fn watch(
     let mut own_questions_seen = HashSet::new();
     // An unreadable mailbox warns every poll until it's readable; say it once.
     let mut warned: HashSet<String> = HashSet::new();
+    // A gone is recorded again every poll until it's written; say each failure once.
+    let mut unrecorded: HashSet<String> = HashSet::new();
     loop {
         let before = last.clone();
         let marks = notify::BlockMarks::read(dir)?;
@@ -218,8 +220,14 @@ pub fn watch(
         }
         for member in &members {
             if member.gone {
-                if let Some(seen_live) = gone.confirm(member, &occupied) {
-                    record_gone_after(dir, &member.name, SystemTime::now(), seen_live)?;
+                if let Some(seen_live) = gone.confirm(member, &occupied)
+                    && let Err(e) =
+                        record_gone_after(dir, &member.name, SystemTime::now(), seen_live)
+                {
+                    let warning = format!("warning: record {} gone: {e:#}", member.name);
+                    if unrecorded.insert(warning.clone()) {
+                        warn(&warning);
+                    }
                 }
                 continue;
             }
@@ -231,8 +239,12 @@ pub fn watch(
             // Only on change: one blocked at start would re-wake every re-armed watch.
             if member.status == AgentStatus::Blocked
                 && was.is_some_and(|w| w != AgentStatus::Blocked)
+                && let Err(e) = record_blocked(dir, &member.name, SystemTime::now())
             {
-                record_blocked(dir, &member.name, SystemTime::now())?;
+                let warning = format!("warning: record {} blocked: {e:#}", member.name);
+                if unrecorded.insert(warning.clone()) {
+                    warn(&warning);
+                }
             }
             if member.status != AgentStatus::Unknown {
                 last.insert(member.name.clone(), member.status);
@@ -2415,6 +2427,42 @@ mod tests {
             run(&herdr, &ledger, dir.path(), &ONCE, &mut steps(|_| {})),
             None
         );
+    }
+
+    #[test]
+    fn a_mailbox_the_poll_cannot_write_warns_and_another_members_block_still_wakes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![
+            member("lh-1", "w9:p1", None),
+            member("lh-2", "w9:p2", None),
+        ]);
+        let herdr = FakeHerdr::new(&[])
+            .with_live_agent(Some("lh-1"), None, "w9:p1")
+            .with_live_agent(Some("lh-2"), None, "w9:p2");
+        herdr.set_status("lh-1", AgentStatus::Idle);
+        herdr.set_status("lh-2", AgentStatus::Idle);
+        fs::create_dir(dir.path().join("lh-1.jsonl")).unwrap();
+        let mut clock = steps(|poll| match poll {
+            1 => herdr.set_status("lh-1", AgentStatus::Blocked),
+            2 => herdr.remove_agent("lh-1"),
+            3 => {}
+            4 => herdr.set_status("lh-2", AgentStatus::Blocked),
+            _ => panic!("slept past the wake"),
+        });
+        let mut warnings = vec![];
+
+        let woke = watch(&herdr, &ledger, dir.path(), &EVERY, &mut clock, &mut |w| {
+            warnings.push(w.to_string())
+        })
+        .unwrap();
+
+        assert_eq!(printed(woke.unwrap()), ["lh-2 blocked"]);
+        let recording: Vec<&str> = warnings
+            .iter()
+            .filter_map(|w| w.split(':').nth(1))
+            .filter(|w| w.starts_with(" record"))
+            .collect();
+        assert_eq!(recording, [" record lh-1 blocked", " record lh-1 gone"]);
     }
 
     #[test]
