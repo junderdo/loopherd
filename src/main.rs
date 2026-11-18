@@ -1,6 +1,7 @@
 mod config;
 mod context;
 mod continuation;
+mod doctor;
 mod feed;
 mod github;
 mod herd;
@@ -48,6 +49,7 @@ mod worktree;
 
 use std::io::{Read, Write};
 use std::num::NonZeroUsize;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -366,6 +368,23 @@ enum Command {
         sender: notify::Sender,
         #[arg(last = true, required = true)]
         args: Vec<String>,
+    },
+    /// Check this machine's loopherd install and herdr: loopherd's hooks in
+    /// Claude's settings, the binary they call against the `loopherd` on PATH,
+    /// and herdr's server and version. Only reads. Prints each warning and
+    /// failure with the command that fixes it, then `doctor: <n> ok, <n>
+    /// warnings, <n> failures`. Exits 0 when clean or only warnings, 1 on any
+    /// failure, 2 when it couldn't run.
+    Doctor {
+        /// List every check, not only the problems.
+        #[arg(long)]
+        verbose: bool,
+        /// Print every check and the counts as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Check this file instead of $CLAUDE_CONFIG_DIR/settings.json or ~/.claude/settings.json.
+        #[arg(long)]
+        settings: Option<PathBuf>,
     },
     /// Add loopherd's Stop, StopFailure, SessionStart, PreToolUse and UserPromptSubmit hooks to Claude's
     /// user settings, calling this binary, and write the `--skill` guide as the loopherd
@@ -686,6 +705,11 @@ fn main() -> ExitCode {
             sender,
             args,
         } => ("notify-run", run_notify(member, sender, args)),
+        Command::Doctor {
+            verbose,
+            json,
+            settings,
+        } => ("doctor", run_doctor(verbose, json, settings)),
         Command::InstallHook {
             remove,
             settings,
@@ -1482,6 +1506,52 @@ fn run_tool_hook() -> Result<i32> {
         println!("{}", tool_hook::deny(&reason));
     }
     Ok(0)
+}
+
+fn run_doctor(verbose: bool, json: bool, settings: Option<PathBuf>) -> Result<i32> {
+    let install = match doctor_install(settings) {
+        Ok(install) => install,
+        Err(e) => {
+            eprintln!("loopherd doctor: {e:#}");
+            return Ok(2);
+        }
+    };
+    let checks = doctor::checks(&install, &CliHerdr);
+    match json {
+        true => println!("{}", doctor::json(&checks)),
+        false => print!("{}", doctor::text(&checks, verbose)),
+    }
+    Ok(doctor::exit_code(&checks))
+}
+
+fn doctor_install(settings: Option<PathBuf>) -> Result<doctor::Install> {
+    let settings_given = settings.is_some();
+    let settings = match settings {
+        Some(path) => path,
+        None => install_hook::default_settings()?,
+    };
+    // No config dir, or a [notify] that doesn't load, leaves pane labels off.
+    let pane_label = herd::herds_dir().is_some_and(|herds| {
+        notify::load(&herds.with_file_name("config.toml"))
+            .is_ok_and(|n| n.is_some_and(|n| n.labels_panes()))
+    });
+    Ok(doctor::Install {
+        settings,
+        settings_given,
+        pane_label,
+        on_path: on_path("loopherd"),
+        running: std::env::current_exe().context("find this binary")?,
+    })
+}
+
+/// The `name` a shell would run: the first executable file of that name on PATH.
+fn on_path(name: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(name))
+        .find(|path| {
+            path.metadata()
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
 }
 
 fn run_install_hook(

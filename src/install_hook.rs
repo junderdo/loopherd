@@ -180,6 +180,27 @@ pub fn prompt_hook_installed(settings: &Path) -> Result<bool> {
         .is_some_and(|root| has_ours(&root, "UserPromptSubmit", "prompt-hook")))
 }
 
+/// One of loopherd's hook events and the binaries its loopherd hooks in a
+/// settings file call; none when the event has no hook of ours.
+pub struct Installed {
+    pub event: &'static str,
+    pub binaries: Vec<PathBuf>,
+}
+
+/// Each of loopherd's hook events as `settings` has it, in install order.
+pub fn hooks(settings: &Path) -> Result<Vec<Installed>> {
+    let root = read_settings(settings)?.unwrap_or(Value::Null);
+    Ok(HOOKS
+        .iter()
+        .map(|hook| Installed {
+            event: hook.event,
+            binaries: our_hooks(&root, hook.event, hook.matcher)
+                .filter_map(|h| our_binary(h, hook.subcommand))
+                .collect(),
+        })
+        .collect())
+}
+
 /// `settings` parsed; `None` if it is missing.
 fn read_settings(settings: &Path) -> Result<Option<Value>> {
     let bytes = match fs::read(settings) {
@@ -193,13 +214,22 @@ fn read_settings(settings: &Path) -> Result<Option<Value>> {
 }
 
 fn has_ours(root: &Value, event: &str, subcommand: &str) -> bool {
+    our_hooks(root, event, None).any(|hook| is_ours(hook, subcommand))
+}
+
+/// The hooks under `event`, only from groups with `matcher` when it is given.
+fn our_hooks<'a>(
+    root: &'a Value,
+    event: &str,
+    matcher: Option<&'a str>,
+) -> impl Iterator<Item = &'a Value> {
     root.pointer(&format!("/hooks/{event}"))
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
+        .filter(move |group| matcher.is_none_or(|m| matcher_of(group) == Some(m)))
         .filter_map(|group| group.get("hooks").and_then(Value::as_array))
         .flatten()
-        .any(|hook| is_ours(hook, subcommand))
 }
 
 /// Applies `change` to the settings object and writes it back only if it
@@ -390,16 +420,18 @@ fn drop_ours(groups: &mut Vec<Value>, subcommand: &str, from: impl Fn(&Value) ->
 /// A command [`hook_command`] built, for a binary named `loopherd` anywhere;
 /// also without `|| true`, as tool-hook was first installed.
 fn is_ours(hook: &Value, subcommand: &str) -> bool {
+    our_binary(hook, subcommand).is_some()
+}
+
+/// The binary an [`is_ours`] hook calls.
+fn our_binary(hook: &Value, subcommand: &str) -> Option<PathBuf> {
     hook.get("command")
         .and_then(Value::as_str)
         .map(|c| c.strip_suffix(" || true").unwrap_or(c))
         .and_then(|c| c.strip_suffix(&format!(" {subcommand}")))
         .and_then(unquote)
-        .is_some_and(|path| {
-            Path::new(&path)
-                .file_name()
-                .is_some_and(|n| n == "loopherd")
-        })
+        .map(PathBuf::from)
+        .filter(|path| path.file_name().is_some_and(|n| n == "loopherd"))
 }
 
 /// The word a single-quoted shell string spells, `'\''` escapes included.
