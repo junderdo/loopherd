@@ -229,6 +229,17 @@ merge = false
     }
 
     #[test]
+    fn set_writes_a_leads_review_rounds() {
+        let (_dir, paths) = herds(HERD);
+        set(&paths, "h", "lead.review_rounds", "5").unwrap();
+        assert_eq!(get(&paths, "h", "lead.review_rounds").unwrap(), "5");
+        assert_eq!(
+            crate::herd::lead_config(&paths, "h").unwrap().review_rounds,
+            5
+        );
+    }
+
+    #[test]
     fn set_creates_missing_tables() {
         let (_dir, paths) = herds("repo = \"/r\"\n");
         set(&paths, "h", "lead.prompt", "\"lead {herd}\"").unwrap();
@@ -254,6 +265,8 @@ merge = false
                 "\"missing.md\"",
                 "lead: set one of prompt and prompt_file, not both",
             ),
+            ("lead.review_rounds", "0", "review_rounds"),
+            ("lead.review_rounds", "-2", "review_rounds"),
             ("queue.max", "three", "three is not a TOML value"),
             ("repo.x", "1", "repo is not a table"),
         ] {

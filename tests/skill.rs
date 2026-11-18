@@ -151,11 +151,12 @@ fn verify_blocks_on_in_scope_findings_rereviews_the_delta_and_caps_rounds() {
     let lead = flat_section(&printed, "\n## Lead\n", "\n## ");
     for rule in [
         "**Review rounds.**",
-        "After round 3",
+        "After your herd's review-round limit (in your prompt; 3 when unset) start no other round",
         "`loopherd report --kind question`",
     ] {
         assert!(lead.contains(rule), "Lead misses {rule:?}");
     }
+    assert!(!lead.contains("After round 3"), "{lead}");
 }
 
 #[test]

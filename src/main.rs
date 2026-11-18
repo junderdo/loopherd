@@ -60,7 +60,7 @@ use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
 use crate::feed::{FeedRequest, feed, run_after_merge};
-use crate::herd::{AddRequest, Paths, add, dry_run, herds};
+use crate::herd::{AddRequest, Paths, SwitchValues, add, dry_run, herds};
 use crate::herd_view::Options;
 use crate::herdr::events::SocketSubscriber;
 use crate::herdr::{CliHerdr, Herdr, socket_from_env};
@@ -135,9 +135,10 @@ enum Command {
         #[arg(long, value_name = "SWITCHES")]
         set: Option<String>,
     },
-    /// Read or edit one of config.toml's handoff settings, keeping its comments
-    /// and layout: `context_window`, `default_context_limit` or
-    /// `shepherd.context_limit`, each a number of tokens.
+    /// Read or edit one of config.toml's settings, keeping its comments and
+    /// layout: `context_window`, `default_context_limit` or
+    /// `shepherd.context_limit`, each a number of tokens, or
+    /// `lead_defaults.review_rounds`, each lead's review-round limit.
     Config {
         #[command(subcommand)]
         action: ConfigAction,
@@ -826,7 +827,7 @@ fn run_lead_defaults(set: Option<String>) -> Result<i32> {
     if let Some(list) = set {
         config::set_lead_defaults(&config, &list)?;
     }
-    if let Some(defaults) = config::lead_defaults(&config)? {
+    if let Some(defaults) = config::lead_defaults(&config)?.filter(SwitchValues::sets_a_switch) {
         println!("{}", defaults.over(&Default::default()).lines());
     }
     Ok(0)
