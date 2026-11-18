@@ -472,8 +472,10 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   `loopherd revive --name <lead>`.
 - **herdr plugin.** `herdr plugin install <owner>/loopherd/herdr-plugin`
   (herdr 0.7.0+; loopherd's README names the repo) adds plugin `loopherd`,
-  whose `status` action runs `loopherd status`. It needs the `loopherd` on PATH or in `~/.local/bin`
-  and never installs loopherd or its hooks; installing stays as above.
+  whose `status` action runs `loopherd status`; its output and errors go
+  only to `herdr plugin log list --plugin loopherd`. It needs the
+  `loopherd` on PATH or in `~/.local/bin` and never installs loopherd or
+  its hooks; installing stays as above.
   Plugins are global to the user, so never link or install one from a test
   or a dev session.
 

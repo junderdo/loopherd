@@ -6,8 +6,8 @@ set -eu
 if bin=$(command -v loopherd); then
   exec "$bin" "$@"
 fi
-if [ -x "$HOME/.local/bin/loopherd" ]; then
-  exec "$HOME/.local/bin/loopherd" "$@"
+if [ -x "${HOME:-}/.local/bin/loopherd" ]; then
+  exec "${HOME:-}/.local/bin/loopherd" "$@"
 fi
 echo "loopherd plugin: loopherd not found on PATH or in ~/.local/bin." \
   "Install it first: https://github.com/junderdo/loopherd#install" >&2

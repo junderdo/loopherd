@@ -100,7 +100,9 @@ herdr plugin install junderdo/loopherd/herdr-plugin
 
 It adds a `loopherd: herd status` action. The plugin runs the `loopherd` on
 `PATH`, else `~/.local/bin/loopherd`, and never installs loopherd or its
-hooks; without one, its commands fail with a pointer here. Remove it with
+hooks; without one, its commands fail with a pointer here. herdr shows no
+action output on screen: read it, errors included, with
+`herdr plugin log list --plugin loopherd`. Remove the plugin with
 `herdr plugin uninstall loopherd`.
 
 ## Set up a repo

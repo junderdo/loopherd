@@ -160,8 +160,9 @@ clears it.
 ## Plugins (0.9.5, LH-223)
 
 Checked 2026-11-18 against herdr 0.9.5, with herdr's
-[plugin docs](https://raw.githubusercontent.com/herdrdev/herdr/v0.9.5/docs/next/website/src/content/docs/plugins.mdx)
-and changelog.
+[plugin docs](https://raw.githubusercontent.com/herdrdev/herdr/v0.9.5/docs/next/website/src/content/docs/plugins.mdx),
+the [0.7.0 plugin docs](https://raw.githubusercontent.com/herdrdev/herdr/v0.7.0/website/src/content/docs/plugins.mdx)
+for what 0.7.0 already had, and the changelog.
 
 - A plugin is a directory with `herdr-plugin.toml`. `id`, `name`,
   `version` and `min_herdr_version` are required; herdr refuses to link or
@@ -174,6 +175,8 @@ and changelog.
   `HERDR_SOCKET_PATH`, `HERDR_PLUGIN_ROOT`, `HERDR_PLUGIN_CONFIG_DIR`,
   `HERDR_PLUGIN_STATE_DIR` and `HERDR_PLUGIN_CONTEXT_JSON`. They inherit the
   server's environment, so its `PATH`, not the user's shell's.
+- herdr pipes an action's stdout and stderr into its plugin command log
+  (`herdr plugin log list --plugin <id>`) and shows nothing on screen.
 - `plugin install owner/repo/subdir` clones, runs `[[build]]` and registers.
   `plugin link <dir>` registers a local directory and runs no build.
 - Since 0.7.5 plugins are **global to the user**, not per session: the

@@ -952,7 +952,10 @@ fn plugin_links_enabled_into_an_isolated_herdr_home() {
     assert_eq!(entry["plugin_id"], "loopherd");
     assert_eq!(entry["enabled"], true);
     assert_eq!(entry["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(entry["plugin_root"], plugin.to_str().unwrap());
+    assert_eq!(
+        entry["plugin_root"],
+        plugin.canonicalize().unwrap().to_str().unwrap()
+    );
 }
 
 const LIVE: &str = "/home/u/.config/herdr/herdr.sock";
