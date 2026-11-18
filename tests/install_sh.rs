@@ -41,10 +41,21 @@ impl Release {
             fake_bin,
             log,
         };
+        fs::create_dir_all(release.exits_dir()).unwrap();
+        release.exits("doctor", 1);
         release.publish("latest/download", "v0.2.0");
         release.publish("download/v0.2.0", "v0.2.0");
         release.publish("download/v0.1.0", "v0.1.0");
         release
+    }
+
+    fn exits_dir(&self) -> PathBuf {
+        self.dir.path().join("exits")
+    }
+
+    /// Sets the exit code of the fake `loopherd`'s `subcommand`.
+    fn exits(&self, subcommand: &str, code: i32) {
+        fs::write(self.exits_dir().join(subcommand), code.to_string()).unwrap();
     }
 
     fn base(&self) -> PathBuf {
@@ -67,8 +78,9 @@ impl Release {
             executable(
                 &stage.join("loopherd"),
                 format!(
-                    "#!/bin/sh\necho \"{tag} $*\" >> '{}'\n[ \"$1\" != doctor ] || {{ echo '{DOCTOR_FAILS}'; exit 1; }}\n",
-                    self.log.display()
+                    "#!/bin/sh\necho \"{tag} $*\" >> '{}'\n[ \"$1\" != doctor ] || echo '{DOCTOR_FAILS}'\n[ ! -f \"{exits}/$1\" ] || exit \"$(cat \"{exits}/$1\")\"\n",
+                    self.log.display(),
+                    exits = self.exits_dir().display(),
                 ),
             );
             let tarball = out.join(format!("loopherd-{target}.tar.gz"));
@@ -168,6 +180,23 @@ fn prints_a_failing_doctor_last_and_still_succeeds() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.trim_end().ends_with(DOCTOR_FAILS), "{stdout}");
+}
+
+#[test]
+fn succeeds_when_doctor_cannot_run() {
+    let release = Release::new("Linux", "x86_64");
+    release.exits("doctor", 2);
+    let out = release.install(&[]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+}
+
+#[test]
+fn a_failed_install_hook_fails_the_install_before_doctor() {
+    let release = Release::new("Linux", "x86_64");
+    release.exits("install-hook", 1);
+    let out = release.install(&[]);
+    assert_ne!(out.status.code(), Some(0), "{}", text(&out));
+    assert_eq!(release.log(), "v0.2.0 install-hook\n");
 }
 
 #[test]

@@ -16,9 +16,10 @@ const INSTALL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install");
 const DOCTOR_FAILS: &str = "doctor: 8 ok, 0 warnings, 1 failures";
 
 /// A temp HOME and a PATH whose `cargo` "builds" a script that logs its
-/// arguments, or fails when `build_fails`. Its `doctor` reports a failure.
+/// arguments, or fails when `build_fails`. Its `doctor` reports a failure
+/// and exits 1; `exits` changes a subcommand's exit code.
 struct Sandbox {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     home: PathBuf,
     fake_bin: PathBuf,
     path: String,
@@ -38,10 +39,13 @@ impl Sandbox {
         executable(
             &built,
             format!(
-                "#!/bin/sh\necho \"new $*\" >> '{}'\n[ \"$1\" != doctor ] || {{ echo '{DOCTOR_FAILS}'; exit 1; }}\n",
-                log.display()
+                "#!/bin/sh\necho \"new $*\" >> '{}'\n[ \"$1\" != doctor ] || echo '{DOCTOR_FAILS}'\n[ ! -f \"{exits}/$1\" ] || exit \"$(cat \"{exits}/$1\")\"\n",
+                log.display(),
+                exits = dir.path().join("exits").display(),
             ),
         );
+        fs::create_dir_all(dir.path().join("exits")).unwrap();
+        fs::write(dir.path().join("exits/doctor"), "1").unwrap();
         let cargo = match build_fails {
             true => "#!/bin/sh\necho 'error: could not compile' >&2\nexit 101\n".to_string(),
             false => format!(
@@ -57,7 +61,7 @@ impl Sandbox {
         );
         let path = format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap());
         Sandbox {
-            _dir: dir,
+            dir,
             home,
             fake_bin,
             path,
@@ -67,6 +71,14 @@ impl Sandbox {
 
     fn installed(&self) -> PathBuf {
         self.home.join(".local/bin/loopherd")
+    }
+
+    fn exits(&self, subcommand: &str, code: i32) {
+        fs::write(
+            self.dir.path().join("exits").join(subcommand),
+            code.to_string(),
+        )
+        .unwrap();
     }
 
     fn command(&self, args: &[&str]) -> Command {
@@ -140,6 +152,30 @@ fn install_prints_a_failing_doctor_last_and_still_succeeds() {
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.trim_end().ends_with(DOCTOR_FAILS), "{stdout}");
+}
+
+#[test]
+fn install_succeeds_when_doctor_cannot_run() {
+    let sandbox = Sandbox::new(false);
+    sandbox.exits("doctor", 2);
+
+    let out = sandbox.install(&["--no-extras", "--settings", "/tmp/s.json"]);
+
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+}
+
+#[test]
+fn a_failed_install_hook_fails_the_install_before_doctor() {
+    let sandbox = Sandbox::new(false);
+    sandbox.exits("install-hook", 1);
+
+    let out = sandbox.install(&["--no-extras", "--settings", "/tmp/s.json"]);
+
+    assert_ne!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        fs::read_to_string(&sandbox.log).unwrap(),
+        "new install-hook --settings /tmp/s.json\n"
+    );
 }
 
 #[test]
