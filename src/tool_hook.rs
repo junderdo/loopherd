@@ -212,7 +212,7 @@ fn decide(
     }
     if needed == Switch::Unreadable {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like, a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, or from a relative `stdin`, `fd/<n>` or all-digit path, a `trap`, `sh -c` or `eval` script that a substitution prints, `gh` after `GH_CONFIG_DIR` is set or with a command or `pr` subcommand that a `$` or substitution builds, a `case` in `$(…)`, a glob or brace in the program's name, or a brace expansion in gh's or git's arguments: {}; rewrite it, or ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like, a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, or from a relative `stdin`, `fd/<n>` or all-digit path, a `trap`, `sh -c` or `eval` script that a substitution prints, `gh` after `GH_CONFIG_DIR` is set or with a command or `pr` subcommand that a `$` or substitution builds, a `case` in `$(…)`, a glob or brace in the program's name, a brace expansion in gh's or git's arguments, an unquoted `$` or substitution, `\"$@\"` or `\"${{a[@]}}\"` among a shell's options or as its operand, or an `xargs` without `-I` that appends stdin to `gh` before its command is chosen, to a wrapper or shell with no command or script, or to `watch` or `find`: {}; rewrite it, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -536,6 +536,29 @@ impl Word {
             && literal
                 .chars()
                 .all(|c| c == '-' || c == '+' || c.is_ascii_alphabetic())
+    }
+
+    /// Whether the word may split into several words, the first of them a
+    /// run of short options: unquoted after nothing, or after a `-` or `+`
+    /// and letters, or a
+    /// `"$@"` or `"${a[@]}"` even quoted.
+    fn may_split_into_options(&self) -> bool {
+        let first = self
+            .text
+            .find('$')
+            .into_iter()
+            .chain(self.substituted_at)
+            .min();
+        let unquoted = self.bare_expansion
+            && first.is_some_and(|at| {
+                let prefix = &self.text[..at];
+                prefix.is_empty()
+                    || (prefix.starts_with(['-', '+'])
+                        && prefix
+                            .chars()
+                            .all(|c| c == '-' || c == '+' || c.is_ascii_alphabetic()))
+            });
+        unquoted || ["$@", "${@", "[@]"].iter().any(|at| self.text.contains(at))
     }
 
     fn mark_substituted(&mut self) {
@@ -1571,16 +1594,28 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
                 .flat_map(|options| i + 1..options.end + usize::from(!options.command_script))
                 .filter(|&at| kept.get(at).is_some_and(|w| w.may_print_option()))
                 .min();
-            // Unquoted, or a quoted `"$@"` or `"${a[@]}"`, it may split into
-            // `-c` and the script itself.
-            let splits = |w: &Word| {
-                w.bare_expansion || ["$@", "${@", "[@]"].iter().any(|at| w.text.contains(at))
+            let guessed = may_print_c.map_or(kept.len(), |at| at + 1);
+            // Bash may read any word up to its operand, or past a guessed
+            // `-c`, as options; one that splits may hold `-c` and the script.
+            let options_end = if may_print_c.is_some() {
+                kept.len()
+            } else {
+                read.iter()
+                    .map(|options| options.end + usize::from(!options.command_script))
+                    .max()
+                    .unwrap_or(i + 1)
+                    .min(kept.len())
             };
-            let script_appended = xargs_appends && read.iter().any(|o| o.end >= kept.len());
-            if script_appended || may_print_c.is_some_and(|at| splits(kept[at])) {
+            let script_appended = xargs_appends
+                && ((may_print_c.is_some() && guessed >= kept.len())
+                    || read.iter().any(|o| o.end >= kept.len()));
+            if script_appended
+                || kept[i + 1..options_end]
+                    .iter()
+                    .any(|w| w.may_split_into_options())
+            {
                 return vec![Switch::Unreadable];
             }
-            let guessed = may_print_c.map_or(kept.len(), |at| at + 1);
             if !scripts.is_empty() || guessed < kept.len() {
                 let mut needs = vec![];
                 for script in scripts.into_iter().filter_map(|at| kept.get(at)) {
@@ -1855,7 +1890,7 @@ fn xargs_may_replace(options: &[String]) -> bool {
 /// Whether `xargs`'s options set a replace string, read as getopt does, so
 /// it fills its command's words instead of appending them.
 fn xargs_replaces(options: &[String]) -> bool {
-    const SHORT_WITH_VALUE: &str = "adEILnPs";
+    const SHORT_WITH_VALUE: &str = "adEPs";
     const LONG_WITH_VALUE: [&str; 6] = [
         "arg-file",
         "delimiter",
@@ -1864,15 +1899,27 @@ fn xargs_replaces(options: &[String]) -> bool {
         "max-procs",
         "process-slot-var",
     ];
+    // A later `-L`, `-l`, `--max-lines`, or `-n` other than 1 clears it.
+    let mut replaces = false;
     let mut words = options.iter();
     while let Some(option) = words.next() {
         if let Some(long) = option.strip_prefix("--") {
-            let name = long.split('=').next().unwrap_or(long);
-            if !name.is_empty() && "replace".starts_with(name) {
-                return true;
+            let (name, attached) = long.split_once('=').unwrap_or((long, ""));
+            if name.is_empty() {
+                continue;
             }
-            if !long.contains('=') && LONG_WITH_VALUE.iter().any(|v| v.starts_with(name)) {
-                words.next();
+            let value =
+                if !long.contains('=') && LONG_WITH_VALUE.iter().any(|v| v.starts_with(name)) {
+                    words.next().map_or("", String::as_str)
+                } else {
+                    attached
+                };
+            if "replace".starts_with(name) {
+                replaces = true;
+            } else if "max-lines".starts_with(name)
+                || ("max-args".starts_with(name) && value != "1")
+            {
+                replaces = false;
             }
             continue;
         }
@@ -1880,22 +1927,44 @@ fn xargs_replaces(options: &[String]) -> bool {
             continue;
         };
         for (at, letter) in cluster.char_indices() {
-            if letter == 'I' || letter == 'i' {
-                return true;
-            }
-            // `-e`, `-l` take only an attached value.
-            if "el".contains(letter) {
-                break;
-            }
-            if SHORT_WITH_VALUE.contains(letter) {
-                if at + 1 == cluster.len() {
-                    words.next();
+            let attached = &cluster[at + letter.len_utf8()..];
+            match letter {
+                'I' | 'i' => {
+                    replaces = true;
+                    if letter == 'I' && attached.is_empty() {
+                        words.next();
+                    }
+                    break;
                 }
-                break;
+                'L' | 'l' => {
+                    replaces = false;
+                    if letter == 'L' && attached.is_empty() {
+                        words.next();
+                    }
+                    break;
+                }
+                'n' => {
+                    let value = if attached.is_empty() {
+                        words.next().map_or("", String::as_str)
+                    } else {
+                        attached
+                    };
+                    replaces &= value == "1";
+                    break;
+                }
+                // `-e` takes only an attached value.
+                'e' => break,
+                _ if SHORT_WITH_VALUE.contains(letter) => {
+                    if attached.is_empty() {
+                        words.next();
+                    }
+                    break;
+                }
+                _ => {}
             }
         }
     }
-    false
+    replaces
 }
 
 fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
@@ -4767,6 +4836,12 @@ mod tests {
             "set -- -c 'gh pr merge 1'; bash \"$@\"",
             "X=(-c 'gh pr merge 1'); bash \"${X[@]}\"",
             "bash \"${@:2}\"",
+            "X='-c gh${IFS}pr${IFS}merge${IFS}1 #'; bash $X.sh",
+            "IFS=,; X='-c,gh pr merge 1,'; bash $X.sh",
+            "bash $(cmd)/x",
+            "bash -$X.sh",
+            "IFS=,; A=-x; B='-c,gh pr merge 1'; bash \"$A\" $B",
+            "set -- -c 'gh pr merge 1'; bash \"$A\" \"$@\"",
         ] {
             assert_unreadable(command);
         }
@@ -4774,6 +4849,9 @@ mod tests {
         assert_passes("bash \"$C\" \"cargo test; echo it's\"");
         assert_passes("bash x.sh $ARGS");
         assert_passes("bash -c 'cargo test' $ARGS");
+        assert_passes("bash x$X.sh");
+        assert_passes("bash -c 'echo hi'");
+        assert_passes("bash script.sh");
     }
 
     #[test]
@@ -4793,6 +4871,12 @@ mod tests {
             "echo merge 1 | xargs --process-slot-var -I gh pr",
             "echo merge 1 | xargs -aIN gh pr",
             "echo merge 1 | xargs -e -l gh pr",
+            "echo merge 1 | xargs -I X -n 2 gh pr",
+            "echo merge 1 | xargs -I X -L 1 gh pr",
+            "echo merge 1 | xargs -iX -l gh pr",
+            "echo merge 1 | xargs --replace=X --max-lines=1 gh pr",
+            "echo merge 1 | xargs -I X --max-args 2 gh pr",
+            "echo merge 1 | xargs -I X -n $N gh pr",
         ] {
             assert_unreadable(command);
         }
@@ -4801,6 +4885,8 @@ mod tests {
         assert_passes("echo 1 | xargs --rep=X gh pr view X");
         assert_passes("echo 1 | xargs -0i gh pr view {}");
         assert_passes("echo 1 | xargs -e -i gh pr view {}");
+        assert_passes("echo 1 | xargs -I X -n 1 gh pr view X");
+        assert_passes("echo 1 | xargs -L 1 -I X gh pr view X");
         assert_judged("echo 12 | xargs gh pr merge", Switch::Merge);
         assert_passes("gh pr list -q '.[].number' | xargs -n1 gh pr view");
         assert_passes("echo 1 | xargs gh issue view");
@@ -4821,6 +4907,7 @@ mod tests {
             "echo gh pr merge 1 | xargs flock /tmp/l",
             "echo merge 1 | xargs watch -x gh pr",
             "echo -exec gh pr merge 1 \\; | xargs find .",
+            "C=-c; echo \"'gh pr merge 1'\" | xargs bash \"$C\"",
         ] {
             assert_unreadable(command);
         }
@@ -4829,6 +4916,18 @@ mod tests {
         assert_passes("ls | xargs -I {} bash -c 'wc -l {}'");
         assert_passes("git ls-files | xargs git add");
         assert_passes("echo gh pr merge 1 | xargs");
+        let message = run(
+            &ledger(vec![lead()]),
+            all_on(),
+            "echo merge 1 | xargs gh pr",
+        )
+        .unwrap();
+        assert!(message.contains("an `xargs` without `-I`"), "{message}");
+        let message = run(&ledger(vec![lead()]), all_on(), "bash $X").unwrap();
+        assert!(message.contains("among a shell's options"), "{message}");
+        assert_passes("git ls-files | xargs grep foo");
+        assert_passes("find . -name '*.rs' | xargs cargo fmt --check");
+        assert_passes("ls | xargs -n1 echo");
     }
 
     #[test]
