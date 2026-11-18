@@ -209,6 +209,15 @@ pub fn tracker_checks(paths: &crate::herd::Paths, timeout: Duration) -> Vec<Chec
                 continue;
             }
         };
+        if !queue.repo.is_dir() {
+            let repo = queue.repo.display();
+            checks.push(failure(
+                &format!("{herd} repo"),
+                format!("{repo} isn't a directory, so its trackers can't run"),
+                format!("loopherd herd set {herd} repo <path>"),
+            ));
+            continue;
+        }
         let commands = [
             ("source", Some(&queue.source)),
             ("backlog", queue.backlog.as_ref()),
@@ -250,9 +259,13 @@ fn tracker(herd: &str, key: &str, command: &str, repo: &Path, timeout: Duration)
         None => output.status.to_string(),
     };
     if !output.status.success() {
-        let detail = match String::from_utf8_lossy(&output.stderr).trim() {
-            "" => format!("{shown:?} failed ({exit})"),
-            stderr => format!("{shown:?} failed ({exit}): {stderr}"),
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = match stderr.trim().lines().last() {
+            None => format!("{shown:?} failed ({exit})"),
+            Some(last) => format!(
+                "{shown:?} failed ({exit}): {}",
+                crate::watch::printable(last)
+            ),
         };
         return failure(&name, detail, fix);
     }
@@ -884,7 +897,15 @@ mod tests {
         let herds = Herds::with(&[("a", &queue("echo x", None)), ("b", "")]);
         let paths = herds.paths();
         std::fs::create_dir_all(&paths.paused).unwrap();
-        std::fs::write(paths.paused.join("a"), "").unwrap();
+        std::fs::write(
+            paths.paused.join("a"),
+            r#"{"since":"2026-01-01T00:00:00Z","reason":null}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            crate::pause::read(&paths.paused, "a"),
+            crate::pause::Reading::Paused(_)
+        ));
         assert_eq!(
             herds.run(TRACKER_TIMEOUT).0,
             "ok a source: exit 0, 1 tasks\ndoctor: 1 ok, 0 warnings, 0 failures\n"
@@ -897,6 +918,34 @@ mod tests {
         std::fs::write(herds.dir.path().join("herds/a.toml"), "repo = ").unwrap();
         let (out, code) = herds.run(TRACKER_TIMEOUT);
         assert!(out.starts_with("failure a trackers: herd: "), "{out}");
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn a_failing_trackers_stderr_shows_only_its_last_line_printable_and_cut() {
+        let long = "x".repeat(300);
+        let source = format!("printf 'first\\n\\033[31mred\\033[0m {long}\\n' >&2; exit 1");
+        let herds = Herds::with(&[("a", &queue(&source, None))]);
+        let (out, _) = herds.run(TRACKER_TIMEOUT);
+        let (_, stderr) = out.split_once("failed (exit 1): ").unwrap();
+        let (stderr, _) = stderr.split_once("; fix: ").unwrap();
+        assert_eq!(stderr, format!("red {}…", "x".repeat(196)));
+    }
+
+    #[test]
+    fn a_missing_repo_fails_once_naming_herd_set_repo_and_runs_nothing() {
+        let herds = Herds::with(&[("a", &queue("echo x", Some("echo y")))]);
+        std::fs::remove_dir(herds.dir.path().join("repo")).unwrap();
+        let (out, code) = herds.run(TRACKER_TIMEOUT);
+        assert_eq!(
+            out,
+            format!(
+                "failure a repo: {} isn't a directory, so its trackers can't run; \
+                 fix: loopherd herd set a repo <path>\n\
+                 doctor: 0 ok, 0 warnings, 1 failures\n",
+                herds.dir.path().join("repo").display()
+            )
+        );
         assert_eq!(code, 1);
     }
 }

@@ -389,8 +389,9 @@ enum Command {
         #[arg(long)]
         settings: Option<PathBuf>,
         /// Also run each herd's `source` and `backlog` from its repo, paused
-        /// herds included, 30s each; reports exit status and task count,
-        /// never task lines.
+        /// herds included, 30s each; a nonzero exit or timeout fails. With
+        /// `--verbose` or `--json`, shows each exit status and task count, never
+        /// task lines.
         #[arg(long)]
         trackers: bool,
     },

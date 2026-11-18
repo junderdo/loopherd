@@ -385,7 +385,8 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   every check, `--json` gives them as data, `--settings <file>` checks
   another settings file, and `--trackers` also runs each herd's `source`
   and `backlog` from its repo (paused herds too, 30s each), failing on a
-  nonzero exit or timeout and printing the task count, never the tasks.
+  nonzero exit or timeout; `--verbose` or `--json` shows each command's
+  exit status and task count, never the tasks.
   Exits 0 clean or warnings only, 1 on any failure,
   2 when it couldn't run (D63).
 - `loopherd status` lists members by herd with herdr's live status;
