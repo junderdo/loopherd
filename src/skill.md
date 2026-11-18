@@ -448,14 +448,18 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   retire meant for an earlier run of the name can't kill a fresh one;
   `--force` retires it anyway. A report before a revive still counts, a
   member herdr no longer shows retires without a report, and an
-  already-retired entry takes `--close` as before. It also refuses when
-  herdr doesn't list its agents within 5s.
+  already-retired entry takes `--close` as before. It also refuses, naming
+  `--force`, when herdr doesn't answer within 5s, answers with an error or
+  a reply loopherd can't parse, or runs another session than the member's;
+  only no herdr server at all lets it through. A live lead rarely reports
+  `done`, so retiring one with no report since its start takes `--force`.
 - **Re-feed a retired task** (its member was retired before it finished,
   e.g. a tab closed by accident or a rescoped card) with `loopherd release
   <name>`, then `loopherd feed <herd>`. Feed skips every name in the
   ledger until it's released, so a merged task isn't spawned again while
   its card is still open. Release refuses a member not retired, a lead, or
-  one whose tab may be open (`loopherd retire --close <name>` first). It
+  one whose tab may be open (`loopherd retire --close <name>` first, with
+  `--force` if it's live with no report since its start). It
   removes the member's worktree, any leftover at the path the new member
   spawns into, its local branch and its branch on origin, so the new member
   starts afresh; when they hold commits not on the base (pushed or not) it
