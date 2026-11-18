@@ -991,30 +991,41 @@ fn run_view(all: bool, strays: bool) -> Result<i32> {
 
 fn run_pr(url: Option<String>, popup: bool) -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    let entries = ledger.entries()?;
     let reports = ledger.reports_dir()?;
     if popup {
-        let var = |name: &str| std::env::var(name).with_context(|| format!("{name} is not set"));
-        let card = pr_link::card(
-            &var("LOOPHERD_PR_MEMBER")?,
-            &var("LOOPHERD_PR_URL")?,
-            &entries,
-            &reports,
-            &CliHerdr,
-        )?;
-        print!("{card}");
+        let width = ratatui::crossterm::terminal::size().map_or(80, |(w, _)| usize::from(w));
+        let var = |name: &str| std::env::var(name).map_err(|_| anyhow!("{name} is not set"));
+        let card = (|| {
+            pr_link::card(
+                &var("LOOPHERD_PR_MEMBER")?,
+                &var("LOOPHERD_PR_URL")?,
+                &ledger.entries()?,
+                &reports,
+                &CliHerdr,
+                width,
+            )
+        })();
+        // herdr closes the popup when this exits, so an error waits to be read too.
+        match &card {
+            Ok(card) => print!("{card}"),
+            Err(e) => print!("loopherd pr: {e:#}\n\nq or Esc to close\n"),
+        }
         std::io::stdout().flush()?;
         ratatui::crossterm::terminal::enable_raw_mode()?;
         let closed = pr_link::wait_to_close(&mut ratatui::crossterm::event::read);
         ratatui::crossterm::terminal::disable_raw_mode()?;
         closed?;
-        return Ok(0);
+        return Ok(i32::from(card.is_err()));
     }
     let url = match url {
         Some(url) => url,
         None => std::env::var("HERDR_PLUGIN_CLICKED_URL")
             .context("no link given and HERDR_PLUGIN_CLICKED_URL is not set")?,
     };
+    let entries = ledger.entries().unwrap_or_else(|e| {
+        eprintln!("loopherd pr: can't read the ledger, so no member owns {url}: {e:#}");
+        Default::default()
+    });
     let shown = pr_link::click(
         &url,
         &entries,
@@ -1030,19 +1041,21 @@ fn run_pr(url: Option<String>, popup: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// Starts the opener without waiting: a browser it launches would hold this
+/// action's output pipes, and herdr its log entry, open until it quits.
 fn open_in_browser(url: &str) -> Result<()> {
     let opener = if cfg!(target_os = "macos") {
         "open"
     } else {
         "xdg-open"
     };
-    let status = std::process::Command::new(opener)
+    std::process::Command::new(opener)
         .arg(url)
-        .status()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .with_context(|| format!("run {opener}"))?;
-    if !status.success() {
-        bail!("{opener} {url}: {status}");
-    }
     Ok(())
 }
 

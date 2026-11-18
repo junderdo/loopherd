@@ -218,7 +218,7 @@ pub fn status(
 
 /// The worktree's checked-out branch, `detached`, or `None` when there's no
 /// worktree or git can't say. The repo's own branch says nothing about the agent's.
-fn branch(record: &AgentRecord) -> Option<String> {
+pub(crate) fn branch(record: &AgentRecord) -> Option<String> {
     branch_at(record.worktree.as_deref()?)
 }
 

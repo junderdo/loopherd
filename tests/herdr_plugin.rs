@@ -359,3 +359,25 @@ fn a_pr_on_a_members_branch_opens_the_popup() {
     assert_eq!(stub_args(&bin, "xdg-open"), None);
     assert_eq!(stub_args(&bin, "open"), None);
 }
+
+#[test]
+fn a_popup_that_cant_show_its_card_says_why() {
+    let tmp = tempfile::tempdir().unwrap();
+    ledger_with_lh_1(&tmp.path().join("state"));
+
+    let out = Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .args(["pr", "--popup"])
+        .env_clear()
+        .env("PATH", tmp.path())
+        .env("HOME", tmp.path())
+        .env("XDG_STATE_HOME", tmp.path().join("state"))
+        .env("LOOPHERD_PR_URL", PR)
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success(), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "loopherd pr: LOOPHERD_PR_MEMBER is not set\n\nq or Esc to close\n"
+    );
+}

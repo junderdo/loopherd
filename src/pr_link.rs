@@ -13,6 +13,7 @@ use crate::herd_view::member as member_view;
 use crate::herdr::Herdr;
 use crate::ledger::AgentRecord;
 use crate::report::{self, Entry, Kind};
+use crate::status;
 use crate::watch::printable;
 
 /// The plugin's popup pane entrypoint, declared in `herdr-plugin.toml`.
@@ -45,9 +46,13 @@ pub fn click(
         browser(url)?;
         return Ok(Shown::Browser);
     };
-    let owner = match named_in_reports(pr, entries, reports_dir)? {
-        Some(name) => Some(name),
-        None => on_head_branch(pr, entries, heads),
+    let owner = match named_in_reports(pr, entries, reports_dir) {
+        Ok(Some(name)) => Some(name),
+        Ok(None) => on_head_branch(pr, entries, heads),
+        Err(e) => {
+            eprintln!("loopherd pr: can't read the reports, opening {pr}: {e:#}");
+            None
+        }
     };
     if let Some(member) = owner {
         let env = [
@@ -79,26 +84,27 @@ fn pr_url(url: &str) -> Option<&str> {
     Some(&url[..len])
 }
 
-/// The open member whose current run reported `pr` last.
+/// The open worker whose current run reported `pr` first: the one that opened
+/// it, not a lead or reviewer that named it after.
 fn named_in_reports(
     pr: &str,
     entries: &BTreeMap<String, AgentRecord>,
     reports_dir: &Path,
 ) -> Result<Option<String>> {
-    let mut latest: Option<(SystemTime, &str)> = None;
-    for record in entries.values().filter(|r| !r.retired) {
+    let mut first: Option<(SystemTime, &str)> = None;
+    for record in entries.values().filter(|r| !r.retired && !r.is_lead()) {
         let (history, _) = report::history(reports_dir, &record.name)?;
         let naming = current_run(&history, record)
             .filter(|e| e.report().is_some_and(|(_, text)| names(text, pr)))
             .filter_map(|e| humantime::parse_rfc3339_weak(&e.at).ok())
-            .max();
+            .min();
         if let Some(at) = naming
-            && latest.is_none_or(|(best, _)| at > best)
+            && first.is_none_or(|(best, _)| at < best)
         {
-            latest = Some((at, &record.name));
+            first = Some((at, &record.name));
         }
     }
-    Ok(latest.map(|(_, name)| name.to_string()))
+    Ok(first.map(|(_, name)| name.to_string()))
 }
 
 /// The entries since `record` was spawned; a name fed again keeps its mailbox.
@@ -115,7 +121,8 @@ fn current_run<'a>(
     )
 }
 
-/// The open member whose recorded branch is `pr`'s head; `None` when GitHub can't say.
+/// The open member on `pr`'s head branch, recorded at spawn or, for a
+/// detached spawn, its worktree's now; `None` when GitHub can't say.
 fn on_head_branch(
     pr: &str,
     entries: &BTreeMap<String, AgentRecord>,
@@ -130,17 +137,23 @@ fn on_head_branch(
     };
     entries
         .values()
-        .find(|r| !r.retired && r.branch.as_deref() == Some(head.as_str()))
+        .filter(|r| !r.retired)
+        .find(|r| match r.branch.as_deref() {
+            Some(branch) if !branch.is_empty() => branch == head,
+            _ => status::branch(r).is_some_and(|branch| branch == head),
+        })
         .map(|r| r.name.clone())
 }
 
-/// The popup's text for `member`, the owner of `pr`.
+/// The popup's text for `member`, the owner of `pr`, each report cut to
+/// `width` columns so the card fits the popup without scrolling.
 pub fn card(
     member: &str,
     pr: &str,
     entries: &BTreeMap<String, AgentRecord>,
     reports_dir: &Path,
     herdr: &dyn Herdr,
+    width: usize,
 ) -> Result<String> {
     let record = entries
         .get(member)
@@ -173,7 +186,9 @@ pub fn card(
     let last = &reports[reports.len().saturating_sub(LAST_REPORTS)..];
     for (entry, kind, said) in last {
         let said = printable(&said.split_whitespace().collect::<Vec<_>>().join(" "));
-        text.push_str(&format!("{}  {}  {said}\n", entry.when(), kind.as_str()));
+        let line = format!("{}  {}  {said}", entry.when(), kind.as_str());
+        text.push_str(&cut(&line, width));
+        text.push('\n');
     }
     if last.is_empty() {
         text.push_str("none\n");
@@ -194,9 +209,20 @@ pub fn wait_to_close(next: &mut dyn FnMut() -> std::io::Result<Event>) -> Result
     }
 }
 
-/// `text` holds `url` not running on into a longer PR number.
+/// `line` in at most `width` characters, ending in `…` when cut.
+fn cut(line: &str, width: usize) -> String {
+    if line.chars().count() <= width {
+        return line.to_string();
+    }
+    let kept: String = line.chars().take(width.saturating_sub(1)).collect();
+    format!("{kept}…")
+}
+
+/// `text` holds `url`, ignoring case as GitHub does, not running on into a
+/// longer PR number.
 fn names(text: &str, url: &str) -> bool {
-    text.match_indices(url)
+    let (text, url) = (text.to_ascii_lowercase(), url.to_ascii_lowercase());
+    text.match_indices(&url)
         .any(|(i, _)| !text[i + url.len()..].starts_with(|c: char| c.is_ascii_digit()))
 }
 
@@ -310,10 +336,13 @@ mod tests {
         );
         assert_eq!(
             c.herdr.popups(),
-            [vec![
-                ("LOOPHERD_PR_MEMBER".to_string(), "lh-1".to_string()),
-                ("LOOPHERD_PR_URL".to_string(), PR.to_string()),
-            ]]
+            [(
+                POPUP.to_string(),
+                vec![
+                    ("LOOPHERD_PR_MEMBER".to_string(), "lh-1".to_string()),
+                    ("LOOPHERD_PR_URL".to_string(), PR.to_string()),
+                ]
+            )]
         );
         assert!(c.opened.is_empty());
     }
@@ -359,12 +388,105 @@ mod tests {
     }
 
     #[test]
-    fn the_member_that_reported_the_pr_last_owns_it() {
+    fn the_worker_that_reported_the_pr_first_owns_it() {
         let dir = tempfile::tempdir().unwrap();
-        done(dir.path(), "lh-1", 9, &format!("verified {PR}"));
-        done(dir.path(), "lh-2", 5, &format!("{PR} opened"));
+        done(dir.path(), "lh-1", 5, &format!("{PR} opened"));
+        done(dir.path(), "lh-2", 9, &format!("reviewed {PR}"));
+        done(dir.path(), "lead", 3, &format!("merge {PR}?"));
+        let lead = AgentRecord {
+            role: Some(crate::ledger::Role::Lead),
+            ..record("lead")
+        };
 
-        let c = click_on(PR, vec![record("lh-1"), record("lh-2")], dir.path());
+        let c = click_on(PR, vec![record("lh-1"), record("lh-2"), lead], dir.path());
+
+        assert_eq!(
+            c.shown,
+            Shown::Popup {
+                member: "lh-1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_report_naming_the_pr_in_other_case_still_names_it() {
+        let dir = tempfile::tempdir().unwrap();
+        done(
+            dir.path(),
+            "lh-1",
+            5,
+            "https://github.com/O/R/pull/12 opened",
+        );
+
+        let c = click_on(PR, vec![record("lh-1")], dir.path());
+
+        assert_eq!(
+            c.shown,
+            Shown::Popup {
+                member: "lh-1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_report_beats_another_members_head_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        done(dir.path(), "lh-1", 5, PR);
+
+        let c = click_with(
+            PR,
+            vec![record("lh-1"), record("lh-2")],
+            dir.path(),
+            Heads(Ok(Some("feat/lh-2"))),
+            FakeHerdr::new(&[]),
+        );
+
+        assert_eq!(
+            c.shown,
+            Shown::Popup {
+                member: "lh-1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn an_unreadable_mailbox_leaves_the_click_to_the_browser() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("lh-1.jsonl")).unwrap();
+
+        let c = click_on(PR, vec![record("lh-1")], dir.path());
+
+        assert_browser(&c, PR);
+    }
+
+    #[test]
+    fn a_detached_spawn_matches_by_its_worktrees_branch_now() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("wt");
+        std::fs::create_dir(&worktree).unwrap();
+        let ok = std::process::Command::new("git")
+            .args(["init", "--quiet", "-b", "feat/own-branch"])
+            .current_dir(&worktree)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git init");
+        let detached = AgentRecord {
+            branch: Some(String::new()),
+            worktree: Some(worktree),
+            ..record("lh-1")
+        };
+
+        let c = click_with(
+            PR,
+            vec![detached],
+            dir.path(),
+            Heads(Ok(Some("feat/own-branch"))),
+            FakeHerdr::new(&[]),
+        );
 
         assert_eq!(
             c.shown,
@@ -438,7 +560,11 @@ mod tests {
                 member: "lh-1".into()
             }
         );
-        assert!(c.herdr.popups()[0].contains(&("LOOPHERD_PR_URL".into(), PR.into())));
+        assert!(
+            c.herdr.popups()[0]
+                .1
+                .contains(&("LOOPHERD_PR_URL".into(), PR.into()))
+        );
     }
 
     #[test]
@@ -490,7 +616,15 @@ mod tests {
             display_agent: None,
         });
 
-        let text = card("lh-1", PR, &entries([record("lh-1")]), dir.path(), &herdr).unwrap();
+        let text = card(
+            "lh-1",
+            PR,
+            &entries([record("lh-1")]),
+            dir.path(),
+            &herdr,
+            80,
+        )
+        .unwrap();
 
         assert_eq!(
             text,
@@ -526,7 +660,7 @@ mod tests {
         let herdr = FakeHerdr::new(&[]);
         herdr.set_unreachable(true);
 
-        let text = card("lh-1", PR, &entries([bare]), dir.path(), &herdr).unwrap();
+        let text = card("lh-1", PR, &entries([bare]), dir.path(), &herdr, 80).unwrap();
 
         assert_eq!(
             text,
@@ -557,6 +691,7 @@ mod tests {
             &entries([record("lh-1")]),
             dir.path(),
             &FakeHerdr::new(&[]),
+            80,
         )
         .unwrap();
 
@@ -583,5 +718,26 @@ mod tests {
 
             assert_eq!(events.next(), Some(key(KeyCode::Char('z'))), "{close:?}");
         }
+    }
+
+    #[test]
+    fn a_long_report_is_cut_to_the_popup_width() {
+        let dir = tempfile::tempdir().unwrap();
+        done(dir.path(), "lh-1", 5, &format!("{PR} {}", "x".repeat(200)));
+
+        let text = card(
+            "lh-1",
+            PR,
+            &entries([record("lh-1")]),
+            dir.path(),
+            &FakeHerdr::new(&[]),
+            40,
+        )
+        .unwrap();
+
+        assert!(
+            text.contains("\n2026-11-01 00:05  done  https://github.…\n"),
+            "{text}"
+        );
     }
 }

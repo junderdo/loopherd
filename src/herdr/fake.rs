@@ -66,8 +66,8 @@ struct State {
     started: Vec<Started>,
     prompts: Vec<(String, String)>,
     focused: Vec<String>,
-    /// Each opened plugin pane's env, sorted by key.
-    popups: Vec<Vec<(String, String)>>,
+    /// Each opened plugin pane's entrypoint and env, sorted by key.
+    popups: Vec<(String, Vec<(String, String)>)>,
     refuse_popup: bool,
     /// Sidebar labels by pane.
     labels: Vec<(String, String)>,
@@ -236,7 +236,7 @@ impl FakeHerdr {
         self.state.lock().unwrap().focused.clone()
     }
 
-    pub fn popups(&self) -> Vec<Vec<(String, String)>> {
+    pub fn popups(&self) -> Vec<(String, Vec<(String, String)>)> {
         self.state.lock().unwrap().popups.clone()
     }
 
@@ -645,7 +645,7 @@ impl Herdr for FakeHerdr {
         Ok(())
     }
 
-    fn open_plugin_pane(&self, _entrypoint: &str, env: &[(&str, &str)]) -> Result<()> {
+    fn open_plugin_pane(&self, entrypoint: &str, env: &[(&str, &str)]) -> Result<()> {
         if self.is_down() {
             bail!("herdr server not running");
         }
@@ -658,7 +658,7 @@ impl Herdr for FakeHerdr {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         env.sort();
-        state.popups.push(env);
+        state.popups.push((entrypoint.to_string(), env));
         Ok(())
     }
 
