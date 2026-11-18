@@ -1449,9 +1449,16 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
     let words = words.as_slice();
     let mut i = 0;
     let mut in_env = false;
+    let mut xargs_appends = false;
+    // A wrapper under an appending `xargs` may get its whole command from stdin.
+    let mut wraps_appended = false;
     loop {
         let Some(word) = words.get(i) else {
-            return vec![];
+            return if wraps_appended {
+                vec![Switch::Unreadable]
+            } else {
+                vec![]
+            };
         };
         let program = file_name(word);
         if in_env && (word.contains('=') || word.is_empty()) && kept[i].name_expands() {
@@ -1493,6 +1500,8 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             }
             args.iter().for_each(|w| aliases.assign(w));
             return vec![];
+        } else if xargs_appends && (program == "watch" || program == "find") {
+            return vec![Switch::Unreadable];
         } else if program == "watch" {
             let with_value =
                 with_abbreviations(&words[i + 1..], &["-n", "-q", "--interval", "--equexit"]);
@@ -1502,6 +1511,7 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             return find_needs(&kept[i + 1..], aliases);
         } else if let Some((_, with_value)) = WRAPPERS.iter().find(|(w, _)| *w == program) {
             in_env |= program == "env";
+            wraps_appended |= xargs_appends;
             let options = i + 1;
             i = skip_options(
                 words,
@@ -1517,14 +1527,21 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             {
                 return vec![Switch::RetireLead];
             }
+            xargs_appends |=
+                program == "xargs" && !xargs_replaces(&words[options..i.min(words.len())]);
             // The duration, CPU mask or lock file before the command.
             if ["timeout", "taskset", "flock"].contains(&program) {
                 i += 1;
             }
             if program == "flock" && words.get(i).is_some_and(|w| w == "-c" || w == "--command") {
-                return kept
-                    .get(i + 1)
-                    .map_or(vec![], |script| script_needs(script, aliases));
+                return kept.get(i + 1).map_or(
+                    if xargs_appends {
+                        vec![Switch::Unreadable]
+                    } else {
+                        vec![]
+                    },
+                    |script| script_needs(script, aliases),
+                );
             }
         } else if program == "rustup" {
             // `rustup [-q] [+toolchain] run [--install] <toolchain> [--install] [--] <command>`
@@ -1554,6 +1571,15 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
                 .flat_map(|options| i + 1..options.end + usize::from(!options.command_script))
                 .filter(|&at| kept.get(at).is_some_and(|w| w.may_print_option()))
                 .min();
+            // Unquoted, or a quoted `"$@"` or `"${a[@]}"`, it may split into
+            // `-c` and the script itself.
+            let splits = |w: &Word| {
+                w.bare_expansion || ["$@", "${@", "[@]"].iter().any(|at| w.text.contains(at))
+            };
+            let script_appended = xargs_appends && read.iter().any(|o| o.end >= kept.len());
+            if script_appended || may_print_c.is_some_and(|at| splits(kept[at])) {
+                return vec![Switch::Unreadable];
+            }
             let guessed = may_print_c.map_or(kept.len(), |at| at + 1);
             if !scripts.is_empty() || guessed < kept.len() {
                 let mut needs = vec![];
@@ -1588,7 +1614,8 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
         } else if program == "gh"
             && (aliases.gh_config_dir
                 || aliases.unreadable_name
-                || gh_command_built(&kept[i + 1..]))
+                || gh_command_built(&kept[i + 1..])
+                || (xargs_appends && gh_command_open(&words[i + 1..])))
         {
             return vec![Switch::Unreadable];
         } else {
@@ -1624,6 +1651,16 @@ fn gh_command_built(args: &[&Word]) -> bool {
         .take(last + 1)
         .enumerate()
         .any(|(at, w)| w.built() && !repo_value(at, w))
+}
+
+/// Whether words appended to `gh args` may still choose its command, the
+/// subcommand after `pr` or `alias`, or a `gh api` call's path or method.
+fn gh_command_open(args: &[String]) -> bool {
+    match positionals(args, &["-R", "--repo"]).as_slice() {
+        [] | ["pr" | "alias"] => true,
+        ["api", ..] => !(args.iter().any(|a| merges(a)) && gh_api_writes(args)),
+        _ => false,
+    }
 }
 
 /// What `watch` running `command` needs. Without `-x` it runs the words
@@ -1813,6 +1850,52 @@ fn xargs_may_replace(options: &[String]) -> bool {
             }
             None => option.starts_with('-') && option.contains(['I', 'i']),
         })
+}
+
+/// Whether `xargs`'s options set a replace string, read as getopt does, so
+/// it fills its command's words instead of appending them.
+fn xargs_replaces(options: &[String]) -> bool {
+    const SHORT_WITH_VALUE: &str = "adEILnPs";
+    const LONG_WITH_VALUE: [&str; 6] = [
+        "arg-file",
+        "delimiter",
+        "max-args",
+        "max-chars",
+        "max-procs",
+        "process-slot-var",
+    ];
+    let mut words = options.iter();
+    while let Some(option) = words.next() {
+        if let Some(long) = option.strip_prefix("--") {
+            let name = long.split('=').next().unwrap_or(long);
+            if !name.is_empty() && "replace".starts_with(name) {
+                return true;
+            }
+            if !long.contains('=') && LONG_WITH_VALUE.iter().any(|v| v.starts_with(name)) {
+                words.next();
+            }
+            continue;
+        }
+        let Some(cluster) = option.strip_prefix('-') else {
+            continue;
+        };
+        for (at, letter) in cluster.char_indices() {
+            if letter == 'I' || letter == 'i' {
+                return true;
+            }
+            // `-e`, `-l` take only an attached value.
+            if "el".contains(letter) {
+                break;
+            }
+            if SHORT_WITH_VALUE.contains(letter) {
+                if at + 1 == cluster.len() {
+                    words.next();
+                }
+                break;
+            }
+        }
+    }
+    false
 }
 
 fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
@@ -4627,27 +4710,26 @@ mod tests {
     #[test]
     fn a_shell_option_or_operand_a_substitution_or_variable_builds_may_be_its_c() {
         for command in [
-            "bash $(echo -c) 'gh pr merge 1'",
-            "bash -$(printf c) 'gh pr merge 1'",
-            "bash `echo -c` 'gh pr merge 1'",
-            "C=-c; bash $C 'gh pr merge 1'",
-            "bash \"$C\" 'gh pr merge 1'",
-            "zsh -o pipefail $C 'gh pr merge 1'",
-            "bash -$C 'gh pr merge 1'",
+            "bash \"$(echo -c)\" 'gh pr merge 1'",
+            "bash \"-$(printf c)\" 'gh pr merge 1'",
+            "bash \"`echo -c`\" 'gh pr merge 1'",
+            "C=-c; bash \"$C\" 'gh pr merge 1'",
+            "zsh -o pipefail \"$C\" 'gh pr merge 1'",
+            "bash \"-$C\" 'gh pr merge 1'",
         ] {
             assert_judged(command, Switch::Merge);
         }
-        assert_unreadable("bash $C \"$(cat f)\"");
+        assert_unreadable("bash \"$C\" \"$(cat f)\"");
         assert_unreadable("bash \"$f\" \"gh pr merge 1\nit's\"");
         assert_passes("bash \"$script\" one two");
         for command in [
-            "bash $C \"gh pr merge 1; echo it\\'s\"",
-            "bash $C \"gh pr merge 1; echo \\'\"",
-            "bash $C \"gh pr merge 1; echo a\\'b\"",
-            "bash $C \"gh pr merge 1; echo $' it\\'s'\"",
-            "bash $C 'gh pr merge 1; echo it\\'\\''s'",
-            "bash $C \"gh pr merge 1; echo it's$X\"",
-            "bash $C \"gh pr merge 1; echo it's${X}\"",
+            "bash \"$C\" \"gh pr merge 1; echo it\\'s\"",
+            "bash \"$C\" \"gh pr merge 1; echo \\'\"",
+            "bash \"$C\" \"gh pr merge 1; echo a\\'b\"",
+            "bash \"$C\" \"gh pr merge 1; echo $' it\\'s'\"",
+            "bash \"$C\" 'gh pr merge 1; echo it\\'\\''s'",
+            "bash \"$C\" \"gh pr merge 1; echo it's$X\"",
+            "bash \"$C\" \"gh pr merge 1; echo it's${X}\"",
         ] {
             assert!(
                 !needs(command).is_empty(),
@@ -4659,7 +4741,6 @@ mod tests {
                 "{command} was allowed"
             );
         }
-        assert_passes("C=-c; bash $C \"gh pr merge 1; echo it's\"");
         assert_passes("bash \"$f\" \"don't stop\"");
         assert_passes("bash \"$SCRIPT\" --message \"it's done\"");
         assert_passes("bash \"$f.sh\" \"can't\"");
@@ -4668,6 +4749,86 @@ mod tests {
         assert_passes("bash \"${f}\"/x.sh \"$(date)\"");
         assert_passes("bash --rcfile \"$f\" -c 'cargo test'");
         assert_passes("bash -c 'cargo test' \"$(pwd)\"");
+    }
+
+    #[test]
+    fn an_unquoted_shell_option_or_operand_may_split_into_c_and_its_script() {
+        for command in [
+            "IFS=,; X='-c,gh pr merge 1'; bash $X",
+            "X='-c gh${IFS}pr${IFS}merge${IFS}1'; bash $X",
+            "bash $X foo",
+            "bash -x $X",
+            "bash $(cat opts)",
+            "bash -$X",
+            "zsh $X",
+            "C=-c; bash $C \"gh pr merge 1; echo it's\"",
+            "bash `echo -c` 'gh pr merge 1'",
+            "bash $(echo -c) 'gh pr merge 1'",
+            "set -- -c 'gh pr merge 1'; bash \"$@\"",
+            "X=(-c 'gh pr merge 1'); bash \"${X[@]}\"",
+            "bash \"${@:2}\"",
+        ] {
+            assert_unreadable(command);
+        }
+        assert_passes("bash \"$X\"");
+        assert_passes("bash \"$C\" \"cargo test; echo it's\"");
+        assert_passes("bash x.sh $ARGS");
+        assert_passes("bash -c 'cargo test' $ARGS");
+    }
+
+    #[test]
+    fn gh_whose_command_words_xargs_appends_from_stdin_is_denied() {
+        for command in [
+            "echo merge 1 | xargs gh pr",
+            "echo pr merge 1 | xargs gh",
+            "echo o/r merge 1 | xargs gh pr --repo",
+            "echo set m 'pr merge' | xargs gh alias",
+            "echo repos/o/r/pulls/1/merge | xargs gh api -X PUT",
+            "echo -X PUT | xargs gh api repos/o/r/pulls/1/merge",
+            "echo merge 1 | xargs -n 2 gh pr",
+            "echo merge 1 | env xargs gh pr",
+            "echo merge 1 | xargs -E -i gh pr",
+            "echo merge 1 | xargs -Eif gh pr",
+            "printf mergei1 | xargs -di gh pr",
+            "echo merge 1 | xargs --process-slot-var -I gh pr",
+            "echo merge 1 | xargs -aIN gh pr",
+            "echo merge 1 | xargs -e -l gh pr",
+        ] {
+            assert_unreadable(command);
+        }
+        assert_passes("echo 1 | xargs -I {} gh pr view {}");
+        assert_passes("echo 1 | xargs -i gh pr view {}");
+        assert_passes("echo 1 | xargs --rep=X gh pr view X");
+        assert_passes("echo 1 | xargs -0i gh pr view {}");
+        assert_passes("echo 1 | xargs -e -i gh pr view {}");
+        assert_judged("echo 12 | xargs gh pr merge", Switch::Merge);
+        assert_passes("gh pr list -q '.[].number' | xargs -n1 gh pr view");
+        assert_passes("echo 1 | xargs gh issue view");
+        assert_passes("ls | xargs echo gh pr");
+        assert_passes("echo merge | gh pr");
+    }
+
+    #[test]
+    fn a_command_xargs_reads_from_stdin_is_denied() {
+        for command in [
+            "echo gh pr merge 1 | xargs env",
+            "echo gh pr merge 1 | xargs nohup",
+            "echo gh pr merge 1 | xargs timeout 60",
+            "echo gh pr merge 1 | xargs xargs",
+            "echo \"'gh pr merge 1'\" | xargs bash -c",
+            "echo -c \"'gh pr merge 1'\" | xargs bash",
+            "echo \"'gh pr merge 1'\" | xargs flock /tmp/l -c",
+            "echo gh pr merge 1 | xargs flock /tmp/l",
+            "echo merge 1 | xargs watch -x gh pr",
+            "echo -exec gh pr merge 1 \\; | xargs find .",
+        ] {
+            assert_unreadable(command);
+        }
+        assert_passes("ls | xargs bash x.sh");
+        assert_passes("ls | xargs sh -c 'wc -l \"$@\"' _");
+        assert_passes("ls | xargs -I {} bash -c 'wc -l {}'");
+        assert_passes("git ls-files | xargs git add");
+        assert_passes("echo gh pr merge 1 | xargs");
     }
 
     #[test]
