@@ -70,7 +70,11 @@ pub fn remove(
     let mailboxes = !how.keep_history;
     let names = match mailboxes {
         true => runs.gone,
-        false => members.iter().map(|r| r.name.clone()).collect(),
+        false => members
+            .iter()
+            .filter(|r| !holds_another_run(r, herd))
+            .map(|r| r.name.clone())
+            .collect(),
     };
     for path in member_files(state, &names, mailboxes).iter().chain(&own) {
         present(path)?;
@@ -93,7 +97,10 @@ pub fn remove(
         for name in &names {
             ledger
                 .update(name, &mut |record| {
-                    if record.herd.as_deref() != Some(herd) || !record.retired {
+                    if record.herd.as_deref() != Some(herd)
+                        || !record.retired
+                        || holds_another_run(record, herd)
+                    {
                         return Ok(());
                     }
                     let files = member_files(state, std::slice::from_ref(name), false);
@@ -120,6 +127,14 @@ pub fn remove(
         out.extend(trimmed.iter().map(kept));
     }
     delete_all(&own, verb, how, out)
+}
+
+/// Whether `record` keeps a run when `herd`'s go, so its name keeps its files.
+fn holds_another_run(record: &AgentRecord, herd: &str) -> bool {
+    record
+        .earlier
+        .iter()
+        .any(|r| r.herd.as_deref() != Some(herd))
 }
 
 /// Fails naming each member that is not retired or that herdr shows open,
@@ -613,6 +628,27 @@ mod tests {
         assert_eq!(a.earlier.len(), 1);
         assert!(s.path("state/reports/a.jsonl").exists());
         assert!(!out.contains("ledger entry a\n"), "{out}");
+    }
+
+    #[test]
+    fn keep_history_keeps_the_handoffs_of_a_member_holding_another_herds_run() {
+        let mut s = Setup::new();
+        spawn(&mut s, "a", Some("g"), "2026-11-01T00:00:00Z", true);
+        spawn(&mut s, "a", Some("h"), "2026-11-03T00:00:00Z", true);
+        spawn(&mut s, "b", Some("h"), "2026-11-03T00:00:00Z", true);
+        for name in ["a", "b"] {
+            s.write(&format!("state/handoffs/{name}.md"), "now\n");
+        }
+        let how = Removal {
+            keep_history: true,
+            ..Removal::default()
+        };
+
+        let out = s.remove("h", how).unwrap();
+
+        assert!(s.path("state/handoffs/a.md").exists(), "{out}");
+        assert!(!s.path("state/handoffs/b.md").exists(), "{out}");
+        assert!(out.contains("kept h's runs in ledger entry a\n"), "{out}");
     }
 
     #[test]
