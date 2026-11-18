@@ -212,7 +212,7 @@ fn decide(
     }
     if needed == Switch::Unreadable {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like, a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, or from a relative `stdin`, `fd/<n>` or all-digit path, a `trap`, `sh -c` or `eval` script that a substitution prints, `gh` after `GH_CONFIG_DIR` is set or with a command or `pr` subcommand that a `$` or substitution builds, a `case` in `$(…)`, a glob or brace in the program's name, a brace expansion in gh's or git's arguments, an unquoted `$` or substitution, `\"$@\"` or `\"${{a[@]}}\"` among a shell's options or as its operand, or an `xargs` without `-I` that appends stdin to `gh` before its command is chosen, to a wrapper or shell with no command or script, or to `watch` or `find`: {}; rewrite it, or ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run a command the hook can't read, as with a backslash-newline, a `$'\\c…'` or `$\"…\"`, a `${{…}}` holding more than a name, a `\\`` in a backtick substitution, a heredoc without its terminator, or with a quote left open in a script that runs more than cat, tee, gh, git and the like, a `<<` in `((…))`, a space or `(` in an assignment's `a[…]`, a shell or `source` reading its script from `<(…)` or `<`, or from a relative `stdin`, `fd/<n>` or all-digit path, a `trap`, `sh -c` or `eval` script that a substitution prints, `gh` after `GH_CONFIG_DIR` is set or with a command or `pr` subcommand that a `$` or substitution builds, a `case` in `$(…)`, a glob or brace in the program's name, a brace expansion in gh's or git's arguments, an unquoted `$` or substitution, `\"$@\"` or `\"${{a[@]}}\"` among a shell's options or as its operand, an `xargs` without `-I` that appends stdin to `gh`, `git`, `loopherd` or `cargo` before its command or switches are chosen, to `curl`, `wget` or `scripts/install`, to a wrapper or shell with no command or script, or to `watch` or `find`, or an `xargs -I` whose replace string fills gh's command: {}; rewrite it, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -1488,6 +1488,7 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
     let mut i = 0;
     let mut in_env = false;
     let mut xargs_appends = false;
+    let mut replace_strings: Vec<String> = vec![];
     // A wrapper under an appending `xargs` may get its whole command from stdin.
     let mut wraps_appended = false;
     loop {
@@ -1513,6 +1514,12 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             || ((word == "source" || word == ".")
                 && reads_script_from_input(words.get(skip_options(words, i + 1, &[]))))
         {
+            return vec![Switch::Unreadable];
+        } else if replace_strings
+            .iter()
+            .any(|r| !r.is_empty() && word.contains(r))
+        {
+            // xargs may fill a wrapper's program word.
             return vec![Switch::Unreadable];
         } else if KEYWORDS.contains(&word.as_str()) || word == "." {
             i += 1;
@@ -1565,8 +1572,11 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             {
                 return vec![Switch::RetireLead];
             }
-            xargs_appends |=
-                program == "xargs" && !xargs_replaces(&words[options..i.min(words.len())]);
+            if program == "xargs" {
+                let (replace, appends) = xargs_fill(&words[options..i.min(words.len())]);
+                replace_strings.extend(replace);
+                xargs_appends |= appends;
+            }
             // The duration, CPU mask or lock file before the command.
             if ["timeout", "taskset", "flock"].contains(&program) {
                 i += 1;
@@ -1669,16 +1679,27 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
         } else if GATED.contains(&program) && kept[i + 1..].iter().any(|w| w.braced()) {
             return vec![Switch::Unreadable];
         } else if program == "cargo" {
-            return cargo_needs(word, &words[i + 1..], aliases);
+            let needs = cargo_needs(word, &words[i + 1..], aliases);
+            if xargs_appends && needs.is_empty() && cargo_run_open(&words[i + 1..], aliases) {
+                return vec![Switch::Unreadable];
+            }
+            return needs;
         } else if program == "gh"
             && (aliases.gh_config_dir
                 || aliases.unreadable_name
                 || gh_command_built(&kept[i + 1..])
-                || (xargs_appends && gh_command_open(&words[i + 1..])))
+                || (xargs_appends && gh_command_open(&words[i + 1..]))
+                || replace_strings
+                    .iter()
+                    .any(|r| gh_command_replaced(&words[i + 1..], r)))
         {
             return vec![Switch::Unreadable];
         } else {
-            return needs_program(word, &words[i + 1..]).into_iter().collect();
+            let needs = needs_program(word, &words[i + 1..]);
+            if xargs_appends && appended_words_may_raise(word, &words[i + 1..], needs) {
+                return vec![Switch::Unreadable];
+            }
+            return needs.into_iter().collect();
         }
     }
 }
@@ -1710,6 +1731,73 @@ fn gh_command_built(args: &[&Word]) -> bool {
         .take(last + 1)
         .enumerate()
         .any(|(at, w)| w.built() && !repo_value(at, w))
+}
+
+/// Whether a word that holds an `xargs` replace string may fill gh's command,
+/// the subcommand after `pr` or `alias`, or a word before them other than a
+/// repo value; or, on a `gh api` merge path, any other word.
+fn gh_command_replaced(args: &[String], replace: &str) -> bool {
+    let with_value = ["-R", "--repo"];
+    let filled = |w: &String| !replace.is_empty() && w.contains(replace);
+    let command = skip_options(args, 0, &with_value);
+    if args.get(command).is_some_and(|api| api == "api") && args.iter().any(|w| merges(w)) {
+        return args.iter().any(|w| filled(w) && !merges(w));
+    }
+    let last = match args.get(command) {
+        Some(sub) if sub == "pr" || sub == "alias" => skip_options(args, command + 1, &with_value),
+        _ => command,
+    };
+    let repo_value = |at: usize, w: &String| {
+        let after_flag = at > 0 && with_value.contains(&args[at - 1].as_str());
+        let inline = w
+            .strip_prefix("--repo=")
+            .is_some_and(|_| w.find(replace).is_some_and(|p| p >= "--repo=".len()));
+        at != command && at != last && (after_flag || inline)
+    };
+    args.iter()
+        .take(last + 1)
+        .enumerate()
+        .any(|(at, w)| filled(w) && !repo_value(at, w))
+}
+
+/// Whether words appended to `path args`, which needs `needs` as written, may
+/// still choose a gated command or switch: git's subcommand or a `push` or
+/// `pull` switch, loopherd's subcommand or the switches of one that has
+/// them, a curl or wget URL, or an install flag.
+fn appended_words_may_raise(path: &str, args: &[String], needs: Option<Switch>) -> bool {
+    if Path::new(path).ends_with("scripts/install") {
+        return needs == Some(Switch::Install);
+    }
+    if needs.is_some() {
+        return false;
+    }
+    match file_name(path) {
+        "git" => {
+            let start = skip_options(args, 0, &GIT_GLOBAL_WITH_VALUE);
+            args.get(start)
+                .is_none_or(|sub| ["push", "pull", "config"].contains(&sub.as_str()))
+        }
+        "loopherd" => match positionals(args, &[]).as_slice() {
+            [] | ["herd" | "config"] => true,
+            [sub, ..] => ["lead-defaults", "setup", "restart"].contains(sub),
+        },
+        "curl" | "wget" => true,
+        _ => false,
+    }
+}
+
+/// Whether words appended to `cargo args` may choose its subcommand or what
+/// `cargo run` runs, directly or through an alias set in the command.
+fn cargo_run_open(args: &[String], aliases: &Aliases) -> bool {
+    args.get(cargo_subcommand(args)).is_none_or(|sub| {
+        sub == "run"
+            || sub == "r"
+            || (!CARGO_BUILTINS.contains(&sub.as_str())
+                && (aliases.unreadable_name
+                    || aliases
+                        .values
+                        .contains_key(&sub.to_uppercase().replace(['-', '.'], "_"))))
+    })
 }
 
 /// Whether words appended to `gh args` may still choose its command, the
@@ -1911,9 +1999,10 @@ fn xargs_may_replace(options: &[String]) -> bool {
         })
 }
 
-/// Whether `xargs`'s options set a replace string, read as getopt does, so
-/// it fills its command's words instead of appending them.
-fn xargs_replaces(options: &[String]) -> bool {
+/// The replace string `xargs`'s options set, read as getopt reads them, and
+/// whether xargs may append to its command instead, as when a `-n` it can't
+/// read may or may not clear the replace string.
+fn xargs_fill(options: &[String]) -> (Option<String>, bool) {
     const SHORT_WITH_VALUE: &str = "adEPs";
     const LONG_WITH_VALUE: [&str; 6] = [
         "arg-file",
@@ -1924,7 +2013,18 @@ fn xargs_replaces(options: &[String]) -> bool {
         "process-slot-var",
     ];
     // A later `-L`, `-l`, `--max-lines`, or `-n` other than 1 clears it.
-    let mut replaces = false;
+    let mut replace: Option<String> = None;
+    let mut may_append = false;
+    // xargs reads `-n`'s value as a number, so `01` and `+1` keep it too.
+    let mut max_args = |value: &str, replace: &mut Option<String>| match value
+        .trim_start()
+        .trim_start_matches('+')
+        .parse::<u64>()
+    {
+        Ok(1) => {}
+        Ok(_) => *replace = None,
+        Err(_) => may_append = true,
+    };
     let mut words = options.iter();
     while let Some(option) = words.next() {
         if let Some(long) = option.strip_prefix("--") {
@@ -1939,11 +2039,11 @@ fn xargs_replaces(options: &[String]) -> bool {
                     attached
                 };
             if "replace".starts_with(name) {
-                replaces = true;
-            } else if "max-lines".starts_with(name)
-                || ("max-args".starts_with(name) && value != "1")
-            {
-                replaces = false;
+                replace = Some(if long.contains('=') { attached } else { "{}" }.to_string());
+            } else if "max-lines".starts_with(name) {
+                replace = None;
+            } else if "max-args".starts_with(name) {
+                max_args(value, &mut replace);
             }
             continue;
         }
@@ -1953,15 +2053,21 @@ fn xargs_replaces(options: &[String]) -> bool {
         for (at, letter) in cluster.char_indices() {
             let attached = &cluster[at + letter.len_utf8()..];
             match letter {
-                'I' | 'i' => {
-                    replaces = true;
-                    if letter == 'I' && attached.is_empty() {
-                        words.next();
-                    }
+                'I' => {
+                    let value = if attached.is_empty() {
+                        words.next().map_or("", String::as_str)
+                    } else {
+                        attached
+                    };
+                    replace = Some(value.to_string());
+                    break;
+                }
+                'i' => {
+                    replace = Some(if attached.is_empty() { "{}" } else { attached }.to_string());
                     break;
                 }
                 'L' | 'l' => {
-                    replaces = false;
+                    replace = None;
                     if letter == 'L' && attached.is_empty() {
                         words.next();
                     }
@@ -1973,7 +2079,7 @@ fn xargs_replaces(options: &[String]) -> bool {
                     } else {
                         attached
                     };
-                    replaces &= value == "1";
+                    max_args(value, &mut replace);
                     break;
                 }
                 // `-e` takes only an attached value.
@@ -1988,7 +2094,8 @@ fn xargs_replaces(options: &[String]) -> bool {
             }
         }
     }
-    replaces
+    let appends = replace.is_none() || may_append;
+    (replace, appends)
 }
 
 fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
@@ -2284,17 +2391,19 @@ fn forces_restart(args: &[String]) -> Option<Switch> {
         .then_some(Switch::ForceRestart)
 }
 
+/// git's global options that take the next word as their value.
+const GIT_GLOBAL_WITH_VALUE: [&str; 7] = [
+    "-C",
+    "-c",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--config-env",
+    "--super-prefix",
+];
+
 fn git_needs(args: &[String]) -> Option<Switch> {
-    const GLOBAL_WITH_VALUE: [&str; 7] = [
-        "-C",
-        "-c",
-        "--git-dir",
-        "--work-tree",
-        "--namespace",
-        "--config-env",
-        "--super-prefix",
-    ];
-    let start = skip_options(args, 0, &GLOBAL_WITH_VALUE);
+    let start = skip_options(args, 0, &GIT_GLOBAL_WITH_VALUE);
     let globals = &args[..start.min(args.len())];
     let sets_alias = globals.iter().enumerate().any(|(at, option)| {
         let value = match option.as_str() {
@@ -4916,6 +5025,75 @@ mod tests {
         assert_passes("echo 1 | xargs gh issue view");
         assert_passes("ls | xargs echo gh pr");
         assert_passes("echo merge | gh pr");
+    }
+
+    #[test]
+    fn gh_whose_command_words_an_xargs_replace_string_fills_is_denied() {
+        for command in [
+            "echo merge | xargs -I X gh pr X 1",
+            "echo pr | xargs -I X gh X merge 1",
+            "echo merge | xargs -i gh pr {} 1",
+            "echo merge | xargs --replace gh pr {} 1",
+            "echo merge | xargs -IR gh pr -R o/r R 1",
+            "echo merge | xargs -I X env gh pr X 1",
+            "echo set | xargs -I X gh alias X m 'pr merge'",
+            "echo -R | xargs -I X gh pr X o/r merge 1",
+            "echo -X | xargs -I Z gh api Z PUT repos/o/r/pulls/1/merge",
+            "echo merge | xargs -I {} -I X gh pr X 1",
+            "echo merge | xargs -I X -n 01 gh pr X 1",
+            "echo merge | xargs -I X -n +1 gh pr X 1",
+            "echo merge | xargs -I X --max-args=01 gh pr X 1",
+            "N=1; echo merge | xargs -I X -n \"$N\" gh pr X 1",
+            "echo gh | xargs -I X env X pr merge 1",
+            "echo gh | xargs -I X timeout 5 X pr merge 1",
+            "echo gh | xargs -I X xargs X pr merge 1",
+        ] {
+            assert_unreadable(command);
+        }
+        assert_passes("echo 1 | xargs -I {} gh pr view {}");
+        assert_passes("echo o/r | xargs -I {} gh -R {} pr view 1");
+        assert_passes("echo o/r | xargs -I {} gh pr --repo={} view 1");
+        assert_passes("echo o/r | xargs -I R gh pr --repo=R view 1");
+        assert_passes("echo 1 | xargs -I X gh issue view X");
+        assert_judged("echo 1 | xargs -I X gh pr merge X", Switch::Merge);
+    }
+
+    #[test]
+    fn a_gated_command_whose_words_xargs_appends_from_stdin_is_denied() {
+        for command in [
+            "echo --force | xargs git push",
+            "echo origin +main | xargs git push origin",
+            "echo --rebase | xargs git pull",
+            "echo push --force | xargs git",
+            "echo alias.x '!gh pr merge 1' | xargs git config",
+            "echo set h k v | xargs loopherd herd",
+            "echo herd set h k v | xargs loopherd",
+            "echo set k v | xargs loopherd config",
+            "echo --set | xargs loopherd lead-defaults",
+            "echo --force | xargs loopherd restart",
+            "echo -- herd set h k v | xargs cargo run",
+            "echo run -- herd set h k v | xargs cargo",
+            "echo -- herd set h k v | CARGO_ALIAS_X=run xargs cargo x",
+            "export CARGO_ALIAS_X=run; echo -- herd set h k v | xargs cargo +stable x",
+            "echo https://api.github.com/repos/o/r/pulls/1/merge | xargs curl -X PUT",
+            "echo https://api.github.com/repos/o/r/pulls/1/merge | xargs wget",
+            "echo --lead-defaults | xargs scripts/install",
+        ] {
+            assert_unreadable(command);
+        }
+        assert_passes("git ls-files | xargs git add");
+        assert_passes("echo f | xargs git log --");
+        assert_passes("echo k | xargs loopherd herd get h");
+        assert_passes("echo h | xargs loopherd status");
+        assert_passes("find . -name '*.rs' | xargs cargo fmt --check");
+        assert_passes("echo f | xargs cargo nextest run");
+        assert_passes("echo 1 | xargs -I X git push origin X");
+        assert_judged("echo main | xargs git push --force origin", Switch::Rebase);
+        assert_judged("echo h k v | xargs loopherd herd set", Switch::HerdEdit);
+        assert_judged(
+            "echo x | xargs scripts/install --lead-defaults",
+            Switch::LeadDefaults,
+        );
     }
 
     #[test]
