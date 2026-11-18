@@ -156,7 +156,7 @@ Init never launches an agent.
    | `<herd> out of work` | The herd isn't paused, claimable is 0, its `backlog` lists nothing unready (or it has none), and no worker is open. A lead's watch prints it for its herd; the shepherd's, every 60s, for each unled herd with a herd file it reads. Once per streak: it prints again only after claimable or unready rises above 0 or a worker opens, even one that opened and retired while no watch ran. The shepherd's doesn't repeat what a retired lead's watch already said. A paused herd prints none and keeps its streak. A lead reports it (see Lead); the shepherd tells the human, who pauses the herd or files and approves work. |
    | `<member> interrupted` | Lead's watch only: the feed running the worker's `after_merge` died before noting it. Feed, which notes it, then read the note. |
    | `<member> blocked` | A dialog only the human answers: tell them. loopherd never answers it. |
-   | `<member> gone` | Its pane exited or closed, its tab or workspace closed, or it had no agent for two polls in a row after this watch saw it live. |
+   | `<member> gone` | Its pane exited or closed, its tab or workspace closed with it inside, or it had no agent for two polls in a row after this watch saw it live. A `gone` recorded when a tab or workspace closed, and then retracted because the member's pane had moved out of it, prints nothing; `reports --all` shows it followed by `moved`. |
    | `<herd> drained` | Lead's watch only: your herd is paused and has no open (non-retired) worker. Report done, stop, and don't re-arm. |
    | `all drained` | Every herd your watch reads is paused with no open worker, and no member it reads may still work: none is working, blocked or unknown (now or on the poll before), died since the watch started without its `gone` line yet, or last stopped failed or with work in flight. Tell the human; don't re-arm. |
    | `shepherd handoff 171k over 160k` | Your own watch only, once per session: your context is past your limit. Hand off (see Your own handoff). |
@@ -442,13 +442,27 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   `--json`; it marks nothing read.
 - `loopherd retire <name>` marks a member finished in the ledger only;
   `--close` also closes its tab and removes its worktree and branch if
-  they're clean and merged. Feed's `done` check does this for you.
+  they're clean and merged. Feed's `done` check does this for you. Retire
+  refuses an entry not yet retired that herdr shows `working` or
+  `blocked`, whatever it reported, or shows idle (or done, or unknown)
+  with no `done`, `question` or `handoff` report since its last start, so a
+  retire meant for an earlier run of the name can't kill a fresh one. The
+  error says which; `--force` retires it anyway. A report before a revive
+  still counts, a member herdr doesn't list retires without a report, and
+  an already-retired entry takes `--close` as before. It also refuses, naming
+  `--force`, when herdr doesn't answer within 5s, answers with an error or
+  a reply loopherd can't parse, or runs another session than the member's
+  (even while this session's herdr is down); otherwise no herdr server at
+  all lets it through. A live lead rarely reports
+  `done` and is often working, so retiring one usually takes `--force`.
 - **Re-feed a retired task** (its member was retired before it finished,
   e.g. a tab closed by accident or a rescoped card) with `loopherd release
   <name>`, then `loopherd feed <herd>`. Feed skips every name in the
   ledger until it's released, so a merged task isn't spawned again while
   its card is still open. Release refuses a member not retired, a lead, or
-  one whose tab may be open (`loopherd retire --close <name>` first). It
+  one whose tab may be open (`loopherd retire --close <name>` first, with
+  `--force` if herdr shows it working, blocked, or idle with no report
+  since its start). It
   removes the member's worktree, any leftover at the path the new member
   spawns into, its local branch and its branch on origin, so the new member
   starts afresh; when they hold commits not on the base (pushed or not) it
@@ -500,8 +514,10 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   member, lead included, isn't retired, ran on another herdr session, or
   may still be open (its agent or pane shows, even busy or moved), and
   while herdr can't be reached; `loopherd retire --close <name>` each
-  first, which also cleans up tabs, worktrees and branches that
-  `herd remove` never touches. `--dry-run` lists what would go;
+  first (`--force` for one herdr shows working, blocked, or idle with no
+  report since its start),
+  which also cleans up tabs, worktrees and branches that `herd remove`
+  never touches. `--dry-run` lists what would go;
   `--keep-history` keeps the ledger entries and mailboxes for `stats`.
 - **Lead defaults** are `[lead_defaults]` in
   `$LOOPHERD_CONFIG_DIR/config.toml`: each lead's switches wherever its herd
@@ -678,7 +694,9 @@ What differs from the shepherd:
 - **Retiring a lead is the shepherd's or the human's.** `loopherd retire`
   refuses to retire you from your own pane, and the hook also denies
   `loopherd retire` of a `lead-` name, or of a name it can't read such as
-  `"$m"`, there; retire members by their spelled-out name.
+  `"$m"`, there; retire members by their spelled-out name. It always
+  denies `loopherd retire --force` there too: retire a member once it is
+  idle and has reported, or once herdr no longer lists it.
   Your gates outlast your retirement: a retired lead's pane is still
   gated.
 - **Pausing is the human's.** The hook always denies `loopherd pause` and

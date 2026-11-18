@@ -2,16 +2,16 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 
-use crate::herdr::{Agent, Herdr, Pane};
+use crate::herdr::{Agent, AgentStatus, Herdr, Pane, Server};
 use crate::ledger::{AgentRecord, Ledger};
-use crate::matching::{by_name, same_session, session_conflict};
+use crate::matching::{by_name, live_agent, same_session, session_conflict};
 use crate::notify::forget_marks;
 use crate::process::{Procs, is_ancestor, live};
-use crate::report::member_in;
+use crate::report::{Body, history, member_in};
 use crate::revive::find_workspace;
 use crate::tool_hook::Pane as OwnPane;
 use crate::worktree::{Gone, Removal, remove_if_gone, remove_if_merged, same_dir};
@@ -43,6 +43,109 @@ pub fn refuse_own_lead(
     if live(procs, entry.process).is_some_and(|lead| is_ancestor(procs, lead.pid, me)) {
         bail!(
             "{name} is the lead running this loopherd; retiring a lead is the shepherd's or the human's job"
+        );
+    }
+    Ok(())
+}
+
+const HERDR_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Fails when `name` isn't retired yet and herdr shows its agent working or
+/// blocked, or shows it at all while its mailbox in `mailboxes` has no done,
+/// question or handoff report since its last start: a retire meant for an
+/// earlier run would kill this one.
+pub fn refuse_unfinished(
+    herdr: &dyn Herdr,
+    ledger: &dyn Ledger,
+    name: &str,
+    mailboxes: &Path,
+) -> Result<()> {
+    let Some(record) = ledger.entries()?.remove(name).filter(|r| !r.retired) else {
+        return Ok(());
+    };
+    let force = "pass --force to retire it anyway";
+    let unknown =
+        |why: String| anyhow!("{why}, so whether {name} is still at work is unknown; {force}");
+    let (here, running) = match herdr.server(HERDR_TIMEOUT) {
+        Ok(Server::Missing) => (herdr.socket(), false),
+        Ok(Server::NotRunning { socket }) => (socket, false),
+        Ok(Server::NoAnswer { .. }) => {
+            return Err(unknown(format!(
+                "herdr didn't answer within {}",
+                humantime::format_duration(HERDR_TIMEOUT)
+            )));
+        }
+        Ok(Server::Running { socket, .. }) => (socket, true),
+        Err(e) => {
+            return Err(e.context(format!(
+                "can't tell whether {name} is still at work; {force}"
+            )));
+        }
+    };
+    if let Some(theirs) = &record.socket {
+        match &here {
+            Some(here) if here == theirs => {}
+            Some(here) => bail!(
+                "{name} is on herdr session {}, not this one ({}); run retire there, or {force}",
+                theirs.display(),
+                here.display()
+            ),
+            None if running => {
+                return Err(unknown(
+                    "herdr didn't say which session it runs".to_string(),
+                ));
+            }
+            None => bail!(
+                "{name} is on herdr session {}, and no herdr here runs it; run retire there, or {force}",
+                theirs.display()
+            ),
+        }
+    }
+    // A session that isn't running has no live panes, so nothing is at work.
+    if !running {
+        return Ok(());
+    }
+    let agents = match herdr.agents_within(HERDR_TIMEOUT) {
+        Ok(Some(agents)) => agents,
+        Ok(None) => {
+            return Err(unknown(format!(
+                "herdr didn't list its agents within {}",
+                humantime::format_duration(HERDR_TIMEOUT)
+            )));
+        }
+        Err(e) => {
+            return Err(e.context(format!(
+                "can't tell whether {name} is still at work; {force}"
+            )));
+        }
+    };
+    let Some(agent) = live_agent(&record, &agents) else {
+        return Ok(());
+    };
+    if matches!(agent.status, AgentStatus::Working | AgentStatus::Blocked) {
+        bail!(
+            "herdr shows {name} {}, so it's still at work whatever it reported; {force}",
+            agent.status.as_str()
+        );
+    }
+    let (entries, _) = history(mailboxes, name)
+        .map_err(|e| e.context(format!("can't read {name}'s reports; {force}")))?;
+    // A revive resumes the same conversation, so its reports still stand.
+    let reported = entries
+        .iter()
+        .rev()
+        .map(|e| &e.body)
+        .take_while(|body| !matches!(body, Body::Start { resumed: false }))
+        .any(|body| {
+            matches!(
+                body,
+                Body::Done { .. } | Body::Question { .. } | Body::Handoff { .. }
+            )
+        });
+    if !reported {
+        bail!(
+            "herdr still shows {name} ({}) and it has no done, question or handoff report since its last start; {force}",
+            agent.status.as_str()
         );
     }
     Ok(())
@@ -2186,5 +2289,260 @@ mod tests {
 
         kept_reused(&close(&herdr, &mut ledger), &wt, "it is labeled 1, not a");
         assert_eq!(herdr.tabs().len(), 1);
+    }
+
+    fn mailbox(dir: &Path, name: &str, bodies: Vec<crate::report::Body>) {
+        for body in bodies {
+            crate::report::append(
+                dir,
+                name,
+                &crate::report::Entry::new(halloween_noon(), body),
+            )
+            .unwrap();
+        }
+    }
+
+    fn started() -> crate::report::Body {
+        crate::report::Body::Start { resumed: false }
+    }
+
+    fn done() -> crate::report::Body {
+        crate::report::Body::Done {
+            text: "PR #1".into(),
+        }
+    }
+
+    #[test]
+    fn a_working_member_is_refused_even_with_a_report_since_its_start() {
+        let root = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let (herdr, ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        herdr.set_status("a", crate::herdr::AgentStatus::Working);
+        mailbox(reports.path(), "a", vec![started(), done()]);
+
+        let err = refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "herdr shows a working, so it's still at work whatever it reported; pass --force to retire it anyway"
+        );
+    }
+
+    #[test]
+    fn a_blocked_member_is_refused_even_with_a_report_since_its_start() {
+        let root = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let (herdr, ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        herdr.set_status("a", crate::herdr::AgentStatus::Blocked);
+        mailbox(reports.path(), "a", vec![started(), done()]);
+
+        let err = refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "herdr shows a blocked, so it's still at work whatever it reported; pass --force to retire it anyway"
+        );
+    }
+
+    #[test]
+    fn an_idle_member_with_no_report_since_its_start_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let (herdr, ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        herdr.set_status("a", crate::herdr::AgentStatus::Idle);
+        mailbox(reports.path(), "a", vec![done(), started()]);
+
+        let err = refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "herdr still shows a (idle) and it has no done, question or handoff report since its last start; pass --force to retire it anyway"
+        );
+    }
+
+    #[test]
+    fn an_idle_member_that_reported_since_its_start_retires_without_force() {
+        let root = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let (herdr, ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        herdr.set_status("a", crate::herdr::AgentStatus::Idle);
+        for report in [
+            done(),
+            crate::report::Body::Question { text: "?".into() },
+            crate::report::Body::Handoff { text: "h".into() },
+        ] {
+            let _ = std::fs::remove_file(reports.path().join("a.jsonl"));
+            mailbox(reports.path(), "a", vec![started(), report]);
+
+            refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_note_is_not_a_report_that_it_finished() {
+        let root = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let (herdr, ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        herdr.set_status("a", crate::herdr::AgentStatus::Idle);
+        let note = crate::report::Body::Note { text: "n".into() };
+        mailbox(reports.path(), "a", vec![started(), note]);
+
+        let err = refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .starts_with("herdr still shows a (idle) and it has no"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_member_herdr_no_longer_shows_retires_without_a_report() {
+        let root = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let (herdr, ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        herdr.remove_agent("a");
+
+        refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap();
+    }
+
+    #[test]
+    fn a_report_before_a_revive_still_counts_since_the_revive_resumes_the_run() {
+        let root = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let (herdr, ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        herdr.set_status("a", crate::herdr::AgentStatus::Idle);
+        let revived = crate::report::Body::Start { resumed: true };
+        mailbox(reports.path(), "a", vec![started(), done(), revived]);
+
+        refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap();
+    }
+
+    #[test]
+    fn a_herdr_server_that_never_answers_refuses_and_names_force() {
+        let root = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let (mut herdr, ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        herdr.server = Some(crate::herdr::Server::NoAnswer { socket: None });
+
+        let err = refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "herdr didn't answer within 5s, so whether a is still at work is unknown; pass --force to retire it anyway"
+        );
+    }
+
+    #[test]
+    fn an_agent_list_error_from_a_running_herdr_refuses_and_names_force() {
+        let root = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let (mut herdr, ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        herdr.server = Some(crate::herdr::Server::Running {
+            socket: Some(FAKE_SOCKET.into()),
+            version: None,
+        });
+        herdr.set_unreachable(true);
+
+        let err = refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .starts_with("can't tell whether a is still at work; pass --force"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_member_on_another_herdr_session_is_refused_and_named_there() {
+        let root = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let (mut herdr, ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        herdr.socket = Some("/run/other.sock".into());
+
+        let err = refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "a is on herdr session {FAKE_SOCKET}, not this one (/run/other.sock); run retire there, or pass --force to retire it anyway"
+            )
+        );
+    }
+
+    #[test]
+    fn a_member_on_another_session_is_refused_while_this_herdr_is_down() {
+        let root = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let (mut herdr, ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        herdr.socket = Some("/run/other.sock".into());
+        herdr.set_unreachable(true);
+
+        let err = refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "a is on herdr session {FAKE_SOCKET}, not this one (/run/other.sock); run retire there, or pass --force to retire it anyway"
+            )
+        );
+    }
+
+    #[test]
+    fn a_member_on_a_session_is_refused_where_herdr_is_missing() {
+        let root = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let (mut herdr, ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        herdr.server = Some(crate::herdr::Server::Missing);
+        herdr.socket = None;
+
+        let err = refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "a is on herdr session {FAKE_SOCKET}, and no herdr here runs it; run retire there, or pass --force to retire it anyway"
+            )
+        );
+    }
+
+    #[test]
+    fn a_herdr_that_cant_be_reached_has_no_member_at_work() {
+        let root = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let (herdr, ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        herdr.set_unreachable(true);
+
+        refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap();
+    }
+
+    #[test]
+    fn a_herdr_reply_it_cant_read_refuses_and_names_force() {
+        let root = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let (herdr, ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        herdr.set_malformed(true);
+
+        let err = refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .starts_with("can't tell whether a is still at work; pass --force"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_already_retired_live_member_is_still_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let reports = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        herdr.set_status("a", crate::herdr::AgentStatus::Working);
+        retire(&mut ledger, "a", halloween_noon()).unwrap();
+
+        refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap();
+        close(&herdr, &mut ledger);
+
+        assert!(herdr.tabs().is_empty());
     }
 }
