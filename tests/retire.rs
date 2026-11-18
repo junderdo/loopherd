@@ -232,12 +232,13 @@ fn a_lead_can_be_retired_from_its_pane_id_on_another_socket() {
 }
 
 /// Runs `loopherd retire <args> lh-1` with a running `herdr` on PATH that
-/// shows `lh-1` working in pane `w1:p1` and logs each call to `bin/calls`.
-fn retire_while_herdr_shows_it_working(state: &Path, args: &[&str]) -> Output {
+/// shows `lh-1` in `status` in pane `w1:p1` and logs each call to `bin/calls`.
+fn retire_while_herdr_shows_it(status: &str, state: &Path, args: &[&str]) -> Output {
     let bin = state.join("bin");
     fs::create_dir_all(&bin).unwrap();
     let herdr = bin.join("herdr");
-    let agents = r#"{"result": {"agents": [{"name": "lh-1", "pane_id": "w1:p1", "tab_id": "w1:t1", "agent_status": "working", "agent_session": null}]}}"#;
+    let agents = r#"{"result": {"agents": [{"name": "lh-1", "pane_id": "w1:p1", "tab_id": "w1:t1", "agent_status": "STATUS", "agent_session": null}]}}"#
+        .replace("STATUS", status);
     fs::write(
         &herdr,
         format!(
@@ -280,29 +281,29 @@ const STARTED: &str = r#"{"at": "2026-11-01T09:00:00Z", "kind": "start"}"#;
 const DONE: &str = r#"{"at": "2026-11-01T10:00:00Z", "kind": "done", "text": "PR #9"}"#;
 
 #[test]
-fn a_member_at_work_without_a_report_is_refused_and_left_alone() {
+fn an_idle_member_without_a_report_since_its_start_is_refused_and_left_alone() {
     let state = tempfile::tempdir().unwrap();
     write_ledger(state.path());
     write_mailbox(state.path(), &[DONE, STARTED]);
 
     for args in [&[][..], &["--close"]] {
-        let out = retire_while_herdr_shows_it_working(state.path(), args);
+        let out = retire_while_herdr_shows_it("idle", state.path(), args);
 
         assert!(!out.status.success(), "{args:?}: {out:?}");
         assert_eq!(
             String::from_utf8_lossy(&out.stderr),
-            "loopherd retire: herdr still shows lh-1 (working) and it has no done, question or handoff report since its last start; pass --force to retire it anyway\n"
+            "loopherd retire: herdr still shows lh-1 (idle) and it has no done, question or handoff report since its last start; pass --force to retire it anyway\n"
         );
         assert!(!ledger_text(state.path()).contains("\"retired\": true"));
     }
 }
 
 #[test]
-fn force_retires_a_member_at_work_without_a_report() {
+fn force_retires_a_working_member() {
     let state = tempfile::tempdir().unwrap();
     write_ledger(state.path());
 
-    let out = retire_while_herdr_shows_it_working(state.path(), &["--force"]);
+    let out = retire_while_herdr_shows_it("working", state.path(), &["--force"]);
 
     assert!(out.status.success(), "{out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "retired lh-1\n");
@@ -310,11 +311,11 @@ fn force_retires_a_member_at_work_without_a_report() {
 }
 
 #[test]
-fn force_with_close_retires_a_member_at_work_and_looks_for_its_tab() {
+fn force_with_close_retires_a_working_member_and_looks_for_its_tab() {
     let state = tempfile::tempdir().unwrap();
     write_ledger(state.path());
 
-    let out = retire_while_herdr_shows_it_working(state.path(), &["--force", "--close"]);
+    let out = retire_while_herdr_shows_it("working", state.path(), &["--force", "--close"]);
 
     assert!(out.status.success(), "{out:?}");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -325,12 +326,12 @@ fn force_with_close_retires_a_member_at_work_and_looks_for_its_tab() {
 }
 
 #[test]
-fn a_member_at_work_that_reported_done_since_its_start_retires_without_force() {
+fn an_idle_member_that_reported_done_since_its_start_retires_without_force() {
     let state = tempfile::tempdir().unwrap();
     write_ledger(state.path());
     write_mailbox(state.path(), &[STARTED, DONE]);
 
-    let out = retire_while_herdr_shows_it_working(state.path(), &[]);
+    let out = retire_while_herdr_shows_it("idle", state.path(), &[]);
 
     assert!(out.status.success(), "{out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "retired lh-1\n");

@@ -181,8 +181,8 @@ enum Command {
         herds: HerdsArg,
     },
     /// Mark a ledger entry finished so revive leaves it alone. Without --close, changes only the ledger.
-    /// Refuses a member herdr still shows with no done, question or handoff
-    /// report since its last start, unless --force.
+    /// Refuses a member herdr shows working or blocked, or shows idle with no
+    /// done, question or handoff report since its last start, unless --force.
     Retire {
         name: String,
         /// Also close its tab, and remove its worktree and branch if clean and merged.

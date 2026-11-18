@@ -242,7 +242,7 @@ fn decide(
     }
     if needed == Switch::ForceRetire {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run `loopherd retire --force`, which skips the check that the member has finished, so {}; retire once it reports done, question or handoff, or ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run `loopherd retire --force`, which skips the checks that the member has finished, so {}; retire it once it is idle and has reported, or once herdr no longer lists it, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
