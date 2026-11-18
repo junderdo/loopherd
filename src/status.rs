@@ -204,7 +204,7 @@ fn text(view: &View, color: bool) -> String {
     let sections = sections(view);
     let rows: Vec<Vec<Vec<String>>> = sections
         .iter()
-        .map(|(_, members)| members.iter().map(text_row).collect())
+        .map(|(_, members)| members.iter().map(row).collect())
         .collect();
     let members_and_rows = || {
         sections
@@ -241,23 +241,14 @@ fn text(view: &View, color: bool) -> String {
     out
 }
 
-/// [`row`], with a retired entry's status naming its retirement so a grepped row
-/// can't pass for an open member.
-fn text_row(member: &Member) -> Vec<String> {
-    let mut cells = row(member);
-    if let Some(at) = &member.retired {
-        cells[1] = match at.as_str() {
-            "unknown" => "retired".into(),
-            at => format!("retired {at}"),
-        };
-    }
-    cells
-}
-
+/// A member's cells; a retired entry's status names its retirement so a grepped
+/// row can't pass for an open member.
 pub fn row(member: &Member) -> Vec<String> {
-    let status = match member.gone {
-        true => "gone".into(),
-        false => member.status.as_str().into(),
+    let status = match (member.retired.as_deref(), member.gone) {
+        (Some("unknown"), _) => "retired".into(),
+        (Some(at), _) => format!("retired {at}"),
+        (None, true) => "gone".into(),
+        (None, false) => member.status.as_str().into(),
     };
     let place = match &member.tab {
         Some(tab) => format!("{tab}/{}", member.pane),

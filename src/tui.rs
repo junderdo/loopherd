@@ -685,14 +685,34 @@ impl App {
         if gauged {
             headings.insert(GAUGE, "CONTEXT".into());
         }
-        let mut widths = widths(cells.iter().flatten().chain([&headings]));
-        if let Some(w) = widths.get_mut(2) {
-            *w = (*w).max(TIME_WIDTH);
-        }
-        let heading = Line::from(vec![
-            Span::raw("   "),
-            Span::styled(aligned(&headings, &widths), self.theme.heading()),
-        ]);
+        let retired = |members: &[Member]| members.iter().any(|m| m.retired.is_some());
+        let column_widths = |cells: Vec<Vec<String>>| {
+            let mut widths = widths(cells.iter().chain([&headings]));
+            if let Some(w) = widths.get_mut(2) {
+                *w = (*w).max(TIME_WIDTH);
+            }
+            let heading = Line::from(vec![
+                Span::raw("   "),
+                Span::styled(aligned(&headings, &widths), self.theme.heading()),
+            ]);
+            (widths, heading)
+        };
+        // A retired row's long status cell widens only the retired panel.
+        let open = column_widths(
+            sections
+                .iter()
+                .zip(&cells)
+                .flat_map(|((_, members), cells)| members.iter().zip(cells))
+                .map(|(member, cells)| {
+                    let mut cells = cells.clone();
+                    if member.retired.is_some() {
+                        cells[1].clear();
+                    }
+                    cells
+                })
+                .collect(),
+        );
+        let all = column_widths(cells.iter().flatten().cloned().collect());
         let spinner = self.opened.map_or(0, |at| {
             now.saturating_duration_since(at).as_millis() / TICK.as_millis()
         }) as usize;
@@ -701,6 +721,10 @@ impl App {
         for (i, (((name, members), cells), gauges)) in
             sections.iter().zip(&cells).zip(gauges).enumerate()
         {
+            let (widths, heading) = match retired(members) {
+                true => &all,
+                false => &open,
+            };
             let mut rows = vec![];
             if !members.is_empty() {
                 rows.push(Row {
@@ -728,7 +752,7 @@ impl App {
                 };
                 let (before, after) = cells.split_at(2);
                 spans.extend([
-                    Span::styled(format!("{}  ", padded(before, &widths)), text_style),
+                    Span::styled(format!("{}  ", padded(before, widths)), text_style),
                     Span::styled(format!("{:w$}", after[0], w = widths[2]), time_style),
                 ]);
                 let rest = match gauged {
@@ -2061,7 +2085,7 @@ max = 3
                 "│╰────────────────────────────────────────────────────────────────────╯│",
                 "│╭ retired ───────────────────────────────────────────────────────────╮│",
                 "││   NAME    STATUS            BRANCH  WORKTREE   PANE                ││",
-                "││ ? done-1  unknown           -       wt-done-1  w1:pdone-1          ││",
+                "││ ? done-1  retired           -       wt-done-1  w1:pdone-1          ││",
                 "│╰────────────────────────────────────────────────────────────────────╯│",
                 "│╭ +1 stray (live in herdr, not in loopherd's ledger) ────────────────╮│",
                 "││ w2:p7  /src/elsewhere  poking around                               ││",
@@ -3033,6 +3057,35 @@ max = 3
             lines(&terminal)[2].contains("╭─"),
             "{:#?}",
             lines(&terminal)
+        );
+    }
+
+    #[test]
+    fn a_retired_row_names_its_retirement_time_without_widening_live_panels() {
+        let (herdr, mut ledger, now) = (herdr(), ledger(), Instant::now());
+        ledger.0.get_mut("done-1").unwrap().retired_at = Some("2026-11-17T08:00:00Z".into());
+        let mut app = app(&herdr, &ledger, now);
+        press(&mut app, &[KeyCode::Char('a')], &herdr, &ledger);
+        let terminal = render_at(&app, now, 120, 30);
+        let shown = lines(&terminal);
+        let row = |name: &str| {
+            shown
+                .iter()
+                .find(|l| l.contains(&format!(" {name} ")))
+                .unwrap_or_else(|| panic!("{name} in {shown:#?}"))
+                .clone()
+        };
+        let retired = shown.iter().position(|l| l.contains(" done-1 ")).unwrap();
+        assert_eq!(
+            shown[retired - 1..=retired],
+            [
+                "││   NAME    STATUS                                 BRANCH  WORKT││                                                   ││",
+                "││ ? done-1  retired 2026-11-17T08:00:00Z           -       wt-do││                                                   ││",
+            ]
+        );
+        assert!(
+            row("⚠ b").contains("⚠ b       blocked           -       wt-b"),
+            "{shown:#?}"
         );
     }
 
