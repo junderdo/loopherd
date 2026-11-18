@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::pr_link::PrHeads;
+use crate::pr_link::{PrHead, PrHeads};
 use crate::shell::run_within;
 use crate::worktree::remote_timeout;
 
@@ -94,29 +94,48 @@ impl PullRequests for GhCli {
 }
 
 impl PrHeads for GhCli {
-    fn head_of(&self, pr: &str) -> Result<Option<String>> {
+    fn head_of(&self, pr: &str) -> Result<Option<PrHead>> {
         let args = [
             "pr",
             "view",
             pr,
             "--json",
-            "headRefName",
+            "headRefName,headRepository,headRepositoryOwner",
             "--jq",
-            ".headRefName",
+            r#".headRepositoryOwner.login + "/" + .headRepository.name + " " + .headRefName"#,
         ];
         let Some(output) = self.run(Path::new("."), &args, HEAD_TIMEOUT)? else {
             bail!("no GitHub CLI (gh) on PATH");
         };
         let said = String::from_utf8_lossy(&output.stderr);
         if output.status.success() {
-            let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            return Ok((!head.is_empty()).then_some(head));
+            let answer = String::from_utf8_lossy(&output.stdout);
+            return Ok(head_from(answer.trim()));
         }
         if said.contains("Could not resolve to a PullRequest") {
             return Ok(None);
         }
         bail!("gh pr view: {}", said.trim())
     }
+
+    fn repo_at(&self, dir: &Path) -> Option<String> {
+        let (host, repo) = github_repo(&origin_url(dir).ok()?)?;
+        (host == "github.com").then_some(repo)
+    }
+}
+
+/// `owner/name branch`, as `head_of` asks gh for it; a deleted head repo
+/// leaves its owner or name empty.
+fn head_from(answer: &str) -> Option<PrHead> {
+    let (repo, branch) = answer.split_once(' ')?;
+    let (owner, name) = repo.split_once('/')?;
+    if owner.is_empty() || name.is_empty() || branch.is_empty() {
+        return None;
+    }
+    Some(PrHead {
+        repo: repo.to_string(),
+        branch: branch.to_string(),
+    })
 }
 
 impl GhCli {
@@ -403,16 +422,52 @@ mod tests {
 
     const PR: &str = "https://github.com/o/r/pull/12";
 
-    #[test]
-    fn asks_gh_for_a_prs_head_branch() {
-        let (dir, gh) = fake_gh_view(Ok("feat/LH-1-x"));
+    const HEAD_QUERY: &str =
+        r#".headRepositoryOwner.login + "/" + .headRepository.name + " " + .headRefName"#;
 
-        assert_eq!(gh.head_of(PR).unwrap(), Some("feat/LH-1-x".into()));
+    #[test]
+    fn asks_gh_for_a_prs_head_repo_and_branch() {
+        let (dir, gh) = fake_gh_view(Ok("o/r feat/LH-1-x"));
+
+        assert_eq!(
+            gh.head_of(PR).unwrap(),
+            Some(PrHead {
+                repo: "o/r".into(),
+                branch: "feat/LH-1-x".into()
+            })
+        );
 
         assert_eq!(
             std::fs::read_to_string(dir.path().join("args")).unwrap(),
-            format!("pr view {PR} --json headRefName --jq .headRefName\n")
+            format!(
+                "pr view {PR} --json headRefName,headRepository,headRepositoryOwner --jq {HEAD_QUERY}\n"
+            )
         );
+    }
+
+    #[test]
+    fn a_pr_whose_head_repo_is_gone_has_no_head() {
+        for answer in ["/ feat/x", "o/ feat/x", "o/r"] {
+            let (_dir, gh) = fake_gh_view(Ok(answer));
+
+            assert_eq!(gh.head_of(PR).unwrap(), None, "{answer}");
+        }
+    }
+
+    #[test]
+    fn a_checkouts_repo_is_its_origin_on_github() {
+        let (dir, gh) = fake_gh("git@github.com:O/R.git", "");
+
+        assert_eq!(gh.repo_at(dir.path()), Some("O/R".into()));
+    }
+
+    #[test]
+    fn a_checkout_with_an_origin_off_github_or_none_has_no_repo() {
+        let (dir, gh) = fake_gh("https://ghe.example.com/o/r", "");
+        let bare = tempfile::tempdir().unwrap();
+
+        assert_eq!(gh.repo_at(dir.path()), None);
+        assert_eq!(gh.repo_at(bare.path()), None);
     }
 
     #[test]
@@ -437,7 +492,7 @@ mod tests {
 
     #[test]
     fn no_gh_to_ask_is_an_error() {
-        let (dir, mut gh) = fake_gh_view(Ok("feat/x"));
+        let (dir, mut gh) = fake_gh_view(Ok("o/r feat/x"));
         gh.program = dir.path().join("no-such-gh");
 
         let err = gh.head_of(PR).unwrap_err();
