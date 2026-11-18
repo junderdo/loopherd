@@ -4782,6 +4782,8 @@ mod tests {
             "env -a x gh pr merge 1",
             "env --argv0 x gh pr merge 1",
             "env --a x gh pr merge 1",
+            "env --split-string '' gh pr merge 1",
+            "env -S '' gh pr merge 1",
             "sudo --user root gh pr merge 1",
             "sudo --us root gh pr merge 1",
             "sudo --group wheel gh pr merge 1",
