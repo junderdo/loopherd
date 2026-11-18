@@ -117,7 +117,8 @@ mod tests {
         let script = format!("sleep 30 & echo $! > {}; wait", pid_file.display());
         let started = Instant::now();
 
-        assert!(sh(&script, Duration::from_millis(300)).is_none());
+        // Long enough that `sh` has written the pid file even on a loaded machine.
+        assert!(sh(&script, Duration::from_secs(3)).is_none());
 
         assert!(started.elapsed() < Duration::from_secs(10));
         let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
