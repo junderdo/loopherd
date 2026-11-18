@@ -177,12 +177,14 @@ pub fn watch(
     let mut unled = match (&reader, req.herd_files) {
         (Reader::Shepherd, Some(paths)) => Some(Unled {
             paths,
+            dir,
             herds: req.herds,
             check_timeout: req.check_timeout,
             fired: Fired::shepherds(dir)?,
             next: Duration::ZERO,
             bad_timeout: None,
             failing: HashSet::new(),
+            unlisted: None,
         }),
         _ => None,
     };
@@ -311,6 +313,9 @@ pub fn watch(
                 fired = Some(checks.fired.with(&events));
             }
         }
+        for mailbox in &wakes {
+            herdr_wakes(mailbox, &mut lines, &mut waiting);
+        }
         // Not on a poll already waking it, so its commands don't hold those lines back.
         if lines.is_empty()
             && let Some(unled) = unled.as_mut().filter(|u| clock.elapsed() >= u.next)
@@ -321,9 +326,6 @@ pub fn watch(
                 lines.extend(events.iter().map(|e| e.line.clone()));
                 fired = Some(unled.fired.with(&events));
             }
-        }
-        for mailbox in &wakes {
-            herdr_wakes(mailbox, &mut lines, &mut waiting);
         }
         if let (Some(notify_own), Some(own), Reader::Lead { herd, .. }) =
             (req.notify_own, &own, &reader)
@@ -570,10 +572,15 @@ impl Checks<'_> {
                     let claimable =
                         claimable_count(ledger, self.paths, &queue, &self.herd, &tasks)?;
                     // Read again: a feed may have opened a worker while the source ran.
-                    let no_worker = !open(&ledger.entries()?, &self.herd, |e| !e.is_lead());
+                    let entries = ledger.entries()?;
+                    let no_worker = !open(&entries, &self.herd, |e| !e.is_lead());
                     if queue.backlog.is_none() {
                         self.end_low_streak()?;
-                        out = self.out_of_work(claimable == 0 && no_worker)?;
+                        out = (self.fired).out_of_work(
+                            &self.herd,
+                            &entries,
+                            claimable == 0 && no_worker,
+                        )?;
                     }
                     if let Some(backlog) = &queue.backlog
                         && let Some(timeout) = budget.left()
@@ -584,8 +591,11 @@ impl Checks<'_> {
                                 let unready = unready.lines().filter(|l| !l.trim().is_empty());
                                 let unready = unready.count();
                                 low = self.running_low(claimable, unready, queue.max)?;
-                                out =
-                                    self.out_of_work(claimable == 0 && unready == 0 && no_worker)?;
+                                out = self.fired.out_of_work(
+                                    &self.herd,
+                                    &entries,
+                                    claimable == 0 && unready == 0 && no_worker,
+                                )?;
                             }
                             Err(_) if budget.cut(timeout) => {}
                             Err(e) => {
@@ -655,16 +665,14 @@ impl Checks<'_> {
     fn low_key(&self) -> String {
         format!("{} {}", self.herd, line::RUNNING_LOW)
     }
-
-    fn out_of_work(&mut self, out: bool) -> Result<Option<Event>> {
-        self.fired.out_of_work(&self.herd, out)
-    }
 }
 
 /// The shepherd's check, every [`CHECK_EVERY`], of each herd it reads that
 /// has a herd file and no open lead: whether it is out of work.
 struct Unled<'a> {
     paths: &'a Paths,
+    /// Where the leads' fired files are.
+    dir: &'a Path,
     /// Only these herds; empty is every herd.
     herds: &'a [String],
     check_timeout: fn() -> Result<Duration>,
@@ -672,8 +680,10 @@ struct Unled<'a> {
     next: Duration,
     /// Why the check timeout was last unreadable, warned once.
     bad_timeout: Option<String>,
-    /// Herds whose queue last failed, warned once a streak.
+    /// Herds whose check last failed, warned once a streak.
     failing: HashSet<String>,
+    /// Why the herd files last couldn't be listed, warned once.
+    unlisted: Option<String>,
 }
 
 /// Whether `herd` has an open member that `is`.
@@ -688,12 +698,16 @@ fn open(
 }
 
 impl Unled<'_> {
-    /// Each `out of work` event not fired before. Any herd with a lead or
-    /// worker open ends its streak, in scope or not. A paused herd keeps its
-    /// streak, and one whose source or backlog fails or runs out of the
-    /// round's time is no event.
+    /// Each `out of work` event not fired before, nor by a retired lead of
+    /// its herd. Any herd with a lead or worker open ends its streak, in
+    /// scope or not. A paused herd keeps its streak, and one whose herd
+    /// file, source or backlog fails or runs out of the round's time is no
+    /// event; a failure warns once a streak.
     fn run(&mut self, ledger: &dyn Ledger, warn: &mut dyn FnMut(&str)) -> Result<Vec<Event>> {
-        let Ok(names) = herd::names(&self.paths.herds) else {
+        let names = herd::names(&self.paths.herds);
+        let problem = (names.as_ref().err()).map(|e| format!("warning: list herd files: {e:#}"));
+        warn_once(&mut self.unlisted, problem, warn);
+        let Ok(names) = names else {
             return Ok(vec![]);
         };
         self.fired.reload()?;
@@ -701,7 +715,7 @@ impl Unled<'_> {
         let mut idle = vec![];
         for herd in names {
             if open(&entries, &herd, |_| true) {
-                self.fired.out_of_work(&herd, false)?;
+                self.fired.out_of_work(&herd, &entries, false)?;
             } else if self.herds.is_empty() || self.herds.contains(&herd) {
                 idle.push(herd);
             }
@@ -724,41 +738,50 @@ impl Unled<'_> {
             if pause::read(&self.paths.paused, &herd).pause().is_some() {
                 continue;
             }
-            let Ok(queue) = herd::queue(self.paths, &herd) else {
-                continue;
-            };
             let counted = (|| {
+                let Some(queue) = lead_checks(self.paths, &herd)?.1 else {
+                    return Ok(None);
+                };
                 let timeout = budget.left().context("out of time")?;
                 let (tasks, _) =
                     run_source(&queue, timeout).with_context(|| why(&queue.source, "failed"))?;
                 let claimable = claimable_count(ledger, self.paths, &queue, &herd, &tasks)?;
                 let Some(backlog) = &queue.backlog else {
-                    return Ok((claimable, 0));
+                    return Ok(Some((claimable, 0)));
                 };
                 let timeout = budget.left().context("out of time")?;
                 let (unready, _) = run_in_repo(backlog, &queue.repo, timeout)
                     .with_context(|| why(backlog, "failed"))?;
-                Ok::<_, anyhow::Error>((
-                    claimable,
-                    unready.lines().filter(|l| !l.trim().is_empty()).count(),
-                ))
+                let unready = unready.lines().filter(|l| !l.trim().is_empty()).count();
+                Ok::<_, anyhow::Error>(Some((claimable, unready)))
             })();
             let (claimable, unready) = match counted {
-                Ok(counts) => counts,
+                Ok(Some(counts)) => counts,
+                Ok(None) => continue,
                 Err(e) => {
                     if budget.left().is_some() && self.failing.insert(herd.clone()) {
-                        warn(&format!("warning: {herd}'s queue: {e:#}"));
+                        warn(&format!("warning: {herd}: {e:#}"));
                     }
                     continue;
                 }
             };
             self.failing.remove(&herd);
             // Read again: a feed may have opened a worker while the commands ran.
-            let worker = open(&ledger.entries()?, &herd, |e| !e.is_lead());
-            events.extend(
-                self.fired
-                    .out_of_work(&herd, claimable == 0 && unready == 0 && !worker)?,
-            );
+            let entries = ledger.entries()?;
+            let worker = open(&entries, &herd, |e| !e.is_lead());
+            let out = claimable == 0 && unready == 0 && !worker;
+            let Some(event) = self.fired.out_of_work(&herd, &entries, out)? else {
+                continue;
+            };
+            let mut said = false;
+            for lead in
+                (entries.values()).filter(|e| e.is_lead() && e.herd.as_deref() == Some(&herd))
+            {
+                said |= Fired::lead_holds(self.dir, lead, &event.key)?;
+            }
+            if !said {
+                events.push(event);
+            }
         }
         Ok(events
             .into_iter()
@@ -941,26 +964,27 @@ impl Fired {
             Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
         };
-        let mut lines = text.lines();
-        self.keys.clear();
-        if lines.next() != Some(self.header.as_str()) {
-            return fs::write(path, format!("{}\n", self.header))
-                .with_context(|| format!("write {}", path.display()));
-        }
-        for line in lines {
-            if line == RESUMED {
-                self.keys.retain(|k| !is_claimable(k));
-            } else if let Some(name) = line.strip_prefix(RELEASED) {
-                self.keys.retain(|k| !is_about(k, name));
-            } else if let Some(low) = line.strip_suffix(ENDED) {
-                self.keys.remove(low);
-            } else if let Some(failing) = failing_key(line) {
-                self.keys.remove(&failing);
-            } else {
-                self.keys.insert(line.to_string());
+        match keys_under(&text, &self.header) {
+            Some(keys) => self.keys = keys,
+            None => {
+                self.keys.clear();
+                fs::write(path, format!("{}\n", self.header))
+                    .with_context(|| format!("write {}", path.display()))?;
             }
         }
         Ok(())
+    }
+
+    /// Whether the retired lead `lead`'s fired file holds `key`.
+    fn lead_holds(dir: &Path, lead: &AgentRecord, key: &str) -> Result<bool> {
+        let path = fired_path(dir, &lead.name);
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+        };
+        let header = format!("lead {}", lead.created);
+        Ok(keys_under(&text, &header).is_some_and(|keys| keys.contains(key)))
     }
 
     /// The keys to append once `events` print.
@@ -990,9 +1014,25 @@ impl Fired {
         Ok(())
     }
 
-    fn out_of_work(&mut self, herd: &str, out: bool) -> Result<Option<Event>> {
+    /// Keyed by the newest of `herd`'s members in `entries`, so a worker that
+    /// opened and retired between watches starts a new streak.
+    fn out_of_work(
+        &mut self,
+        herd: &str,
+        entries: &BTreeMap<String, AgentRecord>,
+        out: bool,
+    ) -> Result<Option<Event>> {
         let line = format!("{herd} {}", line::OUT_OF_WORK);
-        self.streak(line.clone(), line, out)
+        let key = out_of_work_key(herd, entries);
+        let ended: Vec<String> = (self.keys.iter())
+            .filter(|k| **k != key || !out)
+            .filter(|k| *k == &line || k.starts_with(&format!("{line} since ")))
+            .cloned()
+            .collect();
+        for old in ended {
+            self.end(&old)?;
+        }
+        Ok(out.then_some(Event { key, line }))
     }
 
     /// Appends, so keys another watch saved meanwhile survive.
@@ -1011,6 +1051,40 @@ const ENDED: &str = " ended";
 
 fn fired_path(dir: &Path, lead: &str) -> PathBuf {
     dir.join(format!("watch-{lead}.fired"))
+}
+
+/// The keys a fired file's `text` holds, or `None` when it isn't headed `header`.
+fn keys_under(text: &str, header: &str) -> Option<HashSet<String>> {
+    let mut lines = text.lines();
+    if lines.next() != Some(header) {
+        return None;
+    }
+    let mut keys: HashSet<String> = HashSet::new();
+    for line in lines {
+        if line == RESUMED {
+            keys.retain(|k| !is_claimable(k));
+        } else if let Some(name) = line.strip_prefix(RELEASED) {
+            keys.retain(|k| !is_about(k, name));
+        } else if let Some(ended) = line.strip_suffix(ENDED) {
+            keys.remove(ended);
+        } else if let Some(failing) = failing_key(line) {
+            keys.remove(&failing);
+        } else {
+            keys.insert(line.to_string());
+        }
+    }
+    Some(keys)
+}
+
+fn out_of_work_key(herd: &str, entries: &BTreeMap<String, AgentRecord>) -> String {
+    let newest = (entries.values())
+        .filter(|e| e.herd.as_deref() == Some(herd))
+        .map(|e| e.created.as_str())
+        .max();
+    match newest {
+        Some(created) => format!("{herd} {} since {created}", line::OUT_OF_WORK),
+        None => format!("{herd} {}", line::OUT_OF_WORK),
+    }
 }
 
 /// Makes `lead`'s watch announce its herd's claimable tasks again, as the
@@ -4141,6 +4215,29 @@ mod tests {
         assert_eq!(paused_first.once("w9:p0"), None, "resume re-announced it");
     }
 
+    impl Checked {
+        /// A worker of cards spawned after the others and already retired,
+        /// as if it opened and closed while no watch ran.
+        fn spawn_and_retire(&mut self, name: &str) {
+            let worker = AgentRecord {
+                created: "2026-11-02T00:00:00Z".into(),
+                retired: true,
+                ..member(name, "w9:p5", Some("cards"))
+            };
+            self.ledger.0.insert(name.into(), worker);
+        }
+    }
+
+    #[test]
+    fn a_worker_that_opened_and_retired_between_watches_ends_the_leads_streak() {
+        let mut world = Checked::new();
+        world.retire("lh-1");
+        assert_eq!(world.once("w9:p0").unwrap(), ["cards out of work"]);
+        world.spawn_and_retire("lh-2");
+        assert_eq!(world.once("w9:p0").unwrap(), ["cards out of work"]);
+        assert_eq!(world.once("w9:p0"), None);
+    }
+
     #[test]
     fn a_failing_source_or_backlog_is_not_out_of_work() {
         let mut source = Checked::new();
@@ -4327,6 +4424,67 @@ mod tests {
         );
         scoped.retire("lh-1");
         assert_eq!(scoped.shepherd().unwrap(), ["cards out of work"]);
+    }
+
+    #[test]
+    fn a_worker_that_opened_and_retired_between_watches_ends_the_shepherds_streak() {
+        let mut world = Checked::unled();
+        assert_eq!(world.shepherd().unwrap(), ["cards out of work"]);
+        world.spawn_and_retire("lh-2");
+        assert_eq!(world.shepherd().unwrap(), ["cards out of work"]);
+        assert_eq!(world.shepherd(), None);
+    }
+
+    #[test]
+    fn the_shepherd_doesnt_repeat_what_a_retired_lead_said_out_of_work() {
+        let mut world = Checked::new();
+        world.retire("lh-1");
+        assert_eq!(world.once("w9:p0").unwrap(), ["cards out of work"]);
+        world.retire("lead-cards");
+        assert_eq!(world.shepherd(), None, "the lead already said it");
+
+        world.spawn_and_retire("lh-2");
+        assert_eq!(world.shepherd().unwrap(), ["cards out of work"]);
+    }
+
+    #[test]
+    fn a_pending_blocked_line_wakes_the_shepherd_before_its_queue_commands_run() {
+        let mut world = Checked::unled();
+        world.add(member("solo", "w9:p3", None), AgentStatus::Idle);
+        let dir = world.config.path().join("reports");
+        crate::pane_event::record_blocked(&dir, "solo", SystemTime::now()).unwrap();
+        world.edit_herd(|h| h.replace("\"cat tasks\"", "\"touch ran; cat tasks\""));
+
+        assert_eq!(world.shepherd().unwrap(), ["solo blocked"]);
+        assert!(
+            !world.repo.path().join("ran").exists(),
+            "ran the source first"
+        );
+        assert_eq!(world.shepherd().unwrap(), ["cards out of work"]);
+    }
+
+    #[test]
+    fn the_shepherd_warns_once_when_an_unled_herd_file_is_bad() {
+        let world = Checked::unled();
+        world.edit_herd(|h| h.replace("[queue]", "[queue"));
+        let dir = world.config.path().join("reports");
+        let req = Request {
+            timeout: Some(Duration::from_secs(150)),
+            ..world.shepherd_request()
+        };
+        let mut warnings = vec![];
+        let woke = watch(
+            &world.herdr,
+            &world.ledger,
+            &dir,
+            &req,
+            &mut steps(|_| {}),
+            &mut |w| warnings.push(w.to_string()),
+        )
+        .unwrap();
+        assert!(woke.is_none());
+        let cards: Vec<_> = warnings.iter().filter(|w| w.contains("cards")).collect();
+        assert_eq!(cards.len(), 1, "{warnings:?}");
     }
 
     #[test]
