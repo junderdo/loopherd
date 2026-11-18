@@ -2422,7 +2422,7 @@ max = 3
     fn q_quits_while_a_herdr_read_hangs() {
         let (_release, gate) = mpsc::channel();
         let mut herdr = herdr();
-        herdr.agents_gate = Some(gate);
+        herdr.agents_gate = Some(gate.into());
         let keys = vec![
             None,
             Some(key(KeyCode::Char('s'))),
@@ -2437,7 +2437,7 @@ max = 3
     fn escape_quits_while_a_herdr_read_hangs() {
         let (_release, gate) = mpsc::channel();
         let mut herdr = herdr();
-        herdr.agents_gate = Some(gate);
+        herdr.agents_gate = Some(gate.into());
         let keys = vec![None, Some(key(KeyCode::Esc))];
         assert_eq!(run_scripted(herdr, keys, 0), Some(0));
     }
@@ -2446,7 +2446,7 @@ max = 3
     fn ctrl_c_quits_while_a_herdr_read_hangs() {
         let (_release, gate) = mpsc::channel();
         let mut herdr = herdr();
-        herdr.agents_gate = Some(gate);
+        herdr.agents_gate = Some(gate.into());
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(run_scripted(herdr, vec![None, Some(ctrl_c)], 0), Some(0));
     }
@@ -2455,7 +2455,7 @@ max = 3
     fn a_stop_signal_ends_the_loop_with_128_plus_its_number() {
         let (_release, gate) = mpsc::channel();
         let mut herdr = herdr();
-        herdr.agents_gate = Some(gate);
+        herdr.agents_gate = Some(gate.into());
         assert_eq!(
             run_scripted(herdr, vec![], libc::SIGTERM),
             Some(128 + libc::SIGTERM)
@@ -2616,7 +2616,7 @@ max = 3
         // A rendezvous gate: a send goes through only while a read waits on it.
         let (release, gate) = mpsc::sync_channel(0);
         let mut herdr = herdr();
-        herdr.agents_gate = Some(gate);
+        herdr.agents_gate = Some(gate.into());
         let fake = FakeSubscriber::default();
         let subscriber = fake.clone();
         let (quit, quitting) = mpsc::channel::<()>();

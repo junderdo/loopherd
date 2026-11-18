@@ -1,9 +1,13 @@
 id = "loopherd"
 name = "loopherd"
 version = "0.1.1"
-min_herdr_version = "0.7.4"
+min_herdr_version = "0.7.5"
 description = "Group coding agents into herds that keep working across sessions. Needs loopherd on PATH."
 platforms = ["linux", "macos"]
+
+# Does nothing unless config.toml sets [herdr_plugin] revive_on_startup = true.
+[[startup]]
+command = ["sh", "loopherd.sh", "revive", "--startup"]
 
 [[actions]]
 id = "status"

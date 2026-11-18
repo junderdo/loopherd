@@ -20,6 +20,7 @@ pub struct ConfigFile {
     pub shepherd: Option<ShepherdConfig>,
     /// Each lead's switches where its herd file's `[lead]` leaves one unset.
     pub lead_defaults: Option<SwitchValues>,
+    pub herdr_plugin: Option<HerdrPluginConfig>,
     /// Read and checked by `notify`, so a broken table can't cost the rest.
     #[serde(rename = "notify")]
     _notify: Option<toml::Value>,
@@ -31,6 +32,12 @@ pub struct ShepherdConfig {
     pub context_limit: Option<u64>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HerdrPluginConfig {
+    pub revive_on_startup: Option<bool>,
+}
+
 /// `config` parsed and checked; a missing file is an empty one.
 pub fn read(config: &Path) -> Result<ConfigFile> {
     check(&read_text(config)?).with_context(|| config.display().to_string())
@@ -39,6 +46,14 @@ pub fn read(config: &Path) -> Result<ConfigFile> {
 /// The `[lead_defaults]` table, `None` when `config` has none.
 pub fn lead_defaults(config: &Path) -> Result<Option<SwitchValues>> {
     Ok(read(config)?.lead_defaults)
+}
+
+/// Whether the herdr plugin's startup hook runs revive; off unless set.
+pub fn revive_on_startup(config: &Path) -> Result<bool> {
+    Ok(read(config)?
+        .herdr_plugin
+        .and_then(|p| p.revive_on_startup)
+        .unwrap_or(false))
 }
 
 /// Writes `[lead_defaults]` with the switches in `on` (comma-separated, or
@@ -414,6 +429,38 @@ mod tests {
             new_cards: Some(false),
             design_escalation: Some(false),
             blocked_dialogs: Some(false),
+        }
+    }
+
+    #[test]
+    fn revive_on_startup_is_off_unless_the_herdr_plugin_table_turns_it_on() {
+        for (text, on) in [
+            (None, false),
+            (Some("context_window = 1000000\n"), false),
+            (Some("[herdr_plugin]\n"), false),
+            (Some("[herdr_plugin]\nrevive_on_startup = false\n"), false),
+            (Some("[herdr_plugin]\nrevive_on_startup = true\n"), true),
+        ] {
+            let (_dir, path) = config_with(text);
+            assert_eq!(revive_on_startup(&path).unwrap(), on, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_misspelled_or_mistyped_herdr_plugin_key_is_refused() {
+        for (text, wrong) in [
+            (
+                "[herdr_plugin]\nrevive_on_start = true\n",
+                "revive_on_start",
+            ),
+            (
+                "[herdr_plugin]\nrevive_on_startup = \"yes\"\n",
+                "revive_on_startup",
+            ),
+        ] {
+            let (_dir, path) = config_with(Some(text));
+            let error = format!("{:#}", revive_on_startup(&path).unwrap_err());
+            assert!(error.contains(wrong), "{error}");
         }
     }
 
