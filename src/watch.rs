@@ -588,7 +588,7 @@ fn why(command: &str, error: &str) -> String {
 const WHY_MAX: usize = 200;
 
 /// `text` without ANSI escapes or other control characters, cut to [`WHY_MAX`].
-fn printable(text: &str) -> String {
+pub(crate) fn printable(text: &str) -> String {
     let mut out = String::new();
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {

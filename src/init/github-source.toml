@@ -14,3 +14,15 @@ GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue list --repo @OWNER_REPO@ --s
   | ([.title | ascii_downcase | scan("[a-z0-9]+")][:5] | join("-")) as $slug
   | "\(.number) \($type) \($skill) \(if $slug == "" then "issue" else $slug end)"'
 '''
+# Prints "<number> <title>" per open issue the source leaves out, but for
+# blocked ones, oldest first, matching labels whatever their case. Ones waiting
+# on the human stay, @READY_FOR_AGENT@ or not: they are what a dry queue forgets.
+backlog = '''
+GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh issue list --repo @OWNER_REPO@ --state open --limit 1000 --json number,title,labels --jq '
+  sort_by(.number)[]
+  | [.labels[].name | ascii_downcase] as $labels
+  | select(any($labels[]; . == "blocked") | not)
+  | select(any($labels[]; . == "@READY_FOR_AGENT_LC@") | not
+      or any($labels[]; . == "@NEEDS_INFO_LC@" or . == "@READY_FOR_HUMAN_LC@"))
+  | "\(.number) \(.title)"'
+'''

@@ -254,6 +254,7 @@ mod tests {
                 paused: None,
                 members: vec![member("h", status, false)],
                 slots: 1,
+                tasks: Default::default(),
             }],
             retired: Some(vec![member("r", status, false)]),
             ..snapshot(vec![])

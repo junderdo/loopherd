@@ -2,13 +2,17 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::herd_view::{Herd, Member, Options, View, view};
+use crate::feed::{claimable_count, run_in_repo, run_source};
+use crate::herd::{self, Paths};
+use crate::herd_view::{Herd, Member, Options, QueueTasks, Tasks, View, view};
 use crate::herdr::{Herdr, MalformedReply};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::pause;
+use crate::watch::printable;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -114,6 +118,7 @@ fn add_pauses(herds: &mut Vec<Herd>, pauses: Vec<(String, pause::Reading)>) -> V
                     paused: Some(pause),
                     members: vec![],
                     slots: 0,
+                    tasks: QueueTasks::default(),
                 },
             ),
         }
@@ -121,20 +126,85 @@ fn add_pauses(herds: &mut Vec<Herd>, pauses: Vec<(String, pause::Reading)>) -> V
     warnings
 }
 
-/// Prints [`read`]'s view, exiting 2 if herdr is unreachable and 3 if its
-/// `agent list` reply is malformed.
+/// `error` on one line, naming the command by `key`: its first line and, when
+/// it has more, its last, which is where a tool's own error usually is.
+fn reason(key: &str, command: &str, error: &anyhow::Error) -> String {
+    let error = format!("{error:#}");
+    let error = match error.strip_prefix(&format!("{command:?} ")) {
+        Some(rest) => format!("{key} {rest}"),
+        None => format!("{key}: {error}"),
+    };
+    let mut lines = error.trim().lines();
+    let first = lines.next().unwrap_or_default();
+    match lines.last() {
+        Some(last) => printable(&format!("{first} … {last}")),
+        None => printable(first),
+    }
+}
+
+/// Where `status` finds herd files, and how long each queue command may run.
+pub struct Queues<'a> {
+    pub paths: &'a Paths,
+    pub timeout: Duration,
+}
+
+/// Counts the tasks of each herd whose queue has a `backlog`, adding a herd
+/// the view left out. Herd files that can't be read or listed are left to
+/// `herds` and the pause warning.
+fn add_tasks(herds: &mut Vec<Herd>, queues: &Queues, ledger: &dyn Ledger) {
+    let Ok(names) = herd::names(&queues.paths.herds) else {
+        return;
+    };
+    for name in names {
+        let Ok(queue) = herd::queue(queues.paths, &name) else {
+            continue;
+        };
+        let Some(backlog) = &queue.backlog else {
+            continue;
+        };
+        let claimable = run_source(&queue, queues.timeout)
+            .and_then(|(tasks, _)| claimable_count(ledger, queues.paths, &queue, &name, &tasks));
+        let unready = run_in_repo(backlog, &queue.repo, queues.timeout)
+            .map(|(tasks, _)| tasks.lines().filter(|l| !l.trim().is_empty()).count());
+        let tasks = QueueTasks(Some(Tasks {
+            claimable: claimable.map_err(|e| reason("source", &queue.source, &e)),
+            unready: unready.map_err(|e| reason("backlog", backlog, &e)),
+        }));
+        match herds.binary_search_by(|h| h.name.as_str().cmp(&name)) {
+            Ok(i) => herds[i].tasks = tasks,
+            Err(i) => herds.insert(
+                i,
+                Herd {
+                    name,
+                    paused: None,
+                    members: vec![],
+                    slots: 0,
+                    tasks,
+                },
+            ),
+        }
+    }
+}
+
+/// Prints [`read`]'s view, with each backlog herd's task counts when given
+/// `queues`, exiting 2 if herdr is unreachable and 3 if its `agent list`
+/// reply is malformed.
 pub fn status(
     herdr: &dyn Herdr,
     ledger: &dyn Ledger,
     pauses: &pause::Pauses,
+    queues: Option<&Queues>,
     options: Options,
     format: Format,
 ) -> Result<Output> {
     let Read {
-        view,
+        mut view,
         problem,
         code,
     } = read(herdr, ledger, pauses, options)?;
+    if let Some(queues) = queues {
+        add_tasks(&mut view.herds, queues, ledger);
+    }
     let stdout = match format {
         Format::Text { color } => text(&view, color),
         Format::Json => serde_json::to_string_pretty(&view)? + "\n",
@@ -182,11 +252,14 @@ pub fn sections(view: &View) -> Vec<(String, &[Member])> {
         .iter()
         .map(|h| {
             let mut header = h.name.clone();
-            if h.members.is_empty() && h.paused.is_none() {
+            if h.members.is_empty() && h.paused.is_none() && h.tasks.0.is_none() {
                 header += " (retired only)";
             }
             if let Some(pause) = &h.paused {
                 header += &format!("  {pause}");
+            }
+            if let Some(tasks) = &h.tasks.0 {
+                header += &format!("  {tasks}");
             }
             (header, h.members.as_slice())
         })
@@ -430,6 +503,7 @@ mod tests {
                 &herdr,
                 &ledger,
                 &Pauses::under(paused.path()),
+                None,
                 Options::default(),
                 PLAIN,
             )
@@ -451,7 +525,7 @@ mod tests {
         std::fs::write(root.path().join("herds/docs.toml"), "repo = \"/r\"\n").unwrap();
         let paths = Pauses::under(root.path());
 
-        let out = status(&herdr(), &ledger, &paths, Options::default(), PLAIN).unwrap();
+        let out = status(&herdr(), &ledger, &paths, None, Options::default(), PLAIN).unwrap();
 
         assert!(
             out.stdout.starts_with(
@@ -462,7 +536,14 @@ mod tests {
             "{}",
             out.stdout
         );
-        let json = status(&herdr(), &ledger, &paths, Options::default(), Format::Json);
+        let json = status(
+            &herdr(),
+            &ledger,
+            &paths,
+            None,
+            Options::default(),
+            Format::Json,
+        );
         let json: serde_json::Value = serde_json::from_str(&json.unwrap().stdout).unwrap();
         assert_eq!(json["herds"][1]["name"], "prs");
         assert_eq!(json["herds"][1]["paused"]["since"], "2026-11-05T09:00:00Z");
@@ -479,6 +560,7 @@ mod tests {
             &herdr(),
             &ledger(),
             &Pauses::under(root.path()),
+            None,
             Options::default(),
             PLAIN,
         )
@@ -494,7 +576,7 @@ mod tests {
         std::fs::write(root.path().join("paused/prs"), "").unwrap();
         let paths = Pauses::under(root.path());
 
-        let out = status(&herdr(), &ledger(), &paths, Options::default(), PLAIN).unwrap();
+        let out = status(&herdr(), &ledger(), &paths, None, Options::default(), PLAIN).unwrap();
 
         assert!(
             out.stdout.starts_with("prs  paused (time unknown)\n"),
@@ -512,6 +594,7 @@ mod tests {
             &herdr(),
             &ledger(),
             &paths,
+            None,
             Options::default(),
             Format::Json,
         );
@@ -532,6 +615,7 @@ mod tests {
             &herdr(),
             &ledger(),
             &Pauses::under(root.path()),
+            None,
             Options::default(),
             PLAIN,
         );
@@ -600,6 +684,7 @@ mod tests {
             &herdr(),
             &ledger(),
             &Pauses::under(root.path()),
+            None,
             Options::default(),
             PLAIN,
         );
@@ -624,7 +709,15 @@ mod tests {
             herds: None,
         };
 
-        let out = status(&herdr(), &ledger(), &pauses, Options::default(), PLAIN).unwrap();
+        let out = status(
+            &herdr(),
+            &ledger(),
+            &pauses,
+            None,
+            Options::default(),
+            PLAIN,
+        )
+        .unwrap();
 
         assert!(!out.stdout.contains("docs  paused"), "{}", out.stdout);
         assert_eq!(
@@ -644,6 +737,7 @@ mod tests {
             &herdr(),
             &ledger(),
             &Pauses::under(root.path()),
+            None,
             Options::default(),
             PLAIN,
         )
@@ -663,7 +757,15 @@ mod tests {
         let ledger = ledger();
         let paused = paused_prs(Some("freeze"));
         let json = |paths: &Pauses| {
-            let out = status(&herdr(), &ledger, paths, Options::default(), Format::Json).unwrap();
+            let out = status(
+                &herdr(),
+                &ledger,
+                paths,
+                None,
+                Options::default(),
+                Format::Json,
+            )
+            .unwrap();
             serde_json::from_str::<serde_json::Value>(&out.stdout).unwrap()["herds"][0]["paused"]
                 .clone()
         };
@@ -679,7 +781,15 @@ mod tests {
         let herdr = herdr();
         let ledger = ledger();
         let before = ledger.0.clone();
-        let out = status(&herdr, &ledger, &not_paused(), Options::default(), PLAIN).unwrap();
+        let out = status(
+            &herdr,
+            &ledger,
+            &not_paused(),
+            None,
+            Options::default(),
+            PLAIN,
+        )
+        .unwrap();
         assert_eq!(
             out.stdout,
             "\
@@ -711,7 +821,15 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         lead.role = Some(crate::ledger::Role::Lead);
         ledger.0.insert(lead.name.clone(), lead);
 
-        let out = status(&herdr, &ledger, &not_paused(), Options::default(), PLAIN).unwrap();
+        let out = status(
+            &herdr,
+            &ledger,
+            &not_paused(),
+            None,
+            Options::default(),
+            PLAIN,
+        )
+        .unwrap();
 
         assert!(
             out.stdout.starts_with(
@@ -730,7 +848,15 @@ prs
     fn with_herdr_unreachable_prints_the_ledger_as_unknown_warns_and_exits_2() {
         let mut herdr = herdr();
         herdr.unreachable = true;
-        let out = status(&herdr, &ledger(), &not_paused(), Options::default(), PLAIN).unwrap();
+        let out = status(
+            &herdr,
+            &ledger(),
+            &not_paused(),
+            None,
+            Options::default(),
+            PLAIN,
+        )
+        .unwrap();
         assert_eq!(
             out.stdout,
             "\
@@ -758,6 +884,7 @@ strays unknown (herdr unreachable)
             &herdr(),
             &ledger,
             &not_paused(),
+            None,
             Options {
                 all: true,
                 strays: true,
@@ -797,11 +924,20 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             &herdr(),
             &ledger,
             &not_paused(),
+            None,
             options,
             Format::Text { color: false },
         )
         .unwrap();
-        let json = status(&herdr(), &ledger, &not_paused(), options, Format::Json).unwrap();
+        let json = status(
+            &herdr(),
+            &ledger,
+            &not_paused(),
+            None,
+            options,
+            Format::Json,
+        )
+        .unwrap();
 
         assert!(
             text.stdout
@@ -824,8 +960,8 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             strays: false,
         };
 
-        let text = status(&herdr(), &ledger, &not_paused(), all, PLAIN).unwrap();
-        let json = status(&herdr(), &ledger, &not_paused(), all, Format::Json).unwrap();
+        let text = status(&herdr(), &ledger, &not_paused(), None, all, PLAIN).unwrap();
+        let json = status(&herdr(), &ledger, &not_paused(), None, all, Format::Json).unwrap();
 
         let row = text.stdout.lines().find(|l| l.contains("old")).unwrap();
         assert_eq!(
@@ -848,7 +984,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             strays: false,
         };
 
-        let json = status(&herdr(), &ledger, &not_paused(), all, Format::Json).unwrap();
+        let json = status(&herdr(), &ledger, &not_paused(), None, all, Format::Json).unwrap();
 
         let json: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
         assert_eq!(json["retired"][0]["retired"], "unknown");
@@ -864,7 +1000,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             all: true,
             strays: false,
         };
-        let out = status(&herdr(), &ledger, &not_paused(), all, PLAIN).unwrap();
+        let out = status(&herdr(), &ledger, &not_paused(), None, all, PLAIN).unwrap();
         assert!(
             out.stdout.starts_with("prs (retired only)\nungrouped\n"),
             "{}",
@@ -883,6 +1019,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             &herdr(),
             &ledger,
             &not_paused(),
+            None,
             Options {
                 all: true,
                 strays: true,
@@ -913,7 +1050,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
                 "herds": [{"name": "prs", "paused": null, "members": [
                     member("zpr-2", "blocked", false, "pr-2", "w1:pzpr-2", Some("w1:tzpr-2")),
                     zpr_1,
-                ]}],
+                ], "claimable": null, "unready": null}],
                 "ungrouped": [member("lh-42", "idle", false, "feat-x", "w1:plh-42", Some("w1:tlh-42"))],
                 "retired": [old],
                 "strays": {"count": 1, "agents": [{"pane": "w2:p7", "tab": "w2:t7", "status": "idle",
@@ -925,6 +1062,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             &herdr(),
             &ledger,
             &not_paused(),
+            None,
             Options::default(),
             Format::Json,
         )
@@ -947,6 +1085,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
                         &herdr,
                         &ledger,
                         &not_paused(),
+                        None,
                         Options { all, strays },
                         format,
                     )
@@ -985,7 +1124,15 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             "w1:plh-1",
             AgentStatus::Idle,
         ));
-        let out = status(&herdr, &ledger, &not_paused(), Options::default(), PLAIN).unwrap();
+        let out = status(
+            &herdr,
+            &ledger,
+            &not_paused(),
+            None,
+            Options::default(),
+            PLAIN,
+        )
+        .unwrap();
         assert_eq!(
             out.stdout.lines().nth(1),
             Some("  lh-1  idle  -  -  w1:tlh-1/w1:plh-1")
@@ -994,6 +1141,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             &herdr,
             &ledger,
             &not_paused(),
+            None,
             Options::default(),
             Format::Json,
         )

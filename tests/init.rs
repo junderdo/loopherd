@@ -5024,7 +5024,7 @@ fn an_other_tracker_names_no_github_issue_and_marks_what_to_fill() {
         for step in [
             format!(
                 "  2. Fill in from docs/agents/issue-tracker.md, in {}: [queue] source, \
-                 [template.issue] done, and each prompt step marked (fill in).",
+                 [queue] backlog, [template.issue] done, and each prompt step marked (fill in).",
                 herd_file.display()
             ),
             format!(
@@ -5361,4 +5361,113 @@ fn a_role_loopherd_doesnt_read_may_repeat() {
     );
 
     assert_ok(&fixture.init(&[]));
+}
+
+#[test]
+fn the_github_backlog_lists_open_issues_neither_ready_nor_blocked_keeping_those_on_the_human() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.gh_json(
+        "issues.json",
+        r#"[
+  {"number": 12, "title": "Spec the widget API", "labels": []},
+  {"number": 3, "title": "Ready already", "labels": [{"name": "Ready-For-Agent"}]},
+  {"number": 4, "title": "Waits on 3", "labels": [{"name": "BLOCKED"}]},
+  {"number": 5, "title": "Which colour?", "labels": [{"name": "needs-info"}]},
+  {"number": 6, "title": "Pick a licence", "labels": [{"name": "ready-for-human"}, {"name": "bug"}]},
+  {"number": 7, "title": "Asked mid-way", "labels": [{"name": "ready-for-agent"}, {"name": "Needs-Info"}]}
+]"#,
+    );
+    assert_ok(&fixture.init(&[]));
+
+    let backlog = fixture.run(
+        Command::new("sh")
+            .args(["-c", &fixture.herd_get("queue.backlog")])
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    fixture.gh_dir().display(),
+                    std::env::var("PATH").unwrap()
+                ),
+            ),
+    );
+
+    assert_ok(&backlog);
+    assert_eq!(
+        text(&backlog.stdout),
+        "5 Which colour?\n6 Pick a licence\n7 Asked mid-way\n12 Spec the widget API\n"
+    );
+    assert!(
+        fixture
+            .gh_calls()
+            .contains("GH_TOKEN=tok-acme issue list --repo acme/widgets --state open --limit"),
+        "{}",
+        fixture.gh_calls()
+    );
+}
+
+#[test]
+fn the_local_backlog_lists_open_issue_files_neither_ready_nor_blocked_by_path_and_title() {
+    let fixture = Fixture::new(&["acme"]);
+    let mut issues = LOCAL_ISSUES.to_vec();
+    issues.extend([
+        (
+            ".scratch/billing/issues/02-refunds.md",
+            "# 02: Refunds\n\nStatus: blocked\n",
+        ),
+        (
+            ".scratch/billing/issues/03-taxes.md",
+            "No heading and no status yet.\n",
+        ),
+        (
+            ".scratch/billing/issues/04-old.md",
+            "# 04: Old\n\nStatus: closed\n",
+        ),
+        (
+            ".scratch/billing/issues/05-credits.md",
+            "# 05: Credits\n\nBlocked by: 01\nStatus: needs-triage\n",
+        ),
+        (
+            ".scratch/billing/issues/06-coupons.md",
+            "# 06: Coupons\n\nBlocked by: 04\nStatus: needs-triage\n",
+        ),
+    ]);
+    let env = fixture.push_local_issues(&issues);
+    assert_ok(&fixture.init(&["--tracker", "local"]));
+
+    let backlog = fixture.run(
+        Command::new("sh")
+            .args(["-c", &fixture.herd_get("queue.backlog")])
+            .envs(env.iter().map(|(k, v)| (k, v))),
+    );
+
+    assert_ok(&backlog);
+    assert_eq!(
+        text(&backlog.stdout),
+        ".scratch/auth/issues/03-session-expiry.md 03: Session expiry\n\
+         .scratch/auth/issues/08-pick-a-provider.md 08: Pick a provider\n\
+         .scratch/billing/issues/03-taxes.md 03-taxes\n\
+         .scratch/billing/issues/06-coupons.md 06: Coupons\n"
+    );
+}
+
+#[test]
+fn another_trackers_backlog_is_left_to_fill_in_and_named_in_the_steps() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::create_dir_all(fixture.repo().join("docs/agents")).unwrap();
+    fs::write(
+        fixture.repo().join("docs/agents/issue-tracker.md"),
+        "# Issue tracker: Jira\n",
+    )
+    .unwrap();
+
+    let out = fixture.init(&[]);
+
+    assert_ok(&out);
+    assert_eq!(fixture.herd_get("queue.backlog"), "(fill in)");
+    assert!(
+        text(&out.stdout).contains("[queue] source, [queue] backlog, [template.issue] done"),
+        "{}",
+        text(&out.stdout)
+    );
 }

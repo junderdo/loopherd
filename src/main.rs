@@ -69,8 +69,8 @@ use crate::report::{Filter, Kind, Reporter, report, reports};
 use crate::retire::{refuse_own_lead, retire, retire_and_close};
 use crate::revive::{ReviveRequest, revive};
 use crate::spawn::{Checkout, Prompt, SHELL_TIMEOUT, SpawnRequest, spawn};
-use crate::status::{Format, status};
-use crate::worktree::{Fate, remote_timeout, repo_root};
+use crate::status::{Format, Queues};
+use crate::worktree::{Fate, REMOTE_TIMEOUT, remote_timeout, repo_root};
 
 #[derive(Parser)]
 #[command(
@@ -882,7 +882,22 @@ fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
         },
     };
     let pauses = pause::Pauses::from_env()?;
-    let out = status(&CliHerdr, &ledger, &pauses, Options { all, strays }, format)?;
+    // Paths needs HOME; without it status counts no herd's tasks.
+    let paths = Paths::from_env().ok();
+    let timeout = remote_timeout().unwrap_or_else(|e| {
+        let default = humantime::format_duration(REMOTE_TIMEOUT);
+        eprintln!("loopherd status: warning: {e:#}; counting tasks with the default {default}");
+        REMOTE_TIMEOUT
+    });
+    let queues = paths.as_ref().map(|paths| Queues { paths, timeout });
+    let out = status::status(
+        &CliHerdr,
+        &ledger,
+        &pauses,
+        queues.as_ref(),
+        Options { all, strays },
+        format,
+    )?;
     print!("{}", out.stdout);
     for line in out.stderr.lines() {
         eprintln!("loopherd status: {line}");

@@ -4,7 +4,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::ser::SerializeMap;
+use serde::{Serialize, Serializer};
 
 use crate::herdr::{Agent, AgentStatus};
 use crate::ledger::AgentRecord;
@@ -52,6 +53,53 @@ pub struct Herd {
     /// Members counted against the queue's `max`, by [`crate::herd::holds_slot`].
     #[serde(skip)]
     pub slots: usize,
+    /// Filled by the caller, since counting runs the queue's commands.
+    #[serde(flatten)]
+    pub tasks: QueueTasks,
+}
+
+/// A queue's task counts, set only for a herd whose queue has a `backlog`.
+/// Each is the count, or why its command failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tasks {
+    pub claimable: Result<usize, String>,
+    pub unready: Result<usize, String>,
+}
+
+impl std::fmt::Display for Tasks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let count = |count: &Result<usize, String>, what| match count {
+            Ok(n) => format!("{n} {what}"),
+            Err(e) => format!("{what} unknown ({e})"),
+        };
+        write!(
+            f,
+            "{}, {}",
+            count(&self.claimable, "claimable"),
+            count(&self.unready, "unready")
+        )
+    }
+}
+
+/// [`Tasks`] in JSON as `claimable` and `unready`, each a count or null, with
+/// `claimable_error` and `unready_error` beside a failed one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QueueTasks(pub Option<Tasks>);
+
+impl Serialize for QueueTasks {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(None)?;
+        for (key, count) in [
+            ("claimable", self.0.as_ref().map(|t| &t.claimable)),
+            ("unready", self.0.as_ref().map(|t| &t.unready)),
+        ] {
+            map.serialize_entry(key, &count.and_then(|c| c.as_ref().ok()))?;
+            if let Some(Err(e)) = count {
+                map.serialize_entry(&format!("{key}_error"), e)?;
+            }
+        }
+        map.end()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -119,6 +167,7 @@ pub fn view(
                 paused: None,
                 members: sorted(members),
                 slots: slots.get(name).copied().unwrap_or(0),
+                tasks: QueueTasks::default(),
             })
             .collect(),
         ungrouped: sorted(ungrouped),

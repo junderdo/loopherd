@@ -3,3 +3,7 @@
 # the issue template's done check and prompt to the same tracker. Until this
 # is set, `loopherd herds` reports the herd invalid and feed refuses it.
 source = ""
+# Fill in the same way: a shell command printing "<key> <title>" per open task
+# that isn't ready, leaving out blocked ones and keeping ones waiting on the
+# human; `loopherd status` counts its lines. Or drop it.
+backlog = "(fill in)"
