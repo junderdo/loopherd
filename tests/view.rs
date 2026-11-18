@@ -27,7 +27,7 @@ fn start_view(home: &Path) -> Child {
     let mut child = Command::new("script")
         .args([
             "-qec",
-            &format!("'{}' view", env!("CARGO_BIN_EXE_loopherd")),
+            &format!("exec '{}' view", env!("CARGO_BIN_EXE_loopherd")),
             "/dev/null",
         ])
         .env_clear()
@@ -67,7 +67,28 @@ fn start_view(home: &Path) -> Child {
         end(&mut child);
         panic!("the view never drew and called herdr");
     }
+    let built = Path::new(env!("CARGO_BIN_EXE_loopherd"))
+        .canonicalize()
+        .unwrap();
+    let views = children(&child);
+    let exes: Vec<_> = views
+        .iter()
+        .map(|pid| std::fs::read_link(format!("/proc/{pid}/exe")).ok())
+        .collect();
+    if exes != [Some(built)] {
+        end(&mut child);
+        panic!("script's child isn't the view itself: {exes:?}");
+    }
     child
+}
+
+fn children(script: &Child) -> Vec<i32> {
+    let id = script.id();
+    std::fs::read_to_string(format!("/proc/{id}/task/{id}/children"))
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(|pid| pid.parse().unwrap())
+        .collect()
 }
 
 /// Types `keys` into the view: its exit code, or `None` if it was still
@@ -84,14 +105,22 @@ fn exit_code_after(child: &mut Child, keys: &[u8], within: Duration) -> Option<i
     None
 }
 
-/// Sends SIGTERM to the view itself: ending `script` first hangs up the
-/// view's pty, and crossterm then spins on the dead tty instead of exiting.
+/// Ends the view itself before `script`: hanging up its pty first leaves it
+/// spinning on the dead tty. SIGKILLs a view that outlives SIGTERM.
 fn end(script: &mut Child) {
-    let id = script.id();
-    let children = std::fs::read_to_string(format!("/proc/{id}/task/{id}/children"));
-    for pid in children.unwrap_or_default().split_whitespace() {
+    let views = children(script);
+    let alive = |pid: i32| Path::new(&format!("/proc/{pid}")).exists();
+    for &pid in &views {
         // SAFETY: kill takes no pointers.
-        unsafe { libc::kill(pid.parse().unwrap(), libc::SIGTERM) };
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while views.iter().any(|&pid| alive(pid)) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    for &pid in views.iter().filter(|&&pid| alive(pid)) {
+        // SAFETY: kill takes no pointers.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
     }
     let _ = script.wait();
 }

@@ -994,6 +994,7 @@ impl IsolatedServer {
             .env("PATH", path)
             .env("LOOPHERD_CONFIG_DIR", home.path().join("loopherd-config"))
             .env_remove("CLAUDE_PID")
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -1088,19 +1089,37 @@ impl IsolatedServer {
 impl Drop for IsolatedServer {
     fn drop(&mut self) {
         // A view whose pty hangs up spins instead of exiting, so end it first.
-        for (pid, _) in self.loopherds() {
-            // SAFETY: kill takes no pointers.
-            unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        let signal_all = |signal| {
+            for (pid, _) in self.loopherds() {
+                // SAFETY: kill takes no pointers.
+                unsafe { libc::kill(pid as i32, signal) };
+            }
+        };
+        signal_all(libc::SIGTERM);
+        for _ in 0..20 {
+            if self.loopherds().is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
+        signal_all(libc::SIGKILL);
         let _ = self.herdr().args(["server", "stop"]).output();
         let _ = self.server.kill();
         let _ = self.server.wait();
     }
 }
 
+/// How a test ends the view popup.
+enum Close {
+    /// The view exits by itself, as on q: SIGTERM takes the same clean path.
+    ViewQuits,
+    /// herdr closes the popup.
+    PopupClose,
+}
+
 /// Opens the view popup with `open`, checks it runs the view as a popup
-/// does, then closes it as herdr would and waits for loopherd to be gone.
-fn view_popup_opens_and_closes(open: &[&str]) {
+/// does, closes it with `close`, and waits for loopherd and the popup to be gone.
+fn view_popup_opens_and_closes(open: &[&str], close: Close) {
     let server = IsolatedServer::start();
     let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("herdr-plugin");
     server.ok(&["plugin", "link", plugin.to_str().unwrap()]);
@@ -1122,7 +1141,15 @@ fn view_popup_opens_and_closes(open: &[&str]) {
     std::thread::sleep(std::time::Duration::from_secs(1));
     assert_eq!(server.loopherds().len(), 1, "the view exited on its own");
 
-    assert_eq!(server.request("popup.close")["result"]["type"], "ok");
+    match close {
+        Close::ViewQuits => {
+            // SAFETY: kill takes no pointers.
+            unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        }
+        Close::PopupClose => {
+            assert_eq!(server.request("popup.close")["result"]["type"], "ok");
+        }
+    }
 
     server.wait_for_loopherds(0);
     assert_eq!(
@@ -1132,27 +1159,33 @@ fn view_popup_opens_and_closes(open: &[&str]) {
 }
 
 #[test]
-fn the_view_pane_opens_as_a_popup_and_leaves_no_loopherd_once_closed() {
+fn the_view_pane_opens_as_a_popup_that_closes_when_the_view_quits() {
     if !live_enabled() {
         return;
     }
-    view_popup_opens_and_closes(&[
-        "plugin",
-        "pane",
-        "open",
-        "--plugin",
-        "loopherd",
-        "--entrypoint",
-        "view",
-    ]);
+    view_popup_opens_and_closes(
+        &[
+            "plugin",
+            "pane",
+            "open",
+            "--plugin",
+            "loopherd",
+            "--entrypoint",
+            "view",
+        ],
+        Close::ViewQuits,
+    );
 }
 
 #[test]
-fn the_view_action_opens_the_view_popup() {
+fn the_view_action_opens_the_popup_and_popup_close_ends_the_view() {
     if !live_enabled() {
         return;
     }
-    view_popup_opens_and_closes(&["plugin", "action", "invoke", "loopherd.view"]);
+    view_popup_opens_and_closes(
+        &["plugin", "action", "invoke", "loopherd.view"],
+        Close::PopupClose,
+    );
 }
 
 const LIVE: &str = "/home/u/.config/herdr/herdr.sock";
