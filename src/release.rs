@@ -106,8 +106,9 @@ pub fn release(
     if let Some(head) = &clearing.remote {
         let deleted = clearing.delete_remote().with_context(|| {
             format!(
-                "couldn't delete {remote} (was {}); fix the cause and rerun release to retry. \
-                 {name} stays unreleased, so feed won't spawn it, until that rerun deletes it",
+                "couldn't delete {remote} (was {}); fix the cause and rerun the same release \
+                 command to retry. {name} stays unreleased, so feed won't spawn it, until \
+                 that rerun deletes it",
                 short(head)
             )
         })?;
@@ -900,9 +901,9 @@ mod tests {
         let shown = format!("{err:#}");
         assert!(
             shown.starts_with(&format!(
-                "couldn't delete origin/feat/zpr-1 (was {}); fix the cause and rerun release \
-                 to retry. zpr-1 stays unreleased, so feed won't spawn it, until that rerun \
-                 deletes it: the push was refused, perhaps by a pre-push hook: ",
+                "couldn't delete origin/feat/zpr-1 (was {}); fix the cause and rerun the same \
+                 release command to retry. zpr-1 stays unreleased, so feed won't spawn it, \
+                 until that rerun deletes it: the push was refused, perhaps by a pre-push hook: ",
                 &head(&s.repo)[..12]
             )),
             "{shown}"
@@ -941,31 +942,70 @@ mod tests {
         crate::feed::claimable(&s.ledger, &paths, &queue, "prs", 0, "1\n").unwrap()
     }
 
+    /// A retired `zpr-1` whose `feat/zpr-1` holds a pushed commit not on the
+    /// base, whose origin delete a pre-push hook refused under `--drop-branch`.
+    /// Returns the dropped commit.
+    fn refused_drop(s: &mut Setup) -> String {
+        let wt = s.retired_on("zpr-1", "feat/zpr-1");
+        commit(&wt, "to be dropped");
+        push_head(&wt, "feat/zpr-1");
+        let dropped = head(&wt);
+        pre_push_hook(s, "no deletes on fridays", 1);
+        s.release("zpr-1", Fate::Drop).unwrap_err();
+        dropped
+    }
+
     #[test]
     fn a_refused_origin_delete_leaves_the_name_unclaimable_until_a_rerun_deletes_it() {
         let mut s = Setup::new();
-        pushed_on_the_base(&mut s);
-        pre_push_hook(&s, "no deletes on fridays", 1);
 
-        s.release("zpr-1", Fate::Drop).unwrap_err();
+        let dropped = refused_drop(&mut s);
 
-        assert!(has_branch(&origin(&s), "feat/zpr-1"));
+        assert_eq!(head_of(&origin(&s), "feat/zpr-1"), dropped);
         assert_eq!(feed_would_spawn(&s), Vec::<String>::new());
         assert_eq!(s.ledger.0["zpr-1"].released_at, None);
 
-        pre_push_hook(&s, "ok", 0);
+        let ran = pre_push_hook(&s, "ok", 0);
         let out = s.release("zpr-1", Fate::Drop).unwrap();
 
-        assert!(
-            out[out.len() - 2].starts_with("deleted origin/feat/zpr-1 (was "),
-            "{out:?}"
-        );
         assert_eq!(
-            out.last().unwrap(),
-            "released zpr-1: feed may spawn it again"
+            out[out.len() - 2..],
+            [
+                format!("deleted origin/feat/zpr-1 (was {})", &dropped[..12]),
+                "released zpr-1: feed may spawn it again".into(),
+            ]
         );
+        assert!(ran.exists());
         assert!(!has_branch(&origin(&s), "feat/zpr-1"));
         assert_eq!(feed_would_spawn(&s), ["zpr-1"]);
+    }
+
+    #[test]
+    fn a_rerun_that_cant_ask_origin_refuses_while_the_leftover_branch_was_last_seen_there() {
+        let mut s = Setup::new();
+        refused_drop(&mut s);
+        cut_off_origin(&s);
+
+        let err = s.release("zpr-1", Fate::Drop).unwrap_err();
+
+        let shown = format!("{err:#}");
+        assert!(
+            shown.starts_with("refused: can't ask origin for origin/feat/zpr-1 ("),
+            "{shown}"
+        );
+        assert!(
+            shown.ends_with(
+                "), and it was there when last fetched; rerun once origin answers, or pass \
+                 --keep-branch to start the new member from it"
+            ),
+            "{shown}"
+        );
+        assert_eq!(s.ledger.0["zpr-1"].released_at, None);
+        git_in(
+            &s.repo,
+            &["remote", "set-url", "origin", origin(&s).to_str().unwrap()],
+        );
+        assert_eq!(feed_would_spawn(&s), Vec::<String>::new());
     }
 
     #[test]
