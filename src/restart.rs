@@ -1068,6 +1068,24 @@ mod tests {
     }
 
     #[test]
+    fn a_stranger_with_a_moved_members_old_pane_id_under_another_shell_restarts_it() {
+        let w = World::new();
+        w.handed_off();
+        let moved_away = |r: &mut AgentRecord| {
+            r.env_pane_id = Some("w1:p9".into());
+            r.env_pane_shell = Some(Process {
+                pid: 20,
+                start: 910,
+            });
+        };
+
+        let (result, _) = w.restart_as(true, true, Some("w1:p9"), &moved_away);
+
+        result.unwrap();
+        assert!(!w.herdr.prompts().is_empty());
+    }
+
+    #[test]
     fn a_handoff_is_used_once_even_by_a_forced_restart() {
         let w = World::new();
         w.handed_off();

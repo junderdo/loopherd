@@ -607,7 +607,7 @@ mod tests {
 
     use super::*;
     use crate::herdr::fake::{FAKE_SOCKET, FakeHerdr};
-    use crate::ledger::MemLedger;
+    use crate::ledger::{MemLedger, Process};
     use crate::process::{CLAUDE, FakeProcs};
     use crate::spawn::{SpawnRequest, spawn};
     use crate::worktree::testing::{
@@ -1981,6 +1981,16 @@ mod tests {
     }
 
     fn close_as(herdr: &FakeHerdr, ledger: &mut MemLedger, own_pane: &str) -> Vec<String> {
+        close_under(herdr, ledger, own_pane, crate::process::PANE_SHELL)
+    }
+
+    /// Retires `a` with `--close` from `own_pane`, run under `shell`.
+    fn close_under(
+        herdr: &FakeHerdr,
+        ledger: &mut MemLedger,
+        own_pane: &str,
+        shell: Process,
+    ) -> Vec<String> {
         let mut out = vec![];
         retire_and_close(
             herdr,
@@ -1991,7 +2001,7 @@ mod tests {
             Some(&OwnPane {
                 id: own_pane,
                 socket: None,
-                lineage: &[crate::process::PANE_SHELL],
+                lineage: &[shell],
             }),
             &mut out,
         )
@@ -2029,6 +2039,25 @@ mod tests {
 
         let kept = format!("kept tab {tab_id}: it is running this command");
         assert_eq!(out, ["retired a".to_string(), kept]);
+    }
+
+    #[test]
+    fn close_closes_a_moved_members_tab_for_a_stranger_with_its_old_pane_id() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = two_workspaces();
+        let (mut ledger, _, tab_id) = in_w2(&herdr, cwd.path(), true);
+        let stranger = Process {
+            pid: 20,
+            start: 910,
+        };
+
+        let out = close_under(&herdr, &mut ledger, "w1:p7", stranger);
+
+        assert_eq!(
+            out,
+            ["retired a".to_string(), format!("closed tab {tab_id}")]
+        );
+        assert!(herdr.tabs().is_empty());
     }
 
     #[test]
