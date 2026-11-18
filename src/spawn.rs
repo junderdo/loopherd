@@ -205,6 +205,7 @@ pub fn spawn(
     let mut record = AgentRecord {
         name: req.name.clone(),
         pane_id: tab.pane_id.clone(),
+        env_pane_id: None,
         tab_id: Some(tab.tab_id.clone()),
         session_id: None,
         repo: req.repo.clone(),

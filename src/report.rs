@@ -249,9 +249,22 @@ fn ends_in_newline(file: &mut fs::File) -> std::io::Result<bool> {
     Ok(last[0] == b'\n')
 }
 
-/// The non-retired member running in `pane` of the herdr at `socket`. Pane
-/// ids repeat across herdr sessions, so an entry recorded without a socket
-/// matches only a caller that has none either.
+/// The non-retired member of the herdr at `socket` that a process with
+/// `$HERDR_PANE_ID` set to `own_pane` runs in. Pane ids repeat across herdr sessions,
+/// so an entry recorded without a socket matches only a caller that has none
+/// either.
+pub fn member_of_own_pane<'a>(
+    entries: &'a BTreeMap<String, AgentRecord>,
+    own_pane: &str,
+    socket: Option<&Path>,
+) -> Option<&'a AgentRecord> {
+    entries
+        .values()
+        .find(|e| !e.retired && e.is_own_pane(own_pane) && e.socket.as_deref() == socket)
+}
+
+/// The non-retired member of the herdr at `socket` in the pane herdr now
+/// calls `pane`, which a move to another workspace changes.
 pub fn member_in<'a>(
     entries: &'a BTreeMap<String, AgentRecord>,
     pane: &str,
@@ -274,7 +287,7 @@ fn reporter(ledger: &dyn Ledger, who: &Reporter) -> Result<String> {
         return Ok(entry.name.clone());
     }
     let pane = who.own_pane.context("no HERDR_PANE_ID; pass --as <name>")?;
-    member_in(&entries, pane, who.own_socket)
+    member_of_own_pane(&entries, pane, who.own_socket)
         .map(|e| e.name.clone())
         .ok_or_else(|| match who.own_socket {
             Some(socket) => anyhow!("pane {pane} of {} is not a member", socket.display()),
@@ -815,6 +828,7 @@ mod tests {
         AgentRecord {
             name: name.into(),
             pane_id: pane.into(),
+            env_pane_id: None,
             tab_id: None,
             session_id: None,
             repo: "/src/repo".into(),
