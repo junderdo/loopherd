@@ -39,7 +39,8 @@ Init never launches an agent.
    task per line, its words in the template's `params` order. Then fill
    every other placeholder init marked `(fill in)` and listed in its
    steps: the template's `done` check, the worker prompt's steps that read,
-   claim, escalate a question and close the task, the lead prompt's line, and `docs/agents/loopherd.md`. Keep `merged` if
+   claim, escalate a question and close the task, the lead prompt's line, and `docs/agents/loopherd.md`.
+   Fill `[queue] backlog` too, or drop it (see A task's life). Keep `merged` if
    init wrote one (the GitHub PR check); without it, the lead feeds after
    each merge.
 4. Adjust the worker prompt and the checks it lists to how the repo builds,
@@ -81,6 +82,10 @@ Init never launches an agent.
    It runs after feed releases its lock. If that feed dies first, the next
    feed notes it interrupted with no outcome, so run feed in the background
    when a herd has after_merge.
+   An optional `[queue] backlog = "<cmd>"`, run in `repo` like `source`,
+   prints one unready task per line (key, then title): every open task
+   `source` leaves out but blocked ones, keeping those waiting on the human.
+   It changes nothing feed does; `status` counts its lines (D60).
    `loopherd herds` lists herd files, their templates and `after_merge`. Hand-spawn (`loopherd spawn
    … --prompt-file`, or `loopherd add <herd> <template> <params…>`) only for
    work outside the queue; check a prompt's placeholders with `grep -o
@@ -360,8 +365,16 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   (a bare `retired` when the ledger has no time), and `--strays` lists live agents missing from the ledger. `--json` gives
   each member a `retired` field: its retirement time (`unknown` if the
   ledger has none), or null while it's open; check that field, not
-  `status`, before calling a member open. `loopherd view` is the same as a
-  live TUI.
+  `status`, before calling a member open. `loopherd view` shows the same
+  members as a live TUI, without task counts. Each herd whose queue has a
+  `backlog` gets `<n> claimable, <m> unready` beside its name, even with no
+  members: claimable counts the `source` tasks feed would take with no cap
+  on slots (a task whose name an unreleased member holds counts as
+  neither), and unready counts `backlog`'s lines. A failing command shows
+  `claimable unknown (<error>)` (or `unready unknown`) and `status` still
+  succeeds. `--json` gives each herd `claimable` and `unready`, integers or
+  null without a `backlog`, with `claimable_error` or `unready_error` beside
+  a failed one (D60, D61).
 - `loopherd reports` prints unread reports, questions first, and marks them
   read; `loopherd reports --all` prints every report and stop and marks
   none read. Both take member names or `--herd <herd>`. `--all` also takes

@@ -21,6 +21,8 @@ const LEAD_TABLE: &str = include_str!("init/lead-table.toml");
 const GITHUB_SOURCE: &str = include_str!("init/github-source.toml");
 const GITHUB_ISSUE: &str = include_str!("init/github-issue.toml");
 const LOCAL_SOURCE: &str = include_str!("init/local-source.toml");
+/// The local tracker's pipeline: `list` is `ready` for the source, `backlog` for the backlog.
+const LOCAL_ISSUES: &str = include_str!("init/local-issues.sh");
 const LOCAL_ISSUE: &str = include_str!("init/local-issue.toml");
 const OTHER_ISSUE: &str = include_str!("init/other-issue.toml");
 const PLACEHOLDER_SOURCE: &str = include_str!("init/placeholder-source.toml");
@@ -826,6 +828,15 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
     ]
     .map(|(key, text)| (key, fill(text, &values)));
     values.extend(snippets.iter().map(|(key, text)| (*key, text.as_str())));
+    let local = |list| {
+        fill(
+            LOCAL_ISSUES,
+            &[values.as_slice(), &[("LIST", list)]].concat(),
+        )
+    };
+    let (local_ready, local_backlog) = (local("ready"), local("backlog"));
+    values.push(("LOCAL_READY", &local_ready));
+    values.push(("LOCAL_BACKLOG", &local_backlog));
     // Filled before they join the herd file, whose fill leaves inserted text literal.
     let (source, template) = match tracker.kind {
         tracker::Kind::GitHub => (GITHUB_SOURCE, GITHUB_ISSUE),
@@ -907,8 +918,8 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
                 .into(),
         );
         steps.push(format!(
-            "{FILL_IN}, in {}: [queue] source, [template.issue] done, and each prompt step \
-             marked (fill in).",
+            "{FILL_IN}, in {}: [queue] source, [queue] backlog, [template.issue] done, \
+             and each prompt step marked (fill in).",
             herd_file.display()
         ));
         if herd.lead {

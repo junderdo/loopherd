@@ -225,11 +225,33 @@ pub fn claimable(
     freed: usize,
     tasks: &str,
 ) -> Result<Vec<String>> {
-    let entries = ledger.entries().context("ledger")?;
-    let mut free = queue
+    let free = queue
         .max
         .saturating_sub(members(ledger, herd)?.saturating_sub(freed));
-    let mut taken = taken(entries);
+    unclaimed(ledger, paths, queue, herd, tasks, free)
+}
+
+/// How many tasks [`claimable`] would name with no cap on slots.
+pub fn claimable_count(
+    ledger: &dyn Ledger,
+    paths: &Paths,
+    queue: &Queue,
+    herd: &str,
+    tasks: &str,
+) -> Result<usize> {
+    Ok(unclaimed(ledger, paths, queue, herd, tasks, usize::MAX)?.len())
+}
+
+/// Up to `limit` names of tasks in `tasks` with no member.
+fn unclaimed(
+    ledger: &dyn Ledger,
+    paths: &Paths,
+    queue: &Queue,
+    herd: &str,
+    tasks: &str,
+    limit: usize,
+) -> Result<Vec<String>> {
+    let mut taken = taken(ledger.entries().context("ledger")?);
     let req = FeedRequest {
         herd: herd.into(),
         dry_run: true,
@@ -244,7 +266,7 @@ pub fn claimable(
     };
     let mut names = vec![];
     for task in tasks.lines().map(str::trim) {
-        if free == 0 {
+        if names.len() == limit {
             break;
         }
         if task.is_empty() || task.starts_with('#') {
@@ -257,7 +279,6 @@ pub fn claimable(
         };
         if taken.insert(spawn_req.name.clone()) {
             names.push(spawn_req.name);
-            free -= 1;
         }
     }
     Ok(names)
@@ -769,23 +790,28 @@ fn task_request(
 /// The source's stdout and stderr; fails if it exits non-zero or outruns
 /// `timeout`.
 pub(crate) fn run_source(queue: &Queue, timeout: Duration) -> Result<(String, String)> {
+    run_in_repo(&queue.source, &queue.repo, timeout)
+}
+
+/// `command`'s stdout and stderr, run by `sh` in `repo`; fails like [`run_source`].
+pub(crate) fn run_in_repo(
+    command: &str,
+    repo: &Path,
+    timeout: Duration,
+) -> Result<(String, String)> {
     let output = run_within(
-        Command::new("sh")
-            .arg("-c")
-            .arg(&queue.source)
-            .current_dir(&queue.repo),
+        Command::new("sh").arg("-c").arg(command).current_dir(repo),
         timeout,
     )
-    .with_context(|| format!("run in {}", queue.repo.display()))?
+    .with_context(|| format!("run in {}", repo.display()))?
     .with_context(|| {
         format!(
-            "{:?} timed out after {}",
-            queue.source,
+            "{command:?} timed out after {}",
             humantime::format_duration(timeout)
         )
     })?;
     if !output.status.success() {
-        let failed = format!("{:?} failed ({})", queue.source, output.status);
+        let failed = format!("{command:?} failed ({})", output.status);
         match String::from_utf8_lossy(&output.stderr).trim() {
             "" => bail!(failed),
             stderr => bail!("{failed}: {stderr}"),

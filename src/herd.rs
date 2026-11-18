@@ -145,6 +145,8 @@ struct QueueFile {
     templates: Option<Vec<String>>,
     /// A shell command printing one task per line.
     source: String,
+    /// A shell command printing one unready task per line.
+    backlog: Option<String>,
     max: i64,
 }
 
@@ -375,6 +377,7 @@ pub struct Queue {
     /// queue having one.
     pub routed: bool,
     pub source: String,
+    pub backlog: Option<String>,
     pub max: usize,
     pub repo: PathBuf,
     /// Each template's done check, for those that have one.
@@ -427,6 +430,7 @@ fn queue_in(file: &HerdFile, paths: &Paths, herd: &str) -> Result<Option<Queue>>
         templates,
         routed: queue.templates.is_some(),
         source: queue.source.clone(),
+        backlog: queue.backlog.clone(),
         max: queue.max as usize,
         repo: expand_home(&file.repo, &paths.home),
     }))
@@ -959,6 +963,15 @@ fn describe(
         };
         format!("  loopherd feed {herd}  ({template}, max {})", q.max)
     });
+    let backlog =
+        parsed
+            .queue
+            .as_ref()
+            .and_then(|q| q.backlog.as_ref())
+            .map(|backlog| match backlog.trim().split_once('\n') {
+                Some((first, _)) => format!("  backlog: {first} …"),
+                None => format!("  backlog: {}", backlog.trim()),
+            });
     let lead = parsed.lead.as_ref().into_iter().flat_map(|lead| {
         [
             format!("  loopherd lead {herd}"),
@@ -978,6 +991,7 @@ fn describe(
         .chain(usages)
         .chain(lead)
         .chain(feed)
+        .chain(backlog)
         .chain(after_merge)
         .chain(unmerged)
         .collect()
@@ -1099,6 +1113,9 @@ fn validate_queue(queue: &QueueFile, templates: &BTreeMap<String, TemplateFile>)
     }
     if queue.source.trim().is_empty() {
         bail!("source is empty; set the shell command that prints the ready tasks");
+    }
+    if queue.backlog.as_ref().is_some_and(|b| b.trim().is_empty()) {
+        bail!("backlog is empty; set the shell command that prints the unready tasks, or drop it");
     }
     Ok(())
 }
@@ -2299,6 +2316,33 @@ args = ["--model", "opus"]
     }
 
     #[test]
+    fn herds_lists_a_queues_backlog_when_set() {
+        let (report, code) = herds_line(
+            "prompt = \"go\"\n[queue]\ntemplate = \"t\"\nsource = \"echo 1\"\n\
+             backlog = \"cat unready\"\nmax = 3",
+            &[],
+        );
+        assert_eq!(
+            report,
+            "h  repo /r  workspace (current)  paused no\n\
+             \x20 loopherd add h t <n>\n\
+             \x20 loopherd feed h  (template t, max 3)\n\
+             \x20 backlog: cat unready"
+        );
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn herds_lists_a_multi_line_backlog_by_its_first_line() {
+        let (report, _) = herds_line(
+            "prompt = \"go\"\n[queue]\ntemplate = \"t\"\nsource = \"echo 1\"\n\
+             backlog = \"\"\"\ncat unready |\n  sort\n\"\"\"\nmax = 3",
+            &[],
+        );
+        assert!(report.ends_with("\n  backlog: cat unready | …"), "{report}");
+    }
+
+    #[test]
     fn herds_lists_a_routed_queue_with_its_templates() {
         let (report, code) = herds_line(
             "prompt = \"go\"\n[template.u]\nparams = []\nprompt = \"go\"\n\
@@ -2371,6 +2415,14 @@ args = ["--model", "opus"]
             (
                 "templates = [\"t\", \"nope\"]\nsource = \"echo 1\"\nmax = 1",
                 "queue: no template nope (it has: t)",
+            ),
+            (
+                "template = \"t\"\nsource = \"echo 1\"\nbacklog = 3\nmax = 1",
+                "invalid type: integer `3`, expected a string",
+            ),
+            (
+                "template = \"t\"\nsource = \"echo 1\"\nbacklog = \" \"\nmax = 1",
+                "queue: backlog is empty",
             ),
         ] {
             let (report, code) = herds_line(&format!("prompt = \"go\"\n[queue]\n{queue}"), &[]);

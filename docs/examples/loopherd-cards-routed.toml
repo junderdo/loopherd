@@ -27,6 +27,17 @@ scripts/trello cards --list Backlog --label ready-for-agent | awk -F'\t' '
     sub(/^LH-/, "", $1); print template, $1, type, slug
   }'
 '''
+# Prints "<key> <title>" per Backlog card that isn't blocked and either
+# lacks ready-for-agent or has need-human or wayfinding:grilling. A
+# ready-for-agent card with neither an impl:* nor a wayfinding:* label is in
+# neither this nor `source`. `loopherd status` counts this list's lines as
+# unready.
+backlog = '''
+scripts/trello cards --list Backlog | awk -F'\t' '
+  $3 ~ /(^|,)blocked(,|$)/ { next }
+  $3 ~ /(^|,)ready-for-agent(,|$)/ && $3 !~ /(^|,)(need-human|wayfinding:grilling)(,|$)/ { next }
+  { print $1, $4 }'
+'''
 max = 3
 
 [template.wayfinding]

@@ -824,7 +824,7 @@ fn has_ref(repo: &Path, name: &str) -> bool {
 const TIMEOUT_VAR: &str = "LOOPHERD_GIT_TIMEOUT";
 
 /// How long a call to origin may take before loopherd gives up on it.
-const REMOTE_TIMEOUT: Duration = Duration::from_secs(120);
+pub const REMOTE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The most [`TIMEOUT_VAR`] may ask for. It keeps the deadline well inside
 /// what `Instant` can hold, so computing it can't overflow.
