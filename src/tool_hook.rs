@@ -1288,7 +1288,7 @@ fn heredoc_body(
 }
 
 /// Words that run the command after them, with their options that take a value.
-const WRAPPERS: [(&str, &[&str]); 17] = [
+const WRAPPERS: [(&str, &[&str]); 18] = [
     (
         "env",
         &[
@@ -1375,6 +1375,17 @@ const WRAPPERS: [(&str, &[&str]); 17] = [
         ],
     ),
     ("taskset", &[]),
+    (
+        "chrt",
+        &[
+            "-T",
+            "-P",
+            "-D",
+            "--sched-runtime",
+            "--sched-period",
+            "--sched-deadline",
+        ],
+    ),
     (
         "flock",
         &["-w", "--wait", "--timeout", "-E", "--conflict-exit-code"],
@@ -1552,8 +1563,8 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             }
             xargs_appends |=
                 program == "xargs" && !xargs_replaces(&words[options..i.min(words.len())]);
-            // The duration, CPU mask or lock file before the command.
-            if ["timeout", "taskset", "flock"].contains(&program) {
+            // The duration, CPU mask, priority or lock file before the command.
+            if ["timeout", "taskset", "chrt", "flock"].contains(&program) {
                 i += 1;
             }
             if program == "flock" && words.get(i).is_some_and(|w| w == "-c" || w == "--command") {
@@ -5026,6 +5037,29 @@ mod tests {
         assert_judged("flock /tmp/l git -c user.name=x rebase", Switch::Rebase);
         assert_passes("flock /tmp/l gh pr view 1");
         assert_passes("flock /tmp/l grep -c 'gh pr merge' notes");
+    }
+
+    #[test]
+    fn chrt_wraps_the_command_after_its_priority() {
+        for command in [
+            "chrt 10 gh pr merge 1",
+            "chrt -f 10 gh pr merge 1",
+            "chrt --rr 5 gh pr merge 1",
+            "chrt --fi 10 gh pr merge 1",
+            "chrt -R -b 0 gh pr merge 1",
+            "chrt -d -T 100 -P 200 -D 150 0 gh pr merge 1",
+            "chrt --sched-runtime 100 --sched-period 200 --sched-deadline 150 -d 0 gh pr merge 1",
+            "chrt --sched-r 100 --sched-p 200 --sched-d 150 -d 0 gh pr merge 1",
+            "chrt -dT 100 0 gh pr merge 1",
+        ] {
+            assert_judged(command, Switch::Merge);
+        }
+        assert_passes("chrt 0 cargo test");
+        assert_passes("chrt -o 0 cargo test");
+        assert_passes("chrt -p 10 1234");
+        assert_passes("chrt --pid 10 1234");
+        assert_passes("chrt -p 1234");
+        assert_passes("chrt -m");
     }
 
     #[test]
