@@ -1384,6 +1384,10 @@ const WRAPPERS: [(&str, &[&str]); 18] = [
             "--sched-runtime",
             "--sched-period",
             "--sched-deadline",
+            "-U",
+            "-X",
+            "--clamp-min",
+            "--clamp-max",
         ],
     ),
     (
@@ -1563,8 +1567,16 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
             }
             xargs_appends |=
                 program == "xargs" && !xargs_replaces(&words[options..i.min(words.len())]);
-            // The duration, CPU mask, priority or lock file before the command.
-            if ["timeout", "taskset", "chrt", "flock"].contains(&program) {
+            // The duration, CPU mask or lock file before the command.
+            if ["timeout", "taskset", "flock"].contains(&program) {
+                i += 1;
+            }
+            // chrt's priority is optional for policies that don't use it.
+            if program == "chrt"
+                && words
+                    .get(i)
+                    .is_some_and(|w| w.trim_start().parse::<i64>().is_ok())
+            {
                 i += 1;
             }
             if program == "flock" && words.get(i).is_some_and(|w| w == "-c" || w == "--command") {
@@ -5051,6 +5063,15 @@ mod tests {
             "chrt --sched-runtime 100 --sched-period 200 --sched-deadline 150 -d 0 gh pr merge 1",
             "chrt --sched-r 100 --sched-p 200 --sched-d 150 -d 0 gh pr merge 1",
             "chrt -dT 100 0 gh pr merge 1",
+            "chrt -o gh pr merge 1",
+            "chrt -b gh pr merge 1",
+            "chrt -i gh pr merge 1",
+            "chrt -d -P 1000000000 gh pr merge 1",
+            "chrt +0 gh pr merge 1",
+            "chrt ' 0' gh pr merge 1",
+            "chrt -o -U 512 0 gh pr merge 1",
+            "chrt --clamp-max 512 -O -G 0 gh pr merge 1",
+            "chrt --clamp-mi 512 0 gh pr merge 1",
         ] {
             assert_judged(command, Switch::Merge);
         }
