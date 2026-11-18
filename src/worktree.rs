@@ -2215,7 +2215,6 @@ mod tests {
 
     #[test]
     fn a_config_that_cant_be_read_is_not_overridden() {
-        use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(root.path());
         let global = root.path().join("gitconfig");
@@ -2228,16 +2227,14 @@ mod tests {
             .output()
             .unwrap();
         let real_git = String::from_utf8(real_git.stdout).unwrap();
-        std::fs::write(
-            bin.join("git"),
+        crate::test_fakes::executable(
+            &bin.join("git"),
             format!(
                 "#!/bin/sh\necho \"$* ${{GIT_SSH_COMMAND-unset}}\" >>{}\nexec {} \"$@\"\n",
                 log.display(),
                 real_git.trim()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
 
         let stderr = fetch_in_child(
@@ -2348,20 +2345,17 @@ mod tests {
 
     #[test]
     fn a_timeout_kills_the_transports_helpers_without_a_kill_binary() {
-        use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(root.path());
         let pidfile = root.path().join("helper.pid");
         let transport = root.path().join("transport");
-        std::fs::write(
+        crate::test_fakes::executable(
             &transport,
             format!(
                 "#!/bin/sh\nsleep 30 &\necho $! >{}\nwait\n",
                 pidfile.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&transport, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         origin_runs(&repo, transport.to_str().unwrap());
         let path = path_with_only(&root.path().join("bin"), &["git", "sh", "sleep"]);
 
@@ -2455,7 +2449,6 @@ mod tests {
     /// Installs a hook that moves `branch` one commit on when a fetch updates
     /// a remote-tracking ref, standing in for a push racing `--close`.
     fn move_branch_on_next_fetch(repo: &Path, branch: &str) {
-        use std::os::unix::fs::PermissionsExt;
         let hook = repo.join(".git/hooks/reference-transaction");
         let script = format!(
             "#!/bin/sh\n\
@@ -2463,8 +2456,7 @@ mod tests {
              moved=$(git -c user.name=t -c user.email=t@t commit-tree '{branch}^{{tree}}' -p '{branch}' -m moved)\n\
              git update-ref 'refs/heads/{branch}' \"$moved\"\n"
         );
-        std::fs::write(&hook, script).unwrap();
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_fakes::executable(&hook, script);
     }
 
     #[test]
