@@ -218,7 +218,7 @@ pub fn wait_to_close(next: &mut dyn FnMut() -> std::io::Result<Event>) -> Result
 pub fn failed_card(error: &anyhow::Error, width: usize) -> String {
     let mut text = String::new();
     for line in format!("loopherd pr: {error:#}").lines() {
-        text.push_str(&cut(line, width));
+        text.push_str(&cut(&printable(line), width));
         text.push('\n');
     }
     text.push_str("\nq or Esc to close\n");
@@ -876,6 +876,22 @@ mod tests {
         assert_eq!(
             failed_card(&error, 20),
             "loopherd pr: xxxxxx…\nsecond line\n\nq or Esc to close\n"
+        );
+    }
+
+    #[test]
+    fn a_card_that_failed_strips_escapes_from_the_error() {
+        let error = anyhow!("gh: \x1b[31mnot logged in\x1b[0m\x07\nmailbox \x1b]0;x");
+
+        let text = failed_card(&error, 80);
+
+        assert!(
+            !text.chars().any(|c| c.is_control() && c != '\n'),
+            "{text:?}"
+        );
+        assert!(
+            text.starts_with("loopherd pr: gh: not logged in\nmailbox ]0;x\n"),
+            "{text:?}"
         );
     }
 }
