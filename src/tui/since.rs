@@ -6,15 +6,15 @@ use std::time::{Duration, Instant};
 
 use crate::herd_view::{Member, View};
 use crate::herdr::AgentStatus;
-use crate::status::sections;
+use crate::status::{label, sections};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Since(BTreeMap<String, Seen>);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Seen {
-    status: &'static str,
-    /// `None` until a change is observed.
+    status: String,
+    /// `None` until a change is observed, and always for a retired member.
     since: Option<Instant>,
 }
 
@@ -31,6 +31,7 @@ impl Since {
                 .map(|m| {
                     let status = label(m);
                     let since = match self.0.get(&m.name) {
+                        _ if m.retired.is_some() => None,
                         Some(seen) if seen.status == status => seen.since,
                         Some(_) => Some(now),
                         None => None,
@@ -66,14 +67,6 @@ pub fn staleness(member: &Member, time: Duration) -> Staleness {
         (false, AgentStatus::Working) if time >= WORKING_STALE => Staleness::Stale,
         (false, AgentStatus::Blocked) if time >= BLOCKED_OVERDUE => Staleness::Overdue,
         _ => Staleness::Fresh,
-    }
-}
-
-/// A member's status as shown: `gone` or herdr's status.
-pub fn label(member: &Member) -> &'static str {
-    match member.gone {
-        true => "gone",
-        false => member.status.as_str(),
     }
 }
 
@@ -239,7 +232,21 @@ mod tests {
     }
 
     #[test]
-    fn tracks_herd_and_retired_members_too() {
+    fn a_retired_member_has_no_time_whatever_its_pane_does() {
+        let t0 = Instant::now();
+        let retired = |status| Member {
+            retired: Some("2026-11-17T08:00:00Z".into()),
+            ..member("r", status, false)
+        };
+        let since = Since::default()
+            .observe(&snapshot(vec![member("r", AgentStatus::Idle, false)]), t0)
+            .observe(&snapshot(vec![retired(AgentStatus::Idle)]), t0 + secs(1))
+            .observe(&snapshot(vec![retired(AgentStatus::Working)]), t0 + secs(2));
+        assert_eq!(since.of("r", t0 + secs(60)), None);
+    }
+
+    #[test]
+    fn tracks_herd_and_retired_section_members_too() {
         let t0 = Instant::now();
         let view = |status| View {
             herds: vec![crate::herd_view::Herd {

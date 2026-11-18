@@ -3,6 +3,7 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::herd_view::Member;
 use crate::herdr::AgentStatus;
 use crate::report::Kind;
 
@@ -178,11 +179,14 @@ impl Theme {
     }
 
     /// The glyph leading a member's row; `frame` picks the spinner's frame.
-    pub fn glyph(&self, status: AgentStatus, gone: bool, frame: usize) -> (&'static str, Style) {
-        if gone {
+    pub fn glyph(&self, member: &Member, frame: usize) -> (&'static str, Style) {
+        if member.retired.is_some() {
+            return ("·", Style::new().add_modifier(Modifier::DIM));
+        }
+        if member.gone {
             return ("✕", self.plain_fg(Color::Red));
         }
-        match status {
+        match member.status {
             AgentStatus::Working => (SPINNER[frame % SPINNER.len()], self.fg(ORANGE)),
             AgentStatus::Idle => ("○", self.fg(SOFT_VIOLET)),
             AgentStatus::Done => ("✓", self.fg(SOFT_VIOLET)),
