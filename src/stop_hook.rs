@@ -752,10 +752,10 @@ mod tests {
     ) -> (Option<Stopped>, String) {
         let dir = tempfile::tempdir().unwrap();
         let pane = Pane {
-            lineage: &[],
             id: "w1:p1",
             socket: Some(Path::new(SOCKET)),
             claude_pid: None,
+            lineage: &[],
         };
         let stopped = stop_hook(
             ledger,
@@ -889,10 +889,10 @@ mod tests {
         let mut l = NoUpdate(claimed(Some("old"), 30, 300));
         let mut warnings = vec![];
         let pane = Pane {
-            lineage: &[],
             id: "w1:p1",
             socket: Some(Path::new(SOCKET)),
             claude_pid: Some(30),
+            lineage: &[],
         };
         let who = stop_hook(
             &mut l,
@@ -967,10 +967,10 @@ mod tests {
         warnings: &mut Vec<String>,
     ) -> Option<Stopped> {
         let pane = Pane {
-            lineage: &[],
             id: pane,
             socket: Some(Path::new(SOCKET)),
             claude_pid: pid,
+            lineage: &[],
         };
         stop_hook(
             ledger,
@@ -1137,10 +1137,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut l = ledger(vec![member("lh-1", "w1:p1", None)]);
         let pane = Pane {
-            lineage: &[],
             id: "w1:p1",
             socket: None,
             claude_pid: None,
+            lineage: &[],
         };
         let stopped = stop_hook(
             &mut l,

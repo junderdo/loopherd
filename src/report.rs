@@ -887,10 +887,10 @@ mod tests {
 
     fn from_pane(pane: &str) -> Reporter<'_> {
         Reporter {
-            own_lineage: &[],
             own_pane: Some(pane),
             own_socket: None,
             as_name: None,
+            own_lineage: &[],
         }
     }
 
@@ -955,10 +955,10 @@ mod tests {
             member("lh-2", "w1:p2", None, false),
         ]);
         let who = Reporter {
-            own_lineage: &[],
             own_pane: Some("w1:p2"),
             own_socket: None,
             as_name: Some("lh-1"),
+            own_lineage: &[],
         };
 
         let name = report(
@@ -1006,10 +1006,10 @@ mod tests {
         for (case, own_pane, as_name, error) in refused {
             let dir = tempfile::tempdir().unwrap();
             let who = Reporter {
-                own_lineage: &[],
                 own_pane,
                 own_socket: None,
                 as_name,
+                own_lineage: &[],
             };
             let err = report(
                 &ledger,
@@ -1027,10 +1027,10 @@ mod tests {
 
     fn send(ledger: &MemLedger, dir: &Path, name: &str, kind: Kind, text: &str, time: &str) {
         let who = Reporter {
-            own_lineage: &[],
             own_pane: None,
             own_socket: None,
             as_name: Some(name),
+            own_lineage: &[],
         };
         report(ledger, dir, &who, kind, text, at(time)).unwrap();
     }
@@ -2021,10 +2021,10 @@ mod tests {
         live.socket = Some("/run/live.sock".into());
         let ledger = ledger(vec![member("aaa-old", "w1:p3", None, false), live]);
         let who = Reporter {
-            own_lineage: &[],
             own_pane: Some("w1:p3"),
             own_socket: Some(Path::new("/run/live.sock")),
             as_name: None,
+            own_lineage: &[],
         };
         let name = report(
             &ledger,

@@ -182,10 +182,10 @@ mod tests {
 
     fn run_continued(ledger: &mut MemLedger, input: &str) -> Option<String> {
         let pane = Pane {
-            lineage: &[],
             id: "w1:p1",
             socket: Some(Path::new(SOCKET)),
             claude_pid: None,
+            lineage: &[],
         };
         let procs = FakeProcs::default();
         session_hook(
@@ -569,10 +569,10 @@ mod tests {
     fn a_dropped_session_start_says_why() {
         let procs = two_claudes();
         let pane = Pane {
-            lineage: &[],
             id: "w1:p1",
             socket: Some(Path::new(SOCKET)),
             claude_pid: Some(50),
+            lineage: &[],
         };
         let mut l = ledger(vec![claimed(
             member("lh-1", "w1:p1", Some(SOCKET), "s"),

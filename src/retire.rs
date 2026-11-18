@@ -179,7 +179,7 @@ pub fn retire_and_close(
     name: &str,
     now: SystemTime,
     mailboxes: &Path,
-    own_pane: Option<&str>,
+    own_pane: Option<&OwnPane>,
     out: &mut Vec<String>,
 ) -> Result<()> {
     let mut others = ledger.entries()?;
@@ -388,7 +388,7 @@ fn agent_tab(
     herdr: &dyn Herdr,
     record: &AgentRecord,
     others: &BTreeMap<String, AgentRecord>,
-    own_pane: Option<&str>,
+    own_pane: Option<&OwnPane>,
 ) -> Result<TabFate> {
     let agents = herdr.agents()?;
     let live = by_name(record, &agents);
@@ -433,10 +433,10 @@ fn agent_tab(
     let socket = herdr.socket();
     let own_panes: Vec<&str> = std::iter::once(record)
         .chain(others.values())
-        .filter(|e| own_pane.is_some() && e.env_pane_id.as_deref() == own_pane)
+        .filter(|e| own_pane.is_some_and(|p| e.is_own_pane(p.id, p.lineage)))
         .filter(|e| e.socket == socket)
         .map(|e| e.pane_id.as_str())
-        .chain(own_pane)
+        .chain(own_pane.map(|p| p.id))
         .collect();
     if let Some(pane) = &pane
         && panes
@@ -694,9 +694,9 @@ mod tests {
 
     fn another_pane() -> OwnPane<'static> {
         OwnPane {
-            lineage: &[],
             id: "w9:p9",
             socket: Some(Path::new(FAKE_SOCKET)),
+            lineage: &[],
         }
     }
 
@@ -727,9 +727,9 @@ mod tests {
 
     fn the_lead_pane() -> OwnPane<'static> {
         OwnPane {
-            lineage: &[],
             id: "w1:p1",
             socket: Some(Path::new(FAKE_SOCKET)),
+            lineage: &[],
         }
     }
 
@@ -1949,7 +1949,11 @@ mod tests {
             "a",
             halloween_noon(),
             Path::new("/nonexistent/reports"),
-            Some(&pane),
+            Some(&OwnPane {
+                id: &pane,
+                socket: None,
+                lineage: &[],
+            }),
             &mut out,
         )
         .unwrap();
@@ -1969,6 +1973,7 @@ mod tests {
         let mut ledger = plain(cwd, &pane);
         let a = ledger.0.get_mut("a").unwrap();
         a.env_pane_id = moved.then(|| "w1:p7".into());
+        a.env_pane_shell = moved.then_some(crate::process::PANE_SHELL);
         a.workspace = "w2".into();
         a.workspace_label = None;
         a.socket = Some(FAKE_SOCKET.into());
@@ -1983,7 +1988,11 @@ mod tests {
             "a",
             halloween_noon(),
             Path::new("/nonexistent/reports"),
-            Some(own_pane),
+            Some(&OwnPane {
+                id: own_pane,
+                socket: None,
+                lineage: &[crate::process::PANE_SHELL],
+            }),
             &mut out,
         )
         .unwrap();
@@ -2013,6 +2022,7 @@ mod tests {
         lead.name = "lead-k".into();
         lead.pane_id = lead_pane;
         lead.env_pane_id = Some("w1:p7".into());
+        lead.env_pane_shell = Some(crate::process::PANE_SHELL);
         ledger.0.insert("lead-k".into(), lead);
 
         let out = close_as(&herdr, &mut ledger, "w1:p7");
@@ -2045,6 +2055,7 @@ mod tests {
         elsewhere.name = "m".into();
         elsewhere.pane_id = pane;
         elsewhere.env_pane_id = Some("w1:p7".into());
+        elsewhere.env_pane_shell = Some(crate::process::PANE_SHELL);
         elsewhere.socket = Some("/run/other.sock".into());
         ledger.0.insert("m".into(), elsewhere);
 

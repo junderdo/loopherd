@@ -894,7 +894,6 @@ fn run_retire(name: &str, close: bool, force: bool) -> Result<i32> {
         }
         return Ok(0);
     }
-    let own_pane = std::env::var("HERDR_PANE_ID").ok();
     let mailboxes = ledger.reports_dir()?;
     let mut lines = vec![];
     let result = retire_and_close(
@@ -903,7 +902,7 @@ fn run_retire(name: &str, close: bool, force: bool) -> Result<i32> {
         name,
         SystemTime::now(),
         &mailboxes,
-        own_pane.as_deref(),
+        pane.as_ref(),
         &mut lines,
     );
     for line in lines {
@@ -1161,6 +1160,7 @@ fn run_restart(name: &str, force: bool) -> Result<i32> {
         force,
         own_pane: own_pane.as_deref(),
         own_lineage: &own_lineage(),
+        pane_shell: &pane_shell,
         state: &state,
         paths: &paths,
         settle_timeout: Duration::from_secs(30),
@@ -1469,13 +1469,7 @@ fn run_herdr_event_hook() -> Result<i32> {
             &json,
             socket_from_env().as_deref(),
             SystemTime::now(),
-            &|pane| {
-                let pid = CliHerdr.shell_pid(pane)?;
-                Ok(pid.and_then(|pid| {
-                    let start = process::ProcFs.start(pid)?;
-                    Some(Process { pid, start })
-                }))
-            },
+            &pane_shell,
         )
     };
     if let Err(e) = record() {
@@ -1671,6 +1665,15 @@ fn run_install_hook(
         }
     }
     Ok(0)
+}
+
+/// The shell herdr started in `pane`, which a moved member's old pane id is kept for.
+fn pane_shell(pane: &str) -> Result<Option<Process>> {
+    let pid = CliHerdr.shell_pid(pane)?;
+    Ok(pid.and_then(|pid| {
+        let start = process::ProcFs.start(pid)?;
+        Some(Process { pid, start })
+    }))
 }
 
 /// loopherd and its ancestors, which carry a moved member's old pane id.
@@ -1881,6 +1884,7 @@ fn inherited_workspace(ledger: &dyn Ledger) -> Result<Option<String>> {
     Ok(spawn::inherited_workspace(
         &ledger.entries().context("ledger")?,
         own_pane().as_deref(),
+        &own_lineage(),
         socket_from_env().as_deref(),
         env,
     ))

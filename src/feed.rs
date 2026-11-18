@@ -393,10 +393,21 @@ fn reap(
             }
             Ok(true) => {
                 let mut out = vec![];
-                let own_pane = req.own_pane.as_deref();
+                let own_pane = req.own_pane.as_deref().map(|id| Pane {
+                    id,
+                    socket: req.own_socket.as_deref(),
+                    lineage: &req.own_lineage,
+                });
                 let now = SystemTime::now();
-                match retire_and_close(herdr, ledger, name, now, &req.mailboxes, own_pane, &mut out)
-                {
+                match retire_and_close(
+                    herdr,
+                    ledger,
+                    name,
+                    now,
+                    &req.mailboxes,
+                    own_pane.as_ref(),
+                    &mut out,
+                ) {
                     Ok(()) => {
                         lines.push(out.join("; "));
                         reaped.retired += 1;
@@ -936,7 +947,6 @@ mod tests {
 
         fn request(&self, dry_run: bool, pane: Option<&str>) -> FeedRequest<'static> {
             FeedRequest {
-                own_lineage: vec![],
                 herd: "prs".into(),
                 dry_run,
                 ready_timeout: Duration::from_secs(60),
@@ -947,6 +957,7 @@ mod tests {
                 after_merge_timeout: Duration::from_secs(2),
                 owner: OWNER,
                 procs: &*LIVE,
+                own_lineage: vec![],
             }
         }
 
@@ -1805,7 +1816,6 @@ mod tests {
         let mut ledger = fed_one(&setup, &herdr);
         let tab = herdr.tabs()[0].id.clone();
         let req = FeedRequest {
-            own_lineage: vec![],
             herd: "prs".into(),
             dry_run: false,
             ready_timeout: Duration::from_secs(60),
@@ -1816,6 +1826,7 @@ mod tests {
             after_merge_timeout: Duration::from_secs(5),
             owner: OWNER,
             procs: &*LIVE,
+            own_lineage: vec![],
         };
 
         let fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();

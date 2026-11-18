@@ -1496,10 +1496,10 @@ mod tests {
 
     fn send(ledger: &dyn Ledger, dir: &Path, name: &str, kind: Kind, text: &str) {
         let who = Reporter {
-            own_lineage: &[],
             own_pane: None,
             own_socket: None,
             as_name: Some(name),
+            own_lineage: &[],
         };
         let at = humantime::parse_rfc3339("2026-11-01T09:00:00Z").unwrap();
         report(ledger, dir, &who, kind, text, at).unwrap();
@@ -1534,7 +1534,6 @@ mod tests {
     }
 
     const EVERY: Request = Request {
-        own_lineage: &[],
         procs: &crate::process::ProcFs,
         herds: &[],
         timeout: None,
@@ -1546,6 +1545,7 @@ mod tests {
         shepherd_handoff: None,
         notify_own: None,
         pane_label: false,
+        own_lineage: &[],
     };
 
     fn run(
@@ -1876,7 +1876,6 @@ mod tests {
     }
 
     const ONCE: Request = Request {
-        own_lineage: &[],
         procs: &crate::process::ProcFs,
         herds: &[],
         timeout: Some(Duration::ZERO),
@@ -1888,6 +1887,7 @@ mod tests {
         shepherd_handoff: None,
         notify_own: None,
         pane_label: false,
+        own_lineage: &[],
     };
 
     /// One poll of a fresh watch.

@@ -3069,9 +3069,9 @@ mod tests {
         let panics = |_: &str| -> Vec<Switch> { panic!("matcher bug") };
         let all_off = |_: &str| Ok(Switches::default());
         let pane = Pane {
-            lineage: &[],
             id: PANE,
             socket: Some(Path::new(SOCKET)),
+            lineage: &[],
         };
         let lead_ledger = ledger(vec![lead()]);
         let denied = decide(
@@ -3198,9 +3198,9 @@ mod tests {
         switches: &dyn Fn(&str) -> Result<Switches>,
     ) -> Option<String> {
         let pane = Pane {
-            lineage: &[],
             id: PANE,
             socket: socket.map(Path::new),
+            lineage: &[],
         };
         tool_hook(ledger, &pane, input.as_bytes(), switches).unwrap()
     }
