@@ -82,7 +82,8 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D65](decisions/D65.md) | The plugin's `view` action opens `loopherd view` in an 80% popup, a placement herdr added in 0.7.4; its live test runs a herdr server of its own in a throwaway home. |
 | [D66](decisions/D66.md) | The herdr plugin's event hooks record a member's `blocked` and `gone` in its mailbox, as a watch's poll does; a watch prints both only from the mailbox, so each prints once. |
 | [D67](decisions/D67.md) | A Ctrl-clicked GitHub PR link runs `loopherd pr` through the plugin's link handler: the member on the PR's head branch, else the first worker whose report names it, shows in a popup pane; any other click opens the clicked link in the browser. |
-| [D68](decisions/D68.md) | The ledger records each member's herdr tab, and the plugin hooks `tab.closed` and `workspace.closed`, so a member whose tab or workspace closed between watches shows up `gone`. |
+| [D68](decisions/D68.md) | A manual `loopherd revive` skips members recorded on another herdr server's socket, says so per member, and never rewrites a recorded socket; members with none are revived as before. |
+| [D69](decisions/D69.md) | The ledger records each member's herdr tab, and the plugin hooks `tab.closed` and `workspace.closed`, so a member whose tab or workspace closed between watches shows up `gone`. |
 
 ## Emerging model
 

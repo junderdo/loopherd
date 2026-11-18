@@ -374,6 +374,17 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
 
 ### Commands
 
+- `loopherd doctor` checks the install and herdr, changing nothing: each
+  loopherd hook in Claude's settings (a missing Stop, StopFailure,
+  SessionStart or PreToolUse hook fails; a missing UserPromptSubmit hook
+  fails while `[notify] pane_label` is on, else warns), hooks calling a
+  binary other than the `loopherd` on PATH (fails), running a binary other
+  than PATH's (warns), herdr unreachable on its socket, silent for 5s, or
+  older than 0.9.5 (fails). It prints only problems, each with its fix,
+  then `doctor: <n> ok, <n> warnings, <n> failures`; `--verbose` lists
+  every check, `--json` gives them as data, `--settings <file>` checks
+  another settings file. Exits 0 clean or warnings only, 1 on any failure,
+  2 when it couldn't run (D63).
 - `loopherd status` lists members by herd with herdr's live status;
   `--all` adds retired entries, each row's status reading `retired <time>`
   (a bare `retired` when the ledger has no time), and `--strays` lists live agents missing from the ledger. `--json` gives
@@ -484,7 +495,13 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   lead whose pane shows a subagent's view and exits 1 (`--dry-run` says
   so too): switch that pane back to the main conversation, then run
   `loopherd revive --name <lead>`. Two revives never overlap: one waits
-  for the other, then finds its members alive.
+  for the other, then finds its members alive. It touches only members
+  recorded on the herdr server it reaches, printing `skipped <name>:
+  recorded on <socket>` for the rest and still exiting 0, so a revive in
+  the dev session never starts the live session's members, and the other
+  way round; run it in the member's own session. Members with no recorded
+  socket are revived and take that server's. Neither holds when herdr
+  can't name its socket: then nothing is skipped or filled in (D68).
 - **herdr plugin.** `herdr plugin install <owner>/loopherd/herdr-plugin`
   (loopherd's README names the repo) adds plugin `loopherd`,
   whose `status` action runs `loopherd status`; its output and errors go
@@ -503,15 +520,14 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   On, it revives only members recorded on the socket herdr gives the
   hook (`HERDR_SOCKET_PATH`, never one recorded without a socket), so a
   dev server's startup never touches the live session's members, and
-  the other way round. A manual `revive` still walks every entry. herdr
-  shows you nothing of the hook's run, so it copies each lead's line,
-  unless that lead's watch is running, into the lead's mailbox as a
-  `note` starting `herdr's startup revive:`; your next watch surfaces
-  them. A second revive waits for a running one, saying so on stderr,
-  and gives up after 10 minutes and says so; run it again then. A live
-  handoff runs it too, where nothing was lost: a lead between watches
-  then gets the re-arm prompt anyway, and its note says so. Tell a lead
-  that handed off or drained to ignore it.
+  the other way round. herdr shows you nothing of the hook's run, so it
+  copies each lead's line, unless that lead's watch is running, into the
+  lead's mailbox as a `note` starting `herdr's startup revive:`; your
+  next watch surfaces them. A second revive waits for a running one,
+  saying so on stderr, and gives up after 10 minutes and says so; run it
+  again then. A live handoff runs it too, where nothing was lost: a lead
+  between watches then gets the re-arm prompt anyway, and its note says
+  so. Tell a lead that handed off or drained to ignore it.
   Plugins are global to the user, so never link or install one from a test
   or a dev session.
 
