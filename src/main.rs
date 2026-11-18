@@ -493,6 +493,10 @@ struct InitArgs {
     /// The GitHub repo, for an origin init can't read as one (an ssh host alias).
     #[arg(long, value_name = "OWNER/NAME")]
     repo: Option<String>,
+    /// With a local tracker, write the herd without GitHub even when origin
+    /// is GitHub: no gh calls and no merged check.
+    #[arg(long, conflicts_with_all = ["repo", "gh_account"])]
+    no_github: bool,
     /// Where the repo tracks issues, when it has no docs/agents/issue-tracker.md;
     /// asked on a terminal, else github.
     #[arg(long, value_enum)]
@@ -1506,6 +1510,7 @@ fn init_or_diff(args: InitArgs) -> Result<i32> {
         checks: &args.checks,
         gh_account: args.gh_account.as_deref(),
         github: args.repo.as_deref(),
+        no_github: args.no_github,
         tracker: match (args.tracker, args.tracker_desc) {
             (Some(TrackerArg::Other), desc) => Some(init::Tracker::Other(desc)),
             (_, Some(_)) => bail!("--tracker-desc goes with --tracker other"),
