@@ -80,7 +80,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D63](decisions/D63.md) | `loopherd doctor` only reads and names a fix per finding: install (hooks, PATH binary), herdr (reachable, `MIN_HERDR`), config and herd files, and state, with `--trackers` running sources; only problems print, exit 0/1/2, and the herdr plugin stays optional and unchecked. |
 | [D64](decisions/D64.md) | The herdr plugin's startup hook runs `loopherd revive --startup`, off unless `[herdr_plugin] revive_on_startup = true`, reviving only members on the starting server's socket under a lock every revive holds, and noting what it did to each lead whose watch isn't running. |
 | [D65](decisions/D65.md) | The plugin's `view` action opens `loopherd view` in an 80% popup, a placement herdr added in 0.7.4; its live test runs a herdr server of its own in a throwaway home. |
-| [D67](decisions/D67.md) | A Ctrl-clicked GitHub PR link runs `loopherd pr` through the plugin's link handler: the open member whose report names the PR, else whose branch is its head, shows in a popup pane; any other link opens in the browser. |
+| [D67](decisions/D67.md) | A Ctrl-clicked GitHub PR link runs `loopherd pr` through the plugin's link handler: the member on the PR's head branch, else the first worker whose report names it, shows in a popup pane; any other click opens the clicked link in the browser. |
 
 ## Emerging model
 

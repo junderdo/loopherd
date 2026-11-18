@@ -993,7 +993,13 @@ fn run_pr(url: Option<String>, popup: bool) -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let reports = ledger.reports_dir()?;
     if popup {
-        let width = ratatui::crossterm::terminal::size().map_or(80, |(w, _)| usize::from(w));
+        use std::io::IsTerminal;
+        let width = match std::io::stdout().is_terminal() {
+            true => ratatui::crossterm::terminal::size().map_or(0, |(w, _)| usize::from(w)),
+            false => 0,
+        };
+        // A zero width is a terminal that can't say; cut nothing.
+        let width = if width == 0 { usize::MAX } else { width };
         let var = |name: &str| std::env::var(name).map_err(|_| anyhow!("{name} is not set"));
         let card = (|| {
             pr_link::card(
@@ -1005,16 +1011,18 @@ fn run_pr(url: Option<String>, popup: bool) -> Result<i32> {
                 width,
             )
         })();
-        // herdr closes the popup when this exits, so an error waits to be read too.
         match &card {
             Ok(card) => print!("{card}"),
-            Err(e) => print!("loopherd pr: {e:#}\n\nq or Esc to close\n"),
+            Err(e) => print!("{}", pr_link::failed_card(e, width)),
         }
         std::io::stdout().flush()?;
-        ratatui::crossterm::terminal::enable_raw_mode()?;
-        let closed = pr_link::wait_to_close(&mut ratatui::crossterm::event::read);
-        ratatui::crossterm::terminal::disable_raw_mode()?;
-        closed?;
+        // Without a terminal on stdin crossterm would take /dev/tty, the caller's.
+        if std::io::stdin().is_terminal() {
+            ratatui::crossterm::terminal::enable_raw_mode()?;
+            let closed = pr_link::wait_to_close(&mut ratatui::crossterm::event::read);
+            ratatui::crossterm::terminal::disable_raw_mode()?;
+            closed?;
+        }
         return Ok(i32::from(card.is_err()));
     }
     let url = match url {

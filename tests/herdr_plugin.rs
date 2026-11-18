@@ -457,7 +457,9 @@ fn a_pr_no_member_owns_opens_in_the_browser() {
     stub(&bin, "open", "");
     stub(&bin, "herdr", "exit 1");
 
-    let out = clicked(tmp.path(), &bin, PR);
+    let link = format!("{PR}/files#diff-abc");
+
+    let out = clicked(tmp.path(), &bin, &link);
 
     assert!(out.status.success(), "{out:?}");
     let opener = if cfg!(target_os = "macos") {
@@ -465,9 +467,14 @@ fn a_pr_no_member_owns_opens_in_the_browser() {
     } else {
         "xdg-open"
     };
+    // loopherd doesn't wait for the opener.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while stub_args(&bin, opener).is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     assert_eq!(
         stub_args(&bin, opener).as_deref(),
-        Some(&*format!("{PR}\n"))
+        Some(&*format!("{link}\n"))
     );
     assert_eq!(stub_args(&bin, "herdr"), None);
 }

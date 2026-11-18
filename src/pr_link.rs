@@ -8,6 +8,7 @@ use std::time::SystemTime;
 
 use anyhow::{Result, anyhow};
 use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::herd_view::member as member_view;
 use crate::herdr::Herdr;
@@ -34,6 +35,7 @@ pub trait PrHeads {
     fn head_of(&self, pr: &str) -> Result<Option<String>>;
 }
 
+/// Shows `url`'s owner in the popup, or opens `url` as clicked.
 pub fn click(
     url: &str,
     entries: &BTreeMap<String, AgentRecord>,
@@ -42,30 +44,50 @@ pub fn click(
     heads: &dyn PrHeads,
     browser: &mut dyn FnMut(&str) -> Result<()>,
 ) -> Result<Shown> {
-    let Some(pr) = pr_url(url) else {
-        browser(url)?;
-        return Ok(Shown::Browser);
-    };
-    let owner = match named_in_reports(pr, entries, reports_dir) {
-        Ok(Some(name)) => Some(name),
-        Ok(None) => on_head_branch(pr, entries, heads),
-        Err(e) => {
-            eprintln!("loopherd pr: can't read the reports, opening {pr}: {e:#}");
-            None
-        }
-    };
-    if let Some(member) = owner {
+    if let Some(pr) = pr_url(url)
+        && let Some(member) = owner(pr, entries, reports_dir, heads)
+    {
         let env = [
             ("LOOPHERD_PR_MEMBER", member.as_str()),
             ("LOOPHERD_PR_URL", pr),
         ];
         match herdr.open_plugin_pane(POPUP, &env) {
             Ok(()) => return Ok(Shown::Popup { member }),
-            Err(e) => eprintln!("loopherd pr: no popup for {member}, opening {pr} instead: {e:#}"),
+            Err(e) => eprintln!("loopherd pr: no popup for {member}, opening {url} instead: {e:#}"),
         }
     }
-    browser(pr)?;
+    browser(url)?;
     Ok(Shown::Browser)
+}
+
+/// The open member on `pr`'s head branch when GitHub names one of ours,
+/// else the worker that reported `pr` first.
+fn owner(
+    pr: &str,
+    entries: &BTreeMap<String, AgentRecord>,
+    reports_dir: &Path,
+    heads: &dyn PrHeads,
+) -> Option<String> {
+    let head = heads.head_of(pr).unwrap_or_else(|e| {
+        eprintln!("loopherd pr: can't ask GitHub for {pr}'s branch: {e:#}");
+        None
+    });
+    if let Some(head) = head {
+        let on_head = entries.values().find(|r| on_branch(r, &head));
+        if let Some(record) = on_head {
+            return (!record.retired).then(|| record.name.clone());
+        }
+    }
+    named_in_reports(pr, entries, reports_dir)
+}
+
+/// `record` is on `branch`: its recorded branch or, for a detached spawn,
+/// its worktree's branch now.
+fn on_branch(record: &AgentRecord, branch: &str) -> bool {
+    match record.branch.as_deref() {
+        Some(recorded) if !recorded.is_empty() => recorded == branch,
+        _ => !record.retired && status::branch(record).is_some_and(|now| now == branch),
+    }
 }
 
 /// `https://github.com/<owner>/<repo>/pull/<n>` at the start of `url`.
@@ -85,15 +107,21 @@ fn pr_url(url: &str) -> Option<&str> {
 }
 
 /// The open worker whose current run reported `pr` first: the one that opened
-/// it, not a lead or reviewer that named it after.
+/// it, not a lead or reviewer that named it after. Skips an unreadable mailbox.
 fn named_in_reports(
     pr: &str,
     entries: &BTreeMap<String, AgentRecord>,
     reports_dir: &Path,
-) -> Result<Option<String>> {
+) -> Option<String> {
     let mut first: Option<(SystemTime, &str)> = None;
     for record in entries.values().filter(|r| !r.retired && !r.is_lead()) {
-        let (history, _) = report::history(reports_dir, &record.name)?;
+        let history = match report::history(reports_dir, &record.name) {
+            Ok((history, _)) => history,
+            Err(e) => {
+                eprintln!("loopherd pr: skipping {}'s reports: {e:#}", record.name);
+                continue;
+            }
+        };
         let naming = current_run(&history, record)
             .filter(|e| e.report().is_some_and(|(_, text)| names(text, pr)))
             .filter_map(|e| humantime::parse_rfc3339_weak(&e.at).ok())
@@ -104,7 +132,7 @@ fn named_in_reports(
             first = Some((at, &record.name));
         }
     }
-    Ok(first.map(|(_, name)| name.to_string()))
+    first.map(|(_, name)| name.to_string())
 }
 
 /// The entries since `record` was spawned; a name fed again keeps its mailbox.
@@ -119,30 +147,6 @@ fn current_run<'a>(
             _ => true,
         },
     )
-}
-
-/// The open member on `pr`'s head branch, recorded at spawn or, for a
-/// detached spawn, its worktree's now; `None` when GitHub can't say.
-fn on_head_branch(
-    pr: &str,
-    entries: &BTreeMap<String, AgentRecord>,
-    heads: &dyn PrHeads,
-) -> Option<String> {
-    let head = match heads.head_of(pr) {
-        Ok(head) => head?,
-        Err(e) => {
-            eprintln!("loopherd pr: can't ask GitHub for {pr}'s branch: {e:#}");
-            return None;
-        }
-    };
-    entries
-        .values()
-        .filter(|r| !r.retired)
-        .find(|r| match r.branch.as_deref() {
-            Some(branch) if !branch.is_empty() => branch == head,
-            _ => status::branch(r).is_some_and(|branch| branch == head),
-        })
-        .map(|r| r.name.clone())
 }
 
 /// The popup's text for `member`, the owner of `pr`, each report cut to
@@ -209,13 +213,35 @@ pub fn wait_to_close(next: &mut dyn FnMut() -> std::io::Result<Event>) -> Result
     }
 }
 
-/// `line` in at most `width` characters, ending in `…` when cut.
+/// The popup's text when its card can't be built: herdr closes a popup when
+/// its command exits, so the error waits to be read like a card.
+pub fn failed_card(error: &anyhow::Error, width: usize) -> String {
+    let mut text = String::new();
+    for line in format!("loopherd pr: {error:#}").lines() {
+        text.push_str(&cut(line, width));
+        text.push('\n');
+    }
+    text.push_str("\nq or Esc to close\n");
+    text
+}
+
+/// `line` in at most `width` terminal columns, ending in `…` when cut.
 fn cut(line: &str, width: usize) -> String {
-    if line.chars().count() <= width {
+    if line.width() <= width {
         return line.to_string();
     }
-    let kept: String = line.chars().take(width.saturating_sub(1)).collect();
-    format!("{kept}…")
+    let mut kept = String::new();
+    let mut used = 0;
+    for c in line.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w + 1 > width {
+            break;
+        }
+        kept.push(c);
+        used += w;
+    }
+    kept.push('…');
+    kept
 }
 
 /// `text` holds `url`, ignoring case as GitHub does, not running on into a
@@ -429,9 +455,9 @@ mod tests {
     }
 
     #[test]
-    fn a_report_beats_another_members_head_branch() {
+    fn the_member_on_the_head_branch_beats_a_worker_that_reported_the_pr() {
         let dir = tempfile::tempdir().unwrap();
-        done(dir.path(), "lh-1", 5, PR);
+        done(dir.path(), "lh-1", 5, &format!("reviewed {PR}"));
 
         let c = click_with(
             PR,
@@ -444,19 +470,51 @@ mod tests {
         assert_eq!(
             c.shown,
             Shown::Popup {
-                member: "lh-1".into()
+                member: "lh-2".into()
             }
         );
     }
 
     #[test]
-    fn an_unreadable_mailbox_leaves_the_click_to_the_browser() {
+    fn a_retired_owner_on_the_head_branch_leaves_the_pr_to_the_browser() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("lh-1.jsonl")).unwrap();
+        done(dir.path(), "lh-1", 5, &format!("reviewed {PR}"));
 
-        let c = click_on(PR, vec![record("lh-1")], dir.path());
+        let c = click_with(
+            PR,
+            vec![record("lh-1"), retired("lh-2")],
+            dir.path(),
+            Heads(Ok(Some("feat/lh-2"))),
+            FakeHerdr::new(&[]),
+        );
 
         assert_browser(&c, PR);
+    }
+
+    #[test]
+    fn a_link_into_a_pr_no_member_owns_opens_as_clicked() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = format!("{PR}/files#diff-abc");
+
+        let c = click_on(&link, vec![record("lh-1")], dir.path());
+
+        assert_browser(&c, &link);
+    }
+
+    #[test]
+    fn an_unreadable_mailbox_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("lh-1.jsonl")).unwrap();
+        done(dir.path(), "lh-2", 5, PR);
+
+        let c = click_on(PR, vec![record("lh-1"), record("lh-2")], dir.path());
+
+        assert_eq!(
+            c.shown,
+            Shown::Popup {
+                member: "lh-2".into()
+            }
+        );
     }
 
     #[test]
@@ -584,9 +642,17 @@ mod tests {
         let herdr = FakeHerdr::new(&[]);
         herdr.refuse_popups();
 
-        let c = click_with(PR, vec![record("lh-1")], dir.path(), Heads(Ok(None)), herdr);
+        let link = format!("{PR}#issuecomment-1");
 
-        assert_browser(&c, PR);
+        let c = click_with(
+            &link,
+            vec![record("lh-1")],
+            dir.path(),
+            Heads(Ok(None)),
+            herdr,
+        );
+
+        assert_browser(&c, &link);
     }
 
     fn note(dir: &Path, name: &str, minutes: u64, text: &str) {
@@ -738,6 +804,34 @@ mod tests {
         assert!(
             text.contains("\n2026-11-01 00:05  done  https://github.…\n"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn wide_characters_are_cut_by_the_columns_they_take() {
+        let dir = tempfile::tempdir().unwrap();
+        done(dir.path(), "lh-1", 5, &"界".repeat(20));
+
+        let text = card(
+            "lh-1",
+            PR,
+            &entries([record("lh-1")]),
+            dir.path(),
+            &FakeHerdr::new(&[]),
+            30,
+        )
+        .unwrap();
+
+        assert!(text.contains("\n2026-11-01 00:05  done  界界…\n"), "{text}");
+    }
+
+    #[test]
+    fn a_card_that_failed_shows_the_error_cut_to_the_width() {
+        let error = anyhow!("{} is not in the ledger\nsecond line", "x".repeat(30));
+
+        assert_eq!(
+            failed_card(&error, 20),
+            "loopherd pr: xxxxxx…\nsecond line\n\nq or Esc to close\n"
         );
     }
 }
