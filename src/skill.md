@@ -641,7 +641,7 @@ What differs from the shepherd:
   lead-defaults --set`, `loopherd config set` and `unset`, `loopherd
   setup`, and `scripts/install --lead-defaults` or `--context`, whatever
   your switches, so you can't turn your own switches on or raise your own
-  handoff limit; `loopherd herd get`, `loopherd config get` and `loopherd
+  handoff or review-round limit; `loopherd herd get`, `loopherd config get` and `loopherd
   lead-defaults` are fine. Ask for a change instead.
 - **Retiring a lead is the shepherd's or the human's.** `loopherd retire`
   refuses to retire you from your own pane, and the hook also denies

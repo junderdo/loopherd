@@ -32,7 +32,8 @@ pub enum Switch {
     /// `loopherd pause` or `resume`. Not a switch: always the human's.
     Pause,
     /// `loopherd herd set`, `unset` or `remove`, which could turn a lead's own
-    /// switches on or delete its herd. Not a switch: always the human's.
+    /// switches on, raise its review-round limit or delete its herd. Not a
+    /// switch: always the human's.
     HerdEdit,
     /// `loopherd retire` of a lead, or of a name the hook can't read, since
     /// a lead that retires itself would drop its own gates. Not a switch:
@@ -42,7 +43,8 @@ pub enum Switch {
     /// which could turn a lead's own switches on. Not a switch: always the human's.
     LeadDefaults,
     /// `loopherd config set` or `unset`, `loopherd setup`, or `scripts/install
-    /// --context`, which could raise a lead's own handoff limit or switches.
+    /// --context`, which could raise a lead's own handoff or review-round limit
+    /// or switches.
     /// Not a switch: always the human's.
     Config,
     /// `cargo` run through a `CARGO_ALIAS_*` whose value the hook can't read.
@@ -170,7 +172,7 @@ fn decide(
     };
     if needed == Switch::HerdEdit {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not run `loopherd herd set`, `herd unset` or `herd remove`, which could turn its own switches on or delete its herd: {}; ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not run `loopherd herd set`, `herd unset` or `herd remove`, which could turn its own switches on, raise its review-round limit or delete its herd: {}; ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
