@@ -336,10 +336,7 @@ pub fn watch(
             // A lead relays its workers' questions as its own reports, which label its pane.
             if let (true, Reader::Shepherd, Some(pane), Some(first)) =
                 (req.pane_label, &reader, req.own_pane, waiting.first())
-                && !ledger
-                    .entries()?
-                    .values()
-                    .any(|e| !e.retired && e.pane_id == pane)
+                && member_in(&ledger.entries()?, pane, req.own_socket).is_none()
                 && let Err(e) = crate::pane_label::set(herdr, dir, pane, first)
             {
                 warn(&format!("warning: label pane {pane}: {e:#}"));
@@ -3827,6 +3824,7 @@ mod tests {
                     "which DB?",
                 );
                 let asked = "which DB?";
+                let before = herdr.agents().unwrap();
                 crate::pane_label::lead_asked(
                     &herdr,
                     &ledger,
@@ -3836,6 +3834,20 @@ mod tests {
                     asked,
                 )
                 .unwrap();
+                let after = herdr.agents().unwrap();
+                let lead = after.iter().find(|a| a.pane_id == "w9:p0").unwrap();
+                assert_eq!(
+                    lead.display_agent.as_deref(),
+                    Some("lead-cards asks: which DB?")
+                );
+                let unlabelled: Vec<_> = after
+                    .into_iter()
+                    .map(|a| crate::herdr::Agent {
+                        display_agent: None,
+                        ..a
+                    })
+                    .collect();
+                assert_eq!(unlabelled, before);
                 herdr.set_status("lead-cards", AgentStatus::Idle);
             }
         });
@@ -3886,5 +3898,31 @@ mod tests {
         run(&herdr, &ledger, dir.path(), &req, &mut steps(|_| {})).unwrap();
 
         assert_eq!(herdr.label_calls(), 0);
+    }
+
+    #[test]
+    fn the_shepherds_watch_labels_a_pane_whose_id_a_member_holds_on_another_herdr() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = quiet_led_world();
+        send(
+            &ledger,
+            dir.path(),
+            "lead-cards",
+            Kind::Question,
+            "which DB?",
+        );
+        let req = Request {
+            own_pane: Some("w9:p1"),
+            own_socket: Some(Path::new("/run/other.sock")),
+            pane_label: true,
+            ..ONCE
+        };
+
+        run(&herdr, &ledger, dir.path(), &req, &mut steps(|_| {})).unwrap();
+
+        assert_eq!(
+            herdr.label("w9:p1").as_deref(),
+            Some("lead-cards asks: which DB?")
+        );
     }
 }

@@ -255,6 +255,7 @@ impl FakeHerdr {
             launch_pending: pending,
             cwd: None,
             title: None,
+            display_agent: None,
         });
     }
 
@@ -543,6 +544,7 @@ impl Herdr for FakeHerdr {
                 launch_pending: false,
                 cwd: None,
                 title: None,
+                display_agent: None,
             });
         }
         {
@@ -632,6 +634,10 @@ impl Herdr for FakeHerdr {
         state.labels.retain(|(p, _)| p != pane_id);
         if let Some(label) = label {
             state.labels.push((pane_id.to_string(), label.to_string()));
+        }
+        // As herdr does: the label is display metadata on the pane's agent, never its status.
+        for agent in state.agents.iter_mut().filter(|a| a.pane_id == pane_id) {
+            agent.display_agent = label.map(str::to_string);
         }
         Ok(())
     }

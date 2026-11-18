@@ -1293,6 +1293,16 @@ fn a_leads_question_labels_its_claude_pane_until_a_typed_prompt() {
     let labelled = shown();
     assert_eq!(labelled["display_agent"], format!("{name} asks: which DB?"));
     assert_ne!(labelled["agent_status"], "blocked");
+    let listed = herdr_ok(&["agent", "list"])["result"]["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["pane_id"] == pane.as_str())
+        .cloned()
+        .unwrap();
+    assert_eq!(listed["display_agent"], format!("{name} asks: which DB?"));
+    assert_eq!(listed["name"], name.as_str());
+    assert_ne!(listed["agent_status"], "blocked");
 
     prompt_hook("<task-notification>\n<status>completed</status>\n</task-notification>");
     assert_eq!(shown()["display_agent"], format!("{name} asks: which DB?"));

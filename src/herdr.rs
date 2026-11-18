@@ -52,6 +52,8 @@ pub struct Agent {
     pub cwd: Option<PathBuf>,
     /// The terminal title, without the spinner glyph herdr strips.
     pub title: Option<String>,
+    /// A sidebar label some reporter set in place of the agent's name.
+    pub display_agent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,6 +225,8 @@ struct AgentJson {
     terminal_title: Option<String>,
     #[serde(default)]
     terminal_title_stripped: Option<String>,
+    #[serde(default)]
+    display_agent: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -241,6 +245,7 @@ impl From<AgentJson> for Agent {
             launch_pending: a.launch_pending.unwrap_or(false),
             cwd: a.cwd,
             title: a.terminal_title_stripped.or(a.terminal_title),
+            display_agent: a.display_agent,
         }
     }
 }

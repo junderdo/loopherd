@@ -373,6 +373,7 @@ mod tests {
             launch_pending: false,
             cwd: Some("/src/elsewhere".into()),
             title: Some("poking around".into()),
+            display_agent: None,
         }
     }
 

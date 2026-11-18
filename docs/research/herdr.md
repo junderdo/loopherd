@@ -124,12 +124,20 @@ How each field shows, with herdr's default sidebar
 The state icon stays herdr's own throughout, so a label can't show the
 `blocked` icon.
 
+The right-hand column for `--display-agent` is asserted live by
+`a_leads_question_labels_its_claude_pane_until_a_typed_prompt`, through
+both `pane get` and `agent list`. The sidebar column comes from herdr's
+sidebar docs and its default `rows`; no test reads the rendered sidebar.
+
 **Clearing on the human's answer.** Claude Code fires `UserPromptSubmit` for
 a finished background task too, not only for a typed prompt: its `prompt`
 is the `<task-notification>...</task-notification>` block Claude hands the
 model. A shepherd's `loopherd watch` runs as such a task, so a hook that
 clears on any prompt would clear the label the moment the watch that set it
-exits. Seen on Claude Code 2.1.327.
+exits. Seen on Claude Code 2.1.327, where the prompt was one block starting
+the text. loopherd keeps the label only for a prompt made wholly of such
+blocks (several batched together included); a preamble or a typed answer
+batched with a notification clears it.
 
 ## Known gaps (our opportunity)
 

@@ -1,9 +1,11 @@
 //! A label in herdr's sidebar on the pane of whoever must relay or answer
 //! what waits on the human, cleared once the human next prompts there. A
 //! mark in the mailboxes directory says which panes loopherd labelled, so
-//! clearing an unlabelled pane costs no herdr call.
+//! clearing an unlabelled pane costs no herdr call. A per-pane lock holds
+//! each mark change and its herdr call together, so a set and a clear can't
+//! interleave into a label with no mark.
 
-use std::fs;
+use std::fs::{self, File};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
@@ -11,6 +13,7 @@ use anyhow::{Context, Result};
 
 use crate::herdr::Herdr;
 use crate::ledger::Ledger;
+use crate::lock::Lock;
 use crate::notify::{self, Kind, Waiting};
 
 /// Labels `pane` with `waiting`: the asker and the question's first line,
@@ -26,6 +29,7 @@ pub fn set(herdr: &dyn Herdr, dir: &Path, pane: &str, waiting: &Waiting) -> Resu
     };
     let mark = mark(dir, pane);
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let _lock = lock(dir, pane)?;
     // Marked first: a mark with no label costs one needless clear; a label with no mark stays.
     fs::write(&mark, "").with_context(|| format!("write {}", mark.display()))?;
     herdr.label_pane(pane, Some(&label))
@@ -59,14 +63,34 @@ pub fn lead_asked(
 
 /// Clears `pane`'s label for the prompt in a UserPromptSubmit hook's `input`.
 /// Claude hands a finished background task to the model as a prompt too, the
-/// shepherd's own watch among them, and that one keeps the label.
+/// shepherd's own watch among them; a prompt of nothing but those keeps the
+/// label, and one with any other text clears it.
 pub fn prompted(herdr: &dyn Herdr, dir: &Path, pane: &str, input: &[u8]) -> Result<()> {
     let input: Option<serde_json::Value> = serde_json::from_slice(input).ok();
     let prompt = input.as_ref().and_then(|i| i["prompt"].as_str());
-    if prompt.is_some_and(|p| p.trim_start().starts_with("<task-notification>")) {
+    if prompt.is_some_and(only_task_notifications) {
         return Ok(());
     }
     clear(herdr, dir, pane)
+}
+
+fn only_task_notifications(prompt: &str) -> bool {
+    const OPEN: &str = "<task-notification>";
+    const CLOSE: &str = "</task-notification>";
+    let mut rest = prompt.trim();
+    if rest.is_empty() {
+        return false;
+    }
+    while !rest.is_empty() {
+        let Some(after_open) = rest.strip_prefix(OPEN) else {
+            return false;
+        };
+        let Some(end) = after_open.find(CLOSE) else {
+            return false;
+        };
+        rest = after_open[end + CLOSE.len()..].trim_start();
+    }
+    true
 }
 
 /// Clears `pane`'s label for a SessionStart hook's `input` that starts a
@@ -82,7 +106,10 @@ pub fn session_started(herdr: &dyn Herdr, dir: &Path, pane: &str, input: &[u8]) 
 /// Clears the label loopherd left on `pane`, if any.
 pub fn clear(herdr: &dyn Herdr, dir: &Path, pane: &str) -> Result<()> {
     let mark = mark(dir, pane);
-    // Unmarked first, so a label set while herdr clears keeps its fresh mark.
+    if !mark.exists() {
+        return Ok(());
+    }
+    let _lock = lock(dir, pane)?;
     match fs::remove_file(&mark) {
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
         removed => removed.with_context(|| format!("remove {}", mark.display()))?,
@@ -95,6 +122,12 @@ pub fn clear(herdr: &dyn Herdr, dir: &Path, pane: &str) -> Result<()> {
 
 fn mark(dir: &Path, pane: &str) -> PathBuf {
     dir.join(format!(".pane-label-{pane}"))
+}
+
+fn lock(dir: &Path, pane: &str) -> Result<Lock> {
+    let path = dir.join(format!(".pane-label-{pane}.lock"));
+    let file = File::create(&path).with_context(|| format!("create {}", path.display()))?;
+    Lock::wait(file).with_context(|| format!("lock {}", path.display()))
 }
 
 #[cfg(test)]
@@ -284,6 +317,66 @@ mod tests {
         prompted(&herdr, dir.path(), "w9:p0", b"not json").unwrap();
 
         assert_eq!(herdr.label("w9:p0"), None);
+    }
+
+    #[test]
+    fn a_clear_waits_for_a_set_holding_the_panes_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let herdr = FakeHerdr::new(&[]);
+        lead_asked(
+            &herdr,
+            &ledger(),
+            dir.path(),
+            "w9:p0",
+            "lead-cards",
+            "which DB?",
+        )
+        .unwrap();
+        let held = lock(dir.path(), "w9:p0").unwrap();
+
+        let clearing = {
+            let dir = dir.path().to_path_buf();
+            std::thread::spawn(move || {
+                let herdr = FakeHerdr::new(&[]);
+                clear(&herdr, &dir, "w9:p0").unwrap();
+                herdr.label_calls()
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!clearing.is_finished());
+        drop(held);
+
+        assert_eq!(clearing.join().unwrap(), 1);
+    }
+
+    #[test]
+    fn only_a_prompt_that_is_wholly_task_notifications_keeps_the_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let herdr = FakeHerdr::new(&[]);
+        let notification = "<task-notification>\n<status>completed</status>\n</task-notification>";
+        let kept = |prompt: &str| {
+            lead_asked(
+                &herdr,
+                &ledger(),
+                dir.path(),
+                "w9:p0",
+                "lead-cards",
+                "which DB?",
+            )
+            .unwrap();
+            let input =
+                serde_json::json!({"hook_event_name": "UserPromptSubmit", "prompt": prompt});
+            prompted(&herdr, dir.path(), "w9:p0", input.to_string().as_bytes()).unwrap();
+            herdr.label("w9:p0").is_some()
+        };
+
+        assert!(kept(notification));
+        assert!(kept(&format!("\n  {notification}\n")));
+        assert!(kept(&format!("{notification}\n{notification}")));
+        assert!(!kept(&format!("{notification}\nuse postgres")));
+        assert!(!kept(&format!("use postgres\n{notification}")));
+        assert!(!kept(&format!("note:\n{notification}")));
+        assert!(!kept("<task-notification>\n<status>completed</status>"));
     }
 
     #[test]
