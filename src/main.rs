@@ -1226,17 +1226,20 @@ fn run_restart_self() -> Result<i32> {
 }
 
 fn run_restart_wait(name: &str) -> Result<i32> {
-    if let Some(fd) = std::env::var(WAITER_FD)
+    let fd = std::env::var(WAITER_FD)
         .ok()
         .and_then(|v| v.parse::<i32>().ok())
-    {
-        // Kept open here, but not passed on to the herdr calls it makes.
-        // SAFETY: fcntl only sets close-on-exec on an inherited descriptor.
-        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
-    }
+        .context("restart-wait runs only from `loopherd restart --self`, which holds its claim")?;
+    // Kept open here, but not passed on to the herdr calls it makes.
+    // SAFETY: fcntl only sets close-on-exec on an inherited descriptor.
+    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let state = ledger.dir()?;
-    let paths = Paths::from_env()?;
+    let paths = Paths::from_env().inspect_err(|e| {
+        let text = format!("self-restart failed: {e:#}");
+        let note = report::Entry::new(SystemTime::now(), report::Body::Note { text });
+        let _ = report::append(&state.join("reports"), name, &note);
+    })?;
     let req = restart::RestartRequest {
         name,
         force: false,

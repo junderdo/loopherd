@@ -141,7 +141,7 @@ Init never launches an agent.
    |---|---|
    | `<member> done <time> <text>` | A finished member's report, usually with its output's link. Verify it. |
    | `<member> question <time> <text>` | It stopped on a question. Relay it to the human; a lead relays it with its own question report, unless it's a design question and `design_escalation` is on. |
-   | `<member> note <time> <text>` | Information only; nothing waits on it. |
+   | `<member> note <time> <text>` | Information only, except a `self-restart …` note: that member's handoff is still waiting on a restart (see Handoffs). |
    | `<member> handoff <time> <text>` | It passed its context limit and wrote its handoff. Restart it (see Handoffs) if you read it; a lead restarts itself. |
    | `<member> paused  1 shell, 1 cron` | Turn ended with work in flight that can wake it again. Another paused stop is quiet. |
    | `<member> paused  background unknown` | Turn ended and Claude didn't say what's in flight (also `crons unknown`, or `1 shell; crons unknown`). |
@@ -310,16 +310,19 @@ fix the herd, then run restart again.
 **A lead restarts itself.** After reporting `--kind handoff` and stopping its
 watch, it runs `loopherd restart --self` from its own pane and ends its
 turn. That checks it is a member with a handoff file and a `handoff` report
-since its last start, starts a detached waiter, and returns at once. The
+since its last start with no stop since (so run it in the handoff turn),
+starts a detached waiter, and returns at once. The
 waiter runs the plain restart, with every check `--force` skips, once the
 stop after the handoff reads `finished` and herdr shows it idle or done:
 same pane, worktree and ledger entry. One waiter per member: a second
 `--self` refuses while one waits, and a plain `loopherd restart` and the
-waiter never both send `/clear`, since whichever runs second finds the
-handoff used. After 30 minutes, or if the restart fails, the waiter leaves a
-`self-restart …` note in the member's mailbox naming why and keeps the
-handoff, so a plain `loopherd restart <name>` still works once the member is
-finished. Any member may run `--self`, but workers in a led herd leave
+waiter never both send `/clear`; the waiter exits quietly once another
+restart used the handoff. After 30 minutes, on a revive's start, or on any
+failure, the waiter leaves a `self-restart …` note in the member's mailbox
+naming why: act on it as on the `handoff` line. Unless the note says the
+restart failed after its `/clear`, the handoff is still in place, so a plain
+`loopherd restart <name>` works once the member is finished (after a
+revive, the human forces it). Any member may run `--self`, but workers in a led herd leave
 their restart to their lead.
 
 A lead's `loopherd watch` is a background shell, so a lead stops its own

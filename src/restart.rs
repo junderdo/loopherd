@@ -210,7 +210,8 @@ pub enum Waited {
 
 /// A self-restart's waiter: polls every `every` until `req.name` is finished
 /// since its handoff, then runs the restart with every non-forced check. Gives
-/// up after `give_up`, or on a failed restart, with a note in its mailbox.
+/// up after `give_up`, on a failed restart, or on any error, with a note in
+/// its mailbox; exits quietly once another restart has used the handoff.
 pub fn wait_then_restart(
     herdr: &dyn Herdr,
     ledger: &mut dyn Ledger,
@@ -223,32 +224,52 @@ pub fn wait_then_restart(
         own_pane: None,
         ..*req
     };
+    match poll_then_restart(herdr, ledger, &req, give_up, every) {
+        Ok(Ok(waited)) => Ok(waited),
+        Ok(Err(why)) => gave_up(&req, why),
+        Err(e) => gave_up(&req, format!("self-restart failed: {e:#}")),
+    }
+}
+
+/// `Ok(Err(why))` when the waiter gives up for `why`.
+fn poll_then_restart(
+    herdr: &dyn Herdr,
+    ledger: &mut dyn Ledger,
+    req: &RestartRequest,
+    give_up: Duration,
+    every: Duration,
+) -> Result<Result<Waited, String>> {
     let name = req.name;
+    let handoff = handoff_path(req.state, name);
     let deadline = Instant::now() + give_up;
     loop {
-        let handoff = handoff_path(req.state, name);
-        if !handoff.is_file()
-            || since_handoff(&req.state.join("reports"), name)? == SinceHandoff::None
-        {
-            return Ok(Waited::RestartedElsewhere);
+        if !handoff.is_file() {
+            return Ok(Ok(Waited::RestartedElsewhere));
         }
-        let waiting = match waiting_on(herdr, &req) {
-            Ok(Some(why)) => why,
-            Ok(None) => match restart(herdr, ledger, &req, SystemTime::now()) {
-                Ok(_) => return Ok(Waited::Restarted),
-                Err(e) if e.is::<Busy>() => format!("{e}"),
-                Err(e) => return gave_up(&req, format!("self-restart failed: {e:#}")),
+        if since_handoff(&req.state.join("reports"), name)? == SinceHandoff::None {
+            return Ok(Err(format!(
+                "self-restart stopped: {name} started again since its handoff (a revive?) and its handoff is \
+                 still at {}. Check `loopherd reports --all {name}`; restarting it now takes --force.",
+                handoff.display()
+            )));
+        }
+        let (waiting, busy) = match waiting_on(herdr, req) {
+            Ok(Some(why)) => (why, false),
+            Ok(None) => match restart(herdr, ledger, req, SystemTime::now()) {
+                Ok(_) => return Ok(Ok(Waited::Restarted)),
+                Err(e) if e.is::<Busy>() => (format!("{e}"), true),
+                // Another restart used the handoff between our checks and its lock.
+                Err(_) if !handoff.is_file() => return Ok(Ok(Waited::RestartedElsewhere)),
+                Err(e) => return Ok(Err(format!("self-restart failed: {e:#}"))),
             },
-            Err(e) => format!("{e:#}"),
+            Err(e) => (format!("{e:#}"), false),
         };
-        if Instant::now() >= deadline {
-            return gave_up(
-                &req,
-                format!(
-                    "self-restart gave up after {}: {waiting}. Its handoff is still in place; run loopherd restart {name} once it's finished.",
-                    humantime::format_duration(give_up)
-                ),
-            );
+        // A running restart either uses the handoff or fails; wait for which.
+        if Instant::now() >= deadline && !busy {
+            return Ok(Err(format!(
+                "self-restart gave up after {}: {waiting}. Its handoff is still in place; run loopherd restart {name} once it's finished.",
+                humantime::format_duration(give_up)
+            )));
         }
         std::thread::sleep(every);
     }
@@ -308,10 +329,15 @@ pub fn schedule_self(
     if !handoff.is_file() {
         bail!("{name} has no handoff at {}", handoff.display());
     }
-    if since_handoff(&state.join("reports"), &name)? == SinceHandoff::None {
-        bail!(
+    match since_handoff(&state.join("reports"), &name)? {
+        SinceHandoff::None => bail!(
             "{name} hasn't reported --kind handoff since it started; write its handoff, report it, then run this"
-        );
+        ),
+        // Its waiter would take that earlier stop for this turn's end.
+        SinceHandoff::Stopped(_) => bail!(
+            "{name} already stopped since its handoff; report --kind handoff again, then run this in the same turn"
+        ),
+        SinceHandoff::NotStopped => {}
     }
     let waiter = take(state, &name, "waiter")?
         .ok_or_else(|| anyhow!("{name} already has a restart waiting for its stop"))?;
@@ -1387,6 +1413,11 @@ mod tests {
         let waited = std::thread::scope(|s| {
             s.spawn(|| {
                 std::thread::sleep(Duration::from_millis(20));
+                fs::rename(
+                    w.state.path().join("handoffs/lh-1.md"),
+                    w.state.path().join("handoffs/lh-1.prev.md"),
+                )
+                .unwrap();
                 w.put(Body::Start { resumed: false });
             });
             w.wait(Duration::from_secs(5))
@@ -1394,6 +1425,38 @@ mod tests {
         assert!(matches!(waited.unwrap(), Waited::RestartedElsewhere));
         assert!(w.herdr.prompts().is_empty());
         assert!(w.notes().is_empty());
+    }
+
+    #[test]
+    fn a_revive_while_a_self_restart_waits_ends_it_with_a_note() {
+        let w = World::new();
+        w.put(Body::Handoff { text: "x".into() });
+        let waited = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(20));
+                w.put(Body::Start { resumed: true });
+            });
+            w.wait(Duration::from_secs(5))
+        });
+        assert!(matches!(waited.unwrap(), Waited::GaveUp));
+        assert!(w.herdr.prompts().is_empty());
+        let notes = w.notes();
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes[0].starts_with("self-restart stopped: lh-1 started again since its handoff"),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn a_self_restart_is_refused_once_the_member_stopped_since_its_handoff() {
+        let w = World::new();
+        w.handed_off();
+        let err = format!("{:#}", schedule(&w, Some("w1:p1")).err().unwrap());
+        assert!(
+            err.starts_with("lh-1 already stopped since its handoff"),
+            "{err}"
+        );
     }
 
     #[test]
