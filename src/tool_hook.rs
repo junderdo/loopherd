@@ -191,7 +191,7 @@ fn decide(
     }
     if needed == Switch::Config {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not change loopherd's config with `loopherd config set`, `config unset`, `loopherd setup` or `scripts/install --context`, which could raise its own handoff limit or switches: {}; ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not change loopherd's config with `loopherd config set`, `config unset`, `loopherd setup` or `scripts/install --context`, which could raise its own handoff or review-round limit or switches: {}; ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -3646,6 +3646,7 @@ mod tests {
     const HERD_EDITS: &[&str] = &[
         "loopherd herd set h lead.merge true",
         "loopherd herd unset h lead.merge",
+        "loopherd herd set h lead.review_rounds 9",
         "/home/me/.local/bin/loopherd herd set h lead.install true",
         "bash -c 'loopherd herd set h lead.rebase true'",
         "cd /x && loopherd herd unset h queue.max",
@@ -3729,6 +3730,7 @@ mod tests {
         for command in [
             "loopherd config set context_window 1000000",
             "loopherd config unset shepherd.context_limit",
+            "loopherd config set lead_defaults.review_rounds 9",
             "loopherd setup",
             "loopherd setup --again",
             "loopherd setup --context limit=500000",
@@ -3758,6 +3760,7 @@ mod tests {
         }
         for command in [
             "loopherd config get context_window",
+            "loopherd config get lead_defaults.review_rounds",
             "cargo run -- config get default_context_limit",
             "loopherd setup --help",
             "env loopherd config get context_window",

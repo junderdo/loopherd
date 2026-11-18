@@ -133,9 +133,10 @@ enum Command {
         #[arg(long, value_name = "SWITCHES")]
         set: Option<String>,
     },
-    /// Read or edit one of config.toml's handoff settings, keeping its comments
-    /// and layout: `context_window`, `default_context_limit` or
-    /// `shepherd.context_limit`, each a number of tokens.
+    /// Read or edit one of config.toml's settings, keeping its comments and
+    /// layout: `context_window`, `default_context_limit` or
+    /// `shepherd.context_limit`, each a number of tokens, or
+    /// `lead_defaults.review_rounds`, each lead's review-round limit.
     Config {
         #[command(subcommand)]
         action: ConfigAction,

@@ -83,6 +83,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D66](decisions/D66.md) | The herdr plugin's event hooks record a member's `blocked` and `gone` in its mailbox, as a watch's poll does; a watch prints both only from the mailbox, so each prints once. |
 | [D67](decisions/D67.md) | A Ctrl-clicked GitHub PR link runs `loopherd pr` through the plugin's link handler: the member on the PR's head branch, else the first worker whose report names it, shows in a popup pane; any other click opens the clicked link in the browser. |
 | [D68](decisions/D68.md) | A manual `loopherd revive` skips members recorded on another herdr server's socket, says so per member, and never rewrites a recorded socket; members with none are revived as before. |
+| [D69](decisions/D69.md) | A lead's `review_rounds`, a positive integer, resolves from its herd file's `[lead]`, else `[lead_defaults]`, else 3; the lead's prompt gets it as `{review_rounds}` and `loopherd herds` shows it with its source. Amends D31's `[lead_defaults]` keys. |
 
 ## Emerging model
 

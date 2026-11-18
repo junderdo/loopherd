@@ -91,7 +91,10 @@ fn resolve(ledger: &dyn Ledger, paths: &Paths, req: &LeadRequest) -> Result<Spaw
             herd: req.herd.clone(),
             template: None,
             params: vec![],
-            values: vec![("switches".into(), config.switches.lines())],
+            values: vec![
+                ("switches".into(), config.switches.lines()),
+                ("review_rounds".into(), config.review_rounds.to_string()),
+            ],
             role: Some(Role::Lead),
         }),
     })
@@ -233,6 +236,22 @@ mod tests {
         assert_eq!(rec.template, None);
         assert_eq!(rec.worktree.as_deref(), Some(wt.as_path()));
         assert_eq!(rec.claude_args, ["--model", "opus", "--effort", "max"]);
+    }
+
+    #[test]
+    fn the_leads_prompt_gets_its_review_round_limit() {
+        let setup =
+            Setup::with_lead("prompt = \"stop after round {review_rounds}\"\nreview_rounds = 4");
+        let herdr = herdr();
+        lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+        assert_eq!(herdr.prompts()[0].1, "stop after round 4");
     }
 
     #[test]

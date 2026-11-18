@@ -9,6 +9,8 @@ member, and the after-merge steps.
 Your switches (off means the human does it; ask with a question report):
 {switches}
 
+Your review-round limit: {review_rounds}.
+
 Grilling is always the human's.
 
 Start now:

@@ -75,10 +75,11 @@ pub fn set_lead_defaults(config: &Path, on: &str) -> Result<()> {
 }
 
 /// The keys `config get`, `set` and `unset` take.
-pub const KEYS: [&str; 3] = [
+pub const KEYS: [&str; 4] = [
     "context_window",
     "default_context_limit",
     "shepherd.context_limit",
+    "lead_defaults.review_rounds",
 ];
 
 /// `key`'s value in `config`, `None` when unset.
@@ -87,6 +88,10 @@ pub fn get(config: &Path, key: &str) -> Result<Option<u64>> {
     Ok(match known(key)? {
         "context_window" => file.context_window,
         "default_context_limit" => file.default_context_limit,
+        "lead_defaults.review_rounds" => file
+            .lead_defaults
+            .and_then(|d| d.review_rounds)
+            .map(|rounds| rounds.get().into()),
         _ => file.shepherd.and_then(|s| s.context_limit),
     })
 }
@@ -95,11 +100,12 @@ pub fn get(config: &Path, key: &str) -> Result<Option<u64>> {
 /// Refuses, changing nothing, an unknown key or a value under the minimum.
 pub fn set(config: &Path, key: &str, value: &str) -> Result<()> {
     let key = known(key)?;
-    let value: u64 = value
-        .trim()
-        .replace('_', "")
-        .parse()
-        .with_context(|| format!("{key} must be a whole number of tokens, got {value:?}"))?;
+    let value: u64 = value.trim().replace('_', "").parse().with_context(|| {
+        format!(
+            "{key} must be a whole number of {}, got {value:?}",
+            unit(key)
+        )
+    })?;
     let value = i64::try_from(value).with_context(|| format!("{key}: {value} is too big"))?;
     edit(config, |doc| {
         let (table, name) = match key.split_once('.') {
@@ -297,6 +303,13 @@ fn lift_header(doc: &mut DocumentMut) {
     doc.decor_mut().set_prefix(&prefix[..split]);
 }
 
+fn unit(key: &str) -> &'static str {
+    match key {
+        "lead_defaults.review_rounds" => "rounds",
+        _ => "tokens",
+    }
+}
+
 fn known(key: &str) -> Result<&'static str> {
     match KEYS.iter().find(|k| **k == key) {
         Some(key) => Ok(key),
@@ -429,6 +442,7 @@ mod tests {
             new_cards: Some(false),
             design_escalation: Some(false),
             blocked_dialogs: Some(false),
+            review_rounds: None,
         }
     }
 
@@ -628,6 +642,8 @@ mod tests {
 
 #[cfg(test)]
 mod key_tests {
+    use std::num::NonZeroU32;
+
     use super::*;
 
     fn config_with(text: &str) -> (tempfile::TempDir, PathBuf) {
@@ -652,6 +668,35 @@ mod key_tests {
             assert_eq!(get(&path, key).unwrap(), None, "{key}");
             assert!(!unset(&path, key).unwrap(), "{key}");
         }
+    }
+
+    #[test]
+    fn lead_review_rounds_round_trip_through_set_get_and_unset() {
+        let (_dir, path) = config_with("[lead_defaults]\nmerge = true\n");
+        let key = "lead_defaults.review_rounds";
+        set(&path, key, "5").unwrap();
+        assert_eq!(get(&path, key).unwrap(), Some(5));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[lead_defaults]\nmerge = true\nreview_rounds = 5\n"
+        );
+        assert!(unset(&path, key).unwrap());
+        assert_eq!(get(&path, key).unwrap(), None);
+        assert_eq!(lead_defaults(&path).unwrap().unwrap().merge, Some(true));
+    }
+
+    #[test]
+    fn setting_lead_defaults_keeps_their_review_rounds() {
+        let (_dir, path) = config_with("[lead_defaults]\nreview_rounds = 4\nmerge = true\n");
+
+        set_lead_defaults(&path, "install").unwrap();
+
+        let defaults = lead_defaults(&path).unwrap().unwrap();
+        assert_eq!(defaults.review_rounds.map(NonZeroU32::get), Some(4));
+        assert_eq!(
+            (defaults.merge, defaults.install),
+            (Some(false), Some(true))
+        );
     }
 
     #[test]
@@ -851,6 +896,12 @@ mod key_tests {
             ("context_window", "9999", "at least 10000"),
             ("default_context_limit", "lots", "a whole number"),
             ("shepherd.context_limit", "-1", "a whole number"),
+            ("lead_defaults.review_rounds", "0", "nonzero"),
+            (
+                "lead_defaults.review_rounds",
+                "2.5",
+                "a whole number of rounds",
+            ),
         ] {
             let err = format!("{:#}", set(&path, key, value).unwrap_err());
             assert!(err.contains(says), "{key} {value}: {err}");
