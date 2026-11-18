@@ -981,9 +981,17 @@ fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32>
         start_timeout: Duration::from_secs(60),
         reports_dir: ledger.reports_dir()?,
         lock_timeout: Duration::from_secs(600),
+        server: startup.is_some().then(std::os::unix::process::parent_id),
         startup,
     };
-    let (message, code) = revive(&CliHerdr, &mut ledger, &req, &live_session)?.report();
+    let (message, code) = revive(
+        &CliHerdr,
+        &process::ProcFs,
+        &mut ledger,
+        &req,
+        &live_session,
+    )?
+    .report();
     if !message.is_empty() {
         println!("{message}");
     }

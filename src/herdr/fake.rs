@@ -44,6 +44,7 @@ struct FakePane {
     at_prompt: bool,
     /// `at_shell_prompt` polls left before the shell reaches its prompt; `None` is never.
     polls_until_prompt: Option<u32>,
+    shell_pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,6 +228,7 @@ impl FakeHerdr {
             cwd: cwd.to_path_buf(),
             at_prompt: true,
             polls_until_prompt: Some(0),
+            shell_pid: None,
         });
         id
     }
@@ -304,8 +306,15 @@ impl FakeHerdr {
             cwd: cwd.to_path_buf(),
             at_prompt: true,
             polls_until_prompt: Some(0),
+            shell_pid: None,
         });
         tab
+    }
+
+    pub fn set_shell_pid(&self, pane_id: &str, pid: Option<u32>) {
+        let mut state = self.state.lock().unwrap();
+        let pane = state.panes.iter_mut().find(|p| p.id == pane_id);
+        pane.expect("fake pane").shell_pid = pid;
     }
 
     pub fn set_screen(&self, pane_id: &str, text: &str) {
@@ -502,6 +511,14 @@ impl Herdr for FakeHerdr {
             None => return Ok(false),
         }
         Ok(pane.at_prompt && pane.polls_until_prompt == Some(0))
+    }
+
+    fn shell_pid(&self, pane_id: &str) -> Result<Option<u32>> {
+        let state = self.state.lock().unwrap();
+        let pane = state.panes.iter().find(|p| p.id == pane_id);
+        Ok(pane
+            .ok_or_else(|| anyhow!("pane {pane_id} not found"))?
+            .shell_pid)
     }
 
     fn visible_text(&self, pane_id: &str) -> Result<String> {

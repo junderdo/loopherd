@@ -122,6 +122,8 @@ pub trait Herdr {
     /// The shell is alone in the foreground and has drawn its prompt: no
     /// command, editor, agent, or rc file running.
     fn at_shell_prompt(&self, pane_id: &str) -> Result<bool>;
+    /// The pid of the shell herdr started in `pane_id`, if it has one yet.
+    fn shell_pid(&self, pane_id: &str) -> Result<Option<u32>>;
     /// The pane's visible screen as plain text. Read-only.
     fn visible_text(&self, pane_id: &str) -> Result<String>;
     /// Creates a tab without focusing it.
@@ -216,14 +218,6 @@ impl CliHerdr {
 
     fn call_ok(&self, args: &[&str]) -> Result<Value> {
         ok_reply(args, self.call(args)?)
-    }
-
-    /// The pid of the shell herdr started in `pane_id`, if it has one.
-    pub fn shell_pid(&self, pane_id: &str) -> Result<Option<u32>> {
-        let result = self.call_ok(&["pane", "process-info", "--pane", pane_id])?;
-        Ok(result["process_info"]["shell_pid"]
-            .as_u64()
-            .and_then(|p| p.try_into().ok()))
     }
 
     fn call_ok_within(&self, args: &[&str], timeout: Duration) -> Result<Value> {
@@ -452,6 +446,13 @@ impl Herdr for CliHerdr {
     }
 
     // `pane read` prints plain text, not a JSON envelope.
+    fn shell_pid(&self, pane_id: &str) -> Result<Option<u32>> {
+        let result = self.call_ok(&["pane", "process-info", "--pane", pane_id])?;
+        Ok(result["process_info"]["shell_pid"]
+            .as_u64()
+            .and_then(|p| p.try_into().ok()))
+    }
+
     fn visible_text(&self, pane_id: &str) -> Result<String> {
         let args = [
             "pane", "read", pane_id, "--source", "visible", "--format", "text",
