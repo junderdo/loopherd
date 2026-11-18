@@ -821,7 +821,7 @@ pub fn herds(paths: &Paths, settings: &Path) -> Result<(String, i32)> {
         }
     };
     let config = config_file(paths);
-    let files = herd_files(&paths.herds)?;
+    let mut hook_warning_at = None;
     if parses_as_toml(&config) {
         match crate::notify::load(&config) {
             Err(e) => {
@@ -832,19 +832,18 @@ pub fn herds(paths: &Paths, settings: &Path) -> Result<(String, i32)> {
                 "warning: {}: [notify] is enabled with herdr = false, no command and no pane_label, so nothing is sent",
                 config.display()
             )),
-            Ok(Some(notify)) if notify.labels_panes() => {
-                lines.extend(prompt_hook_warning(&config, settings, &files));
-            }
+            Ok(Some(notify)) if notify.labels_panes() => hook_warning_at = Some(lines.len()),
             Ok(_) => {}
         }
     }
+    let files = herd_files(&paths.herds)?;
     if files.is_empty() {
         lines.push(format!(
             "no herds: add a herd file at {}/<herd>.toml",
             paths.herds.display()
         ));
-        return Ok((lines.join("\n"), code));
     }
+    let mut valid = Vec::new();
     for file in &files {
         let herd = file.file_stem().unwrap_or_default().to_string_lossy();
         match std::fs::read_to_string(file)
@@ -859,6 +858,7 @@ pub fn herds(paths: &Paths, settings: &Path) -> Result<(String, i32)> {
                 };
                 lines.extend(describe(&herd, &parsed, &paused, defaults.as_ref()));
                 lines.extend(reading.warning(&herd).map(|w| format!("  {w}")));
+                valid.push(herd.into_owned());
             }
             Err(e) => {
                 let name = file.file_name().unwrap_or_default().to_string_lossy();
@@ -867,37 +867,37 @@ pub fn herds(paths: &Paths, settings: &Path) -> Result<(String, i32)> {
             }
         }
     }
+    if let Some(at) = hook_warning_at
+        && let Some(warning) = prompt_hook_warning(&config, settings, &valid)
+    {
+        lines.insert(at, warning);
+    }
     Ok((lines.join("\n"), code))
 }
 
-/// A warning when `settings` lacks loopherd's prompt hook, without which a
-/// question's pane label stays until the pane's next session start.
-fn prompt_hook_warning(config: &Path, settings: &Path, files: &[PathBuf]) -> Option<String> {
-    match crate::install_hook::prompt_hook_installed(settings) {
-        Ok(true) => None,
-        Ok(false) => {
-            let herds: Vec<_> = files
-                .iter()
-                .map(|f| f.file_stem().unwrap_or_default().to_string_lossy())
-                .collect();
-            let affected = match herds.as_slice() {
-                [] => String::new(),
-                [herd] => format!(" in herd {herd}"),
-                _ => format!(" in herds {}", herds.join(", ")),
-            };
-            Some(format!(
-                "warning: {}: [notify] pane_label is on but loopherd's prompt hook is not in {}, \
-                 so a pane label{affected} stays until its pane's next session; \
-                 run scripts/install or loopherd install-hook",
-                config.display(),
-                settings.display(),
-            ))
-        }
-        Err(e) => Some(format!(
-            "warning: cannot check for loopherd's prompt hook: {}",
+/// A warning when `settings` lacks loopherd's prompt hook, or can't be read,
+/// without which a question's pane label stays until the pane's next session start.
+fn prompt_hook_warning(config: &Path, settings: &Path, herds: &[String]) -> Option<String> {
+    let problem = match crate::install_hook::prompt_hook_installed(settings) {
+        Ok(true) => return None,
+        Ok(false) => format!("loopherd's prompt hook is not in {}", settings.display()),
+        Err(e) => format!(
+            "loopherd's prompt hook can't be checked ({})",
             format!("{e:#}").trim_end()
-        )),
-    }
+        ),
+    };
+    let affected = match herds {
+        [] => String::new(),
+        [herd] => format!(" in herd {herd}"),
+        _ => format!(" in herds {}", herds.join(", ")),
+    };
+    Some(format!(
+        "warning: {}: [notify] pane_label is on but {problem}, \
+         so a pane label{affected} stays until its pane's next session; \
+         run scripts/install or loopherd install-hook, \
+         or pass herds --settings <file> if you installed into another file",
+        config.display(),
+    ))
 }
 
 /// `text` parsed as a herd file and checked as far as `add` and `lead` would
@@ -2143,11 +2143,30 @@ args = ["--model", "opus"]
         );
         assert!(warning.contains(" in herd prs "), "{report}");
         assert!(
-            warning.ends_with("run scripts/install or loopherd install-hook"),
+            warning.contains(
+                "run scripts/install or loopherd install-hook, or pass herds --settings <file>"
+            ),
             "{report}"
         );
         assert!(report.contains("loopherd add prs"), "{report}");
         assert_eq!(code, 0, "{report}");
+    }
+
+    #[test]
+    fn herds_names_only_valid_herds_in_the_prompt_hook_warning() {
+        let config = Config::with(&[("a", PR_HERD), ("b", PR_HERD), ("bad", "repo = ")]);
+        fs::write(
+            config.path().join("config.toml"),
+            "[notify]\nenabled = true\npane_label = true\n",
+        )
+        .unwrap();
+
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+
+        let warning = report.lines().next().unwrap();
+        assert!(warning.contains(" in herds a, b stays "), "{report}");
+        assert!(report.contains("invalid bad.toml"), "{report}");
+        assert_eq!(code, 1, "{report}");
     }
 
     #[test]
@@ -2184,8 +2203,17 @@ args = ["--model", "opus"]
 
         let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
 
+        let warning = report.lines().next().unwrap();
         assert!(
-            report.starts_with("warning: cannot check for loopherd's prompt hook: "),
+            warning.contains(&format!(
+                "[notify] pane_label is on but loopherd's prompt hook can't be checked (parse {}",
+                config.settings().display()
+            )),
+            "{report}"
+        );
+        assert!(warning.contains(" in herd prs "), "{report}");
+        assert!(
+            warning.contains("run scripts/install or loopherd install-hook"),
             "{report}"
         );
         assert_eq!(code, 0, "{report}");

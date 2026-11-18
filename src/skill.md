@@ -350,7 +350,8 @@ prompt in that pane, or a new, resumed or cleared session there, clears it;
 a background task finishing, such as your watch, or a compaction doesn't.
 A lead's watch never labels for its workers. Clearing needs the
 UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
-`pane_label` is on without it.
+`pane_label` is on without it. If you installed with `install-hook
+--settings <file>`, pass the same `--settings <file>` to `herds`.
 
 ### Commands
 
