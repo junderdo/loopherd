@@ -272,8 +272,8 @@ fn lease_refused(err: &anyhow::Error) -> bool {
 /// `branch`, per `fate`, so [`ensure_worktree`] next makes them afresh,
 /// changing nothing. `in_use` names the live member using a worktree. Never
 /// plans removing a worktree with changes, mid-operation or locked, nor
-/// touching the main checkout, one in use, or another worktree on the
-/// branch, whatever the fate. [`Fate::Keep`] never asks origin.
+/// touching the main checkout, one in use, another worktree on the branch,
+/// or origin's default branch, whatever the fate. [`Fate::Keep`] never asks origin.
 pub fn plan_clear(
     repo: &Path,
     worktree: Option<&Path>,
@@ -387,6 +387,11 @@ pub fn plan_clear(
         .collect();
     fetch(repo)?;
     let base = default_branch(repo)?;
+    if let Some(b) = branch
+        && base.strip_prefix("origin/") == Some(b)
+    {
+        return Ok(Plan::Taken(format!("{b} is origin's default branch")));
+    }
     let count = |not: &[&str]| -> Result<usize> {
         let mut args = vec!["rev-list", "--count"];
         args.extend(&heads);
@@ -1478,6 +1483,25 @@ mod tests {
         );
         assert!(!on_origin(root.path(), "feat/x"));
         assert!(!has_branch(&repo, "feat/x"));
+    }
+
+    #[test]
+    fn origins_default_branch_is_taken_and_left_whatever_the_fate() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        git_in(&repo, &["switch", "--quiet", "-c", "elsewhere"]);
+
+        for fate in [Fate::Clear, Fate::Drop] {
+            let plan = plan_clear(&repo, None, Some("main"), fate, &nobody).unwrap();
+
+            assert_eq!(
+                plan,
+                Plan::Taken("main is origin's default branch".into()),
+                "{fate:?}"
+            );
+        }
+        assert!(on_origin(root.path(), "main"));
+        assert!(has_branch(&repo, "main"));
     }
 
     #[test]
