@@ -120,8 +120,17 @@ impl PrHeads for GhCli {
 
     fn repo_at(&self, dir: &Path) -> Option<String> {
         let (host, repo) = github_repo(&origin_url(dir).ok()?)?;
-        (host == "github.com").then_some(repo)
+        is_github_com(&host).then_some(repo)
     }
+}
+
+/// `host` serves github.com, whatever its case: `github.com`, or the
+/// `www.` and `ssh.` names remotes are also cloned from.
+pub fn is_github_com(host: &str) -> bool {
+    matches!(
+        host.to_ascii_lowercase().as_str(),
+        "github.com" | "www.github.com" | "ssh.github.com"
+    )
 }
 
 /// `owner/name branch`, as `head_of` asks gh for it; a deleted head repo
@@ -456,9 +465,16 @@ mod tests {
 
     #[test]
     fn a_checkouts_repo_is_its_origin_on_github() {
-        let (dir, gh) = fake_gh("git@github.com:O/R.git", "");
+        for url in [
+            "git@github.com:O/R.git",
+            "ssh://git@ssh.github.com:443/O/R.git",
+            "git@GitHub.com:O/R.git",
+            "https://www.github.com/O/R",
+        ] {
+            let (dir, gh) = fake_gh(url, "");
 
-        assert_eq!(gh.repo_at(dir.path()), Some("O/R".into()));
+            assert_eq!(gh.repo_at(dir.path()), Some("O/R".into()), "{url}");
+        }
     }
 
     #[test]

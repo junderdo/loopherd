@@ -796,6 +796,27 @@ mod tests {
     }
 
     #[test]
+    fn a_member_whose_origin_cant_be_read_never_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let unreadable = AgentRecord {
+            worktree: Some("/wt/lh-1".into()),
+            ..record("lh-1")
+        };
+
+        let c = click_with(
+            PR,
+            vec![unreadable],
+            dir.path(),
+            Heads::on("feat/lh-1")
+                .origin("/wt/lh-1", None)
+                .origin("/src/repo", None),
+            FakeHerdr::new(&[]),
+        );
+
+        assert_browser(&c, PR);
+    }
+
+    #[test]
     fn a_retired_member_on_the_head_branch_leaves_it_to_the_browser() {
         let dir = tempfile::tempdir().unwrap();
 
