@@ -339,8 +339,9 @@ enum Command {
     /// pane.closed, tab.closed, workspace.closed and pane.moved: records a
     /// member going blocked, or its pane, tab or workspace going, in its
     /// mailbox for the next watch, and follows a member's pane moved to
-    /// another tab of its workspace in the ledger. Reads HERDR_PLUGIN_EVENT and HERDR_PLUGIN_EVENT_JSON; any
-    /// other pane, tab or workspace records nothing.
+    /// another tab of its workspace in the ledger. Reads HERDR_PLUGIN_EVENT
+    /// and HERDR_PLUGIN_EVENT_JSON; any other pane, tab or workspace records
+    /// nothing.
     HerdrEventHook,
     /// Claude's SessionStart hook: when a member's Claude is cleared or resumed,
     /// points its ledger entry at the new session, read from the hook input on

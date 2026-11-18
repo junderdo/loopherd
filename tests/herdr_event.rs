@@ -361,11 +361,28 @@ fn a_move_of_a_pane_loopherd_does_not_follow_changes_nothing() {
         .env(
             "HERDR_PLUGIN_EVENT_JSON",
             r#"{"event":"pane_moved","data":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t4",
-                "workspace_id":"w1"},"previous_pane_id":"w1:p1"}}"#,
+                "workspace_id":"w1"},"previous_pane_id":"w1:p1","previous_tab_id":"w1:t1"}}"#,
         )
         .output()
         .unwrap();
     quiet_success(&other_herdr);
+    let no_previous_tab = event(
+        dir.path(),
+        "pane.moved",
+        r#"{"pane":{"pane_id":"w1:p1","tab_id":"w1:t4","workspace_id":"w1"},
+            "previous_pane_id":"w1:p1"}"#,
+    );
+    quiet_success(&no_previous_tab);
 
     assert_eq!(fs::read_to_string(&ledger).unwrap(), before);
+}
+
+#[test]
+fn a_member_with_no_recorded_tab_takes_the_tab_it_was_moved_to() {
+    let dir = sandbox();
+
+    quiet_success(&moved(dir.path(), ("w1:p5", "w1:t1"), ("w1:p5", "w1:t4")));
+    quiet_success(&tab_closed(dir.path(), "w1:t4"));
+
+    assert_eq!(recorded(dir.path()), ["lh-0 gone"]);
 }
