@@ -33,6 +33,8 @@ mod stop_hook;
 mod subagent_view;
 mod tell;
 mod template;
+#[cfg(test)]
+mod test_fakes;
 mod tool_hook;
 mod tui;
 // build.rs includes it; here only for its tests.
