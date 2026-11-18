@@ -918,7 +918,12 @@ fn isolated_herdr(home: &Path) -> Command {
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_STATE_HOME", home.join(".local/state"))
         .env("HERDR_SOCKET_PATH", socket);
-    for var in HERDR_IDS {
+    let inherited = [
+        "HERDR_CONFIG_PATH",
+        "HERDR_SESSION",
+        "HERDR_CLIENT_SOCKET_PATH",
+    ];
+    for var in HERDR_IDS.iter().chain(&inherited) {
         cmd.env_remove(var);
     }
     cmd
