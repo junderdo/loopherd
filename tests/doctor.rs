@@ -38,6 +38,12 @@ fn sandbox_with(status: &str) -> Sandbox {
         format!("#!/bin/sh\n[ \"$*\" = 'status server --json' ] || exit 64\n{status}\n"),
     );
     let settings = dir.path().join("settings.json");
+    fs::create_dir_all(dir.path().join("config")).unwrap();
+    fs::write(
+        dir.path().join("config/config.toml"),
+        "context_window = 200000\n[lead_defaults]\nmerge = false\n",
+    )
+    .unwrap();
     Sandbox { dir, bin, settings }
 }
 
@@ -91,7 +97,7 @@ fn a_sound_install_prints_one_line_and_exits_0() {
     let s = sandbox(Some("0.9.5"));
     s.install_hooks();
     let out = s.doctor(&[]);
-    assert_eq!(stdout(&out), "doctor: 9 ok, 0 warnings, 0 failures\n");
+    assert_eq!(stdout(&out), "doctor: 13 ok, 0 warnings, 0 failures\n");
     assert_eq!(out.status.code(), Some(0));
 }
 
@@ -112,7 +118,7 @@ fn missing_hooks_in_the_given_settings_fail_naming_install_hook_and_exit_1() {
         "{text}"
     );
     assert!(
-        text.ends_with("doctor: 4 ok, 1 warnings, 4 failures\n"),
+        text.ends_with("doctor: 8 ok, 1 warnings, 4 failures\n"),
         "{text}"
     );
     assert_eq!(out.status.code(), Some(1));
@@ -134,7 +140,8 @@ fn pane_label_on_makes_a_missing_prompt_hook_fail() {
     fs::create_dir_all(&config).unwrap();
     fs::write(
         config.join("config.toml"),
-        "[notify]\nenabled = true\npane_label = true\n",
+        "context_window = 200000\n[lead_defaults]\nmerge = false\n\
+         [notify]\nenabled = true\npane_label = true\n",
     )
     .unwrap();
     let out = s.doctor(&[]);
@@ -227,7 +234,12 @@ fn settings_given_doctor_runs_without_home_or_a_config_dir() {
         .env("PATH", format!("{}:/usr/bin:/bin", s.bin.display()))
         .output()
         .unwrap();
-    assert_eq!(stdout(&out), "doctor: 9 ok, 0 warnings, 0 failures\n");
+    assert_eq!(
+        stdout(&out),
+        "warning config and state: not checked: HOME is not set; \
+         fix: set HOME\n\
+         doctor: 9 ok, 1 warnings, 0 failures\n"
+    );
     assert_eq!(out.status.code(), Some(0));
 }
 
@@ -259,11 +271,11 @@ fn verbose_lists_every_check_and_json_gives_them_as_data() {
     let s = sandbox(Some("0.9.5"));
     s.install_hooks();
     let verbose = stdout(&s.doctor(&["--verbose"]));
-    assert_eq!(verbose.lines().count(), 10, "{verbose}");
+    assert_eq!(verbose.lines().count(), 14, "{verbose}");
     assert!(verbose.contains("ok herdr version: 0.9.5\n"), "{verbose}");
     let out = s.doctor(&["--json"]);
     let data: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(data["ok"], 9);
+    assert_eq!(data["ok"], 13);
     assert_eq!(data["checks"][8]["name"], "herdr version");
     assert_eq!(out.status.code(), Some(0));
 }
@@ -285,13 +297,39 @@ fn doctor_exits_2_when_it_cannot_run() {
 }
 
 #[test]
+fn a_herd_narrows_the_herd_checks_and_an_unknown_one_exits_2() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    let herds = s.dir.path().join("config/herds");
+    let repo = s.dir.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::create_dir_all(&herds).unwrap();
+    fs::write(
+        herds.join("h.toml"),
+        format!("repo = {:?}\n", repo.to_str().unwrap()),
+    )
+    .unwrap();
+    fs::write(herds.join("broken.toml"), "colour = 1\n").unwrap();
+    assert_eq!(s.doctor(&[]).status.code(), Some(1));
+    let out = s.doctor(&["h"]);
+    assert_eq!(stdout(&out), "doctor: 15 ok, 0 warnings, 0 failures\n");
+    assert_eq!(out.status.code(), Some(0));
+    let out = s.doctor(&["nope"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).starts_with("loopherd doctor: herd: read "),
+        "{out:?}"
+    );
+}
+
+#[test]
 fn doctor_help_documents_its_flags() {
     let out = Command::new(LOOPHERD)
         .args(["doctor", "--help"])
         .output()
         .unwrap();
     let help = stdout(&out);
-    for flag in ["--verbose", "--json", "--settings"] {
+    for flag in ["--verbose", "--json", "--settings", "[HERD]"] {
         assert!(help.contains(flag), "{help}");
     }
     let top = stdout(&Command::new(LOOPHERD).arg("--help").output().unwrap());
