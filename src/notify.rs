@@ -561,14 +561,12 @@ impl RunOn {
         }
     }
 
-    /// A strong `key=value` word read as a value, so not by [`clause_start`], whose
-    /// clause or quote runs past it.
+    /// A `key=value` word read as a value, so not by [`clause_start`], whose quote, or
+    /// for a strong key whose clause, runs past it.
     fn clause_after(word: &str) -> Option<RunOn> {
-        let (true, value) = carried_value(word)? else {
-            return None;
-        };
+        let (strong, value) = carried_value(word)?;
         if !value.starts_with(OPENERS) {
-            return clause_end(value).is_none().then_some(RunOn::Clause);
+            return (strong && clause_end(value).is_none()).then_some(RunOn::Clause);
         }
         match Next::after_value(value) {
             Next::Closing(closer) => Some(RunOn::Quote(closer)),
@@ -1748,6 +1746,42 @@ mod tests {
             ),
             (
                 "TOKEN passphrase=“hunter22 horse battery”, then merge?",
+                "TOKEN [redacted] [redacted] [redacted] then merge?",
+            ),
+        ] {
+            assert_eq!(text_sent(question), text, "{question}");
+        }
+    }
+
+    #[test]
+    fn a_weak_or_mid_word_key_value_word_opening_a_quote_after_a_key_or_label_hides_to_its_close() {
+        for (question, text) in [
+            (
+                r#"Use auth key="hunter22 horse battery", then merge?"#,
+                "Use auth [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                r#"TOKEN key="hunter22 horse battery", then merge?"#,
+                "TOKEN [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                r#"TOKEN x.passphrase="hunter22 horse battery", then merge?"#,
+                "TOKEN [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                "Use token passphrase='hunter22 horse battery', then merge?",
+                "Use token [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                "TOKEN key='hunter22 horse battery', then merge?",
+                "TOKEN [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                "Use auth passphrase=[hunter22 horse battery], then merge?",
+                "Use auth [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                "TOKEN key=(hunter22 horse battery), then merge?",
                 "TOKEN [redacted] [redacted] [redacted] then merge?",
             ),
         ] {
