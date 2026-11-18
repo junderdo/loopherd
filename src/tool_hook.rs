@@ -1572,7 +1572,9 @@ fn needs_one(command: &[Word], aliases: &mut Aliases) -> Vec<Switch> {
                 // A nameref (`declare -n r=CARGO_ALIAS_X`) assigns through another name.
                 aliases.unreadable_name = true;
             }
-            args.iter().for_each(|w| aliases.assign(w));
+            for (at, w) in args.iter().enumerate() {
+                aliases.assign_filled(w, |t| fills(&replace_strings, i + 1 + at, t));
+            }
             return vec![];
         } else if xargs_appends && (program == "watch" || program == "find") {
             return vec![Switch::Unreadable];
@@ -5085,6 +5087,8 @@ mod tests {
             "echo 'gh pr merge 1' | xargs -I X bash -c X",
             "echo merge | xargs -I X bash -c 'gh pr X 1'",
             "echo GH_CONFIG_DIR | xargs -I N env N=/tmp/d gh pr view 1",
+            "echo GH_CONFIG_DIR | xargs -I N bash -c 'export N=/tmp/d; gh pr view 1'",
+            "echo 1 | xargs -I e gh pr view e",
         ] {
             assert_unreadable(command);
         }
@@ -5097,6 +5101,8 @@ mod tests {
         for command in [
             "echo run | xargs -I V env CARGO_ALIAS_Y=V cargo y -- herd set h lead.merge true",
             "echo CARGO_ALIAS_Y | xargs -I N env N=run cargo y -- herd set h k v",
+            "echo run | xargs -I V bash -c 'export CARGO_ALIAS_Y=V; cargo y -- herd set h lead.merge true'",
+            "echo run | xargs -I V bash -c 'declare CARGO_ALIAS_Y=V; cargo y -- herd set h k v'",
         ] {
             assert_judged(command, Switch::OpaqueCargoAlias);
         }
