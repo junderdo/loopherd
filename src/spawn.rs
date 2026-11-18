@@ -1,6 +1,6 @@
 //! `loopherd spawn`: start a named Claude agent in a new tab and record it.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -11,6 +11,7 @@ use crate::herdr::{
     Agent, AgentStatus, Herdr, NewTab, StartOutcome, WaitOutcome, Workspace, wait_for_shell_prompt,
 };
 use crate::ledger::{AgentRecord, Ledger, Role};
+use crate::report::member_of_own_pane;
 use crate::template::Template;
 use crate::worktree::{ensure_detached_worktree, ensure_worktree, planned_worktree, worktree_path};
 
@@ -409,6 +410,22 @@ fn ensure_name_free(herdr: &dyn Herdr, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// The workspace a spawn from the pane `own_pane` of the herdr at `socket`
+/// defaults to: `env_workspace`, `$HERDR_WORKSPACE_ID`, unless the caller is a
+/// member moved to another workspace, whose agent inherited its old one.
+pub fn inherited_workspace(
+    entries: &BTreeMap<String, AgentRecord>,
+    own_pane: Option<&str>,
+    socket: Option<&Path>,
+    env_workspace: Option<String>,
+) -> Option<String> {
+    own_pane
+        .and_then(|pane| member_of_own_pane(entries, pane, socket))
+        .filter(|member| member.env_pane_id.is_some())
+        .map(|member| member.workspace.clone())
+        .or(env_workspace)
+}
+
 fn resolve_workspace(
     herdr: &dyn Herdr,
     label: Option<&str>,
@@ -497,7 +514,7 @@ fn close_after_failure(herdr: &dyn Herdr, tab: &NewTab, err: anyhow::Error) -> a
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::herdr::fake::{FakeHerdr, Startup};
+    use crate::herdr::fake::{FAKE_SOCKET, FakeHerdr, Startup};
     use crate::ledger::MemLedger;
     use crate::worktree::testing::{current_branch, repo_with_origin};
 
@@ -588,6 +605,29 @@ mod tests {
         let herdr = herdr();
         run(&herdr, &mut MemLedger::default(), &request("a")).unwrap();
         assert_eq!(herdr.tabs()[0].workspace_id, "w1");
+    }
+
+    #[test]
+    fn a_member_moved_to_another_workspace_spawns_into_its_current_one() {
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        let lead = spawn(&herdr, &mut ledger, &request("lead-a"), Some("w1")).unwrap();
+        let socket = Some(Path::new(FAKE_SOCKET));
+        let inherited = |ledger: &MemLedger, pane: &str| {
+            inherited_workspace(&ledger.0, Some(pane), socket, Some("w1".into()))
+        };
+        assert_eq!(inherited(&ledger, &lead.pane_id).as_deref(), Some("w1"));
+
+        let moved = ledger.0.get_mut("lead-a").unwrap();
+        moved.env_pane_id = Some(lead.pane_id.clone());
+        moved.pane_id = "w2:p9".into();
+        moved.workspace = "w2".into();
+        let workspace = inherited(&ledger, &lead.pane_id);
+        spawn(&herdr, &mut ledger, &request("b"), workspace.as_deref()).unwrap();
+
+        assert_eq!(herdr.tabs()[1].workspace_id, "w2");
+        assert_eq!(inherited(&ledger, "w2:p9").as_deref(), Some("w2"));
+        assert_eq!(inherited(&ledger, "w1:p77").as_deref(), Some("w1"));
     }
 
     #[test]
