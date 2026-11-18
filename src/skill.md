@@ -492,12 +492,15 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   restores a session or a new server takes over, which does nothing
   unless `config.toml` sets `[herdr_plugin] revive_on_startup = true`
   (set it only when the human says so; `loopherd herds` validates it).
-  On, it revives only members recorded on that server's socket (never
-  one recorded without a socket), so the dev session and the live one
-  never touch each other's. Its output goes to the plugin log, not your
-  screen, so it copies each lead's line, unless that lead's watch is
-  running, into the lead's mailbox as a `note` starting `herdr's startup
-  revive:`; your next watch surfaces them. A live handoff runs it too,
+  On, it revives only members recorded on the socket herdr gives the
+  hook (`HERDR_SOCKET_PATH`, never one recorded without a socket), so a
+  dev server's startup never touches the live session's members, and
+  the other way round. A manual `revive` still walks every entry. herdr
+  shows you nothing of the hook's run, so it copies each lead's line,
+  unless that lead's watch is running, into the lead's mailbox as a
+  `note` starting `herdr's startup revive:`; your next watch surfaces
+  them. A second revive waits for a running one (it says so on stderr)
+  and gives up after 10 minutes. A live handoff runs it too,
   where nothing was lost: a lead between watches then gets the re-arm
   prompt anyway, and its note says so. Tell a lead that handed off or
   drained to ignore it.

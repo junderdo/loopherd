@@ -137,16 +137,21 @@ fn wrapper_fails_with_how_to_install_when_loopherd_is_missing() {
 /// `loopherd revive --startup` with only `config` as its config dir and no
 /// herdr on `PATH`, so any herdr call fails.
 fn startup_revive(config: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_loopherd"))
-        .args(["revive", "--startup"])
+    startup_revive_without_socket(config)
+        .env("HERDR_SOCKET_PATH", config.join("herdr.sock"))
+        .output()
+        .unwrap()
+}
+
+fn startup_revive_without_socket(config: &Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_loopherd"));
+    cmd.args(["revive", "--startup"])
         .env_clear()
         .env("PATH", config)
         .env("HOME", config)
         .env("LOOPHERD_CONFIG_DIR", config)
-        .env("XDG_STATE_HOME", config.join("state"))
-        .env("HERDR_SOCKET_PATH", config.join("herdr.sock"))
-        .output()
-        .unwrap()
+        .env("XDG_STATE_HOME", config.join("state"));
+    cmd
 }
 
 #[test]
@@ -199,6 +204,27 @@ fn the_startup_revive_refuses_an_invalid_config() {
     assert!(!out.status.success(), "{out:?}");
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("revive_on_startup"),
+        "{out:?}"
+    );
+    assert!(!config.path().join("state").exists(), "{out:?}");
+}
+
+#[test]
+fn the_startup_revive_refuses_without_the_hooks_socket() {
+    let config = tempfile::tempdir().unwrap();
+    fs::write(
+        config.path().join("config.toml"),
+        "[herdr_plugin]\nrevive_on_startup = true\n",
+    )
+    .unwrap();
+
+    let out = startup_revive_without_socket(config.path())
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("HERDR_SOCKET_PATH is unset"),
         "{out:?}"
     );
     assert!(!config.path().join("state").exists(), "{out:?}");

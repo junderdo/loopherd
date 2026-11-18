@@ -865,16 +865,23 @@ fn run_release(name: &str, keep_branch: bool, drop_branch: bool) -> Result<i32> 
 }
 
 fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32> {
-    if startup {
-        let config = herd::config_file(&Paths::from_env().context("config")?);
-        if !config::revive_on_startup(&config)? {
-            println!(
-                "revive on startup is off; set [herdr_plugin] revive_on_startup = true in {} to turn it on",
-                config.display()
-            );
-            return Ok(0);
+    let startup = match startup {
+        false => None,
+        true => {
+            let config = herd::config_file(&Paths::from_env().context("config")?);
+            if !config::revive_on_startup(&config)? {
+                println!(
+                    "revive on startup is off; set [herdr_plugin] revive_on_startup = true in {} to turn it on",
+                    config.display()
+                );
+                return Ok(0);
+            }
+            // Never herdr's own answer: outside a hook that is whichever server the CLI reaches.
+            Some(socket_from_env().context(
+                "refused: HERDR_SOCKET_PATH is unset; --startup revives only the members of the herdr whose startup hook runs it",
+            )?)
         }
-    }
+    };
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let req = ReviveRequest {
         name,
@@ -883,6 +890,7 @@ fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32>
         poll_interval: Duration::from_millis(250),
         start_timeout: Duration::from_secs(60),
         reports_dir: ledger.reports_dir()?,
+        lock_timeout: Duration::from_secs(600),
         startup,
     };
     let (message, code) = revive(&CliHerdr, &mut ledger, &req, &live_session)?.report();
