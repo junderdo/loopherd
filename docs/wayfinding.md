@@ -86,6 +86,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D69](decisions/D69.md) | The ledger records each member's herdr tab, and the plugin hooks `tab.closed` and `workspace.closed`, so a member whose tab or workspace closed between watches shows up `gone`. |
 | [D70](decisions/D70.md) | A lead's `review_rounds`, a positive integer, resolves from its herd file's `[lead]`, else `[lead_defaults]`, else 3; the lead's prompt gets it as `{review_rounds}` and `loopherd herds` shows it with its source. Amends D31's `[lead_defaults]` keys. |
 | [D71](decisions/D71.md) | A restarted lead's resume prompt carries its switches and `review_rounds`, resolved at restart; a herd file or `config.toml` that can't be read, or a lead with no herd or `[lead]`, refuses the restart before the `/clear`. |
+| [D72](decisions/D72.md) | A watch says `<herd> out of work`, once per streak, for an unpaused herd with no claimable or unready work and no open worker: a lead's for its herd, the shepherd's for unled herds. Amends D60's no herd checks in the shepherd's watch. |
 
 ## Emerging model
 
