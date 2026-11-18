@@ -1,0 +1,10 @@
+{
+  "session_id": "dcba7188-07a5-47eb-a4a4-f3c000b9514d",
+  "transcript_path": "/home/user/.claude/projects/-tmp-project/dcba7188-07a5-47eb-a4a4-f3c000b9514d.jsonl",
+  "cwd": "/tmp/project",
+  "scratchpad_dir": "/tmp/claude-1000/-tmp-project/dcba7188-07a5-47eb-a4a4-f3c000b9514d/scratchpad",
+  "prompt_id": "b8cab07d-1ae4-4a0a-a2a6-0405f62ac6f4",
+  "permission_mode": "auto",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "<task-notification>\n<task-id>bxob6uen8</task-id>\n<tool-use-id>toolu_013tQ9VL8BjrS2UPFwmV62Lz</tool-use-id>\n<output-file>/tmp/claude-1000/-tmp-project/dcba7188-07a5-47eb-a4a4-f3c000b9514d/tasks/bxob6uen8.output</output-file>\n<status>completed</status>\n<summary>Background command \"Sleep 4 seconds then echo bg-done\" completed (exit code 0)</summary>\n</task-notification>"
+}

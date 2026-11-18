@@ -48,6 +48,8 @@ struct Table {
     kinds: Option<Vec<Kind>>,
     herdr: Option<bool>,
     command: Option<CommandLine>,
+    #[serde(default)]
+    pane_label: bool,
 }
 
 /// Words split on whitespace, or an exact argument list.
@@ -63,12 +65,18 @@ pub struct Config {
     kinds: Vec<Kind>,
     herdr: bool,
     command: Vec<String>,
+    pane_label: bool,
 }
 
 impl Config {
-    /// Enabled with herdr's toast off and no command.
+    /// Enabled with herdr's toast off, no command and no pane label.
     pub fn sends_nothing(&self) -> bool {
-        !self.herdr && self.command.is_empty()
+        !self.herdr && self.command.is_empty() && !self.pane_label
+    }
+
+    /// Whether to label the pane that must relay or answer a question; see `pane_label`.
+    pub fn labels_panes(&self) -> bool {
+        self.pane_label
     }
 }
 
@@ -116,6 +124,7 @@ fn check(table: Table) -> Result<Option<Config>> {
         kinds: table.kinds.unwrap_or(vec![Kind::Question, Kind::Blocked]),
         herdr: table.herdr.unwrap_or(true),
         command,
+        pane_label: table.pane_label,
     }))
 }
 
@@ -405,7 +414,7 @@ const MAX_TEXT: usize = 200;
 /// ones, and a word either reading hides stays hidden. The line stops where the
 /// as-written reading's own line is cut, so reading the quotes never shows a word,
 /// or more of one, that the first reading hides or cuts off.
-fn summary(question: &str) -> String {
+pub fn summary(question: &str) -> String {
     let first = question
         .lines()
         .find(|line| !line.trim().is_empty())
@@ -2004,6 +2013,19 @@ mod tests {
         assert!(error("[notify]\nenabled = true\nkinds = ['done']\n").contains("done"));
         assert!(error("[notify]\nenabled = true\ncommand = 'x {who}'\n").contains("{who}"));
         assert!(error("[notify]\nenabled = true\ncommand = ''\n").contains("command"));
+    }
+
+    #[test]
+    fn pane_label_is_off_unless_set_true() {
+        let load = |text: &str| load_text(text).unwrap().unwrap().labels_panes();
+        assert!(!load("[notify]\nenabled = true\n"));
+        assert!(load("[notify]\nenabled = true\npane_label = true\n"));
+        assert!(error("[notify]\nenabled = true\npane_label = 'yes'\n").contains("pane_label"));
+        assert!(
+            load_text("[notify]\nenabled = false\npane_label = true\n")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
