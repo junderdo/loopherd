@@ -10,6 +10,8 @@ use std::process::{Command, Output};
 fn run_herds(config: &Path, bin: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_loopherd"))
         .arg("herds")
+        .arg("--settings")
+        .arg(config.join("settings.json"))
         .env("LOOPHERD_CONFIG_DIR", config)
         .env("XDG_STATE_HOME", config.join("state"))
         .env("PATH", bin)
@@ -109,6 +111,50 @@ fn herds_shows_when_a_herd_was_paused() {
         String::from_utf8_lossy(&out.stdout),
         "docs  repo /r  workspace (current)  paused no\n\
          prs  repo /r  workspace (current)  paused since 2026-11-05T09:00:00Z\n"
+    );
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn herds_warns_of_a_missing_prompt_hook_in_the_settings_it_is_given_until_install_hook_adds_it() {
+    let config = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let herds = config.path().join("herds");
+    fs::create_dir(&herds).unwrap();
+    fs::write(herds.join("prs.toml"), "repo = \"/r\"\n").unwrap();
+    fs::write(
+        config.path().join("config.toml"),
+        "[notify]\nenabled = true\npane_label = true\n",
+    )
+    .unwrap();
+    let settings = config.path().join("settings.json");
+
+    let out = run_herds(config.path(), bin.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!(
+            "prompt hook is not in {}, so a pane label in herd prs stays",
+            settings.display()
+        )),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("run scripts/install or loopherd install-hook"),
+        "{stdout}"
+    );
+    assert_eq!(out.status.code(), Some(0));
+
+    let installed = Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .args(["install-hook", "--settings"])
+        .arg(&settings)
+        .output()
+        .unwrap();
+    assert!(installed.status.success(), "{installed:?}");
+
+    let out = run_herds(config.path(), bin.path());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "prs  repo /r  workspace (current)  paused no\n"
     );
     assert_eq!(out.status.code(), Some(0));
 }

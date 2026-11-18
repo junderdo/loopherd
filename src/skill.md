@@ -349,7 +349,8 @@ status, never `blocked`, so no watch reads it as a dialog. The human's next
 prompt in that pane, or a new, resumed or cleared session there, clears it;
 a background task finishing, such as your watch, or a compaction doesn't.
 A lead's watch never labels for its workers. Clearing needs the
-UserPromptSubmit hook from `install-hook`.
+UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
+`pane_label` is on without it.
 
 ### Commands
 
