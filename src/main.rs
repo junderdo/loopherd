@@ -60,7 +60,7 @@ use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
 use crate::feed::{FeedRequest, feed, run_after_merge};
-use crate::herd::{AddRequest, Paths, add, dry_run, herds};
+use crate::herd::{AddRequest, Paths, SwitchValues, add, dry_run, herds};
 use crate::herd_view::Options;
 use crate::herdr::events::SocketSubscriber;
 use crate::herdr::{CliHerdr, Herdr, socket_from_env};
@@ -819,7 +819,7 @@ fn run_lead_defaults(set: Option<String>) -> Result<i32> {
     if let Some(list) = set {
         config::set_lead_defaults(&config, &list)?;
     }
-    if let Some(defaults) = config::lead_defaults(&config)? {
+    if let Some(defaults) = config::lead_defaults(&config)?.filter(SwitchValues::sets_a_switch) {
         println!("{}", defaults.over(&Default::default()).lines());
     }
     Ok(0)

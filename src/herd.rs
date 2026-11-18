@@ -118,6 +118,11 @@ impl SwitchValues {
         "blocked_dialogs",
     ];
 
+    /// Whether this layer sets any switch; `review_rounds` alone doesn't count.
+    pub fn sets_a_switch(&self) -> bool {
+        self.values().iter().any(Option::is_some)
+    }
+
     fn values(&self) -> [Option<bool>; 6] {
         [
             self.merge,
