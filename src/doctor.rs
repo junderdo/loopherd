@@ -336,12 +336,21 @@ fn message(e: &anyhow::Error) -> String {
 
 fn hook_checks(install: &Install) -> Vec<Check> {
     let settings = install.settings.display();
+    // By name, a stale loopherd first on PATH would point the hooks back at itself.
+    let stale_on_path = install
+        .on_path
+        .as_ref()
+        .filter(|on_path| !same_file(&install.running, on_path));
+    let loopherd = match stale_on_path {
+        Some(_) => crate::shell::quote(&install.running.to_string_lossy()),
+        None => "loopherd".to_string(),
+    };
     let install_hook = match install.settings_given {
         true => format!(
-            "loopherd install-hook --settings {}",
+            "{loopherd} install-hook --settings {}",
             crate::shell::quote(&install.settings.to_string_lossy())
         ),
-        false => "loopherd install-hook".to_string(),
+        false => format!("{loopherd} install-hook"),
     };
     let hooks = match crate::install_hook::hooks(&install.settings) {
         Ok(hooks) => hooks,
@@ -385,13 +394,24 @@ fn hook_checks(install: &Install) -> Vec<Check> {
                     other.display(),
                     on_path.display()
                 ),
-                install_hook,
+                match stale_on_path {
+                    Some(stale) => format!(
+                        "put {} before {} on PATH, then {install_hook}",
+                        dir_of(&install.running).display(),
+                        dir_of(stale).display()
+                    ),
+                    None => install_hook,
+                },
             ),
             None if called.is_empty() => ok("hook binary", "no hooks to check".into()),
             None => ok("hook binary", format!("hooks call {}", on_path.display())),
         },
     });
     checks
+}
+
+fn dir_of(binary: &Path) -> &Path {
+    binary.parent().unwrap_or(binary)
 }
 
 fn running_binary(install: &Install) -> Check {
@@ -971,6 +991,30 @@ mod tests {
                  doctor: 13 ok, 0 warnings, 1 failures\n",
                 old.display(),
                 path_exe.display()
+            )
+        );
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn a_stale_loopherd_first_on_path_names_the_running_binary_in_the_fix() {
+        let mut m = machine(&ALL);
+        let stale = m.dir.path().join("cargo/bin/loopherd");
+        m.install.on_path = Some(stale.clone());
+        let running = m.install.running.clone();
+        let (out, code) = run(&m, &herdr());
+        assert_eq!(
+            out,
+            format!(
+                "failure hook binary: hooks call {running}, not the loopherd on PATH ({stale}); \
+                 fix: put {running_dir} before {stale_dir} on PATH, then '{running}' install-hook\n\
+                 warning running binary: this is {running}, not the loopherd on PATH ({stale}); \
+                 fix: run the loopherd on PATH\n\
+                 doctor: 12 ok, 1 warnings, 1 failures\n",
+                running = running.display(),
+                stale = stale.display(),
+                running_dir = running.parent().unwrap().display(),
+                stale_dir = stale.parent().unwrap().display(),
             )
         );
         assert_eq!(code, 1);
