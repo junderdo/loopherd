@@ -390,11 +390,14 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   it refuses and names them, and refuses while a feed, add or release
   runs (retry once it ends). It won't delete an origin branch that an open
   PR is on, naming the PR, unless you pass `--drop-branch`, which closes
-  the PR. It deletes the origin branch last. If origin kept it because
+  the PR. It deletes the origin branch after the local ones, and marks
+  the name released only once origin's branch is gone, so feed skips the
+  name until then. If origin kept it because
   someone pushed to it meanwhile, check who before anything else: rerun
   with `--keep-branch`, never `--drop-branch`, unless those commits should
-  go. Any other failed delete leaves the rest done, and a rerun retries
-  it once the cause is fixed. The delete runs the repo's pre-push hooks,
+  go. Any other failed delete leaves the rest done, and rerunning the
+  same release command once the cause is fixed deletes it and releases;
+  while origin can't be asked, that rerun refuses. The delete runs the repo's pre-push hooks,
   within `LOOPHERD_GIT_TIMEOUT`; when one refuses, release prints its
   output. `--keep-branch` never contacts origin. A lead
   may run it; it's part of feeding. `status --all` marks the entry

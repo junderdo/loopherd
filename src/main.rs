@@ -186,9 +186,11 @@ enum Command {
     /// Let `feed` spawn a retired member's name again, for a task it left
     /// unfinished. Deletes its local branch and worktree so the new member
     /// starts afresh, refusing while the branch has commits not on the base
-    /// unless told to keep or drop them, and deletes its branch on origin
-    /// last, refusing while an open PR is on it unless told to drop it.
-    /// Refuses a member not retired or whose tab may be open.
+    /// unless told to keep or drop them, and deletes its branch on origin,
+    /// refusing while an open PR is on it unless told to drop it. Marks the
+    /// name released only once origin's branch is gone, so feed skips it
+    /// until a rerun finishes. Refuses a member not retired or whose tab
+    /// may be open.
     Release {
         name: String,
         /// Leave its branch and worktree; the new member starts from them.
