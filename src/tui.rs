@@ -733,7 +733,7 @@ impl App {
                 });
             }
             for ((member, cells), gauge) in members.iter().zip(cells).zip(gauges) {
-                let (glyph, style) = self.theme.glyph(member.status, member.gone, spinner);
+                let (glyph, style) = self.theme.glyph(member, spinner);
                 let mut spans = vec![Span::raw(" "), Span::styled(glyph, style), Span::raw(" ")];
                 let (text_style, time_style) = match member.gone {
                     true => (
@@ -1931,7 +1931,7 @@ max = 3
         assert_eq!(shown("b"), ("⚠".into(), Color::Yellow, false));
         assert_eq!(shown("c"), ("✓".into(), SOFT_VIOLET, false));
         assert_eq!(shown("old"), ("✕".into(), Color::Red, false));
-        assert_eq!(shown("done-1"), ("?".into(), Color::Reset, true));
+        assert_eq!(shown("done-1"), ("·".into(), Color::Reset, true));
         herdr.set_status("c", AgentStatus::Idle);
         refresh(&mut app, &herdr, &ledger, now);
         let terminal = render_tall(&app, now);
@@ -2086,7 +2086,7 @@ max = 3
                 "│╰────────────────────────────────────────────────────────────────────╯│",
                 "│╭ retired ───────────────────────────────────────────────────────────╮│",
                 "││   NAME    STATUS            BRANCH  WORKTREE   PANE                ││",
-                "││ ? done-1  retired           -       wt-done-1  w1:pdone-1          ││",
+                "││ · done-1  retired           -       wt-done-1  w1:pdone-1          ││",
                 "│╰────────────────────────────────────────────────────────────────────╯│",
                 "│╭ +1 stray (live in herdr, not in loopherd's ledger) ────────────────╮│",
                 "││ w2:p7  /src/elsewhere  poking around                               ││",
@@ -3081,13 +3081,84 @@ max = 3
             shown[retired - 1..=retired],
             [
                 "││   NAME    STATUS                                 BRANCH  WORKT││                                                   ││",
-                "││ ? done-1  retired 2026-11-17T08:00:00Z           -       wt-do││                                                   ││",
+                "││ · done-1  retired 2026-11-17T08:00:00Z           -       wt-do││                                                   ││",
             ]
         );
         assert!(
             row("⚠ b").contains("⚠ b       blocked           -       wt-b"),
             "{shown:#?}"
         );
+    }
+
+    /// `done-1` retired at `retired_at`, its pane still live in herdr and
+    /// seen going from idle to working at `t0`; the retired list shown.
+    fn retired_but_running(retired_at: Option<&str>, t0: Instant) -> App {
+        let mut ledger = ledger();
+        ledger.0.get_mut("done-1").unwrap().retired_at = retired_at.map(str::to_string);
+        let herdr = herdr().with_raw_agent(agent(Some("done-1"), "w1:pdone-1", AgentStatus::Idle));
+        let mut app = app(&herdr, &ledger, t0);
+        press(&mut app, &[KeyCode::Char('a')], &herdr, &ledger);
+        herdr.set_status("done-1", AgentStatus::Working);
+        herdr.set_status("a", AgentStatus::Done);
+        refresh(&mut app, &herdr, &ledger, t0);
+        app
+    }
+
+    #[test]
+    fn a_retired_row_shows_no_live_glyph_or_time_while_its_pane_still_runs() {
+        let t0 = Instant::now();
+        let app = retired_but_running(Some("2026-11-17T08:00:00Z"), t0);
+        let terminal = render_at(&app, t0 + Duration::from_secs(61 * 60), 120, 30);
+        let shown = lines(&terminal);
+        let row = |name: &str| {
+            shown
+                .iter()
+                .find(|l| l.contains(&format!(" {name} ")))
+                .unwrap_or_else(|| panic!("{name} in {shown:#?}"))
+                .clone()
+        };
+        assert!(
+            row("done-1").contains("· done-1  retired 2026-11-17T08:00:00Z           -"),
+            "{shown:#?}"
+        );
+        let glyph = glyph(&terminal, "done-1");
+        assert!(glyph.modifier.contains(Modifier::DIM), "{glyph:?}");
+        assert!(
+            row("a").contains("✓ a       done     for 1h   -"),
+            "{shown:#?}"
+        );
+    }
+
+    #[test]
+    fn a_selected_retired_member_reads_retired_with_its_time_in_the_detail_pane() {
+        for (retired_at, status) in [
+            (Some("2026-11-17T08:00:00Z"), "retired 2026-11-17T08:00:00Z"),
+            (None, "retired"),
+        ] {
+            let t0 = Instant::now();
+            let mut app = retired_but_running(retired_at, t0);
+            for _ in 0..4 {
+                app.press(KeyCode::Down, t0);
+            }
+            let shown = pane_text(
+                &render_at(&app, t0 + Duration::from_secs(120), 120, 24),
+                "done-1",
+            );
+            assert_eq!(shown[0], status, "{shown:#?}");
+        }
+    }
+
+    #[test]
+    fn a_live_members_detail_reads_its_status_and_time() {
+        let (herdr, ledger, t0) = (herdr(), ledger(), Instant::now());
+        let mut app = app(&herdr, &ledger, t0);
+        herdr.set_status("b", AgentStatus::Idle);
+        refresh(&mut app, &herdr, &ledger, t0);
+        let shown = pane_text(
+            &render_at(&app, t0 + Duration::from_secs(180), 120, 24),
+            "b",
+        );
+        assert_eq!(shown[0], "idle for 3m", "{shown:#?}");
     }
 
     #[test]

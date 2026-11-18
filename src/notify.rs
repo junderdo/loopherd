@@ -561,12 +561,17 @@ impl RunOn {
         }
     }
 
-    /// A strong `key=value` word read as a value, so not by [`clause_start`], whose
-    /// clause runs past it.
+    /// A `key=value` word read as a value, so not by [`clause_start`], whose quote, or
+    /// for a strong key whose clause, runs past it.
     fn clause_after(word: &str) -> Option<RunOn> {
         let (strong, value) = carried_value(word)?;
-        let runs_on = strong && !value.starts_with(OPENERS) && clause_end(value).is_none();
-        runs_on.then_some(RunOn::Clause)
+        if !value.starts_with(OPENERS) {
+            return (strong && clause_end(value).is_none()).then_some(RunOn::Clause);
+        }
+        match Next::after_value(value) {
+            Next::Closing(closer) => Some(RunOn::Quote(closer)),
+            _ => None,
+        }
     }
 
     /// What is left of the run once `word`, which it hides, is read.
@@ -1718,6 +1723,78 @@ mod tests {
             (
                 "TOKEN passphrase=hunter22 horse battery, then merge?",
                 "TOKEN [redacted], then merge?",
+            ),
+        ] {
+            assert_eq!(text_sent(question), text, "{question}");
+        }
+    }
+
+    #[test]
+    fn a_strong_key_value_word_opening_a_quote_after_a_key_or_label_hides_to_its_close() {
+        for (question, text) in [
+            (
+                r#"Check the passphrase="hunter22 horse battery", then merge?"#,
+                "Check the [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                r#"TOKEN passphrase="hunter22 horse battery", then merge?"#,
+                "TOKEN [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                r#"Use token passphrase="hunter22 horse battery", then merge?"#,
+                "Use token [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                "TOKEN passphrase=“hunter22 horse battery”, then merge?",
+                "TOKEN [redacted] [redacted] [redacted] then merge?",
+            ),
+        ] {
+            assert_eq!(text_sent(question), text, "{question}");
+        }
+    }
+
+    #[test]
+    fn a_weak_or_mid_word_key_value_word_opening_a_quote_after_a_key_or_label_hides_to_its_close() {
+        for (question, text) in [
+            (
+                r#"Use auth key="hunter22 horse battery", then merge?"#,
+                "Use auth [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                r#"TOKEN key="hunter22 horse battery", then merge?"#,
+                "TOKEN [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                r#"TOKEN x.passphrase="hunter22 horse battery", then merge?"#,
+                "TOKEN [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                "Use token passphrase='hunter22 horse battery', then merge?",
+                "Use token [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                "TOKEN key='hunter22 horse battery', then merge?",
+                "TOKEN [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                "Use auth passphrase=[hunter22 horse battery], then merge?",
+                "Use auth [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                "TOKEN key=(hunter22 horse battery), then merge?",
+                "TOKEN [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                "Use auth key=[hunter22 horse battery], then merge?",
+                "Use auth [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                "Use auth key='hunter22 horse battery', then merge?",
+                "Use auth [redacted] [redacted] [redacted] then merge?",
+            ),
+            (
+                r#"Use token x.passphrase="hunter22 horse battery", then merge?"#,
+                "Use token [redacted] [redacted] [redacted] then merge?",
             ),
         ] {
             assert_eq!(text_sent(question), text, "{question}");
