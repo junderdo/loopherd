@@ -429,10 +429,19 @@ fn agent_tab(
         }
     };
     let pane = panes.iter().find(|p| &p.id == pane_id).cloned();
+    // A moved member's processes keep its old id, which herdr no longer lists.
+    let socket = herdr.socket();
+    let own_panes: Vec<&str> = std::iter::once(record)
+        .chain(others.values())
+        .filter(|e| own_pane.is_some() && e.env_pane_id.as_deref() == own_pane)
+        .filter(|e| e.socket == socket)
+        .map(|e| e.pane_id.as_str())
+        .chain(own_pane)
+        .collect();
     if let Some(pane) = &pane
         && panes
             .iter()
-            .any(|p| Some(p.id.as_str()) == own_pane && p.tab_id == pane.tab_id)
+            .any(|p| own_panes.contains(&p.id.as_str()) && p.tab_id == pane.tab_id)
     {
         return kept(&pane.tab_id, "it is running this command".into());
     }
@@ -1947,6 +1956,101 @@ mod tests {
             ["retired a", "kept tab w1:t1: it is running this command"]
         );
         assert_eq!(herdr.tabs().len(), 1);
+    }
+
+    /// `a` alone in a tab in w2, on the fake herdr's socket, moved there from
+    /// `w1:p7` when `moved`. Returns the ledger, its pane and its tab.
+    fn in_w2(herdr: &FakeHerdr, cwd: &Path, moved: bool) -> (MemLedger, String, String) {
+        let pane = herdr.add_tab("w2", "a", cwd, true);
+        let tab_id = herdr.tabs().last().unwrap().id.clone();
+        let mut ledger = plain(cwd, &pane);
+        let a = ledger.0.get_mut("a").unwrap();
+        a.env_pane_id = moved.then(|| "w1:p7".into());
+        a.workspace = "w2".into();
+        a.workspace_label = None;
+        a.socket = Some(FAKE_SOCKET.into());
+        (ledger, pane, tab_id)
+    }
+
+    fn close_as(herdr: &FakeHerdr, ledger: &mut MemLedger, own_pane: &str) -> Vec<String> {
+        let mut out = vec![];
+        retire_and_close(
+            herdr,
+            ledger,
+            "a",
+            halloween_noon(),
+            Path::new("/nonexistent/reports"),
+            Some(own_pane),
+            &mut out,
+        )
+        .unwrap();
+        out
+    }
+
+    #[test]
+    fn close_keeps_the_tab_running_this_command_after_a_move_to_another_workspace() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = two_workspaces();
+        let (mut ledger, _, tab_id) = in_w2(&herdr, cwd.path(), true);
+
+        let out = close_as(&herdr, &mut ledger, "w1:p7");
+
+        let kept = format!("kept tab {tab_id}: it is running this command");
+        assert_eq!(out, ["retired a".to_string(), kept]);
+        assert_eq!(herdr.tabs().len(), 1);
+    }
+
+    #[test]
+    fn close_keeps_the_tab_a_moved_lead_runs_in_when_retiring_a_worker_there() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = two_workspaces();
+        let (mut ledger, _, tab_id) = in_w2(&herdr, cwd.path(), false);
+        let lead_pane = herdr.split(&tab_id, cwd.path());
+        let mut lead = ledger.0["a"].clone();
+        lead.name = "lead-k".into();
+        lead.pane_id = lead_pane;
+        lead.env_pane_id = Some("w1:p7".into());
+        ledger.0.insert("lead-k".into(), lead);
+
+        let out = close_as(&herdr, &mut ledger, "w1:p7");
+
+        let kept = format!("kept tab {tab_id}: it is running this command");
+        assert_eq!(out, ["retired a".to_string(), kept]);
+    }
+
+    #[test]
+    fn close_closes_a_moved_workers_tab_for_a_caller_elsewhere() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = two_workspaces();
+        let (mut ledger, _, tab_id) = in_w2(&herdr, cwd.path(), true);
+
+        let out = close_as(&herdr, &mut ledger, "w1:p3");
+
+        assert_eq!(
+            out,
+            ["retired a".to_string(), format!("closed tab {tab_id}")]
+        );
+        assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
+    fn close_ignores_a_moved_member_of_another_herdr_with_the_callers_pane_id() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = two_workspaces();
+        let (mut ledger, pane, tab_id) = in_w2(&herdr, cwd.path(), false);
+        let mut elsewhere = ledger.0["a"].clone();
+        elsewhere.name = "m".into();
+        elsewhere.pane_id = pane;
+        elsewhere.env_pane_id = Some("w1:p7".into());
+        elsewhere.socket = Some("/run/other.sock".into());
+        ledger.0.insert("m".into(), elsewhere);
+
+        let out = close_as(&herdr, &mut ledger, "w1:p7");
+
+        assert_eq!(
+            out,
+            ["retired a".to_string(), format!("closed tab {tab_id}")]
+        );
     }
 
     /// Commits `.gitignore` with `patterns` in the worktree and lands it on origin's main.
