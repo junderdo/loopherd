@@ -379,6 +379,26 @@ mod tests {
     }
 
     #[test]
+    fn leading_over_a_retired_lead_keeps_its_run_as_an_earlier_one() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let mut ledger = MemLedger::default();
+        let req = request(&[]);
+        lead(&herdr(), &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
+        let first = ledger.0.get_mut("lead-h").unwrap();
+        first.created = "2026-11-01T00:00:00Z".into();
+        first.retired = true;
+        let first = first.clone();
+
+        let (name, _) = lead(&herdr(), &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
+
+        assert_eq!(name, "lead-h");
+        let entry = &ledger.0["lead-h"];
+        assert!(!entry.retired);
+        assert!(entry.is_lead());
+        assert_eq!(entry.earlier, [first]);
+    }
+
+    #[test]
     fn only_an_unretired_lead_of_the_same_herd_blocks_a_new_lead() {
         let setup = Setup::with_lead("prompt = \"go\"");
         setup.copy_herd("a");
