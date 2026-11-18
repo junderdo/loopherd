@@ -70,14 +70,19 @@ impl Entry {
         }
     }
 
-    /// Its kind and text, unless it's a `stop`, `start`, `blocked` or `gone`.
+    /// Its kind and text, unless it's a `stop`, `start`, `blocked`, `gone` or
+    /// `moved`.
     pub fn report(&self) -> Option<(Kind, &str)> {
         match &self.body {
             Body::Done { text } => Some((Kind::Done, text)),
             Body::Question { text } => Some((Kind::Question, text)),
             Body::Note { text } => Some((Kind::Note, text)),
             Body::Handoff { text } => Some((Kind::Handoff, text)),
-            Body::Stop(_) | Body::Start { .. } | Body::Blocked {} | Body::Gone {} => None,
+            Body::Stop(_)
+            | Body::Start { .. }
+            | Body::Blocked {}
+            | Body::Gone { .. }
+            | Body::Moved {} => None,
         }
     }
 }
@@ -107,8 +112,15 @@ pub enum Body {
     },
     /// herdr showed the member waiting on a dialog.
     Blocked {},
-    /// herdr lost the member's pane.
-    Gone {},
+    /// herdr lost the member's pane; `tab` when it was found by its tab
+    /// closing.
+    Gone {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab: Option<String>,
+    },
+    /// herdr moved the member's pane out of the tab whose close recorded the
+    /// `gone` before it, retracting that `gone`.
+    Moved {},
 }
 
 impl Body {
@@ -421,7 +433,8 @@ pub fn unread_wakes(dir: &Path, names: &[String]) -> Result<(Vec<Mailbox>, Pendi
     let (pending, _) = Cursor::Watch.peek(dir, &names, Locked::Take, |name, read, unread| {
         let mut entries = vec![];
         parse(dir, name, unread, &mut entries, &mut vec![]);
-        let wakes = |e: &Entry| matches!(e.body, Body::Stop(_) | Body::Blocked {} | Body::Gone {});
+        let wakes =
+            |e: &Entry| matches!(e.body, Body::Stop(_) | Body::Blocked {} | Body::Gone { .. });
         if !entries.iter().any(|(_, e)| wakes(e)) {
             return;
         }
@@ -614,7 +627,8 @@ fn render(name: &str, entry: &Entry) -> Vec<String> {
         },
         Body::Start { .. } => return vec![format!("{name} start {when}")],
         Body::Blocked {} => return vec![format!("{name} blocked {when}")],
-        Body::Gone {} => return vec![format!("{name} gone {when}")],
+        Body::Gone { .. } => return vec![format!("{name} gone {when}")],
+        Body::Moved {} => return vec![format!("{name} moved {when}")],
         _ => {
             let (kind, text) = entry.report().expect("a report");
             (kind.as_str(), text.to_string())

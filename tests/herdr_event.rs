@@ -386,3 +386,40 @@ fn a_member_with_no_recorded_tab_takes_the_tab_it_was_moved_to() {
 
     assert_eq!(recorded(dir.path()), ["lh-0 gone"]);
 }
+
+#[test]
+fn a_move_out_of_a_tab_that_then_closes_records_no_gone_in_either_hook_order() {
+    let move_first = sandbox();
+    quiet_success(&moved(
+        move_first.path(),
+        ("w1:p1", "w1:t1"),
+        ("w1:p1", "w1:t4"),
+    ));
+    quiet_success(&tab_closed(move_first.path(), "w1:t1"));
+    assert!(recorded(move_first.path()).is_empty());
+
+    let close_first = sandbox();
+    quiet_success(&tab_closed(close_first.path(), "w1:t1"));
+    quiet_success(&moved(
+        close_first.path(),
+        ("w1:p1", "w1:t1"),
+        ("w1:p1", "w1:t4"),
+    ));
+    assert_eq!(recorded(close_first.path()), ["lh-1 gone", "lh-1 moved"]);
+
+    quiet_success(&tab_closed(close_first.path(), "w1:t4"));
+    assert_eq!(
+        recorded(close_first.path()),
+        ["lh-1 gone", "lh-1 moved", "lh-1 gone"]
+    );
+}
+
+#[test]
+fn a_move_retracts_no_gone_but_one_its_old_tab_closing_recorded() {
+    let dir = sandbox();
+
+    quiet_success(&closed(dir.path(), "pane.exited", "w1:p1"));
+    quiet_success(&moved(dir.path(), ("w1:p1", "w1:t1"), ("w1:p1", "w1:t4")));
+
+    assert_eq!(recorded(dir.path()), ["lh-1 gone"]);
+}

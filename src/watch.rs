@@ -18,7 +18,7 @@ use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::{AfterMerge, AgentRecord, Ledger, Process};
 use crate::lock::Lock;
 use crate::notify::{self, Waiting};
-use crate::pane_event::{record_blocked, record_gone_after};
+use crate::pane_event::{record_blocked, record_gone_after, retracted};
 use crate::pause;
 use crate::process::{Procs, live};
 use crate::report::{Body, Filter, Mailbox, Pending, Stop, member_in, peek_reports, unread_wakes};
@@ -1332,7 +1332,7 @@ fn stop_wakes(mailbox: &Mailbox) -> Vec<String> {
                 reported = true;
                 None
             }
-            Body::Note { .. } | Body::Blocked {} | Body::Gone {} => None,
+            Body::Note { .. } | Body::Blocked {} | Body::Gone { .. } | Body::Moved {} => None,
             Body::Stop(Stop {
                 error: Some(error), ..
             }) => {
@@ -1356,11 +1356,11 @@ fn stop_wakes(mailbox: &Mailbox) -> Vec<String> {
     wakes
 }
 
-/// A wake line for each unread `gone`, and one for any unread `blocked`,
-/// which also waits on the human.
+/// A wake line for each unread `gone` no `moved` retracts, and one for any
+/// unread `blocked`, which also waits on the human.
 fn herdr_wakes(mailbox: &Mailbox, lines: &mut Vec<String>, waiting: &mut Vec<Waiting>) {
     let mut blocked = false;
-    for entry in &mailbox.entries[mailbox.unread..] {
+    for (i, entry) in mailbox.entries.iter().enumerate().skip(mailbox.unread) {
         match entry.body {
             Body::Blocked {} if !std::mem::replace(&mut blocked, true) => {
                 lines.push(format!("{} {}", mailbox.name, line::BLOCKED));
@@ -1372,7 +1372,9 @@ fn herdr_wakes(mailbox: &Mailbox, lines: &mut Vec<String>, waiting: &mut Vec<Wai
                     at: None,
                 });
             }
-            Body::Gone {} => lines.push(format!("{} {}", mailbox.name, line::GONE)),
+            Body::Gone { .. } if !retracted(&mailbox.entries[i + 1..]) => {
+                lines.push(format!("{} {}", mailbox.name, line::GONE));
+            }
             _ => {}
         }
     }
