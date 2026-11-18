@@ -326,10 +326,17 @@ fn agent_tab(
         }
     };
     let pane = panes.iter().find(|p| &p.id == pane_id).cloned();
+    // A moved member's processes keep its old id, which herdr no longer lists.
+    let own_panes: Vec<&str> = std::iter::once(record)
+        .chain(others.values())
+        .filter(|e| own_pane.is_some() && e.env_pane_id.as_deref() == own_pane)
+        .map(|e| e.pane_id.as_str())
+        .chain(own_pane)
+        .collect();
     if let Some(pane) = &pane
         && panes
             .iter()
-            .any(|p| Some(p.id.as_str()) == own_pane && p.tab_id == pane.tab_id)
+            .any(|p| own_panes.contains(&p.id.as_str()) && p.tab_id == pane.tab_id)
     {
         return kept(&pane.tab_id, "it is running this command".into());
     }
@@ -1842,6 +1849,40 @@ mod tests {
         assert_eq!(
             out,
             ["retired a", "kept tab w1:t1: it is running this command"]
+        );
+        assert_eq!(herdr.tabs().len(), 1);
+    }
+
+    #[test]
+    fn close_keeps_the_tab_running_this_command_after_a_move_to_another_workspace() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = two_workspaces();
+        let pane = herdr.add_tab("w2", "a", cwd.path(), true);
+        let tab_id = herdr.tabs()[0].id.clone();
+        let mut ledger = plain(cwd.path(), &pane);
+        let a = ledger.0.get_mut("a").unwrap();
+        a.env_pane_id = Some("w1:p7".into());
+        a.workspace = "w2".into();
+        a.workspace_label = None;
+        let mut out = vec![];
+
+        retire_and_close(
+            &herdr,
+            &mut ledger,
+            "a",
+            halloween_noon(),
+            Path::new("/nonexistent/reports"),
+            Some("w1:p7"),
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(
+            out,
+            [
+                "retired a".to_string(),
+                format!("kept tab {tab_id}: it is running this command")
+            ]
         );
         assert_eq!(herdr.tabs().len(), 1);
     }
