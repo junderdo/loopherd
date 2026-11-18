@@ -98,13 +98,6 @@ pub fn revive(
         } = &outcome
         {
             let restarted = ledger.update(&record.name, &mut |current| {
-                current.pane_id = pane_id.clone();
-                current.tab_id = Some(tab_id.clone());
-                current.workspace = workspace_id.clone();
-                current.session_id = session_id
-                    .clone()
-                    .or(current.session_id.take())
-                    .map(|s| live(&s));
                 if let (Some(here), Some(there)) = (&here, &current.socket)
                     && !same_dir(here, there)
                 {
@@ -114,6 +107,13 @@ pub fn revive(
                         there.display()
                     );
                 }
+                current.pane_id = pane_id.clone();
+                current.tab_id = Some(tab_id.clone());
+                current.workspace = workspace_id.clone();
+                current.session_id = session_id
+                    .clone()
+                    .or(current.session_id.take())
+                    .map(|s| live(&s));
                 current.socket = current.socket.take().or_else(|| here.clone());
                 current.process = None;
                 Ok(())
