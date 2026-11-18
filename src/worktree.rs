@@ -253,6 +253,9 @@ impl Clearing {
             Err(e) if push_refused(&e) => {
                 Err(e.context("the push was refused, perhaps by a pre-push hook"))
             }
+            Err(e) if e.is::<TimedOut>() => {
+                Err(e.context("origin didn't answer, or a pre-push hook took too long"))
+            }
             Err(e) => Err(e),
         }
     }
@@ -874,7 +877,9 @@ fn remote_git_within(repo: &Path, args: &[&str], timeout: Duration) -> Result<St
         .arg("-C")
         .arg(repo)
         .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0");
+        .env("GIT_TERMINAL_PROMPT", "0")
+        // Untranslated, so the messages matched on below read the same everywhere.
+        .env("LC_ALL", "C");
     let batch_mode = !has_own_ssh_setting(repo);
     if batch_mode {
         command.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
@@ -893,15 +898,29 @@ fn remote_git_within(repo: &Path, args: &[&str], timeout: Duration) -> Result<St
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stderr = stderr.trim();
         let hint = (batch_mode && ssh_refused(stderr)).then_some(SSH_PROMPT_HINT);
-        let mut message = format!("git {}: {stderr}", args.join(" "));
+        let mut message = format!("git {}: {}", args.join(" "), last_lines(stderr));
         // A pre-push hook's stdout lands on git's stdout.
         let stdout = String::from_utf8_lossy(&out.stdout);
         if !stdout.trim().is_empty() {
-            message = format!("{message}\n{}", stdout.trim());
+            message = format!("{message}\nstdout: {}", last_lines(stdout.trim()));
         }
         return Err(RemoteFailed { message, hint }.into());
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The most lines of a failed git call's output an error keeps, so a hook
+/// that runs a test suite doesn't flood it.
+const KEPT_LINES: usize = 20;
+
+fn last_lines(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let cut = lines.len().saturating_sub(KEPT_LINES);
+    let kept = lines[cut..].join("\n");
+    match cut {
+        0 => kept,
+        n => format!("[{n} earlier lines cut]\n{kept}"),
+    }
 }
 
 const SSH_PROMPT_HINT: &str = "hint: if ssh needed a passphrase or host-key prompt, set \
@@ -1171,6 +1190,20 @@ mod tests {
 
     use super::testing::*;
     use super::*;
+
+    #[test]
+    fn a_failed_calls_output_keeps_its_last_lines_and_says_how_many_it_cut() {
+        let log: Vec<String> = (1..=25).map(|n| format!("line {n}")).collect();
+
+        let kept = last_lines(&log.join("\n"));
+
+        assert!(
+            kept.starts_with("[5 earlier lines cut]\nline 6\n"),
+            "{kept}"
+        );
+        assert!(kept.ends_with("\nline 25"), "{kept}");
+        assert_eq!(last_lines("one\ntwo"), "one\ntwo");
+    }
 
     #[test]
     fn container_layout_puts_worktrees_beside_the_main_checkout() {

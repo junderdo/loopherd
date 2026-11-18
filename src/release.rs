@@ -106,7 +106,9 @@ pub fn release(
     if let Some(head) = &clearing.remote {
         let deleted = clearing.delete_remote().with_context(|| {
             format!(
-                "couldn't delete {remote} (was {}); fix the cause and rerun release to retry",
+                "couldn't delete {remote} (was {}); fix the cause and rerun release to retry. \
+                 {name} is already released, so until that rerun deletes it, a feed may \
+                 start a new {name} from the leftover branch",
                 short(head)
             )
         })?;
@@ -900,13 +902,18 @@ mod tests {
         assert!(
             shown.starts_with(&format!(
                 "couldn't delete origin/feat/zpr-1 (was {}); fix the cause and rerun release \
-                 to retry: the push was refused, perhaps by a pre-push hook: ",
+                 to retry. zpr-1 is already released, so until that rerun deletes it, a feed \
+                 may start a new zpr-1 from the leftover branch: the push was refused, \
+                 perhaps by a pre-push hook: ",
                 &head(&s.repo)[..12]
             )),
             "{shown}"
         );
         assert!(shown.contains("no deletes on fridays\n"), "{shown}");
-        assert!(shown.contains("no deletes on fridays (stdout)"), "{shown}");
+        assert!(
+            shown.contains("stdout: no deletes on fridays (stdout)"),
+            "{shown}"
+        );
         assert!(has_branch(&origin(&s), "feat/zpr-1"));
         assert!(!wt.exists());
         assert!(!has_branch(&s.repo, "feat/zpr-1"));
