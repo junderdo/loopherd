@@ -62,35 +62,21 @@ pub fn lead_asked(
 }
 
 /// Clears `pane`'s label for the prompt in a UserPromptSubmit hook's `input`.
-/// Claude hands a finished background task to the model as a prompt too, the
-/// shepherd's own watch among them; a prompt of nothing but those keeps the
-/// label, and one with any other text clears it.
+/// Claude hands each finished background task to the model as a prompt of
+/// its own, the shepherd's watch among them; that keeps the label, and a
+/// prompt with any other text before or after the block clears it.
 pub fn prompted(herdr: &dyn Herdr, dir: &Path, pane: &str, input: &[u8]) -> Result<()> {
     let input: Option<serde_json::Value> = serde_json::from_slice(input).ok();
     let prompt = input.as_ref().and_then(|i| i["prompt"].as_str());
-    if prompt.is_some_and(only_task_notifications) {
+    if prompt.is_some_and(is_task_notification) {
         return Ok(());
     }
     clear(herdr, dir, pane)
 }
 
-fn only_task_notifications(prompt: &str) -> bool {
-    const OPEN: &str = "<task-notification>";
-    const CLOSE: &str = "</task-notification>";
-    let mut rest = prompt.trim();
-    if rest.is_empty() {
-        return false;
-    }
-    while !rest.is_empty() {
-        let Some(after_open) = rest.strip_prefix(OPEN) else {
-            return false;
-        };
-        let Some(end) = after_open.find(CLOSE) else {
-            return false;
-        };
-        rest = after_open[end + CLOSE.len()..].trim_start();
-    }
-    true
+fn is_task_notification(prompt: &str) -> bool {
+    let prompt = prompt.trim();
+    prompt.starts_with("<task-notification>") && prompt.ends_with("</task-notification>")
 }
 
 /// Clears `pane`'s label for a SessionStart hook's `input` that starts a
@@ -350,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_prompt_that_is_wholly_task_notifications_keeps_the_label() {
+    fn only_a_prompt_that_is_wholly_a_task_notification_keeps_the_label() {
         let dir = tempfile::tempdir().unwrap();
         let herdr = FakeHerdr::new(&[]);
         let notification = "<task-notification>\n<status>completed</status>\n</task-notification>";
@@ -372,7 +358,9 @@ mod tests {
 
         assert!(kept(notification));
         assert!(kept(&format!("\n  {notification}\n")));
-        assert!(kept(&format!("{notification}\n{notification}")));
+        assert!(kept(
+            "<task-notification>\n<summary>printed </task-notification> literally</summary>\n</task-notification>"
+        ));
         assert!(!kept(&format!("{notification}\nuse postgres")));
         assert!(!kept(&format!("use postgres\n{notification}")));
         assert!(!kept(&format!("note:\n{notification}")));

@@ -134,10 +134,28 @@ a finished background task too, not only for a typed prompt: its `prompt`
 is the `<task-notification>...</task-notification>` block Claude hands the
 model. A shepherd's `loopherd watch` runs as such a task, so a hook that
 clears on any prompt would clear the label the moment the watch that set it
-exits. Seen on Claude Code 2.1.327, where the prompt was one block starting
-the text. loopherd keeps the label only for a prompt made wholly of such
-blocks (several batched together included); a preamble or a typed answer
-batched with a notification clears it.
+exits.
+
+What the hook receives, captured on Claude Code 2.1.327 with a logging
+`UserPromptSubmit` hook in a dev pane (pinned as
+`tests/fixtures/prompt-hook/`):
+
+- A finished background task's `prompt` is exactly one
+  `<task-notification>...</task-notification>` block, with nothing before or
+  after it. The input's keys are the same as a typed prompt's, so the text is
+  the only way to tell them apart.
+- A typed prompt queued while a background task finished mid-turn fired its
+  own hook call, apart from the notification's. Claude didn't batch them.
+- Transcripts also show notifications with text around the block: a
+  `<system-reminder>` wrapper, or a harness nudge such as "The user hasn't
+  heard from you in a while" after it. Those are `api-request-blob` entries,
+  the request sent to the model. Each one matched to its task's queued `user`
+  entry (6 of 6 in a lead's transcripts) held the bare block, so the extra
+  text is added after the hook runs.
+
+loopherd keeps the label only for a prompt whose trimmed text starts with
+`<task-notification>` and ends with `</task-notification>`; anything else
+clears it.
 
 ## Known gaps (our opportunity)
 

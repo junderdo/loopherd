@@ -104,8 +104,9 @@ impl World {
 }
 
 const ON: &str = "[notify]\nenabled = true\nherdr = false\npane_label = true\n";
-const PROMPT: &str = r#"{"hook_event_name":"UserPromptSubmit","prompt":"use postgres"}"#;
-const TASK_DONE: &str = r#"{"hook_event_name":"UserPromptSubmit","prompt":"<task-notification>\n<status>completed</status>\n</task-notification>"}"#;
+// UserPromptSubmit inputs captured from Claude Code 2.1.327, paths made generic.
+const PROMPT: &str = include_str!("fixtures/prompt-hook/typed.json");
+const TASK_DONE: &str = include_str!("fixtures/prompt-hook/task-notification.json");
 const SESSION: &str = r#"{"hook_event_name":"SessionStart","source":"startup","session_id":"s1"}"#;
 
 #[test]
