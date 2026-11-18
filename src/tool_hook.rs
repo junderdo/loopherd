@@ -1,6 +1,6 @@
 //! `loopherd tool-hook`: Claude's PreToolUse hook on Bash. Blocks a command
 //! from a lead's pane that needs a switch its herd file leaves off (D17), or
-//! a `loopherd restart --force` (D20), a `loopherd pause` or `resume`
+//! a `loopherd restart --force` (D20) or `retire --force` (D75), a `loopherd pause` or `resume`
 //! (D23), a `loopherd herd set`, `unset` (D29) or `remove` (D43), a `loopherd
 //! retire` of a lead (D50), a write of the lead
 //! defaults (D31), a `loopherd config set`, `unset` or `setup` (D39), cargo
@@ -29,6 +29,9 @@ pub enum Switch {
     Rebase,
     /// Not a switch: always the human's.
     ForceRestart,
+    /// `loopherd retire --force`, which skips the checks that the member has
+    /// finished. Not a switch: always the human's.
+    ForceRetire,
     /// `loopherd pause` or `resume`. Not a switch: always the human's.
     Pause,
     /// `loopherd herd set`, `unset` or `remove`, which could turn a lead's own
@@ -66,6 +69,7 @@ impl Switch {
             Switch::Install => "install",
             Switch::Rebase => "rebase",
             Switch::ForceRestart => "restart --force",
+            Switch::ForceRetire => "retire --force",
             Switch::Pause => "pause",
             Switch::HerdEdit => "herd set",
             Switch::RetireLead => "retire lead",
@@ -83,6 +87,7 @@ impl Switch {
             Switch::Install => "the human runs scripts/install and install-hook",
             Switch::Rebase => "the human rebases and force-pushes",
             Switch::ForceRestart => "the human forces a restart",
+            Switch::ForceRetire => "the human forces a retire",
             Switch::Pause => "the human pauses and resumes herds",
             Switch::HerdEdit => "the human edits herd files",
             Switch::RetireLead => "the shepherd or the human retires leads",
@@ -100,6 +105,7 @@ impl Switch {
             Switch::Install => switches.install,
             Switch::Rebase => switches.rebase,
             Switch::ForceRestart
+            | Switch::ForceRetire
             | Switch::Pause
             | Switch::HerdEdit
             | Switch::RetireLead
@@ -147,6 +153,7 @@ fn decide(
                 Switch::Install,
                 Switch::Rebase,
                 Switch::ForceRestart,
+                Switch::ForceRetire,
                 Switch::Pause,
                 Switch::HerdEdit,
                 Switch::RetireLead,
@@ -229,6 +236,13 @@ fn decide(
     if needed == Switch::ForceRestart {
         return Ok(Some(format!(
             "loopherd: blocked: {} may not run `loopherd restart --force`, which skips the checks that the member is finished since its handoff, so {}; restart once its stop reads finished, or ask with `loopherd report --kind question`",
+            lead.name,
+            needed.humans_part()
+        )));
+    }
+    if needed == Switch::ForceRetire {
+        return Ok(Some(format!(
+            "loopherd: blocked: {} may not run `loopherd retire --force`, which skips the checks that the member has finished, so {}; retire it once it is idle and has reported, or once herdr no longer lists it, or ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -2176,9 +2190,10 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
                 matches!(positional.get(1), Some(&"set" | &"unset")).then_some(Switch::Config)
             }
             Some(&"setup") => runs_setup(args).then_some(Switch::Config),
-            Some(&"restart") => forces_restart(args),
+            Some(&"restart") => forces(args, Switch::ForceRestart),
             Some(&"pause" | &"resume") => Some(Switch::Pause),
-            Some(&"retire") => retires_lead(&positional[1..]).then_some(Switch::RetireLead),
+            Some(&"retire") if retires_lead(&positional[1..]) => Some(Switch::RetireLead),
+            Some(&"retire") => forces(args, Switch::ForceRetire),
             Some(&"herd") => matches!(positional.get(1), Some(&"set" | &"unset" | &"remove"))
                 .then_some(Switch::HerdEdit),
             _ => None,
@@ -2205,7 +2220,8 @@ fn needs_program(path: &str, args: &[String]) -> Option<Switch> {
         }
         // `cargo run -- install-hook` in a loopherd checkout, in any spelling.
         "cargo" if args.iter().any(|a| a == "install-hook") => Some(Switch::Install),
-        "cargo" if args.iter().any(|a| a == "restart") => forces_restart(args),
+        "cargo" if args.iter().any(|a| a == "restart") => forces(args, Switch::ForceRestart),
+        "cargo" if args.iter().any(|a| a == "retire") => forces(args, Switch::ForceRetire),
         _ => None,
     }
 }
@@ -2424,10 +2440,8 @@ fn is_flag(arg: &str, flag: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('='))
 }
 
-fn forces_restart(args: &[String]) -> Option<Switch> {
-    args.iter()
-        .any(|a| a == "--force")
-        .then_some(Switch::ForceRestart)
+fn forces(args: &[String], switch: Switch) -> Option<Switch> {
+    args.iter().any(|a| a == "--force").then_some(switch)
 }
 
 /// git's global options that take the next word as their value.
@@ -3209,6 +3223,7 @@ mod tests {
             Switch::Install => s.install = false,
             Switch::Rebase => s.rebase = false,
             Switch::ForceRestart
+            | Switch::ForceRetire
             | Switch::Pause
             | Switch::HerdEdit
             | Switch::RetireLead
@@ -3257,6 +3272,7 @@ mod tests {
                 Switch::Install => others_off.install = true,
                 Switch::Rebase => others_off.rebase = true,
                 Switch::ForceRestart
+                | Switch::ForceRetire
                 | Switch::Pause
                 | Switch::HerdEdit
                 | Switch::RetireLead
@@ -3418,6 +3434,29 @@ mod tests {
         let message = run(&file, Switches::default(), "gh pr merge 1");
 
         assert!(message.is_some());
+    }
+
+    #[test]
+    fn a_leads_forced_retire_is_denied_whatever_its_switches() {
+        let leads = ledger(vec![lead()]);
+        for command in [
+            "loopherd retire lh-1 --force",
+            "loopherd retire --force --close lh-1",
+            "cd /x && loopherd retire lh-1 --force",
+            "cargo run -- retire lh-1 --force",
+        ] {
+            assert_eq!(needs(command), [Switch::ForceRetire], "{command}");
+            let message =
+                run(&leads, all_on(), command).unwrap_or_else(|| panic!("{command} was allowed"));
+            assert!(
+                message.contains("lead-h may not run `loopherd retire --force`")
+                    && message.contains("the human forces a retire"),
+                "{message}"
+            );
+        }
+        for command in ["loopherd retire lh-1", "cargo run -- retire --close lh-1"] {
+            assert_eq!(needs(command), [], "{command}");
+        }
     }
 
     #[test]

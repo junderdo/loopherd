@@ -70,7 +70,7 @@ use crate::process::Procs;
 use crate::prompt::prompt;
 use crate::release::release;
 use crate::report::{Filter, Kind, Reporter, report, reports};
-use crate::retire::{refuse_own_lead, retire, retire_and_close};
+use crate::retire::{refuse_own_lead, refuse_unfinished, retire, retire_and_close};
 use crate::revive::{ReviveRequest, revive};
 use crate::spawn::{Checkout, Prompt, SHELL_TIMEOUT, SpawnRequest, spawn};
 use crate::status::{Format, Queues};
@@ -181,12 +181,17 @@ enum Command {
         herds: HerdsArg,
     },
     /// Mark a ledger entry finished so revive leaves it alone. Without --close, changes only the ledger.
+    /// Refuses a member herdr shows working or blocked, or shows idle with no
+    /// done, question or handoff report since its last start, unless --force.
     Retire {
         name: String,
         /// Also close its tab, and remove its worktree and branch if clean and merged.
         /// Works on an already-retired entry, to finish or retry cleanup.
         #[arg(long)]
         close: bool,
+        /// Retire it even if it may still be at work.
+        #[arg(long)]
+        force: bool,
     },
     /// Let `feed` spawn a retired member's name again, for a task it left
     /// unfinished. Deletes its local branch and worktree so the new member
@@ -672,7 +677,7 @@ fn main() -> ExitCode {
         } => ("feed", run_feed(herd, dry_run, ready_timeout)),
         Command::Pause { herds, reason } => ("pause", run_pause(&herds, reason.as_deref())),
         Command::Resume { herds } => ("resume", run_resume(&herds)),
-        Command::Retire { name, close } => ("retire", run_retire(&name, close)),
+        Command::Retire { name, close, force } => ("retire", run_retire(&name, close, force)),
         Command::Release {
             name,
             keep_branch,
@@ -861,7 +866,7 @@ fn run_resume(herds: &HerdsArg) -> Result<i32> {
     Ok(done.code)
 }
 
-fn run_retire(name: &str, close: bool) -> Result<i32> {
+fn run_retire(name: &str, close: bool, force: bool) -> Result<i32> {
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let pane_id = std::env::var("HERDR_PANE_ID").ok();
     let socket = socket_from_env();
@@ -876,6 +881,9 @@ fn run_retire(name: &str, close: bool) -> Result<i32> {
         &process::ProcFs,
         std::process::id(),
     )?;
+    if !force {
+        refuse_unfinished(&CliHerdr, &ledger, name, &ledger.reports_dir()?)?;
+    }
     if !close {
         retire(&mut ledger, name, SystemTime::now())?;
         println!("retired {name}");
