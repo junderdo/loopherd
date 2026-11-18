@@ -113,6 +113,7 @@ pub struct FakeHerdr {
     /// Runs inside every `agents()` call, before it answers.
     pub on_agents: Option<Box<dyn Fn() + Send + Sync>>,
     pub socket: Option<PathBuf>,
+    pub version: String,
     state: Mutex<State>,
 }
 
@@ -141,6 +142,7 @@ impl FakeHerdr {
             agents_gate: None,
             on_agents: None,
             socket: Some(FAKE_SOCKET.into()),
+            version: "0.9.5".into(),
             state: Mutex::default(),
         }
     }
@@ -652,6 +654,10 @@ impl Herdr for FakeHerdr {
 
     fn socket(&self) -> Option<PathBuf> {
         self.socket.clone()
+    }
+
+    fn version(&self) -> Result<Option<String>> {
+        Ok((!self.is_down()).then(|| self.version.clone()))
     }
 }
 

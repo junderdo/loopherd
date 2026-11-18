@@ -204,6 +204,18 @@ for what 0.7.0 already had, and the changelog.
   `popup_not_open`. No API sends input to a popup, and keys typed into a
   client attached under `script` didn't reach it.
 
+## Oldest supported herdr (LH-247)
+
+Still unknown. `loopherd doctor` fails below `MIN_HERDR` in
+`src/doctor.rs`, which is 0.9.5 because that is the only herdr loopherd
+has been run against: its live tests, pane labelling (`pane
+report-metadata`) and the plugin notes above were all checked on 0.9.5.
+Lowering it needs each feature loopherd uses dated in herdr's changelog
+and tried on that release: `agent start`/`wait`/`list` with
+`launch_pending`, `display_agent` and `terminal_title_stripped`, the
+socket event subscriptions, `pane report-metadata`, and `status server
+--json`'s `running` and `version`, which `doctor` reads.
+
 ## Known gaps (our opportunity)
 
 - After reboot / server stop, panes return as shells; **agents are not
