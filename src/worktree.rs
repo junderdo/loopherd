@@ -1510,6 +1510,13 @@ mod tests {
                 "{fate:?}"
             );
         }
+        assert_eq!(
+            plan_clear(&repo, None, Some("trunk"), Fate::Keep, &nobody).unwrap(),
+            Plan::Kept {
+                local: false,
+                remote: true
+            }
+        );
         let main = plan_clear(&repo, None, Some("main"), Fate::Clear, &nobody).unwrap();
         assert!(matches!(main, Plan::Clear(_)), "{main:?}");
     }
