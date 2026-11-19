@@ -452,6 +452,22 @@ fn adds_a_member_from_a_temp_herd_file() {
 }
 
 /// Removes a worktree of `.0` at `.1` when dropped, and its container dir once empty.
+struct RemoveDir(PathBuf);
+
+impl Drop for RemoveDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+struct RemoveFile(PathBuf);
+
+impl Drop for RemoveFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 struct RemoveWorktree(PathBuf, PathBuf);
 
 impl Drop for RemoveWorktree {
@@ -493,17 +509,33 @@ fn a_sandboxed_lead_cannot_write_its_herd_file() {
     std::fs::create_dir_all(&herds).unwrap();
     let herd_file = herds.join(format!("{herd}.toml"));
     let control = worktree.join("sandbox-probe");
+    // A member's worktree beside the lead's, and the herd's main checkout: both outside its own.
+    let sibling = worktree.with_file_name(format!("{name}-sibling"));
+    std::fs::create_dir_all(&sibling).unwrap();
+    let _sibling = RemoveDir(sibling.clone());
+    let in_sibling = sibling.join("sandbox-probe");
+    let in_checkout = repo.join(format!("sandbox-probe-{}", std::process::id()));
+    let _in_checkout = RemoveFile(in_checkout.clone());
+    let write = |file: &Path| {
+        format!(
+            "python3 -c \"open('{}', 'a').write('hijack')\"",
+            file.display()
+        )
+    };
     std::fs::write(
         &herd_file,
         format!(
-            "{}[lead]\nprompt = \"\"\"Make exactly two Bash tool calls, in this order, each \
+            "{}[lead]\nprompt = \"\"\"Make exactly four Bash tool calls, in this order, each \
              with the command exactly as written and nothing added before or after it, \
-             running the second even if the first fails. First: \
-             python3 -c \"open('{}', 'a').write('hijack')\" \
-             Second: touch {} \
+             running each even if an earlier one fails. First: {} \
+             Second: {} \
+             Third: {} \
+             Fourth: touch {} \
              Then reply with what each printed.\"\"\"\n",
             herd_head(repo.to_str().unwrap(), &workspace),
-            herd_file.display(),
+            write(&herd_file),
+            write(&in_sibling),
+            write(&in_checkout),
             control.display()
         ),
     )
@@ -563,12 +595,15 @@ fn a_sandboxed_lead_cannot_write_its_herd_file() {
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
     assert_eq!(std::fs::read_to_string(&herd_file).unwrap(), before);
+    assert!(!in_sibling.exists(), "the lead wrote a sibling worktree");
+    assert!(!in_checkout.exists(), "the lead wrote the main checkout");
     let screen = screen();
     // A narrow pane may wrap the error mid-word.
     let unwrapped: String = screen.split_whitespace().collect();
-    assert!(
-        unwrapped.contains("Read-onlyfilesystem"),
-        "the sandbox didn't refuse the write:\n{screen}"
+    assert_eq!(
+        unwrapped.matches("Read-onlyfilesystem").count(),
+        3,
+        "the sandbox didn't refuse each write:\n{screen}"
     );
 }
 
