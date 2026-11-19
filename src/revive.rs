@@ -561,20 +561,34 @@ impl Outcome {
 
 /// A lead's herd and args, and the worktree its herd puts it in, from what
 /// loopherd keeps where the lead can't write. The ledger, which it can,
-/// speaks only for a lead started before that was kept.
-fn kept_lead(paths: &Paths, record: &AgentRecord) -> Result<Option<(sandbox::Lead, PathBuf)>> {
-    let lead = match sandbox::Lead::kept(paths, &record.name)? {
+/// speaks for a lead started before that was kept only when `adopt` names
+/// it: the human's `revive --name`, which a sandboxed lead can't run, since
+/// it writes the lead's settings to the config dir.
+fn kept_lead(
+    paths: &Paths,
+    record: &AgentRecord,
+    adopt: Option<&str>,
+) -> Result<Option<(sandbox::Lead, PathBuf)>> {
+    let name = &record.name;
+    let lead = match sandbox::Lead::kept(paths, name)? {
         Some(lead) => lead,
         None if !record.is_lead() => return Ok(None),
+        None if adopt != Some(name.as_str()) => bail!(
+            "{name} is a lead loopherd kept no record of, so its ledger entry alone \
+             says how to start it; if that entry is yours, run loopherd revive --name {name}"
+        ),
         None => sandbox::Lead {
             herd: record
                 .herd
                 .clone()
-                .with_context(|| format!("{} is a lead with no herd recorded", record.name))?,
+                .with_context(|| format!("{name} is a lead with no herd recorded"))?,
             args: without_settings(&record.claude_args),
         },
     };
-    let worktree = worktree_path(&crate::herd::repo(paths, &lead.herd)?, &record.name);
+    if matches!(name.as_str(), "" | "." | "..") || name.contains('/') {
+        bail!("{name:?} can't name a lead's worktree");
+    }
+    let worktree = worktree_path(&crate::herd::repo(paths, &lead.herd)?, name);
     Ok(Some((lead, worktree)))
 }
 
@@ -610,7 +624,7 @@ fn revive_one(
     {
         return Outcome::Skipped(format!("recorded on {}", there.display()));
     }
-    let lead = match kept_lead(&req.paths, record) {
+    let lead = match kept_lead(&req.paths, record, req.name.as_deref()) {
         Ok(lead) => lead,
         Err(error) => {
             return Outcome::Failed {
@@ -1457,7 +1471,19 @@ mod tests {
 
     /// Lead `name` of herd `h`, in the worktree its herd puts it in; `cwd`
     /// is where the ledger says it runs, which revive doesn't trust.
+    /// Lead `name` of herd `h`, as `loopherd lead` keeps and records it.
     fn lead(name: &str, cwd: &Path) -> AgentRecord {
+        let record = unkept_lead(name, cwd);
+        let kept = sandbox::Lead {
+            herd: "h".into(),
+            args: record.claude_args.clone(),
+        };
+        sandbox::prepare(&own_paths(), name, &kept, || Ok(())).unwrap();
+        record
+    }
+
+    /// A lead started before loopherd kept leads in its config dir.
+    fn unkept_lead(name: &str, cwd: &Path) -> AgentRecord {
         let worktree = worktree_path(&own_repo(), name);
         std::fs::create_dir_all(&worktree).unwrap();
         AgentRecord {
@@ -1679,9 +1705,48 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_loopherd_kept_no_record_of_resumes_only_when_named() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut ledger = ledger([unkept_lead("lead-h", cwd.path())]);
+
+        let (out, code) = run(&herdr, &mut ledger, &request());
+
+        assert_eq!(code, 1);
+        assert_eq!(
+            out,
+            "failed lead-h: sandbox: lead-h is a lead loopherd kept no record of, so its \
+             ledger entry alone says how to start it; if that entry is yours, run loopherd \
+             revive --name lead-h"
+        );
+        assert!(herdr.started().is_empty());
+
+        let named = ReviveRequest {
+            name: Some("lead-h".into()),
+            ..request()
+        };
+        let (out, code) = run(&herdr, &mut ledger, &named);
+
+        assert_eq!(code, 0, "{out}");
+        let settings = sandbox::settings_file(&named.paths, "lead-h");
+        assert_eq!(
+            herdr.started()[0].args,
+            [
+                "--resume",
+                "sess-lead-h",
+                "--model",
+                "opus",
+                "--settings",
+                &settings.display().to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn a_lead_revived_on_prefer_without_its_sandbox_is_flagged_in_the_ledger() {
         let cwd = tempfile::tempdir().unwrap();
         let herdr = herdr();
+        let mut ledger = ledger([lead("lead-h", cwd.path())]);
         let req = ReviveRequest {
             sandbox: || {
                 Err(Unavailable {
@@ -1699,7 +1764,6 @@ mod tests {
             ),
         )
         .unwrap();
-        let mut ledger = ledger([lead("lead-h", cwd.path())]);
 
         let (out, code) = run(&herdr, &mut ledger, &req);
 

@@ -92,7 +92,11 @@ here while a herd has a lead, and `[lead] sandbox = "require"`, the
 default, then refuses to start the lead; `prefer` starts it guarded by its
 hook alone, flagged in `loopherd view`, and only the human sets it. Doctor
 names each running lead without its sandbox; `loopherd revive --name
-<lead>` after quitting its Claude resumes it in one.
+<lead>` after quitting its Claude resumes it in one. A lead started
+before loopherd kept its record (`<config dir>/sandbox/<lead>.lead.json`)
+fails a plain or startup `revive` until that `--name` run adopts it. A
+lead can't make worktrees beside its own, so `loopherd spawn --worktree`
+for its herd is yours; it uses `add`.
 
 ## Notify
 
