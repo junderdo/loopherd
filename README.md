@@ -23,7 +23,10 @@ runs the terminals and knows whether each agent is working, blocked, or done.
 ## Install
 
 Pick one. Both need [herdr](https://herdr.dev/) and
-[Claude Code](https://code.claude.com/docs/en/overview) (`claude`), install
+[Claude Code](https://code.claude.com/docs/en/overview) (`claude`); on
+Linux and WSL2, leads also need [bubblewrap and
+socat](https://code.claude.com/docs/en/sandboxing#set-up-linux-and-wsl2)
+for the sandbox they run in. Both install
 `~/.local/bin/loopherd` (put `~/.local/bin` on `PATH`), add loopherd's
 Claude hooks and skill, run `loopherd setup`, and finish with `loopherd
 doctor`, whose failures (say, herdr not started yet) are printed but don't
@@ -195,7 +198,13 @@ as its main checkout. Then, in order:
    `loopherd lead <herd>`. Run it yourself, or ask the shepherd to. The
    lead, `lead-<herd>`, then feeds and watches the herd's workers within
    the switches you set; the shepherd's watch reads the lead and relays
-   its questions to you.
+   its questions to you. The lead runs in the Claude Code sandbox, which
+   limits its writes to its own worktree and loopherd's state dir, so it
+   doesn't change herd files, `config.toml` or `~/.claude` by mistake. It
+   is a guard rail, not a cage: a lead can still act outside it through
+   herdr, and on WSL2 through Windows interop ([D89](docs/decisions/D89.md)).
+   A lead whose sandbox can't start isn't started unless its `[lead]` sets
+   `sandbox = "prefer"`.
 
 The guide a shepherd or lead follows, from setting up a herd to cleaning up
 after merges, is the loopherd skill: `loopherd --skill` prints it

@@ -332,6 +332,7 @@ pub fn row(member: &Member) -> Vec<String> {
         None => member.pane.clone(),
     };
     let name = match (member.lead, member.released) {
+        (true, _) if member.unsandboxed.is_some() => format!("{} (lead, unsandboxed)", member.name),
         (true, _) => format!("{} (lead)", member.name),
         (false, true) => format!("{} (released)", member.name),
         (false, false) => member.name.clone(),
@@ -431,6 +432,7 @@ mod tests {
             process: None,
             role: None,
             after_merge: None,
+            unsandboxed: None,
             earlier: vec![],
         }
     }
@@ -811,6 +813,37 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         assert_eq!(out.code, 0);
         assert_eq!(herdr.mutations(), 0);
         assert_eq!(ledger.0, before);
+    }
+
+    #[test]
+    fn a_lead_running_without_its_sandbox_is_marked_unsandboxed() {
+        let herdr = herdr().with_raw_agent(agent(
+            Some("lead-prs"),
+            "w1:plead-prs",
+            AgentStatus::Working,
+        ));
+        let mut ledger = ledger();
+        let mut lead = entry("lead-prs", Some("prs"), "lead-prs");
+        lead.role = Some(crate::ledger::Role::Lead);
+        lead.unsandboxed = Some("bubblewrap not installed".into());
+        ledger.0.insert(lead.name.clone(), lead);
+
+        let out = status(
+            &herdr,
+            &ledger,
+            &not_paused(),
+            None,
+            Options::default(),
+            PLAIN,
+        )
+        .unwrap();
+
+        assert!(
+            out.stdout
+                .contains("  lead-prs (lead, unsandboxed)  working"),
+            "{}",
+            out.stdout
+        );
     }
 
     #[test]

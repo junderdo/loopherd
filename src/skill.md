@@ -572,7 +572,8 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   while origin can't be asked, that rerun refuses. The delete runs the repo's pre-push hooks,
   within `LOOPHERD_GIT_TIMEOUT`; when one refuses, release prints its
   output. `--keep-branch` never contacts origin. A lead
-  may run it; it's part of feeding. `status --all` marks the entry
+  may run it on its own herd's members, without `--drop-branch`; it's
+  part of feeding. `status --all` marks the entry
   `(released)`, its mailbox gets a `released` note, and its lead's watch
   announces it claimable again.
 - `loopherd prompt <name>` sends a member its stored prompt, e.g. after a
@@ -584,7 +585,16 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   (see Handoffs); `loopherd restart --self`, from a lead's own pane,
   schedules that for itself once its turn ends.
 - `loopherd lead <herd>` starts the herd's lead from its herd file's
-  `[lead]` table.
+  `[lead]` table, in the Claude Code sandbox (see the Lead section). With
+  `[lead] sandbox = "require"` (the default) a lead whose sandbox can't
+  start isn't started, and `lead`, `restart` and `revive` say why
+  (`loopherd doctor` checks it: bubblewrap and socat on Linux and WSL2);
+  `"prefer"` starts it guarded by its hook alone, with a warning, a note
+  in its mailbox, and `(lead, unsandboxed)` in `loopherd view`. `restart`
+  refuses, under `require`, a lead started without its sandbox (before it
+  existed, or on `prefer`): quit its Claude and run `loopherd revive
+  --name <lead>` to resume it sandboxed. Set `prefer` only when the human
+  says so; doctor names those herds and leads.
 - **Change a herd file's values** with `loopherd herd set <herd> <key>
   <value>`, `loopherd herd get <herd> <key>` and `loopherd herd unset <herd>
   <key>`, not by hand-editing TOML. Keys are dotted (`queue.max`,
@@ -786,6 +796,27 @@ What differs from the shepherd:
   `merge` off, your watch also tells the human of every merge to the repo's
   default branch (`[lead] merge_guard = "hook"`, the default), so expect
   that ping for merges the human makes. Grilling is always the human's.
+- **Sandbox.** Your Claude runs in the Claude Code sandbox, from
+  settings loopherd writes for you to `<config dir>/sandbox/<you>.json`
+  (D89, building D83). Bash can write only to your own worktree,
+  loopherd's state dir and temp files; writes elsewhere, herd files,
+  `config.toml`, those settings and `~/.claude` among them, fail
+  (`Read-only file system`, or a denied command or Edit). Processes a
+  command leaves behind end with it, so keep long waits as background
+  tasks. `loopherd restart --self`, `feed`, `add`, `retire` and
+  `release`, and with `install` on `scripts/install`, run outside the
+  sandbox, but only run bare, as their own Bash call: a `cd x &&`, a pipe
+  or redirect, `$(…)` or a path to `loopherd` keeps one inside it, where
+  it can't make or remove members' worktrees. `retire --close` and
+  `release` refuse anything but your own herd's members, keep a worktree
+  or refuse when the ledger puts one anywhere its herd file wouldn't, and
+  `release --drop-branch` is the human's.
+  `loopherd spawn --worktree` is the human's: its worktree sits beside
+  yours, where you can't write; use `loopherd add` instead. Every host is
+  reachable, and gh uses the human's credentials as before. The sandbox
+  is a guard rail the human set, not the whole boundary: when it refuses
+  something, ask; don't route around it through herdr, a member or
+  another tool.
 - **Herd files and loopherd's config are the human's.** The hook always
   denies `loopherd herd set`, `unset` and `remove` in your pane, and also `loopherd
   lead-defaults --set`, `loopherd config set` and `unset`, `loopherd

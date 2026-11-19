@@ -14,6 +14,7 @@ use crate::lead::{LeadPrompt, rendered};
 use crate::ledger::{Ledger, Process};
 use crate::lock::Lock;
 use crate::report::{Body, Entry, SinceHandoff, append, member_of_own_pane, since_handoff};
+use crate::sandbox::{self, Running};
 use crate::shell::quote;
 use crate::subagent_view::ensure_main_view;
 
@@ -113,15 +114,34 @@ pub fn restart(
     {
         return Err(Refusal::NotReady(format!("{why}; pass --force to restart it anyway")).into());
     }
-    let lead = match (record.is_lead(), &record.herd) {
-        (false, _) => None,
-        (true, None) => bail!("{name} is a lead with no herd recorded"),
-        (true, Some(herd)) => {
+    // The record kept beside its sandbox settings, which the lead can't write, wins over the ledger.
+    let herd = match sandbox::Lead::kept(req.paths, name).context("sandbox")? {
+        Some(kept) => Some(kept.herd),
+        None if !record.is_lead() => None,
+        None => Some(
+            record
+                .herd
+                .clone()
+                .with_context(|| format!("{name} is a lead with no herd recorded"))?,
+        ),
+    };
+    let (lead, running) = match &herd {
+        None => (None, None),
+        Some(herd) => {
             let worktree = record.worktree.as_ref().unwrap_or(&record.repo);
-            Some(
-                rendered(req.paths, herd, name, worktree)
-                    .with_context(|| format!("{name}'s prompt, from herd {herd}"))?,
-            )
+            let prompt = rendered(req.paths, herd, name, worktree)
+                .with_context(|| format!("{name}'s prompt, from herd {herd}"))?;
+            let running = sandbox::check_running(req.paths, name, herd, &record.claude_args)
+                .context("sandbox")?;
+            (Some(prompt), Some(running))
+        }
+    };
+    let (unsandboxed, warning) = match running {
+        None | Some(Running::Sandboxed) => (None, None),
+        Some(Running::Stale(warning)) => (None, Some(warning)),
+        Some(Running::HookOnly(why)) => {
+            let warning = sandbox::hook_only_warning(name, &why);
+            (Some(why), Some(warning))
         }
     };
     let pane = &agent.pane_id;
@@ -190,6 +210,7 @@ pub fn restart(
         }
         current.pane_id = agent.pane_id.clone();
         current.tab_id = Some(agent.tab_id.clone());
+        current.unsandboxed = unsandboxed.clone();
         Ok(())
     })?;
     ledger.started(name, now, false)?;
@@ -203,8 +224,11 @@ pub fn restart(
         }
         _ => String::new(),
     };
+    let warning = warning
+        .map(|w| format!("\nwarning: {w}"))
+        .unwrap_or_default();
     Ok(format!(
-        "restarted {name} in session {live}; prompted it to read {}{unread}",
+        "restarted {name} in session {live}; prompted it to read {}{unread}{warning}",
         read.display()
     ))
 }
@@ -547,6 +571,7 @@ mod tests {
     use crate::ledger::{AgentRecord, MemLedger};
     use crate::report::{Background, Body, Entry, Stop, Tally, append};
     use crate::subagent_view::screens::{MAIN_VIEW, SUBAGENT_PICKER, SUBAGENT_PROMPT};
+    use std::path::PathBuf;
 
     fn record(name: &str) -> AgentRecord {
         AgentRecord {
@@ -576,6 +601,7 @@ mod tests {
             process: None,
             role: None,
             after_merge: None,
+            unsandboxed: None,
             earlier: vec![],
         }
     }
@@ -735,6 +761,7 @@ mod tests {
             live: &dyn Fn(&str) -> String,
         ) -> (Result<String>, MemLedger) {
             let mut member = record("lh-1");
+            member.claude_args = vec!["--settings".into(), self.settings().display().to_string()];
             edit(&mut member);
             let mut ledger = Clearing {
                 recorded: member.session_id.clone(),
@@ -822,6 +849,20 @@ mod tests {
                     _ => None,
                 })
                 .collect()
+        }
+
+        /// Where a lead's sandbox settings are written.
+        fn settings(&self) -> PathBuf {
+            self.state.path().join("config/sandbox/lh-1.json")
+        }
+
+        /// Starts lh-1 as herd `h`'s lead would: its record kept and its settings written.
+        fn prepared(&self) {
+            let lead = sandbox::Lead {
+                herd: "h".into(),
+                args: vec![],
+            };
+            sandbox::prepare(&self.paths(), "lh-1", &lead, || Ok(())).unwrap();
         }
 
         fn paths(&self) -> Paths {
@@ -1317,6 +1358,108 @@ mod tests {
                 w.handoff()
             )),
             "{resume}"
+        );
+    }
+
+    fn as_lead(r: &mut AgentRecord) {
+        r.role = Some(crate::ledger::Role::Lead);
+        r.herd = Some("h".into());
+        r.worktree = Some("/src/worktrees/lh-1".into());
+    }
+
+    #[test]
+    fn a_lead_running_in_its_sandbox_is_restarted() {
+        let w = World::new();
+        w.handed_off();
+        w.prepared();
+
+        let (result, ledger) = w.restart_as(false, true, None, &as_lead);
+
+        assert!(!result.unwrap().contains("warning"));
+        assert_eq!(ledger.0["lh-1"].unsandboxed, None);
+    }
+
+    #[test]
+    fn a_lead_whose_herd_switches_changed_since_it_started_is_restarted_with_a_warning() {
+        let w = World::new();
+        w.handed_off();
+        w.prepared();
+        fs::write(
+            w.paths().herds.join("h.toml"),
+            "repo = \"/src/repo\"\n[lead]\nprompt = \"go\"\ninstall = true\n",
+        )
+        .unwrap();
+
+        let (result, _) = w.restart_as(false, true, None, &as_lead);
+
+        assert!(
+            result.as_ref().unwrap().ends_with(
+                "\nwarning: lh-1's sandbox was set before herd h's current switches, which reach \
+                 it only when its Claude starts again; quit its Claude and run loopherd revive \
+                 --name lh-1"
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_lead_the_ledger_calls_a_worker_is_still_checked_as_the_lead_loopherd_kept() {
+        let w = World::new();
+        w.handed_off();
+        w.prepared();
+
+        let (result, _) = w.restart_as(false, true, None, &|r| {
+            r.claude_args = vec![];
+        });
+
+        assert!(
+            format!("{:#}", result.unwrap_err()).starts_with(
+                "sandbox: lh-1 can't run sandboxed: it was started without its sandbox;"
+            )
+        );
+        assert!(w.herdr.prompts().is_empty());
+    }
+
+    fn unsandboxed(r: &mut AgentRecord) {
+        as_lead(r);
+        r.claude_args = vec!["--model".into(), "opus".into()];
+    }
+
+    #[test]
+    fn a_lead_running_without_its_sandbox_is_not_cleared_under_require() {
+        let w = World::new();
+        w.handed_off();
+
+        let (result, _) = w.restart_as(false, true, None, &unsandboxed);
+
+        assert_eq!(
+            format!("{:#}", result.unwrap_err()),
+            "sandbox: lh-1 can't run sandboxed: it was started without its sandbox; quit its \
+             Claude and run loopherd revive --name lh-1 to resume it sandboxed, or set [lead] \
+             sandbox = \"prefer\" in herd h to run it guarded by its tool hook alone"
+        );
+        assert!(w.herdr.prompts().is_empty());
+    }
+
+    #[test]
+    fn a_lead_on_prefer_running_without_its_sandbox_is_restarted_with_a_warning() {
+        let w = World::new();
+        w.handed_off();
+        fs::write(
+            w.paths().herds.join("h.toml"),
+            "repo = \"/src/repo\"\n[lead]\nprompt = \"go\"\nsandbox = \"prefer\"\n",
+        )
+        .unwrap();
+
+        let (result, ledger) = w.restart_as(false, true, None, &unsandboxed);
+
+        assert!(result.unwrap().ends_with(
+            "\nwarning: lh-1 runs without its sandbox (it was started without its sandbox), \
+                 guarded by its tool hook alone"
+        ));
+        assert_eq!(
+            ledger.0["lh-1"].unsandboxed.as_deref(),
+            Some("it was started without its sandbox")
         );
     }
 
