@@ -1246,6 +1246,179 @@ fn the_pr_popup_opens_with_the_member_and_waits_until_closed() {
     server.wait_for_loopherds(0);
 }
 
+impl IsolatedServer {
+    fn json(&self, args: &[&str]) -> Value {
+        let out = self.herdr().args(args).output().unwrap();
+        assert!(out.status.success(), "herdr {args:?}: {out:?}");
+        serde_json::from_slice(&out.stdout).unwrap()
+    }
+
+    /// The pid and env of the `loopherd view` the plugin's view pane runs,
+    /// once it starts.
+    fn view(&self) -> (u32, Vec<(String, String)>) {
+        for _ in 0..50 {
+            if let Some(view) = self.loopherds().into_iter().find(|(_, env)| {
+                env.iter()
+                    .any(|(k, v)| k == "HERDR_PLUGIN_ENTRYPOINT_ID" && v == "view")
+            }) {
+                return view;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("no view started: {:?}", self.loopherds());
+    }
+}
+
+impl IsolatedServer {
+    /// Runs `command` in `pane` and returns the pid and start time of the
+    /// process it starts under the pane's shell, standing in for a Claude.
+    fn run_in(&self, pane: &str, command: &str) -> (u32, u64) {
+        let info = self.json(&["pane", "process-info", "--pane", pane]);
+        let shell = info["result"]["process_info"]["shell_pid"]
+            .as_u64()
+            .unwrap();
+        self.ok(&["pane", "run", pane, command]);
+        for _ in 0..50 {
+            for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+                let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+                    continue;
+                };
+                let Some((_, fields)) = stat.rsplit_once(')') else {
+                    continue;
+                };
+                let fields: Vec<&str> = fields.split_whitespace().collect();
+                if fields[1].parse::<u64>().ok() == Some(shell) {
+                    let pid = entry.file_name().to_string_lossy().parse().unwrap();
+                    return (pid, fields[19].parse().unwrap());
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("nothing started under pane {pane}'s shell {shell}");
+    }
+}
+
+/// A workspace split into `w1:p1`, focused, and `w1:p2` right of it.
+fn two_panes(server: &IsolatedServer) {
+    let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("herdr-plugin");
+    server.ok(&["plugin", "link", plugin.to_str().unwrap()]);
+    server.ok(&[
+        "workspace",
+        "create",
+        "--cwd",
+        server.home.path().to_str().unwrap(),
+    ]);
+    server.ok(&[
+        "pane",
+        "split",
+        "w1:p1",
+        "--direction",
+        "right",
+        "--no-focus",
+    ]);
+}
+
+/// Each pane in the active tab, left to right, with its width and focus.
+fn panes_across(server: &IsolatedServer) -> Vec<(String, u64, bool)> {
+    let layout = server.json(&["pane", "layout"]);
+    let mut panes: Vec<(u64, String, u64, bool)> = layout["result"]["layout"]["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["rect"]["x"].as_u64().unwrap(),
+                p["pane_id"].as_str().unwrap().to_string(),
+                p["rect"]["width"].as_u64().unwrap(),
+                p["focused"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    panes.sort();
+    panes.into_iter().map(|(_, id, w, f)| (id, w, f)).collect()
+}
+
+fn var<'a>(env: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    env.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+}
+
+#[test]
+fn the_beside_shepherd_action_splits_the_view_right_of_the_recorded_shepherd() {
+    if !live_enabled() {
+        return;
+    }
+    let server = IsolatedServer::start();
+    two_panes(&server);
+    let state = server.home.path().join(".local/state/loopherd");
+    std::fs::create_dir_all(&state).unwrap();
+    let (pid, start) = server.run_in("w1:p2", "sleep 300");
+    let record = serde_json::json!({
+        "pane": "w1:p2", "socket": server.socket, "process": {"pid": pid, "start": start},
+        "session": "s-1", "at": "2026-11-19T00:00:00Z", "used": true,
+    });
+    std::fs::write(state.join("shepherd.json"), record.to_string()).unwrap();
+
+    server.ok(&[
+        "plugin",
+        "action",
+        "invoke",
+        "loopherd.view-beside-shepherd",
+    ]);
+
+    let (pid, env) = server.view();
+    assert_eq!(var(&env, "LOOPHERD_VIEW_NOTE"), None);
+    let panes = panes_across(&server);
+    let [
+        (p1, _, true),
+        (shepherd, shepherd_w, false),
+        (_, view_w, false),
+    ] = panes.as_slice()
+    else {
+        panic!("{panes:?}");
+    };
+    assert_eq!((p1.as_str(), shepherd.as_str()), ("w1:p1", "w1:p2"));
+    assert!(view_w < shepherd_w, "{panes:?}");
+
+    // SAFETY: kill takes no pointers.
+    unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    server.wait_for_loopherds(0);
+    for _ in 0..20 {
+        if panes_across(&server).len() == 2 {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!(
+        "the view's pane outlived the view: {:?}",
+        panes_across(&server)
+    );
+}
+
+#[test]
+fn with_no_shepherd_recorded_the_action_splits_right_of_the_focused_pane_saying_why() {
+    if !live_enabled() {
+        return;
+    }
+    let server = IsolatedServer::start();
+    two_panes(&server);
+
+    server.ok(&[
+        "plugin",
+        "action",
+        "invoke",
+        "loopherd.view-beside-shepherd",
+    ]);
+
+    let (_, env) = server.view();
+    let note = var(&env, "LOOPHERD_VIEW_NOTE").unwrap();
+    assert!(note.contains("no shepherd recorded"), "{note}");
+    let panes = panes_across(&server);
+    let ids: Vec<&str> = panes.iter().map(|(id, _, _)| id.as_str()).collect();
+    assert_eq!(ids[0], "w1:p1");
+    assert_eq!(ids[2], "w1:p2", "{panes:?}");
+    assert!(panes[0].2, "focus left w1:p1: {panes:?}");
+}
+
 const LIVE: &str = "/home/u/.config/herdr/herdr.sock";
 
 #[test]
