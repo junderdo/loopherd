@@ -105,6 +105,21 @@ fn the_view_action_opens_the_view_pane() {
     assert_eq!(strings(&action["contexts"]), ["workspace"]);
 }
 
+#[test]
+fn the_beside_shepherd_action_runs_loopherd_view_beside_shepherd() {
+    let m = manifest();
+    let action = entry(&m, "actions", "view-beside-shepherd");
+    assert_eq!(
+        action["title"].as_str(),
+        Some("loopherd: open view beside shepherd")
+    );
+    assert_eq!(
+        strings(&action["command"]),
+        ["sh", "loopherd.sh", "view", "--beside-shepherd"]
+    );
+    assert_eq!(strings(&action["contexts"]), ["workspace"]);
+}
+
 /// Runs `open-view.sh` as herdr runs an action, with `herdr` at
 /// `HERDR_BIN_PATH` and nowhere on `PATH`.
 #[test]

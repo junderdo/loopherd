@@ -14,6 +14,7 @@ mod ledger;
 mod line_ending;
 mod lock;
 mod matching;
+mod merge_alert;
 mod notify;
 mod pane_event;
 mod pane_label;
@@ -29,6 +30,7 @@ mod revive;
 mod session_hook;
 mod setup;
 mod shell;
+mod shepherd_pane;
 mod shepherd_resume;
 mod skill;
 mod spawn;
@@ -45,6 +47,7 @@ mod tui;
 // build.rs includes it; here only for its tests.
 #[cfg(test)]
 mod version;
+mod view_pane;
 mod watch;
 mod worktree;
 
@@ -139,8 +142,10 @@ enum Command {
     },
     /// Read or edit one of config.toml's settings, keeping its comments and
     /// layout: `context_window`, `default_context_limit` or
-    /// `shepherd.context_limit`, each a number of tokens, or
-    /// `lead_defaults.review_rounds`, each lead's review-round limit.
+    /// `shepherd.context_limit`, each a number of tokens,
+    /// `lead_defaults.review_rounds`, each lead's review-round limit, or
+    /// `view.theme`, `loopherd view`'s palette: `purple-orange`, `phosphor`
+    /// or `catppuccin`.
     Config {
         #[command(subcommand)]
         action: ConfigAction,
@@ -258,7 +263,9 @@ enum Command {
         json: bool,
     },
     /// The herd view as a live TUI, refreshed every 2s. Read-only except that
-    /// Enter focuses the selected agent's pane in herdr.
+    /// Enter focuses the selected agent's pane in herdr, `t` saves the theme it
+    /// switches to as `view.theme` in config.toml, and `S` focuses the
+    /// shepherd or, run in a pane, starts one below the view.
     View {
         /// Start with retired entries shown (toggle with `a`).
         #[arg(long)]
@@ -266,6 +273,10 @@ enum Command {
         /// Start with strays listed (toggle with `s`).
         #[arg(long)]
         strays: bool,
+        /// Open the view in a herdr pane right of the shepherd's (else of
+        /// $HERDR_PANE_ID's, else in the plugin's popup) instead of here.
+        #[arg(long, conflicts_with_all = ["all", "strays"])]
+        beside_shepherd: bool,
     },
     /// herdr's link handler for a Ctrl-clicked GitHub PR: shows the open member
     /// that owns it in the plugin's popup, found by a report naming the PR or
@@ -513,7 +524,8 @@ struct SetupArgs {
 enum ConfigAction {
     /// Print the key's value; exits 1 if it isn't set.
     Get { key: String },
-    /// Set the key, refusing, changing nothing, a value under 10000.
+    /// Set the key, refusing, changing nothing, a token count under 10000
+    /// or a theme `view` doesn't have.
     Set { key: String, value: String },
     /// Remove the key; succeeds if it isn't set.
     Unset { key: String },
@@ -714,7 +726,11 @@ fn main() -> ExitCode {
         Command::RestartWait { name } => ("restart-wait", run_restart_wait(&name)),
         Command::Status { all, strays, json } => ("status", run_status(all, strays, json)),
         Command::Stats { herd, since, json } => ("stats", run_stats(herd, since, json)),
-        Command::View { all, strays } => ("view", run_view(all, strays)),
+        Command::View {
+            beside_shepherd: true,
+            ..
+        } => ("view", run_view_beside_shepherd()),
+        Command::View { all, strays, .. } => ("view", run_view(all, strays)),
         Command::Pr { url, popup } => ("pr", run_pr(url, popup)),
         Command::Report {
             kind,
@@ -1057,10 +1073,27 @@ fn run_stats(herd: Option<String>, since: Option<SystemTime>, json: bool) -> Res
 fn run_view(all: bool, strays: bool) -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let subscriber = SocketSubscriber::new(CliHerdr.socket());
+    let (herds, state, config) = (Paths::from_env()?, ledger.dir()?, config_path()?);
+    let below = match own_pane() {
+        // The split pane gets the herdr server's environment, so pin the
+        // roots this view resolved, set in its own environment or not.
+        Some(pane) => Some(shepherd_pane::Below {
+            pane,
+            cwd: workspace_cwd()?,
+            env: vec![
+                ("XDG_STATE_HOME".into(), env_path(state.parent())?),
+                ("LOOPHERD_CONFIG_DIR".into(), env_path(config.parent())?),
+            ],
+        }),
+        None => None,
+    };
     let dirs = tui::Dirs {
         pauses: pause::Pauses::from_env()?,
-        herds: Paths::from_env()?,
+        herds,
         mailboxes: ledger.reports_dir()?,
+        config,
+        state,
+        below,
     };
     tui::run(
         CliHerdr,
@@ -1072,7 +1105,52 @@ fn run_view(all: bool, strays: bool) -> Result<i32> {
             std::env::var("COLORTERM").ok().as_deref(),
             std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
         ),
+        std::env::var(view_pane::NOTE)
+            .ok()
+            .filter(|n| !n.is_empty()),
     )
+}
+
+fn env_path(dir: Option<&Path>) -> Result<String> {
+    let dir = dir.context("a state or config path has no parent")?;
+    dir.to_str()
+        .map(String::from)
+        .with_context(|| format!("{} is not UTF-8", dir.display()))
+}
+
+/// Where the human works: a plugin pane's workspace, whose own cwd is the
+/// plugin's directory, else the current directory.
+fn workspace_cwd() -> Result<PathBuf> {
+    let context = std::env::var("HERDR_PLUGIN_CONTEXT_JSON").ok();
+    let workspace = context
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        .and_then(|c| c["workspace_cwd"].as_str().map(PathBuf::from));
+    match workspace {
+        Some(cwd) => Ok(cwd),
+        None => std::env::current_dir().context("current directory"),
+    }
+}
+
+fn run_view_beside_shepherd() -> Result<i32> {
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let current = std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|p| !p.is_empty());
+    match view_pane::open(
+        &CliHerdr,
+        &process::ProcFs,
+        &ledger.dir()?,
+        current.as_deref(),
+    )? {
+        view_pane::Opened::BesideShepherd { pane } => {
+            println!("opened the view beside the shepherd's pane {pane}")
+        }
+        view_pane::Opened::Beside { pane, why } => {
+            println!("opened the view beside pane {pane}: {why}")
+        }
+        view_pane::Opened::Popup { why } => println!("opened the view in the popup: {why}"),
+    }
+    Ok(0)
 }
 
 fn run_pr(url: Option<String>, popup: bool) -> Result<i32> {
@@ -1385,6 +1463,7 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         shepherd_handoff: None,
         procs: &process::ProcFs,
         notify_own: None,
+        merges: None,
         pane_label: false,
     };
     let state = ledger.dir()?;
@@ -1392,9 +1471,11 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
     let config = herd_paths.herds.with_file_name("config.toml");
     let mailboxes = ledger.reports_dir()?;
     let notify_own = |events: &[notify::Waiting]| notify_waiting(events, &config, &mailboxes);
+    let gh = github::GhCli::default();
     let req = watch::Request {
         shepherd_handoff: Some(&handoff),
         notify_own: Some(&notify_own),
+        merges: merge_lookups(&config, &gh),
         pane_label: labels_panes(&config),
         ..req
     };
@@ -1418,6 +1499,14 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
     notify_waiting(&wake.waiting, &config, &mailboxes);
     wake.mark_read(&mut |warning| eprintln!("loopherd watch: warning: {warning}"))?;
     Ok(0)
+}
+
+/// `gh` while `config`'s `[notify]` would send a merge alert, else `None`,
+/// so a herd that sends none never asks GitHub.
+fn merge_lookups<'a>(config: &Path, gh: &'a dyn github::Merges) -> Option<&'a dyn github::Merges> {
+    let sends =
+        notify::load(config).is_ok_and(|c| c.is_some_and(|c| c.sends(notify::Kind::MergeAlert)));
+    sends.then_some(gh)
 }
 
 /// Launches each notification `config` asks for as its own `notify-run`,
@@ -2031,6 +2120,27 @@ fn inherited_workspace(ledger: &dyn Ledger) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merges_are_looked_up_only_while_notify_sends_merge_alerts() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        let gh = github::fake::FakeMerges::new(dir.path(), vec![]);
+        for (notify, looks) in [
+            ("", false),
+            ("[notify]\nenabled = false\n", false),
+            (
+                "[notify]\nenabled = true\nkinds = ['question', 'blocked']\n",
+                false,
+            ),
+            ("[notify]\nenabled = true\nkinds = ['merge_alert']\n", true),
+            ("[notify]\nenabled = true\n", true),
+        ] {
+            std::fs::write(&config, notify).unwrap();
+
+            assert_eq!(merge_lookups(&config, &gh).is_some(), looks, "{notify}");
+        }
+    }
 
     #[test]
     fn tell_takes_text_that_starts_with_a_hyphen() {

@@ -102,8 +102,8 @@ herdr plugin install junderdo/loopherd/herdr-plugin
 
 It adds a `loopherd: herd status` action and a `loopherd: open herd view`
 action, which opens `loopherd view` in a popup over most of the screen;
-`q` or Escape quits the view and closes the popup. To open it with a key,
-add a binding to your herdr `config.toml` and run
+`q` or Escape quits the view and closes the popup. To open the popup with
+a key, add a binding to your herdr `config.toml` and run
 `herdr server reload-config`:
 
 ```toml
@@ -117,7 +117,14 @@ description = "loopherd herd view"
 `prefix+m` is unbound in herdr 0.9.5's defaults (`herdr --default-config`);
 pick another if your config uses it. A popup that closes as soon as it
 opens means the view couldn't start; run `loopherd view` in a pane to see
-why. Its event hooks record a member going blocked, or its pane exiting
+why.
+
+`loopherd: open view beside shepherd` (`loopherd.view-beside-shepherd`)
+splits the view into a pane right of the shepherd's, the one its last
+handoff recorded, leaving focus where it was. With no shepherd recorded,
+or its pane gone or no longer running the shepherd's Claude, it splits
+right of the focused pane (the popup when that fails too), and the view
+says why. Bind it the same way, with its own key. Its event hooks record a member going blocked, or its pane exiting
 or closing, or its tab or workspace closing, so the next `loopherd watch`
 reports it even when none was running. They follow a member's pane moved
 to another tab or workspace.
@@ -165,9 +172,16 @@ as its main checkout. Then, in order:
    `loopherd feed <herd> --dry-run` lists the tasks you expect.
 4. **Open the herd view.** In a new herdr tab, run `loopherd view`. It
    lists every member, sorted by what needs you; Enter focuses the
-   selected member's pane.
-5. **Start the shepherd.** In another herdr tab, `cd` to the main
-   checkout, run `claude`, and give it this first prompt:
+   selected member's pane, `S` focuses the shepherd (or, with none, starts
+   one in a pane split below the view), and `t` switches between its
+   purple-orange, phosphor and catppuccin themes, remembering the choice as
+   `view.theme` in `config.toml`.
+5. **Start the shepherd.** Press `S` in the view, run in a pane rather
+   than the plugin's popup, to start it below the view, in the view's
+   directory (a plugin pane's workspace directory, not the plugin's). Or in
+   another herdr tab, `cd` to the main checkout, run `claude`, and give it
+   this first prompt; the skill has it name its herdr agent `shepherd`, so
+   `S` then finds it:
 
    ```text
    You're the shepherd for the <herd> herd in this repo. Read `loopherd --skill`
@@ -248,7 +262,7 @@ table and the rest are what `init` writes; start from its output or from
 | `herd get\|set\|unset <herd> <key>` | Read or edit one value in a herd file, keeping its comments (`queue.max`, `lead.merge`). |
 | `herd remove <herd>` | Delete a finished herd's file and every run of it in the ledger; a name holding another herd's run keeps that run and its files. |
 | `lead-defaults` | Show `config.toml`'s lead switches, on or off, for herds whose `[lead]` doesn't set them; `--set` writes them. |
-| `config get\|set\|unset <key>` | Read or edit `context_window`, `default_context_limit`, `shepherd.context_limit` or `lead_defaults.review_rounds`. |
+| `config get\|set\|unset <key>` | Read or edit `context_window`, `default_context_limit`, `shepherd.context_limit`, `lead_defaults.review_rounds` or `view.theme`. |
 | `install-hook` | Add loopherd's Claude hooks and skill (`--remove` takes them out). |
 
 ### Run
@@ -269,7 +283,7 @@ table and the rest are what `init` writes; start from its output or from
 | `watch [<herd>…]` | Block until a member needs you, print what happened, exit (`--timeout`). |
 | `reports` | Print unread reports, questions first, and mark them read (`--herd`, `--all`). |
 | `status` | Members by herd with herdr's live status (`--all`, `--strays`, `--json`). |
-| `view` | The same as a live TUI; Enter focuses the member's pane. |
+| `view` | The same as a live TUI; Enter focuses the member's pane, `S` focuses the shepherd or starts one below the view, and `t` switches the theme, saving it as `view.theme` in `config.toml`. |
 | `pr [url]` | The herdr plugin's PR link handler: the member that owns the PR in a popup, else the browser. |
 | `stats` | How each herd's work flowed: time to done, review rounds, time waiting on merge (`--herd`, `--since`, `--json`). |
 

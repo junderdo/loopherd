@@ -11,8 +11,8 @@ use anyhow::{Result, anyhow, bail};
 
 use super::events::{Connection, OnPush, PaneNotFound, Pushed, Subscriber, Subscription};
 use super::{
-    Agent, AgentStatus, Herdr, MalformedReply, NewTab, Pane, Plugin, Server, StartOutcome, Tab,
-    WaitOutcome, Workspace,
+    Agent, AgentStatus, Herdr, MalformedReply, NewTab, Pane, Placement, Plugin, Server,
+    StartOutcome, Tab, WaitOutcome, Workspace,
 };
 
 /// How a Claude agent started by the fake behaves.
@@ -48,6 +48,14 @@ struct FakePane {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Split {
+    pub from: String,
+    pub pane: String,
+    pub cwd: PathBuf,
+    pub env: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Started {
     pub name: String,
     pub pane_id: String,
@@ -68,8 +76,8 @@ struct State {
     started: Vec<Started>,
     prompts: Vec<(String, String)>,
     focused: Vec<String>,
-    /// Each opened plugin pane's entrypoint and env, sorted by key.
-    popups: Vec<(String, Vec<(String, String)>)>,
+    splits: Vec<Split>,
+    plugin_panes: Vec<PluginPane>,
     refuse_popup: bool,
     /// Sidebar labels by pane.
     labels: Vec<(String, String)>,
@@ -88,6 +96,9 @@ struct State {
     mutations: u32,
 }
 
+/// An opened plugin pane's entrypoint, placement and env, sorted by key.
+pub type PluginPane = (String, Placement, Vec<(String, String)>);
+
 pub const FAKE_SOCKET: &str = "/run/fake/herdr.sock";
 
 pub struct FakeHerdr {
@@ -96,6 +107,7 @@ pub struct FakeHerdr {
     pub fail_create_tab: bool,
     pub fail_close_tab: bool,
     pub fail_prompt: bool,
+    pub fail_focus: bool,
     pub fail_wait: bool,
     pub fail_visible_text: bool,
     pub fail_shell_pid: bool,
@@ -143,6 +155,7 @@ impl FakeHerdr {
             fail_create_tab: false,
             fail_close_tab: false,
             fail_prompt: false,
+            fail_focus: false,
             fail_wait: false,
             fail_visible_text: false,
             fail_shell_pid: false,
@@ -256,8 +269,30 @@ impl FakeHerdr {
         self.state.lock().unwrap().focused.clone()
     }
 
+    pub fn has_pane(&self, pane_id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .panes
+            .iter()
+            .any(|p| p.id == pane_id)
+    }
+
+    pub fn splits(&self) -> Vec<Split> {
+        self.state.lock().unwrap().splits.clone()
+    }
+
+    /// The plugin panes opened as the manifest places them: entrypoint and env.
     pub fn popups(&self) -> Vec<(String, Vec<(String, String)>)> {
-        self.state.lock().unwrap().popups.clone()
+        self.plugin_panes()
+            .into_iter()
+            .filter(|(_, placement, _)| *placement == Placement::Manifest)
+            .map(|(entrypoint, _, env)| (entrypoint, env))
+            .collect()
+    }
+
+    pub fn plugin_panes(&self) -> Vec<PluginPane> {
+        self.state.lock().unwrap().plugin_panes.clone()
     }
 
     /// The next plugin panes are refused, as herdr does while another modal is open.
@@ -579,6 +614,40 @@ impl Herdr for FakeHerdr {
         Ok(())
     }
 
+    fn split_down(&self, pane_id: &str, cwd: &Path, env: &[(&str, &str)]) -> Result<String> {
+        self.mutating();
+        if self.is_down() {
+            bail!("herdr server not running");
+        }
+        let tab_id = {
+            let state = self.state.lock().unwrap();
+            let pane = state.panes.iter().find(|p| p.id == pane_id);
+            pane.ok_or_else(|| anyhow!("pane {pane_id} not found"))?
+                .tab_id
+                .clone()
+        };
+        let new = self.split(&tab_id, cwd);
+        let mut state = self.state.lock().unwrap();
+        state.splits.push(Split {
+            from: pane_id.to_string(),
+            pane: new.clone(),
+            cwd: cwd.to_path_buf(),
+            env: env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        });
+        Ok(new)
+    }
+
+    fn close_pane(&self, pane_id: &str) -> Result<()> {
+        self.mutating();
+        let mut state = self.state.lock().unwrap();
+        state.panes.retain(|p| p.id != pane_id);
+        state.agents.retain(|a| a.pane_id != pane_id);
+        Ok(())
+    }
+
     fn start_claude(
         &self,
         name: &str,
@@ -690,6 +759,9 @@ impl Herdr for FakeHerdr {
         if self.is_down() {
             bail!("herdr server not running");
         }
+        if self.fail_focus {
+            bail!("focus failed");
+        }
         if !self
             .state
             .lock()
@@ -704,20 +776,33 @@ impl Herdr for FakeHerdr {
         Ok(())
     }
 
-    fn open_plugin_pane(&self, entrypoint: &str, env: &[(&str, &str)]) -> Result<()> {
+    fn open_plugin_pane(
+        &self,
+        entrypoint: &str,
+        placement: &Placement,
+        env: &[(&str, &str)],
+    ) -> Result<()> {
         if self.is_down() {
             bail!("herdr server not running");
         }
         let mut state = self.state.lock().unwrap();
-        if state.refuse_popup {
-            bail!("herdr plugin pane open: another modal is open (ui_busy)");
+        match placement {
+            Placement::Manifest if state.refuse_popup => {
+                bail!("herdr plugin pane open: another modal is open (ui_busy)")
+            }
+            Placement::RightOf { pane, .. } if !state.panes.iter().any(|p| p.id == *pane) => {
+                bail!("herdr plugin pane open: pane {pane} not found (pane_not_found)")
+            }
+            _ => {}
         }
         let mut env: Vec<(String, String)> = env
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         env.sort();
-        state.popups.push((entrypoint.to_string(), env));
+        state
+            .plugin_panes
+            .push((entrypoint.to_string(), placement.clone(), env));
         Ok(())
     }
 

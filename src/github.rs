@@ -13,7 +13,10 @@ use crate::worktree::remote_timeout;
 /// A click waits on this lookup, so it gets a short deadline of its own.
 const HEAD_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// An open pull request.
+/// A watch's poll waits on each merge lookup.
+const MERGES_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A pull request on GitHub.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pr {
     pub number: u64,
@@ -34,6 +37,15 @@ pub trait PullRequests {
     /// The open pull request whose head is `branch` in `repo`'s GitHub repo.
     /// Errs when GitHub could be asked but the asking failed.
     fn open_on(&self, repo: &Path, branch: &str) -> Result<PrLookup>;
+}
+
+pub trait Merges {
+    /// The default branch of `repo`'s GitHub repo.
+    fn default_branch(&self, repo: &Path) -> Result<String>;
+
+    /// The pull requests merged into `branch` of `repo`'s GitHub repo at or
+    /// after `since`, an RFC 3339 time, most recently updated first.
+    fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Pr>>;
 }
 
 /// Asks GitHub through the `gh` program.
@@ -90,6 +102,53 @@ impl PullRequests for GhCli {
             Some(output) => lookup_from(&output),
             None => Ok(no_gh()),
         }
+    }
+}
+
+impl Merges for GhCli {
+    fn default_branch(&self, repo: &Path) -> Result<String> {
+        let full = full_name(repo)?;
+        let default = ".defaultBranchRef.name";
+        let view = [
+            "repo",
+            "view",
+            &full,
+            "--json",
+            "defaultBranchRef",
+            "--jq",
+            default,
+        ];
+        Ok(self.answer(repo, &view)?.trim().to_string())
+    }
+
+    fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Pr>> {
+        let full = full_name(repo)?;
+        let search = format!("merged:>={since} sort:updated-desc");
+        let list = [
+            "pr",
+            "list",
+            "-R",
+            &full,
+            "--state",
+            "merged",
+            "--base",
+            branch,
+            "--search",
+            &search,
+            "--limit",
+            "100",
+            "--json",
+            "number,url",
+        ];
+        let prs: Vec<RawPr> =
+            serde_json::from_str(&self.answer(repo, &list)?).context("read gh pr list's JSON")?;
+        Ok(prs
+            .into_iter()
+            .map(|pr| Pr {
+                number: pr.number,
+                url: pr.url,
+            })
+            .collect())
     }
 }
 
@@ -161,6 +220,29 @@ impl GhCli {
             Ok(None) => bail!("{shown} didn't answer in time"),
             Ok(Some(output)) => Ok(Some(output)),
         }
+    }
+}
+
+impl GhCli {
+    /// What gh with `args` printed within [`MERGES_TIMEOUT`], erring when it
+    /// failed or there's no gh.
+    fn answer(&self, repo: &Path, args: &[&str]) -> Result<String> {
+        let Some(output) = self.run(repo, args, MERGES_TIMEOUT)? else {
+            bail!("no GitHub CLI (gh) on PATH");
+        };
+        if !output.status.success() {
+            let said = String::from_utf8_lossy(&output.stderr);
+            bail!("gh {}: {}", args[..2].join(" "), said.trim());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+}
+
+/// `host/owner/repo` of `repo`'s origin, which must be on GitHub.
+fn full_name(repo: &Path) -> Result<String> {
+    match github_repo(&origin_url(repo)?) {
+        Some((host, name)) => Ok(format!("{host}/{name}")),
+        None => bail!("origin isn't on GitHub"),
     }
 }
 
@@ -260,6 +342,55 @@ pub mod fake {
     impl PullRequests for FakePrs {
         fn open_on(&self, _repo: &Path, _branch: &str) -> Result<PrLookup> {
             self.0.clone().map_err(|e| anyhow::anyhow!(e))
+        }
+    }
+
+    /// `repo`'s pull requests merged into `main`, each with its RFC 3339
+    /// merge time, counting the lookups asked of it.
+    pub struct FakeMerges {
+        pub repo: PathBuf,
+        pub merged: std::cell::RefCell<Vec<(&'static str, u64)>>,
+        pub lookups: std::cell::Cell<u32>,
+    }
+
+    impl FakeMerges {
+        pub fn new(repo: &Path, merged: Vec<(&'static str, u64)>) -> FakeMerges {
+            FakeMerges {
+                repo: repo.into(),
+                merged: merged.into(),
+                lookups: Default::default(),
+            }
+        }
+
+        fn known(&self, repo: &Path) -> Result<()> {
+            self.lookups.set(self.lookups.get() + 1);
+            if repo != self.repo {
+                bail!("no repo {}", repo.display());
+            }
+            Ok(())
+        }
+    }
+
+    impl Merges for FakeMerges {
+        fn default_branch(&self, repo: &Path) -> Result<String> {
+            self.known(repo)?;
+            Ok("main".into())
+        }
+
+        fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Pr>> {
+            self.known(repo)?;
+            assert_eq!(branch, "main");
+            let since = humantime::parse_rfc3339(since)?;
+            let mut prs = vec![];
+            for (at, number) in self.merged.borrow().iter() {
+                if humantime::parse_rfc3339(at)? >= since {
+                    prs.push(Pr {
+                        number: *number,
+                        url: format!("https://github.com/o/r/pull/{number}"),
+                    });
+                }
+            }
+            Ok(prs)
         }
     }
 }
@@ -381,6 +512,52 @@ mod tests {
         );
         crate::test_fakes::executable(&program, script);
         (dir, GhCli { program })
+    }
+
+    /// A repo whose origin is `url`, and a fake gh that records its
+    /// arguments, names `main` the default branch, and lists `prs` as merged.
+    fn fake_gh_merges(url: &str, prs: &str) -> (tempfile::TempDir, GhCli) {
+        let (dir, gh) = fake_gh(url, "");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\n\
+             case \"$1\" in repo) echo main ;; pr) echo '{prs}' ;; esac\n",
+            dir.path().join("args").display()
+        );
+        crate::test_fakes::executable(&gh.program, script);
+        (dir, gh)
+    }
+
+    #[test]
+    fn asks_for_prs_merged_into_the_default_branch_since_a_time() {
+        let listed = r#"[{"number":7,"url":"https://github.com/o/r/pull/7"}]"#;
+        let (dir, gh) = fake_gh_merges("git@github.com:o/r.git", listed);
+
+        let branch = gh.default_branch(dir.path()).unwrap();
+        let merged = (gh.merged_since(dir.path(), &branch, "2026-11-01T00:00:00Z")).unwrap();
+
+        assert_eq!(
+            merged,
+            [Pr {
+                number: 7,
+                url: "https://github.com/o/r/pull/7".into()
+            }]
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("args")).unwrap(),
+            "repo view github.com/o/r --json defaultBranchRef --jq .defaultBranchRef.name\n\
+             pr list -R github.com/o/r --state merged --base main \
+             --search merged:>=2026-11-01T00:00:00Z sort:updated-desc --limit 100 --json number,url\n"
+        );
+    }
+
+    #[test]
+    fn merges_off_github_are_an_error_without_running_gh() {
+        let (dir, gh) = fake_gh_merges("/srv/origin.git", "[]");
+
+        let err = gh.default_branch(dir.path()).unwrap_err();
+
+        assert_eq!(format!("{err:#}"), "origin isn't on GitHub");
+        assert!(!dir.path().join("args").exists());
     }
 
     #[test]

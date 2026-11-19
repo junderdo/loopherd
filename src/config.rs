@@ -11,6 +11,7 @@ use toml_edit::{DocumentMut, Item, RawString, Table, TableLike, Value};
 use crate::context::check_tokens;
 use crate::herd::SwitchValues;
 use crate::line_ending::LineEnding;
+use crate::tui::theme::Palette;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -21,6 +22,7 @@ pub struct ConfigFile {
     /// Each lead's switches where its herd file's `[lead]` leaves one unset.
     pub lead_defaults: Option<SwitchValues>,
     pub herdr_plugin: Option<HerdrPluginConfig>,
+    pub view: Option<ViewConfig>,
     /// Read and checked by `notify`, so a broken table can't cost the rest.
     #[serde(rename = "notify")]
     _notify: Option<toml::Value>,
@@ -36,6 +38,13 @@ pub struct ShepherdConfig {
 #[serde(deny_unknown_fields)]
 pub struct HerdrPluginConfig {
     pub revive_on_startup: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewConfig {
+    /// Checked by `view_theme`, so a theme it doesn't know can't cost the rest.
+    pub theme: Option<String>,
 }
 
 /// `config` parsed and checked; a missing file is an empty one.
@@ -54,6 +63,20 @@ pub fn revive_on_startup(config: &Path) -> Result<bool> {
         .herdr_plugin
         .and_then(|p| p.revive_on_startup)
         .unwrap_or(false))
+}
+
+/// `loopherd view`'s palette, with a warning when `config` can't be read
+/// or names a theme this build doesn't know; both fall back to the default.
+pub fn view_theme(config: &Path) -> (Palette, Option<String>) {
+    let theme = match read(config) {
+        Ok(file) => file.view.and_then(|v| v.theme),
+        Err(e) => return (Palette::default(), Some(format!("{e:#}"))),
+    };
+    match theme.map(|name| name.parse::<Palette>()) {
+        Some(Ok(palette)) => (palette, None),
+        Some(Err(e)) => (Palette::default(), Some(format!("view.theme: {e}"))),
+        None => (Palette::default(), None),
+    }
 }
 
 /// Writes `[lead_defaults]` with the switches in `on` (comma-separated, or
@@ -75,17 +98,19 @@ pub fn set_lead_defaults(config: &Path, on: &str) -> Result<()> {
 }
 
 /// The keys `config get`, `set` and `unset` take.
-pub const KEYS: [&str; 4] = [
+pub const KEYS: [&str; 5] = [
     "context_window",
     "default_context_limit",
     "shepherd.context_limit",
     "lead_defaults.review_rounds",
+    "view.theme",
 ];
 
 /// `key`'s value in `config`, `None` when unset.
-pub fn get(config: &Path, key: &str) -> Result<Option<u64>> {
+pub fn get(config: &Path, key: &str) -> Result<Option<String>> {
     let file = read(config)?;
-    Ok(match known(key)? {
+    let number = match known(key)? {
+        "view.theme" => return Ok(file.view.and_then(|v| v.theme)),
         "context_window" => file.context_window,
         "default_context_limit" => file.default_context_limit,
         "lead_defaults.review_rounds" => file
@@ -93,20 +118,25 @@ pub fn get(config: &Path, key: &str) -> Result<Option<u64>> {
             .and_then(|d| d.review_rounds)
             .map(|rounds| rounds.get().into()),
         _ => file.shepherd.and_then(|s| s.context_limit),
-    })
+    };
+    Ok(number.map(|n| n.to_string()))
 }
 
 /// Writes `key = value`, keeping the file's other keys and comments.
-/// Refuses, changing nothing, an unknown key or a value under the minimum.
+/// Refuses, changing nothing, an unknown key, an unknown theme, or a value
+/// under the minimum.
 pub fn set(config: &Path, key: &str, value: &str) -> Result<()> {
     let key = known(key)?;
-    let value: u64 = value.trim().replace('_', "").parse().with_context(|| {
-        format!(
-            "{key} must be a whole number of {}, got {value:?}",
-            unit(key)
-        )
-    })?;
-    let value = i64::try_from(value).with_context(|| format!("{key}: {value} is too big"))?;
+    let value = match key {
+        "view.theme" => Value::from(
+            value
+                .trim()
+                .parse::<Palette>()
+                .map_err(anyhow::Error::msg)?
+                .name(),
+        ),
+        _ => Value::from(whole_number(key, value)?),
+    };
     edit(config, |doc| {
         let (table, name) = match key.split_once('.') {
             Some((table, name)) => (
@@ -123,12 +153,22 @@ pub fn set(config: &Path, key: &str, value: &str) -> Result<()> {
                 (doc.as_table_mut() as &mut dyn TableLike, key)
             }
         };
-        replace_value(table, name, Value::from(value));
+        replace_value(table, name, value);
         Ok(())
     })
 }
 
-/// Removes `key`, and `[shepherd]` once it's empty; false when `key` was unset.
+fn whole_number(key: &str, value: &str) -> Result<i64> {
+    let number: u64 = value.trim().replace('_', "").parse().with_context(|| {
+        format!(
+            "{key} must be a whole number of {}, got {value:?}",
+            unit(key)
+        )
+    })?;
+    i64::try_from(number).with_context(|| format!("{key}: {number} is too big"))
+}
+
+/// Removes `key`, and its table once it's empty; false when `key` was unset.
 pub fn unset(config: &Path, key: &str) -> Result<bool> {
     let key = known(key)?;
     if get(config, key)?.is_none() {
@@ -663,7 +703,7 @@ mod key_tests {
         ] {
             assert_eq!(get(&path, key).unwrap(), None, "{key}");
             set(&path, key, "300000").unwrap();
-            assert_eq!(get(&path, key).unwrap(), Some(300_000), "{key}");
+            assert_eq!(get(&path, key).unwrap().as_deref(), Some("300000"), "{key}");
             assert!(unset(&path, key).unwrap(), "{key}");
             assert_eq!(get(&path, key).unwrap(), None, "{key}");
             assert!(!unset(&path, key).unwrap(), "{key}");
@@ -675,7 +715,7 @@ mod key_tests {
         let (_dir, path) = config_with("[lead_defaults]\nmerge = true\n");
         let key = "lead_defaults.review_rounds";
         set(&path, key, "5").unwrap();
-        assert_eq!(get(&path, key).unwrap(), Some(5));
+        assert_eq!(get(&path, key).unwrap().as_deref(), Some("5"));
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "[lead_defaults]\nmerge = true\nreview_rounds = 5\n"
@@ -883,7 +923,10 @@ mod key_tests {
                 .file_type()
                 .is_symlink()
         );
-        assert_eq!(get(&target, "context_window").unwrap(), Some(500_000));
+        assert_eq!(
+            get(&target, "context_window").unwrap().as_deref(),
+            Some("500000")
+        );
     }
 
     #[test]
@@ -902,6 +945,11 @@ mod key_tests {
                 "2.5",
                 "a whole number of rounds",
             ),
+            (
+                "view.theme",
+                "solarized",
+                "purple-orange, phosphor, catppuccin",
+            ),
         ] {
             let err = format!("{:#}", set(&path, key, value).unwrap_err());
             assert!(err.contains(says), "{key} {value}: {err}");
@@ -909,5 +957,49 @@ mod key_tests {
         assert!(format!("{:#}", unset(&path, "window").unwrap_err()).contains("unknown key"));
         assert!(format!("{:#}", get(&path, "window").unwrap_err()).contains("unknown key"));
         assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    }
+
+    #[test]
+    fn view_theme_round_trips_through_set_get_and_unset() {
+        let (_dir, path) = config_with("context_window = 1000000\n");
+        set(&path, "view.theme", "phosphor").unwrap();
+        assert_eq!(
+            get(&path, "view.theme").unwrap().as_deref(),
+            Some("phosphor")
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "context_window = 1000000\n\n[view]\ntheme = \"phosphor\"\n"
+        );
+        assert_eq!(view_theme(&path), (Palette::Phosphor, None));
+        assert!(unset(&path, "view.theme").unwrap());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "context_window = 1000000\n"
+        );
+    }
+
+    #[test]
+    fn view_theme_is_the_default_when_unset() {
+        let (_dir, path) = config_with("");
+        assert_eq!(view_theme(&path), (Palette::PurpleOrange, None));
+    }
+
+    #[test]
+    fn an_unknown_view_theme_warns_and_falls_back_to_the_default() {
+        let (_dir, path) = config_with("[view]\ntheme = \"solarized\"\n");
+        let (palette, warning) = view_theme(&path);
+        assert_eq!(palette, Palette::PurpleOrange);
+        let warning = warning.unwrap();
+        assert!(warning.contains("unknown theme \"solarized\""), "{warning}");
+        assert!(warning.contains("purple-orange"), "{warning}");
+    }
+
+    #[test]
+    fn an_unreadable_config_warns_and_the_view_theme_falls_back() {
+        let (_dir, path) = config_with("view = 3\n");
+        let (palette, warning) = view_theme(&path);
+        assert_eq!(palette, Palette::PurpleOrange);
+        assert!(warning.unwrap().contains(&path.display().to_string()));
     }
 }
