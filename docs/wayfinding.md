@@ -96,6 +96,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D79](decisions/D79.md) | No cap on running agents across herds; each herd's `max` stays the only limit. Reopen when two herds run unpaused at once or a usage-limit or `rate_limit` stop hits more than one herd; a future limit starts from reacting to those stops, not a fixed agent count. |
 | [D80](decisions/D80.md) | A lead's watch prints `<herd> running low  0 claimable, <m> unready, no workers open` once per streak of its own, keyed like `out of work`, when its unpaused herd has no claimable work, unready tasks, and no open worker, even mid-way through D60's streak; it replaces the plain line when both start together. Amends D60. |
 | [D81](decisions/D81.md) | `revive --startup` tells a live handoff from a restart by the pane shells (a shell not the server's child, or older than it, means a handoff; otherwise, or when nothing decides, a restart) and prompts no alive lead to re-arm after a handoff. Amends D64. |
+| [D82](decisions/D82.md) | After the shepherd's handoff the human runs `/clear` and sends any message: the watch that printed `shepherd handoff` records the pane, socket, Claude process, session and time in `shepherd.json`; SessionStarts there follow the session, and the first `clear` of the recorded session (or its D33 continuation) after a newer `handoffs/shepherd.md` moves it to `.prev.md`, marks the record used and adds the resume as `additionalContext`. The paste line stays as a fallback. Amends D20. |
 
 ## Emerging model
 

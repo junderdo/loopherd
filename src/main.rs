@@ -29,6 +29,7 @@ mod revive;
 mod session_hook;
 mod setup;
 mod shell;
+mod shepherd_resume;
 mod skill;
 mod spawn;
 mod stats;
@@ -1415,7 +1416,7 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         .and_then(|()| out.flush())
         .context("print the wake; left it unread")?;
     notify_waiting(&wake.waiting, &config, &mailboxes);
-    wake.mark_read()?;
+    wake.mark_read(&mut |warning| eprintln!("loopherd watch: warning: {warning}"))?;
     Ok(0)
 }
 
@@ -1498,6 +1499,8 @@ fn shepherd_handoff(paths: &Paths, state: &Path) -> Option<context::ShepherdHand
         claude_dir: &claude_dir,
         state,
         limit,
+        pane: own_pane().as_deref(),
+        socket: socket_from_env().as_deref(),
     })
 }
 
@@ -1597,6 +1600,17 @@ fn run_session_hook() -> Result<i32> {
         socket: socket.as_deref(),
         claude_pid: process::claude_pid_from_env(&process::ProcFs),
     };
+    match shepherd_resume(&ledger, &pane, &input) {
+        Ok(None) => {}
+        Ok(Some(context)) => println!(
+            "{}",
+            serde_json::json!({"hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": context,
+            }})
+        ),
+        Err(e) => eprintln!("loopherd session-hook: warning: shepherd resume: {e:#}"),
+    }
     if let Err(e) = pane_label::session_started(&CliHerdr, &ledger.reports_dir()?, pane.id, &input)
     {
         eprintln!(
@@ -1613,6 +1627,27 @@ fn run_session_hook() -> Result<i32> {
         &mut |warning| eprintln!("loopherd session-hook: {warning}"),
     )?;
     Ok(0)
+}
+
+/// Follows the Claude where the shepherd's last handoff was recorded across
+/// its session starts, and returns its resume context on the `/clear` that resumes it.
+fn shepherd_resume(
+    ledger: &FileLedger,
+    pane: &session_hook::Pane,
+    input: &[u8],
+) -> Result<Option<String>> {
+    let (Some(socket), Some(pid)) = (pane.socket, pane.claude_pid) else {
+        return Ok(None);
+    };
+    let Some(start) = process::ProcFs.start(pid) else {
+        return Ok(None);
+    };
+    let place = shepherd_resume::Place {
+        pane: pane.id.to_string(),
+        socket: socket.to_path_buf(),
+        process: ledger::Process { pid, start },
+    };
+    shepherd_resume::session_started(&ledger.dir()?, &place, input, &live_session)
 }
 
 fn run_prompt_hook() -> Result<i32> {

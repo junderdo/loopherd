@@ -275,3 +275,21 @@ fn a_lead_restarts_itself_after_its_handoff() {
         "{handoffs}"
     );
 }
+
+#[test]
+fn the_shepherd_tells_the_human_to_clear_and_send_any_message_with_the_paste_line_as_fallback() {
+    let home = tempfile::tempdir().unwrap();
+    let printed = String::from_utf8(skill(home.path())).unwrap();
+    let own = flat_section(
+        &printed,
+        "\n### Your own handoff\n",
+        "\n### Notifying the human\n",
+    );
+    let clear = own.find("Run `/clear`, then send any message (e.g. `go`)");
+    let paste = own.find("`continue as the loopherd shepherd from ");
+    assert!(clear.is_some() && clear < paste, "{own}");
+    assert!(
+        own.contains("given that resume (naming the `.prev.md` path) or the pasted line"),
+        "{own}"
+    );
+}
