@@ -29,6 +29,7 @@ mod revive;
 mod session_hook;
 mod setup;
 mod shell;
+mod shepherd_pane;
 mod shepherd_resume;
 mod skill;
 mod spawn;
@@ -260,8 +261,9 @@ enum Command {
         json: bool,
     },
     /// The herd view as a live TUI, refreshed every 2s. Read-only except that
-    /// Enter focuses the selected agent's pane in herdr and `t` saves the
-    /// theme it switches to as `view.theme` in config.toml.
+    /// Enter focuses the selected agent's pane in herdr, `t` saves the theme it
+    /// switches to as `view.theme` in config.toml, and `S` focuses the
+    /// shepherd or, run in a pane, starts one below the view.
     View {
         /// Start with retired entries shown (toggle with `a`).
         #[arg(long)]
@@ -1066,6 +1068,18 @@ fn run_view(all: bool, strays: bool) -> Result<i32> {
         herds: Paths::from_env()?,
         mailboxes: ledger.reports_dir()?,
         config: config_path()?,
+        state: ledger.dir()?,
+        below: match own_pane() {
+            Some(pane) => Some(shepherd_pane::Below {
+                pane,
+                cwd: workspace_cwd()?,
+                env: ["XDG_STATE_HOME", "LOOPHERD_CONFIG_DIR"]
+                    .into_iter()
+                    .filter_map(|k| Some((k.to_string(), std::env::var(k).ok()?)))
+                    .collect(),
+            }),
+            None => None,
+        },
     };
     tui::run(
         CliHerdr,
@@ -1078,6 +1092,19 @@ fn run_view(all: bool, strays: bool) -> Result<i32> {
             std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
         ),
     )
+}
+
+/// Where the human works: a plugin pane's workspace, whose own cwd is the
+/// plugin's directory, else the current directory.
+fn workspace_cwd() -> Result<PathBuf> {
+    let context = std::env::var("HERDR_PLUGIN_CONTEXT_JSON").ok();
+    let workspace = context
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        .and_then(|c| c["workspace_cwd"].as_str().map(PathBuf::from));
+    match workspace {
+        Some(cwd) => Ok(cwd),
+        None => std::env::current_dir().context("current directory"),
+    }
 }
 
 fn run_pr(url: Option<String>, popup: bool) -> Result<i32> {

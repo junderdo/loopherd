@@ -75,6 +75,13 @@ fn write(state: &Path, record: &Record) -> Result<()> {
     Ok(())
 }
 
+/// Where the last record says the shepherd ran, used or not; `None` when
+/// there's no record or it won't parse.
+pub fn recorded_place(state: &Path) -> Option<Place> {
+    let text = fs::read_to_string(record_path(state)).ok()?;
+    serde_json::from_str::<Record>(&text).ok().map(|r| r.place)
+}
+
 /// The unused record for `place`. A record that isn't JSON, or names another
 /// pane or socket, is none; one for this pane and socket that won't parse is
 /// an error.
@@ -118,7 +125,7 @@ pub fn session_started(
     let cleared = record.current.as_deref().unwrap_or(&record.session);
     let of_the_recorded = live_session(cleared) == live_session(&record.session);
     let written = match source == "clear" && of_the_recorded {
-        true => handoff_written_after(state, &record.at)?,
+        true => handoff_written_after(state, Some(&record.at))?,
         false => None,
     };
     let Some(written) = written else {
@@ -131,27 +138,54 @@ pub fn session_started(
     record.used = true;
     record.current = Some(started);
     write(state, &record)?;
+    resume_from_moved_handoff(state, written).map(Some)
+}
+
+/// The first prompt for a shepherd started afresh: the resume, when
+/// `handoffs/shepherd.md` was written after the last record or there's no
+/// record, marking any record used and moving the handoff as a resume does.
+pub fn new_shepherd_resume(state: &Path) -> Result<Option<String>> {
+    let last = fs::read_to_string(record_path(state))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Record>(&text).ok());
+    let Some(written) = handoff_written_after(state, last.as_ref().map(|r| r.at.as_str()))? else {
+        return Ok(None);
+    };
+    if let Some(mut record) = last.filter(|r| !r.used) {
+        record.used = true;
+        write(state, &record)?;
+    }
+    resume_from_moved_handoff(state, written).map(Some)
+}
+
+/// Moves the handoff to `shepherd.prev.md` and returns the context that
+/// resumes the shepherd from it.
+fn resume_from_moved_handoff(state: &Path, written: SystemTime) -> Result<String> {
     let handoff = handoff_path(state);
     let read = handoff.with_extension("prev.md");
     fs::rename(&handoff, &read)
         .with_context(|| format!("move {} to {}", handoff.display(), read.display()))?;
-    Ok(Some(format!(
+    Ok(format!(
         "You are the loopherd shepherd, resuming after your handoff. Run `loopherd --skill`, \
          read your handoff at {} (written {}), run `loopherd status` and \
          `loopherd reports --all --tail 40` (for a fuller history, `--since <time>` or plain \
          `--all`), re-arm your watch, and continue from the handoff's next steps.",
         read.display(),
         humantime::format_rfc3339_seconds(written),
-    )))
+    ))
 }
 
-/// When the handoff was written, if after the record's time `at`.
-fn handoff_written_after(state: &Path, at: &str) -> Result<Option<SystemTime>> {
+/// When the handoff was written, if after the record's time `at`, or at all
+/// with no `at`.
+fn handoff_written_after(state: &Path, at: Option<&str>) -> Result<Option<SystemTime>> {
     let handoff = handoff_path(state);
     let written = match fs::metadata(&handoff).and_then(|m| m.modified()) {
         Ok(written) => written,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("read {}", handoff.display())),
+    };
+    let Some(at) = at else {
+        return Ok(Some(written));
     };
     let at = humantime::parse_rfc3339(at)
         .with_context(|| format!("parse the time in {}", record_path(state).display()))?;

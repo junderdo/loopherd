@@ -98,6 +98,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D81](decisions/D81.md) | `revive --startup` tells a live handoff from a restart by the pane shells (a shell not the server's child, or older than it, means a handoff; otherwise, or when nothing decides, a restart) and prompts no alive lead to re-arm after a handoff. Amends D64. |
 | [D82](decisions/D82.md) | After the shepherd's handoff the human runs `/clear` and sends any message: the watch that printed `shepherd handoff` records the pane, socket, Claude process, session and time in `shepherd.json`; SessionStarts there follow the session, and the first `clear` of the recorded session (or its D33 continuation) after a newer `handoffs/shepherd.md` moves it to `.prev.md`, marks the record used and adds the resume as `additionalContext`. The paste line stays as a fallback. Amends D20. |
 | [D86](decisions/D86.md) | `loopherd view` has three palettes, `purple-orange` (default), `phosphor` and `catppuccin` (Mocha, as herdr's `catppuccin`); `t` cycles them and saves the pick at once as `config.toml`'s `view.theme`, which `config get\|set\|unset` take; an unknown or unreadable value falls back with a note in the view. |
+| [D88](decisions/D88.md) | `S` in `loopherd view` focuses the live shepherd (herdr agent `shepherd`, or `shepherd.json`'s pane on this socket), or splits the view's pane `down` and starts `shepherd` there with the view's state and config env, resuming from a handoff newer than the record; a popup view only focuses. |
 
 ## Emerging model
 

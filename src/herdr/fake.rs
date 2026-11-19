@@ -47,6 +47,15 @@ struct FakePane {
     shell_pid: Option<u32>,
 }
 
+/// A `split_down`: the pane split, the new pane below it, its cwd and env.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Split {
+    pub from: String,
+    pub pane: String,
+    pub cwd: PathBuf,
+    pub env: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Started {
     pub name: String,
@@ -68,6 +77,7 @@ struct State {
     started: Vec<Started>,
     prompts: Vec<(String, String)>,
     focused: Vec<String>,
+    splits: Vec<Split>,
     /// Each opened plugin pane's entrypoint and env, sorted by key.
     popups: Vec<(String, Vec<(String, String)>)>,
     refuse_popup: bool,
@@ -254,6 +264,10 @@ impl FakeHerdr {
     /// Panes passed to `focus`, in order. Focusing isn't a mutation.
     pub fn focused(&self) -> Vec<String> {
         self.state.lock().unwrap().focused.clone()
+    }
+
+    pub fn splits(&self) -> Vec<Split> {
+        self.state.lock().unwrap().splits.clone()
     }
 
     pub fn popups(&self) -> Vec<(String, Vec<(String, String)>)> {
@@ -577,6 +591,32 @@ impl Herdr for FakeHerdr {
         state.panes.retain(|p| p.tab_id != tab_id);
         state.agents.retain(|a| a.tab_id != tab_id);
         Ok(())
+    }
+
+    fn split_down(&self, pane_id: &str, cwd: &Path, env: &[(&str, &str)]) -> Result<String> {
+        self.mutating();
+        if self.is_down() {
+            bail!("herdr server not running");
+        }
+        let tab_id = {
+            let state = self.state.lock().unwrap();
+            let pane = state.panes.iter().find(|p| p.id == pane_id);
+            pane.ok_or_else(|| anyhow!("pane {pane_id} not found"))?
+                .tab_id
+                .clone()
+        };
+        let new = self.split(&tab_id, cwd);
+        let mut state = self.state.lock().unwrap();
+        state.splits.push(Split {
+            from: pane_id.to_string(),
+            pane: new.clone(),
+            cwd: cwd.to_path_buf(),
+            env: env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        });
+        Ok(new)
     }
 
     fn start_claude(

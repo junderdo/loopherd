@@ -165,10 +165,13 @@ as its main checkout. Then, in order:
    `loopherd feed <herd> --dry-run` lists the tasks you expect.
 4. **Open the herd view.** In a new herdr tab, run `loopherd view`. It
    lists every member, sorted by what needs you; Enter focuses the
-   selected member's pane, and `t` switches between its purple-orange,
-   phosphor and catppuccin themes, remembering the choice as `view.theme`
-   in `config.toml`.
-5. **Start the shepherd.** In another herdr tab, `cd` to the main
+   selected member's pane, `S` focuses the shepherd (or, with none, starts
+   one in a pane split below the view), and `t` switches between its
+   purple-orange, phosphor and catppuccin themes, remembering the choice as
+   `view.theme` in `config.toml`.
+5. **Start the shepherd.** Press `S` in the view, run in a pane rather
+   than the plugin's popup, to start it below the view in the view's
+   directory. Or in another herdr tab, `cd` to the main
    checkout, run `claude`, and give it this first prompt:
 
    ```text
@@ -271,7 +274,7 @@ table and the rest are what `init` writes; start from its output or from
 | `watch [<herd>…]` | Block until a member needs you, print what happened, exit (`--timeout`). |
 | `reports` | Print unread reports, questions first, and mark them read (`--herd`, `--all`). |
 | `status` | Members by herd with herdr's live status (`--all`, `--strays`, `--json`). |
-| `view` | The same as a live TUI; Enter focuses the member's pane, and `t` switches the theme, saving it as `view.theme` in `config.toml`. |
+| `view` | The same as a live TUI; Enter focuses the member's pane, `S` focuses the shepherd or starts one below the view, and `t` switches the theme, saving it as `view.theme` in `config.toml`. |
 | `pr [url]` | The herdr plugin's PR link handler: the member that owns the PR in a popup, else the browser. |
 | `stats` | How each herd's work flowed: time to done, review rounds, time waiting on merge (`--herd`, `--since`, `--json`). |
 

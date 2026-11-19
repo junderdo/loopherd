@@ -295,6 +295,34 @@ shell's parent pid and start time against the server's, and `revive
 --startup` skips the re-arm prompt when the shells survived.
 LH-246 built it (D81) against herdr 0.9.5.
 
+## Bringing up the shepherd from the view (0.9.5, LH-287)
+
+Checked 2026-11-19 against herdr 0.9.5 on the `loopherd-dev` server through
+`scripts/herdr-dev`; the live session was only read.
+
+- **The view's own pane.** A plain pane's process gets `HERDR_PANE_ID`
+  (read from a running view's environment). A plugin pane opened with
+  `plugin pane open --placement split` gets it too, naming its own new
+  pane, beside `HERDR_PLUGIN_*` and `HERDR_PLUGIN_CONTEXT_JSON`; only a
+  popup goes without (see Plugins above). So the view needs no `pane list`
+  lookup: `HERDR_PANE_ID` is its pane, and its absence means a popup. A
+  plugin pane's cwd is the plugin's root; the context JSON's
+  `workspace_cwd` is the workspace's.
+- **Focusing by ID.** `agent focus <pane-id>` takes a pane ID as its target
+  and brings that pane's agent to the front, as the view's Enter already
+  does. `pane focus` only moves to a neighbor by direction.
+- **Splitting below.** `pane split <pane> --direction down --cwd <dir>
+  --no-focus` answers the new pane as `.result.pane.pane_id`. Its shell
+  gets the server's environment plus each `--env K=V`, not the caller's: a
+  variable set on the calling `herdr` was unset in the new pane, and one
+  passed with `--env` was set.
+- **Starting the shepherd.** `agent start shepherd --kind claude --pane
+  <new> -- <prompt>` once the new shell is at its prompt. The prompt resumes
+  from `handoffs/shepherd.md` when it was written after `shepherd.json`'s
+  time, or when there's no record; otherwise it is the plain shepherd start.
+  The live test shows the stacked layout in `pane layout`: the shepherd's
+  pane has the view's `x` and a larger `y`.
+
 ## Oldest supported herdr (LH-247)
 
 Still unknown. `loopherd doctor` fails below `MIN_HERDR` in

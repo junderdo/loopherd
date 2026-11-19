@@ -129,6 +129,9 @@ pub trait Herdr {
     /// Creates a tab without focusing it.
     fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<NewTab>;
     fn close_tab(&self, tab_id: &str) -> Result<()>;
+    /// Splits `pane_id` with a new shell pane below it, without focusing it,
+    /// with `env` set for its shell. Returns the new pane's ID.
+    fn split_down(&self, pane_id: &str, cwd: &Path, env: &[(&str, &str)]) -> Result<String>;
     /// Starts a Claude agent named `name` in `pane_id`.
     fn start_claude(
         &self,
@@ -491,6 +494,26 @@ impl Herdr for CliHerdr {
 
     fn close_tab(&self, tab_id: &str) -> Result<()> {
         self.call_ok(&["tab", "close", tab_id]).map(drop)
+    }
+
+    fn split_down(&self, pane_id: &str, cwd: &Path, env: &[(&str, &str)]) -> Result<String> {
+        let cwd = cwd.to_str().context("cwd is not UTF-8")?;
+        let env: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let mut argv = vec![
+            "pane",
+            "split",
+            pane_id,
+            "--direction",
+            "down",
+            "--cwd",
+            cwd,
+            "--no-focus",
+        ];
+        for pair in &env {
+            argv.extend(["--env", pair]);
+        }
+        let result = self.call_ok(&argv)?;
+        parse(&result["pane"]["pane_id"], "pane split")
     }
 
     fn start_claude(
