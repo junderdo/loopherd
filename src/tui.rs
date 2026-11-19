@@ -123,6 +123,14 @@ where
     (requests, responses)
 }
 
+/// The app in `config`'s saved palette, noting why when it falls back.
+fn opening(options: Options, theme: Theme, config: &std::path::Path) -> App {
+    let (palette, warning) = crate::config::view_theme(config);
+    let mut app = App::new(options, theme.with_palette(palette));
+    app.message = warning.map(|w| format!("{w}; using {}", palette.name()));
+    app
+}
+
 fn save_theme(config: &std::path::Path, palette: Palette) -> Response {
     Response::SavedTheme(crate::config::set(config, "view.theme", palette.name()))
 }
@@ -558,6 +566,7 @@ impl App {
         key(&mut spans, "q", "quit");
         key(&mut spans, "↑↓/jk", "select");
         key(&mut spans, "enter", "focus");
+        key(&mut spans, "t", "theme");
         for (k, label, on) in [
             ("s", "strays:", self.options.strays),
             ("a", "all:", self.options.all),
@@ -566,7 +575,6 @@ impl App {
             spans.push(Span::raw(" "));
             spans.push(Span::styled(if on { "on" } else { "off" }, t.toggle(on)));
         }
-        key(&mut spans, "t", "theme");
         Line::from(spans)
     }
 
@@ -977,7 +985,7 @@ where
     let mut terminal = ratatui::try_init()?;
     let result = run_loop(
         &mut terminal,
-        App::new(options, theme),
+        opening(options, theme, &config),
         &reader,
         &watch,
         terminal_key,
@@ -1861,7 +1869,7 @@ max = 3
                 "││                                                                    ││",
                 "││                                                                    ││",
                 "│╰────────────────────────────────────────────────────────────────────╯│",
-                "│ q quit  ↑↓/jk select  enter focus  s strays: off  a all: off  t theme│",
+                "│ q quit  ↑↓/jk select  enter focus  t theme  s strays: off  a all: off│",
                 "╰──────────────────────────────────────────────────────────────────────╯",
             ]
         );
@@ -2096,11 +2104,46 @@ max = 3
     }
 
     #[test]
+    fn the_view_opens_in_the_saved_theme() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "[view]\ntheme = \"catppuccin\"\n").unwrap();
+        let mut app = opening(Options::default(), truecolor(), &config);
+        let request = app.tick(now).unwrap();
+        app.apply(serve_quiet(request, &herdr, &ledger), now)
+            .unwrap();
+        let terminal = render(&app, now);
+        assert_eq!(cell(&terminal, (0, 0)).fg, Color::Rgb(0xcb, 0xa6, 0xf7));
+    }
+
+    #[test]
+    fn an_unknown_saved_theme_opens_purple_orange_and_says_so_in_the_notes() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "[view]\ntheme = \"solarized\"\n").unwrap();
+        let mut app = opening(Options::default(), truecolor(), &config);
+        let request = app.tick(now).unwrap();
+        app.apply(serve_quiet(request, &herdr, &ledger), now)
+            .unwrap();
+        let terminal = render_tall(&app, now);
+        assert_eq!(cell(&terminal, (0, 0)).fg, PURPLE);
+        let shown = lines(&terminal).concat();
+        assert!(
+            shown.contains("view.theme: unknown theme \"solarized\""),
+            "{shown}"
+        );
+        assert!(shown.contains("using purple-orange"), "{shown}");
+    }
+
+    #[test]
     fn the_footer_lists_t_for_the_theme() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let terminal = render(&app(&herdr, &ledger, now), now);
         assert_eq!(at(&terminal, "t theme").fg, LIGHT_ORANGE);
         assert_eq!(at(&terminal, "theme").fg, GREY_VIOLET);
+        assert!(pos(&terminal, "t theme").0 < pos(&terminal, "s strays").0);
     }
 
     #[test]
@@ -2226,7 +2269,7 @@ max = 3
         );
         assert_eq!(
             text(&terminal)[28],
-            "q quit  ↑↓/jk select  enter focus  s strays: on  a all: on  t theme"
+            "q quit  ↑↓/jk select  enter focus  t theme  s strays: on  a all: on"
         );
         press(
             &mut app,

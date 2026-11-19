@@ -260,7 +260,8 @@ enum Command {
         json: bool,
     },
     /// The herd view as a live TUI, refreshed every 2s. Read-only except that
-    /// Enter focuses the selected agent's pane in herdr.
+    /// Enter focuses the selected agent's pane in herdr and `t` saves the
+    /// theme it switches to as `view.theme` in config.toml.
     View {
         /// Start with retired entries shown (toggle with `a`).
         #[arg(long)]
@@ -1060,19 +1061,11 @@ fn run_stats(herd: Option<String>, since: Option<SystemTime>, json: bool) -> Res
 fn run_view(all: bool, strays: bool) -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let subscriber = SocketSubscriber::new(CliHerdr.socket());
-    let config = config_path()?;
-    let (palette, warning) = config::view_theme(&config);
-    if let Some(warning) = warning {
-        eprintln!(
-            "loopherd view: warning: {warning}; using {}",
-            palette.name()
-        );
-    }
     let dirs = tui::Dirs {
         pauses: pause::Pauses::from_env()?,
         herds: Paths::from_env()?,
         mailboxes: ledger.reports_dir()?,
-        config,
+        config: config_path()?,
     };
     tui::run(
         CliHerdr,
@@ -1083,8 +1076,7 @@ fn run_view(all: bool, strays: bool) -> Result<i32> {
         tui::theme::Theme::from_env(
             std::env::var("COLORTERM").ok().as_deref(),
             std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
-        )
-        .with_palette(palette),
+        ),
     )
 }
 

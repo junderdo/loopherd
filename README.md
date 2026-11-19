@@ -271,7 +271,7 @@ table and the rest are what `init` writes; start from its output or from
 | `watch [<herd>…]` | Block until a member needs you, print what happened, exit (`--timeout`). |
 | `reports` | Print unread reports, questions first, and mark them read (`--herd`, `--all`). |
 | `status` | Members by herd with herdr's live status (`--all`, `--strays`, `--json`). |
-| `view` | The same as a live TUI; Enter focuses the member's pane. |
+| `view` | The same as a live TUI; Enter focuses the member's pane, and `t` switches the theme, saving it as `view.theme` in `config.toml`. |
 | `pr [url]` | The herdr plugin's PR link handler: the member that owns the PR in a popup, else the browser. |
 | `stats` | How each herd's work flowed: time to done, review rounds, time waiting on merge (`--herd`, `--since`, `--json`). |
 
