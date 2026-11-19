@@ -513,7 +513,15 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   transcripts after `cleanupPeriodDays`. `-` means none are left, its
   mailbox can't be read, or Claude's dir can't be found (`HOME` unset), and
   is left out of the medians. Each herd's `lead overhead` line is its lead's
-  tokens within the window, subagents included (D92). `--herd`,
+  tokens within the window, subagents included (D92). The `outcome` column
+  is how the run ended (D92): `merged` when feed retired it with its
+  template's `merged` check passing, `closed` when feed retired it without
+  that (a template with no `merged` check always gives `closed`, so its
+  runs are left out of the medians), `released` after `loopherd release`,
+  `retired` for `loopherd retire`, with or without `--close`, and `-` for a
+  run retired before outcomes were recorded. The medians and maxima cover
+  only `merged` runs; the summary counts the other outcomes apart, and each
+  template's line does the same for its runs. `--herd`,
   `--since <date or time>` (started on or after), `--until <date or time>`
   (started before; an `--until` at or before `--since` is refused; a date
   means midnight UTC, so `--until` excludes that day),

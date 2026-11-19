@@ -72,7 +72,7 @@ use crate::herd_view::Options;
 use crate::herdr::events::SocketSubscriber;
 use crate::herdr::{CliHerdr, Herdr, socket_from_env};
 use crate::lead::LeadRequest;
-use crate::ledger::{FileLedger, Ledger, Process};
+use crate::ledger::{FileLedger, Ledger, Outcome, Process};
 use crate::process::Procs;
 use crate::prompt::prompt;
 use crate::release::release;
@@ -254,11 +254,17 @@ enum Command {
     /// tokens: `in` read (input + cache write + cache read) and `out` written,
     /// over its sessions and their subagents. `-` when retire recorded none and
     /// the transcripts are gone, the mailbox can't be read, or Claude's dir
-    /// can't be found. A summary per herd gives medians, repeated per template
-    /// within the herd; open members are listed apart, and a lead overhead line
-    /// gives the lead's tokens within `--since` and `--until`; the lead gets no
-    /// row. To judge a template or prompt change, run it over the window before
-    /// and the window after. Read-only, and marks no report read.
+    /// can't be found. The `outcome` column is how the run ended: `merged`
+    /// (feed retired it with its template's `merged` check passing), `closed`
+    /// (feed retired it without that), `released` (`loopherd release`),
+    /// `retired` (`loopherd retire`, with or without `--close`), or `-` for a
+    /// run retired before outcomes were recorded. A summary per herd counts
+    /// each outcome and gives medians and maxima over `merged` runs only,
+    /// repeated per template within the herd; open members are listed apart,
+    /// and a lead overhead line gives the lead's tokens within `--since` and
+    /// `--until`; the lead gets no row. To judge a template or prompt change,
+    /// run it over the window before and the window after. Read-only, and
+    /// marks no report read.
     Stats {
         /// Only this herd.
         #[arg(long)]
@@ -947,7 +953,7 @@ fn run_retire(name: &str, close: bool, force: bool) -> Result<i32> {
     }
     if !close {
         let now = SystemTime::now();
-        let record = retire(&mut ledger, name, now)?;
+        let record = retire(&mut ledger, name, now, Outcome::Retired)?;
         println!("retired {name}");
         let mailboxes = ledger.reports_dir()?;
         let claude_dir = install_hook::claude_dir().ok();
@@ -973,6 +979,7 @@ fn run_retire(name: &str, close: bool, force: bool) -> Result<i32> {
         &mut ledger,
         name,
         SystemTime::now(),
+        Outcome::Retired,
         &mailboxes,
         claude_dir.as_deref(),
         pane.as_ref(),
