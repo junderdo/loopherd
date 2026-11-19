@@ -1,6 +1,6 @@
 //! Telling the human, outside the shepherd's pane, that something waits on
-//! them: a `question` report or a `blocked` member, per `config.toml`'s
-//! `[notify]` table.
+//! them: a `question` report or a `blocked` member, or that a lead's repo saw
+//! a merge only the human should make, per `config.toml`'s `[notify]` table.
 
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -23,6 +23,8 @@ use crate::template::Template;
 pub enum Kind {
     Question,
     Blocked,
+    #[serde(rename = "merge_alert")]
+    MergeAlert,
 }
 
 impl Kind {
@@ -30,6 +32,7 @@ impl Kind {
         match self {
             Kind::Question => "question",
             Kind::Blocked => "blocked",
+            Kind::MergeAlert => "merge_alert",
         }
     }
 }
@@ -73,6 +76,10 @@ impl Config {
     /// Enabled with herdr's toast off, no command and no pane label.
     pub fn sends_nothing(&self) -> bool {
         !self.herdr && self.command.is_empty() && !self.pane_label
+    }
+
+    pub fn sends(&self, kind: Kind) -> bool {
+        self.kinds.contains(&kind)
     }
 
     /// Whether to label the pane that must relay or answer a question; see `pane_label`.
@@ -122,7 +129,7 @@ fn check(table: Table) -> Result<Option<Config>> {
             .context("command")?;
     }
     Ok(table.enabled.then(|| Config {
-        kinds: table.kinds.unwrap_or(vec![Kind::Question, Kind::Blocked]),
+        kinds: (table.kinds).unwrap_or(vec![Kind::Question, Kind::Blocked, Kind::MergeAlert]),
         herdr: table.herdr.unwrap_or(true),
         command,
         pane_label: table.pane_label,
@@ -134,9 +141,10 @@ pub struct Waiting {
     pub herd: Option<String>,
     pub member: String,
     pub kind: Kind,
-    /// The question; empty for `blocked`.
+    /// The question, or the merged PR's number and URL; empty for `blocked`.
     pub text: String,
-    /// The question's mailbox time, telling it from the member's others.
+    /// The question's mailbox time or the merged PR's URL, telling it from
+    /// the member's others.
     pub at: Option<String>,
 }
 
@@ -171,9 +179,10 @@ pub fn send(
         let text = match event.kind {
             Kind::Question => summary(&event.text),
             Kind::Blocked => Kind::Blocked.as_str().to_string(),
+            Kind::MergeAlert => event.text.clone(),
         };
         let marked = match &event.at {
-            Some(at) => first_to_notify(mailboxes, &event.member, at),
+            Some(at) => first_to_notify(mailboxes, &event.member, event.kind, at),
             None => first_to_notify_blocked(mailboxes, &event.member),
         };
         match marked {
@@ -388,10 +397,10 @@ fn mark_id(path: &Path) -> Result<Option<(u64, SystemTime)>> {
     }
 }
 
-/// Removes `member`'s notify marks, for a member that will never wake a watch
+/// Removes `member`'s notify marks and a lead's merge-alert state, for a member that will never wake a watch
 /// again. Returns a warning naming each mark that couldn't be removed.
 pub fn forget_marks(mailboxes: &Path, member: &str) -> Vec<String> {
-    ["notified", "blocked", BLOCK_RECORDED]
+    ["notified", "blocked", BLOCK_RECORDED, "merges"]
         .iter()
         .map(|kind| mailboxes.join(format!("{member}.{kind}")))
         .filter_map(|path| match fs::remove_file(&path) {
@@ -403,8 +412,8 @@ pub fn forget_marks(mailboxes: &Path, member: &str) -> Vec<String> {
         .collect()
 }
 
-/// Marks `member`'s question at `at` notified unless a watch already did.
-fn first_to_notify(mailboxes: &Path, member: &str, at: &str) -> Result<bool> {
+/// Marks `member`'s `kind` event at `at` notified unless a watch already did.
+fn first_to_notify(mailboxes: &Path, member: &str, kind: Kind, at: &str) -> Result<bool> {
     fs::create_dir_all(mailboxes).with_context(|| format!("create {}", mailboxes.display()))?;
     let path = mailboxes.join(format!("{member}.notified"));
     let file = OpenOptions::new()
@@ -414,7 +423,7 @@ fn first_to_notify(mailboxes: &Path, member: &str, at: &str) -> Result<bool> {
         .open(&path)
         .with_context(|| format!("open {}", path.display()))?;
     let mut marks = Lock::wait(file).with_context(|| format!("lock {}", path.display()))?;
-    let mark = format!("question {at}");
+    let mark = format!("{} {at}", kind.as_str());
     let mut text = String::new();
     marks
         .read_to_string(&mut text)
