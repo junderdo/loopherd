@@ -221,6 +221,7 @@ pub fn spawn(
         created: humantime::format_rfc3339_seconds(SystemTime::now()).to_string(),
         retired: false,
         retired_at: None,
+        outcome: None,
         released_at: None,
         herd: req.member_of.as_ref().map(|m| m.herd.clone()),
         template: req.member_of.as_ref().and_then(|m| m.template.clone()),
@@ -1144,6 +1145,7 @@ mod tests {
             herd: None,
             since: None,
             now: SystemTime::now(),
+            claude_dir: None,
         };
         let (herds, _) = crate::stats::stats(&ledger, reports.path(), &query).unwrap();
         let retired: Vec<_> = herds[0]

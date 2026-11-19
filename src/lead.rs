@@ -707,7 +707,9 @@ mod tests {
             &crate::sandbox::Guard::new(setup.paths(), None),
             "lead-h",
             now,
+            crate::ledger::Outcome::Retired,
             std::path::Path::new("/nonexistent/reports"),
+            None,
             None,
             &mut out,
         )

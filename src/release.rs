@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::github::{PrLookup, PullRequests};
 use crate::herdr::Herdr;
-use crate::ledger::{AgentRecord, Ledger};
+use crate::ledger::{AgentRecord, Ledger, Outcome};
 use crate::report::{Body, Entry, append};
 use crate::retire::open_tab;
 use crate::sandbox::Guard;
@@ -179,6 +179,7 @@ fn mark_released(
         }
         if r.released_at.is_none() {
             r.released_at = Some(humantime::format_rfc3339_seconds(now).to_string());
+            r.outcome = Some(Outcome::Released);
         }
         Ok(())
     })?;
@@ -257,7 +258,7 @@ mod tests {
     use crate::github::fake::FakePrs;
     use crate::herd::Paths;
     use crate::herdr::fake::FakeHerdr;
-    use crate::ledger::{AgentRecord, MemLedger, Role};
+    use crate::ledger::{MemLedger, Role};
     use crate::report::history;
     use crate::worktree::ensure_worktree;
     use crate::worktree::testing::{
@@ -283,6 +284,7 @@ mod tests {
             created: "2026-11-16T00:00:00Z".into(),
             retired,
             retired_at: retired.then(|| "2026-11-16T01:00:00Z".into()),
+            outcome: None,
             released_at: None,
             herd: Some("prs".into()),
             template: Some("pr".into()),
@@ -450,6 +452,7 @@ mod tests {
             Some("2026-11-17T12:00:00Z")
         );
         assert!(released.retired);
+        assert_eq!(released.outcome, Some(Outcome::Released));
         let (entries, _) = history(&s.mailboxes(), "zpr-1").unwrap();
         assert_eq!(
             entries.last().unwrap().body,
@@ -457,6 +460,18 @@ mod tests {
                 text: "released: feed may spawn zpr-1 again".into()
             }
         );
+    }
+
+    #[test]
+    fn releasing_overwrites_the_outcome_retire_recorded() {
+        let mut s = Setup::new();
+        let mut closed = record("zpr-1", s.repo.clone(), true);
+        closed.outcome = Some(Outcome::Closed);
+        s.add(closed);
+
+        s.release("zpr-1", Fate::Clear).unwrap();
+
+        assert_eq!(s.ledger.0["zpr-1"].outcome, Some(Outcome::Released));
     }
 
     #[test]

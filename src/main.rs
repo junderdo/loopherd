@@ -46,6 +46,7 @@ mod template;
 mod test_fakes;
 mod tool_hook;
 mod tui;
+mod usage;
 // build.rs includes it; here only for its tests.
 #[cfg(test)]
 mod version;
@@ -72,7 +73,7 @@ use crate::herd_view::Options;
 use crate::herdr::events::SocketSubscriber;
 use crate::herdr::{CliHerdr, Herdr, socket_from_env};
 use crate::lead::LeadRequest;
-use crate::ledger::{FileLedger, Ledger, Process};
+use crate::ledger::{FileLedger, Ledger, Outcome, Process};
 use crate::process::Procs;
 use crate::prompt::prompt;
 use crate::release::release;
@@ -250,9 +251,19 @@ enum Command {
         json: bool,
     },
     /// How each herd's work flowed: per retired member, time to its first
-    /// `done` report, review rounds, time waiting on merge and in total, with a
-    /// summary per herd and open members listed apart. Leads are left out.
-    /// Read-only, and marks no report read.
+    /// `done` report, review rounds, time waiting on merge and in total, and
+    /// tokens: `in` read (input + cache write + cache read) and `out` written,
+    /// over its sessions and their subagents. `-` when retire recorded none and
+    /// the transcripts are gone, the mailbox can't be read, or Claude's dir
+    /// can't be found. The `outcome` column is how the run ended: `merged`
+    /// (feed retired it with its template's `merged` check passing), `closed`
+    /// (feed retired it without that), `released` (`loopherd release`),
+    /// `retired` (`loopherd retire`, with or without `--close`), or `-` for a
+    /// run retired before outcomes were recorded. A summary per herd counts each outcome and
+    /// gives medians and maxima over `merged` runs only, open
+    /// members are listed apart, and a lead overhead line gives the lead's
+    /// tokens since `--since`; the lead gets no row. Read-only, and marks no
+    /// report read.
     Stats {
         /// Only this herd.
         #[arg(long)]
@@ -261,7 +272,8 @@ enum Command {
         /// time with `Z` or an offset.
         #[arg(long, value_parser = stats::parse_since)]
         since: Option<SystemTime>,
-        /// Print JSON.
+        /// Print JSON, with tokens split per model into input, cache write, cache
+        /// read and output.
         #[arg(long)]
         json: bool,
     },
@@ -926,9 +938,21 @@ fn run_retire(name: &str, close: bool, force: bool) -> Result<i32> {
         refuse_unfinished(&CliHerdr, &ledger, name, &ledger.reports_dir()?)?;
     }
     if !close {
-        retire(&mut ledger, name, SystemTime::now())?;
+        let now = SystemTime::now();
+        let record = retire(&mut ledger, name, now, Outcome::Retired)?;
         println!("retired {name}");
-        for warning in notify::forget_marks(&ledger.reports_dir()?, name) {
+        let mailboxes = ledger.reports_dir()?;
+        let claude_dir = install_hook::claude_dir().ok();
+        let warnings =
+            notify::forget_marks(&mailboxes, name)
+                .into_iter()
+                .chain(usage::record_at_retire(
+                    &mailboxes,
+                    claude_dir.as_deref(),
+                    &record,
+                    now,
+                ));
+        for warning in warnings {
             eprintln!("{warning}");
         }
         return Ok(0);
@@ -937,6 +961,7 @@ fn run_retire(name: &str, close: bool, force: bool) -> Result<i32> {
     let paths = Paths::from_env().context("herd")?;
     let caller = sandbox::calling_lead(&paths, &process::ProcFs, std::process::id());
     let guard = sandbox::Guard::new(paths, caller);
+    let claude_dir = install_hook::claude_dir().ok();
     let mut lines = vec![];
     let result = retire_and_close(
         &CliHerdr,
@@ -944,7 +969,9 @@ fn run_retire(name: &str, close: bool, force: bool) -> Result<i32> {
         &guard,
         name,
         SystemTime::now(),
+        Outcome::Retired,
         &mailboxes,
+        claude_dir.as_deref(),
         pane.as_ref(),
         &mut lines,
     );
@@ -1066,10 +1093,12 @@ fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
 
 fn run_stats(herd: Option<String>, since: Option<SystemTime>, json: bool) -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let claude_dir = install_hook::claude_dir().ok();
     let query = stats::Query {
         herd: herd.as_deref(),
         since,
         now: SystemTime::now(),
+        claude_dir: claude_dir.as_deref(),
     };
     require_known(&ledger, herd.as_deref())?;
     let (herds, warnings) = stats::stats(&ledger, &ledger.reports_dir()?, &query)?;
@@ -1699,6 +1728,10 @@ fn shepherd_handoff(paths: &Paths, state: &Path) -> Option<context::ShepherdHand
         limit,
         pane: own_pane().as_deref(),
         socket: socket_from_env().as_deref(),
+        shell_pid: &|| match own_pane() {
+            Some(pane) => CliHerdr.shell_pid(&pane),
+            None => Ok(None),
+        },
     })
 }
 
@@ -2165,6 +2198,7 @@ fn run_feed(herd: String, dry_run: bool, ready_timeout: u64) -> Result<i32> {
         own_lineage: own_lineage(),
         own_socket: socket_from_env(),
         mailboxes: ledger.reports_dir()?,
+        claude_dir: install_hook::claude_dir().ok(),
         after_merge_timeout: AFTER_MERGE_TIMEOUT,
         owner: own_process()?,
         procs: &process::ProcFs,

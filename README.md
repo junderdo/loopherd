@@ -125,12 +125,14 @@ why.
 `loopherd: open view beside shepherd` (`loopherd.view-beside-shepherd`)
 splits the view into a pane right of the shepherd's, the one its last
 handoff recorded, leaving focus where it was. With no shepherd recorded,
-or its pane gone or no longer running the shepherd's Claude, it splits
-right of the focused pane (the popup when that fails too), and the view
-says why. Bind it the same way, with its own key. Its event hooks record a member going blocked, or its pane exiting
-or closing, or its tab or workspace closing, so the next `loopherd watch`
-reports it even when none was running. They follow a member's pane moved
-to another tab or workspace.
+or its pane gone or no longer the shepherd's, it splits right of the
+focused pane (the popup when that fails too), and the view says why. Bind
+it the same way, with its own key.
+
+The plugin's event hooks record a member going blocked, or its pane
+exiting or closing, or its tab or workspace closing, so the next
+`loopherd watch` reports it even when none was running. They follow a
+member's pane moved to another tab or workspace.
 
 A Ctrl-click on a GitHub PR link in any pane shows the member that owns
 the PR in a popup (herd, live status, template, review round, last
@@ -294,7 +296,7 @@ table and the rest are what `init` writes; start from its output or from
 | `status` | Members by herd with herdr's live status (`--all`, `--strays`, `--json`). |
 | `view` | The same as a live TUI; Enter focuses the member's pane, `S` focuses the shepherd or starts one below the view, and `t` switches the theme, saving it as `view.theme` in `config.toml`. |
 | `pr [url]` | The herdr plugin's PR link handler: the member that owns the PR in a popup, else the browser. |
-| `stats` | How each herd's work flowed: time to done, review rounds, time waiting on merge (`--herd`, `--since`, `--json`). |
+| `stats` | How each herd's work flowed: time to done, review rounds, time waiting on merge, and each run's outcome (`merged`, `closed`, `released`, `retired`), with medians over merged runs (`--herd`, `--since`, `--json`). |
 
 `watch` can also notify you outside your pane on a question or a blocked
 member: set `[notify] enabled = true` in `config.toml`. The skill has the

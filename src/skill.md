@@ -506,8 +506,23 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   entries after the other filters).
 - `loopherd stats` shows how each herd's work flowed: per retired worker
   (a released and re-fed name gets a row per run), time to its first `done`, review rounds, merge wait and total, with
-  medians per herd and open workers apart. `--herd`, `--since <date or time>`,
-  `--json`; it marks nothing read.
+  medians per herd and open workers apart. `in` is the tokens its Claude
+  read (input + cache write + cache read) and `out` the tokens it wrote,
+  over every session its `stop`s name plus their subagents; retiring
+  records them in the mailbox as a `usage` entry, since Claude deletes
+  transcripts after `cleanupPeriodDays`. `-` means none are left, its
+  mailbox can't be read, or Claude's dir can't be found (`HOME` unset), and
+  is left out of the medians. Each herd's `lead overhead` line is its lead's
+  tokens since `--since`, subagents included (D92). The `outcome` column
+  is how the run ended (D92): `merged` when feed retired it with its
+  template's `merged` check passing, `closed` when feed retired it without
+  that (a template with no `merged` check always gives `closed`, so its
+  runs are left out of the medians), `released` after `loopherd release`,
+  `retired` for `loopherd retire`, with or without `--close`, and `-` for a
+  run retired before outcomes were recorded. The medians and maxima cover only `merged` runs; the
+  summary counts the other outcomes apart. `--herd`,
+  `--since <date or time>`, `--json` (the per-model split); it marks
+  nothing read.
 - `loopherd retire <name>` marks a member finished in the ledger only;
   `--close` also closes its tab and removes its worktree and branch if
   they're clean and merged. Feed's `done` check does this for you. Retire
@@ -640,13 +655,15 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   closes; the README gives the `[[keys.command]]` snippet that binds it to
   a key. Its `view-beside-shepherd` action splits the view right of the
   shepherd's pane recorded at its last handoff, leaving focus where it
-  was, else right of the focused pane with a note saying why (D87). Never edit the human's herdr config
-  to add it. Its event hooks
-  run `loopherd herdr-event-hook`, recording a member going `blocked` or
-  `gone` in its mailbox for the next watch, and following a member's pane
-  moved to another tab or workspace in the ledger. It needs the
-  `loopherd` on PATH or in `~/.local/bin` and never installs loopherd or
-  its hooks; installing stays as above. It needs herdr 0.7.5+.
+  was, else right of the focused pane with a note saying why (D87, D94).
+  Never edit the human's herdr config to add it.
+
+  The plugin's event hooks run `loopherd herdr-event-hook`, recording a
+  member going `blocked` or `gone` in its mailbox for the next watch, and
+  following a member's pane moved to another tab or workspace in the
+  ledger. The plugin needs the `loopherd` on PATH or in `~/.local/bin` and
+  never installs loopherd or its hooks; installing stays as above. It
+  needs herdr 0.7.5+.
   Its startup hook runs `loopherd revive --startup` each time herdr
   restores a session or a new server takes over, which does nothing
   unless `config.toml` sets `[herdr_plugin] revive_on_startup = true`

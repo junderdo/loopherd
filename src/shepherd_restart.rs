@@ -521,7 +521,7 @@ mod tests {
         /// [`PANE`] with an empty input box, with the switch on and the hook in.
         fn new() -> World {
             let state = tempfile::tempdir().unwrap();
-            shepherd_resume::record(state.path(), &place(), "s-old", at(RECORDED)).unwrap();
+            shepherd_resume::record(state.path(), &place(), None, "s-old", at(RECORDED)).unwrap();
             let handoff = context::handoff_path(state.path(), context::SHEPHERD);
             fs::create_dir_all(handoff.parent().unwrap()).unwrap();
             fs::write(&handoff, "## Next steps\n").unwrap();
@@ -938,7 +938,14 @@ mod tests {
         w.wait(|_| w.resume_on_clear());
         let last = w.saved()["last_self_restart"].clone();
 
-        shepherd_resume::record(w.path(), &place(), "s-new", at("2026-11-19T10:20:00Z")).unwrap();
+        shepherd_resume::record(
+            w.path(),
+            &place(),
+            None,
+            "s-new",
+            at("2026-11-19T10:20:00Z"),
+        )
+        .unwrap();
 
         assert_eq!(w.saved()["last_self_restart"], last);
         assert!(w.saved().get("self_restart").is_none());

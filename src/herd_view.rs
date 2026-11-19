@@ -299,6 +299,7 @@ mod tests {
             created: format!("2026-11-01T00:00:{n:02}Z"),
             retired: false,
             retired_at: None,
+            outcome: None,
             released_at: None,
             herd: herd.map(str::to_string),
             template: herd.map(|_| "t".to_string()),
@@ -487,6 +488,7 @@ mod tests {
     fn lists_retired_entries_newest_retirement_first_then_unknown_then_by_name() {
         let retired_at = |name: &str, at: Option<&str>| AgentRecord {
             retired_at: at.map(str::to_string),
+            outcome: None,
             ..retired(name, None)
         };
         let entries = ledger(vec![

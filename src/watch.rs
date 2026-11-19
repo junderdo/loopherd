@@ -1406,7 +1406,11 @@ fn stop_wakes(mailbox: &Mailbox) -> Vec<String> {
                 reported = true;
                 None
             }
-            Body::Note { .. } | Body::Blocked {} | Body::Gone { .. } | Body::Moved {} => None,
+            Body::Note { .. }
+            | Body::Blocked {}
+            | Body::Gone { .. }
+            | Body::Moved {}
+            | Body::Usage { .. } => None,
             Body::Stop(Stop {
                 error: Some(error), ..
             }) => {
@@ -1544,6 +1548,7 @@ mod tests {
             created: "2026-11-01T00:00:00Z".into(),
             retired: false,
             retired_at: None,
+            outcome: None,
             released_at: None,
             herd: herd.map(Into::into),
             template: None,

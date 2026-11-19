@@ -53,6 +53,10 @@ pub struct AgentRecord {
     /// RFC 3339, UTC.
     #[serde(default)]
     pub retired_at: Option<String>,
+    /// How the run ended (D92). Missing in ledgers written before retire
+    /// recorded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<Outcome>,
     /// RFC 3339, UTC. Set on a retired entry so `feed` may spawn its name again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub released_at: Option<String>,
@@ -84,6 +88,31 @@ pub struct AgentRecord {
     /// new one replaced, kept for `stats`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub earlier: Vec<AgentRecord>,
+}
+
+/// How a retired run ended (D92).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Outcome {
+    /// Feed retired it with its template's `merged` check passing.
+    Merged,
+    /// Feed retired it without that.
+    Closed,
+    /// `loopherd release` gave its task back to feed.
+    Released,
+    /// A plain `loopherd retire`.
+    Retired,
+}
+
+impl Outcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Outcome::Merged => "merged",
+            Outcome::Closed => "closed",
+            Outcome::Released => "released",
+            Outcome::Retired => "retired",
+        }
+    }
 }
 
 /// A member's `after_merge`, once a feed has taken it on; it never runs twice.
@@ -513,6 +542,7 @@ mod tests {
             created: "2026-10-31T00:00:00Z".into(),
             retired: false,
             retired_at: None,
+            outcome: None,
             released_at: None,
             herd: None,
             template: None,
@@ -616,6 +646,7 @@ mod tests {
         let retired = AgentRecord {
             retired: true,
             retired_at: Some("2026-11-02T00:00:00Z".into()),
+            outcome: None,
             ..record("a", true)
         };
         ledger.record(retired.clone()).unwrap();

@@ -3159,6 +3159,7 @@ mod tests {
             created: "2026-11-02T00:00:00Z".into(),
             retired: false,
             retired_at: None,
+            outcome: None,
             released_at: None,
             herd: Some("h".into()),
             template: None,

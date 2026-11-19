@@ -252,7 +252,7 @@ mod tests {
             },
         };
         let at = humantime::parse_rfc3339("2026-11-19T10:00:00Z").unwrap();
-        shepherd_resume::record(state.path(), &place, "s-1", at).unwrap();
+        shepherd_resume::record(state.path(), &place, None, "s-1", at).unwrap();
         let paused = br#"{"background_tasks":[{"type":"shell"}],"session_crons":[]}"#;
         let other = Place {
             process: Process {
@@ -296,6 +296,7 @@ mod tests {
             created: "2026-11-01T00:00:00Z".into(),
             retired: false,
             retired_at: None,
+            outcome: None,
             released_at: None,
             herd: None,
             template: None,
