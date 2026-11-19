@@ -238,11 +238,8 @@ fn only_the_humans_shepherd_names_its_herdr_agent_at_session_start() {
     ] {
         assert!(naming.contains(rule), "{naming}");
     }
-    assert_eq!(
-        printed.matches("herdr agent rename").count(),
-        1,
-        "{printed}"
-    );
+    let flat = printed.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(flat.matches("herdr agent rename").count(), 1, "{flat}");
 }
 
 #[test]
