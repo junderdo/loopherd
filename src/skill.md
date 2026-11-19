@@ -29,6 +29,14 @@ At the start of each session, run `loopherd doctor` (with `--settings
 <file>` if you installed with it). It prints only problems; relay each
 failure to the human with the fix it names (D63).
 
+The human's shepherd only, never a lead or member: also at the start of
+each session, name your herdr agent so the herd view's `S` focuses you
+instead of starting a second shepherd: `herdr agent rename
+"$HERDR_PANE_ID" shepherd`. If herdr answers `agent_name_taken`, another
+shepherd already runs in the pane it names; stop and tell the human. On
+any other error, carry on and tell the human that `S` can't find you
+(D88).
+
 ### Setting up a project
 
 `loopherd init` writes a herd's structure; you tailor its prose to the repo.

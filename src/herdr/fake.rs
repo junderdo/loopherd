@@ -48,6 +48,14 @@ struct FakePane {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Split {
+    pub from: String,
+    pub pane: String,
+    pub cwd: PathBuf,
+    pub env: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Started {
     pub name: String,
     pub pane_id: String,
@@ -68,6 +76,7 @@ struct State {
     started: Vec<Started>,
     prompts: Vec<(String, String)>,
     focused: Vec<String>,
+    splits: Vec<Split>,
     plugin_panes: Vec<PluginPane>,
     refuse_popup: bool,
     /// Sidebar labels by pane.
@@ -98,6 +107,7 @@ pub struct FakeHerdr {
     pub fail_create_tab: bool,
     pub fail_close_tab: bool,
     pub fail_prompt: bool,
+    pub fail_focus: bool,
     pub fail_wait: bool,
     pub fail_visible_text: bool,
     pub fail_shell_pid: bool,
@@ -145,6 +155,7 @@ impl FakeHerdr {
             fail_create_tab: false,
             fail_close_tab: false,
             fail_prompt: false,
+            fail_focus: false,
             fail_wait: false,
             fail_visible_text: false,
             fail_shell_pid: false,
@@ -256,6 +267,19 @@ impl FakeHerdr {
     /// Panes passed to `focus`, in order. Focusing isn't a mutation.
     pub fn focused(&self) -> Vec<String> {
         self.state.lock().unwrap().focused.clone()
+    }
+
+    pub fn has_pane(&self, pane_id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .panes
+            .iter()
+            .any(|p| p.id == pane_id)
+    }
+
+    pub fn splits(&self) -> Vec<Split> {
+        self.state.lock().unwrap().splits.clone()
     }
 
     /// The plugin panes opened as the manifest places them: entrypoint and env.
@@ -590,6 +614,40 @@ impl Herdr for FakeHerdr {
         Ok(())
     }
 
+    fn split_down(&self, pane_id: &str, cwd: &Path, env: &[(&str, &str)]) -> Result<String> {
+        self.mutating();
+        if self.is_down() {
+            bail!("herdr server not running");
+        }
+        let tab_id = {
+            let state = self.state.lock().unwrap();
+            let pane = state.panes.iter().find(|p| p.id == pane_id);
+            pane.ok_or_else(|| anyhow!("pane {pane_id} not found"))?
+                .tab_id
+                .clone()
+        };
+        let new = self.split(&tab_id, cwd);
+        let mut state = self.state.lock().unwrap();
+        state.splits.push(Split {
+            from: pane_id.to_string(),
+            pane: new.clone(),
+            cwd: cwd.to_path_buf(),
+            env: env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        });
+        Ok(new)
+    }
+
+    fn close_pane(&self, pane_id: &str) -> Result<()> {
+        self.mutating();
+        let mut state = self.state.lock().unwrap();
+        state.panes.retain(|p| p.id != pane_id);
+        state.agents.retain(|a| a.pane_id != pane_id);
+        Ok(())
+    }
+
     fn start_claude(
         &self,
         name: &str,
@@ -700,6 +758,9 @@ impl Herdr for FakeHerdr {
     fn focus(&self, pane_id: &str) -> Result<()> {
         if self.is_down() {
             bail!("herdr server not running");
+        }
+        if self.fail_focus {
+            bail!("focus failed");
         }
         if !self
             .state

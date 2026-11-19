@@ -48,10 +48,8 @@ fn handoff_path(state: &Path) -> PathBuf {
 /// An unused record of the same session and place keeps its time, so a
 /// repeated handoff line can't postdate a handoff already written.
 pub fn record(state: &Path, place: &Place, session: &str, at: SystemTime) -> Result<()> {
-    let earlier = fs::read_to_string(record_path(state))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Record>(&text).ok())
-        .filter(|r| !r.used && r.session == session && r.place == *place);
+    let earlier =
+        last_record(state).filter(|r| !r.used && r.session == session && r.place == *place);
     let record = match earlier {
         Some(earlier) => earlier,
         None => Record {
@@ -75,11 +73,16 @@ fn write(state: &Path, record: &Record) -> Result<()> {
     Ok(())
 }
 
-/// Where the recorded shepherd runs, used or not; `None` without a readable
-/// record.
+/// Where the last record says the shepherd ran, used or not; `None` when
+/// there's no record or it won't parse.
 pub fn recorded_place(state: &Path) -> Option<Place> {
+    last_record(state).map(|r| r.place)
+}
+
+/// The record, used or not; `None` when missing or it won't parse.
+fn last_record(state: &Path) -> Option<Record> {
     let text = fs::read_to_string(record_path(state)).ok()?;
-    serde_json::from_str::<Record>(&text).ok().map(|r| r.place)
+    serde_json::from_str(&text).ok()
 }
 
 /// The unused record for `place`. A record that isn't JSON, or names another
@@ -138,18 +141,73 @@ pub fn session_started(
     record.used = true;
     record.current = Some(started);
     write(state, &record)?;
+    resume_from_moved_handoff(state, written).map(Some)
+}
+
+/// A shepherd started afresh resuming from the handoff, which
+/// [`NewResume::undo`] gives back when the start fails.
+pub struct NewResume {
+    pub prompt: String,
+}
+
+impl NewResume {
+    /// Moves the handoff back from `shepherd.prev.md` and unmarks the record.
+    pub fn undo(self, state: &Path) -> Result<()> {
+        let handoff = handoff_path(state);
+        let read = handoff.with_extension("prev.md");
+        fs::rename(&read, &handoff)
+            .with_context(|| format!("move {} to {}", read.display(), handoff.display()))?;
+        match last_record(state) {
+            Some(mut record) => {
+                record.used = false;
+                write(state, &record)
+            }
+            None => Ok(()),
+        }
+    }
+}
+
+/// The resume for a shepherd started afresh on the herdr at `socket`, when
+/// the last record is unused and names that socket, its Claude never moved to
+/// another session, and `handoffs/shepherd.md` was written after it: marks the
+/// record used and moves the handoff as a resume does. A moved session means
+/// the handoff was already acted on.
+pub fn new_shepherd_resume(state: &Path, socket: Option<&Path>) -> Result<Option<NewResume>> {
+    let Some(mut record) = last_record(state) else {
+        return Ok(None);
+    };
+    let moved_on = record
+        .current
+        .as_ref()
+        .is_some_and(|c| *c != record.session);
+    let here = socket == Some(record.place.socket.as_path());
+    if record.used || moved_on || !here {
+        return Ok(None);
+    }
+    let Some(written) = handoff_written_after(state, &record.at)? else {
+        return Ok(None);
+    };
+    record.used = true;
+    write(state, &record)?;
+    let prompt = resume_from_moved_handoff(state, written)?;
+    Ok(Some(NewResume { prompt }))
+}
+
+/// Moves the handoff to `shepherd.prev.md` and returns the context that
+/// resumes the shepherd from it.
+fn resume_from_moved_handoff(state: &Path, written: SystemTime) -> Result<String> {
     let handoff = handoff_path(state);
     let read = handoff.with_extension("prev.md");
     fs::rename(&handoff, &read)
         .with_context(|| format!("move {} to {}", handoff.display(), read.display()))?;
-    Ok(Some(format!(
+    Ok(format!(
         "You are the loopherd shepherd, resuming after your handoff. Run `loopherd --skill`, \
          read your handoff at {} (written {}), run `loopherd status` and \
          `loopherd reports --all --tail 40` (for a fuller history, `--since <time>` or plain \
          `--all`), re-arm your watch, and continue from the handoff's next steps.",
         read.display(),
         humantime::format_rfc3339_seconds(written),
-    )))
+    ))
 }
 
 /// When the handoff was written, if after the record's time `at`.
