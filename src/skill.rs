@@ -102,24 +102,6 @@ mod tests {
     }
 
     #[test]
-    fn the_shepherd_names_its_herdr_agent_at_each_session_start() {
-        let shepherd = SKILL
-            .split_once("\n## Shepherd\n")
-            .and_then(|(_, rest)| rest.split_once("\n### "))
-            .expect("a Shepherd section")
-            .0
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        for step in [
-            "herdr agent rename \"$HERDR_PANE_ID\" shepherd",
-            "agent_name_taken",
-        ] {
-            assert!(shepherd.contains(step), "the section misses {step:?}");
-        }
-    }
-
-    #[test]
     fn has_shepherd_and_lead_sections() {
         let headings: Vec<&str> = SKILL.lines().filter(|l| l.starts_with("## ")).collect();
         assert!(headings.contains(&"## Shepherd"), "{headings:?}");

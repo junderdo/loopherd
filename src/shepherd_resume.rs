@@ -167,11 +167,12 @@ impl NewResume {
     }
 }
 
-/// The resume for a shepherd started afresh, when the last record is unused,
-/// its Claude never moved to another session, and `handoffs/shepherd.md` was
-/// written after it: marks the record used and moves the handoff as a resume
-/// does. A moved session means the handoff was already acted on.
-pub fn new_shepherd_resume(state: &Path) -> Result<Option<NewResume>> {
+/// The resume for a shepherd started afresh on the herdr at `socket`, when
+/// the last record is unused and names that socket, its Claude never moved to
+/// another session, and `handoffs/shepherd.md` was written after it: marks the
+/// record used and moves the handoff as a resume does. A moved session means
+/// the handoff was already acted on.
+pub fn new_shepherd_resume(state: &Path, socket: Option<&Path>) -> Result<Option<NewResume>> {
     let Some(mut record) = last_record(state) else {
         return Ok(None);
     };
@@ -179,7 +180,8 @@ pub fn new_shepherd_resume(state: &Path) -> Result<Option<NewResume>> {
         .current
         .as_ref()
         .is_some_and(|c| *c != record.session);
-    if record.used || moved_on {
+    let here = socket == Some(record.place.socket.as_path());
+    if record.used || moved_on || !here {
         return Ok(None);
     }
     let Some(written) = handoff_written_after(state, &record.at)? else {

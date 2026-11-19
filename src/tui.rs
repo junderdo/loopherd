@@ -176,7 +176,8 @@ pub struct App {
     /// An `S` is being served, which holds up the reads queued behind it.
     summoning: bool,
     /// A quit pressed while summoning, held until the start settles so a
-    /// split it made is either running the shepherd or closed.
+    /// split it made is either running the shepherd or closed; a second
+    /// press quits at once, in case herdr hangs.
     quit_after_summon: bool,
     quit: bool,
 }
@@ -347,9 +348,10 @@ impl App {
     pub fn press(&mut self, key: KeyCode, now: Instant) -> Option<Request> {
         self.message = None;
         match key {
-            KeyCode::Char('q') | KeyCode::Esc if self.summoning => {
+            KeyCode::Char('q') | KeyCode::Esc if self.summoning && !self.quit_after_summon => {
                 self.quit_after_summon = true;
-                self.message = Some("quitting once the shepherd is up".into());
+                self.message =
+                    Some("quitting once the shepherd is up; press again to quit now".into());
             }
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('s') => {
@@ -1122,10 +1124,10 @@ where
         let Some(key) = next_key(TICK)? else {
             continue;
         };
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            return Ok(0);
-        }
-        match app.press(key.code, Instant::now()) {
+        let ctrl_c =
+            key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+        let code = if ctrl_c { KeyCode::Esc } else { key.code };
+        match app.press(code, Instant::now()) {
             Some(Request::SaveTheme(palette)) => {
                 app.apply(save_theme(config, palette), Instant::now())?
             }
@@ -2652,6 +2654,16 @@ max = 3
     /// reader thread, feeding `keys` one per tick. Its exit code, or `None` if
     /// it hadn't returned within five seconds.
     fn run_scripted(herdr: FakeHerdr, keys: Vec<Option<KeyEvent>>, stop: i32) -> Option<i32> {
+        run_scripted_within(herdr, keys, stop, Duration::from_secs(5))
+    }
+
+    /// The loop's exit code, if it ends within `wait`.
+    fn run_scripted_within(
+        herdr: FakeHerdr,
+        keys: Vec<Option<KeyEvent>>,
+        stop: i32,
+        wait: Duration,
+    ) -> Option<i32> {
         let (done, finished) = mpsc::channel();
         std::thread::spawn(move || {
             let reader = spawn_reader(herdr, ledger(), nowhere());
@@ -2670,7 +2682,7 @@ max = 3
             );
             let _ = done.send(code.unwrap());
         });
-        finished.recv_timeout(Duration::from_secs(5)).ok()
+        finished.recv_timeout(wait).ok()
     }
 
     #[test]
@@ -2734,6 +2746,24 @@ max = 3
         herdr.agents_gate = Some(gate.into());
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(run_scripted(herdr, vec![None, Some(ctrl_c)], 0), Some(0));
+    }
+
+    #[test]
+    fn ctrl_c_while_the_shepherd_comes_up_waits_for_it_and_a_second_quits_at_once() {
+        let ctrl_c = Some(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let summon_then = |presses: usize| {
+            let (release, gate) = mpsc::channel::<()>();
+            let mut herdr = herdr();
+            herdr.agents_gate = Some(gate.into());
+            let mut keys = vec![None, Some(key(KeyCode::Char('S')))];
+            keys.extend(std::iter::repeat_n(ctrl_c, presses));
+            let code = run_scripted_within(herdr, keys, 0, Duration::from_millis(500));
+            drop(release);
+            code
+        };
+
+        assert_eq!(summon_then(1), None);
+        assert_eq!(summon_then(2), Some(0));
     }
 
     #[test]

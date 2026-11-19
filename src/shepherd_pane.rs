@@ -90,7 +90,7 @@ pub fn summon(
 /// Starts the shepherd in `pane`, giving the handoff back when the start fails.
 fn start_in(herdr: &dyn Herdr, state: &Path, pane: &str) -> Result<()> {
     wait_for_shell_prompt(herdr, pane, SHELL_TIMEOUT, SHELL_POLL)?;
-    let resume = shepherd_resume::new_shepherd_resume(state)?;
+    let resume = shepherd_resume::new_shepherd_resume(state, herdr.socket().as_deref())?;
     let prompt = resume
         .as_ref()
         .map_or(START_PROMPT, |r| &r.prompt)
@@ -274,7 +274,8 @@ mod tests {
             );
             assert!(herdr.splits().is_empty() && herdr.started().is_empty());
             assert!(handoff.exists());
-            assert!(started_prompt(state.path()).contains("resuming after your handoff"));
+            let record = std::fs::read_to_string(state.path().join("shepherd.json")).unwrap();
+            assert!(record.contains(r#""used": false"#), "{record}");
         }
     }
 
@@ -303,6 +304,23 @@ mod tests {
 
         assert!(started_prompt(unrecorded.path()).contains("Shepherd section"));
         assert!(started_prompt(stale.path()).contains("Shepherd section"));
+    }
+
+    #[test]
+    fn a_handoff_recorded_on_another_herdr_is_not_resumed_from_or_marked_used() {
+        let state = tempfile::tempdir().unwrap();
+        recorded_at(
+            state.path(),
+            "w1:p7",
+            "/run/other/herdr.sock",
+            "2026-11-19T09:00:00Z",
+        );
+        let handoff = handed_off(state.path(), "2026-11-19T09:05:00Z");
+
+        assert!(started_prompt(state.path()).contains("Shepherd section"));
+        assert!(handoff.exists());
+        let record = std::fs::read_to_string(state.path().join("shepherd.json")).unwrap();
+        assert!(record.contains(r#""used": false"#), "{record}");
     }
 
     #[test]
