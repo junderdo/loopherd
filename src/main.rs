@@ -14,6 +14,7 @@ mod ledger;
 mod line_ending;
 mod lock;
 mod matching;
+mod merge_alert;
 mod notify;
 mod pane_event;
 mod pane_label;
@@ -1417,6 +1418,7 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         shepherd_handoff: None,
         procs: &process::ProcFs,
         notify_own: None,
+        merges: None,
         pane_label: false,
     };
     let state = ledger.dir()?;
@@ -1424,9 +1426,11 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
     let config = herd_paths.herds.with_file_name("config.toml");
     let mailboxes = ledger.reports_dir()?;
     let notify_own = |events: &[notify::Waiting]| notify_waiting(events, &config, &mailboxes);
+    let gh = github::GhCli::default();
     let req = watch::Request {
         shepherd_handoff: Some(&handoff),
         notify_own: Some(&notify_own),
+        merges: merge_lookups(&config, &gh),
         pane_label: labels_panes(&config),
         ..req
     };
@@ -1450,6 +1454,14 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
     notify_waiting(&wake.waiting, &config, &mailboxes);
     wake.mark_read(&mut |warning| eprintln!("loopherd watch: warning: {warning}"))?;
     Ok(0)
+}
+
+/// `gh` while `config`'s `[notify]` would send a merge alert, else `None`,
+/// so a herd that sends none never asks GitHub.
+fn merge_lookups<'a>(config: &Path, gh: &'a dyn github::Merges) -> Option<&'a dyn github::Merges> {
+    let sends =
+        notify::load(config).is_ok_and(|c| c.is_some_and(|c| c.sends(notify::Kind::MergeAlert)));
+    sends.then_some(gh)
 }
 
 /// Launches each notification `config` asks for as its own `notify-run`,
@@ -2063,6 +2075,27 @@ fn inherited_workspace(ledger: &dyn Ledger) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merges_are_looked_up_only_while_notify_sends_merge_alerts() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        let gh = github::fake::FakeMerges::new(dir.path(), vec![]);
+        for (notify, looks) in [
+            ("", false),
+            ("[notify]\nenabled = false\n", false),
+            (
+                "[notify]\nenabled = true\nkinds = ['question', 'blocked']\n",
+                false,
+            ),
+            ("[notify]\nenabled = true\nkinds = ['merge_alert']\n", true),
+            ("[notify]\nenabled = true\n", true),
+        ] {
+            std::fs::write(&config, notify).unwrap();
+
+            assert_eq!(merge_lookups(&config, &gh).is_some(), looks, "{notify}");
+        }
+    }
 
     #[test]
     fn tell_takes_text_that_starts_with_a_hyphen() {

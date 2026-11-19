@@ -26,6 +26,8 @@ pub fn set(herdr: &dyn Herdr, dir: &Path, pane: &str, waiting: &Waiting) -> Resu
             notify::summary(&waiting.text)
         ),
         Kind::Blocked => format!("{} is blocked", waiting.member),
+        // Sent only by a lead's watch for itself, which labels no pane.
+        Kind::MergeAlert => return Ok(()),
     };
     let mark = mark(dir, pane);
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
