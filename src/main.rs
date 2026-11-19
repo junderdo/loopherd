@@ -140,8 +140,10 @@ enum Command {
     },
     /// Read or edit one of config.toml's settings, keeping its comments and
     /// layout: `context_window`, `default_context_limit` or
-    /// `shepherd.context_limit`, each a number of tokens, or
-    /// `lead_defaults.review_rounds`, each lead's review-round limit.
+    /// `shepherd.context_limit`, each a number of tokens,
+    /// `lead_defaults.review_rounds`, each lead's review-round limit, or
+    /// `view.theme`, `loopherd view`'s palette: `purple-orange`, `phosphor`
+    /// or `catppuccin`.
     Config {
         #[command(subcommand)]
         action: ConfigAction,
@@ -259,7 +261,8 @@ enum Command {
         json: bool,
     },
     /// The herd view as a live TUI, refreshed every 2s. Read-only except that
-    /// Enter focuses the selected agent's pane in herdr.
+    /// Enter focuses the selected agent's pane in herdr and `t` saves the
+    /// theme it switches to as `view.theme` in config.toml.
     View {
         /// Start with retired entries shown (toggle with `a`).
         #[arg(long)]
@@ -518,7 +521,8 @@ struct SetupArgs {
 enum ConfigAction {
     /// Print the key's value; exits 1 if it isn't set.
     Get { key: String },
-    /// Set the key, refusing, changing nothing, a value under 10000.
+    /// Set the key, refusing, changing nothing, a token count under 10000
+    /// or a theme `view` doesn't have.
     Set { key: String, value: String },
     /// Remove the key; succeeds if it isn't set.
     Unset { key: String },
@@ -1070,6 +1074,7 @@ fn run_view(all: bool, strays: bool) -> Result<i32> {
         pauses: pause::Pauses::from_env()?,
         herds: Paths::from_env()?,
         mailboxes: ledger.reports_dir()?,
+        config: config_path()?,
     };
     tui::run(
         CliHerdr,
