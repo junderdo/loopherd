@@ -14,6 +14,7 @@ use crate::continuation::{follow_recorded, live_for};
 use crate::ledger::{AgentRecord, Ledger, Process};
 use crate::process::{self, Claim, Procs};
 use crate::report::{Background, Body, Entry, Stop, Tally, Unknown, append, member_of_own_pane};
+use crate::shepherd_resume::{self, Place, StopAt};
 
 /// Where the hook runs: `$HERDR_PANE_ID`, `$HERDR_SOCKET_PATH` and `$CLAUDE_PID`.
 pub struct Pane<'a> {
@@ -181,6 +182,17 @@ fn settle(
     Ok(Some(Stopped::Filed(name)))
 }
 
+/// Records a stop of the shepherd's Claude at `place` in its handoff record,
+/// read as a member's stop is; nothing when no record names `place`.
+pub fn shepherd_stopped(state: &Path, place: &Place, input: &[u8], now: SystemTime) -> Result<()> {
+    let stop = StopAt {
+        at: humantime::format_rfc3339_nanos(now).to_string(),
+        stop: parse(input),
+    };
+    shepherd_resume::update(state, place, |r| r.restart.stop = Some(stop))?;
+    Ok(())
+}
+
 /// Unparseable input still records the stop, with everything unknown.
 fn parse(input: &[u8]) -> Stop {
     let input: Value = serde_json::from_slice(input).unwrap_or(Value::Null);
@@ -227,6 +239,41 @@ mod tests {
     use super::*;
     use crate::ledger::{AgentRecord, MemLedger, NoUpdate, Process};
     use crate::process::{CLAUDE, FakeProcs, PANE_SHELL};
+
+    #[test]
+    fn the_shepherds_stop_is_recorded_only_at_its_recorded_place() {
+        let state = tempfile::tempdir().unwrap();
+        let place = Place {
+            pane: "w1:p1".into(),
+            socket: SOCKET.into(),
+            process: Process {
+                pid: 30,
+                start: 300,
+            },
+        };
+        let at = humantime::parse_rfc3339("2026-11-19T10:00:00Z").unwrap();
+        shepherd_resume::record(state.path(), &place, "s-1", at).unwrap();
+        let paused = br#"{"background_tasks":[{"type":"shell"}],"session_crons":[]}"#;
+        let other = Place {
+            process: Process {
+                pid: 31,
+                start: 310,
+            },
+            ..place.clone()
+        };
+
+        shepherd_stopped(state.path(), &other, paused, at).unwrap();
+        let saved = || -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(state.path().join("shepherd.json")).unwrap())
+                .unwrap()
+        };
+        assert!(saved().get("stop").is_none());
+
+        shepherd_stopped(state.path(), &place, paused, at).unwrap();
+        let stop = &saved()["stop"];
+        assert_eq!(stop["at"], "2026-11-19T10:00:00.000000000Z");
+        assert_eq!(stop["background"]["shells"], 1);
+    }
 
     const SOCKET: &str = "/run/herdr/herdr.sock";
 

@@ -59,6 +59,9 @@ Claude integration hook installed:
   names a Claude typed by hand there (checked 2026-11-19, herdr 0.9.5).
   Renaming to the name it already has succeeds; renaming another agent to
   a held name fails with `agent_name_taken`, naming the holder's pane.
+- `agent prompt <pane-id> <text>` takes a pane ID as its target too, so
+  an agent is prompted with or without a name (checked 2026-11-19, herdr
+  0.9.5, by the shepherd self-restart live test).
 
 ## Control surface (everything we need to layer on top)
 

@@ -407,7 +407,11 @@ pub fn schedule_self(
     })?;
     let entries = ledger.entries()?;
     let member = member_of_own_pane(&entries, pane, own_lineage, herdr.socket().as_deref())
-        .ok_or_else(|| anyhow!("no member runs in pane {pane} of this herdr"))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "no member runs in pane {pane} of this herdr, and no shepherd handoff is recorded for this pane and Claude"
+            )
+        })?;
     let name = member.name.clone();
     if !member.is_lead() {
         bail!("{name} isn't a lead; whoever reads its handoff line restarts it");
@@ -469,7 +473,7 @@ pub fn adopt_claim(state: &Path, name: &str, fd: std::os::fd::RawFd) -> Result<L
 }
 
 /// `name`'s `kind` lock under the state dir, or `None` while another holds it.
-fn take(state: &Path, name: &str, kind: &str) -> Result<Option<Lock>> {
+pub fn take(state: &Path, name: &str, kind: &str) -> Result<Option<Lock>> {
     let dir = state.join("restarts");
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join(format!("{name}.{kind}.lock"));

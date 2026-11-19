@@ -262,7 +262,7 @@ table and the rest are what `init` writes; start from its output or from
 | `herd get\|set\|unset <herd> <key>` | Read or edit one value in a herd file, keeping its comments (`queue.max`, `lead.merge`). |
 | `herd remove <herd>` | Delete a finished herd's file and every run of it in the ledger; a name holding another herd's run keeps that run and its files. |
 | `lead-defaults` | Show `config.toml`'s lead switches, on or off, for herds whose `[lead]` doesn't set them; `--set` writes them. |
-| `config get\|set\|unset <key>` | Read or edit `context_window`, `default_context_limit`, `shepherd.context_limit`, `lead_defaults.review_rounds` or `view.theme`. |
+| `config get\|set\|unset <key>` | Read or edit `context_window`, `default_context_limit`, `shepherd.context_limit`, `shepherd.self_restart`, `lead_defaults.review_rounds` or `view.theme`. |
 | `install-hook` | Add loopherd's Claude hooks and skill (`--remove` takes them out). |
 
 ### Run

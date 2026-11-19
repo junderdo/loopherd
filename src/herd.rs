@@ -2211,6 +2211,27 @@ args = ["--model", "opus"]
     }
 
     #[test]
+    fn herds_checks_the_shepherds_self_restart_switch() {
+        let config = Config::with(&[("prs", PR_HERD)]);
+        let file = config.path().join("config.toml");
+        fs::write(&file, "[shepherd]\nself_restart = \"on\"\n").unwrap();
+
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+
+        assert!(
+            report.starts_with(&format!("invalid {}: ", file.display())),
+            "{report}"
+        );
+        assert!(report.contains("self_restart"), "{report}");
+        assert_eq!(code, 1, "{report}");
+
+        fs::write(&file, "[shepherd]\nself_restart = true\n").unwrap();
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+        assert!(!report.contains("invalid"), "{report}");
+        assert_eq!(code, 0);
+    }
+
+    #[test]
     fn herds_checks_the_herdr_plugin_table() {
         let config = Config::with(&[("prs", PR_HERD)]);
         let file = config.path().join("config.toml");

@@ -25,6 +25,9 @@ pub enum Kind {
     Blocked,
     #[serde(rename = "merge_alert")]
     MergeAlert,
+    /// The shepherd's self-restart was refused or gave up.
+    #[serde(rename = "self_restart")]
+    SelfRestart,
 }
 
 impl Kind {
@@ -33,6 +36,7 @@ impl Kind {
             Kind::Question => "question",
             Kind::Blocked => "blocked",
             Kind::MergeAlert => "merge_alert",
+            Kind::SelfRestart => "self_restart",
         }
     }
 }
@@ -129,7 +133,12 @@ fn check(table: Table) -> Result<Option<Config>> {
             .context("command")?;
     }
     Ok(table.enabled.then(|| Config {
-        kinds: (table.kinds).unwrap_or(vec![Kind::Question, Kind::Blocked, Kind::MergeAlert]),
+        kinds: (table.kinds).unwrap_or(vec![
+            Kind::Question,
+            Kind::Blocked,
+            Kind::MergeAlert,
+            Kind::SelfRestart,
+        ]),
         herdr: table.herdr.unwrap_or(true),
         command,
         pane_label: table.pane_label,
@@ -179,7 +188,7 @@ pub fn send(
         let text = match event.kind {
             Kind::Question => summary(&event.text),
             Kind::Blocked => Kind::Blocked.as_str().to_string(),
-            Kind::MergeAlert => event.text.clone(),
+            Kind::MergeAlert | Kind::SelfRestart => event.text.clone(),
         };
         let marked = match &event.at {
             Some(at) => first_to_notify(mailboxes, &event.member, event.kind, at),
@@ -1163,6 +1172,33 @@ mod tests {
 
         assert_eq!(launched.len(), 1);
         assert_eq!(launched[0].args[4], "--body=Which way now?");
+    }
+
+    #[test]
+    fn a_self_restart_is_sent_by_default_with_its_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = enabled("command = ['n', '{kind}', '{member}', '{text}']\n");
+        let gave_up = Waiting {
+            herd: None,
+            member: "shepherd".into(),
+            kind: Kind::SelfRestart,
+            text: "self-restart gave up: its pane is gone".into(),
+            at: Some("2026-11-19T10:00:00Z".into()),
+        };
+
+        let launched = sent(&config, dir.path(), &[gave_up]);
+
+        assert_eq!(
+            launched[1].args,
+            args(&[
+                "n",
+                "self_restart",
+                "shepherd",
+                "self-restart gave up: its pane is gone"
+            ])
+        );
+        let narrowed = enabled("kinds = ['question']\n");
+        assert!(!narrowed.sends(Kind::SelfRestart));
     }
 
     #[test]

@@ -449,13 +449,14 @@ impl FakeHerdr {
         self.unreachable || self.state.lock().unwrap().down
     }
 
+    /// herdr takes an agent's name or its pane's ID as a target.
     fn find(&self, name: &str) -> Result<Agent> {
         self.state
             .lock()
             .unwrap()
             .agents
             .iter()
-            .find(|a| a.name.as_deref() == Some(name))
+            .find(|a| a.name.as_deref() == Some(name) || a.pane_id == name)
             .cloned()
             .ok_or_else(|| anyhow!("agent {name} not found"))
     }
