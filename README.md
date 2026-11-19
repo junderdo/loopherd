@@ -102,8 +102,8 @@ herdr plugin install junderdo/loopherd/herdr-plugin
 
 It adds a `loopherd: herd status` action and a `loopherd: open herd view`
 action, which opens `loopherd view` in a popup over most of the screen;
-`q` or Escape quits the view and closes the popup. To open it with a key,
-add a binding to your herdr `config.toml` and run
+`q` or Escape quits the view and closes the popup. To open the popup with
+a key, add a binding to your herdr `config.toml` and run
 `herdr server reload-config`:
 
 ```toml
@@ -117,7 +117,14 @@ description = "loopherd herd view"
 `prefix+m` is unbound in herdr 0.9.5's defaults (`herdr --default-config`);
 pick another if your config uses it. A popup that closes as soon as it
 opens means the view couldn't start; run `loopherd view` in a pane to see
-why. Its event hooks record a member going blocked, or its pane exiting
+why.
+
+`loopherd: open view beside shepherd` (`loopherd.view-beside-shepherd`)
+splits the view into a pane right of the shepherd's, the one its last
+handoff recorded, leaving focus where it was. With no shepherd recorded,
+or its pane gone or no longer running the shepherd's Claude, it splits
+right of the focused pane (the popup when that fails too), and the view
+says why. Bind it the same way, with its own key. Its event hooks record a member going blocked, or its pane exiting
 or closing, or its tab or workspace closing, so the next `loopherd watch`
 reports it even when none was running. They follow a member's pane moved
 to another tab or workspace.

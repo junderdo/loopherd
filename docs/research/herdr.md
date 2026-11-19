@@ -204,6 +204,19 @@ for what 0.7.0 already had, and the changelog.
   `popup_not_open`. No API sends input to a popup, and keys typed into a
   client attached under `script` didn't reach it.
 
+- **Split plugin panes** (LH-286, 0.9.5, probed on an isolated server).
+  `plugin pane open --placement split --target-pane <p> --direction right
+  --no-focus` overrides a manifest `popup` pane, leaves focus on the
+  target, and answers with the new pane in `result.plugin_pane.pane`; an
+  unknown target is `pane_not_found`. It opens at ratio 0.5 and takes no
+  ratio. `pane resize --pane <p> --direction <d> --amount <f>` moves the
+  divider nearest `p` on its `d` edge (else its opposite edge), taking
+  `|f|` capped at 0.5 and clamping ratios to 0.1–0.9. On the target, its
+  right edge is the new divider; the new pane's right edge, inside an
+  existing split, is the outer one. The pane closes when its command
+  exits, as a popup does. An action invoked from the CLI gets
+  `HERDR_PANE_ID` and `focused_pane_id` in its context: the focused pane.
+
 ## Handoff or restart in a startup hook (0.9.5, LH-263)
 
 Checked 2026-11-18 against herdr 0.9.5, the latest release, with its source

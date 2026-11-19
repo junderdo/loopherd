@@ -21,6 +21,13 @@ title = "loopherd: open herd view"
 contexts = ["workspace"]
 command = ["sh", "open-view.sh"]
 
+# Splits the view right of the shepherd's pane, else the current one.
+[[actions]]
+id = "view-beside-shepherd"
+title = "loopherd: open view beside shepherd"
+contexts = ["workspace"]
+command = ["sh", "loopherd.sh", "view", "--beside-shepherd"]
+
 [[panes]]
 id = "view"
 title = "loopherd view"

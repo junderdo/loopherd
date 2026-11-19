@@ -224,6 +224,15 @@ impl App {
         }
     }
 
+    /// Starts with `note` shown after any message, until the first key.
+    pub fn noting(mut self, note: Option<String>) -> App {
+        self.message = match (self.message.take(), note) {
+            (Some(message), Some(note)) => Some(format!("{message}; {note}")),
+            (message, note) => message.or(note),
+        };
+        self
+    }
+
     /// A read, when one is due and none is in flight.
     pub fn tick(&mut self, now: Instant) -> Option<Request> {
         self.opened.get_or_insert(now);
@@ -971,6 +980,7 @@ pub fn run<H, S, L>(
     dirs: Dirs,
     options: Options,
     theme: Theme,
+    note: Option<String>,
 ) -> Result<i32>
 where
     H: Herdr + Send + 'static,
@@ -985,7 +995,7 @@ where
     let mut terminal = ratatui::try_init()?;
     let result = run_loop(
         &mut terminal,
-        opening(options, theme, &config),
+        opening(options, theme, &config).noting(note),
         &reader,
         &watch,
         terminal_key,
@@ -2434,6 +2444,25 @@ max = 3
                 .any(|l| l.starts_with("warning: herdr unreachable"))
         );
         assert!(shown.contains(&"a has no live pane to focus".to_string()));
+    }
+
+    #[test]
+    fn a_note_given_at_start_shows_until_a_key_is_pressed() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mut app = App::new(Options::default(), truecolor()).noting(Some("why here".into()));
+        let request = app.tick(now).expect("first read is due");
+        app.apply(serve_quiet(request, &herdr, &ledger), now)
+            .unwrap();
+        let noted = |app: &App| {
+            lines(&render_tall(app, now))
+                .iter()
+                .any(|l| l.starts_with("│ why here "))
+        };
+        assert!(noted(&app));
+
+        press(&mut app, &[KeyCode::Down], &herdr, &ledger);
+
+        assert!(!noted(&app));
     }
 
     #[test]

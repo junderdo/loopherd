@@ -11,7 +11,7 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::herd_view::member as member_view;
-use crate::herdr::Herdr;
+use crate::herdr::{Herdr, Placement};
 use crate::ledger::AgentRecord;
 use crate::report::{self, Entry, Kind};
 use crate::status;
@@ -62,7 +62,7 @@ pub fn click(
             ("LOOPHERD_PR_MEMBER", member.as_str()),
             ("LOOPHERD_PR_URL", pr),
         ];
-        match herdr.open_plugin_pane(POPUP, &env) {
+        match herdr.open_plugin_pane(POPUP, &Placement::Manifest, &env) {
             Ok(()) => return Ok(Shown::Popup { member }),
             Err(e) => eprintln!("loopherd pr: no popup for {member}, opening {url} instead: {e:#}"),
         }

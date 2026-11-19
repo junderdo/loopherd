@@ -605,7 +605,10 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   only to `herdr plugin log list --plugin loopherd`. Its `view` action
   (`loopherd.view`) opens `loopherd view` in a popup that `q` or Escape
   closes; the README gives the `[[keys.command]]` snippet that binds it to
-  a key. Never edit the human's herdr config to add it. Its event hooks
+  a key. Its `view-beside-shepherd` action splits the view right of the
+  shepherd's pane recorded at its last handoff, leaving focus where it
+  was, else right of the focused pane with a note saying why (D87). Never edit the human's herdr config
+  to add it. Its event hooks
   run `loopherd herdr-event-hook`, recording a member going `blocked` or
   `gone` in its mailbox for the next watch, and following a member's pane
   moved to another tab or workspace in the ledger. It needs the
