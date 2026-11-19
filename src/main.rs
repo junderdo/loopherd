@@ -1711,6 +1711,10 @@ fn shepherd_handoff(paths: &Paths, state: &Path) -> Option<context::ShepherdHand
         limit,
         pane: own_pane().as_deref(),
         socket: socket_from_env().as_deref(),
+        shell_pid: &|| match own_pane() {
+            Some(pane) => CliHerdr.shell_pid(&pane),
+            None => Ok(None),
+        },
     })
 }
 

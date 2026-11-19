@@ -29,6 +29,9 @@ pub struct Place {
 struct Record {
     #[serde(flatten)]
     place: Place,
+    /// The pane's shell, which outlives a Claude restarted in the pane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shell: Option<Process>,
     session: String,
     /// The session the process last started since the record, which a
     /// `/clear` hook can't see: its input names only the new one.
@@ -94,16 +97,26 @@ fn handoff_path(state: &Path) -> PathBuf {
     context::handoff_path(state, context::SHEPHERD)
 }
 
-/// Replaces any earlier record with an unused one for `session` at `place`.
-/// An unused record of the same session and place keeps its time, so a
-/// repeated handoff line can't postdate a handoff already written.
-/// The last self-restart's time carries over from the record replaced.
-pub fn record(state: &Path, place: &Place, session: &str, at: SystemTime) -> Result<()> {
+/// Replaces any earlier record with an unused one for `session` at `place`,
+/// whose pane runs `shell`. An unused record of the same session and place
+/// keeps its time, so a repeated handoff line can't postdate a handoff
+/// already written. The last self-restart's time carries over from the
+/// record replaced.
+pub fn record(
+    state: &Path,
+    place: &Place,
+    shell: Option<Process>,
+    session: &str,
+    at: SystemTime,
+) -> Result<()> {
     let _lock = lock(state)?;
     let earlier = last_record(state);
     let record = match earlier {
         Some(earlier) if !earlier.used && earlier.session == session && earlier.place == *place => {
-            earlier
+            Record {
+                shell: earlier.shell.or(shell),
+                ..earlier
+            }
         }
         earlier => Record {
             restart: Restart {
@@ -111,6 +124,7 @@ pub fn record(state: &Path, place: &Place, session: &str, at: SystemTime) -> Res
                 ..Restart::default()
             },
             place: place.clone(),
+            shell,
             session: session.into(),
             current: None,
             at: humantime::format_rfc3339_nanos(at).to_string(),
@@ -166,6 +180,11 @@ fn write(state: &Path, record: &Record) -> Result<()> {
 /// there's no record or it won't parse.
 pub fn recorded_place(state: &Path) -> Option<Place> {
     last_record(state).map(|r| r.place)
+}
+
+/// The last record's place and the shell its pane ran, used or not.
+pub fn recorded_place_and_shell(state: &Path) -> Option<(Place, Option<Process>)> {
+    last_record(state).map(|r| (r.place, r.shell))
 }
 
 /// The record, used or not; `None` when missing or it won't parse.
@@ -377,7 +396,7 @@ mod tests {
     /// A state dir with a record at [`RECORDED_AT`] and a handoff written at `handoff_at`.
     fn handed_off(handoff_at: &str) -> tempfile::TempDir {
         let state = tempfile::tempdir().unwrap();
-        record(state.path(), &place(), "s-old", at(RECORDED_AT)).unwrap();
+        record(state.path(), &place(), None, "s-old", at(RECORDED_AT)).unwrap();
         write_handoff(state.path(), handoff_at);
         state
     }
@@ -515,7 +534,7 @@ mod tests {
         );
 
         let state = tempfile::tempdir().unwrap();
-        record(state.path(), &place(), "s-old", at(RECORDED_AT)).unwrap();
+        record(state.path(), &place(), None, "s-old", at(RECORDED_AT)).unwrap();
         assert_eq!(
             resume(state.path(), &place(), &start("clear")).unwrap(),
             None
@@ -533,7 +552,7 @@ mod tests {
         );
 
         let later = at("2026-11-20T10:00:00Z");
-        record(state.path(), &place(), "s-next", later).unwrap();
+        record(state.path(), &place(), None, "s-next", later).unwrap();
         write_handoff(state.path(), "2026-12-25T10:00:00Z");
 
         assert!(
@@ -545,11 +564,37 @@ mod tests {
     }
 
     #[test]
+    fn a_repeated_record_of_the_same_unused_session_fills_in_its_shell() {
+        let state = tempfile::tempdir().unwrap();
+        let shell = Process { pid: 7, start: 70 };
+        record(state.path(), &place(), None, "s-old", at(RECORDED_AT)).unwrap();
+        record(
+            state.path(),
+            &place(),
+            Some(shell),
+            "s-old",
+            at(RECORDED_AT),
+        )
+        .unwrap();
+        assert_eq!(
+            recorded_place_and_shell(state.path()),
+            Some((place(), Some(shell)))
+        );
+    }
+
+    #[test]
     fn a_repeated_record_of_the_same_unused_session_keeps_its_time() {
         let state = tempfile::tempdir().unwrap();
-        record(state.path(), &place(), "s-old", at(RECORDED_AT)).unwrap();
+        record(state.path(), &place(), None, "s-old", at(RECORDED_AT)).unwrap();
         write_handoff(state.path(), "2026-11-18T10:05:00Z");
-        record(state.path(), &place(), "s-old", at("2026-11-18T10:10:00Z")).unwrap();
+        record(
+            state.path(),
+            &place(),
+            None,
+            "s-old",
+            at("2026-11-18T10:10:00Z"),
+        )
+        .unwrap();
         assert_eq!(saved(state.path())["at"], "2026-11-18T10:00:00.000000000Z");
         assert!(
             resume(state.path(), &place(), &start("clear"))
@@ -557,7 +602,14 @@ mod tests {
                 .is_some()
         );
 
-        record(state.path(), &place(), "s-next", at("2026-11-18T10:10:00Z")).unwrap();
+        record(
+            state.path(),
+            &place(),
+            None,
+            "s-next",
+            at("2026-11-18T10:10:00Z"),
+        )
+        .unwrap();
         assert_eq!(saved(state.path())["at"], "2026-11-18T10:10:00.000000000Z");
     }
 
@@ -565,7 +617,7 @@ mod tests {
     fn the_record_names_the_pane_socket_session_process_and_time() {
         let state = tempfile::tempdir().unwrap();
         let when = at(RECORDED_AT) + Duration::from_millis(250);
-        record(state.path(), &place(), "s-old", when).unwrap();
+        record(state.path(), &place(), None, "s-old", when).unwrap();
         assert_eq!(
             saved(state.path()),
             serde_json::json!({
@@ -623,7 +675,7 @@ mod tests {
     #[test]
     fn a_clear_after_an_earlier_clear_moved_the_claude_on_adds_nothing() {
         let state = tempfile::tempdir().unwrap();
-        record(state.path(), &place(), "s-old", at(RECORDED_AT)).unwrap();
+        record(state.path(), &place(), None, "s-old", at(RECORDED_AT)).unwrap();
         assert_eq!(
             resume(state.path(), &place(), &start_of("clear", "s-mid")).unwrap(),
             None
