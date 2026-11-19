@@ -61,6 +61,7 @@ struct State {
     /// Set by [`FakeHerdr::set_malformed`].
     malformed: bool,
     next_id: u32,
+    shell_pid_reads: u32,
     tabs: Vec<FakeTab>,
     panes: Vec<FakePane>,
     agents: Vec<Agent>,
@@ -98,6 +99,8 @@ pub struct FakeHerdr {
     pub fail_wait: bool,
     pub fail_visible_text: bool,
     pub fail_shell_pid: bool,
+    /// `shell_pid` fails for this one pane after answering it once.
+    pub fail_shell_pid_of: Option<String>,
     /// After `start_claude`, this many `agent` calls answer without the
     /// session, as herdr does before it has read it; a ready start's reply too.
     pub session_after_gets: u32,
@@ -143,6 +146,7 @@ impl FakeHerdr {
             fail_wait: false,
             fail_visible_text: false,
             fail_shell_pid: false,
+            fail_shell_pid_of: None,
             session_after_gets: 0,
             agent_get_fails_after_start: false,
             new_tab_prompt_after: Some(0),
@@ -516,10 +520,14 @@ impl Herdr for FakeHerdr {
     }
 
     fn shell_pid(&self, pane_id: &str) -> Result<Option<u32>> {
-        if self.fail_shell_pid {
+        let mut state = self.state.lock().unwrap();
+        let flaky = self.fail_shell_pid_of.as_deref() == Some(pane_id);
+        if flaky {
+            state.shell_pid_reads += 1;
+        }
+        if self.fail_shell_pid || (flaky && state.shell_pid_reads > 1) {
             bail!("herdr pane process-info failed");
         }
-        let state = self.state.lock().unwrap();
         let pane = state.panes.iter().find(|p| p.id == pane_id);
         Ok(pane
             .ok_or_else(|| anyhow!("pane {pane_id} not found"))?
