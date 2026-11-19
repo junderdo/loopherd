@@ -77,8 +77,8 @@ pub fn open(
 }
 
 /// A pane id outlives its pane, so the pane must still run the recorded
-/// shell, which outlives a Claude restarted in it; a record without one needs
-/// the shepherd's Claude to be the pane's shell or under it.
+/// shell and an agent; a record without a shell needs the shepherd's Claude
+/// to be the pane's shell or under it.
 fn beside_shepherd(
     herdr: &dyn Herdr,
     procs: &dyn Procs,
@@ -92,11 +92,19 @@ fn beside_shepherd(
         bail!("can't read its shell's process (pid {shell})");
     };
     match recorded_shell {
-        Some(recorded) if recorded != (Process { pid: shell, start }) => bail!(
+        Some(recorded) if recorded.pid != shell => bail!(
             "its shell changed (pid {shell}, was the shepherd's pid {})",
             recorded.pid
         ),
-        Some(_) => {}
+        Some(recorded) if recorded.start != start => {
+            bail!("its shell was restarted (pid {shell} is a new process)")
+        }
+        // The shell outlives a Claude restarted in it, and a Claude quit in it.
+        Some(_) => {
+            if !herdr.agents()?.iter().any(|a| a.pane_id == place.pane) {
+                bail!("its pane runs no agent now, only the shepherd's shell");
+            }
+        }
         None => {
             let under_shell = process::live(procs, Some(place.process)).is_some_and(|claude| {
                 claude.pid == shell || process::is_ancestor(procs, shell, claude.pid)
@@ -161,14 +169,21 @@ mod tests {
     use std::path::PathBuf;
     use std::time::SystemTime;
 
-    /// A herdr whose one pane's shell is [`FakeProcs::pane`]'s, under the
-    /// shepherd's Claude, pid 30.
+    /// A herdr whose one pane, `w1:p1`, runs [`FakeProcs::pane`]'s shell and
+    /// an agent: the shepherd's Claude, pid 30.
     fn herdr_with_tab() -> (FakeHerdr, String) {
-        let herdr = FakeHerdr::new(&[("w1", "loopherd")]);
+        bare_herdr_with_tab(
+            FakeHerdr::new(&[("w1", "loopherd")]).with_live_agent(None, None, "w1:p1"),
+        )
+    }
+
+    /// `herdr`, given a tab whose pane `w1:p1` runs [`FakeProcs::pane`]'s shell.
+    fn bare_herdr_with_tab(herdr: FakeHerdr) -> (FakeHerdr, String) {
         let pane = herdr
             .create_tab("w1", Path::new("/src"), "shepherd")
             .unwrap()
             .pane_id;
+        assert_eq!(pane, "w1:p1");
         herdr.set_shell_pid(&pane, Some(PANE_SHELL.pid));
         (herdr, pane)
     }
@@ -430,18 +445,23 @@ mod tests {
 
     #[test]
     fn a_shepherd_pane_restarted_with_herdr_counts_as_gone() {
-        let state = tempfile::tempdir().unwrap();
         let (herdr, shepherd) = herdr_with_tab();
         let current = herdr.split("w1:t1", Path::new("/src"));
-        for shell in [Some(PANE_SHELL), None] {
+        for (shell, said) in [
+            (
+                Some(PANE_SHELL),
+                "its shell was restarted (pid 20 is a new process)",
+            ),
+            (None, "no longer runs the shepherd's Claude"),
+        ] {
+            let state = tempfile::tempdir().unwrap();
             record_shepherd_with(state.path(), &shepherd, FAKE_SOCKET, shell);
 
             let restarted = FakeProcs::restarted_pane();
             let opened = open(&herdr, &restarted, state.path(), Some(&current)).unwrap();
 
             let why = beside_current_why(opened, &current);
-            let said = ["its shell changed", "no longer runs the shepherd's Claude"];
-            assert!(said.iter().any(|s| why.contains(s)), "{why}");
+            assert!(why.contains(said), "{why}");
         }
     }
 
@@ -464,6 +484,23 @@ mod tests {
                 how: How::Opened
             }
         );
+    }
+
+    #[test]
+    fn a_shepherd_shell_left_at_a_bare_prompt_counts_as_gone() {
+        let state = tempfile::tempdir().unwrap();
+        let (herdr, shepherd) = bare_herdr_with_tab(FakeHerdr::new(&[("w1", "loopherd")]));
+        let current = herdr.split("w1:t1", Path::new("/src"));
+        record_shepherd(state.path(), &shepherd, FAKE_SOCKET);
+        let mut quit = FakeProcs::default();
+        quit.add(10, "/usr/bin/herdr", 1, 100);
+        quit.add(20, "/bin/bash", 10, 200);
+
+        let opened = open(&herdr, &quit, state.path(), Some(&current)).unwrap();
+
+        let why = beside_current_why(opened, &current);
+        assert!(why.contains("runs no agent"), "{why}");
+        assert_eq!(note(&herdr), why);
     }
 
     #[test]
@@ -503,10 +540,10 @@ mod tests {
 
     #[test]
     fn a_shepherd_pane_whose_processes_cant_be_read_says_so() {
-        let state = tempfile::tempdir().unwrap();
         let (herdr, shepherd) = herdr_with_tab();
         let current = herdr.split("w1:t1", Path::new("/src"));
         for shell in [Some(PANE_SHELL), None] {
+            let state = tempfile::tempdir().unwrap();
             record_shepherd_with(state.path(), &shepherd, FAKE_SOCKET, shell);
 
             let opened = open(&herdr, &FakeProcs::default(), state.path(), Some(&current));
