@@ -1097,7 +1097,12 @@ fn run_view_beside_shepherd() -> Result<i32> {
     let current = std::env::var("HERDR_PANE_ID")
         .ok()
         .filter(|p| !p.is_empty());
-    match view_pane::open(&CliHerdr, &ledger.dir()?, current.as_deref())? {
+    match view_pane::open(
+        &CliHerdr,
+        &process::ProcFs,
+        &ledger.dir()?,
+        current.as_deref(),
+    )? {
         view_pane::Opened::BesideShepherd { pane } => {
             println!("opened the view beside the shepherd's pane {pane}")
         }

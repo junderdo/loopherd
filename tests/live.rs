@@ -1269,6 +1269,35 @@ impl IsolatedServer {
     }
 }
 
+impl IsolatedServer {
+    /// Runs `command` in `pane` and returns the pid and start time of the
+    /// process it starts under the pane's shell, standing in for a Claude.
+    fn run_in(&self, pane: &str, command: &str) -> (u32, u64) {
+        let info = self.json(&["pane", "process-info", "--pane", pane]);
+        let shell = info["result"]["process_info"]["shell_pid"]
+            .as_u64()
+            .unwrap();
+        self.ok(&["pane", "run", pane, command]);
+        for _ in 0..50 {
+            for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+                let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+                    continue;
+                };
+                let Some((_, fields)) = stat.rsplit_once(')') else {
+                    continue;
+                };
+                let fields: Vec<&str> = fields.split_whitespace().collect();
+                if fields[1].parse::<u64>().ok() == Some(shell) {
+                    let pid = entry.file_name().to_string_lossy().parse().unwrap();
+                    return (pid, fields[19].parse().unwrap());
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("nothing started under pane {pane}'s shell {shell}");
+    }
+}
+
 /// A workspace split into `w1:p1`, focused, and `w1:p2` right of it.
 fn two_panes(server: &IsolatedServer) {
     let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("herdr-plugin");
@@ -1322,8 +1351,9 @@ fn the_beside_shepherd_action_splits_the_view_right_of_the_recorded_shepherd() {
     two_panes(&server);
     let state = server.home.path().join(".local/state/loopherd");
     std::fs::create_dir_all(&state).unwrap();
+    let (pid, start) = server.run_in("w1:p2", "sleep 300");
     let record = serde_json::json!({
-        "pane": "w1:p2", "socket": server.socket, "process": {"pid": 1, "start": 1},
+        "pane": "w1:p2", "socket": server.socket, "process": {"pid": pid, "start": start},
         "session": "s-1", "at": "2026-11-19T00:00:00Z", "used": true,
     });
     std::fs::write(state.join("shepherd.json"), record.to_string()).unwrap();
