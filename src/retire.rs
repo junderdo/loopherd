@@ -1519,6 +1519,79 @@ mod tests {
         assert!(!worktree_list(&repo).contains("feat-new"));
     }
 
+    /// A git dir copied from `repo`'s whose config has git run `touch <ran>`
+    /// on its next status.
+    fn planted_git_dir(root: &Path, repo: &Path, ran: &Path) -> PathBuf {
+        let planted = root.join("planted");
+        git_in(
+            root,
+            &[
+                "clone",
+                "--quiet",
+                "--bare",
+                repo.to_str().unwrap(),
+                planted.to_str().unwrap(),
+            ],
+        );
+        let fsmonitor = format!("touch {}; false", ran.display());
+        git_in(&planted, &["config", "core.fsmonitor", &fsmonitor]);
+        planted
+    }
+
+    #[test]
+    fn close_runs_no_command_a_planted_commondir_points_git_at() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let ran = root.path().join("ran");
+        let planted = planted_git_dir(root.path(), &repo, &ran);
+        let admin = repo.join(".git/worktrees/feat-new");
+        std::fs::write(admin.join("commondir"), format!("{}\n", planted.display())).unwrap();
+        std::fs::write(
+            repo.join(".git/commondir"),
+            format!("{}\n", planted.display()),
+        )
+        .unwrap();
+
+        let out = close(&herdr, &mut ledger);
+
+        assert!(!ran.exists(), "{out:?}");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        assert_eq!(out.last().unwrap(), &format!("removed {}", wt.display()));
+    }
+
+    #[test]
+    fn close_runs_no_command_a_worktrees_rewritten_git_file_points_git_at() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        let ran = root.path().join("ran");
+        let planted = wt.join("planted");
+        git_in(root.path(), &["init", "--quiet", planted.to_str().unwrap()]);
+        let fsmonitor = format!("touch {}; false", ran.display());
+        git_in(&planted, &["config", "core.fsmonitor", &fsmonitor]);
+        git_in(&planted, &["config", "core.worktree", wt.to_str().unwrap()]);
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}/.git\n", planted.display()),
+        )
+        .unwrap();
+
+        let mut out = vec![];
+        let result = retire_and_close(
+            &herdr,
+            &mut ledger,
+            &open_guard(),
+            "a",
+            halloween_noon(),
+            Path::new("/nonexistent/reports"),
+            None,
+            &mut out,
+        );
+
+        assert!(!ran.exists(), "{result:?} {out:?}");
+        assert!(worktree_list(&repo).contains("feat-new"), "{out:?}");
+    }
+
     #[test]
     fn close_does_not_count_the_closed_entry_as_a_sharer_of_its_missing_worktree() {
         let root = tempfile::tempdir().unwrap();

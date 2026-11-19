@@ -116,14 +116,16 @@ pub fn remove_if_merged(repo: &Path, path: &Path) -> Result<Removal> {
         let reason = format!("not a linked worktree of {}", repo.display());
         return Ok(Removal::Kept(reason));
     }
-    if let Some(op) = operation_in_progress(path)? {
+    if let Some(op) = operation_in_progress(repo, path)? {
         return Ok(Removal::Kept(format!("{op} in progress")));
     }
-    if let Some(reason) = unclean(path)? {
+    if let Some(reason) = unclean(repo, path)? {
         return Ok(Removal::Kept(reason));
     }
-    let head = git(path, &["rev-parse", "HEAD"])?.trim().to_string();
-    let branch = checked_out_branch(path)?;
+    let head = git_at(repo, path, &["rev-parse", "HEAD"])?
+        .trim()
+        .to_string();
+    let branch = checked_out_branch(repo, path)?;
     if let Some(branch) = &branch
         && let Some(reason) = unmerged(repo, branch, &head)?
     {
@@ -393,10 +395,10 @@ pub fn plan_clear(
         if !path.exists() {
             continue;
         }
-        if let Some(op) = operation_in_progress(path)? {
+        if let Some(op) = operation_in_progress(repo, path)? {
             return Ok(Plan::Dirty(format!("{} has a {op} in progress", w.path)));
         }
-        if let Some(reason) = unclean(path)? {
+        if let Some(reason) = unclean(repo, path)? {
             return Ok(Plan::Dirty(format!("{} has {reason}", w.path)));
         }
     }
@@ -565,8 +567,8 @@ const IN_PROGRESS: [(&str, &str); 8] = [
     ("BISECT_LOG", "bisect"),
 ];
 
-fn operation_in_progress(path: &Path) -> Result<Option<&'static str>> {
-    let git_dir = PathBuf::from(git(path, &["rev-parse", "--absolute-git-dir"])?.trim());
+fn operation_in_progress(repo: &Path, path: &Path) -> Result<Option<&'static str>> {
+    let git_dir = PathBuf::from(git_at(repo, path, &["rev-parse", "--absolute-git-dir"])?.trim());
     Ok(IN_PROGRESS
         .iter()
         .find(|(marker, _)| git_dir.join(marker).exists())
@@ -578,10 +580,14 @@ const BUILD_DIRS: [&str; 2] = ["target", "node_modules"];
 
 /// Why the worktree at `path` isn't clean: changes, or an ignored file outside
 /// [`BUILD_DIRS`].
-fn unclean(path: &Path) -> Result<Option<String>> {
+fn unclean(repo: &Path, path: &Path) -> Result<Option<String>> {
     // -z leaves paths unquoted. Rename entries carry a second path, but any
     // change returns before that matters.
-    let status = git(path, &["status", "--porcelain", "-z", "--ignored=matching"])?;
+    let status = git_at(
+        repo,
+        path,
+        &["status", "--porcelain", "-z", "--ignored=matching"],
+    )?;
     for entry in status.split('\0').filter(|e| !e.is_empty()) {
         let Some(ignored) = entry.strip_prefix("!! ") else {
             return Ok(Some("uncommitted or untracked changes".into()));
@@ -613,10 +619,8 @@ fn is_linked_worktree(repo: &Path, path: &Path) -> Result<bool> {
 }
 
 /// The branch checked out at `path`, or `None` when HEAD is detached.
-fn checked_out_branch(path: &Path) -> Result<Option<String>> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(path)
+fn checked_out_branch(repo: &Path, path: &Path) -> Result<Option<String>> {
+    let out = git_command(repo, path)
         .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
         .output()
         .context("run git")?;
@@ -634,9 +638,7 @@ fn checked_out_branch(path: &Path) -> Result<Option<String>> {
 }
 
 fn is_ancestor(repo: &Path, commit: &str, of: &str) -> Result<bool> {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let status = git_command(repo, repo)
         .args(["merge-base", "--is-ancestor", commit, of])
         .status()
         .context("run git")?;
@@ -880,10 +882,8 @@ impl std::error::Error for TimedOut {}
 /// Runs git against origin with no credential prompt, killing it and its
 /// helpers after `timeout`.
 fn remote_git_within(repo: &Path, args: &[&str], timeout: Duration) -> Result<String> {
-    let mut command = Command::new("git");
+    let mut command = git_command(repo, repo);
     command
-        .arg("-C")
-        .arg(repo)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         // Untranslated, so the messages matched on below read the same everywhere.
@@ -998,9 +998,7 @@ fn non_empty_var(name: &str) -> bool {
 
 /// Only a clean "not set" counts: a config git can't read may hold one.
 fn core_ssh_command_unset(repo: &Path) -> bool {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let status = git_command(repo, repo)
         .args(["config", "--get", "core.sshCommand"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1008,10 +1006,38 @@ fn core_ssh_command_unset(repo: &Path) -> bool {
     matches!(status, Ok(s) if s.code() == Some(1))
 }
 
+/// The common git dir of the checkout at `repo`, read from its `.git` without
+/// asking git, which would follow a `commondir` file anyone who can write the
+/// shared `.git` (a sandboxed lead) can plant.
+fn common_dir(repo: &Path) -> Option<PathBuf> {
+    let dot_git = repo.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+    let text = std::fs::read_to_string(&dot_git).ok()?;
+    let admin = repo.join(text.strip_prefix("gitdir:")?.trim());
+    let worktrees = admin.parent()?;
+    (worktrees.file_name()? == "worktrees").then(|| worktrees.parent().map(Path::to_path_buf))?
+}
+
+/// git run in `dir`, a checkout of `repo`, reading config and hooks from
+/// `repo`'s own common git dir only. A worktree's `.git` file or admin dir
+/// can't point it at a config, hence a command, of someone else's choosing.
+fn git_command(repo: &Path, dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(dir);
+    if let Some(common) = common_dir(repo) {
+        command.env("GIT_COMMON_DIR", common);
+    }
+    command
+}
+
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    git_at(repo, repo, args)
+}
+
+fn git_at(repo: &Path, dir: &Path, args: &[&str]) -> Result<String> {
+    let out = git_command(repo, dir)
         .args(args)
         .output()
         .context("run git")?;
