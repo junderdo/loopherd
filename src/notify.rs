@@ -412,8 +412,9 @@ pub fn forget_marks(mailboxes: &Path, member: &str) -> Vec<String> {
         .collect()
 }
 
-/// Marks `member`'s `kind` event at `at` notified unless a watch already did.
-fn first_to_notify(mailboxes: &Path, member: &str, kind: Kind, at: &str) -> Result<bool> {
+/// Marks `member`'s `kind` event at `at` notified unless a watch already did,
+/// returning whether this call marked it.
+pub fn first_to_notify(mailboxes: &Path, member: &str, kind: Kind, at: &str) -> Result<bool> {
     fs::create_dir_all(mailboxes).with_context(|| format!("create {}", mailboxes.display()))?;
     let path = mailboxes.join(format!("{member}.notified"));
     let file = OpenOptions::new()

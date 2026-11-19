@@ -9,9 +9,9 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::github::{self, Merges};
+use crate::github::{self, Merges, Pr};
 use crate::herd::{self, Paths};
-use crate::notify::{Kind, Waiting};
+use crate::notify::{self, Kind, Waiting};
 use crate::report::{self, Body};
 
 /// The least time between two lookups, across every watch the lead arms.
@@ -26,6 +26,9 @@ const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
 
 /// How far behind the local clock a new window starts, for GitHub's clock.
 const CLOCK_SKEW: Duration = Duration::from_secs(5);
+
+/// How long wakes may hold a due lookup off before it runs on a waking round.
+const WAKES_HOLD_OFF: Duration = Duration::from_secs(15 * 60);
 
 /// How long the default branch is kept before it's asked again.
 const BRANCH_EVERY: Duration = Duration::from_secs(60 * 60);
@@ -69,59 +72,66 @@ impl MergeAlerts {
 
     /// The merges to alert at `now`, when the herd file asks for them and a
     /// lookup is due. A lead's first lookup only starts its window. After
-    /// over [`STALE_AFTER`] without a successful one, the merges come as one
-    /// summary and the window starts over. Repeats are left to
-    /// `notify::send`'s marks. A failure warns once a streak.
+    /// over [`STALE_AFTER`] without a successful one, the merges not yet sent
+    /// come as one summary. On a `waking` round a lookup waits, up to
+    /// [`WAKES_HOLD_OFF`]. Repeats are left to `notify::send`'s marks. A
+    /// failure warns once a streak.
     pub fn poll(
         &mut self,
         paths: &Paths,
         merges: &dyn Merges,
         now: SystemTime,
+        waking: bool,
         warn: &mut dyn FnMut(&str),
     ) -> Vec<Waiting> {
-        self.try_poll(paths, merges, now)
-            .unwrap_or_else(|e| self.failed(&e, warn))
+        match self.try_poll(paths, merges, now, waking) {
+            Ok(Some(found)) => {
+                self.failing = false;
+                found
+            }
+            Ok(None) => vec![],
+            Err(e) => self.failed(&e, warn),
+        }
     }
 
+    /// `None` when no lookup ran and was saved.
     fn try_poll(
         &mut self,
         paths: &Paths,
         merges: &dyn Merges,
         now: SystemTime,
-    ) -> Result<Vec<Waiting>> {
+        waking: bool,
+    ) -> Result<Option<Vec<Waiting>>> {
         let Some(repo) = herd::merge_alerts(paths, &self.herd)? else {
-            return Ok(vec![]);
-        };
-        let baseline = || State {
-            created: self.created.clone(),
-            since: now - CLOCK_SKEW,
-            polled: now,
-            branch: None,
-            branched: None,
+            return Ok(None);
         };
         let Some(mut state) = self.load()?.filter(|s| s.created == self.created) else {
-            self.save(&baseline())?;
-            return Ok(vec![]);
+            self.save(&State {
+                created: self.created.clone(),
+                since: now - CLOCK_SKEW,
+                polled: now,
+                branch: None,
+                branched: None,
+            })?;
+            return Ok(None);
         };
         // A `polled` ahead of `now` is a clock that jumped back, so it's due.
         let since_poll = now.duration_since(state.polled).unwrap_or(POLL_EVERY);
-        if since_poll < POLL_EVERY {
-            return Ok(vec![]);
+        if since_poll < POLL_EVERY || (waking && since_poll < WAKES_HOLD_OFF) {
+            return Ok(None);
         }
         state.polled = now;
-        // A `since` ahead of `now` was saved by a clock running ahead.
-        let since = if state.since > now {
-            now - SEARCH_LAG
-        } else {
-            state.since
-        };
-        let since = since.max(self.revived()?.unwrap_or(SystemTime::UNIX_EPOCH));
+        let revived = self.revived()?.filter(|at| *at <= now);
+        let since = state.since.max(revived.unwrap_or(SystemTime::UNIX_EPOCH));
+        // Ahead of `now`, it was saved by a clock running ahead.
+        let since = if since > now { now - SEARCH_LAG } else { since };
         let fresh = |at: SystemTime| now.duration_since(at).is_ok_and(|d| d < BRANCH_EVERY);
         let found = match (&state.branch, state.branched) {
             (Some(branch), Some(at)) if fresh(at) => Ok(branch.clone()),
-            _ => merges
+            (cached, _) => merges
                 .default_branch(&repo)
-                .inspect(|_| state.branched = Some(now)),
+                .inspect(|_| state.branched = Some(now))
+                .or_else(|e| cached.clone().ok_or(e)),
         }
         .and_then(|branch| {
             state.branch = Some(branch.clone());
@@ -134,47 +144,49 @@ impl MergeAlerts {
                 return Err(e);
             }
         };
-        self.failing = false;
-        if now
+        let stale = now
             .duration_since(since)
-            .is_ok_and(|gap| gap > SEARCH_LAG + STALE_AFTER)
-        {
-            self.save(&State {
-                branch: state.branch,
-                branched: state.branched,
-                ..baseline()
-            })?;
-            return Ok(self.summary(prs.len(), now).into_iter().collect());
-        }
+            .is_ok_and(|gap| gap > SEARCH_LAG + STALE_AFTER);
+        let alerts = if stale {
+            self.summary(&prs, now)?.into_iter().collect()
+        } else {
+            prs.into_iter()
+                .map(|pr| self.alert(format!("#{} {}", pr.number, pr.url), pr.url))
+                .collect()
+        };
         state.since = since.max(now - SEARCH_LAG);
         self.save(&state)?;
-        Ok(prs
-            .into_iter()
-            .map(|pr| Waiting {
-                herd: Some(self.herd.clone()),
-                member: self.lead.clone(),
-                kind: Kind::MergeAlert,
-                text: format!("#{} {}", pr.number, pr.url),
-                at: Some(pr.url),
-            })
-            .collect())
+        Ok(Some(alerts))
     }
 
-    /// One line for `count` merges found at `now`, or none for none.
-    fn summary(&self, count: usize, now: SystemTime) -> Option<Waiting> {
-        let text = match count {
-            0 => return None,
+    /// One line for those of `prs` not sent yet, which it marks sent so a
+    /// later lookup doesn't send them one by one; `None` when all were sent.
+    fn summary(&self, prs: &[Pr], now: SystemTime) -> Result<Option<Waiting>> {
+        let mut unsent = 0;
+        for pr in prs {
+            if notify::first_to_notify(&self.mailboxes, &self.lead, Kind::MergeAlert, &pr.url)? {
+                unsent += 1;
+            }
+        }
+        let text = match unsent {
+            0 => return Ok(None),
+            n if prs.len() >= github::MERGED_LIMIT => format!("{n} or more merges while unwatched"),
             1 => "1 merge while unwatched".to_string(),
-            n if n >= github::MERGED_LIMIT => format!("{n} or more merges while unwatched"),
             n => format!("{n} merges while unwatched"),
         };
-        Some(Waiting {
+        Ok(Some(
+            self.alert(text, format!("unwatched {}", seconds(now))),
+        ))
+    }
+
+    fn alert(&self, text: String, at: String) -> Waiting {
+        Waiting {
             herd: Some(self.herd.clone()),
             member: self.lead.clone(),
             kind: Kind::MergeAlert,
             text,
-            at: Some(format!("unwatched {}", seconds(now))),
-        })
+            at: Some(at),
+        }
     }
 
     fn failed(&mut self, e: &anyhow::Error, warn: &mut dyn FnMut(&str)) -> Vec<Waiting> {

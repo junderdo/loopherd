@@ -380,16 +380,14 @@ pub fn watch(
             };
             lines.extend(drained(ledger, &flight, req, &reader, &members)?);
         }
-        // Only on a round with nothing to report, so gh's wait never holds a wake back.
-        if lines.is_empty()
-            && let (Some(notify_own), Some(merges), Some(checks)) = (
-                req.notify_own,
-                req.merges,
-                checks.as_mut().filter(|c| c.merges_due),
-            )
-        {
+        if let (Some(notify_own), Some(merges), Some(checks)) = (
+            req.notify_own,
+            req.merges,
+            checks.as_mut().filter(|c| c.merges_due),
+        ) {
             checks.merges_due = false;
-            let merged = (checks.alerts).poll(checks.paths, merges, clock.now(), warn);
+            let waking = !lines.is_empty();
+            let merged = (checks.alerts).poll(checks.paths, merges, clock.now(), waking, warn);
             if !merged.is_empty() {
                 notify_own(&merged);
             }
@@ -3659,6 +3657,80 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_summary_counts_no_merge_already_sent() {
+        let (world, notifier, gh) = guarded("", vec![]);
+        world.lead_at(&notifier, &gh, FIRST);
+        gh.merged.borrow_mut().push(("2026-11-01T09:09:00Z", 7));
+        world.lead_at(&notifier, &gh, LATER);
+
+        world.lead_at(&notifier, &gh, "2026-11-01T12:00:00Z");
+
+        assert_eq!(notifier.sent(), [merge_sent(7)]);
+    }
+
+    #[test]
+    fn a_merge_indexed_late_after_a_stale_summary_is_still_sent_once() {
+        let (world, notifier, gh) = guarded("", vec![]);
+        world.lead_at(&notifier, &gh, FIRST);
+        gh.merged.borrow_mut().push(("2026-11-01T10:00:00Z", 7));
+        world.lead_at(&notifier, &gh, "2026-11-01T12:00:00Z");
+        let indexed_late = ("2026-11-01T11:58:00Z", 8);
+        gh.merged.borrow_mut().push(indexed_late);
+
+        world.lead_at(&notifier, &gh, "2026-11-01T12:01:00Z");
+
+        let summary = merges_summed("1 merge while unwatched");
+        assert_eq!(notifier.sent(), [summary, merge_sent(8)]);
+    }
+
+    #[test]
+    fn a_revive_recorded_while_the_clock_ran_ahead_skips_no_merges() {
+        let (world, notifier, gh) = guarded("", vec![]);
+        world.lead_at(&notifier, &gh, FIRST);
+        let reports = world.reports();
+        for (at, body) in [
+            (
+                "2026-11-01T11:00:00Z",
+                Body::Gone {
+                    tab: None,
+                    workspace: None,
+                },
+            ),
+            ("2026-11-01T11:30:00Z", Body::Start { resumed: true }),
+        ] {
+            append(
+                &reports,
+                "lead-cards",
+                &Entry {
+                    at: at.into(),
+                    body,
+                },
+            )
+            .unwrap();
+        }
+        gh.merged.borrow_mut().push(("2026-11-01T09:05:00Z", 7));
+        world.lead_at(&notifier, &gh, LATER);
+        gh.merged.borrow_mut().push(("2026-11-01T09:15:00Z", 8));
+
+        world.lead_at(&notifier, &gh, "2026-11-01T09:20:00Z");
+
+        assert_eq!(notifier.sent(), [merge_sent(7), merge_sent(8)]);
+    }
+
+    #[test]
+    fn a_merge_lookup_held_off_by_wakes_for_a_quarter_hour_runs_on_a_waking_round() {
+        let (world, notifier, gh) = guarded("", vec![]);
+        world.lead_at(&notifier, &gh, FIRST);
+        gh.merged.borrow_mut().push(("2026-11-01T09:05:00Z", 7));
+        world.touch("merged-1", "");
+
+        let woke = world.lead_wakes_at(&notifier, &gh, "2026-11-01T09:16:00Z");
+
+        assert_eq!(woke.unwrap(), ["lh-1 merged"]);
+        assert_eq!(notifier.sent(), [merge_sent(7)]);
+    }
+
+    #[test]
     fn a_due_merge_lookup_waits_for_a_round_with_nothing_to_report() {
         let (world, notifier, gh) = guarded("", vec![]);
         world.lead_at(&notifier, &gh, FIRST);
@@ -3702,8 +3774,9 @@ mod tests {
     }
 
     #[test]
-    fn a_merge_window_that_cannot_be_saved_warns_once_a_streak() {
+    fn a_merge_window_that_cannot_be_saved_after_a_lookup_warns_once_a_streak() {
         let (world, notifier, gh) = guarded("", vec![]);
+        world.lead_at(&notifier, &gh, FIRST);
         fs::create_dir(world.reports().join("lead-cards.merges.new")).unwrap();
         let own = |events: &[Waiting]| notifier.send(events);
         let req = Request {
@@ -3719,7 +3792,7 @@ mod tests {
             &world.ledger,
             &world.reports(),
             &req,
-            &mut steps(|_| {}),
+            &mut steps_from(LATER, |_| {}),
             &mut |w| warned.push(w.to_string()),
         );
 
