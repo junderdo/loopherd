@@ -1142,15 +1142,23 @@ fn run_view_beside_shepherd() -> Result<i32> {
         &ledger.dir()?,
         current.as_deref(),
     )? {
-        view_pane::Opened::BesideShepherd { pane } => {
-            println!("opened the view beside the shepherd's pane {pane}")
+        view_pane::Opened::BesideShepherd { pane, how } => {
+            println!("{} beside the shepherd's pane {pane}", view_outcome(&how))
         }
-        view_pane::Opened::Beside { pane, why } => {
-            println!("opened the view beside pane {pane}: {why}")
+        view_pane::Opened::Beside { pane, why, how } => {
+            println!("{} beside pane {pane}: {why}", view_outcome(&how))
         }
         view_pane::Opened::Popup { why } => println!("opened the view in the popup: {why}"),
     }
     Ok(0)
+}
+
+fn view_outcome(how: &view_pane::How) -> String {
+    match how {
+        view_pane::How::Opened => "opened the view".into(),
+        view_pane::How::OpenedFocused => "opened and focused the view".into(),
+        view_pane::How::Focused { view } => format!("focused the view already open in {view}"),
+    }
 }
 
 fn run_pr(url: Option<String>, popup: bool) -> Result<i32> {

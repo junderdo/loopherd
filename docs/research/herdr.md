@@ -220,6 +220,11 @@ for what 0.7.0 already had, and the changelog.
   existing split, is the outer one. The pane closes when its command
   exits, as a popup does. An action invoked from the CLI gets
   `HERDR_PANE_ID` and `focused_pane_id` in its context: the focused pane.
+  A plugin pane lists with its manifest title as `label`. `plugin pane
+  focus <p>` switches tab and workspace to it and answers
+  `plugin_pane_not_found` for a pane that isn't a plugin's; `--focus` on
+  `open` switches to the target's tab too. `workspace list` gives each
+  workspace's `focused` and `active_tab_id` (LH-290).
 
 ## Handoff or restart in a startup hook (0.9.5, LH-263)
 

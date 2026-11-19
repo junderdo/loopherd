@@ -5,11 +5,13 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 
-use crate::herdr::{Herdr, Placement};
+use crate::herdr::{Herdr, Pane, Placement};
 use crate::process::{self, Procs};
 use crate::shepherd_resume::{self, Place};
 
 const VIEW: &str = "view";
+/// The view pane's title in the plugin manifest, which herdr shows as its label.
+const VIEW_TITLE: &str = "loopherd view";
 /// Set on a view opened anywhere but beside the shepherd, saying why.
 pub const NOTE: &str = "LOOPHERD_VIEW_NOTE";
 /// The view's share of the width it splits off.
@@ -17,9 +19,19 @@ const SHARE: f64 = 0.4;
 
 #[derive(Debug, PartialEq)]
 pub enum Opened {
-    BesideShepherd { pane: String },
-    Beside { pane: String, why: String },
+    BesideShepherd { pane: String, how: How },
+    Beside { pane: String, why: String, how: How },
     Popup { why: String },
+}
+
+#[derive(Debug, PartialEq)]
+pub enum How {
+    /// Split off, leaving focus where it was.
+    Opened,
+    /// Split off and focused, the pane's tab being out of the human's sight.
+    OpenedFocused,
+    /// A view already open in the pane's tab, focused instead of stacking another.
+    Focused { view: String },
 }
 
 /// Opens the view right of the shepherd's recorded pane in `state`, else
@@ -37,16 +49,22 @@ pub fn open(
             place.pane
         ),
         Some(place) => match beside_shepherd(herdr, procs, &place) {
-            Ok(()) => return Ok(Opened::BesideShepherd { pane: place.pane }),
+            Ok(how) => {
+                return Ok(Opened::BesideShepherd {
+                    pane: place.pane,
+                    how,
+                });
+            }
             Err(e) => format!("not beside the shepherd's pane {}: {e:#}", place.pane),
         },
     };
     let why = match current {
-        Some(pane) => match herdr.open_plugin_pane(VIEW, &right_of(pane), &[(NOTE, &why)]) {
-            Ok(()) => {
+        Some(pane) => match beside(herdr, pane, &[(NOTE, &why)]) {
+            Ok(how) => {
                 return Ok(Opened::Beside {
                     pane: pane.into(),
                     why,
+                    how,
                 });
             }
             Err(e) => format!("{why}; no split beside {pane} either: {e:#}"),
@@ -59,7 +77,7 @@ pub fn open(
 
 /// A pane id outlives its pane, so the shepherd's Claude must still run
 /// under the pane's shell.
-fn beside_shepherd(herdr: &dyn Herdr, procs: &dyn Procs, place: &Place) -> Result<()> {
+fn beside_shepherd(herdr: &dyn Herdr, procs: &dyn Procs, place: &Place) -> Result<How> {
     let shell = herdr.shell_pid(&place.pane)?;
     let claude = process::live(procs, Some(place.process));
     if !shell
@@ -71,13 +89,44 @@ fn beside_shepherd(herdr: &dyn Herdr, procs: &dyn Procs, place: &Place) -> Resul
             place.process.pid
         );
     }
-    herdr.open_plugin_pane(VIEW, &right_of(&place.pane), &[])
+    beside(herdr, &place.pane, &[])
 }
 
-fn right_of(pane: &str) -> Placement {
+/// Focuses a view already in `pane`'s tab, else splits one right of it,
+/// focused when the human isn't looking at that tab.
+fn beside(herdr: &dyn Herdr, pane: &str, env: &[(&str, &str)]) -> Result<How> {
+    let target = herdr.pane(pane)?;
+    if let Some(view) = open_view_in_tab_of(herdr, &target)
+        && herdr.focus_plugin_pane(&view).is_ok()
+    {
+        return Ok(How::Focused { view });
+    }
+    // Unknown counts as seen: focus moves only when the human surely can't see the tab.
+    let off_screen = herdr
+        .visible_tab()
+        .ok()
+        .flatten()
+        .is_some_and(|tab| tab != target.tab_id);
+    herdr.open_plugin_pane(VIEW, &right_of(pane, off_screen), env)?;
+    Ok(match off_screen {
+        true => How::OpenedFocused,
+        false => How::Opened,
+    })
+}
+
+fn open_view_in_tab_of(herdr: &dyn Herdr, target: &Pane) -> Option<String> {
+    let panes = herdr.panes_in(&target.workspace_id).ok()?;
+    panes
+        .into_iter()
+        .find(|p| p.tab_id == target.tab_id && p.label.as_deref() == Some(VIEW_TITLE))
+        .map(|p| p.id)
+}
+
+fn right_of(pane: &str, focus: bool) -> Placement {
     Placement::RightOf {
         pane: pane.into(),
         share: SHARE,
+        focus,
     }
 }
 
@@ -122,7 +171,7 @@ mod tests {
     }
 
     fn beside_current_why(opened: Opened, current: &str) -> String {
-        let Opened::Beside { pane, why } = opened else {
+        let Opened::Beside { pane, why, .. } = opened else {
             panic!("{opened:?}");
         };
         assert_eq!(pane, current);
@@ -141,13 +190,107 @@ mod tests {
         assert_eq!(
             opened,
             Opened::BesideShepherd {
-                pane: shepherd.clone()
+                pane: shepherd.clone(),
+                how: How::Opened
             }
         );
         assert_eq!(
             herdr.plugin_panes(),
-            [(VIEW.to_string(), right_of(&shepherd), vec![])]
+            [(VIEW.to_string(), right_of(&shepherd, false), vec![])]
         );
+    }
+
+    #[test]
+    fn a_second_open_beside_the_shepherd_focuses_its_view_instead_of_stacking() {
+        let state = tempfile::tempdir().unwrap();
+        let (herdr, shepherd) = herdr_with_tab();
+        record_shepherd(state.path(), &shepherd, FAKE_SOCKET);
+        open(&herdr, &FakeProcs::pane(), state.path(), None).unwrap();
+        let view = herdr.plugin_pane_ids()[0].clone();
+
+        let opened = open(&herdr, &FakeProcs::pane(), state.path(), None).unwrap();
+
+        assert_eq!(
+            opened,
+            Opened::BesideShepherd {
+                pane: shepherd,
+                how: How::Focused { view: view.clone() }
+            }
+        );
+        assert_eq!(herdr.plugin_panes().len(), 1);
+        assert_eq!(herdr.focused(), [view]);
+    }
+
+    #[test]
+    fn run_from_its_own_view_the_action_focuses_that_view() {
+        let state = tempfile::tempdir().unwrap();
+        let (herdr, current) = herdr_with_tab();
+        open(&herdr, &FakeProcs::pane(), state.path(), Some(&current)).unwrap();
+        let view = herdr.plugin_pane_ids()[0].clone();
+
+        let opened = open(&herdr, &FakeProcs::pane(), state.path(), Some(&view)).unwrap();
+
+        let Opened::Beside { how, .. } = opened else {
+            panic!("{opened:?}");
+        };
+        assert_eq!(how, How::Focused { view });
+        assert_eq!(herdr.plugin_panes().len(), 1);
+    }
+
+    #[test]
+    fn a_view_in_another_tab_doesnt_count_as_beside_the_shepherd() {
+        let state = tempfile::tempdir().unwrap();
+        let (herdr, shepherd) = herdr_with_tab();
+        let other = herdr.add_tab("w1", "other", Path::new("/src"), true);
+        open(&herdr, &FakeProcs::pane(), state.path(), Some(&other)).unwrap();
+        record_shepherd(state.path(), &shepherd, FAKE_SOCKET);
+
+        let opened = open(&herdr, &FakeProcs::pane(), state.path(), None).unwrap();
+
+        assert_eq!(
+            opened,
+            Opened::BesideShepherd {
+                pane: shepherd,
+                how: How::Opened
+            }
+        );
+        assert_eq!(herdr.plugin_panes().len(), 2);
+    }
+
+    #[test]
+    fn a_shepherd_off_screen_gets_its_view_opened_with_focus_so_the_human_sees_it() {
+        let state = tempfile::tempdir().unwrap();
+        let (herdr, shepherd) = herdr_with_tab();
+        let elsewhere = herdr.add_tab("w1", "elsewhere", Path::new("/src"), true);
+        herdr.show_tab_of(&elsewhere);
+        record_shepherd(state.path(), &shepherd, FAKE_SOCKET);
+
+        let opened = open(&herdr, &FakeProcs::pane(), state.path(), None).unwrap();
+
+        assert_eq!(
+            opened,
+            Opened::BesideShepherd {
+                pane: shepherd.clone(),
+                how: How::OpenedFocused
+            }
+        );
+        assert_eq!(herdr.plugin_panes()[0].1, right_of(&shepherd, true));
+    }
+
+    #[test]
+    fn the_view_title_is_the_manifests() {
+        let manifest: toml::Table = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("herdr-plugin/herdr-plugin.toml"),
+        )
+        .unwrap()
+        .parse()
+        .unwrap();
+        let panes = manifest["panes"].as_array().unwrap();
+        let view = panes
+            .iter()
+            .find(|p| p["id"].as_str() == Some(VIEW))
+            .unwrap();
+        assert_eq!(view["title"].as_str(), Some(VIEW_TITLE));
     }
 
     #[test]
@@ -163,7 +306,13 @@ mod tests {
 
         let opened = open(&herdr, &FakeProcs::pane(), state.path(), None).unwrap();
 
-        assert_eq!(opened, Opened::BesideShepherd { pane: shepherd });
+        assert_eq!(
+            opened,
+            Opened::BesideShepherd {
+                pane: shepherd,
+                how: How::Opened
+            }
+        );
     }
 
     #[test]
@@ -175,7 +324,7 @@ mod tests {
 
         let why = beside_current_why(opened, &current);
         assert!(why.contains("no shepherd recorded"), "{why}");
-        assert_eq!(herdr.plugin_panes()[0].1, right_of(&current));
+        assert_eq!(herdr.plugin_panes()[0].1, right_of(&current, false));
         assert_eq!(note(&herdr), why);
     }
 
