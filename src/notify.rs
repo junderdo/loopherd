@@ -436,6 +436,9 @@ pub fn first_to_notify_each(
     kind: Kind,
     ats: &[&str],
 ) -> Result<usize> {
+    if ats.is_empty() {
+        return Ok(0);
+    }
     fs::create_dir_all(mailboxes).with_context(|| format!("create {}", mailboxes.display()))?;
     let path = mailboxes.join(format!("{member}.notified"));
     let file = OpenOptions::new()
@@ -457,7 +460,7 @@ pub fn first_to_notify_each(
         }
     }
     if !new.is_empty() {
-        // One write, so a failure doesn't leave some of them marked.
+        // One write, so a failure usually leaves none of them marked.
         let lines = new.join("\n") + "\n";
         marks
             .write_all(lines.as_bytes())

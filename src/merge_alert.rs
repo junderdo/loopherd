@@ -173,7 +173,8 @@ impl MergeAlerts {
         let unsent = match marked {
             Ok(unsent) => unsent,
             Err(e) => {
-                // The summary couldn't be marked either, so the next lookup counts them again.
+                // The summary couldn't be marked either, so the next lookup counts them
+                // again. If this save fails too, the window stays moved and they're missed.
                 state.since = window;
                 self.save(&state)?;
                 return Err(e.context("mark merges sent"));
@@ -426,5 +427,16 @@ mod tests {
 
         assert_eq!(sent, ["1 merge while unwatched"]);
         assert_eq!(warned, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_stale_lookup_finding_no_merges_leaves_the_sent_marks_alone() {
+        let world = World::new();
+        world.poll(&gh(vec![]), FIRST);
+
+        let (sent, warned) = world.poll(&gh(vec![]), "2026-11-01T12:00:00Z");
+
+        assert_eq!((sent, warned), (vec![], vec![]));
+        assert!(!world.mailboxes().join("lead-cards.notified").exists());
     }
 }
