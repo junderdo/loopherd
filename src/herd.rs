@@ -11,6 +11,7 @@ use serde::Deserialize;
 use crate::herdr::Herdr;
 use crate::ledger::{AgentRecord, FileLedger, Ledger};
 use crate::lock::Lock;
+use crate::sandbox::SandboxMode;
 use crate::spawn::{
     Checkout, MemberOf, Prompt, SHELL_TIMEOUT, SpawnRequest, Spawned, preview, spawn,
 };
@@ -55,6 +56,8 @@ struct LeadFile {
     context_limit: Option<u64>,
     #[serde(default)]
     merge_guard: MergeGuard,
+    #[serde(default)]
+    sandbox: SandboxMode,
 }
 
 /// How a lead with `merge` off is kept from merging.
@@ -225,6 +228,7 @@ const FEED_LOCK_GRACE: Duration = Duration::from_secs(1);
 /// Where herd files live, the home a leading `~` expands to, the lock
 /// that keeps `feed` and `add` from filling a queue's slots at once, and
 /// the paused herds' files.
+#[derive(Debug, Clone)]
 pub struct Paths {
     pub herds: PathBuf,
     pub home: PathBuf,
@@ -233,6 +237,16 @@ pub struct Paths {
 }
 
 impl Paths {
+    /// loopherd's config dir, holding `herds/` and `config.toml`.
+    pub fn config_dir(&self) -> &Path {
+        self.herds.parent().unwrap_or(&self.herds)
+    }
+
+    /// loopherd's state dir, holding the ledger beside the feed lock.
+    pub fn state_dir(&self) -> &Path {
+        self.feed_lock.parent().unwrap_or(&self.feed_lock)
+    }
+
     /// `$LOOPHERD_CONFIG_DIR/herds`, else `$XDG_CONFIG_HOME/loopherd/herds`,
     /// defaulting to `~/.config/loopherd/herds`.
     pub fn from_env() -> Result<Paths> {
@@ -747,13 +761,18 @@ pub fn repo(paths: &Paths, herd: &str) -> Result<PathBuf> {
     Ok(expand_home(&parsed.repo, &paths.home))
 }
 
-/// A herd's lead's switches, without reading its prompt.
-pub fn lead_switches(paths: &Paths, herd: &str) -> Result<Switches> {
+/// A herd's lead's switches and sandbox mode, without reading its prompt.
+pub fn lead_sandbox(paths: &Paths, herd: &str) -> Result<(Switches, SandboxMode)> {
     let file = load(&paths.herds, herd).context("herd")?;
     let lead = file
         .lead
         .with_context(|| format!("herd: {herd} has no [lead]"))?;
-    Ok(lead.switches().over(&lead_defaults(paths)?))
+    Ok((lead.switches().over(&lead_defaults(paths)?), lead.sandbox))
+}
+
+/// A herd's lead's switches, without reading its prompt.
+pub fn lead_switches(paths: &Paths, herd: &str) -> Result<Switches> {
+    Ok(lead_sandbox(paths, herd)?.0)
 }
 
 /// The repo whose merges the human hears of while `herd`'s lead runs: one

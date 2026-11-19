@@ -85,6 +85,12 @@ A switch its `[lead]` leaves unset comes from `[lead_defaults]` in
 `~/.config/loopherd/config.toml` (`scripts/install --lead-defaults` to change
 them), else is off; `loopherd herds` shows each switch's value and source.
 
+Each lead runs in the Claude Code sandbox from settings loopherd writes
+from its switches (D89). `loopherd doctor` fails when the sandbox can't
+start here (bubblewrap and socat on Linux and WSL2), and `[lead] sandbox =
+"require"`, the default, then refuses to start the lead; `prefer` starts
+it guarded by its hook alone, and only the human sets it.
+
 ## Notify
 
 The human's `[notify]` table in `~/.config/loopherd/config.toml` decides

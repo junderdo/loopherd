@@ -451,6 +451,115 @@ fn adds_a_member_from_a_temp_herd_file() {
     );
 }
 
+/// Removes a worktree of `.0` at `.1` when dropped, and its container dir once empty.
+struct RemoveWorktree(PathBuf, PathBuf);
+
+impl Drop for RemoveWorktree {
+    fn drop(&mut self) {
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&self.0)
+            .args(["worktree", "remove", "--force"])
+            .arg(&self.1)
+            .output();
+        if let Some(container) = self.1.parent() {
+            let _ = std::fs::remove_dir(container);
+        }
+    }
+}
+
+#[test]
+fn a_sandboxed_lead_cannot_write_its_herd_file() {
+    if !live_enabled() {
+        return;
+    }
+    let workspace = assert_dev_session();
+    let state = tempfile::tempdir().unwrap();
+    // This checkout is already trusted; a fresh repo would stop the lead at the trust dialog.
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let herd = format!("lh-live-sbx-{}", std::process::id());
+    let name = format!("lead-{herd}");
+    let checkout = repo.file_name().unwrap().to_str().unwrap();
+    let parent = repo.parent().unwrap();
+    let container = match parent.file_name() == repo.file_name() {
+        true => parent.join("worktrees"),
+        false => parent.join(format!("{checkout}-worktrees")),
+    };
+    let worktree = container.join(&name);
+    let _worktree = RemoveWorktree(repo.clone(), worktree.clone());
+    // Inside a dir the sandbox lets the lead write, so only the config dir's deny stops it.
+    std::fs::create_dir_all(&container).unwrap();
+    let config = tempfile::tempdir_in(&container).unwrap();
+    let herds = config.path().join("herds");
+    std::fs::create_dir(&herds).unwrap();
+    let herd_file = herds.join(format!("{herd}.toml"));
+    let control = worktree.join("sandbox-probe");
+    std::fs::write(
+        &herd_file,
+        format!(
+            "{}[lead]\nprompt = \"\"\"Run these two Bash commands, one at a time and in this \
+             order, running the second even if the first fails: `echo hijack >> {}`, then \
+             `touch {}`. Then reply with what each printed.\"\"\"\n",
+            herd_head(repo.to_str().unwrap(), &workspace),
+            herd_file.display(),
+            control.display()
+        ),
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(&herd_file).unwrap();
+    let _cleanup = CloseTab(name.clone());
+
+    let out = dev(env!("CARGO_BIN_EXE_loopherd"))
+        .env("XDG_STATE_HOME", state.path())
+        .env("LOOPHERD_CONFIG_DIR", config.path())
+        // acceptEdits approves the control write; auto mode's classifier would refuse the append
+        // before loopherd's settings could, so it isn't what this measures.
+        .args(["lead", &herd, "--", "--permission-mode", "acceptEdits"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let entry = ledger_entry(state.path(), &name);
+    assert_eq!(entry["worktree"], worktree.to_str().unwrap());
+    let settings = config.path().join(format!("sandbox/{name}.json"));
+    assert!(
+        entry["claude_args"]
+            .as_array()
+            .unwrap()
+            .contains(&settings.display().to_string().into()),
+        "{entry}"
+    );
+
+    let given_up = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    let finished = |status: &Value| status == "idle" || status == "done";
+    loop {
+        let status = herdr_ok(&["agent", "get", &name])["result"]["agent"]["agent_status"].clone();
+        if control.exists() && finished(&status) {
+            break;
+        }
+        if std::time::Instant::now() >= given_up {
+            let pane = herdr_ok(&["agent", "get", &name])["result"]["agent"]["pane_id"].clone();
+            let screen = dev("herdr")
+                .args(["pane", "read", pane.as_str().unwrap()])
+                .args(["--source", "recent", "--format", "text"])
+                .output()
+                .unwrap();
+            panic!(
+                "lead never ran its commands (status {status}):\n{}",
+                String::from_utf8_lossy(&screen.stdout)
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    // The control file is touched after the append, and its dir is as writable as the herd file's.
+    assert_eq!(std::fs::read_to_string(&herd_file).unwrap(), before);
+}
+
 #[test]
 fn retire_close_closes_the_tab_and_removes_a_clean_merged_worktree() {
     if !live_enabled() {

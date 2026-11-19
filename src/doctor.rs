@@ -14,6 +14,7 @@ use crate::herd::Paths;
 use crate::herdr::{Herdr, Server};
 use crate::ledger::{FileLedger, Ledger};
 use crate::pause::Reading;
+use crate::sandbox::SandboxMode;
 
 /// What the install checks read, gathered by the caller.
 pub struct Install {
@@ -24,6 +25,8 @@ pub struct Install {
     /// The `loopherd` a shell finds on PATH.
     pub on_path: Option<PathBuf>,
     pub running: PathBuf,
+    /// Why Claude Code's sandbox can't start on this machine, if it can't.
+    pub sandbox: Result<(), String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -65,6 +68,14 @@ pub fn checks(
     }
     let mut checks = hook_checks(install);
     checks.push(running_binary(install));
+    checks.push(match &install.sandbox {
+        Ok(()) => ok("sandbox", "can start".into()),
+        Err(why) => failure(
+            "sandbox",
+            format!("can't start: {why}"),
+            "install bubblewrap and socat".into(),
+        ),
+    });
     let (herdr_checks, reached) = herdr_checks(herdr);
     checks.extend(herdr_checks);
     match setup {
@@ -177,6 +188,15 @@ fn herd_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
             ),
             true => ok(&name, repo.display().to_string()),
         });
+        if let Ok((_, SandboxMode::Prefer)) = crate::herd::lead_sandbox(paths, &herd) {
+            checks.push(warning(
+                &format!("herd {herd} sandbox"),
+                "prefer: its lead starts without the sandbox, guarded by its tool hook alone, \
+                 whenever the sandbox can't start"
+                    .into(),
+                format!("loopherd herd set {herd} lead.sandbox '\"require\"'"),
+            ));
+        }
     }
     checks
 }
@@ -826,6 +846,7 @@ mod tests {
                 pane_label: false,
                 on_path: Some(exe.clone()),
                 running: exe,
+                sandbox: Ok(()),
             },
             setup: Ok(setup),
             dir,
@@ -877,7 +898,7 @@ mod tests {
         let m = machine(&ALL);
         assert_eq!(
             run(&m, &herdr()),
-            ("doctor: 14 ok, 0 warnings, 0 failures\n".into(), 0)
+            ("doctor: 15 ok, 0 warnings, 0 failures\n".into(), 0)
         );
     }
 
@@ -891,7 +912,7 @@ mod tests {
                 out,
                 format!(
                     "failure {missing} hook: not in {}; fix: loopherd install-hook\n\
-                     doctor: 13 ok, 0 warnings, 1 failures\n",
+                     doctor: 14 ok, 0 warnings, 1 failures\n",
                     m.install.settings.display()
                 ),
             );
@@ -909,7 +930,7 @@ mod tests {
         assert_eq!(
             run(&m, &herdr()),
             (
-                format!("warning {line}doctor: 13 ok, 1 warnings, 0 failures\n"),
+                format!("warning {line}doctor: 14 ok, 1 warnings, 0 failures\n"),
                 0
             )
         );
@@ -917,7 +938,7 @@ mod tests {
         assert_eq!(
             run(&m, &herdr()),
             (
-                format!("failure {line}doctor: 13 ok, 0 warnings, 1 failures\n"),
+                format!("failure {line}doctor: 14 ok, 0 warnings, 1 failures\n"),
                 1
             )
         );
@@ -943,7 +964,7 @@ mod tests {
         m.install.settings = m.dir.path().join("absent.json");
         let (out, code) = run(&m, &herdr());
         assert!(
-            out.ends_with("doctor: 9 ok, 1 warnings, 4 failures\n"),
+            out.ends_with("doctor: 10 ok, 1 warnings, 4 failures\n"),
             "{out}"
         );
         assert_eq!(code, 1);
@@ -963,7 +984,7 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.ends_with("doctor: 8 ok, 0 warnings, 1 failures\n"),
+            out.ends_with("doctor: 9 ok, 0 warnings, 1 failures\n"),
             "{out}"
         );
         assert_eq!(code, 1);
@@ -988,7 +1009,7 @@ mod tests {
             format!(
                 "failure hook binary: hooks call {}, not the loopherd on PATH ({}); \
                  fix: loopherd install-hook\n\
-                 doctor: 13 ok, 0 warnings, 1 failures\n",
+                 doctor: 14 ok, 0 warnings, 1 failures\n",
                 old.display(),
                 path_exe.display()
             )
@@ -1010,7 +1031,7 @@ mod tests {
                  fix: put {running_dir} before {stale_dir} on PATH, then '{running}' install-hook\n\
                  warning running binary: this is {running}, not the loopherd on PATH ({stale}); \
                  fix: run the loopherd on PATH\n\
-                 doctor: 12 ok, 1 warnings, 1 failures\n",
+                 doctor: 13 ok, 1 warnings, 1 failures\n",
                 running = running.display(),
                 stale = stale.display(),
                 running_dir = running.parent().unwrap().display(),
@@ -1046,7 +1067,7 @@ mod tests {
             format!(
                 "warning running binary: this is {}, not the loopherd on PATH ({}); \
                  fix: run the loopherd on PATH\n\
-                 doctor: 13 ok, 1 warnings, 0 failures\n",
+                 doctor: 14 ok, 1 warnings, 0 failures\n",
                 dev.display(),
                 m.install.on_path.as_ref().unwrap().display()
             )
@@ -1064,7 +1085,7 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         m.install.on_path = Some(link);
         assert_eq!(run(&m, &herdr()).1, 0);
-        assert!(run(&m, &herdr()).0.starts_with("doctor: 14 ok"));
+        assert!(run(&m, &herdr()).0.starts_with("doctor: 15 ok"));
     }
 
     #[test]
@@ -1076,7 +1097,7 @@ mod tests {
         assert_eq!(
             out,
             "failure herdr: no herdr server answers on /run/fake/herdr.sock; fix: herdr\n\
-             doctor: 11 ok, 0 warnings, 1 failures\n"
+             doctor: 12 ok, 0 warnings, 1 failures\n"
         );
         assert_eq!(code, 1);
     }
@@ -1101,7 +1122,7 @@ mod tests {
                     format!(
                         "failure herdr version: {version} is older than {MIN_HERDR}; \
                          fix: upgrade herdr to {MIN_HERDR} or later and restart its server\n\
-                         doctor: 13 ok, 0 warnings, 1 failures\n"
+                         doctor: 14 ok, 0 warnings, 1 failures\n"
                     )
                 ),
             }
@@ -1125,6 +1146,7 @@ mod tests {
                  ok UserPromptSubmit hook: in {settings}\n\
                  ok hook binary: hooks call {exe}\n\
                  ok running binary: {exe}\n\
+                 ok sandbox: can start\n\
                  ok herdr: answers on /run/fake/herdr.sock\n\
                  ok herdr version: 0.9.5\n\
                  ok herdr plugin: {VERSION}, enabled\n\
@@ -1132,7 +1154,7 @@ mod tests {
                  ok lead defaults: set in {config}\n\
                  ok context limits: set in {config}\n\
                  ok ledger: 0 entries\n\
-                 doctor: 14 ok, 0 warnings, 0 failures\n"
+                 doctor: 15 ok, 0 warnings, 0 failures\n"
             )
         );
     }
@@ -1144,9 +1166,9 @@ mod tests {
         let data: Value = serde_json::from_str(&json(&checks)).unwrap();
         assert_eq!(
             (&data["ok"], &data["warnings"], &data["failures"]),
-            (&json!(13), &json!(1), &json!(0))
+            (&json!(14), &json!(1), &json!(0))
         );
-        assert_eq!(data["checks"].as_array().unwrap().len(), 14);
+        assert_eq!(data["checks"].as_array().unwrap().len(), 15);
         assert_eq!(
             data["checks"][4],
             json!({
@@ -1201,7 +1223,7 @@ mod tests {
             out,
             format!(
                 "failure Stop hook: not in {}; fix: loopherd install-hook\n\
-                 doctor: 13 ok, 0 warnings, 1 failures\n",
+                 doctor: 14 ok, 0 warnings, 1 failures\n",
                 m.install.settings.display()
             )
         );
@@ -1249,7 +1271,7 @@ mod tests {
                 "warning herdr plugin: loopherd's herdr plugin isn't installed, so its \
                  actions, popups and event hooks are unavailable; \
                  fix: herdr plugin install junderdo/loopherd/herdr-plugin\n\
-                 doctor: 13 ok, 1 warnings, 0 failures\n"
+                 doctor: 14 ok, 1 warnings, 0 failures\n"
                     .into(),
                 0
             )
@@ -1264,7 +1286,7 @@ mod tests {
                 "warning herdr plugin: loopherd's herdr plugin is disabled, so its \
                  actions, popups and event hooks are unavailable; \
                  fix: herdr plugin enable loopherd\n\
-                 doctor: 13 ok, 1 warnings, 0 failures\n"
+                 doctor: 14 ok, 1 warnings, 0 failures\n"
                     .into(),
                 0
             )
@@ -1279,7 +1301,7 @@ mod tests {
             format!(
                 "warning herdr plugin: plugin 0.0.1 differs from loopherd {VERSION}; \
                  fix: herdr plugin update loopherd\n\
-                 doctor: 13 ok, 1 warnings, 0 failures\n"
+                 doctor: 14 ok, 1 warnings, 0 failures\n"
             )
         );
         assert_eq!(code, 0);
@@ -1302,7 +1324,7 @@ mod tests {
                 format!(
                     "warning herdr plugin: plugin 999.0.0 differs from loopherd {VERSION}; \
                      fix: update loopherd to 999.0.0\n\
-                     doctor: 13 ok, 1 warnings, 0 failures\n"
+                     doctor: 14 ok, 1 warnings, 0 failures\n"
                 )
             );
             assert_eq!(code, 0);
@@ -1443,7 +1465,7 @@ mod tests {
                 format!(
                     "warning lead defaults: unset in {config}; fix: loopherd setup\n\
                      warning context limits: unset in {config}; fix: loopherd setup\n\
-                     doctor: 12 ok, 2 warnings, 0 failures\n"
+                     doctor: 13 ok, 2 warnings, 0 failures\n"
                 ),
                 0
             )
@@ -1498,6 +1520,38 @@ mod tests {
         assert!(line.ends_with(&fix), "{out}");
         assert_eq!(out.lines().count(), 2, "{out}");
         assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn a_sandbox_that_cant_start_fails_naming_why() {
+        let mut m = machine(&ALL);
+        m.install.sandbox = Err("bubblewrap not installed".into());
+        assert_eq!(
+            problems(&m, &herdr()),
+            ["failure sandbox: can't start: bubblewrap not installed; \
+              fix: install bubblewrap and socat"]
+        );
+    }
+
+    #[test]
+    fn a_herd_whose_lead_runs_on_prefer_is_named() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nsandbox = \"prefer\"\n",
+                repo.to_str().unwrap()
+            ),
+        );
+        assert_eq!(
+            problems(&m, &herdr()),
+            [
+                "warning herd h sandbox: prefer: its lead starts without the sandbox, \
+              guarded by its tool hook alone, whenever the sandbox can't start; \
+              fix: loopherd herd set h lead.sandbox '\"require\"'"
+            ]
+        );
     }
 
     #[test]
@@ -1635,7 +1689,7 @@ mod tests {
             (
                 "warning member gone: no live agent matches it (pane w1:p2) on /run/fake/herdr.sock; \
                  fix: loopherd revive --name gone, or loopherd retire gone\n\
-                 doctor: 15 ok, 1 warnings, 0 failures\n"
+                 doctor: 16 ok, 1 warnings, 0 failures\n"
                     .into(),
                 0
             )
@@ -1664,7 +1718,7 @@ mod tests {
     fn strays_are_not_reported() {
         let m = machine(&ALL);
         let herdr = herdr().with_live_agent(Some("stray"), None, "w1:p9");
-        assert_eq!(run(&m, &herdr).0, "doctor: 14 ok, 0 warnings, 0 failures\n");
+        assert_eq!(run(&m, &herdr).0, "doctor: 15 ok, 0 warnings, 0 failures\n");
     }
 
     #[test]
@@ -1728,7 +1782,7 @@ mod tests {
             (
                 "warning config and state: not checked: HOME is not set; \
                  fix: set HOME\n\
-                 doctor: 10 ok, 1 warnings, 0 failures\n"
+                 doctor: 11 ok, 1 warnings, 0 failures\n"
                     .into(),
                 0
             )

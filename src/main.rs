@@ -27,6 +27,7 @@ mod report;
 mod restart;
 mod retire;
 mod revive;
+mod sandbox;
 mod session_hook;
 mod setup;
 mod shell;
@@ -998,6 +999,8 @@ fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32>
         lock_timeout: Duration::from_secs(600),
         server: startup.is_some().then(std::os::unix::process::parent_id),
         startup,
+        paths: Paths::from_env()?,
+        sandbox: sandbox::probe,
     };
     let (message, code) = revive(
         &CliHerdr,
@@ -1795,6 +1798,7 @@ fn doctor_install(settings: Option<PathBuf>) -> Result<doctor::Install> {
         pane_label,
         on_path: on_path("loopherd"),
         running: std::env::current_exe().context("find this binary")?,
+        sandbox: sandbox::probe(),
     })
 }
 
@@ -1947,6 +1951,7 @@ fn run_lead(args: LeadArgs) -> Result<i32> {
         herd: args.herd,
         claude_args: args.claude_args,
         ready_timeout: Duration::from_secs(args.ready_timeout),
+        sandbox: sandbox::probe,
     };
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let inherited = inherited_workspace(&ledger)?;
