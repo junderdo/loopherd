@@ -111,6 +111,7 @@ pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger, dirs: &Di
         Request::SaveTheme(palette) => save_theme(&dirs.config, palette),
         Request::Shepherd => Response::Shepherd(shepherd_pane::summon(
             herdr,
+            &crate::process::ProcFs,
             &dirs.state,
             dirs.below.as_ref(),
         )),
@@ -172,6 +173,8 @@ pub struct App {
     invalidated: bool,
     /// herdr's events are subscribed, so the poll slows.
     live: bool,
+    /// An `S` is being served, which holds up the reads queued behind it.
+    summoning: bool,
     quit: bool,
 }
 
@@ -232,6 +235,7 @@ impl App {
             polled: None,
             invalidated: false,
             live: false,
+            summoning: false,
             quit: false,
         }
     }
@@ -303,6 +307,7 @@ impl App {
             Response::SavedTheme(Ok(())) => {}
             Response::SavedTheme(Err(e)) => self.message = Some(format!("save theme: {e:#}")),
             Response::Shepherd(result) => {
+                self.summoning = false;
                 self.message = Some(match result {
                     Ok(Summoned::Focused(pane)) => format!("focused the shepherd in {pane}"),
                     Ok(Summoned::Started(pane)) => format!("started the shepherd below, in {pane}"),
@@ -333,7 +338,7 @@ impl App {
                 return Some(Request::SaveTheme(self.theme.palette()));
             }
             KeyCode::Char('S') => {
-                self.message = Some("bringing up the shepherd…".into());
+                self.summoning = true;
                 return Some(Request::Shepherd);
             }
             KeyCode::Down | KeyCode::Char('j') => self.select(self.selected + 1),
@@ -682,6 +687,7 @@ impl App {
             );
         }
         match (&self.read, self.reading) {
+            (_, _) if self.summoning => notes.push("bringing up the shepherd…".into()),
             (None, _) => notes.push("reading herdr and the ledger…".into()),
             (Some(_), Some(since)) if now.saturating_duration_since(since) >= POLL => {
                 let waited = now.saturating_duration_since(since).as_secs();
@@ -3946,5 +3952,18 @@ max = 3
         let terminal = render_at(&app(&herdr, &ledger, now), now, 100, 14);
         assert_eq!(at(&terminal, "S shepherd").fg, LIGHT_ORANGE);
         assert!(pos(&terminal, "a all").0 < pos(&terminal, "S shepherd").0);
+    }
+
+    #[test]
+    fn while_the_shepherd_comes_up_the_view_says_so_not_that_herdr_is_slow() {
+        let (herdr, ledger, t0) = (herdr(), ledger(), Instant::now());
+        let mut app = app(&herdr, &ledger, t0);
+        app.press(KeyCode::Char('S'), t0);
+        app.tick(t0 + POLL);
+
+        let shown = text(&render_tall(&app, t0 + POLL * 5)).concat();
+
+        assert!(shown.contains("bringing up the shepherd"), "{shown}");
+        assert!(!shown.contains("hasn't answered"), "{shown}");
     }
 }

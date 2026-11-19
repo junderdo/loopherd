@@ -1649,7 +1649,6 @@ fn a_leads_question_labels_its_claude_pane_until_a_typed_prompt() {
     assert!(shown()["display_agent"].is_null(), "{}", shown());
 }
 
-/// Polls `check` every quarter second until it returns `Some`, for `secs`.
 fn poll<T>(secs: u64, mut check: impl FnMut() -> Option<T>) -> Option<T> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
     loop {
@@ -1720,7 +1719,7 @@ fn capital_s_in_a_view_pane_starts_the_shepherd_below_it_then_focuses_it() {
         .as_str()
         .unwrap()
         .to_string();
-    poll(15, || visible(&view).contains('$').then_some(())).expect("no shell prompt");
+    poll(15, || (!visible(&view).trim().is_empty()).then_some(())).expect("no shell prompt");
     let command = format!(
         "XDG_STATE_HOME={} LOOPHERD_CONFIG_DIR={} {} view",
         state.path().display(),

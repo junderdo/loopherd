@@ -48,10 +48,8 @@ fn handoff_path(state: &Path) -> PathBuf {
 /// An unused record of the same session and place keeps its time, so a
 /// repeated handoff line can't postdate a handoff already written.
 pub fn record(state: &Path, place: &Place, session: &str, at: SystemTime) -> Result<()> {
-    let earlier = fs::read_to_string(record_path(state))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Record>(&text).ok())
-        .filter(|r| !r.used && r.session == session && r.place == *place);
+    let earlier =
+        last_record(state).filter(|r| !r.used && r.session == session && r.place == *place);
     let record = match earlier {
         Some(earlier) => earlier,
         None => Record {
@@ -78,8 +76,13 @@ fn write(state: &Path, record: &Record) -> Result<()> {
 /// Where the last record says the shepherd ran, used or not; `None` when
 /// there's no record or it won't parse.
 pub fn recorded_place(state: &Path) -> Option<Place> {
+    last_record(state).map(|r| r.place)
+}
+
+/// The record, used or not; `None` when missing or it won't parse.
+fn last_record(state: &Path) -> Option<Record> {
     let text = fs::read_to_string(record_path(state)).ok()?;
-    serde_json::from_str::<Record>(&text).ok().map(|r| r.place)
+    serde_json::from_str(&text).ok()
 }
 
 /// The unused record for `place`. A record that isn't JSON, or names another
@@ -141,21 +144,49 @@ pub fn session_started(
     resume_from_moved_handoff(state, written).map(Some)
 }
 
-/// The first prompt for a shepherd started afresh: the resume, when
-/// `handoffs/shepherd.md` was written after the last record or there's no
-/// record, marking any record used and moving the handoff as a resume does.
-pub fn new_shepherd_resume(state: &Path) -> Result<Option<String>> {
-    let last = fs::read_to_string(record_path(state))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Record>(&text).ok());
+/// A shepherd started afresh resuming from the handoff, which
+/// [`NewResume::undo`] gives back when the start fails.
+pub struct NewResume {
+    pub prompt: String,
+    marked_used: bool,
+}
+
+impl NewResume {
+    /// Moves the handoff back from `shepherd.prev.md` and unmarks the record.
+    pub fn undo(self, state: &Path) -> Result<()> {
+        let handoff = handoff_path(state);
+        let read = handoff.with_extension("prev.md");
+        fs::rename(&read, &handoff)
+            .with_context(|| format!("move {} to {}", read.display(), handoff.display()))?;
+        match last_record(state).filter(|_| self.marked_used) {
+            Some(mut record) => {
+                record.used = false;
+                write(state, &record)
+            }
+            None => Ok(()),
+        }
+    }
+}
+
+/// The resume for a shepherd started afresh, when `handoffs/shepherd.md` was
+/// written after the last record or there's no record: marks any record used
+/// and moves the handoff as a resume does.
+pub fn new_shepherd_resume(state: &Path) -> Result<Option<NewResume>> {
+    let last = last_record(state);
     let Some(written) = handoff_written_after(state, last.as_ref().map(|r| r.at.as_str()))? else {
         return Ok(None);
     };
-    if let Some(mut record) = last.filter(|r| !r.used) {
+    let unused = last.filter(|r| !r.used);
+    let marked_used = unused.is_some();
+    if let Some(mut record) = unused {
         record.used = true;
         write(state, &record)?;
     }
-    resume_from_moved_handoff(state, written).map(Some)
+    let prompt = resume_from_moved_handoff(state, written)?;
+    Ok(Some(NewResume {
+        prompt,
+        marked_used,
+    }))
 }
 
 /// Moves the handoff to `shepherd.prev.md` and returns the context that

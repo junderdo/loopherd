@@ -47,7 +47,6 @@ struct FakePane {
     shell_pid: Option<u32>,
 }
 
-/// A `split_down`: the pane split, the new pane below it, its cwd and env.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Split {
     pub from: String,
@@ -264,6 +263,15 @@ impl FakeHerdr {
     /// Panes passed to `focus`, in order. Focusing isn't a mutation.
     pub fn focused(&self) -> Vec<String> {
         self.state.lock().unwrap().focused.clone()
+    }
+
+    pub fn has_pane(&self, pane_id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .panes
+            .iter()
+            .any(|p| p.id == pane_id)
     }
 
     pub fn splits(&self) -> Vec<Split> {
@@ -617,6 +625,14 @@ impl Herdr for FakeHerdr {
                 .collect(),
         });
         Ok(new)
+    }
+
+    fn close_pane(&self, pane_id: &str) -> Result<()> {
+        self.mutating();
+        let mut state = self.state.lock().unwrap();
+        state.panes.retain(|p| p.id != pane_id);
+        state.agents.retain(|a| a.pane_id != pane_id);
+        Ok(())
     }
 
     fn start_claude(

@@ -132,6 +132,7 @@ pub trait Herdr {
     /// Splits `pane_id` with a new shell pane below it, without focusing it,
     /// with `env` set for its shell. Returns the new pane's ID.
     fn split_down(&self, pane_id: &str, cwd: &Path, env: &[(&str, &str)]) -> Result<String>;
+    fn close_pane(&self, pane_id: &str) -> Result<()>;
     /// Starts a Claude agent named `name` in `pane_id`.
     fn start_claude(
         &self,
@@ -514,6 +515,10 @@ impl Herdr for CliHerdr {
         }
         let result = self.call_ok(&argv)?;
         parse(&result["pane"]["pane_id"], "pane split")
+    }
+
+    fn close_pane(&self, pane_id: &str) -> Result<()> {
+        self.call_ok(&["pane", "close", pane_id]).map(drop)
     }
 
     fn start_claude(
