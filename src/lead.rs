@@ -452,6 +452,7 @@ mod tests {
             crate::ledger::Outcome::Retired,
             std::path::Path::new("/nonexistent/reports"),
             None,
+            None,
             &mut out,
         )
         .unwrap();

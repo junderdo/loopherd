@@ -180,6 +180,8 @@ fn a_retired_member_gets_a_row_of_its_flow() {
             "2",
             "1h00m",
             "5h00m",
+            "-",
+            "-",
             "merged"
         ],
         "{out}"
@@ -350,7 +352,7 @@ fn json_gives_the_same_data() {
         serde_json::json!({
             "name": "lh-1", "template": "card", "started": "2026-11-01T00:00:00Z",
             "first_done_secs": 7200, "rounds": 2, "merge_wait_secs": 3600,
-            "total_secs": 18000, "outcome": "merged",
+            "total_secs": 18000, "tokens": null, "outcome": "merged",
         })
     );
     assert_eq!(herd["summary"]["members"], 1);
@@ -529,7 +531,7 @@ fn a_member_without_a_done_keeps_its_row_but_not_the_rounds_median() {
         serde_json::json!({
             "name": "lh-2", "template": "card", "started": "2026-11-02T00:00:00Z",
             "first_done_secs": null, "rounds": 0, "merge_wait_secs": null,
-            "total_secs": 3600, "outcome": "merged",
+            "total_secs": 3600, "tokens": null, "outcome": "merged",
         })
     );
     assert_eq!(herd["summary"]["rounds_median"], 1.0);
@@ -687,6 +689,8 @@ fn an_unreadable_mailbox_warns_and_its_row_keeps_the_ledger_columns() {
             "1",
             "3h00m",
             "5h00m",
+            "-",
+            "-",
             "merged"
         ]
     );
@@ -701,6 +705,8 @@ fn an_unreadable_mailbox_warns_and_its_row_keeps_the_ledger_columns() {
             "-",
             "-",
             "3h00m",
+            "-",
+            "-",
             "merged"
         ]
     );
@@ -778,6 +784,574 @@ fn json_gives_null_rounds_for_a_member_whose_mailbox_is_unreadable() {
     );
 }
 
+/// Appends raw `entries` to `name`'s mailbox.
+fn append_entries(state: &Path, name: &str, entries: &[serde_json::Value]) {
+    let dir = state.join("loopherd/reports");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.jsonl"));
+    let mut text = fs::read_to_string(&path).unwrap_or_default();
+    for entry in entries {
+        text.push_str(&format!("{entry}\n"));
+    }
+    fs::write(path, text).unwrap();
+}
+
+fn stop(at: &str, session: &str) -> serde_json::Value {
+    serde_json::json!({
+        "at": at, "kind": "stop", "session": session, "crons": 0,
+        "background": {"shells": 0, "subagents": 0, "other": 0},
+    })
+}
+
+/// An assistant line of a transcript; `[input, cache write, cache read, output]`.
+fn assistant(id: &str, model: &str, at: &str, tokens: [u64; 4]) -> serde_json::Value {
+    serde_json::json!({
+        "type": "assistant", "timestamp": at,
+        "message": {
+            "id": id, "model": model, "role": "assistant",
+            "usage": {
+                "input_tokens": tokens[0],
+                "cache_creation_input_tokens": tokens[1],
+                "cache_read_input_tokens": tokens[2],
+                "output_tokens": tokens[3],
+            },
+        },
+    })
+}
+
+/// `relative` is under a Claude project dir: `<session>.jsonl`, or
+/// `<session>/subagents/<agent>.jsonl`.
+fn write_transcript(state: &Path, relative: &str, lines: &[serde_json::Value]) {
+    let path = state.join("claude/projects/-repo").join(relative);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut text =
+        String::from("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n");
+    for line in lines {
+        text.push_str(&format!("{line}\n"));
+    }
+    fs::write(path, text).unwrap();
+}
+
+#[test]
+fn a_workers_tokens_sum_its_sessions_across_a_restart_counting_each_message_once() {
+    let state = tempfile::tempdir().unwrap();
+    one_retired_member(state.path());
+    append_entries(
+        state.path(),
+        "lh-1",
+        &[
+            stop("2026-11-01T01:00:00Z", "s1"),
+            serde_json::json!({"at": "2026-11-01T02:30:00Z", "kind": "start"}),
+            stop("2026-11-01T03:00:00Z", "s2"),
+            stop("2026-11-01T03:30:00Z", "s2"),
+        ],
+    );
+    let first = assistant("m1", "opus", "2026-11-01T00:10:00Z", [1, 2, 3, 4]);
+    write_transcript(state.path(), "s1.jsonl", &[first.clone(), first]);
+    write_transcript(
+        state.path(),
+        "s2.jsonl",
+        &[assistant(
+            "m2",
+            "opus",
+            "2026-11-01T02:10:00Z",
+            [10, 20, 30, 40],
+        )],
+    );
+
+    let json = json(state.path(), &[]);
+
+    assert_eq!(
+        json["herds"][0]["retired"][0]["tokens"],
+        serde_json::json!({
+            "opus": {"input": 11, "cache_write": 22, "cache_read": 33, "output": 44},
+        })
+    );
+}
+
+#[test]
+fn a_workers_tokens_add_its_subagents_and_skip_a_missing_transcript() {
+    let state = tempfile::tempdir().unwrap();
+    one_retired_member(state.path());
+    append_entries(
+        state.path(),
+        "lh-1",
+        &[
+            stop("2026-11-01T01:00:00Z", "gone"),
+            stop("2026-11-01T03:00:00Z", "s1"),
+        ],
+    );
+    write_transcript(
+        state.path(),
+        "s1.jsonl",
+        &[assistant(
+            "m1",
+            "opus",
+            "2026-11-01T00:10:00Z",
+            [1, 2, 3, 4],
+        )],
+    );
+    write_transcript(
+        state.path(),
+        "s1/subagents/agent-a.jsonl",
+        &[
+            assistant("m2", "haiku", "2026-11-01T00:20:00Z", [5, 0, 0, 1]),
+            assistant("m2", "haiku", "2026-11-01T00:20:00Z", [5, 0, 0, 1]),
+        ],
+    );
+
+    let json = json(state.path(), &[]);
+
+    assert_eq!(
+        json["herds"][0]["retired"][0]["tokens"],
+        serde_json::json!({
+            "haiku": {"input": 5, "cache_write": 0, "cache_read": 0, "output": 1},
+            "opus": {"input": 1, "cache_write": 2, "cache_read": 3, "output": 4},
+        })
+    );
+}
+
+#[test]
+fn a_worker_with_no_transcript_left_has_no_tokens() {
+    let state = tempfile::tempdir().unwrap();
+    one_retired_member(state.path());
+    append_entries(
+        state.path(),
+        "lh-1",
+        &[stop("2026-11-01T01:00:00Z", "gone")],
+    );
+
+    let json = json(state.path(), &[]);
+
+    assert_eq!(
+        json["herds"][0]["retired"][0]["tokens"],
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn the_table_shows_in_and_out_and_the_summary_their_medians() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[
+            Member::new("lh-1", "2026-11-01T00:00:00Z").retired("2026-11-01T05:00:00Z"),
+            Member::new("lh-2", "2026-11-02T00:00:00Z").retired("2026-11-02T05:00:00Z"),
+            Member::new("lh-3", "2026-11-03T00:00:00Z").retired("2026-11-03T05:00:00Z"),
+            Member::new("lh-4", "2026-11-04T00:00:00Z"),
+        ],
+    );
+    append_entries(state.path(), "lh-1", &[stop("2026-11-01T01:00:00Z", "s1")]);
+    append_entries(state.path(), "lh-2", &[stop("2026-11-02T01:00:00Z", "s2")]);
+    append_entries(state.path(), "lh-4", &[stop("2026-11-04T01:00:00Z", "s4")]);
+    write_transcript(
+        state.path(),
+        "s1.jsonl",
+        &[assistant(
+            "m1",
+            "opus",
+            "2026-11-01T00:10:00Z",
+            [100, 200, 700, 50],
+        )],
+    );
+    write_transcript(
+        state.path(),
+        "s2.jsonl",
+        &[assistant(
+            "m2",
+            "opus",
+            "2026-11-02T00:10:00Z",
+            [1_000, 2_000, 2_500_000, 3_000],
+        )],
+    );
+    write_transcript(
+        state.path(),
+        "s4.jsonl",
+        &[assistant(
+            "m4",
+            "opus",
+            "2026-11-04T00:10:00Z",
+            [1, 1, 1, 7],
+        )],
+    );
+
+    let out = stdout(&run(state.path(), &[]));
+
+    let row = |name: &str| -> Vec<String> {
+        out.lines()
+            .find(|l| l.trim_start().starts_with(name))
+            .unwrap_or_else(|| panic!("no {name} row in:\n{out}"))
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
+    };
+    let header = row("member");
+    assert_eq!(
+        header[header.len() - 3..],
+        ["in", "out", "outcome"],
+        "{out}"
+    );
+    assert_eq!(row("lh-1")[8..10], ["1.0k", "50"], "{out}");
+    assert_eq!(row("lh-2")[8..10], ["2.5M", "3.0k"], "{out}");
+    assert_eq!(row("lh-3")[8..10], ["-", "-"], "{out}");
+    assert_eq!(
+        row("lh-4")[5..],
+        ["3", "7"],
+        "open members show theirs: {out}"
+    );
+    assert!(
+        out.contains("; in median 1.3M; out median 1.5k\n"),
+        "lh-3's unknown tokens are left out: {out}"
+    );
+}
+
+#[test]
+fn each_herd_gets_its_leads_tokens_since_the_window_as_overhead() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[
+            Member::new("lead-h", "2026-10-01T00:00:00Z").lead(),
+            Member::new("lh-1", "2026-11-02T00:00:00Z").retired("2026-11-02T05:00:00Z"),
+        ],
+    );
+    append_entries(
+        state.path(),
+        "lead-h",
+        &[
+            stop("2026-10-31T00:00:00Z", "l1"),
+            stop("2026-11-02T00:00:00Z", "l2"),
+        ],
+    );
+    write_transcript(
+        state.path(),
+        "l1.jsonl",
+        &[
+            assistant("a", "opus", "2026-10-31T00:00:00Z", [1_000, 0, 0, 1_000]),
+            assistant("b", "opus", "2026-11-01T12:00:00Z", [1, 2, 3, 4]),
+        ],
+    );
+    write_transcript(
+        state.path(),
+        "l2.jsonl",
+        &[assistant(
+            "c",
+            "opus",
+            "2026-11-02T00:00:00Z",
+            [10, 20, 30, 40],
+        )],
+    );
+    write_transcript(
+        state.path(),
+        "l2/subagents/agent-r.jsonl",
+        &[assistant(
+            "d",
+            "sonnet",
+            "2026-11-02T01:00:00Z",
+            [100, 0, 0, 5],
+        )],
+    );
+
+    let out = stdout(&run(state.path(), &["--since", "2026-11-01"]));
+
+    assert!(out.contains("  lead overhead: in 166, out 49\n"), "{out}");
+    assert!(
+        !out.contains("  lead-h "),
+        "the lead still gets no row: {out}"
+    );
+    let json = json(state.path(), &["--since", "2026-11-01"]);
+    assert_eq!(
+        json["herds"][0]["lead_overhead"],
+        serde_json::json!({
+            "opus": {"input": 11, "cache_write": 22, "cache_read": 33, "output": 44},
+            "sonnet": {"input": 100, "cache_write": 0, "cache_read": 0, "output": 5},
+        })
+    );
+}
+
+#[test]
+fn a_retired_workers_recorded_usage_outlasts_its_transcripts() {
+    let state = tempfile::tempdir().unwrap();
+    one_retired_member(state.path());
+    append_entries(
+        state.path(),
+        "lh-1",
+        &[
+            stop("2026-11-01T01:00:00Z", "s1"),
+            serde_json::json!({
+                "at": "2026-11-01T05:00:00Z", "kind": "usage",
+                "models": {"opus": {"input": 7, "cache_write": 8, "cache_read": 9, "output": 10}},
+            }),
+        ],
+    );
+    write_transcript(
+        state.path(),
+        "s1.jsonl",
+        &[assistant(
+            "m1",
+            "opus",
+            "2026-11-01T00:10:00Z",
+            [1, 1, 1, 1],
+        )],
+    );
+
+    let json = json(state.path(), &[]);
+
+    assert_eq!(
+        json["herds"][0]["retired"][0]["tokens"],
+        serde_json::json!({
+            "opus": {"input": 7, "cache_write": 8, "cache_read": 9, "output": 10},
+        })
+    );
+}
+
+#[test]
+fn a_herd_with_only_its_lead_in_the_window_still_gets_its_overhead() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[
+            Member::new("lead-h", "2026-10-01T00:00:00Z").lead(),
+            Member::new("lh-1", "2026-10-02T00:00:00Z").retired("2026-10-02T05:00:00Z"),
+        ],
+    );
+    append_entries(
+        state.path(),
+        "lead-h",
+        &[stop("2026-11-02T00:00:00Z", "l1")],
+    );
+    write_transcript(
+        state.path(),
+        "l1.jsonl",
+        &[assistant("a", "opus", "2026-11-02T00:00:00Z", [1, 2, 3, 4])],
+    );
+
+    let out = stdout(&run(state.path(), &["--since", "2026-11-01"]));
+
+    assert!(out.contains("herd h\n"), "{out}");
+    assert!(out.contains("  lead overhead: in 6, out 4\n"), "{out}");
+}
+
+#[test]
+fn synthetic_messages_and_the_ledgers_session_are_handled() {
+    let state = tempfile::tempdir().unwrap();
+    let mut ledger = Member::new("lh-1", "2026-11-01T00:00:00Z").json();
+    ledger["session_id"] = "s1".into();
+    fs::create_dir_all(state.path().join("loopherd")).unwrap();
+    fs::write(
+        state.path().join("loopherd/ledger.json"),
+        serde_json::json!({"lh-1": ledger}).to_string(),
+    )
+    .unwrap();
+    write_transcript(
+        state.path(),
+        "s1.jsonl",
+        &[
+            assistant("m1", "opus", "2026-11-01T00:10:00Z", [1, 2, 3, 4]),
+            assistant("m2", "<synthetic>", "2026-11-01T00:11:00Z", [0, 0, 0, 0]),
+        ],
+    );
+
+    let json = json(state.path(), &[]);
+
+    assert_eq!(
+        json["herds"][0]["open"][0]["tokens"],
+        serde_json::json!({
+            "opus": {"input": 1, "cache_write": 2, "cache_read": 3, "output": 4},
+        }),
+        "a first turn has no stop yet; the ledger names its session"
+    );
+}
+
+#[test]
+fn a_reused_name_counts_only_its_own_runs_sessions() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[Member::new("lh-1", "2026-11-05T00:00:00Z").retired("2026-11-05T05:00:00Z")],
+    );
+    append_entries(
+        state.path(),
+        "lh-1",
+        &[
+            stop("2026-11-01T01:00:00Z", "old"),
+            serde_json::json!({
+                "at": "2026-11-01T05:00:00Z", "kind": "usage",
+                "models": {"opus": {"input": 9, "cache_write": 9, "cache_read": 9, "output": 9}},
+            }),
+            stop("2026-11-05T01:00:00Z", "new"),
+        ],
+    );
+    write_transcript(
+        state.path(),
+        "old.jsonl",
+        &[assistant(
+            "m1",
+            "opus",
+            "2026-11-01T00:10:00Z",
+            [100, 0, 0, 100],
+        )],
+    );
+    write_transcript(
+        state.path(),
+        "new.jsonl",
+        &[assistant(
+            "m2",
+            "opus",
+            "2026-11-05T00:10:00Z",
+            [1, 0, 0, 1],
+        )],
+    );
+
+    let json = json(state.path(), &[]);
+
+    assert_eq!(
+        json["herds"][0]["retired"][0]["tokens"],
+        serde_json::json!({
+            "opus": {"input": 1, "cache_write": 0, "cache_read": 0, "output": 1},
+        })
+    );
+}
+
+#[test]
+fn a_herd_with_only_an_idle_lead_in_the_window_is_left_out() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[
+            Member::new("lead-h", "2026-10-01T00:00:00Z").lead(),
+            Member::new("lh-1", "2026-10-02T00:00:00Z").retired("2026-10-02T05:00:00Z"),
+        ],
+    );
+    append_entries(
+        state.path(),
+        "lead-h",
+        &[stop("2026-10-02T00:00:00Z", "l1")],
+    );
+    write_transcript(
+        state.path(),
+        "l1.jsonl",
+        &[assistant("a", "opus", "2026-10-02T00:00:00Z", [1, 2, 3, 4])],
+    );
+
+    let out = stdout(&run(state.path(), &["--since", "2026-11-01"]));
+
+    assert_eq!(out, "", "nothing happened in h since then");
+}
+
+#[test]
+fn a_leads_mailbox_is_read_once_however_many_runs_it_had() {
+    let state = tempfile::tempdir().unwrap();
+    let mut lead = Member::new("lead-h", "2026-11-03T00:00:00Z").lead().json();
+    lead["earlier"] = serde_json::json!([
+        Member::new("lead-h", "2026-11-01T00:00:00Z")
+            .lead()
+            .retired("2026-11-02T00:00:00Z")
+            .json(),
+        Member::new("lead-h", "2026-11-02T00:00:00Z")
+            .lead()
+            .retired("2026-11-03T00:00:00Z")
+            .json(),
+    ]);
+    fs::create_dir_all(state.path().join("loopherd/reports")).unwrap();
+    fs::write(
+        state.path().join("loopherd/ledger.json"),
+        serde_json::json!({
+            "lead-h": lead,
+            "lh-1": Member::new("lh-1", "2026-11-01T00:00:00Z").json(),
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        state.path().join("loopherd/reports/lead-h.jsonl"),
+        "not json\n",
+    )
+    .unwrap();
+
+    let out = run(state.path(), &[]);
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(stderr.matches("skipped a bad line").count(), 1, "{stderr}");
+}
+
+#[test]
+fn a_torn_transcript_line_and_an_unstamped_message_are_skipped_under_since() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[
+            Member::new("lead-h", "2026-10-01T00:00:00Z").lead(),
+            Member::new("lh-1", "2026-11-02T00:00:00Z").retired("2026-11-02T05:00:00Z"),
+        ],
+    );
+    append_entries(
+        state.path(),
+        "lead-h",
+        &[stop("2026-11-02T00:00:00Z", "l1")],
+    );
+    append_entries(state.path(), "lh-1", &[stop("2026-11-02T01:00:00Z", "s1")]);
+    let mut unstamped = assistant("b", "opus", "2026-11-02T00:00:00Z", [100, 0, 0, 100]);
+    unstamped.as_object_mut().unwrap().remove("timestamp");
+    write_transcript(
+        state.path(),
+        "l1.jsonl",
+        &[
+            assistant("a", "opus", "2026-11-02T00:00:00Z", [1, 2, 3, 4]),
+            unstamped,
+        ],
+    );
+    write_transcript(
+        state.path(),
+        "s1.jsonl",
+        &[assistant("c", "opus", "2026-11-02T00:10:00Z", [1, 0, 0, 1])],
+    );
+    let s1 = state.path().join("claude/projects/-repo/s1.jsonl");
+    let mut text = fs::read_to_string(&s1).unwrap();
+    text.push_str(r#"{"type":"assistant","message":{"id":"torn","model":"opus","usage":{"inp"#);
+    fs::write(&s1, text).unwrap();
+
+    let json = json(state.path(), &["--since", "2026-11-01"]);
+
+    let herd = &json["herds"][0];
+    assert_eq!(
+        herd["lead_overhead"]["opus"],
+        serde_json::json!({"input": 1, "cache_write": 2, "cache_read": 3, "output": 4}),
+        "the unstamped message can't be placed in the window"
+    );
+    assert_eq!(
+        herd["retired"][0]["tokens"]["opus"],
+        serde_json::json!({"input": 1, "cache_write": 0, "cache_read": 0, "output": 1}),
+    );
+}
+
+#[test]
+fn a_corrupt_huge_count_saturates_instead_of_overflowing() {
+    let state = tempfile::tempdir().unwrap();
+    one_retired_member(state.path());
+    append_entries(state.path(), "lh-1", &[stop("2026-11-01T01:00:00Z", "s1")]);
+    write_transcript(
+        state.path(),
+        "s1.jsonl",
+        &[
+            assistant(
+                "m1",
+                "opus",
+                "2026-11-01T00:10:00Z",
+                [u64::MAX, 1, 0, u64::MAX],
+            ),
+            assistant("m2", "opus", "2026-11-01T00:11:00Z", [1, 0, 0, 1]),
+        ],
+    );
+
+    let out = stdout(&run(state.path(), &[]));
+
+    assert!(
+        out.contains("in median 18446744073709.6M; out median 18446744073709.6M"),
+        "{out}"
+    );
+}
+
 /// One run per outcome, plus one from a ledger written before outcomes: the
 /// merged lh-1 and lh-2 took 2h and 4h, each with one `done` an hour in.
 fn a_run_of_each_outcome(state: &Path) {
@@ -851,7 +1425,7 @@ fn medians_and_maxima_cover_only_merged_runs_and_the_summary_counts_the_rest_apa
         out.contains(
             "summary: 6 members: 2 merged, 1 closed, 1 released, 1 retired, 1 unrecorded; \
              first done median 1h00m, max 1h00m; rounds median 1; \
-             merge wait median 2h00m, max 3h00m; total median 3h00m, max 4h00m"
+             merge wait median 2h00m, max 3h00m; total median 3h00m, max 4h00m; in median -; out median -"
         ),
         "{out}"
     );
@@ -866,6 +1440,7 @@ fn medians_and_maxima_cover_only_merged_runs_and_the_summary_counts_the_rest_apa
             "rounds_median": 1.0,
             "merge_wait": {"median_secs": 7200, "max_secs": 10800},
             "total": {"median_secs": 10800, "max_secs": 14400},
+            "in_median": null, "out_median": null,
         })
     );
 }
@@ -884,7 +1459,7 @@ fn a_herd_with_no_merged_run_has_no_medians() {
     assert!(
         out.contains(
             "summary: 1 members: 0 merged, 1 unrecorded; first done median -, max -; \
-             rounds median -; merge wait median -, max -; total median -, max -"
+             rounds median -; merge wait median -, max -; total median -, max -; in median -; out median -"
         ),
         "{out}"
     );

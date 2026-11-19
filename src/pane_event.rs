@@ -279,7 +279,7 @@ fn gone_or_alive(body: &Body) -> bool {
         | Body::Handoff { .. }
         | Body::Moved {}
         | Body::Gone { .. } => true,
-        Body::Note { .. } => false,
+        Body::Note { .. } | Body::Usage { .. } => false,
     }
 }
 

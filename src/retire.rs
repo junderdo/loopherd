@@ -14,6 +14,7 @@ use crate::process::{Procs, is_ancestor, live};
 use crate::report::{Body, history, member_in};
 use crate::revive::find_workspace;
 use crate::tool_hook::Pane as OwnPane;
+use crate::usage;
 use crate::worktree::{Gone, Removal, remove_if_gone, remove_if_merged, same_dir};
 
 /// Fails when `name` is a lead recorded in `pane`, the pane running loopherd,
@@ -174,9 +175,10 @@ fn retired_since(record: &AgentRecord) -> String {
     format!("already retired (since {since})")
 }
 
-/// Retires `name` as `outcome` unless it already is, removes its notify marks from
-/// `mailboxes`, then closes its tab and removes its worktree when safe, so a
-/// failed or deferred close can be re-run. `own_pane` is the pane running
+/// Retires `name` as `outcome` unless it already is, records its tokens from
+/// `claude_dir`'s transcripts unless its mailbox in `mailboxes` has them,
+/// removes its notify marks there, then closes its tab and removes its
+/// worktree when safe, so a failed or deferred close can be re-run. `own_pane` is the pane running
 /// loopherd, whose tab is never closed. Pushes one line per action to `out`,
 /// including before an error; a mark left in place is a warning line.
 #[allow(clippy::too_many_arguments)]
@@ -187,6 +189,7 @@ pub fn retire_and_close(
     now: SystemTime,
     outcome: Outcome,
     mailboxes: &Path,
+    claude_dir: Option<&Path>,
     own_pane: Option<&OwnPane>,
     out: &mut Vec<String>,
 ) -> Result<()> {
@@ -194,11 +197,13 @@ pub fn retire_and_close(
     let record = match others.remove(name) {
         Some(record) if record.retired => {
             out.push(format!("{name} is {}", retired_since(&record)));
+            out.extend(usage::record_at_retire(mailboxes, claude_dir, &record, now));
             record
         }
         _ => {
             let record = retire(ledger, name, now, outcome)?;
             out.push(format!("retired {name}"));
+            out.extend(usage::record_at_retire(mailboxes, claude_dir, &record, now));
             record
         }
     };
@@ -926,6 +931,7 @@ mod tests {
             Outcome::Retired,
             Path::new("/nonexistent/reports"),
             None,
+            None,
             &mut out,
         )
         .unwrap();
@@ -1427,6 +1433,7 @@ mod tests {
             Outcome::Retired,
             mailboxes,
             None,
+            None,
             &mut out,
         )
         .unwrap();
@@ -1709,6 +1716,7 @@ mod tests {
             Outcome::Retired,
             Path::new("/nonexistent/reports"),
             None,
+            None,
             &mut out,
         )
         .unwrap_err();
@@ -1734,6 +1742,7 @@ mod tests {
             Outcome::Closed,
             Path::new("/nonexistent/reports"),
             None,
+            None,
             &mut vec![],
         )
         .unwrap_err();
@@ -1748,6 +1757,7 @@ mod tests {
             later,
             Outcome::Retired,
             Path::new("/nonexistent/reports"),
+            None,
             None,
             &mut out,
         )
@@ -1961,6 +1971,7 @@ mod tests {
             Outcome::Retired,
             Path::new("/nonexistent/reports"),
             None,
+            None,
             &mut vec![],
         )
         .unwrap_err();
@@ -1984,6 +1995,7 @@ mod tests {
             halloween_noon(),
             Outcome::Retired,
             Path::new("/nonexistent/reports"),
+            None,
             Some(&OwnPane {
                 id: &pane,
                 socket: None,
@@ -2034,6 +2046,7 @@ mod tests {
             halloween_noon(),
             Outcome::Retired,
             Path::new("/nonexistent/reports"),
+            None,
             Some(&OwnPane {
                 id: own_pane,
                 socket: None,

@@ -1144,6 +1144,7 @@ mod tests {
             herd: None,
             since: None,
             now: SystemTime::now(),
+            claude_dir: None,
         };
         let (herds, _) = crate::stats::stats(&ledger, reports.path(), &query).unwrap();
         let retired: Vec<_> = herds[0]
