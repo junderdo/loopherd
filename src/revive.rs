@@ -156,26 +156,31 @@ pub fn revive(
                 }
             }
         }
+        let mut handoff_warnings = vec![];
         rearm_lead(
             herdr,
             req,
             &record,
             handoff.as_ref(),
             &mut outcome,
-            &mut warnings,
+            &mut handoff_warnings,
         );
         let line = outcome.line(&record);
         // Nobody reads a startup hook's output, so a lead's line goes to the
         // shepherd's next watch unless its own watch already runs.
         let noted = req.startup.is_some() && !req.dry_run && record.is_lead() && !record.retired;
         // The shepherd reads leads' mailboxes, so startup warnings reach it there.
-        let warned = startup_warnings.iter().filter(|_| noted);
-        for text in warned.map(|w| format!("herdr's startup revive: warning: {w}")) {
+        let warned = startup_warnings.iter().chain(&handoff_warnings);
+        for text in warned
+            .filter(|_| noted)
+            .map(|w| format!("herdr's startup revive: warning: {w}"))
+        {
             let note = Entry::new(SystemTime::now(), Body::Note { text });
             if let Err(e) = append(&req.reports_dir, &record.name, &note) {
                 warnings.push(format!("no note in its mailbox: {e:#}"));
             }
         }
+        warnings.extend(handoff_warnings);
         if noted
             && !matches!(
                 outcome.rearm(),
@@ -1880,8 +1885,8 @@ mod tests {
     fn a_startup_revive_leaves_a_note_for_a_lead_it_skips_for_a_subagent_view() {
         let cwd = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
-        let herdr = dev_herdr().with_live_agent(Some("lead-h"), Some("sess-lead-h"), "w1:p4");
-        herdr.set_screen("w1:p4", SUBAGENT_PROMPT);
+        let herdr = alive_lead_herdr();
+        herdr.set_screen("w1:p1", SUBAGENT_PROMPT);
         let mut ledger = ledger([dev(lead("lead-h", cwd.path()))]);
 
         let (out, code) = run(&herdr, &mut ledger, &startup(state.path()));
@@ -1890,7 +1895,7 @@ mod tests {
         assert_eq!(
             notes(state.path(), "lead-h"),
             [format!(
-                "herdr's startup revive: alive lead-h w1:p4{SKIPPED_REARM}"
+                "herdr's startup revive: alive lead-h w1:p1{SKIPPED_REARM}"
             )]
         );
     }
@@ -1916,14 +1921,14 @@ mod tests {
     fn a_startup_revive_leaves_a_note_for_an_alive_lead_it_prompts() {
         let cwd = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
-        let herdr = dev_herdr().with_live_agent(Some("lead-h"), Some("sess-lead-h"), "w1:p4");
+        let herdr = alive_lead_herdr();
         let mut ledger = ledger([dev(lead("lead-h", cwd.path()))]);
 
         run(&herdr, &mut ledger, &startup(state.path()));
 
         assert_eq!(
             notes(state.path(), "lead-h"),
-            ["herdr's startup revive: alive lead-h w1:p4 (prompted to re-arm its watch)"]
+            ["herdr's startup revive: alive lead-h w1:p1 (prompted to re-arm its watch)"]
         );
     }
 
@@ -2377,11 +2382,16 @@ mod tests {
 
         let out = run_startup(&herdr, &procs, lead("lead-h", cwd.path()), state.path());
 
+        let warning = "can't read its pane's shell, so treating this startup \
+                       as a restart for it: herdr pane process-info failed";
+        let line = "alive lead-h w1:p1 (prompted to re-arm its watch)";
+        assert_eq!(out, format!("warning lead-h: {warning}\n{line}"));
         assert_eq!(
-            out,
-            "warning lead-h: can't read its pane's shell, so treating this startup \
-             as a restart for it: herdr pane process-info failed\n\
-             alive lead-h w1:p1 (prompted to re-arm its watch)"
+            notes(state.path(), "lead-h"),
+            [
+                format!("herdr's startup revive: warning: {warning}"),
+                format!("herdr's startup revive: {line}"),
+            ]
         );
     }
 }
