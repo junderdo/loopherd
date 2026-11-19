@@ -551,7 +551,7 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   while origin can't be asked, that rerun refuses. The delete runs the repo's pre-push hooks,
   within `LOOPHERD_GIT_TIMEOUT`; when one refuses, release prints its
   output. `--keep-branch` never contacts origin. A lead
-  may run it; it's part of feeding. `status --all` marks the entry
+  may run it on its own herd's members; it's part of feeding. `status --all` marks the entry
   `(released)`, its mailbox gets a `released` note, and its lead's watch
   announces it claimable again.
 - `loopherd prompt <name>` sends a member its stored prompt, e.g. after a
@@ -779,8 +779,15 @@ What differs from the shepherd:
   `config.toml`, those settings and `~/.claude` among them, fail
   (`Read-only file system`, or a denied command or Edit). Processes a
   command leaves behind end with it, so keep long waits as background
-  tasks. `loopherd restart --self`, `feed`, `add` and `retire`, and with
-  `install` on `scripts/install`, run outside the sandbox. Every host is
+  tasks. `loopherd restart --self`, `feed`, `add`, `retire` and
+  `release`, and with `install` on `scripts/install`, run outside the
+  sandbox, but only run bare, as their own Bash call: a `cd x &&`, a pipe
+  or redirect, `$(…)` or a path to `loopherd` keeps one inside it, where
+  it can't make or remove members' worktrees. `retire --close` and
+  `release` act only on your own herd's members, and keep a worktree or
+  refuse when the ledger puts one anywhere its herd file wouldn't.
+  `loopherd spawn --worktree` is the human's: its worktree sits beside
+  yours, where you can't write; use `loopherd add` instead. Every host is
   reachable, and gh uses the human's credentials as before. The sandbox
   is a guard rail the human set, not the whole boundary: when it refuses
   something, ask; don't route around it through herdr, a member or
