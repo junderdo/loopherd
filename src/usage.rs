@@ -26,14 +26,16 @@ pub struct Tokens {
 impl Tokens {
     /// Everything the model read: input plus cache write and cache read.
     pub fn read(&self) -> u64 {
-        self.input + self.cache_write + self.cache_read
+        self.input
+            .saturating_add(self.cache_write)
+            .saturating_add(self.cache_read)
     }
 
     fn add(&mut self, other: &Tokens) {
-        self.input += other.input;
-        self.cache_write += other.cache_write;
-        self.cache_read += other.cache_read;
-        self.output += other.output;
+        self.input = self.input.saturating_add(other.input);
+        self.cache_write = self.cache_write.saturating_add(other.cache_write);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.output = self.output.saturating_add(other.output);
     }
 }
 

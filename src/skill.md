@@ -510,8 +510,9 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   read (input + cache write + cache read) and `out` the tokens it wrote,
   over every session its `stop`s name plus their subagents; retiring
   records them in the mailbox as a `usage` entry, since Claude deletes
-  transcripts after `cleanupPeriodDays`. `-` means none are left, and is
-  left out of the medians. Each herd's `lead overhead` line is its lead's
+  transcripts after `cleanupPeriodDays`. `-` means none are left, its
+  mailbox can't be read, or Claude's dir can't be found (`HOME` unset), and
+  is left out of the medians. Each herd's `lead overhead` line is its lead's
   tokens since `--since`, subagents included (D92). `--herd`,
   `--since <date or time>`, `--json` (the per-model split); it marks
   nothing read.

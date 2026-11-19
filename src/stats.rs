@@ -1,7 +1,7 @@
 //! `loopherd stats`: how each herd's work flowed, read from the ledger and the
 //! mailboxes. Writes nothing and moves no cursor.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -103,12 +103,14 @@ pub fn stats(
         }
         by_herd.entry(herd).or_default().push(record);
     }
+    // A herd with only its lead in the window is shown if the lead spent tokens.
     for herd in leads.keys() {
         by_herd.entry(herd.clone()).or_default();
     }
     let mut warnings = vec![];
     let mut herds = vec![];
     for (herd, mut records) in by_herd {
+        let records_were_empty = records.is_empty();
         records.sort_by(|a, b| (&a.created, &a.name).cmp(&(&b.created, &b.name)));
         let mut retired = vec![];
         let mut open = vec![];
@@ -183,24 +185,27 @@ pub fn stats(
             });
         }
         let lead_overhead = query.claude_dir.and_then(|dir| {
-            let mut sessions = vec![];
-            for lead in leads.get(&herd).into_iter().flatten() {
-                let entries = match report::history(reports_dir, &lead.name) {
+            let runs = leads.get(&herd).map_or(&[][..], Vec::as_slice);
+            let mut sessions: Vec<String> =
+                runs.iter().filter_map(|r| r.session_id.clone()).collect();
+            let names: BTreeSet<&str> = runs.iter().map(|r| r.name.as_str()).collect();
+            for name in names {
+                match report::history(reports_dir, name) {
                     Ok((entries, bad)) => {
                         warnings.extend(bad);
-                        entries
+                        sessions.extend(usage::sessions(&entries, None));
                     }
-                    Err(e) => {
-                        warnings.push(format!("{e:#}"));
-                        vec![]
-                    }
-                };
-                sessions.extend(usage::sessions(&entries, lead.session_id.as_deref()));
+                    Err(e) => warnings.push(format!("{e:#}")),
+                }
             }
             sessions.sort_unstable();
             sessions.dedup();
             usage::of_sessions(dir, &sessions, query.since)
         });
+        let lead_was_busy = lead_overhead.as_ref().is_some_and(|u| !u.is_empty());
+        if records_were_empty && !lead_was_busy {
+            continue;
+        }
         herds.push(Herd {
             herd,
             summary: summarize(&retired),

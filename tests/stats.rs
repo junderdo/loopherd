@@ -1191,3 +1191,142 @@ fn a_reused_name_counts_only_its_own_runs_sessions() {
         })
     );
 }
+
+#[test]
+fn a_herd_with_only_an_idle_lead_in_the_window_is_left_out() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[
+            Member::new("lead-h", "2026-10-01T00:00:00Z").lead(),
+            Member::new("lh-1", "2026-10-02T00:00:00Z").retired("2026-10-02T05:00:00Z"),
+        ],
+    );
+    append_entries(
+        state.path(),
+        "lead-h",
+        &[stop("2026-10-02T00:00:00Z", "l1")],
+    );
+    write_transcript(
+        state.path(),
+        "l1.jsonl",
+        &[assistant("a", "opus", "2026-10-02T00:00:00Z", [1, 2, 3, 4])],
+    );
+
+    let out = stdout(&run(state.path(), &["--since", "2026-11-01"]));
+
+    assert_eq!(out, "", "nothing happened in h since then");
+}
+
+#[test]
+fn a_leads_mailbox_is_read_once_however_many_runs_it_had() {
+    let state = tempfile::tempdir().unwrap();
+    let mut lead = Member::new("lead-h", "2026-11-03T00:00:00Z").lead().json();
+    lead["earlier"] = serde_json::json!([
+        Member::new("lead-h", "2026-11-01T00:00:00Z")
+            .lead()
+            .retired("2026-11-02T00:00:00Z")
+            .json(),
+        Member::new("lead-h", "2026-11-02T00:00:00Z")
+            .lead()
+            .retired("2026-11-03T00:00:00Z")
+            .json(),
+    ]);
+    fs::create_dir_all(state.path().join("loopherd/reports")).unwrap();
+    fs::write(
+        state.path().join("loopherd/ledger.json"),
+        serde_json::json!({
+            "lead-h": lead,
+            "lh-1": Member::new("lh-1", "2026-11-01T00:00:00Z").json(),
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        state.path().join("loopherd/reports/lead-h.jsonl"),
+        "not json\n",
+    )
+    .unwrap();
+
+    let out = run(state.path(), &[]);
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(stderr.matches("skipped a bad line").count(), 1, "{stderr}");
+}
+
+#[test]
+fn a_torn_transcript_line_and_an_unstamped_message_are_skipped_under_since() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[
+            Member::new("lead-h", "2026-10-01T00:00:00Z").lead(),
+            Member::new("lh-1", "2026-11-02T00:00:00Z").retired("2026-11-02T05:00:00Z"),
+        ],
+    );
+    append_entries(
+        state.path(),
+        "lead-h",
+        &[stop("2026-11-02T00:00:00Z", "l1")],
+    );
+    append_entries(state.path(), "lh-1", &[stop("2026-11-02T01:00:00Z", "s1")]);
+    let mut unstamped = assistant("b", "opus", "2026-11-02T00:00:00Z", [100, 0, 0, 100]);
+    unstamped.as_object_mut().unwrap().remove("timestamp");
+    write_transcript(
+        state.path(),
+        "l1.jsonl",
+        &[
+            assistant("a", "opus", "2026-11-02T00:00:00Z", [1, 2, 3, 4]),
+            unstamped,
+        ],
+    );
+    write_transcript(
+        state.path(),
+        "s1.jsonl",
+        &[assistant("c", "opus", "2026-11-02T00:10:00Z", [1, 0, 0, 1])],
+    );
+    let s1 = state.path().join("claude/projects/-repo/s1.jsonl");
+    let mut text = fs::read_to_string(&s1).unwrap();
+    text.push_str(r#"{"type":"assistant","message":{"id":"torn","model":"opus","usage":{"inp"#);
+    fs::write(&s1, text).unwrap();
+
+    let json = json(state.path(), &["--since", "2026-11-01"]);
+
+    let herd = &json["herds"][0];
+    assert_eq!(
+        herd["lead_overhead"]["opus"],
+        serde_json::json!({"input": 1, "cache_write": 2, "cache_read": 3, "output": 4}),
+        "the unstamped message can't be placed in the window"
+    );
+    assert_eq!(
+        herd["retired"][0]["tokens"]["opus"],
+        serde_json::json!({"input": 1, "cache_write": 0, "cache_read": 0, "output": 1}),
+    );
+}
+
+#[test]
+fn a_corrupt_huge_count_saturates_instead_of_overflowing() {
+    let state = tempfile::tempdir().unwrap();
+    one_retired_member(state.path());
+    append_entries(state.path(), "lh-1", &[stop("2026-11-01T01:00:00Z", "s1")]);
+    write_transcript(
+        state.path(),
+        "s1.jsonl",
+        &[
+            assistant(
+                "m1",
+                "opus",
+                "2026-11-01T00:10:00Z",
+                [u64::MAX, 1, 0, u64::MAX],
+            ),
+            assistant("m2", "opus", "2026-11-01T00:11:00Z", [1, 0, 0, 1]),
+        ],
+    );
+
+    let out = stdout(&run(state.path(), &[]));
+
+    assert!(
+        out.contains("in median 18446744073709.6M; out median 18446744073709.6M"),
+        "{out}"
+    );
+}

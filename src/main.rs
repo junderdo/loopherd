@@ -252,8 +252,9 @@ enum Command {
     /// How each herd's work flowed: per retired member, time to its first
     /// `done` report, review rounds, time waiting on merge and in total, and
     /// tokens: `in` read (input + cache write + cache read) and `out` written,
-    /// over its sessions and their subagents, `-` once the transcripts are gone
-    /// unless retire recorded them. A summary per herd gives medians, open
+    /// over its sessions and their subagents. `-` when retire recorded none and
+    /// the transcripts are gone, the mailbox can't be read, or Claude's dir
+    /// can't be found. A summary per herd gives medians, open
     /// members are listed apart, and a lead overhead line gives the lead's
     /// tokens since `--since`; the lead gets no row. Read-only, and marks no
     /// report read.
