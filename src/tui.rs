@@ -101,11 +101,7 @@ pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger, dirs: &Di
             let result = herdr.focus(&pane);
             Response::Focus(pane, result)
         }
-        Request::SaveTheme(palette) => Response::SavedTheme(crate::config::set(
-            &dirs.config,
-            "view.theme",
-            palette.name(),
-        )),
+        Request::SaveTheme(palette) => save_theme(&dirs.config, palette),
     }
 }
 
@@ -125,6 +121,10 @@ where
         }
     });
     (requests, responses)
+}
+
+fn save_theme(config: &std::path::Path, palette: Palette) -> Response {
+    Response::SavedTheme(crate::config::set(config, "view.theme", palette.name()))
 }
 
 pub struct App {
@@ -971,17 +971,18 @@ where
 {
     catch_stop_signals()?;
     exit_on_hangup()?;
-    let (requests, responses) = spawn_reader(herdr, ledger, dirs);
+    let config = dirs.config.clone();
+    let reader = spawn_reader(herdr, ledger, dirs);
     let watch = watch(subscriber);
     let mut terminal = ratatui::try_init()?;
     let result = run_loop(
         &mut terminal,
         App::new(options, theme),
-        &requests,
-        &responses,
+        &reader,
         &watch,
         terminal_key,
         &STOP_SIGNAL,
+        &config,
     );
     ratatui::try_restore()?;
     // A hung read keeps the reader thread blocked; exiting the process ends it.
@@ -999,15 +1000,16 @@ fn terminal_key(timeout: Duration) -> Result<Option<KeyEvent>> {
 }
 
 /// Never touches herdr or the ledger itself, so keys and signals are handled
-/// within a [`TICK`] however long a read takes.
+/// within a [`TICK`] however long a read takes. Saves a theme itself, so the
+/// save can't wait behind a hung read and be lost on quit.
 fn run_loop<B>(
     terminal: &mut Terminal<B>,
     mut app: App,
-    requests: &Sender<Request>,
-    responses: &Receiver<Response>,
+    (requests, responses): &(Sender<Request>, Receiver<Response>),
     watch: &Watch,
     mut next_key: impl FnMut(Duration) -> Result<Option<KeyEvent>>,
     stop: &AtomicI32,
+    config: &std::path::Path,
 ) -> Result<i32>
 where
     B: Backend,
@@ -1052,8 +1054,12 @@ where
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Ok(0);
         }
-        if let Some(request) = app.press(key.code, Instant::now()) {
-            send(request)?;
+        match app.press(key.code, Instant::now()) {
+            Some(Request::SaveTheme(palette)) => {
+                app.apply(save_theme(config, palette), Instant::now())?
+            }
+            Some(request) => send(request)?,
+            None => {}
         }
     }
 }
@@ -2520,7 +2526,7 @@ max = 3
     fn run_scripted(herdr: FakeHerdr, keys: Vec<Option<KeyEvent>>, stop: i32) -> Option<i32> {
         let (done, finished) = mpsc::channel();
         std::thread::spawn(move || {
-            let (requests, responses) = spawn_reader(herdr, ledger(), nowhere());
+            let reader = spawn_reader(herdr, ledger(), nowhere());
             let watch = watch(FakeSubscriber::default());
             let mut terminal = Terminal::new(TestBackend::new(72, 14)).unwrap();
             let mut keys = keys.into_iter();
@@ -2528,11 +2534,11 @@ max = 3
             let code = run_loop(
                 &mut terminal,
                 App::new(Options::default(), truecolor()),
-                &requests,
-                &responses,
+                &reader,
                 &watch,
                 |_| Ok(keys.next().flatten()),
                 &stop,
+                std::path::Path::new("/nonexistent/config.toml"),
             );
             let _ = done.send(code.unwrap());
         });
@@ -2552,6 +2558,36 @@ max = 3
             Some(key(KeyCode::Char('q'))),
         ];
         assert_eq!(run_scripted(herdr, keys, 0), Some(0));
+    }
+
+    #[test]
+    fn a_theme_picked_while_a_herdr_read_hangs_is_saved_before_quitting() {
+        let (_release, gate) = mpsc::channel();
+        let mut herdr = herdr();
+        herdr.agents_gate = Some(gate.into());
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        let reader = spawn_reader(herdr, ledger(), nowhere());
+        let mut keys = vec![
+            None,
+            Some(key(KeyCode::Char('t'))),
+            Some(key(KeyCode::Char('q'))),
+        ]
+        .into_iter();
+        let code = run_loop(
+            &mut Terminal::new(TestBackend::new(72, 14)).unwrap(),
+            App::new(Options::default(), truecolor()),
+            &reader,
+            &watch(FakeSubscriber::default()),
+            |_| Ok(keys.next().flatten()),
+            &AtomicI32::new(0),
+            &config,
+        );
+        assert_eq!(code.unwrap(), 0);
+        assert_eq!(
+            crate::config::view_theme(&config),
+            (Palette::Phosphor, None)
+        );
     }
 
     #[test]
@@ -2743,20 +2779,20 @@ max = 3
         let subscriber = fake.clone();
         let (quit, quitting) = mpsc::channel::<()>();
         let looping = std::thread::spawn(move || {
-            let (requests, responses) = spawn_reader(herdr, ledger(), nowhere());
+            let reader = spawn_reader(herdr, ledger(), nowhere());
             let watch = watch(subscriber);
             let mut terminal = Terminal::new(TestBackend::new(72, 14)).unwrap();
             run_loop(
                 &mut terminal,
                 App::new(Options::default(), truecolor()),
-                &requests,
-                &responses,
+                &reader,
                 &watch,
                 |timeout| {
                     std::thread::sleep(timeout.min(Duration::from_millis(5)));
                     Ok(quitting.try_recv().ok().map(|()| key(KeyCode::Char('q'))))
                 },
                 &AtomicI32::new(0),
+                std::path::Path::new("/nonexistent/config.toml"),
             )
         });
         let read_within = |wait: Duration| {
