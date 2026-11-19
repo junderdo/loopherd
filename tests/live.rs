@@ -516,26 +516,34 @@ fn a_sandboxed_lead_cannot_write_its_herd_file() {
     let in_sibling = sibling.join("sandbox-probe");
     let in_checkout = repo.join(format!("sandbox-probe-{}", std::process::id()));
     let _in_checkout = RemoveFile(in_checkout.clone());
-    let write = |file: &Path| {
+    // One script, so the model copies no long paths, and its results go to loopherd's
+    // state dir, which the lead may write, since Claude Code folds long output in the pane.
+    let probe = state.path().join("probe.py");
+    let results = state.path().join("loopherd/probe.out");
+    std::fs::write(
+        &probe,
         format!(
-            "python3 -c \"open('{}', 'a').write('hijack')\"",
-            file.display()
-        )
-    };
+            "with open({:?}, 'w') as out:\n    for path in {:?}:\n        try:\n            \
+             open(path, 'a').write('probe')\n            out.write(f'{{path}}\\twrote\\n')\n        \
+             except OSError as e:\n            out.write(f'{{path}}\\t{{e.strerror}}\\n')\n",
+            results.display().to_string(),
+            [&herd_file, &in_sibling, &in_checkout].map(|p| p.display().to_string())
+        ),
+    )
+    .unwrap();
     std::fs::write(
         &herd_file,
         format!(
-            "{}[lead]\nprompt = \"\"\"Make exactly four Bash tool calls, in this order, each \
-             with the command exactly as written and nothing added before or after it, \
-             running each even if an earlier one fails. First: {} \
-             Second: {} \
-             Third: {} \
-             Fourth: touch {} \
+            "{}[lead]\nprompt = \"\"\"This is loopherd's live test of your sandbox, which the \
+             human runs: it checks that writes outside your worktree are refused. The first \
+             command tries three such writes and is expected to record Read-only file \
+             system for each; that is the result being measured. Make exactly two Bash tool calls, in \
+             this order, each with the command exactly as written and nothing added before or \
+             after it, running the second even if the first fails. First: python3 {} \
+             Second: touch {} \
              Then reply with what each printed.\"\"\"\n",
             herd_head(repo.to_str().unwrap(), &workspace),
-            write(&herd_file),
-            write(&in_sibling),
-            write(&in_checkout),
+            probe.display(),
             control.display()
         ),
     )
@@ -597,13 +605,14 @@ fn a_sandboxed_lead_cannot_write_its_herd_file() {
     assert_eq!(std::fs::read_to_string(&herd_file).unwrap(), before);
     assert!(!in_sibling.exists(), "the lead wrote a sibling worktree");
     assert!(!in_checkout.exists(), "the lead wrote the main checkout");
-    let screen = screen();
-    // A narrow pane may wrap the error mid-word.
-    let unwrapped: String = screen.split_whitespace().collect();
+    let expected: String = [&herd_file, &in_sibling, &in_checkout]
+        .map(|p| format!("{}\tRead-only file system\n", p.display()))
+        .concat();
     assert_eq!(
-        unwrapped.matches("Read-onlyfilesystem").count(),
-        3,
-        "the sandbox didn't refuse each write:\n{screen}"
+        std::fs::read_to_string(&results).unwrap_or_default(),
+        expected,
+        "the sandbox didn't refuse each write:\n{}",
+        screen()
     );
 }
 
