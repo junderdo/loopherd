@@ -59,6 +59,9 @@ Claude integration hook installed:
   names a Claude typed by hand there (checked 2026-11-19, herdr 0.9.5).
   Renaming to the name it already has succeeds; renaming another agent to
   a held name fails with `agent_name_taken`, naming the holder's pane.
+- `agent prompt <pane-id> <text>` takes a pane ID as its target too, so
+  an agent is prompted with or without a name (checked 2026-11-19, herdr
+  0.9.5, by the shepherd self-restart live test).
 
 ## Control surface (everything we need to layer on top)
 
@@ -220,6 +223,11 @@ for what 0.7.0 already had, and the changelog.
   existing split, is the outer one. The pane closes when its command
   exits, as a popup does. An action invoked from the CLI gets
   `HERDR_PANE_ID` and `focused_pane_id` in its context: the focused pane.
+  A plugin pane lists with its manifest title as `label`. `plugin pane
+  focus <p>` switches tab and workspace to it and answers
+  `plugin_pane_not_found` for a pane that isn't a plugin's; `--focus` on
+  `open` switches to the target's tab too. `workspace list` gives each
+  workspace's `focused` and `active_tab_id` (LH-290).
 
 ## Handoff or restart in a startup hook (0.9.5, LH-263)
 

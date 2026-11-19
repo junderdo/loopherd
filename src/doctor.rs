@@ -74,7 +74,7 @@ pub fn checks(
     checks.extend(herdr_checks);
     match setup {
         Ok(setup) => {
-            checks.extend(config_checks(&setup.paths));
+            checks.extend(config_checks(&setup.paths, &install.settings));
             checks.extend(herd_checks(&setup.paths, herd));
             checks.extend(state_checks(
                 setup,
@@ -139,7 +139,7 @@ fn lead_sandbox_check(paths: &Paths, lead: &AgentRecord) -> Option<Check> {
     ))
 }
 
-fn config_checks(paths: &Paths) -> Vec<Check> {
+fn config_checks(paths: &Paths, settings: &Path) -> Vec<Check> {
     let config = crate::herd::config_file(paths);
     let by_hand = format!("fix {} by hand", config.display());
     let mut checks = vec![];
@@ -153,6 +153,13 @@ fn config_checks(paths: &Paths) -> Vec<Check> {
             None
         }
     };
+    let self_restart = file
+        .as_ref()
+        .and_then(|f| f.shepherd.as_ref()?.self_restart)
+        .unwrap_or(false);
+    if self_restart {
+        checks.extend(self_restart_checks(&config, settings));
+    }
     if crate::herd::parses_as_toml(&config) {
         match crate::notify::load(&config) {
             Err(e) => checks.push(failure("notify", message(&e), by_hand)),
@@ -184,6 +191,39 @@ fn config_checks(paths: &Paths) -> Vec<Check> {
         file.context_window.is_none() && file.default_context_limit.is_none() && shepherd.is_none();
     checks.push(unset("lead defaults", file.lead_defaults.is_none()));
     checks.push(unset("context limits", limits_unset));
+    checks
+}
+
+/// With `[shepherd] self_restart` on: a prompt can't cancel a self-restart
+/// without the UserPromptSubmit hook, and a give-up goes unseen unless
+/// `[notify]` sends it.
+fn self_restart_checks(config: &Path, settings: &Path) -> Vec<Check> {
+    let mut checks = vec![];
+    if !crate::install_hook::prompt_hook_installed(settings).unwrap_or(false) {
+        checks.push(warning(
+            "self_restart",
+            format!(
+                "[shepherd] self_restart is on, but loopherd's UserPromptSubmit hook isn't in {}, \
+                 so restart --self refuses",
+                settings.display()
+            ),
+            "loopherd install-hook".into(),
+        ));
+    }
+    let sends = crate::notify::load(config)
+        .is_ok_and(|n| n.is_some_and(|n| n.sends(crate::notify::Kind::SelfRestart)));
+    if !sends {
+        checks.push(warning(
+            "self_restart",
+            "[shepherd] self_restart is on, but [notify] doesn't send self_restart, so a give-up \
+             shows only on the shepherd's pane"
+                .into(),
+            format!(
+                "set [notify] enabled = true with self_restart in its kinds, in {}",
+                config.display()
+            ),
+        ));
+    }
     checks
 }
 
@@ -1958,6 +1998,55 @@ mod tests {
                 config.display()
             )),
             "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn self_restart_warns_without_the_prompt_hook_or_a_notify_that_sends_it() {
+        let m = machine(&ALL);
+        let config = m.config();
+        let notify = "[notify]\nenabled = true\n";
+        std::fs::write(
+            &config,
+            format!("{CONFIG}[shepherd]\nself_restart = true\n{notify}"),
+        )
+        .unwrap();
+        assert_eq!(problems(&m, &herdr()), Vec::<String>::new());
+
+        std::fs::write(
+            &config,
+            format!("{CONFIG}[shepherd]\nself_restart = true\n"),
+        )
+        .unwrap();
+        let found = problems(&m, &herdr());
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].starts_with(
+                "warning self_restart: [shepherd] self_restart is on, but [notify] doesn't send self_restart"
+            ),
+            "{found:?}"
+        );
+
+        let m = machine(&ALL[..4]);
+        std::fs::write(
+            m.config(),
+            format!("{CONFIG}[shepherd]\nself_restart = true\n{notify}"),
+        )
+        .unwrap();
+        let found = problems(&m, &herdr());
+        assert!(
+            found.iter().any(|p| p.starts_with(
+                "warning self_restart: [shepherd] self_restart is on, but loopherd's UserPromptSubmit hook isn't in"
+            ) && p.ends_with("; fix: loopherd install-hook")),
+            "{found:?}"
+        );
+
+        let m = machine(&ALL[..4]);
+        std::fs::write(m.config(), format!("{CONFIG}{notify}")).unwrap();
+        let found = problems(&m, &herdr());
+        assert!(
+            !found.iter().any(|p| p.contains("self_restart")),
+            "{found:?}"
         );
     }
 

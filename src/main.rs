@@ -32,6 +32,7 @@ mod session_hook;
 mod setup;
 mod shell;
 mod shepherd_pane;
+mod shepherd_restart;
 mod shepherd_resume;
 mod skill;
 mod spawn;
@@ -144,7 +145,8 @@ enum Command {
     /// Read or edit one of config.toml's settings, keeping its comments and
     /// layout: `context_window`, `default_context_limit` or
     /// `shepherd.context_limit`, each a number of tokens,
-    /// `lead_defaults.review_rounds`, each lead's review-round limit, or
+    /// `lead_defaults.review_rounds`, each lead's review-round limit,
+    /// `shepherd.self_restart` (`true` or `false`), or
     /// `view.theme`, `loopherd view`'s palette: `purple-orange`, `phosphor`
     /// or `catppuccin`.
     Config {
@@ -321,9 +323,12 @@ enum Command {
         /// record: that turn's work, background tasks and crons.
         #[arg(long)]
         force: bool,
-        /// Restart the member in this pane once its turn ends: starts a detached
+        /// Restart the lead in this pane once its turn ends: starts a detached
         /// waiter that runs the plain restart after its stop since the handoff
-        /// reads finished, giving up after 30 minutes with a note.
+        /// reads finished, giving up after 30 minutes with a note. From the
+        /// shepherd's recorded pane, with `[shepherd] self_restart` on, it also
+        /// waits until the human leaves the pane alone for 5 minutes, and any
+        /// prompt there cancels it.
         #[arg(long = "self", id = "own", conflicts_with_all = ["name", "force"])]
         own: bool,
     },
@@ -525,8 +530,8 @@ struct SetupArgs {
 enum ConfigAction {
     /// Print the key's value; exits 1 if it isn't set.
     Get { key: String },
-    /// Set the key, refusing, changing nothing, a token count under 10000
-    /// or a theme `view` doesn't have.
+    /// Set the key, refusing, changing nothing, a token count under 10000,
+    /// a switch that isn't `true` or `false`, or a theme `view` doesn't have.
     Set { key: String, value: String },
     /// Remove the key; succeeds if it isn't set.
     Unset { key: String },
@@ -1145,15 +1150,23 @@ fn run_view_beside_shepherd() -> Result<i32> {
         &ledger.dir()?,
         current.as_deref(),
     )? {
-        view_pane::Opened::BesideShepherd { pane } => {
-            println!("opened the view beside the shepherd's pane {pane}")
+        view_pane::Opened::BesideShepherd { pane, how } => {
+            println!("{} beside the shepherd's pane {pane}", view_outcome(&how))
         }
-        view_pane::Opened::Beside { pane, why } => {
-            println!("opened the view beside pane {pane}: {why}")
+        view_pane::Opened::Beside { pane, why, how } => {
+            println!("{} beside pane {pane}: {why}", view_outcome(&how))
         }
         view_pane::Opened::Popup { why } => println!("opened the view in the popup: {why}"),
     }
     Ok(0)
+}
+
+fn view_outcome(how: &view_pane::How) -> String {
+    match how {
+        view_pane::How::Opened => "opened the view".into(),
+        view_pane::How::OpenedFocused => "opened and focused the view".into(),
+        view_pane::How::Focused { view } => format!("focused the view already open in {view}"),
+    }
 }
 
 fn run_pr(url: Option<String>, popup: bool) -> Result<i32> {
@@ -1285,6 +1298,12 @@ const WAITER_FD: &str = "LOOPHERD_RESTART_WAITER_FD";
 fn run_restart_self() -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let state = ledger.dir()?;
+    if let Some(place) = shepherd_here(&state, own_pane().as_deref()) {
+        let armed = arm_shepherd(&ledger, &state, &place)?;
+        spawn_waiter(context::SHEPHERD, armed.waiter)?;
+        println!("{}", armed.message);
+        return Ok(0);
+    }
     let scheduled = restart::schedule_self(
         &CliHerdr,
         &ledger,
@@ -1292,16 +1311,44 @@ fn run_restart_self() -> Result<i32> {
         &own_lineage(),
         &state,
     )?;
-    let fd = scheduled.waiter.as_raw_fd();
+    spawn_waiter(&scheduled.name, scheduled.waiter)?;
+    println!("{}", scheduled.message);
+    Ok(0)
+}
+
+fn arm_shepherd(
+    ledger: &FileLedger,
+    state: &Path,
+    place: &shepherd_resume::Place,
+) -> Result<shepherd_restart::Armed> {
+    let config = Paths::from_env()?.herds.with_file_name("config.toml");
+    let switches = shepherd_restart::Switches {
+        enabled: config::self_restart(&config)?,
+        prompt_hook: install_hook::prompt_hook_installed(&install_hook::default_settings()?)?,
+    };
+    let mailboxes = ledger.reports_dir()?;
+    let mut notify = |text: &str| notify_self_restart(text, &config, &mailboxes);
+    shepherd_restart::arm(
+        state,
+        place,
+        &switches,
+        &mut watch::RealClock::start(),
+        &mut notify,
+    )
+}
+
+/// Starts `restart-wait <name>` in a session of its own, handing it `waiter`.
+fn spawn_waiter(name: &str, waiter: lock::Lock) -> Result<()> {
+    let fd = waiter.as_raw_fd();
     // The waiter inherits the lock's open file, so the claim lasts as long as it runs.
     // SAFETY: fcntl only clears close-on-exec on a descriptor the lock keeps open.
     if unsafe { libc::fcntl(fd, libc::F_SETFD, 0) } != 0 {
         return Err(std::io::Error::last_os_error()).context("pass the waiter its lock");
     }
     let exe = std::env::current_exe().context("find the loopherd binary")?;
-    let mut waiter = std::process::Command::new(&exe);
-    waiter
-        .args(["restart-wait", &scheduled.name])
+    let mut command = std::process::Command::new(&exe);
+    command
+        .args(["restart-wait", name])
         .env(WAITER_FD, fd.to_string())
         .env_remove("HERDR_PANE_ID")
         .stdin(std::process::Stdio::null())
@@ -1310,18 +1357,17 @@ fn run_restart_self() -> Result<i32> {
     // SAFETY: setsid is async-signal-safe. A session of its own outlives the
     // calling Claude's shells and their hangups.
     unsafe {
-        waiter.pre_exec(|| match libc::setsid() {
+        command.pre_exec(|| match libc::setsid() {
             -1 => Err(std::io::Error::last_os_error()),
             _ => Ok(()),
         });
     }
-    waiter
+    command
         .spawn()
         .with_context(|| format!("start {} restart-wait", exe.display()))?;
     // Dropping unlocks the open file the waiter shares; exiting only closes ours.
-    std::mem::forget(scheduled.waiter);
-    println!("{}", scheduled.message);
-    Ok(0)
+    std::mem::forget(waiter);
+    Ok(())
 }
 
 fn run_restart_wait(name: &str) -> Result<i32> {
@@ -1331,6 +1377,10 @@ fn run_restart_wait(name: &str) -> Result<i32> {
         .context("restart-wait runs only from `loopherd restart --self`, which holds its claim")?;
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let state = ledger.dir()?;
+    // No member may be named `shepherd`.
+    if name == context::SHEPHERD {
+        return run_shepherd_wait(&state, fd);
+    }
     let _claim = restart::adopt_claim(&state, name, fd)?;
     let paths = Paths::from_env().inspect_err(|e| {
         let text = format!("self-restart failed: {e:#}");
@@ -1357,6 +1407,54 @@ fn run_restart_wait(name: &str) -> Result<i32> {
         Duration::from_secs(2),
     )?;
     Ok(0)
+}
+
+fn run_shepherd_wait(state: &Path, fd: std::os::fd::RawFd) -> Result<i32> {
+    let mailboxes = state.join("reports");
+    let config_file = Paths::from_env().map(|p| p.herds.with_file_name("config.toml"));
+    let mut notify = |text: &str| match &config_file {
+        Ok(config_file) => notify_self_restart(text, config_file, &mailboxes),
+        Err(e) => eprintln!("loopherd restart-wait: warning: sent no notification: {e:#}"),
+    };
+    let Some(place) = shepherd_resume::recorded_place(state) else {
+        let why = "the shepherd's handoff record is gone";
+        notify(&format!("self-restart gave up: {why}"));
+        bail!(why);
+    };
+    let alive = |p: &ledger::Process| process::live(&process::ProcFs, Some(*p)).is_some();
+    let enabled = || match &config_file {
+        Ok(config_file) => config::self_restart(config_file),
+        Err(e) => Err(anyhow!("{e:#}")),
+    };
+    let waiter = shepherd_restart::Waiter {
+        herdr: &CliHerdr,
+        state,
+        mailboxes: &mailboxes,
+        place: &place,
+        alive: &alive,
+        enabled: &enabled,
+    };
+    let _claim = match restart::adopt_claim(state, context::SHEPHERD, fd) {
+        Ok(claim) => claim,
+        Err(e) => {
+            shepherd_restart::give_up(&waiter, &format!("{e:#}"), &mut notify)?;
+            return Err(e);
+        }
+    };
+    shepherd_restart::wait(&waiter, &mut watch::RealClock::start(), &mut notify)?;
+    Ok(0)
+}
+
+/// Sends `text` as the shepherd's `self_restart` notification.
+fn notify_self_restart(text: &str, config: &Path, mailboxes: &Path) {
+    let waiting = notify::Waiting {
+        herd: None,
+        member: context::SHEPHERD.into(),
+        kind: notify::Kind::SelfRestart,
+        text: text.into(),
+        at: Some(humantime::format_rfc3339_nanos(SystemTime::now()).to_string()),
+    };
+    notify_waiting(&[waiting], config, mailboxes);
 }
 
 fn run_report(kind: Kind, as_name: Option<String>, text: &str) -> Result<i32> {
@@ -1623,6 +1721,11 @@ fn run_stop_hook() -> Result<i32> {
     };
     let reports = ledger.reports_dir()?;
     let state = ledger.dir()?;
+    if let Some(place) = shepherd_here(&state, Some(pane.id))
+        && let Err(e) = stop_hook::shepherd_stopped(&state, &place, &input, SystemTime::now())
+    {
+        eprintln!("loopherd stop-hook: warning: record the shepherd's stop: {e:#}");
+    }
     let handoff = |member: &ledger::AgentRecord| {
         let limit = Paths::from_env().and_then(|paths| herd::context_limit(&paths, member));
         let note = |text| {
@@ -1728,18 +1831,29 @@ fn shepherd_resume(
     pane: &session_hook::Pane,
     input: &[u8],
 ) -> Result<Option<String>> {
-    let (Some(socket), Some(pid)) = (pane.socket, pane.claude_pid) else {
+    let Some(place) = own_place(Some(pane.id)) else {
         return Ok(None);
-    };
-    let Some(start) = process::ProcFs.start(pid) else {
-        return Ok(None);
-    };
-    let place = shepherd_resume::Place {
-        pane: pane.id.to_string(),
-        socket: socket.to_path_buf(),
-        process: ledger::Process { pid, start },
     };
     shepherd_resume::session_started(&ledger.dir()?, &place, input, &live_session)
+}
+
+/// [`own_place`] when the shepherd's handoff record names it.
+fn shepherd_here(state: &Path, pane: Option<&str>) -> Option<shepherd_resume::Place> {
+    let recorded = shepherd_resume::recorded_place(state)?;
+    own_place(pane).filter(|place| *place == recorded)
+}
+
+/// This pane, herdr and the Claude this process runs under, as a shepherd
+/// record names them; `None` when any is unknown.
+fn own_place(pane: Option<&str>) -> Option<shepherd_resume::Place> {
+    let socket = socket_from_env()?;
+    let pid = process::claude_pid_from_env(&process::ProcFs)?;
+    let start = process::ProcFs.start(pid)?;
+    Some(shepherd_resume::Place {
+        pane: pane?.to_string(),
+        socket,
+        process: ledger::Process { pid, start },
+    })
 }
 
 fn run_prompt_hook() -> Result<i32> {
@@ -1751,6 +1865,27 @@ fn run_prompt_hook() -> Result<i32> {
         .read_to_end(&mut input)
         .context("read hook input")?;
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let state = ledger.dir()?;
+    if let Some(place) = shepherd_here(&state, Some(&pane)) {
+        let mailboxes = ledger.reports_dir()?;
+        let mut notify = |text: &str| match Paths::from_env() {
+            Ok(paths) => {
+                notify_self_restart(text, &paths.herds.with_file_name("config.toml"), &mailboxes)
+            }
+            Err(e) => eprintln!("loopherd prompt-hook: warning: sent no notification: {e:#}"),
+        };
+        match shepherd_restart::prompted(&state, &place, &input, &mut notify) {
+            Ok(None) => {}
+            Ok(Some(context)) => println!(
+                "{}",
+                serde_json::json!({"hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": context,
+                }})
+            ),
+            Err(e) => eprintln!("loopherd prompt-hook: warning: shepherd self-restart: {e:#}"),
+        }
+    }
     pane_label::prompted(&CliHerdr, &ledger.reports_dir()?, &pane, &input)?;
     Ok(0)
 }
