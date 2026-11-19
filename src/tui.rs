@@ -1795,7 +1795,7 @@ max = 3
     const LIGHT_ORANGE: Color = Color::Rgb(255, 192, 77);
     const GREY_VIOLET: Color = Color::Rgb(120, 110, 140);
     const SOFT_VIOLET: Color = Color::Rgb(160, 165, 190);
-    const LIGHT: Color = Color::Rgb(235, 235, 242);
+    const NEAR_BLACK: Color = Color::Rgb(20, 16, 28);
 
     /// Each row with the window's and boxes' side borders trimmed off.
     fn text(terminal: &Terminal<TestBackend>) -> Vec<String> {
@@ -2104,14 +2104,14 @@ max = 3
     }
 
     #[test]
-    fn the_selected_row_is_light_on_orange_across_its_box_without_a_marker() {
+    fn the_selected_row_is_near_black_on_orange_across_its_box_without_a_marker() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let terminal = render(&app(&herdr, &ledger, now), now);
         let (_, y) = pos(&terminal, "b     blocked");
         for x in 2..70 {
             assert_eq!(cell(&terminal, (x, y)).bg, ORANGE, "x {x}");
         }
-        assert_eq!(at(&terminal, "b     blocked").fg, LIGHT);
+        assert_eq!(at(&terminal, "b     blocked").fg, NEAR_BLACK);
         assert_eq!(cell(&terminal, (70, y)).bg, Color::Reset);
         assert!(!lines(&terminal).concat().contains('›'));
     }
