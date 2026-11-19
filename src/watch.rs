@@ -3419,6 +3419,33 @@ mod tests {
             assert_eq!(self.lead_wakes_at(notifier, merges, at), None);
         }
 
+        /// What one poll of a fresh lead's watch at `at`, which wakes on
+        /// nothing, warns.
+        fn lead_warned_at(
+            &self,
+            notifier: &Notifier,
+            merges: &dyn Merges,
+            at: &str,
+        ) -> Vec<String> {
+            let own = |events: &[Waiting]| notifier.send(events);
+            let req = Request {
+                notify_own: Some(&own),
+                merges: Some(merges),
+                ..self.request("w9:p0")
+            };
+            let mut warned = vec![];
+            let woke = watch(
+                &self.herdr,
+                &self.ledger,
+                &self.reports(),
+                &req,
+                &mut steps_from(at, |_| {}),
+                &mut |w| warned.push(w.to_string()),
+            );
+            assert!(woke.unwrap().is_none());
+            warned
+        }
+
         /// What one poll of a fresh lead's watch at `at` wakes on.
         fn lead_wakes_at(
             &self,
@@ -3681,6 +3708,46 @@ mod tests {
 
         let summary = merges_summed("1 merge while unwatched");
         assert_eq!(notifier.sent(), [summary, merge_sent(8)]);
+    }
+
+    #[test]
+    fn a_stale_summary_whose_window_cannot_be_saved_is_sent_by_the_next_lookup() {
+        let (world, notifier, gh) = guarded("", vec![]);
+        world.lead_at(&notifier, &gh, FIRST);
+        gh.merged.borrow_mut().push(("2026-11-01T10:00:00Z", 7));
+        let blocker = world.reports().join("lead-cards.merges.new");
+        fs::create_dir(&blocker).unwrap();
+        world.lead_at(&notifier, &gh, "2026-11-01T12:00:00Z");
+        fs::remove_dir(&blocker).unwrap();
+
+        world.lead_at(&notifier, &gh, "2026-11-01T12:01:00Z");
+
+        assert_eq!(notifier.sent(), [merges_summed("1 merge while unwatched")]);
+    }
+
+    #[test]
+    fn a_failing_default_branch_refresh_looks_up_the_cached_branch() {
+        let (world, notifier, gh) = guarded("", vec![]);
+        world.lead_at(&notifier, &gh, FIRST);
+        world.lead_at(&notifier, &gh, LATER);
+        gh.fail_branch.set(true);
+        gh.merged.borrow_mut().push(("2026-11-01T10:05:00Z", 7));
+
+        let warned = world.lead_warned_at(&notifier, &gh, "2026-11-01T10:11:00Z");
+
+        assert_eq!(warned, Vec::<String>::new());
+        assert_eq!(notifier.sent(), [merge_sent(7)]);
+    }
+
+    #[test]
+    fn a_failing_default_branch_with_none_cached_warns() {
+        let (world, notifier, gh) = guarded("", vec![]);
+        world.lead_at(&notifier, &gh, FIRST);
+        gh.fail_branch.set(true);
+
+        let warned = world.lead_warned_at(&notifier, &gh, LATER);
+
+        assert_eq!(warned, ["cards's merges: no default branch"]);
     }
 
     #[test]

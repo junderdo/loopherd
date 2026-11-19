@@ -147,36 +147,39 @@ impl MergeAlerts {
         let stale = now
             .duration_since(since)
             .is_ok_and(|gap| gap > SEARCH_LAG + STALE_AFTER);
-        let alerts = if stale {
-            self.summary(&prs, now)?.into_iter().collect()
-        } else {
-            prs.into_iter()
-                .map(|pr| self.alert(format!("#{} {}", pr.number, pr.url), pr.url))
-                .collect()
-        };
+        let total = prs.len();
+        let prs = if stale { self.unsent(prs)? } else { prs };
         state.since = since.max(now - SEARCH_LAG);
         self.save(&state)?;
-        Ok(Some(alerts))
-    }
-
-    /// One line for those of `prs` not sent yet, which it marks sent so a
-    /// later lookup doesn't send them one by one; `None` when all were sent.
-    fn summary(&self, prs: &[Pr], now: SystemTime) -> Result<Option<Waiting>> {
-        let mut unsent = 0;
-        for pr in prs {
-            if notify::first_to_notify(&self.mailboxes, &self.lead, Kind::MergeAlert, &pr.url)? {
-                unsent += 1;
-            }
+        if !stale {
+            return Ok(Some(
+                prs.into_iter()
+                    .map(|pr| self.alert(format!("#{} {}", pr.number, pr.url), pr.url))
+                    .collect(),
+            ));
         }
-        let text = match unsent {
-            0 => return Ok(None),
-            n if prs.len() >= github::MERGED_LIMIT => format!("{n} or more merges while unwatched"),
+        // Marked only once the window is saved, so an unsaved one finds them again
+        // unmarked. One left unmarked is at worst later sent on its own.
+        for pr in &prs {
+            let _ = notify::first_to_notify(&self.mailboxes, &self.lead, Kind::MergeAlert, &pr.url);
+        }
+        let text = match prs.len() {
+            0 => return Ok(Some(vec![])),
+            n if total >= github::MERGED_LIMIT => format!("{n} or more merges while unwatched"),
             1 => "1 merge while unwatched".to_string(),
             n => format!("{n} merges while unwatched"),
         };
-        Ok(Some(
-            self.alert(text, format!("unwatched {}", seconds(now))),
-        ))
+        let at = format!("unwatched {}", seconds(now));
+        Ok(Some(vec![self.alert(text, at)]))
+    }
+
+    /// Those of `prs` not yet sent.
+    fn unsent(&self, prs: Vec<Pr>) -> Result<Vec<Pr>> {
+        let sent = notify::notified(&self.mailboxes, &self.lead, Kind::MergeAlert)?;
+        Ok(prs
+            .into_iter()
+            .filter(|pr| !sent.contains(&pr.url))
+            .collect())
     }
 
     fn alert(&self, text: String, at: String) -> Waiting {

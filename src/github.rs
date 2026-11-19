@@ -354,6 +354,8 @@ pub mod fake {
         pub repo: PathBuf,
         pub merged: std::cell::RefCell<Vec<(&'static str, u64)>>,
         pub lookups: std::cell::Cell<u32>,
+        /// Fails each default branch lookup.
+        pub fail_branch: std::cell::Cell<bool>,
     }
 
     impl FakeMerges {
@@ -362,6 +364,7 @@ pub mod fake {
                 repo: repo.into(),
                 merged: merged.into(),
                 lookups: Default::default(),
+                fail_branch: Default::default(),
             }
         }
 
@@ -377,6 +380,9 @@ pub mod fake {
     impl Merges for FakeMerges {
         fn default_branch(&self, repo: &Path) -> Result<String> {
             self.known(repo)?;
+            if self.fail_branch.get() {
+                bail!("no default branch");
+            }
             Ok("main".into())
         }
 
