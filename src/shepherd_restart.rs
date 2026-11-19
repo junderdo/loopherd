@@ -28,6 +28,9 @@ pub const GUARD: Duration = Duration::from_secs(30 * 60);
 /// How long after `/clear` the resume has to mark the record used.
 pub const RESUME_WAIT: Duration = Duration::from_secs(30);
 pub const POLL: Duration = Duration::from_secs(2);
+/// A longer gap between polls, as when the machine slept, starts the
+/// human's [`WARNING`] minutes again: nothing was seen during it.
+const GAP: Duration = Duration::from_secs(30);
 /// How long arming waits for a cancelled waiter to let go of its claim.
 const CLAIM_WAIT: Duration = Duration::from_secs(5);
 
@@ -150,6 +153,8 @@ pub struct Waiter<'a> {
     pub mailboxes: &'a Path,
     pub place: &'a Place,
     pub alive: &'a dyn Fn(&Process) -> bool,
+    /// Reads `[shepherd] self_restart` afresh, so turning it off stops the waiter.
+    pub enabled: &'a dyn Fn() -> Result<bool>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -167,6 +172,7 @@ enum Gate {
     Go,
     Wait(String),
     Stop,
+    Cancel(String),
     GiveUp(String),
 }
 
@@ -174,33 +180,49 @@ use Gate::GiveUp;
 
 /// Polls every [`POLL`] until the shepherd's stop since arming reads
 /// finished with nothing in flight, herdr shows its pane idle or done, the
-/// human sent no prompt there for [`WARNING`], and its input box is empty;
-/// then restarts it. Gives up after [`TIMEOUT`], when its pane or Claude is
-/// gone, or on any failure: the reason goes in the record, to `notify`,
-/// and on the pane's label.
+/// human sent no prompt there for [`WARNING`] of polls it saw, and its
+/// input box is empty; then restarts it. Stops when the switch is turned
+/// off. Gives up after [`TIMEOUT`], when its pane or Claude is gone, or on
+/// any failure: the reason goes in the record, to `notify`, and on the
+/// pane's label.
 pub fn wait(w: &Waiter, clock: &mut dyn Clock, notify: &mut dyn FnMut(&str)) -> Result<Waited> {
     let deadline = clock.now() + TIMEOUT;
+    let mut quiet_from = SystemTime::UNIX_EPOCH;
+    let mut polled = clock.now();
     loop {
-        let gate = check(w, clock.now()).unwrap_or_else(|e| GiveUp(format!("{e:#}")));
+        let now = clock.now();
+        if now.duration_since(polled).map_or(true, |gap| gap > GAP) {
+            quiet_from = now;
+        }
+        polled = now;
+        let gate = check(w, now, quiet_from).unwrap_or_else(|e| GiveUp(format!("{e:#}")));
         match gate {
+            Gate::Stop => return Ok(Waited::Stopped),
+            Gate::Cancel(why) => {
+                set_state(w, AttemptState::Cancelled, Some(why))?;
+                return Ok(Waited::Stopped);
+            }
+            Gate::GiveUp(why) => return give_up(w, &why, notify),
+            Gate::Go | Gate::Wait(_) if now >= deadline => {
+                let why = match gate {
+                    Gate::Wait(why) => why,
+                    _ => "its conditions held only after that".into(),
+                };
+                let why = format!("waited {} minutes: {why}", TIMEOUT.as_secs() / 60);
+                return give_up(w, &why, notify);
+            }
             Gate::Go => {
-                return match restart_now(w, clock) {
+                return match restart_now(w, clock, notify) {
                     Ok(waited) => Ok(waited),
                     Err(e) => give_up(w, &format!("{e:#}"), notify),
                 };
-            }
-            Gate::Stop => return Ok(Waited::Stopped),
-            Gate::GiveUp(why) => return give_up(w, &why, notify),
-            Gate::Wait(why) if clock.now() >= deadline => {
-                let why = format!("waited {} minutes: {why}", TIMEOUT.as_secs() / 60);
-                return give_up(w, &why, notify);
             }
             Gate::Wait(_) => clock.sleep(POLL),
         }
     }
 }
 
-fn check(w: &Waiter, now: SystemTime) -> Result<Gate> {
+fn check(w: &Waiter, now: SystemTime, quiet_from: SystemTime) -> Result<Gate> {
     let Some((used, restart)) =
         shepherd_resume::update(w.state, w.place, |r| (r.used, r.restart.clone()))?
     else {
@@ -214,6 +236,11 @@ fn check(w: &Waiter, now: SystemTime) -> Result<Gate> {
     };
     if used {
         return Ok(Gate::Stop);
+    }
+    if !(w.enabled)()? {
+        return Ok(Gate::Cancel(
+            "[shepherd] self_restart was turned off".into(),
+        ));
     }
     if !(w.alive)(&w.place.process) {
         return Ok(GiveUp(format!(
@@ -245,11 +272,16 @@ fn check(w: &Waiter, now: SystemTime) -> Result<Gate> {
         )));
     }
     // Any prompt since arming cancelled it, so these are minutes without one.
-    if now < armed + WARNING {
+    let quiet_until = armed.max(quiet_from) + WARNING;
+    if now < quiet_until {
+        let paused = match quiet_from > armed {
+            true => ", counted again after a pause in its checks",
+            false => "",
+        };
         return Ok(Gate::Wait(format!(
-            "the human's {} minutes run until {}",
+            "the human's {} minutes{paused} run until {}",
             WARNING.as_secs() / 60,
-            humantime::format_rfc3339_seconds(armed + WARNING)
+            humantime::format_rfc3339_seconds(quiet_until)
         )));
     }
     let screen = w.herdr.visible_text(pane)?;
@@ -267,8 +299,7 @@ fn check(w: &Waiter, now: SystemTime) -> Result<Gate> {
 /// Marks the restart under way, unless a prompt cancelled it since the
 /// check, then sends `/clear` and, once the resume marks the record used,
 /// `go`; without the resume, the paste line naming the handoff.
-fn restart_now(w: &Waiter, clock: &mut dyn Clock) -> Result<Waited> {
-    let now = clock.now();
+fn restart_now(w: &Waiter, clock: &mut dyn Clock, notify: &mut dyn FnMut(&str)) -> Result<Waited> {
     let started = shepherd_resume::update(w.state, w.place, |r| {
         let Some(attempt) = r.restart.self_restart.as_mut() else {
             return false;
@@ -277,7 +308,6 @@ fn restart_now(w: &Waiter, clock: &mut dyn Clock) -> Result<Waited> {
             return false;
         }
         attempt.state = AttemptState::Restarting;
-        r.restart.last_self_restart = Some(time(now));
         true
     })?;
     if started != Some(true) {
@@ -285,6 +315,10 @@ fn restart_now(w: &Waiter, clock: &mut dyn Clock) -> Result<Waited> {
     }
     let pane = &w.place.pane;
     w.herdr.prompt(pane, "/clear")?;
+    let cleared = time(clock.now());
+    shepherd_resume::update(w.state, w.place, |r| {
+        r.restart.last_self_restart = Some(cleared)
+    })?;
     let deadline = clock.now() + RESUME_WAIT;
     let resumed = loop {
         let used = shepherd_resume::update(w.state, w.place, |r| r.used)?;
@@ -296,32 +330,40 @@ fn restart_now(w: &Waiter, clock: &mut dyn Clock) -> Result<Waited> {
         }
         clock.sleep(Duration::from_secs(1));
     };
-    // The human may have started typing in the cleared session; `go` would join it.
+    let handoff = context::handoff_path(w.state, context::SHEPHERD);
+    let paste = format!(
+        "continue as the loopherd shepherd from {}",
+        handoff.display()
+    );
+    // The human may have started typing in the cleared session; a send would join it.
     if !input_box_empty(&w.herdr.visible_text(pane)?) {
+        if !resumed {
+            let why = format!(
+                "the human was typing after the /clear and no resume followed it, so it sent \
+                 nothing; paste `{paste}`"
+            );
+            return give_up(w, &why, notify);
+        }
         let why = "the human was typing after the /clear, so it sent nothing more";
         set_state(w, AttemptState::Restarted, Some(why.into()))?;
         return Ok(Waited::Restarted);
     }
     let (line, waited, why) = match resumed {
-        true => ("go".to_string(), Waited::Restarted, None),
-        false => {
-            let handoff = context::handoff_path(w.state, context::SHEPHERD);
-            (
-                format!(
-                    "continue as the loopherd shepherd from {}",
-                    handoff.display()
-                ),
-                Waited::Fallback,
-                Some("no resume followed the /clear, so it sent the paste line".to_string()),
-            )
-        }
+        true => ("go", Waited::Restarted, None),
+        false => (
+            paste.as_str(),
+            Waited::Fallback,
+            Some("no resume followed the /clear, so it sent the paste line".to_string()),
+        ),
     };
-    w.herdr.prompt(pane, &line)?;
+    w.herdr.prompt(pane, line)?;
     set_state(w, AttemptState::Restarted, why)?;
     Ok(waited)
 }
 
-fn give_up(w: &Waiter, why: &str, notify: &mut dyn FnMut(&str)) -> Result<Waited> {
+/// Records why the self-restart gave up, sends it to `notify` and puts it
+/// on the pane's label.
+pub fn give_up(w: &Waiter, why: &str, notify: &mut dyn FnMut(&str)) -> Result<Waited> {
     let recorded = set_state(w, AttemptState::GaveUp, Some(why.to_string()));
     notify(&format!("self-restart gave up: {why}"));
     let label = format!("shepherd: self-restart gave up: {why}");
@@ -341,9 +383,15 @@ fn set_state(w: &Waiter, state: AttemptState, why: Option<String>) -> Result<()>
 }
 
 /// For a UserPromptSubmit at `place`: cancels a pending self-restart,
-/// returning the context that tells the shepherd so. A prompt Claude made from a finished background task is no
-/// human's and changes nothing.
-pub fn prompted(state: &Path, place: &Place, input: &[u8]) -> Result<Option<String>> {
+/// returning the context that tells the shepherd so. A pending one whose
+/// waiter died gives up, telling `notify` and the shepherd. A prompt Claude
+/// made from a finished background task changes nothing.
+pub fn prompted(
+    state: &Path,
+    place: &Place,
+    input: &[u8],
+    notify: &mut dyn FnMut(&str),
+) -> Result<Option<String>> {
     let input: Option<serde_json::Value> = serde_json::from_slice(input).ok();
     let prompt = input.as_ref().and_then(|i| i["prompt"].as_str());
     if prompt.is_some_and(pane_label::is_task_notification) {
@@ -351,29 +399,37 @@ pub fn prompted(state: &Path, place: &Place, input: &[u8]) -> Result<Option<Stri
     }
     // A free claim means no waiter runs: it never started, or died.
     let waiter_runs = restart::take(state, context::SHEPHERD, "waiter")?.is_none();
-    let cancelled = shepherd_resume::update(state, place, |r| {
+    let ended = shepherd_resume::update(state, place, |r| {
         let attempt = r.restart.self_restart.as_mut();
-        match attempt.filter(|a| a.state == AttemptState::Pending && !r.used) {
-            Some(attempt) if waiter_runs => {
-                attempt.state = AttemptState::Cancelled;
-                attempt.why = Some("the human prompted in its pane".into());
-                true
-            }
-            Some(attempt) => {
-                attempt.state = AttemptState::GaveUp;
-                attempt.why = Some("its waiter wasn't running".into());
-                false
-            }
-            None => false,
-        }
+        let attempt = attempt.filter(|a| a.state == AttemptState::Pending && !r.used)?;
+        let (state, why, told) = match waiter_runs {
+            true => (
+                AttemptState::Cancelled,
+                "a prompt came in its pane",
+                CANCELLED,
+            ),
+            false => (AttemptState::GaveUp, WAITER_GONE, WAITER_DIED),
+        };
+        attempt.state = state;
+        attempt.why = Some(why.into());
+        Some((state, told))
     })?;
-    Ok((cancelled == Some(true)).then(|| CANCELLED.to_string()))
+    let Some((state, told)) = ended.flatten() else {
+        return Ok(None);
+    };
+    if state == AttemptState::GaveUp {
+        notify(&format!("self-restart gave up: {WAITER_GONE}"));
+    }
+    Ok(Some(format!("{told} {NEXT}")))
 }
 
-const CANCELLED: &str = "Your self-restart is cancelled: this prompt came while it waited. \
-    Your handoff is still written. Once you've answered, tell the human to run `/clear` and send \
-    `go` when they're ready, or ask whether to re-arm it; on a yes, run `loopherd restart --self` \
-    again, which waits another 5 minutes without a prompt here.";
+const WAITER_GONE: &str = "its waiter wasn't running";
+const CANCELLED: &str = "Your self-restart is cancelled: this prompt came while it waited.";
+const WAITER_DIED: &str =
+    "Your self-restart had given up: its waiter wasn't running, so nothing restarted you.";
+const NEXT: &str = "Your handoff is still written. Once you've answered, tell the human to run \
+    `/clear` and send `go` when they're ready, or ask whether to re-arm it; on a yes, run \
+    `loopherd restart --self` again, which waits another 5 minutes without a prompt here.";
 
 fn time(at: SystemTime) -> String {
     humantime::format_rfc3339_nanos(at).to_string()
@@ -414,10 +470,12 @@ mod tests {
         }
     }
 
-    /// A clock at `start` whose every sleep first runs `step` with the time it wakes at.
+    /// A clock at `start` whose every sleep first runs `step` with the time it
+    /// wakes at; the sleep numbered by `gap` lasts its duration longer.
     struct Steps<'a> {
         now: SystemTime,
         sleeps: u32,
+        gap: Option<(u32, Duration)>,
         step: Box<dyn FnMut(SystemTime) + 'a>,
     }
 
@@ -429,6 +487,9 @@ mod tests {
             self.sleeps += 1;
             assert!(self.sleeps < 2000, "never woke");
             self.now += duration;
+            if let Some((_, gap)) = self.gap.filter(|(at, _)| *at == self.sleeps) {
+                self.now += gap;
+            }
             (self.step)(self.now);
         }
         fn now(&self) -> SystemTime {
@@ -440,6 +501,7 @@ mod tests {
         Steps {
             now: at(start),
             sleeps: 0,
+            gap: None,
             step: Box::new(step),
         }
     }
@@ -448,6 +510,7 @@ mod tests {
         state: tempfile::TempDir,
         herdr: FakeHerdr,
         alive: std::cell::Cell<bool>,
+        enabled: std::cell::Cell<bool>,
         notified: RefCell<Vec<String>>,
         /// The claims of the waiters armed, held as a running waiter holds its own.
         claims: RefCell<Vec<Lock>>,
@@ -478,6 +541,7 @@ mod tests {
                 state,
                 herdr,
                 alive: std::cell::Cell::new(true),
+                enabled: std::cell::Cell::new(true),
                 notified: RefCell::default(),
                 claims: RefCell::default(),
             }
@@ -519,7 +583,14 @@ mod tests {
 
         fn prompt(&self, prompt: &str) -> Option<String> {
             let input = json!({"hook_event_name": "UserPromptSubmit", "prompt": prompt});
-            prompted(self.path(), &place(), input.to_string().as_bytes()).unwrap()
+            let mut notify = |text: &str| self.notified.borrow_mut().push(text.into());
+            prompted(
+                self.path(),
+                &place(),
+                input.to_string().as_bytes(),
+                &mut notify,
+            )
+            .unwrap()
         }
 
         /// What the SessionStart hook does on the `/clear` the waiter sends.
@@ -538,7 +609,12 @@ mod tests {
 
         /// Runs the waiter from [`ARMED`], calling `step` at each wake.
         fn wait(&self, step: impl FnMut(SystemTime)) -> Waited {
+            self.wait_on(clock_at(ARMED, step))
+        }
+
+        fn wait_on(&self, mut clock: Steps) -> Waited {
             let alive = |_: &Process| self.alive.get();
+            let enabled = || Ok(self.enabled.get());
             let mailboxes = self.path().join("reports");
             let waiter = Waiter {
                 herdr: &self.herdr,
@@ -546,9 +622,10 @@ mod tests {
                 mailboxes: &mailboxes,
                 place: &place(),
                 alive: &alive,
+                enabled: &enabled,
             };
             let mut notify = |text: &str| self.notified.borrow_mut().push(text.into());
-            wait(&waiter, &mut clock_at(ARMED, step), &mut notify).unwrap()
+            wait(&waiter, &mut clock, &mut notify).unwrap()
         }
 
         fn saved(&self) -> Value {
@@ -930,6 +1007,9 @@ mod tests {
         };
         assert!(why.contains("prompt refused"), "{why}");
         assert_eq!(w.saved()["self_restart"]["state"], "gave_up");
+        assert!(w.saved().get("last_self_restart").is_none());
+        w.claims.borrow_mut().clear();
+        w.arm_at("2026-11-19T10:10:00Z", on()).unwrap();
     }
 
     #[test]
@@ -993,15 +1073,108 @@ mod tests {
     }
 
     #[test]
-    fn a_prompt_with_no_waiter_running_tells_the_shepherd_nothing() {
+    fn a_prompt_with_no_waiter_running_gives_up_and_says_so() {
         let w = World::new();
         w.arm();
         w.claims.borrow_mut().clear();
 
-        assert_eq!(w.prompt("hello"), None);
+        let told = w.prompt("hello").unwrap();
 
+        assert!(told.contains("waiter wasn't running"), "{told}");
+        assert!(told.contains("loopherd restart --self"), "{told}");
         let saved = w.saved();
         assert_eq!(saved["self_restart"]["state"], "gave_up");
         assert_eq!(saved["self_restart"]["why"], "its waiter wasn't running");
+        assert_eq!(
+            *w.notified.borrow(),
+            ["self-restart gave up: its waiter wasn't running"]
+        );
+    }
+
+    #[test]
+    fn a_waiter_that_wakes_past_its_30_minutes_gives_up_instead_of_clearing() {
+        let w = World::new();
+        w.arm();
+        w.stop(at(ARMED), 0);
+        let slept = Steps {
+            gap: Some((1, Duration::from_secs(8 * 60 * 60))),
+            ..clock_at(ARMED, |_| {})
+        };
+
+        let waited = w.wait_on(slept);
+
+        assert_gave_up(&w, waited, "waited 30 minutes: the human's 5 minutes");
+    }
+
+    #[test]
+    fn a_pause_in_its_checks_starts_the_humans_5_minutes_again() {
+        let w = World::new();
+        w.arm();
+        w.stop(at(ARMED), 0);
+        let mut sent_at = None;
+        let paused = Steps {
+            gap: Some((1, minutes(10))),
+            ..clock_at(ARMED, |now| {
+                if sent_at.is_none() && !w.herdr.prompts().is_empty() {
+                    sent_at = Some(now);
+                }
+                w.resume_on_clear();
+            })
+        };
+
+        assert_eq!(w.wait_on(paused), Waited::Restarted);
+
+        let woke = at(ARMED) + POLL + minutes(10);
+        assert!(sent_at.unwrap() >= woke + WARNING, "{sent_at:?}");
+    }
+
+    #[test]
+    fn turning_the_switch_off_stops_a_waiting_restart() {
+        let w = World::new();
+        w.arm();
+        w.stop(at(ARMED), 0);
+        let off = at(ARMED) + minutes(1);
+
+        let waited = w.wait(|now| {
+            if now >= off {
+                w.enabled.set(false);
+            }
+        });
+
+        assert_eq!(waited, Waited::Stopped);
+        assert!(w.sent().is_empty());
+        let saved = w.saved();
+        assert_eq!(saved["self_restart"]["state"], "cancelled");
+        assert_eq!(
+            saved["self_restart"]["why"],
+            "[shepherd] self_restart was turned off"
+        );
+        assert!(w.notified.borrow().is_empty());
+    }
+
+    #[test]
+    fn typing_after_a_clear_no_resume_followed_gives_up_naming_the_paste_line() {
+        let w = World::new();
+        w.arm();
+        w.stop(at(ARMED), 0);
+        w.herdr
+            .set_screen_on_prompt(PANE, &MAIN_VIEW.replace("❯ \n", "❯ what happ\n"));
+
+        let waited = w.wait(|_| {});
+
+        let Waited::GaveUp(why) = waited else {
+            panic!("{waited:?}");
+        };
+        assert!(
+            why.contains("continue as the loopherd shepherd from"),
+            "{why}"
+        );
+        assert_eq!(w.sent(), ["/clear"]);
+        assert_eq!(w.saved()["self_restart"]["state"], "gave_up");
+        assert!(w.saved()["last_self_restart"].is_string());
+        assert_eq!(
+            *w.notified.borrow(),
+            [format!("self-restart gave up: {why}")]
+        );
     }
 }

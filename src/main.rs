@@ -1366,11 +1366,11 @@ fn run_restart_wait(name: &str) -> Result<i32> {
         .context("restart-wait runs only from `loopherd restart --self`, which holds its claim")?;
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let state = ledger.dir()?;
-    let _claim = restart::adopt_claim(&state, name, fd)?;
     // No member may be named `shepherd`.
     if name == context::SHEPHERD {
-        return run_shepherd_wait(&ledger, &state);
+        return run_shepherd_wait(&state, fd);
     }
+    let _claim = restart::adopt_claim(&state, name, fd)?;
     let paths = Paths::from_env().inspect_err(|e| {
         let text = format!("self-restart failed: {e:#}");
         let note = report::Entry::new(SystemTime::now(), report::Body::Note { text });
@@ -1398,22 +1398,37 @@ fn run_restart_wait(name: &str) -> Result<i32> {
     Ok(0)
 }
 
-fn run_shepherd_wait(ledger: &FileLedger, state: &Path) -> Result<i32> {
-    let place =
-        shepherd_resume::recorded_place(state).context("the shepherd's handoff record is gone")?;
-    let mailboxes = ledger.reports_dir()?;
-    let config = Paths::from_env().map(|p| p.herds.with_file_name("config.toml"));
-    let mut notify = |text: &str| match &config {
-        Ok(config) => notify_self_restart(text, config, &mailboxes),
+fn run_shepherd_wait(state: &Path, fd: std::os::fd::RawFd) -> Result<i32> {
+    let mailboxes = state.join("reports");
+    let config_file = Paths::from_env().map(|p| p.herds.with_file_name("config.toml"));
+    let mut notify = |text: &str| match &config_file {
+        Ok(config_file) => notify_self_restart(text, config_file, &mailboxes),
         Err(e) => eprintln!("loopherd restart-wait: warning: sent no notification: {e:#}"),
     };
+    let Some(place) = shepherd_resume::recorded_place(state) else {
+        let why = "the shepherd's handoff record is gone";
+        notify(&format!("self-restart gave up: {why}"));
+        bail!(why);
+    };
     let alive = |p: &ledger::Process| process::live(&process::ProcFs, Some(*p)).is_some();
+    let enabled = || match &config_file {
+        Ok(config_file) => config::self_restart(config_file),
+        Err(e) => Err(anyhow!("{e:#}")),
+    };
     let waiter = shepherd_restart::Waiter {
         herdr: &CliHerdr,
         state,
         mailboxes: &mailboxes,
         place: &place,
         alive: &alive,
+        enabled: &enabled,
+    };
+    let _claim = match restart::adopt_claim(state, context::SHEPHERD, fd) {
+        Ok(claim) => claim,
+        Err(e) => {
+            shepherd_restart::give_up(&waiter, &format!("{e:#}"), &mut notify)?;
+            return Err(e);
+        }
     };
     shepherd_restart::wait(&waiter, &mut watch::RealClock::start(), &mut notify)?;
     Ok(0)
@@ -1841,7 +1856,14 @@ fn run_prompt_hook() -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let state = ledger.dir()?;
     if let Some(place) = shepherd_here(&state, Some(&pane)) {
-        match shepherd_restart::prompted(&state, &place, &input) {
+        let mailboxes = ledger.reports_dir()?;
+        let mut notify = |text: &str| match Paths::from_env() {
+            Ok(paths) => {
+                notify_self_restart(text, &paths.herds.with_file_name("config.toml"), &mailboxes)
+            }
+            Err(e) => eprintln!("loopherd prompt-hook: warning: sent no notification: {e:#}"),
+        };
+        match shepherd_restart::prompted(&state, &place, &input, &mut notify) {
             Ok(None) => {}
             Ok(Some(context)) => println!(
                 "{}",
