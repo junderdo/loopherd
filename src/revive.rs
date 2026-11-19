@@ -281,9 +281,12 @@ impl<'a> Handoff<'a> {
     }
 
     /// Whether the session in `pane_id` kept running through a live handoff:
-    /// its own shell decides when it has one, else the other panes'.
+    /// its own shell decides when it has one, else the other panes'. An
+    /// unreadable shell is a restart.
     fn survived(&self, herdr: &dyn Herdr, pane_id: &str) -> bool {
-        let own = herdr.shell_pid(pane_id).ok().flatten();
+        let Ok(own) = herdr.shell_pid(pane_id) else {
+            return false;
+        };
         own.and_then(|shell| self.outlived(shell))
             .unwrap_or(self.any_survived)
     }
@@ -2106,8 +2109,11 @@ mod tests {
         .0
     }
 
+    /// A live lead in a pane of its own, `w1:p1`, whose shell herdr doesn't report.
     fn alive_lead_herdr() -> FakeHerdr {
-        dev_herdr().with_live_agent(Some("lead-h"), Some("sess-lead-h"), "w1:p4")
+        let herdr = dev_herdr();
+        let pane = herdr.add_tab("w1", "lead-h", Path::new("/tmp"), false);
+        herdr.with_live_agent(Some("lead-h"), Some("sess-lead-h"), &pane)
     }
 
     #[test]
@@ -2123,7 +2129,7 @@ mod tests {
 
             assert_eq!(
                 out,
-                "alive lead-h w1:p4 (not prompted: herdr handed off live, so its session kept running)",
+                "alive lead-h w1:p1 (not prompted: herdr handed off live, so its session kept running)",
                 "{parent} {start}"
             );
             assert!(herdr.prompts().is_empty());
@@ -2143,7 +2149,7 @@ mod tests {
             let out = run_startup(&herdr, &procs, lead("lead-h", cwd.path()), state.path());
 
             assert_eq!(
-                out, "alive lead-h w1:p4 (prompted to re-arm its watch)",
+                out, "alive lead-h w1:p1 (prompted to re-arm its watch)",
                 "{start}"
             );
             assert_eq!(herdr.prompts().len(), 1);
@@ -2160,7 +2166,7 @@ mod tests {
 
         let out = run_startup(&herdr, &procs, lead("lead-h", cwd.path()), state.path());
 
-        assert_eq!(out, "alive lead-h w1:p4 (prompted to re-arm its watch)");
+        assert_eq!(out, "alive lead-h w1:p1 (prompted to re-arm its watch)");
     }
 
     #[test]
@@ -2216,13 +2222,13 @@ mod tests {
                        so treating this startup as a restart";
         assert_eq!(
             out,
-            format!("{warning}\nalive lead-h w1:p4 (prompted to re-arm its watch)")
+            format!("{warning}\nalive lead-h w1:p1 (prompted to re-arm its watch)")
         );
         assert_eq!(
             notes(state.path(), "lead-h"),
             [
                 format!("herdr's startup revive: {warning}"),
-                "herdr's startup revive: alive lead-h w1:p4 (prompted to re-arm its watch)".into(),
+                "herdr's startup revive: alive lead-h w1:p1 (prompted to re-arm its watch)".into(),
             ]
         );
     }
@@ -2244,7 +2250,7 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.ends_with("\nalive lead-h w1:p4 (prompted to re-arm its watch)"),
+            out.ends_with("\nalive lead-h w1:p1 (prompted to re-arm its watch)"),
             "{out}"
         );
     }
@@ -2264,7 +2270,7 @@ mod tests {
             state.path(),
         );
 
-        assert_eq!(out, "alive lead-h w1:p4 (prompted to re-arm its watch)");
+        assert_eq!(out, "alive lead-h w1:p1 (prompted to re-arm its watch)");
     }
 
     /// `FakeProcs` with no start time for one pid.
@@ -2323,7 +2329,7 @@ mod tests {
 
         assert_eq!(
             out,
-            "alive lead-h w1:p4 (not prompted: herdr handed off live, so its session kept running)"
+            "alive lead-h w1:p1 (not prompted: herdr handed off live, so its session kept running)"
         );
     }
 
@@ -2345,5 +2351,18 @@ mod tests {
             out,
             format!("alive lead-h {lead_pane} (prompted to re-arm its watch)")
         );
+    }
+
+    #[test]
+    fn after_a_live_handoff_a_lead_whose_own_shell_cant_be_read_is_prompted() {
+        let cwd = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let mut herdr = alive_lead_herdr();
+        let procs = shell_under(&herdr, 1, 50);
+        herdr.fail_shell_pid_of = Some("w1:p1".into());
+
+        let out = run_startup(&herdr, &procs, lead("lead-h", cwd.path()), state.path());
+
+        assert_eq!(out, "alive lead-h w1:p1 (prompted to re-arm its watch)");
     }
 }
