@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ledger::{AgentRecord, Ledger, Process};
 use crate::lock::Lock;
+use crate::usage::Usage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -84,7 +85,8 @@ impl Entry {
             | Body::Start { .. }
             | Body::Blocked {}
             | Body::Gone { .. }
-            | Body::Moved {} => None,
+            | Body::Moved {}
+            | Body::Usage { .. } => None,
         }
     }
 }
@@ -125,6 +127,10 @@ pub enum Body {
     /// herdr moved the member's pane out of the tab or workspace whose close
     /// recorded the `gone` before it, retracting that `gone`.
     Moved {},
+    /// The member's tokens, recorded when it retired.
+    Usage {
+        models: Usage,
+    },
 }
 
 impl Body {
@@ -647,6 +653,11 @@ fn render(name: &str, entry: &Entry) -> Vec<String> {
         Body::Blocked {} => return vec![format!("{name} blocked {when}")],
         Body::Gone { .. } => return vec![format!("{name} gone {when}")],
         Body::Moved {} => return vec![format!("{name} moved {when}")],
+        Body::Usage { models } => {
+            let sum = crate::usage::total(models);
+            let (read, wrote) = (kilo(sum.read()), kilo(sum.output));
+            return vec![format!("{name} usage {when} in {read}k, out {wrote}k")];
+        }
         _ => {
             let (kind, text) = entry.report().expect("a report");
             (kind.as_str(), text.to_string())

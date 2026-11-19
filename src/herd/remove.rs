@@ -581,6 +581,7 @@ mod tests {
             herd: None,
             since: None,
             now: std::time::SystemTime::now(),
+            claude_dir: None,
         };
         let (herds, _) = crate::stats::stats(&s.ledger, &s.path("state/reports"), &query).unwrap();
         herds

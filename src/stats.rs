@@ -9,19 +9,24 @@ use anyhow::{Result, anyhow, bail};
 use serde::Serialize;
 
 use crate::ledger::{AgentRecord, Ledger};
-use crate::report::{self, Body};
+use crate::report::{self, Body, Entry};
+use crate::usage::{self, Usage};
 
 pub struct Query<'a> {
     pub herd: Option<&'a str>,
     /// Only members started at or after this.
     pub since: Option<SystemTime>,
     pub now: SystemTime,
+    /// Where Claude keeps transcripts; `None` reads none.
+    pub claude_dir: Option<&'a Path>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct Herd {
     pub herd: String,
     pub summary: Summary,
+    /// The lead's tokens since `--since`, its subagents' included.
+    pub lead_overhead: Option<Usage>,
     pub retired: Vec<Retired>,
     pub open: Vec<Open>,
 }
@@ -37,6 +42,7 @@ pub struct Retired {
     /// From the last `done` to retirement: waiting on merge.
     pub merge_wait_secs: Option<u64>,
     pub total_secs: Option<u64>,
+    pub tokens: Option<Usage>,
 }
 
 #[derive(Debug, Serialize)]
@@ -45,6 +51,7 @@ pub struct Open {
     pub template: Option<String>,
     pub started: String,
     pub so_far_secs: Option<u64>,
+    pub tokens: Option<Usage>,
 }
 
 #[derive(Debug, Serialize)]
@@ -55,6 +62,9 @@ pub struct Summary {
     pub rounds_median: Option<f64>,
     pub merge_wait: Spread,
     pub total: Spread,
+    /// Of the members whose tokens are known.
+    pub in_median: Option<u64>,
+    pub out_median: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,6 +80,7 @@ pub fn stats(
     query: &Query,
 ) -> Result<(Vec<Herd>, Vec<String>)> {
     let mut by_herd: BTreeMap<String, Vec<AgentRecord>> = BTreeMap::new();
+    let mut leads: BTreeMap<String, Vec<AgentRecord>> = BTreeMap::new();
     let runs = ledger.entries()?.into_values().flat_map(|mut record| {
         let earlier = std::mem::take(&mut record.earlier);
         earlier.into_iter().chain([record])
@@ -78,7 +89,11 @@ pub fn stats(
         let Some(herd) = record.herd.clone() else {
             continue;
         };
-        if record.is_lead() || query.herd.is_some_and(|h| h != herd) {
+        if query.herd.is_some_and(|h| h != herd) {
+            continue;
+        }
+        if record.is_lead() {
+            leads.entry(herd).or_default().push(record);
             continue;
         }
         if let Some(since) = query.since
@@ -88,6 +103,9 @@ pub fn stats(
         }
         by_herd.entry(herd).or_default().push(record);
     }
+    for herd in leads.keys() {
+        by_herd.entry(herd.clone()).or_default();
+    }
     let mut warnings = vec![];
     let mut herds = vec![];
     for (herd, mut records) in by_herd {
@@ -96,15 +114,7 @@ pub fn stats(
         let mut open = vec![];
         for record in records {
             let started = parse_time(&record.created);
-            if !record.retired {
-                open.push(Open {
-                    so_far_secs: started.map(|s| secs_between(s, query.now)),
-                    name: record.name,
-                    template: record.template,
-                    started: record.created,
-                });
-                continue;
-            }
+            let retired_at = record.retired_at.as_deref().and_then(parse_time);
             let entries = match report::history(reports_dir, &record.name) {
                 Ok((entries, bad)) => {
                     warnings.extend(bad);
@@ -115,16 +125,44 @@ pub fn stats(
                     None
                 }
             };
-            let retired_at = record.retired_at.as_deref().and_then(parse_time);
             // A reused name's mailbox still holds its earlier life's entries.
-            let dones: Option<Vec<SystemTime>> = entries.map(|entries| {
+            let life: Option<Vec<(SystemTime, Entry)>> = entries.map(|entries| {
                 entries
-                    .iter()
-                    .filter(|e| matches!(e.body, Body::Done { .. }))
-                    .filter_map(|e| parse_time(&e.at))
-                    .filter(|at| started.is_none_or(|s| *at >= s))
+                    .into_iter()
+                    .filter_map(|e| Some((parse_time(&e.at)?, e)))
+                    .filter(|(at, _)| started.is_none_or(|s| *at >= s))
                     // retired_at has whole seconds; mailbox times have nanos.
-                    .filter(|at| retired_at.is_none_or(|r| *at < r + Duration::from_secs(1)))
+                    .filter(|(at, _)| retired_at.is_none_or(|r| *at < r + Duration::from_secs(1)))
+                    .collect()
+            });
+            let recorded = life
+                .iter()
+                .flatten()
+                .rev()
+                .find_map(|(_, e)| match &e.body {
+                    Body::Usage { models } => Some(models.clone()),
+                    _ => None,
+                });
+            let tokens = recorded.or_else(|| {
+                let (life, dir) = life.as_ref().zip(query.claude_dir)?;
+                let run =
+                    usage::sessions(life.iter().map(|(_, e)| e), record.session_id.as_deref());
+                usage::of_sessions(dir, &run, None)
+            });
+            if !record.retired {
+                open.push(Open {
+                    so_far_secs: started.map(|s| secs_between(s, query.now)),
+                    tokens,
+                    name: record.name,
+                    template: record.template,
+                    started: record.created,
+                });
+                continue;
+            }
+            let dones: Option<Vec<SystemTime>> = life.as_ref().map(|life| {
+                life.iter()
+                    .filter(|(_, e)| matches!(e.body, Body::Done { .. }))
+                    .map(|(at, _)| *at)
                     .collect()
             });
             let dones = dones.as_deref();
@@ -138,14 +176,35 @@ pub fn stats(
                     .zip(retired_at)
                     .map(|(d, r)| secs_between(*d, r)),
                 total_secs: started.zip(retired_at).map(|(s, r)| secs_between(s, r)),
+                tokens,
                 name: record.name,
                 template: record.template,
                 started: record.created,
             });
         }
+        let lead_overhead = query.claude_dir.and_then(|dir| {
+            let mut sessions = vec![];
+            for lead in leads.get(&herd).into_iter().flatten() {
+                let entries = match report::history(reports_dir, &lead.name) {
+                    Ok((entries, bad)) => {
+                        warnings.extend(bad);
+                        entries
+                    }
+                    Err(e) => {
+                        warnings.push(format!("{e:#}"));
+                        vec![]
+                    }
+                };
+                sessions.extend(usage::sessions(&entries, lead.session_id.as_deref()));
+            }
+            sessions.sort_unstable();
+            sessions.dedup();
+            usage::of_sessions(dir, &sessions, query.since)
+        });
         herds.push(Herd {
             herd,
             summary: summarize(&retired),
+            lead_overhead,
             retired,
             open,
         });
@@ -168,7 +227,18 @@ fn summarize(retired: &[Retired]) -> Summary {
         .map(|n| n as u64)
         .collect();
     rounds.sort_unstable();
+    let token_median = |side: fn(&usage::Tokens) -> u64| {
+        let mut values: Vec<u64> = retired
+            .iter()
+            .filter_map(|r| r.tokens.as_ref())
+            .map(|t| side(&usage::total(t)))
+            .collect();
+        values.sort_unstable();
+        median(&values).map(|m| m.round() as u64)
+    };
     Summary {
+        in_median: token_median(usage::Tokens::read),
+        out_median: token_median(|t| t.output),
         members: retired.len(),
         first_done: spread(|r| r.first_done_secs),
         rounds_median: median(&rounds),
@@ -291,6 +361,8 @@ pub fn render(herds: &[Herd]) -> String {
                 "rounds",
                 "merge wait",
                 "total",
+                "in",
+                "out",
             ])];
             rows.extend(herd.retired.iter().map(|r| {
                 vec![
@@ -301,19 +373,36 @@ pub fn render(herds: &[Herd]) -> String {
                     r.rounds.map_or("-".to_string(), |n| n.to_string()),
                     duration(r.merge_wait_secs),
                     duration(r.total_secs),
+                    count(r.tokens.as_ref().map(|t| usage::total(t).read())),
+                    count(r.tokens.as_ref().map(|t| usage::total(t).output)),
                 ]
             }));
             out.push_str(&table(&rows));
         }
         out.push_str(&format!("  summary: {}\n", summary_line(&herd.summary)));
+        let lead = herd.lead_overhead.as_ref().map(usage::total);
+        out.push_str(&format!(
+            "  lead overhead: in {}, out {}\n",
+            count(lead.map(|t| t.read())),
+            count(lead.map(|t| t.output)),
+        ));
         if !herd.open.is_empty() {
-            let mut rows = vec![cells(&["open", "template", "started (UTC)", "so far"])];
+            let mut rows = vec![cells(&[
+                "open",
+                "template",
+                "started (UTC)",
+                "so far",
+                "in",
+                "out",
+            ])];
             rows.extend(herd.open.iter().map(|o| {
                 vec![
                     o.name.clone(),
                     template(&o.template),
                     minute(&o.started),
                     duration(o.so_far_secs),
+                    count(o.tokens.as_ref().map(|t| usage::total(t).read())),
+                    count(o.tokens.as_ref().map(|t| usage::total(t).output)),
                 ]
             }));
             out.push_str(&table(&rows));
@@ -332,11 +421,13 @@ fn summary_line(s: &Summary) -> String {
     };
     let rounds = s.rounds_median.map_or("-".to_string(), |m| format!("{m}"));
     format!(
-        "{} members; {}; rounds median {rounds}; {}; {}",
+        "{} members; {}; rounds median {rounds}; {}; {}; in median {}; out median {}",
         s.members,
         spread("first done", &s.first_done),
         spread("merge wait", &s.merge_wait),
         spread("total", &s.total),
+        count(s.in_median),
+        count(s.out_median),
     )
 }
 
@@ -384,5 +475,15 @@ fn duration(secs: Option<u64>) -> String {
         (0, 0) => format!("{minutes}m"),
         (0, _) => format!("{hours}h{minutes:02}m"),
         _ => format!("{days}d{hours:02}h"),
+    }
+}
+
+/// `950`, `12.3k` or `4.5M` tokens; `-` when unknown.
+fn count(tokens: Option<u64>) -> String {
+    match tokens {
+        None => "-".into(),
+        Some(n) if n < 1_000 => n.to_string(),
+        Some(n) if n < 999_950 => format!("{:.1}k", n as f64 / 1e3),
+        Some(n) => format!("{:.1}M", n as f64 / 1e6),
     }
 }
