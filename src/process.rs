@@ -127,7 +127,7 @@ mod os {
     }
 
     pub fn cwd(pid: u32) -> Option<PathBuf> {
-        let info: libc::proc_vnodepathinfo = pid_info(pid, libc::PROC_PIDVNODEPATHINFO)?;
+        let info: libc::proc_vnodepathinfo = pid_info(pid)?;
         let path = info.pvi_cdir.vip_path.as_flattened();
         // SAFETY: c_char and u8 have the same size and alignment.
         let path: &[u8] = unsafe { &*(std::ptr::from_ref(path) as *const [u8]) };
@@ -136,17 +136,30 @@ mod os {
     }
 
     fn bsd_info(pid: u32) -> Option<libc::proc_bsdinfo> {
-        pid_info(pid, libc::PROC_PIDTBSDINFO)
+        pid_info(pid)
     }
 
-    /// `T` must be the struct that `flavor` fills.
-    fn pid_info<T>(pid: u32, flavor: c_int) -> Option<T> {
+    /// A plain C struct that `proc_pidinfo` fills for `FLAVOR`, valid when all zero.
+    trait PidInfo {
+        const FLAVOR: c_int;
+    }
+
+    impl PidInfo for libc::proc_bsdinfo {
+        const FLAVOR: c_int = libc::PROC_PIDTBSDINFO;
+    }
+
+    impl PidInfo for libc::proc_vnodepathinfo {
+        const FLAVOR: c_int = libc::PROC_PIDVNODEPATHINFO;
+    }
+
+    fn pid_info<T: PidInfo>(pid: u32) -> Option<T> {
+        // SAFETY: every `PidInfo` is a C struct of integers and arrays.
         let mut info: T = unsafe { std::mem::zeroed() };
         let size = std::mem::size_of::<T>() as c_int;
         let read = unsafe {
             libc::proc_pidinfo(
                 pid as c_int,
-                flavor,
+                T::FLAVOR,
                 0,
                 (&raw mut info).cast::<c_void>(),
                 size,
