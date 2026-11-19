@@ -11,8 +11,8 @@ use anyhow::{Result, anyhow, bail};
 
 use super::events::{Connection, OnPush, PaneNotFound, Pushed, Subscriber, Subscription};
 use super::{
-    Agent, AgentStatus, Herdr, MalformedReply, NewTab, Pane, Plugin, Server, StartOutcome, Tab,
-    WaitOutcome, Workspace,
+    Agent, AgentStatus, Herdr, MalformedReply, NewTab, Pane, Placement, Plugin, Server,
+    StartOutcome, Tab, WaitOutcome, Workspace,
 };
 
 /// How a Claude agent started by the fake behaves.
@@ -68,8 +68,7 @@ struct State {
     started: Vec<Started>,
     prompts: Vec<(String, String)>,
     focused: Vec<String>,
-    /// Each opened plugin pane's entrypoint and env, sorted by key.
-    popups: Vec<(String, Vec<(String, String)>)>,
+    plugin_panes: Vec<PluginPane>,
     refuse_popup: bool,
     /// Sidebar labels by pane.
     labels: Vec<(String, String)>,
@@ -87,6 +86,9 @@ struct State {
     agent_unreadable: bool,
     mutations: u32,
 }
+
+/// An opened plugin pane's entrypoint, placement and env, sorted by key.
+pub type PluginPane = (String, Placement, Vec<(String, String)>);
 
 pub const FAKE_SOCKET: &str = "/run/fake/herdr.sock";
 
@@ -256,8 +258,17 @@ impl FakeHerdr {
         self.state.lock().unwrap().focused.clone()
     }
 
+    /// The plugin panes opened as the manifest places them: entrypoint and env.
     pub fn popups(&self) -> Vec<(String, Vec<(String, String)>)> {
-        self.state.lock().unwrap().popups.clone()
+        self.plugin_panes()
+            .into_iter()
+            .filter(|(_, placement, _)| *placement == Placement::Manifest)
+            .map(|(entrypoint, _, env)| (entrypoint, env))
+            .collect()
+    }
+
+    pub fn plugin_panes(&self) -> Vec<PluginPane> {
+        self.state.lock().unwrap().plugin_panes.clone()
     }
 
     /// The next plugin panes are refused, as herdr does while another modal is open.
@@ -704,20 +715,33 @@ impl Herdr for FakeHerdr {
         Ok(())
     }
 
-    fn open_plugin_pane(&self, entrypoint: &str, env: &[(&str, &str)]) -> Result<()> {
+    fn open_plugin_pane(
+        &self,
+        entrypoint: &str,
+        placement: &Placement,
+        env: &[(&str, &str)],
+    ) -> Result<()> {
         if self.is_down() {
             bail!("herdr server not running");
         }
         let mut state = self.state.lock().unwrap();
-        if state.refuse_popup {
-            bail!("herdr plugin pane open: another modal is open (ui_busy)");
+        match placement {
+            Placement::Manifest if state.refuse_popup => {
+                bail!("herdr plugin pane open: another modal is open (ui_busy)")
+            }
+            Placement::RightOf { pane, .. } if !state.panes.iter().any(|p| p.id == *pane) => {
+                bail!("herdr plugin pane open: pane {pane} not found (pane_not_found)")
+            }
+            _ => {}
         }
         let mut env: Vec<(String, String)> = env
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
         env.sort();
-        state.popups.push((entrypoint.to_string(), env));
+        state
+            .plugin_panes
+            .push((entrypoint.to_string(), placement.clone(), env));
         Ok(())
     }
 

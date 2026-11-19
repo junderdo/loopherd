@@ -75,6 +75,13 @@ fn write(state: &Path, record: &Record) -> Result<()> {
     Ok(())
 }
 
+/// Where the recorded shepherd runs, used or not; `None` without a readable
+/// record.
+pub fn recorded_place(state: &Path) -> Option<Place> {
+    let text = fs::read_to_string(record_path(state)).ok()?;
+    serde_json::from_str::<Record>(&text).ok().map(|r| r.place)
+}
+
 /// The unused record for `place`. A record that isn't JSON, or names another
 /// pane or socket, is none; one for this pane and socket that won't parse is
 /// an error.

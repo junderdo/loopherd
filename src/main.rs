@@ -46,6 +46,7 @@ mod tui;
 // build.rs includes it; here only for its tests.
 #[cfg(test)]
 mod version;
+mod view_pane;
 mod watch;
 mod worktree;
 
@@ -270,6 +271,10 @@ enum Command {
         /// Start with strays listed (toggle with `s`).
         #[arg(long)]
         strays: bool,
+        /// Open the view in a herdr pane right of the shepherd's (else of
+        /// $HERDR_PANE_ID's, else in the plugin's popup) instead of here.
+        #[arg(long, conflicts_with_all = ["all", "strays"])]
+        beside_shepherd: bool,
     },
     /// herdr's link handler for a Ctrl-clicked GitHub PR: shows the open member
     /// that owns it in the plugin's popup, found by a report naming the PR or
@@ -719,7 +724,11 @@ fn main() -> ExitCode {
         Command::RestartWait { name } => ("restart-wait", run_restart_wait(&name)),
         Command::Status { all, strays, json } => ("status", run_status(all, strays, json)),
         Command::Stats { herd, since, json } => ("stats", run_stats(herd, since, json)),
-        Command::View { all, strays } => ("view", run_view(all, strays)),
+        Command::View {
+            beside_shepherd: true,
+            ..
+        } => ("view", run_view_beside_shepherd()),
+        Command::View { all, strays, .. } => ("view", run_view(all, strays)),
         Command::Pr { url, popup } => ("pr", run_pr(url, popup)),
         Command::Report {
             kind,
@@ -1078,7 +1087,32 @@ fn run_view(all: bool, strays: bool) -> Result<i32> {
             std::env::var("COLORTERM").ok().as_deref(),
             std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
         ),
+        std::env::var(view_pane::NOTE)
+            .ok()
+            .filter(|n| !n.is_empty()),
     )
+}
+
+fn run_view_beside_shepherd() -> Result<i32> {
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let current = std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|p| !p.is_empty());
+    match view_pane::open(
+        &CliHerdr,
+        &process::ProcFs,
+        &ledger.dir()?,
+        current.as_deref(),
+    )? {
+        view_pane::Opened::BesideShepherd { pane } => {
+            println!("opened the view beside the shepherd's pane {pane}")
+        }
+        view_pane::Opened::Beside { pane, why } => {
+            println!("opened the view beside pane {pane}: {why}")
+        }
+        view_pane::Opened::Popup { why } => println!("opened the view in the popup: {why}"),
+    }
+    Ok(0)
 }
 
 fn run_pr(url: Option<String>, popup: bool) -> Result<i32> {
