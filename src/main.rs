@@ -1416,7 +1416,7 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         .and_then(|()| out.flush())
         .context("print the wake; left it unread")?;
     notify_waiting(&wake.waiting, &config, &mailboxes);
-    wake.mark_read()?;
+    wake.mark_read(&mut |warning| eprintln!("loopherd watch: warning: {warning}"))?;
     Ok(0)
 }
 
@@ -1629,8 +1629,8 @@ fn run_session_hook() -> Result<i32> {
     Ok(0)
 }
 
-/// The shepherd's resume context when `pane`'s Claude is where its last
-/// handoff was recorded.
+/// Follows the Claude where the shepherd's last handoff was recorded across
+/// its session starts, and returns its resume context on the `/clear` that resumes it.
 fn shepherd_resume(
     ledger: &FileLedger,
     pane: &session_hook::Pane,
@@ -1647,7 +1647,7 @@ fn shepherd_resume(
         socket: socket.to_path_buf(),
         process: ledger::Process { pid, start },
     };
-    shepherd_resume::resume(&ledger.dir()?, &place, input)
+    shepherd_resume::session_started(&ledger.dir()?, &place, input, &live_session)
 }
 
 fn run_prompt_hook() -> Result<i32> {

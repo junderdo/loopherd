@@ -354,11 +354,16 @@ impl ShepherdHandoff {
         }
     }
 
-    /// Records where the shepherd runs for its resume, then remembers the
-    /// session was told, so no later watch tells it again.
-    pub fn mark(self) -> Result<()> {
-        if let Some((state, place)) = &self.resume {
-            shepherd_resume::record(state, place, &self.session, SystemTime::now())?;
+    /// Records where the shepherd runs for its resume, warning on `warn` if
+    /// that fails, then remembers the session was told, so no later watch
+    /// tells it again.
+    pub fn mark(self, warn: &mut dyn FnMut(String)) -> Result<()> {
+        if let Some((state, place)) = &self.resume
+            && let Err(e) = shepherd_resume::record(state, place, &self.session, SystemTime::now())
+        {
+            warn(format!(
+                "record the shepherd's resume, so paste the handoff line after /clear: {e:#}"
+            ));
         }
         let dir = self.marker.parent().expect("a marker is in handoff-asked");
         fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
@@ -1193,7 +1198,7 @@ mod shepherd_tests {
                 socket: Some(Path::new("/run/herdr.sock")),
             })?;
             let line = handoff.line.clone();
-            handoff.mark().unwrap();
+            handoff.mark(&mut |w| panic!("{w}")).unwrap();
             Some(line)
         }
 
@@ -1251,10 +1256,38 @@ mod shepherd_tests {
                 pane,
                 socket,
             };
-            shepherd_handoff(&check).unwrap().mark().unwrap();
+            shepherd_handoff(&check)
+                .unwrap()
+                .mark(&mut |w| panic!("{w}"))
+                .unwrap();
             assert!(!state.join("shepherd.json").exists());
             fs::remove_dir_all(state.join("handoff-asked")).unwrap();
         }
+    }
+
+    #[test]
+    fn a_record_that_cant_be_written_warns_and_still_marks_the_session_told() {
+        let s = Shepherd::new(171_400);
+        fs::create_dir_all(s.state().join("shepherd.json")).unwrap();
+        let (claude, state) = (s.claude(), s.state());
+        let check = ShepherdCheck {
+            procs: &s.procs,
+            claude_pid: Some("30"),
+            me: 36,
+            claude_dir: &claude,
+            state: &state,
+            limit: 160_000,
+            pane: Some("w1:p1"),
+            socket: Some(Path::new("/run/herdr.sock")),
+        };
+        let mut warned = vec![];
+        shepherd_handoff(&check)
+            .unwrap()
+            .mark(&mut |w| warned.push(w))
+            .unwrap();
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(warned[0].contains("shepherd.json"), "{warned:?}");
+        assert!(shepherd_handoff(&check).is_none());
     }
 
     #[test]

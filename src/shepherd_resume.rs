@@ -1,6 +1,7 @@
 //! The shepherd's resume after its handoff. The watch that tells it to hand
-//! off records where its Claude runs; the first `/clear` there after the
-//! handoff is written gets told, through the SessionStart hook, to resume.
+//! off records where its Claude runs and which session it measured; the
+//! first `/clear` of that session after the handoff is written gets told,
+//! through the SessionStart hook, to resume.
 
 use std::fs;
 use std::io;
@@ -14,8 +15,7 @@ use serde_json::Value;
 use crate::context;
 use crate::ledger::Process;
 
-/// Where the shepherd's Claude runs. A `/clear` keeps the process, and the
-/// hook can't see the session it cleared, so the process stands for it.
+/// Where the shepherd's Claude runs. A `/clear` keeps the process.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Place {
     pub pane: String,
@@ -28,6 +28,10 @@ struct Record {
     #[serde(flatten)]
     place: Place,
     session: String,
+    /// The session the process last started since the record, which a
+    /// `/clear` hook can't see: its input names only the new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    current: Option<String>,
     at: String,
     used: bool,
 }
@@ -48,19 +52,17 @@ pub fn record(state: &Path, place: &Place, session: &str, at: SystemTime) -> Res
         .ok()
         .and_then(|text| serde_json::from_str::<Record>(&text).ok())
         .filter(|r| !r.used && r.session == session && r.place == *place);
-    let at = match earlier {
-        Some(earlier) => earlier.at,
-        None => humantime::format_rfc3339_nanos(at).to_string(),
-    };
-    write(
-        state,
-        &Record {
+    let record = match earlier {
+        Some(earlier) => earlier,
+        None => Record {
             place: place.clone(),
             session: session.into(),
-            at,
+            current: None,
+            at: humantime::format_rfc3339_nanos(at).to_string(),
             used: false,
         },
-    )
+    };
+    write(state, &record)
 }
 
 fn write(state: &Path, record: &Record) -> Result<()> {
@@ -73,41 +75,63 @@ fn write(state: &Path, record: &Record) -> Result<()> {
     Ok(())
 }
 
-/// The context resuming the shepherd, for a `clear` session start at the
-/// recorded `place` with an unused record and a handoff written after it.
-/// Marks the record used, then moves the handoff to `shepherd.prev.md`, so a
-/// failed move leaves the handoff where the human's fallback line names it.
-pub fn resume(state: &Path, place: &Place, input: &[u8]) -> Result<Option<String>> {
-    let source = serde_json::from_slice::<Value>(input)
-        .ok()
-        .and_then(|v| v.get("source")?.as_str().map(str::to_string));
-    if source.as_deref() != Some("clear") {
-        return Ok(None);
-    }
+/// The unused record for `place`. A record that isn't JSON, or names another
+/// pane or socket, is none; one for this pane and socket that won't parse is
+/// an error.
+fn read(state: &Path, place: &Place) -> Result<Option<Record>> {
     let path = record_path(state);
-    let mut record: Record = match fs::read_to_string(&path) {
-        Ok(text) => {
-            serde_json::from_str(&text).with_context(|| format!("parse {}", path.display()))?
-        }
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
     };
-    if record.used || record.place != *place {
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
         return Ok(None);
-    }
-    let handoff = handoff_path(state);
-    let written = match fs::metadata(&handoff).and_then(|m| m.modified()) {
-        Ok(written) => written,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("read {}", handoff.display())),
     };
-    let at = humantime::parse_rfc3339(&record.at)
-        .with_context(|| format!("parse the time in {}", path.display()))?;
-    if written <= at {
+    let socket = place.socket.to_str();
+    if value["pane"].as_str() != Some(place.pane.as_str()) || value["socket"].as_str() != socket {
         return Ok(None);
     }
+    let record: Record =
+        serde_json::from_value(value).with_context(|| format!("parse {}", path.display()))?;
+    Ok((!record.used && record.place == *place).then_some(record))
+}
+
+/// Called on every session start at `place`. Returns the context resuming the
+/// shepherd for a `clear` of the recorded session (or one `live_session`
+/// resolves to the same live session) once a handoff was written after the
+/// record; marks the record used, then moves the handoff to
+/// `shepherd.prev.md`, so a failed move leaves it where the fallback names it.
+/// Any other start only follows the process to the session it started.
+pub fn session_started(
+    state: &Path,
+    place: &Place,
+    input: &[u8],
+    live_session: &dyn Fn(&str) -> String,
+) -> Result<Option<String>> {
+    let Some((source, started)) = parse(input) else {
+        return Ok(None);
+    };
+    let Some(mut record) = read(state, place)? else {
+        return Ok(None);
+    };
+    let cleared = record.current.as_deref().unwrap_or(&record.session);
+    let of_the_recorded = live_session(cleared) == live_session(&record.session);
+    let written = match source == "clear" && of_the_recorded {
+        true => handoff_written_after(state, &record.at)?,
+        false => None,
+    };
+    let Some(written) = written else {
+        if record.current.as_deref() != Some(started.as_str()) {
+            record.current = Some(started);
+            write(state, &record)?;
+        }
+        return Ok(None);
+    };
     record.used = true;
+    record.current = Some(started);
     write(state, &record)?;
+    let handoff = handoff_path(state);
     let read = handoff.with_extension("prev.md");
     fs::rename(&handoff, &read)
         .with_context(|| format!("move {} to {}", handoff.display(), read.display()))?;
@@ -119,6 +143,26 @@ pub fn resume(state: &Path, place: &Place, input: &[u8]) -> Result<Option<String
         read.display(),
         humantime::format_rfc3339_seconds(written),
     )))
+}
+
+/// When the handoff was written, if after the record's time `at`.
+fn handoff_written_after(state: &Path, at: &str) -> Result<Option<SystemTime>> {
+    let handoff = handoff_path(state);
+    let written = match fs::metadata(&handoff).and_then(|m| m.modified()) {
+        Ok(written) => written,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("read {}", handoff.display())),
+    };
+    let at = humantime::parse_rfc3339(at)
+        .with_context(|| format!("parse the time in {}", record_path(state).display()))?;
+    Ok((written > at).then_some(written))
+}
+
+fn parse(input: &[u8]) -> Option<(String, String)> {
+    let input: Value = serde_json::from_slice(input).ok()?;
+    let source = input.get("source")?.as_str()?;
+    let session = input.get("session_id")?.as_str()?;
+    (!session.is_empty()).then(|| (source.to_string(), session.to_string()))
 }
 
 #[cfg(test)]
@@ -141,8 +185,19 @@ mod tests {
     }
 
     fn start(source: &str) -> Vec<u8> {
-        format!(r#"{{"hook_event_name":"SessionStart","source":"{source}","session_id":"new"}}"#)
-            .into_bytes()
+        start_of(source, "new")
+    }
+
+    fn start_of(source: &str, session: &str) -> Vec<u8> {
+        format!(
+            r#"{{"hook_event_name":"SessionStart","source":"{source}","session_id":"{session}"}}"#
+        )
+        .into_bytes()
+    }
+
+    /// A session start where no session continued in another.
+    fn resume(state: &Path, place: &Place, input: &[u8]) -> Result<Option<String>> {
+        session_started(state, place, input, &|s| s.to_string())
     }
 
     fn at(time: &str) -> SystemTime {
@@ -355,10 +410,92 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_record_is_an_error_not_a_resume() {
+    fn a_record_that_isnt_json_or_names_another_pane_is_no_record() {
         let state = handed_off("2026-11-18T10:05:00Z");
         fs::write(record_path(state.path()), "not json").unwrap();
+        assert_eq!(
+            resume(state.path(), &place(), &start("clear")).unwrap(),
+            None
+        );
+
+        let other = r#"{"pane": "w1:p2", "socket": "/run/herdr.sock"}"#;
+        fs::write(record_path(state.path()), other).unwrap();
+        assert_eq!(
+            resume(state.path(), &place(), &start("clear")).unwrap(),
+            None
+        );
+        assert!(handoff_path(state.path()).is_file());
+    }
+
+    #[test]
+    fn a_broken_record_for_this_pane_and_socket_is_an_error_not_a_resume() {
+        let state = handed_off("2026-11-18T10:05:00Z");
+        let broken = r#"{"pane": "w1:p1", "socket": "/run/herdr.sock", "used": "no"}"#;
+        fs::write(record_path(state.path()), broken).unwrap();
         assert!(resume(state.path(), &place(), &start("clear")).is_err());
         assert!(handoff_path(state.path()).is_file());
+    }
+
+    #[test]
+    fn a_clear_of_another_session_in_the_same_claude_adds_nothing() {
+        let state = handed_off("2026-11-18T10:05:00Z");
+        let resumed = start_of("resume", "unrelated");
+        assert_eq!(resume(state.path(), &place(), &resumed).unwrap(), None);
+
+        assert_eq!(
+            resume(state.path(), &place(), &start("clear")).unwrap(),
+            None
+        );
+        assert!(handoff_path(state.path()).is_file());
+        assert_eq!(saved(state.path())["used"], false);
+    }
+
+    #[test]
+    fn a_clear_after_an_earlier_clear_moved_the_claude_on_adds_nothing() {
+        let state = tempfile::tempdir().unwrap();
+        record(state.path(), &place(), "s-old", at(RECORDED_AT)).unwrap();
+        assert_eq!(
+            resume(state.path(), &place(), &start_of("clear", "s-mid")).unwrap(),
+            None
+        );
+        write_handoff(state.path(), "2026-11-18T10:05:00Z");
+
+        assert_eq!(
+            resume(state.path(), &place(), &start("clear")).unwrap(),
+            None
+        );
+        assert_eq!(saved(state.path())["current"], "new");
+    }
+
+    #[test]
+    fn returning_to_the_recorded_session_before_the_clear_resumes() {
+        let state = handed_off("2026-11-18T10:05:00Z");
+        resume(state.path(), &place(), &start_of("resume", "unrelated")).unwrap();
+        resume(state.path(), &place(), &start_of("resume", "s-old")).unwrap();
+
+        assert!(
+            resume(state.path(), &place(), &start("clear"))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_clear_of_a_session_the_recorded_one_continued_in_resumes() {
+        let continued = |s: &str| match s {
+            "s-old" => "s-cont".to_string(),
+            other => other.to_string(),
+        };
+        let state = handed_off("2026-11-18T10:05:00Z");
+        session_started(
+            state.path(),
+            &place(),
+            &start_of("resume", "s-cont"),
+            &continued,
+        )
+        .unwrap();
+
+        let told = session_started(state.path(), &place(), &start("clear"), &continued).unwrap();
+        assert!(told.is_some());
     }
 }

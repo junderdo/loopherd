@@ -476,6 +476,31 @@ fn a_clear_after_the_shepherds_handoff_resumes_it_once() {
 }
 
 #[test]
+fn a_clear_of_another_conversation_in_the_shepherds_claude_does_not_resume() {
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+    let pid = as_shepherds_claude(&sandbox, "s1", 170_000);
+    let state = sandbox.dir.path().join("state/loopherd");
+    sandbox
+        .loopherd(&["watch", "--timeout", "0"])
+        .env("CLAUDE_PID", &pid)
+        .env("HERDR_PANE_ID", "w9:p1")
+        .env("HERDR_SOCKET_PATH", "/run/live.sock")
+        .output()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    fs::create_dir_all(state.join("handoffs")).unwrap();
+    fs::write(state.join("handoffs/shepherd.md"), "## State\n").unwrap();
+
+    let resumed = sandbox.session_hook("w9:p1", &pid, &session_start("resume", "unrelated"));
+    assert!(resumed.stdout.is_empty(), "{resumed:?}");
+    let cleared = sandbox.session_hook("w9:p1", &pid, &session_start("clear", "s2"));
+
+    assert!(cleared.stdout.is_empty(), "{cleared:?}");
+    assert!(state.join("handoffs/shepherd.md").is_file());
+}
+
+#[test]
 fn an_unreadable_shepherd_record_warns_and_the_hook_still_succeeds() {
     let sandbox = Sandbox::new();
     let state = sandbox.dir.path().join("state/loopherd");
@@ -486,7 +511,11 @@ fn an_unreadable_shepherd_record_warns_and_the_hook_still_succeeds() {
             r#""session_id": "old", "socket": "/run/live.sock","#,
         );
     fs::write(state.join("ledger.json"), ledger).unwrap();
-    fs::write(state.join("shepherd.json"), "not json").unwrap();
+    fs::write(
+        state.join("shepherd.json"),
+        r#"{"pane": "w9:p1", "socket": "/run/live.sock", "used": "no"}"#,
+    )
+    .unwrap();
     let pid = as_shepherds_claude(&sandbox, "s1", 1_000);
 
     let shepherd = sandbox.session_hook("w9:p1", &pid, &session_start("clear", "s2"));
@@ -496,6 +525,8 @@ fn an_unreadable_shepherd_record_warns_and_the_hook_still_succeeds() {
         "{}",
         stderr(&shepherd)
     );
+    let elsewhere = sandbox.session_hook("w9:p2", &pid, &session_start("clear", "s3"));
+    assert_eq!(stderr(&elsewhere), "");
 
     let member = sandbox.session_hook("w1:p1", "", &session_start("clear", "new"));
     assert!(member.stdout.is_empty(), "{member:?}");

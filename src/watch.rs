@@ -137,10 +137,10 @@ pub struct Wake {
 }
 
 impl Wake {
-    pub fn mark_read(self) -> Result<()> {
+    pub fn mark_read(self, warn: &mut dyn FnMut(String)) -> Result<()> {
         self.pending.into_iter().try_for_each(Pending::save)?;
         self.fired.map_or(Ok(()), Fired::save)?;
-        self.handoff.map_or(Ok(()), ShepherdHandoff::mark)
+        self.handoff.map_or(Ok(()), |h| h.mark(warn))
     }
 }
 
@@ -1602,7 +1602,7 @@ mod tests {
 
     fn printed(wake: Wake) -> Vec<String> {
         let lines = wake.lines.clone();
-        wake.mark_read().unwrap();
+        wake.mark_read(&mut |_| {}).unwrap();
         lines
     }
 
@@ -1700,7 +1700,7 @@ mod tests {
             &mut steps(|_| {}),
             &mut |_| {},
         );
-        first.unwrap().unwrap().mark_read().unwrap();
+        first.unwrap().unwrap().mark_read(&mut |_| {}).unwrap();
 
         let wake = watch(&herdr, &ledger, dir.path(), &EVERY, &mut clock, &mut |_| {});
 

@@ -368,8 +368,8 @@ and, once per session past your limit, adds `shepherd handoff <n>k over
    > `continue as the loopherd shepherd from /home/<you>/.local/state/loopherd/handoffs/shepherd.md`
 
    and end your turn. Never `/clear` yourself. The watch that told you
-   recorded your pane and Claude, so the first `/clear` there after your
-   handoff is written moves it to `handoffs/shepherd.prev.md` and adds the
+   recorded your pane, Claude and session, so the first `/clear` of this
+   session after your handoff is written moves it to `handoffs/shepherd.prev.md` and adds the
    resume to the new session's context.
 
 In a fresh session, given that resume (naming the `.prev.md` path) or the
