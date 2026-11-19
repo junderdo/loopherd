@@ -98,7 +98,9 @@ fails a plain or startup `revive` until that `--name` run adopts it. A
 lead can't make worktrees beside its own, so `loopherd spawn --worktree`
 for its herd is yours; it uses `add`. A lead can still write most of
 its repo's shared `.git`, so git you run in that repo or its worktrees
-may run a command it planted; loopherd's own git doesn't (D89).
+may run a command it planted; loopherd's git for a herd's members
+doesn't (D89). Check a hand-spawned entry's `repo` in the ledger before
+`retire --close` or `release` on it.
 
 ## Notify
 
