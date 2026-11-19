@@ -1598,6 +1598,7 @@ fn shepherd_handoff(paths: &Paths, state: &Path) -> Option<context::ShepherdHand
         limit,
         pane: own_pane().as_deref(),
         socket: socket_from_env().as_deref(),
+        shell_pid: &|| CliHerdr.shell_pid(own_pane()?.as_str()).ok().flatten(),
     })
 }
 

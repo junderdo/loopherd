@@ -122,7 +122,7 @@ why.
 `loopherd: open view beside shepherd` (`loopherd.view-beside-shepherd`)
 splits the view into a pane right of the shepherd's, the one its last
 handoff recorded, leaving focus where it was. With no shepherd recorded,
-or its pane gone or no longer running the shepherd's Claude, it splits
+or its pane gone or no longer the shepherd's, it splits
 right of the focused pane (the popup when that fails too), and the view
 says why. Bind it the same way, with its own key. Its event hooks record a member going blocked, or its pane exiting
 or closing, or its tab or workspace closing, so the next `loopherd watch`

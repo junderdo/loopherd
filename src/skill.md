@@ -615,7 +615,7 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   closes; the README gives the `[[keys.command]]` snippet that binds it to
   a key. Its `view-beside-shepherd` action splits the view right of the
   shepherd's pane recorded at its last handoff, leaving focus where it
-  was, else right of the focused pane with a note saying why (D87). Never edit the human's herdr config
+  was, else right of the focused pane with a note saying why (D87, D94). Never edit the human's herdr config
   to add it. Its event hooks
   run `loopherd herdr-event-hook`, recording a member going `blocked` or
   `gone` in its mailbox for the next watch, and following a member's pane
