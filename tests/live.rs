@@ -1270,13 +1270,26 @@ impl IsolatedServer {
 }
 
 impl IsolatedServer {
+    fn wait_for_agent_in(&self, pane: &str) {
+        for _ in 0..100 {
+            let agents = self.json(&["agent", "list"]);
+            let listed = agents["result"]["agents"].as_array().unwrap();
+            if listed.iter().any(|a| a["pane_id"] == pane) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("herdr lists no agent in {pane}");
+    }
+
     /// Runs `command` in `pane` and returns the pid and start time of the
-    /// process it starts under the pane's shell, standing in for a Claude.
+    /// shell's child whose argv is `command`'s words, standing in for a Claude.
     fn run_in(&self, pane: &str, command: &str) -> (u32, u64) {
         let info = self.json(&["pane", "process-info", "--pane", pane]);
         let shell = info["result"]["process_info"]["shell_pid"]
             .as_u64()
             .unwrap();
+        let argv: Vec<&str> = command.split_whitespace().collect();
         self.ok(&["pane", "run", pane, command]);
         for _ in 0..50 {
             for entry in std::fs::read_dir("/proc").unwrap().flatten() {
@@ -1287,15 +1300,30 @@ impl IsolatedServer {
                     continue;
                 };
                 let fields: Vec<&str> = fields.split_whitespace().collect();
-                if fields[1].parse::<u64>().ok() == Some(shell) {
+                if fields[1].parse::<u64>().ok() != Some(shell) {
+                    continue;
+                }
+                let cmdline = std::fs::read(entry.path().join("cmdline")).unwrap_or_default();
+                let args: Vec<&[u8]> = cmdline
+                    .split(|b| *b == 0)
+                    .filter(|a| !a.is_empty())
+                    .collect();
+                if args.iter().copied().eq(argv.iter().map(|a| a.as_bytes())) {
                     let pid = entry.file_name().to_string_lossy().parse().unwrap();
                     return (pid, fields[19].parse().unwrap());
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        panic!("nothing started under pane {pane}'s shell {shell}");
+        panic!("no `{command}` started under pane {pane}'s shell {shell}");
     }
+}
+
+/// Field 22 of `/proc/<pid>/stat`: clock ticks since boot, as loopherd reads it.
+fn proc_start(pid: u64) -> u64 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let (_, fields) = stat.rsplit_once(')').unwrap();
+    fields.split_whitespace().nth(19).unwrap().parse().unwrap()
 }
 
 /// A workspace split into `w1:p1`, focused, and `w1:p2` right of it.
@@ -1347,15 +1375,42 @@ fn the_beside_shepherd_action_splits_the_view_right_of_the_recorded_shepherd() {
     if !live_enabled() {
         return;
     }
+    view_opens_beside_the_recorded_shepherd(false);
+}
+
+#[test]
+fn a_recorded_shell_running_an_agent_counts_as_the_shepherds_pane() {
+    if !live_enabled() {
+        return;
+    }
+    view_opens_beside_the_recorded_shepherd(true);
+}
+
+/// Records `w1:p2` as the shepherd's, its Claude a `sleep` herdr detects as
+/// one by its name, with the pane's shell when `with_shell`, then checks the
+/// action splits the view right of it and the view's pane closes with it.
+fn view_opens_beside_the_recorded_shepherd(with_shell: bool) {
     let server = IsolatedServer::start();
     two_panes(&server);
     let state = server.home.path().join(".local/state/loopherd");
     std::fs::create_dir_all(&state).unwrap();
-    let (pid, start) = server.run_in("w1:p2", "sleep 300");
-    let record = serde_json::json!({
+    let bin = server.home.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink("/bin/sleep", bin.join("claude")).unwrap();
+    let claude = format!("{} 300", bin.join("claude").display());
+    let (pid, start) = server.run_in("w1:p2", &claude);
+    server.wait_for_agent_in("w1:p2");
+    let mut record = serde_json::json!({
         "pane": "w1:p2", "socket": server.socket, "process": {"pid": pid, "start": start},
         "session": "s-1", "at": "2026-11-19T00:00:00Z", "used": true,
     });
+    if with_shell {
+        let info = server.json(&["pane", "process-info", "--pane", "w1:p2"]);
+        let shell = info["result"]["process_info"]["shell_pid"]
+            .as_u64()
+            .unwrap();
+        record["shell"] = serde_json::json!({"pid": shell, "start": proc_start(shell)});
+    }
     std::fs::write(state.join("shepherd.json"), record.to_string()).unwrap();
 
     server.ok(&[

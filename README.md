@@ -122,12 +122,14 @@ why.
 `loopherd: open view beside shepherd` (`loopherd.view-beside-shepherd`)
 splits the view into a pane right of the shepherd's, the one its last
 handoff recorded, leaving focus where it was. With no shepherd recorded,
-or its pane gone or no longer running the shepherd's Claude, it splits
-right of the focused pane (the popup when that fails too), and the view
-says why. Bind it the same way, with its own key. Its event hooks record a member going blocked, or its pane exiting
-or closing, or its tab or workspace closing, so the next `loopherd watch`
-reports it even when none was running. They follow a member's pane moved
-to another tab or workspace.
+or its pane gone or no longer the shepherd's, it splits right of the
+focused pane (the popup when that fails too), and the view says why. Bind
+it the same way, with its own key.
+
+The plugin's event hooks record a member going blocked, or its pane
+exiting or closing, or its tab or workspace closing, so the next
+`loopherd watch` reports it even when none was running. They follow a
+member's pane moved to another tab or workspace.
 
 A Ctrl-click on a GitHub PR link in any pane shows the member that owns
 the PR in a popup (herd, live status, template, review round, last

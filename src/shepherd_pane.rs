@@ -142,7 +142,7 @@ mod tests {
             },
         };
         let at = humantime::parse_rfc3339(at).unwrap();
-        shepherd_resume::record(state, &place, "s1", at).unwrap();
+        shepherd_resume::record(state, &place, None, "s1", at).unwrap();
     }
 
     fn handed_off(state: &Path, written: &str) -> std::path::PathBuf {
