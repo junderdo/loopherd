@@ -71,7 +71,7 @@ use crate::herd_view::Options;
 use crate::herdr::events::SocketSubscriber;
 use crate::herdr::{CliHerdr, Herdr, socket_from_env};
 use crate::lead::LeadRequest;
-use crate::ledger::{FileLedger, Ledger, Process};
+use crate::ledger::{FileLedger, Ledger, Outcome, Process};
 use crate::process::Procs;
 use crate::prompt::prompt;
 use crate::release::release;
@@ -249,9 +249,15 @@ enum Command {
         json: bool,
     },
     /// How each herd's work flowed: per retired member, time to its first
-    /// `done` report, review rounds, time waiting on merge and in total, with a
-    /// summary per herd and open members listed apart. Leads are left out.
-    /// Read-only, and marks no report read.
+    /// `done` report, review rounds, time waiting on merge and in total, and
+    /// its outcome, with a summary per herd and open members listed apart.
+    /// The `outcome` column is how the run ended: `merged` (feed retired it
+    /// with its template's `merged` check passing), `closed` (feed retired it
+    /// without that), `released` (`loopherd release`), `retired` (a plain
+    /// `loopherd retire`), or `-` for a run retired before outcomes were
+    /// recorded. The summary's medians and maxima cover only `merged` runs
+    /// and it counts the other outcomes apart. Leads are left out. Read-only,
+    /// and marks no report read.
     Stats {
         /// Only this herd.
         #[arg(long)]
@@ -925,7 +931,7 @@ fn run_retire(name: &str, close: bool, force: bool) -> Result<i32> {
         refuse_unfinished(&CliHerdr, &ledger, name, &ledger.reports_dir()?)?;
     }
     if !close {
-        retire(&mut ledger, name, SystemTime::now())?;
+        retire(&mut ledger, name, SystemTime::now(), Outcome::Retired)?;
         println!("retired {name}");
         for warning in notify::forget_marks(&ledger.reports_dir()?, name) {
             eprintln!("{warning}");
@@ -939,6 +945,7 @@ fn run_retire(name: &str, close: bool, force: bool) -> Result<i32> {
         &mut ledger,
         name,
         SystemTime::now(),
+        Outcome::Retired,
         &mailboxes,
         pane.as_ref(),
         &mut lines,

@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::herd::{AddRequest, Paths, Queue, lead_switches, members, queue, resolve};
 use crate::herdr::Herdr;
-use crate::ledger::{AfterMerge, AgentRecord, Ledger, Process};
+use crate::ledger::{AfterMerge, AgentRecord, Ledger, Outcome, Process};
 use crate::lock::Lock;
 use crate::pause;
 use crate::process::{Procs, live};
@@ -298,7 +298,8 @@ struct Reaped {
 /// member whose after_merge is due runs its merged check first; once that
 /// passes, its after_merge is queued and its done check waits for the next
 /// feed, so a watch sees the note before it retires. The rest are retired
-/// and closed when their done check passes.
+/// and closed when their done check passes: as merged when their merged
+/// check passed then or earlier, else as closed (D92).
 fn reap(
     herdr: &dyn Herdr,
     ledger: &mut dyn Ledger,
@@ -392,6 +393,25 @@ fn reap(
                 reaped.retired += 1;
             }
             Ok(true) => {
+                let outcome = if member.after_merge.is_some() {
+                    Outcome::Merged
+                } else {
+                    let check = template.and_then(|t| queue.merged.get(t));
+                    let passed = check.map(|check| match check.render(&member, params) {
+                        Ok(command) => run_check(&command, &queue.repo, req.command_timeout),
+                        Err(e) => Err(format!("{e:#}")),
+                    });
+                    match passed {
+                        Some(Ok(true)) => Outcome::Merged,
+                        Some(Err(why)) => {
+                            lines.push(format!(
+                                "warning: merged check failed {name}: {why}; recording it closed"
+                            ));
+                            Outcome::Closed
+                        }
+                        Some(Ok(false)) | None => Outcome::Closed,
+                    }
+                };
                 let mut out = vec![];
                 let own_pane = req.own_pane.as_deref().map(|id| Pane {
                     id,
@@ -404,6 +424,7 @@ fn reap(
                     ledger,
                     name,
                     now,
+                    outcome,
                     &req.mailboxes,
                     own_pane.as_ref(),
                     &mut out,
@@ -1028,6 +1049,7 @@ mod tests {
             created: "2026-11-01T00:00:00Z".into(),
             retired,
             retired_at: None,
+            outcome: None,
             released_at: None,
             herd: herd.map(str::to_string),
             template: herd.map(|_| "pr".to_string()),
@@ -2771,6 +2793,106 @@ mod tests {
             [format!("after_merge never ran: {never}")]
         );
         assert_eq!(setup.read("log"), None);
+    }
+
+    const BOTH_CHECKS: &str =
+        "done = \"test -f done-{number}\"\nmerged = \"test -f merged-{number}\"\n";
+
+    #[test]
+    fn a_member_retired_with_its_merged_check_passing_ends_merged() {
+        let setup = Setup::after_merge_checks("[]", BOTH_CHECKS, "");
+        let herdr = herdr();
+        let mut ledger = fed_one(&setup, &herdr);
+        setup.touch("merged-1");
+        setup.touch("done-1");
+
+        setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(ledger.0["zpr-1"].outcome, Some(Outcome::Merged));
+    }
+
+    #[test]
+    fn a_member_retired_with_its_merged_check_failing_ends_closed() {
+        let setup = Setup::after_merge_checks("[]", BOTH_CHECKS, "");
+        let herdr = herdr();
+        let mut ledger = fed_one(&setup, &herdr);
+        setup.touch("done-1");
+
+        setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(ledger.0["zpr-1"].outcome, Some(Outcome::Closed));
+    }
+
+    #[test]
+    fn a_member_retired_from_a_template_without_a_merged_check_ends_closed() {
+        let setup = Setup::with_done("cat tasks", 1, "test -f done-{number}");
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        setup.tasks("1\n");
+        setup.feed(&herdr, &mut ledger, false).unwrap();
+        setup.touch("done-1");
+
+        setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(ledger.0["zpr-1"].outcome, Some(Outcome::Closed));
+    }
+
+    #[test]
+    fn a_member_retired_with_its_merged_check_erroring_ends_closed_with_a_warning() {
+        let checks = "done = \"exit 0\"\nmerged = \"exit 2\"\n";
+        let setup = Setup::after_merge_checks("[]", checks, "");
+        let herdr = herdr();
+        let mut ledger = fed_one(&setup, &herdr);
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(
+            fed.lines[0],
+            "warning: merged check failed zpr-1: exit 2; recording it closed"
+        );
+        assert_eq!(ledger.0["zpr-1"].outcome, Some(Outcome::Closed));
+    }
+
+    #[test]
+    fn a_member_retired_after_its_after_merge_ran_ends_merged() {
+        let setup = Setup::after_merge(r#"["echo ran >> log"]"#, "");
+        let herdr = herdr();
+        let mut ledger = fed_one(&setup, &herdr);
+        setup.touch("merged-1");
+        setup.feed(&herdr, &mut ledger, false).unwrap();
+        // The merged check isn't run again once after_merge is noted.
+        fs::remove_file(setup.repo.path().join("merged-1")).unwrap();
+        setup.touch("done-1");
+
+        setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert!(ledger.0["zpr-1"].retired);
+        assert_eq!(ledger.0["zpr-1"].outcome, Some(Outcome::Merged));
+    }
+
+    #[test]
+    fn a_member_merged_between_its_merged_and_done_checks_ends_merged() {
+        let checks = "done = \"touch merged-{number}\"\nmerged = \"test -f merged-{number}\"\n";
+        let setup = Setup::after_merge_checks(r#"["echo ran >> log"]"#, checks, "");
+        let herdr = herdr();
+        let mut ledger = fed_one(&setup, &herdr);
+
+        setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert!(ledger.0["zpr-1"].retired);
+        assert_eq!(ledger.0["zpr-1"].outcome, Some(Outcome::Merged));
+    }
+
+    #[test]
+    fn a_member_done_before_its_merged_check_passes_ends_closed() {
+        let checks = "done = \"exit 0\"\nmerged = \"exit 1\"\n";
+        let setup = Setup::after_merge_checks(r#"["echo ran >> log"]"#, checks, "");
+        let herdr = herdr();
+        let mut ledger = fed_one(&setup, &herdr);
+
+        setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(ledger.0["zpr-1"].outcome, Some(Outcome::Closed));
     }
 
     #[test]

@@ -11,6 +11,7 @@ struct Member<'a> {
     created: &'a str,
     retired: bool,
     retired_at: Option<&'a str>,
+    outcome: Option<&'a str>,
 }
 
 impl<'a> Member<'a> {
@@ -22,12 +23,21 @@ impl<'a> Member<'a> {
             created,
             retired: false,
             retired_at: None,
+            outcome: None,
         }
     }
 
-    fn retired(mut self, at: &'a str) -> Self {
+    /// Retired by feed with its merged check passing.
+    fn retired(self, at: &'a str) -> Self {
+        self.ended(at, Some("merged"))
+    }
+
+    /// Retired with `outcome`; `None` as in ledgers written before retire
+    /// recorded it.
+    fn ended(mut self, at: &'a str, outcome: Option<&'a str>) -> Self {
         self.retired = true;
         self.retired_at = Some(at);
+        self.outcome = outcome;
         self
     }
 
@@ -48,14 +58,18 @@ impl<'a> Member<'a> {
     }
 
     fn json(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut json = serde_json::json!({
             "name": self.name, "pane_id": "w1:p1", "session_id": null, "repo": "/",
             "worktree": null, "workspace": "w1", "prompt": null, "prompt_sent": true,
             "created": self.created, "retired": self.retired,
             "retired_at": self.retired_at, "herd": self.herd,
             "template": self.herd.map(|_| "card"),
             "role": if self.lead { Some("lead") } else { None },
-        })
+        });
+        if let Some(outcome) = self.outcome {
+            json["outcome"] = outcome.into();
+        }
+        json
     }
 }
 
@@ -165,7 +179,8 @@ fn a_retired_member_gets_a_row_of_its_flow() {
             "2h00m",
             "2",
             "1h00m",
-            "5h00m"
+            "5h00m",
+            "merged"
         ],
         "{out}"
     );
@@ -195,7 +210,7 @@ fn each_herd_gets_a_summary_of_medians_and_maxima() {
 
     assert!(
         out.contains(
-            "summary: 2 members; first done median 1h30m, max 2h00m; rounds median 1.5; \
+            "summary: 2 members: 2 merged; first done median 1h30m, max 2h00m; rounds median 1.5; \
              merge wait median 1h30m, max 2h00m; total median 4h00m, max 5h00m"
         ),
         "{out}"
@@ -219,7 +234,7 @@ fn leads_are_left_out_and_unretired_members_are_listed_as_open() {
     let out = stdout(&run(state.path(), &[]));
 
     assert!(!out.contains("lead-h"), "{out}");
-    assert!(out.contains("summary: 1 members;"), "{out}");
+    assert!(out.contains("summary: 1 members: 1 merged;"), "{out}");
     let open = out
         .lines()
         .skip_while(|l| !l.trim_start().starts_with("open"))
@@ -335,7 +350,7 @@ fn json_gives_the_same_data() {
         serde_json::json!({
             "name": "lh-1", "template": "card", "started": "2026-11-01T00:00:00Z",
             "first_done_secs": 7200, "rounds": 2, "merge_wait_secs": 3600,
-            "total_secs": 18000,
+            "total_secs": 18000, "outcome": "merged",
         })
     );
     assert_eq!(herd["summary"]["members"], 1);
@@ -514,7 +529,7 @@ fn a_member_without_a_done_keeps_its_row_but_not_the_rounds_median() {
         serde_json::json!({
             "name": "lh-2", "template": "card", "started": "2026-11-02T00:00:00Z",
             "first_done_secs": null, "rounds": 0, "merge_wait_secs": null,
-            "total_secs": 3600,
+            "total_secs": 3600, "outcome": "merged",
         })
     );
     assert_eq!(herd["summary"]["rounds_median"], 1.0);
@@ -671,7 +686,8 @@ fn an_unreadable_mailbox_warns_and_its_row_keeps_the_ledger_columns() {
             "2h00m",
             "1",
             "3h00m",
-            "5h00m"
+            "5h00m",
+            "merged"
         ]
     );
     assert_eq!(
@@ -684,7 +700,8 @@ fn an_unreadable_mailbox_warns_and_its_row_keeps_the_ledger_columns() {
             "-",
             "-",
             "-",
-            "3h00m"
+            "3h00m",
+            "merged"
         ]
     );
 }
@@ -758,5 +775,117 @@ fn json_gives_null_rounds_for_a_member_whose_mailbox_is_unreadable() {
         retired.get("rounds"),
         Some(&serde_json::Value::Null),
         "{retired}"
+    );
+}
+
+/// One run per outcome, plus one from a ledger written before outcomes: the
+/// merged lh-1 and lh-2 took 2h and 4h, each with one `done` an hour in.
+fn a_run_of_each_outcome(state: &Path) {
+    write_ledger(
+        state,
+        &[
+            Member::new("lh-1", "2026-11-01T00:00:00Z")
+                .ended("2026-11-01T02:00:00Z", Some("merged")),
+            Member::new("lh-2", "2026-11-02T00:00:00Z")
+                .ended("2026-11-02T04:00:00Z", Some("merged")),
+            Member::new("lh-3", "2026-11-03T00:00:00Z")
+                .ended("2026-11-03T20:00:00Z", Some("closed")),
+            Member::new("lh-4", "2026-11-04T00:00:00Z")
+                .ended("2026-11-04T21:00:00Z", Some("released")),
+            Member::new("lh-5", "2026-11-05T00:00:00Z")
+                .ended("2026-11-05T22:00:00Z", Some("retired")),
+            Member::new("lh-6", "2026-11-06T00:00:00Z").ended("2026-11-06T23:00:00Z", None),
+        ],
+    );
+    for day in 1..=6 {
+        let done = format!("2026-11-0{day}T01:00:00Z");
+        write_mailbox(state, &format!("lh-{day}"), &[(&done, "done")]);
+    }
+}
+
+#[test]
+fn each_row_shows_how_its_run_ended_and_a_dash_for_runs_retired_before_outcomes() {
+    let state = tempfile::tempdir().unwrap();
+    a_run_of_each_outcome(state.path());
+
+    let out = stdout(&run(state.path(), &[]));
+    let herd = &json(state.path(), &[])["herds"][0];
+
+    let last_cells: Vec<&str> = out
+        .lines()
+        .filter(|l| l.trim_start().starts_with("member") || l.trim_start().starts_with("lh-"))
+        .map(|l| l.split_whitespace().last().unwrap())
+        .collect();
+    assert_eq!(
+        last_cells,
+        [
+            "outcome", "merged", "merged", "closed", "released", "retired", "-"
+        ],
+        "{out}"
+    );
+    let outcomes: Vec<&serde_json::Value> = herd["retired"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| &r["outcome"])
+        .collect();
+    assert_eq!(
+        outcomes,
+        ["merged", "merged", "closed", "released", "retired"]
+            .map(serde_json::Value::from)
+            .iter()
+            .chain([&serde_json::Value::Null])
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn medians_and_maxima_cover_only_merged_runs_and_the_summary_counts_the_rest_apart() {
+    let state = tempfile::tempdir().unwrap();
+    a_run_of_each_outcome(state.path());
+
+    let out = stdout(&run(state.path(), &[]));
+    let summary = &json(state.path(), &[])["herds"][0]["summary"];
+
+    assert!(
+        out.contains(
+            "summary: 6 members: 2 merged, 1 closed, 1 released, 1 retired, 1 unrecorded; \
+             first done median 1h00m, max 1h00m; rounds median 1; \
+             merge wait median 2h00m, max 3h00m; total median 3h00m, max 4h00m"
+        ),
+        "{out}"
+    );
+    assert_eq!(
+        *summary,
+        serde_json::json!({
+            "members": 6,
+            "outcomes": {
+                "merged": 2, "closed": 1, "released": 1, "retired": 1, "unrecorded": 1,
+            },
+            "first_done": {"median_secs": 3600, "max_secs": 3600},
+            "rounds_median": 1.0,
+            "merge_wait": {"median_secs": 7200, "max_secs": 10800},
+            "total": {"median_secs": 10800, "max_secs": 14400},
+        })
+    );
+}
+
+#[test]
+fn a_herd_with_no_merged_run_has_no_medians() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[Member::new("lh-1", "2026-11-01T00:00:00Z").ended("2026-11-01T05:00:00Z", None)],
+    );
+    write_mailbox(state.path(), "lh-1", &[("2026-11-01T02:00:00Z", "done")]);
+
+    let out = stdout(&run(state.path(), &[]));
+
+    assert!(
+        out.contains(
+            "summary: 1 members: 0 merged, 1 unrecorded; first done median -, max -; \
+             rounds median -; merge wait median -, max -; total median -, max -"
+        ),
+        "{out}"
     );
 }

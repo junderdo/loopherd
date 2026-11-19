@@ -68,6 +68,19 @@ fn retire_removes_the_members_notify_marks_and_leaves_other_files() {
 }
 
 #[test]
+fn retire_records_the_outcome_retired() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+
+    let out = retire(state.path());
+
+    assert!(out.status.success(), "{out:?}");
+    let ledger = fs::read_to_string(state.path().join("loopherd/ledger.json")).unwrap();
+    let ledger: serde_json::Value = serde_json::from_str(&ledger).unwrap();
+    assert_eq!(ledger["lh-1"]["outcome"], "retired");
+}
+
+#[test]
 fn retire_without_notify_marks_is_not_an_error() {
     let state = tempfile::tempdir().unwrap();
     write_ledger(state.path());

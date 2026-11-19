@@ -862,6 +862,7 @@ mod tests {
             created: "2026-11-01T00:00:00Z".into(),
             retired,
             retired_at: None,
+            outcome: None,
             released_at: None,
             herd: herd.map(Into::into),
             template: None,
