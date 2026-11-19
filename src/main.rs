@@ -1489,7 +1489,10 @@ fn run_shepherd_wait(state: &Path, fd: std::os::fd::RawFd) -> Result<i32> {
     let _claim = match restart::adopt_claim(state, context::SHEPHERD, fd) {
         Ok(claim) => claim,
         Err(e) => {
-            shepherd_restart::give_up(&waiter, &format!("{e:#}"), &mut notify)?;
+            if let Err(unsaid) = shepherd_restart::refused(&waiter, &format!("{e:#}"), &mut notify)
+            {
+                eprintln!("loopherd restart-wait: warning: {unsaid:#}");
+            }
             return Err(e);
         }
     };
