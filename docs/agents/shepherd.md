@@ -96,7 +96,9 @@ names each running lead without its sandbox; `loopherd revive --name
 before loopherd kept its record (`<config dir>/sandbox/<lead>.lead.json`)
 fails a plain or startup `revive` until that `--name` run adopts it. A
 lead can't make worktrees beside its own, so `loopherd spawn --worktree`
-for its herd is yours; it uses `add`.
+for its herd is yours; it uses `add`. A lead can still write most of
+its repo's shared `.git`, so git you run in that repo or its worktrees
+may run a command it planted; loopherd's own git doesn't (D89).
 
 ## Notify
 
