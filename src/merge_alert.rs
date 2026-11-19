@@ -9,9 +9,9 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::github::Merges;
+use crate::github::{self, Merges, Pr};
 use crate::herd::{self, Paths};
-use crate::notify::{Kind, Waiting};
+use crate::notify::{self, Kind, Waiting};
 use crate::report::{self, Body};
 
 /// The least time between two lookups, across every watch the lead arms.
@@ -20,6 +20,18 @@ const POLL_EVERY: Duration = Duration::from_secs(60);
 /// How far behind a lookup the next one starts, so a merge GitHub's search
 /// indexes late is still found.
 const SEARCH_LAG: Duration = Duration::from_secs(15 * 60);
+
+/// How long without a successful lookup before its merges come as one summary.
+const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
+
+/// How far behind the local clock a new window starts, for GitHub's clock.
+const CLOCK_SKEW: Duration = Duration::from_secs(5);
+
+/// How long wakes may hold a due lookup off before it runs on a waking round.
+const WAKES_HOLD_OFF: Duration = Duration::from_secs(15 * 60);
+
+/// How long the default branch is kept before it's asked again.
+const BRANCH_EVERY: Duration = Duration::from_secs(60 * 60);
 
 /// One lead's merge lookups, from the lead's watch.
 pub struct MergeAlerts {
@@ -37,9 +49,14 @@ pub struct MergeAlerts {
 struct State {
     created: String,
     /// The earliest merge time the next lookup asks for.
-    since: String,
-    polled: String,
+    #[serde(with = "rfc3339")]
+    since: SystemTime,
+    #[serde(with = "rfc3339")]
+    polled: SystemTime,
     branch: Option<String>,
+    /// When `branch` was asked; `None` asks again.
+    #[serde(default, with = "rfc3339::option")]
+    branched: Option<SystemTime>,
 }
 
 impl MergeAlerts {
@@ -54,37 +71,67 @@ impl MergeAlerts {
     }
 
     /// The merges to alert at `now`, when the herd file asks for them and a
-    /// lookup is due. A lead's first lookup only sets the start of its
-    /// window to `now`. Repeats are left to `notify::send`'s marks.
+    /// lookup is due. A lead's first lookup only starts its window. After
+    /// over [`STALE_AFTER`] without a successful one, the merges not yet sent
+    /// come as one summary. On a `waking` round a lookup waits, up to
+    /// [`WAKES_HOLD_OFF`]. Repeats are left to `notify::send`'s marks. A
+    /// failure warns once a streak.
     pub fn poll(
         &mut self,
         paths: &Paths,
         merges: &dyn Merges,
         now: SystemTime,
+        waking: bool,
         warn: &mut dyn FnMut(&str),
-    ) -> Result<Vec<Waiting>> {
-        let repo = match herd::merge_alerts(paths, &self.herd) {
-            Ok(Some(repo)) => repo,
-            Ok(None) => return Ok(vec![]),
-            Err(e) => return self.failed(&e, warn),
+    ) -> Vec<Waiting> {
+        match self.try_poll(paths, merges, now, waking) {
+            Ok(Some(found)) => {
+                self.failing = false;
+                found
+            }
+            Ok(None) => vec![],
+            Err(e) => self.failed(&e, warn),
+        }
+    }
+
+    /// `None` when no lookup ran and was saved.
+    fn try_poll(
+        &mut self,
+        paths: &Paths,
+        merges: &dyn Merges,
+        now: SystemTime,
+        waking: bool,
+    ) -> Result<Option<Vec<Waiting>>> {
+        let Some(repo) = herd::merge_alerts(paths, &self.herd)? else {
+            return Ok(None);
         };
         let Some(mut state) = self.load()?.filter(|s| s.created == self.created) else {
             self.save(&State {
                 created: self.created.clone(),
-                since: seconds(now),
-                polled: seconds(now),
+                since: now - CLOCK_SKEW,
+                polled: now,
                 branch: None,
+                branched: None,
             })?;
-            return Ok(vec![]);
+            return Ok(None);
         };
-        if parse(&state.polled)? + POLL_EVERY > now {
-            return Ok(vec![]);
+        // A `polled` ahead of `now` is a clock that jumped back, so it's due.
+        let since_poll = now.duration_since(state.polled).unwrap_or(POLL_EVERY);
+        if since_poll < POLL_EVERY || (waking && since_poll < WAKES_HOLD_OFF) {
+            return Ok(None);
         }
-        state.polled = seconds(now);
-        let since = parse(&state.since)?.max(self.revived()?.unwrap_or(SystemTime::UNIX_EPOCH));
-        let found = match &state.branch {
-            Some(branch) => Ok(branch.clone()),
-            None => merges.default_branch(&repo),
+        state.polled = now;
+        let revived = self.revived()?.filter(|at| *at <= now);
+        let since = state.since.max(revived.unwrap_or(SystemTime::UNIX_EPOCH));
+        // Ahead of `now`, it was saved by a clock running ahead.
+        let since = if since > now { now - SEARCH_LAG } else { since };
+        let fresh = |at: SystemTime| now.duration_since(at).is_ok_and(|d| d < BRANCH_EVERY);
+        let found = match (&state.branch, state.branched) {
+            (Some(branch), Some(at)) if fresh(at) => Ok(branch.clone()),
+            (cached, _) => merges
+                .default_branch(&repo)
+                .inspect(|_| state.branched = Some(now))
+                .or_else(|e| cached.clone().ok_or(e)),
         }
         .and_then(|branch| {
             state.branch = Some(branch.clone());
@@ -94,30 +141,63 @@ impl MergeAlerts {
             Ok(prs) => prs,
             Err(e) => {
                 self.save(&state)?;
-                return self.failed(&e, warn);
+                return Err(e);
             }
         };
-        self.failing = false;
-        state.since = seconds(since.max(now - SEARCH_LAG));
+        let stale = now
+            .duration_since(since)
+            .is_ok_and(|gap| gap > SEARCH_LAG + STALE_AFTER);
+        let total = prs.len();
+        let prs = if stale { self.unsent(prs)? } else { prs };
+        state.since = since.max(now - SEARCH_LAG);
         self.save(&state)?;
+        if !stale {
+            return Ok(Some(
+                prs.into_iter()
+                    .map(|pr| self.alert(format!("#{} {}", pr.number, pr.url), pr.url))
+                    .collect(),
+            ));
+        }
+        // Marked only once the window is saved, so an unsaved one finds them again
+        // unmarked. One left unmarked is at worst later sent on its own.
+        for pr in &prs {
+            let _ = notify::first_to_notify(&self.mailboxes, &self.lead, Kind::MergeAlert, &pr.url);
+        }
+        let text = match prs.len() {
+            0 => return Ok(Some(vec![])),
+            n if total >= github::MERGED_LIMIT => format!("{n} or more merges while unwatched"),
+            1 => "1 merge while unwatched".to_string(),
+            n => format!("{n} merges while unwatched"),
+        };
+        let at = format!("unwatched {}", seconds(now));
+        Ok(Some(vec![self.alert(text, at)]))
+    }
+
+    /// Those of `prs` not yet sent.
+    fn unsent(&self, prs: Vec<Pr>) -> Result<Vec<Pr>> {
+        let sent = notify::notified(&self.mailboxes, &self.lead, Kind::MergeAlert)?;
         Ok(prs
             .into_iter()
-            .map(|pr| Waiting {
-                herd: Some(self.herd.clone()),
-                member: self.lead.clone(),
-                kind: Kind::MergeAlert,
-                text: format!("#{} {}", pr.number, pr.url),
-                at: Some(pr.url),
-            })
+            .filter(|pr| !sent.contains(&pr.url))
             .collect())
     }
 
-    fn failed(&mut self, e: &anyhow::Error, warn: &mut dyn FnMut(&str)) -> Result<Vec<Waiting>> {
+    fn alert(&self, text: String, at: String) -> Waiting {
+        Waiting {
+            herd: Some(self.herd.clone()),
+            member: self.lead.clone(),
+            kind: Kind::MergeAlert,
+            text,
+            at: Some(at),
+        }
+    }
+
+    fn failed(&mut self, e: &anyhow::Error, warn: &mut dyn FnMut(&str)) -> Vec<Waiting> {
         if !self.failing {
             warn(&format!("{}'s merges: {e:#}", self.herd));
         }
         self.failing = true;
-        Ok(vec![])
+        vec![]
     }
 
     /// When this lead last came back: the first `start` after its last
@@ -147,7 +227,7 @@ impl MergeAlerts {
         self.mailboxes.join(format!("{}.merges", self.lead))
     }
 
-    /// `None` when there is none or it can't be read, which starts a new window.
+    /// `None` when there is none or it can't be parsed, which starts a new window.
     fn load(&self) -> Result<Option<State>> {
         let path = self.path();
         match fs::read_to_string(&path) {
@@ -176,4 +256,41 @@ fn parse(at: &str) -> Result<SystemTime> {
 /// In whole seconds, as GitHub's search reads it.
 fn seconds(at: SystemTime) -> String {
     humantime::format_rfc3339_seconds(at).to_string()
+}
+
+/// A time kept as RFC 3339 whole seconds.
+mod rfc3339 {
+    use std::time::SystemTime;
+
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    pub fn serialize<S: Serializer>(at: &SystemTime, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&super::seconds(*at))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<SystemTime, D::Error> {
+        let text = String::deserialize(d)?;
+        humantime::parse_rfc3339_weak(&text).map_err(D::Error::custom)
+    }
+
+    pub mod option {
+        use std::time::SystemTime;
+
+        use serde::{Deserialize, Deserializer, Serializer};
+
+        pub fn serialize<S: Serializer>(at: &Option<SystemTime>, s: S) -> Result<S::Ok, S::Error> {
+            match at {
+                Some(at) => super::serialize(at, s),
+                None => s.serialize_none(),
+            }
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            d: D,
+        ) -> Result<Option<SystemTime>, D::Error> {
+            #[derive(Deserialize)]
+            struct Wrap(#[serde(with = "super")] SystemTime);
+            Ok(Option::<Wrap>::deserialize(d)?.map(|Wrap(at)| at))
+        }
+    }
 }

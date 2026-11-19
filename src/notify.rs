@@ -2,7 +2,7 @@
 //! them: a `question` report or a `blocked` member, or that a lead's repo saw
 //! a merge only the human should make, per `config.toml`'s `[notify]` table.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
@@ -421,8 +421,25 @@ pub fn forget_marks(mailboxes: &Path, member: &str) -> Vec<String> {
         .collect()
 }
 
-/// Marks `member`'s `kind` event at `at` notified unless a watch already did.
-fn first_to_notify(mailboxes: &Path, member: &str, kind: Kind, at: &str) -> Result<bool> {
+/// The `at` of each of `member`'s `kind` events marked notified.
+pub fn notified(mailboxes: &Path, member: &str, kind: Kind) -> Result<HashSet<String>> {
+    let path = mailboxes.join(format!("{member}.notified"));
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+    };
+    let prefix = format!("{} ", kind.as_str());
+    Ok(text
+        .lines()
+        .filter_map(|line| line.strip_prefix(&prefix))
+        .map(String::from)
+        .collect())
+}
+
+/// Marks `member`'s `kind` event at `at` notified unless a watch already did,
+/// returning whether this call marked it.
+pub fn first_to_notify(mailboxes: &Path, member: &str, kind: Kind, at: &str) -> Result<bool> {
     fs::create_dir_all(mailboxes).with_context(|| format!("create {}", mailboxes.display()))?;
     let path = mailboxes.join(format!("{member}.notified"));
     let file = OpenOptions::new()
