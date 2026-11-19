@@ -47,7 +47,7 @@ const PURPLE_ORANGE: Colors = Colors {
     accent_light: ((255, 192, 77), 214),
     muted: ((120, 110, 140), 60),
     soft: ((160, 165, 190), 146),
-    on_accent: ((20, 16, 28), 16),
+    on_accent: ((20, 16, 28), 232),
     bright: ((255, 255, 255), 231),
     wordmark_end: (255, 80, 0),
     wordmark_steps: [93, 134, 169, 203, 202],
@@ -440,7 +440,7 @@ mod tests {
         for (palette, expected) in [
             (
                 Palette::PurpleOrange,
-                indexed([93, 208, 214, 60, 146, 208, 16, 231, 93, 202]),
+                indexed([93, 208, 214, 60, 146, 208, 232, 231, 93, 202]),
             ),
             (
                 Palette::Phosphor,
