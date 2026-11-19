@@ -259,11 +259,13 @@ enum Command {
     /// (feed retired it with its template's `merged` check passing), `closed`
     /// (feed retired it without that), `released` (`loopherd release`),
     /// `retired` (`loopherd retire`, with or without `--close`), or `-` for a
-    /// run retired before outcomes were recorded. A summary per herd counts each outcome and
-    /// gives medians and maxima over `merged` runs only, open
-    /// members are listed apart, and a lead overhead line gives the lead's
-    /// tokens since `--since`; the lead gets no row. Read-only, and marks no
-    /// report read.
+    /// run retired before outcomes were recorded. A summary per herd counts
+    /// each outcome and gives medians and maxima over `merged` runs only,
+    /// repeated per template within the herd; open members are listed apart,
+    /// and a lead overhead line gives the lead's tokens within `--since` and
+    /// `--until`; the lead gets no row. To judge a template or prompt change,
+    /// run it over the window before and the window after. Read-only, and
+    /// marks no report read.
     Stats {
         /// Only this herd.
         #[arg(long)]
@@ -272,6 +274,11 @@ enum Command {
         /// time with `Z` or an offset.
         #[arg(long, value_parser = stats::parse_since)]
         since: Option<SystemTime>,
+        /// Only members started before this, in `--since`'s forms, so a date leaves
+        /// that day out; with `--since` it bounds a window, to compare one against
+        /// another.
+        #[arg(long, value_parser = stats::parse_since)]
+        until: Option<SystemTime>,
         /// Print JSON, with tokens split per model into input, cache write, cache
         /// read and output.
         #[arg(long)]
@@ -743,7 +750,15 @@ fn main() -> ExitCode {
         Command::Restart { .. } => ("restart", run_restart_self()),
         Command::RestartWait { name } => ("restart-wait", run_restart_wait(&name)),
         Command::Status { all, strays, json } => ("status", run_status(all, strays, json)),
-        Command::Stats { herd, since, json } => ("stats", run_stats(herd, since, json)),
+        Command::Stats {
+            herd,
+            since,
+            until,
+            json,
+        } => (
+            "stats",
+            run_stats(herd, usage::Window { since, until }, json),
+        ),
         Command::View {
             beside_shepherd: true,
             ..
@@ -1091,12 +1106,23 @@ fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
     Ok(out.code)
 }
 
-fn run_stats(herd: Option<String>, since: Option<SystemTime>, json: bool) -> Result<i32> {
+fn run_stats(herd: Option<String>, window: usage::Window, json: bool) -> Result<i32> {
+    if let (Some(since), Some(until)) = (window.since, window.until)
+        && until <= since
+    {
+        let mut cli = Cli::command();
+        // Building fills in each subcommand's usage line.
+        cli.build();
+        cli.find_subcommand_mut("stats")
+            .expect("stats is a subcommand")
+            .error(ErrorKind::ValueValidation, "--until must be after --since")
+            .exit();
+    }
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let claude_dir = install_hook::claude_dir().ok();
     let query = stats::Query {
         herd: herd.as_deref(),
-        since,
+        window,
         now: SystemTime::now(),
         claude_dir: claude_dir.as_deref(),
     };

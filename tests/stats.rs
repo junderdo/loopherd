@@ -12,6 +12,7 @@ struct Member<'a> {
     retired: bool,
     retired_at: Option<&'a str>,
     outcome: Option<&'a str>,
+    template: &'a str,
 }
 
 impl<'a> Member<'a> {
@@ -24,7 +25,13 @@ impl<'a> Member<'a> {
             retired: false,
             retired_at: None,
             outcome: None,
+            template: "card",
         }
+    }
+
+    fn template(mut self, template: &'a str) -> Self {
+        self.template = template;
+        self
     }
 
     /// Retired by feed with its merged check passing.
@@ -63,7 +70,7 @@ impl<'a> Member<'a> {
             "worktree": null, "workspace": "w1", "prompt": null, "prompt_sent": true,
             "created": self.created, "retired": self.retired,
             "retired_at": self.retired_at, "herd": self.herd,
-            "template": self.herd.map(|_| "card"),
+            "template": self.herd.map(|_| self.template),
             "role": if self.lead { Some("lead") } else { None },
         });
         if let Some(outcome) = self.outcome {
@@ -1486,5 +1493,209 @@ fn a_herd_with_no_merged_run_has_no_medians() {
              rounds median -; merge wait median -, max -; total median -, max -; in median -; out median -"
         ),
         "{out}"
+    );
+}
+
+/// lh-1, lh-2 and lh-3 started at midnight UTC on Nov 1, 2 and 3.
+fn three_days(state: &Path) {
+    write_ledger(
+        state,
+        &[
+            Member::new("lh-1", "2026-11-01T00:00:00Z").retired("2026-11-01T05:00:00Z"),
+            Member::new("lh-2", "2026-11-02T00:00:00Z").retired("2026-11-04T05:00:00Z"),
+            Member::new("lh-3", "2026-11-03T00:00:00Z"),
+        ],
+    );
+}
+
+#[test]
+fn until_keeps_members_started_before_it() {
+    let state = tempfile::tempdir().unwrap();
+    three_days(state.path());
+
+    let first = json(state.path(), &["--until", "2026-11-02"]);
+    assert_eq!(names(&first, "retired"), ["lh-1"]);
+    assert_eq!(names(&first, "open"), [""; 0]);
+
+    let json = json(state.path(), &["--until", "2026-11-02T19:00:01-05:00"]);
+    assert_eq!(names(&json, "retired"), ["lh-1", "lh-2"]);
+    assert_eq!(names(&json, "open"), ["lh-3"]);
+}
+
+#[test]
+fn since_and_until_bound_a_window_for_members_and_the_leads_tokens() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[
+            Member::new("lead-h", "2026-10-01T00:00:00Z").lead(),
+            Member::new("lh-1", "2026-11-01T00:00:00Z").retired("2026-11-01T05:00:00Z"),
+            Member::new("lh-2", "2026-11-02T00:00:00Z").retired("2026-11-04T05:00:00Z"),
+            Member::new("lh-3", "2026-11-03T00:00:00Z"),
+        ],
+    );
+    append_entries(
+        state.path(),
+        "lead-h",
+        &[stop("2026-11-04T00:00:00Z", "l1")],
+    );
+    write_transcript(
+        state.path(),
+        "l1.jsonl",
+        &[
+            assistant("a", "opus", "2026-11-01T23:59:59Z", [1_000, 0, 0, 1_000]),
+            assistant("b", "opus", "2026-11-02T00:00:00Z", [1, 2, 3, 4]),
+            assistant("c", "opus", "2026-11-02T23:59:59Z", [10, 20, 30, 40]),
+            assistant("d", "opus", "2026-11-03T00:00:00Z", [2_000, 0, 0, 2_000]),
+        ],
+    );
+    let window = ["--since", "2026-11-02", "--until", "2026-11-03"];
+
+    let json = json(state.path(), &window);
+
+    assert_eq!(names(&json, "retired"), ["lh-2"]);
+    assert_eq!(names(&json, "open"), [""; 0]);
+    assert_eq!(
+        json["herds"][0]["lead_overhead"],
+        serde_json::json!({
+            "opus": {"input": 11, "cache_write": 22, "cache_read": 33, "output": 44},
+        })
+    );
+}
+
+#[test]
+fn an_until_at_or_before_since_is_refused() {
+    let state = tempfile::tempdir().unwrap();
+    three_days(state.path());
+    for (since, until) in [
+        ("2026-11-03", "2026-11-02"),
+        ("2026-11-02", "2026-11-02"),
+        ("2026-11-02T00:00:00Z", "2026-11-02T01:00:00+02:00"),
+    ] {
+        let out = run(state.path(), &["--since", since, "--until", until]);
+        assert_eq!(out.status.code(), Some(2), "{since} to {until}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("--until must be after --since"),
+            "{since} to {until}: {err}"
+        );
+        assert!(err.contains("Usage: loopherd stats [OPTIONS]"), "{err}");
+    }
+}
+
+#[test]
+fn each_herd_also_gets_a_summary_per_template_over_its_merged_runs() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[
+            Member::new("lh-1", "2026-11-01T00:00:00Z").retired("2026-11-01T05:00:00Z"),
+            Member::new("lh-2", "2026-11-02T00:00:00Z")
+                .ended("2026-11-02T03:00:00Z", Some("closed")),
+            Member::new("lh-3", "2026-11-03T00:00:00Z")
+                .template("quick")
+                .retired("2026-11-03T01:00:00Z"),
+            Member::new("lh-4", "2026-11-04T00:00:00Z").template("open-only"),
+        ],
+    );
+    write_mailbox(
+        state.path(),
+        "lh-1",
+        &[
+            ("2026-11-01T02:00:00Z", "done"),
+            ("2026-11-01T04:00:00Z", "done"),
+        ],
+    );
+    write_mailbox(state.path(), "lh-2", &[("2026-11-02T01:00:00Z", "done")]);
+    write_mailbox(state.path(), "lh-3", &[("2026-11-03T00:30:00Z", "done")]);
+
+    let out = stdout(&run(state.path(), &[]));
+
+    assert!(
+        out.contains(
+            "  summary: 3 members: 2 merged, 1 closed; \
+             first done median 1h15m, max 2h00m; rounds median 1.5; \
+             merge wait median 45m, max 1h00m; total median 3h00m, max 5h00m; \
+             in median -; out median -\n\
+             \x20 template card: 2 members: 1 merged, 1 closed; \
+             first done median 2h00m, max 2h00m; \
+             rounds median 2; merge wait median 1h00m, max 1h00m; \
+             total median 5h00m, max 5h00m; in median -; out median -\n\
+             \x20 template quick: 1 members: 1 merged; first done median 30m, max 30m; \
+             rounds median 1; merge wait median 30m, max 30m; \
+             total median 1h00m, max 1h00m; in median -; out median -\n\
+             \x20 lead overhead:"
+        ),
+        "{out}"
+    );
+    let json = json(state.path(), &[]);
+    let templates = json["herds"][0]["templates"].as_array().unwrap();
+    assert_eq!(templates.len(), 2, "open members aren't summarized");
+    assert_eq!(templates[0]["template"], "card");
+    assert_eq!(templates[0]["summary"]["members"], 2);
+    assert_eq!(
+        templates[0]["summary"]["outcomes"],
+        serde_json::json!({
+            "merged": 1, "closed": 1, "released": 0, "retired": 0, "unrecorded": 0,
+        })
+    );
+    assert_eq!(templates[0]["summary"]["total"]["median_secs"], 18_000);
+    assert_eq!(templates[1]["template"], "quick");
+    assert_eq!(
+        templates[1]["summary"],
+        serde_json::json!({
+            "members": 1,
+            "outcomes": {
+                "merged": 1, "closed": 0, "released": 0, "retired": 0, "unrecorded": 0,
+            },
+            "first_done": {"median_secs": 1_800, "max_secs": 1_800},
+            "rounds_median": 1.0,
+            "merge_wait": {"median_secs": 1_800, "max_secs": 1_800},
+            "total": {"median_secs": 3_600, "max_secs": 3_600},
+            "in_median": null,
+            "out_median": null,
+        })
+    );
+}
+
+#[test]
+fn help_and_the_skill_describe_until_and_the_template_summaries() {
+    let state = tempfile::tempdir().unwrap();
+    let help = stdout(&run(state.path(), &["--help"]));
+    let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(help.contains("--until <UNTIL>"), "{help}");
+    assert!(help.contains("started before this"), "{help}");
+    assert!(help.contains("per template"), "{help}");
+
+    let skill = Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .arg("--skill")
+        .output()
+        .unwrap();
+    let skill = String::from_utf8_lossy(&skill.stdout);
+    let skill = skill.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(skill.contains("`--until <date or time>`"), "{skill}");
+    assert!(skill.contains("per template"), "{skill}");
+}
+
+#[test]
+fn runs_without_a_template_are_summarized_as_a_dash() {
+    let state = tempfile::tempdir().unwrap();
+    one_retired_member(state.path());
+    let path = state.path().join("loopherd/ledger.json");
+    let mut ledger: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    ledger["lh-1"]["template"] = serde_json::Value::Null;
+    fs::write(&path, ledger.to_string()).unwrap();
+
+    let out = stdout(&run(state.path(), &[]));
+    assert!(
+        out.contains("\n  template -: 1 members: 1 merged; "),
+        "{out}"
+    );
+    let json = json(state.path(), &[]);
+    assert_eq!(
+        json["herds"][0]["templates"][0]["template"],
+        serde_json::Value::Null
     );
 }
