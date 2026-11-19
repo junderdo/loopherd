@@ -12,12 +12,16 @@ use crate::report::{Body, Stop};
 /// `time` is how long it has held its status, blank when unseen.
 pub fn member(member: &Member, mail: &Mail, time: &str, theme: Theme) -> Vec<Line<'static>> {
     let status = crate::status::label(member);
-    let role = if member.lead { "lead" } else { "worker" };
+    let role = match (member.lead, &member.unsandboxed) {
+        (true, Some(why)) => format!("lead, unsandboxed: {why}"),
+        (true, None) => "lead".into(),
+        (false, _) => "worker".into(),
+    };
     let mut lines = vec![
         Line::raw(format!("{status} {time}").trim_end().to_string()),
         Line::raw(match &member.template {
             Some(template) => format!("{template} · {role}"),
-            None => role.into(),
+            None => role,
         }),
     ];
     lines.extend(

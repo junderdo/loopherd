@@ -86,10 +86,13 @@ A switch its `[lead]` leaves unset comes from `[lead_defaults]` in
 them), else is off; `loopherd herds` shows each switch's value and source.
 
 Each lead runs in the Claude Code sandbox from settings loopherd writes
-from its switches (D89). `loopherd doctor` fails when the sandbox can't
-start here (bubblewrap and socat on Linux and WSL2), and `[lead] sandbox =
-"require"`, the default, then refuses to start the lead; `prefer` starts
-it guarded by its hook alone, and only the human sets it.
+from its switches (D89), a guard rail rather than containment (D89 lists
+what gets past it). `loopherd doctor` fails when the sandbox can't start
+here while a herd has a lead, and `[lead] sandbox = "require"`, the
+default, then refuses to start the lead; `prefer` starts it guarded by its
+hook alone, flagged in `loopherd view`, and only the human sets it. Doctor
+names each running lead without its sandbox; `loopherd revive --name
+<lead>` after quitting its Claude resumes it in one.
 
 ## Notify
 

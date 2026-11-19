@@ -36,6 +36,9 @@ pub struct Member {
     pub tab: Option<String>,
     /// Its herd's lead, not a worker.
     pub lead: bool,
+    /// Why this lead runs without its sandbox, guarded by its tool hook alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsandboxed: Option<String>,
     /// The template it was spawned from, if recorded.
     pub template: Option<String>,
     /// Retired, and released so `feed` may spawn its name again.
@@ -260,6 +263,7 @@ pub(crate) fn member(
         pane: live.map_or(&record.pane_id, |a| &a.pane_id).clone(),
         tab: live.map(|a| a.tab_id.clone()),
         lead: record.is_lead(),
+        unsandboxed: record.unsandboxed.clone(),
         template: record.template.clone(),
         released: record.released_at.is_some(),
         retired: record.retired.then(|| {
@@ -303,6 +307,7 @@ mod tests {
             process: None,
             role: None,
             after_merge: None,
+            unsandboxed: None,
             earlier: vec![],
         }
     }

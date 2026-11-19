@@ -232,6 +232,7 @@ pub fn spawn(
         process: None,
         role: req.member_of.as_ref().and_then(|m| m.role),
         after_merge: None,
+        unsandboxed: None,
         earlier: vec![],
     };
     let (agent, no_session) = match readiness {

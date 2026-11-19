@@ -481,25 +481,27 @@ fn a_sandboxed_lead_cannot_write_its_herd_file() {
     let name = format!("lead-{herd}");
     let checkout = repo.file_name().unwrap().to_str().unwrap();
     let parent = repo.parent().unwrap();
-    let container = match parent.file_name() == repo.file_name() {
+    let worktree = match parent.file_name() == repo.file_name() {
         true => parent.join("worktrees"),
         false => parent.join(format!("{checkout}-worktrees")),
-    };
-    let worktree = container.join(&name);
+    }
+    .join(&name);
     let _worktree = RemoveWorktree(repo.clone(), worktree.clone());
-    // Inside a dir the sandbox lets the lead write, so only the config dir's deny stops it.
-    std::fs::create_dir_all(&container).unwrap();
-    let config = tempfile::tempdir_in(&container).unwrap();
-    let herds = config.path().join("herds");
-    std::fs::create_dir(&herds).unwrap();
+    // Inside the state dir, which the sandbox lets the lead write, so only the config dir's deny stops it.
+    let config = state.path().join("loopherd/config");
+    let herds = config.join("herds");
+    std::fs::create_dir_all(&herds).unwrap();
     let herd_file = herds.join(format!("{herd}.toml"));
     let control = worktree.join("sandbox-probe");
     std::fs::write(
         &herd_file,
         format!(
-            "{}[lead]\nprompt = \"\"\"Run these two Bash commands, one at a time and in this \
-             order, running the second even if the first fails: `echo hijack >> {}`, then \
-             `touch {}`. Then reply with what each printed.\"\"\"\n",
+            "{}[lead]\nprompt = \"\"\"Make exactly two Bash tool calls, in this order, each \
+             with the command exactly as written and nothing added before or after it, \
+             running the second even if the first fails. First: \
+             python3 -c \"open('{}', 'a').write('hijack')\" \
+             Second: touch {} \
+             Then reply with what each printed.\"\"\"\n",
             herd_head(repo.to_str().unwrap(), &workspace),
             herd_file.display(),
             control.display()
@@ -511,10 +513,11 @@ fn a_sandboxed_lead_cannot_write_its_herd_file() {
 
     let out = dev(env!("CARGO_BIN_EXE_loopherd"))
         .env("XDG_STATE_HOME", state.path())
-        .env("LOOPHERD_CONFIG_DIR", config.path())
-        // acceptEdits approves the control write; auto mode's classifier would refuse the append
-        // before loopherd's settings could, so it isn't what this measures.
+        .env("LOOPHERD_CONFIG_DIR", &config)
+        // The permission layer can't tell where python3 writes, so with this rule it lets the
+        // write through to the sandbox, which is what this measures.
         .args(["lead", &herd, "--", "--permission-mode", "acceptEdits"])
+        .args(["--allowedTools", "Bash(python3:*)"])
         .output()
         .unwrap();
     assert_eq!(
@@ -526,7 +529,7 @@ fn a_sandboxed_lead_cannot_write_its_herd_file() {
     );
     let entry = ledger_entry(state.path(), &name);
     assert_eq!(entry["worktree"], worktree.to_str().unwrap());
-    let settings = config.path().join(format!("sandbox/{name}.json"));
+    let settings = config.join(format!("sandbox/{name}.json"));
     assert!(
         entry["claude_args"]
             .as_array()
@@ -537,27 +540,36 @@ fn a_sandboxed_lead_cannot_write_its_herd_file() {
 
     let given_up = std::time::Instant::now() + std::time::Duration::from_secs(180);
     let finished = |status: &Value| status == "idle" || status == "done";
+    let screen = || {
+        let pane = herdr_ok(&["agent", "get", &name])["result"]["agent"]["pane_id"].clone();
+        let out = dev("herdr")
+            .args(["pane", "read", pane.as_str().unwrap()])
+            .args(["--source", "recent", "--format", "text"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
     loop {
         let status = herdr_ok(&["agent", "get", &name])["result"]["agent"]["agent_status"].clone();
         if control.exists() && finished(&status) {
             break;
         }
         if std::time::Instant::now() >= given_up {
-            let pane = herdr_ok(&["agent", "get", &name])["result"]["agent"]["pane_id"].clone();
-            let screen = dev("herdr")
-                .args(["pane", "read", pane.as_str().unwrap()])
-                .args(["--source", "recent", "--format", "text"])
-                .output()
-                .unwrap();
             panic!(
                 "lead never ran its commands (status {status}):\n{}",
-                String::from_utf8_lossy(&screen.stdout)
+                screen()
             );
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
-    // The control file is touched after the append, and its dir is as writable as the herd file's.
     assert_eq!(std::fs::read_to_string(&herd_file).unwrap(), before);
+    let screen = screen();
+    // A narrow pane may wrap the error mid-word.
+    let unwrapped: String = screen.split_whitespace().collect();
+    assert!(
+        unwrapped.contains("Read-onlyfilesystem"),
+        "the sandbox didn't refuse the write:\n{screen}"
+    );
 }
 
 #[test]

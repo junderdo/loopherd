@@ -12,7 +12,6 @@ use crate::report::{self, Body, Entry};
 use crate::sandbox::{self, Probe};
 use crate::spawn::{Checkout, MemberOf, Prompt, SHELL_TIMEOUT, SpawnRequest, Spawned, spawn};
 use crate::template::Template;
-use crate::worktree::worktree_path;
 
 pub struct LeadRequest {
     pub herd: String,
@@ -23,8 +22,9 @@ pub struct LeadRequest {
 }
 
 /// Spawns `lead-<herd>` in a detached worktree of the same name, in its
-/// sandbox, returning its name and the warning a hook-only start leaves in
-/// its mailbox. Refuses while the herd has an unretired lead.
+/// sandbox, returning its name and the warning a hook-only start carries,
+/// which its ledger entry and mailbox keep too. Refuses while the herd has
+/// an unretired lead.
 pub fn lead(
     herdr: &dyn Herdr,
     ledger: &mut dyn Ledger,
@@ -33,25 +33,30 @@ pub fn lead(
     inherited_workspace: Option<&str>,
 ) -> Result<(String, Spawned, Option<String>)> {
     let mut spawn_req = resolve(ledger, paths, req)?;
-    let worktree = worktree_path(&spawn_req.repo, &spawn_req.name);
-    let sandboxed = sandbox::Lead {
-        name: &spawn_req.name,
-        herd: &req.herd,
-        repo: &spawn_req.repo,
-        worktree: &worktree,
+    let kept = sandbox::Lead {
+        herd: req.herd.clone(),
+        args: spawn_req.claude_args.clone(),
     };
-    let launch = sandbox::prepare(paths, &sandboxed, req.sandbox).context("sandbox")?;
+    let launch = sandbox::prepare(paths, &spawn_req.name, &kept, req.sandbox).context("sandbox")?;
     spawn_req.claude_args.extend(launch.args());
     let spawned = spawn(herdr, ledger, &spawn_req, inherited_workspace)?;
-    let mut warning = launch.warning(&spawn_req.name);
-    if let Some(text) = &warning {
-        let note = Entry::new(SystemTime::now(), Body::Note { text: text.clone() });
-        // The lead already runs, so a mailbox it can't write only adds to the warning.
-        if let Err(e) = report::append(&paths.state_dir().join("reports"), &spawn_req.name, &note) {
-            warning = Some(format!("{text}; not noted in its mailbox: {e:#}"));
-        }
+    let (Some(why), Some(text)) = (launch.hook_only(), launch.warning(&spawn_req.name)) else {
+        return Ok((spawn_req.name, spawned, None));
+    };
+    // The lead already runs, so what can't be noted only adds to the warning.
+    let mut warning = text.clone();
+    let flagged = ledger.update(&spawn_req.name, &mut |r| {
+        r.unsandboxed = Some(why.to_string());
+        Ok(())
+    });
+    if let Err(e) = flagged {
+        warning += &format!("; not flagged in the ledger: {e:#}");
     }
-    Ok((spawn_req.name, spawned, warning))
+    let note = Entry::new(SystemTime::now(), Body::Note { text });
+    if let Err(e) = report::append(&paths.state_dir().join("reports"), &spawn_req.name, &note) {
+        warning += &format!("; not noted in its mailbox: {e:#}");
+    }
+    Ok((spawn_req.name, spawned, Some(warning)))
 }
 
 /// `dry_run`'s plan, or `lead`'s spawn report, with the exit code.
@@ -197,6 +202,7 @@ mod tests {
     use crate::herd::Paths;
     use crate::herdr::fake::FakeHerdr;
     use crate::ledger::{AgentRecord, MemLedger, Role};
+    use crate::sandbox::Unavailable;
     use crate::worktree::testing;
 
     struct Setup {
@@ -338,7 +344,6 @@ mod tests {
 
         let (path, settings) = started_settings(&herdr);
         let root = setup.root.display();
-        let repo = setup.repo.display();
         assert_eq!(path, setup.root.join("config/sandbox/lead-h.json"));
         assert_eq!(
             settings,
@@ -350,17 +355,29 @@ mod tests {
                     "network": {"allowAllUnixSockets": true},
                     "filesystem": {
                         "allowWrite": [
-                            format!("{root}/proj/worktrees"),
-                            format!("{repo}"),
+                            format!("{root}/proj/worktrees/lead-h"),
                             format!("{root}/state"),
                         ],
                         "denyWrite": [format!("{root}/config"), "/home/me/.claude"],
                     },
-                    "excludedCommands": ["loopherd restart --self"],
+                    "excludedCommands": [
+                        "loopherd restart --self",
+                        "loopherd feed",
+                        "loopherd feed *",
+                        "loopherd add *",
+                        "loopherd retire *",
+                    ],
                 },
                 "permissions": {
                     "denyInsteadOfPrompting": true,
-                    "allow": ["WebFetch(domain:*)", "Bash(loopherd restart --self)"],
+                    "allow": [
+                        "WebFetch(domain:*)",
+                        "Bash(loopherd restart --self)",
+                        "Bash(loopherd feed)",
+                        "Bash(loopherd feed *)",
+                        "Bash(loopherd add *)",
+                        "Bash(loopherd retire *)",
+                    ],
                     "deny": [
                         format!("Edit(/{root}/config/**)"),
                         "Edit(//home/me/.claude/**)",
@@ -372,6 +389,38 @@ mod tests {
             ledger.0["lead-h"].claude_args,
             ["--model", "opus", "--settings", &path.display().to_string()]
         );
+        assert_eq!(ledger.0["lead-h"].unsandboxed, None);
+        assert_eq!(
+            sandbox::Lead::kept(&setup.paths(), "lead-h").unwrap(),
+            Some(sandbox::Lead {
+                herd: "h".into(),
+                args: vec!["--model".into(), "opus".into()],
+            }),
+            "kept where the lead can't write, for revive to trust over the ledger"
+        );
+    }
+
+    #[test]
+    fn a_lead_given_its_own_settings_is_refused_since_its_sandbox_takes_that_flag() {
+        let setup = Setup::with_lead(PROMPT);
+        let herdr = herdr();
+
+        let err = lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&["--settings", "/mine.json"]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert!(
+            format!("{err:#}").starts_with(
+                "sandbox: lead-h's args pass --settings, which its sandbox's settings file takes;"
+            ),
+            "{err:#}"
+        );
+        assert!(herdr.tabs().is_empty());
     }
 
     #[test]
@@ -391,13 +440,17 @@ mod tests {
         let (_, settings) = started_settings(&herdr);
         let sandbox = &settings["sandbox"];
         assert_eq!(
-            sandbox["filesystem"]["allowWrite"][3],
+            sandbox["filesystem"]["allowWrite"][2],
             "/home/me/.local/bin"
         );
         assert_eq!(
             sandbox["excludedCommands"],
             serde_json::json!([
                 "loopherd restart --self",
+                "loopherd feed",
+                "loopherd feed *",
+                "loopherd add *",
+                "loopherd retire *",
                 "scripts/install",
                 "scripts/install *",
                 "./scripts/install",
@@ -405,7 +458,7 @@ mod tests {
             ])
         );
         assert_eq!(
-            settings["permissions"]["allow"][2], "Bash(scripts/install)",
+            settings["permissions"]["allow"][6], "Bash(scripts/install)",
             "an excluded command still goes through the permission flow"
         );
         assert_eq!(
@@ -419,7 +472,12 @@ mod tests {
         let setup = Setup::with_lead("prompt = \"go\"");
         let herdr = herdr();
         let req = LeadRequest {
-            sandbox: || Err("bubblewrap not installed".into()),
+            sandbox: || {
+                Err(Unavailable {
+                    why: "bubblewrap not installed".into(),
+                    fix: "install bubblewrap".into(),
+                })
+            },
             ..request(&[])
         };
 
@@ -435,7 +493,7 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             "sandbox: lead-h can't run sandboxed: its sandbox can't start: bubblewrap not \
-             installed; install what it needs, or set [lead] sandbox = \"prefer\" in herd h \
+             installed; install bubblewrap, or set [lead] sandbox = \"prefer\" in herd h \
              to run it guarded by its tool hook alone"
         );
         assert!(herdr.tabs().is_empty());
@@ -447,7 +505,12 @@ mod tests {
         let herdr = herdr();
         let mut ledger = MemLedger::default();
         let req = LeadRequest {
-            sandbox: || Err("bubblewrap not installed".into()),
+            sandbox: || {
+                Err(Unavailable {
+                    why: "bubblewrap not installed".into(),
+                    fix: "install bubblewrap".into(),
+                })
+            },
             ..request(&[])
         };
 
@@ -459,6 +522,10 @@ mod tests {
         assert_eq!(code, 0);
         assert!(out.starts_with(&format!("warning: {warning}\n")), "{out}");
         assert!(!herdr.started()[0].args.contains(&"--settings".to_string()));
+        assert_eq!(
+            ledger.0["lead-h"].unsandboxed.as_deref(),
+            Some("bubblewrap not installed")
+        );
         let (mailbox, _) = report::history(&setup.root.join("state/reports"), "lead-h").unwrap();
         assert!(
             mailbox.iter().any(|e| e.body
@@ -680,6 +747,7 @@ mod tests {
             herd: Some("b".into()),
             role: None,
             after_merge: None,
+            unsandboxed: None,
             earlier: vec![],
             ..ledger.0["lead-a"].clone()
         };
@@ -711,6 +779,7 @@ mod tests {
             herd: None,
             role: None,
             after_merge: None,
+            unsandboxed: None,
             earlier: vec![],
             prompt: Some("a plain spawn".into()),
             ..ledger.0["lead-h"].clone()

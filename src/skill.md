@@ -552,11 +552,12 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   `[lead] sandbox = "require"` (the default) a lead whose sandbox can't
   start isn't started, and `lead`, `restart` and `revive` say why
   (`loopherd doctor` checks it: bubblewrap and socat on Linux and WSL2);
-  `"prefer"` starts it guarded by its hook alone, with a warning and a
-  note in its mailbox. `restart` refuses, under `require`, a lead started
-  without its sandbox (before it existed, or on `prefer`); retire it and
-  start it again. Set `prefer` only when the human says so; doctor
-  names those herds.
+  `"prefer"` starts it guarded by its hook alone, with a warning, a note
+  in its mailbox, and `(lead, unsandboxed)` in `loopherd view`. `restart`
+  refuses, under `require`, a lead started without its sandbox (before it
+  existed, or on `prefer`): quit its Claude and run `loopherd revive
+  --name <lead>` to resume it sandboxed. Set `prefer` only when the human
+  says so; doctor names those herds and leads.
 - **Change a herd file's values** with `loopherd herd set <herd> <key>
   <value>`, `loopherd herd get <herd> <key>` and `loopherd herd unset <herd>
   <key>`, not by hand-editing TOML. Keys are dotted (`queue.max`,
@@ -758,15 +759,17 @@ What differs from the shepherd:
   that ping for merges the human makes. Grilling is always the human's.
 - **Sandbox.** Your Claude runs in the Claude Code sandbox, from
   settings loopherd writes for you to `<config dir>/sandbox/<you>.json`
-  (D89, building D83). Bash can write only to the repo's worktrees, its
-  main checkout, loopherd's state dir and temp files; writes to herd
-  files, `config.toml`, those settings and `~/.claude` fail (`Read-only
-  file system`, or a denied command or Edit). Processes a command leaves
-  behind end with it, so keep long waits as background tasks. `loopherd
-  restart --self`, and with `install` on `scripts/install`, run outside
-  the sandbox. Every host is reachable, and gh uses the human's
-  credentials as before. A failure from the sandbox is the boundary
-  working: ask, don't work around it.
+  (D89, building D83). Bash can write only to your own worktree,
+  loopherd's state dir and temp files; writes elsewhere, herd files,
+  `config.toml`, those settings and `~/.claude` among them, fail
+  (`Read-only file system`, or a denied command or Edit). Processes a
+  command leaves behind end with it, so keep long waits as background
+  tasks. `loopherd restart --self`, `feed`, `add` and `retire`, and with
+  `install` on `scripts/install`, run outside the sandbox. Every host is
+  reachable, and gh uses the human's credentials as before. The sandbox
+  is a guard rail the human set, not the whole boundary: when it refuses
+  something, ask; don't route around it through herdr, a member or
+  another tool.
 - **Herd files and loopherd's config are the human's.** The hook always
   denies `loopherd herd set`, `unset` and `remove` in your pane, and also `loopherd
   lead-defaults --set`, `loopherd config set` and `unset`, `loopherd

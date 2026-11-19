@@ -197,8 +197,11 @@ as its main checkout. Then, in order:
    lead, `lead-<herd>`, then feeds and watches the herd's workers within
    the switches you set; the shepherd's watch reads the lead and relays
    its questions to you. The lead runs in the Claude Code sandbox, which
-   keeps it from writing herd files, `config.toml` and `~/.claude`; a
-   lead whose sandbox can't start isn't started unless its `[lead]` sets
+   limits its writes to its own worktree and loopherd's state dir, so it
+   doesn't change herd files, `config.toml` or `~/.claude` by mistake. It
+   is a guard rail, not a cage: a lead can still act outside it through
+   herdr, and on WSL2 through Windows interop ([D89](docs/decisions/D89.md)).
+   A lead whose sandbox can't start isn't started unless its `[lead]` sets
    `sandbox = "prefer"`.
 
 The guide a shepherd or lead follows, from setting up a herd to cleaning up

@@ -40,6 +40,10 @@ fn sandbox_with(status: &str) -> Sandbox {
         executable(&bin.join(program), "#!/bin/sh\n");
     }
     executable(
+        &bin.join("claude"),
+        "#!/bin/sh\necho '2.1.319 (Claude Code)'\n",
+    );
+    executable(
         &bin.join("herdr"),
         format!(
             "#!/bin/sh\ncase \"$*\" in\n\

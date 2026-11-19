@@ -12,9 +12,10 @@ use anyhow::{Result, bail};
 
 use crate::herd::Paths;
 use crate::herdr::{Herdr, Server};
+use crate::ledger::AgentRecord;
 use crate::ledger::{FileLedger, Ledger};
 use crate::pause::Reading;
-use crate::sandbox::SandboxMode;
+use crate::sandbox::{SandboxMode, Unavailable};
 
 /// What the install checks read, gathered by the caller.
 pub struct Install {
@@ -26,7 +27,7 @@ pub struct Install {
     pub on_path: Option<PathBuf>,
     pub running: PathBuf,
     /// Why Claude Code's sandbox can't start on this machine, if it can't.
-    pub sandbox: Result<(), String>,
+    pub sandbox: Result<(), Unavailable>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -68,14 +69,7 @@ pub fn checks(
     }
     let mut checks = hook_checks(install);
     checks.push(running_binary(install));
-    checks.push(match &install.sandbox {
-        Ok(()) => ok("sandbox", "can start".into()),
-        Err(why) => failure(
-            "sandbox",
-            format!("can't start: {why}"),
-            "install bubblewrap and socat".into(),
-        ),
-    });
+    checks.push(sandbox_check(install, setup));
     let (herdr_checks, reached) = herdr_checks(herdr);
     checks.extend(herdr_checks);
     match setup {
@@ -97,6 +91,52 @@ pub fn checks(
         }),
     }
     Ok(checks)
+}
+
+/// Fails only while some herd has a lead to run in the sandbox.
+fn sandbox_check(install: &Install, setup: &Result<Setup>) -> Check {
+    let Err(Unavailable { why, fix }) = &install.sandbox else {
+        return ok("sandbox", "can start".into());
+    };
+    let has_lead = |paths: &Paths| {
+        crate::herd::names(&paths.herds).is_ok_and(|herds| {
+            herds
+                .iter()
+                .any(|herd| crate::herd::lead_sandbox(paths, herd).is_ok())
+        })
+    };
+    match setup {
+        Ok(setup) if !has_lead(&setup.paths) => warning(
+            "sandbox",
+            format!("can't start: {why}; no herd has a lead to run in it yet"),
+            fix.clone(),
+        ),
+        _ => failure("sandbox", format!("can't start: {why}"), fix.clone()),
+    }
+}
+
+/// A running lead without its sandbox, by `prefer` or from before it had one.
+fn lead_sandbox_check(paths: &Paths, lead: &AgentRecord) -> Option<Check> {
+    let settings = crate::sandbox::settings_file(paths, &lead.name)
+        .display()
+        .to_string();
+    let started_with_it = lead
+        .claude_args
+        .windows(2)
+        .any(|pair| pair[0] == "--settings" && pair[1] == settings);
+    let why = match &lead.unsandboxed {
+        Some(why) => why.as_str(),
+        None if started_with_it => return None,
+        None => "it was started without its sandbox",
+    };
+    Some(warning(
+        &format!("lead {}", lead.name),
+        crate::sandbox::hook_only_warning(&lead.name, why),
+        format!(
+            "quit its Claude and run loopherd revive --name {}",
+            lead.name
+        ),
+    ))
 }
 
 fn config_checks(paths: &Paths) -> Vec<Check> {
@@ -229,6 +269,12 @@ fn state_checks(
             checks.extend(mailbox_check(&dir, &member.name));
         }
     }
+    checks.extend(
+        members
+            .iter()
+            .filter(|r| !r.retired && r.is_lead())
+            .filter_map(|lead| lead_sandbox_check(&setup.paths, lead)),
+    );
     if let Some((herdr, socket)) = reached {
         let unretired: Vec<_> = members.iter().filter(|r| !r.retired).collect();
         checks.extend(pane_checks(herdr, socket.as_deref(), &unretired));
@@ -667,7 +713,7 @@ fn tracker(herd: &str, key: &str, command: &str, repo: &Path, timeout: Duration)
 }
 
 /// `major.minor.patch` as numbers, ignoring any pre-release or build suffix.
-fn numbers(version: &str) -> Option<[u64; 3]> {
+pub(crate) fn numbers(version: &str) -> Option<[u64; 3]> {
     let core = version.split(['-', '+']).next()?;
     let mut parts = core.split('.').map(|p| p.parse::<u64>().ok());
     let numbers = [parts.next()??, parts.next()??, parts.next()??];
@@ -1522,14 +1568,73 @@ mod tests {
         assert_eq!(code, 1);
     }
 
+    fn without_bubblewrap(m: &mut Machine) {
+        m.install.sandbox = Err(Unavailable {
+            why: "bubblewrap not installed".into(),
+            fix: "install bubblewrap".into(),
+        });
+    }
+
     #[test]
-    fn a_sandbox_that_cant_start_fails_naming_why() {
+    fn a_sandbox_that_cant_start_fails_naming_why_and_the_fix_while_a_herd_has_a_lead() {
         let mut m = machine(&ALL);
-        m.install.sandbox = Err("bubblewrap not installed".into());
+        without_bubblewrap(&mut m);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\n",
+                repo.to_str().unwrap()
+            ),
+        );
         assert_eq!(
             problems(&m, &herdr()),
-            ["failure sandbox: can't start: bubblewrap not installed; \
-              fix: install bubblewrap and socat"]
+            ["failure sandbox: can't start: bubblewrap not installed; fix: install bubblewrap"]
+        );
+    }
+
+    #[test]
+    fn a_sandbox_that_cant_start_only_warns_while_no_herd_has_a_lead() {
+        let mut m = machine(&ALL);
+        without_bubblewrap(&mut m);
+        let repo = m.herd("h");
+        m.herd_file("h", &format!("repo = {:?}\n", repo.to_str().unwrap()));
+        assert_eq!(
+            problems(&m, &herdr()),
+            ["warning sandbox: can't start: bubblewrap not installed; \
+                 no herd has a lead to run in it yet; fix: install bubblewrap"]
+        );
+    }
+
+    #[test]
+    fn a_running_lead_without_its_sandbox_is_named_with_how_to_resume_it_in_one() {
+        let m = machine(&ALL);
+        let mut old = member("lead-old", "h", "w1:p1", None);
+        old.role = Some(crate::ledger::Role::Lead);
+        let mut hook_only = member("lead-pre", "h", "w1:p2", None);
+        hook_only.role = Some(crate::ledger::Role::Lead);
+        hook_only.unsandboxed = Some("bubblewrap not installed".into());
+        let settings = crate::sandbox::settings_file(m.paths(), "lead-ok");
+        let mut sandboxed = member("lead-ok", "h", "w1:p3", None);
+        sandboxed.role = Some(crate::ledger::Role::Lead);
+        sandboxed.claude_args = vec!["--settings".into(), settings.display().to_string()];
+        m.ledger(&[old, hook_only, sandboxed]);
+
+        let found: Vec<_> = problems(&m, &herdr())
+            .into_iter()
+            .filter(|p| p.starts_with("warning lead "))
+            .collect();
+
+        assert_eq!(
+            found,
+            [
+                "warning lead lead-old: lead-old runs without its sandbox (it was started \
+                 without its sandbox), guarded by its tool hook alone; fix: quit its Claude and \
+                 run loopherd revive --name lead-old",
+                "warning lead lead-pre: lead-pre runs without its sandbox (bubblewrap not \
+                 installed), guarded by its tool hook alone; fix: quit its Claude and run \
+                 loopherd revive --name lead-pre",
+            ]
         );
     }
 
