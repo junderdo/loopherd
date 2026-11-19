@@ -1,5 +1,6 @@
-//! Claude processes, read from `/proc`. A hook's `$CLAUDE_PID` names the
-//! Claude that fired it; the ledger remembers which one is the member's.
+//! Claude processes, read from `/proc`, or `proc_pidinfo` and `sysctl` on
+//! macOS. A hook's `$CLAUDE_PID` names the Claude that fired it; the ledger
+//! remembers which one is the member's.
 
 use std::path::{Path, PathBuf};
 
@@ -34,17 +35,11 @@ impl Procs for ProcFs {
     }
 
     fn cmdline(&self, pid: u32) -> Option<Vec<String>> {
-        let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-        let args = raw.split(|b| *b == 0).filter(|a| !a.is_empty());
-        Some(
-            args.map(|a| String::from_utf8_lossy(a).into_owned())
-                .collect(),
-        )
+        os::cmdline(pid)
     }
 
     fn resolve(&self, pid: u32, path: &str) -> Option<PathBuf> {
-        let cwd = PathBuf::from(format!("/proc/{pid}/cwd"));
-        std::fs::canonicalize(cwd.join(path)).ok()
+        std::fs::canonicalize(os::cwd(pid)?.join(path)).ok()
     }
 }
 
@@ -62,6 +57,19 @@ mod os {
 
     pub fn start(pid: u32) -> Option<u64> {
         stat_field(pid, 19)?.parse().ok()
+    }
+
+    pub fn cmdline(pid: u32) -> Option<Vec<String>> {
+        let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let args = raw.split(|b| *b == 0).filter(|a| !a.is_empty());
+        Some(
+            args.map(|a| String::from_utf8_lossy(a).into_owned())
+                .collect(),
+        )
+    }
+
+    pub fn cwd(pid: u32) -> Option<PathBuf> {
+        Some(PathBuf::from(format!("/proc/{pid}/cwd")))
     }
 
     /// Field `index` of `/proc/<pid>/stat` counted from the state (0); the command name
@@ -100,13 +108,45 @@ mod os {
         bsd_info(pid).map(|info| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
     }
 
+    pub fn cmdline(pid: u32) -> Option<Vec<String>> {
+        let mut max: c_int = 0;
+        let mut len = std::mem::size_of::<c_int>();
+        sysctl(
+            &mut [libc::CTL_KERN, libc::KERN_ARGMAX],
+            (&raw mut max).cast(),
+            &mut len,
+        )?;
+        let mut buf = vec![0u8; usize::try_from(max).ok()?];
+        let mut len = buf.len();
+        sysctl(
+            &mut [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as c_int],
+            buf.as_mut_ptr().cast(),
+            &mut len,
+        )?;
+        super::parse_procargs2(&buf[..len])
+    }
+
+    pub fn cwd(pid: u32) -> Option<PathBuf> {
+        let info: libc::proc_vnodepathinfo = pid_info(pid, libc::PROC_PIDVNODEPATHINFO)?;
+        let path = info.pvi_cdir.vip_path.as_flattened();
+        // SAFETY: c_char and u8 have the same size and alignment.
+        let path: &[u8] = unsafe { &*(std::ptr::from_ref(path) as *const [u8]) };
+        let end = path.iter().position(|b| *b == 0)?;
+        (end > 0).then(|| OsStr::from_bytes(&path[..end]).into())
+    }
+
     fn bsd_info(pid: u32) -> Option<libc::proc_bsdinfo> {
-        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-        let size = std::mem::size_of::<libc::proc_bsdinfo>() as c_int;
+        pid_info(pid, libc::PROC_PIDTBSDINFO)
+    }
+
+    /// `T` must be the struct that `flavor` fills.
+    fn pid_info<T>(pid: u32, flavor: c_int) -> Option<T> {
+        let mut info: T = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<T>() as c_int;
         let read = unsafe {
             libc::proc_pidinfo(
                 pid as c_int,
-                libc::PROC_PIDTBSDINFO,
+                flavor,
                 0,
                 (&raw mut info).cast::<c_void>(),
                 size,
@@ -114,6 +154,37 @@ mod os {
         };
         (read == size).then_some(info)
     }
+
+    fn sysctl(mib: &mut [c_int], out: *mut c_void, len: &mut usize) -> Option<()> {
+        let status = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                mib.len() as u32,
+                out,
+                len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        (status == 0).then_some(())
+    }
+}
+
+/// argv from a `KERN_PROCARGS2` buffer: `argc` as a native `int`, the exec
+/// path, NUL padding, then `argc` NUL-terminated arguments and the environment.
+#[cfg(any(target_os = "macos", test))]
+fn parse_procargs2(buf: &[u8]) -> Option<Vec<String>> {
+    let (argc, rest) = buf.split_first_chunk::<4>()?;
+    let argc = usize::try_from(i32::from_ne_bytes(*argc)).ok()?;
+    let after_exec = &rest[rest.iter().position(|b| *b == 0)?..];
+    let args = &after_exec[after_exec.iter().position(|b| *b != 0)?..];
+    let args: Vec<String> = args
+        .split_inclusive(|b| *b == 0)
+        .map_while(|a| a.strip_suffix(&[0]))
+        .take(argc)
+        .map(|a| String::from_utf8_lossy(a).into_owned())
+        .collect();
+    (args.len() == argc).then_some(args)
 }
 
 /// `$CLAUDE_PID` as the hook sees it: only a PID that is an ancestor of this
@@ -370,6 +441,41 @@ mod tests {
         let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
         assert_eq!(ProcFs.resolve(me, "."), Some(cwd));
         assert_eq!(ProcFs.resolve(me, "/no/such/path"), None);
+    }
+
+    fn procargs2(argc: i32, exec: &str, rest: &[&str]) -> Vec<u8> {
+        let mut buf = argc.to_ne_bytes().to_vec();
+        buf.extend_from_slice(exec.as_bytes());
+        buf.extend_from_slice(&[0; 5]);
+        for arg in rest {
+            buf.extend_from_slice(arg.as_bytes());
+            buf.push(0);
+        }
+        buf
+    }
+
+    #[test]
+    fn procargs2_gives_argv_without_the_exec_path_or_environment() {
+        let buf = procargs2(
+            3,
+            NODE,
+            &["node", NPM_CLI, "--resume", "HOME=/Users/u", "TERM=xterm"],
+        );
+        assert_eq!(
+            parse_procargs2(&buf),
+            Some(vec!["node".into(), NPM_CLI.into(), "--resume".into()])
+        );
+    }
+
+    #[test]
+    fn a_truncated_procargs2_is_unreadable() {
+        assert_eq!(
+            parse_procargs2(&procargs2(3, NODE, &["node", NPM_CLI])),
+            None
+        );
+        assert_eq!(parse_procargs2(&procargs2(1, NODE, &[])), None);
+        assert_eq!(parse_procargs2(&[1, 0]), None);
+        assert_eq!(parse_procargs2(&procargs2(-1, NODE, &["node"])), None);
     }
 
     #[test]
