@@ -96,8 +96,10 @@ fn beside_shepherd(herdr: &dyn Herdr, procs: &dyn Procs, place: &Place) -> Resul
 /// focused when the human isn't looking at that tab.
 fn beside(herdr: &dyn Herdr, pane: &str, env: &[(&str, &str)]) -> Result<How> {
     let target = herdr.pane(pane)?;
-    if let Some(view) = open_view_in_tab_of(herdr, &target)
-        && herdr.focus_plugin_pane(&view).is_ok()
+    // A shell pane can carry the view's name; herdr refuses to plugin-focus it.
+    if let Some(view) = views_in_tab_of(herdr, &target)
+        .into_iter()
+        .find(|view| herdr.focus_plugin_pane(view).is_ok())
     {
         return Ok(How::Focused { view });
     }
@@ -114,12 +116,13 @@ fn beside(herdr: &dyn Herdr, pane: &str, env: &[(&str, &str)]) -> Result<How> {
     })
 }
 
-fn open_view_in_tab_of(herdr: &dyn Herdr, target: &Pane) -> Option<String> {
-    let panes = herdr.panes_in(&target.workspace_id).ok()?;
+fn views_in_tab_of(herdr: &dyn Herdr, target: &Pane) -> Vec<String> {
+    let panes = herdr.panes_in(&target.workspace_id).unwrap_or_default();
     panes
         .into_iter()
-        .find(|p| p.tab_id == target.tab_id && p.label.as_deref() == Some(VIEW_TITLE))
+        .filter(|p| p.tab_id == target.tab_id && p.label.as_deref() == Some(VIEW_TITLE))
         .map(|p| p.id)
+        .collect()
 }
 
 fn right_of(pane: &str, focus: bool) -> Placement {
@@ -291,6 +294,49 @@ mod tests {
             .find(|p| p["id"].as_str() == Some(VIEW))
             .unwrap();
         assert_eq!(view["title"].as_str(), Some(VIEW_TITLE));
+    }
+
+    #[test]
+    fn a_shell_pane_named_like_the_view_doesnt_hide_the_open_view() {
+        let state = tempfile::tempdir().unwrap();
+        let (herdr, shepherd) = herdr_with_tab();
+        let decoy = herdr.split("w1:t1", Path::new("/src"));
+        herdr.set_label(&decoy, VIEW_TITLE);
+        record_shepherd(state.path(), &shepherd, FAKE_SOCKET);
+        open(&herdr, &FakeProcs::pane(), state.path(), None).unwrap();
+        let view = herdr.plugin_pane_ids()[0].clone();
+
+        let opened = open(&herdr, &FakeProcs::pane(), state.path(), None).unwrap();
+
+        assert_eq!(
+            opened,
+            Opened::BesideShepherd {
+                pane: shepherd,
+                how: How::Focused { view: view.clone() }
+            }
+        );
+        assert_eq!(herdr.plugin_panes().len(), 1);
+        assert_eq!(herdr.focused(), [view]);
+    }
+
+    #[test]
+    fn a_shepherd_on_screen_gets_its_view_opened_leaving_focus_put() {
+        let state = tempfile::tempdir().unwrap();
+        let (herdr, shepherd) = herdr_with_tab();
+        herdr.show_tab_of(&shepherd);
+        record_shepherd(state.path(), &shepherd, FAKE_SOCKET);
+
+        let opened = open(&herdr, &FakeProcs::pane(), state.path(), None).unwrap();
+
+        assert_eq!(
+            opened,
+            Opened::BesideShepherd {
+                pane: shepherd.clone(),
+                how: How::Opened
+            }
+        );
+        assert_eq!(herdr.plugin_panes()[0].1, right_of(&shepherd, false));
+        assert!(herdr.focused().is_empty());
     }
 
     #[test]

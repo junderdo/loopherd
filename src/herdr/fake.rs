@@ -313,6 +313,13 @@ impl FakeHerdr {
         self.state.lock().unwrap().plugin_pane_ids.clone()
     }
 
+    /// Names `pane_id` as `pane rename` does.
+    pub fn set_label(&self, pane_id: &str, label: &str) {
+        let mut state = self.state.lock().unwrap();
+        let pane = state.panes.iter_mut().find(|p| p.id == pane_id);
+        pane.expect("fake pane").label = Some(label.to_string());
+    }
+
     /// The human's client shows `pane_id`'s tab.
     pub fn show_tab_of(&self, pane_id: &str) {
         let mut state = self.state.lock().unwrap();
@@ -572,6 +579,9 @@ impl Herdr for FakeHerdr {
     }
 
     fn pane(&self, pane_id: &str) -> Result<Pane> {
+        if self.is_down() {
+            bail!("herdr server not running");
+        }
         let state = self.state.lock().unwrap();
         let pane = state.panes.iter().find(|p| p.id == pane_id);
         Ok(pane
@@ -869,7 +879,7 @@ impl Herdr for FakeHerdr {
             let id = format!("{}:p{}", target.workspace_id, state.next_id);
             state.panes.push(FakePane {
                 id: id.clone(),
-                label: Some(format!("loopherd {entrypoint}")),
+                label: Some(manifest_title(entrypoint)),
                 shell_pid: None,
                 ..target.clone()
             });
@@ -1045,4 +1055,14 @@ impl Subscriber for FakeSubscriber {
             }
         }))
     }
+}
+
+/// The title the plugin manifest gives pane `entrypoint`, which herdr shows as its label.
+fn manifest_title(entrypoint: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("herdr-plugin/herdr-plugin.toml");
+    let manifest: toml::Table = std::fs::read_to_string(path).unwrap().parse().unwrap();
+    let panes = manifest["panes"].as_array().unwrap();
+    let pane = panes.iter().find(|p| p["id"].as_str() == Some(entrypoint));
+    let title = pane.unwrap_or_else(|| panic!("no manifest pane {entrypoint}"))["title"].as_str();
+    title.unwrap().to_string()
 }
