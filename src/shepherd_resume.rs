@@ -128,7 +128,7 @@ pub fn session_started(
     let cleared = record.current.as_deref().unwrap_or(&record.session);
     let of_the_recorded = live_session(cleared) == live_session(&record.session);
     let written = match source == "clear" && of_the_recorded {
-        true => handoff_written_after(state, Some(&record.at))?,
+        true => handoff_written_after(state, &record.at)?,
         false => None,
     };
     let Some(written) = written else {
@@ -148,7 +148,6 @@ pub fn session_started(
 /// [`NewResume::undo`] gives back when the start fails.
 pub struct NewResume {
     pub prompt: String,
-    marked_used: bool,
 }
 
 impl NewResume {
@@ -158,7 +157,7 @@ impl NewResume {
         let read = handoff.with_extension("prev.md");
         fs::rename(&read, &handoff)
             .with_context(|| format!("move {} to {}", read.display(), handoff.display()))?;
-        match last_record(state).filter(|_| self.marked_used) {
+        match last_record(state) {
             Some(mut record) => {
                 record.used = false;
                 write(state, &record)
@@ -168,25 +167,28 @@ impl NewResume {
     }
 }
 
-/// The resume for a shepherd started afresh, when `handoffs/shepherd.md` was
-/// written after the last record or there's no record: marks any record used
-/// and moves the handoff as a resume does.
+/// The resume for a shepherd started afresh, when the last record is unused,
+/// its Claude never moved to another session, and `handoffs/shepherd.md` was
+/// written after it: marks the record used and moves the handoff as a resume
+/// does. A moved session means the handoff was already acted on.
 pub fn new_shepherd_resume(state: &Path) -> Result<Option<NewResume>> {
-    let last = last_record(state);
-    let Some(written) = handoff_written_after(state, last.as_ref().map(|r| r.at.as_str()))? else {
+    let Some(mut record) = last_record(state) else {
         return Ok(None);
     };
-    let unused = last.filter(|r| !r.used);
-    let marked_used = unused.is_some();
-    if let Some(mut record) = unused {
-        record.used = true;
-        write(state, &record)?;
+    let moved_on = record
+        .current
+        .as_ref()
+        .is_some_and(|c| *c != record.session);
+    if record.used || moved_on {
+        return Ok(None);
     }
+    let Some(written) = handoff_written_after(state, &record.at)? else {
+        return Ok(None);
+    };
+    record.used = true;
+    write(state, &record)?;
     let prompt = resume_from_moved_handoff(state, written)?;
-    Ok(Some(NewResume {
-        prompt,
-        marked_used,
-    }))
+    Ok(Some(NewResume { prompt }))
 }
 
 /// Moves the handoff to `shepherd.prev.md` and returns the context that
@@ -206,17 +208,13 @@ fn resume_from_moved_handoff(state: &Path, written: SystemTime) -> Result<String
     ))
 }
 
-/// When the handoff was written, if after the record's time `at`, or at all
-/// with no `at`.
-fn handoff_written_after(state: &Path, at: Option<&str>) -> Result<Option<SystemTime>> {
+/// When the handoff was written, if after the record's time `at`.
+fn handoff_written_after(state: &Path, at: &str) -> Result<Option<SystemTime>> {
     let handoff = handoff_path(state);
     let written = match fs::metadata(&handoff).and_then(|m| m.modified()) {
         Ok(written) => written,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("read {}", handoff.display())),
-    };
-    let Some(at) = at else {
-        return Ok(Some(written));
     };
     let at = humantime::parse_rfc3339(at)
         .with_context(|| format!("parse the time in {}", record_path(state).display()))?;

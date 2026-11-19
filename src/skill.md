@@ -25,9 +25,13 @@ that pane. Read `herdr --skill` before controlling herdr.
 
 ## Shepherd
 
-At the start of each session, run `loopherd doctor` (with `--settings
-<file>` if you installed with it). It prints only problems; relay each
-failure to the human with the fix it names (D63).
+At the start of each session, name your herdr agent so the herd view's `S`
+focuses you instead of starting a second shepherd: `herdr agent rename
+"$HERDR_PANE_ID" shepherd`. If herdr answers `agent_name_taken`, another
+shepherd already runs in the pane it names; stop and tell the human (D88).
+Then run `loopherd doctor` (with `--settings <file>` if you installed with
+it). It prints only problems; relay each failure to the human with the fix
+it names (D63).
 
 ### Setting up a project
 

@@ -175,6 +175,9 @@ pub struct App {
     live: bool,
     /// An `S` is being served, which holds up the reads queued behind it.
     summoning: bool,
+    /// A quit pressed while summoning, held until the start settles so a
+    /// split it made is either running the shepherd or closed.
+    quit_after_summon: bool,
     quit: bool,
 }
 
@@ -236,6 +239,7 @@ impl App {
             invalidated: false,
             live: false,
             summoning: false,
+            quit_after_summon: false,
             quit: false,
         }
     }
@@ -317,9 +321,19 @@ impl App {
             Response::SavedTheme(Err(e)) => self.message = Some(format!("save theme: {e:#}")),
             Response::Shepherd(result) => {
                 self.summoning = false;
+                self.quit = self.quit_after_summon;
                 self.message = Some(match result {
                     Ok(Summoned::Focused(pane)) => format!("focused the shepherd in {pane}"),
                     Ok(Summoned::Started(pane)) => format!("started the shepherd below, in {pane}"),
+                    Ok(Summoned::Unfocused(pane, e)) => {
+                        format!("started the shepherd below, in {pane}; focus failed: {e}")
+                    }
+                    Ok(Summoned::Elsewhere(place)) => format!(
+                        "the shepherd's Claude (pid {}) runs in {} on {}; not starting another",
+                        place.process.pid,
+                        place.pane,
+                        place.socket.display()
+                    ),
                     Ok(Summoned::NoPane) => {
                         "no live shepherd; open the view as a pane to start one".into()
                     }
@@ -333,6 +347,10 @@ impl App {
     pub fn press(&mut self, key: KeyCode, now: Instant) -> Option<Request> {
         self.message = None;
         match key {
+            KeyCode::Char('q') | KeyCode::Esc if self.summoning => {
+                self.quit_after_summon = true;
+                self.message = Some("quitting once the shepherd is up".into());
+            }
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('s') => {
                 self.options.strays = !self.options.strays;
@@ -346,6 +364,7 @@ impl App {
                 self.theme = self.theme.with_palette(self.theme.palette().next());
                 return Some(Request::SaveTheme(self.theme.palette()));
             }
+            KeyCode::Char('S') if self.summoning => {}
             KeyCode::Char('S') => {
                 self.summoning = true;
                 return Some(Request::Shepherd);
@@ -3953,6 +3972,49 @@ max = 3
         assert_eq!(herdr.started().len(), 1);
         assert_eq!(herdr.focused().last(), Some(&split.pane));
         assert!(shown.contains("focused the shepherd"), "{shown}");
+    }
+
+    #[test]
+    fn capital_s_in_a_popup_focuses_a_live_shepherd() {
+        let (ledger, now) = (ledger(), Instant::now());
+        let herdr = herdr().with_live_agent(Some("shepherd"), None, "w1:ps");
+        let state = tempfile::tempdir().unwrap();
+        let mut app = app(&herdr, &ledger, now);
+
+        let shown = press_shepherd(
+            &mut app,
+            &herdr,
+            &ledger,
+            &shepherd_dirs(state.path(), None),
+        );
+
+        assert_eq!(herdr.focused(), ["w1:ps"]);
+        assert_eq!(herdr.mutations(), 0);
+        assert!(shown.contains("focused the shepherd in w1:ps"), "{shown}");
+    }
+
+    #[test]
+    fn while_the_shepherd_comes_up_a_second_s_is_ignored_and_q_waits_for_it() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let view = herdr.add_tab("w1", "view", std::path::Path::new("/repo"), true);
+        let state = tempfile::tempdir().unwrap();
+        let dirs = shepherd_dirs(state.path(), Some(&view));
+        let mut app = app(&herdr, &ledger, now);
+        let request = app.press(KeyCode::Char('S'), now).unwrap();
+
+        assert!(app.press(KeyCode::Char('S'), now).is_none());
+        app.press(KeyCode::Char('q'), now);
+        assert!(!app.quit());
+        let shown = text(&render_tall(&app, now)).concat();
+        assert!(
+            shown.contains("quitting once the shepherd is up"),
+            "{shown}"
+        );
+
+        app.apply(serve(request, &herdr, &ledger, &dirs), now)
+            .unwrap();
+        assert!(app.quit());
+        assert_eq!(herdr.started().len(), 1);
     }
 
     #[test]

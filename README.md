@@ -177,9 +177,11 @@ as its main checkout. Then, in order:
    purple-orange, phosphor and catppuccin themes, remembering the choice as
    `view.theme` in `config.toml`.
 5. **Start the shepherd.** Press `S` in the view, run in a pane rather
-   than the plugin's popup, to start it below the view in the view's
-   directory. Or in another herdr tab, `cd` to the main
-   checkout, run `claude`, and give it this first prompt:
+   than the plugin's popup, to start it below the view, in the view's
+   directory (a plugin pane's workspace directory, not the plugin's). Or in
+   another herdr tab, `cd` to the main checkout, run `claude`, and give it
+   this first prompt; the skill has it name its herdr agent `shepherd`, so
+   `S` then finds it:
 
    ```text
    You're the shepherd for the <herd> herd in this repo. Read `loopherd --skill`

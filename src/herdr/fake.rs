@@ -107,6 +107,7 @@ pub struct FakeHerdr {
     pub fail_create_tab: bool,
     pub fail_close_tab: bool,
     pub fail_prompt: bool,
+    pub fail_focus: bool,
     pub fail_wait: bool,
     pub fail_visible_text: bool,
     pub fail_shell_pid: bool,
@@ -154,6 +155,7 @@ impl FakeHerdr {
             fail_create_tab: false,
             fail_close_tab: false,
             fail_prompt: false,
+            fail_focus: false,
             fail_wait: false,
             fail_visible_text: false,
             fail_shell_pid: false,
@@ -756,6 +758,9 @@ impl Herdr for FakeHerdr {
     fn focus(&self, pane_id: &str) -> Result<()> {
         if self.is_down() {
             bail!("herdr server not running");
+        }
+        if self.fail_focus {
+            bail!("focus failed");
         }
         if !self
             .state

@@ -1073,23 +1073,27 @@ fn run_stats(herd: Option<String>, since: Option<SystemTime>, json: bool) -> Res
 fn run_view(all: bool, strays: bool) -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let subscriber = SocketSubscriber::new(CliHerdr.socket());
+    let (herds, state, config) = (Paths::from_env()?, ledger.dir()?, config_path()?);
+    let below = match own_pane() {
+        // The split pane gets the herdr server's environment, so pin the
+        // roots this view resolved, set in its own environment or not.
+        Some(pane) => Some(shepherd_pane::Below {
+            pane,
+            cwd: workspace_cwd()?,
+            env: vec![
+                ("XDG_STATE_HOME".into(), env_path(state.parent())?),
+                ("LOOPHERD_CONFIG_DIR".into(), env_path(config.parent())?),
+            ],
+        }),
+        None => None,
+    };
     let dirs = tui::Dirs {
         pauses: pause::Pauses::from_env()?,
-        herds: Paths::from_env()?,
+        herds,
         mailboxes: ledger.reports_dir()?,
-        config: config_path()?,
-        state: ledger.dir()?,
-        below: match own_pane() {
-            Some(pane) => Some(shepherd_pane::Below {
-                pane,
-                cwd: workspace_cwd()?,
-                env: ["XDG_STATE_HOME", "LOOPHERD_CONFIG_DIR"]
-                    .into_iter()
-                    .filter_map(|k| Some((k.to_string(), std::env::var(k).ok()?)))
-                    .collect(),
-            }),
-            None => None,
-        },
+        config,
+        state,
+        below,
     };
     tui::run(
         CliHerdr,
@@ -1105,6 +1109,13 @@ fn run_view(all: bool, strays: bool) -> Result<i32> {
             .ok()
             .filter(|n| !n.is_empty()),
     )
+}
+
+fn env_path(dir: Option<&Path>) -> Result<String> {
+    let dir = dir.context("a state or config path has no parent")?;
+    dir.to_str()
+        .map(String::from)
+        .with_context(|| format!("{} is not UTF-8", dir.display()))
 }
 
 /// Where the human works: a plugin pane's workspace, whose own cwd is the

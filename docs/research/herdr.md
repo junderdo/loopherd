@@ -55,6 +55,10 @@ Claude integration hook installed:
   for as long as it runs.
 - After `server stop` and a restart, resumed agents come back with
   `name: null` and their session set: names don't survive a restart.
+- `agent rename <pane-id> <name>` takes a pane ID as its target and
+  names a Claude typed by hand there (checked 2026-11-19, herdr 0.9.5).
+  Renaming to the name it already has succeeds; renaming another agent to
+  a held name fails with `agent_name_taken`, naming the holder's pane.
 
 ## Control surface (everything we need to layer on top)
 
