@@ -102,7 +102,11 @@ herdr plugin install junderdo/loopherd/herdr-plugin
 
 It adds a `loopherd: herd status` action and a `loopherd: open herd view`
 action, which opens `loopherd view` in a popup over most of the screen;
-`q` or Escape quits the view and closes the popup. To open it with a key,
+`q` or Escape quits the view and closes the popup. `loopherd: open view
+beside shepherd` instead splits the view into a pane right of the
+shepherd's, the one its last handoff recorded, leaving focus with the
+shepherd. With no shepherd recorded, or its pane gone, it splits right of
+the focused pane (the popup when there is none), and the view says why. To open it with a key,
 add a binding to your herdr `config.toml` and run
 `herdr server reload-config`:
 

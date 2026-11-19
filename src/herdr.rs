@@ -145,9 +145,14 @@ pub trait Herdr {
     /// Shows `label` in place of the Claude's name in `pane_id`'s sidebar row,
     /// or clears it. Display-only: herdr's status for the pane is unchanged.
     fn label_pane(&self, pane_id: &str, label: Option<&str>) -> Result<()>;
-    /// Opens the loopherd plugin's pane `entrypoint` with `env` set for its
-    /// process. Refused while another herdr modal is open.
-    fn open_plugin_pane(&self, entrypoint: &str, env: &[(&str, &str)]) -> Result<()>;
+    /// Opens the loopherd plugin's pane `entrypoint` at `placement` with `env`
+    /// set for its process. A popup is refused while another herdr modal is open.
+    fn open_plugin_pane(
+        &self,
+        entrypoint: &str,
+        placement: &Placement,
+        env: &[(&str, &str)],
+    ) -> Result<()>;
     /// The plugin `id` in the reached herdr's registry; `None` when neither
     /// installed nor linked. Gives up after `timeout`.
     fn plugin(&self, id: &str, timeout: Duration) -> Result<Option<Plugin>>;
@@ -155,6 +160,15 @@ pub trait Herdr {
     fn socket(&self) -> Option<PathBuf>;
     /// The server as `herdr status server` reports it, giving up after `timeout`.
     fn server(&self, timeout: Duration) -> Result<Server>;
+}
+
+/// Where a plugin pane opens.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Placement {
+    /// As the plugin's manifest declares it.
+    Manifest,
+    /// Split right of `pane`, leaving focus there, with `share` of their width.
+    RightOf { pane: String, share: f64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -576,7 +590,12 @@ impl Herdr for CliHerdr {
         }
     }
 
-    fn open_plugin_pane(&self, entrypoint: &str, env: &[(&str, &str)]) -> Result<()> {
+    fn open_plugin_pane(
+        &self,
+        entrypoint: &str,
+        placement: &Placement,
+        env: &[(&str, &str)],
+    ) -> Result<()> {
         let env: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
         let mut argv = vec![
             "plugin",
@@ -587,6 +606,17 @@ impl Herdr for CliHerdr {
             "--entrypoint",
             entrypoint,
         ];
+        if let Placement::RightOf { pane, .. } = placement {
+            argv.extend([
+                "--placement",
+                "split",
+                "--target-pane",
+                pane,
+                "--direction",
+                "right",
+                "--no-focus",
+            ]);
+        }
         for pair in &env {
             argv.extend(["--env", pair]);
         }
@@ -594,23 +624,45 @@ impl Herdr for CliHerdr {
             .command(&argv)
             .output()
             .with_context(|| format!("run herdr {}", argv[..3].join(" ")))?;
-        if out.status.success() {
-            return Ok(());
+        if !out.status.success() {
+            match [&out.stdout, &out.stderr]
+                .into_iter()
+                .find_map(|bytes| serde_json::from_slice::<ErrorEnvelope>(bytes).ok())
+            {
+                Some(env) => bail!(
+                    "herdr plugin pane open: {} ({})",
+                    env.error.message,
+                    env.error.code
+                ),
+                None => bail!(
+                    "herdr plugin pane open failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+            }
         }
-        match [&out.stdout, &out.stderr]
-            .into_iter()
-            .find_map(|bytes| serde_json::from_slice::<ErrorEnvelope>(bytes).ok())
-        {
-            Some(env) => bail!(
-                "herdr plugin pane open: {} ({})",
-                env.error.message,
-                env.error.code
-            ),
-            None => bail!(
-                "herdr plugin pane open failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ),
+        if let Placement::RightOf { pane, share } = placement {
+            // A split opens at half. Resizing the target, not the new pane,
+            // moves the divider between them; herdr ignores the amount's sign.
+            let (direction, amount) = match *share <= 0.5 {
+                true => ("right", 0.5 - share),
+                false => ("left", share - 0.5),
+            };
+            let amount = amount.to_string();
+            let args = [
+                "pane",
+                "resize",
+                "--pane",
+                pane,
+                "--direction",
+                direction,
+                "--amount",
+                &amount,
+            ];
+            if let Err(e) = self.call_ok(&args) {
+                eprintln!("loopherd: the plugin pane opened at half width: {e:#}");
+            }
         }
+        Ok(())
     }
 
     fn plugin(&self, id: &str, timeout: Duration) -> Result<Option<Plugin>> {
