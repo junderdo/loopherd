@@ -267,8 +267,9 @@ enum Command {
         /// time with `Z` or an offset.
         #[arg(long, value_parser = stats::parse_since)]
         since: Option<SystemTime>,
-        /// Only members started before this, in `--since`'s forms; with `--since` it
-        /// bounds a window, to compare one against another.
+        /// Only members started before this, in `--since`'s forms, so a date leaves
+        /// that day out; with `--since` it bounds a window, to compare one against
+        /// another.
         #[arg(long, value_parser = stats::parse_since)]
         until: Option<SystemTime>,
         /// Print JSON, with tokens split per model into input, cache write, cache
@@ -1091,7 +1092,11 @@ fn run_stats(herd: Option<String>, window: usage::Window, json: bool) -> Result<
     if let (Some(since), Some(until)) = (window.since, window.until)
         && until <= since
     {
-        Cli::command()
+        let mut cli = Cli::command();
+        // Building fills in each subcommand's usage line.
+        cli.build();
+        cli.find_subcommand_mut("stats")
+            .expect("stats is a subcommand")
             .error(ErrorKind::ValueValidation, "--until must be after --since")
             .exit();
     }

@@ -1422,6 +1422,7 @@ fn an_until_at_or_before_since_is_refused() {
             err.contains("--until must be after --since"),
             "{since} to {until}: {err}"
         );
+        assert!(err.contains("Usage: loopherd stats [OPTIONS]"), "{err}");
     }
 }
 
@@ -1505,4 +1506,23 @@ fn help_and_the_skill_describe_until_and_the_template_summaries() {
     let skill = skill.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(skill.contains("`--until <date or time>`"), "{skill}");
     assert!(skill.contains("per template"), "{skill}");
+}
+
+#[test]
+fn runs_without_a_template_are_summarized_as_a_dash() {
+    let state = tempfile::tempdir().unwrap();
+    one_retired_member(state.path());
+    let path = state.path().join("loopherd/ledger.json");
+    let mut ledger: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    ledger["lh-1"]["template"] = serde_json::Value::Null;
+    fs::write(&path, ledger.to_string()).unwrap();
+
+    let out = stdout(&run(state.path(), &[]));
+    assert!(out.contains("\n  template -: 1 members; "), "{out}");
+    let json = json(state.path(), &[]);
+    assert_eq!(
+        json["herds"][0]["templates"][0]["template"],
+        serde_json::Value::Null
+    );
 }

@@ -290,8 +290,8 @@ fn parse_time(at: &str) -> Option<SystemTime> {
     humantime::parse_rfc3339_weak(at).ok()
 }
 
-/// `--since`: a date, `2026-11-01`, meaning midnight UTC, or an RFC 3339 time
-/// with `Z` or a `±HH:MM` offset.
+/// `--since` and `--until`: a date, `2026-11-01`, meaning midnight UTC, or an
+/// RFC 3339 time with `Z` or a `±HH:MM` offset.
 pub fn parse_since(value: &str) -> Result<SystemTime> {
     parse_moment(
         value,

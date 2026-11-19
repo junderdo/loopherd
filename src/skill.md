@@ -515,8 +515,10 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   is left out of the medians. Each herd's `lead overhead` line is its lead's
   tokens within the window, subagents included (D92). `--herd`,
   `--since <date or time>` (started on or after), `--until <date or time>`
-  (started before; an `--until` at or before `--since` is refused),
+  (started before; an `--until` at or before `--since` is refused; a date
+  means midnight UTC, so `--until` excludes that day),
   `--json` (the per-model split, and `templates`); it marks nothing read.
+  Runs without a template are summarized as `-`, `null` in JSON.
   To judge a template or prompt change, run it once per window, before and
   after, and compare the template's lines (D92).
 - `loopherd retire <name>` marks a member finished in the ledger only;
