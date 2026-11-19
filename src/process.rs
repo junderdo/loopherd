@@ -184,7 +184,7 @@ fn parse_procargs2(buf: &[u8]) -> Option<Vec<String>> {
         .take(argc)
         .map(|a| String::from_utf8_lossy(a).into_owned())
         .collect();
-    (args.len() == argc).then_some(args)
+    (args.len() == argc).then(|| args.into_iter().filter(|a| !a.is_empty()).collect())
 }
 
 /// `$CLAUDE_PID` as the hook sees it: only a PID that is an ancestor of this
@@ -465,6 +465,12 @@ mod tests {
             parse_procargs2(&buf),
             Some(vec!["node".into(), NPM_CLI.into(), "--resume".into()])
         );
+    }
+
+    #[test]
+    fn procargs2_drops_empty_args_as_proc_cmdline_does() {
+        let buf = procargs2(3, NODE, &["claude", "", ""]);
+        assert_eq!(parse_procargs2(&buf), Some(vec!["claude".into()]));
     }
 
     #[test]
