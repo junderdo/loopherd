@@ -23,7 +23,8 @@ use crate::template::Template;
 pub enum Kind {
     Question,
     Blocked,
-    Merged,
+    #[serde(rename = "merge_alert")]
+    MergeAlert,
 }
 
 impl Kind {
@@ -31,7 +32,7 @@ impl Kind {
         match self {
             Kind::Question => "question",
             Kind::Blocked => "blocked",
-            Kind::Merged => "merged",
+            Kind::MergeAlert => "merge_alert",
         }
     }
 }
@@ -75,6 +76,10 @@ impl Config {
     /// Enabled with herdr's toast off, no command and no pane label.
     pub fn sends_nothing(&self) -> bool {
         !self.herdr && self.command.is_empty() && !self.pane_label
+    }
+
+    pub fn sends(&self, kind: Kind) -> bool {
+        self.kinds.contains(&kind)
     }
 
     /// Whether to label the pane that must relay or answer a question; see `pane_label`.
@@ -124,7 +129,7 @@ fn check(table: Table) -> Result<Option<Config>> {
             .context("command")?;
     }
     Ok(table.enabled.then(|| Config {
-        kinds: (table.kinds).unwrap_or(vec![Kind::Question, Kind::Blocked, Kind::Merged]),
+        kinds: (table.kinds).unwrap_or(vec![Kind::Question, Kind::Blocked, Kind::MergeAlert]),
         herdr: table.herdr.unwrap_or(true),
         command,
         pane_label: table.pane_label,
@@ -174,7 +179,7 @@ pub fn send(
         let text = match event.kind {
             Kind::Question => summary(&event.text),
             Kind::Blocked => Kind::Blocked.as_str().to_string(),
-            Kind::Merged => event.text.clone(),
+            Kind::MergeAlert => event.text.clone(),
         };
         let marked = match &event.at {
             Some(at) => first_to_notify(mailboxes, &event.member, event.kind, at),

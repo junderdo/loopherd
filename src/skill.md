@@ -391,7 +391,7 @@ the lead's, and a mark per event keeps it to one send:
 ```toml
 [notify]
 enabled = true                    # default false: nothing is sent
-kinds = ["question", "blocked", "merged"]   # the default
+kinds = ["question", "blocked", "merge_alert"]   # the default
 herdr = true                      # herdr's toast on the watched socket; default true
 command = "notify-send {herd}/{member} {text}"
 pane_label = true                 # label the relaying pane in herdr; default false
@@ -402,8 +402,8 @@ of arguments for spaces), each placeholder (`{herd}`, `{member}`, `{kind}`,
 `{text}`) filled within its own argument, never through a shell. `{text}`
 is the question's first non-blank line, cut to 200 characters with token-like words
 and URL passwords `[redacted]` (best-effort: a secret in an unknown shape
-gets through), or `blocked`. Each send runs detached within 30s; a failing
-one leaves a `note` in the member's mailbox, once until it next succeeds.
+gets through), `blocked`, or a merge alert's PR. Each send runs detached
+within 30s; a failing one leaves a `note` in the member's mailbox, once until it next succeeds.
 `loopherd herds` reports a broken table, which sends nothing, and warns of
 an enabled one with `herdr = false`, no `command` and no `pane_label`.
 Notifying doesn't replace relaying: still tell the human in your pane. Not
@@ -411,11 +411,15 @@ sent: a question you read with `loopherd reports` before a watch saw it, and
 a member already blocked when every watch started. A lead relaying a worker's
 question as its own sends a second notification.
 
-A lead's watch also sends `merged`, with `{text}` the PR's number and URL,
-once per PR merged into its repo's default branch since the lead started,
-when its `[lead]` has `merge` off and `merge_guard = "hook"` (the default).
-The hook holds the human's credentials, so a merge the human didn't make
-shows up. It asks gh every minute; a failure warns on the watch's stderr.
+A lead's watch also sends `merge_alert`, with `{text}` the PR's number and
+URL, once per PR merged into its repo's default branch since the lead
+started (or was last revived), when its `[lead]` has `merge` off and
+`merge_guard = "hook"` (the default). The lead runs with the human's
+credentials, so a merge the human didn't make shows up. It asks gh every
+minute, only while `kinds` holds `merge_alert`; a failure warns on the
+watch's stderr. A watch re-armed later catches up on merges it missed;
+pushes straight to the branch, and merges after the lead's watch stops for
+good (a drained lead), aren't covered.
 
 `pane_label = true` (default false) also labels, in herdr's sidebar, the
 pane that must relay or answer: yours when your watch prints a `question`

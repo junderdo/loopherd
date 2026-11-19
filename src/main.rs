@@ -1394,10 +1394,12 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
     let mailboxes = ledger.reports_dir()?;
     let notify_own = |events: &[notify::Waiting]| notify_waiting(events, &config, &mailboxes);
     let gh = github::GhCli::default();
+    let alerts_merges =
+        notify::load(&config).is_ok_and(|c| c.is_some_and(|c| c.sends(notify::Kind::MergeAlert)));
     let req = watch::Request {
         shepherd_handoff: Some(&handoff),
         notify_own: Some(&notify_own),
-        merges: Some(&gh),
+        merges: alerts_merges.then_some(&gh as &dyn github::Merges),
         pane_label: labels_panes(&config),
         ..req
     };

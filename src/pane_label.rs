@@ -26,7 +26,7 @@ pub fn set(herdr: &dyn Herdr, dir: &Path, pane: &str, waiting: &Waiting) -> Resu
             notify::summary(&waiting.text)
         ),
         Kind::Blocked => format!("{} is blocked", waiting.member),
-        Kind::Merged => format!("{} saw {} merged", waiting.member, waiting.text),
+        Kind::MergeAlert => format!("{} saw {} merged", waiting.member, waiting.text),
     };
     let mark = mark(dir, pane);
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;

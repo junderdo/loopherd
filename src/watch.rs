@@ -173,7 +173,8 @@ pub fn watch(
         ) => Some(Checks {
             herd: herd.clone(),
             lead: name.clone(),
-            since: created.clone(),
+            created: created.clone(),
+            mailboxes: dir,
             paths,
             procs: req.procs,
             timeout: (req.check_timeout)()?,
@@ -505,8 +506,8 @@ impl Flight<'_> {
 struct Checks<'a> {
     herd: String,
     lead: String,
-    /// When the lead started, the earliest merge it hears of.
-    since: String,
+    created: String,
+    mailboxes: &'a Path,
     paths: &'a Paths,
     procs: &'a dyn Procs,
     timeout: Duration,
@@ -667,12 +668,12 @@ impl Checks<'_> {
 }
 
 impl Checks<'_> {
-    /// Each PR merged since the lead started into the repo
-    /// [`herd::merge_alerts`] names, for the human; repeats are left to
+    /// Each PR merged into the repo [`herd::merge_alerts`] names since this
+    /// run of the lead started, for the human; repeats are left to
     /// [`notify::send`]'s marks.
     fn merges(&mut self, merges: &dyn Merges, warn: &mut dyn FnMut(&str)) -> Vec<Waiting> {
         let found = herd::merge_alerts(self.paths, &self.herd).and_then(|repo| match repo {
-            Some(repo) => merges.merged_since(&repo, &self.since),
+            Some(repo) => merges.merged_since(&repo, &self.running_since()?),
             None => Ok(vec![]),
         });
         let problem = (found.as_ref().err()).map(|e| format!("{}'s merges: {e:#}", self.herd));
@@ -682,11 +683,32 @@ impl Checks<'_> {
             .map(|pr| Waiting {
                 herd: Some(self.herd.clone()),
                 member: self.lead.clone(),
-                kind: notify::Kind::Merged,
+                kind: notify::Kind::MergeAlert,
                 text: format!("#{} {}", pr.number, pr.url),
                 at: Some(pr.url),
             })
             .collect()
+    }
+
+    /// The first `start` after the lead's last `gone`, else its creation, so
+    /// a revived lead skips merges made while it was down; in whole seconds,
+    /// as GitHub's search reads it.
+    fn running_since(&self) -> Result<String> {
+        let (entries, _) = crate::report::history(self.mailboxes, &self.lead)?;
+        let mut since = self.created.clone();
+        let mut down = false;
+        for entry in entries {
+            match entry.body {
+                Body::Gone { .. } => down = true,
+                Body::Start { .. } if down => {
+                    since = entry.at;
+                    down = false;
+                }
+                _ => {}
+            }
+        }
+        let at = humantime::parse_rfc3339_weak(&since).with_context(|| format!("read {since}"))?;
+        Ok(humantime::format_rfc3339_seconds(at).to_string())
     }
 
     /// The `running low` event while claimable is at or below `max` with
@@ -3454,7 +3476,7 @@ mod tests {
 
     fn merge_sent(number: u64) -> Vec<String> {
         let url = format!("#{number} https://github.com/o/r/pull/{number}");
-        ["n", "lead-cards", "merged", &url]
+        ["n", "lead-cards", "merge_alert", &url]
             .map(String::from)
             .to_vec()
     }
@@ -3496,6 +3518,45 @@ mod tests {
         assert!(woke.unwrap().is_none());
         let repo = world.repo.path().display();
         assert_eq!(warned, [format!("cards's merges: no repo {repo}")]);
+        assert_eq!(notifier.sent(), Vec::<Vec<String>>::new());
+    }
+
+    #[test]
+    fn a_revived_lead_hears_only_of_merges_since_its_revive() {
+        let down = ("2026-11-01T13:00:00Z", 6);
+        let revived = ("2026-11-01T15:00:00Z", 7);
+        let (world, notifier, gh) = guarded("", vec![down, revived]);
+        let reports = world.config.path().join("reports");
+        for (at, body) in [
+            (
+                "2026-11-01T12:00:00Z",
+                Body::Gone {
+                    tab: None,
+                    workspace: None,
+                },
+            ),
+            ("2026-11-01T14:00:00.5Z", Body::Start { resumed: true }),
+        ] {
+            let entry = Entry {
+                at: at.into(),
+                body,
+            };
+            append(&reports, "lead-cards", &entry).unwrap();
+        }
+
+        world.lead_once(&notifier, &gh);
+
+        assert_eq!(notifier.sent(), [merge_sent(7)]);
+    }
+
+    #[test]
+    fn a_lead_given_merge_by_lead_defaults_hears_of_no_merges() {
+        let (world, notifier, gh) = guarded("", vec![("2026-11-01T10:00:00Z", 7)]);
+        let config = world.config.path().join("config.toml");
+        fs::write(config, "[lead_defaults]\nmerge = true\n").unwrap();
+
+        world.lead_once(&notifier, &gh);
+
         assert_eq!(notifier.sent(), Vec::<Vec<String>>::new());
     }
 

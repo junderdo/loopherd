@@ -13,6 +13,9 @@ use crate::worktree::remote_timeout;
 /// A click waits on this lookup, so it gets a short deadline of its own.
 const HEAD_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// A watch's poll waits on each merge lookup.
+const MERGES_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// A pull request on GitHub.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pr {
@@ -116,7 +119,7 @@ impl Merges for GhCli {
             default,
         ];
         let branch = self.answer(repo, &view)?;
-        let search = format!("merged:>={since}");
+        let search = format!("merged:>={since} sort:updated-desc");
         let list = [
             "pr",
             "list",
@@ -217,9 +220,10 @@ impl GhCli {
 }
 
 impl GhCli {
-    /// What gh with `args` printed, erring when it failed or there's no gh.
+    /// What gh with `args` printed within [`MERGES_TIMEOUT`], erring when it
+    /// failed or there's no gh.
     fn answer(&self, repo: &Path, args: &[&str]) -> Result<String> {
-        let Some(output) = self.run(repo, args, remote_timeout()?)? else {
+        let Some(output) = self.run(repo, args, MERGES_TIMEOUT)? else {
             bail!("no GitHub CLI (gh) on PATH");
         };
         if !output.status.success() {
@@ -505,7 +509,7 @@ mod tests {
             std::fs::read_to_string(dir.path().join("args")).unwrap(),
             "repo view github.com/o/r --json defaultBranchRef --jq .defaultBranchRef.name\n\
              pr list -R github.com/o/r --state merged --base main \
-             --search merged:>=2026-11-01T00:00:00Z --limit 100 --json number,url\n"
+             --search merged:>=2026-11-01T00:00:00Z sort:updated-desc --limit 100 --json number,url\n"
         );
     }
 
