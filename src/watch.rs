@@ -12,11 +12,13 @@ use anyhow::{Context, Result, bail};
 
 use crate::context::ShepherdHandoff;
 use crate::feed::{claimable, claimable_count, run_check, run_in_repo, run_source};
+use crate::github::Merges;
 use crate::herd::{self, MemberCheck, MemberChecks, Paths, lead_checks};
 use crate::herd_view::{Member, Options, View};
 use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::{AfterMerge, AgentRecord, Ledger, Process};
 use crate::lock::Lock;
+use crate::merge_alert::MergeAlerts;
 use crate::notify::{self, Waiting};
 use crate::pane_event::{record_blocked, record_gone_after, retracted};
 use crate::pause;
@@ -67,6 +69,8 @@ pub trait Clock {
     /// Time since the watch started.
     fn elapsed(&self) -> Duration;
     fn sleep(&mut self, duration: Duration);
+    /// The wall-clock time.
+    fn now(&self) -> SystemTime;
 }
 
 pub struct RealClock(Instant);
@@ -83,6 +87,9 @@ impl Clock for RealClock {
     }
     fn sleep(&mut self, duration: Duration) {
         std::thread::sleep(duration);
+    }
+    fn now(&self) -> SystemTime {
+        SystemTime::now()
     }
 }
 
@@ -112,6 +119,9 @@ pub struct Request<'a> {
     /// Given a lead's own questions and blocks as its watch first sees them,
     /// which wake only the shepherd's watch.
     pub notify_own: Option<NotifyOwn<'a>>,
+    /// Asked by a lead's watch, through `notify_own`, for merges the human
+    /// should hear of (see [`herd::merge_alerts`]).
+    pub merges: Option<&'a dyn Merges>,
     /// Labels the caller's pane with what wakes the shepherd's watch waiting
     /// on the human, until the human next prompts there.
     pub pane_label: bool,
@@ -168,6 +178,7 @@ pub fn watch(
             Some(paths),
         ) => Some(Checks {
             herd: herd.clone(),
+            alerts: MergeAlerts::new(herd, name, created, dir),
             paths,
             procs: req.procs,
             timeout: (req.check_timeout)()?,
@@ -311,6 +322,16 @@ pub fn watch(
         let mut fired = None;
         if let Some(checks) = checks.as_mut().filter(|c| clock.elapsed() >= c.next) {
             let events = checks.run(ledger, warn)?;
+            if let (Some(notify_own), Some(merges)) = (req.notify_own, req.merges) {
+                let polled = (checks.alerts).poll(checks.paths, merges, clock.now(), warn);
+                let merged = polled.unwrap_or_else(|e| {
+                    warn(&format!("{}'s merges: {e:#}", checks.herd));
+                    vec![]
+                });
+                if !merged.is_empty() {
+                    notify_own(&merged);
+                }
+            }
             checks.next = clock.elapsed() + CHECK_EVERY;
             if !events.is_empty() {
                 lines.extend(events.iter().map(|e| e.line.clone()));
@@ -491,6 +512,7 @@ impl Flight<'_> {
 /// A lead's merged and claimable checks, run every [`CHECK_EVERY`].
 struct Checks<'a> {
     herd: String,
+    alerts: MergeAlerts,
     paths: &'a Paths,
     procs: &'a dyn Procs,
     timeout: Duration,
@@ -1492,6 +1514,7 @@ fn own_questions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::github::fake::FakeMerges;
     use crate::herdr::fake::FakeHerdr;
     use crate::ledger::{FileLedger, MemLedger};
     use crate::report::{Background, Entry, Kind, Reporter, Tally, Unknown, append, report};
@@ -1548,6 +1571,7 @@ mod tests {
     /// Runs `step` with the poll count before each sleep, so a test changes
     /// the world between polls.
     struct Steps<F: FnMut(u32)> {
+        start: SystemTime,
         elapsed: Duration,
         polls: u32,
         step: F,
@@ -1556,6 +1580,9 @@ mod tests {
     impl<F: FnMut(u32)> Clock for Steps<F> {
         fn elapsed(&self) -> Duration {
             self.elapsed
+        }
+        fn now(&self) -> SystemTime {
+            self.start + self.elapsed
         }
         fn sleep(&mut self, duration: Duration) {
             self.polls += 1;
@@ -1566,7 +1593,13 @@ mod tests {
     }
 
     fn steps<F: FnMut(u32)>(step: F) -> Steps<F> {
+        steps_from("2026-11-01T09:00:00Z", step)
+    }
+
+    /// Steps whose wall clock starts at `start`, an RFC 3339 time.
+    fn steps_from<F: FnMut(u32)>(start: &str, step: F) -> Steps<F> {
         Steps {
+            start: humantime::parse_rfc3339(start).unwrap(),
             elapsed: Duration::ZERO,
             polls: 0,
             step,
@@ -1584,6 +1617,7 @@ mod tests {
         check_timeout: || bail!("no check timeout in this test"),
         shepherd_handoff: None,
         notify_own: None,
+        merges: None,
         pane_label: false,
         own_lineage: &[],
     };
@@ -1926,6 +1960,7 @@ mod tests {
         check_timeout: || bail!("no check timeout in this test"),
         shepherd_handoff: None,
         notify_own: None,
+        merges: None,
         pane_label: false,
         own_lineage: &[],
     };
@@ -2366,10 +2401,14 @@ mod tests {
 
     impl Notifier {
         fn new(dir: &Path) -> Notifier {
+            Notifier::with_command(dir, "['n', '{herd}', '{member}', '{kind}']")
+        }
+
+        fn with_command(dir: &Path, command: &str) -> Notifier {
             let config = dir.join("config.toml");
             fs::write(
                 &config,
-                "[notify]\nenabled = true\nherdr = false\ncommand = ['n', '{herd}', '{member}', '{kind}']\n",
+                format!("[notify]\nenabled = true\nherdr = false\ncommand = {command}\n"),
             )
             .unwrap();
             Notifier {
@@ -3364,6 +3403,29 @@ mod tests {
             }
         }
 
+        fn reports(&self) -> PathBuf {
+            self.config.path().join("reports")
+        }
+
+        /// One poll of a fresh lead's watch at wall-clock `at`, asking
+        /// `merges` and sending its own events through `notifier`.
+        fn lead_at(&self, notifier: &Notifier, merges: &dyn Merges, at: &str) {
+            let own = |events: &[Waiting]| notifier.send(events);
+            let req = Request {
+                notify_own: Some(&own),
+                merges: Some(merges),
+                ..self.request("w9:p0")
+            };
+            let woke = run(
+                &self.herdr,
+                &self.ledger,
+                &self.reports(),
+                &req,
+                &mut steps_from(at, |_| {}),
+            );
+            assert_eq!(woke, None);
+        }
+
         /// One poll of a fresh watch from `pane`.
         fn once(&self, pane: &'static str) -> Option<Vec<String>> {
             let dir = self.config.path().join("reports");
@@ -3375,6 +3437,187 @@ mod tests {
                 &mut steps(|_| {}),
             )
         }
+    }
+
+    /// Checked, its lead's `[lead]` ending in `lead`, with a notifier that
+    /// sends each event's member, kind and text, and gh listing `merged` in its repo.
+    fn guarded(lead: &str, merged: Vec<(&'static str, u64)>) -> (Checked, Notifier, FakeMerges) {
+        let world = Checked::new();
+        world.edit_herd(|h| format!("{h}[lead]\nprompt = \"go\"\n{lead}"));
+        let reports = world.reports();
+        fs::create_dir_all(&reports).unwrap();
+        let notifier = Notifier::with_command(&reports, "['n', '{member}', '{kind}', '{text}']");
+        let gh = FakeMerges::new(world.repo.path(), merged);
+        (world, notifier, gh)
+    }
+
+    fn merge_sent(number: u64) -> Vec<String> {
+        let url = format!("#{number} https://github.com/o/r/pull/{number}");
+        ["n", "lead-cards", "merge_alert", &url]
+            .map(String::from)
+            .to_vec()
+    }
+
+    /// The first lookup's time, and one due after it.
+    const FIRST: &str = "2026-11-01T09:00:00Z";
+    const LATER: &str = "2026-11-01T09:10:00Z";
+
+    #[test]
+    fn a_leads_first_lookup_sets_a_baseline_and_later_ones_send_each_new_merge_once() {
+        let older = ("2026-11-01T08:00:00Z", 6);
+        let (world, notifier, gh) = guarded("merge = false\n", vec![older]);
+
+        world.lead_at(&notifier, &gh, FIRST);
+        gh.merged.borrow_mut().push(("2026-11-01T09:05:00Z", 7));
+        world.lead_at(&notifier, &gh, LATER);
+        world.lead_at(&notifier, &gh, "2026-11-01T09:20:00Z");
+
+        assert_eq!(notifier.sent(), [merge_sent(7)]);
+    }
+
+    #[test]
+    fn a_new_lead_ignores_its_predecessors_merge_window_and_mailbox() {
+        let predecessors = ("2026-10-20T00:00:00Z", 6);
+        let (world, notifier, gh) = guarded("", vec![predecessors]);
+        let reports = world.reports();
+        let state = r#"{"created":"2026-10-01T00:00:00Z","since":"2026-10-01T00:00:00Z","polled":"2026-10-01T00:00:00Z","branch":"main"}"#;
+        fs::write(reports.join("lead-cards.merges"), state).unwrap();
+        for (at, body) in [
+            (
+                "2026-10-02T00:00:00Z",
+                Body::Gone {
+                    tab: None,
+                    workspace: None,
+                },
+            ),
+            ("2026-10-03T00:00:00Z", Body::Start { resumed: true }),
+        ] {
+            append(
+                &reports,
+                "lead-cards",
+                &Entry {
+                    at: at.into(),
+                    body,
+                },
+            )
+            .unwrap();
+        }
+
+        world.lead_at(&notifier, &gh, FIRST);
+        gh.merged.borrow_mut().push(("2026-11-01T09:05:00Z", 7));
+        world.lead_at(&notifier, &gh, LATER);
+
+        assert_eq!(notifier.sent(), [merge_sent(7)]);
+    }
+
+    #[test]
+    fn merges_are_looked_up_at_most_once_a_minute_across_watches_with_the_branch_kept() {
+        let (world, notifier, gh) = guarded("", vec![]);
+
+        world.lead_at(&notifier, &gh, FIRST);
+        assert_eq!(gh.lookups.get(), 0, "the baseline asks nothing");
+        world.lead_at(&notifier, &gh, LATER);
+        assert_eq!(gh.lookups.get(), 2, "the default branch, then the merges");
+        world.lead_at(&notifier, &gh, "2026-11-01T09:10:30Z");
+        assert_eq!(gh.lookups.get(), 2, "a watch re-armed within the minute");
+        world.lead_at(&notifier, &gh, "2026-11-01T09:11:00Z");
+        assert_eq!(gh.lookups.get(), 3, "the merges alone");
+    }
+
+    #[test]
+    fn a_revived_lead_hears_only_of_merges_since_its_revive() {
+        let (world, notifier, gh) = guarded("", vec![]);
+        world.lead_at(&notifier, &gh, FIRST);
+        let reports = world.reports();
+        for (at, body) in [
+            (
+                "2026-11-01T10:00:00Z",
+                Body::Gone {
+                    tab: None,
+                    workspace: None,
+                },
+            ),
+            ("2026-11-01T12:00:00.5Z", Body::Start { resumed: true }),
+        ] {
+            append(
+                &reports,
+                "lead-cards",
+                &Entry {
+                    at: at.into(),
+                    body,
+                },
+            )
+            .unwrap();
+        }
+        let down = ("2026-11-01T11:00:00Z", 6);
+        let revived = ("2026-11-01T12:30:00Z", 7);
+        gh.merged.borrow_mut().extend([down, revived]);
+
+        world.lead_at(&notifier, &gh, "2026-11-01T13:00:00Z");
+
+        assert_eq!(notifier.sent(), [merge_sent(7)]);
+    }
+
+    #[test]
+    fn a_lead_with_merge_on_by_its_herd_file_or_lead_defaults_hears_of_no_merges() {
+        for (lead, defaults) in [
+            ("merge = true\n", ""),
+            ("", "[lead_defaults]\nmerge = true\n"),
+        ] {
+            let (world, notifier, gh) = guarded(lead, vec![]);
+            fs::write(world.config.path().join("config.toml"), defaults).unwrap();
+
+            world.lead_at(&notifier, &gh, FIRST);
+            gh.merged.borrow_mut().push(("2026-11-01T09:05:00Z", 7));
+            world.lead_at(&notifier, &gh, LATER);
+
+            assert_eq!(
+                notifier.sent(),
+                Vec::<Vec<String>>::new(),
+                "{lead}{defaults}"
+            );
+            assert_eq!(gh.lookups.get(), 0);
+        }
+    }
+
+    #[test]
+    fn a_lead_with_merge_off_by_default_hears_of_merges() {
+        let (world, notifier, gh) = guarded("merge_guard = \"hook\"\n", vec![]);
+
+        world.lead_at(&notifier, &gh, FIRST);
+        gh.merged.borrow_mut().push(("2026-11-01T09:05:00Z", 7));
+        world.lead_at(&notifier, &gh, LATER);
+
+        assert_eq!(notifier.sent(), [merge_sent(7)]);
+    }
+
+    #[test]
+    fn failing_merge_lookups_warn_once_a_streak_and_fail_no_watch() {
+        let (world, notifier, mut gh) = guarded("", vec![]);
+        gh.repo = PathBuf::from("/elsewhere");
+        let own = |events: &[Waiting]| notifier.send(events);
+        let req = Request {
+            timeout: Some(Duration::from_secs(130)),
+            notify_own: Some(&own),
+            merges: Some(&gh),
+            ..world.request("w9:p0")
+        };
+        let mut warned = vec![];
+
+        let woke = watch(
+            &world.herdr,
+            &world.ledger,
+            &world.reports(),
+            &req,
+            &mut steps(|_| {}),
+            &mut |w| warned.push(w.to_string()),
+        );
+
+        assert!(woke.unwrap().is_none());
+        assert_eq!(gh.lookups.get(), 2, "one lookup a round after the baseline");
+        let repo = world.repo.path().display();
+        assert_eq!(warned, [format!("cards's merges: no repo {repo}")]);
+        assert_eq!(notifier.sent(), Vec::<Vec<String>>::new());
     }
 
     #[test]
