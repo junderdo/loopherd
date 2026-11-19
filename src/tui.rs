@@ -33,7 +33,7 @@ use crate::pause::Pauses;
 use crate::status::{Read, aligned, read, row, sections, stray_lines, widths};
 use mail::{Mail, Waiting, waiting};
 use since::{Since, Staleness, staleness};
-use theme::Theme;
+use theme::{Palette, Theme};
 use title::Outlines;
 use watcher::{Signal, Watch, watch};
 
@@ -69,11 +69,13 @@ const GAUGE: usize = 3;
 pub enum Request {
     Read(Options),
     Focus(String),
+    SaveTheme(Palette),
 }
 
 pub enum Response {
     Read(Options, Result<(Read, Mail, Outlines)>),
     Focus(String, Result<()>),
+    SavedTheme(Result<()>),
 }
 
 /// Where the reader finds what isn't in herdr or the ledger.
@@ -81,6 +83,8 @@ pub struct Dirs {
     pub pauses: Pauses,
     pub mailboxes: PathBuf,
     pub herds: herd::Paths,
+    /// config.toml, where a theme picked with `t` is saved.
+    pub config: PathBuf,
 }
 
 pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger, dirs: &Dirs) -> Response {
@@ -97,6 +101,7 @@ pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger, dirs: &Di
             let result = herdr.focus(&pane);
             Response::Focus(pane, result)
         }
+        Request::SaveTheme(palette) => save_theme(&dirs.config, palette),
     }
 }
 
@@ -116,6 +121,18 @@ where
         }
     });
     (requests, responses)
+}
+
+/// The app in `config`'s saved palette, noting why when it falls back.
+fn opening(options: Options, theme: Theme, config: &std::path::Path) -> App {
+    let (palette, warning) = crate::config::view_theme(config);
+    let mut app = App::new(options, theme.with_palette(palette));
+    app.message = warning.map(|w| format!("{w}; using {}", palette.name()));
+    app
+}
+
+fn save_theme(config: &std::path::Path, palette: Palette) -> Response {
+    Response::SavedTheme(crate::config::set(config, "view.theme", palette.name()))
 }
 
 pub struct App {
@@ -271,6 +288,8 @@ impl App {
             }
             Response::Focus(_, Ok(())) => {}
             Response::Focus(pane, Err(e)) => self.message = Some(format!("focus {pane}: {e:#}")),
+            Response::SavedTheme(Ok(())) => {}
+            Response::SavedTheme(Err(e)) => self.message = Some(format!("save theme: {e:#}")),
         }
         Ok(())
     }
@@ -286,6 +305,10 @@ impl App {
             KeyCode::Char('a') => {
                 self.options.all = !self.options.all;
                 return Some(self.request_read(now));
+            }
+            KeyCode::Char('t') => {
+                self.theme = self.theme.with_palette(self.theme.palette().next());
+                return Some(Request::SaveTheme(self.theme.palette()));
             }
             KeyCode::Down | KeyCode::Char('j') => self.select(self.selected + 1),
             KeyCode::Up | KeyCode::Char('k') => self.select(self.selected.saturating_sub(1)),
@@ -543,6 +566,7 @@ impl App {
         key(&mut spans, "q", "quit");
         key(&mut spans, "↑↓/jk", "select");
         key(&mut spans, "enter", "focus");
+        key(&mut spans, "t", "theme");
         for (k, label, on) in [
             ("s", "strays:", self.options.strays),
             ("a", "all:", self.options.all),
@@ -955,17 +979,18 @@ where
 {
     catch_stop_signals()?;
     exit_on_hangup()?;
-    let (requests, responses) = spawn_reader(herdr, ledger, dirs);
+    let config = dirs.config.clone();
+    let reader = spawn_reader(herdr, ledger, dirs);
     let watch = watch(subscriber);
     let mut terminal = ratatui::try_init()?;
     let result = run_loop(
         &mut terminal,
-        App::new(options, theme),
-        &requests,
-        &responses,
+        opening(options, theme, &config),
+        &reader,
         &watch,
         terminal_key,
         &STOP_SIGNAL,
+        &config,
     );
     ratatui::try_restore()?;
     // A hung read keeps the reader thread blocked; exiting the process ends it.
@@ -983,15 +1008,16 @@ fn terminal_key(timeout: Duration) -> Result<Option<KeyEvent>> {
 }
 
 /// Never touches herdr or the ledger itself, so keys and signals are handled
-/// within a [`TICK`] however long a read takes.
+/// within a [`TICK`] however long a read takes. Saves a theme itself, so the
+/// save can't wait behind a hung read and be lost on quit.
 fn run_loop<B>(
     terminal: &mut Terminal<B>,
     mut app: App,
-    requests: &Sender<Request>,
-    responses: &Receiver<Response>,
+    (requests, responses): &(Sender<Request>, Receiver<Response>),
     watch: &Watch,
     mut next_key: impl FnMut(Duration) -> Result<Option<KeyEvent>>,
     stop: &AtomicI32,
+    config: &std::path::Path,
 ) -> Result<i32>
 where
     B: Backend,
@@ -1036,8 +1062,12 @@ where
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Ok(0);
         }
-        if let Some(request) = app.press(key.code, Instant::now()) {
-            send(request)?;
+        match app.press(key.code, Instant::now()) {
+            Some(Request::SaveTheme(palette)) => {
+                app.apply(save_theme(config, palette), Instant::now())?
+            }
+            Some(request) => send(request)?,
+            None => {}
         }
     }
 }
@@ -1213,6 +1243,7 @@ max = 3
             pauses: Pauses::under(root),
             mailboxes: quiet_mail(ledger).path().into(),
             herds: herd::Paths::under(root),
+            config: root.join("config.toml"),
         };
         app.apply(serve(request, herdr, ledger, &dirs), now)
             .unwrap();
@@ -1405,6 +1436,7 @@ max = 3
             pauses: Pauses::under(std::path::Path::new("/nonexistent")),
             mailboxes: mailboxes.into(),
             herds: plain_herds(),
+            config: "/nonexistent/config.toml".into(),
         }
     }
 
@@ -1837,7 +1869,7 @@ max = 3
                 "││                                                                    ││",
                 "││                                                                    ││",
                 "│╰────────────────────────────────────────────────────────────────────╯│",
-                "│ q quit  ↑↓/jk select  enter focus  s strays: off  a all: off         │",
+                "│ q quit  ↑↓/jk select  enter focus  t theme  s strays: off  a all: off│",
                 "╰──────────────────────────────────────────────────────────────────────╯",
             ]
         );
@@ -2056,6 +2088,100 @@ max = 3
     }
 
     #[test]
+    fn t_cycles_the_theme_redrawing_at_once_and_asks_to_save_each() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mut app = app(&herdr, &ledger, now);
+        let cases = [
+            (Palette::Phosphor, Color::Rgb(0x05, 0xdf, 0x72)),
+            (Palette::Catppuccin, Color::Rgb(0xcb, 0xa6, 0xf7)),
+            (Palette::PurpleOrange, PURPLE),
+        ];
+        for (palette, border) in cases {
+            let request = app.press(KeyCode::Char('t'), now);
+            assert_eq!(request, Some(Request::SaveTheme(palette)), "{palette:?}");
+            assert_eq!(cell(&render(&app, now), (0, 0)).fg, border, "{palette:?}");
+        }
+    }
+
+    #[test]
+    fn the_view_opens_in_the_saved_theme() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "[view]\ntheme = \"catppuccin\"\n").unwrap();
+        let mut app = opening(Options::default(), truecolor(), &config);
+        let request = app.tick(now).unwrap();
+        app.apply(serve_quiet(request, &herdr, &ledger), now)
+            .unwrap();
+        let terminal = render(&app, now);
+        assert_eq!(cell(&terminal, (0, 0)).fg, Color::Rgb(0xcb, 0xa6, 0xf7));
+    }
+
+    #[test]
+    fn an_unknown_saved_theme_opens_purple_orange_and_says_so_in_the_notes() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "[view]\ntheme = \"solarized\"\n").unwrap();
+        let mut app = opening(Options::default(), truecolor(), &config);
+        let request = app.tick(now).unwrap();
+        app.apply(serve_quiet(request, &herdr, &ledger), now)
+            .unwrap();
+        let terminal = render_tall(&app, now);
+        assert_eq!(cell(&terminal, (0, 0)).fg, PURPLE);
+        let shown = lines(&terminal).concat();
+        assert!(
+            shown.contains("view.theme: unknown theme \"solarized\""),
+            "{shown}"
+        );
+        assert!(shown.contains("using purple-orange"), "{shown}");
+    }
+
+    #[test]
+    fn the_footer_lists_t_for_the_theme() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let terminal = render(&app(&herdr, &ledger, now), now);
+        assert_eq!(at(&terminal, "t theme").fg, LIGHT_ORANGE);
+        assert_eq!(at(&terminal, "theme").fg, GREY_VIOLET);
+        assert!(pos(&terminal, "t theme").0 < pos(&terminal, "s strays").0);
+    }
+
+    #[test]
+    fn saving_a_theme_writes_view_theme_to_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        let dirs = Dirs {
+            config: config.clone(),
+            ..nowhere()
+        };
+        let response = serve(
+            Request::SaveTheme(Palette::Catppuccin),
+            &herdr(),
+            &ledger(),
+            &dirs,
+        );
+        assert!(matches!(response, Response::SavedTheme(Ok(()))));
+        assert_eq!(
+            crate::config::view_theme(&config),
+            (Palette::Catppuccin, None)
+        );
+    }
+
+    #[test]
+    fn a_theme_that_cant_be_saved_says_so_in_the_notes() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mut app = app(&herdr, &ledger, now);
+        app.press(KeyCode::Char('t'), now);
+        let failed = Response::SavedTheme(Err(anyhow!("config.toml: permission denied")));
+        app.apply(failed, now).unwrap();
+        let shown = lines(&render_tall(&app, now)).concat();
+        assert!(
+            shown.contains("save theme: config.toml: permission denied"),
+            "{shown}"
+        );
+    }
+
+    #[test]
     fn colorterm_picks_truecolor_or_256_colors_and_no_color_drops_color() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let cases = [
@@ -2143,7 +2269,7 @@ max = 3
         );
         assert_eq!(
             text(&terminal)[28],
-            "q quit  ↑↓/jk select  enter focus  s strays: on  a all: on"
+            "q quit  ↑↓/jk select  enter focus  t theme  s strays: on  a all: on"
         );
         press(
             &mut app,
@@ -2443,7 +2569,7 @@ max = 3
     fn run_scripted(herdr: FakeHerdr, keys: Vec<Option<KeyEvent>>, stop: i32) -> Option<i32> {
         let (done, finished) = mpsc::channel();
         std::thread::spawn(move || {
-            let (requests, responses) = spawn_reader(herdr, ledger(), nowhere());
+            let reader = spawn_reader(herdr, ledger(), nowhere());
             let watch = watch(FakeSubscriber::default());
             let mut terminal = Terminal::new(TestBackend::new(72, 14)).unwrap();
             let mut keys = keys.into_iter();
@@ -2451,11 +2577,11 @@ max = 3
             let code = run_loop(
                 &mut terminal,
                 App::new(Options::default(), truecolor()),
-                &requests,
-                &responses,
+                &reader,
                 &watch,
                 |_| Ok(keys.next().flatten()),
                 &stop,
+                std::path::Path::new("/nonexistent/config.toml"),
             );
             let _ = done.send(code.unwrap());
         });
@@ -2475,6 +2601,36 @@ max = 3
             Some(key(KeyCode::Char('q'))),
         ];
         assert_eq!(run_scripted(herdr, keys, 0), Some(0));
+    }
+
+    #[test]
+    fn a_theme_picked_while_a_herdr_read_hangs_is_saved_before_quitting() {
+        let (_release, gate) = mpsc::channel();
+        let mut herdr = herdr();
+        herdr.agents_gate = Some(gate.into());
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        let reader = spawn_reader(herdr, ledger(), nowhere());
+        let mut keys = vec![
+            None,
+            Some(key(KeyCode::Char('t'))),
+            Some(key(KeyCode::Char('q'))),
+        ]
+        .into_iter();
+        let code = run_loop(
+            &mut Terminal::new(TestBackend::new(72, 14)).unwrap(),
+            App::new(Options::default(), truecolor()),
+            &reader,
+            &watch(FakeSubscriber::default()),
+            |_| Ok(keys.next().flatten()),
+            &AtomicI32::new(0),
+            &config,
+        );
+        assert_eq!(code.unwrap(), 0);
+        assert_eq!(
+            crate::config::view_theme(&config),
+            (Palette::Phosphor, None)
+        );
     }
 
     #[test]
@@ -2642,6 +2798,7 @@ max = 3
                 pauses: Pauses::under(root.path()),
                 mailboxes: quiet_mail(&ledger).path().into(),
                 herds: plain_herds(),
+                config: root.path().join("config.toml"),
             },
         );
         app.apply(response, t0).unwrap();
@@ -2665,20 +2822,20 @@ max = 3
         let subscriber = fake.clone();
         let (quit, quitting) = mpsc::channel::<()>();
         let looping = std::thread::spawn(move || {
-            let (requests, responses) = spawn_reader(herdr, ledger(), nowhere());
+            let reader = spawn_reader(herdr, ledger(), nowhere());
             let watch = watch(subscriber);
             let mut terminal = Terminal::new(TestBackend::new(72, 14)).unwrap();
             run_loop(
                 &mut terminal,
                 App::new(Options::default(), truecolor()),
-                &requests,
-                &responses,
+                &reader,
                 &watch,
                 |timeout| {
                     std::thread::sleep(timeout.min(Duration::from_millis(5)));
                     Ok(quitting.try_recv().ok().map(|()| key(KeyCode::Char('q'))))
                 },
                 &AtomicI32::new(0),
+                std::path::Path::new("/nonexistent/config.toml"),
             )
         });
         let read_within = |wait: Duration| {

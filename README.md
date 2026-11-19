@@ -165,7 +165,9 @@ as its main checkout. Then, in order:
    `loopherd feed <herd> --dry-run` lists the tasks you expect.
 4. **Open the herd view.** In a new herdr tab, run `loopherd view`. It
    lists every member, sorted by what needs you; Enter focuses the
-   selected member's pane.
+   selected member's pane, and `t` switches between its purple-orange,
+   phosphor and catppuccin themes, remembering the choice as `view.theme`
+   in `config.toml`.
 5. **Start the shepherd.** In another herdr tab, `cd` to the main
    checkout, run `claude`, and give it this first prompt:
 
@@ -248,7 +250,7 @@ table and the rest are what `init` writes; start from its output or from
 | `herd get\|set\|unset <herd> <key>` | Read or edit one value in a herd file, keeping its comments (`queue.max`, `lead.merge`). |
 | `herd remove <herd>` | Delete a finished herd's file and every run of it in the ledger; a name holding another herd's run keeps that run and its files. |
 | `lead-defaults` | Show `config.toml`'s lead switches, on or off, for herds whose `[lead]` doesn't set them; `--set` writes them. |
-| `config get\|set\|unset <key>` | Read or edit `context_window`, `default_context_limit`, `shepherd.context_limit` or `lead_defaults.review_rounds`. |
+| `config get\|set\|unset <key>` | Read or edit `context_window`, `default_context_limit`, `shepherd.context_limit`, `lead_defaults.review_rounds` or `view.theme`. |
 | `install-hook` | Add loopherd's Claude hooks and skill (`--remove` takes them out). |
 
 ### Run
@@ -269,7 +271,7 @@ table and the rest are what `init` writes; start from its output or from
 | `watch [<herd>…]` | Block until a member needs you, print what happened, exit (`--timeout`). |
 | `reports` | Print unread reports, questions first, and mark them read (`--herd`, `--all`). |
 | `status` | Members by herd with herdr's live status (`--all`, `--strays`, `--json`). |
-| `view` | The same as a live TUI; Enter focuses the member's pane. |
+| `view` | The same as a live TUI; Enter focuses the member's pane, and `t` switches the theme, saving it as `view.theme` in `config.toml`. |
 | `pr [url]` | The herdr plugin's PR link handler: the member that owns the PR in a popup, else the browser. |
 | `stats` | How each herd's work flowed: time to done, review rounds, time waiting on merge (`--herd`, `--since`, `--json`). |
 
