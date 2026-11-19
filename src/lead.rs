@@ -449,6 +449,7 @@ mod tests {
             &mut ledger,
             "lead-h",
             now,
+            crate::ledger::Outcome::Retired,
             std::path::Path::new("/nonexistent/reports"),
             None,
             None,

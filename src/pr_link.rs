@@ -307,6 +307,7 @@ mod tests {
             created: "2026-10-31T00:00:00Z".into(),
             retired: false,
             retired_at: None,
+            outcome: None,
             released_at: None,
             herd: Some("loopherd".into()),
             template: Some("impl".into()),
@@ -456,6 +457,7 @@ mod tests {
         AgentRecord {
             retired: true,
             retired_at: Some("2026-11-02T00:00:00Z".into()),
+            outcome: None,
             ..record(name)
         }
     }

@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Result, anyhow, bail};
 
 use crate::herdr::{Agent, AgentStatus, Herdr, Pane, Server};
-use crate::ledger::{AgentRecord, Ledger};
+use crate::ledger::{AgentRecord, Ledger, Outcome};
 use crate::matching::{by_name, live_agent, same_session, session_conflict};
 use crate::notify::forget_marks;
 use crate::process::{Procs, is_ancestor, live};
@@ -152,14 +152,20 @@ pub fn refuse_unfinished(
     Ok(())
 }
 
-/// Marks `name` retired at `now`. Touches only the ledger.
-pub fn retire(ledger: &mut dyn Ledger, name: &str, now: SystemTime) -> Result<AgentRecord> {
+/// Marks `name` retired at `now`, ending as `outcome`. Touches only the ledger.
+pub fn retire(
+    ledger: &mut dyn Ledger,
+    name: &str,
+    now: SystemTime,
+    outcome: Outcome,
+) -> Result<AgentRecord> {
     ledger.update(name, &mut |record| {
         if record.retired {
             bail!("{name} is {}", retired_since(record));
         }
         record.retired = true;
         record.retired_at = Some(humantime::format_rfc3339_seconds(now).to_string());
+        record.outcome = Some(outcome);
         Ok(())
     })
 }
@@ -169,7 +175,7 @@ fn retired_since(record: &AgentRecord) -> String {
     format!("already retired (since {since})")
 }
 
-/// Retires `name` unless it already is, records its tokens from
+/// Retires `name` as `outcome` unless it already is, records its tokens from
 /// `claude_dir`'s transcripts unless its mailbox in `mailboxes` has them,
 /// removes its notify marks there, then closes its tab and removes its
 /// worktree when safe, so a failed or deferred close can be re-run. `own_pane` is the pane running
@@ -181,6 +187,7 @@ pub fn retire_and_close(
     ledger: &mut dyn Ledger,
     name: &str,
     now: SystemTime,
+    outcome: Outcome,
     mailboxes: &Path,
     claude_dir: Option<&Path>,
     own_pane: Option<&OwnPane>,
@@ -194,7 +201,7 @@ pub fn retire_and_close(
             record
         }
         _ => {
-            let record = retire(ledger, name, now)?;
+            let record = retire(ledger, name, now, outcome)?;
             out.push(format!("retired {name}"));
             out.extend(usage::record_at_retire(mailboxes, claude_dir, &record, now));
             record
@@ -647,6 +654,7 @@ mod tests {
             created: "2026-10-31T00:00:00Z".into(),
             retired: false,
             retired_at: None,
+            outcome: None,
             released_at: None,
             herd: None,
             template: None,
@@ -827,7 +835,7 @@ mod tests {
     #[test]
     fn marks_the_entry_retired_with_the_time() {
         let mut ledger = ledger_with(&["a", "b"]);
-        retire(&mut ledger, "a", halloween_noon()).unwrap();
+        retire(&mut ledger, "a", halloween_noon(), Outcome::Retired).unwrap();
         let a = &ledger.0["a"];
         assert!(a.retired);
         assert_eq!(a.retired_at.as_deref(), Some("2026-10-31T12:00:00Z"));
@@ -835,9 +843,18 @@ mod tests {
     }
 
     #[test]
+    fn records_how_the_run_ended() {
+        let mut ledger = ledger_with(&["a", "b"]);
+        retire(&mut ledger, "a", halloween_noon(), Outcome::Retired).unwrap();
+        retire(&mut ledger, "b", halloween_noon(), Outcome::Merged).unwrap();
+        assert_eq!(ledger.0["a"].outcome, Some(Outcome::Retired));
+        assert_eq!(ledger.0["b"].outcome, Some(Outcome::Merged));
+    }
+
+    #[test]
     fn an_unknown_name_fails_and_leaves_the_ledger_untouched() {
         let mut ledger = ledger_with(&["a"]);
-        let err = retire(&mut ledger, "ghost", halloween_noon()).unwrap_err();
+        let err = retire(&mut ledger, "ghost", halloween_noon(), Outcome::Retired).unwrap_err();
         assert_eq!(format!("{err:#}"), "ghost is not in the ledger");
         assert_eq!(ledger.0, ledger_with(&["a"]).0);
     }
@@ -845,10 +862,10 @@ mod tests {
     #[test]
     fn an_already_retired_name_fails_and_keeps_its_first_retirement() {
         let mut ledger = ledger_with(&["a"]);
-        retire(&mut ledger, "a", halloween_noon()).unwrap();
+        retire(&mut ledger, "a", halloween_noon(), Outcome::Retired).unwrap();
         let before = ledger.0.clone();
         let later = halloween_noon() + Duration::from_secs(3600);
-        let err = retire(&mut ledger, "a", later).unwrap_err();
+        let err = retire(&mut ledger, "a", later, Outcome::Retired).unwrap_err();
         assert_eq!(
             format!("{err:#}"),
             "a is already retired (since 2026-10-31T12:00:00Z)"
@@ -876,7 +893,7 @@ mod tests {
         spawn(&herdr, &mut ledger, &req, Some("w1")).unwrap();
         let (tabs, agents) = (herdr.tabs(), herdr.agents().unwrap());
 
-        retire(&mut ledger, "a", halloween_noon()).unwrap();
+        retire(&mut ledger, "a", halloween_noon(), Outcome::Retired).unwrap();
 
         assert!(ledger.0["a"].retired);
         assert_eq!(herdr.tabs(), tabs);
@@ -911,6 +928,7 @@ mod tests {
             ledger,
             "a",
             halloween_noon(),
+            Outcome::Retired,
             Path::new("/nonexistent/reports"),
             None,
             None,
@@ -1279,7 +1297,7 @@ mod tests {
     fn close_keeps_a_worktree_and_branch_another_active_entry_uses() {
         let root = tempfile::tempdir().unwrap();
         let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
-        retire(&mut ledger, "a", halloween_noon()).unwrap();
+        retire(&mut ledger, "a", halloween_noon(), Outcome::Retired).unwrap();
         let req = SpawnRequest {
             repo: repo.clone(),
             name: "b".into(),
@@ -1315,7 +1333,7 @@ mod tests {
     /// the worktree's real path.
     fn shared_with_b(root: &Path) -> (FakeHerdr, MemLedger, PathBuf, PathBuf) {
         let (herdr, mut ledger, repo) = spawned_in_worktree(root, "feat/new");
-        retire(&mut ledger, "a", halloween_noon()).unwrap();
+        retire(&mut ledger, "a", halloween_noon(), Outcome::Retired).unwrap();
         let req = SpawnRequest {
             repo: repo.clone(),
             name: "b".into(),
@@ -1412,6 +1430,7 @@ mod tests {
             &mut ledger,
             "a",
             halloween_noon(),
+            Outcome::Retired,
             mailboxes,
             None,
             None,
@@ -1694,6 +1713,7 @@ mod tests {
             &mut ledger,
             "a",
             halloween_noon(),
+            Outcome::Retired,
             Path::new("/nonexistent/reports"),
             None,
             None,
@@ -1708,7 +1728,8 @@ mod tests {
     }
 
     #[test]
-    fn close_retried_after_a_failed_tab_close_finishes_and_keeps_the_first_retire_time() {
+    fn close_retried_after_a_failed_tab_close_finishes_and_keeps_the_first_retire_time_and_outcome()
+    {
         let root = tempfile::tempdir().unwrap();
         let (mut herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
         let wt = root.path().join("proj/worktrees/feat-new");
@@ -1718,6 +1739,7 @@ mod tests {
             &mut ledger,
             "a",
             halloween_noon(),
+            Outcome::Closed,
             Path::new("/nonexistent/reports"),
             None,
             None,
@@ -1733,6 +1755,7 @@ mod tests {
             &mut ledger,
             "a",
             later,
+            Outcome::Retired,
             Path::new("/nonexistent/reports"),
             None,
             None,
@@ -1754,6 +1777,7 @@ mod tests {
         );
         assert!(herdr.tabs().is_empty());
         assert!(!wt.exists());
+        assert_eq!(ledger.0["a"].outcome, Some(Outcome::Closed));
     }
 
     #[test]
@@ -1762,7 +1786,7 @@ mod tests {
         let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
         let wt = root.path().join("proj/worktrees/feat-new");
         let earlier = halloween_noon() - Duration::from_secs(86400);
-        retire(&mut ledger, "a", earlier).unwrap();
+        retire(&mut ledger, "a", earlier, Outcome::Merged).unwrap();
 
         let out = close(&herdr, &mut ledger);
 
@@ -1774,6 +1798,7 @@ mod tests {
                 format!("removed {}", wt.display()),
             ]
         );
+        assert_eq!(ledger.0["a"].outcome, Some(Outcome::Merged));
         assert_eq!(
             ledger.0["a"].retired_at.as_deref(),
             Some("2026-10-30T12:00:00Z")
@@ -1943,6 +1968,7 @@ mod tests {
             &mut ledger,
             "a",
             halloween_noon(),
+            Outcome::Retired,
             Path::new("/nonexistent/reports"),
             None,
             None,
@@ -1967,6 +1993,7 @@ mod tests {
             &mut ledger,
             "a",
             halloween_noon(),
+            Outcome::Retired,
             Path::new("/nonexistent/reports"),
             None,
             Some(&OwnPane {
@@ -2017,6 +2044,7 @@ mod tests {
             ledger,
             "a",
             halloween_noon(),
+            Outcome::Retired,
             Path::new("/nonexistent/reports"),
             None,
             Some(&OwnPane {
@@ -2665,7 +2693,7 @@ mod tests {
         let reports = tempfile::tempdir().unwrap();
         let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
         herdr.set_status("a", crate::herdr::AgentStatus::Working);
-        retire(&mut ledger, "a", halloween_noon()).unwrap();
+        retire(&mut ledger, "a", halloween_noon(), Outcome::Retired).unwrap();
 
         refuse_unfinished(&herdr, &ledger, "a", reports.path()).unwrap();
         close(&herdr, &mut ledger);

@@ -1,5 +1,5 @@
 //! `loopherd stats`: how each herd's work flowed, read from the ledger and the
-//! mailboxes. Writes nothing and moves no cursor.
+//! mailboxes (D30, D92). Writes nothing and moves no cursor.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Result, anyhow, bail};
 use serde::Serialize;
 
-use crate::ledger::{AgentRecord, Ledger};
+use crate::ledger::{AgentRecord, Ledger, Outcome};
 use crate::report::{self, Body, Entry};
 use crate::usage::{self, Usage};
 
@@ -43,6 +43,8 @@ pub struct Retired {
     pub merge_wait_secs: Option<u64>,
     pub total_secs: Option<u64>,
     pub tokens: Option<Usage>,
+    /// `None` for a run retired before retire recorded it.
+    pub outcome: Option<Outcome>,
 }
 
 #[derive(Debug, Serialize)]
@@ -58,13 +60,26 @@ pub struct Open {
 pub struct Summary {
     /// Retired members; open ones aren't summarized.
     pub members: usize,
+    pub outcomes: Outcomes,
+    /// The medians and maxima cover only merged runs.
     pub first_done: Spread,
     pub rounds_median: Option<f64>,
     pub merge_wait: Spread,
     pub total: Spread,
-    /// Of the members whose tokens are known.
+    /// Of the merged members whose tokens are known.
     pub in_median: Option<u64>,
     pub out_median: Option<u64>,
+}
+
+/// Retired members by how their run ended.
+#[derive(Debug, Default, Serialize)]
+pub struct Outcomes {
+    pub merged: usize,
+    pub closed: usize,
+    pub released: usize,
+    pub retired: usize,
+    /// Retired before retire recorded an outcome.
+    pub unrecorded: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -179,6 +194,7 @@ pub fn stats(
                     .map(|(d, r)| secs_between(*d, r)),
                 total_secs: started.zip(retired_at).map(|(s, r)| secs_between(s, r)),
                 tokens,
+                outcome: record.outcome,
                 name: record.name,
                 template: record.template,
                 started: record.created,
@@ -218,23 +234,36 @@ pub fn stats(
 }
 
 fn summarize(retired: &[Retired]) -> Summary {
+    let mut outcomes = Outcomes::default();
+    for run in retired {
+        *match run.outcome {
+            Some(Outcome::Merged) => &mut outcomes.merged,
+            Some(Outcome::Closed) => &mut outcomes.closed,
+            Some(Outcome::Released) => &mut outcomes.released,
+            Some(Outcome::Retired) => &mut outcomes.retired,
+            None => &mut outcomes.unrecorded,
+        } += 1;
+    }
+    let merged = || {
+        retired
+            .iter()
+            .filter(|r| r.outcome == Some(Outcome::Merged))
+    };
     let spread = |column: fn(&Retired) -> Option<u64>| {
-        let mut values: Vec<u64> = retired.iter().filter_map(column).collect();
+        let mut values: Vec<u64> = merged().filter_map(column).collect();
         values.sort_unstable();
         Spread {
             median_secs: median(&values).map(|m| m.round() as u64),
             max_secs: values.last().copied(),
         }
     };
-    let mut rounds: Vec<u64> = retired
-        .iter()
+    let mut rounds: Vec<u64> = merged()
         .filter_map(|r| r.rounds.filter(|&n| n > 0))
         .map(|n| n as u64)
         .collect();
     rounds.sort_unstable();
     let token_median = |side: fn(&usage::Tokens) -> u64| {
-        let mut values: Vec<u64> = retired
-            .iter()
+        let mut values: Vec<u64> = merged()
             .filter_map(|r| r.tokens.as_ref())
             .map(|t| side(&usage::total(t)))
             .collect();
@@ -245,6 +274,7 @@ fn summarize(retired: &[Retired]) -> Summary {
         in_median: token_median(usage::Tokens::read),
         out_median: token_median(|t| t.output),
         members: retired.len(),
+        outcomes,
         first_done: spread(|r| r.first_done_secs),
         rounds_median: median(&rounds),
         merge_wait: spread(|r| r.merge_wait_secs),
@@ -368,6 +398,7 @@ pub fn render(herds: &[Herd]) -> String {
                 "total",
                 "in",
                 "out",
+                "outcome",
             ])];
             rows.extend(herd.retired.iter().map(|r| {
                 vec![
@@ -380,6 +411,7 @@ pub fn render(herds: &[Herd]) -> String {
                     duration(r.total_secs),
                     count(r.tokens.as_ref().map(|t| usage::total(t).read())),
                     count(r.tokens.as_ref().map(|t| usage::total(t).output)),
+                    r.outcome.map_or("-", Outcome::as_str).to_string(),
                 ]
             }));
             out.push_str(&table(&rows));
@@ -425,9 +457,21 @@ fn summary_line(s: &Summary) -> String {
         )
     };
     let rounds = s.rounds_median.map_or("-".to_string(), |m| format!("{m}"));
+    let others = [
+        ("closed", s.outcomes.closed),
+        ("released", s.outcomes.released),
+        ("retired", s.outcomes.retired),
+        ("unrecorded", s.outcomes.unrecorded),
+    ];
+    let outcomes: String = others
+        .iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(label, count)| format!(", {count} {label}"))
+        .collect();
     format!(
-        "{} members; {}; rounds median {rounds}; {}; {}; in median {}; out median {}",
+        "{} members: {} merged{outcomes}; {}; rounds median {rounds}; {}; {}; in median {}; out median {}",
         s.members,
+        s.outcomes.merged,
         spread("first done", &s.first_done),
         spread("merge wait", &s.merge_wait),
         spread("total", &s.total),
