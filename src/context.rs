@@ -333,7 +333,7 @@ pub struct ShepherdCheck<'a> {
     pub pane: Option<&'a str>,
     pub socket: Option<&'a Path>,
     /// herdr's shell pid for `pane`, asked only when a handoff is recorded.
-    pub shell_pid: &'a dyn Fn() -> Option<u32>,
+    pub shell_pid: &'a dyn Fn() -> Result<Option<u32>>,
 }
 
 /// The line telling the shepherd to hand off, due until [`Self::mark`].
@@ -342,7 +342,8 @@ pub struct ShepherdHandoff {
     /// The Claude session measured.
     pub session: String,
     marker: PathBuf,
-    resume: Option<(PathBuf, shepherd_resume::Place, Option<Process>)>,
+    /// The pane's shell, or why it isn't recorded.
+    resume: Option<(PathBuf, shepherd_resume::Place, Result<Process, String>)>,
 }
 
 impl ShepherdHandoff {
@@ -360,13 +361,20 @@ impl ShepherdHandoff {
     /// that fails, then remembers the session was told, so no later watch
     /// tells it again.
     pub fn mark(self, warn: &mut dyn FnMut(String)) -> Result<()> {
-        if let Some((state, place, shell)) = &self.resume
-            && let Err(e) =
-                shepherd_resume::record(state, place, *shell, &self.session, SystemTime::now())
-        {
-            warn(format!(
-                "record the shepherd's resume, so paste the handoff line after /clear: {e:#}"
-            ));
+        if let Some((state, place, shell)) = &self.resume {
+            if let Err(why) = shell {
+                warn(format!(
+                    "record the shepherd's pane shell, so the beside-shepherd view checks its Claude instead: {why}"
+                ));
+            }
+            let shell = shell.as_ref().ok().copied();
+            if let Err(e) =
+                shepherd_resume::record(state, place, shell, &self.session, SystemTime::now())
+            {
+                warn(format!(
+                    "record the shepherd's resume, so paste the handoff line after /clear: {e:#}"
+                ));
+            }
         }
         let dir = self.marker.parent().expect("a marker is in handoff-asked");
         fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
@@ -412,13 +420,20 @@ pub fn shepherd_handoff(check: &ShepherdCheck) -> Option<ShepherdHandoff> {
 
 /// The pane's shell, when it is `claude` or an ancestor of it; a live
 /// handoff of herdr leaves shells that aren't the server's children.
-fn pane_shell(check: &ShepherdCheck, claude: u32) -> Option<Process> {
+fn pane_shell(check: &ShepherdCheck, claude: u32) -> Result<Process, String> {
     let pid = (check.shell_pid)()
-        .filter(|&shell| shell == claude || process::is_ancestor(check.procs, shell, claude))?;
-    Some(Process {
-        pid,
-        start: check.procs.start(pid)?,
-    })
+        .map_err(|e| format!("{e:#}"))?
+        .ok_or("herdr names no shell for its pane")?;
+    if pid != claude && !process::is_ancestor(check.procs, pid, claude) {
+        return Err(format!(
+            "herdr's shell pid {pid} isn't the shepherd's Claude (pid {claude}) or above it"
+        ));
+    }
+    let start = check
+        .procs
+        .start(pid)
+        .ok_or_else(|| format!("can't read its shell's process (pid {pid})"))?;
+    Ok(Process { pid, start })
 }
 
 /// The session in Claude's `sessions/<pid>.json`, which follows `/clear`; its
@@ -1216,7 +1231,7 @@ mod shepherd_tests {
                 limit,
                 pane: Some("w1:p1"),
                 socket: Some(Path::new("/run/herdr.sock")),
-                shell_pid: &|| self.shell_pid,
+                shell_pid: &|| Ok(self.shell_pid),
             })?;
             let line = handoff.line.clone();
             handoff.mark(&mut |w| panic!("{w}")).unwrap();
@@ -1292,12 +1307,49 @@ mod shepherd_tests {
     }
 
     #[test]
-    fn a_shell_not_above_the_shepherds_claude_or_none_isnt_recorded() {
-        for shell_pid in [Some(99), None] {
+    fn a_shell_it_cant_record_warns_and_still_records_the_handoff() {
+        type ShellPid = fn() -> Result<Option<u32>>;
+        let cases: [(ShellPid, &str); 3] = [
+            (
+                || Ok(Some(99)),
+                "herdr's shell pid 99 isn't the shepherd's Claude (pid 30)",
+            ),
+            (|| Ok(None), "herdr names no shell for its pane"),
+            (
+                || Err(anyhow::anyhow!("herdr pane process-info failed")),
+                "herdr pane process-info failed",
+            ),
+        ];
+        for (shell_pid, said) in cases {
             let mut s = Shepherd::new(171_400);
             s.procs.add(99, "/bin/bash", 10, 990);
-            s.shell_pid = shell_pid;
-            assert_eq!(recorded_shell(&s), Value::Null);
+            let (claude, state) = (s.claude(), s.state());
+            let check = ShepherdCheck {
+                procs: &s.procs,
+                claude_pid: Some("30"),
+                me: 36,
+                claude_dir: &claude,
+                state: &state,
+                limit: 160_000,
+                pane: Some("w1:p1"),
+                socket: Some(Path::new("/run/herdr.sock")),
+                shell_pid: &shell_pid,
+            };
+            let mut warned = vec![];
+            shepherd_handoff(&check)
+                .unwrap()
+                .mark(&mut |w| warned.push(w))
+                .unwrap();
+
+            let [warning] = warned.as_slice() else {
+                panic!("{warned:?}");
+            };
+            assert!(warning.contains(said), "{warning}");
+            let record: Value =
+                serde_json::from_str(&fs::read_to_string(state.join("shepherd.json")).unwrap())
+                    .unwrap();
+            assert_eq!(record["pane"], "w1:p1");
+            assert_eq!(record["shell"], Value::Null);
         }
     }
 
@@ -1318,7 +1370,7 @@ mod shepherd_tests {
                 limit: 100_000,
                 pane,
                 socket,
-                shell_pid: &|| Some(20),
+                shell_pid: &|| Ok(Some(20)),
             };
             shepherd_handoff(&check)
                 .unwrap()
@@ -1343,7 +1395,7 @@ mod shepherd_tests {
             limit: 160_000,
             pane: Some("w1:p1"),
             socket: Some(Path::new("/run/herdr.sock")),
-            shell_pid: &|| Some(20),
+            shell_pid: &|| Ok(Some(20)),
         };
         let mut warned = vec![];
         shepherd_handoff(&check)
@@ -1375,7 +1427,7 @@ mod shepherd_tests {
             limit: 100_000,
             pane: None,
             socket: None,
-            shell_pid: &|| Some(20),
+            shell_pid: &|| Ok(Some(20)),
         };
         assert!(shepherd_handoff(&check).is_some());
         assert!(shepherd_handoff(&check).is_some());
