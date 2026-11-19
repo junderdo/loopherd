@@ -131,27 +131,23 @@ impl Lead {
     }
 }
 
-/// Every lead kept in loopherd's config dir, by name.
-fn kept_leads(paths: &Paths) -> Result<Vec<(String, Lead)>> {
-    let dir = paths.config_dir().join("sandbox");
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-        Err(e) => return Err(e).with_context(|| format!("read {}", dir.display())),
+/// The worktree of every lead kept in loopherd's config dir, by name. A kept
+/// record or herd file that can't be read is skipped: one bad file mustn't
+/// stop every retire.
+fn lead_worktrees(paths: &Paths) -> Vec<(String, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(paths.config_dir().join("sandbox")) else {
+        return vec![];
     };
-    let mut leads = vec![];
-    for entry in entries {
-        let file = entry
-            .with_context(|| format!("read {}", dir.display()))?
-            .file_name();
-        let Some(name) = file.to_str().and_then(|f| f.strip_suffix(".lead.json")) else {
-            continue;
-        };
-        if let Some(lead) = Lead::kept(paths, name)? {
-            leads.push((name.to_string(), lead));
-        }
-    }
-    Ok(leads)
+    entries
+        .filter_map(|entry| {
+            let file = entry.ok()?.file_name();
+            let name = file.to_str()?.strip_suffix(".lead.json")?.to_string();
+            let lead = Lead::kept(paths, &name).ok()??;
+            let repo = herd::repo(paths, &lead.herd).ok()?;
+            let worktree = worktree_path(&repo, &name);
+            Some((name, worktree))
+        })
+        .collect()
 }
 
 /// The lead whose sandboxed Claude started process `me`: an ancestor run with
@@ -193,25 +189,70 @@ impl Guard {
         Guard { paths, caller }
     }
 
-    /// Why loopherd won't run git on `record`'s repo and worktree, if it
-    /// won't. A herd's member must be where its herd file puts members: its
-    /// repo the herd's, its worktree one beside the herd's other worktrees,
-    /// and no lead's, whose `.git` the lead can write. A caller lead may act
-    /// only on its own herd's members.
-    pub fn refusal(&self, record: &AgentRecord) -> Result<Option<String>> {
+    /// Why the lead running this loopherd, if one does, may not act on
+    /// `record` at all: it isn't a member of the lead's own herd.
+    pub fn caller_refusal(&self, record: &AgentRecord) -> Result<Option<String>> {
+        let Some(caller) = &self.caller else {
+            return Ok(None);
+        };
+        let own = Lead::kept(&self.paths, caller)?.map(|lead| lead.herd);
+        Ok((own.is_none() || record.herd != own).then(|| {
+            format!(
+                "{} isn't a member of {caller}'s herd, and {caller} runs this loopherd",
+                record.name
+            )
+        }))
+    }
+
+    /// Why loopherd won't run git on `record`'s repo, its worktree, or the
+    /// worktree its branch would be given, if it won't. A herd's member must
+    /// be where its herd file puts members: its repo the herd's, its worktree
+    /// beside the herd's other worktrees. No entry may name another lead's
+    /// worktree, or a repo in a lead's worktree or the state dir, where a lead
+    /// could have written its git config.
+    pub fn path_refusal(&self, record: &AgentRecord) -> Result<Option<String>> {
+        if let Some(why) = self.caller_refusal(record)? {
+            return Ok(Some(why));
+        }
         let name = &record.name;
-        if let Some(caller) = &self.caller {
-            let own = Lead::kept(&self.paths, caller)?.map(|lead| lead.herd);
-            if own.is_none() || record.herd != own {
+        let leads = lead_worktrees(&self.paths);
+        let writable = leads
+            .iter()
+            .map(|(_, worktree)| worktree.as_path())
+            .chain([self.paths.state_dir()]);
+        let inside = |path: &Path, dir: &Path| {
+            let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+            real(path).starts_with(real(dir))
+        };
+        if let Some(dir) = writable.into_iter().find(|dir| inside(&record.repo, dir)) {
+            return Ok(Some(format!(
+                "{name}'s ledger entry names repo {}, inside {}, which a lead can write",
+                record.repo.display(),
+                dir.display()
+            )));
+        }
+        let branch_path = record
+            .branch
+            .as_deref()
+            .filter(|b| !b.is_empty())
+            .map(|b| worktree_path(&record.repo, b));
+        for path in record.worktree.iter().chain(&branch_path) {
+            if let Some((lead, _)) = leads
+                .iter()
+                .find(|(lead, worktree)| lead != name && same_dir(path, worktree))
+            {
                 return Ok(Some(format!(
-                    "{name} isn't a member of {caller}'s herd, and {caller} runs this loopherd"
+                    "{name}'s ledger entry names lead {lead}'s worktree {}",
+                    path.display()
                 )));
             }
         }
         let Some(herd) = &record.herd else {
             return Ok(None);
         };
-        let repo = herd::repo(&self.paths, herd)?;
+        let repo = herd::repo(&self.paths, herd).with_context(|| {
+            format!("herd {herd}'s file names no repo to check {name}'s ledger entry against")
+        })?;
         if !same_dir(&record.repo, &repo) {
             return Ok(Some(format!(
                 "{name}'s ledger entry names repo {}, not herd {herd}'s {}",
@@ -219,16 +260,15 @@ impl Guard {
                 repo.display()
             )));
         }
-        let Some(worktree) = &record.worktree else {
-            return Ok(None);
-        };
         let beside = worktree_path(&repo, "x");
-        let in_place = worktree.file_name().is_some()
-            && worktree
-                .parent()
-                .zip(beside.parent())
-                .is_some_and(|(a, b)| same_dir(a, b));
-        if !in_place {
+        let in_place = |worktree: &Path| {
+            worktree.file_name().is_some()
+                && worktree
+                    .parent()
+                    .zip(beside.parent())
+                    .is_some_and(|(a, b)| same_dir(a, b))
+        };
+        if let Some(worktree) = record.worktree.as_deref().filter(|w| !in_place(w)) {
             return Ok(Some(format!(
                 "{name}'s ledger entry names worktree {}, which isn't beside herd {herd}'s \
                  worktrees in {}",
@@ -236,21 +276,12 @@ impl Guard {
                 beside.parent().unwrap_or(&repo).display()
             )));
         }
-        for (lead, kept) in kept_leads(&self.paths)? {
-            if lead == *name {
-                continue;
-            }
-            let Ok(lead_repo) = herd::repo(&self.paths, &kept.herd) else {
-                continue;
-            };
-            if same_dir(worktree, &worktree_path(&lead_repo, &lead)) {
-                return Ok(Some(format!(
-                    "{name}'s ledger entry names lead {lead}'s worktree {}",
-                    worktree.display()
-                )));
-            }
-        }
         Ok(None)
+    }
+
+    /// Whether a lead runs this loopherd.
+    pub fn for_lead(&self) -> bool {
+        self.caller.is_some()
     }
 }
 

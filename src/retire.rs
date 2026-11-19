@@ -187,6 +187,14 @@ pub fn retire_and_close(
     out: &mut Vec<String>,
 ) -> Result<()> {
     let mut others = ledger.entries()?;
+    if let Some(why) = others
+        .get(name)
+        .map(|record| guard.caller_refusal(record))
+        .transpose()?
+        .flatten()
+    {
+        bail!("refused: {why}");
+    }
     let record = match others.remove(name) {
         Some(record) if record.retired => {
             out.push(format!("{name} is {}", retired_since(&record)));
@@ -236,8 +244,8 @@ pub fn retire_and_close(
             return Ok(());
         }
         let refusal = guard
-            .refusal(&record)
-            .unwrap_or_else(|e| Some(format!("can't check it against its herd file: {e:#}")));
+            .path_refusal(&record)
+            .unwrap_or_else(|e| Some(format!("{e:#}; remove it by hand if it's {name}'s")));
         if let Some(why) = refusal {
             out.push(format!("kept {}: {why}", path.display()));
             return Ok(());
@@ -1382,16 +1390,18 @@ mod tests {
     fn herd_member(root: &Path, caller: Option<&str>) -> (FakeHerdr, MemLedger, PathBuf, Guard) {
         let (herdr, mut ledger, repo) = spawned_in_worktree(root, "feat/new");
         ledger.0.get_mut("a").unwrap().herd = Some("h".into());
-        std::fs::create_dir(root.join("herds")).unwrap();
-        std::fs::write(root.join("herds/h.toml"), format!("repo = {repo:?}\n")).unwrap();
-        let guard = Guard::new(crate::herd::Paths::under(root), caller.map(String::from));
+        let config = root.join("loopherd");
+        std::fs::create_dir_all(config.join("herds")).unwrap();
+        std::fs::write(config.join("herds/h.toml"), format!("repo = {repo:?}\n")).unwrap();
+        let guard = Guard::new(crate::herd::Paths::under(&config), caller.map(String::from));
         (herdr, ledger, repo, guard)
     }
 
     fn keep_lead(root: &Path, lead: &str, herd: &str) {
-        std::fs::create_dir_all(root.join("sandbox")).unwrap();
+        let sandbox = root.join("loopherd/sandbox");
+        std::fs::create_dir_all(&sandbox).unwrap();
         let record = format!("{{\"herd\": {herd:?}, \"args\": []}}");
-        std::fs::write(root.join(format!("sandbox/{lead}.lead.json")), record).unwrap();
+        std::fs::write(sandbox.join(format!("{lead}.lead.json")), record).unwrap();
     }
 
     fn close_guarded(herdr: &FakeHerdr, ledger: &mut MemLedger, guard: &Guard) -> Vec<String> {
@@ -1495,21 +1505,31 @@ mod tests {
     }
 
     #[test]
-    fn a_lead_running_retire_removes_its_own_herds_member_but_no_other_herds() {
+    fn a_lead_running_retire_closes_its_own_herds_member_and_refuses_another_herds_untouched() {
         let root = tempfile::tempdir().unwrap();
         let (herdr, mut ledger, repo, guard) = herd_member(root.path(), Some("lead-h"));
         keep_lead(root.path(), "lead-h", "other");
         let wt = root.path().join("proj/worktrees/feat-new");
 
-        let out = close_guarded(&herdr, &mut ledger, &guard);
+        let mut out = vec![];
+        let err = retire_and_close(
+            &herdr,
+            &mut ledger,
+            &guard,
+            "a",
+            halloween_noon(),
+            Path::new("/nonexistent/reports"),
+            None,
+            &mut out,
+        )
+        .unwrap_err();
 
         assert_eq!(
-            out.last().unwrap(),
-            &format!(
-                "kept {}: a isn't a member of lead-h's herd, and lead-h runs this loopherd",
-                wt.display()
-            )
+            err.to_string(),
+            "refused: a isn't a member of lead-h's herd, and lead-h runs this loopherd"
         );
+        assert!(!ledger.0["a"].retired);
+        assert_eq!(herdr.tabs().len(), 1);
         assert!(wt.exists());
 
         keep_lead(root.path(), "lead-h", "h");
@@ -1590,6 +1610,48 @@ mod tests {
 
         assert!(!ran.exists(), "{result:?} {out:?}");
         assert!(worktree_list(&repo).contains("feat-new"), "{out:?}");
+    }
+
+    #[test]
+    fn close_runs_no_git_in_a_herdless_entrys_repo_inside_a_leads_worktree() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo, guard) = herd_member(root.path(), None);
+        keep_lead(root.path(), "lead-h", "h");
+        let lead_wt = root.path().join("proj/worktrees/lead-h");
+        let planted = lead_wt.join("planted");
+        std::fs::create_dir_all(&planted).unwrap();
+        let a = ledger.0.get_mut("a").unwrap();
+        a.herd = None;
+        a.repo = planted.clone();
+        let wt = a.worktree.clone().unwrap();
+
+        let out = close_guarded(&herdr, &mut ledger, &guard);
+
+        assert_eq!(
+            out.last().unwrap(),
+            &format!(
+                "kept {}: a's ledger entry names repo {}, inside {}, which a lead can write",
+                wt.display(),
+                planted.display(),
+                lead_wt.display()
+            )
+        );
+        assert!(worktree_list(&repo).contains("feat-new"));
+    }
+
+    #[test]
+    fn an_unreadable_kept_lead_record_stops_no_retire() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo, guard) = herd_member(root.path(), None);
+        let sandbox = root.path().join("loopherd/sandbox");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        std::fs::write(sandbox.join("lead-x.lead.json"), "not json").unwrap();
+        let wt = root.path().join("proj/worktrees/feat-new");
+
+        let out = close_guarded(&herdr, &mut ledger, &guard);
+
+        assert_eq!(out.last().unwrap(), &format!("removed {}", wt.display()));
+        assert!(!worktree_list(&repo).contains("feat-new"));
     }
 
     #[test]

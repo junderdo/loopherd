@@ -64,8 +64,11 @@ pub fn release(
     {
         bail!("refused: {name}'s tab may still be open; close it first:\n  {fix}");
     }
-    if let Some(why) = guard.refusal(&record)? {
+    if let Some(why) = guard.path_refusal(&record)? {
         bail!("refused: {why}");
+    }
+    if guard.for_lead() && fate == Fate::Drop {
+        bail!("refused: --drop-branch deletes commits, so it's the human's, not a lead's");
     }
     let in_use = |path: &Path| {
         others
@@ -306,8 +309,8 @@ mod tests {
         fn new() -> Setup {
             let root = tempfile::tempdir().unwrap();
             let repo = repo_with_origin(root.path());
-            let herds = root.path().join("herds");
-            std::fs::create_dir(&herds).unwrap();
+            let herds = root.path().join("loopherd/herds");
+            std::fs::create_dir_all(&herds).unwrap();
             std::fs::write(herds.join("prs.toml"), format!("repo = {repo:?}\n")).unwrap();
             Setup {
                 root,
@@ -341,7 +344,10 @@ mod tests {
             let mut out = vec![];
             let now = humantime::parse_rfc3339("2026-11-17T12:00:00Z").unwrap();
             let mailboxes = self.mailboxes();
-            let guard = Guard::new(Paths::under(self.root.path()), self.caller.clone());
+            let guard = Guard::new(
+                Paths::under(&self.root.path().join("loopherd")),
+                self.caller.clone(),
+            );
             release(
                 &self.herdr,
                 self.prs.as_ref(),
@@ -373,7 +379,7 @@ mod tests {
         assert!(wt.exists());
 
         s.ledger.0.get_mut("zpr-1").unwrap().repo = s.repo.clone();
-        let sandbox = s.root.path().join("sandbox");
+        let sandbox = s.root.path().join("loopherd/sandbox");
         std::fs::create_dir(&sandbox).unwrap();
         std::fs::write(
             sandbox.join("lead-other.lead.json"),
@@ -389,6 +395,44 @@ mod tests {
             "refused: zpr-1 isn't a member of lead-other's herd, and lead-other runs this loopherd"
         );
         assert!(wt.exists());
+        assert!(has_branch(&s.repo, "feat/x"));
+    }
+
+    #[test]
+    fn refuses_a_branch_whose_worktree_would_be_a_leads_and_a_leads_drop_branch() {
+        let mut s = Setup::new();
+        s.retired_on("zpr-1", "feat/x");
+        let sandbox = s.root.path().join("loopherd/sandbox");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        std::fs::write(
+            sandbox.join("lead-prs.lead.json"),
+            r#"{"herd": "prs", "args": []}"#,
+        )
+        .unwrap();
+        let lead_wt = s.root.path().join("proj/worktrees/lead-prs");
+        let entry = s.ledger.0.get_mut("zpr-1").unwrap();
+        entry.worktree = None;
+        entry.branch = Some("lead-prs".into());
+
+        let err = s.release("zpr-1", Fate::Clear).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "refused: zpr-1's ledger entry names lead lead-prs's worktree {}",
+                lead_wt.display()
+            )
+        );
+
+        s.ledger.0.get_mut("zpr-1").unwrap().branch = Some("feat/x".into());
+        s.caller = Some("lead-prs".into());
+
+        let err = s.release("zpr-1", Fate::Drop).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "refused: --drop-branch deletes commits, so it's the human's, not a lead's"
+        );
         assert!(has_branch(&s.repo, "feat/x"));
     }
 
