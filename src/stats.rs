@@ -10,12 +10,12 @@ use serde::Serialize;
 
 use crate::ledger::{AgentRecord, Ledger};
 use crate::report::{self, Body, Entry};
-use crate::usage::{self, Usage};
+use crate::usage::{self, Usage, Window};
 
 pub struct Query<'a> {
     pub herd: Option<&'a str>,
-    /// Only members started at or after this.
-    pub since: Option<SystemTime>,
+    /// Only members started within this.
+    pub window: Window,
     pub now: SystemTime,
     /// Where Claude keeps transcripts; `None` reads none.
     pub claude_dir: Option<&'a Path>,
@@ -25,10 +25,18 @@ pub struct Query<'a> {
 pub struct Herd {
     pub herd: String,
     pub summary: Summary,
-    /// The lead's tokens since `--since`, its subagents' included.
+    /// `summary` again for each template's retired members, by template name.
+    pub templates: Vec<TemplateSummary>,
+    /// The lead's tokens within the window, its subagents' included.
     pub lead_overhead: Option<Usage>,
     pub retired: Vec<Retired>,
     pub open: Vec<Open>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TemplateSummary {
+    pub template: Option<String>,
+    pub summary: Summary,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,8 +104,8 @@ pub fn stats(
             leads.entry(herd).or_default().push(record);
             continue;
         }
-        if let Some(since) = query.since
-            && parse_time(&record.created).is_none_or(|created| created < since)
+        if !query.window.is_open()
+            && parse_time(&record.created).is_none_or(|created| !query.window.contains(created))
         {
             continue;
         }
@@ -149,7 +157,7 @@ pub fn stats(
                 let (life, dir) = life.as_ref().zip(query.claude_dir)?;
                 let run =
                     usage::sessions(life.iter().map(|(_, e)| e), record.session_id.as_deref());
-                usage::of_sessions(dir, &run, None)
+                usage::of_sessions(dir, &run, &Window::default())
             });
             if !record.retired {
                 open.push(Open {
@@ -200,15 +208,27 @@ pub fn stats(
             }
             sessions.sort_unstable();
             sessions.dedup();
-            usage::of_sessions(dir, &sessions, query.since)
+            usage::of_sessions(dir, &sessions, &query.window)
         });
         let lead_was_busy = lead_overhead.as_ref().is_some_and(|u| !u.is_empty());
         if records_were_empty && !lead_was_busy {
             continue;
         }
+        let mut by_template: BTreeMap<&Option<String>, Vec<&Retired>> = BTreeMap::new();
+        for run in &retired {
+            by_template.entry(&run.template).or_default().push(run);
+        }
+        let templates = by_template
+            .into_iter()
+            .map(|(template, runs)| TemplateSummary {
+                template: template.clone(),
+                summary: summarize(&runs),
+            })
+            .collect();
         herds.push(Herd {
             herd,
-            summary: summarize(&retired),
+            summary: summarize(&retired.iter().collect::<Vec<_>>()),
+            templates,
             lead_overhead,
             retired,
             open,
@@ -217,9 +237,9 @@ pub fn stats(
     Ok((herds, warnings))
 }
 
-fn summarize(retired: &[Retired]) -> Summary {
+fn summarize(retired: &[&Retired]) -> Summary {
     let spread = |column: fn(&Retired) -> Option<u64>| {
-        let mut values: Vec<u64> = retired.iter().filter_map(column).collect();
+        let mut values: Vec<u64> = retired.iter().filter_map(|r| column(r)).collect();
         values.sort_unstable();
         Spread {
             median_secs: median(&values).map(|m| m.round() as u64),
@@ -385,6 +405,13 @@ pub fn render(herds: &[Herd]) -> String {
             out.push_str(&table(&rows));
         }
         out.push_str(&format!("  summary: {}\n", summary_line(&herd.summary)));
+        for t in &herd.templates {
+            out.push_str(&format!(
+                "  template {}: {}\n",
+                template(&t.template),
+                summary_line(&t.summary)
+            ));
+        }
         let lead = herd.lead_overhead.as_ref().map(usage::total);
         out.push_str(&format!(
             "  lead overhead: in {}, out {}\n",

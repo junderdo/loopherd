@@ -75,7 +75,7 @@ fn record(
     let in_run = |e: &&Entry| created.is_none_or(|c| parse_time(&e.at).is_some_and(|at| at >= c));
     let (entries, _) = report::history(mailboxes, &member.name)?;
     let run = sessions(entries.iter().filter(in_run), member.session_id.as_deref());
-    let Some(models) = of_sessions(claude_dir, &run, None) else {
+    let Some(models) = of_sessions(claude_dir, &run, &Window::default()) else {
         return Ok(());
     };
     // At the retirement, where stats looks, even when a rerun records it.
@@ -112,14 +112,27 @@ pub fn sessions<'a>(
         .collect()
 }
 
+/// From `since` on and before `until`; a missing bound is open.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Window {
+    pub since: Option<SystemTime>,
+    pub until: Option<SystemTime>,
+}
+
+impl Window {
+    pub fn contains(&self, at: SystemTime) -> bool {
+        self.since.is_none_or(|since| at >= since) && self.until.is_none_or(|until| at < until)
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.since.is_none() && self.until.is_none()
+    }
+}
+
 /// The tokens of every assistant message in `sessions`' transcripts under
 /// `claude_dir` and their `subagents/`, each message id once, keeping
-/// messages stamped at or after `since`. `None` when no transcript is found.
-pub fn of_sessions(
-    claude_dir: &Path,
-    sessions: &[String],
-    since: Option<SystemTime>,
-) -> Option<Usage> {
+/// messages stamped within `window`. `None` when no transcript is found.
+pub fn of_sessions(claude_dir: &Path, sessions: &[String], window: &Window) -> Option<Usage> {
     let files: Vec<PathBuf> = sessions
         .iter()
         .filter_map(|s| transcript_of(claude_dir, s))
@@ -144,11 +157,11 @@ pub fn of_sessions(
             if record["type"] != "assistant" {
                 continue;
             }
-            if let Some(since) = since
+            if !window.is_open()
                 && record["timestamp"]
                     .as_str()
                     .and_then(parse_time)
-                    .is_none_or(|at| at < since)
+                    .is_none_or(|at| !window.contains(at))
             {
                 continue;
             }
