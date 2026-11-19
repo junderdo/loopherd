@@ -39,6 +39,9 @@ pub trait PullRequests {
     fn open_on(&self, repo: &Path, branch: &str) -> Result<PrLookup>;
 }
 
+/// The most pull requests [`Merges::merged_since`] lists.
+pub const MERGED_LIMIT: usize = 100;
+
 pub trait Merges {
     /// The default branch of `repo`'s GitHub repo.
     fn default_branch(&self, repo: &Path) -> Result<String>;
@@ -136,7 +139,7 @@ impl Merges for GhCli {
             "--search",
             &search,
             "--limit",
-            "100",
+            &MERGED_LIMIT.to_string(),
             "--json",
             "number,url",
         ];
@@ -351,6 +354,8 @@ pub mod fake {
         pub repo: PathBuf,
         pub merged: std::cell::RefCell<Vec<(&'static str, u64)>>,
         pub lookups: std::cell::Cell<u32>,
+        /// Fails each default branch lookup.
+        pub fail_branch: std::cell::Cell<bool>,
     }
 
     impl FakeMerges {
@@ -359,6 +364,7 @@ pub mod fake {
                 repo: repo.into(),
                 merged: merged.into(),
                 lookups: Default::default(),
+                fail_branch: Default::default(),
             }
         }
 
@@ -374,6 +380,9 @@ pub mod fake {
     impl Merges for FakeMerges {
         fn default_branch(&self, repo: &Path) -> Result<String> {
             self.known(repo)?;
+            if self.fail_branch.get() {
+                bail!("no default branch");
+            }
             Ok("main".into())
         }
 
