@@ -105,6 +105,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D90](decisions/D90.md) | `loopherd view`'s selected row keeps the accent background with a dark foreground in every palette (purple-orange (20,16,28), phosphor #0c0f0b, catppuccin Mocha's base #1e1e2e; 256-color 232, 233, 234), each at least 4.5:1. Amends D86. |
 | [D91](decisions/D91.md) | With `[shepherd] self_restart` on (default off), the shepherd runs `loopherd restart --self` after its handoff; the Stop hook files its stops in `shepherd.json`, and a waiter sends `/clear` then `go` once it reads finished, the input box is empty and the human sent nothing for 5 minutes; a prompt there cancels (re-armed on the human's yes), 30 minutes without the conditions gives up with a `self_restart` notification and pane label, and a second self-restart within 30 minutes is refused. Amends D82. |
 | [D92](decisions/D92.md) | `stats` adds tokens per task (every session in the mailbox plus subagents, each message once, recorded as a `usage` mailbox entry at retire and read from transcripts until then), `in`/`out` columns with the per-model split in `--json`, a per-herd lead overhead line, each run's outcome (`merged`, `closed`, `released`, `retired`) with medians over merged runs only, `--until`, and summaries per template; no dollars. Amends D30. |
+| [D93](decisions/D93.md) | Amends D87. `--beside-shepherd` focuses a `loopherd view` pane already in the target's tab instead of stacking another, opens with focus when that tab is off-screen, and refuses a split share over half. |
 
 ## Emerging model
 

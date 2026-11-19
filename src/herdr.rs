@@ -66,7 +66,10 @@ pub struct Tab {
 pub struct Pane {
     pub id: String,
     pub tab_id: String,
+    pub workspace_id: String,
     pub cwd: Option<PathBuf>,
+    /// A plugin pane's manifest title, or a name the human gave the pane.
+    pub label: Option<String>,
 }
 
 impl Pane {
@@ -119,6 +122,9 @@ pub trait Herdr {
     fn agent(&self, name: &str) -> Result<Agent>;
     fn tabs_in(&self, workspace_id: &str) -> Result<Vec<Tab>>;
     fn panes_in(&self, workspace_id: &str) -> Result<Vec<Pane>>;
+    fn pane(&self, pane_id: &str) -> Result<Pane>;
+    /// The active tab of the workspace the human's client shows, if herdr knows one.
+    fn visible_tab(&self) -> Result<Option<String>>;
     /// The shell is alone in the foreground and has drawn its prompt: no
     /// command, editor, agent, or rc file running.
     fn at_shell_prompt(&self, pane_id: &str) -> Result<bool>;
@@ -146,6 +152,9 @@ pub trait Herdr {
     fn prompt(&self, name: &str, text: &str) -> Result<()>;
     /// Brings the agent in `pane_id` to the front of the human's herdr client.
     fn focus(&self, pane_id: &str) -> Result<()>;
+    /// Brings the loopherd plugin pane `pane_id` to the front, switching tab
+    /// and workspace. Refused for a pane that isn't a plugin's.
+    fn focus_plugin_pane(&self, pane_id: &str) -> Result<()>;
     /// Shows `label` in place of the Claude's name in `pane_id`'s sidebar row,
     /// or clears it. Display-only: herdr's status for the pane is unchanged.
     fn label_pane(&self, pane_id: &str, label: Option<&str>) -> Result<()>;
@@ -171,8 +180,24 @@ pub trait Herdr {
 pub enum Placement {
     /// As the plugin's manifest declares it.
     Manifest,
-    /// Split right of `pane`, leaving focus there, with `share` of their width.
-    RightOf { pane: String, share: f64 },
+    /// Split right of `pane` with `share` of their width, at most half, and
+    /// focus on the new pane only when `focus` is set.
+    RightOf {
+        pane: String,
+        share: f64,
+        focus: bool,
+    },
+}
+
+/// The amount to resize a split's target `right` by after a split, which opens
+/// at half, so the new pane gets `share`. Only shrinking the new pane is
+/// supported: growing it means moving the target's left edge, which is an
+/// outer divider when the target already sits inside a split.
+pub fn split_resize(share: f64) -> Result<f64> {
+    if !(0.0..=0.5).contains(&share) {
+        bail!("a split pane's share must be at most half, not {share}");
+    }
+    Ok(0.5 - share)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,6 +331,27 @@ struct AgentJson {
 }
 
 #[derive(Deserialize)]
+struct PaneJson {
+    pane_id: String,
+    tab_id: String,
+    workspace_id: String,
+    cwd: Option<PathBuf>,
+    label: Option<String>,
+}
+
+impl From<PaneJson> for Pane {
+    fn from(p: PaneJson) -> Self {
+        Pane {
+            id: p.pane_id,
+            tab_id: p.tab_id,
+            workspace_id: p.workspace_id,
+            cwd: p.cwd,
+            label: p.label,
+        }
+    }
+}
+
+#[derive(Deserialize)]
 struct PluginJson {
     plugin_id: String,
     enabled: bool,
@@ -420,22 +466,28 @@ impl Herdr for CliHerdr {
     }
 
     fn panes_in(&self, workspace_id: &str) -> Result<Vec<Pane>> {
-        #[derive(Deserialize)]
-        struct PaneJson {
-            pane_id: String,
-            tab_id: String,
-            cwd: Option<PathBuf>,
-        }
         let result = self.call_ok(&["pane", "list", "--workspace", workspace_id])?;
         let list: Vec<PaneJson> = parse(&result["panes"], "pane list")?;
+        Ok(list.into_iter().map(Pane::from).collect())
+    }
+
+    fn pane(&self, pane_id: &str) -> Result<Pane> {
+        let result = self.call_ok(&["pane", "get", pane_id])?;
+        Ok(parse::<PaneJson>(&result["pane"], "pane get")?.into())
+    }
+
+    fn visible_tab(&self) -> Result<Option<String>> {
+        #[derive(Deserialize)]
+        struct WorkspaceJson {
+            focused: bool,
+            active_tab_id: Option<String>,
+        }
+        let result = self.call_ok(&["workspace", "list"])?;
+        let list: Vec<WorkspaceJson> = parse(&result["workspaces"], "workspace list")?;
         Ok(list
             .into_iter()
-            .map(|p| Pane {
-                id: p.pane_id,
-                tab_id: p.tab_id,
-                cwd: p.cwd,
-            })
-            .collect())
+            .find(|w| w.focused)
+            .and_then(|w| w.active_tab_id))
     }
 
     fn at_shell_prompt(&self, pane_id: &str) -> Result<bool> {
@@ -588,6 +640,11 @@ impl Herdr for CliHerdr {
         self.call_ok(&["agent", "focus", pane_id]).map(drop)
     }
 
+    fn focus_plugin_pane(&self, pane_id: &str) -> Result<()> {
+        self.call_ok(&["plugin", "pane", "focus", pane_id])
+            .map(drop)
+    }
+
     // herdr 0.9.5 reads `--source` as an unknown option unless the pane comes
     // first, and prints nothing on success.
     fn label_pane(&self, pane_id: &str, label: Option<&str>) -> Result<()> {
@@ -634,7 +691,9 @@ impl Herdr for CliHerdr {
             "--entrypoint",
             entrypoint,
         ];
-        if let Placement::RightOf { pane, .. } = placement {
+        let mut resize = None;
+        if let Placement::RightOf { pane, share, focus } = placement {
+            resize = Some(split_resize(*share)?.to_string());
             argv.extend([
                 "--placement",
                 "split",
@@ -642,7 +701,7 @@ impl Herdr for CliHerdr {
                 pane,
                 "--direction",
                 "right",
-                "--no-focus",
+                if *focus { "--focus" } else { "--no-focus" },
             ]);
         }
         for pair in &env {
@@ -668,21 +727,15 @@ impl Herdr for CliHerdr {
                 ),
             }
         }
-        if let Placement::RightOf { pane, share } = placement {
-            // A split opens at half. Resizing the target, not the new pane,
-            // moves the divider between them; herdr ignores the amount's sign.
-            let (direction, amount) = match *share <= 0.5 {
-                true => ("right", 0.5 - share),
-                false => ("left", share - 0.5),
-            };
-            let amount = amount.to_string();
+        if let (Placement::RightOf { pane, .. }, Some(amount)) = (placement, resize) {
+            // Resizing the target, not the new pane, moves the divider between them.
             let args = [
                 "pane",
                 "resize",
                 "--pane",
                 pane,
                 "--direction",
-                direction,
+                "right",
                 "--amount",
                 &amount,
             ];
@@ -762,4 +815,32 @@ pub fn socket_from_env() -> Option<PathBuf> {
     std::env::var_os("HERDR_SOCKET_PATH")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fake::FakeHerdr;
+
+    #[test]
+    fn a_split_shrinks_the_new_pane_from_half_by_resizing_its_target() {
+        assert!((split_resize(0.4).unwrap() - 0.1).abs() < 1e-9);
+        assert_eq!(split_resize(0.5).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn a_split_wider_than_half_is_refused_and_opens_nothing() {
+        let herdr = FakeHerdr::new(&[("w1", "loopherd")]);
+        let pane = herdr.add_tab("w1", "t", Path::new("/src"), true);
+        let wide = Placement::RightOf {
+            pane,
+            share: 0.6,
+            focus: false,
+        };
+
+        let err = herdr.open_plugin_pane("view", &wide, &[]).unwrap_err();
+
+        assert!(format!("{err:#}").contains("at most half"), "{err:#}");
+        assert!(herdr.plugin_panes().is_empty());
+    }
 }

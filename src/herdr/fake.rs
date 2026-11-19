@@ -45,6 +45,19 @@ struct FakePane {
     /// `at_shell_prompt` polls left before the shell reaches its prompt; `None` is never.
     polls_until_prompt: Option<u32>,
     shell_pid: Option<u32>,
+    label: Option<String>,
+}
+
+impl FakePane {
+    fn to_pane(&self) -> Pane {
+        Pane {
+            id: self.id.clone(),
+            tab_id: self.tab_id.clone(),
+            workspace_id: self.workspace_id.clone(),
+            cwd: Some(self.cwd.clone()),
+            label: self.label.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +91,9 @@ struct State {
     focused: Vec<String>,
     splits: Vec<Split>,
     plugin_panes: Vec<PluginPane>,
+    /// Panes the split plugin panes opened into.
+    plugin_pane_ids: Vec<String>,
+    visible_tab: Option<String>,
     refuse_popup: bool,
     /// Sidebar labels by pane.
     labels: Vec<(String, String)>,
@@ -248,6 +264,7 @@ impl FakeHerdr {
             at_prompt: true,
             polls_until_prompt: Some(0),
             shell_pid: None,
+            label: None,
         });
         id
     }
@@ -289,6 +306,31 @@ impl FakeHerdr {
             .filter(|(_, placement, _)| *placement == Placement::Manifest)
             .map(|(entrypoint, _, env)| (entrypoint, env))
             .collect()
+    }
+
+    /// The panes split plugin panes opened into, in order.
+    pub fn plugin_pane_ids(&self) -> Vec<String> {
+        self.state.lock().unwrap().plugin_pane_ids.clone()
+    }
+
+    /// Names `pane_id` as `pane rename` does.
+    pub fn set_label(&self, pane_id: &str, label: &str) {
+        let mut state = self.state.lock().unwrap();
+        let pane = state.panes.iter_mut().find(|p| p.id == pane_id);
+        pane.expect("fake pane").label = Some(label.to_string());
+    }
+
+    /// The human's client shows `pane_id`'s tab.
+    pub fn show_tab_of(&self, pane_id: &str) {
+        let mut state = self.state.lock().unwrap();
+        let tab = state
+            .panes
+            .iter()
+            .find(|p| p.id == pane_id)
+            .unwrap()
+            .tab_id
+            .clone();
+        state.visible_tab = Some(tab);
     }
 
     pub fn plugin_panes(&self) -> Vec<PluginPane> {
@@ -348,6 +390,7 @@ impl FakeHerdr {
             at_prompt: true,
             polls_until_prompt: Some(0),
             shell_pid: None,
+            label: None,
         });
         tab
     }
@@ -531,12 +574,26 @@ impl Herdr for FakeHerdr {
             .panes
             .iter()
             .filter(|p| p.workspace_id == workspace_id)
-            .map(|p| Pane {
-                id: p.id.clone(),
-                tab_id: p.tab_id.clone(),
-                cwd: Some(p.cwd.clone()),
-            })
+            .map(FakePane::to_pane)
             .collect())
+    }
+
+    fn pane(&self, pane_id: &str) -> Result<Pane> {
+        if self.is_down() {
+            bail!("herdr server not running");
+        }
+        let state = self.state.lock().unwrap();
+        let pane = state.panes.iter().find(|p| p.id == pane_id);
+        Ok(pane
+            .ok_or_else(|| anyhow!("pane {pane_id} not found"))?
+            .to_pane())
+    }
+
+    fn visible_tab(&self) -> Result<Option<String>> {
+        if self.is_down() {
+            bail!("herdr server not running");
+        }
+        Ok(self.state.lock().unwrap().visible_tab.clone())
     }
 
     fn at_shell_prompt(&self, pane_id: &str) -> Result<bool> {
@@ -776,6 +833,26 @@ impl Herdr for FakeHerdr {
         Ok(())
     }
 
+    fn focus_plugin_pane(&self, pane_id: &str) -> Result<()> {
+        if self.is_down() {
+            bail!("herdr server not running");
+        }
+        let mut state = self.state.lock().unwrap();
+        if !state.plugin_pane_ids.iter().any(|p| p == pane_id) {
+            bail!("plugin pane not found (plugin_pane_not_found)");
+        }
+        let tab = state
+            .panes
+            .iter()
+            .find(|p| p.id == pane_id)
+            .unwrap()
+            .tab_id
+            .clone();
+        state.visible_tab = Some(tab);
+        state.focused.push(pane_id.to_string());
+        Ok(())
+    }
+
     fn open_plugin_pane(
         &self,
         entrypoint: &str,
@@ -794,6 +871,22 @@ impl Herdr for FakeHerdr {
                 bail!("herdr plugin pane open: pane {pane} not found (pane_not_found)")
             }
             _ => {}
+        }
+        if let Placement::RightOf { pane, share, focus } = placement {
+            super::split_resize(*share)?;
+            let target = state.panes.iter().find(|p| p.id == *pane).unwrap().clone();
+            state.next_id += 1;
+            let id = format!("{}:p{}", target.workspace_id, state.next_id);
+            state.panes.push(FakePane {
+                id: id.clone(),
+                label: Some(manifest_title(entrypoint)),
+                shell_pid: None,
+                ..target.clone()
+            });
+            state.plugin_pane_ids.push(id);
+            if *focus {
+                state.visible_tab = Some(target.tab_id);
+            }
         }
         let mut env: Vec<(String, String)> = env
             .iter()
@@ -962,4 +1055,14 @@ impl Subscriber for FakeSubscriber {
             }
         }))
     }
+}
+
+/// The title the plugin manifest gives pane `entrypoint`, which herdr shows as its label.
+fn manifest_title(entrypoint: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("herdr-plugin/herdr-plugin.toml");
+    let manifest: toml::Table = std::fs::read_to_string(path).unwrap().parse().unwrap();
+    let panes = manifest["panes"].as_array().unwrap();
+    let pane = panes.iter().find(|p| p["id"].as_str() == Some(entrypoint));
+    let title = pane.unwrap_or_else(|| panic!("no manifest pane {entrypoint}"))["title"].as_str();
+    title.unwrap().to_string()
 }
