@@ -31,8 +31,8 @@ struct Colors {
     muted: Paint,
     /// Idle and done glyphs.
     soft: Paint,
-    /// The selected row's text.
-    text: Paint,
+    /// The selected row's text, dark to read on `accent`.
+    on_accent: Paint,
     bright: Paint,
     /// The wordmark runs from `primary` to this in truecolor.
     wordmark_end: (u8, u8, u8),
@@ -47,7 +47,7 @@ const PURPLE_ORANGE: Colors = Colors {
     accent_light: ((255, 192, 77), 214),
     muted: ((120, 110, 140), 60),
     soft: ((160, 165, 190), 146),
-    text: ((235, 235, 242), 254),
+    on_accent: ((20, 16, 28), 16),
     bright: ((255, 255, 255), 231),
     wordmark_end: (255, 80, 0),
     wordmark_steps: [93, 134, 169, 203, 202],
@@ -60,7 +60,7 @@ const PHOSPHOR: Colors = Colors {
     accent_light: ((0x7b, 0xf1, 0xa8), 121),
     muted: ((0xa6, 0xa0, 0x9b), 247),
     soft: ((0xd6, 0xd3, 0xd1), 252),
-    text: ((0xf5, 0xf5, 0xf4), 255),
+    on_accent: ((0x0c, 0x0f, 0x0b), 233),
     bright: ((255, 255, 255), 231),
     wordmark_end: (0xff, 0xd2, 0x30),
     wordmark_steps: [41, 77, 113, 149, 221],
@@ -73,7 +73,7 @@ const CATPPUCCIN: Colors = Colors {
     accent_light: ((0xf9, 0xe2, 0xaf), 223),
     muted: ((0x6c, 0x70, 0x86), 243),
     soft: ((0xa6, 0xad, 0xc8), 146),
-    text: ((0xcd, 0xd6, 0xf4), 189),
+    on_accent: ((0x1e, 0x1e, 0x2e), 234),
     bright: ((0xcd, 0xd6, 0xf4), 189),
     wordmark_end: (0xfa, 0xb3, 0x87),
     wordmark_steps: [183, 182, 181, 217, 216],
@@ -233,7 +233,7 @@ impl Theme {
     pub fn selected(&self) -> Style {
         match (
             self.color(self.colors().accent),
-            self.color(self.colors().text),
+            self.color(self.colors().on_accent),
         ) {
             (Some(bg), Some(fg)) => Style::new().bg(bg).fg(fg),
             _ => Style::new().add_modifier(Modifier::REVERSED),
@@ -388,7 +388,7 @@ mod tests {
                     (120, 110, 140),
                     (160, 165, 190),
                     (255, 154, 31),
-                    (235, 235, 242),
+                    (20, 16, 28),
                     (255, 255, 255),
                     (150, 50, 230),
                     (255, 80, 0),
@@ -403,7 +403,7 @@ mod tests {
                     (0xa6, 0xa0, 0x9b),
                     (0xd6, 0xd3, 0xd1),
                     (0xff, 0xd2, 0x30),
-                    (0xf5, 0xf5, 0xf4),
+                    (0x0c, 0x0f, 0x0b),
                     (255, 255, 255),
                     (0x05, 0xdf, 0x72),
                     (0xff, 0xd2, 0x30),
@@ -418,7 +418,7 @@ mod tests {
                     (0x6c, 0x70, 0x86),
                     (0xa6, 0xad, 0xc8),
                     (0xfa, 0xb3, 0x87),
-                    (0xcd, 0xd6, 0xf4),
+                    (0x1e, 0x1e, 0x2e),
                     (0xcd, 0xd6, 0xf4),
                     (0xcb, 0xa6, 0xf7),
                     (0xfa, 0xb3, 0x87),
@@ -440,15 +440,15 @@ mod tests {
         for (palette, expected) in [
             (
                 Palette::PurpleOrange,
-                indexed([93, 208, 214, 60, 146, 208, 254, 231, 93, 202]),
+                indexed([93, 208, 214, 60, 146, 208, 16, 231, 93, 202]),
             ),
             (
                 Palette::Phosphor,
-                indexed([41, 221, 121, 247, 252, 221, 255, 231, 41, 221]),
+                indexed([41, 221, 121, 247, 252, 221, 233, 231, 41, 221]),
             ),
             (
                 Palette::Catppuccin,
-                indexed([183, 216, 223, 243, 146, 216, 189, 189, 183, 216]),
+                indexed([183, 216, 223, 243, 146, 216, 234, 189, 183, 216]),
             ),
         ] {
             assert_eq!(
@@ -456,6 +456,60 @@ mod tests {
                 expected,
                 "{palette:?}"
             );
+        }
+    }
+
+    /// The xterm RGB of a 256-color index from 16 up.
+    fn xterm_rgb(index: u8) -> (u8, u8, u8) {
+        match index {
+            232.. => {
+                let v = 8 + 10 * (index - 232);
+                (v, v, v)
+            }
+            16.. => {
+                let level = |n: u8| [0, 95, 135, 175, 215, 255][usize::from(n)];
+                let i = index - 16;
+                (level(i / 36), level(i / 6 % 6), level(i % 6))
+            }
+            _ => panic!("ANSI color {index} has no fixed RGB"),
+        }
+    }
+
+    /// WCAG 2 contrast ratio.
+    fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
+        let luminance = |(r, g, b): (u8, u8, u8)| {
+            let channel = |c: u8| {
+                let c = f64::from(c) / 255.0;
+                if c <= 0.03928 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+        };
+        let (la, lb) = (luminance(a), luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    fn rgb_of(color: Option<Color>) -> (u8, u8, u8) {
+        match color {
+            Some(Color::Rgb(r, g, b)) => (r, g, b),
+            Some(Color::Indexed(i)) => xterm_rgb(i),
+            other => panic!("not a fixed color: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_selected_row_reaches_4_5_to_1_in_every_palette_and_depth() {
+        for colorterm in [Some("truecolor"), None] {
+            for palette in Palette::ALL {
+                let selected = Theme::from_env(colorterm, false)
+                    .with_palette(palette)
+                    .selected();
+                let ratio = contrast(rgb_of(selected.fg), rgb_of(selected.bg));
+                assert!(ratio >= 4.5, "{palette:?} {colorterm:?}: {ratio:.2}");
+            }
         }
     }
 
