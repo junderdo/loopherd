@@ -57,11 +57,13 @@ pub fn summon(
                 && agents.iter().any(|a| a.pane_id == place.pane);
             let claude_runs = process::live(procs, Some(place.process)).is_some();
             // The shell outlives a Claude restarted in it; a pane id reused later runs another.
-            let in_its_shell = || {
-                process::live(procs, shell)
-                    .is_some_and(|s| herdr.shell_pid(&place.pane).ok().flatten() == Some(s.pid))
+            let in_its_shell = match process::live(procs, shell) {
+                Some(shell) if here && !claude_runs => {
+                    herdr.shell_pid(&place.pane)? == Some(shell.pid)
+                }
+                _ => false,
             };
-            match (here && (claude_runs || in_its_shell()), claude_runs) {
+            match (here && (claude_runs || in_its_shell), claude_runs) {
                 (true, _) => Some(place.pane),
                 (false, true) => return Ok(Summoned::Elsewhere(place)),
                 (false, false) => None,
@@ -432,7 +434,7 @@ mod tests {
 
     #[test]
     fn a_recorded_pane_whose_shell_changed_or_restarted_is_no_live_shepherd() {
-        let mut replaced = FakeProcs::default();
+        let mut replaced = only_the_pane_shell();
         replaced.add(21, "/bin/bash", 10, 210);
         let mut restarted = FakeProcs::default();
         restarted.add(PANE_SHELL.pid, "/bin/bash", 10, 910);
@@ -452,6 +454,27 @@ mod tests {
                 "{shell_pid}: {summoned:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_recorded_pane_whose_shell_herdr_cant_read_fails_and_starts_nothing() {
+        let state = tempfile::tempdir().unwrap();
+        let mut herdr =
+            FakeHerdr::new(&[("w1", "main")]).with_live_agent(None, Some("s2"), "w1:p1");
+        herdr.fail_shell_pid = true;
+        let (herdr, _) = recorded_under_the_pane_shell(state.path(), herdr);
+        let view = herdr.add_tab("w1", "view", Path::new("/repo"), true);
+
+        let failed = summon(
+            &herdr,
+            &only_the_pane_shell(),
+            state.path(),
+            Some(&below(&view)),
+        );
+
+        let error = format!("{:#}", failed.unwrap_err());
+        assert!(error.contains("process-info failed"), "{error}");
+        assert!(herdr.splits().is_empty() && herdr.started().is_empty());
     }
 
     #[test]
