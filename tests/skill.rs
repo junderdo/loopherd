@@ -224,6 +224,28 @@ fn the_shepherd_runs_doctor_at_session_start_and_relays_failures() {
 }
 
 #[test]
+fn only_the_humans_shepherd_names_its_herdr_agent_at_session_start() {
+    let home = tempfile::tempdir().unwrap();
+    let printed = String::from_utf8(skill(home.path())).unwrap();
+    let start = flat_section(&printed, "\n## Shepherd\n", "\n### Setting up a project\n");
+    let (_, naming) = start
+        .split_once("The human's shepherd only, never a lead or member: ")
+        .expect("the rename is guarded to the human's shepherd");
+    for rule in [
+        "`herdr agent rename \"$HERDR_PANE_ID\" shepherd`",
+        "If herdr answers `agent_name_taken`, another shepherd already runs",
+        "On any other error, carry on and tell the human that `S` can't find you",
+    ] {
+        assert!(naming.contains(rule), "{naming}");
+    }
+    assert_eq!(
+        printed.matches("herdr agent rename").count(),
+        1,
+        "{printed}"
+    );
+}
+
+#[test]
 fn only_a_forced_restart_is_the_humans_call() {
     let home = tempfile::tempdir().unwrap();
     let printed = String::from_utf8(skill(home.path())).unwrap();

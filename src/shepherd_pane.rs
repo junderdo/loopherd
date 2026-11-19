@@ -1,0 +1,405 @@
+//! Bringing up the shepherd from the herd view: its pane when it's alive,
+//! else a new one split below the view's.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::Result;
+
+use crate::context::SHEPHERD;
+use crate::herdr::{Herdr, wait_for_shell_prompt};
+use crate::process::{self, Procs};
+use crate::shepherd_resume::{self, Place};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Summoned {
+    Focused(String),
+    Started(String),
+    /// Started in the pane, which then couldn't be focused, for the reason given.
+    Unfocused(String, String),
+    /// The recorded shepherd's Claude still runs, but not in a pane of this
+    /// herdr that the view can focus, so nothing starts.
+    Elsewhere(Place),
+    /// No live shepherd, and the view has no pane to split, as in a popup.
+    NoPane,
+}
+
+/// Where a shepherd started from the view goes: split below the view's
+/// `pane`, in `cwd`, with `env` for loopherd's state and config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Below {
+    pub pane: String,
+    pub cwd: PathBuf,
+    pub env: Vec<(String, String)>,
+}
+
+const SHELL_TIMEOUT: Duration = Duration::from_secs(30);
+const SHELL_POLL: Duration = Duration::from_millis(50);
+const START_TIMEOUT: Duration = Duration::from_secs(60);
+
+const START_PROMPT: &str = "You're the loopherd shepherd. Run `loopherd --skill` and follow its \
+     Shepherd section: feed the herds, watch them, verify members' work, and clean up after merges.";
+
+/// Focuses the live shepherd, or starts one `below` the view; `None` is a
+/// view with no pane of its own. A failed start closes the pane it split.
+pub fn summon(
+    herdr: &dyn Herdr,
+    procs: &dyn Procs,
+    state: &Path,
+    below: Option<&Below>,
+) -> Result<Summoned> {
+    let agents = herdr.agents()?;
+    let named = agents.iter().find(|a| a.name.as_deref() == Some(SHEPHERD));
+    let recorded = shepherd_resume::recorded_place(state)
+        .filter(|place| process::live(procs, Some(place.process)).is_some());
+    let live = match (named, recorded) {
+        (Some(agent), _) => Some(agent.pane_id.clone()),
+        (None, Some(place)) => {
+            let here = herdr.socket().as_deref() == Some(place.socket.as_path())
+                && agents.iter().any(|a| a.pane_id == place.pane);
+            if !here {
+                return Ok(Summoned::Elsewhere(place));
+            }
+            Some(place.pane)
+        }
+        (None, None) => None,
+    };
+    if let Some(pane) = live {
+        herdr.focus(&pane)?;
+        return Ok(Summoned::Focused(pane));
+    }
+    let Some(below) = below else {
+        return Ok(Summoned::NoPane);
+    };
+    let env: Vec<(&str, &str)> = below
+        .env
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let pane = herdr.split_down(&below.pane, &below.cwd, &env)?;
+    if let Err(e) = start_in(herdr, state, &pane) {
+        let _ = herdr.close_pane(&pane);
+        return Err(e);
+    }
+    match herdr.focus(&pane) {
+        Ok(()) => Ok(Summoned::Started(pane)),
+        Err(e) => Ok(Summoned::Unfocused(pane, format!("{e:#}"))),
+    }
+}
+
+/// Starts the shepherd in `pane`, giving the handoff back when the start fails.
+fn start_in(herdr: &dyn Herdr, state: &Path, pane: &str) -> Result<()> {
+    wait_for_shell_prompt(herdr, pane, SHELL_TIMEOUT, SHELL_POLL)?;
+    let resume = shepherd_resume::new_shepherd_resume(state, herdr.socket().as_deref())?;
+    let prompt = resume
+        .as_ref()
+        .map_or(START_PROMPT, |r| &r.prompt)
+        .to_string();
+    // A blocked start waits on a dialog in the pane, which focusing shows.
+    let Err(e) = herdr.start_claude(SHEPHERD, pane, START_TIMEOUT, &[prompt]) else {
+        return Ok(());
+    };
+    match resume.map(|r| r.undo(state)).transpose() {
+        Ok(_) => Err(e),
+        Err(undo) => Err(e.context(format!("and the handoff wasn't given back: {undo:#}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::herdr::fake::Startup;
+    use crate::herdr::fake::{FAKE_SOCKET, FakeHerdr, Split};
+    use crate::ledger::Process;
+    use crate::process::FakeProcs;
+
+    fn below(pane: &str) -> Below {
+        Below {
+            pane: pane.into(),
+            cwd: "/repo".into(),
+            env: vec![("XDG_STATE_HOME".into(), "/state".into())],
+        }
+    }
+
+    /// The Claude process [`recorded_at`] records, still running.
+    fn shepherd_alive() -> FakeProcs {
+        let mut procs = FakeProcs::default();
+        procs.add(4242, "/usr/bin/claude", 1, 7);
+        procs
+    }
+
+    fn recorded(state: &Path, pane: &str, socket: &str) {
+        recorded_at(state, pane, socket, "2026-11-19T09:00:00Z");
+    }
+
+    fn recorded_at(state: &Path, pane: &str, socket: &str, at: &str) {
+        let place = Place {
+            pane: pane.into(),
+            socket: socket.into(),
+            process: Process {
+                pid: 4242,
+                start: 7,
+            },
+        };
+        let at = humantime::parse_rfc3339(at).unwrap();
+        shepherd_resume::record(state, &place, "s1", at).unwrap();
+    }
+
+    fn handed_off(state: &Path, written: &str) -> std::path::PathBuf {
+        let path = state.join("handoffs/shepherd.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "## State\n").unwrap();
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(humantime::parse_rfc3339(written).unwrap())
+            .unwrap();
+        path
+    }
+
+    /// The first prompt of the shepherd `summon` starts below a fresh view
+    /// pane, with the recorded Claude gone.
+    fn started_prompt(state: &Path) -> String {
+        let herdr = FakeHerdr::new(&[("w1", "main")]);
+        let view = herdr.add_tab("w1", "view", Path::new("/repo"), true);
+        summon(&herdr, &FakeProcs::default(), state, Some(&below(&view))).unwrap();
+        let [started] = herdr.started().try_into().unwrap();
+        let [prompt] = started.args.try_into().unwrap();
+        prompt
+    }
+
+    #[test]
+    fn a_live_agent_named_shepherd_is_focused_and_nothing_starts() {
+        let state = tempfile::tempdir().unwrap();
+        let herdr =
+            FakeHerdr::new(&[("w1", "main")]).with_live_agent(Some("shepherd"), None, "w1:p5");
+
+        let summoned = summon(
+            &herdr,
+            &shepherd_alive(),
+            state.path(),
+            Some(&below("w1:p1")),
+        )
+        .unwrap();
+
+        assert_eq!(summoned, Summoned::Focused("w1:p5".into()));
+        assert_eq!(herdr.focused(), vec!["w1:p5"]);
+        assert_eq!(herdr.mutations(), 0);
+    }
+
+    #[test]
+    fn the_recorded_shepherd_pane_with_a_live_agent_is_focused() {
+        let state = tempfile::tempdir().unwrap();
+        recorded(state.path(), "w1:p7", FAKE_SOCKET);
+        let herdr = FakeHerdr::new(&[("w1", "main")]).with_live_agent(None, Some("s2"), "w1:p7");
+
+        let summoned = summon(
+            &herdr,
+            &shepherd_alive(),
+            state.path(),
+            Some(&below("w1:p1")),
+        )
+        .unwrap();
+
+        assert_eq!(summoned, Summoned::Focused("w1:p7".into()));
+        assert_eq!(herdr.mutations(), 0);
+    }
+
+    #[test]
+    fn with_no_live_shepherd_it_starts_below_the_view_and_a_second_press_focuses_it() {
+        let state = tempfile::tempdir().unwrap();
+        let herdr = FakeHerdr::new(&[("w1", "main")]);
+        let view = herdr.add_tab("w1", "view", Path::new("/repo"), true);
+
+        let summoned =
+            summon(&herdr, &shepherd_alive(), state.path(), Some(&below(&view))).unwrap();
+
+        let [split] = herdr.splits().try_into().unwrap();
+        let Split { pane, .. } = &split;
+        assert_eq!(
+            split,
+            Split {
+                from: view.clone(),
+                pane: pane.clone(),
+                cwd: "/repo".into(),
+                env: vec![("XDG_STATE_HOME".into(), "/state".into())],
+            }
+        );
+        assert_eq!(summoned, Summoned::Started(pane.clone()));
+        let [started] = herdr.started().try_into().unwrap();
+        assert_eq!(
+            (started.name.as_str(), started.pane_id.as_str()),
+            ("shepherd", pane.as_str())
+        );
+        let [prompt] = started.args.try_into().unwrap();
+        assert!(prompt.contains("`loopherd --skill`"), "{prompt}");
+        assert!(prompt.contains("Shepherd section"), "{prompt}");
+        assert_eq!(herdr.focused(), vec![pane.clone()]);
+
+        let again = summon(&herdr, &shepherd_alive(), state.path(), Some(&below(&view))).unwrap();
+
+        assert_eq!(again, Summoned::Focused(pane.clone()));
+        assert_eq!(herdr.started().len(), 1);
+    }
+
+    #[test]
+    fn without_a_view_pane_it_starts_nothing() {
+        let state = tempfile::tempdir().unwrap();
+        let herdr = FakeHerdr::new(&[("w1", "main")]);
+
+        let summoned = summon(&herdr, &shepherd_alive(), state.path(), None).unwrap();
+
+        assert_eq!(summoned, Summoned::NoPane);
+        assert_eq!(herdr.mutations(), 0);
+    }
+
+    #[test]
+    fn a_live_recorded_claude_this_view_cant_focus_starts_nothing_and_keeps_the_handoff() {
+        for (record_socket, agent_pane) in
+            [("/run/other/herdr.sock", "w1:p7"), (FAKE_SOCKET, "w1:p8")]
+        {
+            let state = tempfile::tempdir().unwrap();
+            recorded_at(state.path(), "w1:p7", record_socket, "2026-11-19T09:00:00Z");
+            let handoff = handed_off(state.path(), "2026-11-19T09:05:00Z");
+            let herdr = FakeHerdr::new(&[("w1", "main")]).with_live_agent(None, None, agent_pane);
+            let view = herdr.add_tab("w1", "view", Path::new("/repo"), true);
+
+            let summoned =
+                summon(&herdr, &shepherd_alive(), state.path(), Some(&below(&view))).unwrap();
+
+            let Summoned::Elsewhere(place) = summoned else {
+                panic!("{record_socket} {agent_pane}: {summoned:?}");
+            };
+            assert_eq!(
+                (place.process.pid, place.socket.to_str()),
+                (4242, Some(record_socket))
+            );
+            assert!(herdr.splits().is_empty() && herdr.started().is_empty());
+            assert!(handoff.exists());
+            let record = std::fs::read_to_string(state.path().join("shepherd.json")).unwrap();
+            assert!(record.contains(r#""used": false"#), "{record}");
+        }
+    }
+
+    #[test]
+    fn a_handoff_newer_than_the_record_is_resumed_from_once() {
+        let state = tempfile::tempdir().unwrap();
+        recorded_at(state.path(), "w1:p7", FAKE_SOCKET, "2026-11-19T09:00:00Z");
+        let handoff = handed_off(state.path(), "2026-11-19T09:05:00Z");
+
+        let prompt = started_prompt(state.path());
+
+        let moved = state.path().join("handoffs/shepherd.prev.md");
+        assert!(prompt.contains("resuming after your handoff"), "{prompt}");
+        assert!(prompt.contains(&moved.display().to_string()), "{prompt}");
+        assert!(!handoff.exists() && moved.exists());
+        assert!(started_prompt(state.path()).contains("Shepherd section"));
+    }
+
+    #[test]
+    fn a_handoff_with_no_record_or_older_than_the_record_is_not_resumed_from() {
+        let unrecorded = tempfile::tempdir().unwrap();
+        handed_off(unrecorded.path(), "2026-11-19T09:05:00Z");
+        let stale = tempfile::tempdir().unwrap();
+        handed_off(stale.path(), "2026-11-19T08:55:00Z");
+        recorded_at(stale.path(), "w1:p7", FAKE_SOCKET, "2026-11-19T09:00:00Z");
+
+        assert!(started_prompt(unrecorded.path()).contains("Shepherd section"));
+        assert!(started_prompt(stale.path()).contains("Shepherd section"));
+    }
+
+    #[test]
+    fn a_handoff_recorded_on_another_herdr_is_not_resumed_from_or_marked_used() {
+        let state = tempfile::tempdir().unwrap();
+        recorded_at(
+            state.path(),
+            "w1:p7",
+            "/run/other/herdr.sock",
+            "2026-11-19T09:00:00Z",
+        );
+        let handoff = handed_off(state.path(), "2026-11-19T09:05:00Z");
+
+        assert!(started_prompt(state.path()).contains("Shepherd section"));
+        assert!(handoff.exists());
+        let record = std::fs::read_to_string(state.path().join("shepherd.json")).unwrap();
+        assert!(record.contains(r#""used": false"#), "{record}");
+    }
+
+    #[test]
+    fn a_handoff_after_the_recorded_claude_moved_to_another_session_is_not_resumed_from() {
+        let state = tempfile::tempdir().unwrap();
+        recorded_at(state.path(), "w1:p7", FAKE_SOCKET, "2026-11-19T09:00:00Z");
+        handed_off(state.path(), "2026-11-19T09:05:00Z");
+        let place = Place {
+            pane: "w1:p7".into(),
+            socket: FAKE_SOCKET.into(),
+            process: Process {
+                pid: 4242,
+                start: 7,
+            },
+        };
+        let cleared = br#"{"source":"clear","session_id":"s2"}"#;
+        shepherd_resume::session_started(state.path(), &place, cleared, &|s| s.into()).unwrap();
+
+        assert!(started_prompt(state.path()).contains("Shepherd section"));
+    }
+
+    #[test]
+    fn the_recorded_pane_whose_claude_has_exited_is_no_live_shepherd() {
+        let state = tempfile::tempdir().unwrap();
+        recorded(state.path(), "w1:p7", FAKE_SOCKET);
+        let herdr = FakeHerdr::new(&[("w1", "main")]).with_live_agent(None, Some("s9"), "w1:p7");
+        let view = herdr.add_tab("w1", "view", Path::new("/repo"), true);
+        let mut restarted = FakeProcs::default();
+        restarted.add(4242, "/usr/bin/claude", 1, 8);
+
+        let summoned = summon(&herdr, &restarted, state.path(), Some(&below(&view))).unwrap();
+
+        assert!(matches!(summoned, Summoned::Started(_)), "{summoned:?}");
+    }
+
+    #[test]
+    fn a_failed_start_closes_its_pane_and_leaves_the_handoff_for_the_next_press() {
+        let state = tempfile::tempdir().unwrap();
+        recorded_at(state.path(), "w1:p7", FAKE_SOCKET, "2026-11-19T09:00:00Z");
+        let handoff = handed_off(state.path(), "2026-11-19T09:05:00Z");
+        let mut herdr = FakeHerdr::new(&[("w1", "main")]);
+        herdr.startup = Startup::Fails;
+        let view = herdr.add_tab("w1", "view", Path::new("/repo"), true);
+
+        let failed = summon(
+            &herdr,
+            &FakeProcs::default(),
+            state.path(),
+            Some(&below(&view)),
+        );
+
+        assert!(failed.is_err());
+        let [split] = herdr.splits().try_into().unwrap();
+        assert!(!herdr.has_pane(&split.pane));
+        assert!(handoff.exists());
+        assert!(started_prompt(state.path()).contains("resuming after your handoff"));
+    }
+
+    #[test]
+    fn a_focus_that_fails_after_the_start_keeps_the_running_shepherd() {
+        let state = tempfile::tempdir().unwrap();
+        let mut herdr = FakeHerdr::new(&[("w1", "main")]);
+        herdr.fail_focus = true;
+        let view = herdr.add_tab("w1", "view", Path::new("/repo"), true);
+
+        let summoned = summon(
+            &herdr,
+            &FakeProcs::default(),
+            state.path(),
+            Some(&below(&view)),
+        )
+        .unwrap();
+
+        let [split] = herdr.splits().try_into().unwrap();
+        assert_eq!(
+            summoned,
+            Summoned::Unfocused(split.pane.clone(), "focus failed".into())
+        );
+        assert!(herdr.has_pane(&split.pane));
+        assert_eq!(herdr.started().len(), 1);
+    }
+}

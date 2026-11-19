@@ -1930,3 +1930,130 @@ fn a_leads_question_labels_its_claude_pane_until_a_typed_prompt() {
     prompt_hook("use postgres");
     assert!(shown()["display_agent"].is_null(), "{}", shown());
 }
+
+fn poll<T>(secs: u64, mut check: impl FnMut() -> Option<T>) -> Option<T> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        if let Some(found) = check() {
+            return Some(found);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+/// Runs a herdr command that prints nothing on success.
+fn herdr_quiet(args: &[&str]) {
+    let out = dev("herdr").args(args).output().unwrap();
+    assert!(
+        out.status.success(),
+        "herdr {}: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn visible(pane: &str) -> String {
+    let out = dev("herdr")
+        .args(["pane", "read", pane, "--source", "visible"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn capital_s_in_a_view_pane_starts_the_shepherd_below_it_then_focuses_it() {
+    if !live_enabled() {
+        return;
+    }
+    let label = assert_dev_session();
+    let shepherd_before = dev("herdr").args(["agent", "get", "shepherd"]).output();
+    assert!(
+        !shepherd_before.unwrap().status.success(),
+        "loopherd-dev already has an agent named shepherd; close it first"
+    );
+    let workspaces = herdr_ok(&["workspace", "list"]);
+    let workspace = workspaces["result"]["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["label"] == label.as_str())
+        .unwrap()["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (state, config) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let tab = herdr_ok(&[
+        "tab",
+        "create",
+        "--workspace",
+        &workspace,
+        "--cwd",
+        env!("CARGO_MANIFEST_DIR"),
+        "--label",
+        &format!("lh-live-shepherd-{}", std::process::id()),
+        "--no-focus",
+    ]);
+    let _cleanup = CloseTabId(tab["result"]["tab"]["tab_id"].as_str().unwrap().into());
+    let view = tab["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    poll(15, || (!visible(&view).trim().is_empty()).then_some(())).expect("no shell prompt");
+    let command = format!(
+        "XDG_STATE_HOME={} LOOPHERD_CONFIG_DIR={} {} view",
+        state.path().display(),
+        config.path().display(),
+        env!("CARGO_BIN_EXE_loopherd"),
+    );
+    herdr_quiet(&["pane", "run", &view, &command]);
+    poll(15, || visible(&view).contains("q quit").then_some(())).expect("no view drawn");
+
+    herdr_quiet(&["pane", "send-keys", &view, "S"]);
+
+    let shepherd = poll(90, || {
+        let out = dev("herdr")
+            .args(["agent", "get", "shepherd"])
+            .output()
+            .ok()?;
+        out.status.success().then(|| json(&out))
+    })
+    .expect("no shepherd started");
+    let below = shepherd["result"]["agent"]["pane_id"].as_str().unwrap();
+    let layout = herdr_ok(&["pane", "layout", "--pane", &view]);
+    let rect = |pane: &str| {
+        let panes = layout["result"]["layout"]["panes"].as_array().unwrap();
+        panes.iter().find(|p| p["pane_id"] == pane).unwrap()["rect"].clone()
+    };
+    let (top, bottom) = (rect(&view), rect(below));
+    assert_eq!(top["x"], bottom["x"], "{layout}");
+    assert!(
+        bottom["y"].as_u64() > top["y"].as_u64(),
+        "shepherd not below the view: {layout}"
+    );
+    poll(90, || {
+        visible(&view)
+            .contains("started the shepherd")
+            .then_some(())
+    })
+    .unwrap_or_else(|| panic!("{}", visible(&view)));
+
+    herdr_quiet(&["pane", "send-keys", &view, "S"]);
+
+    poll(15, || {
+        visible(&view)
+            .contains("focused the shepherd")
+            .then_some(())
+    })
+    .unwrap_or_else(|| panic!("{}", visible(&view)));
+    let panes = herdr_ok(&["pane", "list", "--workspace", &workspace]);
+    let in_tab = panes["result"]["panes"].as_array().unwrap().iter();
+    let tab_id = &tab["result"]["tab"]["tab_id"];
+    assert_eq!(
+        in_tab.filter(|p| p["tab_id"] == *tab_id).count(),
+        2,
+        "{panes}"
+    );
+}

@@ -30,6 +30,7 @@ use crate::herdr::Herdr;
 use crate::herdr::events::Subscriber;
 use crate::ledger::Ledger;
 use crate::pause::Pauses;
+use crate::shepherd_pane::{self, Below, Summoned};
 use crate::status::{Read, aligned, read, row, sections, stray_lines, widths};
 use mail::{Mail, Waiting, waiting};
 use since::{Since, Staleness, staleness};
@@ -70,12 +71,14 @@ pub enum Request {
     Read(Options),
     Focus(String),
     SaveTheme(Palette),
+    Shepherd,
 }
 
 pub enum Response {
     Read(Options, Result<(Read, Mail, Outlines)>),
     Focus(String, Result<()>),
     SavedTheme(Result<()>),
+    Shepherd(Result<Summoned>),
 }
 
 /// Where the reader finds what isn't in herdr or the ledger.
@@ -85,6 +88,10 @@ pub struct Dirs {
     pub herds: herd::Paths,
     /// config.toml, where a theme picked with `t` is saved.
     pub config: PathBuf,
+    /// loopherd's state, where the shepherd's handoff and record are.
+    pub state: PathBuf,
+    /// Where `S` starts a shepherd; `None` in a popup, which has no pane.
+    pub below: Option<Below>,
 }
 
 pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger, dirs: &Dirs) -> Response {
@@ -102,6 +109,12 @@ pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger, dirs: &Di
             Response::Focus(pane, result)
         }
         Request::SaveTheme(palette) => save_theme(&dirs.config, palette),
+        Request::Shepherd => Response::Shepherd(shepherd_pane::summon(
+            herdr,
+            &crate::process::ProcFs,
+            &dirs.state,
+            dirs.below.as_ref(),
+        )),
     }
 }
 
@@ -160,6 +173,12 @@ pub struct App {
     invalidated: bool,
     /// herdr's events are subscribed, so the poll slows.
     live: bool,
+    /// An `S` is being served, which holds up the reads queued behind it.
+    summoning: bool,
+    /// A quit pressed while summoning, held until the start settles so a
+    /// split it made is either running the shepherd or closed; a second
+    /// press quits at once, in case herdr hangs.
+    quit_after_summon: bool,
     quit: bool,
 }
 
@@ -220,6 +239,8 @@ impl App {
             polled: None,
             invalidated: false,
             live: false,
+            summoning: false,
+            quit_after_summon: false,
             quit: false,
         }
     }
@@ -299,6 +320,27 @@ impl App {
             Response::Focus(pane, Err(e)) => self.message = Some(format!("focus {pane}: {e:#}")),
             Response::SavedTheme(Ok(())) => {}
             Response::SavedTheme(Err(e)) => self.message = Some(format!("save theme: {e:#}")),
+            Response::Shepherd(result) => {
+                self.summoning = false;
+                self.quit = self.quit_after_summon;
+                self.message = Some(match result {
+                    Ok(Summoned::Focused(pane)) => format!("focused the shepherd in {pane}"),
+                    Ok(Summoned::Started(pane)) => format!("started the shepherd below, in {pane}"),
+                    Ok(Summoned::Unfocused(pane, e)) => {
+                        format!("started the shepherd below, in {pane}; focus failed: {e}")
+                    }
+                    Ok(Summoned::Elsewhere(place)) => format!(
+                        "the shepherd's Claude (pid {}) runs in {} on {}; not starting another",
+                        place.process.pid,
+                        place.pane,
+                        place.socket.display()
+                    ),
+                    Ok(Summoned::NoPane) => {
+                        "no live shepherd; open the view as a pane to start one".into()
+                    }
+                    Err(e) => format!("shepherd: {e:#}"),
+                })
+            }
         }
         Ok(())
     }
@@ -306,6 +348,11 @@ impl App {
     pub fn press(&mut self, key: KeyCode, now: Instant) -> Option<Request> {
         self.message = None;
         match key {
+            KeyCode::Char('q') | KeyCode::Esc if self.summoning && !self.quit_after_summon => {
+                self.quit_after_summon = true;
+                self.message =
+                    Some("quitting once the shepherd is up; press again to quit now".into());
+            }
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('s') => {
                 self.options.strays = !self.options.strays;
@@ -318,6 +365,11 @@ impl App {
             KeyCode::Char('t') => {
                 self.theme = self.theme.with_palette(self.theme.palette().next());
                 return Some(Request::SaveTheme(self.theme.palette()));
+            }
+            KeyCode::Char('S') if self.summoning => {}
+            KeyCode::Char('S') => {
+                self.summoning = true;
+                return Some(Request::Shepherd);
             }
             KeyCode::Down | KeyCode::Char('j') => self.select(self.selected + 1),
             KeyCode::Up | KeyCode::Char('k') => self.select(self.selected.saturating_sub(1)),
@@ -584,6 +636,8 @@ impl App {
             spans.push(Span::raw(" "));
             spans.push(Span::styled(if on { "on" } else { "off" }, t.toggle(on)));
         }
+        // Last, so a narrow view cuts it before the toggles' state.
+        key(&mut spans, "S", "shepherd");
         Line::from(spans)
     }
 
@@ -663,6 +717,7 @@ impl App {
             );
         }
         match (&self.read, self.reading) {
+            (_, _) if self.summoning => notes.push("bringing up the shepherd…".into()),
             (None, _) => notes.push("reading herdr and the ledger…".into()),
             (Some(_), Some(since)) if now.saturating_duration_since(since) >= POLL => {
                 let waited = now.saturating_duration_since(since).as_secs();
@@ -1069,10 +1124,10 @@ where
         let Some(key) = next_key(TICK)? else {
             continue;
         };
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            return Ok(0);
-        }
-        match app.press(key.code, Instant::now()) {
+        let ctrl_c =
+            key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+        let code = if ctrl_c { KeyCode::Esc } else { key.code };
+        match app.press(code, Instant::now()) {
             Some(Request::SaveTheme(palette)) => {
                 app.apply(save_theme(config, palette), Instant::now())?
             }
@@ -1254,6 +1309,7 @@ max = 3
             mailboxes: quiet_mail(ledger).path().into(),
             herds: herd::Paths::under(root),
             config: root.join("config.toml"),
+            ..nowhere()
         };
         app.apply(serve(request, herdr, ledger, &dirs), now)
             .unwrap();
@@ -1447,6 +1503,8 @@ max = 3
             mailboxes: mailboxes.into(),
             herds: plain_herds(),
             config: "/nonexistent/config.toml".into(),
+            state: "/nonexistent/state".into(),
+            below: None,
         }
     }
 
@@ -1758,7 +1816,7 @@ max = 3
     const LIGHT_ORANGE: Color = Color::Rgb(255, 192, 77);
     const GREY_VIOLET: Color = Color::Rgb(120, 110, 140);
     const SOFT_VIOLET: Color = Color::Rgb(160, 165, 190);
-    const LIGHT: Color = Color::Rgb(235, 235, 242);
+    const NEAR_BLACK: Color = Color::Rgb(20, 16, 28);
 
     /// Each row with the window's and boxes' side borders trimmed off.
     fn text(terminal: &Terminal<TestBackend>) -> Vec<String> {
@@ -2067,14 +2125,14 @@ max = 3
     }
 
     #[test]
-    fn the_selected_row_is_light_on_orange_across_its_box_without_a_marker() {
+    fn the_selected_row_is_near_black_on_orange_across_its_box_without_a_marker() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let terminal = render(&app(&herdr, &ledger, now), now);
         let (_, y) = pos(&terminal, "b     blocked");
         for x in 2..70 {
             assert_eq!(cell(&terminal, (x, y)).bg, ORANGE, "x {x}");
         }
-        assert_eq!(at(&terminal, "b     blocked").fg, LIGHT);
+        assert_eq!(at(&terminal, "b     blocked").fg, NEAR_BLACK);
         assert_eq!(cell(&terminal, (70, y)).bg, Color::Reset);
         assert!(!lines(&terminal).concat().contains('›'));
     }
@@ -2596,6 +2654,16 @@ max = 3
     /// reader thread, feeding `keys` one per tick. Its exit code, or `None` if
     /// it hadn't returned within five seconds.
     fn run_scripted(herdr: FakeHerdr, keys: Vec<Option<KeyEvent>>, stop: i32) -> Option<i32> {
+        run_scripted_within(herdr, keys, stop, Duration::from_secs(5))
+    }
+
+    /// The loop's exit code, if it ends within `wait`.
+    fn run_scripted_within(
+        herdr: FakeHerdr,
+        keys: Vec<Option<KeyEvent>>,
+        stop: i32,
+        wait: Duration,
+    ) -> Option<i32> {
         let (done, finished) = mpsc::channel();
         std::thread::spawn(move || {
             let reader = spawn_reader(herdr, ledger(), nowhere());
@@ -2614,7 +2682,7 @@ max = 3
             );
             let _ = done.send(code.unwrap());
         });
-        finished.recv_timeout(Duration::from_secs(5)).ok()
+        finished.recv_timeout(wait).ok()
     }
 
     #[test]
@@ -2678,6 +2746,24 @@ max = 3
         herdr.agents_gate = Some(gate.into());
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(run_scripted(herdr, vec![None, Some(ctrl_c)], 0), Some(0));
+    }
+
+    #[test]
+    fn ctrl_c_while_the_shepherd_comes_up_waits_for_it_and_a_second_quits_at_once() {
+        let ctrl_c = Some(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let summon_then = |presses: usize| {
+            let (release, gate) = mpsc::channel::<()>();
+            let mut herdr = herdr();
+            herdr.agents_gate = Some(gate.into());
+            let mut keys = vec![None, Some(key(KeyCode::Char('S')))];
+            keys.extend(std::iter::repeat_n(ctrl_c, presses));
+            let code = run_scripted_within(herdr, keys, 0, Duration::from_millis(500));
+            drop(release);
+            code
+        };
+
+        assert_eq!(summon_then(1), None);
+        assert_eq!(summon_then(2), Some(0));
     }
 
     #[test]
@@ -2828,6 +2914,7 @@ max = 3
                 mailboxes: quiet_mail(&ledger).path().into(),
                 herds: plain_herds(),
                 config: root.path().join("config.toml"),
+                ..nowhere()
             },
         );
         app.apply(response, t0).unwrap();
@@ -3857,5 +3944,147 @@ max = 3
         );
         let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
         assert_eq!(ticker(&terminal)[0], "10:05 a done shipped");
+    }
+
+    /// The view's dirs with `state` for the shepherd record, run in `pane`.
+    fn shepherd_dirs(state: &std::path::Path, pane: Option<&str>) -> Dirs {
+        Dirs {
+            state: state.into(),
+            below: pane.map(|pane| Below {
+                pane: pane.into(),
+                cwd: "/repo".into(),
+                env: vec![],
+            }),
+            ..nowhere()
+        }
+    }
+
+    fn press_shepherd(app: &mut App, herdr: &FakeHerdr, ledger: &MemLedger, dirs: &Dirs) -> String {
+        let now = Instant::now();
+        let request = app.press(KeyCode::Char('S'), now).unwrap();
+        app.apply(serve(request, herdr, ledger, dirs), now).unwrap();
+        lines(&render_tall(app, now)).concat()
+    }
+
+    #[test]
+    fn capital_s_focuses_a_live_shepherd_and_starts_nothing() {
+        let (ledger, now) = (ledger(), Instant::now());
+        let herdr = herdr().with_live_agent(Some("shepherd"), None, "w1:ps");
+        let state = tempfile::tempdir().unwrap();
+        let mut app = app(&herdr, &ledger, now);
+
+        let shown = press_shepherd(
+            &mut app,
+            &herdr,
+            &ledger,
+            &shepherd_dirs(state.path(), Some("w1:pv")),
+        );
+
+        assert_eq!(herdr.focused(), ["w1:ps"]);
+        assert_eq!(herdr.mutations(), 0);
+        assert!(shown.contains("focused the shepherd"), "{shown}");
+    }
+
+    #[test]
+    fn capital_s_with_no_shepherd_starts_one_below_the_view_then_focuses_it() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let view = herdr.add_tab("w1", "view", std::path::Path::new("/repo"), true);
+        let state = tempfile::tempdir().unwrap();
+        let dirs = shepherd_dirs(state.path(), Some(&view));
+        let mut app = app(&herdr, &ledger, now);
+
+        let shown = press_shepherd(&mut app, &herdr, &ledger, &dirs);
+
+        let [split] = herdr.splits().try_into().unwrap();
+        assert_eq!(split.from, view);
+        assert!(shown.contains("started the shepherd below"), "{shown}");
+        let shown = press_shepherd(&mut app, &herdr, &ledger, &dirs);
+        assert_eq!(herdr.started().len(), 1);
+        assert_eq!(herdr.focused().last(), Some(&split.pane));
+        assert!(shown.contains("focused the shepherd"), "{shown}");
+    }
+
+    #[test]
+    fn capital_s_in_a_popup_focuses_a_live_shepherd() {
+        let (ledger, now) = (ledger(), Instant::now());
+        let herdr = herdr().with_live_agent(Some("shepherd"), None, "w1:ps");
+        let state = tempfile::tempdir().unwrap();
+        let mut app = app(&herdr, &ledger, now);
+
+        let shown = press_shepherd(
+            &mut app,
+            &herdr,
+            &ledger,
+            &shepherd_dirs(state.path(), None),
+        );
+
+        assert_eq!(herdr.focused(), ["w1:ps"]);
+        assert_eq!(herdr.mutations(), 0);
+        assert!(shown.contains("focused the shepherd in w1:ps"), "{shown}");
+    }
+
+    #[test]
+    fn while_the_shepherd_comes_up_a_second_s_is_ignored_and_q_waits_for_it() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let view = herdr.add_tab("w1", "view", std::path::Path::new("/repo"), true);
+        let state = tempfile::tempdir().unwrap();
+        let dirs = shepherd_dirs(state.path(), Some(&view));
+        let mut app = app(&herdr, &ledger, now);
+        let request = app.press(KeyCode::Char('S'), now).unwrap();
+
+        assert!(app.press(KeyCode::Char('S'), now).is_none());
+        app.press(KeyCode::Char('q'), now);
+        assert!(!app.quit());
+        let shown = text(&render_tall(&app, now)).concat();
+        assert!(
+            shown.contains("quitting once the shepherd is up"),
+            "{shown}"
+        );
+
+        app.apply(serve(request, &herdr, &ledger, &dirs), now)
+            .unwrap();
+        assert!(app.quit());
+        assert_eq!(herdr.started().len(), 1);
+    }
+
+    #[test]
+    fn capital_s_in_a_popup_with_no_shepherd_says_to_open_the_view_as_a_pane() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let state = tempfile::tempdir().unwrap();
+        let mut app = app(&herdr, &ledger, now);
+
+        let shown = press_shepherd(
+            &mut app,
+            &herdr,
+            &ledger,
+            &shepherd_dirs(state.path(), None),
+        );
+
+        assert_eq!(herdr.mutations(), 0);
+        assert!(
+            shown.contains("open the view as a pane to start one"),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn the_footer_lists_capital_s_for_the_shepherd_after_the_toggles() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let terminal = render_at(&app(&herdr, &ledger, now), now, 100, 14);
+        assert_eq!(at(&terminal, "S shepherd").fg, LIGHT_ORANGE);
+        assert!(pos(&terminal, "a all").0 < pos(&terminal, "S shepherd").0);
+    }
+
+    #[test]
+    fn while_the_shepherd_comes_up_the_view_says_so_not_that_herdr_is_slow() {
+        let (herdr, ledger, t0) = (herdr(), ledger(), Instant::now());
+        let mut app = app(&herdr, &ledger, t0);
+        app.press(KeyCode::Char('S'), t0);
+        app.tick(t0 + POLL);
+
+        let shown = text(&render_tall(&app, t0 + POLL * 5)).concat();
+
+        assert!(shown.contains("bringing up the shepherd"), "{shown}");
+        assert!(!shown.contains("hasn't answered"), "{shown}");
     }
 }
