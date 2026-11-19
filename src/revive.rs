@@ -156,7 +156,14 @@ pub fn revive(
                 }
             }
         }
-        rearm_lead(herdr, req, &record, handoff.as_ref(), &mut outcome);
+        rearm_lead(
+            herdr,
+            req,
+            &record,
+            handoff.as_ref(),
+            &mut outcome,
+            &mut warnings,
+        );
         let line = outcome.line(&record);
         // Nobody reads a startup hook's output, so a lead's line goes to the
         // shepherd's next watch unless its own watch already runs.
@@ -281,14 +288,12 @@ impl<'a> Handoff<'a> {
     }
 
     /// Whether the session in `pane_id` kept running through a live handoff:
-    /// its own shell decides when it has one, else the other panes'. An
-    /// unreadable shell is a restart.
-    fn survived(&self, herdr: &dyn Herdr, pane_id: &str) -> bool {
-        let Ok(own) = herdr.shell_pid(pane_id) else {
-            return false;
-        };
-        own.and_then(|shell| self.outlived(shell))
-            .unwrap_or(self.any_survived)
+    /// its own shell decides when it has one, else the other panes'.
+    fn survived(&self, herdr: &dyn Herdr, pane_id: &str) -> Result<bool> {
+        let own = herdr.shell_pid(pane_id)?;
+        Ok(own
+            .and_then(|shell| self.outlived(shell))
+            .unwrap_or(self.any_survived))
     }
 
     /// The shell isn't the server's child or started before it; `None` once it has exited.
@@ -320,11 +325,9 @@ fn rearm_lead(
     record: &AgentRecord,
     handoff: Option<&Handoff>,
     outcome: &mut Outcome,
+    warnings: &mut Vec<String>,
 ) {
-    let survived = match (&outcome, handoff) {
-        (Outcome::Alive { pane_id, .. }, Some(handoff)) => handoff.survived(herdr, pane_id),
-        _ => false,
-    };
+    let alive = matches!(outcome, Outcome::Alive { .. });
     let pane = match outcome {
         Outcome::Alive { pane_id, .. } | Outcome::Started { pane_id, .. } => Some(pane_id.clone()),
         _ => None,
@@ -341,9 +344,20 @@ fn rearm_lead(
         let retry = format!("run loopherd revive --name {name}");
         ensure_main_view(herdr, name, pane, TEXT_REACHES_SUBAGENT, &retry)
     };
+    let handed_off = |warnings: &mut Vec<String>| {
+        let (true, Some(handoff), Some(pane)) = (alive, handoff, pane) else {
+            return false;
+        };
+        handoff.survived(herdr, pane).unwrap_or_else(|error| {
+            warnings.push(format!(
+                "can't read its pane's shell, so treating this startup as a restart for it: {error:#}"
+            ));
+            false
+        })
+    };
     *rearm = match crate::watch::lead_watch_running(&req.reports_dir, name) {
         Ok(true) => Rearm::WatchRunning,
-        Ok(false) if survived => Rearm::HandedOff,
+        Ok(false) if handed_off(warnings) => Rearm::HandedOff,
         Ok(false) => match pane.map(main_view).transpose() {
             Err(error) if error.is::<ShowsSubagentView>() => Rearm::SubagentView,
             Err(error) if req.dry_run => Rearm::Unchecked(error),
@@ -2363,6 +2377,11 @@ mod tests {
 
         let out = run_startup(&herdr, &procs, lead("lead-h", cwd.path()), state.path());
 
-        assert_eq!(out, "alive lead-h w1:p1 (prompted to re-arm its watch)");
+        assert_eq!(
+            out,
+            "warning lead-h: can't read its pane's shell, so treating this startup \
+             as a restart for it: herdr pane process-info failed\n\
+             alive lead-h w1:p1 (prompted to re-arm its watch)"
+        );
     }
 }

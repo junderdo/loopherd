@@ -521,10 +521,11 @@ impl Herdr for FakeHerdr {
 
     fn shell_pid(&self, pane_id: &str) -> Result<Option<u32>> {
         let mut state = self.state.lock().unwrap();
-        if self.fail_shell_pid_of.as_deref() == Some(pane_id) {
+        let flaky = self.fail_shell_pid_of.as_deref() == Some(pane_id);
+        if flaky {
             state.shell_pid_reads += 1;
         }
-        if self.fail_shell_pid || state.shell_pid_reads > 1 {
+        if self.fail_shell_pid || (flaky && state.shell_pid_reads > 1) {
             bail!("herdr pane process-info failed");
         }
         let pane = state.panes.iter().find(|p| p.id == pane_id);
