@@ -39,6 +39,9 @@ pub trait PullRequests {
     fn open_on(&self, repo: &Path, branch: &str) -> Result<PrLookup>;
 }
 
+/// The most pull requests [`Merges::merged_since`] lists.
+pub const MERGED_LIMIT: usize = 100;
+
 pub trait Merges {
     /// The default branch of `repo`'s GitHub repo.
     fn default_branch(&self, repo: &Path) -> Result<String>;
@@ -136,7 +139,7 @@ impl Merges for GhCli {
             "--search",
             &search,
             "--limit",
-            "100",
+            &MERGED_LIMIT.to_string(),
             "--json",
             "number,url",
         ];
