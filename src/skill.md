@@ -391,7 +391,7 @@ the lead's, and a mark per event keeps it to one send:
 ```toml
 [notify]
 enabled = true                    # default false: nothing is sent
-kinds = ["question", "blocked"]   # the default
+kinds = ["question", "blocked", "merged"]   # the default
 herdr = true                      # herdr's toast on the watched socket; default true
 command = "notify-send {herd}/{member} {text}"
 pane_label = true                 # label the relaying pane in herdr; default false
@@ -410,6 +410,12 @@ Notifying doesn't replace relaying: still tell the human in your pane. Not
 sent: a question you read with `loopherd reports` before a watch saw it, and
 a member already blocked when every watch started. A lead relaying a worker's
 question as its own sends a second notification.
+
+A lead's watch also sends `merged`, with `{text}` the PR's number and URL,
+once per PR merged into its repo's default branch since the lead started,
+when its `[lead]` has `merge` off and `merge_guard = "hook"` (the default).
+The hook holds the human's credentials, so a merge the human didn't make
+shows up. It asks gh every minute; a failure warns on the watch's stderr.
 
 `pane_label = true` (default false) also labels, in herdr's sidebar, the
 pane that must relay or answer: yours when your watch prints a `question`
@@ -722,8 +728,10 @@ What differs from the shepherd:
   commands it held back by hand or ask the human to. It denies
   broadly: `gh pr merge --help`, `git rebase --abort` and any `curl` to a
   PR's merge endpoint are denied too, so ask the human to run a `rebase
-  --abort`, and check merges with `gh pr view <n> --json state`. Grilling
-  is always the human's.
+  --abort`, and check merges with `gh pr view <n> --json state`. With
+  `merge` off, your watch also tells the human of every merge to the repo's
+  default branch (`[lead] merge_guard = "hook"`, the default), so expect
+  that ping for merges the human makes. Grilling is always the human's.
 - **Herd files and loopherd's config are the human's.** The hook always
   denies `loopherd herd set`, `unset` and `remove` in your pane, and also `loopherd
   lead-defaults --set`, `loopherd config set` and `unset`, `loopherd

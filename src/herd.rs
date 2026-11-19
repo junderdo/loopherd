@@ -53,6 +53,18 @@ struct LeadFile {
     blocked_dialogs: Option<bool>,
     review_rounds: Option<NonZeroU32>,
     context_limit: Option<u64>,
+    #[serde(default)]
+    merge_guard: MergeGuard,
+}
+
+/// How a lead with `merge` off is kept from merging.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MergeGuard {
+    /// The lead's tool hook refuses its merges, but it holds the human's
+    /// credentials, so the human is also told of every merge.
+    #[default]
+    Hook,
 }
 
 /// What a lead may do on its own; off means the human does it.
@@ -742,6 +754,20 @@ pub fn lead_switches(paths: &Paths, herd: &str) -> Result<Switches> {
         .lead
         .with_context(|| format!("herd: {herd} has no [lead]"))?;
     Ok(lead.switches().over(&lead_defaults(paths)?))
+}
+
+/// The repo whose merges the human hears of while `herd`'s lead runs: one
+/// whose `[lead]` has `merge` off and guards it by hook; else `None`.
+pub fn merge_alerts(paths: &Paths, herd: &str) -> Result<Option<PathBuf>> {
+    let file = load(&paths.herds, herd).context("herd")?;
+    let Some(lead) = file.lead else {
+        return Ok(None);
+    };
+    let merge = lead.switches().over(&lead_defaults(paths)?).merge;
+    Ok(match (merge, lead.merge_guard) {
+        (false, MergeGuard::Hook) => Some(expand_home(&file.repo, &paths.home)),
+        (true, _) => None,
+    })
 }
 
 /// What a herd's box in `loopherd view` shows from its herd file.

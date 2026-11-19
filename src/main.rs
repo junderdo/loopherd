@@ -1385,6 +1385,7 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         shepherd_handoff: None,
         procs: &process::ProcFs,
         notify_own: None,
+        merges: None,
         pane_label: false,
     };
     let state = ledger.dir()?;
@@ -1392,9 +1393,11 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
     let config = herd_paths.herds.with_file_name("config.toml");
     let mailboxes = ledger.reports_dir()?;
     let notify_own = |events: &[notify::Waiting]| notify_waiting(events, &config, &mailboxes);
+    let gh = github::GhCli::default();
     let req = watch::Request {
         shepherd_handoff: Some(&handoff),
         notify_own: Some(&notify_own),
+        merges: Some(&gh),
         pane_label: labels_panes(&config),
         ..req
     };
