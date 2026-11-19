@@ -1406,7 +1406,11 @@ fn stop_wakes(mailbox: &Mailbox) -> Vec<String> {
                 reported = true;
                 None
             }
-            Body::Note { .. } | Body::Blocked {} | Body::Gone { .. } | Body::Moved {} => None,
+            Body::Note { .. }
+            | Body::Blocked {}
+            | Body::Gone { .. }
+            | Body::Moved {}
+            | Body::Usage { .. } => None,
             Body::Stop(Stop {
                 error: Some(error), ..
             }) => {

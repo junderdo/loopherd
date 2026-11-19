@@ -338,3 +338,83 @@ fn an_idle_member_that_reported_done_since_its_start_retires_without_force() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "retired lh-1\n");
     assert!(ledger_text(state.path()).contains("\"retired\": true"));
 }
+
+const STOPPED: &str = r#"{"at": "2026-11-01T09:30:00Z", "kind": "stop", "session": "s1", "crons": 0, "background": {"shells": 0, "subagents": 0, "other": 0}}"#;
+
+fn write_transcript(state: &Path) {
+    let project = state.join("claude/projects/-repo");
+    fs::create_dir_all(&project).unwrap();
+    let line = r#"{"type": "assistant", "timestamp": "2026-11-01T09:10:00Z", "message": {"id": "m1", "model": "opus", "usage": {"input_tokens": 1, "cache_creation_input_tokens": 2, "cache_read_input_tokens": 3, "output_tokens": 4}}}"#;
+    fs::write(project.join("s1.jsonl"), format!("{line}\n{line}\n")).unwrap();
+}
+
+fn last_entry(state: &Path) -> serde_json::Value {
+    let text = fs::read_to_string(state.join("loopherd/reports/lh-1.jsonl")).unwrap();
+    serde_json::from_str(text.lines().last().unwrap()).unwrap()
+}
+
+#[test]
+fn retiring_records_the_members_tokens_in_its_mailbox() {
+    for args in [&["--force"][..], &["--force", "--close"]] {
+        let state = tempfile::tempdir().unwrap();
+        write_ledger(state.path());
+        write_mailbox(state.path(), &[STARTED, STOPPED]);
+        write_transcript(state.path());
+
+        let out = retire_while_herdr_shows_it("working", state.path(), args);
+
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        let entry = last_entry(state.path());
+        assert_eq!(entry["kind"], "usage", "{args:?}: {entry}");
+        assert_eq!(
+            entry["models"],
+            serde_json::json!({
+                "opus": {"input": 1, "cache_write": 2, "cache_read": 3, "output": 4},
+            }),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn retiring_a_member_with_no_transcript_records_no_tokens() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    write_mailbox(state.path(), &[STARTED, STOPPED]);
+
+    let out = retire_while_herdr_shows_it("working", state.path(), &["--force"]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(last_entry(state.path())["kind"], "stop");
+}
+
+#[test]
+fn rerunning_close_records_tokens_a_failed_retire_left_out_and_never_twice() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    write_mailbox(state.path(), &[STARTED, STOPPED]);
+    let out = retire_while_herdr_shows_it("working", state.path(), &["--force"]);
+    assert!(out.status.success(), "{out:?}");
+    write_mailbox(state.path(), &[STARTED, STOPPED]);
+    write_transcript(state.path());
+
+    for _ in 0..2 {
+        let out = retire_while_herdr_shows_it("working", state.path(), &["--close"]);
+        assert!(out.status.success(), "{out:?}");
+    }
+
+    let text = fs::read_to_string(state.path().join("loopherd/reports/lh-1.jsonl")).unwrap();
+    assert_eq!(text.matches("\"kind\":\"usage\"").count(), 1, "{text}");
+    let ledger: serde_json::Value = serde_json::from_str(&ledger_text(state.path())).unwrap();
+    let retired_at = ledger["lh-1"]["retired_at"]
+        .as_str()
+        .unwrap()
+        .trim_end_matches('Z');
+    assert!(
+        last_entry(state.path())["at"]
+            .as_str()
+            .unwrap()
+            .starts_with(retired_at),
+        "stamped at the retirement, where stats reads it: {text}"
+    );
+}

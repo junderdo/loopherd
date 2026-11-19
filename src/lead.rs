@@ -451,6 +451,7 @@ mod tests {
             now,
             std::path::Path::new("/nonexistent/reports"),
             None,
+            None,
             &mut out,
         )
         .unwrap();

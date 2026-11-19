@@ -37,6 +37,8 @@ pub struct FeedRequest<'a> {
     pub own_socket: Option<PathBuf>,
     /// Where members' mailboxes live, for after_merge's notes.
     pub mailboxes: PathBuf,
+    /// Where Claude keeps transcripts, to record a retired member's tokens.
+    pub claude_dir: Option<PathBuf>,
     /// How long each after_merge command may run.
     pub after_merge_timeout: Duration,
     /// This feed's process, recorded on the after_merge it takes on.
@@ -263,6 +265,7 @@ fn unclaimed(
         own_lineage: vec![],
         own_socket: None,
         mailboxes: PathBuf::new(),
+        claude_dir: None,
         after_merge_timeout: Duration::ZERO,
         owner: Process { pid: 0, start: 0 },
         procs: &crate::process::ProcFs,
@@ -405,6 +408,7 @@ fn reap(
                     name,
                     now,
                     &req.mailboxes,
+                    req.claude_dir.as_deref(),
                     own_pane.as_ref(),
                     &mut out,
                 ) {
@@ -954,6 +958,7 @@ mod tests {
                 own_pane: pane.map(str::to_string),
                 own_socket: pane.map(|_| PathBuf::from("/s")),
                 mailboxes: self.config.path().join("reports"),
+                claude_dir: None,
                 after_merge_timeout: Duration::from_secs(2),
                 owner: OWNER,
                 procs: &*LIVE,
@@ -1140,6 +1145,7 @@ mod tests {
             herd: None,
             since: None,
             now: SystemTime::now(),
+            claude_dir: None,
         };
         let (herds, _) = crate::stats::stats(&ledger, reports.path(), &query).unwrap();
         let earlier: Vec<_> = herds[0]
@@ -1730,6 +1736,7 @@ mod tests {
             own_lineage: vec![],
             own_socket: None,
             mailboxes: config.path().join("reports"),
+            claude_dir: None,
             after_merge_timeout: Duration::from_secs(5),
             owner: OWNER,
             procs: &*LIVE,
@@ -1810,6 +1817,37 @@ mod tests {
     }
 
     #[test]
+    fn a_done_member_retires_with_its_tokens_recorded_in_its_mailbox() {
+        let setup = Setup::with_done("cat tasks", 1, "exit 0");
+        setup.tasks("");
+        let mut zpr = member("zpr-1", Some("prs"), false);
+        zpr.params = Some([("number".to_string(), "1".to_string())].into());
+        zpr.session_id = Some("s1".into());
+        let mut ledger = ledger(&[zpr]);
+        let claude = tempfile::tempdir().unwrap();
+        let project = claude.path().join("projects/-repo");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("s1.jsonl"),
+            r#"{"type":"assistant","timestamp":"2026-11-01T00:10:00Z","message":{"id":"m1","model":"opus","usage":{"input_tokens":1,"cache_creation_input_tokens":2,"cache_read_input_tokens":3,"output_tokens":4}}}"#,
+        )
+        .unwrap();
+        let mut req = setup.request(false, None);
+        req.claude_dir = Some(claude.path().to_path_buf());
+
+        let fed = feed(&herdr(), &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
+
+        assert!(ledger.0["zpr-1"].retired, "{:?}", fed.lines);
+        let mailbox = fs::read_to_string(req.mailboxes.join("zpr-1.jsonl")).unwrap();
+        let entry: serde_json::Value = serde_json::from_str(mailbox.trim_end()).unwrap();
+        assert_eq!(entry["kind"], "usage");
+        assert_eq!(
+            entry["models"]["opus"],
+            serde_json::json!({"input": 1, "cache_write": 2, "cache_read": 3, "output": 4})
+        );
+    }
+
+    #[test]
     fn reaping_keeps_retires_safety_rules_such_as_sparing_the_tab_running_feed() {
         let setup = Setup::with_done("cat tasks", 1, "exit 0");
         let herdr = herdr();
@@ -1823,6 +1861,7 @@ mod tests {
             own_pane: Some(ledger.0["zpr-1"].pane_id.clone()),
             own_socket: None,
             mailboxes: PathBuf::from("/nonexistent/reports"),
+            claude_dir: None,
             after_merge_timeout: Duration::from_secs(5),
             owner: OWNER,
             procs: &*LIVE,
@@ -1884,6 +1923,7 @@ mod tests {
             own_lineage: vec![],
             own_socket: None,
             mailboxes: PathBuf::from("/nonexistent/reports"),
+            claude_dir: None,
             after_merge_timeout: Duration::from_secs(5),
             owner: OWNER,
             procs: &*LIVE,
@@ -2018,6 +2058,7 @@ mod tests {
             own_lineage: vec![],
             own_socket: None,
             mailboxes: PathBuf::from("/nonexistent/reports"),
+            claude_dir: None,
             after_merge_timeout: Duration::from_secs(5),
             owner: OWNER,
             procs: &*LIVE,
@@ -2320,6 +2361,7 @@ mod tests {
                     own_lineage: vec![],
                     own_socket: None,
                     mailboxes: PathBuf::from("/nonexistent/reports"),
+                    claude_dir: None,
                     after_merge_timeout: Duration::from_secs(5),
                     owner: OWNER,
                     procs: &*LIVE,
