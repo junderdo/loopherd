@@ -1271,12 +1271,13 @@ impl IsolatedServer {
 
 impl IsolatedServer {
     /// Runs `command` in `pane` and returns the pid and start time of the
-    /// process it starts under the pane's shell, standing in for a Claude.
+    /// shell's child whose argv is `command`'s words, standing in for a Claude.
     fn run_in(&self, pane: &str, command: &str) -> (u32, u64) {
         let info = self.json(&["pane", "process-info", "--pane", pane]);
         let shell = info["result"]["process_info"]["shell_pid"]
             .as_u64()
             .unwrap();
+        let argv: Vec<&str> = command.split_whitespace().collect();
         self.ok(&["pane", "run", pane, command]);
         for _ in 0..50 {
             for entry in std::fs::read_dir("/proc").unwrap().flatten() {
@@ -1287,14 +1288,22 @@ impl IsolatedServer {
                     continue;
                 };
                 let fields: Vec<&str> = fields.split_whitespace().collect();
-                if fields[1].parse::<u64>().ok() == Some(shell) {
+                if fields[1].parse::<u64>().ok() != Some(shell) {
+                    continue;
+                }
+                let cmdline = std::fs::read(entry.path().join("cmdline")).unwrap_or_default();
+                let args: Vec<&[u8]> = cmdline
+                    .split(|b| *b == 0)
+                    .filter(|a| !a.is_empty())
+                    .collect();
+                if args.iter().copied().eq(argv.iter().map(|a| a.as_bytes())) {
                     let pid = entry.file_name().to_string_lossy().parse().unwrap();
                     return (pid, fields[19].parse().unwrap());
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        panic!("nothing started under pane {pane}'s shell {shell}");
+        panic!("no `{command}` started under pane {pane}'s shell {shell}");
     }
 }
 
