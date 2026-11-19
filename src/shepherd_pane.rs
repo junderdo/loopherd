@@ -50,17 +50,22 @@ pub fn summon(
 ) -> Result<Summoned> {
     let agents = herdr.agents()?;
     let named = agents.iter().find(|a| a.name.as_deref() == Some(SHEPHERD));
-    let recorded = shepherd_resume::recorded_place(state)
-        .filter(|place| process::live(procs, Some(place.process)).is_some());
-    let live = match (named, recorded) {
+    let live = match (named, shepherd_resume::recorded_place_and_shell(state)) {
         (Some(agent), _) => Some(agent.pane_id.clone()),
-        (None, Some(place)) => {
+        (None, Some((place, shell))) => {
             let here = herdr.socket().as_deref() == Some(place.socket.as_path())
                 && agents.iter().any(|a| a.pane_id == place.pane);
-            if !here {
-                return Ok(Summoned::Elsewhere(place));
+            let claude_runs = process::live(procs, Some(place.process)).is_some();
+            // The shell outlives a Claude restarted in it; a pane id reused later runs another.
+            let in_its_shell = || {
+                process::live(procs, shell)
+                    .is_some_and(|s| herdr.shell_pid(&place.pane).ok().flatten() == Some(s.pid))
+            };
+            match (here && (claude_runs || in_its_shell()), claude_runs) {
+                (true, _) => Some(place.pane),
+                (false, true) => return Ok(Summoned::Elsewhere(place)),
+                (false, false) => None,
             }
-            Some(place.pane)
         }
         (None, None) => None,
     };
@@ -111,7 +116,7 @@ mod tests {
     use crate::herdr::fake::Startup;
     use crate::herdr::fake::{FAKE_SOCKET, FakeHerdr, Split};
     use crate::ledger::Process;
-    use crate::process::FakeProcs;
+    use crate::process::{FakeProcs, PANE_SHELL};
 
     fn below(pane: &str) -> Below {
         Below {
@@ -354,6 +359,99 @@ mod tests {
         let summoned = summon(&herdr, &restarted, state.path(), Some(&below(&view))).unwrap();
 
         assert!(matches!(summoned, Summoned::Started(_)), "{summoned:?}");
+    }
+
+    /// A herdr whose pane `w1:p1` runs [`PANE_SHELL`], and a record of the
+    /// shepherd's Claude (pid 4242) there under that shell.
+    fn recorded_under_the_pane_shell(state: &Path, herdr: FakeHerdr) -> (FakeHerdr, String) {
+        let pane = herdr
+            .create_tab("w1", Path::new("/repo"), "shepherd")
+            .unwrap()
+            .pane_id;
+        assert_eq!(pane, "w1:p1");
+        herdr.set_shell_pid(&pane, Some(PANE_SHELL.pid));
+        let place = Place {
+            pane: pane.clone(),
+            socket: FAKE_SOCKET.into(),
+            process: Process {
+                pid: 4242,
+                start: 7,
+            },
+        };
+        let at = humantime::parse_rfc3339("2026-11-19T09:00:00Z").unwrap();
+        shepherd_resume::record(state, &place, Some(PANE_SHELL), "s1", at).unwrap();
+        (herdr, pane)
+    }
+
+    /// The pane's shell still running, the recorded Claude (pid 4242) gone.
+    fn only_the_pane_shell() -> FakeProcs {
+        let mut procs = FakeProcs::default();
+        procs.add(PANE_SHELL.pid, "/bin/bash", 10, PANE_SHELL.start);
+        procs
+    }
+
+    #[test]
+    fn a_shepherd_claude_restarted_in_its_recorded_pane_is_focused_and_nothing_starts() {
+        let state = tempfile::tempdir().unwrap();
+        let (herdr, shepherd) = recorded_under_the_pane_shell(
+            state.path(),
+            FakeHerdr::new(&[("w1", "main")]).with_live_agent(None, Some("s2"), "w1:p1"),
+        );
+        let view = herdr.add_tab("w1", "view", Path::new("/repo"), true);
+
+        let summoned = summon(
+            &herdr,
+            &only_the_pane_shell(),
+            state.path(),
+            Some(&below(&view)),
+        )
+        .unwrap();
+
+        assert_eq!(summoned, Summoned::Focused(shepherd.clone()));
+        assert_eq!(herdr.focused(), vec![shepherd]);
+        assert!(herdr.splits().is_empty() && herdr.started().is_empty());
+    }
+
+    #[test]
+    fn the_recorded_shell_left_at_a_bare_prompt_is_no_live_shepherd() {
+        let state = tempfile::tempdir().unwrap();
+        let (herdr, _) =
+            recorded_under_the_pane_shell(state.path(), FakeHerdr::new(&[("w1", "main")]));
+        let view = herdr.add_tab("w1", "view", Path::new("/repo"), true);
+
+        let summoned = summon(
+            &herdr,
+            &only_the_pane_shell(),
+            state.path(),
+            Some(&below(&view)),
+        )
+        .unwrap();
+
+        assert!(matches!(summoned, Summoned::Started(_)), "{summoned:?}");
+    }
+
+    #[test]
+    fn a_recorded_pane_whose_shell_changed_or_restarted_is_no_live_shepherd() {
+        let mut replaced = FakeProcs::default();
+        replaced.add(21, "/bin/bash", 10, 210);
+        let mut restarted = FakeProcs::default();
+        restarted.add(PANE_SHELL.pid, "/bin/bash", 10, 910);
+        for (shell_pid, procs) in [(21, replaced), (PANE_SHELL.pid, restarted)] {
+            let state = tempfile::tempdir().unwrap();
+            let (herdr, shepherd) = recorded_under_the_pane_shell(
+                state.path(),
+                FakeHerdr::new(&[("w1", "main")]).with_live_agent(None, Some("s9"), "w1:p1"),
+            );
+            herdr.set_shell_pid(&shepherd, Some(shell_pid));
+            let view = herdr.add_tab("w1", "view", Path::new("/repo"), true);
+
+            let summoned = summon(&herdr, &procs, state.path(), Some(&below(&view))).unwrap();
+
+            assert!(
+                matches!(summoned, Summoned::Started(_)),
+                "{shell_pid}: {summoned:?}"
+            );
+        }
     }
 
     #[test]
