@@ -33,7 +33,7 @@ use crate::pause::Pauses;
 use crate::status::{Read, aligned, read, row, sections, stray_lines, widths};
 use mail::{Mail, Waiting, waiting};
 use since::{Since, Staleness, staleness};
-use theme::Theme;
+use theme::{Palette, Theme};
 use title::Outlines;
 use watcher::{Signal, Watch, watch};
 
@@ -69,11 +69,13 @@ const GAUGE: usize = 3;
 pub enum Request {
     Read(Options),
     Focus(String),
+    SaveTheme(Palette),
 }
 
 pub enum Response {
     Read(Options, Result<(Read, Mail, Outlines)>),
     Focus(String, Result<()>),
+    SavedTheme(Result<()>),
 }
 
 /// Where the reader finds what isn't in herdr or the ledger.
@@ -81,6 +83,8 @@ pub struct Dirs {
     pub pauses: Pauses,
     pub mailboxes: PathBuf,
     pub herds: herd::Paths,
+    /// config.toml, where a theme picked with `t` is saved.
+    pub config: PathBuf,
 }
 
 pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger, dirs: &Dirs) -> Response {
@@ -97,6 +101,11 @@ pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger, dirs: &Di
             let result = herdr.focus(&pane);
             Response::Focus(pane, result)
         }
+        Request::SaveTheme(palette) => Response::SavedTheme(crate::config::set(
+            &dirs.config,
+            "view.theme",
+            palette.name(),
+        )),
     }
 }
 
@@ -271,6 +280,8 @@ impl App {
             }
             Response::Focus(_, Ok(())) => {}
             Response::Focus(pane, Err(e)) => self.message = Some(format!("focus {pane}: {e:#}")),
+            Response::SavedTheme(Ok(())) => {}
+            Response::SavedTheme(Err(e)) => self.message = Some(format!("save theme: {e:#}")),
         }
         Ok(())
     }
@@ -286,6 +297,10 @@ impl App {
             KeyCode::Char('a') => {
                 self.options.all = !self.options.all;
                 return Some(self.request_read(now));
+            }
+            KeyCode::Char('t') => {
+                self.theme = self.theme.with_palette(self.theme.palette().next());
+                return Some(Request::SaveTheme(self.theme.palette()));
             }
             KeyCode::Down | KeyCode::Char('j') => self.select(self.selected + 1),
             KeyCode::Up | KeyCode::Char('k') => self.select(self.selected.saturating_sub(1)),
@@ -551,6 +566,7 @@ impl App {
             spans.push(Span::raw(" "));
             spans.push(Span::styled(if on { "on" } else { "off" }, t.toggle(on)));
         }
+        key(&mut spans, "t", "theme");
         Line::from(spans)
     }
 
@@ -1213,6 +1229,7 @@ max = 3
             pauses: Pauses::under(root),
             mailboxes: quiet_mail(ledger).path().into(),
             herds: herd::Paths::under(root),
+            config: root.join("config.toml"),
         };
         app.apply(serve(request, herdr, ledger, &dirs), now)
             .unwrap();
@@ -1405,6 +1422,7 @@ max = 3
             pauses: Pauses::under(std::path::Path::new("/nonexistent")),
             mailboxes: mailboxes.into(),
             herds: plain_herds(),
+            config: "/nonexistent/config.toml".into(),
         }
     }
 
@@ -1837,7 +1855,7 @@ max = 3
                 "││                                                                    ││",
                 "││                                                                    ││",
                 "│╰────────────────────────────────────────────────────────────────────╯│",
-                "│ q quit  ↑↓/jk select  enter focus  s strays: off  a all: off         │",
+                "│ q quit  ↑↓/jk select  enter focus  s strays: off  a all: off  t theme│",
                 "╰──────────────────────────────────────────────────────────────────────╯",
             ]
         );
@@ -2056,6 +2074,65 @@ max = 3
     }
 
     #[test]
+    fn t_cycles_the_theme_redrawing_at_once_and_asks_to_save_each() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mut app = app(&herdr, &ledger, now);
+        let cases = [
+            (Palette::Phosphor, Color::Rgb(0x05, 0xdf, 0x72)),
+            (Palette::Catppuccin, Color::Rgb(0xcb, 0xa6, 0xf7)),
+            (Palette::PurpleOrange, PURPLE),
+        ];
+        for (palette, border) in cases {
+            let request = app.press(KeyCode::Char('t'), now);
+            assert_eq!(request, Some(Request::SaveTheme(palette)), "{palette:?}");
+            assert_eq!(cell(&render(&app, now), (0, 0)).fg, border, "{palette:?}");
+        }
+    }
+
+    #[test]
+    fn the_footer_lists_t_for_the_theme() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let terminal = render(&app(&herdr, &ledger, now), now);
+        assert_eq!(at(&terminal, "t theme").fg, LIGHT_ORANGE);
+        assert_eq!(at(&terminal, "theme").fg, GREY_VIOLET);
+    }
+
+    #[test]
+    fn saving_a_theme_writes_view_theme_to_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        let dirs = Dirs {
+            config: config.clone(),
+            ..nowhere()
+        };
+        let response = serve(
+            Request::SaveTheme(Palette::Catppuccin),
+            &herdr(),
+            &ledger(),
+            &dirs,
+        );
+        assert!(matches!(response, Response::SavedTheme(Ok(()))));
+        assert_eq!(
+            crate::config::view_theme(&config),
+            (Palette::Catppuccin, None)
+        );
+    }
+
+    #[test]
+    fn a_theme_that_cant_be_saved_says_so_in_the_notes() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mut app = app(&herdr, &ledger, now);
+        app.press(KeyCode::Char('t'), now);
+        let failed = Response::SavedTheme(Err(anyhow!("config.toml: permission denied")));
+        app.apply(failed, now).unwrap();
+        let shown = lines(&render_tall(&app, now)).concat();
+        assert!(
+            shown.contains("save theme: config.toml: permission denied"),
+            "{shown}"
+        );
+    }
+
+    #[test]
     fn colorterm_picks_truecolor_or_256_colors_and_no_color_drops_color() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let cases = [
@@ -2143,7 +2220,7 @@ max = 3
         );
         assert_eq!(
             text(&terminal)[28],
-            "q quit  ↑↓/jk select  enter focus  s strays: on  a all: on"
+            "q quit  ↑↓/jk select  enter focus  s strays: on  a all: on  t theme"
         );
         press(
             &mut app,
@@ -2642,6 +2719,7 @@ max = 3
                 pauses: Pauses::under(root.path()),
                 mailboxes: quiet_mail(&ledger).path().into(),
                 herds: plain_herds(),
+                config: root.path().join("config.toml"),
             },
         );
         app.apply(response, t0).unwrap();

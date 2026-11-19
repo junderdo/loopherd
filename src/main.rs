@@ -139,8 +139,10 @@ enum Command {
     },
     /// Read or edit one of config.toml's settings, keeping its comments and
     /// layout: `context_window`, `default_context_limit` or
-    /// `shepherd.context_limit`, each a number of tokens, or
-    /// `lead_defaults.review_rounds`, each lead's review-round limit.
+    /// `shepherd.context_limit`, each a number of tokens,
+    /// `lead_defaults.review_rounds`, each lead's review-round limit, or
+    /// `view.theme`, `loopherd view`'s palette: `purple-orange`, `phosphor`
+    /// or `catppuccin`.
     Config {
         #[command(subcommand)]
         action: ConfigAction,
@@ -513,7 +515,8 @@ struct SetupArgs {
 enum ConfigAction {
     /// Print the key's value; exits 1 if it isn't set.
     Get { key: String },
-    /// Set the key, refusing, changing nothing, a value under 10000.
+    /// Set the key, refusing, changing nothing, a token count under 10000
+    /// or a theme `view` doesn't have.
     Set { key: String, value: String },
     /// Remove the key; succeeds if it isn't set.
     Unset { key: String },
@@ -1057,10 +1060,19 @@ fn run_stats(herd: Option<String>, since: Option<SystemTime>, json: bool) -> Res
 fn run_view(all: bool, strays: bool) -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let subscriber = SocketSubscriber::new(CliHerdr.socket());
+    let config = config_path()?;
+    let (palette, warning) = config::view_theme(&config);
+    if let Some(warning) = warning {
+        eprintln!(
+            "loopherd view: warning: {warning}; using {}",
+            palette.name()
+        );
+    }
     let dirs = tui::Dirs {
         pauses: pause::Pauses::from_env()?,
         herds: Paths::from_env()?,
         mailboxes: ledger.reports_dir()?,
+        config,
     };
     tui::run(
         CliHerdr,
@@ -1071,7 +1083,8 @@ fn run_view(all: bool, strays: bool) -> Result<i32> {
         tui::theme::Theme::from_env(
             std::env::var("COLORTERM").ok().as_deref(),
             std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
-        ),
+        )
+        .with_palette(palette),
     )
 }
 
