@@ -579,7 +579,7 @@ mod tests {
     fn herds_in_stats(s: &Setup) -> Vec<(String, Vec<String>)> {
         let query = crate::stats::Query {
             herd: None,
-            since: None,
+            window: crate::usage::Window::default(),
             now: std::time::SystemTime::now(),
             claude_dir: None,
         };

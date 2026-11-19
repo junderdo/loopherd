@@ -1142,7 +1142,7 @@ mod tests {
         let reports = tempfile::tempdir().unwrap();
         let query = crate::stats::Query {
             herd: None,
-            since: None,
+            window: crate::usage::Window::default(),
             now: SystemTime::now(),
             claude_dir: None,
         };
