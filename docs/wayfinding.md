@@ -100,7 +100,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D85](decisions/D85.md) | `[lead] merge_guard` (only `hook`, the default, for now): while a `merge = false`, hook-guarded lead runs, its watch (when `[notify]` sends `merge_alert`) looks up PRs merged into the repo's default branch at most once a minute, from a per-lead window whose first lookup only sets a baseline, and sends each once as kind `merge_alert`. Amends D32's `kinds`. |
 | [D86](decisions/D86.md) | `loopherd view` has three palettes, `purple-orange` (default), `phosphor` and `catppuccin` (Mocha, as herdr's `catppuccin`); `t` cycles them and saves the pick at once as `config.toml`'s `view.theme`, which `config get\|set\|unset` take; an unknown or unreadable value falls back with a note in the view. |
 | [D87](decisions/D87.md) | `loopherd: open view beside shepherd` splits the view right of the shepherd's recorded pane (D82's `shepherd.json`, used or not) at 40%, leaving focus where it was, while the recorded Claude still runs under that pane's shell; otherwise it splits right of the action's `$HERDR_PANE_ID`, else (none, or that split fails) opens the popup, and the view notes why. |
-| [D88](decisions/D88.md) | `loopherd view`'s selected row keeps the accent background with a dark foreground in every palette (purple-orange (20,16,28), phosphor #0c0f0b, catppuccin Mocha's base #1e1e2e; 256-color 16, 233, 234), each at least 4.5:1. Amends D86. |
+| [D90](decisions/D90.md) | `loopherd view`'s selected row keeps the accent background with a dark foreground in every palette (purple-orange (20,16,28), phosphor #0c0f0b, catppuccin Mocha's base #1e1e2e; 256-color 16, 233, 234), each at least 4.5:1. Amends D86. |
 
 ## Emerging model
 
