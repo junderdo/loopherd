@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::github::{self, Merges, Pr};
+use crate::github::{self, Merges};
 use crate::herd::{self, Paths};
 use crate::notify::{self, Kind, Waiting};
 use crate::report::{self, Body};
@@ -42,6 +42,9 @@ pub struct MergeAlerts {
     mailboxes: PathBuf,
     /// Whether the last lookup failed, so a streak warns once.
     failing: bool,
+    /// This watch's last lookup, which holds the next off when the window
+    /// that records it couldn't be saved.
+    looked: Option<SystemTime>,
 }
 
 /// What `<lead>.merges` keeps between watches.
@@ -67,6 +70,7 @@ impl MergeAlerts {
             created: created.into(),
             mailboxes: mailboxes.into(),
             failing: false,
+            looked: None,
         }
     }
 
@@ -84,7 +88,7 @@ impl MergeAlerts {
         waking: bool,
         warn: &mut dyn FnMut(&str),
     ) -> Vec<Waiting> {
-        match self.try_poll(paths, merges, now, waking) {
+        match self.try_poll(paths, merges, now, waking, warn) {
             Ok(Some(found)) => {
                 self.failing = false;
                 found
@@ -101,6 +105,7 @@ impl MergeAlerts {
         merges: &dyn Merges,
         now: SystemTime,
         waking: bool,
+        warn: &mut dyn FnMut(&str),
     ) -> Result<Option<Vec<Waiting>>> {
         let Some(repo) = herd::merge_alerts(paths, &self.herd)? else {
             return Ok(None);
@@ -117,10 +122,13 @@ impl MergeAlerts {
         };
         // A `polled` ahead of `now` is a clock that jumped back, so it's due.
         let since_poll = now.duration_since(state.polled).unwrap_or(POLL_EVERY);
+        let since_look = self.looked.and_then(|at| now.duration_since(at).ok());
+        let since_poll = since_look.map_or(since_poll, |look| look.min(since_poll));
         if since_poll < POLL_EVERY || (waking && since_poll < WAKES_HOLD_OFF) {
             return Ok(None);
         }
         state.polled = now;
+        self.looked = Some(now);
         let revived = self.revived()?.filter(|at| *at <= now);
         let since = state.since.max(revived.unwrap_or(SystemTime::UNIX_EPOCH));
         // Ahead of `now`, it was saved by a clock running ahead.
@@ -148,7 +156,6 @@ impl MergeAlerts {
             .duration_since(since)
             .is_ok_and(|gap| gap > SEARCH_LAG + STALE_AFTER);
         let total = prs.len();
-        let prs = if stale { self.unsent(prs)? } else { prs };
         state.since = since.max(now - SEARCH_LAG);
         self.save(&state)?;
         if !stale {
@@ -159,11 +166,23 @@ impl MergeAlerts {
             ));
         }
         // Marked only once the window is saved, so an unsaved one finds them again
-        // unmarked. One left unmarked is at worst later sent on its own.
+        // unmarked. Counting the marks this watch made keeps two watches from
+        // both counting one merge; a failed mark counts, as no watch sent it.
+        let mut unmarked = None;
+        let mut unsent = 0;
         for pr in &prs {
-            let _ = notify::first_to_notify(&self.mailboxes, &self.lead, Kind::MergeAlert, &pr.url);
+            match notify::first_to_notify(&self.mailboxes, &self.lead, Kind::MergeAlert, &pr.url) {
+                Ok(first) => unsent += usize::from(first),
+                Err(e) => {
+                    unsent += 1;
+                    unmarked.get_or_insert(e);
+                }
+            }
         }
-        let text = match prs.len() {
+        if let Some(e) = unmarked {
+            warn(&format!("{}'s merges: mark {e:#}", self.herd));
+        }
+        let text = match unsent {
             0 => return Ok(Some(vec![])),
             n if total >= github::MERGED_LIMIT => format!("{n} or more merges while unwatched"),
             1 => "1 merge while unwatched".to_string(),
@@ -171,15 +190,6 @@ impl MergeAlerts {
         };
         let at = format!("unwatched {}", seconds(now));
         Ok(Some(vec![self.alert(text, at)]))
-    }
-
-    /// Those of `prs` not yet sent.
-    fn unsent(&self, prs: Vec<Pr>) -> Result<Vec<Pr>> {
-        let sent = notify::notified(&self.mailboxes, &self.lead, Kind::MergeAlert)?;
-        Ok(prs
-            .into_iter()
-            .filter(|pr| !sent.contains(&pr.url))
-            .collect())
     }
 
     fn alert(&self, text: String, at: String) -> Waiting {
@@ -292,5 +302,125 @@ mod rfc3339 {
             struct Wrap(#[serde(with = "super")] SystemTime);
             Ok(Option::<Wrap>::deserialize(d)?.map(|Wrap(at)| at))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    use super::*;
+    use crate::github::Pr;
+    use crate::github::fake::FakeMerges;
+
+    const CREATED: &str = "2026-11-01T08:00:00Z";
+    const FIRST: &str = "2026-11-01T09:00:00Z";
+
+    /// A herd `cards` whose lead's merges are alerted, with its mailboxes.
+    struct World {
+        dir: tempfile::TempDir,
+        paths: Paths,
+    }
+
+    impl World {
+        fn new() -> World {
+            let dir = tempfile::tempdir().unwrap();
+            let herds = dir.path().join("herds");
+            fs::create_dir(&herds).unwrap();
+            let herd = "repo = \"/repo\"\n[lead]\nprompt = \"go\"\n";
+            fs::write(herds.join("cards.toml"), herd).unwrap();
+            let paths = Paths {
+                herds,
+                home: PathBuf::from("/home/me"),
+                feed_lock: dir.path().join("feed.lock"),
+                paused: dir.path().join("paused"),
+            };
+            World { dir, paths }
+        }
+
+        fn mailboxes(&self) -> PathBuf {
+            self.dir.path().join("reports")
+        }
+
+        fn watch(&self) -> MergeAlerts {
+            MergeAlerts::new("cards", "lead-cards", CREATED, &self.mailboxes())
+        }
+
+        /// What one watch's lookup at `at` sends and warns.
+        fn poll(&self, merges: &dyn Merges, at: &str) -> (Vec<String>, Vec<String>) {
+            let mut warned = vec![];
+            let sent =
+                self.watch()
+                    .poll(&self.paths, merges, parse(at).unwrap(), false, &mut |w| {
+                        warned.push(w.to_string())
+                    });
+            (sent.into_iter().map(|w| w.text).collect(), warned)
+        }
+    }
+
+    fn gh(merged: Vec<(&'static str, u64)>) -> FakeMerges {
+        FakeMerges::new(Path::new("/repo"), merged)
+    }
+
+    /// Holds each merge lookup until every watch has reached its own.
+    struct Together(FakeMerges, Arc<Barrier>);
+
+    impl Merges for Together {
+        fn default_branch(&self, repo: &Path) -> Result<String> {
+            self.0.default_branch(repo)
+        }
+
+        fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Pr>> {
+            let prs = self.0.merged_since(repo, branch, since);
+            self.1.wait();
+            prs
+        }
+    }
+
+    /// Enough tries that counting from a read taken before the marks fails:
+    /// each try hit that order about 1 time in 60.
+    const RACES: usize = 400;
+
+    #[test]
+    fn two_watches_looking_up_at_once_send_one_stale_summary_between_them() {
+        for _ in 0..RACES {
+            let world = World::new();
+            world.poll(&gh(vec![]), FIRST);
+            let barrier = Arc::new(Barrier::new(2));
+
+            let sent: Vec<String> = thread::scope(|s| {
+                let watches = ["2026-11-01T12:00:00Z", "2026-11-01T12:00:01Z"].map(|at| {
+                    let (world, barrier) = (&world, barrier.clone());
+                    s.spawn(move || {
+                        let gh = Together(gh(vec![("2026-11-01T10:00:00Z", 7)]), barrier);
+                        world.poll(&gh, at).0
+                    })
+                });
+                watches
+                    .into_iter()
+                    .flat_map(|w| w.join().unwrap())
+                    .collect()
+            });
+
+            assert_eq!(sent, ["1 merge while unwatched"]);
+        }
+    }
+
+    #[test]
+    fn a_stale_summary_whose_merge_cannot_be_marked_still_counts_it_and_warns() {
+        let world = World::new();
+        world.poll(&gh(vec![]), FIRST);
+        fs::create_dir(world.mailboxes().join("lead-cards.notified")).unwrap();
+
+        let (sent, warned) = world.poll(
+            &gh(vec![("2026-11-01T10:00:00Z", 7)]),
+            "2026-11-01T12:00:00Z",
+        );
+
+        assert_eq!(sent, ["1 merge while unwatched"]);
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(warned[0].starts_with("cards's merges: mark "), "{warned:?}");
+        assert!(warned[0].contains("lead-cards.notified"), "{warned:?}");
     }
 }

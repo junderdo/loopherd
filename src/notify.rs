@@ -2,7 +2,7 @@
 //! them: a `question` report or a `blocked` member, or that a lead's repo saw
 //! a merge only the human should make, per `config.toml`'s `[notify]` table.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
@@ -419,22 +419,6 @@ pub fn forget_marks(mailboxes: &Path, member: &str) -> Vec<String> {
             _ => None,
         })
         .collect()
-}
-
-/// The `at` of each of `member`'s `kind` events marked notified.
-pub fn notified(mailboxes: &Path, member: &str, kind: Kind) -> Result<HashSet<String>> {
-    let path = mailboxes.join(format!("{member}.notified"));
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(HashSet::new()),
-        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
-    };
-    let prefix = format!("{} ", kind.as_str());
-    Ok(text
-        .lines()
-        .filter_map(|line| line.strip_prefix(&prefix))
-        .map(String::from)
-        .collect())
 }
 
 /// Marks `member`'s `kind` event at `at` notified unless a watch already did,
