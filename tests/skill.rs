@@ -238,11 +238,8 @@ fn only_the_humans_shepherd_names_its_herdr_agent_at_session_start() {
     ] {
         assert!(naming.contains(rule), "{naming}");
     }
-    assert_eq!(
-        printed.matches("herdr agent rename").count(),
-        1,
-        "{printed}"
-    );
+    let flat = printed.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(flat.matches("herdr agent rename").count(), 1, "{flat}");
 }
 
 #[test]
@@ -314,4 +311,25 @@ fn the_shepherd_tells_the_human_to_clear_and_send_any_message_with_the_paste_lin
         own.contains("given that resume (naming the `.prev.md` path) or the pasted line"),
         "{own}"
     );
+}
+
+#[test]
+fn with_self_restart_on_the_shepherd_arms_its_own_restart_and_warns_the_human() {
+    let home = tempfile::tempdir().unwrap();
+    let printed = String::from_utf8(skill(home.path())).unwrap();
+    let own = flat_section(
+        &printed,
+        "\n### Your own handoff\n",
+        "\n### Notifying the human\n",
+    );
+    for part in [
+        "With `[shepherd] self_restart = true`",
+        "first run `loopherd restart --self` in this turn",
+        "you restart yourself in this pane in 5 minutes, and any prompt here stops that",
+        "When it refuses, give the human its reason",
+        "`self_restart` notification",
+        "ask whether to re-arm",
+    ] {
+        assert!(own.contains(part), "{part}: {own}");
+    }
 }

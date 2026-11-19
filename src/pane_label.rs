@@ -26,15 +26,20 @@ pub fn set(herdr: &dyn Herdr, dir: &Path, pane: &str, waiting: &Waiting) -> Resu
             notify::summary(&waiting.text)
         ),
         Kind::Blocked => format!("{} is blocked", waiting.member),
-        // Sent only by a lead's watch for itself, which labels no pane.
-        Kind::MergeAlert => return Ok(()),
+        // A lead's watch sends these for itself, and the shepherd's self-restart labels its own pane.
+        Kind::MergeAlert | Kind::SelfRestart => return Ok(()),
     };
+    label_until_prompted(herdr, dir, pane, &label)
+}
+
+/// Labels `pane` with `label` until the human next prompts there.
+pub fn label_until_prompted(herdr: &dyn Herdr, dir: &Path, pane: &str, label: &str) -> Result<()> {
     let mark = mark(dir, pane);
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let _lock = lock(dir, pane)?;
     // Marked first: a mark with no label costs one needless clear; a label with no mark stays.
     fs::write(&mark, "").with_context(|| format!("write {}", mark.display()))?;
-    herdr.label_pane(pane, Some(&label))
+    herdr.label_pane(pane, Some(label))
 }
 
 /// Labels `pane` with `question` when `reporter` is the lead whose pane it is.
@@ -76,7 +81,8 @@ pub fn prompted(herdr: &dyn Herdr, dir: &Path, pane: &str, input: &[u8]) -> Resu
     clear(herdr, dir, pane)
 }
 
-fn is_task_notification(prompt: &str) -> bool {
+/// A prompt Claude made from a finished background task, not one the human typed.
+pub fn is_task_notification(prompt: &str) -> bool {
     let prompt = prompt.trim();
     prompt.starts_with("<task-notification>") && prompt.ends_with("</task-notification>")
 }

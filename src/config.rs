@@ -32,6 +32,8 @@ pub struct ConfigFile {
 #[serde(deny_unknown_fields)]
 pub struct ShepherdConfig {
     pub context_limit: Option<u64>,
+    /// The shepherd restarts itself after its handoff; off unless set.
+    pub self_restart: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -55,6 +57,14 @@ pub fn read(config: &Path) -> Result<ConfigFile> {
 /// The `[lead_defaults]` table, `None` when `config` has none.
 pub fn lead_defaults(config: &Path) -> Result<Option<SwitchValues>> {
     Ok(read(config)?.lead_defaults)
+}
+
+/// Whether the shepherd restarts itself after its handoff; off unless set.
+pub fn self_restart(config: &Path) -> Result<bool> {
+    Ok(read(config)?
+        .shepherd
+        .and_then(|s| s.self_restart)
+        .unwrap_or(false))
 }
 
 /// Whether the herdr plugin's startup hook runs revive; off unless set.
@@ -98,10 +108,11 @@ pub fn set_lead_defaults(config: &Path, on: &str) -> Result<()> {
 }
 
 /// The keys `config get`, `set` and `unset` take.
-pub const KEYS: [&str; 5] = [
+pub const KEYS: [&str; 6] = [
     "context_window",
     "default_context_limit",
     "shepherd.context_limit",
+    "shepherd.self_restart",
     "lead_defaults.review_rounds",
     "view.theme",
 ];
@@ -111,6 +122,12 @@ pub fn get(config: &Path, key: &str) -> Result<Option<String>> {
     let file = read(config)?;
     let number = match known(key)? {
         "view.theme" => return Ok(file.view.and_then(|v| v.theme)),
+        "shepherd.self_restart" => {
+            return Ok(file
+                .shepherd
+                .and_then(|s| s.self_restart)
+                .map(|on| on.to_string()));
+        }
         "context_window" => file.context_window,
         "default_context_limit" => file.default_context_limit,
         "lead_defaults.review_rounds" => file
@@ -135,6 +152,7 @@ pub fn set(config: &Path, key: &str, value: &str) -> Result<()> {
                 .map_err(anyhow::Error::msg)?
                 .name(),
         ),
+        "shepherd.self_restart" => Value::from(switch(key, value)?),
         _ => Value::from(whole_number(key, value)?),
     };
     edit(config, |doc| {
@@ -156,6 +174,14 @@ pub fn set(config: &Path, key: &str, value: &str) -> Result<()> {
         replace_value(table, name, value);
         Ok(())
     })
+}
+
+fn switch(key: &str, value: &str) -> Result<bool> {
+    match value.trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => bail!("{key} must be true or false, got {value:?}"),
+    }
 }
 
 fn whole_number(key: &str, value: &str) -> Result<i64> {
@@ -708,6 +734,40 @@ mod key_tests {
             assert_eq!(get(&path, key).unwrap(), None, "{key}");
             assert!(!unset(&path, key).unwrap(), "{key}");
         }
+    }
+
+    #[test]
+    fn self_restart_round_trips_through_set_get_and_unset_and_is_off_unless_set() {
+        let (_dir, path) = config_with("[shepherd]\ncontext_limit = 300000\n");
+        assert!(!self_restart(&path).unwrap());
+        assert_eq!(get(&path, "shepherd.self_restart").unwrap(), None);
+
+        set(&path, "shepherd.self_restart", "true").unwrap();
+        assert!(self_restart(&path).unwrap());
+        assert_eq!(
+            get(&path, "shepherd.self_restart").unwrap().as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[shepherd]\ncontext_limit = 300000\nself_restart = true\n"
+        );
+
+        assert!(unset(&path, "shepherd.self_restart").unwrap());
+        assert_eq!(get(&path, "shepherd.self_restart").unwrap(), None);
+        assert!(!self_restart(&path).unwrap());
+    }
+
+    #[test]
+    fn self_restart_takes_only_true_or_false() {
+        let (_dir, path) = config_with("");
+        let e = set(&path, "shepherd.self_restart", "yes").unwrap_err();
+        assert_eq!(
+            format!("{e:#}"),
+            "shepherd.self_restart must be true or false, got \"yes\""
+        );
+        let (_dir, path) = config_with("[shepherd]\nself_restart = 1\n");
+        assert!(read(&path).is_err());
     }
 
     #[test]

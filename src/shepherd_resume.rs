@@ -14,6 +14,8 @@ use serde_json::Value;
 
 use crate::context;
 use crate::ledger::Process;
+use crate::lock::Lock;
+use crate::report::Stop;
 
 /// Where the shepherd's Claude runs. A `/clear` keeps the process.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +39,54 @@ struct Record {
     current: Option<String>,
     at: String,
     used: bool,
+    #[serde(flatten)]
+    restart: Restart,
+}
+
+/// What the shepherd's self-restart keeps in the record. Times are RFC 3339.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Restart {
+    /// The shepherd's last stop at the recorded place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<StopAt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_restart: Option<Attempt>,
+    /// When a self-restart last sent `/clear`; carried into later records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_self_restart: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StopAt {
+    pub at: String,
+    #[serde(flatten)]
+    pub stop: Stop,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Attempt {
+    pub armed: String,
+    pub state: AttemptState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptState {
+    Pending,
+    Cancelled,
+    Restarting,
+    Restarted,
+    GaveUp,
+}
+
+/// The record at a place, as [`update`] hands it over.
+pub struct Recorded {
+    pub used: bool,
+    /// `handoffs/shepherd.md` was written after the record, so a `/clear` resumes from it.
+    pub handoff_written: bool,
+    pub restart: Restart,
 }
 
 fn record_path(state: &Path) -> PathBuf {
@@ -50,7 +100,8 @@ fn handoff_path(state: &Path) -> PathBuf {
 /// Replaces any earlier record with an unused one for `session` at `place`,
 /// whose pane runs `shell`. An unused record of the same session and place
 /// keeps its time, so a repeated handoff line can't postdate a handoff
-/// already written.
+/// already written. The last self-restart's time carries over from the
+/// record replaced.
 pub fn record(
     state: &Path,
     place: &Place,
@@ -58,14 +109,20 @@ pub fn record(
     session: &str,
     at: SystemTime,
 ) -> Result<()> {
-    let earlier =
-        last_record(state).filter(|r| !r.used && r.session == session && r.place == *place);
+    let _lock = lock(state)?;
+    let earlier = last_record(state);
     let record = match earlier {
-        Some(earlier) => Record {
-            shell: earlier.shell.or(shell),
-            ..earlier
-        },
-        None => Record {
+        Some(earlier) if !earlier.used && earlier.session == session && earlier.place == *place => {
+            Record {
+                shell: earlier.shell.or(shell),
+                ..earlier
+            }
+        }
+        earlier => Record {
+            restart: Restart {
+                last_self_restart: earlier.and_then(|e| e.restart.last_self_restart),
+                ..Restart::default()
+            },
             place: place.clone(),
             shell,
             session: session.into(),
@@ -75,6 +132,38 @@ pub fn record(
         },
     };
     write(state, &record)
+}
+
+/// Holds `shepherd.json` for one read and rewrite: hooks and the self-restart waiter share it.
+fn lock(state: &Path) -> Result<Lock> {
+    let path = state.join("shepherd.json.lock");
+    fs::create_dir_all(state).with_context(|| format!("create {}", state.display()))?;
+    let file = fs::File::create(&path).with_context(|| format!("open {}", path.display()))?;
+    Lock::wait(file).with_context(|| format!("lock {}", path.display()))
+}
+
+/// Runs `change` on the record at `place`, used or not, under its lock, and
+/// saves what it changed; `None` when there's no record for `place`.
+pub fn update<T>(
+    state: &Path,
+    place: &Place,
+    change: impl FnOnce(&mut Recorded) -> T,
+) -> Result<Option<T>> {
+    let _lock = lock(state)?;
+    let Some(mut record) = read_any(state, place)? else {
+        return Ok(None);
+    };
+    let mut recorded = Recorded {
+        used: record.used,
+        handoff_written: handoff_written_after(state, &record.at)?.is_some(),
+        restart: record.restart.clone(),
+    };
+    let out = change(&mut recorded);
+    if recorded.restart != record.restart {
+        record.restart = recorded.restart;
+        write(state, &record)?;
+    }
+    Ok(Some(out))
 }
 
 fn write(state: &Path, record: &Record) -> Result<()> {
@@ -104,10 +193,15 @@ fn last_record(state: &Path) -> Option<Record> {
     serde_json::from_str(&text).ok()
 }
 
-/// The unused record for `place`. A record that isn't JSON, or names another
-/// pane or socket, is none; one for this pane and socket that won't parse is
-/// an error.
+/// The unused record for `place`; see [`read_any`].
 fn read(state: &Path, place: &Place) -> Result<Option<Record>> {
+    Ok(read_any(state, place)?.filter(|r| !r.used))
+}
+
+/// The record for `place`, used or not. A record that isn't JSON, or names
+/// another pane or socket, is none; one for this pane and socket that won't
+/// parse is an error.
+fn read_any(state: &Path, place: &Place) -> Result<Option<Record>> {
     let path = record_path(state);
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
@@ -123,7 +217,7 @@ fn read(state: &Path, place: &Place) -> Result<Option<Record>> {
     }
     let record: Record =
         serde_json::from_value(value).with_context(|| format!("parse {}", path.display()))?;
-    Ok((!record.used && record.place == *place).then_some(record))
+    Ok((record.place == *place).then_some(record))
 }
 
 /// Called on every session start at `place`. Returns the context resuming the
@@ -141,6 +235,7 @@ pub fn session_started(
     let Some((source, started)) = parse(input) else {
         return Ok(None);
     };
+    let _lock = lock(state)?;
     let Some(mut record) = read(state, place)? else {
         return Ok(None);
     };
@@ -160,7 +255,15 @@ pub fn session_started(
     record.used = true;
     record.current = Some(started);
     write(state, &record)?;
-    resume_from_moved_handoff(state, written).map(Some)
+    let resume = resume_from_moved_handoff(state, written)?;
+    let restarting = record.restart.self_restart.as_ref().map(|a| a.state);
+    Ok(Some(match restarting {
+        Some(AttemptState::Restarting) => format!(
+            "{resume} You restarted yourself after your handoff ([shepherd] self_restart); \
+             say so in your first message."
+        ),
+        _ => resume,
+    }))
 }
 
 /// A shepherd started afresh resuming from the handoff, which
@@ -172,6 +275,7 @@ pub struct NewResume {
 impl NewResume {
     /// Moves the handoff back from `shepherd.prev.md` and unmarks the record.
     pub fn undo(self, state: &Path) -> Result<()> {
+        let _lock = lock(state)?;
         let handoff = handoff_path(state);
         let read = handoff.with_extension("prev.md");
         fs::rename(&read, &handoff)
@@ -192,6 +296,7 @@ impl NewResume {
 /// record used and moves the handoff as a resume does. A moved session means
 /// the handoff was already acted on.
 pub fn new_shepherd_resume(state: &Path, socket: Option<&Path>) -> Result<Option<NewResume>> {
+    let _lock = lock(state)?;
     let Some(mut record) = last_record(state) else {
         return Ok(None);
     };

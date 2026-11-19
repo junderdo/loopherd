@@ -380,6 +380,21 @@ and, once per session past your limit, adds `shepherd handoff <n>k over
    session after your handoff is written moves it to `handoffs/shepherd.prev.md` and adds the
    resume to the new session's context.
 
+   With `[shepherd] self_restart = true` in `config.toml`
+   (`loopherd config get shepherd.self_restart`), first run `loopherd
+   restart --self` in this turn. When it arms, tell the human in your last
+   message, above the lines above: you restart yourself in this pane in 5
+   minutes, and any prompt here stops that. Then end your turn. A detached
+   waiter sends `/clear` and `go` once your turn has ended, herdr shows the
+   pane idle, its input box is empty and the human sent nothing here for 5
+   minutes. When it refuses, give the human its reason with the lines
+   above. A self-restart that gives up labels your pane and sends a
+   `self_restart` notification; the handoff stays for the manual resume. A
+   prompt from the human while it waits cancels it: once you've answered,
+   tell them to `/clear` and send `go`, or ask whether to re-arm, and on a
+   yes run `restart --self` again. After a self-restart the resume says
+   so; say it in your first message.
+
 In a fresh session, given that resume (naming the `.prev.md` path) or the
 pasted line, run `loopherd --skill`, read the handoff at the path it names
 (or `shepherd.prev.md` beside it, if a resume already moved it there),
@@ -399,7 +414,7 @@ the lead's, and a mark per event keeps it to one send:
 ```toml
 [notify]
 enabled = true                    # default false: nothing is sent
-kinds = ["question", "blocked", "merge_alert"]   # the default
+kinds = ["question", "blocked", "merge_alert", "self_restart"]   # the default
 herdr = true                      # herdr's toast on the watched socket; default true
 command = "notify-send {herd}/{member} {text}"
 pane_label = true                 # label the relaying pane in herdr; default false

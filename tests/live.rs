@@ -1,4 +1,4 @@
-//! End-to-end runs of `loopherd spawn`, `add`, `revive`, `retire --close`, `feed`, the Stop hook, `watch` and the herd view's event subscriber against the real `loopherd-dev` herdr
+//! End-to-end runs of `loopherd spawn`, `add`, `revive`, `retire --close`, `feed`, the Stop hook, `watch`, the shepherd's self-restart and the herd view's event subscriber against the real `loopherd-dev` herdr
 //! session, `herdr plugin link` of `herdr-plugin/` into a throwaway herdr home, and its view popup on a throwaway herdr server. Skipped unless `LOOPHERD_LIVE=1`; start the session first with
 //! `scripts/herdr-dev --start`, then run through it:
 //! `LOOPHERD_LIVE=1 scripts/herdr-dev cargo test --test live`.
@@ -1956,4 +1956,232 @@ fn capital_s_in_a_view_pane_starts_the_shepherd_below_it_then_focuses_it() {
         2,
         "{panes}"
     );
+}
+
+/// `pane`'s top-level Claude: the shell's child running `claude`.
+fn claude_in(pane: &str) -> (u32, u64) {
+    let info = herdr_ok(&["pane", "process-info", "--pane", pane]);
+    let shell = info["result"]["process_info"]["shell_pid"]
+        .as_u64()
+        .unwrap();
+    let children = std::fs::read_to_string(format!("/proc/{shell}/task/{shell}/children")).unwrap();
+    let pid: u32 = children
+        .split_whitespace()
+        .map(|p| p.parse().unwrap())
+        .find(|pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/comm")).is_ok_and(|c| c.trim() == "claude")
+        })
+        .expect("no claude under the pane's shell");
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let start = stat
+        .rsplit(") ")
+        .next()
+        .unwrap()
+        .split(' ')
+        .nth(19)
+        .unwrap();
+    (pid, start.parse().unwrap())
+}
+
+fn shepherd_json(state: &Path) -> Value {
+    let text = std::fs::read_to_string(state.join("loopherd/shepherd.json")).unwrap();
+    serde_json::from_str(&text).unwrap()
+}
+
+/// Rewrites the shepherd's record under the lock its hooks and waiter take.
+fn edit_shepherd_json(state: &Path, change: impl FnOnce(&mut Value)) {
+    use std::os::fd::AsRawFd;
+    let lock = std::fs::File::create(state.join("loopherd/shepherd.json.lock")).unwrap();
+    // SAFETY: flock on a descriptor `lock` keeps open; closing it unlocks.
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let mut record = shepherd_json(state);
+    change(&mut record);
+    std::fs::write(state.join("loopherd/shepherd.json"), record.to_string()).unwrap();
+}
+
+fn wait_until(what: &str, timeout_secs: u64, mut done: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    while !done() {
+        assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
+#[test]
+fn a_shepherd_with_self_restart_on_clears_and_resumes_itself_after_its_handoff() {
+    if !live_enabled() {
+        return;
+    }
+    let label = assert_dev_session();
+    let workspaces = herdr_ok(&["workspace", "list"]);
+    let workspace = workspaces["result"]["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["label"] == label.as_str())
+        .unwrap()["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    let config = root.path().join("config");
+    let claude = root.path().join("claude");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::create_dir_all(&claude).unwrap();
+    std::fs::write(
+        config.join("config.toml"),
+        "[shepherd]\nself_restart = true\n",
+    )
+    .unwrap();
+    let loopherd = env!("CARGO_BIN_EXE_loopherd");
+    let settings = claude.join("settings.json");
+    let out = dev(loopherd)
+        .args(["install-hook", "--settings", settings.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    // The arm reads its UserPromptSubmit hook from these settings, not the human's.
+    let arm = root.path().join("arm.sh");
+    std::fs::write(
+        &arm,
+        format!(
+            "#!/bin/sh\nCLAUDE_CONFIG_DIR={} exec {loopherd} restart --self\n",
+            claude.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&arm, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+    let name = format!("lh-live-shepherd-{}", std::process::id());
+    let tab = herdr_ok(&[
+        "tab",
+        "create",
+        "--workspace",
+        &workspace,
+        "--cwd",
+        env!("CARGO_MANIFEST_DIR"),
+        "--label",
+        &name,
+        "--no-focus",
+        "--env",
+        &format!("XDG_STATE_HOME={}", state.display()),
+        "--env",
+        &format!("LOOPHERD_CONFIG_DIR={}", config.display()),
+    ]);
+    let _cleanup = CloseTabId(tab["result"]["tab"]["tab_id"].as_str().unwrap().into());
+    let pane = tab["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{tab}"))
+        .to_string();
+    let allowed = format!("Bash({})", arm.display());
+    let mut started = None;
+    for _ in 0..20 {
+        let out = dev("herdr")
+            .args([
+                "agent", "start", &name, "--kind", "claude", "--pane", &pane, "--",
+            ])
+            .args(MODEL)
+            // Auto mode offers a dialog of its own after a turn, which herdr shows as blocked.
+            .args(["--permission-mode", "manual"])
+            .args(["--setting-sources", "project", "--settings"])
+            .arg(&settings)
+            .args(["--allowedTools", &allowed])
+            .output()
+            .unwrap();
+        if out.status.success() {
+            started = Some(out);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    assert!(started.is_some(), "claude never started in {pane}");
+    let session = herdr_ok(&["agent", "get", &name])["result"]["agent"]["agent_session"]["value"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
+    let (pid, start) = claude_in(&pane);
+
+    std::fs::create_dir_all(state.join("loopherd/handoffs")).unwrap();
+    let record = serde_json::json!({
+        "pane": pane, "socket": dev_socket(), "process": {"pid": pid, "start": start},
+        "session": session, "at": "2026-01-01T00:00:00Z", "used": false,
+    });
+    std::fs::write(state.join("loopherd/shepherd.json"), record.to_string()).unwrap();
+    std::fs::write(
+        state.join("loopherd/handoffs/shepherd.md"),
+        "## Next steps\nReply with just the word resumed.\n",
+    )
+    .unwrap();
+
+    herdr_ok(&[
+        "agent",
+        "prompt",
+        &name,
+        &format!(
+            "Run this exact shell command with the Bash tool: {} — then reply with just the word armed.",
+            arm.display()
+        ),
+    ]);
+    wait_until("the arm and the turn's stop", 120, || {
+        let record = shepherd_json(&state);
+        let armed = record["self_restart"]["armed"].as_str().map(str::to_string);
+        let stopped = record["stop"]["at"].as_str().map(str::to_string);
+        matches!((armed, stopped), (Some(a), Some(s)) if s >= a)
+    });
+    // Past the human's 5 minutes, which aren't configurable.
+    edit_shepherd_json(&state, |record| {
+        let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(6 * 60);
+        record["self_restart"]["armed"] =
+            humantime::format_rfc3339_nanos(earlier).to_string().into();
+        record["stop"]["at"] = humantime::format_rfc3339_nanos(std::time::SystemTime::now())
+            .to_string()
+            .into();
+    });
+
+    let screen = || {
+        let out = dev("herdr")
+            .args([
+                "pane", "read", &pane, "--source", "visible", "--format", "text",
+            ])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        let record = shepherd_json(&state);
+        let attempt = &record["self_restart"]["state"];
+        assert_ne!(attempt, "gave_up", "{record}");
+        if attempt == "restarted" {
+            break;
+        }
+        let agent = herdr_ok(&["agent", "get", &name]);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no self-restart: {record}\n{}\n{}",
+            agent["result"]["agent"],
+            screen()
+        );
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    let record = shepherd_json(&state);
+    assert_eq!(record["used"], true, "{record}");
+    assert!(record["self_restart"].get("why").is_none(), "{record}");
+    assert!(record["last_self_restart"].is_string(), "{record}");
+    assert!(state.join("loopherd/handoffs/shepherd.prev.md").is_file());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    // Sent, not left in the input box: `❯ go` in the transcript and a bare `❯` below it.
+    let sent_go = |screen: &str| {
+        let prompts: Vec<&str> = screen
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with('❯'))
+            .collect();
+        prompts.contains(&"❯ go") && prompts.last() == Some(&"❯")
+    };
+    while !sent_go(&screen()) {
+        assert!(std::time::Instant::now() < deadline, "no go:\n{}", screen());
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
 }
