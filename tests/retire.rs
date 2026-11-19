@@ -340,6 +340,18 @@ fn force_with_close_retires_a_working_member_and_looks_for_its_tab() {
 }
 
 #[test]
+fn retire_with_close_records_the_outcome_retired() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+
+    let out = retire_while_herdr_shows_it("working", state.path(), &["--force", "--close"]);
+
+    assert!(out.status.success(), "{out:?}");
+    let ledger: serde_json::Value = serde_json::from_str(&ledger_text(state.path())).unwrap();
+    assert_eq!(ledger["lh-1"]["outcome"], "retired");
+}
+
+#[test]
 fn an_idle_member_that_reported_done_since_its_start_retires_without_force() {
     let state = tempfile::tempdir().unwrap();
     write_ledger(state.path());

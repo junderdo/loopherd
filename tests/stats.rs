@@ -1352,28 +1352,52 @@ fn a_corrupt_huge_count_saturates_instead_of_overflowing() {
     );
 }
 
-/// One run per outcome, plus one from a ledger written before outcomes: the
-/// merged lh-1 and lh-2 took 2h and 4h, each with one `done` an hour in.
+/// One run per outcome, plus one from a ledger written before outcomes. The
+/// merged lh-1 and lh-2 took 2h and 4h with one `done` an hour in, and read
+/// 10 and 30 tokens and wrote 100 and 300. Every other run has two `done`s,
+/// the first five hours in, and 9000 tokens each way.
 fn a_run_of_each_outcome(state: &Path) {
-    write_ledger(
-        state,
-        &[
-            Member::new("lh-1", "2026-11-01T00:00:00Z")
-                .ended("2026-11-01T02:00:00Z", Some("merged")),
-            Member::new("lh-2", "2026-11-02T00:00:00Z")
-                .ended("2026-11-02T04:00:00Z", Some("merged")),
-            Member::new("lh-3", "2026-11-03T00:00:00Z")
-                .ended("2026-11-03T20:00:00Z", Some("closed")),
-            Member::new("lh-4", "2026-11-04T00:00:00Z")
-                .ended("2026-11-04T21:00:00Z", Some("released")),
-            Member::new("lh-5", "2026-11-05T00:00:00Z")
-                .ended("2026-11-05T22:00:00Z", Some("retired")),
-            Member::new("lh-6", "2026-11-06T00:00:00Z").ended("2026-11-06T23:00:00Z", None),
-        ],
-    );
-    for day in 1..=6 {
-        let done = format!("2026-11-0{day}T01:00:00Z");
-        write_mailbox(state, &format!("lh-{day}"), &[(&done, "done")]);
+    let runs = [
+        ("lh-1", "2026-11-01", "02:00:00Z", Some("merged")),
+        ("lh-2", "2026-11-02", "04:00:00Z", Some("merged")),
+        ("lh-3", "2026-11-03", "20:00:00Z", Some("closed")),
+        ("lh-4", "2026-11-04", "21:00:00Z", Some("released")),
+        ("lh-5", "2026-11-05", "22:00:00Z", Some("retired")),
+        ("lh-6", "2026-11-06", "23:00:00Z", None),
+    ];
+    let times: Vec<(String, String)> = runs
+        .iter()
+        .map(|(_, day, end, _)| (format!("{day}T00:00:00Z"), format!("{day}T{end}")))
+        .collect();
+    let members: Vec<Member> = runs
+        .iter()
+        .zip(&times)
+        .map(|((name, _, _, outcome), (start, end))| Member::new(name, start).ended(end, *outcome))
+        .collect();
+    write_ledger(state, &members);
+    for ((name, day, _, outcome), (_, end)) in runs.iter().zip(&times) {
+        let merged = *outcome == Some("merged");
+        let dones: &[&str] = if merged { &["01"] } else { &["05", "06"] };
+        let (read, written) = match *name {
+            "lh-1" => (10, 100),
+            "lh-2" => (30, 300),
+            _ => (9000, 9000),
+        };
+        let mut entries: Vec<serde_json::Value> = dones
+            .iter()
+            .map(|hour| {
+                serde_json::json!({
+                    "at": format!("{day}T{hour}:00:00Z"), "kind": "done", "text": "PR #1",
+                })
+            })
+            .collect();
+        entries.push(serde_json::json!({
+            "at": end, "kind": "usage",
+            "models": {"opus": {
+                "input": read, "cache_write": 0, "cache_read": 0, "output": written,
+            }},
+        }));
+        append_entries(state, name, &entries);
     }
 }
 
@@ -1425,7 +1449,7 @@ fn medians_and_maxima_cover_only_merged_runs_and_the_summary_counts_the_rest_apa
         out.contains(
             "summary: 6 members: 2 merged, 1 closed, 1 released, 1 retired, 1 unrecorded; \
              first done median 1h00m, max 1h00m; rounds median 1; \
-             merge wait median 2h00m, max 3h00m; total median 3h00m, max 4h00m; in median -; out median -"
+             merge wait median 2h00m, max 3h00m; total median 3h00m, max 4h00m; in median 20; out median 200"
         ),
         "{out}"
     );
@@ -1440,7 +1464,7 @@ fn medians_and_maxima_cover_only_merged_runs_and_the_summary_counts_the_rest_apa
             "rounds_median": 1.0,
             "merge_wait": {"median_secs": 7200, "max_secs": 10800},
             "total": {"median_secs": 10800, "max_secs": 14400},
-            "in_median": null, "out_median": null,
+            "in_median": 20, "out_median": 200,
         })
     );
 }

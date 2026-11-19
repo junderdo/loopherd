@@ -517,9 +517,9 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   is how the run ended (D92): `merged` when feed retired it with its
   template's `merged` check passing, `closed` when feed retired it without
   that (a template with no `merged` check always gives `closed`, so its
-  herd's medians stay `-`), `released` after `loopherd release`, `retired`
-  for a plain `loopherd retire`, and `-` for a run retired before outcomes
-  were recorded. The medians and maxima cover only `merged` runs; the
+  runs are left out of the medians), `released` after `loopherd release`,
+  `retired` for `loopherd retire`, with or without `--close`, and `-` for a
+  run retired before outcomes were recorded. The medians and maxima cover only `merged` runs; the
   summary counts the other outcomes apart. `--herd`,
   `--since <date or time>`, `--json` (the per-model split); it marks
   nothing read.

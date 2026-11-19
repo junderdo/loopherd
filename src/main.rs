@@ -257,8 +257,8 @@ enum Command {
     /// can't be found. The `outcome` column is how the run ended: `merged`
     /// (feed retired it with its template's `merged` check passing), `closed`
     /// (feed retired it without that), `released` (`loopherd release`),
-    /// `retired` (a plain `loopherd retire`), or `-` for a run retired before
-    /// outcomes were recorded. A summary per herd counts each outcome and
+    /// `retired` (`loopherd retire`, with or without `--close`), or `-` for a
+    /// run retired before outcomes were recorded. A summary per herd counts each outcome and
     /// gives medians and maxima over `merged` runs only, open
     /// members are listed apart, and a lead overhead line gives the lead's
     /// tokens since `--since`; the lead gets no row. Read-only, and marks no
