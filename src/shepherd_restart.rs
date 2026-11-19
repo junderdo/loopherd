@@ -181,8 +181,8 @@ use Gate::GiveUp;
 /// Polls every [`POLL`] until the shepherd's stop since arming reads
 /// finished with nothing in flight, herdr shows its pane idle or done, the
 /// human sent no prompt there for [`WARNING`] of polls it saw, and its
-/// input box is empty; then restarts it, unless the machine slept while it
-/// checked. Stops when the switch is turned
+/// input box is empty; then restarts it. A sleep of the machine while it
+/// checked starts the human's [`WARNING`] again. Stops when the switch is turned
 /// off. Gives up after [`TIMEOUT`], when its pane or Claude is gone, or on
 /// any failure: the reason goes in the record, to `notify`, and on the
 /// pane's label.
@@ -385,15 +385,18 @@ fn give_up(w: &Waiter, why: &str, notify: &mut dyn FnMut(&str)) -> Result<Waited
 }
 
 /// Ends a waiter that was refused the claim `restart --self` hands over.
-/// Gives up as [`give_up`] does, unless a waiter holds that claim: its
-/// pending restart is left alone, and only `notify` is told.
+/// Gives up as [`give_up`] does, also when the claim can't be read, unless
+/// a waiter holds that claim: its pending restart is left alone, and only
+/// `notify` is told.
 pub fn refused(w: &Waiter, why: &str, notify: &mut dyn FnMut(&str)) -> Result<()> {
-    if restart::take(w.state, context::SHEPHERD, "waiter")?.is_some() {
-        give_up(w, why, notify)?;
-    } else {
+    // Kept to the end, so a restart armed meanwhile isn't the one marked.
+    let claim = restart::take(w.state, context::SHEPHERD, "waiter");
+    if matches!(claim, Ok(None)) {
         notify(&format!(
             "a self-restart waiter was refused: {why}; the one already waiting carries on"
         ));
+    } else {
+        give_up(w, why, notify)?;
     }
     Ok(())
 }
@@ -1262,6 +1265,37 @@ mod tests {
         let w = World::new();
         w.arm();
         w.claims.borrow_mut().clear();
+
+        w.with_waiter(|waiter, notify| refused(waiter, "no claim", notify).unwrap());
+
+        assert_gave_up(&w, Waited::GaveUp("no claim".into()), "no claim");
+    }
+
+    #[test]
+    fn a_wait_refused_its_claim_holds_it_while_it_gives_up() {
+        let w = World::new();
+        w.arm();
+        w.claims.borrow_mut().clear();
+        let mut free_while_giving_up = None;
+
+        w.with_waiter(|waiter, _| {
+            let mut notify = |_: &str| {
+                let claim = restart::take(w.path(), context::SHEPHERD, "waiter").unwrap();
+                free_while_giving_up = Some(claim.is_some());
+            };
+            refused(waiter, "no claim", &mut notify).unwrap()
+        });
+
+        assert_eq!(free_while_giving_up, Some(false));
+    }
+
+    #[test]
+    fn a_wait_refused_its_claim_gives_up_when_the_claim_cant_be_read() {
+        let w = World::new();
+        w.arm();
+        w.claims.borrow_mut().clear();
+        fs::remove_dir_all(w.path().join("restarts")).unwrap();
+        fs::write(w.path().join("restarts"), "").unwrap();
 
         w.with_waiter(|waiter, notify| refused(waiter, "no claim", notify).unwrap());
 
