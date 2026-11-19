@@ -40,9 +40,12 @@ pub trait PullRequests {
 }
 
 pub trait Merges {
-    /// The pull requests merged into the default branch of `repo`'s GitHub
-    /// repo at or after `since`, an RFC 3339 time.
-    fn merged_since(&self, repo: &Path, since: &str) -> Result<Vec<Pr>>;
+    /// The default branch of `repo`'s GitHub repo.
+    fn default_branch(&self, repo: &Path) -> Result<String>;
+
+    /// The pull requests merged into `branch` of `repo`'s GitHub repo at or
+    /// after `since`, an RFC 3339 time, most recently updated first.
+    fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Pr>>;
 }
 
 /// Asks GitHub through the `gh` program.
@@ -103,11 +106,8 @@ impl PullRequests for GhCli {
 }
 
 impl Merges for GhCli {
-    fn merged_since(&self, repo: &Path, since: &str) -> Result<Vec<Pr>> {
-        let Some((host, name)) = github_repo(&origin_url(repo)?) else {
-            bail!("origin isn't on GitHub");
-        };
-        let full = format!("{host}/{name}");
+    fn default_branch(&self, repo: &Path) -> Result<String> {
+        let full = full_name(repo)?;
         let default = ".defaultBranchRef.name";
         let view = [
             "repo",
@@ -118,7 +118,11 @@ impl Merges for GhCli {
             "--jq",
             default,
         ];
-        let branch = self.answer(repo, &view)?;
+        Ok(self.answer(repo, &view)?.trim().to_string())
+    }
+
+    fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Pr>> {
+        let full = full_name(repo)?;
         let search = format!("merged:>={since} sort:updated-desc");
         let list = [
             "pr",
@@ -128,7 +132,7 @@ impl Merges for GhCli {
             "--state",
             "merged",
             "--base",
-            branch.trim(),
+            branch,
             "--search",
             &search,
             "--limit",
@@ -234,6 +238,14 @@ impl GhCli {
     }
 }
 
+/// `host/owner/repo` of `repo`'s origin, which must be on GitHub.
+fn full_name(repo: &Path) -> Result<String> {
+    match github_repo(&origin_url(repo)?) {
+        Some((host, name)) => Ok(format!("{host}/{name}")),
+        None => bail!("origin isn't on GitHub"),
+    }
+}
+
 fn no_gh() -> PrLookup {
     PrLookup::Unknown("no GitHub CLI (gh) on PATH".into())
 }
@@ -333,20 +345,44 @@ pub mod fake {
         }
     }
 
-    /// `repo`'s merged pull requests, each with its RFC 3339 merge time.
+    /// `repo`'s pull requests merged into `main`, each with its RFC 3339
+    /// merge time, counting the lookups asked of it.
     pub struct FakeMerges {
         pub repo: PathBuf,
-        pub merged: Vec<(&'static str, u64)>,
+        pub merged: std::cell::RefCell<Vec<(&'static str, u64)>>,
+        pub lookups: std::cell::Cell<u32>,
     }
 
-    impl Merges for FakeMerges {
-        fn merged_since(&self, repo: &Path, since: &str) -> Result<Vec<Pr>> {
+    impl FakeMerges {
+        pub fn new(repo: &Path, merged: Vec<(&'static str, u64)>) -> FakeMerges {
+            FakeMerges {
+                repo: repo.into(),
+                merged: merged.into(),
+                lookups: Default::default(),
+            }
+        }
+
+        fn known(&self, repo: &Path) -> Result<()> {
+            self.lookups.set(self.lookups.get() + 1);
             if repo != self.repo {
                 bail!("no repo {}", repo.display());
             }
+            Ok(())
+        }
+    }
+
+    impl Merges for FakeMerges {
+        fn default_branch(&self, repo: &Path) -> Result<String> {
+            self.known(repo)?;
+            Ok("main".into())
+        }
+
+        fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Pr>> {
+            self.known(repo)?;
+            assert_eq!(branch, "main");
             let since = humantime::parse_rfc3339(since)?;
             let mut prs = vec![];
-            for (at, number) in &self.merged {
+            for (at, number) in self.merged.borrow().iter() {
                 if humantime::parse_rfc3339(at)? >= since {
                     prs.push(Pr {
                         number: *number,
@@ -496,7 +532,8 @@ mod tests {
         let listed = r#"[{"number":7,"url":"https://github.com/o/r/pull/7"}]"#;
         let (dir, gh) = fake_gh_merges("git@github.com:o/r.git", listed);
 
-        let merged = gh.merged_since(dir.path(), "2026-11-01T00:00:00Z").unwrap();
+        let branch = gh.default_branch(dir.path()).unwrap();
+        let merged = (gh.merged_since(dir.path(), &branch, "2026-11-01T00:00:00Z")).unwrap();
 
         assert_eq!(
             merged,
@@ -517,9 +554,7 @@ mod tests {
     fn merges_off_github_are_an_error_without_running_gh() {
         let (dir, gh) = fake_gh_merges("/srv/origin.git", "[]");
 
-        let err = gh
-            .merged_since(dir.path(), "2026-11-01T00:00:00Z")
-            .unwrap_err();
+        let err = gh.default_branch(dir.path()).unwrap_err();
 
         assert_eq!(format!("{err:#}"), "origin isn't on GitHub");
         assert!(!dir.path().join("args").exists());

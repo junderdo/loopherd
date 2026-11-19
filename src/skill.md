@@ -412,14 +412,15 @@ a member already blocked when every watch started. A lead relaying a worker's
 question as its own sends a second notification.
 
 A lead's watch also sends `merge_alert`, with `{text}` the PR's number and
-URL, once per PR merged into its repo's default branch since the lead
-started (or was last revived), when its `[lead]` has `merge` off and
-`merge_guard = "hook"` (the default). The lead runs with the human's
-credentials, so a merge the human didn't make shows up. It asks gh every
-minute, only while `kinds` holds `merge_alert`; a failure warns on the
-watch's stderr. A watch re-armed later catches up on merges it missed;
-pushes straight to the branch, and merges after the lead's watch stops for
-good (a drained lead), aren't covered.
+URL, once per PR merged into its repo's default branch, when its `[lead]`
+has `merge` off and `merge_guard = "hook"` (the default). The lead runs
+with the human's credentials, so a merge the human didn't make shows up.
+The lead's first lookup only marks where its window starts, so no earlier
+merge is sent; later ones run at most once a minute across its watches,
+only while `kinds` holds `merge_alert`, and a re-armed watch catches up on
+merges it missed. A lookup that fails warns on the watch's stderr. Not
+covered: pushes straight to the branch, and merges after the lead's watch
+stops for good (a drained lead).
 
 `pane_label = true` (default false) also labels, in herdr's sidebar, the
 pane that must relay or answer: yours when your watch prints a `question`

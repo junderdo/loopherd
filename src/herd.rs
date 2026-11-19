@@ -2544,6 +2544,26 @@ args = ["--model", "opus"]
                              [template.t]\nparams = []\nprompt = \"go\"\n";
 
     #[test]
+    fn merge_guard_takes_only_hook_and_fails_the_herd_file_otherwise() {
+        let herd = |guard: &str| format!("{LEAD_HERD}[lead]\nprompt = \"go\"\n{guard}");
+        let config = Config::with(&[
+            ("unset", &herd("")),
+            ("hook", &herd("merge_guard = \"hook\"\n")),
+            ("credentials", &herd("merge_guard = \"credentials\"\n")),
+        ]);
+        let paths = config.paths();
+
+        for name in ["unset", "hook"] {
+            assert_eq!(
+                merge_alerts(&paths, name).unwrap(),
+                Some(PathBuf::from("/r"))
+            );
+        }
+        let err = format!("{:#}", merge_alerts(&paths, "credentials").unwrap_err());
+        assert!(err.contains("unknown variant `credentials`"), "{err}");
+    }
+
+    #[test]
     fn a_lead_table_parses_with_every_switch_off_by_default() {
         let herd = format!("{LEAD_HERD}[lead]\nprompt = \"lead {{herd}}\"\nmerge = true\n");
         let config = Config::with(&[("h", &herd)]);

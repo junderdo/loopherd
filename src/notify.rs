@@ -397,10 +397,10 @@ fn mark_id(path: &Path) -> Result<Option<(u64, SystemTime)>> {
     }
 }
 
-/// Removes `member`'s notify marks, for a member that will never wake a watch
+/// Removes `member`'s notify marks and a lead's merge-alert state, for a member that will never wake a watch
 /// again. Returns a warning naming each mark that couldn't be removed.
 pub fn forget_marks(mailboxes: &Path, member: &str) -> Vec<String> {
-    ["notified", "blocked", BLOCK_RECORDED]
+    ["notified", "blocked", BLOCK_RECORDED, "merges"]
         .iter()
         .map(|kind| mailboxes.join(format!("{member}.{kind}")))
         .filter_map(|path| match fs::remove_file(&path) {
