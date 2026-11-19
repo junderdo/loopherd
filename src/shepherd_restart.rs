@@ -181,7 +181,8 @@ use Gate::GiveUp;
 /// Polls every [`POLL`] until the shepherd's stop since arming reads
 /// finished with nothing in flight, herdr shows its pane idle or done, the
 /// human sent no prompt there for [`WARNING`] of polls it saw, and its
-/// input box is empty; then restarts it. Stops when the switch is turned
+/// input box is empty; then restarts it, unless the machine slept while it
+/// checked. Stops when the switch is turned
 /// off. Gives up after [`TIMEOUT`], when its pane or Claude is gone, or on
 /// any failure: the reason goes in the record, to `notify`, and on the
 /// pane's label.
@@ -191,11 +192,17 @@ pub fn wait(w: &Waiter, clock: &mut dyn Clock, notify: &mut dyn FnMut(&str)) -> 
     let mut polled = clock.now();
     loop {
         let now = clock.now();
-        if now.duration_since(polled).map_or(true, |gap| gap > GAP) {
+        if paused(polled, now) {
             quiet_from = now;
         }
         polled = now;
         let gate = check(w, now, quiet_from).unwrap_or_else(|e| GiveUp(format!("{e:#}")));
+        // The machine can sleep during the check's herdr calls, so a pass is
+        // judged again on the time it ended at.
+        let checked = clock.now();
+        if matches!(gate, Gate::Go) && paused(now, checked) {
+            continue;
+        }
         match gate {
             Gate::Stop => return Ok(Waited::Stopped),
             Gate::Cancel(why) => {
@@ -203,7 +210,7 @@ pub fn wait(w: &Waiter, clock: &mut dyn Clock, notify: &mut dyn FnMut(&str)) -> 
                 return Ok(Waited::Stopped);
             }
             Gate::GiveUp(why) => return give_up(w, &why, notify),
-            Gate::Go | Gate::Wait(_) if now >= deadline => {
+            Gate::Go | Gate::Wait(_) if checked >= deadline => {
                 let why = match gate {
                     Gate::Wait(why) => why,
                     _ => "its conditions held only after that".into(),
@@ -220,6 +227,11 @@ pub fn wait(w: &Waiter, clock: &mut dyn Clock, notify: &mut dyn FnMut(&str)) -> 
             Gate::Wait(_) => clock.sleep(POLL),
         }
     }
+}
+
+/// Whether more than [`GAP`] passed unseen between two reads of the clock.
+fn paused(from: SystemTime, to: SystemTime) -> bool {
+    to.duration_since(from).map_or(true, |gap| gap > GAP)
 }
 
 fn check(w: &Waiter, now: SystemTime, quiet_from: SystemTime) -> Result<Gate> {
@@ -363,13 +375,27 @@ fn restart_now(w: &Waiter, clock: &mut dyn Clock, notify: &mut dyn FnMut(&str)) 
 
 /// Records why the self-restart gave up, sends it to `notify` and puts it
 /// on the pane's label.
-pub fn give_up(w: &Waiter, why: &str, notify: &mut dyn FnMut(&str)) -> Result<Waited> {
+fn give_up(w: &Waiter, why: &str, notify: &mut dyn FnMut(&str)) -> Result<Waited> {
     let recorded = set_state(w, AttemptState::GaveUp, Some(why.to_string()));
     notify(&format!("self-restart gave up: {why}"));
     let label = format!("shepherd: self-restart gave up: {why}");
     let labelled = pane_label::label_until_prompted(w.herdr, w.mailboxes, &w.place.pane, &label);
     recorded.and(labelled)?;
     Ok(Waited::GaveUp(why.to_string()))
+}
+
+/// Ends a waiter that was refused the claim `restart --self` hands over.
+/// Gives up as [`give_up`] does, unless a waiter holds that claim: its
+/// pending restart is left alone, and only `notify` is told.
+pub fn refused(w: &Waiter, why: &str, notify: &mut dyn FnMut(&str)) -> Result<()> {
+    if restart::take(w.state, context::SHEPHERD, "waiter")?.is_some() {
+        give_up(w, why, notify)?;
+    } else {
+        notify(&format!(
+            "a self-restart waiter was refused: {why}; the one already waiting carries on"
+        ));
+    }
+    Ok(())
 }
 
 fn set_state(w: &Waiter, state: AttemptState, why: Option<String>) -> Result<()> {
@@ -441,8 +467,9 @@ fn parse_time(text: &str) -> Option<SystemTime> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::fs;
+    use std::rc::Rc;
 
     use serde_json::{Value, json};
 
@@ -471,9 +498,11 @@ mod tests {
     }
 
     /// A clock at `start` whose every sleep first runs `step` with the time it
-    /// wakes at; the sleep numbered by `gap` lasts its duration longer.
+    /// wakes at; the sleep numbered by `gap` lasts its duration longer, and
+    /// `suspended` is time the machine slept outside any sleep.
     struct Steps<'a> {
         now: SystemTime,
+        suspended: Rc<Cell<Duration>>,
         sleeps: u32,
         gap: Option<(u32, Duration)>,
         step: Box<dyn FnMut(SystemTime) + 'a>,
@@ -490,16 +519,18 @@ mod tests {
             if let Some((_, gap)) = self.gap.filter(|(at, _)| *at == self.sleeps) {
                 self.now += gap;
             }
-            (self.step)(self.now);
+            let woke = self.now();
+            (self.step)(woke);
         }
         fn now(&self) -> SystemTime {
-            self.now
+            self.now + self.suspended.get()
         }
     }
 
     fn clock_at<'a>(start: &str, step: impl FnMut(SystemTime) + 'a) -> Steps<'a> {
         Steps {
             now: at(start),
+            suspended: Rc::default(),
             sleeps: 0,
             gap: None,
             step: Box::new(step),
@@ -509,8 +540,11 @@ mod tests {
     struct World {
         state: tempfile::TempDir,
         herdr: FakeHerdr,
-        alive: std::cell::Cell<bool>,
-        enabled: std::cell::Cell<bool>,
+        alive: Cell<bool>,
+        enabled: Cell<bool>,
+        /// How long the machine sleeps during the waiter's next check.
+        suspend_in_check: Cell<Option<Duration>>,
+        suspended: Rc<Cell<Duration>>,
         notified: RefCell<Vec<String>>,
         /// The claims of the waiters armed, held as a running waiter holds its own.
         claims: RefCell<Vec<Lock>>,
@@ -540,8 +574,10 @@ mod tests {
             World {
                 state,
                 herdr,
-                alive: std::cell::Cell::new(true),
-                enabled: std::cell::Cell::new(true),
+                alive: Cell::new(true),
+                enabled: Cell::new(true),
+                suspend_in_check: Cell::default(),
+                suspended: Rc::default(),
                 notified: RefCell::default(),
                 claims: RefCell::default(),
             }
@@ -613,8 +649,18 @@ mod tests {
         }
 
         fn wait_on(&self, mut clock: Steps) -> Waited {
+            clock.suspended = self.suspended.clone();
+            self.with_waiter(|waiter, notify| wait(waiter, &mut clock, notify).unwrap())
+        }
+
+        fn with_waiter<T>(&self, run: impl FnOnce(&Waiter, &mut dyn FnMut(&str)) -> T) -> T {
             let alive = |_: &Process| self.alive.get();
-            let enabled = || Ok(self.enabled.get());
+            let enabled = || {
+                if let Some(slept) = self.suspend_in_check.take() {
+                    self.suspended.set(self.suspended.get() + slept);
+                }
+                Ok(self.enabled.get())
+            };
             let mailboxes = self.path().join("reports");
             let waiter = Waiter {
                 herdr: &self.herdr,
@@ -625,7 +671,7 @@ mod tests {
                 enabled: &enabled,
             };
             let mut notify = |text: &str| self.notified.borrow_mut().push(text.into());
-            wait(&waiter, &mut clock, &mut notify).unwrap()
+            run(&waiter, &mut notify)
         }
 
         fn saved(&self) -> Value {
@@ -1133,6 +1179,93 @@ mod tests {
 
         let woke = at(ARMED) + POLL + minutes(10);
         assert!(sent_at.unwrap() >= woke + WARNING, "{sent_at:?}");
+    }
+
+    #[test]
+    fn a_suspend_during_the_check_that_passes_starts_the_humans_5_minutes_again() {
+        let w = World::new();
+        w.arm();
+        w.stop(at(ARMED), 0);
+        let holds = at(ARMED) + WARNING;
+        let mut sent_at = None;
+
+        let waited = w.wait(|now| {
+            if now == holds {
+                w.suspend_in_check.set(Some(minutes(10)));
+            }
+            if sent_at.is_none() && !w.herdr.prompts().is_empty() {
+                sent_at = Some(now);
+            }
+            w.resume_on_clear();
+        });
+
+        assert_eq!(waited, Waited::Restarted);
+        let woke = holds + minutes(10);
+        assert!(sent_at.unwrap() >= woke + WARNING, "{sent_at:?}");
+    }
+
+    #[test]
+    fn a_suspend_past_its_30_minutes_during_the_check_that_passes_gives_up() {
+        let w = World::new();
+        w.arm();
+        w.stop(at(ARMED), 0);
+        let holds = at(ARMED) + WARNING;
+
+        let waited = w.wait(|now| {
+            if now == holds {
+                w.suspend_in_check
+                    .set(Some(Duration::from_secs(8 * 60 * 60)));
+            }
+        });
+
+        assert_gave_up(&w, waited, "waited 30 minutes: the human's 5 minutes");
+    }
+
+    #[test]
+    fn a_check_that_passes_only_as_its_30_minutes_run_out_gives_up() {
+        let w = World::new();
+        w.arm();
+        w.stop(at(ARMED), 1);
+        let last_poll = at(ARMED) + TIMEOUT - POLL;
+
+        let waited = w.wait(|now| {
+            if now == last_poll {
+                w.stop(now, 0);
+                w.suspend_in_check.set(Some(Duration::from_secs(20)));
+            }
+        });
+
+        assert_gave_up(
+            &w,
+            waited,
+            "waited 30 minutes: its conditions held only after that",
+        );
+    }
+
+    #[test]
+    fn a_wait_refused_its_claim_leaves_a_running_waiters_restart_pending() {
+        let w = World::new();
+        w.arm();
+
+        w.with_waiter(|waiter, notify| refused(waiter, "no claim", notify).unwrap());
+
+        assert_eq!(w.saved()["self_restart"]["state"], "pending");
+        assert_eq!(w.herdr.label(PANE), None);
+        assert_eq!(
+            *w.notified.borrow(),
+            ["a self-restart waiter was refused: no claim; the one already waiting carries on"]
+        );
+    }
+
+    #[test]
+    fn a_wait_refused_its_claim_gives_up_when_no_waiter_runs() {
+        let w = World::new();
+        w.arm();
+        w.claims.borrow_mut().clear();
+
+        w.with_waiter(|waiter, notify| refused(waiter, "no claim", notify).unwrap());
+
+        assert_gave_up(&w, Waited::GaveUp("no claim".into()), "no claim");
     }
 
     #[test]

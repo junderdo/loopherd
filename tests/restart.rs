@@ -194,6 +194,40 @@ fn the_shepherd_arms_its_own_restart_and_a_prompt_in_its_pane_cancels_it() {
 }
 
 #[test]
+fn a_shepherd_wait_without_the_claim_leaves_the_running_waiters_restart_pending() {
+    let state = tempfile::tempdir().unwrap();
+    write_shepherd(state.path());
+    let out = as_shepherd(state.path(), &["restart", "--self"], "");
+    assert!(out.status.success(), "{out:?}");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .args(["restart-wait", "shepherd"])
+        .env("XDG_STATE_HOME", state.path())
+        .env("LOOPHERD_CONFIG_DIR", state.path().join("config"))
+        .env("LOOPHERD_RESTART_WAITER_FD", "0")
+        .env("PATH", "")
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("doesn't hold shepherd's self-restart claim"),
+        "{out:?}"
+    );
+    let saved = fs::read_to_string(state.path().join("loopherd/shepherd.json")).unwrap();
+    assert!(saved.contains(r#""state": "pending""#), "{saved}");
+    assert!(shepherd_waiter_holds_its_claim(state.path()));
+
+    let prompt = r#"{"hook_event_name":"UserPromptSubmit","prompt":"stop"}"#;
+    as_shepherd(state.path(), &["prompt-hook"], prompt);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while shepherd_waiter_holds_its_claim(state.path()) {
+        assert!(Instant::now() < deadline, "the waiter never exited");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
 fn the_shepherds_restart_is_refused_with_the_switch_off() {
     let state = tempfile::tempdir().unwrap();
     write_shepherd(state.path());
