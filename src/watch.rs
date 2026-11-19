@@ -3876,6 +3876,39 @@ mod tests {
     }
 
     #[test]
+    fn a_watch_that_cannot_save_its_merge_window_still_holds_a_lookup_off_a_waking_round() {
+        let (world, notifier, gh) = guarded("", vec![]);
+        world.lead_at(&notifier, &gh, FIRST);
+        fs::create_dir(world.reports().join("lead-cards.merges.new")).unwrap();
+        let own = |events: &[Waiting]| notifier.send(events);
+        let req = Request {
+            timeout: Some(Duration::from_secs(130)),
+            notify_own: Some(&own),
+            merges: Some(&gh),
+            ..world.request("w9:p0")
+        };
+        let mut looked_up_quietly = 0;
+
+        let woke = watch(
+            &world.herdr,
+            &world.ledger,
+            &world.reports(),
+            &req,
+            &mut steps_from("2026-11-01T09:20:00Z", |poll| {
+                if poll == 5 {
+                    looked_up_quietly = gh.lookups.get();
+                    world.touch("merged-1", "");
+                }
+            }),
+            &mut |_| {},
+        );
+
+        assert_eq!(printed(woke.unwrap().unwrap()), ["lh-1 merged"]);
+        assert_eq!(looked_up_quietly, 2, "the default branch, then the merges");
+        assert_eq!(gh.lookups.get(), 2, "looked up again on the waking round");
+    }
+
+    #[test]
     fn a_leads_watch_wakes_once_on_a_worker_merged_but_not_done() {
         let world = Checked::new();
         assert_eq!(world.once("w9:p0"), None);
