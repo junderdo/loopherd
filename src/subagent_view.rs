@@ -1,5 +1,6 @@
-//! Whether a Claude pane shows a subagent's view, where typed text and
-//! `/clear` reach the subagent instead of the main conversation.
+//! Reading Claude's prompt box off a pane's screen: whether it shows a
+//! subagent's view, where typed text and `/clear` reach the subagent instead
+//! of the main conversation, and whether anything is typed in it.
 
 use anyhow::{Context, Result};
 
@@ -67,17 +68,8 @@ pub const TEXT_REACHES_SUBAGENT: &str = "so text sent there would reach the suba
 /// other than `main` selected.
 fn shows_subagent_view(screen: &str) -> bool {
     let lines: Vec<&str> = screen.lines().map(unboxed).collect();
-    let is_rule = |line: &&str| !line.is_empty() && line.chars().all(|c| c == '─');
-    let rules = lines.iter().rposition(is_rule).and_then(|bottom| {
-        let top = lines[..bottom].iter().rposition(is_rule)?;
-        Some((top, bottom))
-    });
-    let (prompt, footer) = match rules {
-        Some((top, bottom)) => (&lines[top + 1..bottom], &lines[bottom + 1..]),
-        None => match lines.iter().rposition(|l| l.starts_with('❯')) {
-            Some(at) => (&lines[at..=at], &lines[at..]),
-            None => return false,
-        },
+    let Some((prompt, footer)) = prompt_box(&lines) else {
+        return false;
     };
     prompt.iter().any(|line| line.starts_with("❯ Message @"))
         || footer
@@ -87,6 +79,34 @@ fn shows_subagent_view(screen: &str) -> bool {
                 entries().any(|(_, entry)| entry == "main")
                     && entries().any(|(selected, entry)| selected && entry != "main")
             })
+}
+
+/// Whether Claude's input box on `screen` holds nothing typed: its `❯`
+/// line bare and any lines after it in the box blank. False when there's no box.
+pub fn input_box_empty(screen: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().map(unboxed).collect();
+    let Some((prompt, _)) = prompt_box(&lines) else {
+        return false;
+    };
+    let mut typed = prompt.iter().skip_while(|line| !line.starts_with('❯'));
+    typed.next().is_some_and(|first| first == &"❯") && typed.all(|line| line.is_empty())
+}
+
+/// Claude's live prompt box (between the last two rules) and the footer
+/// below it; without that box, the lowest `❯` line and what follows it.
+fn prompt_box<'a>(lines: &'a [&'a str]) -> Option<(&'a [&'a str], &'a [&'a str])> {
+    let is_rule = |line: &&str| !line.is_empty() && line.chars().all(|c| c == '─');
+    let rules = lines.iter().rposition(is_rule).and_then(|bottom| {
+        let top = lines[..bottom].iter().rposition(is_rule)?;
+        Some((top, bottom))
+    });
+    match rules {
+        Some((top, bottom)) => Some((&lines[top + 1..bottom], &lines[bottom + 1..])),
+        None => {
+            let at = lines.iter().rposition(|l| l.starts_with('❯'))?;
+            Some((&lines[at..=at], &lines[at..]))
+        }
+    }
 }
 
 /// `(selected, entry)` for an agent picker line, `◯ entry` or `● entry`.
@@ -133,4 +153,30 @@ pub mod screens {
   ◯ local_agent · Review PR #97 …
   ● main
 ";
+}
+
+#[cfg(test)]
+mod tests {
+    use super::screens::{MAIN_VIEW, SUBAGENT_PROMPT};
+    use super::*;
+
+    #[test]
+    fn an_input_box_is_empty_only_with_nothing_typed_in_it() {
+        assert!(input_box_empty(MAIN_VIEW));
+        let boxed = "│ ● done\n│ ───────\n│ ❯ \n│ ───────\n";
+        assert!(input_box_empty(boxed));
+
+        let typed = MAIN_VIEW.replace("❯ \n", "❯ wait, one more thing\n");
+        assert!(!input_box_empty(&typed));
+        let second_line = MAIN_VIEW.replace("❯ \n", "❯ \n  and this\n");
+        assert!(!input_box_empty(&second_line));
+        assert!(!input_box_empty(SUBAGENT_PROMPT));
+        assert!(!input_box_empty("● Working…\n"));
+    }
+
+    #[test]
+    fn quoted_rules_and_prompts_above_the_box_dont_count() {
+        let screen = format!("❯ an old prompt\n─────\n❯ quoted\n─────\n\n{MAIN_VIEW}");
+        assert!(input_box_empty(&screen));
+    }
 }
