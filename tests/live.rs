@@ -2162,7 +2162,16 @@ fn a_shepherd_with_self_restart_on_clears_and_resumes_itself_after_its_handoff()
     assert!(record["last_self_restart"].is_string(), "{record}");
     assert!(state.join("loopherd/handoffs/shepherd.prev.md").is_file());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while !screen().lines().any(|l| l.trim() == "❯ go") {
+    // Sent, not left in the input box: `❯ go` in the transcript and a bare `❯` below it.
+    let sent_go = |screen: &str| {
+        let prompts: Vec<&str> = screen
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with('❯'))
+            .collect();
+        prompts.contains(&"❯ go") && prompts.last() == Some(&"❯")
+    };
+    while !sent_go(&screen()) {
         assert!(std::time::Instant::now() < deadline, "no go:\n{}", screen());
         std::thread::sleep(std::time::Duration::from_secs(1));
     }

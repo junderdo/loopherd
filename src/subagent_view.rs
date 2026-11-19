@@ -66,7 +66,7 @@ pub const TEXT_REACHES_SUBAGENT: &str = "so text sent there would reach the suba
 /// that box, the prompt is the lowest `❯` line and the footer is what follows.
 /// A subagent view addresses the subagent there, or its picker has an entry
 /// other than `main` selected.
-fn shows_subagent_view(screen: &str) -> bool {
+pub fn shows_subagent_view(screen: &str) -> bool {
     let lines: Vec<&str> = screen.lines().map(unboxed).collect();
     let Some((prompt, footer)) = prompt_box(&lines) else {
         return false;

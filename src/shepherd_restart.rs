@@ -16,7 +16,7 @@ use crate::lock::Lock;
 use crate::pane_label;
 use crate::restart;
 use crate::shepherd_resume::{self, Attempt, AttemptState, Place, Recorded, StopAt};
-use crate::subagent_view::input_box_empty;
+use crate::subagent_view::{TEXT_REACHES_SUBAGENT, input_box_empty, shows_subagent_view};
 use crate::watch::Clock;
 
 /// How long the pane must go without a prompt from the human.
@@ -252,7 +252,13 @@ fn check(w: &Waiter, now: SystemTime) -> Result<Gate> {
             humantime::format_rfc3339_seconds(armed + WARNING)
         )));
     }
-    if !input_box_empty(&w.herdr.visible_text(pane)?) {
+    let screen = w.herdr.visible_text(pane)?;
+    if shows_subagent_view(&screen) {
+        return Ok(Gate::Wait(format!(
+            "its pane shows a subagent's view, {TEXT_REACHES_SUBAGENT}"
+        )));
+    }
+    if !input_box_empty(&screen) {
         return Ok(Gate::Wait("its input box isn't empty".into()));
     }
     Ok(Gate::Go)
@@ -290,6 +296,12 @@ fn restart_now(w: &Waiter, clock: &mut dyn Clock) -> Result<Waited> {
         }
         clock.sleep(Duration::from_secs(1));
     };
+    // The human may have started typing in the cleared session; `go` would join it.
+    if !input_box_empty(&w.herdr.visible_text(pane)?) {
+        let why = "the human was typing after the /clear, so it sent nothing more";
+        set_state(w, AttemptState::Restarted, Some(why.into()))?;
+        return Ok(Waited::Restarted);
+    }
     let (line, waited, why) = match resumed {
         true => ("go".to_string(), Waited::Restarted, None),
         false => {
@@ -337,13 +349,20 @@ pub fn prompted(state: &Path, place: &Place, input: &[u8]) -> Result<Option<Stri
     if prompt.is_some_and(pane_label::is_task_notification) {
         return Ok(None);
     }
+    // A free claim means no waiter runs: it never started, or died.
+    let waiter_runs = restart::take(state, context::SHEPHERD, "waiter")?.is_none();
     let cancelled = shepherd_resume::update(state, place, |r| {
         let attempt = r.restart.self_restart.as_mut();
         match attempt.filter(|a| a.state == AttemptState::Pending && !r.used) {
-            Some(attempt) => {
+            Some(attempt) if waiter_runs => {
                 attempt.state = AttemptState::Cancelled;
                 attempt.why = Some("the human prompted in its pane".into());
                 true
+            }
+            Some(attempt) => {
+                attempt.state = AttemptState::GaveUp;
+                attempt.why = Some("its waiter wasn't running".into());
+                false
             }
             None => false,
         }
@@ -430,6 +449,8 @@ mod tests {
         herdr: FakeHerdr,
         alive: std::cell::Cell<bool>,
         notified: RefCell<Vec<String>>,
+        /// The claims of the waiters armed, held as a running waiter holds its own.
+        claims: RefCell<Vec<Lock>>,
     }
 
     impl World {
@@ -458,6 +479,7 @@ mod tests {
                 herdr,
                 alive: std::cell::Cell::new(true),
                 notified: RefCell::default(),
+                claims: RefCell::default(),
             }
         }
 
@@ -476,8 +498,10 @@ mod tests {
             )
         }
 
-        fn arm(&self) -> Armed {
-            self.arm_at(ARMED, on()).unwrap()
+        fn arm(&self) -> String {
+            let armed = self.arm_at(ARMED, on()).unwrap();
+            self.claims.borrow_mut().push(armed.waiter);
+            armed.message
         }
 
         fn stop(&self, now: SystemTime, shells: usize) {
@@ -551,12 +575,8 @@ mod tests {
     #[test]
     fn an_armed_shepherd_restarts_with_clear_then_go_once_its_turn_ends_and_the_pane_is_quiet() {
         let w = World::new();
-        let armed = w.arm();
-        assert!(
-            armed.message.contains("any prompt here stops it"),
-            "{}",
-            armed.message
-        );
+        let message = w.arm();
+        assert!(message.contains("any prompt here stops it"), "{message}");
         assert_eq!(w.saved()["self_restart"]["state"], "pending");
         w.stop(at(ARMED) + Duration::from_secs(5), 0);
 
@@ -748,6 +768,7 @@ mod tests {
         let w = World::new();
         w.arm();
         w.prompt("hold on");
+        w.claims.borrow_mut().clear();
 
         let again = "2026-11-19T10:04:00Z";
         w.arm_at(again, on()).unwrap();
@@ -763,7 +784,7 @@ mod tests {
     #[test]
     fn a_second_arm_is_refused_while_a_waiter_holds_the_claim() {
         let w = World::new();
-        let _first = w.arm();
+        w.arm();
         let e = w.arm_at(ARMED, on()).err().unwrap();
         assert!(format!("{e:#}").contains("already waiting"), "{e:#}");
     }
@@ -935,5 +956,52 @@ mod tests {
         assert_eq!(waited, Waited::Stopped);
         assert!(w.sent().is_empty());
         assert!(w.notified.borrow().is_empty());
+    }
+
+    #[test]
+    fn it_waits_while_the_pane_shows_a_subagents_view() {
+        use crate::subagent_view::screens::SUBAGENT_PICKER;
+        let w = World::new();
+        w.arm();
+        w.stop(at(ARMED), 0);
+        w.herdr.set_screen(PANE, SUBAGENT_PICKER);
+        let late = at(ARMED) + minutes(12);
+
+        let sent = cleared_at(&w, |now, w| {
+            if now == late {
+                w.herdr.set_screen(PANE, MAIN_VIEW);
+            }
+        });
+
+        assert!(sent >= late, "{sent:?}");
+    }
+
+    #[test]
+    fn it_sends_no_go_into_text_the_human_typed_after_the_clear() {
+        let w = World::new();
+        w.arm();
+        w.stop(at(ARMED), 0);
+        w.herdr
+            .set_screen_on_prompt(PANE, &MAIN_VIEW.replace("❯ \n", "❯ what happ\n"));
+
+        let waited = w.wait(|_| w.resume_on_clear());
+
+        assert_eq!(waited, Waited::Restarted);
+        assert_eq!(w.sent(), ["/clear"]);
+        let why = w.saved()["self_restart"]["why"].clone();
+        assert!(why.as_str().unwrap().contains("typing"), "{why}");
+    }
+
+    #[test]
+    fn a_prompt_with_no_waiter_running_tells_the_shepherd_nothing() {
+        let w = World::new();
+        w.arm();
+        w.claims.borrow_mut().clear();
+
+        assert_eq!(w.prompt("hello"), None);
+
+        let saved = w.saved();
+        assert_eq!(saved["self_restart"]["state"], "gave_up");
+        assert_eq!(saved["self_restart"]["why"], "its waiter wasn't running");
     }
 }

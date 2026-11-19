@@ -407,7 +407,11 @@ pub fn schedule_self(
     })?;
     let entries = ledger.entries()?;
     let member = member_of_own_pane(&entries, pane, own_lineage, herdr.socket().as_deref())
-        .ok_or_else(|| anyhow!("no member runs in pane {pane} of this herdr"))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "no member runs in pane {pane} of this herdr, and no shepherd handoff is recorded for this pane and Claude"
+            )
+        })?;
     let name = member.name.clone();
     if !member.is_lead() {
         bail!("{name} isn't a lead; whoever reads its handoff line restarts it");
