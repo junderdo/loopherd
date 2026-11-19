@@ -366,6 +366,7 @@ mod tests {
                         "loopherd feed *",
                         "loopherd add *",
                         "loopherd retire *",
+                        "loopherd release *",
                     ],
                 },
                 "permissions": {
@@ -377,6 +378,7 @@ mod tests {
                         "Bash(loopherd feed *)",
                         "Bash(loopherd add *)",
                         "Bash(loopherd retire *)",
+                        "Bash(loopherd release *)",
                     ],
                     "deny": [
                         format!("Edit(/{root}/config/**)"),
@@ -451,6 +453,7 @@ mod tests {
                 "loopherd feed *",
                 "loopherd add *",
                 "loopherd retire *",
+                "loopherd release *",
                 "scripts/install",
                 "scripts/install *",
                 "./scripts/install",
@@ -458,7 +461,7 @@ mod tests {
             ])
         );
         assert_eq!(
-            settings["permissions"]["allow"][6], "Bash(scripts/install)",
+            settings["permissions"]["allow"][7], "Bash(scripts/install)",
             "an excluded command still goes through the permission flow"
         );
         assert_eq!(
@@ -701,6 +704,7 @@ mod tests {
         crate::retire::retire_and_close(
             &herdr,
             &mut ledger,
+            &crate::sandbox::Guard::new(setup.paths(), None),
             "lead-h",
             now,
             std::path::Path::new("/nonexistent/reports"),

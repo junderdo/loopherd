@@ -15,6 +15,7 @@ use crate::pause;
 use crate::process::{Procs, live};
 use crate::report::{Body, Entry, append};
 use crate::retire::retire_and_close;
+use crate::sandbox::{self, Guard};
 use crate::shell::run_within;
 use crate::spawn::{BLOCKED_EXIT, spawn};
 use crate::tool_hook::{Pane, Switch, lead_in, needs};
@@ -312,6 +313,8 @@ fn reap(
         errors: 0,
         after_merge: vec![],
     };
+    let caller = sandbox::calling_lead(paths, req.procs, req.owner.pid);
+    let guard = Guard::new(paths.clone(), caller);
     let mut held_back = None;
     if !queue.after_merge.is_empty() {
         for template in queue.templates.keys() {
@@ -402,6 +405,7 @@ fn reap(
                 match retire_and_close(
                     herdr,
                     ledger,
+                    &guard,
                     name,
                     now,
                     &req.mailboxes,

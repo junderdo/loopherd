@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::herd::{self, Paths};
-use crate::worktree::worktree_path;
+use crate::ledger::AgentRecord;
+use crate::process::Procs;
+use crate::worktree::{same_dir, worktree_path};
 
 /// `[lead] sandbox`: what happens to a lead whose sandbox can't start.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -126,6 +128,129 @@ impl Lead {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e).with_context(|| format!("read {}", file.display())),
         }
+    }
+}
+
+/// Every lead kept in loopherd's config dir, by name.
+fn kept_leads(paths: &Paths) -> Result<Vec<(String, Lead)>> {
+    let dir = paths.config_dir().join("sandbox");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e).with_context(|| format!("read {}", dir.display())),
+    };
+    let mut leads = vec![];
+    for entry in entries {
+        let file = entry
+            .with_context(|| format!("read {}", dir.display()))?
+            .file_name();
+        let Some(name) = file.to_str().and_then(|f| f.strip_suffix(".lead.json")) else {
+            continue;
+        };
+        if let Some(lead) = Lead::kept(paths, name)? {
+            leads.push((name.to_string(), lead));
+        }
+    }
+    Ok(leads)
+}
+
+/// The lead whose sandboxed Claude started process `me`: an ancestor run with
+/// `--settings` naming that lead's settings file. A lead can't change its own
+/// Claude's command line, as it can its ledger entry.
+pub fn calling_lead(paths: &Paths, procs: &dyn Procs, me: u32) -> Option<String> {
+    let dir = paths.config_dir().join("sandbox");
+    let mut pid = procs.parent(me);
+    while let Some(p) = pid.filter(|&p| p > 1) {
+        let found = procs.cmdline(p).and_then(|args| {
+            args.windows(2)
+                .filter(|pair| pair[0] == "--settings")
+                .find_map(|pair| lead_of_settings(&dir, Path::new(&pair[1])))
+        });
+        if found.is_some() {
+            return found;
+        }
+        pid = procs.parent(p);
+    }
+    None
+}
+
+fn lead_of_settings(dir: &Path, file: &Path) -> Option<String> {
+    let name = file.file_name()?.to_str()?.strip_suffix(".json")?;
+    let is_settings = file.parent() == Some(dir) && !name.ends_with(".lead");
+    is_settings.then(|| name.to_string())
+}
+
+/// Checks a ledger entry, which any lead can write, before loopherd runs git
+/// outside the sandbox on its repo and worktree.
+pub struct Guard {
+    paths: Paths,
+    /// The lead whose sandboxed Claude runs this loopherd, if one does.
+    caller: Option<String>,
+}
+
+impl Guard {
+    pub fn new(paths: Paths, caller: Option<String>) -> Guard {
+        Guard { paths, caller }
+    }
+
+    /// Why loopherd won't run git on `record`'s repo and worktree, if it
+    /// won't. A herd's member must be where its herd file puts members: its
+    /// repo the herd's, its worktree one beside the herd's other worktrees,
+    /// and no lead's, whose `.git` the lead can write. A caller lead may act
+    /// only on its own herd's members.
+    pub fn refusal(&self, record: &AgentRecord) -> Result<Option<String>> {
+        let name = &record.name;
+        if let Some(caller) = &self.caller {
+            let own = Lead::kept(&self.paths, caller)?.map(|lead| lead.herd);
+            if own.is_none() || record.herd != own {
+                return Ok(Some(format!(
+                    "{name} isn't a member of {caller}'s herd, and {caller} runs this loopherd"
+                )));
+            }
+        }
+        let Some(herd) = &record.herd else {
+            return Ok(None);
+        };
+        let repo = herd::repo(&self.paths, herd)?;
+        if !same_dir(&record.repo, &repo) {
+            return Ok(Some(format!(
+                "{name}'s ledger entry names repo {}, not herd {herd}'s {}",
+                record.repo.display(),
+                repo.display()
+            )));
+        }
+        let Some(worktree) = &record.worktree else {
+            return Ok(None);
+        };
+        let beside = worktree_path(&repo, "x");
+        let in_place = worktree.file_name().is_some()
+            && worktree
+                .parent()
+                .zip(beside.parent())
+                .is_some_and(|(a, b)| same_dir(a, b));
+        if !in_place {
+            return Ok(Some(format!(
+                "{name}'s ledger entry names worktree {}, which isn't beside herd {herd}'s \
+                 worktrees in {}",
+                worktree.display(),
+                beside.parent().unwrap_or(&repo).display()
+            )));
+        }
+        for (lead, kept) in kept_leads(&self.paths)? {
+            if lead == *name {
+                continue;
+            }
+            let Ok(lead_repo) = herd::repo(&self.paths, &kept.herd) else {
+                continue;
+            };
+            if same_dir(worktree, &worktree_path(&lead_repo, &lead)) {
+                return Ok(Some(format!(
+                    "{name}'s ledger entry names lead {lead}'s worktree {}",
+                    worktree.display()
+                )));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -280,11 +405,12 @@ fn lead_file(paths: &Paths, name: &str) -> PathBuf {
 
 /// The loopherd commands a lead runs that make or remove its members'
 /// worktrees, beside its own and so outside what it may write.
-const WORKTREE_COMMANDS: [&str; 4] = [
+const WORKTREE_COMMANDS: [&str; 5] = [
     "loopherd feed",
     "loopherd feed *",
     "loopherd add *",
     "loopherd retire *",
+    "loopherd release *",
 ];
 
 /// Lead `name`'s settings, from its herd file alone: its worktree is where
@@ -344,6 +470,23 @@ fn edit_rule(dir: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_calling_lead_is_the_one_whose_settings_an_ancestor_claude_was_started_with() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        let settings = settings_file(&paths, "lead-h").display().to_string();
+        let mut procs = crate::process::FakeProcs::pane();
+        procs.set_cmdline(30, &["claude", "--settings", &settings]);
+        procs.add(40, "/bin/bash", 30, 400);
+        procs.add(50, "/usr/bin/loopherd", 40, 500);
+
+        assert_eq!(calling_lead(&paths, &procs, 50), Some("lead-h".into()));
+
+        let elsewhere = root.path().join("lead-h.json").display().to_string();
+        procs.set_cmdline(30, &["claude", "--settings", &elsewhere]);
+        assert_eq!(calling_lead(&paths, &procs, 50), None);
+    }
 
     #[test]
     fn claude_at_or_past_the_floor_passes_and_older_says_to_update() {

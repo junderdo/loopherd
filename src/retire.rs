@@ -13,6 +13,7 @@ use crate::notify::forget_marks;
 use crate::process::{Procs, is_ancestor, live};
 use crate::report::{Body, history, member_in};
 use crate::revive::find_workspace;
+use crate::sandbox::Guard;
 use crate::tool_hook::Pane as OwnPane;
 use crate::worktree::{Gone, Removal, remove_if_gone, remove_if_merged, same_dir};
 
@@ -171,11 +172,14 @@ fn retired_since(record: &AgentRecord) -> String {
 /// Retires `name` unless it already is, removes its notify marks from
 /// `mailboxes`, then closes its tab and removes its worktree when safe, so a
 /// failed or deferred close can be re-run. `own_pane` is the pane running
-/// loopherd, whose tab is never closed. Pushes one line per action to `out`,
+/// loopherd, whose tab is never closed, and `guard` keeps a worktree its
+/// ledger entry misplaces. Pushes one line per action to `out`,
 /// including before an error; a mark left in place is a warning line.
+#[allow(clippy::too_many_arguments)]
 pub fn retire_and_close(
     herdr: &dyn Herdr,
     ledger: &mut dyn Ledger,
+    guard: &Guard,
     name: &str,
     now: SystemTime,
     mailboxes: &Path,
@@ -229,6 +233,13 @@ pub fn retire_and_close(
     if let Some(path) = &record.worktree {
         if let Some(other) = other_user(ledger, name, path)? {
             out.push(format!("kept {}: in use by {other}", path.display()));
+            return Ok(());
+        }
+        let refusal = guard
+            .refusal(&record)
+            .unwrap_or_else(|e| Some(format!("can't check it against its herd file: {e:#}")));
+        if let Some(why) = refusal {
+            out.push(format!("kept {}: {why}", path.display()));
             return Ok(());
         }
         match remove_if_gone(&record.repo, path)? {
@@ -622,6 +633,10 @@ mod tests {
         move_origin_default, push_head, repo_with_origin, worktree_list,
     };
 
+    fn open_guard() -> Guard {
+        Guard::new(crate::herd::Paths::under(Path::new("/nonexistent")), None)
+    }
+
     fn record(name: &str) -> AgentRecord {
         AgentRecord {
             name: name.into(),
@@ -904,6 +919,7 @@ mod tests {
         retire_and_close(
             herdr,
             ledger,
+            &open_guard(),
             "a",
             halloween_noon(),
             Path::new("/nonexistent/reports"),
@@ -1361,6 +1377,148 @@ mod tests {
         assert!(has_branch(&repo, "feat/new"));
     }
 
+    /// `a` spawned in a worktree of `root`'s repo and recorded as a member of
+    /// herd `h`, whose herd file names that repo; and the guard that checks it.
+    fn herd_member(root: &Path, caller: Option<&str>) -> (FakeHerdr, MemLedger, PathBuf, Guard) {
+        let (herdr, mut ledger, repo) = spawned_in_worktree(root, "feat/new");
+        ledger.0.get_mut("a").unwrap().herd = Some("h".into());
+        std::fs::create_dir(root.join("herds")).unwrap();
+        std::fs::write(root.join("herds/h.toml"), format!("repo = {repo:?}\n")).unwrap();
+        let guard = Guard::new(crate::herd::Paths::under(root), caller.map(String::from));
+        (herdr, ledger, repo, guard)
+    }
+
+    fn keep_lead(root: &Path, lead: &str, herd: &str) {
+        std::fs::create_dir_all(root.join("sandbox")).unwrap();
+        let record = format!("{{\"herd\": {herd:?}, \"args\": []}}");
+        std::fs::write(root.join(format!("sandbox/{lead}.lead.json")), record).unwrap();
+    }
+
+    fn close_guarded(herdr: &FakeHerdr, ledger: &mut MemLedger, guard: &Guard) -> Vec<String> {
+        let mut out = vec![];
+        retire_and_close(
+            herdr,
+            ledger,
+            guard,
+            "a",
+            halloween_noon(),
+            Path::new("/nonexistent/reports"),
+            None,
+            &mut out,
+        )
+        .unwrap();
+        out
+    }
+
+    #[test]
+    fn close_runs_no_git_in_a_repo_the_entry_names_but_its_herd_file_doesnt() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo, guard) = herd_member(root.path(), None);
+        let forged = root.path().join("forged");
+        let ran = root.path().join("ssh-command-ran");
+        git_in(root.path(), &["init", "--quiet", forged.to_str().unwrap()]);
+        let ssh = format!("touch {}", ran.display());
+        git_in(&forged, &["config", "core.sshCommand", &ssh]);
+        git_in(
+            &forged,
+            &["remote", "add", "origin", "ssh://example.invalid/x.git"],
+        );
+        let wt = root.path().join("proj/worktrees/feat-new");
+        ledger.0.get_mut("a").unwrap().repo = forged.clone();
+        std::fs::remove_dir_all(&wt).unwrap();
+
+        let out = close_guarded(&herdr, &mut ledger, &guard);
+
+        assert_eq!(
+            out.last().unwrap(),
+            &format!(
+                "kept {}: a's ledger entry names repo {}, not herd h's {}",
+                wt.display(),
+                forged.display(),
+                repo.display()
+            )
+        );
+        assert!(!ran.exists());
+        assert!(ledger.0["a"].retired);
+    }
+
+    #[test]
+    fn close_keeps_a_worktree_the_entry_places_away_from_its_herds_worktrees() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo, guard) = herd_member(root.path(), None);
+        let elsewhere = root.path().join("elsewhere/feat-new");
+        ledger.0.get_mut("a").unwrap().worktree = Some(elsewhere.clone());
+
+        let out = close_guarded(&herdr, &mut ledger, &guard);
+
+        assert!(
+            out.last().unwrap().starts_with(&format!(
+                "kept {}: a's ledger entry names worktree {}, which isn't beside herd h's",
+                elsewhere.display(),
+                elsewhere.display()
+            )),
+            "{out:?}"
+        );
+        assert!(has_branch(&repo, "feat/new"));
+    }
+
+    #[test]
+    fn close_keeps_a_leads_worktree_another_entry_names() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo, guard) = herd_member(root.path(), None);
+        keep_lead(root.path(), "lead-h", "h");
+        let lead_wt = root.path().join("proj/worktrees/lead-h");
+        git_in(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "lead-h",
+                lead_wt.to_str().unwrap(),
+            ],
+        );
+        ledger.0.get_mut("a").unwrap().worktree = Some(lead_wt.clone());
+
+        let out = close_guarded(&herdr, &mut ledger, &guard);
+
+        assert_eq!(
+            out.last().unwrap(),
+            &format!(
+                "kept {}: a's ledger entry names lead lead-h's worktree {}",
+                lead_wt.display(),
+                lead_wt.display()
+            )
+        );
+        assert!(lead_wt.exists());
+    }
+
+    #[test]
+    fn a_lead_running_retire_removes_its_own_herds_member_but_no_other_herds() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo, guard) = herd_member(root.path(), Some("lead-h"));
+        keep_lead(root.path(), "lead-h", "other");
+        let wt = root.path().join("proj/worktrees/feat-new");
+
+        let out = close_guarded(&herdr, &mut ledger, &guard);
+
+        assert_eq!(
+            out.last().unwrap(),
+            &format!(
+                "kept {}: a isn't a member of lead-h's herd, and lead-h runs this loopherd",
+                wt.display()
+            )
+        );
+        assert!(wt.exists());
+
+        keep_lead(root.path(), "lead-h", "h");
+        let out = close_guarded(&herdr, &mut ledger, &guard);
+
+        assert_eq!(out.last().unwrap(), &format!("removed {}", wt.display()));
+        assert!(!worktree_list(&repo).contains("feat-new"));
+    }
+
     #[test]
     fn close_does_not_count_the_closed_entry_as_a_sharer_of_its_missing_worktree() {
         let root = tempfile::tempdir().unwrap();
@@ -1404,6 +1562,7 @@ mod tests {
         retire_and_close(
             &herdr,
             &mut ledger,
+            &open_guard(),
             "a",
             halloween_noon(),
             mailboxes,
@@ -1685,6 +1844,7 @@ mod tests {
         let err = retire_and_close(
             &herdr,
             &mut ledger,
+            &open_guard(),
             "a",
             halloween_noon(),
             Path::new("/nonexistent/reports"),
@@ -1708,6 +1868,7 @@ mod tests {
         retire_and_close(
             &herdr,
             &mut ledger,
+            &open_guard(),
             "a",
             halloween_noon(),
             Path::new("/nonexistent/reports"),
@@ -1722,6 +1883,7 @@ mod tests {
         retire_and_close(
             &herdr,
             &mut ledger,
+            &open_guard(),
             "a",
             later,
             Path::new("/nonexistent/reports"),
@@ -1931,6 +2093,7 @@ mod tests {
         retire_and_close(
             &herdr,
             &mut ledger,
+            &open_guard(),
             "a",
             halloween_noon(),
             Path::new("/nonexistent/reports"),
@@ -1954,6 +2117,7 @@ mod tests {
         retire_and_close(
             &herdr,
             &mut ledger,
+            &open_guard(),
             "a",
             halloween_noon(),
             Path::new("/nonexistent/reports"),
@@ -2003,6 +2167,7 @@ mod tests {
         retire_and_close(
             herdr,
             ledger,
+            &open_guard(),
             "a",
             halloween_noon(),
             Path::new("/nonexistent/reports"),
