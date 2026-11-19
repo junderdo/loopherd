@@ -85,6 +85,23 @@ A switch its `[lead]` leaves unset comes from `[lead_defaults]` in
 `~/.config/loopherd/config.toml` (`scripts/install --lead-defaults` to change
 them), else is off; `loopherd herds` shows each switch's value and source.
 
+Each lead runs in the Claude Code sandbox from settings loopherd writes
+from its switches (D89), a guard rail rather than containment (D89 lists
+what gets past it). `loopherd doctor` fails when the sandbox can't start
+here while a herd has a lead, and `[lead] sandbox = "require"`, the
+default, then refuses to start the lead; `prefer` starts it guarded by its
+hook alone, flagged in `loopherd view`, and only the human sets it. Doctor
+names each running lead without its sandbox; `loopherd revive --name
+<lead>` after quitting its Claude resumes it in one. A lead started
+before loopherd kept its record (`<config dir>/sandbox/<lead>.lead.json`)
+fails a plain or startup `revive` until that `--name` run adopts it. A
+lead can't make worktrees beside its own, so `loopherd spawn --worktree`
+for its herd is yours; it uses `add`. A lead can still write most of
+its repo's shared `.git`, so git you run in that repo or its worktrees
+may run a command it planted; loopherd's git for a herd's members
+doesn't (D89). Check a hand-spawned entry's `repo` in the ledger before
+`retire --close` or `release` on it.
+
 ## Notify
 
 The human's `[notify]` table in `~/.config/loopherd/config.toml` decides

@@ -27,6 +27,7 @@ mod report;
 mod restart;
 mod retire;
 mod revive;
+mod sandbox;
 mod session_hook;
 mod setup;
 mod shell;
@@ -972,11 +973,15 @@ fn run_retire(name: &str, close: bool, force: bool) -> Result<i32> {
         return Ok(0);
     }
     let mailboxes = ledger.reports_dir()?;
+    let paths = Paths::from_env().context("herd")?;
+    let caller = sandbox::calling_lead(&paths, &process::ProcFs, std::process::id());
+    let guard = sandbox::Guard::new(paths, caller);
     let claude_dir = install_hook::claude_dir().ok();
     let mut lines = vec![];
     let result = retire_and_close(
         &CliHerdr,
         &mut ledger,
+        &guard,
         name,
         SystemTime::now(),
         Outcome::Retired,
@@ -993,7 +998,8 @@ fn run_retire(name: &str, close: bool, force: bool) -> Result<i32> {
 
 fn run_release(name: &str, keep_branch: bool, drop_branch: bool) -> Result<i32> {
     // A feed spawning this name owns its fresh worktree before the ledger says so.
-    let _feed = Paths::from_env().context("herd")?.lock_feed()?;
+    let paths = Paths::from_env().context("herd")?;
+    let _feed = paths.lock_feed()?;
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let fate = match (keep_branch, drop_branch) {
         (true, _) => Fate::Keep,
@@ -1001,11 +1007,14 @@ fn run_release(name: &str, keep_branch: bool, drop_branch: bool) -> Result<i32> 
         _ => Fate::Clear,
     };
     let mailboxes = ledger.reports_dir()?;
+    let caller = sandbox::calling_lead(&paths, &process::ProcFs, std::process::id());
+    let guard = sandbox::Guard::new(paths, caller);
     let mut lines = vec![];
     let result = release(
         &CliHerdr,
         &github::GhCli::default(),
         &mut ledger,
+        &guard,
         name,
         fate,
         SystemTime::now(),
@@ -1047,6 +1056,8 @@ fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32>
         lock_timeout: Duration::from_secs(600),
         server: startup.is_some().then(std::os::unix::process::parent_id),
         startup,
+        paths: Paths::from_env()?,
+        sandbox: sandbox::probe,
     };
     let (message, code) = revive(
         &CliHerdr,
@@ -2030,6 +2041,7 @@ fn doctor_install(settings: Option<PathBuf>) -> Result<doctor::Install> {
         pane_label,
         on_path: on_path("loopherd"),
         running: std::env::current_exe().context("find this binary")?,
+        sandbox: sandbox::probe(),
     })
 }
 
@@ -2182,6 +2194,7 @@ fn run_lead(args: LeadArgs) -> Result<i32> {
         herd: args.herd,
         claude_args: args.claude_args,
         ready_timeout: Duration::from_secs(args.ready_timeout),
+        sandbox: sandbox::probe,
     };
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let inherited = inherited_workspace(&ledger)?;

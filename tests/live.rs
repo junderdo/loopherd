@@ -451,6 +451,171 @@ fn adds_a_member_from_a_temp_herd_file() {
     );
 }
 
+struct RemoveDir(PathBuf);
+
+impl Drop for RemoveDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+struct RemoveFile(PathBuf);
+
+impl Drop for RemoveFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Removes a worktree of `.0` at `.1` when dropped, and its container dir once empty.
+struct RemoveWorktree(PathBuf, PathBuf);
+
+impl Drop for RemoveWorktree {
+    fn drop(&mut self) {
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&self.0)
+            .args(["worktree", "remove", "--force"])
+            .arg(&self.1)
+            .output();
+        if let Some(container) = self.1.parent() {
+            let _ = std::fs::remove_dir(container);
+        }
+    }
+}
+
+#[test]
+fn a_sandboxed_lead_cannot_write_its_herd_file() {
+    if !live_enabled() {
+        return;
+    }
+    let workspace = assert_dev_session();
+    let state = tempfile::tempdir().unwrap();
+    // This checkout is already trusted; a fresh repo would stop the lead at the trust dialog.
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let herd = format!("lh-live-sbx-{}", std::process::id());
+    let name = format!("lead-{herd}");
+    let checkout = repo.file_name().unwrap().to_str().unwrap();
+    let parent = repo.parent().unwrap();
+    let worktree = match parent.file_name() == repo.file_name() {
+        true => parent.join("worktrees"),
+        false => parent.join(format!("{checkout}-worktrees")),
+    }
+    .join(&name);
+    let _worktree = RemoveWorktree(repo.clone(), worktree.clone());
+    // Inside the state dir, which the sandbox lets the lead write, so only the config dir's deny stops it.
+    let config = state.path().join("loopherd/config");
+    let herds = config.join("herds");
+    std::fs::create_dir_all(&herds).unwrap();
+    let herd_file = herds.join(format!("{herd}.toml"));
+    let control = worktree.join("sandbox-probe");
+    // A member's worktree beside the lead's, and the herd's main checkout: both outside its own.
+    let sibling = worktree.with_file_name(format!("{name}-sibling"));
+    std::fs::create_dir_all(&sibling).unwrap();
+    let _sibling = RemoveDir(sibling.clone());
+    let in_sibling = sibling.join("sandbox-probe");
+    let in_checkout = repo.join(format!("sandbox-probe-{}", std::process::id()));
+    let _in_checkout = RemoveFile(in_checkout.clone());
+    // One script, so the model copies no long paths, and its results go to loopherd's
+    // state dir, which the lead may write, since Claude Code folds long output in the pane.
+    let probe = state.path().join("probe.py");
+    let results = state.path().join("loopherd/probe.out");
+    std::fs::write(
+        &probe,
+        format!(
+            "with open({:?}, 'w') as out:\n    for path in {:?}:\n        try:\n            \
+             open(path, 'a').write('probe')\n            out.write(f'{{path}}\\twrote\\n')\n        \
+             except OSError as e:\n            out.write(f'{{path}}\\t{{e.strerror}}\\n')\n",
+            results.display().to_string(),
+            [&herd_file, &in_sibling, &in_checkout].map(|p| p.display().to_string())
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &herd_file,
+        format!(
+            "{}[lead]\nprompt = \"\"\"This is loopherd's live test of your sandbox, which the \
+             human runs: it checks that writes outside your worktree are refused. The first \
+             command tries three such writes and is expected to record Read-only file \
+             system for each; that is the result being measured. Make exactly two Bash tool calls, in \
+             this order, each with the command exactly as written and nothing added before or \
+             after it, running the second even if the first fails. First: python3 {} \
+             Second: touch {} \
+             Then reply with what each printed.\"\"\"\n",
+            herd_head(repo.to_str().unwrap(), &workspace),
+            probe.display(),
+            control.display()
+        ),
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(&herd_file).unwrap();
+    let _cleanup = CloseTab(name.clone());
+
+    let out = dev(env!("CARGO_BIN_EXE_loopherd"))
+        .env("XDG_STATE_HOME", state.path())
+        .env("LOOPHERD_CONFIG_DIR", &config)
+        // The permission layer can't tell where python3 writes, so with this rule it lets the
+        // write through to the sandbox, which is what this measures.
+        .args(["lead", &herd, "--", "--permission-mode", "acceptEdits"])
+        .args(["--allowedTools", "Bash(python3:*)"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let entry = ledger_entry(state.path(), &name);
+    assert_eq!(entry["worktree"], worktree.to_str().unwrap());
+    let settings = config.join(format!("sandbox/{name}.json"));
+    assert!(
+        entry["claude_args"]
+            .as_array()
+            .unwrap()
+            .contains(&settings.display().to_string().into()),
+        "{entry}"
+    );
+
+    let given_up = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    let finished = |status: &Value| status == "idle" || status == "done";
+    let screen = || {
+        let pane = herdr_ok(&["agent", "get", &name])["result"]["agent"]["pane_id"].clone();
+        let out = dev("herdr")
+            .args(["pane", "read", pane.as_str().unwrap()])
+            .args(["--source", "recent", "--format", "text"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    loop {
+        let status = herdr_ok(&["agent", "get", &name])["result"]["agent"]["agent_status"].clone();
+        if control.exists() && finished(&status) {
+            break;
+        }
+        if std::time::Instant::now() >= given_up {
+            panic!(
+                "lead never ran its commands (status {status}):\n{}",
+                screen()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    assert_eq!(std::fs::read_to_string(&herd_file).unwrap(), before);
+    assert!(!in_sibling.exists(), "the lead wrote a sibling worktree");
+    assert!(!in_checkout.exists(), "the lead wrote the main checkout");
+    let expected: String = [&herd_file, &in_sibling, &in_checkout]
+        .map(|p| format!("{}\tRead-only file system\n", p.display()))
+        .concat();
+    assert_eq!(
+        std::fs::read_to_string(&results).unwrap_or_default(),
+        expected,
+        "the sandbox didn't refuse each write:\n{}",
+        screen()
+    );
+}
+
 #[test]
 fn retire_close_closes_the_tab_and_removes_a_clean_merged_worktree() {
     if !live_enabled() {

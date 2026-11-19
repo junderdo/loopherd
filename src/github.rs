@@ -66,7 +66,10 @@ impl Default for GhCli {
 
 impl PullRequests for GhCli {
     fn open_on(&self, repo: &Path, branch: &str) -> Result<PrLookup> {
-        let url = origin_url(repo)?;
+        // release runs outside a lead's sandbox, so origin is read through git pinned to the repo.
+        let url = crate::worktree::git(repo, &["remote", "get-url", "origin"])?
+            .trim()
+            .to_string();
         let Some((host, name)) = github_repo(&url) else {
             return Ok(PrLookup::Unknown("origin isn't on GitHub".into()));
         };

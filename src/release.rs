@@ -11,6 +11,7 @@ use crate::herdr::Herdr;
 use crate::ledger::{AgentRecord, Ledger, Outcome};
 use crate::report::{Body, Entry, append};
 use crate::retire::open_tab;
+use crate::sandbox::Guard;
 use crate::watch::forget_member;
 use crate::worktree::{Fate, Plan, RemoteDelete, plan_clear, same_dir};
 
@@ -18,7 +19,7 @@ use crate::worktree::{Fate, Plan, RemoteDelete, plan_clear, same_dir};
 /// by that name, after clearing its worktree and branch per `fate` so the
 /// new member starts afresh. Refuses, changing nothing, a live entry, a
 /// lead, one whose tab may still be open, a checkout it would lose work
-/// from, or (unless dropping) an origin branch an open PR is on. Marks the
+/// from, one whose ledger entry `guard` refuses, or (unless dropping) an origin branch an open PR is on. Marks the
 /// entry released last, only once origin's branch is gone, so a failed
 /// delete leaves it unreleased for a rerun to finish. Rerunning it on a
 /// released entry clears and forgets again. Pushes one line per action to
@@ -28,6 +29,7 @@ pub fn release(
     herdr: &dyn Herdr,
     prs: &dyn PullRequests,
     ledger: &mut dyn Ledger,
+    guard: &Guard,
     name: &str,
     fate: Fate,
     now: SystemTime,
@@ -61,6 +63,12 @@ pub fn release(
         .with_context(|| format!("refused: can't ask herdr whether {name}'s tab is closed"))?
     {
         bail!("refused: {name}'s tab may still be open; close it first:\n  {fix}");
+    }
+    if let Some(why) = guard.path_refusal(&record)? {
+        bail!("refused: {why}");
+    }
+    if guard.for_lead() && fate == Fate::Drop {
+        bail!("refused: --drop-branch deletes commits, so it's the human's, not a lead's");
     }
     let in_use = |path: &Path| {
         others
@@ -248,6 +256,7 @@ mod tests {
     use super::*;
     use crate::github::Pr;
     use crate::github::fake::FakePrs;
+    use crate::herd::Paths;
     use crate::herdr::fake::FakeHerdr;
     use crate::ledger::{MemLedger, Role};
     use crate::report::history;
@@ -284,6 +293,7 @@ mod tests {
             process: None,
             role: None,
             after_merge: None,
+            unsandboxed: None,
             earlier: vec![],
         }
     }
@@ -294,18 +304,23 @@ mod tests {
         herdr: FakeHerdr,
         prs: Box<dyn PullRequests>,
         ledger: MemLedger,
+        caller: Option<String>,
     }
 
     impl Setup {
         fn new() -> Setup {
             let root = tempfile::tempdir().unwrap();
             let repo = repo_with_origin(root.path());
+            let herds = root.path().join("loopherd/herds");
+            std::fs::create_dir_all(&herds).unwrap();
+            std::fs::write(herds.join("prs.toml"), format!("repo = {repo:?}\n")).unwrap();
             Setup {
                 root,
                 repo,
                 herdr: FakeHerdr::new(&[("w1", "loopherd")]),
                 prs: Box::new(FakePrs(Ok(PrLookup::None))),
                 ledger: MemLedger::default(),
+                caller: None,
             }
         }
 
@@ -331,10 +346,15 @@ mod tests {
             let mut out = vec![];
             let now = humantime::parse_rfc3339("2026-11-17T12:00:00Z").unwrap();
             let mailboxes = self.mailboxes();
+            let guard = Guard::new(
+                Paths::under(&self.root.path().join("loopherd")),
+                self.caller.clone(),
+            );
             release(
                 &self.herdr,
                 self.prs.as_ref(),
                 &mut self.ledger,
+                &guard,
                 name,
                 fate,
                 now,
@@ -343,6 +363,79 @@ mod tests {
             )?;
             Ok(out)
         }
+    }
+
+    #[test]
+    fn refuses_an_entry_its_herd_file_disowns_or_a_lead_outside_its_herd_and_clears_nothing() {
+        let mut s = Setup::new();
+        let wt = s.retired_on("zpr-1", "feat/x");
+        s.ledger.0.get_mut("zpr-1").unwrap().repo = s.root.path().join("forged");
+
+        let err = s.release("zpr-1", Fate::Drop).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .starts_with("refused: zpr-1's ledger entry names repo"),
+            "{err}"
+        );
+        assert!(wt.exists());
+
+        s.ledger.0.get_mut("zpr-1").unwrap().repo = s.repo.clone();
+        let sandbox = s.root.path().join("loopherd/sandbox");
+        std::fs::create_dir(&sandbox).unwrap();
+        std::fs::write(
+            sandbox.join("lead-other.lead.json"),
+            r#"{"herd": "other", "args": []}"#,
+        )
+        .unwrap();
+        s.caller = Some("lead-other".into());
+
+        let err = s.release("zpr-1", Fate::Drop).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "refused: zpr-1 isn't a member of lead-other's herd, and lead-other runs this loopherd"
+        );
+        assert!(wt.exists());
+        assert!(has_branch(&s.repo, "feat/x"));
+    }
+
+    #[test]
+    fn refuses_a_branch_whose_worktree_would_be_a_leads_and_a_leads_drop_branch() {
+        let mut s = Setup::new();
+        s.retired_on("zpr-1", "feat/x");
+        let sandbox = s.root.path().join("loopherd/sandbox");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        std::fs::write(
+            sandbox.join("lead-prs.lead.json"),
+            r#"{"herd": "prs", "args": []}"#,
+        )
+        .unwrap();
+        let lead_wt = s.root.path().join("proj/worktrees/lead-prs");
+        let entry = s.ledger.0.get_mut("zpr-1").unwrap();
+        entry.worktree = None;
+        entry.branch = Some("lead-prs".into());
+
+        let err = s.release("zpr-1", Fate::Clear).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "refused: zpr-1's ledger entry names lead lead-prs's worktree {}",
+                lead_wt.display()
+            )
+        );
+
+        s.ledger.0.get_mut("zpr-1").unwrap().branch = Some("feat/x".into());
+        s.caller = Some("lead-prs".into());
+
+        let err = s.release("zpr-1", Fate::Drop).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "refused: --drop-branch deletes commits, so it's the human's, not a lead's"
+        );
+        assert!(has_branch(&s.repo, "feat/x"));
     }
 
     #[test]

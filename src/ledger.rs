@@ -77,6 +77,10 @@ pub struct AgentRecord {
     /// `None` is a worker.
     #[serde(default)]
     pub role: Option<Role>,
+    /// Why this lead runs without its sandbox, guarded by its tool hook
+    /// alone; `None` when sandboxed, and for a worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsandboxed: Option<String>,
     /// How far `feed` has got with its herd's `after_merge` for this member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_merge: Option<AfterMerge>,
@@ -547,6 +551,7 @@ mod tests {
             process: None,
             role: None,
             after_merge: None,
+            unsandboxed: None,
             earlier: vec![],
         }
     }
@@ -895,6 +900,7 @@ mod tests {
         let lead = AgentRecord {
             role: Some(Role::Lead),
             after_merge: None,
+            unsandboxed: None,
             earlier: vec![],
             ..record("lead-h", true)
         };

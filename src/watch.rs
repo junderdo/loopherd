@@ -1557,6 +1557,7 @@ mod tests {
             process: None,
             role: None,
             after_merge: None,
+            unsandboxed: None,
             earlier: vec![],
         }
     }
@@ -2354,6 +2355,7 @@ mod tests {
         AgentRecord {
             role: Some(crate::ledger::Role::Lead),
             after_merge: None,
+            unsandboxed: None,
             earlier: vec![],
             ..member(name, pane, Some(herd))
         }

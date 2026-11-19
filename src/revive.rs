@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 
+use crate::herd::Paths;
 use crate::herdr::{
     Agent, AgentStatus, Herdr, Pane, StartOutcome, Workspace, wait_for_shell_prompt,
 };
@@ -14,8 +15,9 @@ use crate::ledger::{AgentRecord, Ledger};
 use crate::lock::Lock;
 use crate::process::{Procs, is_herdr};
 use crate::report::{Body, Entry, append};
+use crate::sandbox::{self, Probe};
 use crate::subagent_view::{ShowsSubagentView, TEXT_REACHES_SUBAGENT, ensure_main_view};
-use crate::worktree::same_dir;
+use crate::worktree::{same_dir, worktree_path};
 
 /// Sent to a lead whose watch isn't running: after a restart nothing else wakes it (D17).
 pub const REARM_PROMPT: &str = "You were revived after a restart, so your \
@@ -44,6 +46,9 @@ pub struct ReviveRequest {
     pub startup: Option<PathBuf>,
     /// The herdr server that ran the startup hook: the hook's parent.
     pub server: Option<u32>,
+    /// Where a lead's herd file is read and its sandbox settings written.
+    pub paths: Paths,
+    pub sandbox: Probe,
 }
 
 /// One line per entry, and whether any entry failed.
@@ -107,6 +112,7 @@ pub fn revive(
             tab_id,
             workspace_id,
             session_id,
+            unsandboxed,
             ..
         } = &outcome
         {
@@ -133,6 +139,7 @@ pub fn revive(
                     .map(|s| live(&s));
                 current.socket = current.socket.take().or_else(|| here.clone());
                 current.process = None;
+                current.unsandboxed = unsandboxed.clone();
                 Ok(())
             });
             match restarted {
@@ -457,6 +464,8 @@ enum Outcome {
         session_id: Option<String>,
         blocked: bool,
         rearm: Rearm,
+        /// Why a lead runs without its sandbox; `None` when sandboxed, and for a worker.
+        unsandboxed: Option<String>,
     },
     Failed {
         step: &'static str,
@@ -550,6 +559,55 @@ impl Outcome {
     }
 }
 
+/// A lead's herd and args, and the worktree its herd puts it in, from what
+/// loopherd keeps where the lead can't write. The ledger, which it can,
+/// speaks for a lead started before that was kept only when `adopt` names
+/// it: the human's `revive --name`, which a sandboxed lead can't run, since
+/// it writes the lead's settings to the config dir.
+fn kept_lead(
+    paths: &Paths,
+    record: &AgentRecord,
+    adopt: Option<&str>,
+) -> Result<Option<(sandbox::Lead, PathBuf)>> {
+    let name = &record.name;
+    let lead = match sandbox::Lead::kept(paths, name)? {
+        Some(lead) => lead,
+        None if !record.is_lead() => return Ok(None),
+        None if adopt != Some(name.as_str()) => bail!(
+            "{name} is a lead loopherd kept no record of, so its ledger entry alone \
+             says how to start it; if that entry is yours, run loopherd revive --name {name}"
+        ),
+        None => sandbox::Lead {
+            herd: record
+                .herd
+                .clone()
+                .with_context(|| format!("{name} is a lead with no herd recorded"))?,
+            args: without_settings(&record.claude_args),
+        },
+    };
+    if matches!(name.as_str(), "" | "." | "..") || name.contains('/') {
+        bail!("{name:?} can't name a lead's worktree");
+    }
+    let worktree = worktree_path(&crate::herd::repo(paths, &lead.herd)?, name);
+    Ok(Some((lead, worktree)))
+}
+
+/// `args` without `--settings`, which a lead's revive writes afresh.
+fn without_settings(args: &[String]) -> Vec<String> {
+    let mut kept = vec![];
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--settings" => {
+                args.next();
+            }
+            _ if arg.starts_with("--settings=") => {}
+            _ => kept.push(arg.clone()),
+        }
+    }
+    kept
+}
+
 fn revive_one(
     herdr: &dyn Herdr,
     req: &ReviveRequest,
@@ -566,7 +624,19 @@ fn revive_one(
     {
         return Outcome::Skipped(format!("recorded on {}", there.display()));
     }
-    let cwd = record.worktree.as_ref().unwrap_or(&record.repo);
+    let lead = match kept_lead(&req.paths, record, req.name.as_deref()) {
+        Ok(lead) => lead,
+        Err(error) => {
+            return Outcome::Failed {
+                step: "sandbox",
+                error,
+            };
+        }
+    };
+    let cwd = match &lead {
+        Some((_, worktree)) => worktree,
+        None => record.worktree.as_ref().unwrap_or(&record.repo),
+    };
     if !cwd.is_dir() {
         return Outcome::Skipped(format!("cwd {} is gone", cwd.display()));
     }
@@ -630,6 +700,25 @@ fn revive_one(
             rearm: Rearm::NotSent,
         };
     }
+    let mut args = vec!["--resume".to_string(), session.clone()];
+    let mut unsandboxed = None;
+    match &lead {
+        None => args.extend(record.claude_args.iter().cloned()),
+        Some((lead, _)) => match sandbox::prepare(&req.paths, &record.name, lead, req.sandbox) {
+            Ok(launch) => {
+                warnings.extend(launch.warning(&record.name));
+                unsandboxed = launch.hook_only().map(str::to_string);
+                args.extend(lead.args.iter().cloned());
+                args.extend(launch.args());
+            }
+            Err(error) => {
+                return Outcome::Failed {
+                    step: "sandbox",
+                    error,
+                };
+            }
+        },
+    }
     let (pane_id, tab_id, new_tab) = match reusable {
         Some(pane) => (pane.id, pane.tab_id, false),
         None => match herdr.create_tab(&workspace.id, cwd, &record.name) {
@@ -637,8 +726,6 @@ fn revive_one(
             Err(error) => return Outcome::Failed { step: "tab", error },
         },
     };
-    let mut args = vec!["--resume".to_string(), session.clone()];
-    args.extend(record.claude_args.iter().cloned());
     let started = match new_tab {
         true => wait_for_shell_prompt(herdr, &pane_id, req.start_timeout, req.poll_interval),
         false => Ok(()),
@@ -652,6 +739,7 @@ fn revive_one(
             session_id: agent.session_id,
             blocked: false,
             rearm: Rearm::NotSent,
+            unsandboxed,
         },
         Ok(StartOutcome::Blocked) => Outcome::Started {
             pane_id,
@@ -660,6 +748,7 @@ fn revive_one(
             session_id: None,
             blocked: true,
             rearm: Rearm::NotSent,
+            unsandboxed,
         },
         Err(error) => {
             let error = match new_tab.then(|| herdr.close_tab(&tab_id)) {
@@ -715,6 +804,7 @@ mod tests {
     use crate::herdr::fake::{FakeHerdr, Startup};
     use crate::ledger::{AgentRecord, MemLedger, Process};
     use crate::process::FakeProcs;
+    use crate::sandbox::Unavailable;
     use crate::subagent_view::screens::{SUBAGENT_PICKER, SUBAGENT_PROMPT};
 
     fn request() -> ReviveRequest {
@@ -728,6 +818,31 @@ mod tests {
             lock_timeout: Duration::from_secs(10),
             startup: None,
             server: None,
+            paths: own_paths(),
+            sandbox: || Ok(()),
+        }
+    }
+
+    /// Herd `h`'s repo, under this thread's dir.
+    fn own_repo() -> PathBuf {
+        own_reports_dir().join("src/repo")
+    }
+
+    /// Config and state under this thread's dir, with herd `h`'s `[lead]`.
+    fn own_paths() -> Paths {
+        let root = own_reports_dir().join("loopherd");
+        let herds = root.join("config/herds");
+        std::fs::create_dir_all(&herds).unwrap();
+        std::fs::write(
+            herds.join("h.toml"),
+            format!("repo = {:?}\n[lead]\nprompt = \"go\"\n", own_repo()),
+        )
+        .unwrap();
+        Paths {
+            herds,
+            home: PathBuf::from("/home/me"),
+            feed_lock: root.join("state/feed.lock"),
+            paused: root.join("state/paused"),
         }
     }
 
@@ -767,6 +882,7 @@ mod tests {
             process: None,
             role: None,
             after_merge: None,
+            unsandboxed: None,
             earlier: vec![],
         }
     }
@@ -1354,10 +1470,28 @@ mod tests {
         assert_eq!(format!("{err:#}"), "ghost is not in the ledger");
     }
 
+    /// Lead `name` of herd `h`, as `loopherd lead` keeps and records it.
     fn lead(name: &str, cwd: &Path) -> AgentRecord {
+        let record = unkept_lead(name, cwd);
+        let kept = sandbox::Lead {
+            herd: "h".into(),
+            args: record.claude_args.clone(),
+        };
+        sandbox::prepare(&own_paths(), name, &kept, || Ok(())).unwrap();
+        record
+    }
+
+    /// A lead started before loopherd kept leads in its config dir, in the
+    /// worktree its herd puts it in; `cwd` is where the ledger says it runs,
+    /// which revive doesn't trust.
+    fn unkept_lead(name: &str, cwd: &Path) -> AgentRecord {
+        let worktree = worktree_path(&own_repo(), name);
+        std::fs::create_dir_all(&worktree).unwrap();
         AgentRecord {
+            worktree: Some(worktree),
             role: Some(crate::ledger::Role::Lead),
             after_merge: None,
+            unsandboxed: None,
             earlier: vec![],
             herd: Some("h".into()),
             ..record(name, cwd)
@@ -1499,6 +1633,192 @@ mod tests {
             ("resumed lead-h w1:p1 (prompted to re-arm its watch)", 0)
         );
         assert_eq!(herdr.prompts(), rearmed("lead-h"));
+    }
+
+    #[test]
+    fn a_revived_lead_resumes_in_its_sandbox_with_its_settings_written_afresh() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut lead = lead("lead-h", cwd.path());
+        lead.claude_args = ["--model", "opus", "--settings", "/old/lead-h.json"]
+            .map(String::from)
+            .into();
+        let mut ledger = ledger([lead]);
+        let req = request();
+
+        run(&herdr, &mut ledger, &req);
+
+        let settings = req.paths.config_dir().join("sandbox/lead-h.json");
+        assert_eq!(
+            herdr.started()[0].args,
+            [
+                "--resume",
+                "sess-lead-h",
+                "--model",
+                "opus",
+                "--settings",
+                &settings.display().to_string()
+            ]
+        );
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(written["sandbox"]["failIfUnavailable"], true);
+    }
+
+    #[test]
+    fn a_lead_resumes_as_loopherd_kept_it_whatever_its_ledger_entry_now_says() {
+        let herdr = herdr();
+        let req = request();
+        let kept = sandbox::Lead {
+            herd: "h".into(),
+            args: vec!["--model".into(), "opus".into()],
+        };
+        sandbox::prepare(&req.paths, "lead-h", &kept, || Ok(())).unwrap();
+        let worktree = worktree_path(&own_repo(), "lead-h");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let mut tampered = record("lead-h", home.path());
+        tampered.herd = Some("other".into());
+        tampered.claude_args = vec!["--add-dir".into(), "/".into()];
+        let mut ledger = ledger([tampered]);
+
+        run(&herdr, &mut ledger, &req);
+
+        let settings = sandbox::settings_file(&req.paths, "lead-h");
+        assert_eq!(
+            herdr.started()[0].args,
+            [
+                "--resume",
+                "sess-lead-h",
+                "--model",
+                "opus",
+                "--settings",
+                &settings.display().to_string()
+            ]
+        );
+        assert_eq!(herdr.tabs()[0].cwd, worktree);
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(
+            written["sandbox"]["filesystem"]["allowWrite"][0],
+            worktree.display().to_string()
+        );
+    }
+
+    #[test]
+    fn a_lead_loopherd_kept_no_record_of_resumes_only_when_named() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut ledger = ledger([unkept_lead("lead-h", cwd.path())]);
+
+        let (out, code) = run(&herdr, &mut ledger, &request());
+
+        assert_eq!(code, 1);
+        assert_eq!(
+            out,
+            "failed lead-h: sandbox: lead-h is a lead loopherd kept no record of, so its \
+             ledger entry alone says how to start it; if that entry is yours, run loopherd \
+             revive --name lead-h"
+        );
+        assert!(herdr.started().is_empty());
+
+        let named = ReviveRequest {
+            name: Some("lead-h".into()),
+            ..request()
+        };
+        let (out, code) = run(&herdr, &mut ledger, &named);
+
+        assert_eq!(code, 0, "{out}");
+        let settings = sandbox::settings_file(&named.paths, "lead-h");
+        assert_eq!(
+            herdr.started()[0].args,
+            [
+                "--resume",
+                "sess-lead-h",
+                "--model",
+                "opus",
+                "--settings",
+                &settings.display().to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_lead_revived_on_prefer_without_its_sandbox_is_flagged_in_the_ledger() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut ledger = ledger([lead("lead-h", cwd.path())]);
+        let req = ReviveRequest {
+            sandbox: || {
+                Err(Unavailable {
+                    why: "bubblewrap not installed".into(),
+                    fix: "install bubblewrap".into(),
+                })
+            },
+            ..request()
+        };
+        std::fs::write(
+            req.paths.herds.join("h.toml"),
+            format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nsandbox = \"prefer\"\n",
+                own_repo()
+            ),
+        )
+        .unwrap();
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 0, "{out}");
+        assert!(!herdr.started()[0].args.contains(&"--settings".to_string()));
+        assert_eq!(
+            ledger.0["lead-h"].unsandboxed.as_deref(),
+            Some("bubblewrap not installed")
+        );
+    }
+
+    #[test]
+    fn a_revived_worker_keeps_its_own_settings() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut worker = record("w", cwd.path());
+        worker.claude_args = ["--settings", "/herd/worker.json"].map(String::from).into();
+        let mut ledger = ledger([worker]);
+
+        run(&herdr, &mut ledger, &request());
+
+        assert_eq!(
+            herdr.started()[0].args,
+            ["--resume", "sess-w", "--settings", "/herd/worker.json"]
+        );
+    }
+
+    #[test]
+    fn a_lead_whose_sandbox_cant_start_is_not_revived_under_require() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut ledger = ledger([lead("lead-h", cwd.path())]);
+        let req = ReviveRequest {
+            sandbox: || {
+                Err(Unavailable {
+                    why: "bubblewrap not installed".into(),
+                    fix: "install bubblewrap".into(),
+                })
+            },
+            ..request()
+        };
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 1);
+        assert!(
+            out.starts_with(
+                "failed lead-h: sandbox: lead-h can't run sandboxed: its sandbox can't start: \
+                 bubblewrap not installed;"
+            ),
+            "{out}"
+        );
+        assert!(herdr.started().is_empty());
+        assert!(herdr.tabs().is_empty());
     }
 
     #[test]

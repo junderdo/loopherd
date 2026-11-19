@@ -44,11 +44,25 @@ pub fn checkout_root(dir: &Path) -> Result<PathBuf> {
 }
 
 fn git_common_dir(dir: &Path) -> Result<PathBuf> {
-    let common = git(
-        dir,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )?;
-    Ok(PathBuf::from(common.trim()))
+    // For git's own reason when it won't read the repo (safe.directory, say); the
+    // answer comes from the walk below, which no planted commondir can redirect.
+    let asked = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--git-dir"])
+        .output()
+        .context("run git")?;
+    if !asked.status.success() {
+        bail!(
+            "git rev-parse --git-dir: {}",
+            String::from_utf8_lossy(&asked.stderr).trim()
+        );
+    }
+    let checkout = dir
+        .ancestors()
+        .find(|d| d.join(".git").exists())
+        .with_context(|| format!("no .git in {} or above it", dir.display()))?;
+    common_dir(checkout)
 }
 
 fn checkout_above(common: &Path) -> Result<PathBuf> {
@@ -116,14 +130,16 @@ pub fn remove_if_merged(repo: &Path, path: &Path) -> Result<Removal> {
         let reason = format!("not a linked worktree of {}", repo.display());
         return Ok(Removal::Kept(reason));
     }
-    if let Some(op) = operation_in_progress(path)? {
+    if let Some(op) = operation_in_progress(repo, path)? {
         return Ok(Removal::Kept(format!("{op} in progress")));
     }
-    if let Some(reason) = unclean(path)? {
+    if let Some(reason) = unclean(repo, path)? {
         return Ok(Removal::Kept(reason));
     }
-    let head = git(path, &["rev-parse", "HEAD"])?.trim().to_string();
-    let branch = checked_out_branch(path)?;
+    let head = git_at(repo, path, &["rev-parse", "HEAD"])?
+        .trim()
+        .to_string();
+    let branch = checked_out_branch(repo, path)?;
     if let Some(branch) = &branch
         && let Some(reason) = unmerged(repo, branch, &head)?
     {
@@ -393,10 +409,10 @@ pub fn plan_clear(
         if !path.exists() {
             continue;
         }
-        if let Some(op) = operation_in_progress(path)? {
+        if let Some(op) = operation_in_progress(repo, path)? {
             return Ok(Plan::Dirty(format!("{} has a {op} in progress", w.path)));
         }
-        if let Some(reason) = unclean(path)? {
+        if let Some(reason) = unclean(repo, path)? {
             return Ok(Plan::Dirty(format!("{} has {reason}", w.path)));
         }
     }
@@ -565,8 +581,8 @@ const IN_PROGRESS: [(&str, &str); 8] = [
     ("BISECT_LOG", "bisect"),
 ];
 
-fn operation_in_progress(path: &Path) -> Result<Option<&'static str>> {
-    let git_dir = PathBuf::from(git(path, &["rev-parse", "--absolute-git-dir"])?.trim());
+fn operation_in_progress(repo: &Path, path: &Path) -> Result<Option<&'static str>> {
+    let git_dir = PathBuf::from(git_at(repo, path, &["rev-parse", "--absolute-git-dir"])?.trim());
     Ok(IN_PROGRESS
         .iter()
         .find(|(marker, _)| git_dir.join(marker).exists())
@@ -578,10 +594,14 @@ const BUILD_DIRS: [&str; 2] = ["target", "node_modules"];
 
 /// Why the worktree at `path` isn't clean: changes, or an ignored file outside
 /// [`BUILD_DIRS`].
-fn unclean(path: &Path) -> Result<Option<String>> {
+fn unclean(repo: &Path, path: &Path) -> Result<Option<String>> {
     // -z leaves paths unquoted. Rename entries carry a second path, but any
     // change returns before that matters.
-    let status = git(path, &["status", "--porcelain", "-z", "--ignored=matching"])?;
+    let status = git_at(
+        repo,
+        path,
+        &["status", "--porcelain", "-z", "--ignored=matching"],
+    )?;
     for entry in status.split('\0').filter(|e| !e.is_empty()) {
         let Some(ignored) = entry.strip_prefix("!! ") else {
             return Ok(Some("uncommitted or untracked changes".into()));
@@ -613,10 +633,8 @@ fn is_linked_worktree(repo: &Path, path: &Path) -> Result<bool> {
 }
 
 /// The branch checked out at `path`, or `None` when HEAD is detached.
-fn checked_out_branch(path: &Path) -> Result<Option<String>> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(path)
+fn checked_out_branch(repo: &Path, path: &Path) -> Result<Option<String>> {
+    let out = git_command(repo, path)?
         .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
         .output()
         .context("run git")?;
@@ -634,9 +652,7 @@ fn checked_out_branch(path: &Path) -> Result<Option<String>> {
 }
 
 fn is_ancestor(repo: &Path, commit: &str, of: &str) -> Result<bool> {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let status = git_command(repo, repo)?
         .args(["merge-base", "--is-ancestor", commit, of])
         .status()
         .context("run git")?;
@@ -880,10 +896,8 @@ impl std::error::Error for TimedOut {}
 /// Runs git against origin with no credential prompt, killing it and its
 /// helpers after `timeout`.
 fn remote_git_within(repo: &Path, args: &[&str], timeout: Duration) -> Result<String> {
-    let mut command = Command::new("git");
+    let mut command = git_command(repo, repo)?;
     command
-        .arg("-C")
-        .arg(repo)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         // Untranslated, so the messages matched on below read the same everywhere.
@@ -998,9 +1012,10 @@ fn non_empty_var(name: &str) -> bool {
 
 /// Only a clean "not set" counts: a config git can't read may hold one.
 fn core_ssh_command_unset(repo: &Path) -> bool {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let Ok(mut command) = git_command(repo, repo) else {
+        return false;
+    };
+    let status = command
         .args(["config", "--get", "core.sshCommand"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1008,10 +1023,65 @@ fn core_ssh_command_unset(repo: &Path) -> bool {
     matches!(status, Ok(s) if s.code() == Some(1))
 }
 
-fn git(repo: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
+/// The common git dir of the checkout at `repo`, read from its `.git` without
+/// asking git, which would follow a `commondir` file anyone who can write the
+/// shared `.git` (a sandboxed lead) can plant. Fails for a repo that reads a
+/// `config.worktree`, which that writer could also plant.
+fn common_dir(repo: &Path) -> Result<PathBuf> {
+    let dot_git = repo.join(".git");
+    let common = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let text = std::fs::read_to_string(&dot_git)
+            .with_context(|| format!("{} is not a git checkout", repo.display()))?;
+        let git_dir = repo.join(
+            text.strip_prefix("gitdir:")
+                .with_context(|| format!("{} has no gitdir line", dot_git.display()))?
+                .trim(),
+        );
+        match git_dir.parent() {
+            Some(worktrees) if worktrees.file_name() == Some("worktrees".as_ref()) => worktrees
+                .parent()
+                .context("worktrees dir at the filesystem root")?
+                .to_path_buf(),
+            _ => git_dir,
+        }
+    };
+    let config = common.join("config");
+    let worktree_config = Command::new("git")
+        .args(["config", "--file"])
+        .arg(&config)
+        .args(["--bool", "--get", "extensions.worktreeConfig"])
+        .output()
+        .context("run git")?;
+    if String::from_utf8_lossy(&worktree_config.stdout).trim() == "true" {
+        bail!(
+            "{} sets extensions.worktreeConfig, so git there reads config.worktree files \
+             a sandboxed lead can write; loopherd won't run git in it",
+            config.display()
+        );
+    }
+    Ok(common)
+}
+
+/// git run in `dir`, a checkout of `repo`, reading config and hooks from
+/// `repo`'s own common git dir only. A worktree's `.git` file or admin dir
+/// can't point it at a config, hence a command, of someone else's choosing.
+pub(crate) fn git_command(repo: &Path, dir: &Path) -> Result<Command> {
+    let mut command = Command::new("git");
+    command
         .arg("-C")
-        .arg(repo)
+        .arg(dir)
+        .env("GIT_COMMON_DIR", common_dir(repo)?);
+    Ok(command)
+}
+
+pub(crate) fn git(repo: &Path, args: &[&str]) -> Result<String> {
+    git_at(repo, repo, args)
+}
+
+fn git_at(repo: &Path, dir: &Path, args: &[&str]) -> Result<String> {
+    let out = git_command(repo, dir)?
         .args(args)
         .output()
         .context("run git")?;
@@ -1028,6 +1098,19 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
 #[cfg(test)]
 pub mod testing {
     use super::*;
+
+    /// git as a test runs it, unpinned, so it works in a dir that isn't a checkout yet.
+    pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
+        let out = Command::new("git").arg("-C").arg(dir).args(args).output()?;
+        if !out.status.success() {
+            bail!(
+                "git {}: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
 
     /// A repo at `<root>/proj/proj` cloned from a bare origin with `main` and
     /// `feature/existing` branches.
@@ -1166,7 +1249,8 @@ pub mod testing {
     }
 
     pub fn has_branch(repo: &Path, branch: &str) -> bool {
-        has_ref(repo, &format!("refs/heads/{branch}"))
+        let name = format!("refs/heads/{branch}");
+        git(repo, &["show-ref", "--verify", "--quiet", &name]).is_ok()
     }
 
     pub fn head(dir: &Path) -> String {
@@ -1196,7 +1280,7 @@ pub mod testing {
 mod tests {
     use std::time::Instant;
 
-    use super::testing::*;
+    use super::testing::{git, *};
     use super::*;
 
     #[test]
@@ -1453,7 +1537,7 @@ mod tests {
     }
 
     fn on_origin(root: &Path, branch: &str) -> bool {
-        has_ref(&root.join("origin.git"), &format!("refs/heads/{branch}"))
+        has_branch(&root.join("origin.git"), branch)
     }
 
     /// A `feat/x` pushed with one commit not on the base, then removed locally.
@@ -2507,6 +2591,46 @@ mod tests {
         let sub = repo.join("a/b");
         std::fs::create_dir_all(&sub).unwrap();
         assert_eq!(repo_root(&sub).unwrap(), repo.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn repo_root_from_a_subdirectory_ignores_a_planted_commondir() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let elsewhere = root.path().join("elsewhere");
+        git(
+            root.path(),
+            &["init", "--quiet", elsewhere.to_str().unwrap()],
+        )
+        .unwrap();
+        let planted = format!("{}\n", elsewhere.join(".git").display());
+        std::fs::write(repo.join(".git/commondir"), planted).unwrap();
+        let sub = repo.join("a/b");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        assert_eq!(repo_root(&sub).unwrap(), repo.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn a_repo_that_reads_config_worktree_files_gets_no_git_run_in_it() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+        git(&repo, &["config", "extensions.worktreeConfig", "true"]).unwrap();
+        let ran = root.path().join("ran");
+        let fsmonitor = format!("core.fsmonitor = touch {}; false\n", ran.display());
+        let admin = repo.join(".git/worktrees/feat-x/config.worktree");
+        std::fs::write(admin, format!("[core]\n{}", fsmonitor.replace("core.", ""))).unwrap();
+
+        let result = remove_if_merged(&repo, &wt);
+
+        assert!(!ran.exists(), "{result:?}");
+        let err = result.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("sets extensions.worktreeConfig"),
+            "{err:#}"
+        );
+        assert!(wt.exists());
     }
 
     #[test]

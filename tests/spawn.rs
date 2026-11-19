@@ -90,7 +90,7 @@ fn a_spawn_goes_ahead_whatever_herds_are_paused() {
 }
 
 #[test]
-fn a_checkout_spawn_cant_resolve_is_not_called_outside_a_git_repo() {
+fn a_repo_git_names_is_ignored_without_a_dot_git_above_the_dir() {
     let bin = tempfile::tempdir().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let git = bin.path().join("git");
@@ -107,6 +107,9 @@ fn a_checkout_spawn_cant_resolve_is_not_called_outside_a_git_repo() {
 
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("repo: /nonexistent/checkout"), "{stderr}");
-    assert!(!stderr.contains("not in a git repo"), "{stderr}");
+    assert!(
+        stderr.contains(&format!("no .git in {} or above it", dir.path().display())),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("/nonexistent/checkout"), "{stderr}");
 }
