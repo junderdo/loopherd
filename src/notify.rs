@@ -2,7 +2,7 @@
 //! them: a `question` report or a `blocked` member, or that a lead's repo saw
 //! a merge only the human should make, per `config.toml`'s `[notify]` table.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
@@ -421,25 +421,24 @@ pub fn forget_marks(mailboxes: &Path, member: &str) -> Vec<String> {
         .collect()
 }
 
-/// The `at` of each of `member`'s `kind` events marked notified.
-pub fn notified(mailboxes: &Path, member: &str, kind: Kind) -> Result<HashSet<String>> {
-    let path = mailboxes.join(format!("{member}.notified"));
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(HashSet::new()),
-        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
-    };
-    let prefix = format!("{} ", kind.as_str());
-    Ok(text
-        .lines()
-        .filter_map(|line| line.strip_prefix(&prefix))
-        .map(String::from)
-        .collect())
-}
-
 /// Marks `member`'s `kind` event at `at` notified unless a watch already did,
 /// returning whether this call marked it.
 pub fn first_to_notify(mailboxes: &Path, member: &str, kind: Kind, at: &str) -> Result<bool> {
+    Ok(first_to_notify_each(mailboxes, member, kind, &[at])? == 1)
+}
+
+/// Marks each of `member`'s `kind` events at `ats` notified unless a watch
+/// already did, returning how many this call marked. One lock covers them
+/// all, so two calls never split a set of marks between them.
+pub fn first_to_notify_each(
+    mailboxes: &Path,
+    member: &str,
+    kind: Kind,
+    ats: &[&str],
+) -> Result<usize> {
+    if ats.is_empty() {
+        return Ok(0);
+    }
     fs::create_dir_all(mailboxes).with_context(|| format!("create {}", mailboxes.display()))?;
     let path = mailboxes.join(format!("{member}.notified"));
     let file = OpenOptions::new()
@@ -449,16 +448,25 @@ pub fn first_to_notify(mailboxes: &Path, member: &str, kind: Kind, at: &str) -> 
         .open(&path)
         .with_context(|| format!("open {}", path.display()))?;
     let mut marks = Lock::wait(file).with_context(|| format!("lock {}", path.display()))?;
-    let mark = format!("{} {at}", kind.as_str());
     let mut text = String::new();
     marks
         .read_to_string(&mut text)
         .with_context(|| format!("read {}", path.display()))?;
-    if text.lines().any(|line| line == mark) {
-        return Ok(false);
+    let mut new = vec![];
+    for at in ats {
+        let mark = format!("{} {at}", kind.as_str());
+        if !text.lines().any(|line| line == mark) && !new.contains(&mark) {
+            new.push(mark);
+        }
     }
-    writeln!(marks, "{mark}").with_context(|| format!("write {}", path.display()))?;
-    Ok(true)
+    if !new.is_empty() {
+        // One write, so a failure usually leaves none of them marked.
+        let lines = new.join("\n") + "\n";
+        marks
+            .write_all(lines.as_bytes())
+            .with_context(|| format!("write {}", path.display()))?;
+    }
+    Ok(new.len())
 }
 
 const MAX_TEXT: usize = 200;
