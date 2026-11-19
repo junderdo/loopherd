@@ -1469,8 +1469,6 @@ mod tests {
         assert_eq!(format!("{err:#}"), "ghost is not in the ledger");
     }
 
-    /// Lead `name` of herd `h`, in the worktree its herd puts it in; `cwd`
-    /// is where the ledger says it runs, which revive doesn't trust.
     /// Lead `name` of herd `h`, as `loopherd lead` keeps and records it.
     fn lead(name: &str, cwd: &Path) -> AgentRecord {
         let record = unkept_lead(name, cwd);
@@ -1482,7 +1480,9 @@ mod tests {
         record
     }
 
-    /// A lead started before loopherd kept leads in its config dir.
+    /// A lead started before loopherd kept leads in its config dir, in the
+    /// worktree its herd puts it in; `cwd` is where the ledger says it runs,
+    /// which revive doesn't trust.
     fn unkept_lead(name: &str, cwd: &Path) -> AgentRecord {
         let worktree = worktree_path(&own_repo(), name);
         std::fs::create_dir_all(&worktree).unwrap();

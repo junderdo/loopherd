@@ -451,7 +451,6 @@ fn adds_a_member_from_a_temp_herd_file() {
     );
 }
 
-/// Removes a worktree of `.0` at `.1` when dropped, and its container dir once empty.
 struct RemoveDir(PathBuf);
 
 impl Drop for RemoveDir {
@@ -468,6 +467,7 @@ impl Drop for RemoveFile {
     }
 }
 
+/// Removes a worktree of `.0` at `.1` when dropped, and its container dir once empty.
 struct RemoveWorktree(PathBuf, PathBuf);
 
 impl Drop for RemoveWorktree {
