@@ -464,7 +464,9 @@ mod tests {
         let plain = Theme::from_env(Some("truecolor"), true);
         for palette in Palette::ALL {
             let theme = plain.with_palette(palette);
-            assert_eq!(roles(theme)[..5], [None; 5], "{palette:?}");
+            let roles = roles(theme);
+            assert_eq!(roles[..5], [None; 5], "{palette:?}");
+            assert_eq!(roles[7..], [None; 3], "{palette:?}");
             assert!(theme.selected().add_modifier.contains(Modifier::REVERSED));
         }
     }
