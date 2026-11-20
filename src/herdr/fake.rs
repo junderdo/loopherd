@@ -118,6 +118,8 @@ pub type PluginPane = (String, Placement, Vec<(String, String)>);
 
 pub const FAKE_SOCKET: &str = "/run/fake/herdr.sock";
 
+pub type OnPrompt = Box<dyn Fn(&str) + Send + Sync>;
+
 pub struct FakeHerdr {
     pub workspaces: Vec<Workspace>,
     pub startup: Startup,
@@ -149,6 +151,10 @@ pub struct FakeHerdr {
     pub agents_gate: Option<Mutex<Receiver<()>>>,
     /// Runs inside every `agents()` call, before it answers.
     pub on_agents: Option<Box<dyn Fn() + Send + Sync>>,
+    /// Runs inside every `start_claude` call, before it starts anything.
+    pub on_start: Option<Box<dyn Fn() + Send + Sync>>,
+    /// Runs inside every `prompt` call with its text, before it sends anything.
+    pub on_prompt: Option<OnPrompt>,
     pub socket: Option<PathBuf>,
     pub version: String,
     /// Answers `server` in place of a running server at `version`.
@@ -185,6 +191,8 @@ impl FakeHerdr {
             malformed_agents: false,
             agents_gate: None,
             on_agents: None,
+            on_start: None,
+            on_prompt: None,
             socket: Some(FAKE_SOCKET.into()),
             version: "0.9.5".into(),
             server: None,
@@ -740,6 +748,9 @@ impl Herdr for FakeHerdr {
     ) -> Result<StartOutcome> {
         self.called();
         self.mutating();
+        if let Some(on_start) = &self.on_start {
+            on_start();
+        }
         if self.startup == Startup::Fails {
             bail!("claude exited during startup");
         }
@@ -820,6 +831,9 @@ impl Herdr for FakeHerdr {
     fn prompt(&self, name: &str, text: &str) -> Result<()> {
         self.called();
         self.mutating();
+        if let Some(on_prompt) = &self.on_prompt {
+            on_prompt(text);
+        }
         if self.find(name)?.status == AgentStatus::Blocked {
             bail!("agent {name} is blocked");
         }

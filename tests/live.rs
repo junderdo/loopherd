@@ -598,6 +598,7 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
         "ledger.lock",
         "reports/watch.lock",
         "reports/watch.fired",
+        "broker/lead-other/requests/probe",
     ]
     .map(|p| state_dir.join(p));
     let own_state = [
@@ -607,7 +608,7 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
         format!("reports/watch-{name}.fired"),
     ]
     .map(|p| state_dir.join(p));
-    for dir in ["handoffs", "paused"] {
+    for dir in ["handoffs", "paused", "broker/lead-other/requests"] {
         std::fs::create_dir_all(state_dir.join(dir)).unwrap();
     }
     // One script, so the model copies no long paths, and its results go to loopherd's
@@ -642,7 +643,7 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
              except OSError as e:\n            \
              out.write(f'{{path}}\\t{{e.strerror}}\\n')\n    \
              env = dict(os.environ, XDG_STATE_HOME={state:?}, LOOPHERD_CONFIG_DIR={config:?})\n    \
-             for args in [['report', '--kind', 'note', 'sandbox probe'], ['watch', '--timeout', '1'], ['revive'], ['prompt', 'no-such-member']]:\n        \
+             for args in [['report', '--kind', 'note', 'sandbox probe'], ['watch', '--timeout', '1'], ['revive'], ['prompt', 'no-such-member'], ['feed', {herd:?}, '--dry-run']]:\n        \
              run = subprocess.run([{bin:?}] + args, env=env, capture_output=True, text=True)\n        \
              out.write(f'{{args[0]}}\\t{{run.returncode}}\\t{{run.stderr.strip()}}\\n')\n    \
              open({waiting:?}, 'w').close()\n    \
@@ -662,13 +663,17 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
             state = state.path().display().to_string(),
             config = config.display().to_string(),
             bin = env!("CARGO_BIN_EXE_loopherd"),
+            herd = herd,
         ),
     )
     .unwrap();
     std::fs::write(
         &herd_file,
         format!(
-            "{}[lead]\nprompt = \"\"\"This is loopherd's live test of your sandbox, which the \
+            "{}[template.echo]\nparams = [\"n\"]\nname = \"{{herd}}-{{n}}\"\n\
+             prompt = \"Reply with just the word ok.\"\ndone = \"false\"\n\
+             [queue]\ntemplate = \"echo\"\nsource = \"true\"\nmax = 1\n\
+             [lead]\nprompt = \"\"\"This is loopherd's live test of your sandbox, which the \
              human runs: it checks which writes your sandbox refuses. The first command \
              tries writes outside your worktree and is expected to record Read-only file \
              system for most of them; that is the result being measured. Make exactly two Bash tool calls, in \
@@ -776,17 +781,23 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
             .starts_with("revive\t1\tloopherd revive: refused: revive is the shepherd's")),
         "{probed}"
     );
+    // Both through its broker, whose requests folder its sandbox opens though it denies the
+    // rest of broker/: the broker refuses a member outside the lead's herd.
     assert!(
-        ran.get(3).is_some_and(|line| line.starts_with(
-            "prompt\t1\tloopherd prompt: refused: this loopherd runs in a lead's sandbox"
-        )),
+        ran.get(3).is_some_and(|line| line.starts_with(&format!(
+            "prompt\t1\tloopherd prompt: {name}'s broker refused prompt: no unretired member"
+        ))),
+        "{probed}"
+    );
+    assert!(
+        ran.get(4).is_some_and(|line| line.starts_with("feed\t0\t")),
         "{probed}"
     );
     let after: Vec<String> = replaced
         .iter()
         .map(|p| format!("replaced {}\tRead-only file system", p.display()))
         .collect();
-    assert_eq!(ran[4..], after, "{probed}");
+    assert_eq!(ran[5..], after, "{probed}");
     let mail = std::fs::read_to_string(state_dir.join(format!("reports/{name}.jsonl"))).unwrap();
     assert!(mail.contains("sandbox probe"), "{mail}");
 }

@@ -1,5 +1,6 @@
 //! The Claude Code sandbox a lead runs in, written from its switches (D83, D89).
 
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -874,7 +875,8 @@ pub fn check_running(
         return Err(refusal);
     }
     warnings.extend(loosened.iter().map(|line| loosened_warning(name, line)));
-    if on_disk.as_ref() != Some(&current) {
+    let switched = on_disk.as_ref().map(|s| switch_settings(s, paths));
+    if switched != Some(switch_settings(&current, paths)) {
         warnings.push(format!(
             "{name}'s sandbox was set before herd {herd}'s current switches, \
              which reach it only when its Claude starts again; {resume}"
@@ -920,12 +922,11 @@ const WRITABLE_STATE: [&str; 2] = ["reports", "handoffs"];
 /// replaced, so a deny on each file holds.
 const SHEPHERDS_WATCH: [&str; 2] = ["reports/watch.lock", "reports/watch.fired"];
 
-/// What in the state dir is the human's, the shepherd's or a broker's,
-/// denied by name to the file tools, which the sandbox doesn't cover. `true`
-/// marks a directory.
-const KEPT_FROM_FILE_TOOLS: [(&str, bool); 6] = [
+/// What in the state dir is the human's or the shepherd's, denied by name
+/// to the file tools, which the sandbox doesn't cover. `true` marks a
+/// directory.
+const KEPT_FROM_FILE_TOOLS: [(&str, bool); 5] = [
     ("paused", true),
-    ("broker", true),
     ("shepherd.json", false),
     ("shepherd.json.lock", false),
     ("ledger.json", false),
@@ -935,7 +936,7 @@ const KEPT_FROM_FILE_TOOLS: [(&str, bool); 6] = [
 /// Makes what lead `name`'s sandbox names in the state dir. An `allowWrite`
 /// entry for a missing path has no effect on Linux, and a `denyWrite` entry
 /// gets a placeholder that would sit in the way of the first real write.
-fn create_state(paths: &Paths, name: &str) -> Result<()> {
+pub fn create_state(paths: &Paths, name: &str) -> Result<()> {
     let state = paths.state_dir();
     let requests = crate::broker::requests_dir(paths, name);
     for dir in WRITABLE_STATE
@@ -981,6 +982,14 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
         false => file_rule(&state.join(path)),
     }));
     deny.extend(shepherds_watch.iter().map(|file| file_rule(file)));
+    deny.extend(
+        others_in_broker(paths, name)?
+            .iter()
+            .map(|(path, dir)| match dir {
+                true => edit_rule(path),
+                false => file_rule(path),
+            }),
+    );
     let mut sandbox = json!({
         "enabled": true,
         "failIfUnavailable": true,
@@ -1046,6 +1055,46 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
         settings["env"] = Value::Object(env);
     }
     Ok(settings)
+}
+
+/// What in `<state>/broker/` isn't lead `name`'s `requests/`, each named, as
+/// the file tools' denies. An `Edit` deny is also a sandbox write deny, which
+/// beats `allowWrite`, so one on all of `broker/` would close `requests/`.
+/// The sandbox skips glob denies on Linux, and the file tools' globs can't
+/// negate, so a lead started later isn't covered until this one restarts.
+fn others_in_broker(paths: &Paths, name: &str) -> Result<Vec<(PathBuf, bool)>> {
+    let broker = paths.state_dir().join("broker");
+    let own = broker.join(name);
+    let mut found = vec![];
+    for (dir, skip) in [(&broker, name), (&own, "requests")] {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+                continue;
+            }
+            Err(e) => return Err(e).with_context(|| format!("list {}", dir.display())),
+        };
+        for entry in entries {
+            let entry = entry.with_context(|| format!("list {}", dir.display()))?;
+            if entry.file_name() != skip {
+                let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+                found.push((entry.path(), is_dir));
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// `settings` without the file tools' denies in `<state>/broker/`, which
+/// change as other leads start, not with the herd's switches.
+fn switch_settings(settings: &Value, paths: &Paths) -> Value {
+    let broker = format!("Edit(/{}/", paths.state_dir().join("broker").display());
+    let mut settings = settings.clone();
+    if let Some(deny) = settings["permissions"]["deny"].as_array_mut() {
+        deny.retain(|rule| !rule.as_str().is_some_and(|r| r.starts_with(&broker)));
+    }
+    settings
 }
 
 /// A deny for the file tools; `//` marks the path absolute, not relative to the settings file.

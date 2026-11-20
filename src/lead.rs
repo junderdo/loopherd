@@ -358,10 +358,33 @@ mod tests {
         (path, serde_json::from_str(&text).unwrap())
     }
 
+    /// Whether an `Edit` rule in `deny` keeps the file tools from writing `path`.
+    fn denied_to_file_tools(deny: &serde_json::Value, path: &Path) -> bool {
+        deny.as_array().unwrap().iter().any(|rule| {
+            let rule = rule.as_str().unwrap();
+            let Some(spec) = rule
+                .strip_prefix("Edit(/")
+                .and_then(|r| r.strip_suffix(')'))
+            else {
+                return false;
+            };
+            match spec.strip_suffix("/**") {
+                Some(dir) => path.starts_with(dir),
+                None => path == Path::new(spec),
+            }
+        })
+    }
+
     #[test]
     fn a_lead_can_write_its_own_broker_requests_and_no_other_leads() {
         let setup = Setup::with_lead(PROMPT);
         let herdr = herdr();
+        let state = setup.root.join("state");
+        let other = state.join("broker/lead-g/requests");
+        fs::create_dir_all(&other).unwrap();
+        let stray = state.join("broker/lead-h/stray");
+        fs::create_dir_all(stray.parent().unwrap()).unwrap();
+        fs::write(&stray, "").unwrap();
 
         lead(
             &herdr,
@@ -373,9 +396,7 @@ mod tests {
         .unwrap();
 
         let (_, settings) = started_settings(&herdr);
-        let state = setup.root.join("state");
         let own = state.join("broker/lead-h/requests");
-        let other = state.join("broker/lead-g/requests");
         let allowed: Vec<PathBuf> = settings["sandbox"]["filesystem"]["allowWrite"]
             .as_array()
             .unwrap()
@@ -384,19 +405,41 @@ mod tests {
             .collect();
         assert!(allowed.contains(&own), "{allowed:?}");
         assert!(
-            own.is_dir(),
-            "an allowWrite path that's missing opens nothing"
-        );
-        assert!(
             !allowed.iter().any(|dir| other.starts_with(dir)),
             "{allowed:?}"
         );
         let deny = &settings["permissions"]["deny"];
-        let file_tools = format!("Edit(/{}/**)", state.join("broker").display());
         assert!(
-            deny.as_array().unwrap().iter().any(|r| r == &file_tools),
-            "{deny}"
+            !denied_to_file_tools(deny, &own.join(".1.part")),
+            "an Edit deny is also a sandbox write deny, which beats allowWrite: {deny}"
         );
+        assert!(denied_to_file_tools(deny, &other.join("x")), "{deny}");
+        assert!(denied_to_file_tools(deny, &stray), "{deny}");
+    }
+
+    #[test]
+    fn a_lead_s_writable_state_dirs_exist_when_its_claude_starts() {
+        let setup = Setup::with_lead(PROMPT);
+        let mut herdr = herdr();
+        let state = setup.root.join("state");
+        let dirs = ["broker/lead-h/requests", "reports", "handoffs"].map(|d| state.join(d));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let record = (seen.clone(), dirs.clone());
+        herdr.on_start = Some(Box::new(move || {
+            let (seen, dirs) = &record;
+            *seen.lock().unwrap() = dirs.iter().map(|d| d.is_dir()).collect();
+        }));
+
+        lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert_eq!(*seen.lock().unwrap(), [true, true, true], "{dirs:?}");
     }
 
     #[test]
@@ -455,7 +498,6 @@ mod tests {
                         format!("Edit(/{root}/config/**)"),
                         "Edit(//home/me/.claude/**)",
                         format!("Edit(/{root}/state/paused/**)"),
-                        format!("Edit(/{root}/state/broker/**)"),
                         format!("Edit(/{root}/state/shepherd.json)"),
                         format!("Edit(/{root}/state/shepherd.json.lock)"),
                         format!("Edit(/{root}/state/ledger.json)"),

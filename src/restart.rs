@@ -150,7 +150,10 @@ pub fn restart(
     };
     let (unsandboxed, warnings) = match running {
         None => (None, vec![]),
-        Some(Running::Sandboxed(warnings)) => (None, warnings),
+        Some(Running::Sandboxed(warnings)) => {
+            sandbox::create_state(req.paths, name).context("sandbox")?;
+            (None, warnings)
+        }
         Some(Running::HookOnly(why, mut warnings)) => {
             warnings.push(sandbox::hook_only_warning(name, &why));
             (Some(why), warnings)
@@ -1496,6 +1499,60 @@ mod tests {
             ),
             "{result:?}"
         );
+    }
+
+    #[test]
+    fn a_lead_s_writable_state_dirs_exist_when_it_is_cleared() {
+        let mut w = World::new();
+        w.handed_off();
+        w.prepared();
+        let state = w.paths().state_dir().to_path_buf();
+        fs::remove_dir_all(state.join("broker")).unwrap();
+        let dirs = ["broker/lh-1/requests", "reports", "handoffs"].map(|d| state.join(d));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let record = (seen.clone(), dirs.clone());
+        w.herdr.on_prompt = Some(Box::new(move |text| {
+            let (seen, dirs) = &record;
+            if text == "/clear" {
+                *seen.lock().unwrap() = dirs.iter().map(|d| d.is_dir()).collect();
+            }
+        }));
+
+        let (result, _) = w.restart_as(false, true, None, &as_lead);
+
+        result.unwrap();
+        assert_eq!(*seen.lock().unwrap(), [true, true, true], "{dirs:?}");
+    }
+
+    #[test]
+    fn a_lead_s_writable_state_dir_that_can_t_be_made_refuses_the_restart_naming_it() {
+        let w = World::new();
+        w.handed_off();
+        w.prepared();
+        let broker = w.paths().state_dir().join("broker");
+        fs::remove_dir_all(&broker).unwrap();
+        fs::write(&broker, "").unwrap();
+
+        let (result, _) = w.restart_as(false, true, None, &as_lead);
+
+        let error = format!("{:#}", result.unwrap_err());
+        assert!(
+            error.contains(&broker.join("lh-1/requests").display().to_string()),
+            "{error}"
+        );
+        assert!(w.herdr.prompts().is_empty());
+    }
+
+    #[test]
+    fn another_lead_starting_doesn_t_tell_a_running_lead_its_sandbox_is_stale() {
+        let w = World::new();
+        w.handed_off();
+        w.prepared();
+        fs::create_dir_all(w.paths().state_dir().join("broker/lead-g/requests")).unwrap();
+
+        let (result, _) = w.restart_as(false, true, None, &as_lead);
+
+        assert!(!result.as_ref().unwrap().contains("warning"), "{result:?}");
     }
 
     #[test]
