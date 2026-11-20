@@ -291,26 +291,34 @@ pub enum Launch {
         settings: PathBuf,
         /// What the human's own settings loosen, under `prefer`.
         loosened: Vec<String>,
+        mcp: PathBuf,
     },
     /// `prefer`, with why the sandbox can't start.
-    HookOnly { why: String },
+    HookOnly { why: String, mcp: PathBuf },
 }
 
 impl Launch {
     pub fn args(&self) -> Vec<String> {
-        match self {
-            Launch::Sandboxed { settings, .. } => {
-                vec!["--settings".into(), settings.display().to_string()]
-            }
-            Launch::HookOnly { .. } => vec![],
-        }
+        let (settings, mcp) = match self {
+            Launch::Sandboxed { settings, mcp, .. } => (Some(settings), mcp),
+            Launch::HookOnly { mcp, .. } => (None, mcp),
+        };
+        let mut args: Vec<String> = settings
+            .map(|file| vec!["--settings".into(), file.display().to_string()])
+            .unwrap_or_default();
+        args.extend([
+            "--strict-mcp-config".into(),
+            "--mcp-config".into(),
+            mcp.display().to_string(),
+        ]);
+        args
     }
 
     /// Why the lead runs without its sandbox, if it does.
     pub fn hook_only(&self) -> Option<&str> {
         match self {
             Launch::Sandboxed { .. } => None,
-            Launch::HookOnly { why } => Some(why),
+            Launch::HookOnly { why, .. } => Some(why),
         }
     }
 
@@ -321,7 +329,7 @@ impl Launch {
                 .iter()
                 .map(|line| loosened_warning(name, line))
                 .collect(),
-            Launch::HookOnly { why } => vec![hook_only_warning(name, why)],
+            Launch::HookOnly { why, .. } => vec![hook_only_warning(name, why)],
         }
     }
 }
@@ -335,16 +343,25 @@ pub fn hook_only_warning(name: &str, why: &str) -> String {
 /// `require` when `probe` says the sandbox can't start, and for args that
 /// pass their own `--settings`, which would displace or double the lead's.
 pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<Launch> {
-    if lead
-        .args
-        .iter()
-        .any(|a| a == "--settings" || a.starts_with("--settings="))
-    {
+    let passes = |flag: &str| {
+        lead.args
+            .iter()
+            .any(|a| a == flag || a.starts_with(&format!("{flag}=")))
+    };
+    let drop = "drop it from [lead].args, the herd's args and the command line";
+    if passes("--settings") {
         bail!(
             "{name}'s args pass --settings, which its sandbox's settings file takes; \
-             drop it from [lead].args, the herd's args and the command line, and put those \
-             settings in ~/.claude/settings.json"
+             {drop}, and put those settings in ~/.claude/settings.json"
         );
+    }
+    for flag in ["--mcp-config", "--strict-mcp-config"] {
+        if passes(flag) {
+            bail!(
+                "{name}'s args pass {flag}, which its launch takes; {drop}, and name the \
+                 servers it may use in [lead] mcp_servers"
+            );
+        }
     }
     let (_, mode) = herd::lead_sandbox(paths, &lead.herd)?;
     let dir = paths.config_dir().join("sandbox");
@@ -352,6 +369,9 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
     let file = lead_file(paths, name);
     std::fs::write(&file, serde_json::to_string_pretty(lead)? + "\n")
         .with_context(|| format!("write {}", file.display()))?;
+    let mcp = dir.join(format!("{name}.mcp.json"));
+    let text = serde_json::to_string_pretty(&mcp_config(paths, name, &lead.herd)?)? + "\n";
+    write_private(&mcp, &text).with_context(|| format!("write {}", mcp.display()))?;
     let by_credentials = herd::merge_guard(paths, &lead.herd)? == Some(MergeGuard::Credentials);
     if let Err(Unavailable { why, fix }) = probe() {
         if by_credentials {
@@ -365,7 +385,7 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
             ));
         }
         return match mode {
-            SandboxMode::Prefer => Ok(Launch::HookOnly { why }),
+            SandboxMode::Prefer => Ok(Launch::HookOnly { why, mcp }),
             SandboxMode::Require => Err(refusal(
                 name,
                 &lead.herd,
@@ -385,7 +405,43 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
     Ok(Launch::Sandboxed {
         settings: file,
         loosened,
+        mcp,
     })
+}
+
+/// The only MCP servers lead `name` gets, by `--strict-mcp-config`: those its
+/// herd's `[lead] mcp_servers` names, as the human's `~/.claude.json`
+/// configures them for the lead's worktree (local scope) or for the human
+/// (user scope). Never from the worktree's `.mcp.json`, which the lead can write.
+fn mcp_config(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
+    let wanted = herd::lead_mcp_servers(paths, herd)?;
+    let mut servers = serde_json::Map::new();
+    if wanted.is_empty() {
+        return Ok(json!({"mcpServers": servers}));
+    }
+    let file = paths.home.join(".claude.json");
+    let config: Value = match std::fs::read_to_string(&file) {
+        Ok(text) => {
+            serde_json::from_str(&text).with_context(|| format!("parse {}", file.display()))?
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Null,
+        Err(e) => return Err(e).with_context(|| format!("read {}", file.display())),
+    };
+    let worktree = worktree_path(&herd::repo(paths, herd)?, name);
+    let local = &config["projects"][worktree.display().to_string()]["mcpServers"];
+    for server in wanted {
+        let Some(found) = local.get(&server).or(config["mcpServers"].get(&server)) else {
+            bail!(
+                "{name} can't start: herd {herd}'s [lead] mcp_servers names {server:?}, which \
+                 {} doesn't configure for you or for the lead's worktree; add it with claude \
+                 mcp add --scope user, or drop it from mcp_servers (claude.ai connectors and \
+                 plugins' servers can't be given to a lead)",
+                file.display()
+            );
+        };
+        servers.insert(server, found.clone());
+    }
+    Ok(json!({"mcpServers": servers}))
 }
 
 /// What the human's own Claude settings loosen in lead `name`'s sandbox, one
@@ -595,6 +651,12 @@ pub fn check_running(
         warnings.push(format!(
             "{name}'s sandbox was set before herd {herd}'s current switches, \
              which reach it only when its Claude starts again; {resume}"
+        ));
+    }
+    if !claude_args.iter().any(|a| a == "--strict-mcp-config") {
+        warnings.push(format!(
+            "{name} was started with every MCP server you configure, not only its herd's \
+             [lead] mcp_servers; {resume}"
         ));
     }
     Ok(Running::Sandboxed(warnings))

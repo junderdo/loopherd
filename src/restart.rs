@@ -780,7 +780,16 @@ mod tests {
             live: &dyn Fn(&str) -> String,
         ) -> (Result<String>, MemLedger) {
             let mut member = record("lh-1");
-            member.claude_args = vec!["--settings".into(), self.settings().display().to_string()];
+            member.claude_args = vec![
+                "--settings".into(),
+                self.settings().display().to_string(),
+                "--strict-mcp-config".into(),
+                "--mcp-config".into(),
+                self.settings()
+                    .with_extension("mcp.json")
+                    .display()
+                    .to_string(),
+            ];
             edit(&mut member);
             let mut ledger = Clearing {
                 recorded: member.session_id.clone(),
@@ -1524,6 +1533,27 @@ mod tests {
             "{out}"
         );
         assert_eq!(ledger.0["lh-1"].unsandboxed, None);
+    }
+
+    #[test]
+    fn a_lead_started_with_every_mcp_server_is_restarted_with_a_warning() {
+        let w = World::new();
+        w.handed_off();
+        w.prepared();
+
+        let (result, _) = w.restart_as(false, true, None, &|r| {
+            as_lead(r);
+            r.claude_args.truncate(2);
+        });
+
+        let out = result.unwrap();
+        assert!(
+            out.ends_with(
+                "\nwarning: lh-1 was started with every MCP server you configure, not only its \
+                 herd's [lead] mcp_servers; quit its Claude and run loopherd revive --name lh-1"
+            ),
+            "{out}"
+        );
     }
 
     fn unsandboxed(r: &mut AgentRecord) {

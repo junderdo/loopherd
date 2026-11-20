@@ -614,7 +614,10 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   (`excludedCommands`, `allowWrite` and the like): `lead`, `revive` and
   `restart` refuse such a lead under `require`, naming each file and key,
   and start it with them as warnings under `prefer`; doctor reports them
-  too. Only the human edits that file; ask them. Set `prefer` only when the
+  too. Only the human edits that file; ask them. A lead has no MCP tools
+  unless its herd's `[lead] mcp_servers` names servers from the human's
+  user or local scope (`loopherd herds` shows them); a lead that needs one
+  asks the human to add it. Set `prefer` only when the
   human says so; doctor names those herds and leads.
 - **Change a herd file's values** with `loopherd herd set <herd> <key>
   <value>`, `loopherd herd get <herd> <key>` and `loopherd herd unset <herd>

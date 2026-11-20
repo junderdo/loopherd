@@ -207,6 +207,9 @@ as its main checkout. Then, in order:
    `~/.claude/settings.json` loosens (an `excludedCommands` or `allowWrite`
    entry, say), isn't started unless its `[lead]` sets `sandbox = "prefer"`,
    which starts it with a warning instead ([D100](docs/decisions/D100.md)).
+   A lead starts with no MCP servers; list the ones it may use, by the
+   name `claude mcp add --scope user` gave them, in `[lead] mcp_servers`.
+   Those run outside the sandbox.
 
 The guide a shepherd or lead follows, from setting up a herd to cleaning up
 after merges, is the loopherd skill: `loopherd --skill` prints it

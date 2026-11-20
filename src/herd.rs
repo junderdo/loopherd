@@ -58,6 +58,9 @@ struct LeadFile {
     merge_guard: MergeGuard,
     #[serde(default)]
     sandbox: SandboxMode,
+    /// MCP servers, by name, from the human's own Claude config; a lead gets no others.
+    #[serde(default)]
+    mcp_servers: Vec<String>,
 }
 
 /// How a lead with `merge` off is kept from merging.
@@ -782,6 +785,15 @@ pub fn lead_sandbox(paths: &Paths, herd: &str) -> Result<(Switches, SandboxMode)
     Ok((lead.switches().over(&lead_defaults(paths)?), lead.sandbox))
 }
 
+/// The MCP servers a herd's `[lead]` names, which its lead alone gets.
+pub fn lead_mcp_servers(paths: &Paths, herd: &str) -> Result<Vec<String>> {
+    let file = load(&paths.herds, herd).context("herd")?;
+    let lead = file
+        .lead
+        .with_context(|| format!("herd: {herd} has no [lead]"))?;
+    Ok(lead.mcp_servers)
+}
+
 /// A herd's lead's switches, without reading its prompt.
 pub fn lead_switches(paths: &Paths, herd: &str) -> Result<Switches> {
     Ok(lead_sandbox(paths, herd)?.0)
@@ -1026,8 +1038,21 @@ fn check(text: &str, paths: &Paths) -> Result<HerdFile> {
     if let Some(lead) = &parsed.lead {
         let prompt = read_prompt(&lead.prompt, &lead.prompt_file, paths);
         prompt.and_then(|p| check_lead_prompt(&p)).context("lead")?;
+        check_mcp_servers(&lead.mcp_servers).context("lead")?;
     }
     Ok(parsed)
+}
+
+fn check_mcp_servers(servers: &[String]) -> Result<()> {
+    for (at, server) in servers.iter().enumerate() {
+        if server.trim().is_empty() {
+            bail!("mcp_servers names a blank server");
+        }
+        if servers[..at].contains(server) {
+            bail!("mcp_servers names {server:?} twice");
+        }
+    }
+    Ok(())
 }
 
 /// The `*.toml` files in `dir` by herd name, skipping hidden ones; none if `dir` is missing.
@@ -1092,6 +1117,10 @@ fn describe(
                 "  review_rounds: {}",
                 review_rounds_source(&lead.switches(), defaults)
             ),
+            match lead.mcp_servers.is_empty() {
+                true => "  mcp_servers: none".into(),
+                false => format!("  mcp_servers: {}", lead.mcp_servers.join(", ")),
+            },
         ]
     });
     let after_merge = (!parsed.after_merge.is_empty())
@@ -2788,6 +2817,36 @@ args = ["--model", "opus"]
     }
 
     #[test]
+    fn herds_shows_the_mcp_servers_each_lead_may_use_and_refuses_a_blank_or_repeated_name() {
+        let herd = |servers: &str| {
+            format!("{LEAD_HERD}[lead]\nprompt = \"go\"\nmcp_servers = [{servers}]\n")
+        };
+        let config = Config::with(&[
+            ("named", &herd("\"docs\", \"browser\"")),
+            ("none", &format!("{LEAD_HERD}[lead]\nprompt = \"go\"\n")),
+            ("blank", &herd("\"\"")),
+            ("twice", &herd("\"docs\", \"docs\"")),
+        ]);
+
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+
+        assert_eq!(code, 1, "{report}");
+        assert!(
+            report.contains("  mcp_servers: docs, browser\n"),
+            "{report}"
+        );
+        assert!(report.contains("  mcp_servers: none\n"), "{report}");
+        assert!(
+            report.contains("lead: mcp_servers names a blank server"),
+            "{report}"
+        );
+        assert!(
+            report.contains("lead: mcp_servers names \"docs\" twice"),
+            "{report}"
+        );
+    }
+
+    #[test]
     fn herds_shows_every_switch_off_while_config_toml_is_broken() {
         let herd = format!("{LEAD_HERD}[lead]\nprompt = \"go\"\nmerge = true\n");
         let config = Config::with(&[("h", &herd)]);
@@ -2896,6 +2955,7 @@ args = ["--model", "opus"]
              \x20 switches: merge off (built-in), install off (built-in), rebase off (built-in), \
              new_cards off (built-in), design_escalation off (built-in), blocked_dialogs off (built-in)\n\
              \x20 review_rounds: 3 (built-in)\n\
+             \x20 mcp_servers: none\n\
              invalid b.toml: lead: prompt: unknown placeholder {pane}"
         );
         assert_eq!(code, 1);

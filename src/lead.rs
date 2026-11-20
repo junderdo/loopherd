@@ -408,7 +408,15 @@ mod tests {
         );
         assert_eq!(
             ledger.0["lead-h"].claude_args,
-            ["--model", "opus", "--settings", &path.display().to_string()]
+            [
+                "--model",
+                "opus",
+                "--settings",
+                &path.display().to_string(),
+                "--strict-mcp-config",
+                "--mcp-config",
+                &path.with_extension("mcp.json").display().to_string(),
+            ]
         );
         assert_eq!(ledger.0["lead-h"].unsandboxed, None);
         assert_eq!(
@@ -579,6 +587,156 @@ mod tests {
             assert!(
                 allow.contains(&format!("Bash({command})").into()),
                 "{allow:?}"
+            );
+        }
+    }
+
+    /// The `--mcp-config` a lead's Claude was started with, parsed, after `--strict-mcp-config`.
+    fn started_mcp(herdr: &FakeHerdr) -> (PathBuf, serde_json::Value) {
+        let args = &herdr.started()[0].args;
+        let at = args.iter().position(|a| a == "--mcp-config").unwrap();
+        assert!(
+            args.contains(&"--strict-mcp-config".to_string()),
+            "{args:?}"
+        );
+        let path = PathBuf::from(&args[at + 1]);
+        let text = fs::read_to_string(&path).unwrap();
+        (path, serde_json::from_str(&text).unwrap())
+    }
+
+    #[test]
+    fn a_lead_starts_with_no_mcp_servers_from_any_scope() {
+        let setup = Setup::with_lead(PROMPT);
+        let herdr = herdr();
+
+        lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        let (path, mcp) = started_mcp(&herdr);
+        assert_eq!(path, setup.root.join("config/sandbox/lead-h.mcp.json"));
+        assert_eq!(mcp, serde_json::json!({"mcpServers": {}}));
+    }
+
+    #[test]
+    fn a_lead_on_prefer_without_its_sandbox_still_starts_with_no_mcp_servers() {
+        let setup = Setup::with_lead("prompt = \"go\"\nsandbox = \"prefer\"");
+        let herdr = herdr();
+        let req = LeadRequest {
+            sandbox: || {
+                Err(Unavailable {
+                    why: "bubblewrap not installed".into(),
+                    fix: "install bubblewrap".into(),
+                })
+            },
+            ..request(&[])
+        };
+
+        lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &req,
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert_eq!(started_mcp(&herdr).1, serde_json::json!({"mcpServers": {}}));
+    }
+
+    #[test]
+    fn a_lead_gets_the_mcp_servers_its_herd_names_from_the_humans_user_and_local_scopes() {
+        let setup = Setup::with_lead("prompt = \"go\"\nmcp_servers = [\"docs\", \"browser\"]");
+        let herdr = herdr();
+        let home = setup.root.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let worktree = setup.worktree().display().to_string();
+        fs::write(
+            home.join(".claude.json"),
+            serde_json::json!({
+                "mcpServers": {
+                    "docs": {"type": "http", "url": "https://docs.example/mcp"},
+                    "browser": {"command": "old-browser"},
+                    "mail": {"command": "mail-mcp"},
+                },
+                "projects": {worktree: {"mcpServers": {"browser": {"command": "browser-mcp"}}}},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let paths = Paths {
+            home,
+            ..setup.paths()
+        };
+
+        lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            started_mcp(&herdr).1,
+            serde_json::json!({"mcpServers": {
+                "docs": {"type": "http", "url": "https://docs.example/mcp"},
+                "browser": {"command": "browser-mcp"},
+            }})
+        );
+    }
+
+    #[test]
+    fn a_lead_naming_an_mcp_server_the_human_hasnt_configured_is_refused() {
+        let setup = Setup::with_lead("prompt = \"go\"\nmcp_servers = [\"docs\"]");
+        let herdr = herdr();
+
+        let err = lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "sandbox: lead-h can't start: herd h's [lead] mcp_servers names \"docs\", which \
+             /home/me/.claude.json doesn't configure for you or for the lead's worktree; add it \
+             with claude mcp add --scope user, or drop it from mcp_servers (claude.ai connectors \
+             and plugins' servers can't be given to a lead)"
+        );
+        assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
+    fn a_lead_given_its_own_mcp_config_is_refused_since_its_launch_takes_that_flag() {
+        let setup = Setup::with_lead(PROMPT);
+        for flag in ["--mcp-config", "--strict-mcp-config", "--mcp-config=x.json"] {
+            let herdr = herdr();
+
+            let err = lead(
+                &herdr,
+                &mut MemLedger::default(),
+                &setup.paths(),
+                &request(&[flag]),
+                Some("w1"),
+            )
+            .unwrap_err();
+
+            assert!(
+                format!("{err:#}").starts_with(&format!(
+                    "sandbox: lead-h's args pass {}, which its launch takes;",
+                    flag.split('=').next().unwrap()
+                )),
+                "{err:#}"
             );
         }
     }

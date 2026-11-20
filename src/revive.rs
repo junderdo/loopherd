@@ -592,16 +592,17 @@ fn kept_lead(
     Ok(Some((lead, worktree)))
 }
 
-/// `args` without `--settings`, which a lead's revive writes afresh.
+/// `args` without `--settings` and the MCP flags, which a lead's revive writes afresh.
 fn without_settings(args: &[String]) -> Vec<String> {
     let mut kept = vec![];
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--settings" => {
+            "--settings" | "--mcp-config" => {
                 args.next();
             }
-            _ if arg.starts_with("--settings=") => {}
+            "--strict-mcp-config" => {}
+            _ if arg.starts_with("--settings=") || arg.starts_with("--mcp-config=") => {}
             _ => kept.push(arg.clone()),
         }
     }
@@ -1657,7 +1658,10 @@ mod tests {
                 "--model",
                 "opus",
                 "--settings",
-                &settings.display().to_string()
+                &settings.display().to_string(),
+                "--strict-mcp-config",
+                "--mcp-config",
+                &settings.with_extension("mcp.json").display().to_string(),
             ]
         );
         let written: serde_json::Value =
@@ -1693,7 +1697,10 @@ mod tests {
                 "--model",
                 "opus",
                 "--settings",
-                &settings.display().to_string()
+                &settings.display().to_string(),
+                "--strict-mcp-config",
+                "--mcp-config",
+                &settings.with_extension("mcp.json").display().to_string(),
             ]
         );
         assert_eq!(herdr.tabs()[0].cwd, worktree);
@@ -1709,7 +1716,19 @@ mod tests {
     fn a_lead_loopherd_kept_no_record_of_resumes_only_when_named() {
         let cwd = tempfile::tempdir().unwrap();
         let herdr = herdr();
-        let mut ledger = ledger([unkept_lead("lead-h", cwd.path())]);
+        let mut unkept = unkept_lead("lead-h", cwd.path());
+        unkept.claude_args = [
+            "--model",
+            "opus",
+            "--settings",
+            "/old/lead-h.json",
+            "--strict-mcp-config",
+            "--mcp-config",
+            "/old/lead-h.mcp.json",
+        ]
+        .map(String::from)
+        .into();
+        let mut ledger = ledger([unkept]);
 
         let (out, code) = run(&herdr, &mut ledger, &request());
 
@@ -1738,7 +1757,10 @@ mod tests {
                 "--model",
                 "opus",
                 "--settings",
-                &settings.display().to_string()
+                &settings.display().to_string(),
+                "--strict-mcp-config",
+                "--mcp-config",
+                &settings.with_extension("mcp.json").display().to_string(),
             ]
         );
     }
