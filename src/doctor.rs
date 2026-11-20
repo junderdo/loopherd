@@ -119,7 +119,7 @@ fn sandbox_check(install: &Install, setup: &Result<Setup>) -> Check {
 }
 
 /// A running lead without its sandbox, by `prefer` or from before it had one.
-fn lead_sandbox_check(paths: &Paths, lead: &AgentRecord) -> Option<Check> {
+pub(crate) fn lead_sandbox_check(paths: &Paths, lead: &AgentRecord) -> Option<Check> {
     let started_with_it =
         crate::sandbox::launched_with_settings(paths, &lead.name, &lead.claude_args);
     let why = match &lead.unsandboxed {

@@ -115,7 +115,7 @@ pub fn revive(
             workspace_id,
             session_id,
             unsandboxed,
-            claude_args,
+            lead_args,
             ..
         } = &outcome
         {
@@ -143,7 +143,9 @@ pub fn revive(
                 current.socket = current.socket.take().or_else(|| here.clone());
                 current.process = None;
                 current.unsandboxed = unsandboxed.clone();
-                current.claude_args = claude_args.clone();
+                if let Some(args) = lead_args {
+                    current.claude_args = args.clone();
+                }
                 Ok(())
             });
             match restarted {
@@ -479,8 +481,9 @@ enum Outcome {
         rearm: Rearm,
         /// Why a lead runs without its sandbox; `None` when sandboxed, and for a worker.
         unsandboxed: Option<String>,
-        /// What it was launched with after `--resume`, for the ledger.
-        claude_args: Vec<String>,
+        /// What a lead was launched with after `--resume`; `None` for a worker,
+        /// which keeps its recorded args.
+        lead_args: Option<Vec<String>>,
     },
     Failed {
         step: &'static str,
@@ -725,16 +728,15 @@ fn revive_one(
             rearm: Rearm::NotSent,
         };
     }
-    let mut claude_args = vec![];
+    let mut lead_args = None;
     let mut unsandboxed = None;
     match &lead {
-        None => claude_args.extend(record.claude_args.iter().cloned()),
+        None => {}
         Some((lead, _)) => match sandbox::prepare(&req.paths, &record.name, lead, req.sandbox) {
             Ok(launch) => {
                 warnings.extend(launch.warnings(&record.name));
                 unsandboxed = launch.hook_only().map(str::to_string);
-                claude_args.extend(lead.args.iter().cloned());
-                claude_args.extend(launch.args());
+                lead_args = Some([lead.args.clone(), launch.args()].concat());
             }
             Err(error) => {
                 return Outcome::Failed {
@@ -746,7 +748,7 @@ fn revive_one(
     }
     let args = [
         vec!["--resume".to_string(), session.clone()],
-        claude_args.clone(),
+        lead_args.clone().unwrap_or_else(|| record.claude_args.clone()),
     ]
     .concat();
     let (pane_id, tab_id, new_tab) = match reusable {
@@ -770,7 +772,7 @@ fn revive_one(
             blocked: false,
             rearm: Rearm::NotSent,
             unsandboxed,
-            claude_args,
+            lead_args,
         },
         Ok(StartOutcome::Blocked) => Outcome::Started {
             pane_id,
@@ -780,7 +782,7 @@ fn revive_one(
             blocked: true,
             rearm: Rearm::NotSent,
             unsandboxed,
-            claude_args,
+            lead_args,
         },
         Err(error) => {
             let error = match new_tab.then(|| herdr.close_tab(&tab_id)) {
@@ -1715,12 +1717,10 @@ mod tests {
 
         let revived = &ledger.0["lead-h"];
         assert_eq!(revived.claude_args, herdr.started()[0].args[2..]);
-        assert_eq!(revived.unsandboxed, None);
-        assert!(sandbox::launched_with_settings(
-            &req.paths,
-            "lead-h",
-            &revived.claude_args
-        ));
+        assert_eq!(
+            crate::doctor::lead_sandbox_check(&req.paths, revived).map(|c| c.detail),
+            None
+        );
         assert_eq!(
             sandbox::check_running(&req.paths, "lead-h", "h", &revived.claude_args).unwrap(),
             sandbox::Running::Sandboxed(vec![])
@@ -1852,14 +1852,9 @@ mod tests {
         assert!(!herdr.started()[0].args.contains(&"--settings".to_string()));
         let revived = &ledger.0["lead-h"];
         assert_eq!(revived.claude_args, herdr.started()[0].args[2..]);
-        assert!(!sandbox::launched_with_settings(
-            &req.paths,
-            "lead-h",
-            &revived.claude_args
-        ));
         assert_eq!(
-            revived.unsandboxed.as_deref(),
-            Some("bubblewrap not installed")
+            crate::doctor::lead_sandbox_check(&req.paths, revived).map(|c| c.detail),
+            Some(sandbox::hook_only_warning("lead-h", "bubblewrap not installed"))
         );
     }
 
