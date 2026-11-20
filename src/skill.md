@@ -638,8 +638,16 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   through a reviewed PR; ask the human. A lead has no MCP tools
   unless its herd's `[lead] mcp_servers` names servers from the human's
   user scope (`loopherd herds` shows them); a lead that needs one
-  asks the human to add it. Set `prefer` only when the
-  human says so; doctor names those herds and leads.
+  asks the human to add it. A lead has no Unix sockets unless its herd's
+  `[lead] unix_sockets = "all"` (`loopherd herds` shows it), which reopens
+  herdr, the ssh agent and WSL2 interop to it; `lead`, `revive` and doctor
+  warn of it, and only the human sets it. Where Claude Code's seccomp
+  filter can't block them (doctor says so, naming `npm install -g
+  @anthropic-ai/sandbox-runtime`), `require` refuses the lead and
+  `prefer` starts it as `(lead, sockets open)`. What still gets past the
+  sandbox: workers run unsandboxed, so a lead can have one act for it,
+  and most of the state dir stays writable to it. Set `prefer` only
+  when the human says so; doctor names those herds and leads.
 - **Change a herd file's values** with `loopherd herd set <herd> <key>
   <value>`, `loopherd herd get <herd> <key>` and `loopherd herd unset <herd>
   <key>`, not by hand-editing TOML. Keys are dotted (`queue.max`,
@@ -889,6 +897,11 @@ What differs from the shepherd:
   git pushes over ssh with the herd's deploy key, and the files holding the
   human's own GitHub credentials and ssh keys are unreadable. Pushes to the default
   branch and force-pushes are refused by GitHub; ask the human. The sandbox
+  gives you no Unix sockets, so `herdr`, an ssh agent and WSL2's Windows
+  programs fail inside it (`Operation not permitted`), unless your herd
+  sets `[lead] unix_sockets = "all"`, which only the human does. Workers
+  run unsandboxed and most of the state dir stays writable to you;
+  neither is yours to use against the sandbox. The sandbox
   is a guard rail the human set, not the whole boundary: when it refuses
   something, ask; don't route around it through herdr, a member or
   another tool.
