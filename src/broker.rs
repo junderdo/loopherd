@@ -259,7 +259,11 @@ impl Op {
             } => status(ctx, *all, *json, *color, sink),
             Op::Read { name, lines } => {
                 let read = crate::read::read(ctx.herdr, &*ctx.ledger, name, *lines)?;
-                sink.out(read.trim_end_matches('\n'));
+                // A reply drops empty output, so an empty screen prints nothing either way.
+                let read = read.trim_end_matches('\n');
+                if !read.is_empty() {
+                    sink.out(read);
+                }
                 Ok(0)
             }
         }
@@ -2203,6 +2207,27 @@ mod tests {
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
         assert_eq!(herdr.mutations(), 0);
+    }
+
+    #[test]
+    fn an_empty_screen_reads_as_nothing_through_the_broker_and_directly() {
+        let world = World::new();
+        world.add(member("lh-1", Some("h")));
+        let blank = || FakeHerdr::new(&[]).with_agent("lh-1");
+        let serving = world.serve(blank());
+        let read = Op::Read {
+            name: "lh-1".into(),
+            lines: 40,
+        };
+
+        let (_, brokered) =
+            run_here(&FakeHerdr::new(&[]), &world, Some(&world.client()), &read).unwrap();
+        let (_, direct) = run_here(&blank(), &world, None, &read).unwrap();
+
+        assert_eq!((brokered.out, brokered.err), (vec![], vec![]));
+        assert_eq!((direct.out, direct.err), (vec![], vec![]));
+        world.retire("lead-h");
+        serving.join().unwrap();
     }
 
     #[test]
