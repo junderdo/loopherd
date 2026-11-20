@@ -1038,6 +1038,173 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_starts_with_each_allowed_arg_and_no_warning() {
+        let allowed: [&[&str]; 9] = [
+            &["--model", "sonnet"],
+            &["--model=sonnet"],
+            &["--effort", "max"],
+            &["--effort=high"],
+            &["--verbose"],
+            &["--permission-mode", "default"],
+            &["--permission-mode", "auto"],
+            &["--permission-mode", "plan"],
+            &["--permission-mode=plan"],
+        ];
+        for args in allowed {
+            let setup = Setup::with_lead(PROMPT);
+            let herdr = herdr();
+
+            let (out, code) = run(
+                &herdr,
+                &mut MemLedger::default(),
+                &setup.paths(),
+                &request(args),
+                false,
+                Some("w1"),
+            )
+            .unwrap();
+
+            assert_eq!(code, 0, "{args:?}");
+            assert!(!out.contains("warning:"), "{args:?}: {out}");
+        }
+    }
+
+    #[test]
+    fn require_refuses_a_lead_any_arg_outside_the_allowlist_naming_it_and_its_source() {
+        let refused: [(&[&str], &str); 6] = [
+            (
+                &["--permission-mode", "bypassPermissions"],
+                "--permission-mode bypassPermissions",
+            ),
+            (
+                &["--dangerously-skip-permissions"],
+                "--dangerously-skip-permissions",
+            ),
+            (&["--add-dir", "/srv"], "--add-dir /srv"),
+            (
+                &["--allowedTools", "Write", "Edit"],
+                "--allowedTools Write Edit",
+            ),
+            (&["--frobnicate"], "--frobnicate"),
+            (&["--model"], "--model"),
+        ];
+        for (args, shown) in refused {
+            let setup = Setup::with_lead(PROMPT);
+            let herdr = herdr();
+
+            let err = lead(
+                &herdr,
+                &mut MemLedger::default(),
+                &setup.paths(),
+                &request(args),
+                Some("w1"),
+            )
+            .unwrap_err();
+
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "sandbox: lead-h can't run sandboxed: its args may loosen its sandbox or \
+                     permissions: {shown}, from the command line; a lead takes only --model, \
+                     --effort, --verbose and --permission-mode default, auto or plan, so drop \
+                     those, or set [lead] sandbox = \"prefer\" in herd h to start it with them \
+                     as warnings"
+                )
+            );
+            assert!(herdr.tabs().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_refused_arg_is_named_with_the_herd_file_entry_it_came_from() {
+        let cases = [
+            (
+                "prompt = \"go\"\nargs = [\"--add-dir\", \"/srv\"]",
+                "--add-dir /srv, from [lead].args",
+            ),
+            (PROMPT, "--add-dir /srv, from herd h's args"),
+        ];
+        for (lead_table, named) in cases {
+            let setup = Setup::with_lead(lead_table);
+            let file = setup.root.join("config/herds/h.toml");
+            let text = fs::read_to_string(&file).unwrap().replacen(
+                "args = [\"--model\", \"opus\"]",
+                "args = [\"--add-dir\", \"/srv\"]",
+                1,
+            );
+            fs::write(&file, text).unwrap();
+
+            let err = lead(
+                &herdr(),
+                &mut MemLedger::default(),
+                &setup.paths(),
+                &request(&["--verbose"]),
+                Some("w1"),
+            )
+            .unwrap_err();
+
+            assert!(
+                format!("{err:#}").contains(&format!(": {named};")),
+                "{err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn prefer_starts_a_lead_with_a_disallowed_arg_warning_of_it_in_its_mailbox() {
+        let setup = Setup::with_lead("prompt = \"go\"\nsandbox = \"prefer\"");
+        let herdr = herdr();
+
+        let (out, code) = run(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&["--add-dir", "/srv"]),
+            false,
+            Some("w1"),
+        )
+        .unwrap();
+
+        let warning = "lead-h starts with an arg that may loosen its sandbox or permissions: \
+                       --add-dir /srv, from the command line";
+        assert_eq!(code, 0);
+        assert!(out.starts_with(&format!("warning: {warning}\n")), "{out}");
+        let (mailbox, _) = report::history(&setup.root.join("state/reports"), "lead-h").unwrap();
+        assert!(
+            mailbox.iter().any(|e| e.body
+                == Body::Note {
+                    text: warning.into()
+                }),
+            "{mailbox:?}"
+        );
+    }
+
+    #[test]
+    fn a_credentials_lead_with_a_disallowed_arg_isnt_started_even_under_prefer() {
+        let setup = Setup::with_lead(&format!("{CREDENTIALS}\nsandbox = \"prefer\""));
+        let herdr = herdr();
+
+        let err = lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&["--dangerously-skip-permissions"]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("--dangerously-skip-permissions, from the command line"),
+            "{err:#}"
+        );
+        assert!(
+            format!("{err:#}").contains("merge_guard = \"hook\""),
+            "{err:#}"
+        );
+        assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
     fn a_lead_given_its_own_settings_is_refused_since_its_sandbox_takes_that_flag() {
         let setup = Setup::with_lead(PROMPT);
         let herdr = herdr();
@@ -1960,13 +2127,13 @@ mod tests {
             &herdr(),
             &mut ledger,
             &setup.paths(),
-            &request(&["-x"]),
+            &request(&["--verbose"]),
             Some("w1"),
         )
         .unwrap();
         assert_eq!(
             ledger.0["lead-h"].claude_args[..3],
-            ["--model", "sonnet", "-x"]
+            ["--model", "sonnet", "--verbose"]
         );
     }
 

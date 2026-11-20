@@ -528,7 +528,7 @@ fn a_lead_starts_with_no_mcp_tools() {
     let out = dev(env!("CARGO_BIN_EXE_loopherd"))
         .env("XDG_STATE_HOME", state.path())
         .env("LOOPHERD_CONFIG_DIR", &config)
-        .args(["lead", &herd, "--", "--permission-mode", "acceptEdits"])
+        .args(["lead", &herd, "--", "--permission-mode", "auto"])
         .output()
         .unwrap();
     assert_eq!(
@@ -608,13 +608,11 @@ fn herdr_from_a_lead(herd: &str, lead_line: &str) -> String {
     )
     .unwrap();
     let _cleanup = CloseTab(name.clone());
-    let read_rule = format!("Read(/{}/**)", state.path().display());
 
     let out = dev(env!("CARGO_BIN_EXE_loopherd"))
         .env("XDG_STATE_HOME", state.path())
         .env("LOOPHERD_CONFIG_DIR", &config)
-        .args(["lead", herd, "--", "--permission-mode", "acceptEdits"])
-        .args(["--allowedTools", "Bash(sh:*)", &read_rule])
+        .args(["lead", herd, "--", "--permission-mode", "auto"])
         .output()
         .unwrap();
     assert_eq!(
@@ -818,7 +816,8 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
             "{}[template.echo]\nparams = [\"n\"]\nname = \"{{herd}}-{{n}}\"\n\
              prompt = \"Reply with just the word ok.\"\ndone = \"false\"\n\
              [queue]\ntemplate = \"echo\"\nsource = \"true\"\nmax = 1\n\
-             [lead]\nprompt = \"\"\"This is loopherd's live test of your sandbox, which the \
+             [lead]\nsandbox = \"prefer\"\n\
+             prompt = \"\"\"This is loopherd's live test of your sandbox, which the \
              human runs: it checks which writes your sandbox refuses. The first command \
              tries writes outside your worktree and is expected to record Read-only file \
              system for most of them; that is the result being measured. It then reports a \
@@ -856,8 +855,9 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
         .env("XDG_STATE_HOME", state.path())
         .env("LOOPHERD_CONFIG_DIR", &config)
         // The permission layer can't tell where python3 writes, so with this rule it lets the
-        // write through to the sandbox, which is what this measures.
-        .args(["lead", &herd, "--", "--permission-mode", "acceptEdits"])
+        // write through to the sandbox, which is what this measures. Rules a lead's allowlist
+        // refuses, so its herd is on prefer, which still starts it sandboxed.
+        .args(["lead", &herd, "--", "--permission-mode", "auto"])
         .args(["--allowedTools", "Bash(python3:*)", &write_rule, &read_rule])
         .output()
         .unwrap();
@@ -1066,7 +1066,7 @@ fn a_leads_running_watch_leaves_git_config_writable_in_other_worktrees() {
         .env("LOOPHERD_CONFIG_DIR", &config)
         .env("HERDR_SOCKET_PATH", &server.socket)
         .env_remove("HERDR_PANE_ID")
-        .args(["lead", &herd, "--", "--permission-mode", "acceptEdits"])
+        .args(["lead", &herd, "--", "--permission-mode", "auto"])
         .output()
         .unwrap();
     assert_eq!(
@@ -1224,7 +1224,8 @@ fn a_sandboxed_lead_s_feed_tell_read_and_status_go_through_its_broker_and_stop_a
             "{}[template.echo]\nparams = [\"n\"]\nname = \"{{herd}}-{{n}}\"\n\
              prompt = \"Reply with just the word ok.\"\n\
              [queue]\ntemplate = \"echo\"\nsource = \"cat {}\"\nmax = 1\n\
-             [lead]\nprompt = \"\"\"This is loopherd's live test of your broker, which the \
+             [lead]\nsandbox = \"prefer\"\n\
+             prompt = \"\"\"This is loopherd's live test of your broker, which the \
              human runs. Make exactly one Bash tool call, with the command exactly as written \
              and nothing added before or after it: python3 {} Then reply done.\"\"\"\n",
             herd_head(repo.to_str().unwrap(), &workspace),
@@ -1239,7 +1240,7 @@ fn a_sandboxed_lead_s_feed_tell_read_and_status_go_through_its_broker_and_stop_a
     let out = dev(env!("CARGO_BIN_EXE_loopherd"))
         .env("XDG_STATE_HOME", state.path())
         .env("LOOPHERD_CONFIG_DIR", &config)
-        .args(["lead", &herd, "--", "--permission-mode", "acceptEdits"])
+        .args(["lead", &herd, "--", "--permission-mode", "auto"])
         .args(["--allowedTools", "Bash(python3:*)"])
         .output()
         .unwrap();
