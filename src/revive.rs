@@ -115,6 +115,7 @@ pub fn revive(
             workspace_id,
             session_id,
             unsandboxed,
+            lead_args,
             ..
         } = &outcome
         {
@@ -142,6 +143,9 @@ pub fn revive(
                 current.socket = current.socket.take().or_else(|| here.clone());
                 current.process = None;
                 current.unsandboxed = unsandboxed.clone();
+                if let Some(args) = lead_args {
+                    current.claude_args = args.clone();
+                }
                 Ok(())
             });
             match restarted {
@@ -477,6 +481,9 @@ enum Outcome {
         rearm: Rearm,
         /// Why a lead runs without its sandbox; `None` when sandboxed, and for a worker.
         unsandboxed: Option<String>,
+        /// What a lead was launched with after `--resume`; `None` for a worker,
+        /// which keeps its recorded args.
+        lead_args: Option<Vec<String>>,
     },
     Failed {
         step: &'static str,
@@ -721,16 +728,15 @@ fn revive_one(
             rearm: Rearm::NotSent,
         };
     }
-    let mut args = vec!["--resume".to_string(), session.clone()];
+    let mut lead_args = None;
     let mut unsandboxed = None;
     match &lead {
-        None => args.extend(record.claude_args.iter().cloned()),
+        None => {}
         Some((lead, _)) => match sandbox::prepare(&req.paths, &record.name, lead, req.sandbox) {
             Ok(launch) => {
                 warnings.extend(launch.warnings(&record.name));
                 unsandboxed = launch.hook_only().map(str::to_string);
-                args.extend(lead.args.iter().cloned());
-                args.extend(launch.args());
+                lead_args = Some([lead.args.clone(), launch.args()].concat());
             }
             Err(error) => {
                 return Outcome::Failed {
@@ -740,6 +746,13 @@ fn revive_one(
             }
         },
     }
+    let args = [
+        vec!["--resume".to_string(), session.clone()],
+        lead_args
+            .clone()
+            .unwrap_or_else(|| record.claude_args.clone()),
+    ]
+    .concat();
     let (pane_id, tab_id, new_tab) = match reusable {
         Some(pane) => (pane.id, pane.tab_id, false),
         None => match herdr.create_tab(&workspace.id, cwd, &record.name) {
@@ -761,6 +774,7 @@ fn revive_one(
             blocked: false,
             rearm: Rearm::NotSent,
             unsandboxed,
+            lead_args,
         },
         Ok(StartOutcome::Blocked) => Outcome::Started {
             pane_id,
@@ -770,6 +784,7 @@ fn revive_one(
             blocked: true,
             rearm: Rearm::NotSent,
             unsandboxed,
+            lead_args,
         },
         Err(error) => {
             let error = match new_tab.then(|| herdr.close_tab(&tab_id)) {
@@ -1712,6 +1727,29 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_revived_into_its_sandbox_is_recorded_as_running_in_it() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut lead = lead("lead-h", cwd.path());
+        lead.claude_args = vec!["--model".into(), "opus".into()];
+        let mut ledger = ledger([lead]);
+        let req = request();
+
+        run(&herdr, &mut ledger, &req);
+
+        let revived = &ledger.0["lead-h"];
+        assert_eq!(revived.claude_args, herdr.started()[0].args[2..]);
+        assert_eq!(
+            crate::doctor::lead_sandbox_check(&req.paths, revived).map(|c| c.detail),
+            None
+        );
+        assert_eq!(
+            sandbox::check_running(&req.paths, "lead-h", "h", &revived.claude_args).unwrap(),
+            sandbox::Running::Sandboxed(vec![])
+        );
+    }
+
+    #[test]
     fn a_lead_resumes_as_loopherd_kept_it_whatever_its_ledger_entry_now_says() {
         let herdr = herdr();
         let req = request();
@@ -1834,9 +1872,14 @@ mod tests {
 
         assert_eq!(code, 0, "{out}");
         assert!(!herdr.started()[0].args.contains(&"--settings".to_string()));
+        let revived = &ledger.0["lead-h"];
+        assert_eq!(revived.claude_args, herdr.started()[0].args[2..]);
         assert_eq!(
-            ledger.0["lead-h"].unsandboxed.as_deref(),
-            Some("bubblewrap not installed")
+            crate::doctor::lead_sandbox_check(&req.paths, revived).map(|c| c.detail),
+            Some(sandbox::hook_only_warning(
+                "lead-h",
+                "bubblewrap not installed"
+            ))
         );
     }
 

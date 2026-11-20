@@ -119,14 +119,9 @@ fn sandbox_check(install: &Install, setup: &Result<Setup>) -> Check {
 }
 
 /// A running lead without its sandbox, by `prefer` or from before it had one.
-fn lead_sandbox_check(paths: &Paths, lead: &AgentRecord) -> Option<Check> {
-    let settings = crate::sandbox::settings_file(paths, &lead.name)
-        .display()
-        .to_string();
-    let started_with_it = lead
-        .claude_args
-        .windows(2)
-        .any(|pair| pair[0] == "--settings" && pair[1] == settings);
+pub(crate) fn lead_sandbox_check(paths: &Paths, lead: &AgentRecord) -> Option<Check> {
+    let started_with_it =
+        crate::sandbox::launched_with_settings(paths, &lead.name, &lead.claude_args);
     let why = match &lead.unsandboxed {
         Some(why) => why.as_str(),
         None if started_with_it => return None,
@@ -2059,6 +2054,7 @@ mod tests {
                 process: crate::ledger::Process { pid: 0, start: 0 },
                 live: |session| session.to_string(),
                 spawn_waiter: |_, _| Ok(()),
+                prs: &crate::github::fake::FakePrs(Ok(crate::github::PrLookup::None)),
             };
             crate::broker::serve(
                 &host,
