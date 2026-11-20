@@ -98,10 +98,11 @@ Init never launches an agent.
    prints one unready task per line (key, then title): every open task
    `source` leaves out but blocked ones, keeping those waiting on the human.
    It changes nothing feed does; `status` counts its lines (D60).
-   `loopherd herds` lists herd files, their templates and `after_merge`. Hand-spawn (`loopherd spawn
-   … --prompt-file`, or `loopherd add <herd> <template> <params…>`) only for
-   work outside the queue; check a prompt's placeholders with `grep -o
-   '{[a-z]*}'`.
+   `loopherd herds` lists herd files, their templates and `after_merge`. Hand-spawn only for
+   work outside the queue, with `loopherd add <herd> <template> <params…>`.
+   A lead always uses `add`: `loopherd spawn … --prompt-file` records no
+   herd, so a sandboxed lead can't `retire --close` what it spawns. Check a
+   prompt's placeholders with `grep -o '{[a-z]*}'`.
 2. **Watch.** Keep one wait in the background for everything you read:
    ```bash
    loopherd watch --timeout 3600
