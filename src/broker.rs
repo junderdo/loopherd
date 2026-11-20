@@ -821,10 +821,11 @@ struct Job {
     op: Op,
 }
 
-/// The environment `lead`'s broker takes on before it serves, so its git
-/// and gh reach origin with the lead's narrowed credentials, as in the
-/// lead's sandbox: none unless the herd its launch record names guards
-/// merges by credentials (D95). Errs, naming the fix, while they're missing.
+/// The environment `lead`'s broker, and its unsandboxed watch, take on
+/// before running anything, so their git and gh reach origin with the
+/// lead's narrowed credentials, as in the lead's sandbox: none unless the
+/// herd its launch record names guards merges by credentials (D95). Errs,
+/// naming the fix, while they're missing.
 pub fn lead_env(paths: &Paths, lead: &str) -> Result<Vec<(String, String)>> {
     use crate::herd::MergeGuard;
     validate_name(lead)?;
@@ -832,18 +833,13 @@ pub fn lead_env(paths: &Paths, lead: &str) -> Result<Vec<(String, String)>> {
         return Ok(vec![]);
     };
     let herd = &kept.herd;
-    let guard = crate::herd::merge_guard(paths, herd).with_context(|| {
-        format!(
-            "{lead}'s broker can't start: whether herd {herd} guards merges by credentials \
-             is unknown"
-        )
-    })?;
+    let guard = crate::herd::merge_guard(paths, herd)
+        .with_context(|| format!("whether herd {herd} guards merges by credentials is unknown"))?;
     if guard != Some(MergeGuard::Credentials) {
         return Ok(vec![]);
     }
-    let env = crate::credentials::lead_env(paths, herd).with_context(|| {
-        format!("{lead}'s broker can't start: herd {herd} guards merges by credentials")
-    })?;
+    let env = crate::credentials::lead_env(paths, herd)
+        .with_context(|| format!("herd {herd} guards merges by credentials"))?;
     let mut env: Vec<(String, String)> = env
         .into_iter()
         .map(|(name, value)| (name, value.as_str().unwrap_or_default().to_string()))
@@ -851,7 +847,7 @@ pub fn lead_env(paths: &Paths, lead: &str) -> Result<Vec<(String, String)>> {
     // Outside the sandbox the human's keys are readable: a core.sshCommand -i or
     // a `Host *` IdentityFile would offer them, so ssh reads loopherd's config alone.
     if let Some(missing) = crate::credentials::host_block_missing(paths, herd) {
-        bail!("{lead}'s broker can't start: herd {herd} guards merges by credentials: {missing}");
+        bail!("herd {herd} guards merges by credentials: {missing}");
     }
     let ssh_config = crate::credentials::ssh_config(paths);
     // Setting it turns off loopherd's own BatchMode, so a prompt would hang until the git timeout.
@@ -1373,6 +1369,7 @@ struct Request {
 /// The broker of the lead running this loopherd, process `me`: the lead
 /// whose sandboxed Claude is an ancestor, else the unretired lead the ledger
 /// has in `pane`. Asks herdr nothing; a ledger it can't read names no lead.
+/// A lead from another config dir falls back to the pane alone.
 pub fn route(
     paths: &Paths,
     ledger: &dyn Ledger,
@@ -1380,10 +1377,13 @@ pub fn route(
     me: u32,
     pane: Option<&tool_hook::Pane>,
 ) -> Option<Client> {
-    let lead = sandbox::calling_lead(paths, procs, me).or_else(|| {
-        let record = tool_hook::lead_in(ledger, pane?).ok()??;
-        (!record.retired).then_some(record.name)
-    })?;
+    let lead = sandbox::calling_lead(paths, procs, me)
+        .ok()
+        .flatten()
+        .or_else(|| {
+            let record = tool_hook::lead_in(ledger, pane?).ok()??;
+            (!record.retired).then_some(record.name)
+        })?;
     Some(Client::for_lead(paths, &lead))
 }
 
@@ -3442,9 +3442,8 @@ mod tests {
         let err = lead_env(&world.paths, "lead-h").unwrap_err();
 
         assert!(
-            format!("{err:#}").starts_with(
-                "lead-h's broker can't start: whether herd h guards merges by credentials is unknown: "
-            ),
+            format!("{err:#}")
+                .starts_with("whether herd h guards merges by credentials is unknown: "),
             "{err:#}"
         );
     }
@@ -3460,7 +3459,7 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             format!(
-                "lead-c's broker can't start: herd c guards merges by credentials: no token at {}; \
+                "herd c guards merges by credentials: no token at {}; \
                  run loopherd merge-guard c for how to create and store it",
                 token.display()
             )
@@ -3479,7 +3478,7 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             format!(
-                "lead-c's broker can't start: herd c guards merges by credentials: \
+                "herd c guards merges by credentials: \
                  no current Host loopherd-c in {}; run loopherd merge-guard c",
                 ssh_config.display()
             )

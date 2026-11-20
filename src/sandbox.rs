@@ -161,28 +161,61 @@ fn lead_worktrees(paths: &Paths) -> Vec<(String, PathBuf)> {
 
 /// The lead whose sandboxed Claude started process `me`: an ancestor run with
 /// `--settings` naming that lead's settings file. A lead can't change its own
-/// Claude's command line, as it can its ledger entry.
-pub fn calling_lead(paths: &Paths, procs: &dyn Procs, me: u32) -> Option<String> {
+/// Claude's command line, as it can its ledger entry. Errs when an ancestor
+/// runs a lead from another config dir, which this loopherd can't vouch for.
+pub fn calling_lead(paths: &Paths, procs: &dyn Procs, me: u32) -> Result<Option<String>> {
     let dir = paths.config_dir().join("sandbox");
     let mut pid = procs.parent(me);
     while let Some(p) = pid.filter(|&p| p > 1) {
-        let found = procs.cmdline(p).and_then(|args| {
+        let settings = procs.cmdline(p).into_iter().flat_map(|args| {
             args.windows(2)
                 .filter(|pair| pair[0] == "--settings")
-                .find_map(|pair| lead_of_settings(&dir, Path::new(&pair[1])))
+                .map(|pair| PathBuf::from(&pair[1]))
+                .collect::<Vec<_>>()
         });
-        if found.is_some() {
-            return found;
+        for file in settings {
+            let Some((at, name)) = lead_of_settings(&file) else {
+                continue;
+            };
+            if at == dir {
+                return Ok(Some(name));
+            }
+            if at.join(format!("{name}.lead.json")).is_file() {
+                bail!(
+                    "refused: an ancestor Claude runs lead {name} from {}, not from this \
+                     loopherd's config dir {}",
+                    at.display(),
+                    paths.config_dir().display()
+                );
+            }
         }
         pid = procs.parent(p);
     }
-    None
+    Ok(None)
 }
 
-fn lead_of_settings(dir: &Path, file: &Path) -> Option<String> {
+/// The first `PATH` entry that would let a lead choose which `loopherd` runs:
+/// empty or relative (resolved from its cwd), or inside a dir it can write.
+fn plantable_path_entry(path: Option<&std::ffi::OsStr>, writable: &[&Path]) -> Option<String> {
+    std::env::split_paths(path?).find_map(|dir| {
+        if dir.as_os_str().is_empty() {
+            Some("an empty entry".to_string())
+        } else if dir.is_relative() {
+            Some(format!("the relative entry {}", dir.display()))
+        } else {
+            let inside = writable.iter().find(|w| dir.starts_with(w))?;
+            Some(format!("{}, inside {}", dir.display(), inside.display()))
+        }
+    })
+}
+
+/// The sandbox dir and lead name a lead's settings file `file` names.
+fn lead_of_settings(file: &Path) -> Option<(PathBuf, String)> {
     let name = file.file_name()?.to_str()?.strip_suffix(".json")?;
-    let is_settings = file.parent() == Some(dir) && !name.ends_with(".lead");
-    is_settings.then(|| name.to_string())
+    let at = file.parent()?;
+    let is_settings =
+        at.file_name()? == "sandbox" && !name.ends_with(".lead") && !name.ends_with(".mcp");
+    is_settings.then(|| (at.to_path_buf(), name.to_string()))
 }
 
 /// Checks a ledger entry, which any lead can write, before loopherd runs git
@@ -410,10 +443,17 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
             )),
         };
     }
+    let worktree = worktree_path(&herd::repo(paths, &lead.herd)?, name);
+    let writable = [worktree.as_path(), paths.state_dir()];
+    if let Some(entry) = plantable_path_entry(std::env::var_os("PATH").as_deref(), &writable) {
+        bail!(
+            "{name} can't start: PATH has {entry}, where it could plant the loopherd its \
+             watch runs outside its sandbox; drop that entry from PATH"
+        );
+    }
     // Before its settings, which name what it makes.
     create_state(paths, name)?;
     let own = settings(paths, name, &lead.herd)?;
-    let worktree = worktree_path(&herd::repo(paths, &lead.herd)?, name);
     let loosened = loosenings(&paths.home, &worktree, &own);
     if let Some(refusal) = loosened_refusal(paths, name, &lead.herd, &loosened)? {
         return Err(refusal);
@@ -1021,7 +1061,8 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
         },
     });
     // loopherd's own commands that write past the sandbox run in the lead's broker (D98).
-    let mut excluded: Vec<&str> = vec![];
+    // A sandboxed watch would hold the sandbox's .git/config.lock placeholder for its whole run (D104).
+    let mut excluded: Vec<&str> = vec!["loopherd watch", "loopherd watch *"];
     if switches.install {
         // ~/.claude is a protected path no allowWrite opens, and the installer writes there.
         excluded.extend([
@@ -1143,11 +1184,58 @@ mod tests {
         procs.add(40, "/bin/bash", 30, 400);
         procs.add(50, "/usr/bin/loopherd", 40, 500);
 
-        assert_eq!(calling_lead(&paths, &procs, 50), Some("lead-h".into()));
+        assert_eq!(
+            calling_lead(&paths, &procs, 50).unwrap(),
+            Some("lead-h".into())
+        );
 
         let elsewhere = root.path().join("lead-h.json").display().to_string();
         procs.set_cmdline(30, &["claude", "--settings", &elsewhere]);
-        assert_eq!(calling_lead(&paths, &procs, 50), None);
+        assert_eq!(calling_lead(&paths, &procs, 50).unwrap(), None);
+    }
+
+    #[test]
+    fn a_path_entry_a_lead_could_plant_loopherd_in_is_named() {
+        let worktree = Path::new("/repo-worktrees/lead-h");
+        let state = Path::new("/state/loopherd");
+        let named = |path: &str| plantable_path_entry(Some(path.as_ref()), &[worktree, state]);
+
+        assert_eq!(named("/usr/bin:/home/h/.local/bin"), None);
+        assert_eq!(named("/usr/bin::/bin").as_deref(), Some("an empty entry"));
+        assert_eq!(
+            named("/usr/bin:node_modules/.bin").as_deref(),
+            Some("the relative entry node_modules/.bin")
+        );
+        assert_eq!(
+            named("/repo-worktrees/lead-h/bin:/usr/bin").as_deref(),
+            Some("/repo-worktrees/lead-h/bin, inside /repo-worktrees/lead-h")
+        );
+        assert_eq!(named("/repo-worktrees/lead-hx/bin"), None);
+    }
+
+    #[test]
+    fn a_lead_run_from_another_config_dir_is_refused_not_missed() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(&root.path().join("ours"));
+        let theirs = root.path().join("theirs/sandbox");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(theirs.join("lead-h.lead.json"), "{}").unwrap();
+        let settings = theirs.join("lead-h.json").display().to_string();
+        let mut procs = crate::process::FakeProcs::pane();
+        procs.set_cmdline(30, &["claude", "--settings", &settings]);
+        procs.add(50, "/usr/bin/loopherd", 30, 500);
+
+        let err = calling_lead(&paths, &procs, 50).unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "refused: an ancestor Claude runs lead lead-h from {}, not from this \
+                 loopherd's config dir {}",
+                theirs.display(),
+                paths.config_dir().display()
+            )
+        );
     }
 
     #[test]
