@@ -313,17 +313,20 @@ fn herd_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
 /// What the human's own Claude settings loosen in `herd`'s lead's sandbox,
 /// failing where that keeps the lead from starting.
 fn loosened_checks(paths: &Paths, herd: &str) -> Vec<Check> {
+    use crate::sandbox::WhenLoosened;
     let loosened = crate::lead::lead_name(herd)
         .and_then(|name| crate::sandbox::loosened(paths, &name, herd))
-        .and_then(|lines| Ok((lines, crate::sandbox::refuses_loosened(paths, herd)?)));
-    let Ok((lines, refuses)) = loosened else {
+        .and_then(|lines| Ok((lines, crate::sandbox::when_loosened(paths, herd)?)));
+    // A herd whose lead's settings can't be built has that reported by its own check.
+    let Ok((lines, when)) = loosened else {
         return vec![];
     };
     let name = format!("herd {herd} sandbox settings");
     lines
         .into_iter()
-        .map(|line| match refuses {
-            true => failure(
+        .map(|line| match when {
+            WhenLoosened::Warn => warning(&name, line, "remove it".into()),
+            WhenLoosened::Refuse => failure(
                 &name,
                 line,
                 format!(
@@ -331,7 +334,14 @@ fn loosened_checks(paths: &Paths, herd: &str) -> Vec<Check> {
                      its lead with it as a warning"
                 ),
             ),
-            false => warning(&name, line, "remove it".into()),
+            WhenLoosened::RefuseForCredentials => failure(
+                &name,
+                line,
+                format!(
+                    "remove it; a credentials lead never starts with it, so the other way is \
+                     loopherd herd set {herd} lead.merge_guard '\"hook\"'"
+                ),
+            ),
         })
         .collect()
 }

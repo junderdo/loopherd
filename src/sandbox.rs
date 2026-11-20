@@ -395,8 +395,8 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
     }
     let own = settings(paths, name, &lead.herd)?;
     let loosened = loosenings(&paths.home, &own);
-    if !loosened.is_empty() && refuses_loosened(paths, &lead.herd)? {
-        return Err(loosened_refusal(name, &lead.herd, &loosened));
+    if let Some(refusal) = loosened_refusal(paths, name, &lead.herd, &loosened)? {
+        return Err(refusal);
     }
     create_state(paths.state_dir())?;
     let file = settings_file(paths, name);
@@ -450,43 +450,72 @@ pub fn loosened(paths: &Paths, name: &str, herd: &str) -> Result<Vec<String>> {
     Ok(loosenings(&paths.home, &settings(paths, name, herd)?))
 }
 
-/// Whether a loosened sandbox keeps `herd`'s lead from starting: under
-/// `require`, or with `merge_guard = "credentials"`, whose token a loosened
-/// sandbox could expose.
-pub fn refuses_loosened(paths: &Paths, herd: &str) -> Result<bool> {
+/// What a loosened sandbox does to a lead's start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhenLoosened {
+    /// `prefer`: it starts, warned.
+    Warn,
+    /// `require`: it doesn't start.
+    Refuse,
+    /// `merge_guard = "credentials"`, whose token a loosened sandbox could expose, under either mode.
+    RefuseForCredentials,
+}
+
+pub fn when_loosened(paths: &Paths, herd: &str) -> Result<WhenLoosened> {
     let (_, mode) = herd::lead_sandbox(paths, herd)?;
-    Ok(mode == SandboxMode::Require
-        || herd::merge_guard(paths, herd)? == Some(MergeGuard::Credentials))
+    Ok(match (herd::merge_guard(paths, herd)?, mode) {
+        (Some(MergeGuard::Credentials), _) => WhenLoosened::RefuseForCredentials,
+        (_, SandboxMode::Require) => WhenLoosened::Refuse,
+        (_, SandboxMode::Prefer) => WhenLoosened::Warn,
+    })
 }
 
 fn loosened_warning(name: &str, line: &str) -> String {
     format!("{name}'s sandbox is loosened by {line}")
 }
 
-fn loosened_refusal(name: &str, herd: &str, loosened: &[String]) -> anyhow::Error {
-    anyhow::anyhow!(
-        "{name} can't run sandboxed: your Claude settings loosen its sandbox: {}; remove \
-         those, or set [lead] sandbox = \"prefer\" in herd {herd} to start it with them as \
-         warnings",
+/// The refusal for a loosened sandbox, or `None` where it starts warned.
+fn loosened_refusal(
+    paths: &Paths,
+    name: &str,
+    herd: &str,
+    loosened: &[String],
+) -> Result<Option<anyhow::Error>> {
+    if loosened.is_empty() {
+        return Ok(None);
+    }
+    let why = format!(
+        "your Claude settings loosen its sandbox: {}; remove those",
         loosened.join("; ")
-    )
+    );
+    Ok(match when_loosened(paths, herd)? {
+        WhenLoosened::Warn => None,
+        WhenLoosened::Refuse => Some(anyhow::anyhow!(
+            "{name} can't run sandboxed: {why}, or set [lead] sandbox = \"prefer\" in herd \
+             {herd} to start it with them as warnings"
+        )),
+        WhenLoosened::RefuseForCredentials => Some(credentials_refusal(
+            name,
+            &format!("{why}, or set [lead] merge_guard = \"hook\" in herd {herd}"),
+        )),
+    })
 }
 
 /// Boolean keys that loosen a sandbox when set to anything but `false`.
-const LOOSENING_SWITCHES: [(&str, &str); 3] = [
+const LOOSENING_SWITCHES: [(&str, &str); 5] = [
     (
         "/sandbox/filesystem/disabled",
         "turns its filesystem rules off",
     ),
     ("/sandbox/enableWeakerNestedSandbox", "weakens it"),
     ("/sandbox/allowNestedUserNamespaces", "weakens it"),
+    ("/sandbox/enableWeakerNetworkIsolation", "weakens it"),
+    ("/sandbox/allowAppleEvents", "lets it drive other apps"),
 ];
 
 /// What the human's `~/.claude/settings.json` adds to a lead's sandbox, whose
 /// own settings are `own`: one line per loosening entry, naming the file.
-/// Claude Code merges user settings' lists into `--settings`, and takes their
-/// booleans where `--settings` sets none. A repo's project and local settings
-/// don't reach a sandbox with `allowUnsandboxedCommands` off.
+/// D100 says which keys reach a sandbox locked by `--settings`, and why.
 fn loosenings(home: &Path, own: &Value) -> Vec<String> {
     let file = home.join(".claude/settings.json");
     let shown = file.display();
@@ -511,21 +540,46 @@ fn loosenings(home: &Path, own: &Value) -> Vec<String> {
         .into_iter()
         .map(PathBuf::from)
         .collect();
-    for path in entries(&user["sandbox"]["filesystem"]["allowWrite"]) {
-        let inside = absolute(&path, home)
-            .is_some_and(|path| own_writes.iter().any(|own| path.starts_with(own)));
-        if !inside {
-            found.push(format!(
-                "{shown}: sandbox.filesystem.allowWrite opens {path} to writes"
-            ));
+    // Only an exact match counts: beneath one, the lead could plant a symlink before it exists.
+    let opens = |path: Option<PathBuf>| !path.is_some_and(|path| own_writes.contains(&path));
+    for (key, list) in [
+        (
+            "sandbox.filesystem.allowWrite",
+            &user["sandbox"]["filesystem"]["allowWrite"],
+        ),
+        (
+            "permissions.additionalDirectories",
+            &user["permissions"]["additionalDirectories"],
+        ),
+    ] {
+        for path in entries(list) {
+            if opens(absolute(&path, home)) {
+                found.push(format!("{shown}: {key} opens {path} to writes"));
+            }
         }
     }
-    let own_reads = entries(&own["sandbox"]["filesystem"]["allowRead"]);
-    for path in entries(&user["sandbox"]["filesystem"]["allowRead"]) {
-        if !own_reads.contains(&path) {
-            found.push(format!(
-                "{shown}: sandbox.filesystem.allowRead opens {path} to reads"
-            ));
+    for rule in entries(&user["permissions"]["allow"]) {
+        let edit = match rule.strip_prefix("Edit") {
+            Some("") => None,
+            Some(rest) => match rest.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
+                Some(spec) => Some(edit_rule_path(spec, home)),
+                None => continue,
+            },
+            None => continue,
+        };
+        if opens(edit.flatten()) {
+            found.push(format!("{shown}: permissions.allow opens {rule} to writes"));
+        }
+    }
+    // allowRead only carves into denyRead, which a lead has only with credentials to hide.
+    if !own["sandbox"]["filesystem"]["denyRead"].is_null() {
+        let own_reads = entries(&own["sandbox"]["filesystem"]["allowRead"]);
+        for path in entries(&user["sandbox"]["filesystem"]["allowRead"]) {
+            if !own_reads.contains(&path) {
+                found.push(format!(
+                    "{shown}: sandbox.filesystem.allowRead opens {path} to reads"
+                ));
+            }
         }
     }
     for (pointer, what) in LOOSENING_SWITCHES {
@@ -538,6 +592,24 @@ fn loosenings(home: &Path, own: &Value) -> Vec<String> {
         }
     }
     found
+}
+
+/// An `Edit(…)` rule's directory in user settings: `//` absolute, `~/` home,
+/// `/` relative to `~/.claude`. `None` for a relative path or a glob before its end.
+fn edit_rule_path(spec: &str, home: &Path) -> Option<PathBuf> {
+    let spec = spec.trim_end_matches("/**").trim_end_matches("/*");
+    if spec.contains('*') {
+        return None;
+    }
+    let path = if let Some(rest) = spec.strip_prefix("//") {
+        format!("/{rest}")
+    } else if spec.starts_with("~/") {
+        spec.to_string()
+    } else {
+        let rest = spec.strip_prefix('/')?;
+        home.join(".claude").join(rest).display().to_string()
+    };
+    absolute(&path, home)
 }
 
 /// A settings list's entries; anything else that's set is one entry, as written.
@@ -636,17 +708,18 @@ pub fn check_running(
         };
     }
     let current = settings(paths, name, herd)?;
-    let loosened = loosenings(&paths.home, &current);
-    if !loosened.is_empty() && refuses_loosened(paths, herd)? {
-        return Err(loosened_refusal(name, herd, &loosened));
+    let on_disk = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    // Judged against what the running Claude started with, which may predate the switches.
+    let loosened = loosenings(&paths.home, on_disk.as_ref().unwrap_or(&current));
+    if let Some(refusal) = loosened_refusal(paths, name, herd, &loosened)? {
+        return Err(refusal);
     }
     let mut warnings: Vec<String> = loosened
         .iter()
         .map(|line| loosened_warning(name, line))
         .collect();
-    let on_disk = std::fs::read_to_string(&file)
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
     if on_disk.as_ref() != Some(&current) {
         warnings.push(format!(
             "{name}'s sandbox was set before herd {herd}'s current switches, \

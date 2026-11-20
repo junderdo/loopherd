@@ -22,9 +22,9 @@ pub struct LeadRequest {
 }
 
 /// Spawns `lead-<herd>` in a detached worktree of the same name, in its
-/// sandbox, returning its name and the warnings its start carries (a hook-only
-/// start, or what loosens its sandbox under `prefer`), which its mailbox keeps
-/// too, and a hook-only start its ledger entry. Refuses while the herd has an
+/// sandbox, returning its name and its start's warnings: a hook-only start, or
+/// what loosens its sandbox under `prefer`. Each is noted in its mailbox, and a
+/// hook-only start flagged in the ledger. Refuses while the herd has an
 /// unretired lead.
 pub fn lead(
     herdr: &dyn Herdr,
@@ -1169,17 +1169,17 @@ mod tests {
     }
 
     #[test]
-    fn user_settings_that_stay_inside_what_the_lead_may_write_or_its_own_settings_set_dont_count() {
+    fn user_settings_that_the_leads_own_settings_already_set_dont_count() {
         let setup = Setup::with_lead("prompt = \"go\"");
-        let worktree = setup.worktree().join("target");
+        let worktree = setup.worktree();
         let paths = home_with_settings(
             &setup,
             &format!(
                 r#"{{"sandbox": {{"enabled": false, "allowUnsandboxedCommands": true,
                     "excludedCommands": ["loopherd feed"],
                     "enableWeakerNestedSandbox": false,
-                    "filesystem": {{"allowWrite": [{worktree:?}]}}}},
-                    "permissions": {{"allow": ["Bash(*)"]}}}}"#
+                    "filesystem": {{"allowWrite": [{worktree:?}], "allowRead": ["/srv"]}}}},
+                    "permissions": {{"allow": ["Bash(*)", "Read(//srv/**)"]}}}}"#
             ),
         );
 
@@ -1194,6 +1194,72 @@ mod tests {
         assert!(
             started.as_ref().is_ok_and(|(_, _, w)| w.is_empty()),
             "{started:?}"
+        );
+    }
+
+    #[test]
+    fn user_permissions_that_open_writes_count_even_beneath_what_the_lead_may_write() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let beneath = setup.worktree().join("link").display().to_string();
+        let paths = home_with_settings(
+            &setup,
+            &format!(
+                r#"{{"sandbox": {{"filesystem": {{"allowWrite": [{beneath:?}]}}}},
+                    "permissions": {{"additionalDirectories": ["~/notes"],
+                    "allow": ["Edit(//srv/**)", "Edit"]}}}}"#
+            ),
+        );
+
+        let err = lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        let file = setup.root.join("home/.claude/settings.json");
+        let file = file.display();
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "sandbox: lead-h can't run sandboxed: your Claude settings loosen its sandbox: \
+                 {file}: sandbox.filesystem.allowWrite opens {beneath} to writes; \
+                 {file}: permissions.additionalDirectories opens ~/notes to writes; \
+                 {file}: permissions.allow opens Edit(//srv/**) to writes; \
+                 {file}: permissions.allow opens Edit to writes; \
+                 remove those, or set [lead] sandbox = \"prefer\" in herd h to start it with \
+                 them as warnings"
+            )
+        );
+    }
+
+    #[test]
+    fn a_credentials_lead_whose_user_settings_loosen_its_sandbox_isnt_started_even_under_prefer() {
+        let setup = Setup::with_lead(&format!("{CREDENTIALS}\nsandbox = \"prefer\""));
+        origin_on_github(&setup, "https://github.com/acme/widgets.git");
+        store_credentials(&setup, true, Some("github_pat_1"));
+        let paths =
+            home_with_settings(&setup, r#"{"sandbox": {"excludedCommands": ["docker *"]}}"#);
+
+        let err = lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "sandbox: lead-h can't start with merge_guard = \"credentials\": your Claude \
+                 settings loosen its sandbox: {}: sandbox.excludedCommands runs \"docker *\" \
+                 outside it; remove those, or set [lead] merge_guard = \"hook\" in herd h",
+                setup.root.join("home/.claude/settings.json").display()
+            )
         );
     }
 
