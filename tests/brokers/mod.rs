@@ -47,6 +47,19 @@ impl Broker {
     pub fn pid(&self) -> u32 {
         self.0.id()
     }
+
+    /// Whether it exits within `within`.
+    #[allow(dead_code)] // Not every test file that starts a broker waits on it.
+    pub fn wait_exited(&mut self, within: Duration) -> bool {
+        let given_up = Instant::now() + within;
+        while self.0.try_wait().unwrap().is_none() {
+            if Instant::now() >= given_up {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        true
+    }
 }
 
 impl Drop for Broker {

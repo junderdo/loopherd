@@ -683,6 +683,13 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   A watch that exited `drained` stays down: after `loopherd resume`, re-arm
   yours by hand, and `loopherd tell` a lead that stopped on `<herd> drained`
   to re-arm its own.
+- **After a merge that changes the broker**, once it is installed, run
+  `loopherd broker-restart <lead>` for each lead, from your own shell, never
+  a lead's. It asks the broker to stop once its request in flight is
+  answered, then starts one on the installed binary, which serves what is
+  still queued; with none running it starts one. A broker still busy after
+  4 hours is left running and the command fails naming its pid. A lead's
+  `<lead>'s broker predates this loopherd` error asks for the same command.
 - **After a herdr restart** run `loopherd revive` (`--dry-run` first). It
   resumes non-retired members by session ID, and prompts each lead whose
   watch isn't running to re-arm it. It never prompts workers. It skips a

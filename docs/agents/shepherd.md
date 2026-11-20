@@ -49,7 +49,9 @@ Backlog cards into members `lh-<n>` on `<type>/LH-<n>-<slug>`.
   steps by hand. Run feed in the background when after_merge is set, since
   `scripts/install` can take minutes. If a feed dies partway, the next feed
   notes the after_merge as interrupted, with no outcome; check what ran and
-  finish the steps by hand.
+  finish the steps by hand. Once a merge that changes the broker is
+  installed, run `loopherd broker-restart <lead>` for each lead: it waits
+  for the request its broker is serving, then starts one on the new binary.
 
 - **Triage** (the skill's Triage, D60): the herd file's `[queue] backlog`
   (see [examples/loopherd-cards-routed.toml](../examples/loopherd-cards-routed.toml))
