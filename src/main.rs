@@ -77,7 +77,6 @@ use crate::herdr::{CliHerdr, Herdr, socket_from_env};
 use crate::lead::LeadRequest;
 use crate::ledger::{FileLedger, Ledger, Outcome, Process};
 use crate::process::Procs;
-use crate::prompt::prompt;
 use crate::release::release;
 use crate::report::{Filter, Kind, Reporter, report, reports};
 use crate::retire::{refuse_own_lead, refuse_unfinished, retire, retire_and_close};
@@ -1350,31 +1349,13 @@ fn open_in_browser(url: &str) -> Result<()> {
 }
 
 fn run_prompt(name: &str, force: bool) -> Result<i32> {
-    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    refuse_inside_sandbox(&ledger, &format!("loopherd prompt {name}"))?;
-    let paths = Paths::from_env()?;
-    let caller = sandbox::calling_lead(&paths, &process::ProcFs, std::process::id());
-    prompt(
-        &CliHerdr,
-        &mut ledger,
-        name,
-        force,
-        &sandbox::Guard::new(paths, caller),
-    )?;
-    println!("prompted {name}");
-    Ok(0)
-}
-
-/// Refuses before anything reaches herdr when this run can't write the ledger: a lead's
-/// command that misses its sandbox exclusion runs inside, where its herd isn't checked.
-fn refuse_inside_sandbox(ledger: &FileLedger, command: &str) -> Result<()> {
-    if ledger.read_only()? {
-        bail!(
-            "refused: this loopherd runs in a lead's sandbox, which can't write the ledger; \
-             run `{command}` as a Bash command of its own, which runs outside the sandbox"
-        );
-    }
-    Ok(())
+    run_op(
+        own_broker().as_ref(),
+        &broker::Op::Prompt {
+            name: name.into(),
+            force,
+        },
+    )
 }
 
 fn run_tell(name: &str, text: Option<String>, text_file: Option<PathBuf>) -> Result<i32> {
@@ -1414,6 +1395,8 @@ fn run_op(client: Option<&broker::Client>, op: &broker::Op) -> Result<i32> {
             process: own_process()?,
             lead: None,
         },
+        live: live_session,
+        spawn_waiter,
     };
     broker::run(&mut ctx, client, op, &mut Printed)
 }
@@ -1453,30 +1436,13 @@ fn own_broker() -> Option<broker::Client> {
 }
 
 fn run_restart(name: &str, force: bool) -> Result<i32> {
-    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    refuse_inside_sandbox(&ledger, &format!("loopherd restart {name}"))?;
-    let state = ledger.dir()?;
-    let paths = Paths::from_env()?;
-    let own_pane = own_pane();
-    let caller = sandbox::calling_lead(&paths, &process::ProcFs, std::process::id());
-    let req = restart::RestartRequest {
-        name,
-        force,
-        own_pane: own_pane.as_deref(),
-        own_lineage: &own_lineage(),
-        pane_shell: &pane_shell,
-        state: &state,
-        paths: &paths,
-        caller: caller.as_deref(),
-        settle_timeout: Duration::from_secs(30),
-        poll: Duration::from_millis(250),
-        live: &live_session,
-    };
-    println!(
-        "{}",
-        restart::restart(&CliHerdr, &mut ledger, &req, SystemTime::now())?
-    );
-    Ok(0)
+    run_op(
+        own_broker().as_ref(),
+        &broker::Op::Restart {
+            name: name.into(),
+            force,
+        },
+    )
 }
 
 const WAITER_FD: &str = "LOOPHERD_RESTART_WAITER_FD";
@@ -1490,16 +1456,7 @@ fn run_restart_self() -> Result<i32> {
         println!("{}", armed.message);
         return Ok(0);
     }
-    let scheduled = restart::schedule_self(
-        &CliHerdr,
-        &ledger,
-        own_pane().as_deref(),
-        &own_lineage(),
-        &state,
-    )?;
-    spawn_waiter(&scheduled.name, scheduled.waiter)?;
-    println!("{}", scheduled.message);
-    Ok(0)
+    run_op(own_broker().as_ref(), &broker::Op::RestartSelf)
 }
 
 fn arm_shepherd(
@@ -1524,14 +1481,17 @@ fn arm_shepherd(
 }
 
 /// Starts `restart-wait <name>` in a session of its own, handing it `waiter`.
+/// Closes this process's copy, since a broker lives on: the claim lasts as
+/// long as the waiter runs, and no longer.
 fn spawn_waiter(name: &str, waiter: lock::Lock) -> Result<()> {
-    let fd = waiter.as_raw_fd();
+    let file = waiter.into_file();
+    let fd = file.as_raw_fd();
     // The waiter inherits the lock's open file, so the claim lasts as long as it runs.
-    // SAFETY: fcntl only clears close-on-exec on a descriptor the lock keeps open.
+    // SAFETY: fcntl only clears close-on-exec on a descriptor `file` keeps open.
     if unsafe { libc::fcntl(fd, libc::F_SETFD, 0) } != 0 {
         return Err(std::io::Error::last_os_error()).context("pass the waiter its lock");
     }
-    let exe = std::env::current_exe().context("find the loopherd binary")?;
+    let exe = runnable_exe()?;
     let mut command = std::process::Command::new(&exe);
     command
         .args(["restart-wait", name])
@@ -1548,12 +1508,27 @@ fn spawn_waiter(name: &str, waiter: lock::Lock) -> Result<()> {
             _ => Ok(()),
         });
     }
-    command
+    let mut child = command
         .spawn()
         .with_context(|| format!("start {} restart-wait", exe.display()))?;
-    // Dropping unlocks the open file the waiter shares; exiting only closes ours.
-    std::mem::forget(waiter);
+    drop(file);
+    // A broker outlives its waiters; reaping each leaves no zombie behind.
+    std::thread::spawn(move || child.wait());
     Ok(())
+}
+
+/// This binary, or `loopherd` on PATH once a reinstall has moved a new one over it.
+fn runnable_exe() -> Result<PathBuf> {
+    Ok(runnable(
+        std::env::current_exe().context("find the loopherd binary")?,
+    ))
+}
+
+fn runnable(exe: PathBuf) -> PathBuf {
+    match exe.to_string_lossy().ends_with(" (deleted)") {
+        true => PathBuf::from("loopherd"),
+        false => exe,
+    }
 }
 
 fn run_broker(lead: &str) -> Result<i32> {
@@ -1564,6 +1539,8 @@ fn run_broker(lead: &str) -> Result<i32> {
         procs: &process::ProcFs,
         claude_dir: install_hook::claude_dir().ok(),
         process: own_process()?,
+        live: live_session,
+        spawn_waiter,
     };
     let served = broker::serve(&host, &mut ledger, &paths, lead, Duration::from_millis(100))?;
     if served == broker::Served::AlreadyRunning {
@@ -1830,11 +1807,7 @@ fn notify_waiting(waiting: &[notify::Waiting], config: &Path, mailboxes: &Path) 
             return;
         }
     };
-    // A reinstall moves a new binary over this one, leaving it unrunnable.
-    let exe = std::env::current_exe()
-        .ok()
-        .filter(|exe| !exe.to_string_lossy().ends_with(" (deleted)"))
-        .unwrap_or_else(|| PathBuf::from("loopherd"));
+    let exe = runnable_exe().unwrap_or_else(|_| PathBuf::from("loopherd"));
     let sent = notify::send(&config, mailboxes, waiting, &mut |launch| {
         let sender = match launch.sender {
             notify::Sender::Herdr => "herdr",
@@ -2434,6 +2407,15 @@ fn inherited_workspace(ledger: &dyn Ledger) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_binary_a_reinstall_replaced_runs_as_loopherd_on_path() {
+        let gone = PathBuf::from("/home/u/.local/bin/loopherd (deleted)");
+        let here = PathBuf::from("/home/u/.local/bin/loopherd");
+
+        assert_eq!(runnable(gone), PathBuf::from("loopherd"));
+        assert_eq!(runnable(here.clone()), here);
+    }
 
     #[test]
     fn merges_are_looked_up_only_while_notify_sends_merge_alerts() {

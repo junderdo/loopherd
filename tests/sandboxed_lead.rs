@@ -68,8 +68,7 @@ fn commands_that_reach_herdr_refuse_a_run_that_cannot_write_the_ledger() {
         let err = refused(&out);
         assert!(
             err.contains(&format!(
-                "refused: this loopherd runs in a lead's sandbox, which can't write the ledger; \
-                 run `loopherd {command} lh-1` as a Bash command of its own"
+                "refused: this loopherd runs in a sandbox, where it can't run loopherd {command} itself"
             )),
             "{err}"
         );

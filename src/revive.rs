@@ -582,7 +582,11 @@ fn kept_lead(
 ) -> Result<Option<(sandbox::Lead, PathBuf)>> {
     let name = &record.name;
     let lead = match sandbox::Lead::kept(paths, name)? {
-        Some(lead) => lead,
+        // A record kept before leads' MCP flags were loopherd's may still hold them.
+        Some(lead) => sandbox::Lead {
+            args: without_settings(&lead.args),
+            ..lead
+        },
         None if !record.is_lead() => return Ok(None),
         None if adopt != Some(name.as_str()) => bail!(
             "{name} is a lead loopherd kept no record of, so its ledger entry alone \
@@ -603,16 +607,19 @@ fn kept_lead(
     Ok(Some((lead, worktree)))
 }
 
-/// `args` without `--settings`, which a lead's revive writes afresh.
+/// `args` without `--settings` and the MCP flags, which a lead's revive writes afresh.
 fn without_settings(args: &[String]) -> Vec<String> {
     let mut kept = vec![];
-    let mut args = args.iter();
+    let mut args = args.iter().peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--settings" => {
                 args.next();
             }
-            _ if arg.starts_with("--settings=") => {}
+            // It takes every value up to the next flag.
+            "--mcp-config" => while args.next_if(|a| !a.starts_with('-')).is_some() {},
+            "--strict-mcp-config" => {}
+            _ if arg.starts_with("--settings=") || arg.starts_with("--mcp-config=") => {}
             _ => kept.push(arg.clone()),
         }
     }
@@ -720,7 +727,7 @@ fn revive_one(
         None => args.extend(record.claude_args.iter().cloned()),
         Some((lead, _)) => match sandbox::prepare(&req.paths, &record.name, lead, req.sandbox) {
             Ok(launch) => {
-                warnings.extend(launch.warning(&record.name));
+                warnings.extend(launch.warnings(&record.name));
                 unsandboxed = launch.hook_only().map(str::to_string);
                 args.extend(lead.args.iter().cloned());
                 args.extend(launch.args());
@@ -1673,7 +1680,10 @@ mod tests {
                 "--model",
                 "opus",
                 "--settings",
-                &settings.display().to_string()
+                &settings.display().to_string(),
+                "--strict-mcp-config",
+                "--mcp-config",
+                &settings.with_extension("mcp.json").display().to_string(),
             ]
         );
         let written: serde_json::Value =
@@ -1709,7 +1719,10 @@ mod tests {
                 "--model",
                 "opus",
                 "--settings",
-                &settings.display().to_string()
+                &settings.display().to_string(),
+                "--strict-mcp-config",
+                "--mcp-config",
+                &settings.with_extension("mcp.json").display().to_string(),
             ]
         );
         assert_eq!(herdr.tabs()[0].cwd, worktree);
@@ -1725,7 +1738,19 @@ mod tests {
     fn a_lead_loopherd_kept_no_record_of_resumes_only_when_named() {
         let cwd = tempfile::tempdir().unwrap();
         let herdr = herdr();
-        let mut ledger = ledger([unkept_lead("lead-h", cwd.path())]);
+        let mut unkept = unkept_lead("lead-h", cwd.path());
+        unkept.claude_args = [
+            "--model",
+            "opus",
+            "--settings",
+            "/old/lead-h.json",
+            "--strict-mcp-config",
+            "--mcp-config",
+            "/old/lead-h.mcp.json",
+        ]
+        .map(String::from)
+        .into();
+        let mut ledger = ledger([unkept]);
 
         let (out, code) = run(&herdr, &mut ledger, &request());
 
@@ -1754,7 +1779,10 @@ mod tests {
                 "--model",
                 "opus",
                 "--settings",
-                &settings.display().to_string()
+                &settings.display().to_string(),
+                "--strict-mcp-config",
+                "--mcp-config",
+                &settings.with_extension("mcp.json").display().to_string(),
             ]
         );
     }
@@ -1835,6 +1863,83 @@ mod tests {
         );
         assert!(herdr.started().is_empty());
         assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
+    fn a_lead_whose_user_settings_loosen_its_sandbox_is_not_revived_under_require() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut ledger = ledger([lead("lead-h", cwd.path())]);
+        let home = own_reports_dir().join("home");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        let settings = home.join(".claude/settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"sandbox": {"excludedCommands": ["docker *"]}}"#,
+        )
+        .unwrap();
+        let req = ReviveRequest {
+            paths: Paths {
+                home,
+                ..own_paths()
+            },
+            ..request()
+        };
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 1);
+        assert!(
+            out.starts_with(&format!(
+                "failed lead-h: sandbox: lead-h can't run sandboxed: your Claude settings \
+                 loosen its sandbox: {}: sandbox.excludedCommands runs \"docker *\" outside it;",
+                settings.display()
+            )),
+            "{out}"
+        );
+        assert!(herdr.started().is_empty());
+    }
+
+    #[test]
+    fn a_lead_kept_with_its_own_mcp_config_from_before_resumes_without_it() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut ledger = ledger([lead("lead-h", cwd.path())]);
+        let req = request();
+        let kept = sandbox::Lead {
+            herd: "h".into(),
+            args: [
+                "--mcp-config",
+                "a.json",
+                "b.json",
+                "--strict-mcp-config",
+                "--model",
+                "opus",
+            ]
+            .map(String::from)
+            .into(),
+        };
+        std::fs::write(
+            req.paths.config_dir().join("sandbox/lead-h.lead.json"),
+            serde_json::to_string(&kept).unwrap(),
+        )
+        .unwrap();
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 0, "{out}");
+        let args = &herdr.started()[0].args;
+        assert_eq!(
+            args[..4],
+            ["--resume", "sess-lead-h", "--model", "opus"],
+            "{args:?}"
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.ends_with("a.json") || a.ends_with("b.json")),
+            "{args:?}"
+        );
     }
 
     #[test]
