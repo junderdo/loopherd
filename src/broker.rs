@@ -77,6 +77,19 @@ pub enum Op {
     Label {
         question: String,
     },
+    /// `loopherd status`; a lead sees its own herd alone.
+    Status {
+        all: bool,
+        /// Refused from a lead: strays are herdr's agents outside every herd.
+        strays: bool,
+        json: bool,
+        color: bool,
+    },
+    /// A member's last `lines` lines of output.
+    Read {
+        name: String,
+        lines: usize,
+    },
 }
 
 /// What an operation acts on, for the broker's reach rule.
@@ -139,21 +152,26 @@ impl Op {
             Op::Retire { .. } => "retire",
             Op::Release { .. } => "release",
             Op::Label { .. } => "label its pane",
+            Op::Status { .. } => "status",
+            Op::Read { .. } => "read",
         }
     }
 
     fn reach(&self) -> Reach<'_> {
         match self {
-            Op::Tell { name, .. } | Op::Prompt { name, .. } | Op::Restart { name, .. } => {
-                Reach::Member(name)
-            }
+            Op::Tell { name, .. }
+            | Op::Prompt { name, .. }
+            | Op::Restart { name, .. }
+            | Op::Read { name, .. } => Reach::Member(name),
             Op::Feed { herd, .. } | Op::Add { herd, .. } => Reach::Herd(herd),
-            Op::RestartSelf | Op::Label { .. } => Reach::Lead,
+            // Status reads the herd the launch record names, never one a request does.
+            Op::RestartSelf | Op::Label { .. } | Op::Status { .. } => Reach::Lead,
             Op::Retire { name, .. } | Op::Release { name, .. } => Reach::AnyMember(name),
         }
     }
 
-    /// Herd changes run one at a time, apart from the quick requests.
+    /// Herd changes run one at a time, apart from the quick requests and
+    /// from status, whose queue source and backlog may each take a git timeout.
     fn lane(&self) -> Lane {
         match self {
             Op::Feed { .. }
@@ -161,7 +179,12 @@ impl Op {
             | Op::Restart { .. }
             | Op::Retire { .. }
             | Op::Release { .. } => Lane::Herd,
-            Op::Tell { .. } | Op::Prompt { .. } | Op::RestartSelf | Op::Label { .. } => Lane::Quick,
+            Op::Tell { .. }
+            | Op::Read { .. }
+            | Op::Prompt { .. }
+            | Op::RestartSelf
+            | Op::Label { .. } => Lane::Quick,
+            Op::Status { .. } => Lane::Status,
         }
     }
 
@@ -169,7 +192,11 @@ impl Op {
     /// broker's git timeout.
     fn answer_within(&self, remote: Duration) -> Duration {
         match self {
-            Op::Tell { .. } | Op::Prompt { .. } | Op::RestartSelf => Duration::from_secs(120),
+            Op::Tell { .. } | Op::Prompt { .. } | Op::RestartSelf | Op::Read { .. } => {
+                Duration::from_secs(120)
+            }
+            // Its queue's source and backlog may each take the git timeout.
+            Op::Status { .. } => remote * 2 + Duration::from_secs(120),
             // The report is written already; a label isn't worth waiting out a feed for.
             Op::Label { .. } => Duration::from_secs(10),
             // Its settle timeout, with room for herdr and the member's view.
@@ -247,8 +274,67 @@ impl Op {
                 drop_branch,
             } => release(ctx, name, *keep_branch, *drop_branch, sink),
             Op::Label { question } => label(ctx, question, sink),
+            // The broker refused strays already.
+            Op::Status {
+                all, json, color, ..
+            } => status(ctx, *all, *json, *color, sink),
+            Op::Read { name, lines } => {
+                let read = crate::read::read(ctx.herdr, &*ctx.ledger, name, *lines)?;
+                // A reply drops empty output, so an empty screen prints nothing either way.
+                let read = read.trim_end_matches('\n');
+                if !read.is_empty() {
+                    sink.out(read);
+                }
+                Ok(0)
+            }
         }
     }
+}
+
+/// A lead's `loopherd status`: its own herd's. The shepherd's runs directly.
+fn status(ctx: &mut Ctx, all: bool, json: bool, color: bool, sink: &mut dyn Sink) -> Result<i32> {
+    use crate::status::{Format, Queues};
+    let herd = &ctx
+        .caller
+        .lead
+        .as_ref()
+        .context("only a lead's broker runs status")?
+        .herd;
+    let format = match json {
+        true => Format::Json,
+        false => Format::Text { color },
+    };
+    let pauses = crate::pause::Pauses {
+        dir: ctx.paths.paused.clone(),
+        herds: Some(ctx.paths.herds.clone()),
+    };
+    let timeout = crate::worktree::remote_timeout().unwrap_or_else(|e| {
+        let default = humantime::format_duration(crate::worktree::REMOTE_TIMEOUT);
+        sink.err(&format!(
+            "loopherd status: warning: {e:#}; counting tasks with the default {default}"
+        ));
+        crate::worktree::REMOTE_TIMEOUT
+    });
+    let queues = Queues {
+        paths: ctx.paths,
+        timeout,
+    };
+    let out = crate::status::herd_status(
+        ctx.herdr,
+        &*ctx.ledger,
+        &pauses,
+        Some(&queues),
+        all,
+        format,
+        herd,
+    )?;
+    if !out.stdout.is_empty() {
+        sink.out(out.stdout.trim_end_matches('\n'));
+    }
+    for line in out.stderr.lines() {
+        sink.err(&format!("loopherd status: {line}"));
+    }
+    Ok(out.code)
 }
 
 /// Labels the lead's pane with `question`, from the lead's own record.
@@ -603,7 +689,7 @@ pub fn refuse_spawn(client: Option<&Client>, ledger: &dyn Ledger) -> Result<()> 
 
 /// Refuses `command` run directly where the ledger is read-only: in a lead's
 /// sandbox, yet the ledger places no lead in this pane, so no broker runs it.
-fn refuse_unrouted(ledger: &dyn Ledger, command: &str) -> Result<()> {
+pub fn refuse_unrouted(ledger: &dyn Ledger, command: &str) -> Result<()> {
     if ledger.read_only()? {
         bail!(
             "refused: this loopherd runs in a sandbox, where it can't run loopherd {command} itself, and the \
@@ -631,9 +717,9 @@ pub struct Host<'a> {
 /// Its herd comes from the record `loopherd lead` kept in the config dir,
 /// never from a request or the ledger.
 ///
-/// Requests run in two lanes, each one at a time: herd changes (feed, add,
-/// restart, retire, release) in one, everything else in the other, so a
-/// long feed holds up no tell. Once its lead retires it refuses every request
+/// Requests run in three lanes, each one at a time: herd changes (feed,
+/// add, restart, retire, release), status, and everything else, so a long
+/// feed holds up no tell. Once its lead retires it refuses every request
 /// it hasn't started, and returns when the ones it has end.
 pub fn serve<L: Ledger + Clone + Send>(
     host: &Host,
@@ -670,7 +756,7 @@ pub fn serve<L: Ledger + Clone + Send>(
         let (done_tx, done) = mpsc::channel::<String>();
         let mut lanes = vec![];
         let mut senders = vec![];
-        for _ in [Lane::Quick, Lane::Herd] {
+        for _ in [Lane::Quick, Lane::Herd, Lane::Status] {
             let (tx, jobs) = mpsc::channel::<Job>();
             let (mut ledger, done_tx) = (ledger.clone(), done_tx.clone());
             let (broker, replies, retired) = (&broker, &replies, &retired);
@@ -727,6 +813,7 @@ fn unretired(ledger: &dyn Ledger, lead: &str) -> bool {
 enum Lane {
     Quick = 0,
     Herd = 1,
+    Status = 2,
 }
 
 /// A request read and waiting in its lane.
@@ -930,6 +1017,12 @@ impl Broker<'_> {
                 )));
             }
             Reach::Herd(_) => return self.start_refusal(op),
+            Reach::Lead if matches!(op, Op::Status { strays: true, .. }) => {
+                return Ok(Some(format!(
+                    "strays are herdr's agents outside every herd; {lead} sees only herd \
+                     {herd}, so run loopherd status without --strays"
+                )));
+            }
             Reach::Lead => return Ok(None),
             Reach::Member(target) | Reach::AnyMember(target) => target,
         };
@@ -1771,6 +1864,10 @@ mod tests {
                     name: target.into(),
                     force: false,
                 },
+                Op::Read {
+                    name: target.into(),
+                    lines: 40,
+                },
             ] {
                 let err = world.client().call(&op).unwrap_err();
                 let command = op.command();
@@ -2237,6 +2334,122 @@ mod tests {
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
         assert_eq!(herdr.prompts().len(), 1);
+    }
+
+    fn status_op(all: bool, strays: bool) -> Op {
+        Op::Status {
+            all,
+            strays,
+            json: false,
+            color: false,
+        }
+    }
+
+    #[test]
+    fn in_a_sandboxed_lead_s_pane_status_shows_its_herd_alone_through_its_broker() {
+        let world = World::new();
+        world.herd("g");
+        world.add(member("lh-1", Some("h")));
+        world.add(member("lh-9", Some("g")));
+        world.add(member("lh-8", None));
+        let mut retired = member("lh-7", Some("h"));
+        retired.retired = true;
+        world.add(retired);
+        let serving = world.serve(telling_herdr());
+        let own = FakeHerdr::new(&[]);
+        let client = world.route_from("p-lead-h");
+
+        let (code, status) =
+            run_here(&own, &world, client.as_ref(), &status_op(true, false)).unwrap();
+
+        let pauses = crate::pause::Pauses {
+            dir: world.paths.paused.clone(),
+            herds: Some(world.paths.herds.clone()),
+        };
+        let direct = crate::status::herd_status(
+            &telling_herdr(),
+            &world.ledger(),
+            &pauses,
+            None,
+            true,
+            crate::status::Format::Text { color: false },
+            "h",
+        )
+        .unwrap();
+        assert_eq!((code, status.out.join("\n") + "\n"), (0, direct.stdout));
+        let shown = status.out.join("\n");
+        for hidden in ["lh-9", "lh-8", "stray"] {
+            assert!(!shown.contains(hidden), "{shown}");
+        }
+        for seen in ["lh-1", "lh-7", "lead-h"] {
+            assert!(shown.contains(seen), "{shown}");
+        }
+        assert_eq!(own.calls(), 0);
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert_eq!(herdr.mutations(), 0);
+    }
+
+    #[test]
+    fn an_empty_screen_reads_as_nothing_through_the_broker_and_directly() {
+        let world = World::new();
+        world.add(member("lh-1", Some("h")));
+        let blank = || FakeHerdr::new(&[]).with_agent("lh-1");
+        let serving = world.serve(blank());
+        let read = Op::Read {
+            name: "lh-1".into(),
+            lines: 40,
+        };
+
+        let (_, brokered) =
+            run_here(&FakeHerdr::new(&[]), &world, Some(&world.client()), &read).unwrap();
+        let (_, direct) = run_here(&blank(), &world, None, &read).unwrap();
+
+        assert_eq!((brokered.out, brokered.err), (vec![], vec![]));
+        assert_eq!((direct.out, direct.err), (vec![], vec![]));
+        world.retire("lead-h");
+        let (served, _) = serving.join().unwrap();
+        assert_eq!(served.unwrap(), Served::Retired);
+    }
+
+    #[test]
+    fn in_a_sandboxed_lead_s_pane_read_goes_through_its_broker_and_calls_no_herdr() {
+        let world = World::new();
+        world.add(member("lh-1", Some("h")));
+        let herdr = telling_herdr();
+        herdr.set_screen("w9:p9", "one\ntwo\nthree\n");
+        let serving = world.serve(herdr);
+        let own = FakeHerdr::new(&[]);
+        let client = world.route_from("p-lead-h");
+        let read = Op::Read {
+            name: "lh-1".into(),
+            lines: 2,
+        };
+
+        let (code, kept) = run_here(&own, &world, client.as_ref(), &read).unwrap();
+
+        assert_eq!((code, kept.out), (0, vec!["two\nthree".to_string()]));
+        assert_eq!(own.calls(), 0);
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert_eq!(herdr.mutations(), 0);
+    }
+
+    #[test]
+    fn a_lead_s_status_strays_are_refused() {
+        let world = World::new();
+        let serving = world.serve(telling_herdr());
+
+        let err = world.client().call(&status_op(false, true)).unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "lead-h's broker refused status: strays are herdr's agents outside every herd; \
+             lead-h sees only herd h, so run loopherd status without --strays"
+        );
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert_eq!(herdr.calls(), 0);
     }
 
     #[test]

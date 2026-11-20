@@ -203,6 +203,11 @@ as its main checkout. Then, in order:
    doesn't change herd files, `config.toml` or `~/.claude` by mistake. It
    is a guard rail, not a cage: a lead can still act outside it through
    herdr, and on WSL2 through Windows interop ([D89](docs/decisions/D89.md)).
+   Its `tell`, `read`, `status`, `feed`, `add`, `prompt`, `restart`,
+   `retire` and `release` run in its broker, a process `loopherd lead`
+   starts outside the sandbox, which acts only on the lead's own herd
+   ([D98](docs/decisions/D98.md)). With the broker down they fail, naming
+   `loopherd revive --name <lead>`, which starts it again.
    A lead whose sandbox can't start, or whose sandbox your own
    `~/.claude/settings.json` loosens (an `excludedCommands` or `allowWrite`
    entry, say), isn't started unless its `[lead]` sets `sandbox = "prefer"`,
@@ -301,6 +306,7 @@ table and the rest are what `init` writes; start from its output or from
 | `watch [<herd>…]` | Block until a member needs you, print what happened, exit (`--timeout`). |
 | `reports` | Print unread reports, questions first, and mark them read (`--herd`, `--all`). |
 | `status` | Members by herd with herdr's live status (`--all`, `--strays`, `--json`). |
+| `read <member>` | A member's last lines of output, unwrapped (`--lines`, 40 by default, up to 1000). |
 | `view` | The same as a live TUI; Enter focuses the member's pane, `S` focuses the shepherd or starts one below the view, and `t` switches the theme, saving it as `view.theme` in `config.toml`. |
 | `pr [url]` | The herdr plugin's PR link handler: the member that owns the PR in a popup, else the browser. |
 | `stats` | How each herd's work flowed: time to done, review rounds, time waiting on merge, and each run's outcome (`merged`, `closed`, `released`, `retired`), with medians over merged runs per herd and per template (`--herd`, `--since`, `--until`, `--json`). |
