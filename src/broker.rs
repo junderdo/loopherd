@@ -109,7 +109,7 @@ impl Op {
             Op::Feed { .. } => Duration::from_secs(4 * 60 * 60),
             Op::Add {
                 ready_timeout_secs, ..
-            } => Duration::from_secs(ready_timeout_secs.saturating_add(300)),
+            } => Duration::from_secs((*ready_timeout_secs).min(MAX_READY_TIMEOUT_SECS) + 300),
         }
     }
 
@@ -146,6 +146,9 @@ impl Op {
         }
     }
 }
+
+/// The longest ready timeout a lead may ask for.
+const MAX_READY_TIMEOUT_SECS: u64 = 60 * 60;
 
 /// Long enough for `scripts/install` to build a release binary.
 const AFTER_MERGE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -451,7 +454,19 @@ impl Broker<'_> {
     }
 
     /// Why `op` would start a worker other than as the herd file says.
-    fn template_refusal(&self, op: &Op) -> Result<Option<String>> {
+    fn start_refusal(&self, op: &Op) -> Result<Option<String>> {
+        if let Op::Feed {
+            ready_timeout_secs, ..
+        }
+        | Op::Add {
+            ready_timeout_secs, ..
+        } = op
+            && *ready_timeout_secs > MAX_READY_TIMEOUT_SECS
+        {
+            return Ok(Some(format!(
+                "a ready timeout of {ready_timeout_secs}s is over the {MAX_READY_TIMEOUT_SECS}s a lead may ask for"
+            )));
+        }
         let Op::Add {
             template,
             claude_args,
@@ -1367,6 +1382,17 @@ mod tests {
             (
                 add("h", "evil", &[]),
                 "herd h has no template evil; lead-h adds only its herd's templates".into(),
+            ),
+            (
+                Op::Feed {
+                    herd: "h".into(),
+                    dry_run: false,
+                    ready_timeout_secs: u64::MAX,
+                },
+                format!(
+                    "a ready timeout of {}s is over the 3600s a lead may ask for",
+                    u64::MAX
+                ),
             ),
             (
                 add("h", "pr", &["--dangerously-skip-permissions"]),
