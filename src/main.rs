@@ -871,7 +871,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// The commands a lead's pane refuses, named, with why (D109). Commands a
+/// The commands a lead's pane refuses, named, with why (D110). Commands a
 /// lead's broker carries out, or that refuse a lead themselves, aren't here.
 fn refused_to_leads(command: &Command) -> Option<(&'static str, &'static str)> {
     const HERD_FILE: &str = "a herd file is the human's to change";
