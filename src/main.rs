@@ -1349,36 +1349,13 @@ fn open_in_browser(url: &str) -> Result<()> {
 }
 
 fn run_prompt(name: &str, force: bool) -> Result<i32> {
-    run_ledger_op(
-        &format!("loopherd prompt {name}"),
+    run_op(
+        own_broker().as_ref(),
         &broker::Op::Prompt {
             name: name.into(),
             force,
         },
     )
-}
-
-/// Runs `op`, which writes the ledger, through the lead's broker, or here
-/// when no lead runs this loopherd.
-fn run_ledger_op(command: &str, op: &broker::Op) -> Result<i32> {
-    let client = own_broker();
-    if client.is_none() {
-        let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-        refuse_inside_sandbox(&ledger, command)?;
-    }
-    run_op(client.as_ref(), op)
-}
-
-/// Refuses before anything reaches herdr when this run can't write the
-/// ledger: it runs in a sandbox, yet found no lead whose broker could run it.
-fn refuse_inside_sandbox(ledger: &FileLedger, command: &str) -> Result<()> {
-    if ledger.read_only()? {
-        bail!(
-            "refused: this loopherd runs in a sandbox, which can't write the ledger, \
-             and finds no lead whose broker could run `{command}`"
-        );
-    }
-    Ok(())
 }
 
 fn run_tell(name: &str, text: Option<String>, text_file: Option<PathBuf>) -> Result<i32> {
@@ -1459,8 +1436,8 @@ fn own_broker() -> Option<broker::Client> {
 }
 
 fn run_restart(name: &str, force: bool) -> Result<i32> {
-    run_ledger_op(
-        &format!("loopherd restart {name}"),
+    run_op(
+        own_broker().as_ref(),
         &broker::Op::Restart {
             name: name.into(),
             force,
@@ -1504,14 +1481,17 @@ fn arm_shepherd(
 }
 
 /// Starts `restart-wait <name>` in a session of its own, handing it `waiter`.
+/// Closes this process's copy, since a broker lives on: the claim lasts as
+/// long as the waiter runs, and no longer.
 fn spawn_waiter(name: &str, waiter: lock::Lock) -> Result<()> {
-    let fd = waiter.as_raw_fd();
+    let file = waiter.into_file();
+    let fd = file.as_raw_fd();
     // The waiter inherits the lock's open file, so the claim lasts as long as it runs.
-    // SAFETY: fcntl only clears close-on-exec on a descriptor the lock keeps open.
+    // SAFETY: fcntl only clears close-on-exec on a descriptor `file` keeps open.
     if unsafe { libc::fcntl(fd, libc::F_SETFD, 0) } != 0 {
         return Err(std::io::Error::last_os_error()).context("pass the waiter its lock");
     }
-    let exe = std::env::current_exe().context("find the loopherd binary")?;
+    let exe = runnable_exe()?;
     let mut command = std::process::Command::new(&exe);
     command
         .args(["restart-wait", name])
@@ -1528,12 +1508,22 @@ fn spawn_waiter(name: &str, waiter: lock::Lock) -> Result<()> {
             _ => Ok(()),
         });
     }
-    command
+    let mut child = command
         .spawn()
         .with_context(|| format!("start {} restart-wait", exe.display()))?;
-    // Dropping unlocks the open file the waiter shares; exiting only closes ours.
-    std::mem::forget(waiter);
+    drop(file);
+    // A broker outlives its waiters; reaping each leaves no zombie behind.
+    std::thread::spawn(move || child.wait());
     Ok(())
+}
+
+/// This binary, or `loopherd` on PATH once a reinstall has moved a new one over it.
+fn runnable_exe() -> Result<PathBuf> {
+    let exe = std::env::current_exe().context("find the loopherd binary")?;
+    Ok(match exe.to_string_lossy().ends_with(" (deleted)") {
+        true => PathBuf::from("loopherd"),
+        false => exe,
+    })
 }
 
 fn run_broker(lead: &str) -> Result<i32> {
@@ -1812,11 +1802,7 @@ fn notify_waiting(waiting: &[notify::Waiting], config: &Path, mailboxes: &Path) 
             return;
         }
     };
-    // A reinstall moves a new binary over this one, leaving it unrunnable.
-    let exe = std::env::current_exe()
-        .ok()
-        .filter(|exe| !exe.to_string_lossy().ends_with(" (deleted)"))
-        .unwrap_or_else(|| PathBuf::from("loopherd"));
+    let exe = runnable_exe().unwrap_or_else(|_| PathBuf::from("loopherd"));
     let sent = notify::send(&config, mailboxes, waiting, &mut |launch| {
         let sender = match launch.sender {
             notify::Sender::Herdr => "herdr",

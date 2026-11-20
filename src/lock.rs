@@ -24,6 +24,14 @@ impl Lock {
             Err(e) => Err(e),
         }
     }
+
+    /// The locked file, still locked: whoever holds it, or a process it is
+    /// passed to, keeps the lock until every copy closes.
+    pub fn into_file(self) -> File {
+        let lock = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `lock` is never dropped, so the file is read out exactly once.
+        unsafe { std::ptr::read(&lock.0) }
+    }
 }
 
 impl Drop for Lock {

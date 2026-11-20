@@ -76,6 +76,14 @@ impl Drop for Broker {
     }
 }
 
+/// Whether process `pid` has `path` open.
+fn has_open(pid: u32, path: &Path) -> bool {
+    fs::read_dir(format!("/proc/{pid}/fd"))
+        .unwrap()
+        .filter_map(|fd| fs::read_link(fd.ok()?.path()).ok())
+        .any(|target| target == path)
+}
+
 fn held(file: &File) -> bool {
     // SAFETY: flock on a descriptor `file` keeps open for the call.
     unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) != 0 }
@@ -91,7 +99,7 @@ fn self_restart_returns_at_once_and_leaves_a_detached_waiter_holding_the_claim()
     write_member(state.path());
     let out = run(state.path(), &["report", "--kind", "handoff", "at step 3"]);
     assert!(out.status.success(), "{out:?}");
-    let _broker = Broker::start(state.path());
+    let broker = Broker::start(state.path());
 
     // `output` waits for stdout to close, so a waiter holding it would hang here.
     let out = run(state.path(), &["restart", "--self"]);
@@ -101,6 +109,9 @@ fn self_restart_returns_at_once_and_leaves_a_detached_waiter_holding_the_claim()
         "{out:?}"
     );
     assert!(waiter_holds_its_claim(state.path()));
+    // The broker lives on, so only the waiter may keep the claim open.
+    let claim = state.path().join("loopherd/restarts/lh-1.waiter.lock");
+    assert!(!has_open(broker.0.id(), &claim.canonicalize().unwrap()));
 
     let again = run(state.path(), &["restart", "--self"]);
     assert_eq!(

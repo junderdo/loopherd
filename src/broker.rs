@@ -188,6 +188,14 @@ impl Op {
                     &caller.lineage,
                     ctx.paths.state_dir(),
                 )?;
+                if let Some(lead) = caller.lead.as_ref().filter(|l| l.name != scheduled.name) {
+                    bail!(
+                        "the ledger has {} in {}'s pane; restart --self restarts only {}",
+                        scheduled.name,
+                        lead.name,
+                        lead.name
+                    );
+                }
                 (ctx.spawn_waiter)(&scheduled.name, scheduled.waiter)?;
                 sink.out(&scheduled.message);
                 Ok(0)
@@ -560,13 +568,23 @@ impl Broker<'_> {
             Reach::Lead => return Ok(None),
             Reach::Member(target) => target,
         };
+        if let Op::Restart { force: true, .. } = op {
+            return Ok(Some(format!(
+                "restart --force skips the checks that a member is finished since its handoff, \
+                 so the human forces a restart; {lead} restarts once its stop reads finished"
+            )));
+        }
         let reach = format!("{lead} reaches only herd {herd}'s workers");
         if target == SHEPHERD {
             return Ok(Some(format!("{target} is the shepherd; {reach}")));
         }
         if target == lead {
+            let self_restart = match op {
+                Op::Restart { .. } => "; it restarts itself with loopherd restart --self",
+                _ => "",
+            };
             return Ok(Some(format!(
-                "{target} is the lead itself; {} reaches only herd {herd}'s workers",
+                "{target} is the lead itself; {} reaches only herd {herd}'s workers{self_restart}",
                 op.command()
             )));
         }
@@ -1252,20 +1270,37 @@ mod tests {
                 },
                 Op::Restart {
                     name: target.into(),
-                    force: true,
+                    force: false,
                 },
             ] {
                 let err = world.client().call(&op).unwrap_err();
                 let command = op.command();
+                let hint = match (target, &op) {
+                    ("lead-h", Op::Restart { .. }) => {
+                        "; it restarts itself with loopherd restart --self"
+                    }
+                    _ => "",
+                };
                 assert_eq!(
                     format!("{err:#}"),
                     format!(
-                        "lead-h's broker refused {command}: {}",
+                        "lead-h's broker refused {command}: {}{hint}",
                         why.replace("{command}", command)
                     )
                 );
             }
         }
+        world.add(member("lh-1", Some("h")));
+        let forced = Op::Restart {
+            name: "lh-1".into(),
+            force: true,
+        };
+        assert_eq!(
+            format!("{:#}", world.client().call(&forced).unwrap_err()),
+            "lead-h's broker refused restart: restart --force skips the checks that a member is \
+             finished since its handoff, so the human forces a restart; lead-h restarts once its \
+             stop reads finished"
+        );
 
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
@@ -1642,13 +1677,6 @@ mod tests {
         assert!(herdr.calls() > 0);
     }
 
-    /// A client routed as the sandboxed `lead-h`'s Claude would be.
-    fn sandboxed_lead(world: &World) -> Option<Client> {
-        let settings = sandbox::settings_file(&world.paths, "lead-h");
-        let procs = procs(&["claude", "--settings", settings.to_str().unwrap()]);
-        route(&world.paths, &world.ledger(), &procs, 50, None)
-    }
-
     #[test]
     fn in_a_sandboxed_lead_s_pane_prompt_and_restart_go_through_its_broker_and_call_no_herdr() {
         let world = World::new();
@@ -1658,10 +1686,10 @@ mod tests {
         world.add(unprompted);
         let serving = world.serve(telling_herdr());
         let own = FakeHerdr::new(&[]);
-        let client = sandboxed_lead(&world);
+        let client = world.route_from("p-lead-h");
         let restart = Op::Restart {
             name: "lh-1".into(),
-            force: true,
+            force: false,
         };
         let prompt = Op::Prompt {
             name: "lh-1".into(),
@@ -1686,34 +1714,27 @@ mod tests {
         assert_eq!(herdr.prompts(), [("lh-1".to_string(), "go".to_string())]);
     }
 
-    #[test]
-    fn a_sandboxed_lead_s_restart_self_is_scheduled_by_its_broker_for_its_own_pane() {
-        let world = World::new();
-        world
-            .ledger()
-            .update("lead-h", &mut |r| {
-                r.socket = Some(crate::herdr::fake::FAKE_SOCKET.into());
-                Ok(())
-            })
-            .unwrap();
+    /// Gives `name` a handoff file and a handoff report, as before `restart --self`.
+    fn handed_off(world: &World, name: &str) {
         let state = world.paths.state_dir();
         std::fs::create_dir_all(state.join("handoffs")).unwrap();
-        std::fs::write(crate::context::handoff_path(state, "lead-h"), "next").unwrap();
+        std::fs::write(crate::context::handoff_path(state, name), "next").unwrap();
         let handoff = crate::report::Entry::new(
             SystemTime::now(),
             crate::report::Body::Handoff { text: "h".into() },
         );
-        crate::report::append(&state.join("reports"), "lead-h", &handoff).unwrap();
+        crate::report::append(&state.join("reports"), name, &handoff).unwrap();
+    }
+
+    #[test]
+    fn a_sandboxed_lead_s_restart_self_is_scheduled_by_its_broker_for_its_own_pane() {
+        let world = World::new();
+        let client = world.route_from("p-lead-h");
+        handed_off(&world, "lead-h");
         let serving = world.serve(FakeHerdr::new(&[]));
         let own = FakeHerdr::new(&[]);
 
-        let (code, kept) = run_here(
-            &own,
-            &world,
-            sandboxed_lead(&world).as_ref(),
-            &Op::RestartSelf,
-        )
-        .unwrap();
+        let (code, kept) = run_here(&own, &world, client.as_ref(), &Op::RestartSelf).unwrap();
 
         assert_eq!(code, 0);
         assert!(
@@ -1722,6 +1743,35 @@ mod tests {
             kept.out
         );
         assert_eq!(own.calls(), 0);
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn restart_self_from_a_broker_restarts_only_its_own_lead() {
+        let world = World::new();
+        let client = world.route_from("p-lead-h");
+        // Another lead's stale entry, sorting first, on the lead's pane.
+        let mut other = member("a-lead", Some("h"));
+        other.role = Some(Role::Lead);
+        other.pane_id = "p-lead-h".into();
+        other.socket = Some(crate::herdr::fake::FAKE_SOCKET.into());
+        world.add(other);
+        handed_off(&world, "a-lead");
+        let serving = world.serve(FakeHerdr::new(&[]));
+
+        let err = client.unwrap().call(&Op::RestartSelf).unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "the ledger has a-lead in lead-h's pane; restart --self restarts only lead-h"
+        );
+        let waiter = world.paths.state_dir().join("restarts/a-lead.waiter.lock");
+        let file = std::fs::File::open(waiter).unwrap();
+        assert!(
+            Lock::try_take(file).unwrap().is_some(),
+            "the claim was kept"
+        );
         world.retire("lead-h");
         serving.join().unwrap().0.unwrap();
     }
@@ -1896,6 +1946,8 @@ mod tests {
                 process: me(),
                 lead: None,
             },
+            live: same_session,
+            spawn_waiter: no_waiter,
         };
         let mut kept = Kept::default();
 
