@@ -505,12 +505,14 @@ mod tests {
                             format!("{root}/state/reports/watch.fired"),
                         ],
                     },
-                    "excludedCommands": [],
+                    "excludedCommands": ["loopherd watch", "loopherd watch *"],
                 },
                 "permissions": {
                     "denyInsteadOfPrompting": true,
                     "allow": [
                         "WebFetch(domain:*)",
+                        "Bash(loopherd watch)",
+                        "Bash(loopherd watch *)",
                     ],
                     "deny": [
                         format!("Edit(/{root}/config/**)"),
@@ -746,6 +748,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_leads_watch_runs_outside_the_sandbox_in_its_plain_forms_only() {
+        let setup = Setup::with_lead(PROMPT);
+        let herdr = herdr();
+
+        lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        let (_, settings) = started_settings(&herdr);
+        let excluded = settings["sandbox"]["excludedCommands"].as_array().unwrap();
+        let allow = settings["permissions"]["allow"].as_array().unwrap();
+        for command in ["loopherd watch", "loopherd watch *"] {
+            assert!(excluded.contains(&command.into()), "{excluded:?}");
+            assert!(
+                allow.contains(&format!("Bash({command})").into()),
+                "an excluded command still goes through the permission flow: {allow:?}"
+            );
+        }
+        assert_eq!(excluded.len(), 2, "{excluded:?}");
+    }
+
     /// The `--mcp-config` a lead's Claude was started with, parsed, after `--strict-mcp-config`.
     fn started_mcp(herdr: &FakeHerdr) -> (PathBuf, serde_json::Value) {
         let args = &herdr.started()[0].args;
@@ -942,6 +971,8 @@ mod tests {
         assert_eq!(
             sandbox["excludedCommands"],
             serde_json::json!([
+                "loopherd watch",
+                "loopherd watch *",
                 "scripts/install",
                 "scripts/install *",
                 "./scripts/install",
@@ -949,7 +980,7 @@ mod tests {
             ])
         );
         assert_eq!(
-            settings["permissions"]["allow"][1], "Bash(scripts/install)",
+            settings["permissions"]["allow"][3], "Bash(scripts/install)",
             "an excluded command still goes through the permission flow"
         );
         assert_eq!(
