@@ -38,8 +38,8 @@ pub enum Switch {
     /// switches on, raise its review-round limit or delete its herd. Not a
     /// switch: always the human's.
     HerdEdit,
-    /// `loopherd retire` of a lead, or of a name the hook can't read, since
-    /// a lead that retires itself would drop its own gates. Not a switch:
+    /// `loopherd retire` of a lead, since a lead that retires itself would
+    /// drop its own gates. Not a switch:
     /// the shepherd's or the human's.
     RetireLead,
     /// `loopherd lead-defaults --set` or `scripts/install --lead-defaults`,
@@ -302,7 +302,16 @@ impl Lexer<'_> {
                         self.heredoc_operator();
                     }
                 }
-                '(' if word.as_deref().is_some_and(|w| w.ends_with('$')) => self.script(true),
+                '(' if word.as_deref().is_some_and(|w| w.ends_with('$')) => {
+                    if self.chars.next_if_eq(&'(').is_some() {
+                        self.arithmetic();
+                    } else {
+                        self.script(true);
+                    }
+                }
+                '(' if word.is_none() && self.chars.next_if_eq(&'(').is_some() => {
+                    self.arithmetic();
+                }
                 ' ' | '\t' => command.extend(word.take()),
                 ';' | '&' | '|' | '(' | ')' | '`' | '\n' => {
                     command.extend(word.take());
@@ -321,12 +330,34 @@ impl Lexer<'_> {
         self.commands.push(command);
     }
 
+    /// Skips a `((…))` or `$((…))` whose `((` was just read; a `<<` in it is
+    /// a shift, not a heredoc.
+    fn arithmetic(&mut self) {
+        let mut depth = 2;
+        for c in self.chars.by_ref() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 {
+                return;
+            }
+        }
+    }
+
     fn double_quoted(&mut self, word: &mut String) {
         while let Some(c) = self.chars.next() {
             match c {
                 '"' => return,
                 '\\' => word.extend(self.chars.next()),
-                '$' if self.chars.next_if_eq(&'(').is_some() => self.script(true),
+                '$' if self.chars.next_if_eq(&'(').is_some() => {
+                    if self.chars.next_if_eq(&'(').is_some() {
+                        self.arithmetic();
+                    } else {
+                        self.script(true);
+                    }
+                }
                 _ => word.push(c),
             }
         }
@@ -692,6 +723,18 @@ mod tests {
             "cat <<-EOF > a; cat <<'B' > b\n\tloopherd pause h\n\tEOF\ngit rebase main\nB\nls",
         ] {
             assert_eq!(run(&leads, Switches::default(), command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn a_shift_in_arithmetic_is_no_heredoc_and_hides_no_line() {
+        for (command, want) in [
+            ("x=$((1 << 2))\ngh pr merge 12", Switch::Merge),
+            ("(( n <<= 1 ))\ngit push --force", Switch::Rebase),
+            ("echo \"$((1 << 2))\"\nscripts/install", Switch::Install),
+            ("echo $(( (1 << 2) + 1 ))\ngit rebase main", Switch::Rebase),
+        ] {
+            assert_eq!(needs(command), [want], "{command}");
         }
     }
 
