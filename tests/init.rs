@@ -4777,10 +4777,21 @@ fn diff_right_after_a_local_init_without_github_prints_nothing_and_makes_no_gh_c
 
 #[test]
 fn diff_reads_back_the_repo_passed_to_init_over_an_origin_that_isnt_github() {
-    for tracker in ["local", "github"] {
+    for (tracker, guard) in [
+        ("local", "hook"),
+        ("github", "hook"),
+        ("github", "credentials"),
+    ] {
         let fixture = Fixture::new(&["acme"]);
         fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
-        let init = fixture.init(&["--tracker", tracker, "--repo", "acme/widgets"]);
+        let init = fixture.init(&[
+            "--tracker",
+            tracker,
+            "--repo",
+            "acme/widgets",
+            "--merge-guard",
+            guard,
+        ]);
         assert_ok(&init);
         let before = everything(&fixture);
 
@@ -4795,6 +4806,30 @@ fn diff_reads_back_the_repo_passed_to_init_over_an_origin_that_isnt_github() {
         assert_eq!(text(&out.stdout), "", "{tracker}");
         assert_eq!(everything(&fixture), before, "{tracker}");
     }
+}
+
+#[test]
+fn diff_reads_back_the_repo_from_a_merged_that_starts_with_gh() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
+    let init = fixture.init(&["--repo", "acme/widgets", "--merge-guard", "credentials"]);
+    assert_ok(&init);
+    let herd_file = fixture.herds().join("widgets.toml");
+    let bare = fs::read_to_string(&herd_file).unwrap().replace(
+        "merged = \"GH_TOKEN=${GH_TOKEN:-$(gh auth token --user acme)} gh pr list",
+        "merged = \"gh pr list",
+    );
+    fs::write(&herd_file, &bare).unwrap();
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.contains("\n-merged = \"gh pr list --repo acme/widgets "),
+        "{stdout}"
+    );
+    assert_eq!(stdout.matches("\n-").count(), 1, "{stdout}");
 }
 
 #[test]
@@ -5509,7 +5544,10 @@ fn a_credentials_herd_runs_gh_on_the_leads_own_token_where_a_hook_herd_names_the
 
     for (fixture, gh) in [
         (&hook, "GH_TOKEN=$(gh auth token --user acme) gh "),
-        (&credentials, "gh "),
+        (
+            &credentials,
+            "GH_TOKEN=${GH_TOKEN:-$(gh auth token --user acme)} gh ",
+        ),
     ] {
         let herd = herd_toml(fixture);
         for check in [

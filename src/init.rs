@@ -847,10 +847,11 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
         Some(_) => github_text,
         None => otherwise,
     };
-    // A credentials lead can't read the human's gh login; its gh has the herd's token.
+    // A credentials lead can't read the human's gh login, so its own GH_TOKEN wins; a
+    // human shell without one still runs as the account.
     let credentials = herd.merge_guard == Some(MergeGuard::Credentials);
     let gh = match credentials {
-        true => "gh".to_string(),
+        true => format!("GH_TOKEN=${{GH_TOKEN:-$(gh auth token --user {account})}} gh"),
         false => format!("GH_TOKEN=$(gh auth token --user {account}) gh"),
     };
     let switches = match herd.merge_guard {
