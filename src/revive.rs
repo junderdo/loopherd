@@ -1674,6 +1674,26 @@ mod tests {
     }
 
     #[test]
+    fn a_revived_lead_s_writable_state_dirs_exist_when_its_claude_starts() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut herdr = herdr();
+        let mut ledger = ledger([lead("lead-h", cwd.path())]);
+        let req = request();
+        let state = req.paths.state_dir();
+        let dirs = ["broker/lead-h/requests", "reports", "handoffs"].map(|d| state.join(d));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let record = (seen.clone(), dirs.clone());
+        herdr.on_start = Some(Box::new(move || {
+            let (seen, dirs) = &record;
+            *seen.lock().unwrap() = dirs.iter().map(|d| d.is_dir()).collect();
+        }));
+
+        run(&herdr, &mut ledger, &req);
+
+        assert_eq!(*seen.lock().unwrap(), [true, true, true], "{dirs:?}");
+    }
+
+    #[test]
     fn a_revived_lead_resumes_in_its_sandbox_with_its_settings_written_afresh() {
         let cwd = tempfile::tempdir().unwrap();
         let herdr = herdr();

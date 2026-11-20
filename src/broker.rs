@@ -70,6 +70,10 @@ pub enum Op {
         keep_branch: bool,
         drop_branch: bool,
     },
+    /// Labels the lead's pane with the question it reported.
+    Label {
+        question: String,
+    },
 }
 
 /// What an operation acts on, for the broker's reach rule.
@@ -131,6 +135,7 @@ impl Op {
             Op::RestartSelf => "restart --self",
             Op::Retire { .. } => "retire",
             Op::Release { .. } => "release",
+            Op::Label { .. } => "label its pane",
         }
     }
 
@@ -140,20 +145,21 @@ impl Op {
                 Reach::Member(name)
             }
             Op::Feed { herd, .. } | Op::Add { herd, .. } => Reach::Herd(herd),
-            Op::RestartSelf => Reach::Lead,
+            Op::RestartSelf | Op::Label { .. } => Reach::Lead,
             Op::Retire { name, .. } | Op::Release { name, .. } => Reach::AnyMember(name),
         }
     }
 
-    /// How long a lead waits for its broker to answer.
-    fn answer_within(&self) -> Duration {
+    /// How long a lead waits for its broker to answer, `remote` being the
+    /// broker's git timeout.
+    fn answer_within(&self, remote: Duration) -> Duration {
         match self {
             Op::Tell { .. } | Op::Prompt { .. } | Op::RestartSelf => Duration::from_secs(120),
+            // The report is written already; a label isn't worth waiting out a feed for.
+            Op::Label { .. } => Duration::from_secs(10),
             // Its settle timeout, with room for herdr and the member's view.
             Op::Restart { .. } => Duration::from_secs(300),
-            Op::Retire { .. } | Op::Release { .. } => {
-                origin_wait(crate::worktree::remote_timeout())
-            }
+            Op::Retire { .. } | Op::Release { .. } => origin_wait(remote),
             // Each member may take its ready timeout, then after_merge its own.
             Op::Feed { .. } => Duration::from_secs(4 * 60 * 60),
             Op::Add {
@@ -225,16 +231,44 @@ impl Op {
                 keep_branch,
                 drop_branch,
             } => release(ctx, name, *keep_branch, *drop_branch, sink),
+            Op::Label { question } => label(ctx, question, sink),
         }
     }
 }
 
+/// Labels the lead's pane with `question`, from the lead's own record.
+fn label(ctx: &mut Ctx, question: &str, sink: &mut dyn Sink) -> Result<i32> {
+    let lead = ctx
+        .caller
+        .lead
+        .as_ref()
+        .context("only a lead's broker labels its pane")?;
+    let record = own_record(ctx.herdr, &*ctx.ledger, &lead.name)?;
+    if !crate::notify::labels_panes(&crate::herd::config_file(ctx.paths)) {
+        return Ok(0);
+    }
+    let mailboxes = ctx.paths.state_dir().join("reports");
+    let pane = &record.pane_id;
+    if let Err(e) = crate::pane_label::lead_asked(
+        ctx.herdr,
+        &*ctx.ledger,
+        &mailboxes,
+        pane,
+        &record.name,
+        question,
+    ) {
+        sink.err(&format!(
+            "loopherd report: warning: label pane {pane}: {e:#}"
+        ));
+    }
+    Ok(0)
+}
+
 /// How long a lead waits on an operation that asks origin a few things in
-/// turn, each within `remote`, the git timeout: release asks up to nine.
-fn origin_wait(remote: Result<Duration>) -> Duration {
-    // The broker's git reads its own timeout; a bad one here only sets this wait.
-    let remote = remote.unwrap_or(crate::worktree::REMOTE_TIMEOUT);
-    remote * 9 + Duration::from_secs(300)
+/// turn, each within `remote`, the git timeout: release usually asks nine,
+/// and a fetch may retry once or `remote set-head` join them, so twice that.
+fn origin_wait(remote: Duration) -> Duration {
+    remote * 18 + Duration::from_secs(300)
 }
 
 /// Lead `lead`'s own unretired record, in this herdr; by name, since a stale
@@ -594,6 +628,11 @@ pub fn serve(
     let Some(_lock) = take_lock(paths, lead)? else {
         return Ok(Served::AlreadyRunning);
     };
+    // Its lead sizes waits on origin by the broker's git timeout, not its own. A plain
+    // write is safe: the lead's sandbox can't write config/broker to plant a link.
+    if let Ok(remote) = crate::worktree::remote_timeout() {
+        let _ = std::fs::write(lock_file(paths, lead), remote.as_secs().to_string());
+    }
     let herd = sandbox::Lead::kept(paths, lead)?
         .ok_or_else(|| anyhow!("{lead} has no launch record, so its broker has no herd"))?
         .herd;
@@ -650,11 +689,15 @@ pub fn lead_env(paths: &Paths, lead: &str) -> Result<Vec<(String, String)>> {
         .collect();
     // Outside the sandbox the human's keys are readable: a core.sshCommand -i or
     // a `Host *` IdentityFile would offer them, so ssh reads loopherd's config alone.
+    if let Some(missing) = crate::credentials::host_block_missing(paths, herd) {
+        bail!("{lead}'s broker can't start: herd {herd} guards merges by credentials: {missing}");
+    }
     let ssh_config = crate::credentials::ssh_config(paths);
+    // Setting it turns off loopherd's own BatchMode, so a prompt would hang until the git timeout.
     env.push((
         "GIT_SSH_COMMAND".into(),
         format!(
-            "ssh -F {} -o IdentitiesOnly=yes -o IdentityAgent=none",
+            "ssh -F {} -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes",
             crate::shell::quote(&ssh_config.to_string_lossy())
         ),
     ));
@@ -966,6 +1009,9 @@ impl Dir {
 
 const MALFORMED: &str = "malformed request";
 
+/// Why a label that failed asks for nothing more: its report went out first.
+const NO_LABEL: &str = "the pane got no label; the report itself is sent, so don't send it again";
+
 /// The lead's side of the transport: writes requests, reads replies.
 pub struct Client {
     lead: String,
@@ -977,6 +1023,11 @@ pub struct Client {
 }
 
 impl Client {
+    /// The lead this client hands operations to.
+    pub fn lead(&self) -> &str {
+        &self.lead
+    }
+
     pub fn for_lead(paths: &Paths, lead: &str) -> Client {
         Client {
             lead: lead.into(),
@@ -1016,7 +1067,9 @@ impl Client {
     fn answer(&self, id: &str, op: &Op) -> Result<(String, String, i32)> {
         let lead = &self.lead;
         let reply = self.replies.join(format!("{id}.json"));
-        let answer_within = self.answer_within.unwrap_or_else(|| op.answer_within());
+        let answer_within = self
+            .answer_within
+            .unwrap_or_else(|| op.answer_within(broker_remote_timeout(&self.lock)));
         let given_up = Instant::now() + answer_within;
         loop {
             if let Ok(text) = std::fs::read(&reply) {
@@ -1036,7 +1089,11 @@ impl Client {
                     Reply::Failed(why) => Err(anyhow!("{why}")),
                 };
             }
+            let labelling = matches!(op, Op::Label { .. });
             if !held(&self.lock) {
+                if labelling {
+                    bail!("{lead}'s broker stopped, so {NO_LABEL}");
+                }
                 bail!(
                     "{lead}'s broker stopped before answering {}: \
                      the shepherd's loopherd revive --name {lead} starts it again",
@@ -1044,6 +1101,9 @@ impl Client {
                 );
             }
             if Instant::now() >= given_up {
+                if labelling {
+                    bail!("{lead}'s broker was busy, so {NO_LABEL}");
+                }
                 bail!(
                     "{lead}'s broker didn't answer {} within {}; it may still be carrying it out, \
                      so check before asking again, and check the broker with loopherd doctor",
@@ -1134,6 +1194,18 @@ pub fn start(paths: &Paths, lead: &str) -> Result<bool> {
 /// Whether a broker serves `lead` now.
 pub fn running(paths: &Paths, lead: &str) -> bool {
     held(&lock_file(paths, lead))
+}
+
+/// The git timeout the broker holding `lock` recorded; an older broker's
+/// record is empty, so this loopherd's own stands in.
+fn broker_remote_timeout(lock: &Path) -> Duration {
+    std::fs::read_to_string(lock)
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| {
+            crate::worktree::remote_timeout().unwrap_or(crate::worktree::REMOTE_TIMEOUT)
+        })
 }
 
 fn held(lock: &Path) -> bool {
@@ -1909,6 +1981,45 @@ mod tests {
     }
 
     #[test]
+    fn a_serving_broker_records_its_git_timeout_for_its_leads_waits() {
+        let world = World::new();
+        let serving = world.serve(FakeHerdr::new(&[]));
+
+        let lock = lock_file(&world.paths, "lead-h");
+        // The broker records it just after taking the lock.
+        let given_up = Instant::now() + Duration::from_secs(5);
+        while std::fs::read_to_string(&lock).unwrap().is_empty() {
+            assert!(
+                Instant::now() < given_up,
+                "the broker never recorded its timeout"
+            );
+            std::thread::sleep(POLL);
+        }
+        let recorded = broker_remote_timeout(&lock);
+
+        let own = crate::worktree::remote_timeout().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&lock).unwrap(),
+            own.as_secs().to_string()
+        );
+        assert_eq!(recorded, own);
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_lead_sizes_its_wait_by_the_brokers_git_timeout_else_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("lead-h.lock");
+        let own = crate::worktree::remote_timeout().unwrap();
+
+        std::fs::write(&lock, "7").unwrap();
+        assert_eq!(broker_remote_timeout(&lock), Duration::from_secs(7));
+        std::fs::write(&lock, "").unwrap();
+        assert_eq!(broker_remote_timeout(&lock), own);
+    }
+
+    #[test]
     fn with_no_broker_running_a_lead_s_command_fails_at_once_naming_it_and_revive() {
         let world = World::new();
         let started = Instant::now();
@@ -2144,6 +2255,56 @@ mod tests {
         );
         let left = std::fs::read_dir(requests_dir(&world.paths, "lead-h")).unwrap();
         assert_eq!(left.count(), 0);
+    }
+
+    #[test]
+    fn a_label_a_busy_broker_never_answered_says_the_report_went_out_anyway() {
+        let world = World::new();
+        let _held = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+        let client = Client {
+            answer_within: Some(Duration::from_millis(50)),
+            ..world.client()
+        };
+        std::fs::create_dir_all(requests_dir(&world.paths, "lead-h")).unwrap();
+
+        let err = client
+            .call(&Op::Label {
+                question: "which DB?".into(),
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "lead-h's broker was busy, so the pane got no label; \
+             the report itself is sent, so don't send it again"
+        );
+        let left = std::fs::read_dir(requests_dir(&world.paths, "lead-h")).unwrap();
+        assert_eq!(left.count(), 0);
+    }
+
+    #[test]
+    fn a_label_whose_broker_stopped_before_answering_says_the_report_went_out_anyway() {
+        let world = World::new();
+        let held = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+        std::fs::create_dir_all(requests_dir(&world.paths, "lead-h")).unwrap();
+        let stopping = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(held);
+        });
+
+        let err = world
+            .client()
+            .call(&Op::Label {
+                question: "which DB?".into(),
+            })
+            .unwrap_err();
+
+        stopping.join().unwrap();
+        assert_eq!(
+            format!("{err:#}"),
+            "lead-h's broker stopped, so the pane got no label; \
+             the report itself is sent, so don't send it again"
+        );
     }
 
     #[test]
@@ -2649,6 +2810,7 @@ mod tests {
         if let Some(token) = token {
             std::fs::write(&files.token, token).unwrap();
         }
+        crate::credentials::write_host_block(&world.paths, "c").unwrap();
     }
 
     #[test]
@@ -2672,7 +2834,7 @@ mod tests {
             var("GIT_SSH_COMMAND"),
             Some(
                 format!(
-                    "ssh -F '{}' -o IdentitiesOnly=yes -o IdentityAgent=none",
+                    "ssh -F '{}' -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes",
                     ssh_config.display()
                 )
                 .as_str()
@@ -2689,12 +2851,11 @@ mod tests {
     }
 
     #[test]
-    fn a_lead_waits_on_retire_and_release_for_nine_remote_calls_and_room_for_herdr() {
+    fn a_lead_waits_on_retire_and_release_for_eighteen_remote_calls_and_room_for_herdr() {
         let secs = |s| Duration::from_secs(s);
 
-        assert_eq!(origin_wait(Ok(secs(120))), secs(1380));
-        assert_eq!(origin_wait(Ok(secs(3600))), secs(9 * 3600 + 300));
-        assert_eq!(origin_wait(Err(anyhow!("bad timeout"))), secs(1380));
+        assert_eq!(origin_wait(secs(120)), secs(18 * 120 + 300));
+        assert_eq!(origin_wait(secs(3600)), secs(18 * 3600 + 300));
     }
 
     #[test]
@@ -2725,6 +2886,25 @@ mod tests {
                 "herd c guards merges by credentials: no token at {}; \
                  run loopherd merge-guard c for how to create and store it",
                 token.display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_credentials_herds_broker_without_its_host_block_fails_to_start_naming_the_fix() {
+        let world = World::new();
+        credentials_herd(&world, Some("github_pat_1\n"));
+        let ssh_config = crate::credentials::ssh_config(&world.paths);
+        std::fs::remove_file(&ssh_config).unwrap();
+
+        let err = lead_env(&world.paths, "lead-c").unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "lead-c's broker can't start: herd c guards merges by credentials: \
+                 no current Host loopherd-c in {}; run loopherd merge-guard c",
+                ssh_config.display()
             )
         );
     }

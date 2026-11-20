@@ -1,10 +1,13 @@
-//! `[notify] pane_label` through the binary: a lead's question labels its pane,
-//! and the prompt and session hooks clear it, with a `herdr` on PATH that
-//! records each call and, like herdr's `pane report-metadata`, prints nothing.
+//! A lead's report, its pane label through its broker, and `[notify] pane_label` through the
+//! binary: a lead's question labels its pane, and the prompt and session hooks
+//! clear it, with a `herdr` on PATH that records each call and, like herdr's
+//! `pane report-metadata`, prints nothing.
 
+mod brokers;
 mod common;
 mod fakes;
 
+use brokers::Broker;
 use common::feed_stdin;
 use fakes::executable;
 use std::fs;
@@ -17,11 +20,12 @@ const LABEL: &str = "pane report-metadata w1:p0 --source loopherd --agent claude
 const CLEAR: &str = "pane report-metadata w1:p0 --source loopherd --clear-display-agent";
 
 struct World {
+    broker: Option<Broker>,
     root: tempfile::TempDir,
 }
 
 impl World {
-    /// lead-cards leads cards from pane w1:p0; lh-1 works in w1:p1.
+    /// lead-cards leads cards from pane w1:p0, with its broker running; lh-1 works in w1:p1.
     fn new(notify: &str) -> World {
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("state/loopherd");
@@ -54,7 +58,23 @@ impl World {
                 root.path().join("calls").display()
             ),
         );
-        World { root }
+        let mut world = World { broker: None, root };
+        let config = world.root.path().join("config");
+        world.broker = Some(Broker::start(
+            world.loopherd("", &[]),
+            &config,
+            "lead-cards",
+            "cards",
+        ));
+        world
+    }
+
+    fn mailbox(&self, name: &str) -> String {
+        let path = self
+            .root
+            .path()
+            .join(format!("state/loopherd/reports/{name}.jsonl"));
+        fs::read_to_string(path).unwrap_or_default()
     }
 
     fn loopherd(&self, pane: &str, args: &[&str]) -> Command {
@@ -171,9 +191,46 @@ fn a_label_herdr_refuses_leaves_the_report_written_with_a_warning() {
         "loopherd report: warning: label pane w1:p0: \
          herdr pane report-metadata: pane w1:p0 not found (pane_not_found)\n"
     );
-    let mailbox = world
-        .root
-        .path()
-        .join("state/loopherd/reports/lead-cards.jsonl");
-    assert!(fs::read_to_string(mailbox).unwrap().contains("which DB?"));
+    assert!(world.mailbox("lead-cards").contains("which DB?"));
+}
+
+#[test]
+fn a_lead_reports_only_as_itself() {
+    let world = World::new(ON);
+
+    world.run("w1:p0", &["report", "--as", "lead-cards", "PR #9"]);
+    let out = world
+        .loopherd("w1:p0", &["report", "--as", "lh-1", "PR #10"])
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "loopherd report: lead-cards reports only as itself; lh-1's reports are lh-1's own\n"
+    );
+    assert!(world.mailbox("lead-cards").contains("PR #9"));
+    assert_eq!(world.mailbox("lh-1"), "");
+}
+
+#[test]
+fn a_lead_whose_broker_is_down_still_reports_but_gets_no_label() {
+    let mut world = World::new(ON);
+    world.broker = None;
+
+    let out = world
+        .loopherd("w1:p0", &["report", "--kind", "question", "which DB?"])
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with(
+            "loopherd report: warning: no broker is running for lead-cards, so it can't label its pane"
+        ),
+        "{stderr}"
+    );
+    assert!(world.mailbox("lead-cards").contains("which DB?"));
+    assert_eq!(world.calls(), Vec::<String>::new());
 }
