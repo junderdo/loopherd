@@ -46,6 +46,15 @@ pub struct FeedRequest<'a> {
     pub owner: Process,
     /// Tells whether another feed's recorded process still runs.
     pub procs: &'a dyn Procs,
+    /// The lead a broker runs this feed for, which no pane names.
+    pub lead: Option<ForLead>,
+}
+
+/// A lead, with the herd its launch record names.
+#[derive(Debug, Clone)]
+pub struct ForLead {
+    pub name: String,
+    pub herd: String,
 }
 
 /// One line per task, then a summary, and the exit code.
@@ -270,6 +279,7 @@ fn unclaimed(
         after_merge_timeout: Duration::ZERO,
         owner: Process { pid: 0, start: 0 },
         procs: &crate::process::ProcFs,
+        lead: None,
     };
     let mut names = vec![];
     for task in tasks.lines().map(str::trim) {
@@ -317,7 +327,10 @@ fn reap(
         errors: 0,
         after_merge: vec![],
     };
-    let caller = sandbox::calling_lead(paths, req.procs, req.owner.pid);
+    let caller = match &req.lead {
+        Some(lead) => Some(lead.name.clone()),
+        None => sandbox::calling_lead(paths, req.procs, req.owner.pid),
+    };
     let guard = Guard::new(paths.clone(), caller);
     let mut held_back = None;
     if !queue.after_merge.is_empty() {
@@ -344,7 +357,8 @@ fn reap(
             if live(req.procs, Some(owner)).is_some() {
                 lines.push(format!("after_merge {name}: running in feed {}", owner.pid));
             } else {
-                interrupted(ledger, req, name, owner, lines)?;
+                let why = "the feed running it exited before noting an outcome";
+                interrupted(ledger, req, name, owner, why, lines)?;
             }
             continue;
         }
@@ -509,23 +523,28 @@ impl HeldBack {
     }
 }
 
-/// The first of `commands` the lead running feed may not run: feed runs in
-/// a lead's pane, and the tool hook would deny that command there.
+/// The first of `commands` the lead running feed may not run, as the tool
+/// hook would deny that command in the lead's pane.
 fn gate(
     ledger: &dyn Ledger,
     paths: &Paths,
     req: &FeedRequest,
     commands: &[String],
 ) -> Result<Option<HeldBack>> {
-    let pane = req.own_pane.as_deref().map(|id| Pane {
-        id,
-        socket: req.own_socket.as_deref(),
-        lineage: &req.own_lineage,
-    });
-    let Some(lead) = pane.map(|p| lead_in(ledger, &p)).transpose()?.flatten() else {
-        return Ok(None);
+    let herd = match &req.lead {
+        Some(lead) => lead.herd.clone(),
+        None => {
+            let pane = req.own_pane.as_deref().map(|id| Pane {
+                id,
+                socket: req.own_socket.as_deref(),
+                lineage: &req.own_lineage,
+            });
+            let Some(lead) = pane.map(|p| lead_in(ledger, &p)).transpose()?.flatten() else {
+                return Ok(None);
+            };
+            lead.herd.unwrap_or_default()
+        }
     };
-    let herd = lead.herd.unwrap_or_default();
     let (switches, unread) = match lead_switches(paths, &herd) {
         Ok(switches) => (switches, None),
         Err(e) => (Default::default(), Some(format!("{e:#}"))),
@@ -582,6 +601,7 @@ fn interrupted(
     req: &FeedRequest,
     name: &str,
     owner: Process,
+    why: &str,
     lines: &mut Vec<String>,
 ) -> Result<()> {
     if req.dry_run {
@@ -602,11 +622,35 @@ fn interrupted(
         .context("ledger")?;
     if claimed {
         lines.push(format!("after_merge {name}: interrupted"));
-        let text = "after_merge interrupted: the feed running it exited before noting an outcome; \
-                    check what ran and finish its commands by hand";
-        note(req, name, text, lines);
+        let text = format!(
+            "after_merge interrupted: {why}; check what ran and finish its commands by hand"
+        );
+        note(req, name, &text, lines);
     }
     Ok(())
+}
+
+/// Notes interrupted every after_merge still pending on this feed's
+/// `req.owner`, for a feed that failed and whose process lives on, as a
+/// broker's does, saying `why` in each member's note. Returns a line per
+/// member, and a warning if it can't.
+pub fn abandon(ledger: &mut dyn Ledger, req: &FeedRequest, why: &str) -> Vec<String> {
+    let mut lines = vec![];
+    let pending = Some(AfterMerge::Pending { owner: req.owner });
+    let names: Vec<String> = match ledger.entries() {
+        Ok(entries) => entries
+            .into_values()
+            .filter(|r| r.after_merge == pending)
+            .map(|r| r.name)
+            .collect(),
+        Err(e) => return vec![format!("warning: ledger: {e:#}; after_merge left pending")],
+    };
+    for name in names {
+        if let Err(e) = interrupted(ledger, req, &name, req.owner, why, &mut lines) {
+            lines.push(format!("warning: {name}: {e:#}; after_merge left pending"));
+        }
+    }
+    lines
 }
 
 fn set_after_merge(ledger: &mut dyn Ledger, name: &str, state: AfterMerge) -> Result<()> {
@@ -999,6 +1043,7 @@ mod tests {
                 after_merge_timeout: Duration::from_secs(2),
                 owner: OWNER,
                 procs: &*LIVE,
+                lead: None,
                 own_lineage: vec![],
             }
         }
@@ -1780,6 +1825,7 @@ mod tests {
             after_merge_timeout: Duration::from_secs(5),
             owner: OWNER,
             procs: &*LIVE,
+            lead: None,
         };
         let herdr = herdr();
         let mut ledger = MemLedger::default();
@@ -1905,6 +1951,7 @@ mod tests {
             after_merge_timeout: Duration::from_secs(5),
             owner: OWNER,
             procs: &*LIVE,
+            lead: None,
             own_lineage: vec![],
         };
 
@@ -1967,6 +2014,7 @@ mod tests {
             after_merge_timeout: Duration::from_secs(5),
             owner: OWNER,
             procs: &*LIVE,
+            lead: None,
         };
 
         let fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
@@ -2102,6 +2150,7 @@ mod tests {
             after_merge_timeout: Duration::from_secs(5),
             owner: OWNER,
             procs: &*LIVE,
+            lead: None,
         };
 
         let fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
@@ -2427,6 +2476,7 @@ mod tests {
                     after_merge_timeout: Duration::from_secs(5),
                     owner: OWNER,
                     procs: &*LIVE,
+                    lead: None,
                 };
                 task_request(&setup.paths(), &req, template, params)
                     .unwrap()
@@ -3149,5 +3199,59 @@ mod tests {
             assert_eq!(fed.lines[1], "after_merge zpr-1: ok", "{lead} {pane:?}");
             assert_eq!(setup.read("log").unwrap(), "one\ninstalled --no-extras\n");
         }
+    }
+
+    #[test]
+    fn a_feed_run_for_a_lead_gates_after_merge_by_its_launch_records_herd_from_no_pane() {
+        let commands = r#"["echo one >> log", "scripts/install"]"#;
+        let setup = Setup::after_merge(commands, "[lead]\nprompt = \"go\"\n");
+        let herdr = herdr();
+        let mut ledger = with_lead(fed_one(&setup, &herdr), "forged");
+        setup.touch("merged-1");
+        let req = FeedRequest {
+            lead: Some(ForLead {
+                name: "lead-prs".into(),
+                herd: "prs".into(),
+            }),
+            ..setup.request(false, None)
+        };
+
+        let mut fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
+        run_after_merge(&mut ledger, &setup.paths(), &req, &mut fed).unwrap();
+
+        assert_eq!(
+            fed.lines[0],
+            "after_merge zpr-1: not run: `scripts/install` needs the install switch, off in prs's [lead]"
+        );
+        assert_eq!(setup.read("log"), None);
+    }
+
+    #[test]
+    fn a_failed_feed_notes_interrupted_only_the_after_merge_it_left_pending() {
+        let setup = Setup::after_merge(r#"["echo one >> log"]"#, "");
+        let herdr = herdr();
+        let mut ledger = fed_one(&setup, &herdr);
+        let mut other = ledger.0["zpr-1"].clone();
+        other.name = "zpr-2".into();
+        ledger.0.insert("zpr-2".into(), other);
+        let elsewhere = Process { pid: 8, start: 80 };
+        for (name, owner) in [("zpr-1", OWNER), ("zpr-2", elsewhere)] {
+            ledger.0.get_mut(name).unwrap().after_merge = Some(AfterMerge::Pending { owner });
+        }
+
+        let lines = abandon(&mut ledger, &setup.request(false, None), "it failed: boom");
+
+        assert_eq!(lines, ["after_merge zpr-1: interrupted"]);
+        assert_eq!(ledger.0["zpr-1"].after_merge, Some(AfterMerge::Noted));
+        assert_eq!(
+            ledger.0["zpr-2"].after_merge,
+            Some(AfterMerge::Pending { owner: elsewhere })
+        );
+        assert_eq!(
+            setup.notes("zpr-1"),
+            [
+                "after_merge interrupted: it failed: boom; check what ran and finish its commands by hand"
+            ]
+        );
     }
 }

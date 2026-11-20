@@ -762,6 +762,11 @@ pub fn config_file(paths: &Paths) -> PathBuf {
     paths.herds.with_file_name("config.toml")
 }
 
+/// Whether `herd`'s file defines `template`.
+pub fn has_template(paths: &Paths, herd: &str, template: &str) -> Result<bool> {
+    Ok(load(&paths.herds, herd)?.template.contains_key(template))
+}
+
 /// The repo a herd's file names, with a leading `~` expanded, even while a
 /// value in it is invalid (an unfilled queue source); a file that doesn't
 /// parse is still an error.

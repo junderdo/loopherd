@@ -205,6 +205,11 @@ pub trait Ledger {
     /// Appends a `start` boundary to `name`'s mailbox; `resumed` when the
     /// conversation carried over, as on a revive.
     fn started(&mut self, name: &str, at: SystemTime, resumed: bool) -> Result<()>;
+    /// Whether this process is refused writing the ledger, as one in a
+    /// lead's sandbox is (D97). Takes no lock.
+    fn read_only(&self) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// The ledger entries `remove_herd` changed, by name.
@@ -331,28 +336,32 @@ impl FileLedger {
         Ok(self.dir()?.join("reports"))
     }
 
-    /// Whether this process is refused writing the ledger, as one in a
-    /// lead's sandbox is (D97). Takes no lock.
-    pub fn read_only(&self) -> Result<bool> {
-        let path = self.path.with_extension("lock");
-        let opened = fs::create_dir_all(self.dir()?).and_then(|()| {
-            fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(&path)
-        });
-        match opened {
-            Ok(_) => Ok(false),
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::ReadOnlyFilesystem | io::ErrorKind::PermissionDenied
-                ) =>
-            {
-                Ok(true)
+    /// Whether the ledger lock, or the nearest folder above it that exists,
+    /// may be written. Creates nothing, so a dry run leaves no trace.
+    fn writable(&self) -> Result<bool> {
+        use std::os::unix::ffi::OsStrExt;
+        let lock = self.path.with_extension("lock");
+        let probe = lock
+            .ancestors()
+            .find(|p| p.exists())
+            .context("ledger path has no existing parent")?;
+        let e = if probe == lock {
+            // A real open: macOS's sandbox denies writes that access(2) may still allow.
+            match fs::OpenOptions::new().write(true).open(&lock) {
+                Ok(_) => return Ok(true),
+                Err(e) => e,
             }
-            Err(e) => Err(e).with_context(|| format!("open {}", path.display())),
+        } else {
+            let c_path = std::ffi::CString::new(probe.as_os_str().as_bytes())?;
+            // SAFETY: access only reads a C string the call borrows.
+            if unsafe { libc::access(c_path.as_ptr(), libc::W_OK) } == 0 {
+                return Ok(true);
+            }
+            io::Error::last_os_error()
+        };
+        match e.kind() {
+            io::ErrorKind::ReadOnlyFilesystem | io::ErrorKind::PermissionDenied => Ok(false),
+            _ => Err(e).with_context(|| format!("check {}", probe.display())),
         }
     }
 
@@ -400,6 +409,10 @@ fn temp_path(path: &Path) -> PathBuf {
 }
 
 impl Ledger for FileLedger {
+    fn read_only(&self) -> Result<bool> {
+        Ok(!self.writable()?)
+    }
+
     fn entries(&self) -> Result<BTreeMap<String, AgentRecord>> {
         self.load()
     }

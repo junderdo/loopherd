@@ -422,9 +422,6 @@ mod tests {
                         ],
                     },
                     "excludedCommands": [
-                        "loopherd feed",
-                        "loopherd feed *",
-                        "loopherd add *",
                         "loopherd retire *",
                         "loopherd release *",
                         "loopherd restart *",
@@ -435,9 +432,6 @@ mod tests {
                     "denyInsteadOfPrompting": true,
                     "allow": [
                         "WebFetch(domain:*)",
-                        "Bash(loopherd feed)",
-                        "Bash(loopherd feed *)",
-                        "Bash(loopherd add *)",
                         "Bash(loopherd retire *)",
                         "Bash(loopherd release *)",
                         "Bash(loopherd restart *)",
@@ -681,9 +675,6 @@ mod tests {
         assert_eq!(
             sandbox["excludedCommands"],
             serde_json::json!([
-                "loopherd feed",
-                "loopherd feed *",
-                "loopherd add *",
                 "loopherd retire *",
                 "loopherd release *",
                 "loopherd restart *",
@@ -695,7 +686,7 @@ mod tests {
             ])
         );
         assert_eq!(
-            settings["permissions"]["allow"][8], "Bash(scripts/install)",
+            settings["permissions"]["allow"][5], "Bash(scripts/install)",
             "an excluded command still goes through the permission flow"
         );
         assert_eq!(
