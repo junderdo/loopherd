@@ -419,6 +419,15 @@ pub fn check_running(
         .any(|pair| pair[0] == "--settings" && pair[1] == shown)
     {
         let why = "it was started without its sandbox";
+        if herd::merge_guard(paths, herd)? == Some(MergeGuard::Credentials) {
+            return Err(credentials_refusal(
+                name,
+                &format!(
+                    "{why}, so it can read your GitHub credentials; {resume} to resume it \
+                     sandboxed"
+                ),
+            ));
+        }
         return match mode {
             SandboxMode::Prefer => Ok(Running::HookOnly(why.into())),
             SandboxMode::Require => Err(refusal(
@@ -515,11 +524,22 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
     let mut deny = vec![edit_rule(config), edit_rule(&claude)];
     let mut env = None;
     if herd::merge_guard(paths, herd)? == Some(MergeGuard::Credentials) {
+        if switches.install {
+            return Err(credentials_refusal(
+                name,
+                &format!(
+                    "install = true runs scripts/install outside the sandbox, from a worktree \
+                     the lead can edit; set [lead] install = false, or merge_guard = \"hook\", \
+                     in herd {herd}"
+                ),
+            ));
+        }
         env = Some(
             crate::credentials::lead_env(paths, herd)
                 .map_err(|e| credentials_refusal(name, &format!("{e:#}")))?,
         );
-        let human = crate::credentials::human_credentials(&paths.home);
+        let human =
+            crate::credentials::human_credentials(&paths.home, &|name| std::env::var_os(name));
         // The file tools run outside the sandbox, so each path is denied to both.
         sandbox["filesystem"]["denyRead"] = human
             .iter()
