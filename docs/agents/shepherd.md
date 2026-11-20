@@ -90,7 +90,12 @@ from its switches (D89), a guard rail rather than containment (D89 lists
 what gets past it). `loopherd doctor` fails when the sandbox can't start
 here while a herd has a lead, and `[lead] sandbox = "require"`, the
 default, then refuses to start the lead; `prefer` starts it guarded by its
-hook alone, flagged in `loopherd view`, and only the human sets it. Doctor
+hook alone, flagged in `loopherd view`, and only the human sets it. The
+same mode governs what the human's own `~/.claude/settings.json` loosens
+(D100): `require` refuses the lead naming each file and key, `prefer`
+starts it sandboxed with them as warnings; doctor reports them. A lead
+gets no MCP servers but those its `[lead] mcp_servers` names, which run
+unsandboxed; only the human adds one. Doctor
 names each running lead without its sandbox; `loopherd revive --name
 <lead>` after quitting its Claude resumes it in one. A lead started
 before loopherd kept its record (`<config dir>/sandbox/<lead>.lead.json`)

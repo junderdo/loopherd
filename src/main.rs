@@ -1459,6 +1459,10 @@ fn runnable(exe: PathBuf) -> PathBuf {
 
 fn run_broker(lead: &str) -> Result<i32> {
     let paths = Paths::from_env().context("herd")?;
+    for (name, value) in broker::lead_env(&paths, lead)? {
+        // SAFETY: the broker has started no threads yet.
+        unsafe { std::env::set_var(name, value) };
+    }
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let host = broker::Host {
         herdr: &CliHerdr,

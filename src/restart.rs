@@ -148,12 +148,12 @@ pub fn restart(
             (Some(prompt), Some(running))
         }
     };
-    let (unsandboxed, warning) = match running {
-        None | Some(Running::Sandboxed) => (None, None),
-        Some(Running::Stale(warning)) => (None, Some(warning)),
-        Some(Running::HookOnly(why)) => {
-            let warning = sandbox::hook_only_warning(name, &why);
-            (Some(why), Some(warning))
+    let (unsandboxed, warnings) = match running {
+        None => (None, vec![]),
+        Some(Running::Sandboxed(warnings)) => (None, warnings),
+        Some(Running::HookOnly(why, mut warnings)) => {
+            warnings.push(sandbox::hook_only_warning(name, &why));
+            (Some(why), warnings)
         }
     };
     let pane = &agent.pane_id;
@@ -236,9 +236,7 @@ pub fn restart(
         }
         _ => String::new(),
     };
-    let warning = warning
-        .map(|w| format!("\nwarning: {w}"))
-        .unwrap_or_default();
+    let warning: String = warnings.iter().map(|w| format!("\nwarning: {w}")).collect();
     Ok(format!(
         "restarted {name} in session {live}; prompted it to read {}{unread}{warning}",
         read.display()
@@ -794,7 +792,16 @@ mod tests {
             live: &dyn Fn(&str) -> String,
         ) -> (Result<String>, MemLedger) {
             let mut member = record("lh-1");
-            member.claude_args = vec!["--settings".into(), self.settings().display().to_string()];
+            member.claude_args = vec![
+                "--settings".into(),
+                self.settings().display().to_string(),
+                "--strict-mcp-config".into(),
+                "--mcp-config".into(),
+                self.settings()
+                    .with_extension("mcp.json")
+                    .display()
+                    .to_string(),
+            ];
             edit(&mut member);
             let mut ledger = Clearing {
                 recorded: member.session_id.clone(),
@@ -886,6 +893,14 @@ mod tests {
                 .collect()
         }
 
+        /// Writes the human's `~/.claude/settings.json`, returning its path.
+        fn user_settings(&self, text: &str) -> PathBuf {
+            let dir = self.paths().home.join(".claude");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("settings.json"), text).unwrap();
+            dir.join("settings.json")
+        }
+
         /// Where a lead's sandbox settings are written.
         fn settings(&self) -> PathBuf {
             self.state.path().join("config/sandbox/lh-1.json")
@@ -904,7 +919,7 @@ mod tests {
             let config = self.state.path().join("config");
             Paths {
                 herds: config.join("herds"),
-                home: "/home/me".into(),
+                home: self.state.path().join("home"),
                 feed_lock: config.join("feed.lock"),
                 paused: config.join("paused"),
             }
@@ -1501,6 +1516,74 @@ mod tests {
         assert!(w.herdr.prompts().is_empty());
     }
 
+    #[test]
+    fn a_lead_whose_user_settings_loosen_its_sandbox_is_not_cleared_under_require() {
+        let w = World::new();
+        w.handed_off();
+        w.prepared();
+        let settings = w.user_settings(r#"{"sandbox": {"excludedCommands": ["docker *"]}}"#);
+
+        let (result, _) = w.restart_as(false, true, None, &as_lead);
+
+        assert_eq!(
+            format!("{:#}", result.unwrap_err()),
+            format!(
+                "sandbox: lh-1 can't run sandboxed: your Claude settings loosen its sandbox: \
+                 {}: sandbox.excludedCommands runs \"docker *\" outside it; remove those, or set \
+                 [lead] sandbox = \"prefer\" in herd h to start it with them as warnings",
+                settings.display()
+            )
+        );
+        assert!(w.herdr.prompts().is_empty());
+    }
+
+    #[test]
+    fn a_lead_on_prefer_whose_user_settings_loosen_its_sandbox_is_restarted_with_a_warning() {
+        let w = World::new();
+        w.handed_off();
+        fs::write(
+            w.paths().herds.join("h.toml"),
+            "repo = \"/src/repo\"\n[lead]\nprompt = \"go\"\nsandbox = \"prefer\"\n",
+        )
+        .unwrap();
+        w.prepared();
+        let settings = w.user_settings(r#"{"sandbox": {"excludedCommands": ["docker *"]}}"#);
+
+        let (result, ledger) = w.restart_as(false, true, None, &as_lead);
+
+        let out = result.unwrap();
+        assert!(
+            out.ends_with(&format!(
+                "\nwarning: lh-1's sandbox is loosened by {}: sandbox.excludedCommands runs \
+                 \"docker *\" outside it",
+                settings.display()
+            )),
+            "{out}"
+        );
+        assert_eq!(ledger.0["lh-1"].unsandboxed, None);
+    }
+
+    #[test]
+    fn a_lead_started_with_every_mcp_server_is_restarted_with_a_warning() {
+        let w = World::new();
+        w.handed_off();
+        w.prepared();
+
+        let (result, _) = w.restart_as(false, true, None, &|r| {
+            as_lead(r);
+            r.claude_args.truncate(2);
+        });
+
+        let out = result.unwrap();
+        assert!(
+            out.ends_with(
+                "\nwarning: lh-1 was started with every MCP server you configure, not only its \
+                 herd's [lead] mcp_servers; quit its Claude and run loopherd revive --name lh-1"
+            ),
+            "{out}"
+        );
+    }
+
     fn unsandboxed(r: &mut AgentRecord) {
         as_lead(r);
         r.claude_args = vec!["--model".into(), "opus".into()];
@@ -1534,10 +1617,16 @@ mod tests {
 
         let (result, ledger) = w.restart_as(false, true, None, &unsandboxed);
 
-        assert!(result.unwrap().ends_with(
-            "\nwarning: lh-1 runs without its sandbox (it was started without its sandbox), \
+        let out = result.unwrap();
+        assert!(
+            out.ends_with(
+                "\nwarning: lh-1 was started with every MCP server you configure, not only its \
+                 herd's [lead] mcp_servers; quit its Claude and run loopherd revive --name lh-1\n\
+                 warning: lh-1 runs without its sandbox (it was started without its sandbox), \
                  guarded by its tool hook alone"
-        ));
+            ),
+            "{out}"
+        );
         assert_eq!(
             ledger.0["lh-1"].unsandboxed.as_deref(),
             Some("it was started without its sandbox")

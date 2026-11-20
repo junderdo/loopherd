@@ -18,6 +18,12 @@ impl Broker {
             format!(r#"{{"herd": "{herd}", "args": []}}"#),
         )
         .unwrap();
+        // A broker reads its herd file at start, for whether it guards merges by credentials.
+        let herd_file = config.join(format!("herds/{herd}.toml"));
+        if !herd_file.exists() {
+            fs::create_dir_all(herd_file.parent().unwrap()).unwrap();
+            fs::write(&herd_file, "repo = \"/\"\n").unwrap();
+        }
         let child = loopherd
             .args(["broker", lead])
             .env_remove("HERDR_PANE_ID")

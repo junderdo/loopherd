@@ -131,6 +131,14 @@ impl Lead {
     }
 }
 
+fn is_not_found(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
 /// The worktree of every lead kept in loopherd's config dir, by name. A kept
 /// record or herd file that can't be read is skipped: one bad file mustn't
 /// stop every retire.
@@ -206,8 +214,9 @@ impl Guard {
 
     /// Why loopherd won't run git on `record`'s repo, its worktree, or the
     /// worktree its branch would be given, if it won't. A herd's member must
-    /// be where its herd file puts members: its repo the herd's, its worktree
-    /// beside the herd's other worktrees. No entry may name another lead's
+    /// be in its herd's repo, and when a lead runs this, its worktree must sit
+    /// beside the herd's other worktrees. An entry whose herd file is gone is
+    /// the human's to act on, as a hand-spawned one. No entry may name another lead's
     /// worktree, or a repo in a lead's worktree or the state dir, where a lead
     /// could have written its git config.
     pub fn path_refusal(&self, record: &AgentRecord) -> Result<Option<String>> {
@@ -250,15 +259,22 @@ impl Guard {
         let Some(herd) = &record.herd else {
             return Ok(None);
         };
-        let repo = herd::repo(&self.paths, herd).with_context(|| {
-            format!("herd {herd}'s file names no repo to check {name}'s ledger entry against")
-        })?;
+        let repo = match herd::repo(&self.paths, herd) {
+            Err(err) if !self.for_lead() && is_not_found(&err) => return Ok(None),
+            found => found.with_context(|| {
+                format!("herd {herd}'s file names no repo to check {name}'s ledger entry against")
+            })?,
+        };
         if !same_dir(&record.repo, &repo) {
             return Ok(Some(format!(
                 "{name}'s ledger entry names repo {}, not herd {herd}'s {}",
                 record.repo.display(),
                 repo.display()
             )));
+        }
+        // ensure_worktree reuses a branch's worktree wherever the human made it.
+        if !self.for_lead() {
+            return Ok(None);
         }
         let beside = worktree_path(&repo, "x");
         let in_place = |worktree: &Path| {
@@ -289,34 +305,48 @@ impl Guard {
 pub enum Launch {
     Sandboxed {
         settings: PathBuf,
+        /// What the human's own settings loosen, under `prefer`.
+        loosened: Vec<String>,
+        mcp: PathBuf,
     },
     /// `prefer`, with why the sandbox can't start.
-    HookOnly {
-        why: String,
-    },
+    HookOnly { why: String, mcp: PathBuf },
 }
 
 impl Launch {
     pub fn args(&self) -> Vec<String> {
-        match self {
-            Launch::Sandboxed { settings } => {
-                vec!["--settings".into(), settings.display().to_string()]
-            }
-            Launch::HookOnly { .. } => vec![],
-        }
+        let (settings, mcp) = match self {
+            Launch::Sandboxed { settings, mcp, .. } => (Some(settings), mcp),
+            Launch::HookOnly { mcp, .. } => (None, mcp),
+        };
+        let mut args: Vec<String> = settings
+            .map(|file| vec!["--settings".into(), file.display().to_string()])
+            .unwrap_or_default();
+        args.extend([
+            "--strict-mcp-config".into(),
+            "--mcp-config".into(),
+            mcp.display().to_string(),
+        ]);
+        args
     }
 
     /// Why the lead runs without its sandbox, if it does.
     pub fn hook_only(&self) -> Option<&str> {
         match self {
             Launch::Sandboxed { .. } => None,
-            Launch::HookOnly { why } => Some(why),
+            Launch::HookOnly { why, .. } => Some(why),
         }
     }
 
-    /// The warning a hook-only start carries, if this is one.
-    pub fn warning(&self, name: &str) -> Option<String> {
-        self.hook_only().map(|why| hook_only_warning(name, why))
+    /// The warnings the start carries: why it's hook-only, or what loosens its sandbox.
+    pub fn warnings(&self, name: &str) -> Vec<String> {
+        match self {
+            Launch::Sandboxed { loosened, .. } => loosened
+                .iter()
+                .map(|line| loosened_warning(name, line))
+                .collect(),
+            Launch::HookOnly { why, .. } => vec![hook_only_warning(name, why)],
+        }
     }
 }
 
@@ -329,16 +359,25 @@ pub fn hook_only_warning(name: &str, why: &str) -> String {
 /// `require` when `probe` says the sandbox can't start, and for args that
 /// pass their own `--settings`, which would displace or double the lead's.
 pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<Launch> {
-    if lead
-        .args
-        .iter()
-        .any(|a| a == "--settings" || a.starts_with("--settings="))
-    {
+    let passes = |flag: &str| {
+        lead.args
+            .iter()
+            .any(|a| a == flag || a.starts_with(&format!("{flag}=")))
+    };
+    let drop = "drop it from [lead].args, the herd's args and the command line";
+    if passes("--settings") {
         bail!(
             "{name}'s args pass --settings, which its sandbox's settings file takes; \
-             drop it from [lead].args, the herd's args and the command line, and put those \
-             settings in ~/.claude/settings.json"
+             {drop}, and put those settings in ~/.claude/settings.json"
         );
+    }
+    for flag in ["--mcp-config", "--strict-mcp-config"] {
+        if passes(flag) {
+            bail!(
+                "{name}'s args pass {flag}, which its launch takes; {drop}, and name the \
+                 servers it may use in [lead] mcp_servers"
+            );
+        }
     }
     let (_, mode) = herd::lead_sandbox(paths, &lead.herd)?;
     let dir = paths.config_dir().join("sandbox");
@@ -346,6 +385,9 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
     let file = lead_file(paths, name);
     std::fs::write(&file, serde_json::to_string_pretty(lead)? + "\n")
         .with_context(|| format!("write {}", file.display()))?;
+    let mcp = dir.join(format!("{name}.mcp.json"));
+    let text = serde_json::to_string_pretty(&mcp_config(paths, name, &lead.herd)?)? + "\n";
+    write_private(&mcp, &text).with_context(|| format!("write {}", mcp.display()))?;
     let by_credentials = herd::merge_guard(paths, &lead.herd)? == Some(MergeGuard::Credentials);
     if let Err(Unavailable { why, fix }) = probe() {
         if by_credentials {
@@ -359,7 +401,7 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
             ));
         }
         return match mode {
-            SandboxMode::Prefer => Ok(Launch::HookOnly { why }),
+            SandboxMode::Prefer => Ok(Launch::HookOnly { why, mcp }),
             SandboxMode::Require => Err(refusal(
                 name,
                 &lead.herd,
@@ -367,11 +409,386 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
             )),
         };
     }
+    let own = settings(paths, name, &lead.herd)?;
+    let worktree = worktree_path(&herd::repo(paths, &lead.herd)?, name);
+    let loosened = loosenings(&paths.home, &worktree, &own);
+    if let Some(refusal) = loosened_refusal(paths, name, &lead.herd, &loosened)? {
+        return Err(refusal);
+    }
     create_state(paths, name)?;
     let file = settings_file(paths, name);
-    let text = serde_json::to_string_pretty(&settings(paths, name, &lead.herd)?)? + "\n";
+    let text = serde_json::to_string_pretty(&own)? + "\n";
     write_private(&file, &text).with_context(|| format!("write {}", file.display()))?;
-    Ok(Launch::Sandboxed { settings: file })
+    Ok(Launch::Sandboxed {
+        settings: file,
+        loosened,
+        mcp,
+    })
+}
+
+/// The only MCP servers lead `name` gets, by `--strict-mcp-config`: those its
+/// herd's `[lead] mcp_servers` names, from the human's user scope in
+/// `~/.claude.json`. Local and project scope are the repo's, which members
+/// and the lead can write.
+fn mcp_config(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
+    let wanted = herd::lead_mcp_servers(paths, herd)?;
+    let mut servers = serde_json::Map::new();
+    if wanted.is_empty() {
+        return Ok(json!({"mcpServers": servers}));
+    }
+    let configured = user_mcp_servers(paths)?;
+    for server in wanted {
+        let Some(found) = configured.get(&server) else {
+            bail!(
+                "{name} can't start: herd {herd}'s [lead] mcp_servers names {server:?}, which \
+                 {} doesn't configure in your user scope; add it with claude mcp add --scope \
+                 user, or drop it from mcp_servers (local and project scopes, claude.ai \
+                 connectors and plugins' servers can't be given to a lead)",
+                user_mcp_file(paths).display()
+            );
+        };
+        servers.insert(server, found.clone());
+    }
+    Ok(json!({"mcpServers": servers}))
+}
+
+pub fn user_mcp_file(paths: &Paths) -> PathBuf {
+    paths.home.join(".claude.json")
+}
+
+/// The MCP servers the human's user scope configures, by name; none when
+/// `~/.claude.json` is missing.
+pub fn user_mcp_servers(paths: &Paths) -> Result<serde_json::Map<String, Value>> {
+    let file = user_mcp_file(paths);
+    let config: Value = match std::fs::read_to_string(&file) {
+        Ok(text) => {
+            serde_json::from_str(&text).with_context(|| format!("parse {}", file.display()))?
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Null,
+        Err(e) => return Err(e).with_context(|| format!("read {}", file.display())),
+    };
+    Ok(match &config["mcpServers"] {
+        Value::Object(servers) => servers.clone(),
+        _ => serde_json::Map::new(),
+    })
+}
+
+/// What the human's own Claude settings loosen in lead `name`'s sandbox, one
+/// line per key, each naming its file.
+/// A lead whose own settings can't be built is judged against none, so a
+/// failure to build them doesn't hide these.
+pub fn loosened(paths: &Paths, name: &str, herd: &str) -> Result<Vec<String>> {
+    let own = settings(paths, name, herd).unwrap_or_else(|_| json!({}));
+    let worktree = worktree_path(&herd::repo(paths, herd)?, name);
+    Ok(loosenings(&paths.home, &worktree, &own))
+}
+
+/// What a loosened sandbox does to a lead's start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhenLoosened {
+    /// `prefer`: it starts, warned.
+    Warn,
+    /// `require`: it doesn't start.
+    Refuse,
+    /// `merge_guard = "credentials"`, whose token a loosened sandbox could expose, under either mode.
+    RefuseForCredentials,
+}
+
+pub fn when_loosened(paths: &Paths, herd: &str) -> Result<WhenLoosened> {
+    let (_, mode) = herd::lead_sandbox(paths, herd)?;
+    Ok(match (herd::merge_guard(paths, herd)?, mode) {
+        (Some(MergeGuard::Credentials), _) => WhenLoosened::RefuseForCredentials,
+        (_, SandboxMode::Require) => WhenLoosened::Refuse,
+        (_, SandboxMode::Prefer) => WhenLoosened::Warn,
+    })
+}
+
+fn loosened_warning(name: &str, line: &str) -> String {
+    format!("{name}'s sandbox is loosened by {line}")
+}
+
+/// The refusal for a loosened sandbox, or `None` where it starts warned.
+fn loosened_refusal(
+    paths: &Paths,
+    name: &str,
+    herd: &str,
+    loosened: &[String],
+) -> Result<Option<anyhow::Error>> {
+    if loosened.is_empty() {
+        return Ok(None);
+    }
+    let why = format!(
+        "your Claude settings loosen its sandbox: {}; remove those",
+        loosened.join("; ")
+    );
+    Ok(match when_loosened(paths, herd)? {
+        WhenLoosened::Warn => None,
+        WhenLoosened::Refuse => Some(anyhow::anyhow!(
+            "{name} can't run sandboxed: {why}, or set [lead] sandbox = \"prefer\" in herd \
+             {herd} to start it with them as warnings"
+        )),
+        WhenLoosened::RefuseForCredentials => Some(credentials_refusal(
+            name,
+            &format!("{why}, or set [lead] merge_guard = \"hook\" in herd {herd}"),
+        )),
+    })
+}
+
+/// Keys that loosen a sandbox when set to anything but `false`.
+const LOOSENING_SWITCHES: [(&str, &str); 9] = [
+    (
+        "/sandbox/filesystem/disabled",
+        "turns its filesystem rules off",
+    ),
+    ("/sandbox/enableWeakerNestedSandbox", "weakens it"),
+    ("/sandbox/allowNestedUserNamespaces", "weakens it"),
+    ("/sandbox/enableWeakerNetworkIsolation", "weakens it"),
+    ("/sandbox/allowAppleEvents", "lets it drive other apps"),
+    (
+        "/sandbox/network/httpProxyPort",
+        "hands its network to your proxy, past its own checks on local addresses",
+    ),
+    (
+        "/sandbox/network/socksProxyPort",
+        "hands its network to your proxy, past its own checks on local addresses",
+    ),
+    (
+        "/sandbox/network/allowLocalBinding",
+        "lets it bind local ports on macOS",
+    ),
+    (
+        "/sandbox/network/allowMachLookup",
+        "opens macOS services to it",
+    ),
+];
+
+/// The tools whose `permissions.allow` rules open writes; the file tools run
+/// outside the sandbox.
+const WRITING_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+
+/// What the human's Claude settings add to a lead's sandbox, whose own
+/// settings are `own`: one line per loosening entry, naming its file. Of the
+/// worktree's project and local settings only the permissions count, since
+/// `--settings` locks their sandbox keys out. D100 says which keys reach a
+/// lead, and why.
+fn loosenings(home: &Path, worktree: &Path, own: &Value) -> Vec<String> {
+    let own_writes: Vec<PathBuf> = entries(&own["sandbox"]["filesystem"]["allowWrite"])
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    let user_file = home.join(".claude/settings.json");
+    let mut found = vec![];
+    if let Some(user) = read_settings(&user_file, &mut found) {
+        found.extend(sandbox_loosenings(
+            &user,
+            &user_file,
+            home,
+            own,
+            &own_writes,
+        ));
+        let rules_root = home.join(".claude");
+        found.extend(permission_loosenings(
+            &user,
+            &user_file,
+            &rules_root,
+            worktree,
+            home,
+            &own_writes,
+        ));
+    }
+    for name in ["settings.json", "settings.local.json"] {
+        let file = worktree.join(".claude").join(name);
+        if let Some(project) = read_settings(&file, &mut found) {
+            found.extend(permission_loosenings(
+                &project,
+                &file,
+                worktree,
+                worktree,
+                home,
+                &own_writes,
+            ));
+        }
+    }
+    found
+}
+
+/// A settings file's contents; `None` when it's missing, or, noted in
+/// `found`, when it can't be read or parsed.
+fn read_settings(file: &Path, found: &mut Vec<String>) -> Option<Value> {
+    let shown = file.display();
+    match std::fs::read_to_string(file) {
+        Ok(text) => match serde_json::from_str(&text) {
+            Ok(settings) => Some(settings),
+            Err(e) => {
+                found.push(format!("{shown}: can't parse it: {e}"));
+                None
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            found.push(format!("{shown}: can't read it: {e}"));
+            None
+        }
+    }
+}
+
+/// Only an exact match with a path the lead may write is no loosening:
+/// beneath one, the lead could plant a symlink before it exists.
+fn opens_writes(path: Option<PathBuf>, own_writes: &[PathBuf]) -> bool {
+    !path.is_some_and(|path| own_writes.contains(&path))
+}
+
+fn sandbox_loosenings(
+    user: &Value,
+    file: &Path,
+    home: &Path,
+    own: &Value,
+    own_writes: &[PathBuf],
+) -> Vec<String> {
+    let shown = file.display();
+    let mut found = vec![];
+    let own_commands = entries(&own["sandbox"]["excludedCommands"]);
+    for command in entries(&user["sandbox"]["excludedCommands"]) {
+        if !own_commands.contains(&command) {
+            found.push(format!(
+                "{shown}: sandbox.excludedCommands runs {command:?} outside it"
+            ));
+        }
+    }
+    for path in entries(&user["sandbox"]["filesystem"]["allowWrite"]) {
+        if opens_writes(absolute(&path, home), own_writes) {
+            found.push(format!(
+                "{shown}: sandbox.filesystem.allowWrite opens {path} to writes"
+            ));
+        }
+    }
+    // allowRead only carves into denyRead, which a lead has only with credentials to hide.
+    if !own["sandbox"]["filesystem"]["denyRead"].is_null() {
+        let own_reads = entries(&own["sandbox"]["filesystem"]["allowRead"]);
+        for path in entries(&user["sandbox"]["filesystem"]["allowRead"]) {
+            if !own_reads.contains(&path) {
+                found.push(format!(
+                    "{shown}: sandbox.filesystem.allowRead opens {path} to reads"
+                ));
+            }
+        }
+    }
+    for (pointer, what) in LOOSENING_SWITCHES {
+        let set = user
+            .pointer(pointer)
+            .is_some_and(|v| v != &Value::Bool(false));
+        if set && own.pointer(pointer).is_none() {
+            let key = pointer.trim_start_matches('/').replace('/', ".");
+            found.push(format!("{shown}: {key} {what}"));
+        }
+    }
+    found
+}
+
+/// What a settings file's permissions open to the file tools, which run
+/// outside the sandbox. `rules_root` is where its `/path` rules start.
+fn permission_loosenings(
+    settings: &Value,
+    file: &Path,
+    rules_root: &Path,
+    worktree: &Path,
+    home: &Path,
+    own_writes: &[PathBuf],
+) -> Vec<String> {
+    let shown = file.display();
+    let mut found = vec![];
+    for path in entries(&settings["permissions"]["additionalDirectories"]) {
+        if opens_writes(absolute(&path, home), own_writes) {
+            found.push(format!(
+                "{shown}: permissions.additionalDirectories opens {path} to writes"
+            ));
+        }
+    }
+    for rule in entries(&settings["permissions"]["allow"]) {
+        let (tool, spec) = match rule.split_once('(') {
+            Some((tool, rest)) => match rest.strip_suffix(')') {
+                Some(spec) => (tool, spec),
+                None => continue,
+            },
+            None => (rule.as_str(), "*"),
+        };
+        if !WRITING_TOOLS.contains(&tool) {
+            continue;
+        }
+        let everywhere = matches!(spec, "*" | "**");
+        // Only Edit's rules take paths; another tool's rule with one matches nothing.
+        if !everywhere && tool != "Edit" {
+            continue;
+        }
+        let confined = !everywhere
+            && rule_dir(spec, rules_root, worktree, home)
+                .is_some_and(|dir| own_writes.iter().any(|own| dir.starts_with(own)));
+        if !confined {
+            found.push(format!("{shown}: permissions.allow opens {rule} to writes"));
+        }
+    }
+    if settings["permissions"]["defaultMode"] == "bypassPermissions" {
+        found.push(format!(
+            "{shown}: permissions.defaultMode bypassPermissions lets its file tools write \
+             anywhere"
+        ));
+    }
+    found
+}
+
+/// The directory an `Edit(…)` rule's matches all lie beneath: its path up to
+/// the first wildcard. `//` starts at `/`, `~/` at home, `/` at `rules_root`,
+/// and a bare path at the lead's working directory, its worktree. `None` when
+/// it climbs with `..`.
+fn rule_dir(spec: &str, rules_root: &Path, worktree: &Path, home: &Path) -> Option<PathBuf> {
+    let (base, rest) = if let Some(rest) = spec.strip_prefix("//") {
+        (Path::new("/"), rest)
+    } else if let Some(rest) = spec.strip_prefix("~/") {
+        (home, rest)
+    } else if let Some(rest) = spec.strip_prefix('/') {
+        (rules_root, rest)
+    } else {
+        (worktree, spec)
+    };
+    let literal: PathBuf = rest
+        .split('/')
+        .take_while(|part| !part.contains(['*', '?', '[']))
+        .collect();
+    let dir = base.join(literal);
+    let climbs = dir
+        .components()
+        .any(|c| c == std::path::Component::ParentDir);
+    (!climbs).then_some(dir)
+}
+
+/// A settings list's entries; anything else that's set is one entry, as written.
+fn entries(value: &Value) -> Vec<String> {
+    match value {
+        Value::Null => vec![],
+        Value::Array(items) => items
+            .iter()
+            .map(|item| item.as_str().map_or_else(|| item.to_string(), String::from))
+            .collect(),
+        other => vec![other.to_string()],
+    }
+}
+
+/// A sandbox path as an absolute one, or `None` when it's relative or climbs with `..`.
+fn absolute(path: &str, home: &Path) -> Option<PathBuf> {
+    let path = match path.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            home.join(rest.trim_start_matches('/'))
+        }
+        _ => PathBuf::from(
+            path.strip_prefix('/')
+                .filter(|p| p.starts_with('/'))
+                .unwrap_or(path),
+        ),
+    };
+    let climbs = path
+        .components()
+        .any(|c| c == std::path::Component::ParentDir);
+    (path.is_absolute() && !climbs).then_some(path)
 }
 
 /// A credentials lead's settings hold its token, so only the human reads them.
@@ -395,16 +812,17 @@ fn credentials_refusal(name: &str, why: &str) -> anyhow::Error {
 /// How a running lead stands against its sandbox.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Running {
-    Sandboxed,
-    /// Sandboxed, by settings its herd's switches have since changed.
-    Stale(String),
-    /// Started without its settings, under `prefer`.
-    HookOnly(String),
+    /// With warnings: what loosens its sandbox under `prefer`, and whether its
+    /// herd's switches have changed since its settings were written.
+    Sandboxed(Vec<String>),
+    /// Started without its settings, under `prefer`: why, and other warnings.
+    HookOnly(String, Vec<String>),
 }
 
 /// Checks a running lead was launched with its settings, as `claude_args`
-/// record, and that they match its herd's current switches. Under `require`
-/// one launched without them is refused.
+/// record, that they match its herd's current switches, and what the human's
+/// own settings loosen. Under `require` one launched without them, or loosened,
+/// is refused.
 pub fn check_running(
     paths: &Paths,
     name: &str,
@@ -415,6 +833,13 @@ pub fn check_running(
     let file = settings_file(paths, name);
     let shown = file.display().to_string();
     let resume = format!("quit its Claude and run loopherd revive --name {name}");
+    let mut warnings = vec![];
+    if !claude_args.iter().any(|a| a == "--strict-mcp-config") {
+        warnings.push(format!(
+            "{name} was started with every MCP server you configure, not only its herd's \
+             [lead] mcp_servers; {resume}"
+        ));
+    }
     if !claude_args
         .windows(2)
         .any(|pair| pair[0] == "--settings" && pair[1] == shown)
@@ -430,7 +855,7 @@ pub fn check_running(
             ));
         }
         return match mode {
-            SandboxMode::Prefer => Ok(Running::HookOnly(why.into())),
+            SandboxMode::Prefer => Ok(Running::HookOnly(why.into(), warnings)),
             SandboxMode::Require => Err(refusal(
                 name,
                 herd,
@@ -442,13 +867,20 @@ pub fn check_running(
     let on_disk = std::fs::read_to_string(&file)
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok());
-    if on_disk.as_ref() == Some(&current) {
-        return Ok(Running::Sandboxed);
+    // Judged against what the running Claude started with, which may predate the switches.
+    let worktree = worktree_path(&herd::repo(paths, herd)?, name);
+    let loosened = loosenings(&paths.home, &worktree, on_disk.as_ref().unwrap_or(&current));
+    if let Some(refusal) = loosened_refusal(paths, name, herd, &loosened)? {
+        return Err(refusal);
     }
-    Ok(Running::Stale(format!(
-        "{name}'s sandbox was set before herd {herd}'s current switches, \
-         which reach it only when its Claude starts again; {resume}"
-    )))
+    warnings.extend(loosened.iter().map(|line| loosened_warning(name, line)));
+    if on_disk.as_ref() != Some(&current) {
+        warnings.push(format!(
+            "{name}'s sandbox was set before herd {herd}'s current switches, \
+             which reach it only when its Claude starts again; {resume}"
+        ));
+    }
+    Ok(Running::Sandboxed(warnings))
 }
 
 fn refusal(name: &str, herd: &str, why: &str) -> anyhow::Error {
