@@ -8,6 +8,7 @@ use std::ffi::{CStr, CString};
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -274,7 +275,8 @@ impl Dir {
         // SAFETY: openat just returned this descriptor, owned by nothing else.
         let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
         let meta = file.metadata().context("not a request")?;
-        if !meta.is_file() {
+        // A hard link would hand the broker a file the lead can't read itself.
+        if !meta.is_file() || meta.nlink() > 1 {
             bail!("not a request: not a plain file");
         }
         if meta.len() > MAX_REQUEST {
@@ -745,6 +747,7 @@ mod tests {
         let secret = world.dir.path().join("secret");
         std::fs::write(&secret, r#"{"op":{"tell":{"name":"lh-1","text":"hi"}}}"#).unwrap();
         std::os::unix::fs::symlink(&secret, requests.join("link.json")).unwrap();
+        std::fs::hard_link(&secret, requests.join("hard.json")).unwrap();
         std::fs::write(requests.join("garbage.json"), "{ nope").unwrap();
         std::fs::write(
             requests.join("spawn.json"),
@@ -777,6 +780,7 @@ mod tests {
             }
         };
         assert_eq!(refused("link"), "not a request: not a plain file");
+        assert_eq!(refused("hard"), "not a request: not a plain file");
         assert!(refused("garbage").starts_with("malformed request: "));
         assert!(refused("spawn").starts_with("malformed request: unknown variant `spawn`"));
         assert!(refused("extra").starts_with("malformed request: unknown field `lead`"));
