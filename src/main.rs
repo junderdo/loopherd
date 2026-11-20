@@ -6,6 +6,7 @@ mod credentials;
 mod doctor;
 mod feed;
 mod github;
+mod handoff;
 mod herd;
 mod herd_view;
 mod herdr;
@@ -392,6 +393,9 @@ enum Command {
         as_name: Option<String>,
         text: String,
     },
+    /// Write the handoff of the member running in this pane from stdin, to
+    /// its own `handoffs/<name>/handoff.md` in the state dir.
+    Handoff,
     /// Print members' unread reports, questions first, and mark them read.
     Reports {
         /// Only these members, retired ones included.
@@ -821,6 +825,7 @@ fn main() -> ExitCode {
             as_name,
             text,
         } => ("report", run_report(kind, as_name, &text)),
+        Command::Handoff => ("handoff", run_handoff()),
         Command::Reports {
             names,
             herd,
@@ -1712,15 +1717,27 @@ fn notify_self_restart(text: &str, config: &Path, mailboxes: &Path) {
 }
 
 fn run_report(kind: Kind, as_name: Option<String>, text: &str) -> Result<i32> {
-    let broker = own_broker();
-    let as_name = match (&broker, as_name) {
-        (Some(broker), Some(other)) if other != broker.lead() => {
+    if let Some(broker) = own_broker() {
+        if let Some(other) = as_name.filter(|other| other != broker.lead()) {
             let lead = broker.lead();
             bail!("{lead} reports only as itself; {other}'s reports are {other}'s own");
         }
-        (Some(broker), _) => Some(broker.lead().to_string()),
-        (None, as_name) => as_name,
-    };
+        let op = broker::Op::Report {
+            kind,
+            text: text.into(),
+        };
+        match run_op(Some(&broker), &op) {
+            // A lead still on settings from before its broker wrote reports may write its own.
+            Err(e) if e.downcast_ref::<broker::TooOld>().is_some() => {
+                eprintln!("loopherd report: warning: {e:#}; writing the report directly");
+                let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+                let entry = report::Entry::new(SystemTime::now(), report::Body::report(kind, text));
+                report::append(&ledger.reports_dir()?, broker.lead(), &entry)?;
+                return Ok(0);
+            }
+            done => return done,
+        }
+    }
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let own_pane = own_pane();
     let own_socket = socket_from_env();
@@ -1737,20 +1754,37 @@ fn run_report(kind: Kind, as_name: Option<String>, text: &str) -> Result<i32> {
     if kind != Kind::Question || !labels {
         return Ok(0);
     }
-    if let Some(broker) = broker {
-        let label = broker::Op::Label {
-            question: text.into(),
-        };
-        if let Err(e) = run_op(Some(&broker), &label) {
-            eprintln!("loopherd report: warning: {e:#}");
-        }
-        return Ok(0);
-    }
     if let Some(pane) = &own_pane
         && let Err(e) = pane_label::lead_asked(&CliHerdr, &ledger, &mailboxes, pane, &name, text)
     {
         eprintln!("loopherd report: warning: label pane {pane}: {e:#}");
     }
+    Ok(0)
+}
+
+fn run_handoff() -> Result<i32> {
+    let mut text = String::new();
+    std::io::stdin()
+        .read_to_string(&mut text)
+        .context("read the handoff from stdin")?;
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let name = match own_broker() {
+        Some(broker) => broker.lead().to_string(),
+        None => {
+            let own_pane = own_pane();
+            let own_socket = socket_from_env();
+            let who = Reporter {
+                own_pane: own_pane.as_deref(),
+                own_lineage: &own_lineage(),
+                own_socket: own_socket.as_deref(),
+                as_name: None,
+            };
+            report::reporter(&ledger, &who)?
+        }
+    };
+    let reports = ledger.reports_dir()?;
+    let state = reports.parent().context("the state dir")?;
+    println!("wrote {}", handoff::write(state, &name, &text)?.display());
     Ok(0)
 }
 

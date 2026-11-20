@@ -288,6 +288,14 @@ impl SpawnRequest {
     pub fn branch(&self) -> Option<&str> {
         self.worktree.as_ref().and_then(Checkout::branch)
     }
+
+    /// The worktree spawn would use, with read-only git calls.
+    pub fn planned_worktree(&self) -> Result<Option<PathBuf>> {
+        self.worktree
+            .as_ref()
+            .map(|checkout| checkout.planned(&self.repo).context("worktree"))
+            .transpose()
+    }
 }
 
 /// What spawn would do, found with read-only herdr and git calls.
@@ -306,10 +314,7 @@ pub fn preview(
     inherited_workspace: Option<&str>,
 ) -> Result<Preview> {
     let (template, workspace, _) = check(herdr, req, inherited_workspace)?;
-    let worktree = match &req.worktree {
-        Some(checkout) => Some(checkout.planned(&req.repo).context("worktree")?),
-        None => None,
-    };
+    let worktree = req.planned_worktree()?;
     let cwd = worktree.as_ref().unwrap_or(&req.repo);
     let unborn = NewTab {
         tab_id: String::new(),
@@ -399,7 +404,7 @@ pub fn validate_name(name: &str) -> Result<()> {
         bail!("{name:?} must match [a-z][a-z0-9_-]{{0,31}}");
     }
     if name == SHEPHERD {
-        bail!("{name} is reserved: the shepherd's handoff is handoffs/{SHEPHERD}.md");
+        bail!("{name} is reserved: the shepherd's handoff is handoffs/{SHEPHERD}/");
     }
     Ok(())
 }
@@ -555,7 +560,7 @@ mod tests {
         let err = run(&herdr, &mut MemLedger::default(), &request("shepherd")).unwrap_err();
         assert_eq!(
             format!("{err:#}"),
-            "name: shepherd is reserved: the shepherd's handoff is handoffs/shepherd.md"
+            "name: shepherd is reserved: the shepherd's handoff is handoffs/shepherd/"
         );
         assert!(herdr.tabs().is_empty());
         assert!(run(&herdr, &mut MemLedger::default(), &request("shepherd-2")).is_ok());

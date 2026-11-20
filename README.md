@@ -275,7 +275,9 @@ prompt = "You're {name}. Run `gh pr checkout --detach {number}` and review it."
 
 Then `loopherd add my-project pr 1050`. Patterns take `{param}`
 placeholders and `{herd}`; `prompt`, `done` and `merged` also take
-`{name}`, `{branch}`, `{worktree}` and `{pane}`. A `[queue]`, a `[lead]`
+`{name}`, `{branch}`, `{worktree}` and `{pane}`. A param used in `name`,
+`branch` or `worktree`, or any param of a template with no `name`, must be a
+plain word (`[A-Za-z0-9][A-Za-z0-9._-]*`, no `..`). A `[queue]`, a `[lead]`
 table and the rest are what `init` writes; start from its output or from
 [docs/examples/](docs/examples/).
 

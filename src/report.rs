@@ -134,7 +134,7 @@ pub enum Body {
 }
 
 impl Body {
-    fn report(kind: Kind, text: &str) -> Body {
+    pub fn report(kind: Kind, text: &str) -> Body {
         let text = text.to_string();
         match kind {
             Kind::Done => Body::Done { text },
@@ -298,7 +298,7 @@ pub fn member_in<'a>(
         .find(|e| !e.retired && e.pane_id == pane && e.socket.as_deref() == socket)
 }
 
-fn reporter(ledger: &dyn Ledger, who: &Reporter) -> Result<String> {
+pub fn reporter(ledger: &dyn Ledger, who: &Reporter) -> Result<String> {
     let entries = ledger.entries()?;
     if let Some(name) = who.as_name {
         let entry = entries

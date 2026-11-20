@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use super::{Paths, expand_home, file_of, herd_files};
-use crate::context::handoff_path;
+use crate::handoff;
 use crate::herdr::Herdr;
 use crate::ledger::{AgentRecord, Ledger, herd_runs};
 use crate::retire::open_tab;
@@ -79,6 +79,11 @@ pub fn remove(
     for path in member_files(state, &names, mailboxes).iter().chain(&own) {
         present(path)?;
     }
+    for dir in names.iter().map(|n| handoff::dir(state, n)) {
+        if dir.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
+            bail!("refused: {} is a symlink", dir.display());
+        }
+    }
 
     let verb = if how.dry_run {
         "would remove"
@@ -88,7 +93,7 @@ pub fn remove(
     let trim_line =
         |n: &String| format!("{verb} {herd}'s runs from ledger entry {n}; its other runs stay");
     if how.dry_run || (names.is_empty() && trimmed.is_empty()) {
-        delete_all(&member_files(state, &names, mailboxes), verb, how, out)?;
+        delete_members(state, &names, mailboxes, verb, how, out)?;
         if mailboxes {
             out.extend(names.iter().map(|n| format!("{verb} ledger entry {n}")));
             out.extend(trimmed.iter().map(trim_line));
@@ -103,15 +108,14 @@ pub fn remove(
                     {
                         return Ok(());
                     }
-                    let files = member_files(state, std::slice::from_ref(name), false);
-                    delete_all(&files, verb, how, out)
+                    delete_members(state, std::slice::from_ref(name), false, verb, how, out)
                 })
                 .context("ledger")?;
         }
     } else {
         let removed = ledger
             .remove_herd(herd, &mut |names| {
-                delete_all(&member_files(state, names, true), verb, how, out)
+                delete_members(state, names, true, verb, how, out)
             })
             .context("ledger")?;
         out.extend(
@@ -203,11 +207,37 @@ fn member_files(state: &Path, names: &[String], mailboxes: bool) -> Vec<PathBuf>
         if mailboxes {
             files.push(state.join("reports").join(format!("{name}.jsonl")));
         }
-        let handoff = handoff_path(state, name);
-        let prev = handoff.with_extension("prev.md");
-        files.extend([handoff, prev]);
+        files.extend(handoff::files(state, name));
     }
     files
+}
+
+/// Deletes each member's files, then its handoff dir once that is empty.
+fn delete_members(
+    state: &Path,
+    names: &[String],
+    mailboxes: bool,
+    verb: &str,
+    how: Removal,
+    out: &mut Vec<String>,
+) -> Result<()> {
+    delete_all(&member_files(state, names, mailboxes), verb, how, out)?;
+    for dir in names.iter().map(|n| handoff::dir(state, n)) {
+        if !present(&dir)? {
+            continue;
+        }
+        if !how.dry_run {
+            match std::fs::remove_dir(&dir) {
+                Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                    out.push(format!("kept {}: not empty", dir.display()));
+                    continue;
+                }
+                removed => removed.with_context(|| format!("remove {}", dir.display()))?,
+            }
+        }
+        out.push(format!("{verb} {}", dir.display()));
+    }
+    Ok(())
 }
 
 /// Stats every path before deleting any.
@@ -411,9 +441,12 @@ mod tests {
         s.member("a", "old", true, false);
         for name in ["lead-old", "a"] {
             s.write(&format!("state/reports/{name}.jsonl"), "{}\n");
-            s.write(&format!("state/handoffs/{name}.md"), "now\n");
-            s.write(&format!("state/handoffs/{name}.prev.md"), "before\n");
         }
+        s.write("state/handoffs/a/handoff.md", "now\n");
+        s.write("state/handoffs/a/prev.md", "before\n");
+        // Flat, as an older release left them.
+        s.write("state/handoffs/lead-old.md", "now\n");
+        s.write("state/handoffs/lead-old.prev.md", "before\n");
         s.member("other", "live", false, false);
         s.write("state/reports/other.jsonl", "{}\n");
         s.write("state/handoffs/other.md", "x\n");
@@ -424,14 +457,13 @@ mod tests {
         rels.iter().map(|r| s.path(r).exists()).collect()
     }
 
-    const OLD_FILES: [&str; 9] = [
+    const OLD_FILES: [&str; 8] = [
         "herds/old.toml",
         "herds/old-lead.md",
         "paused/old",
         "state/reports/a.jsonl",
         "state/reports/lead-old.jsonl",
-        "state/handoffs/a.md",
-        "state/handoffs/a.prev.md",
+        "state/handoffs/a",
         "state/handoffs/lead-old.md",
         "state/handoffs/lead-old.prev.md",
     ];
@@ -443,7 +475,7 @@ mod tests {
 
         let out = s.remove("old", Removal::default()).unwrap();
 
-        assert_eq!(exists(&s, &OLD_FILES), [false; 9], "{out}");
+        assert_eq!(exists(&s, &OLD_FILES), [false; 8], "{out}");
         assert_eq!(s.names(), ["other"]);
         assert_eq!(
             exists(
@@ -461,11 +493,12 @@ mod tests {
             out,
             format!(
                 "removed {root}/state/reports/a.jsonl\n\
-                 removed {root}/state/handoffs/a.md\n\
-                 removed {root}/state/handoffs/a.prev.md\n\
+                 removed {root}/state/handoffs/a/handoff.md\n\
+                 removed {root}/state/handoffs/a/prev.md\n\
                  removed {root}/state/reports/lead-old.jsonl\n\
                  removed {root}/state/handoffs/lead-old.md\n\
                  removed {root}/state/handoffs/lead-old.prev.md\n\
+                 removed {root}/state/handoffs/a\n\
                  removed ledger entry a\n\
                  removed ledger entry lead-old\n\
                  removed {root}/paused/old\n\
@@ -702,7 +735,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(exists(&s, &OLD_FILES), [true; 9]);
+        assert_eq!(exists(&s, &OLD_FILES), [true; 8]);
         assert_eq!(s.names(), ["a", "lead-old", "other"]);
         for rel in OLD_FILES {
             let line = format!("would remove {}\n", s.path(rel).display());
@@ -734,7 +767,7 @@ mod tests {
 
         assert_eq!(
             exists(&s, &OLD_FILES),
-            [false, false, false, true, true, false, false, false, false],
+            [false, false, false, true, true, false, false, false],
             "{out}"
         );
         assert_eq!(s.names(), ["a", "lead-old", "other"]);
@@ -930,6 +963,26 @@ mod tests {
             format!("refused: {} is a symlink", handoffs.display())
         );
         assert!(s.path("elsewhere/a.md").exists());
+        assert_eq!(s.names(), ["a"]);
+    }
+
+    #[test]
+    fn refuses_a_symlinked_member_handoff_dir_and_changes_nothing() {
+        let mut s = Setup::new();
+        s.write("herds/old.toml", "repo = \"/r\"\n");
+        s.write("elsewhere/handoff.md", "not ours\n");
+        fs::create_dir_all(s.path("state/handoffs")).unwrap();
+        std::os::unix::fs::symlink(s.path("elsewhere"), s.path("state/handoffs/a")).unwrap();
+        s.member("a", "old", true, false);
+
+        let err = s.remove("old", Removal::default()).unwrap_err();
+
+        let dir = s.path("state/handoffs/a");
+        assert_eq!(
+            format!("{err:#}"),
+            format!("refused: {} is a symlink", dir.display())
+        );
+        assert!(s.path("elsewhere/handoff.md").exists());
         assert_eq!(s.names(), ["a"]);
     }
 

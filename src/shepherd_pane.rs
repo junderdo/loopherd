@@ -153,7 +153,7 @@ mod tests {
     }
 
     fn handed_off(state: &Path, written: &str) -> std::path::PathBuf {
-        let path = state.join("handoffs/shepherd.md");
+        let path = state.join("handoffs/shepherd/handoff.md");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "## State\n").unwrap();
         let file = std::fs::File::options().write(true).open(&path).unwrap();
@@ -294,7 +294,7 @@ mod tests {
 
         let prompt = started_prompt(state.path());
 
-        let moved = state.path().join("handoffs/shepherd.prev.md");
+        let moved = state.path().join("handoffs/shepherd/prev.md");
         assert!(prompt.contains("resuming after your handoff"), "{prompt}");
         assert!(prompt.contains(&moved.display().to_string()), "{prompt}");
         assert!(!handoff.exists() && moved.exists());

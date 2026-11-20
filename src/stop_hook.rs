@@ -1073,7 +1073,7 @@ mod tests {
             reason.contains("151 tokens, past your limit of 100"),
             "{reason}"
         );
-        assert!(reason.contains(&state.join("handoffs/lh-1.md").display().to_string()));
+        assert!(reason.contains(&state.join("handoffs/lh-1/handoff.md").display().to_string()));
         assert_eq!(mailbox(dir.path(), "lh-1"), "");
 
         let second = hook_with(
@@ -1096,8 +1096,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("state");
         let handoffs = state.join("handoffs");
-        std::fs::create_dir_all(handoffs.join("lh-1.prev.md/x")).unwrap();
-        std::fs::write(handoffs.join("lh-1.md"), "first").unwrap();
+        std::fs::create_dir_all(handoffs.join("lh-1/prev.md/x")).unwrap();
+        std::fs::write(handoffs.join("lh-1/handoff.md"), "first").unwrap();
         let transcript = dir.path().join("t.jsonl");
         std::fs::write(
             &transcript,

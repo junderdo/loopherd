@@ -11,6 +11,7 @@ use serde_json::Value;
 
 use crate::config::{self, ConfigFile};
 use crate::continuation::{is_plain_name, live_transcript, session_in, transcript_of};
+use crate::handoff;
 use crate::ledger::{AgentRecord, Process};
 use crate::process::{self, Procs};
 use crate::report::{self, Body};
@@ -79,11 +80,6 @@ pub fn check_tokens(key: &str, value: Option<u64>) -> Result<()> {
     }
 }
 
-/// Where `name` writes its handoff, in loopherd's state dir `state`.
-pub fn handoff_path(state: &Path, name: &str) -> PathBuf {
-    state.join("handoffs").join(format!("{name}.md"))
-}
-
 /// What the Stop hook learned about a member's context on one stop.
 #[derive(Debug)]
 pub struct Check {
@@ -112,7 +108,7 @@ pub struct Measured {
 /// Measures the context of the stop `input` describes, and gives the reason
 /// to block it when `member`'s context is over `limit`: once per session,
 /// never on a stop a Stop hook already continued. Before asking, moves any
-/// handoff from last time to `<name>.prev.md`. A failed `limit` falls back
+/// handoff from last time to its `prev.md`. A failed `limit` falls back
 /// to the built-in one and is passed to `note` once per session.
 pub fn handoff_block(
     member: &AgentRecord,
@@ -183,16 +179,13 @@ fn ask(
         return Ok(None);
     }
     // Rotate before marking, so a failed rotation leaves the ask for the next stop.
-    let handoff = handoff_path(state, &member.name);
-    let moved = match handoff.exists() && !written_this_run(&handoff, state, &member.name)? {
-        true => {
-            let prev = handoff.with_extension("prev.md");
-            fs::rename(&handoff, &prev)
-                .with_context(|| format!("move {} to {}", handoff.display(), prev.display()))?;
-            Some(prev)
+    let moved = match handoff::find(state, &member.name) {
+        Some(last) if !written_this_run(&last, state, &member.name)? => {
+            Some(handoff::set_aside(state, &member.name, &last)?)
         }
-        false => None,
+        _ => None,
     };
+    let handoff = handoff::path(state, &member.name);
     fs::create_dir_all(&asked).with_context(|| format!("create {}", asked.display()))?;
     match fs::OpenOptions::new()
         .write(true)
@@ -286,15 +279,17 @@ fn reason(
 ) -> String {
     // A lead's watch is a background shell; left running, its stop reads
     // paused and restart refuses it.
-    let (save, plan, restart) = match member.is_lead() {
+    let (save, how, plan, restart) = match member.is_lead() {
         true => (
             "stop your own `loopherd watch` (TaskStop it, or kill it) so your stop reads finished, then ",
+            " with `loopherd handoff <<'EOF'`, since your sandbox refuses your file tools there",
             "your plan as next steps, re-arming your watch first",
             ", then `loopherd restart --self`, and end your turn. It restarts you fresh from that file \
              in this pane once this turn ends.",
         ),
         false => (
             "commit and push your branch, comment your progress on your task in the project's tracker, then ",
+            "",
             "your plan as next steps",
             ", and end your turn. Whoever reads your reports restarts you fresh from that file; \
              don't restart yourself.",
@@ -311,7 +306,7 @@ fn reason(
         .unwrap_or_default();
     format!(
         "loopherd: your context is at {tokens} tokens, past your limit of {limit}. \
-         Stop your current work: {save}write your handoff to {} (your state, {plan}, \
+         Stop your current work: {save}write your handoff to {}{how} (your state, {plan}, \
          gotchas; nothing already in the tracker or the ledger), run \
          `loopherd report --kind handoff \"<one line on where you are>\"`{restart}{moved}",
         handoff.display()
@@ -674,7 +669,7 @@ mod tests {
         let reason = w
             .block(&member("lh-1", None), &w.stop("s1", &t, ""), 100_000)
             .unwrap();
-        let handoff = w.state().join("handoffs/lh-1.md");
+        let handoff = w.state().join("handoffs/lh-1/handoff.md");
         assert_eq!(
             reason,
             format!(
@@ -732,6 +727,15 @@ mod tests {
             "{reason}"
         );
         assert!(!reason.contains("branch"), "{reason}");
+        let handoff = w.state().join("handoffs/lead-cards/handoff.md");
+        assert!(
+            reason.contains(&format!(
+                "write your handoff to {} with `loopherd handoff <<'EOF'`, since your sandbox \
+                 refuses your file tools there (your state,",
+                handoff.display()
+            )),
+            "{reason}"
+        );
         assert!(
             reason.contains("your plan as next steps, re-arming your watch first"),
             "{reason}"
@@ -894,7 +898,7 @@ mod tests {
             fresh_start(),
         );
         written_at(
-            &handoffs.join("lead-loopherd-cards.md"),
+            &handoffs.join("lead-loopherd-cards/handoff.md"),
             "## State\nfresh",
             "2026-11-17T05:01:02Z",
         );
@@ -910,10 +914,10 @@ mod tests {
         assert!(reason.contains("320368 tokens"), "{reason}");
         assert!(!reason.contains("moved"), "{reason}");
         assert_eq!(
-            fs::read_to_string(handoffs.join("lead-loopherd-cards.md")).unwrap(),
+            fs::read_to_string(handoffs.join("lead-loopherd-cards/handoff.md")).unwrap(),
             "## State\nfresh"
         );
-        assert!(!handoffs.join("lead-loopherd-cards.prev.md").exists());
+        assert!(!handoffs.join("lead-loopherd-cards/prev.md").exists());
     }
 
     #[test]
@@ -962,7 +966,11 @@ mod tests {
                 false,
             ),
         ];
-        for (case, mailbox, written, moved) in cases {
+        // The flat file is where an older release wrote the handoff.
+        let cases = cases
+            .into_iter()
+            .flat_map(|c| ["lh-1/handoff.md", "lh-1.md"].map(|file| (c.clone(), file)));
+        for ((case, mailbox, written, moved), file) in cases {
             let w = World::new();
             let who = member("lh-1", None);
             let handoffs = w.state().join("handoffs");
@@ -970,7 +978,7 @@ mod tests {
                 posted(&w.state(), "lh-1", &format!("2026-11-17T{at}Z"), body);
             }
             written_at(
-                &handoffs.join("lh-1.md"),
+                &handoffs.join(file),
                 "earlier",
                 &format!("2026-11-17T{written}Z"),
             );
@@ -978,9 +986,10 @@ mod tests {
 
             let reason = w.block(&who, &w.stop("s1", &t, ""), 100).unwrap();
 
-            let prev = handoffs.join("lh-1.prev.md");
+            let case = format!("{case}, in {file}");
+            let prev = handoffs.join("lh-1/prev.md");
             assert_eq!(prev.exists(), moved, "{case}");
-            assert_eq!(handoffs.join("lh-1.md").exists(), !moved, "{case}");
+            assert_eq!(handoffs.join(file).exists(), !moved, "{case}");
             let told = format!(
                 "The handoff that was there is from before your last start or handoff, \
                  so it was moved to {}; write a new one even if you think it is current.",
@@ -996,8 +1005,8 @@ mod tests {
         let who = member("lh-1", None);
         let t = w.transcript(&[assistant(0, 0, 200, false)]);
         let handoffs = w.state().join("handoffs");
-        fs::create_dir_all(handoffs.join("lh-1.prev.md/x")).unwrap();
-        fs::write(handoffs.join("lh-1.md"), "first").unwrap();
+        fs::create_dir_all(handoffs.join("lh-1/prev.md/x")).unwrap();
+        fs::write(handoffs.join("lh-1/handoff.md"), "first").unwrap();
         assert!(
             handoff_block(
                 &who,
@@ -1009,7 +1018,7 @@ mod tests {
             .reason
             .is_err()
         );
-        fs::remove_dir_all(handoffs.join("lh-1.prev.md")).unwrap();
+        fs::remove_dir_all(handoffs.join("lh-1/prev.md")).unwrap();
         assert!(w.block(&who, &w.stop("s1", &t, ""), 100).is_some());
     }
 
@@ -1087,8 +1096,8 @@ mod tests {
         assert_eq!(noted.measured, at);
 
         let handoffs = w.state().join("handoffs");
-        fs::create_dir_all(handoffs.join("lh-1.prev.md/x")).unwrap();
-        fs::write(handoffs.join("lh-1.md"), "first").unwrap();
+        fs::create_dir_all(handoffs.join("lh-1/prev.md/x")).unwrap();
+        fs::write(handoffs.join("lh-1/handoff.md"), "first").unwrap();
         let t = w.transcript(&[assistant(0, 0, 200, false)]);
         let asked = handoff_block(
             &who,

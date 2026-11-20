@@ -450,7 +450,7 @@ mod tests {
         let setup = Setup::with_lead(PROMPT);
         let mut herdr = herdr();
         let state = setup.root.join("state");
-        let dirs = ["broker/lead-h/requests", "reports", "handoffs"].map(|d| state.join(d));
+        let dirs = ["broker/lead-h/requests", "handoffs/lead-h"].map(|d| state.join(d));
         let seen = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
         let record = (seen.clone(), dirs.clone());
         herdr.on_start = Some(Box::new(move || {
@@ -467,7 +467,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(*seen.lock().unwrap(), [true, true, true], "{dirs:?}");
+        assert_eq!(*seen.lock().unwrap(), [true, true], "{dirs:?}");
     }
 
     #[test]
@@ -499,16 +499,10 @@ mod tests {
                     "filesystem": {
                         "allowWrite": [
                             format!("{root}/proj/worktrees/lead-h"),
-                            format!("{root}/state/reports"),
-                            format!("{root}/state/handoffs"),
+                            format!("{root}/state/handoffs/lead-h"),
                             format!("{root}/state/broker/lead-h/requests"),
                         ],
-                        "denyWrite": [
-                            format!("{root}/config"),
-                            "/home/me/.claude",
-                            format!("{root}/state/reports/watch.lock"),
-                            format!("{root}/state/reports/watch.fired"),
-                        ],
+                        "denyWrite": [format!("{root}/config"), "/home/me/.claude"],
                         "denyRead": [format!("{root}/state/locks")],
                     },
                     "excludedCommands": ["loopherd watch", "loopherd watch *"],
@@ -523,14 +517,14 @@ mod tests {
                     "deny": [
                         format!("Edit(/{root}/config/**)"),
                         "Edit(//home/me/.claude/**)",
+                        format!("Edit(/{root}/state/reports/**)"),
                         format!("Edit(/{root}/state/paused/**)"),
                         format!("Edit(/{root}/state/shepherd.json)"),
                         format!("Edit(/{root}/state/shepherd.json.lock)"),
                         format!("Edit(/{root}/state/ledger.json)"),
                         format!("Edit(/{root}/state/ledger.lock)"),
-                        format!("Edit(/{root}/state/reports/watch.lock)"),
-                        format!("Edit(/{root}/state/reports/watch.fired)"),
                         format!("Edit(/{root}/state/broker/*)"),
+                        format!("Edit(/{root}/state/handoffs/*)"),
                     ],
                 },
             })
@@ -648,6 +642,11 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_cant_write_any_mailbox_or_watch_file() {
+        assert_denied("reports", true);
+    }
+
+    #[test]
     fn a_lead_cant_rewrite_the_ledger() {
         assert_denied("ledger.json", false);
     }
@@ -658,20 +657,14 @@ mod tests {
     }
 
     #[test]
-    fn a_lead_cant_hold_the_shepherds_watch_lock() {
-        assert_denied("reports/watch.lock", false);
-    }
-
-    #[test]
-    fn a_lead_cant_rewrite_what_the_shepherds_watch_announced() {
-        assert_denied("reports/watch.fired", false);
-    }
-
-    #[test]
-    fn a_lead_writes_its_mailbox_watch_files_and_handoff_in_dirs_made_before_it_starts() {
+    fn a_lead_writes_in_the_state_dir_only_its_own_handoff_dir_and_broker_requests() {
         let setup = Setup::with_lead(PROMPT);
+        setup.copy_herd("g");
         let herdr = herdr();
         let paths = setup.paths();
+        let state = paths.state_dir().to_path_buf();
+        fs::create_dir_all(state.join("handoffs/lh-9")).unwrap();
+        fs::write(state.join("handoffs/lh-8.md"), "flat\n").unwrap();
 
         lead(
             &herdr,
@@ -683,29 +676,81 @@ mod tests {
         .unwrap();
 
         let (_, settings) = started_settings(&herdr);
-        let allowed = listed(&settings, "allowWrite");
-        for dir in ["reports", "handoffs"] {
-            let dir = paths.state_dir().join(dir);
-            assert!(allowed.contains(&dir), "{allowed:?}");
-            assert!(dir.is_dir(), "{}", dir.display());
-        }
-        assert!(
-            !allowed.contains(&paths.state_dir().to_path_buf()),
-            "{allowed:?}"
+        let in_state: Vec<PathBuf> = listed(&settings, "allowWrite")
+            .into_iter()
+            .filter(|dir| dir.starts_with(&state))
+            .collect();
+        let own = state.join("handoffs/lead-h");
+        assert_eq!(
+            in_state,
+            [own.clone(), state.join("broker/lead-h/requests")]
         );
+        assert!(own.is_dir());
+        let deny = &settings["permissions"]["deny"];
+        assert!(
+            !denied_to_sandbox(deny, &own.join("handoff.md")),
+            "an Edit deny is also a sandbox write deny, which beats allowWrite: {deny}"
+        );
+        // Made now, so a deny names them without a glob.
+        for dir in ["handoffs/shepherd", "handoffs/lead-g"] {
+            assert!(state.join(dir).is_dir(), "{dir}");
+        }
+        let bash_may_write = |path: &Path| in_state.iter().any(|dir| path.starts_with(dir));
+        let others = [
+            "reports/lead-h.jsonl",
+            "reports/lh-1.jsonl",
+            "reports/watch.lock",
+            "reports/.cursor",
+            "handoffs/shepherd/handoff.md",
+            "handoffs/shepherd.md",
+            "handoffs/lead-g/handoff.md",
+            "handoffs/lh-9/handoff.md",
+            "handoffs/lh-8.md",
+            "handoffs/lh-later/handoff.md",
+        ];
+        for path in others.map(|p| state.join(p)) {
+            assert!(!bash_may_write(&path), "{}", path.display());
+            if cfg!(target_os = "linux") {
+                assert!(
+                    denied_to_file_tools(deny, &path),
+                    "{} {deny}",
+                    path.display()
+                );
+            }
+        }
+        // Off Linux, what exists is named too, for a sandbox that applies globs.
+        let named = [
+            "handoffs/shepherd/handoff.md",
+            "handoffs/lead-g/handoff.md",
+            "handoffs/lh-9/handoff.md",
+            "handoffs/lh-8.md",
+        ];
+        assert!(denied_to_sandbox(deny, &state.join("reports/lh-1.jsonl")));
+        for path in named.map(|p| state.join(p)) {
+            let denied = denied_to_sandbox(deny, &path);
+            assert_eq!(
+                denied,
+                !cfg!(target_os = "linux"),
+                "{} {deny}",
+                path.display()
+            );
+        }
     }
 
+    /// On Linux a deny on a path that later goes missing leaves an empty
+    /// placeholder there, which a reader would take for a handoff.
     #[test]
-    fn starting_a_lead_keeps_the_shepherds_watch_files_already_there() {
+    #[cfg(target_os = "linux")]
+    fn on_linux_a_lead_s_settings_name_no_path_under_handoffs_while_a_flat_handoff_exists() {
         let setup = Setup::with_lead(PROMPT);
+        let herdr = herdr();
         let paths = setup.paths();
-        let reports = paths.state_dir().join("reports");
-        fs::create_dir_all(&reports).unwrap();
-        fs::write(reports.join("watch.fired"), "shepherd\nlh-1 done\n").unwrap();
-        fs::write(reports.join("watch.lock"), "4242").unwrap();
+        let handoffs = paths.state_dir().join("handoffs");
+        fs::create_dir_all(&handoffs).unwrap();
+        fs::write(handoffs.join("lh-8.md"), "pending\n").unwrap();
 
         lead(
-            &herdr(),
+            &herdr,
             &mut MemLedger::default(),
             &paths,
             &request(&[]),
@@ -713,13 +758,21 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            fs::read_to_string(reports.join("watch.fired")).unwrap(),
-            "shepherd\nlh-1 done\n"
-        );
-        assert_eq!(
-            fs::read_to_string(reports.join("watch.lock")).unwrap(),
-            "4242"
+        let (_, settings) = started_settings(&herdr);
+        let glob = format!("Edit(/{}/*)", handoffs.display());
+        let under = format!("/{}/", handoffs.display());
+        let named: Vec<&str> = settings["permissions"]["deny"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|rule| rule.as_str())
+            .filter(|rule| rule.contains(&under) && *rule != glob)
+            .collect();
+        assert_eq!(named, Vec::<&str>::new());
+        let deny_write = listed(&settings, "denyWrite");
+        assert!(
+            !deny_write.iter().any(|p| p.starts_with(&handoffs)),
+            "{deny_write:?}"
         );
     }
 
@@ -1191,7 +1244,7 @@ mod tests {
         let (_, settings) = started_settings(&herdr);
         let sandbox = &settings["sandbox"];
         assert_eq!(
-            sandbox["filesystem"]["allowWrite"][4],
+            sandbox["filesystem"]["allowWrite"][3],
             "/home/me/.local/bin"
         );
         assert_eq!(
