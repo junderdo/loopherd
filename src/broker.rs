@@ -193,10 +193,19 @@ fn feed(
         }
         Ok(fed.code)
     }));
-    let failed = match &ran {
-        Ok(Ok(_)) => None,
-        Ok(Err(e)) => Some(format!("the feed failed before noting an outcome: {e:#}")),
-        Err(_) => Some("the feed panicked before noting an outcome".to_string()),
+    let panicked = ran.as_ref().err().map(|payload| {
+        let text = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+        format!("the feed panicked: {}", text.unwrap_or("no message"))
+    });
+    let failed = match (&ran, &panicked) {
+        (Ok(Ok(_)), _) => None,
+        (Ok(Err(e)), _) => Some(format!("the feed failed before noting an outcome: {e:#}")),
+        (Err(_), panicked) => panicked
+            .as_ref()
+            .map(|p| format!("{p}, before noting an outcome")),
     };
     // A broker outlives its feeds, so no later feed would see these as interrupted.
     if let Some(why) = failed.filter(|_| !dry_run) {
@@ -205,7 +214,7 @@ fn feed(
         }
     }
     // An error, not a panic, so a broker's reply keeps the lines above.
-    ran.unwrap_or_else(|_| Err(anyhow!("the feed panicked")))
+    ran.unwrap_or_else(|_| Err(anyhow!(panicked.unwrap_or_default())))
 }
 
 fn add(ctx: &mut Ctx, req: &AddRequest, dry_run: bool, sink: &mut dyn Sink) -> Result<i32> {
@@ -312,7 +321,8 @@ fn refuse_unrouted(ledger: &dyn Ledger, command: &str) -> Result<()> {
         bail!(
             "refused: this loopherd runs in a sandbox, where it can't {command} itself, and the \
              ledger places no lead in this pane (as after the pane moved), so no lead's broker \
-             can; ask the shepherd, whose loopherd doctor checks each lead's broker"
+             can; if a lead runs here, ask the shepherd to run loopherd revive --name <lead>, \
+             since loopherd doctor doesn't see a moved pane"
         );
     }
     Ok(())
@@ -1017,18 +1027,24 @@ mod tests {
 
         /// Runs `f` with the state dir read-only, as in a lead's sandbox (D97).
         fn read_only<T>(&self, f: impl FnOnce() -> T) -> T {
-            use std::os::unix::fs::PermissionsExt;
+            /// Makes the dir writable again, even if `f` panics, so it can be removed.
+            struct Restore<'a>(&'a Path);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
+                    mode(self.0, 0o755);
+                    mode(&self.0.join("ledger.lock"), 0o644);
+                }
+            }
+            fn mode(path: &Path, mode: u32) {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+            }
             let root = self.dir.path();
-            let mode = |path: &Path, mode| {
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
-            };
             std::fs::write(root.join("ledger.lock"), "").unwrap();
+            let _restore = Restore(root);
             mode(&root.join("ledger.lock"), 0o444);
             mode(root, 0o555);
-            let result = f();
-            mode(root, 0o755);
-            mode(&root.join("ledger.lock"), 0o644);
-            result
+            f()
         }
     }
 
@@ -1698,7 +1714,7 @@ mod tests {
 
         let err = feed("h").carry_out(&mut ctx, &mut kept).unwrap_err();
 
-        assert_eq!(format!("{err:#}"), "the feed panicked");
+        assert_eq!(format!("{err:#}"), "the feed panicked: record");
         assert_eq!(kept.err, ["after_merge lh-1: interrupted"]);
         assert_eq!(
             ledger.0.0["lh-1"].after_merge,

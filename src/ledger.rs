@@ -345,12 +345,20 @@ impl FileLedger {
             .ancestors()
             .find(|p| p.exists())
             .context("ledger path has no existing parent")?;
-        let c_path = std::ffi::CString::new(probe.as_os_str().as_bytes())?;
-        // SAFETY: access only reads a C string the call borrows.
-        if unsafe { libc::access(c_path.as_ptr(), libc::W_OK) } == 0 {
-            return Ok(true);
-        }
-        let e = io::Error::last_os_error();
+        let e = if probe == lock {
+            // A real open: macOS's sandbox denies writes that access(2) may still allow.
+            match fs::OpenOptions::new().write(true).open(&lock) {
+                Ok(_) => return Ok(true),
+                Err(e) => e,
+            }
+        } else {
+            let c_path = std::ffi::CString::new(probe.as_os_str().as_bytes())?;
+            // SAFETY: access only reads a C string the call borrows.
+            if unsafe { libc::access(c_path.as_ptr(), libc::W_OK) } == 0 {
+                return Ok(true);
+            }
+            io::Error::last_os_error()
+        };
         match e.kind() {
             io::ErrorKind::ReadOnlyFilesystem | io::ErrorKind::PermissionDenied => Ok(false),
             _ => Err(e).with_context(|| format!("check {}", probe.display())),
