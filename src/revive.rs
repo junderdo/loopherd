@@ -193,6 +193,7 @@ pub fn revive(
         if record.is_lead()
             && !record.retired
             && !req.dry_run
+            && !elsewhere(here.as_deref(), &record)
             && let Err(e) = (req.broker)(&req.paths, &record.name)
         {
             warnings.push(format!("its broker didn't start: {e:#}"));
@@ -618,6 +619,11 @@ fn without_settings(args: &[String]) -> Vec<String> {
     kept
 }
 
+/// Whether `record` is on another herdr than `here`, so this revive leaves it alone.
+fn elsewhere(here: Option<&Path>, record: &AgentRecord) -> bool {
+    matches!((here, &record.socket), (Some(here), Some(there)) if !same_dir(here, there))
+}
+
 fn revive_one(
     herdr: &dyn Herdr,
     req: &ReviveRequest,
@@ -629,9 +635,7 @@ fn revive_one(
     if record.retired {
         return Outcome::Skipped("retired".into());
     }
-    if let (Some(here), Some(there)) = (here, &record.socket)
-        && !same_dir(here, there)
-    {
+    if let Some(there) = record.socket.as_ref().filter(|_| elsewhere(here, record)) {
         return Outcome::Skipped(format!("recorded on {}", there.display()));
     }
     let lead = match kept_lead(&req.paths, record, req.name.as_deref()) {
@@ -1927,6 +1931,28 @@ mod tests {
         assert_eq!(code, 0);
         let started = std::fs::read_to_string(own_paths().state_dir().join("brokers-started"));
         assert_eq!(started.unwrap(), "lead-a\n");
+    }
+
+    #[test]
+    fn a_lead_on_another_herdr_gets_no_broker_from_this_revive() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut herdr = herdr();
+        herdr.socket = Some("/run/dev.sock".into());
+        let mut ledger = ledger([on_socket(
+            lead("lead-live", cwd.path()),
+            Some("/run/live.sock"),
+        )]);
+        let req = ReviveRequest {
+            broker: |_, lead| anyhow::bail!("started a broker for {lead}"),
+            ..request()
+        };
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(
+            (out.as_str(), code),
+            ("skipped lead-live: recorded on /run/live.sock", 0)
+        );
     }
 
     #[test]

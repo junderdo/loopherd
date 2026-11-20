@@ -315,10 +315,13 @@ fn state_checks(
             .filter(|r| !r.retired && r.is_lead())
             .filter_map(|lead| lead_sandbox_check(&setup.paths, lead)),
     );
+    // A lead on another herdr has its broker under that herdr's config dir.
+    let here = reached.as_ref().map(|(_, socket)| socket.as_deref());
     checks.extend(
         members
             .iter()
             .filter(|r| !r.retired && r.is_lead())
+            .filter(|lead| here.is_none_or(|here| !elsewhere(here, lead)))
             .filter(|lead| !crate::broker::running(&setup.paths, &lead.name))
             .map(|lead| {
                 let name = &lead.name;
@@ -388,6 +391,16 @@ fn mailbox_check(dir: &Path, name: &str) -> Option<Check> {
     Some(failure(&format!("mailbox {name}"), detail, fix))
 }
 
+/// Whether `record` is on another herdr than the one at `here`. With herdr's
+/// socket unknown, a recorded one can't be shown to be this herdr's.
+fn elsewhere(here: Option<&Path>, record: &crate::ledger::AgentRecord) -> bool {
+    match (here, &record.socket) {
+        (Some(here), Some(there)) => !same_file(here, there),
+        (None, Some(_)) => true,
+        (_, None) => false,
+    }
+}
+
 /// Each member on `here`'s herdr whose pane is gone warns; those on another
 /// socket are counted, not checked.
 fn pane_checks(
@@ -416,13 +429,8 @@ fn pane_checks(
         }
     };
     let on = here.map_or("herdr's default socket".into(), |s| s.display().to_string());
-    // With herdr's socket unknown, a recorded one can't be shown to be this herdr's.
-    let elsewhere = |r: &&crate::ledger::AgentRecord| match (here, &r.socket) {
-        (Some(here), Some(there)) => !same_file(here, there),
-        (None, Some(_)) => true,
-        (_, None) => false,
-    };
-    let (other, local): (Vec<_>, Vec<_>) = members.iter().copied().partition(elsewhere);
+    let (other, local): (Vec<_>, Vec<_>) =
+        members.iter().copied().partition(|r| elsewhere(here, r));
     let mut checks: Vec<Check> = local
         .iter()
         .filter(|r| crate::matching::live_agent(r, &agents).is_none())
@@ -1693,7 +1701,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unretired_lead_with_no_broker_fails_naming_revive() {
+    fn an_unretired_lead_on_this_herdr_with_no_broker_fails_naming_revive() {
         let m = machine(&ALL);
         let repo = m.herd("h");
         m.herd_file(
@@ -1717,7 +1725,9 @@ mod tests {
         };
         let mut retired = lead("lead-old");
         retired.retired = true;
-        m.ledger(&[lead("lead-down"), lead("lead-up"), retired]);
+        let mut elsewhere = lead("lead-dev");
+        elsewhere.socket = Some("/run/dev.sock".into());
+        m.ledger(&[lead("lead-down"), lead("lead-up"), retired, elsewhere]);
         let paths = m.paths().clone();
         let mut ledger = FileLedger::new(m.state().join("ledger.json"));
         let serving = std::thread::spawn(move || {

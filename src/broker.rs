@@ -4,10 +4,11 @@
 //! The lead writes requests to its own folder in the state dir; the broker
 //! answers in the config dir, which the lead can read but not write.
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -496,13 +497,35 @@ impl Dir {
 
     /// Entries ready to answer, oldest name first; dotfiles are still being written.
     fn names(&self) -> Vec<String> {
-        let listed = std::fs::read_dir(format!("/proc/self/fd/{}", self.0.as_raw_fd()));
-        let mut names: Vec<_> = listed
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok()?.file_name().into_string().ok())
-            .filter(|name| !name.starts_with('.'))
-            .collect();
+        let mut names = vec![];
+        // SAFETY: fdopendir takes ownership of the dup, which closedir closes;
+        // each entry is read before the next readdir.
+        unsafe {
+            let fd = libc::dup(self.0.as_raw_fd());
+            if fd < 0 {
+                return names;
+            }
+            let dir = libc::fdopendir(fd);
+            if dir.is_null() {
+                libc::close(fd);
+                return names;
+            }
+            // The dup shares the descriptor's offset, which an earlier listing moved.
+            libc::rewinddir(dir);
+            loop {
+                let entry = libc::readdir(dir);
+                if entry.is_null() {
+                    break;
+                }
+                let name = CStr::from_ptr((*entry).d_name.as_ptr());
+                if let Ok(name) = name.to_str()
+                    && !name.starts_with('.')
+                {
+                    names.push(name.to_string());
+                }
+            }
+            libc::closedir(dir);
+        }
         names.sort();
         names
     }
@@ -524,7 +547,8 @@ impl Dir {
         // SAFETY: openat just returned this descriptor, owned by nothing else.
         let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
         let meta = file.metadata().context("not a request")?;
-        if !meta.is_file() {
+        // A hard link would hand the broker a file the lead can't read itself.
+        if !meta.is_file() || meta.nlink() > 1 {
             bail!("not a request: not a plain file");
         }
         if meta.len() > MAX_REQUEST {
@@ -1043,6 +1067,7 @@ mod tests {
         let secret = world.dir.path().join("secret");
         std::fs::write(&secret, r#"{"op":{"tell":{"name":"lh-1","text":"hi"}}}"#).unwrap();
         std::os::unix::fs::symlink(&secret, requests.join("link.json")).unwrap();
+        std::fs::hard_link(&secret, requests.join("hard.json")).unwrap();
         std::fs::write(requests.join("garbage.json"), "{ nope").unwrap();
         std::fs::write(
             requests.join("spawn.json"),
@@ -1075,6 +1100,7 @@ mod tests {
             }
         };
         assert_eq!(refused("link"), "not a request: not a plain file");
+        assert_eq!(refused("hard"), "not a request: not a plain file");
         assert!(refused("garbage").starts_with("malformed request: "));
         assert!(refused("spawn").starts_with("malformed request: unknown variant `spawn`"));
         assert!(refused("extra").starts_with("malformed request: unknown field `lead`"));
@@ -1366,5 +1392,20 @@ mod tests {
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
         assert!(herdr.calls() > 0);
+    }
+
+    #[test]
+    fn a_folder_lists_its_ready_entries_in_order_each_time_it_is_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["b.json", "a.json", ".c.part"] {
+            std::fs::write(dir.path().join(name), "").unwrap();
+        }
+        let opened = Dir::open(dir.path(), &[]).unwrap();
+
+        let first = opened.names();
+        let second = opened.names();
+
+        assert_eq!(first, ["a.json", "b.json"]);
+        assert_eq!(second, first);
     }
 }
