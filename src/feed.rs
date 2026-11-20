@@ -46,6 +46,15 @@ pub struct FeedRequest<'a> {
     pub owner: Process,
     /// Tells whether another feed's recorded process still runs.
     pub procs: &'a dyn Procs,
+    /// The lead a broker runs this feed for, which no pane names.
+    pub lead: Option<ForLead>,
+}
+
+/// A lead, with the herd its launch record names.
+#[derive(Debug, Clone)]
+pub struct ForLead {
+    pub name: String,
+    pub herd: String,
 }
 
 /// One line per task, then a summary, and the exit code.
@@ -270,6 +279,7 @@ fn unclaimed(
         after_merge_timeout: Duration::ZERO,
         owner: Process { pid: 0, start: 0 },
         procs: &crate::process::ProcFs,
+        lead: None,
     };
     let mut names = vec![];
     for task in tasks.lines().map(str::trim) {
@@ -317,7 +327,10 @@ fn reap(
         errors: 0,
         after_merge: vec![],
     };
-    let caller = sandbox::calling_lead(paths, req.procs, req.owner.pid);
+    let caller = match &req.lead {
+        Some(lead) => Some(lead.name.clone()),
+        None => sandbox::calling_lead(paths, req.procs, req.owner.pid),
+    };
     let guard = Guard::new(paths.clone(), caller);
     let mut held_back = None;
     if !queue.after_merge.is_empty() {
@@ -497,23 +510,28 @@ impl HeldBack {
     }
 }
 
-/// The first of `commands` the lead running feed may not run: feed runs in
-/// a lead's pane, and the tool hook would deny that command there.
+/// The first of `commands` the lead running feed may not run, as the tool
+/// hook would deny that command in the lead's pane.
 fn gate(
     ledger: &dyn Ledger,
     paths: &Paths,
     req: &FeedRequest,
     commands: &[String],
 ) -> Result<Option<HeldBack>> {
-    let pane = req.own_pane.as_deref().map(|id| Pane {
-        id,
-        socket: req.own_socket.as_deref(),
-        lineage: &req.own_lineage,
-    });
-    let Some(lead) = pane.map(|p| lead_in(ledger, &p)).transpose()?.flatten() else {
-        return Ok(None);
+    let herd = match &req.lead {
+        Some(lead) => lead.herd.clone(),
+        None => {
+            let pane = req.own_pane.as_deref().map(|id| Pane {
+                id,
+                socket: req.own_socket.as_deref(),
+                lineage: &req.own_lineage,
+            });
+            let Some(lead) = pane.map(|p| lead_in(ledger, &p)).transpose()?.flatten() else {
+                return Ok(None);
+            };
+            lead.herd.unwrap_or_default()
+        }
     };
-    let herd = lead.herd.unwrap_or_default();
     let (switches, unread) = match lead_switches(paths, &herd) {
         Ok(switches) => (switches, None),
         Err(e) => (Default::default(), Some(format!("{e:#}"))),
@@ -987,6 +1005,7 @@ mod tests {
                 after_merge_timeout: Duration::from_secs(2),
                 owner: OWNER,
                 procs: &*LIVE,
+                lead: None,
                 own_lineage: vec![],
             }
         }
@@ -1767,6 +1786,7 @@ mod tests {
             after_merge_timeout: Duration::from_secs(5),
             owner: OWNER,
             procs: &*LIVE,
+            lead: None,
         };
         let herdr = herdr();
         let mut ledger = MemLedger::default();
@@ -1892,6 +1912,7 @@ mod tests {
             after_merge_timeout: Duration::from_secs(5),
             owner: OWNER,
             procs: &*LIVE,
+            lead: None,
             own_lineage: vec![],
         };
 
@@ -1954,6 +1975,7 @@ mod tests {
             after_merge_timeout: Duration::from_secs(5),
             owner: OWNER,
             procs: &*LIVE,
+            lead: None,
         };
 
         let fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
@@ -2089,6 +2111,7 @@ mod tests {
             after_merge_timeout: Duration::from_secs(5),
             owner: OWNER,
             procs: &*LIVE,
+            lead: None,
         };
 
         let fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
@@ -2392,6 +2415,7 @@ mod tests {
                     after_merge_timeout: Duration::from_secs(5),
                     owner: OWNER,
                     procs: &*LIVE,
+                    lead: None,
                 };
                 task_request(&setup.paths(), &req, template, params)
                     .unwrap()
