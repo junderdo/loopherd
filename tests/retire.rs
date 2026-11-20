@@ -588,7 +588,7 @@ fn a_credentials_herds_broker_reaches_origin_with_its_leads_token_not_its_starte
     assert!(
         ls_remote.ends_with(&format!(
             " GH_TOKEN=github_pat_lead SSH_AUTH_SOCK= GIT_SSH_COMMAND=ssh -F '{}' \
-             -o IdentitiesOnly=yes -o IdentityAgent=none",
+             -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes",
             ssh_config.display()
         )),
         "{ls_remote}"

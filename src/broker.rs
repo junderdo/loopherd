@@ -691,10 +691,11 @@ pub fn lead_env(paths: &Paths, lead: &str) -> Result<Vec<(String, String)>> {
     // Outside the sandbox the human's keys are readable: a core.sshCommand -i or
     // a `Host *` IdentityFile would offer them, so ssh reads loopherd's config alone.
     let ssh_config = crate::credentials::ssh_config(paths);
+    // Setting it turns off loopherd's own BatchMode, so a prompt would hang until the git timeout.
     env.push((
         "GIT_SSH_COMMAND".into(),
         format!(
-            "ssh -F {} -o IdentitiesOnly=yes -o IdentityAgent=none",
+            "ssh -F {} -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes",
             crate::shell::quote(&ssh_config.to_string_lossy())
         ),
     ));
@@ -2717,7 +2718,7 @@ mod tests {
             var("GIT_SSH_COMMAND"),
             Some(
                 format!(
-                    "ssh -F '{}' -o IdentitiesOnly=yes -o IdentityAgent=none",
+                    "ssh -F '{}' -o IdentitiesOnly=yes -o IdentityAgent=none -o BatchMode=yes",
                     ssh_config.display()
                 )
                 .as_str()
