@@ -589,7 +589,9 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   `[lead] sandbox = "require"` (the default) a lead whose sandbox can't
   start isn't started, and `lead`, `restart` and `revive` say why
   (`loopherd doctor` checks it: bubblewrap and socat on Linux and WSL2);
-  `"prefer"` starts it guarded by its hook alone, with a warning, a note
+  `"prefer"` starts it guarded by its hook alone, which catches only
+  plainly written commands, so its herd files, config and switches are
+  protected against plain forms only. It starts with a warning, a note
   in its mailbox, and `(lead, unsandboxed)` in `loopherd view`. `restart`
   refuses, under `require`, a lead started without its sandbox (before it
   existed, or on `prefer`): quit its Claude and run `loopherd revive
