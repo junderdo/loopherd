@@ -131,31 +131,40 @@ fn flat_section(printed: &str, start: &str, end: &str) -> String {
     body.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+const SEND_BACK_ONLY_BLOCKING: [&str; 8] = [
+    "A finding is blocking when it's inside the task's acceptance criteria, or a correctness or safety bug the PR introduces",
+    "Only blocking findings fail a round, and only they go back to the member while it fails",
+    "never hold the merge",
+    "one follow-up task per PR",
+    "when the member has a next PR in the same card's stack, into that PR's scope",
+    "Nits go on the PR as a comment marked non-blocking and are not tasks",
+    "is each previous blocking finding fixed, and does the fix diff introduce a new correctness or safety bug?",
+    "never fails the round",
+];
+
 #[test]
-fn verify_blocks_on_in_scope_findings_rereviews_the_delta_and_caps_rounds() {
+fn verify_sends_back_only_blocking_findings_narrows_later_rounds_and_caps_rounds() {
     let home = tempfile::tempdir().unwrap();
     let printed = String::from_utf8(skill(home.path())).unwrap();
     let verify = flat_section(&printed, "4. **Verify**", "5. **After merge**");
-    for rule in [
-        "A finding is blocking when it's inside the task's acceptance criteria, or a correctness or safety bug the PR introduces",
-        "any other finding that should be fixed and fits within the task's scope",
-        "a PR comment marked non-blocking",
-        "the PR doesn't wait on them",
+    for rule in SEND_BACK_ONLY_BLOCKING.into_iter().chain([
         "the diff since that round's head, not the whole PR",
         "After round 3, start no other round",
         "merge as-is, narrow the scope, or change approach",
         "the open blocking findings",
-    ] {
+    ]) {
         assert!(verify.contains(rule), "Verify misses {rule:?}");
     }
+    assert!(!verify.contains("fits within the task's scope"), "{verify}");
     let lead = flat_section(&printed, "\n## Lead\n", "\n## ");
-    for rule in [
+    for rule in SEND_BACK_ONLY_BLOCKING.into_iter().chain([
         "**Review rounds.**",
         "After your herd's review-round limit (in your prompt; 3 when unset) start no other round",
         "`loopherd report --kind question`",
-    ] {
+    ]) {
         assert!(lead.contains(rule), "Lead misses {rule:?}");
     }
+    assert!(!lead.contains("other in-scope findings go back"), "{lead}");
     assert!(!lead.contains("After round 3"), "{lead}");
 }
 
