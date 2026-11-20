@@ -744,6 +744,12 @@ fn main() -> ExitCode {
             )
             .exit();
     };
+    if let Some((name, why)) = refused_to_leads(&command)
+        && let Err(e) = refuse_from_lead(why, by_pane(&command))
+    {
+        eprintln!("loopherd {name}: {e:#}");
+        return ExitCode::FAILURE;
+    }
     let (command, result) = match command {
         Command::Spawn(args) => ("spawn", run_spawn(args)),
         Command::Add(args) => ("add", run_add(args)),
@@ -868,6 +874,77 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The commands a lead's pane refuses, named, with why (D110). Commands a
+/// lead's broker carries out, or that refuse a lead themselves, aren't here.
+fn refused_to_leads(command: &Command) -> Option<(&'static str, &'static str)> {
+    const HERD_FILE: &str = "a herd file is the human's to change";
+    const CONFIG: &str = "config.toml is the human's to change";
+    const PAUSE: &str = "pausing a herd is the human's";
+    Some(match command {
+        Command::Lead(_) => ("lead", "starting a lead is the shepherd's"),
+        Command::Revive { .. } => ("revive", "reviving members is the shepherd's"),
+        Command::Pause { .. } => ("pause", PAUSE),
+        Command::Resume { .. } => ("resume", PAUSE),
+        Command::Herd {
+            action: HerdAction::Set { .. },
+        } => ("herd set", HERD_FILE),
+        Command::Herd {
+            action: HerdAction::Unset { .. },
+        } => ("herd unset", HERD_FILE),
+        Command::Herd {
+            action: HerdAction::Remove { .. },
+        } => ("herd remove", HERD_FILE),
+        Command::Init(_) => ("init", HERD_FILE),
+        Command::LeadDefaults { set: Some(_) } => ("lead-defaults", CONFIG),
+        Command::Config {
+            action: ConfigAction::Set { .. } | ConfigAction::Unset { .. },
+        } => ("config", CONFIG),
+        // Plain setup only names its flags without a terminal, and the
+        // installer a lead may run (D17) runs it so.
+        Command::Setup(args)
+            if args.again || args.lead_defaults.is_some() || args.context.is_some() =>
+        {
+            ("setup", CONFIG)
+        }
+        Command::MergeGuard { .. } => (
+            "merge-guard",
+            "a herd's credentials are the human's to set up",
+        ),
+        Command::Broker { .. } => ("broker", "a lead's broker starts outside its sandbox"),
+        Command::RestartWait { .. } => {
+            ("restart-wait", "a lead's broker starts its restart waiter")
+        }
+        _ => return None,
+    })
+}
+
+/// Refuses the running command, `why` saying whose it is, in a lead's pane
+/// or sandbox. The shepherd's pane may carry a dead lead's old id after a
+/// herdr restart, so it is never a lead's.
+fn refuse_from_lead(why: &str, by_pane: bool) -> Result<()> {
+    let Ok(path) = FileLedger::default_path() else {
+        return Ok(());
+    };
+    let ledger = FileLedger::new(path);
+    let shepherd = ledger
+        .dir()
+        .is_ok_and(|state| shepherd_here(&state, own_pane().as_deref()).is_some());
+    let lead = match by_pane {
+        true => own_broker(),
+        false => Paths::from_env().ok().and_then(|paths| {
+            broker::route(&paths, &ledger, &process::ProcFs, std::process::id(), None)
+        }),
+    };
+    let lead = lead.filter(|_| !shepherd);
+    broker::refuse_from_lead(lead.as_ref(), &ledger, why)
+}
+
+/// herdr runs `revive --startup` with its focused pane's id, which may be a
+/// lead's, so only its lineage or a sandbox can make it a lead's.
+fn by_pane(command: &Command) -> bool {
+    !matches!(command, Command::Revive { startup: true, .. })
 }
 
 fn run_herd(action: HerdAction) -> Result<i32> {
@@ -1044,11 +1121,6 @@ fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32>
         }
     };
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    // A sandboxed lead's revive would start Claudes before failing on the ledger. Its
-    // sandbox hides the lead from calling_lead, so a read-only ledger gives it away.
-    if !dry_run && ledger.read_only()? {
-        bail!(refusal);
-    }
     let req = ReviveRequest {
         name,
         dry_run,
