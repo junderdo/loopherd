@@ -2,6 +2,7 @@ mod broker;
 mod config;
 mod context;
 mod continuation;
+mod credentials;
 mod doctor;
 mod feed;
 mod github;
@@ -16,6 +17,7 @@ mod line_ending;
 mod lock;
 mod matching;
 mod merge_alert;
+mod merge_guard;
 mod notify;
 mod pane_event;
 mod pane_label;
@@ -162,6 +164,15 @@ enum Command {
     /// one it asks nothing and names the flags for whatever is unset. Naming
     /// a group's flag handles just that group: set with a value, asked without.
     Setup(SetupArgs),
+    /// Set up the split credentials of a herd whose lead has merge off and
+    /// `merge_guard = "credentials"` (D83, D95), as your own gh login: makes
+    /// the lead's deploy key in the config dir if missing, adds it to the
+    /// herd's GitHub repo with write access, creates or updates the rulesets
+    /// `loopherd: default branch` (updates and deletions only through a PR
+    /// merged by an admin) and `loopherd: no force-push` (deploy keys bypass
+    /// it only with `rebase` on), then says how to create and store the
+    /// lead's token, which GitHub makes only in the web UI. Safe to re-run.
+    MergeGuard { herd: String },
     /// Start the herd's lead member, lead-<herd>, from its herd file's [lead] table,
     /// in a detached worktree of the same name.
     Lead(LeadArgs),
@@ -636,6 +647,10 @@ struct InitArgs {
     /// Write no [lead] table and no lead prompt.
     #[arg(long)]
     no_lead: bool,
+    /// How a lead with merge off is kept from merging; asked on a terminal,
+    /// else hook. credentials needs `loopherd merge-guard <herd>` afterwards.
+    #[arg(long, value_enum, conflicts_with = "no_lead")]
+    merge_guard: Option<herd::MergeGuard>,
     /// The workers' handoff limit in tokens; unset, config.toml's default applies.
     #[arg(long, value_name = "TOKENS")]
     context_limit: Option<u64>,
@@ -716,6 +731,7 @@ fn main() -> ExitCode {
         Command::Spawn(args) => ("spawn", run_spawn(args)),
         Command::Add(args) => ("add", run_add(args)),
         Command::Init(args) => ("init", run_init(args)),
+        Command::MergeGuard { herd } => ("merge-guard", run_merge_guard(&herd)),
         Command::Herds { settings } => ("herds", run_herds(settings)),
         Command::Herd { action } => ("herd", run_herd(action)),
         Command::LeadDefaults { set } => ("lead-defaults", run_lead_defaults(set)),
@@ -907,6 +923,14 @@ fn run_setup(args: SetupArgs) -> Result<i32> {
             .map(|(input, output)| setup::Tty { input, output }),
     )?;
     lines.iter().for_each(|line| println!("{line}"));
+    Ok(0)
+}
+
+fn run_merge_guard(herd: &str) -> Result<i32> {
+    let paths = Paths::from_env()?;
+    merge_guard::setup(&paths, herd)?
+        .iter()
+        .for_each(|line| println!("{line}"));
     Ok(0)
 }
 
@@ -2078,6 +2102,10 @@ fn run_doctor(
     };
     let checks = doctor_install(settings).and_then(|install| {
         let mut checks = doctor::checks(&install, &setup(), herd.as_deref(), &CliHerdr)?;
+        if let Ok(paths) = Paths::from_env() {
+            let rules = github::GhCli::default();
+            checks.extend(doctor::ruleset_checks(&paths, herd.as_deref(), &rules));
+        }
         if trackers {
             let paths = Paths::from_env()?;
             let only = herd.as_deref();
@@ -2368,6 +2396,7 @@ fn init_or_diff(args: InitArgs) -> Result<i32> {
         },
         max: args.max.map(|max| max as u64),
         lead: args.no_lead.then_some(false),
+        merge_guard: args.merge_guard,
         context_limit: args.context_limit,
     };
     if args.diff {

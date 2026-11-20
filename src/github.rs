@@ -67,7 +67,7 @@ impl Default for GhCli {
 impl PullRequests for GhCli {
     fn open_on(&self, repo: &Path, branch: &str) -> Result<PrLookup> {
         // release runs outside a lead's sandbox, so origin is read through git pinned to the repo.
-        let url = crate::worktree::git(repo, &["remote", "get-url", "origin"])?
+        let url = crate::worktree::git(repo, &["config", "--get", "remote.origin.url"])?
             .trim()
             .to_string();
         let Some((host, name)) = github_repo(&url) else {
@@ -155,6 +155,29 @@ impl Merges for GhCli {
                 url: pr.url,
             })
             .collect())
+    }
+}
+
+impl crate::doctor::Rulesets for GhCli {
+    fn loopherd_rulesets(&self, repo: &Path) -> Result<Vec<serde_json::Value>> {
+        let slug = github_com_origin(repo)?.slug;
+        let list = format!("repos/{slug}/rulesets?includes_parents=false");
+        let listed: Vec<serde_json::Value> =
+            serde_json::from_str(&self.answer(repo, &["api", &list])?)
+                .context("read gh's list of rulesets")?;
+        let ours = [
+            crate::merge_guard::DEFAULT_BRANCH_RULESET,
+            crate::merge_guard::FORCE_PUSH_RULESET,
+        ];
+        listed
+            .iter()
+            .filter(|r| ours.iter().any(|name| r["name"] == *name))
+            .map(|r| {
+                let one = format!("repos/{slug}/rulesets/{}", r["id"]);
+                serde_json::from_str(&self.answer(repo, &["api", &one])?)
+                    .context("read gh's ruleset")
+            })
+            .collect()
     }
 }
 
@@ -252,6 +275,26 @@ fn full_name(repo: &Path) -> Result<String> {
     }
 }
 
+/// A repo's origin on github.com.
+pub struct Origin {
+    /// As the repo's config spells it, before any `insteadOf` rewrite.
+    pub url: String,
+    /// `owner/repo`.
+    pub slug: String,
+}
+
+/// `repo`'s origin, which must be on github.com.
+pub fn github_com_origin(repo: &Path) -> Result<Origin> {
+    let url = crate::worktree::git(repo, &["config", "--get", "remote.origin.url"])
+        .with_context(|| format!("read origin of {}", repo.display()))?
+        .trim()
+        .to_string();
+    match github_repo(&url) {
+        Some((host, slug)) if is_github_com(&host) => Ok(Origin { url, slug }),
+        _ => bail!("origin {url} of {} isn't a github.com repo", repo.display()),
+    }
+}
+
 fn no_gh() -> PrLookup {
     PrLookup::Unknown("no GitHub CLI (gh) on PATH".into())
 }
@@ -261,15 +304,17 @@ fn is_not_found(err: &anyhow::Error) -> bool {
         .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
 }
 
+/// Origin's URL before any `insteadOf`, which a credentials lead's git
+/// rewrites to its ssh `Host` alias.
 fn origin_url(repo: &Path) -> Result<String> {
     let out = Command::new("git")
-        .args(["remote", "get-url", "origin"])
+        .args(["config", "--get", "remote.origin.url"])
         .current_dir(repo)
         .output()
-        .context("run git remote get-url origin")?;
+        .context("run git config --get remote.origin.url")?;
     if !out.status.success() {
         bail!(
-            "git remote get-url origin: {}",
+            "git config --get remote.origin.url: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
@@ -578,6 +623,25 @@ mod tests {
 
         assert_eq!(gh.open_on(dir.path(), "feat/x").unwrap(), PrLookup::None);
 
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("args")).unwrap(),
+            "pr list -R github.com/o/r --state open --limit 1 --json number,url --head feat/x\n"
+        );
+    }
+
+    #[test]
+    fn origin_is_read_as_configured_not_as_insteadof_rewrites_it() {
+        let (dir, gh) = fake_gh("https://github.com/o/r.git", "[]");
+        let rewrite = Command::new("git")
+            .args(["config", "url.git@loopherd-h:o/r.git.insteadOf"])
+            .arg("https://github.com/o/r.git")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(rewrite.success());
+
+        assert_eq!(gh.open_on(dir.path(), "feat/x").unwrap(), PrLookup::None);
+        assert_eq!(gh.repo_at(dir.path()), Some("o/r".into()));
         assert_eq!(
             std::fs::read_to_string(dir.path().join("args")).unwrap(),
             "pr list -R github.com/o/r --state open --limit 1 --json number,url --head feat/x\n"
