@@ -1248,6 +1248,18 @@ impl Dir {
 
 const MALFORMED: &str = "malformed request";
 
+/// A broker older than its lead's loopherd refused a request it can't read.
+#[derive(Debug)]
+pub struct TooOld(String);
+
+impl std::fmt::Display for TooOld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TooOld {}
+
 /// Why a label that failed asks for nothing more: its report went out first.
 /// The lead's side of the transport: writes requests, reads replies.
 pub struct Client {
@@ -1315,11 +1327,12 @@ impl Client {
                 {
                     Reply::Done { out, err, code } => Ok((out, err, code)),
                     // This client wrote a well-formed request, so only an older broker can't read it.
-                    Reply::Refused(why) if why.starts_with(MALFORMED) => Err(anyhow!(
+                    Reply::Refused(why) if why.starts_with(MALFORMED) => Err(TooOld(format!(
                         "{lead}'s broker predates this loopherd, so it can't {}; the shepherd must \
                          restart it (kill it, then loopherd revive --name {lead})",
                         op.command()
-                    )),
+                    ))
+                    .into()),
                     Reply::Refused(why) => {
                         Err(anyhow!("{lead}'s broker refused {}: {why}", op.command()))
                     }
@@ -2893,6 +2906,7 @@ mod tests {
             "lead-h's broker predates this loopherd, so it can't prompt; the shepherd must \
              restart it (kill it, then loopherd revive --name lead-h)"
         );
+        assert!(err.downcast_ref::<TooOld>().is_some());
         old.join().unwrap();
     }
 

@@ -1626,7 +1626,17 @@ fn run_report(kind: Kind, as_name: Option<String>, text: &str) -> Result<i32> {
             kind,
             text: text.into(),
         };
-        return run_op(Some(&broker), &op);
+        match run_op(Some(&broker), &op) {
+            // A lead still on settings from before its broker wrote reports may write its own.
+            Err(e) if e.downcast_ref::<broker::TooOld>().is_some() => {
+                eprintln!("loopherd report: warning: {e:#}; writing the report directly");
+                let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+                let entry = report::Entry::new(SystemTime::now(), report::Body::report(kind, text));
+                report::append(&ledger.reports_dir()?, broker.lead(), &entry)?;
+                return Ok(0);
+            }
+            done => return done,
+        }
     }
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let own_pane = own_pane();
