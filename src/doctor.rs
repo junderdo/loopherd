@@ -17,7 +17,7 @@ use crate::ledger::AgentRecord;
 use crate::ledger::{FileLedger, Ledger};
 use crate::merge_guard::{DEFAULT_BRANCH_RULESET, FORCE_PUSH_RULESET};
 use crate::pause::Reading;
-use crate::sandbox::{SandboxMode, Unavailable};
+use crate::sandbox::{SandboxMode, Sockets, Unavailable};
 use serde_json::Value;
 
 /// What the install checks read, gathered by the caller.
@@ -30,7 +30,10 @@ pub struct Install {
     pub on_path: Option<PathBuf>,
     pub running: PathBuf,
     /// Why Claude Code's sandbox can't start on this machine, if it can't.
-    pub sandbox: Result<(), Unavailable>,
+    /// Whether it keeps Unix sockets closed when it does.
+    pub sandbox: Result<Sockets, Unavailable>,
+    /// WSL2 lets this machine run Windows programs.
+    pub wsl_interop: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -79,6 +82,7 @@ pub fn checks(
         Ok(setup) => {
             checks.extend(config_checks(&setup.paths, &install.settings));
             checks.extend(herd_checks(&setup.paths, herd));
+            checks.extend(unix_socket_checks(install, &setup.paths, herd));
             checks.extend(state_checks(
                 setup,
                 herd,
@@ -96,10 +100,15 @@ pub fn checks(
     Ok(checks)
 }
 
-/// Fails only while some herd has a lead to run in the sandbox.
+/// Fails only while some herd has a lead to run in the sandbox, or, for a
+/// filter that can't block Unix sockets, a lead it would refuse.
 fn sandbox_check(install: &Install, setup: &Result<Setup>) -> Check {
-    let Err(Unavailable { why, fix }) = &install.sandbox else {
-        return ok("sandbox", "can start".into());
+    let (why, fix) = match &install.sandbox {
+        Ok(Sockets::Blocked) => return ok("sandbox", "can start".into()),
+        Ok(Sockets::Open(Unavailable { why, fix })) => {
+            return sockets_check(why, fix, setup);
+        }
+        Err(Unavailable { why, fix }) => (why, fix),
     };
     let has_lead = |paths: &Paths| {
         crate::herd::names(&paths.herds).is_ok_and(|herds| {
@@ -118,13 +127,43 @@ fn sandbox_check(install: &Install, setup: &Result<Setup>) -> Check {
     }
 }
 
+fn sockets_check(why: &str, fix: &str, setup: &Result<Setup>) -> Check {
+    use crate::sandbox::WhenLoosened;
+    let refused = |paths: &Paths| {
+        crate::herd::names(&paths.herds).is_ok_and(|herds| {
+            herds.iter().any(|herd| {
+                crate::herd::lead_sandbox(paths, herd).is_ok()
+                    && !crate::sandbox::sockets_open(paths, herd).unwrap_or(false)
+                    && crate::sandbox::when_loosened(paths, herd)
+                        .is_ok_and(|when| when != WhenLoosened::Warn)
+            })
+        })
+    };
+    let detail = format!("can't block Unix sockets: {why}");
+    match setup {
+        Ok(setup) if !refused(&setup.paths) => warning("sandbox", detail, fix.into()),
+        _ => failure("sandbox", detail, fix.into()),
+    }
+}
+
 /// A running lead without its sandbox, by `prefer` or from before it had one.
 pub(crate) fn lead_sandbox_check(paths: &Paths, lead: &AgentRecord) -> Option<Check> {
     let started_with_it =
         crate::sandbox::launched_with_settings(paths, &lead.name, &lead.claude_args);
     let why = match &lead.unsandboxed {
         Some(why) => why.as_str(),
-        None if started_with_it => return None,
+        None if started_with_it => {
+            let why = lead.sockets_unblocked.as_deref()?;
+            return Some(warning(
+                &format!("lead {}", lead.name),
+                crate::sandbox::sockets_unblocked_warning(&lead.name, why),
+                format!(
+                    "fix the sandbox check's cause, then quit its Claude and run loopherd \
+                     revive --name {}",
+                    lead.name
+                ),
+            ));
+        }
         None => "it was started without its sandbox",
     };
     Some(warning(
@@ -304,6 +343,33 @@ fn herd_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
         checks.extend(mcp_server_checks(paths, &herd));
     }
     checks
+}
+
+/// Each herd whose `[lead] unix_sockets` reopens every Unix socket to its lead.
+fn unix_socket_checks(install: &Install, paths: &Paths, only: Option<&str>) -> Vec<Check> {
+    let herds = match only {
+        Some(herd) => vec![herd.to_string()],
+        None => crate::herd::names(&paths.herds).unwrap_or_default(),
+    };
+    let interop = match install.wsl_interop {
+        true => {
+            "; WSL2's Windows interop is enabled on this machine, so it can run Windows \
+                 programs outside its sandbox"
+        }
+        false => "",
+    };
+    herds
+        .into_iter()
+        .filter(|herd| crate::sandbox::sockets_open(paths, herd).unwrap_or(false))
+        .filter_map(|herd| {
+            let lead = crate::lead::lead_name(&herd).ok()?;
+            Some(warning(
+                &format!("herd {herd} unix_sockets"),
+                crate::sandbox::sockets_open_warning(&lead, &herd) + interop,
+                format!("loopherd herd unset {herd} lead.unix_sockets"),
+            ))
+        })
+        .collect()
 }
 
 /// Each `[lead] mcp_servers` name the human's user scope doesn't configure,
@@ -1269,7 +1335,8 @@ mod tests {
                 pane_label: false,
                 on_path: Some(exe.clone()),
                 running: exe,
-                sandbox: Ok(()),
+                sandbox: Ok(Sockets::Blocked),
+                wsl_interop: false,
             },
             setup: Ok(setup),
             dir,
@@ -1971,6 +2038,70 @@ mod tests {
     }
 
     #[test]
+    fn a_sandbox_that_cant_block_unix_sockets_fails_for_a_lead_that_would_be_refused() {
+        let mut m = machine(&ALL);
+        m.install.sandbox = Ok(Sockets::Open(Unavailable {
+            why: "Claude Code finds no seccomp filter to block them with".into(),
+            fix: "npm install -g @anthropic-ai/sandbox-runtime".into(),
+        }));
+        let repo = m.herd("h");
+        let lead = |line: &str| {
+            format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge = true\n{line}\n",
+                repo.to_str().unwrap()
+            )
+        };
+        let check = "sandbox: can't block Unix sockets: Claude Code finds no seccomp filter to \
+                     block them with";
+        let fix = "; fix: npm install -g @anthropic-ai/sandbox-runtime";
+
+        m.herd_file("h", &lead(""));
+        assert_eq!(problems(&m, &herdr()), [format!("failure {check}{fix}")]);
+
+        m.herd_file("h", &lead("sandbox = \"prefer\""));
+        let found = problems(&m, &herdr());
+        assert!(
+            found.contains(&format!("warning {check}{fix}")),
+            "{found:?}"
+        );
+
+        m.herd_file("h", &lead("unix_sockets = \"all\""));
+        let found = problems(&m, &herdr());
+        assert!(
+            found.contains(&format!("warning {check}{fix}")),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_running_lead_whose_sandbox_cant_block_unix_sockets_is_named() {
+        let m = machine(&ALL);
+        let mut lead = member("lead-h", "h", "w1:p2", None);
+        lead.role = Some(crate::ledger::Role::Lead);
+        lead.claude_args = vec![
+            "--settings".into(),
+            crate::sandbox::settings_file(m.paths(), "lead-h")
+                .display()
+                .to_string(),
+        ];
+        lead.sockets_unblocked = Some("Claude Code finds no seccomp filter".into());
+        m.ledger(&[lead]);
+        let found: Vec<_> = problems(&m, &herdr())
+            .into_iter()
+            .filter(|p| p.starts_with("warning lead "))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                "warning lead lead-h: lead-h's sandbox can't block Unix sockets (Claude Code finds \
+              no seccomp filter), so herdr, your ssh agent and WSL2's Windows interop stay open \
+              to it; fix: fix the sandbox check's cause, then quit its Claude and run loopherd \
+              revive --name lead-h"
+            ]
+        );
+    }
+
+    #[test]
     fn a_sandbox_that_cant_start_only_warns_while_no_herd_has_a_lead() {
         let mut m = machine(&ALL);
         without_bubblewrap(&mut m);
@@ -2030,7 +2161,10 @@ mod tests {
             herd: "h".into(),
             args: vec![],
         };
-        crate::sandbox::prepare(m.paths(), "lead-up", &kept, || Ok(())).unwrap();
+        crate::sandbox::prepare(m.paths(), "lead-up", &kept, || {
+            Ok(crate::sandbox::Sockets::Blocked)
+        })
+        .unwrap();
         let settings = crate::sandbox::settings_file(m.paths(), "lead-up");
         let lead = |name: &str| {
             let mut lead = member(name, "h", "w1:p1", None);
@@ -2113,6 +2247,33 @@ mod tests {
               guarded by its tool hook alone, whenever the sandbox can't start; \
               fix: loopherd herd set h lead.sandbox '\"require\"'"
             ]
+        );
+    }
+
+    #[test]
+    fn a_herd_whose_lead_may_use_every_unix_socket_is_warned_of_and_of_windows_interop() {
+        let mut m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge = true\nunix_sockets = \"all\"\n",
+                repo.to_str().unwrap()
+            ),
+        );
+        let opened = "warning herd h unix_sockets: lead-h's sandbox lets it use any Unix socket, \
+                      as herd h's [lead] unix_sockets = \"all\" says, which reopens the herdr \
+                      socket, your ssh agent and WSL2's Windows interop to it";
+        let fix = "; fix: loopherd herd unset h lead.unix_sockets";
+        assert_eq!(problems(&m, &herdr()), [format!("{opened}{fix}")]);
+
+        m.install.wsl_interop = true;
+        assert_eq!(
+            problems(&m, &herdr()),
+            [format!(
+                "{opened}; WSL2's Windows interop is enabled on this machine, so it can run \
+                 Windows programs outside its sandbox{fix}"
+            )]
         );
     }
 

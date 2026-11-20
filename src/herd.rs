@@ -11,7 +11,7 @@ use serde::Deserialize;
 use crate::herdr::Herdr;
 use crate::ledger::{AgentRecord, FileLedger, Ledger};
 use crate::lock::Lock;
-use crate::sandbox::SandboxMode;
+use crate::sandbox::{SandboxMode, UnixSockets};
 use crate::spawn::{
     Checkout, MemberOf, Prompt, SHELL_TIMEOUT, SpawnRequest, Spawned, preview, spawn,
 };
@@ -61,6 +61,7 @@ struct LeadFile {
     /// MCP servers, by name, from the human's own Claude config; a lead gets no others.
     #[serde(default)]
     mcp_servers: Vec<String>,
+    unix_sockets: Option<UnixSockets>,
 }
 
 /// How a lead with `merge` off is kept from merging.
@@ -799,6 +800,15 @@ pub fn lead_mcp_servers(paths: &Paths, herd: &str) -> Result<Vec<String>> {
     Ok(lead.mcp_servers)
 }
 
+/// The Unix sockets a herd's `[lead]` opens to its lead; `None` is none.
+pub fn lead_unix_sockets(paths: &Paths, herd: &str) -> Result<Option<UnixSockets>> {
+    let file = load(&paths.herds, herd).context("herd")?;
+    let lead = file
+        .lead
+        .with_context(|| format!("herd: {herd} has no [lead]"))?;
+    Ok(lead.unix_sockets)
+}
+
 /// A herd's lead's switches, without reading its prompt.
 pub fn lead_switches(paths: &Paths, herd: &str) -> Result<Switches> {
     Ok(lead_sandbox(paths, herd)?.0)
@@ -1125,6 +1135,10 @@ fn describe(
             match lead.mcp_servers.is_empty() {
                 true => "  mcp_servers: none".into(),
                 false => format!("  mcp_servers: {}", lead.mcp_servers.join(", ")),
+            },
+            match lead.unix_sockets {
+                Some(UnixSockets::All) => "  unix_sockets: all".into(),
+                None => "  unix_sockets: none".into(),
             },
         ]
     });
@@ -2852,6 +2866,32 @@ args = ["--model", "opus"]
     }
 
     #[test]
+    fn herds_shows_which_unix_sockets_each_lead_may_use_and_refuses_any_but_all() {
+        let lead = |line: &str| format!("{LEAD_HERD}[lead]\nprompt = \"go\"\n{line}\n");
+        let config = Config::with(&[
+            ("all", &lead("unix_sockets = \"all\"")),
+            ("none", &lead("")),
+            ("some", &lead("unix_sockets = \"herdr\"")),
+        ]);
+
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+
+        assert_eq!(code, 1, "{report}");
+        let shown = |herd: &str| {
+            let at = report.find(&format!("{herd}  repo")).unwrap();
+            report[at..]
+                .lines()
+                .find(|line| line.starts_with("  unix_sockets:"))
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(shown("all"), "  unix_sockets: all");
+        assert_eq!(shown("none"), "  unix_sockets: none");
+        assert!(report.contains("invalid some.toml"), "{report}");
+        assert!(report.contains("unknown variant `herdr`"), "{report}");
+    }
+
+    #[test]
     fn herds_shows_every_switch_off_while_config_toml_is_broken() {
         let herd = format!("{LEAD_HERD}[lead]\nprompt = \"go\"\nmerge = true\n");
         let config = Config::with(&[("h", &herd)]);
@@ -2961,6 +3001,7 @@ args = ["--model", "opus"]
              new_cards off (built-in), design_escalation off (built-in), blocked_dialogs off (built-in)\n\
              \x20 review_rounds: 3 (built-in)\n\
              \x20 mcp_servers: none\n\
+             \x20 unix_sockets: none\n\
              invalid b.toml: lead: prompt: unknown placeholder {pane}"
         );
         assert_eq!(code, 1);
@@ -3057,6 +3098,7 @@ args = ["--model", "opus"]
             role: lead.then_some(crate::ledger::Role::Lead),
             after_merge: None,
             unsandboxed: None,
+            sockets_unblocked: None,
             earlier: vec![],
             unknown: Default::default(),
         }

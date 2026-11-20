@@ -294,6 +294,7 @@ mod tests {
             role: None,
             after_merge: None,
             unsandboxed: None,
+            sockets_unblocked: None,
             earlier: vec![],
             unknown: Default::default(),
         }
