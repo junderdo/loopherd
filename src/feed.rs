@@ -691,9 +691,16 @@ pub fn run_after_merge(
     let Some(pending) = fed.pending.take() else {
         return Ok(());
     };
-    let path = paths.feed_lock.with_file_name("after-merge.lock");
+    let dir = paths.locks_dir();
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join("after-merge.lock");
     let file = std::fs::File::create(&path).with_context(|| format!("open {}", path.display()))?;
-    let _lock = Lock::wait(file).with_context(|| format!("lock {}", path.display()))?;
+    // Another feed's after_merge may run several commands, each up to this limit.
+    let bound = req
+        .after_merge_timeout
+        .saturating_mul(2)
+        .max(crate::lock::BRIEF);
+    let _lock = Lock::wait(file, bound).with_context(|| format!("lock {}", path.display()))?;
     for name in &pending.members {
         let (line, text) =
             match run_commands(&pending.commands, &pending.repo, req.after_merge_timeout) {
@@ -2811,7 +2818,7 @@ mod tests {
         let setup = Setup::new("true", 1);
         let members: Vec<String> = (1..=20).map(|n| format!("zpr-{n}")).collect();
         let members: Vec<&str> = members.iter().map(String::as_str).collect();
-        let lock = setup.config.path().join("after-merge.lock");
+        let lock = setup.paths().locks_dir().join("after-merge.lock");
         let ran = || setup.read("runs").map_or(0, |runs| runs.lines().count());
 
         let free_after = std::thread::scope(|scope| {
