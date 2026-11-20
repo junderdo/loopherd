@@ -1713,6 +1713,62 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_started_with_an_arg_outside_the_allowlist_is_not_cleared_under_require() {
+        let w = World::new();
+        w.handed_off();
+        let herd = w.paths().herds.join("h.toml");
+        let require = fs::read_to_string(&herd).unwrap();
+        fs::write(&herd, format!("{require}sandbox = \"prefer\"\n")).unwrap();
+        let lead = sandbox::Lead {
+            herd: "h".into(),
+            args: vec!["--add-dir".into(), "/srv".into()],
+        };
+        sandbox::prepare(&w.paths(), "lh-1", &lead, || {
+            Ok(crate::sandbox::Sockets::Blocked)
+        })
+        .unwrap();
+        fs::write(&herd, require).unwrap();
+
+        let (result, _) = w.restart_as(false, true, None, &as_lead);
+
+        assert!(format!("{:#}", result.unwrap_err()).starts_with(
+            "sandbox: lh-1 can't run sandboxed: its args may loosen its sandbox or \
+                 permissions: --add-dir /srv, from the command line;"
+        ));
+        assert!(w.herdr.prompts().is_empty());
+    }
+
+    #[test]
+    fn a_lead_on_prefer_started_with_an_arg_outside_the_allowlist_is_restarted_with_a_warning() {
+        let w = World::new();
+        w.handed_off();
+        fs::write(
+            w.paths().herds.join("h.toml"),
+            "repo = \"/src/repo\"\n[lead]\nprompt = \"go\"\nsandbox = \"prefer\"\n",
+        )
+        .unwrap();
+        let lead = sandbox::Lead {
+            herd: "h".into(),
+            args: vec!["--permission-mode".into(), "bypassPermissions".into()],
+        };
+        sandbox::prepare(&w.paths(), "lh-1", &lead, || {
+            Ok(crate::sandbox::Sockets::Blocked)
+        })
+        .unwrap();
+
+        let (result, _) = w.restart_as(false, true, None, &as_lead);
+
+        let out = result.unwrap();
+        assert!(
+            out.contains(
+                "\nwarning: lh-1 starts with an arg that may loosen its sandbox or permissions: \
+                 --permission-mode bypassPermissions, from the command line"
+            ),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn a_lead_started_with_every_mcp_server_is_restarted_with_a_warning() {
         let w = World::new();
         w.handed_off();

@@ -594,7 +594,7 @@ fn kept_lead(
     let lead = match sandbox::Lead::kept(paths, name)? {
         // A record kept before leads' MCP flags were loopherd's may still hold them.
         Some(lead) => sandbox::Lead {
-            args: without_settings(&lead.args),
+            args: sandbox::without_launch_flags(&lead.args),
             ..lead
         },
         None if !record.is_lead() => return Ok(None),
@@ -607,7 +607,7 @@ fn kept_lead(
                 .herd
                 .clone()
                 .with_context(|| format!("{name} is a lead with no herd recorded"))?,
-            args: without_settings(&record.claude_args),
+            args: sandbox::without_launch_flags(&record.claude_args),
         },
     };
     if matches!(name.as_str(), "" | "." | "..") || name.contains('/') {
@@ -615,25 +615,6 @@ fn kept_lead(
     }
     let worktree = worktree_path(&crate::herd::repo(paths, &lead.herd)?, name);
     Ok(Some((lead, worktree)))
-}
-
-/// `args` without `--settings` and the MCP flags, which a lead's revive writes afresh.
-fn without_settings(args: &[String]) -> Vec<String> {
-    let mut kept = vec![];
-    let mut args = args.iter().peekable();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--settings" => {
-                args.next();
-            }
-            // It takes every value up to the next flag.
-            "--mcp-config" => while args.next_if(|a| !a.starts_with('-')).is_some() {},
-            "--strict-mcp-config" => {}
-            _ if arg.starts_with("--settings=") || arg.starts_with("--mcp-config=") => {}
-            _ => kept.push(arg.clone()),
-        }
-    }
-    kept
 }
 
 /// Whether `record` is on another herdr than `here`, so this revive leaves it alone.
@@ -2012,6 +1993,31 @@ mod tests {
                  loosen its sandbox: {}: sandbox.excludedCommands runs \"docker *\" outside it;",
                 settings.display()
             )),
+            "{out}"
+        );
+        assert!(herdr.started().is_empty());
+    }
+
+    #[test]
+    fn a_lead_with_an_arg_outside_the_allowlist_is_not_revived_under_require() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut adopted = unkept_lead("lead-h", cwd.path());
+        adopted.claude_args = vec!["--dangerously-skip-permissions".into()];
+        let mut ledger = ledger([adopted]);
+        let req = ReviveRequest {
+            name: Some("lead-h".into()),
+            ..request()
+        };
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 1);
+        assert!(
+            out.starts_with(
+                "failed lead-h: sandbox: lead-h can't run sandboxed: its args may loosen its \
+                 sandbox or permissions: --dangerously-skip-permissions, from the command line;"
+            ),
             "{out}"
         );
         assert!(herdr.started().is_empty());

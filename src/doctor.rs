@@ -341,6 +341,7 @@ fn herd_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
             ));
         }
         checks.extend(loosened_checks(paths, &herd));
+        checks.extend(lead_arg_checks(paths, &herd));
         checks.extend(mcp_server_checks(paths, &herd));
     }
     checks
@@ -415,24 +416,49 @@ fn mcp_server_checks(paths: &Paths, herd: &str) -> Vec<Check> {
 /// What the human's own Claude settings loosen in `herd`'s lead's sandbox,
 /// failing where that keeps the lead from starting.
 fn loosened_checks(paths: &Paths, herd: &str) -> Vec<Check> {
-    use crate::sandbox::WhenLoosened;
-    let loosened = crate::lead::lead_name(herd)
-        .and_then(|name| crate::sandbox::loosened(paths, &name, herd))
-        .and_then(|lines| Ok((lines, crate::sandbox::when_loosened(paths, herd)?)));
+    let loosened =
+        crate::lead::lead_name(herd).and_then(|name| crate::sandbox::loosened(paths, &name, herd));
     // A herd whose lead's settings can't be built has that reported by its own check.
-    let Ok((lines, when)) = loosened else {
+    let Ok(lines) = loosened else {
         return vec![];
     };
-    let name = format!("herd {herd} sandbox settings");
+    finding_checks(paths, herd, "sandbox settings", lines, "remove it")
+}
+
+/// Each arg a herd's file passes its lead outside the allowlist, failing where
+/// that keeps the lead from starting.
+fn lead_arg_checks(paths: &Paths, herd: &str) -> Vec<Check> {
+    let Ok(lines) = crate::sandbox::configured_disallowed_args(paths, herd) else {
+        return vec![];
+    };
+    let drop = format!(
+        "drop it (a lead takes only {})",
+        crate::sandbox::ALLOWED_ARGS
+    );
+    finding_checks(paths, herd, "lead args", lines, &drop)
+}
+
+fn finding_checks(
+    paths: &Paths,
+    herd: &str,
+    what: &str,
+    lines: Vec<String>,
+    remove: &str,
+) -> Vec<Check> {
+    use crate::sandbox::WhenLoosened;
+    let Ok(when) = crate::sandbox::when_loosened(paths, herd) else {
+        return vec![];
+    };
+    let name = format!("herd {herd} {what}");
     lines
         .into_iter()
         .map(|line| match when {
-            WhenLoosened::Warn => warning(&name, line, "remove it".into()),
+            WhenLoosened::Warn => warning(&name, line, remove.into()),
             WhenLoosened::Refuse => failure(
                 &name,
                 line,
                 format!(
-                    "remove it, or loopherd herd set {herd} lead.sandbox '\"prefer\"' to start \
+                    "{remove}, or loopherd herd set {herd} lead.sandbox '\"prefer\"' to start \
                      its lead with it as a warning"
                 ),
             ),
@@ -440,7 +466,7 @@ fn loosened_checks(paths: &Paths, herd: &str) -> Vec<Check> {
                 &name,
                 line,
                 format!(
-                    "remove it; a credentials lead never starts with it, so the other way is \
+                    "{remove}; a credentials lead never starts with it, so the other way is \
                      loopherd herd set {herd} lead.merge_guard '\"hook\"'"
                 ),
             ),
@@ -2426,6 +2452,42 @@ mod tests {
                 "warning herd h sandbox settings: {file}: sandbox.excludedCommands runs \
                  \"docker *\" outside it; fix: remove it"
             )),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_herd_files_lead_arg_outside_the_allowlist_fails_under_require_and_warns_under_prefer() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        let lead = |mode: &str| {
+            format!(
+                "repo = {:?}\nargs = [\"--model\", \"opus\", \"--add-dir\", \"/srv\"]\n\
+                 [lead]\nprompt = \"go\"\nmerge = true\nsandbox = \"{mode}\"\n",
+                repo.to_str().unwrap()
+            )
+        };
+
+        m.herd_file("h", &lead("require"));
+        assert_eq!(
+            problems(&m, &herdr()),
+            [
+                "failure herd h lead args: --add-dir /srv, from herd h's args; fix: drop it (a lead \
+              takes only --model, --effort, --verbose and --permission-mode default, auto or \
+              plan), or loopherd herd set h lead.sandbox '\"prefer\"' to start its lead with it \
+              as a warning"
+            ]
+        );
+
+        m.herd_file("h", &lead("prefer"));
+        let problems = problems(&m, &herdr());
+        assert!(
+            problems.contains(
+                &"warning herd h lead args: --add-dir /srv, from herd h's args; fix: drop it (a \
+                  lead takes only --model, --effort, --verbose and --permission-mode default, \
+                  auto or plan)"
+                    .to_string()
+            ),
             "{problems:?}"
         );
     }

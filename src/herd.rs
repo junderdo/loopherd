@@ -797,6 +797,19 @@ pub fn lead_sandbox(paths: &Paths, herd: &str) -> Result<(Switches, SandboxMode)
     Ok((lead.switches().over(&lead_defaults(paths)?), lead.sandbox))
 }
 
+/// The args a herd's lead starts with before the command line's, and where
+/// they're set: `[lead].args`, else the herd's `args`.
+pub fn lead_args(paths: &Paths, herd: &str) -> Result<(Vec<String>, String)> {
+    let file = load(&paths.herds, herd).context("herd")?;
+    let lead = file
+        .lead
+        .with_context(|| format!("herd: {herd} has no [lead]"))?;
+    Ok(match lead.args {
+        Some(args) => (args, "[lead].args".into()),
+        None => (file.args, format!("herd {herd}'s args")),
+    })
+}
+
 /// The MCP servers a herd's `[lead]` names, which its lead alone gets.
 pub fn lead_mcp_servers(paths: &Paths, herd: &str) -> Result<Vec<String>> {
     let file = load(&paths.herds, herd).context("herd")?;
