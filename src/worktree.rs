@@ -1080,13 +1080,24 @@ fn refuse_worktree_config(common: &Path, dir: &Path) -> Result<()> {
     if let Some(checkout) = own {
         git_dirs.push(git_dir(&checkout)?);
     }
-    if let Ok(admin) = std::fs::read_dir(common.join("worktrees")) {
-        for entry in admin {
-            git_dirs.push(entry.context("read worktrees dir")?.path());
+    let worktrees = common.join("worktrees");
+    match std::fs::read_dir(&worktrees) {
+        Ok(admin) => {
+            for entry in admin {
+                let entry = entry.with_context(|| format!("read {}", worktrees.display()))?;
+                git_dirs.push(entry.path());
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(e).with_context(|| format!("read {}", worktrees.display()));
         }
     }
     for file in git_dirs.iter().map(|d| d.join("config.worktree")) {
-        if !file.exists() {
+        if !file
+            .try_exists()
+            .with_context(|| format!("read {}", file.display()))?
+        {
             continue;
         }
         let keys = config_values(&file, &["--name-only", "--list"])?;
@@ -2723,6 +2734,30 @@ mod tests {
         let err = format!("{:#}", result.unwrap_err());
         assert!(err.contains("sets core.fsmonitor"), "{err}");
         assert!(wt.exists());
+    }
+
+    #[test]
+    fn a_sparse_repo_whose_worktrees_dir_cant_be_read_gets_no_git_run_in_it() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        git(&repo, &["sparse-checkout", "init", "--cone"]).unwrap();
+        ensure_worktree(&repo, "feat/x").unwrap();
+        let worktrees = repo.join(".git/worktrees");
+        std::fs::set_permissions(&worktrees, std::fs::Permissions::from_mode(0o100)).unwrap();
+
+        let result = git_at(&repo, &repo, &["status", "--short"]);
+
+        std::fs::set_permissions(&worktrees, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(
+            err.contains(&format!("read {}", worktrees.display())),
+            "{err}"
+        );
     }
 
     #[test]
