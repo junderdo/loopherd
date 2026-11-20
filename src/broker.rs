@@ -203,7 +203,7 @@ impl Op {
             Op::Restart { .. } => Duration::from_secs(300),
             Op::Retire { .. } | Op::Release { .. } => origin_wait(remote),
             // Each member may take its ready timeout, then after_merge its own.
-            Op::Feed { .. } => Duration::from_secs(4 * 60 * 60),
+            Op::Feed { .. } => FEED_WITHIN,
             Op::Add {
                 ready_timeout_secs, ..
             } => Duration::from_secs((*ready_timeout_secs).min(MAX_READY_TIMEOUT_SECS) + 300),
@@ -395,6 +395,8 @@ const MAX_READY_TIMEOUT_SECS: u64 = 60 * 60;
 
 /// Long enough for `scripts/install` to build a release binary.
 const AFTER_MERGE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// How long a lead waits on a feed through its broker.
+const FEED_WITHIN: Duration = Duration::from_secs(4 * 60 * 60);
 
 fn feed(
     ctx: &mut Ctx,
@@ -652,7 +654,13 @@ pub enum Served {
     Retired,
     /// Another broker already serves the lead.
     AlreadyRunning,
+    /// `loopherd broker-restart` asked it to stop.
+    Stopped,
 }
+
+/// Set in a broker's environment, naming its lead, so the commands its
+/// requests run know they run inside it.
+pub const BROKER_ENV: &str = "LOOPHERD_BROKER_OF";
 
 /// Requests bigger than this are refused unread.
 const MAX_REQUEST: u64 = 1 << 20;
@@ -740,6 +748,8 @@ pub fn serve<L: Ledger + Clone + Send>(
     let remote =
         crate::worktree::remote_timeout().map_or(String::new(), |r| r.as_secs().to_string());
     let _ = std::fs::write(lock_file(paths, lead), format!("{remote}\n{MARKS}\n"));
+    write_replacing(&pid_file(paths, lead), &std::process::id().to_string())?;
+    let _pid = RemovedOnExit(pid_file(paths, lead));
     let herd = sandbox::Lead::kept(paths, lead)?
         .ok_or_else(|| anyhow!("{lead} has no launch record, so its broker has no herd"))?
         .herd;
@@ -752,6 +762,7 @@ pub fn serve<L: Ledger + Clone + Send>(
     let replies = replies_dir(paths, lead);
     std::fs::create_dir_all(&replies).with_context(|| format!("create {}", replies.display()))?;
     let retired = AtomicBool::new(false);
+    let broker_stopping = AtomicBool::new(false);
     std::thread::scope(|scope| {
         let (done_tx, done) = mpsc::channel::<String>();
         let mut senders = vec![];
@@ -759,9 +770,10 @@ pub fn serve<L: Ledger + Clone + Send>(
             let (tx, jobs) = mpsc::channel::<Job>();
             let (mut ledger, done_tx) = (ledger.clone(), done_tx.clone());
             let (broker, replies, retired) = (&broker, &replies, &retired);
+            let stopping = &broker_stopping;
             scope.spawn(move || {
                 for job in jobs {
-                    broker.take_up(&mut ledger, &job, replies, retired);
+                    broker.take_up(&mut ledger, &job, replies, retired, stopping);
                     let _ = done_tx.send(job.name);
                 }
             });
@@ -777,6 +789,16 @@ pub fn serve<L: Ledger + Clone + Send>(
             retired.store(stopping, Ordering::SeqCst);
             if stopping && in_flight.is_empty() {
                 return Ok(Served::Retired);
+            }
+            // Not kept: a restart that gives up withdraws its stop, and serving resumes.
+            let asked = asked_to_stop(paths, lead);
+            broker_stopping.store(asked, Ordering::SeqCst);
+            if asked {
+                if in_flight.is_empty() {
+                    return Ok(Served::Stopped);
+                }
+                std::thread::sleep(poll);
+                continue;
             }
             // Reopened each round: the lead can replace any folder on the way.
             if let Ok(requests) = Dir::open(paths.state_dir(), &["broker", lead, "requests"]) {
@@ -861,6 +883,15 @@ pub fn lead_env(paths: &Paths, lead: &str) -> Result<Vec<(String, String)>> {
     Ok(env)
 }
 
+/// Removes its file when dropped, so a broker's pid outlives it only if it is killed.
+struct RemovedOnExit(PathBuf);
+
+impl Drop for RemovedOnExit {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 struct Broker<'a> {
     lead: &'a str,
     herd: &'a str,
@@ -903,7 +934,14 @@ impl Broker<'_> {
 
     /// Carries `job` out and answers it, marking it started first so a lead
     /// that gives up can tell; a request withdrawn before then never runs.
-    fn take_up(&self, ledger: &mut dyn Ledger, job: &Job, replies: &Path, retired: &AtomicBool) {
+    fn take_up(
+        &self,
+        ledger: &mut dyn Ledger,
+        job: &Job,
+        replies: &Path,
+        retired: &AtomicBool,
+        stopping: &AtomicBool,
+    ) {
         let Job {
             requests,
             name,
@@ -913,6 +951,10 @@ impl Broker<'_> {
         if retired.load(Ordering::SeqCst) {
             write_reply(replies, id, &Reply::Refused(self.retired()));
             requests.remove(name);
+            return;
+        }
+        // Left in the queue for the broker a restart starts next.
+        if stopping.load(Ordering::SeqCst) {
             return;
         }
         let started = replies.join(format!("{id}.started"));
@@ -1249,6 +1291,8 @@ pub struct Client {
     requests: PathBuf,
     replies: PathBuf,
     lock: PathBuf,
+    stop: PathBuf,
+    restart: PathBuf,
     /// Overrides the op's own wait.
     answer_within: Option<Duration>,
 }
@@ -1265,16 +1309,19 @@ impl Client {
             requests: requests_dir(paths, lead),
             replies: replies_dir(paths, lead),
             lock: lock_file(paths, lead),
+            stop: stop_file(paths, lead),
+            restart: restart_file(paths, lead),
             answer_within: None,
         }
     }
 
     /// Hands `op` to the broker and waits for its answer. Fails at once when
-    /// no broker runs, and as soon as one stops without answering, then
-    /// withdraws the request so no later broker carries it out.
+    /// no broker runs, and as soon as one stops without answering, unless a
+    /// restart is replacing it, then withdraws the request so no later
+    /// broker carries it out.
     pub fn call(&self, op: &Op) -> Result<(String, String, i32)> {
         let lead = &self.lead;
-        if !held(&self.lock) {
+        if !held(&self.lock) && live_stop(&self.stop, &self.restart).is_none() {
             bail!(
                 "no broker is running for {lead}, so it can't {}: \
                  the shepherd's loopherd revive --name {lead} starts it",
@@ -1311,7 +1358,7 @@ impl Client {
                     // This client wrote a well-formed request, so only an older broker can't read it.
                     Reply::Refused(why) if why.starts_with(MALFORMED) => Err(anyhow!(
                         "{lead}'s broker predates this loopherd, so it can't {}; the shepherd must \
-                         restart it (kill it, then loopherd revive --name {lead})",
+                         restart it with loopherd broker-restart {lead}",
                         op.command()
                     )),
                     Reply::Refused(why) => {
@@ -1321,7 +1368,9 @@ impl Client {
                 };
             }
             let labelling = matches!(op, Op::Label { .. });
-            if !held(&self.lock) {
+            // Read first: a restart removes its stop only once the new broker holds the lock.
+            let restarting = live_stop(&self.stop, &self.restart).is_some();
+            if !restarting && !held(&self.lock) {
                 if labelling {
                     bail!("{lead}'s broker stopped, so {NO_LABEL}");
                 }
@@ -1396,11 +1445,17 @@ const START_TIMEOUT: Duration = Duration::from_secs(5);
 /// Starts `loopherd broker <lead>` detached, in a session of its own, unless
 /// a broker already serves `lead`, and waits until it serves.
 pub fn start(paths: &Paths, lead: &str) -> Result<bool> {
-    use std::os::unix::process::CommandExt;
     validate_name(lead)?;
     if running(paths, lead) {
         return Ok(false);
     }
+    spawn(paths, lead)?;
+    Ok(true)
+}
+
+/// Starts `loopherd broker <lead>` detached and waits until it serves, returning its pid.
+fn spawn(paths: &Paths, lead: &str) -> Result<u32> {
+    use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().context("find the loopherd binary")?;
     let mut command = std::process::Command::new(&exe);
     command
@@ -1422,8 +1477,8 @@ pub fn start(paths: &Paths, lead: &str) -> Result<bool> {
         .with_context(|| format!("start {} broker {lead}", exe.display()))?;
     let given_up = Instant::now() + START_TIMEOUT;
     loop {
-        if running(paths, lead) {
-            return Ok(true);
+        if running(paths, lead) && serving_pid(paths, lead) == Some(child.id()) {
+            return Ok(child.id());
         }
         if let Some(status) = child.try_wait()? {
             bail!("it exited at once ({status}); run loopherd broker {lead} to see why");
@@ -1437,6 +1492,124 @@ pub fn start(paths: &Paths, lead: &str) -> Result<bool> {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Stops lead `lead`'s broker once its request in flight is answered, then
+/// starts one from this loopherd's binary; with none running, just starts one.
+/// Requests still queued wait for the new broker. Gives up, leaving the old
+/// one running, after as long as its lead waits on a feed.
+pub fn restart_broker(paths: &Paths, lead: &str, sink: &mut dyn Sink) -> Result<()> {
+    restart_broker_with(paths, lead, FEED_WITHIN, sink, &mut || spawn(paths, lead))
+}
+
+fn restart_broker_with(
+    paths: &Paths,
+    lead: &str,
+    within: Duration,
+    sink: &mut dyn Sink,
+    start: &mut dyn FnMut() -> Result<u32>,
+) -> Result<()> {
+    validate_name(lead)?;
+    // Held until it returns: what makes its stop live, to brokers and to leads in any pid namespace.
+    let Some(_restarting) = take_lock_at(&restart_file(paths, lead))? else {
+        bail!("another loopherd broker-restart {lead} is running");
+    };
+    let stop = stop_file(paths, lead);
+    // A killed restart's leftover, which a broker given its pid would obey.
+    let _ = std::fs::remove_file(&stop);
+    if !running(paths, lead) {
+        let pid = start().with_context(|| format!("start {lead}'s broker"))?;
+        sink.out(&format!("started {lead}'s broker: pid {pid}"));
+        return Ok(());
+    }
+    // A broker that just took its lock writes its pid a moment later.
+    let given_up = Instant::now() + START_TIMEOUT;
+    let old = loop {
+        if let Some(pid) = serving_pid(paths, lead) {
+            break pid;
+        }
+        if Instant::now() >= given_up {
+            bail!(
+                "{lead}'s broker predates loopherd broker-restart, so it can't be asked to stop; \
+                 stop it yourself (pgrep -f 'loopherd broker {lead}' finds it), then run \
+                 loopherd broker-restart {lead}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    write_replacing(&stop, &old.to_string())?;
+    sink.out(&format!(
+        "asked {lead}'s broker (pid {old}) to stop once its request in flight is answered"
+    ));
+    let given_up = Instant::now() + within;
+    while running(paths, lead) {
+        if Instant::now() >= given_up {
+            let _ = std::fs::remove_file(&stop);
+            // A broker that stopped at the bound holds its lock until its lanes are joined.
+            let grace = Instant::now() + STOP_GRACE;
+            while running(paths, lead) && Instant::now() < grace {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if running(paths, lead) {
+                bail!(
+                    "{lead}'s broker (pid {old}) didn't stop within {}, so it is left running; \
+                     run loopherd broker-restart {lead} again once its request is answered",
+                    humantime::format_duration(within)
+                );
+            }
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let started = start();
+    let _ = std::fs::remove_file(&stop);
+    let new = started.with_context(|| {
+        format!("{lead}'s broker (pid {old}) stopped, but none started in its place")
+    })?;
+    sink.out(&format!(
+        "restarted {lead}'s broker: pid {old} stopped, pid {new} serves"
+    ));
+    Ok(())
+}
+
+/// How long a restart past its bound still waits for the broker to let go of its lock.
+const STOP_GRACE: Duration = Duration::from_millis(500);
+
+/// Whether a running `broker-restart` asked this process, as `lead`'s broker, to stop.
+fn asked_to_stop(paths: &Paths, lead: &str) -> bool {
+    live_stop(&stop_file(paths, lead), &restart_file(paths, lead)) == Some(std::process::id())
+}
+
+/// The broker pid the stop at `stop` names, while a restart holds `restart`;
+/// a restart that was killed leaves a stop nothing obeys.
+fn live_stop(stop: &Path, restart: &Path) -> Option<u32> {
+    if !restarting(restart) {
+        return None;
+    }
+    std::fs::read_to_string(stop).ok()?.trim().parse().ok()
+}
+
+/// The pid of `lead`'s broker, as it recorded it, while that process lives.
+fn serving_pid(paths: &Paths, lead: &str) -> Option<u32> {
+    let text = std::fs::read_to_string(pid_file(paths, lead)).ok()?;
+    let pid = text.trim().parse().ok()?;
+    alive(pid).then_some(pid)
+}
+
+fn alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 only checks that the process exists.
+    pid > 0
+        && (unsafe { libc::kill(pid, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+}
+
+fn write_replacing(path: &Path, text: &str) -> Result<()> {
+    let partial = PathBuf::from(format!("{}.part", path.display()));
+    std::fs::write(&partial, text).with_context(|| format!("write {}", partial.display()))?;
+    std::fs::rename(&partial, path).with_context(|| format!("write {}", path.display()))
 }
 
 /// Whether a broker serves `lead` now.
@@ -1463,6 +1636,17 @@ fn marks_starts(lock: &Path) -> bool {
     std::fs::read_to_string(lock).is_ok_and(|text| text.lines().any(|line| line == MARKS))
 }
 
+/// Whether a restart holds `restart` exclusively. Probed shared, so probes
+/// running at once never mistake each other for a restart.
+fn restarting(restart: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(restart) else {
+        return false;
+    };
+    // SAFETY: flock on a descriptor `file` keeps open; closing it drops a shared lock taken here.
+    let probed = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
+    probed != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK)
+}
+
 fn held(lock: &Path) -> bool {
     // Read-only, so a sandboxed lead can probe a lock in the config dir.
     let Ok(file) = std::fs::File::open(lock) else {
@@ -1475,7 +1659,10 @@ fn held(lock: &Path) -> bool {
 const LOCK_GRACE: Duration = Duration::from_secs(1);
 
 fn take_lock(paths: &Paths, lead: &str) -> Result<Option<Lock>> {
-    let path = lock_file(paths, lead);
+    take_lock_at(&lock_file(paths, lead))
+}
+
+fn take_lock_at(path: &Path) -> Result<Option<Lock>> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
@@ -1483,7 +1670,7 @@ fn take_lock(paths: &Paths, lead: &str) -> Result<Option<Lock>> {
         .create(true)
         .truncate(false)
         .write(true)
-        .open(&path)
+        .open(path)
         .with_context(|| format!("open {}", path.display()))?;
     let given_up = Instant::now() + LOCK_GRACE;
     loop {
@@ -1564,6 +1751,21 @@ fn broker_dir(paths: &Paths) -> PathBuf {
 
 fn lock_file(paths: &Paths, lead: &str) -> PathBuf {
     broker_dir(paths).join(format!("{lead}.lock"))
+}
+
+fn pid_file(paths: &Paths, lead: &str) -> PathBuf {
+    broker_dir(paths).join(format!("{lead}.pid"))
+}
+
+/// Locked by `broker-restart` while it runs.
+fn restart_file(paths: &Paths, lead: &str) -> PathBuf {
+    broker_dir(paths).join(format!("{lead}.restart"))
+}
+
+/// Names the pid of the broker `broker-restart` is stopping; in the config
+/// dir, so a lead can read it but not write it.
+fn stop_file(paths: &Paths, lead: &str) -> PathBuf {
+    broker_dir(paths).join(format!("{lead}.stop"))
 }
 
 #[cfg(test)]
@@ -2917,7 +3119,7 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             "lead-h's broker predates this loopherd, so it can't prompt; the shepherd must \
-             restart it (kill it, then loopherd revive --name lead-h)"
+             restart it with loopherd broker-restart lead-h"
         );
         old.join().unwrap();
     }
@@ -3483,5 +3685,280 @@ mod tests {
                 ssh_config.display()
             )
         );
+    }
+
+    /// A herdr showing `lh-1`'s screen as `screen`, whose `agents` waits on `gate` when given.
+    fn reading_herdr(screen: &str, gate: Option<std::sync::mpsc::Receiver<()>>) -> FakeHerdr {
+        let mut herdr = FakeHerdr::new(&[]).with_agent("lh-1");
+        herdr.set_screen("w9:p9", screen);
+        herdr.agents_gate = gate.map(std::sync::Mutex::new);
+        herdr
+    }
+
+    fn read_lh_1(client: Client) -> JoinHandle<Result<(String, String, i32)>> {
+        std::thread::spawn(move || {
+            client.call(&Op::Read {
+                name: "lh-1".into(),
+                lines: 5,
+            })
+        })
+    }
+
+    #[test]
+    fn a_broker_restart_lets_the_request_in_flight_finish_and_leaves_later_ones_to_the_new_broker()
+    {
+        let world = World::new();
+        world.add(member("lh-1", Some("h")));
+        let (open, gate) = std::sync::mpsc::channel();
+        let old = world.serve(reading_herdr("old", Some(gate)));
+        let in_flight = read_lh_1(world.client());
+        std::thread::sleep(Duration::from_millis(200));
+        // Taken up into its lane behind the one in flight, but not started.
+        let queued = read_lh_1(world.client());
+        std::thread::sleep(Duration::from_millis(200));
+        let mut new = None;
+        let mut said = Kept::default();
+
+        std::thread::scope(|scope| {
+            let restarting = scope.spawn(|| {
+                restart_broker_with(
+                    &world.paths,
+                    "lead-h",
+                    Duration::from_secs(10),
+                    &mut said,
+                    &mut || {
+                        // A gap between the old broker's exit and the new one's lock.
+                        std::thread::sleep(Duration::from_millis(300));
+                        // Both brokers share this test's pid; a real stop names the old one alone.
+                        let stop = stop_file(&world.paths, "lead-h");
+                        write_replacing(&stop, "0").unwrap();
+                        new = Some(world.serve(reading_herdr("new", None)));
+                        Ok(4242)
+                    },
+                )
+            });
+            while !stop_file(&world.paths, "lead-h").exists() {
+                std::thread::sleep(POLL);
+            }
+            let later = read_lh_1(world.client());
+            std::thread::sleep(Duration::from_millis(200));
+            drop(open);
+
+            restarting.join().unwrap().unwrap();
+            assert_eq!(
+                in_flight.join().unwrap().unwrap(),
+                ("old".into(), "".into(), 0)
+            );
+            assert_eq!(later.join().unwrap().unwrap(), ("new".into(), "".into(), 0));
+            assert_eq!(
+                queued.join().unwrap().unwrap(),
+                ("new".into(), "".into(), 0)
+            );
+        });
+
+        let pid = std::process::id();
+        assert_eq!(
+            said.out,
+            [
+                format!(
+                    "asked lead-h's broker (pid {pid}) to stop once its request in flight is answered"
+                ),
+                format!("restarted lead-h's broker: pid {pid} stopped, pid 4242 serves"),
+            ]
+        );
+        assert_eq!(old.join().unwrap().0.unwrap(), Served::Stopped);
+        assert!(!stop_file(&world.paths, "lead-h").exists());
+        world.retire("lead-h");
+        assert_eq!(new.unwrap().join().unwrap().0.unwrap(), Served::Retired);
+    }
+
+    #[test]
+    fn a_broker_restart_with_no_broker_running_just_starts_one() {
+        let world = World::new();
+        let mut started = None;
+        let mut said = Kept::default();
+
+        restart_broker_with(
+            &world.paths,
+            "lead-h",
+            Duration::from_secs(10),
+            &mut said,
+            &mut || {
+                started = Some(world.serve(FakeHerdr::new(&[])));
+                Ok(4242)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(said.out, ["started lead-h's broker: pid 4242"]);
+        world.retire("lead-h");
+        assert_eq!(started.unwrap().join().unwrap().0.unwrap(), Served::Retired);
+    }
+
+    #[test]
+    fn a_broker_that_doesnt_stop_in_time_fails_the_restart_naming_its_pid_and_keeps_serving() {
+        let world = World::new();
+        world.add(member("lh-1", Some("h")));
+        let (open, gate) = std::sync::mpsc::channel();
+        let serving = world.serve(reading_herdr("old", Some(gate)));
+        let in_flight = read_lh_1(world.client());
+        std::thread::sleep(Duration::from_millis(200));
+
+        let err = restart_broker_with(
+            &world.paths,
+            "lead-h",
+            Duration::from_millis(200),
+            &mut Kept::default(),
+            &mut || panic!("no new broker starts while the old one runs"),
+        )
+        .unwrap_err();
+
+        let pid = std::process::id();
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "lead-h's broker (pid {pid}) didn't stop within 200ms, so it is left running; \
+                 run loopherd broker-restart lead-h again once its request is answered"
+            )
+        );
+        drop(open);
+        assert_eq!(in_flight.join().unwrap().unwrap().0, "old");
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!serving.is_finished());
+        assert!(running(&world.paths, "lead-h"));
+        world.retire("lead-h");
+        assert_eq!(serving.join().unwrap().0.unwrap(), Served::Retired);
+    }
+
+    #[test]
+    fn a_broker_refuses_a_request_to_restart_brokers() {
+        let world = World::new();
+        let serving = world.serve(FakeHerdr::new(&[]));
+        let requests = requests_dir(&world.paths, "lead-h");
+        let replies = replies_dir(&world.paths, "lead-h");
+        let request = json!({"op": {"broker_restart": {"lead": "lead-h"}}});
+        write_atomically(&requests, "restart", request.to_string().as_bytes()).unwrap();
+
+        let reply = replies.join("restart.json");
+        let given_up = Instant::now() + Duration::from_secs(5);
+        while !reply.exists() {
+            assert!(Instant::now() < given_up, "no reply");
+            std::thread::sleep(POLL);
+        }
+
+        let why = match serde_json::from_slice(&std::fs::read(&reply).unwrap()).unwrap() {
+            Reply::Refused(why) => why,
+            other => panic!("{other:?}"),
+        };
+        assert!(
+            why.starts_with("malformed request: unknown variant `broker_restart`"),
+            "{why}"
+        );
+        assert!(running(&world.paths, "lead-h"));
+        world.retire("lead-h");
+        assert_eq!(serving.join().unwrap().0.unwrap(), Served::Retired);
+    }
+
+    #[test]
+    fn a_stop_left_by_a_restart_that_died_is_ignored_by_the_broker_and_its_lead() {
+        let world = World::new();
+        world.add(member("lh-1", Some("h")));
+        let serving = world.serve(reading_herdr("on", None));
+        // Its own pid, as a later process reusing the dead restart's pid would leave it.
+        let stop = stop_file(&world.paths, "lead-h");
+        std::fs::write(&stop, std::process::id().to_string()).unwrap();
+
+        let read = read_lh_1(world.client()).join().unwrap();
+
+        assert_eq!(read.unwrap(), ("on".into(), "".into(), 0));
+        assert!(!serving.is_finished());
+        world.retire("lead-h");
+        assert_eq!(serving.join().unwrap().0.unwrap(), Served::Retired);
+    }
+
+    #[test]
+    fn a_lead_waits_out_the_gap_while_a_restart_holds_its_lock_whatever_pids_it_sees() {
+        let world = World::new();
+        world.add(member("lh-1", Some("h")));
+        let restarting = take_lock_at(&restart_file(&world.paths, "lead-h"))
+            .unwrap()
+            .unwrap();
+        // The old broker's pid, which a lead in its own pid namespace can't see.
+        std::fs::write(stop_file(&world.paths, "lead-h"), "999999").unwrap();
+        std::fs::create_dir_all(requests_dir(&world.paths, "lead-h")).unwrap();
+
+        let read = read_lh_1(world.client());
+        std::thread::sleep(Duration::from_millis(300));
+
+        assert!(!read.is_finished(), "{:?}", read.join());
+        let serving = world.serve(reading_herdr("new", None));
+        std::fs::remove_file(stop_file(&world.paths, "lead-h")).unwrap();
+        drop(restarting);
+        assert_eq!(read.join().unwrap().unwrap(), ("new".into(), "".into(), 0));
+        world.retire("lead-h");
+        assert_eq!(serving.join().unwrap().0.unwrap(), Served::Retired);
+    }
+
+    #[test]
+    fn a_broker_that_lets_go_of_its_lock_just_after_the_bound_is_still_replaced() {
+        let world = World::new();
+        let lock = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+        std::fs::write(
+            pid_file(&world.paths, "lead-h"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        // Still joining its lanes after it returned Stopped at the bound.
+        let exiting = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(lock);
+        });
+        let mut said = Kept::default();
+
+        restart_broker_with(
+            &world.paths,
+            "lead-h",
+            Duration::from_millis(200),
+            &mut said,
+            &mut || Ok(4242),
+        )
+        .unwrap();
+
+        exiting.join().unwrap();
+        let pid = std::process::id();
+        assert_eq!(
+            said.out.last().unwrap(),
+            &format!("restarted lead-h's broker: pid {pid} stopped, pid 4242 serves")
+        );
+    }
+
+    #[test]
+    fn probes_racing_each_other_never_make_a_dead_restarts_stop_live() {
+        let world = World::new();
+        let restart = restart_file(&world.paths, "lead-h");
+        std::fs::create_dir_all(restart.parent().unwrap()).unwrap();
+        std::fs::write(&restart, "").unwrap();
+        std::fs::write(
+            stop_file(&world.paths, "lead-h"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        let until = Instant::now() + Duration::from_millis(500);
+
+        let probing: Vec<_> = (0..2)
+            .map(|_| {
+                let paths = world.paths.clone();
+                std::thread::spawn(move || {
+                    let mut live = 0;
+                    while Instant::now() < until {
+                        live += usize::from(asked_to_stop(&paths, "lead-h"));
+                    }
+                    live
+                })
+            })
+            .collect();
+
+        let live: usize = probing.into_iter().map(|p| p.join().unwrap()).sum();
+        assert_eq!(live, 0);
     }
 }
