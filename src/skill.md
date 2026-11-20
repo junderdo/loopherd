@@ -438,7 +438,13 @@ A lead's watch also sends `merge_alert`, with `{text}` the PR's number and
 URL, once per PR merged into its repo's default branch, when its `[lead]`
 has `merge` off and `merge_guard = "hook"` (the default). The lead runs
 with the human's credentials, so a merge the human didn't make shows up.
-A `credentials` lead can't merge, so it gets no alert.
+The lead's first lookup only marks where its window starts, so no earlier
+merge is sent; later ones run at most once a minute across its watches,
+only while `kinds` holds `merge_alert`, and a re-armed watch catches up on
+merges it missed. A lookup that fails warns on the watch's stderr. Not
+covered: pushes straight to the branch, and merges after the lead's watch
+stops for good (a drained lead). A `credentials` lead can't merge, so it
+gets no alert.
 
 To guard a `merge = false` lead with split credentials instead, set
 `[lead] merge_guard = "credentials"` (or answer `init`'s question), then
@@ -449,14 +455,9 @@ force-pushes, writes `Host loopherd-<herd>` into `<config dir>/ssh/config`,
 and prints the rest for the human: `Include <config dir>/ssh/config` as the
 first line of `~/.ssh/config` (once; loopherd never writes `~/.ssh`), and
 the web-UI steps for the token stored at `<herd>.token`. The lead won't
-start without its key and token; `loopherd doctor` checks those, the
-Include, the `Host` block and the rulesets.
-The lead's first lookup only marks where its window starts, so no earlier
-merge is sent; later ones run at most once a minute across its watches,
-only while `kinds` holds `merge_alert`, and a re-armed watch catches up on
-merges it missed. A lookup that fails warns on the watch's stderr. Not
-covered: pushes straight to the branch, and merges after the lead's watch
-stops for good (a drained lead).
+start without its key and token, or with `install = true`; `loopherd
+doctor` checks the key, the token, the Include, the `Host` block and the
+rulesets.
 
 `pane_label = true` (default false) also labels, in herdr's sidebar, the
 pane that must relay or answer: yours when your watch prints a `question`
