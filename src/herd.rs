@@ -626,6 +626,21 @@ pub fn resolve(paths: &Paths, req: &AddRequest) -> Result<SpawnRequest> {
         .cloned()
         .zip(req.params.iter().cloned())
         .collect();
+    for (key, value) in &params {
+        // The default name joins every param.
+        let reaches_a_path = checked.name.is_none()
+            || [&checked.name, &checked.branch, &checked.worktree]
+                .into_iter()
+                .flatten()
+                .any(|pattern| pattern.uses(key));
+        if reaches_a_path && !is_plain_word(value) {
+            bail!(
+                "template {}: param {key} is {value:?}; a param in a name, branch or worktree \
+                 must match [A-Za-z0-9][A-Za-z0-9._-]* without \"..\"",
+                req.template
+            );
+        }
+    }
     let mut values: HashMap<&str, &str> = params
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -670,6 +685,16 @@ pub fn resolve(paths: &Paths, req: &AddRequest) -> Result<SpawnRequest> {
 }
 
 const USAGE: &str = "usage: loopherd add <herd> <template> <param>…";
+
+/// Safe as a path component and a ref component: no `/`, no `..`, and no
+/// leading `.` or `-` that git or a shell could read as something else.
+fn is_plain_word(value: &str) -> bool {
+    value.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && !value.contains("..")
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
 
 /// A template's patterns and prompt, checked as far as they can be without param values.
 struct CheckedTemplate {
@@ -1654,6 +1679,38 @@ args = ["--model", "opus"]
         }
     }
 
+    #[test]
+    fn a_param_that_reaches_a_name_branch_or_worktree_must_be_a_plain_word() {
+        let herd = "repo = \"/r\"\n\
+             [template.named]\nparams = [\"n\"]\nname = \"z-{n}\"\nprompt = \"go\"\n\
+             [template.default]\nparams = [\"n\"]\nprompt = \"go\"\n\
+             [template.branched]\nparams = [\"n\"]\nname = \"z\"\nbranch = \"fix/{n}\"\nprompt = \"go\"\n\
+             [template.detached]\nparams = [\"n\"]\nname = \"z\"\nworktree = \"review-{n}\"\nprompt = \"go\"\n";
+        let config = Config::with(&[("h", herd)]);
+        for template in ["named", "default", "branched", "detached"] {
+            for value in ["..", "a/b", "../lead-h", "-x", ".hidden", "a b", ""] {
+                let err = add_err(&config, &request("h", template, &[value]));
+                assert_eq!(
+                    err,
+                    format!(
+                        "template {template}: param n is {value:?}; a param in a name, branch or \
+                         worktree must match [A-Za-z0-9][A-Za-z0-9._-]* without \"..\""
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_param_only_the_prompt_uses_may_hold_any_text() {
+        let herd = "repo = \"/r\"\n[template.ask]\nparams = [\"n\", \"q\"]\nname = \"z-{n}\"\n\
+                    prompt = \"{q}\"\n";
+        let config = Config::with(&[("h", herd)]);
+        let (herdr, _, name) = add_ok(&config, &request("h", "ask", &["v1_x-3", "../a/b c"]));
+        assert_eq!(name, "z-v1_x-3");
+        assert_eq!(herdr.prompts()[0].1, "../a/b c");
+    }
+
     fn add_ok(config: &Config, req: &AddRequest) -> (FakeHerdr, MemLedger, String) {
         let herdr = herdr();
         let mut ledger = MemLedger::default();
@@ -1941,7 +1998,7 @@ args = ["--model", "opus"]
         );
         assert!(herdr.tabs().is_empty());
 
-        let err = add_err(&config, &request("prs", "pr", &["Bad/Name"]));
+        let err = add_err(&config, &request("prs", "pr", &["Bad"]));
         assert!(err.starts_with("name: "), "{err}");
     }
 
