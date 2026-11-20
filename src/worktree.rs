@@ -1062,33 +1062,42 @@ const SPARSE_KEYS: [&str; 3] = [
     "index.sparse",
 ];
 
-/// Fails when git run in `dir` would read a `config.worktree` setting
-/// anything but sparse checkout: a sandboxed lead can write those files.
+/// Fails when git run in `dir`, or a git it starts in another worktree (as
+/// `worktree remove` does), could read a `config.worktree` setting anything
+/// but sparse checkout: a sandboxed lead can write those files.
 fn refuse_worktree_config(common: &Path, dir: &Path) -> Result<()> {
     let config = common.join("config");
     let on = config_values(&config, &["--bool", "--get", "extensions.worktreeConfig"])?;
     if on.trim() != "true" {
         return Ok(());
     }
-    let Some(checkout) = dir.canonicalize().ok().and_then(|dir| {
+    let own = dir.canonicalize().ok().and_then(|dir| {
         dir.ancestors()
             .find(|d| d.join(".git").exists())
             .map(Path::to_path_buf)
-    }) else {
-        return Ok(());
-    };
-    let file = git_dir(&checkout)?.join("config.worktree");
-    if !file.exists() {
-        return Ok(());
+    });
+    let mut git_dirs = vec![common.to_path_buf()];
+    if let Some(checkout) = own {
+        git_dirs.push(git_dir(&checkout)?);
     }
-    let keys = config_values(&file, &["--name-only", "--list"])?;
-    if let Some(key) = keys.lines().find(|key| !SPARSE_KEYS.contains(key)) {
-        bail!(
-            "{} sets {key}, which a sandboxed lead could have written; \
-             loopherd won't run git in {}",
-            file.display(),
-            dir.display()
-        );
+    if let Ok(admin) = std::fs::read_dir(common.join("worktrees")) {
+        for entry in admin {
+            git_dirs.push(entry.context("read worktrees dir")?.path());
+        }
+    }
+    for file in git_dirs.iter().map(|d| d.join("config.worktree")) {
+        if !file.exists() {
+            continue;
+        }
+        let keys = config_values(&file, &["--name-only", "--list"])?;
+        if let Some(key) = keys.lines().find(|key| !SPARSE_KEYS.contains(key)) {
+            bail!(
+                "{} sets {key}, which a sandboxed lead could have written; \
+                 loopherd won't run git in {}",
+                file.display(),
+                dir.display()
+            );
+        }
     }
     Ok(())
 }
@@ -2690,6 +2699,30 @@ mod tests {
         );
 
         assert!(out.contains("branch=feat/x\n"), "{out}");
+    }
+
+    #[test]
+    fn removing_a_worktree_of_a_sparse_repo_refuses_a_config_worktree_planted_in_its_admin_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        git(&repo, &["sparse-checkout", "init", "--cone"]).unwrap();
+        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+        let Plan::Clear(clearing) =
+            plan_clear(&repo, Some(&wt), Some("feat/x"), Fate::Clear, &nobody).unwrap()
+        else {
+            panic!("expected a clear plan");
+        };
+        let ran = root.path().join("ran");
+        let admin = repo.join(".git/worktrees/feat-x/config.worktree");
+        let planted = format!("[core]\n\tfsmonitor = touch {}; false\n", ran.display());
+        std::fs::write(&admin, planted).unwrap();
+
+        let result = clearing.remove_local();
+
+        assert!(!ran.exists(), "{result:?}");
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(err.contains("sets core.fsmonitor"), "{err}");
+        assert!(wt.exists());
     }
 
     #[test]

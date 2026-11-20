@@ -1498,6 +1498,42 @@ mod tests {
     }
 
     #[test]
+    fn the_humans_close_removes_a_reused_worktree_away_from_its_herds_worktrees() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let elsewhere = root.path().join("elsewhere/feat-new");
+        let path = elsewhere.to_str().unwrap();
+        git_in(
+            &repo,
+            &["worktree", "add", "--quiet", "-b", "feat/new", path],
+        );
+        let herdr = FakeHerdr::new(&[("w1", "loopherd")]);
+        let mut ledger = MemLedger::default();
+        let req = SpawnRequest {
+            repo: repo.clone(),
+            name: "a".into(),
+            worktree: Some("feat/new".into()),
+            workspace: None,
+            prompt: None,
+            ready_timeout: Duration::from_secs(60),
+            shell_timeout: crate::spawn::SHELL_TIMEOUT,
+            claude_args: vec![],
+            member_of: None,
+        };
+        spawn(&herdr, &mut ledger, &req, Some("w1")).unwrap();
+        ledger.0.get_mut("a").unwrap().herd = Some("h".into());
+        let config = root.path().join("loopherd");
+        std::fs::create_dir_all(config.join("herds")).unwrap();
+        std::fs::write(config.join("herds/h.toml"), format!("repo = {repo:?}\n")).unwrap();
+        let guard = Guard::new(crate::herd::Paths::under(&config), None);
+        assert_eq!(ledger.0["a"].worktree.as_deref(), Some(elsewhere.as_path()));
+
+        let out = close_guarded(&herdr, &mut ledger, &guard);
+
+        assert!(!elsewhere.exists(), "{out:?}");
+    }
+
+    #[test]
     fn a_leads_close_keeps_a_worktree_the_entry_places_away_from_its_herds_worktrees() {
         let root = tempfile::tempdir().unwrap();
         let (herdr, mut ledger, repo, guard) = herd_member(root.path(), Some("lead-h"));

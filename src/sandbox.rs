@@ -131,9 +131,6 @@ impl Lead {
     }
 }
 
-/// The worktree of every lead kept in loopherd's config dir, by name. A kept
-/// record or herd file that can't be read is skipped: one bad file mustn't
-/// stop every retire.
 fn is_not_found(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause
@@ -142,6 +139,9 @@ fn is_not_found(err: &anyhow::Error) -> bool {
     })
 }
 
+/// The worktree of every lead kept in loopherd's config dir, by name. A kept
+/// record or herd file that can't be read is skipped: one bad file mustn't
+/// stop every retire.
 fn lead_worktrees(paths: &Paths) -> Vec<(String, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(paths.config_dir().join("sandbox")) else {
         return vec![];

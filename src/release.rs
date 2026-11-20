@@ -438,6 +438,29 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_may_not_release_its_member_whose_herd_file_is_gone() {
+        let mut s = Setup::new();
+        let wt = s.retired_on("zpr-1", "feat/zpr-1");
+        std::fs::remove_file(s.root.path().join("loopherd/herds/prs.toml")).unwrap();
+        let sandbox = s.root.path().join("loopherd/sandbox");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        std::fs::write(
+            sandbox.join("lead-prs.lead.json"),
+            r#"{"herd": "prs", "args": []}"#,
+        )
+        .unwrap();
+        s.caller = Some("lead-prs".into());
+
+        let err = s.release("zpr-1", Fate::Clear).unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("herd prs's file names no repo"),
+            "{err:#}"
+        );
+        assert!(wt.exists());
+    }
+
+    #[test]
     fn a_lead_may_not_release_its_member_in_a_worktree_outside_the_herds_worktrees() {
         let mut s = Setup::new();
         let wt = retired_in_a_reused_worktree(&mut s, "zpr-1", "feat/zpr-1");
