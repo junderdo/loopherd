@@ -819,6 +819,15 @@ pub enum Running {
     HookOnly(String, Vec<String>),
 }
 
+/// Whether `claude_args`, as the ledger records a lead's launch, pass lead
+/// `name` its sandbox's settings file.
+pub fn launched_with_settings(paths: &Paths, name: &str, claude_args: &[String]) -> bool {
+    let file = settings_file(paths, name).display().to_string();
+    claude_args
+        .windows(2)
+        .any(|pair| pair[0] == "--settings" && pair[1] == file)
+}
+
 /// Checks a running lead was launched with its settings, as `claude_args`
 /// record, that they match its herd's current switches, and what the human's
 /// own settings loosen. Under `require` one launched without them, or loosened,
@@ -831,7 +840,6 @@ pub fn check_running(
 ) -> Result<Running> {
     let (_, mode) = herd::lead_sandbox(paths, herd)?;
     let file = settings_file(paths, name);
-    let shown = file.display().to_string();
     let resume = format!("quit its Claude and run loopherd revive --name {name}");
     let mut warnings = vec![];
     if !claude_args.iter().any(|a| a == "--strict-mcp-config") {
@@ -840,10 +848,7 @@ pub fn check_running(
              [lead] mcp_servers; {resume}"
         ));
     }
-    if !claude_args
-        .windows(2)
-        .any(|pair| pair[0] == "--settings" && pair[1] == shown)
-    {
+    if !launched_with_settings(paths, name, claude_args) {
         let why = "it was started without its sandbox";
         if herd::merge_guard(paths, herd)? == Some(MergeGuard::Credentials) {
             return Err(credentials_refusal(
