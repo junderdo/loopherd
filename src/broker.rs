@@ -4,7 +4,7 @@
 //! The lead writes requests to its own folder in the state dir; the broker
 //! answers in the config dir, which the lead can read but not write.
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -224,13 +224,35 @@ impl Dir {
 
     /// Entries ready to answer, oldest name first; dotfiles are still being written.
     fn names(&self) -> Vec<String> {
-        let listed = std::fs::read_dir(format!("/proc/self/fd/{}", self.0.as_raw_fd()));
-        let mut names: Vec<_> = listed
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok()?.file_name().into_string().ok())
-            .filter(|name| !name.starts_with('.'))
-            .collect();
+        let mut names = vec![];
+        // SAFETY: fdopendir takes ownership of the dup, which closedir closes;
+        // each entry is read before the next readdir.
+        unsafe {
+            let fd = libc::dup(self.0.as_raw_fd());
+            if fd < 0 {
+                return names;
+            }
+            let dir = libc::fdopendir(fd);
+            if dir.is_null() {
+                libc::close(fd);
+                return names;
+            }
+            // The dup shares the descriptor's offset, which an earlier listing moved.
+            libc::rewinddir(dir);
+            loop {
+                let entry = libc::readdir(dir);
+                if entry.is_null() {
+                    break;
+                }
+                let name = CStr::from_ptr((*entry).d_name.as_ptr());
+                if let Ok(name) = name.to_str()
+                    && !name.starts_with('.')
+                {
+                    names.push(name.to_string());
+                }
+            }
+            libc::closedir(dir);
+        }
         names.sort();
         names
     }
@@ -973,5 +995,20 @@ mod tests {
         assert!(!serving.is_finished());
         world.retire("lead-h");
         assert_eq!(serving.join().unwrap().0.unwrap(), Served::Retired);
+    }
+
+    #[test]
+    fn a_folder_lists_its_ready_entries_in_order_each_time_it_is_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["b.json", "a.json", ".c.part"] {
+            std::fs::write(dir.path().join(name), "").unwrap();
+        }
+        let opened = Dir::open(dir.path(), &[]).unwrap();
+
+        let first = opened.names();
+        let second = opened.names();
+
+        assert_eq!(first, ["a.json", "b.json"]);
+        assert_eq!(second, first);
     }
 }
