@@ -67,7 +67,7 @@ impl Default for GhCli {
 impl PullRequests for GhCli {
     fn open_on(&self, repo: &Path, branch: &str) -> Result<PrLookup> {
         // release runs outside a lead's sandbox, so origin is read through git pinned to the repo.
-        let url = crate::worktree::git(repo, &["remote", "get-url", "origin"])?
+        let url = crate::worktree::git(repo, &["config", "--get", "remote.origin.url"])?
             .trim()
             .to_string();
         let Some((host, name)) = github_repo(&url) else {
@@ -304,15 +304,17 @@ fn is_not_found(err: &anyhow::Error) -> bool {
         .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
 }
 
+/// Origin's URL before any `insteadOf`, which a credentials lead's git
+/// rewrites to its ssh `Host` alias.
 fn origin_url(repo: &Path) -> Result<String> {
     let out = Command::new("git")
-        .args(["remote", "get-url", "origin"])
+        .args(["config", "--get", "remote.origin.url"])
         .current_dir(repo)
         .output()
-        .context("run git remote get-url origin")?;
+        .context("run git config --get remote.origin.url")?;
     if !out.status.success() {
         bail!(
-            "git remote get-url origin: {}",
+            "git config --get remote.origin.url: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
@@ -621,6 +623,25 @@ mod tests {
 
         assert_eq!(gh.open_on(dir.path(), "feat/x").unwrap(), PrLookup::None);
 
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("args")).unwrap(),
+            "pr list -R github.com/o/r --state open --limit 1 --json number,url --head feat/x\n"
+        );
+    }
+
+    #[test]
+    fn origin_is_read_as_configured_not_as_insteadof_rewrites_it() {
+        let (dir, gh) = fake_gh("https://github.com/o/r.git", "[]");
+        let rewrite = Command::new("git")
+            .args(["config", "url.git@loopherd-h:o/r.git.insteadOf"])
+            .arg("https://github.com/o/r.git")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(rewrite.success());
+
+        assert_eq!(gh.open_on(dir.path(), "feat/x").unwrap(), PrLookup::None);
+        assert_eq!(gh.repo_at(dir.path()), Some("o/r".into()));
         assert_eq!(
             std::fs::read_to_string(dir.path().join("args")).unwrap(),
             "pr list -R github.com/o/r --state open --limit 1 --json number,url --head feat/x\n"
