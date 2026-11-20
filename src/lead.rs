@@ -525,7 +525,6 @@ mod tests {
                         format!("Edit(/{root}/state/ledger.lock)"),
                         format!("Edit(/{root}/state/broker/*)"),
                         format!("Edit(/{root}/state/handoffs/*)"),
-                        format!("Edit(/{root}/state/handoffs/shepherd/**)"),
                     ],
                 },
             })
@@ -719,17 +718,62 @@ mod tests {
                 );
             }
         }
-        // What exists is named too, for a sandbox that applies globs.
+        // Off Linux, what exists is named too, for a sandbox that applies globs.
         let named = [
-            "reports/lh-1.jsonl",
             "handoffs/shepherd/handoff.md",
             "handoffs/lead-g/handoff.md",
             "handoffs/lh-9/handoff.md",
             "handoffs/lh-8.md",
         ];
+        assert!(denied_to_sandbox(deny, &state.join("reports/lh-1.jsonl")));
         for path in named.map(|p| state.join(p)) {
-            assert!(denied_to_sandbox(deny, &path), "{} {deny}", path.display());
+            let denied = denied_to_sandbox(deny, &path);
+            assert_eq!(
+                denied,
+                !cfg!(target_os = "linux"),
+                "{} {deny}",
+                path.display()
+            );
         }
+    }
+
+    /// On Linux a deny on a path that later goes missing leaves an empty
+    /// placeholder there, which a reader would take for a handoff.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn on_linux_a_lead_s_settings_name_no_path_under_handoffs_while_a_flat_handoff_exists() {
+        let setup = Setup::with_lead(PROMPT);
+        let herdr = herdr();
+        let paths = setup.paths();
+        let handoffs = paths.state_dir().join("handoffs");
+        fs::create_dir_all(&handoffs).unwrap();
+        fs::write(handoffs.join("lh-8.md"), "pending\n").unwrap();
+
+        lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        let (_, settings) = started_settings(&herdr);
+        let glob = format!("Edit(/{}/*)", handoffs.display());
+        let under = format!("/{}/", handoffs.display());
+        let named: Vec<&str> = settings["permissions"]["deny"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|rule| rule.as_str())
+            .filter(|rule| rule.contains(&under) && *rule != glob)
+            .collect();
+        assert_eq!(named, Vec::<&str>::new());
+        let deny_write = listed(&settings, "denyWrite");
+        assert!(
+            !deny_write.iter().any(|p| p.starts_with(&handoffs)),
+            "{deny_write:?}"
+        );
     }
 
     #[test]

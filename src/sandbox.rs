@@ -1271,9 +1271,13 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
         // The shepherd's resume still reads this, which may not exist to be listed below.
         deny.push(file_rule(&handoff::flat(state, crate::context::SHEPHERD)));
     }
-    let others = others_in_broker(paths, name)?
-        .into_iter()
-        .chain(others_in_handoffs(paths, name)?);
+    // On Linux the glob covers the file tools, and a named path that later goes
+    // missing would get the sandbox's empty placeholder, which reads as a handoff.
+    let handoffs = match cfg!(target_os = "linux") {
+        true => vec![],
+        false => others_in_handoffs(paths, name)?,
+    };
+    let others = others_in_broker(paths, name)?.into_iter().chain(handoffs);
     deny.extend(others.map(|(path, dir)| match dir {
         true => edit_rule(&path),
         false => file_rule(&path),
