@@ -22,7 +22,8 @@ use crate::herdr::Herdr;
 use crate::ledger::{Ledger, Process};
 use crate::lock::Lock;
 use crate::process::Procs;
-use crate::sandbox;
+use crate::restart::RestartRequest;
+use crate::sandbox::{self, Guard};
 use crate::spawn::validate_name;
 use crate::tool_hook;
 
@@ -48,12 +49,24 @@ pub enum Op {
         dry_run: bool,
         ready_timeout_secs: u64,
     },
+    Prompt {
+        name: String,
+        force: bool,
+    },
+    Restart {
+        name: String,
+        force: bool,
+    },
+    /// The lead restarting itself once its turn after its handoff ends.
+    RestartSelf,
 }
 
 /// What an operation acts on, for the broker's reach rule.
 enum Reach<'a> {
     Member(&'a str),
     Herd(&'a str),
+    /// The lead itself, found by its pane.
+    Lead,
 }
 
 /// Who runs an operation and what it runs against.
@@ -64,7 +77,15 @@ pub struct Ctx<'a> {
     pub procs: &'a dyn Procs,
     pub claude_dir: Option<PathBuf>,
     pub caller: Caller,
+    pub live: LiveSession,
+    pub spawn_waiter: SpawnWaiter,
 }
+
+/// The session a Claude session lives on in, after any continuations.
+pub type LiveSession = fn(&str) -> String;
+
+/// Starts `restart-wait` for a member, handing it the claim it holds.
+pub type SpawnWaiter = fn(&str, Lock) -> Result<()>;
 
 /// Where an operation runs: loopherd's own pane and process, or, in a
 /// broker, the pane of the lead it serves.
@@ -91,20 +112,28 @@ impl Op {
             Op::Tell { .. } => "tell",
             Op::Feed { .. } => "feed",
             Op::Add { .. } => "add",
+            Op::Prompt { .. } => "prompt",
+            Op::Restart { .. } => "restart",
+            Op::RestartSelf => "restart --self",
         }
     }
 
     fn reach(&self) -> Reach<'_> {
         match self {
-            Op::Tell { name, .. } => Reach::Member(name),
+            Op::Tell { name, .. } | Op::Prompt { name, .. } | Op::Restart { name, .. } => {
+                Reach::Member(name)
+            }
             Op::Feed { herd, .. } | Op::Add { herd, .. } => Reach::Herd(herd),
+            Op::RestartSelf => Reach::Lead,
         }
     }
 
     /// How long a lead waits for its broker to answer.
     fn answer_within(&self) -> Duration {
         match self {
-            Op::Tell { .. } => Duration::from_secs(120),
+            Op::Tell { .. } | Op::Prompt { .. } | Op::RestartSelf => Duration::from_secs(120),
+            // Its settle timeout, with room for herdr and the member's view.
+            Op::Restart { .. } => Duration::from_secs(300),
             // Each member may take its ready timeout, then after_merge its own.
             Op::Feed { .. } => Duration::from_secs(4 * 60 * 60),
             Op::Add {
@@ -142,6 +171,26 @@ impl Op {
                     ready_timeout: Duration::from_secs(*ready_timeout_secs),
                 };
                 add(ctx, &req, *dry_run, sink)
+            }
+            Op::Prompt { name, force } => {
+                let guard = ctx.guard();
+                crate::prompt::prompt(ctx.herdr, ctx.ledger, name, *force, &guard)?;
+                sink.out(&format!("prompted {name}"));
+                Ok(0)
+            }
+            Op::Restart { name, force } => restart(ctx, name, *force, sink),
+            Op::RestartSelf => {
+                let caller = &ctx.caller;
+                let scheduled = crate::restart::schedule_self(
+                    ctx.herdr,
+                    &*ctx.ledger,
+                    caller.pane.as_deref(),
+                    &caller.lineage,
+                    ctx.paths.state_dir(),
+                )?;
+                (ctx.spawn_waiter)(&scheduled.name, scheduled.waiter)?;
+                sink.out(&scheduled.message);
+                Ok(0)
             }
         }
     }
@@ -218,7 +267,44 @@ fn add(ctx: &mut Ctx, req: &AddRequest, dry_run: bool, sink: &mut dyn Sink) -> R
     Ok(code)
 }
 
+fn restart(ctx: &mut Ctx, name: &str, force: bool, sink: &mut dyn Sink) -> Result<i32> {
+    let (herdr, procs) = (ctx.herdr, ctx.procs);
+    let pane_shell = |pane: &str| -> Result<Option<Process>> {
+        Ok(herdr.shell_pid(pane)?.and_then(|pid| {
+            let start = procs.start(pid)?;
+            Some(Process { pid, start })
+        }))
+    };
+    let caller = &ctx.caller;
+    let req = RestartRequest {
+        name,
+        force,
+        own_pane: caller.pane.as_deref(),
+        own_lineage: &caller.lineage,
+        pane_shell: &pane_shell,
+        state: ctx.paths.state_dir(),
+        paths: ctx.paths,
+        caller: caller.lead.as_ref().map(|lead| lead.name.as_str()),
+        settle_timeout: Duration::from_secs(30),
+        poll: Duration::from_millis(250),
+        live: &ctx.live,
+    };
+    sink.out(&crate::restart::restart(
+        herdr,
+        ctx.ledger,
+        &req,
+        SystemTime::now(),
+    )?);
+    Ok(0)
+}
+
 impl Ctx<'_> {
+    /// Refuses, for a broker, entries outside its lead's herd.
+    fn guard(&self) -> Guard {
+        let lead = self.caller.lead.as_ref().map(|lead| lead.name.clone());
+        Guard::new(self.paths.clone(), lead)
+    }
+
     /// The workspace a new member joins when its herd names none: the caller's.
     fn inherited_workspace(&self) -> Result<Option<String>> {
         let caller = &self.caller;
@@ -294,6 +380,8 @@ pub struct Host<'a> {
     pub claude_dir: Option<PathBuf>,
     /// The broker's own process, which owns the after_merge its feeds take on.
     pub process: Process,
+    pub live: LiveSession,
+    pub spawn_waiter: SpawnWaiter,
 }
 
 /// Serves lead `lead`'s requests, polling every `poll`, until it is retired.
@@ -383,6 +471,8 @@ impl Broker<'_> {
             procs: self.host.procs,
             claude_dir: self.host.claude_dir.clone(),
             caller,
+            live: self.host.live,
+            spawn_waiter: self.host.spawn_waiter,
         };
         let mut kept = Kept::default();
         let carried = op.carry_out(&mut ctx, &mut kept);
@@ -436,6 +526,7 @@ impl Broker<'_> {
                 )));
             }
             Reach::Herd(_) => return self.start_refusal(op),
+            Reach::Lead => return Ok(None),
             Reach::Member(target) => target,
         };
         let reach = format!("{lead} reaches only herd {herd}'s workers");
@@ -969,7 +1060,17 @@ mod tests {
             procs: &crate::process::ProcFs,
             claude_dir: None,
             process: me(),
+            live: same_session,
+            spawn_waiter: no_waiter,
         }
+    }
+
+    fn same_session(session: &str) -> String {
+        session.into()
+    }
+
+    fn no_waiter(_: &str, _: Lock) -> Result<()> {
+        Ok(())
     }
 
     fn me() -> Process {
@@ -1000,6 +1101,8 @@ mod tests {
                 process: me(),
                 lead: None,
             },
+            live: same_session,
+            spawn_waiter: no_waiter,
         };
         let mut kept = Kept::default();
         let code = run(&mut ctx, client, op, &mut kept)?;
@@ -1056,14 +1159,30 @@ mod tests {
             ),
             (
                 "lead-h",
-                "lead-h is the lead itself; tell reaches only herd h's workers".into(),
+                "lead-h is the lead itself; {command} reaches only herd h's workers".into(),
             ),
         ] {
-            let err = world.client().call(&tell(target, "hi")).unwrap_err();
-            assert_eq!(
-                format!("{err:#}"),
-                format!("lead-h's broker refused tell: {why}")
-            );
+            for op in [
+                tell(target, "hi"),
+                Op::Prompt {
+                    name: target.into(),
+                    force: true,
+                },
+                Op::Restart {
+                    name: target.into(),
+                    force: true,
+                },
+            ] {
+                let err = world.client().call(&op).unwrap_err();
+                let command = op.command();
+                assert_eq!(
+                    format!("{err:#}"),
+                    format!(
+                        "lead-h's broker refused {command}: {}",
+                        why.replace("{command}", command)
+                    )
+                );
+            }
         }
 
         world.retire("lead-h");
@@ -1441,6 +1560,90 @@ mod tests {
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
         assert!(herdr.calls() > 0);
+    }
+
+    /// A client routed as the sandboxed `lead-h`'s Claude would be.
+    fn sandboxed_lead(world: &World) -> Option<Client> {
+        let settings = sandbox::settings_file(&world.paths, "lead-h");
+        let procs = procs(&["claude", "--settings", settings.to_str().unwrap()]);
+        route(&world.paths, &world.ledger(), &procs, 50, None)
+    }
+
+    #[test]
+    fn in_a_sandboxed_lead_s_pane_prompt_and_restart_go_through_its_broker_and_call_no_herdr() {
+        let world = World::new();
+        let mut unprompted = member("lh-1", Some("h"));
+        unprompted.prompt = Some("go".into());
+        unprompted.prompt_sent = false;
+        world.add(unprompted);
+        let serving = world.serve(telling_herdr());
+        let own = FakeHerdr::new(&[]);
+        let client = sandboxed_lead(&world);
+        let restart = Op::Restart {
+            name: "lh-1".into(),
+            force: true,
+        };
+        let prompt = Op::Prompt {
+            name: "lh-1".into(),
+            force: false,
+        };
+
+        let (prompted, kept) = run_here(&own, &world, client.as_ref(), &prompt).unwrap();
+        let err = run_here(&own, &world, client.as_ref(), &restart)
+            .map(|_| ())
+            .unwrap_err();
+
+        assert_eq!((prompted, kept.out), (0, vec!["prompted lh-1".to_string()]));
+        assert!(world.ledger().entries().unwrap()["lh-1"].prompt_sent);
+        // The broker's restart got as far as the entry, which has no socket to follow.
+        assert!(
+            format!("{err:#}").contains("lh-1 was recorded without a herdr socket"),
+            "{err:#}"
+        );
+        assert_eq!(own.calls(), 0);
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert_eq!(herdr.prompts(), [("lh-1".to_string(), "go".to_string())]);
+    }
+
+    #[test]
+    fn a_sandboxed_lead_s_restart_self_is_scheduled_by_its_broker_for_its_own_pane() {
+        let world = World::new();
+        world
+            .ledger()
+            .update("lead-h", &mut |r| {
+                r.socket = Some(crate::herdr::fake::FAKE_SOCKET.into());
+                Ok(())
+            })
+            .unwrap();
+        let state = world.paths.state_dir();
+        std::fs::create_dir_all(state.join("handoffs")).unwrap();
+        std::fs::write(crate::context::handoff_path(state, "lead-h"), "next").unwrap();
+        let handoff = crate::report::Entry::new(
+            SystemTime::now(),
+            crate::report::Body::Handoff { text: "h".into() },
+        );
+        crate::report::append(&state.join("reports"), "lead-h", &handoff).unwrap();
+        let serving = world.serve(FakeHerdr::new(&[]));
+        let own = FakeHerdr::new(&[]);
+
+        let (code, kept) = run_here(
+            &own,
+            &world,
+            sandboxed_lead(&world).as_ref(),
+            &Op::RestartSelf,
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        assert!(
+            kept.out[0].starts_with("lead-h restarts in this pane"),
+            "{:?}",
+            kept.out
+        );
+        assert_eq!(own.calls(), 0);
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
     }
 
     #[test]

@@ -77,7 +77,6 @@ use crate::herdr::{CliHerdr, Herdr, socket_from_env};
 use crate::lead::LeadRequest;
 use crate::ledger::{FileLedger, Ledger, Outcome, Process};
 use crate::process::Procs;
-use crate::prompt::prompt;
 use crate::release::release;
 use crate::report::{Filter, Kind, Reporter, report, reports};
 use crate::retire::{refuse_own_lead, refuse_unfinished, retire, retire_and_close};
@@ -1350,28 +1349,33 @@ fn open_in_browser(url: &str) -> Result<()> {
 }
 
 fn run_prompt(name: &str, force: bool) -> Result<i32> {
-    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    refuse_inside_sandbox(&ledger, &format!("loopherd prompt {name}"))?;
-    let paths = Paths::from_env()?;
-    let caller = sandbox::calling_lead(&paths, &process::ProcFs, std::process::id());
-    prompt(
-        &CliHerdr,
-        &mut ledger,
-        name,
-        force,
-        &sandbox::Guard::new(paths, caller),
-    )?;
-    println!("prompted {name}");
-    Ok(0)
+    run_ledger_op(
+        &format!("loopherd prompt {name}"),
+        &broker::Op::Prompt {
+            name: name.into(),
+            force,
+        },
+    )
 }
 
-/// Refuses before anything reaches herdr when this run can't write the ledger: a lead's
-/// command that misses its sandbox exclusion runs inside, where its herd isn't checked.
+/// Runs `op`, which writes the ledger, through the lead's broker, or here
+/// when no lead runs this loopherd.
+fn run_ledger_op(command: &str, op: &broker::Op) -> Result<i32> {
+    let client = own_broker();
+    if client.is_none() {
+        let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+        refuse_inside_sandbox(&ledger, command)?;
+    }
+    run_op(client.as_ref(), op)
+}
+
+/// Refuses before anything reaches herdr when this run can't write the
+/// ledger: it runs in a sandbox, yet found no lead whose broker could run it.
 fn refuse_inside_sandbox(ledger: &FileLedger, command: &str) -> Result<()> {
     if ledger.read_only()? {
         bail!(
-            "refused: this loopherd runs in a lead's sandbox, which can't write the ledger; \
-             run `{command}` as a Bash command of its own, which runs outside the sandbox"
+            "refused: this loopherd runs in a sandbox, which can't write the ledger, \
+             and finds no lead whose broker could run `{command}`"
         );
     }
     Ok(())
@@ -1414,6 +1418,8 @@ fn run_op(client: Option<&broker::Client>, op: &broker::Op) -> Result<i32> {
             process: own_process()?,
             lead: None,
         },
+        live: live_session,
+        spawn_waiter,
     };
     broker::run(&mut ctx, client, op, &mut Printed)
 }
@@ -1453,30 +1459,13 @@ fn own_broker() -> Option<broker::Client> {
 }
 
 fn run_restart(name: &str, force: bool) -> Result<i32> {
-    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    refuse_inside_sandbox(&ledger, &format!("loopherd restart {name}"))?;
-    let state = ledger.dir()?;
-    let paths = Paths::from_env()?;
-    let own_pane = own_pane();
-    let caller = sandbox::calling_lead(&paths, &process::ProcFs, std::process::id());
-    let req = restart::RestartRequest {
-        name,
-        force,
-        own_pane: own_pane.as_deref(),
-        own_lineage: &own_lineage(),
-        pane_shell: &pane_shell,
-        state: &state,
-        paths: &paths,
-        caller: caller.as_deref(),
-        settle_timeout: Duration::from_secs(30),
-        poll: Duration::from_millis(250),
-        live: &live_session,
-    };
-    println!(
-        "{}",
-        restart::restart(&CliHerdr, &mut ledger, &req, SystemTime::now())?
-    );
-    Ok(0)
+    run_ledger_op(
+        &format!("loopherd restart {name}"),
+        &broker::Op::Restart {
+            name: name.into(),
+            force,
+        },
+    )
 }
 
 const WAITER_FD: &str = "LOOPHERD_RESTART_WAITER_FD";
@@ -1490,16 +1479,7 @@ fn run_restart_self() -> Result<i32> {
         println!("{}", armed.message);
         return Ok(0);
     }
-    let scheduled = restart::schedule_self(
-        &CliHerdr,
-        &ledger,
-        own_pane().as_deref(),
-        &own_lineage(),
-        &state,
-    )?;
-    spawn_waiter(&scheduled.name, scheduled.waiter)?;
-    println!("{}", scheduled.message);
-    Ok(0)
+    run_op(own_broker().as_ref(), &broker::Op::RestartSelf)
 }
 
 fn arm_shepherd(
@@ -1564,6 +1544,8 @@ fn run_broker(lead: &str) -> Result<i32> {
         procs: &process::ProcFs,
         claude_dir: install_hook::claude_dir().ok(),
         process: own_process()?,
+        live: live_session,
+        spawn_waiter,
     };
     let served = broker::serve(&host, &mut ledger, &paths, lead, Duration::from_millis(100))?;
     if served == broker::Served::AlreadyRunning {

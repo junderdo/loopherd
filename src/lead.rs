@@ -424,8 +424,6 @@ mod tests {
                     "excludedCommands": [
                         "loopherd retire *",
                         "loopherd release *",
-                        "loopherd restart *",
-                        "loopherd prompt *",
                     ],
                 },
                 "permissions": {
@@ -434,8 +432,6 @@ mod tests {
                         "WebFetch(domain:*)",
                         "Bash(loopherd retire *)",
                         "Bash(loopherd release *)",
-                        "Bash(loopherd restart *)",
-                        "Bash(loopherd prompt *)",
                     ],
                     "deny": [
                         format!("Edit(/{root}/config/**)"),
@@ -604,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn a_lead_restarts_and_prompts_members_outside_the_sandbox_since_both_write_the_ledger() {
+    fn a_lead_restarts_and_prompts_members_through_its_broker_not_outside_the_sandbox() {
         let setup = Setup::with_lead(PROMPT);
         let herdr = herdr();
 
@@ -621,9 +617,9 @@ mod tests {
         let excluded = settings["sandbox"]["excludedCommands"].as_array().unwrap();
         let allow = settings["permissions"]["allow"].as_array().unwrap();
         for command in ["loopherd restart *", "loopherd prompt *"] {
-            assert!(excluded.contains(&command.into()), "{excluded:?}");
+            assert!(!excluded.contains(&command.into()), "{excluded:?}");
             assert!(
-                allow.contains(&format!("Bash({command})").into()),
+                !allow.contains(&format!("Bash({command})").into()),
                 "{allow:?}"
             );
         }
@@ -677,8 +673,6 @@ mod tests {
             serde_json::json!([
                 "loopherd retire *",
                 "loopherd release *",
-                "loopherd restart *",
-                "loopherd prompt *",
                 "scripts/install",
                 "scripts/install *",
                 "./scripts/install",
@@ -686,7 +680,7 @@ mod tests {
             ])
         );
         assert_eq!(
-            settings["permissions"]["allow"][5], "Bash(scripts/install)",
+            settings["permissions"]["allow"][3], "Bash(scripts/install)",
             "an excluded command still goes through the permission flow"
         );
         assert_eq!(

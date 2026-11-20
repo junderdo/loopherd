@@ -824,9 +824,10 @@ What differs from the shepherd:
   `paused/`, `shepherd.json` and the ledger among them, fail
   (`Read-only file system`, or a denied command or Edit). Processes a
   command leaves behind end with it, so keep long waits as background
-  tasks. `loopherd restart` (`--self` included), `prompt`, `feed`, `add`,
-  `retire` and `release`, and with `install` on `scripts/install`, run
-  outside the sandbox, but only run bare, as their own Bash call: a
+  tasks. `loopherd restart` (`--self` included), `prompt`, `feed` and
+  `add` run in your broker, outside the sandbox, in any form. `retire` and
+  `release`, and with `install` on `scripts/install`, run outside the
+  sandbox only bare, as their own Bash call: a
   `cd x &&`, a pipe or redirect, `$(…)` or a path to `loopherd` keeps one
   inside it, where it can't write the ledger or make or remove members'
   worktrees. `revive` is the shepherd's or the human's. `restart`,
