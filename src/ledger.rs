@@ -40,7 +40,8 @@ pub struct AgentRecord {
     /// Missing in ledgers written before revive existed.
     #[serde(default)]
     pub workspace_label: Option<String>,
-    /// Passed to claude at spawn, and again on resume.
+    /// Passed to claude at spawn, and again on resume. A lead's are what its
+    /// Claude last launched with, sandbox flags included.
     #[serde(default)]
     pub claude_args: Vec<String>,
     pub prompt: Option<String>,
