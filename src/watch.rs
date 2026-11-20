@@ -551,7 +551,7 @@ impl Checks<'_> {
             each: self.timeout,
         };
         let workers = ledger.entries()?.into_values().filter(|e| {
-            !e.retired && !e.is_lead() && e.herd.as_deref() == Some(self.herd.as_str())
+            !e.retired && !e.may_be_lead() && e.herd.as_deref() == Some(self.herd.as_str())
         });
         let after_merge = queue.as_ref().is_some_and(|q| !q.after_merge.is_empty());
         let mut events = vec![];
@@ -573,8 +573,8 @@ impl Checks<'_> {
             }
             let due = after_merge && worker.after_merge.is_none();
             // Feed keeps, done or not, a member whose after_merge is due or unnoted.
-            let kept = match worker.after_merge {
-                Some(AfterMerge::Pending { owner }) => {
+            let kept = match worker.after_merge.as_ref() {
+                Some(&AfterMerge::Pending { owner }) => {
                     if live(self.procs, Some(owner)).is_none()
                         && still_pending(ledger, &worker.name, owner)?
                     {
@@ -583,6 +583,7 @@ impl Checks<'_> {
                     true
                 }
                 Some(AfterMerge::Noted) => false,
+                Some(AfterMerge::Unknown(_)) => true,
                 None => due && matches!(merged, Some(Ok(true) | Err(_))),
             };
             freed += usize::from(done == Some(Ok(true)) && !kept);
@@ -1559,6 +1560,7 @@ mod tests {
             after_merge: None,
             unsandboxed: None,
             earlier: vec![],
+            unknown: Default::default(),
         }
     }
 
@@ -4007,21 +4009,38 @@ mod tests {
     }
 
     #[test]
+    fn a_done_member_whose_role_is_from_another_version_frees_no_slot() {
+        let mut world = Checked::with_template("done = \"exit 0\"\nmerged = \"exit 0\"\n");
+        world.edit_herd(|herd| herd.replace("max = 2", "max = 1"));
+        world.ledger.0.get_mut("lh-1").unwrap().role =
+            Some(crate::ledger::Role::Unknown("reviewer".into()));
+        world.touch("tasks", "1\n2\n3\n");
+        assert_eq!(world.once("w9:p0"), None);
+    }
+
+    #[test]
     fn a_done_worker_frees_its_slot_unless_its_after_merge_is_due_or_its_merged_check_errors() {
         let none = None;
         let noted = Some(AfterMerge::Noted);
+        let unknown = Some(AfterMerge::Unknown("skipped".into()));
         let frees = Some(vec!["lh-2 claimable".to_string()]);
         let errors = Some(vec![
             "cards failing  lh-1 merged \"exit 3\": exit 3".to_string(),
         ]);
         // (case, herd's after_merge, merged check, ledger's after_merge, what it wakes on)
         let cases = [
-            ("no after_merge, merged", "", "exit 0", none, frees.clone()),
+            (
+                "no after_merge, merged",
+                "",
+                "exit 0",
+                none.clone(),
+                frees.clone(),
+            ),
             (
                 "after_merge, unmerged",
                 "[\"true\"]",
                 "exit 1",
-                none,
+                none.clone(),
                 frees.clone(),
             ),
             (
@@ -4037,6 +4056,13 @@ mod tests {
                 "exit 0",
                 noted,
                 frees,
+            ),
+            (
+                "after_merge from another version, merged",
+                "[\"true\"]",
+                "exit 0",
+                unknown,
+                None,
             ),
         ];
         for (case, after_merge, merged, recorded, woke) in cases {

@@ -231,8 +231,8 @@ pub fn lead_in(ledger: &dyn Ledger, pane: &Pane) -> Result<Option<AgentRecord>> 
         .filter(|e| e.is_own_pane(pane.id, pane.lineage) && e.socket.as_deref() == Some(socket))
         .partition(|e| !e.retired);
     Ok(match live.into_iter().next() {
-        Some(entry) => entry.is_lead().then_some(entry),
-        None => retired.into_iter().find(AgentRecord::is_lead),
+        Some(entry) => entry.may_be_lead().then_some(entry),
+        None => retired.into_iter().find(AgentRecord::may_be_lead),
     })
 }
 
@@ -924,6 +924,7 @@ mod tests {
             after_merge: None,
             unsandboxed: None,
             earlier: vec![],
+            unknown: Default::default(),
         }
     }
 
@@ -1039,6 +1040,20 @@ mod tests {
             }
             for command in commands {
                 assert_eq!(run(&leads, others_off, command), None, "{command}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_role_from_another_loopherd_version_is_gated_as_a_lead() {
+        let unknown = entry("lead-h", Some(Role::Unknown("reviewer".into())));
+        let leads = ledger(vec![unknown]);
+        for (commands, _) in tables() {
+            for command in commands {
+                assert!(
+                    run(&leads, Switches::default(), command).is_some(),
+                    "{command} was allowed"
+                );
             }
         }
     }
