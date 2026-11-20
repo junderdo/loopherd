@@ -705,6 +705,22 @@ pub fn refuse_spawn(client: Option<&Client>, ledger: &dyn Ledger) -> Result<()> 
     refuse_unrouted(ledger, "spawn")
 }
 
+/// Refuses a command that is the shepherd's or the human's, `why` saying so,
+/// from the pane of the lead `client` routes to, or from a sandbox, where the
+/// ledger is read-only, that found no lead to route by.
+pub fn refuse_from_lead(client: Option<&Client>, ledger: &dyn Ledger, why: &str) -> Result<()> {
+    if let Some(client) = client {
+        bail!(
+            "refused: lead {} runs this loopherd, and {why}",
+            client.lead
+        );
+    }
+    if ledger.read_only()? {
+        bail!("refused: this loopherd runs in a sandbox, and {why}");
+    }
+    Ok(())
+}
+
 /// Refuses `command` run directly where the ledger is read-only: in a lead's
 /// sandbox, yet the ledger places no lead in this pane, so no broker runs it.
 pub fn refuse_unrouted(ledger: &dyn Ledger, command: &str) -> Result<()> {
