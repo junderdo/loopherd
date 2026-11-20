@@ -390,7 +390,13 @@ fn retire(ctx: &mut Ctx, name: &str, close: bool, force: bool, sink: &mut dyn Si
     )?;
     let mailboxes = ctx.paths.state_dir().join("reports");
     if !force {
-        refuse_unfinished(ctx.herdr, &*ctx.ledger, name, &mailboxes)?;
+        refuse_unfinished(
+            ctx.herdr,
+            &*ctx.ledger,
+            name,
+            &mailboxes,
+            caller.lead.is_some(),
+        )?;
     }
     let now = SystemTime::now();
     if !close {
