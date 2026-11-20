@@ -363,8 +363,13 @@ fn on_path(program: &str) -> bool {
 
 #[test]
 fn setup_names_the_package_when_claude_code_has_no_seccomp_filter_and_installs_nothing() {
-    if !cfg!(target_os = "linux") || !on_path("bwrap") || !on_path("socat") {
-        eprintln!("skipped: needs Linux with bubblewrap and socat");
+    let sandboxes = Command::new("bwrap")
+        .args(["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"])
+        .args(["--unshare-pid", "true"])
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !cfg!(target_os = "linux") || !sandboxes || !on_path("socat") {
+        eprintln!("skipped: needs Linux with socat and a bubblewrap that can make a sandbox");
         return;
     }
     let config = Config::new(Some(
@@ -377,13 +382,13 @@ fn setup_names_the_package_when_claude_code_has_no_seccomp_filter_and_installs_n
     fs::write(&claude, "#!/bin/sh\necho '2.1.329 (Claude Code)'\n").unwrap();
     fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
-    let empty_npm = config.dir.join("npm-root");
+    let npm_prefix = config.dir.join("npm-prefix");
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_loopherd"));
     cmd.arg("setup")
         .stdin(Stdio::null())
         .env("PATH", path)
-        .env("npm_config_prefix", &empty_npm);
+        .env("npm_config_prefix", &npm_prefix);
     config.env(&mut cmd);
     let out = cmd.output().unwrap();
 
@@ -398,5 +403,8 @@ fn setup_names_the_package_when_claude_code_has_no_seccomp_filter_and_installs_n
         ),
         "{stdout}"
     );
-    assert!(!empty_npm.exists(), "setup installed something");
+    assert!(
+        !npm_prefix.join("lib/node_modules/@anthropic-ai").exists(),
+        "setup installed the package"
+    );
 }

@@ -141,8 +141,8 @@ fn sockets_check(why: &str, fix: &str, setup: &Result<Setup>) -> Check {
     };
     let detail = format!("can't block Unix sockets: {why}");
     match setup {
-        Ok(setup) if refused(&setup.paths) => failure("sandbox", detail, fix.into()),
-        _ => warning("sandbox", detail, fix.into()),
+        Ok(setup) if !refused(&setup.paths) => warning("sandbox", detail, fix.into()),
+        _ => failure("sandbox", detail, fix.into()),
     }
 }
 
@@ -154,12 +154,12 @@ pub(crate) fn lead_sandbox_check(paths: &Paths, lead: &AgentRecord) -> Option<Ch
         Some(why) => why.as_str(),
         None if started_with_it => {
             let why = lead.sockets_unblocked.as_deref()?;
-            let fix = crate::sandbox::FILTER_FIX;
             return Some(warning(
                 &format!("lead {}", lead.name),
                 crate::sandbox::sockets_unblocked_warning(&lead.name, why),
                 format!(
-                    "{fix}, then quit its Claude and run loopherd revive --name {}",
+                    "fix the sandbox check's cause, then quit its Claude and run loopherd \
+                     revive --name {}",
                     lead.name
                 ),
             ));
@@ -2095,8 +2095,8 @@ mod tests {
             [
                 "warning lead lead-h: lead-h's sandbox can't block Unix sockets (Claude Code finds \
               no seccomp filter), so herdr, your ssh agent and WSL2's Windows interop stay open \
-              to it; fix: npm install -g @anthropic-ai/sandbox-runtime, then quit its Claude and \
-              run loopherd revive --name lead-h"
+              to it; fix: fix the sandbox check's cause, then quit its Claude and run loopherd \
+              revive --name lead-h"
             ]
         );
     }
