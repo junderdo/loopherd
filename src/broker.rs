@@ -253,12 +253,10 @@ impl Op {
                 drop_branch,
             } => release(ctx, name, *keep_branch, *drop_branch, sink),
             Op::Label { question } => label(ctx, question, sink),
+            // The broker refused strays already.
             Op::Status {
-                all,
-                strays,
-                json,
-                color,
-            } => status(ctx, *all, *strays, *json, *color, sink),
+                all, json, color, ..
+            } => status(ctx, *all, *json, *color, sink),
             Op::Read { name, lines } => {
                 let read = crate::read::read(ctx.herdr, &*ctx.ledger, name, *lines)?;
                 sink.out(read.trim_end_matches('\n'));
@@ -268,16 +266,15 @@ impl Op {
     }
 }
 
-/// `loopherd status`, or, for a lead, its own herd's.
-fn status(
-    ctx: &mut Ctx,
-    all: bool,
-    strays: bool,
-    json: bool,
-    color: bool,
-    sink: &mut dyn Sink,
-) -> Result<i32> {
+/// A lead's `loopherd status`: its own herd's. The shepherd's runs directly.
+fn status(ctx: &mut Ctx, all: bool, json: bool, color: bool, sink: &mut dyn Sink) -> Result<i32> {
     use crate::status::{Format, Queues};
+    let herd = &ctx
+        .caller
+        .lead
+        .as_ref()
+        .context("only a lead's broker runs status")?
+        .herd;
     let format = match json {
         true => Format::Json,
         false => Format::Text { color },
@@ -297,22 +294,15 @@ fn status(
         paths: ctx.paths,
         timeout,
     };
-    let ledger = &*ctx.ledger;
-    let out = match &ctx.caller.lead {
-        Some(lead) => crate::status::herd_status(
-            ctx.herdr,
-            ledger,
-            &pauses,
-            Some(&queues),
-            all,
-            format,
-            &lead.herd,
-        )?,
-        None => {
-            let options = crate::herd_view::Options { all, strays };
-            crate::status::status(ctx.herdr, ledger, &pauses, Some(&queues), options, format)?
-        }
-    };
+    let out = crate::status::herd_status(
+        ctx.herdr,
+        &*ctx.ledger,
+        &pauses,
+        Some(&queues),
+        all,
+        format,
+        herd,
+    )?;
     if !out.stdout.is_empty() {
         sink.out(out.stdout.trim_end_matches('\n'));
     }
@@ -2239,20 +2229,17 @@ mod tests {
     }
 
     #[test]
-    fn a_lead_s_status_strays_are_refused_and_the_shepherd_s_list_them() {
+    fn a_lead_s_status_strays_are_refused() {
         let world = World::new();
         let serving = world.serve(telling_herdr());
 
         let err = world.client().call(&status_op(false, true)).unwrap_err();
-        let herdr = telling_herdr();
-        let (_, kept) = run_here(&herdr, &world, None, &status_op(false, true)).unwrap();
 
         assert_eq!(
             format!("{err:#}"),
             "lead-h's broker refused status: strays are herdr's agents outside every herd; \
              lead-h sees only herd h, so run loopherd status without --strays"
         );
-        assert!(kept.out.join("\n").contains("+1 stray"), "{:?}", kept.out);
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
         assert_eq!(herdr.calls(), 0);
