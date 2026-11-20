@@ -13,6 +13,10 @@ use serde_json::Value;
 #[path = "../src/herdr/events.rs"]
 mod events;
 
+mod brokers;
+
+use brokers::Broker;
+
 const HERDR_IDS: [&str; 4] = [
     "HERDR_ENV",
     "HERDR_WORKSPACE_ID",
@@ -2529,6 +2533,12 @@ fn a_leads_question_labels_its_claude_pane_until_a_typed_prompt() {
     )
     .unwrap();
     let pane = entries[&name]["pane_id"].as_str().unwrap().to_string();
+    // A lead's report goes through its broker, which labels its pane.
+    let mut broker = dev(env!("CARGO_BIN_EXE_loopherd"));
+    broker
+        .env("XDG_STATE_HOME", state.path())
+        .env("LOOPHERD_CONFIG_DIR", config.path());
+    let _broker = Broker::start(broker, config.path(), &name, "cards");
     let in_pane = |args: &[&str]| {
         let mut cmd = dev(env!("CARGO_BIN_EXE_loopherd"));
         cmd.env("XDG_STATE_HOME", state.path())
