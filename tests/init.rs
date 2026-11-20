@@ -5501,6 +5501,35 @@ fn a_lead_with_merge_off_is_guarded_by_hook_unless_init_is_told_credentials() {
 }
 
 #[test]
+fn a_credentials_herd_runs_gh_on_the_leads_own_token_where_a_hook_herd_names_the_account() {
+    let hook = Fixture::new(&["acme"]);
+    assert_ok(&hook.init(&[]));
+    let credentials = Fixture::new(&["acme"]);
+    assert_ok(&credentials.init(&["--merge-guard", "credentials"]));
+
+    for (fixture, gh) in [
+        (&hook, "GH_TOKEN=$(gh auth token --user acme) gh "),
+        (&credentials, "gh "),
+    ] {
+        let herd = herd_toml(fixture);
+        for check in [
+            &herd["template"]["issue"]["merged"],
+            &herd["template"]["issue"]["done"],
+        ] {
+            let check = check.as_str().unwrap();
+            assert!(check.starts_with(gh), "{check}");
+        }
+        for list in [&herd["queue"]["source"], &herd["queue"]["backlog"]] {
+            let list = list.as_str().unwrap().trim_start().to_string();
+            assert!(list.starts_with(gh), "{list}");
+        }
+    }
+    let lead = fs::read_to_string(credentials.herds().join("widgets-lead.md")).unwrap();
+    assert!(!lead.contains("gh auth token"), "{lead}");
+    assert!(lead.contains("--admin --match-head-commit"), "{lead}");
+}
+
+#[test]
 fn a_lead_with_merge_on_gets_no_merge_guard_and_refuses_one_given() {
     let fixture = Fixture::new(&["acme"]);
     fs::write(

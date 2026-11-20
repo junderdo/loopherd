@@ -40,6 +40,8 @@ const LOCAL_PUSH_HAND_IN: &str =
    the human merges the branch into @BRANCH@.";
 const LEAD_GH: &str = "Run every gh command as @ACCOUNT@, prefixed with
 `GH_TOKEN=$(gh auth token --user @ACCOUNT@)`. ";
+const LEAD_GH_CREDENTIALS: &str = "Your gh already runs on the herd's own token, so
+run gh commands as they are, with no `GH_TOKEN=` prefix. ";
 const LEAD_ON_MERGED: &str = "On `<member> merged`, run `loopherd feed {herd}`,
    which retires it once its issue is closed.";
 const LEAD_ON_BRANCH_MERGED: &str = "No `<member> merged` line comes, as the herd
@@ -50,6 +52,10 @@ link, any PR that must merge first, and the line
 `! GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh pr merge <n> --repo @OWNER_REPO@ --merge --match-head-commit <full sha>`
 for the head your reviewer verified. Single-quote that question ('...', not
 \"...\"): double quotes run the $(...) and leak the token.";
+const LEAD_PR_MERGE_ASK_CREDENTIALS: &str = "With merge off, a merge question carries
+the PR link, any PR that must merge first, and the full sha of the head your
+reviewer verified. Your token can't merge, so the human merges from their own
+terminal: `gh pr merge <n> --repo @OWNER_REPO@ --merge --admin --match-head-commit <full sha>`.";
 const OTHER_PR_HAND_IN: &str = "5. Push the branch as @ACCOUNT@:
    `GH_TOKEN=$(gh auth token --user @ACCOUNT@) git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin HEAD`.
    Then open a pull request into @BRANCH@ with `GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh pr create --repo @OWNER_REPO@ --base @BRANCH@ --head {branch} --assignee @ACCOUNT@ --title \"<title>\" --body \"<summary>\"`.
@@ -841,6 +847,12 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
         Some(_) => github_text,
         None => otherwise,
     };
+    // A credentials lead can't read the human's gh login; its gh has the herd's token.
+    let credentials = herd.merge_guard == Some(MergeGuard::Credentials);
+    let gh = match credentials {
+        true => "gh".to_string(),
+        false => format!("GH_TOKEN=$(gh auth token --user {account}) gh"),
+    };
     let switches = match herd.merge_guard {
         Some(guard) => format!("{}\nmerge_guard = \"{}\"", herd.switches, guard.name()),
         None => herd.switches.clone(),
@@ -848,6 +860,7 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
     let mut values = vec![
         ("OWNER_REPO", slug),
         ("ACCOUNT", account),
+        ("GH", &gh),
         ("CHECKOUT_OF", checkout_of),
         ("HERD", name),
         ("REPO", &repo_path),
@@ -878,14 +891,27 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
             "OTHER_HAND_IN",
             github_text(OTHER_PR_HAND_IN, OTHER_PUSH_HAND_IN),
         ),
-        ("LEAD_GH", github_text(LEAD_GH, "")),
+        (
+            "LEAD_GH",
+            github_text(
+                if credentials {
+                    LEAD_GH_CREDENTIALS
+                } else {
+                    LEAD_GH
+                },
+                "",
+            ),
+        ),
         (
             "ON_MERGED",
             github_text(LEAD_ON_MERGED, LEAD_ON_BRANCH_MERGED),
         ),
         (
             "MERGE_ASK",
-            github_text(LEAD_PR_MERGE_ASK, LEAD_BRANCH_MERGE_ASK),
+            match credentials {
+                true => LEAD_PR_MERGE_ASK_CREDENTIALS,
+                false => github_text(LEAD_PR_MERGE_ASK, LEAD_BRANCH_MERGE_ASK),
+            },
         ),
     ]
     .map(|(key, text)| (key, fill(text, &values)));
