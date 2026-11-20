@@ -2227,7 +2227,8 @@ mod tests {
         assert_eq!((brokered.out, brokered.err), (vec![], vec![]));
         assert_eq!((direct.out, direct.err), (vec![], vec![]));
         world.retire("lead-h");
-        serving.join().unwrap();
+        let (served, _) = serving.join().unwrap();
+        assert_eq!(served.unwrap(), Served::Retired);
     }
 
     #[test]
