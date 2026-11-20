@@ -147,9 +147,11 @@ const SEND_BACK_ONLY_BLOCKING: [&str; 13] = [
     "never fails the round",
 ];
 
-const PASS_WHEN_NOTHING_BLOCKS: [&str; 2] = [
-    "`pass <head sha>: <m> minor, <n> nit` when nothing is blocking",
-    "the file only to forward findings, to file a pass's minors and nits, or to write a merge question",
+const PASS_WHEN_NOTHING_BLOCKS: [&str; 4] = [
+    "`pass <head sha>: <m> minor, <k> nit` when nothing is blocking",
+    "the file only to forward findings, to file minors and nits, or to write a merge question",
+    "From every round's review file, not only the passing one, route the minors as for any minor (the follow-up task, a question with `new_cards` off, or the member's next stacked PR) and post the nits as a non-blocking comment",
+    "later rounds answer only about blockers",
 ];
 
 #[test]
@@ -198,6 +200,12 @@ fn verify_sends_back_only_blocking_findings_narrows_later_rounds_and_caps_rounds
     assert!(!lead.contains("out-of-scope ones become tasks"), "{lead}");
     assert!(!printed.contains("out-of-scope gaps"), "{printed}");
     assert!(!lead.contains("After round 3"), "{lead}");
+    assert!(lead.contains(PASS_WHEN_NOTHING_BLOCKS[2]), "{lead}");
+    assert!(!printed.contains("<n> nit"), "{printed}");
+    assert!(
+        !printed.contains("file the minors as the follow-up task"),
+        "{printed}"
+    );
 }
 
 #[test]

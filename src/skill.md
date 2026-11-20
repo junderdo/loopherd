@@ -190,21 +190,24 @@ Init never launches an agent.
    target dirs and any copies (mutation runs), so one removal cleans up.
    Have it write its findings to `<scratch>/pr<n>/review-<round>.md`,
    each with severity (blocking, minor or nit), failure scenario and
-   file:line, and return only one line: `pass <head sha>: <m> minor, <n>
+   file:line, and return only one line: `pass <head sha>: <m> minor, <k>
    nit` when nothing is blocking, else `fail <head sha>: <b> blocking, <m>
-   minor, <n> nit`, plus the file's path. Its reply lands in your context
+   minor, <k> nit`, plus the file's path. Its reply lands in your context
    and the file doesn't, so read the file only to forward findings, to
-   file a pass's minors and nits, or to write a merge question. Parallel
-   reviews of one PR write `review-<round>-<axis>.md`. Members can't read
-   your scratch dir, so forward only a failing round's blocking findings,
-   in a PR comment holding just those: copy them to
+   file minors and nits, or to write a merge question. From every round's
+   review file, not only the passing one, route the minors as for any minor
+   (the follow-up task, a question with `new_cards` off, or the member's
+   next stacked PR) and post the nits as a non-blocking comment: later
+   rounds answer only about blockers, so a failed round's minors live only
+   in its file. Parallel reviews of one PR write `review-<round>-<axis>.md`.
+   Members can't read your scratch dir, so forward only a failing round's
+   blocking findings, in a PR comment holding just those: copy them to
    `<scratch>/pr<n>/review-<round>-blocking.md`, run `gh pr comment <n>
    --body-file` on that file, then `loopherd tell` the member to read that
-   comment. Post nits in a separate PR comment marked non-blocking. Keep
-   the files until the PR merges or closes.
-   For anything that deletes or closes, have it hunt for safety gaps and
-   name the test covering each rule. Report as soon as it lands; the human
-   often merges fast.
+   comment. Post nits in a separate PR comment marked non-blocking. Keep the
+   files until the PR merges or closes. For anything that deletes or closes,
+   have it hunt for safety gaps and name the test covering each rule. Report
+   as soon as it lands; the human often merges fast.
 
    A finding is blocking when it's inside the task's acceptance criteria,
    or a correctness or safety bug the PR introduces; give the reviewer this
@@ -807,12 +810,16 @@ Shepherd section has the detail):
    against the task's acceptance criteria, with a temp `XDG_STATE_HOME` and
    `LOOPHERD_CONFIG_DIR`, building under `<scratch>/pr<n>/`. It writes its
    findings to `<scratch>/pr<n>/review-<round>.md` and returns one line:
-   `pass <head sha>: <m> minor, <n> nit` when nothing is blocking, else
-   `fail <head sha>: <b> blocking, <m> minor, <n> nit`, plus the file's
-   path. Read the file only to forward findings, to file a pass's minors
-   and nits, or to write a merge question. Members can't read your scratch
-   dir: forward only a failing round's blocking findings, in a PR comment
-   holding just those (`gh pr comment <n> --body-file
+   `pass <head sha>: <m> minor, <k> nit` when nothing is blocking, else
+   `fail <head sha>: <b> blocking, <m> minor, <k> nit`, plus the file's
+   path. Read the file only to forward findings, to file minors and nits,
+   or to write a merge question. From every round's review file, not only
+   the passing one, route the minors as for any minor (the follow-up task, a
+   question with `new_cards` off, or the member's next stacked PR) and post
+   the nits as a non-blocking comment: later rounds answer only about
+   blockers, so a failed round's minors live only in its file. Members can't
+   read your scratch dir: forward only a failing round's blocking findings,
+   in a PR comment holding just those (`gh pr comment <n> --body-file
    <scratch>/pr<n>/review-<round>-blocking.md`), then `loopherd tell` the
    member to read it. Post nits in a separate PR comment marked
    non-blocking. Keep the files until the PR merges or closes.
@@ -958,20 +965,24 @@ What differs from the shepherd:
   hold the merge: they go to one follow-up task per PR, or, when the
   member has a next PR in the same card's stack, into that PR's scope.
   With `new_cards` off, list the follow-up minors in a question to the
-  human rather than creating a task. Each round after the first checks
-  the previous round's blocking findings and only the diff since its
-  head: hand the reviewer `review-<round - 1>.md` and `git diff <its head
-  sha>..<new head>`, and give it a narrower bar: is each previous
-  blocking finding fixed, and does the fix diff introduce a new
-  correctness or safety bug? Its `<b> blocking` counts only those; a new
+  human rather than creating a task. From every round's review file, not
+  only the passing one, route the minors as for any minor (the follow-up
+  task, a question with `new_cards` off, or the member's next stacked PR)
+  and post the nits as a non-blocking comment: later rounds answer only
+  about blockers, so a failed round's minors live only in its file. Each
+  round after the first checks the previous round's blocking findings and
+  only the diff since its head: hand the reviewer `review-<round - 1>.md`
+  and `git diff <its head sha>..<new head>`, and give it a narrower bar: is
+  each previous blocking finding fixed, and does the fix diff introduce a
+  new correctness or safety bug? Its `<b> blocking` counts only those; a new
   minor or nit is reported as non-blocking, handled as above, and never
-  fails the round. A first review uses the reviewer as defined; later
-  rounds pass `model: sonnet` to the subagent. `<round>` counts per PR
-  across handoffs; your handoff's current review file carries it. After
-  your herd's review-round limit (in your prompt; 3 when unset) start no
-  other round; send `loopherd report --kind question` asking whether to
-  merge as-is, narrow the scope, or change approach, with the PR link and
-  the open blocking findings, then end your turn.
+  fails the round. A first review uses the reviewer as defined; later rounds
+  pass `model: sonnet` to the subagent. `<round>` counts per PR across
+  handoffs; your handoff's current review file carries it. After your herd's
+  review-round limit (in your prompt; 3 when unset) start no other round;
+  send `loopherd report --kind question` asking whether to merge as-is,
+  narrow the scope, or change approach, with the PR link and the open
+  blocking findings, then end your turn.
 - **Heartbeat.** Keep `loopherd watch --timeout 3600` as a background task,
   run bare, exactly so. Run from your pane, it's your watch: it reads your
   herd's workers only, never you, and naming any other herd is an error.
