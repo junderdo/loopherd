@@ -27,21 +27,12 @@ pub fn files(paths: &Paths, herd: &str) -> Files {
 /// to the herd's GitHub repo over ssh with the deploy key alone. Errs, naming
 /// the fix, while the key or the token is missing.
 pub fn lead_env(paths: &Paths, herd: &str) -> Result<Map<String, Value>> {
+    if let Some(missing) = missing(paths, herd) {
+        bail!("{missing}");
+    }
     let files = files(paths, herd);
-    if !files.key.is_file() {
-        bail!(
-            "no deploy key at {}; run loopherd merge-guard {herd}",
-            files.key.display()
-        );
-    }
-    let token = std::fs::read_to_string(&files.token).unwrap_or_default();
+    let token = std::fs::read_to_string(&files.token)?;
     let token = token.trim();
-    if token.is_empty() {
-        bail!(
-            "no token at {}; run loopherd merge-guard {herd} for how to create and store it",
-            files.token.display()
-        );
-    }
     let origin = crate::github::github_com_origin(&crate::herd::repo(paths, herd)?)?;
     // ssh reaches GitHub only through the sandbox's proxy, and must offer no key of the human's.
     let ssh = format!(
@@ -64,6 +55,24 @@ pub fn lead_env(paths: &Paths, herd: &str) -> Result<Map<String, Value>> {
         .into_iter()
         .map(|(name, value)| (name.to_string(), Value::String(value)))
         .collect())
+}
+
+/// What `herd`'s lead lacks of its deploy key and token, with the fix.
+pub fn missing(paths: &Paths, herd: &str) -> Option<String> {
+    let files = files(paths, herd);
+    if !files.key.is_file() {
+        return Some(format!(
+            "no deploy key at {}; run loopherd merge-guard {herd}",
+            files.key.display()
+        ));
+    }
+    let token = std::fs::read_to_string(&files.token).unwrap_or_default();
+    token.trim().is_empty().then(|| {
+        format!(
+            "no token at {}; run loopherd merge-guard {herd} for how to create and store it",
+            files.token.display()
+        )
+    })
 }
 
 /// Where gh and git keep the human's GitHub credentials, each with whether

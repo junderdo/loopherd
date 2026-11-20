@@ -10,12 +10,15 @@ use serde::Serialize;
 
 use anyhow::{Result, bail};
 
+use crate::herd::MergeGuard;
 use crate::herd::Paths;
 use crate::herdr::{Herdr, Server};
 use crate::ledger::AgentRecord;
 use crate::ledger::{FileLedger, Ledger};
+use crate::merge_guard::{DEFAULT_BRANCH_RULESET, FORCE_PUSH_RULESET};
 use crate::pause::Reading;
 use crate::sandbox::{SandboxMode, Unavailable};
+use serde_json::Value;
 
 /// What the install checks read, gathered by the caller.
 pub struct Install {
@@ -268,6 +271,29 @@ fn herd_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
             ),
             true => ok(&name, repo.display().to_string()),
         });
+        match crate::herd::merge_guard(paths, &herd) {
+            Ok(Some(MergeGuard::Hook)) => checks.push(warning(
+                &format!("herd {herd} merge_guard"),
+                "hook: its lead holds your GitHub credentials, so its merges and force-pushes \
+                 are stopped only for an honest lead"
+                    .into(),
+                format!(
+                    "loopherd herd set {herd} lead.merge_guard '\"credentials\"', then \
+                     loopherd merge-guard {herd}"
+                ),
+            )),
+            Ok(Some(MergeGuard::Credentials)) => {
+                if let Some(missing) = crate::credentials::missing(paths, &herd) {
+                    let (detail, fix) = missing.split_once("; run ").unwrap_or((&missing, ""));
+                    checks.push(warning(
+                        &format!("herd {herd} credentials"),
+                        detail.into(),
+                        fix.into(),
+                    ));
+                }
+            }
+            _ => {}
+        }
         if let Ok((_, SandboxMode::Prefer)) = crate::herd::lead_sandbox(paths, &herd) {
             checks.push(warning(
                 &format!("herd {herd} sandbox"),
@@ -279,6 +305,220 @@ fn herd_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
         }
     }
     checks
+}
+
+/// The loopherd rulesets on a herd's GitHub repo.
+pub trait Rulesets {
+    /// Each of [`DEFAULT_BRANCH_RULESET`] and [`FORCE_PUSH_RULESET`] on
+    /// `repo`'s GitHub repo, as GitHub returns it.
+    fn loopherd_rulesets(&self, repo: &Path) -> Result<Vec<Value>>;
+}
+
+struct RepoLead {
+    herd: String,
+    merge: bool,
+    rebase: bool,
+    guard: Option<MergeGuard>,
+}
+
+/// Each herd whose switches disagree with the loopherd rulesets on its
+/// repo, looked up only for repos a credentials lead runs on, since only
+/// `loopherd merge-guard` makes them.
+pub fn ruleset_checks(paths: &Paths, only: Option<&str>, rules: &dyn Rulesets) -> Vec<Check> {
+    let Ok(herds) = crate::herd::names(&paths.herds) else {
+        return vec![];
+    };
+    let mut repos: Vec<(PathBuf, Vec<RepoLead>)> = vec![];
+    for herd in herds {
+        let (Ok(repo), Ok(Some(switches)), Ok(guard)) = (
+            crate::herd::repo(paths, &herd),
+            crate::herd::lead_switches(paths, &herd).map(Some),
+            crate::herd::merge_guard(paths, &herd),
+        ) else {
+            continue;
+        };
+        let lead = RepoLead {
+            herd,
+            merge: switches.merge,
+            rebase: switches.rebase,
+            guard,
+        };
+        match repos
+            .iter_mut()
+            .find(|(r, _)| crate::worktree::same_dir(r, &repo))
+        {
+            Some((_, leads)) => leads.push(lead),
+            None => repos.push((repo, vec![lead])),
+        }
+    }
+    let mut checks = vec![];
+    for (repo, leads) in repos {
+        let guarded = leads
+            .iter()
+            .any(|l| l.guard == Some(MergeGuard::Credentials));
+        if !guarded || only.is_some_and(|herd| leads.iter().all(|l| l.herd != herd)) {
+            continue;
+        }
+        let found = match rules.loopherd_rulesets(&repo) {
+            Ok(found) => found,
+            Err(e) => {
+                let names: Vec<&str> = leads.iter().map(|l| l.herd.as_str()).collect();
+                let herds = match names.len() {
+                    1 => "herd",
+                    _ => "herds",
+                };
+                checks.push(warning(
+                    &format!("{herds} {} rulesets", names.join(", ")),
+                    format!("can't read the rulesets of {}: {e:#}", repo.display()),
+                    "check gh can reach the repo, then loopherd doctor".into(),
+                ));
+                continue;
+            }
+        };
+        checks.extend(
+            disagreements(&repo, &leads, &found)
+                .into_iter()
+                .filter(|(herd, _)| only.is_none_or(|o| o == herd))
+                .map(|(_, check)| check),
+        );
+    }
+    checks
+}
+
+/// The shape of a ruleset loopherd compares, leaving out ids and the like.
+fn ruleset_shape(ruleset: &Value) -> (Value, Value, Vec<String>, Vec<String>) {
+    let mut rules: Vec<String> = ruleset["rules"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r["type"].as_str().map(String::from))
+        .collect();
+    rules.sort();
+    let mut bypass: Vec<String> = ruleset["bypass_actors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|a| format!("{} {} {}", a["actor_type"], a["actor_id"], a["bypass_mode"]))
+        .collect();
+    bypass.sort();
+    (
+        ruleset["enforcement"].clone(),
+        ruleset["conditions"]["ref_name"]["include"].clone(),
+        rules,
+        bypass,
+    )
+}
+
+fn disagreements(repo: &Path, leads: &[RepoLead], found: &[Value]) -> Vec<(String, Check)> {
+    let named = |name: &str| found.iter().find(|r| r["name"] == name);
+    let shape = |r: &Value| ruleset_shape(r);
+    let default_ok = named(DEFAULT_BRANCH_RULESET)
+        .is_some_and(|r| shape(r) == shape(&crate::merge_guard::default_branch_ruleset()));
+    let default_present = named(DEFAULT_BRANCH_RULESET).is_some();
+    // Whether the force-push ruleset lets deploy keys through, when it's loopherd's.
+    let force_bypass = named(FORCE_PUSH_RULESET).and_then(|r| {
+        [false, true]
+            .into_iter()
+            .find(|&rebase| shape(r) == shape(&crate::merge_guard::force_push_ruleset(rebase)))
+    });
+    let force_present = named(FORCE_PUSH_RULESET).is_some();
+    let shown = repo.display();
+    let mut out = vec![];
+    let mut push = |herd: &str, detail: String, fix: String| {
+        out.push((
+            herd.to_string(),
+            warning(&format!("herd {herd} rulesets"), detail, fix),
+        ));
+    };
+    let guarded: Vec<&RepoLead> = leads
+        .iter()
+        .filter(|l| l.guard == Some(MergeGuard::Credentials))
+        .collect();
+    for lead in leads {
+        let herd = &lead.herd;
+        let setup = format!("loopherd merge-guard {herd}");
+        if lead.guard == Some(MergeGuard::Credentials) {
+            if !default_ok {
+                push(
+                    herd,
+                    format!(
+                        "{shown} has no ruleset {DEFAULT_BRANCH_RULESET} as loopherd merge-guard \
+                         makes it, so nothing on GitHub stops a push to the default branch"
+                    ),
+                    setup.clone(),
+                );
+            }
+            match (force_bypass, lead.rebase) {
+                (None, _) => push(
+                    herd,
+                    format!(
+                        "{shown} has no ruleset {FORCE_PUSH_RULESET} as loopherd merge-guard \
+                         makes it, so nothing on GitHub stops a force-push"
+                    ),
+                    setup.clone(),
+                ),
+                (Some(false), true) => push(
+                    herd,
+                    format!(
+                        "rebase is on, but {FORCE_PUSH_RULESET} stops deploy keys too, so its \
+                         lead can't force-push"
+                    ),
+                    setup.clone(),
+                ),
+                (Some(true), false) => push(
+                    herd,
+                    format!("rebase is off, but {FORCE_PUSH_RULESET} lets deploy keys force-push"),
+                    setup.clone(),
+                ),
+                _ => {}
+            }
+            if let Some(other) = guarded
+                .iter()
+                .find(|o| o.herd < lead.herd && o.rebase != lead.rebase)
+            {
+                let on_off = |on: bool| if on { "on" } else { "off" };
+                push(
+                    herd,
+                    format!(
+                        "herds {} and {herd} both run on {shown} but need different force-push \
+                         bypasses (rebase {} in {}, {} in {herd}), and one ruleset can't \
+                         enforce both",
+                        other.herd,
+                        on_off(other.rebase),
+                        other.herd,
+                        on_off(lead.rebase)
+                    ),
+                    "give them the same rebase".into(),
+                );
+            }
+            continue;
+        }
+        if lead.merge && default_present {
+            push(
+                herd,
+                format!(
+                    "its lead has merge on, but {DEFAULT_BRANCH_RULESET} on {shown} stops its \
+                     merges"
+                ),
+                format!(
+                    "loopherd herd set {herd} lead.merge false, or run herd {herd} on a repo of its own"
+                ),
+            );
+        }
+        if lead.rebase && force_present && !lead.merge {
+            push(
+                herd,
+                format!(
+                    "rebase is on, but {FORCE_PUSH_RULESET} on {shown} stops its force-pushes, \
+                     made with your credentials"
+                ),
+                format!(
+                    "loopherd herd set {herd} lead.rebase false, or run herd {herd} on a repo of its own"
+                ),
+            );
+        }
+    }
+    out
 }
 
 /// The ledger, pause files and mailboxes, and, when herdr was reached, each
@@ -851,7 +1091,7 @@ mod tests {
     use crate::herdr::Plugin;
     use crate::herdr::fake::FakeHerdr;
     use crate::ledger::AgentRecord;
-    use serde_json::{Value, json};
+    use serde_json::json;
 
     const EVENTS: [(&str, &str); 5] = [
         ("Stop", "stop-hook"),
@@ -1623,7 +1863,7 @@ mod tests {
         m.herd_file(
             "h",
             &format!(
-                "repo = {:?}\n[lead]\nprompt = \"go\"\n",
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge = true\n",
                 repo.to_str().unwrap()
             ),
         );
@@ -1685,7 +1925,7 @@ mod tests {
         m.herd_file(
             "h",
             &format!(
-                "repo = {:?}\n[lead]\nprompt = \"go\"\nsandbox = \"prefer\"\n",
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge = true\nsandbox = \"prefer\"\n",
                 repo.to_str().unwrap()
             ),
         );
@@ -1696,6 +1936,236 @@ mod tests {
               guarded by its tool hook alone, whenever the sandbox can't start; \
               fix: loopherd herd set h lead.sandbox '\"require\"'"
             ]
+        );
+    }
+
+    #[test]
+    fn a_herd_whose_lead_has_merge_off_on_hook_is_warned() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\n",
+                repo.to_str().unwrap()
+            ),
+        );
+        assert_eq!(
+            problems(&m, &herdr()),
+            [
+                "warning herd h merge_guard: hook: its lead holds your GitHub credentials, so \
+                 its merges and force-pushes are stopped only for an honest lead; \
+                 fix: loopherd herd set h lead.merge_guard '\"credentials\"', then loopherd \
+                 merge-guard h"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_credentials_lead_missing_its_key_or_token_is_warned() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge_guard = \"credentials\"\n",
+                repo.to_str().unwrap()
+            ),
+        );
+        let dir = m.dir.path().join("config/credentials");
+        assert_eq!(
+            problems(&m, &herdr()),
+            [format!(
+                "warning herd h credentials: no deploy key at {}; fix: loopherd merge-guard h",
+                dir.join("h.key").display()
+            )]
+        );
+
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("h.key"), "key").unwrap();
+        assert_eq!(
+            problems(&m, &herdr()),
+            [format!(
+                "warning herd h credentials: no token at {}; fix: loopherd merge-guard h for how \
+                 to create and store it",
+                dir.join("h.token").display()
+            )]
+        );
+
+        std::fs::write(dir.join("h.token"), "github_pat_1").unwrap();
+        assert_eq!(problems(&m, &herdr()), Vec::<String>::new());
+    }
+
+    /// The loopherd rulesets each repo has, or why they couldn't be read.
+    struct FakeRulesets(Vec<(PathBuf, std::result::Result<Vec<Value>, String>)>);
+
+    impl Rulesets for FakeRulesets {
+        fn loopherd_rulesets(&self, repo: &Path) -> Result<Vec<Value>> {
+            match self.0.iter().find(|(r, _)| r == repo) {
+                Some((_, Ok(found))) => Ok(found.clone()),
+                Some((_, Err(e))) => anyhow::bail!("{e}"),
+                None => panic!("looked up {}", repo.display()),
+            }
+        }
+    }
+
+    /// Herds named by `leads` (herd, `[lead]` lines) all on one repo.
+    fn on_one_repo(leads: &[(&str, &str)]) -> (Machine, PathBuf) {
+        let m = machine(&ALL);
+        let repo = m.dir.path().join("repos/shared");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        for (herd, lead) in leads {
+            m.herd_file(
+                herd,
+                &format!(
+                    "repo = {:?}\n[lead]\nprompt = \"go\"\n{lead}\n",
+                    repo.to_str().unwrap()
+                ),
+            );
+        }
+        (m, repo)
+    }
+
+    fn ruleset_lines(m: &Machine, only: Option<&str>, rules: &FakeRulesets) -> Vec<String> {
+        ruleset_checks(m.paths(), only, rules)
+            .iter()
+            .map(|c| {
+                format!(
+                    "{} {}: {}; fix: {}",
+                    serde_json::to_value(c.status).unwrap().as_str().unwrap(),
+                    c.name,
+                    c.detail,
+                    c.fix.as_deref().unwrap_or("-")
+                )
+            })
+            .collect()
+    }
+
+    const CREDENTIALS: &str = "merge_guard = \"credentials\"";
+
+    #[test]
+    fn rulesets_are_read_only_for_repos_a_credentials_lead_runs_on() {
+        let (m, _) = on_one_repo(&[("h", ""), ("m", "merge = true")]);
+
+        assert_eq!(
+            ruleset_lines(&m, None, &FakeRulesets(vec![])),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_credentials_lead_whose_rulesets_match_its_switches_passes() {
+        for (rebase, force) in [("", false), ("rebase = true", true)] {
+            let (m, repo) = on_one_repo(&[("h", &format!("{CREDENTIALS}\n{rebase}"))]);
+            let found = vec![
+                crate::merge_guard::default_branch_ruleset(),
+                crate::merge_guard::force_push_ruleset(force),
+            ];
+
+            assert_eq!(
+                ruleset_lines(&m, None, &FakeRulesets(vec![(repo, Ok(found))])),
+                Vec::<String>::new(),
+                "{rebase}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_credentials_lead_missing_a_ruleset_or_with_the_wrong_bypass_is_warned() {
+        let (m, repo) = on_one_repo(&[("h", &format!("{CREDENTIALS}\nrebase = true"))]);
+        let mut changed = crate::merge_guard::default_branch_ruleset();
+        changed["rules"] = json!([{"type": "deletion"}]);
+        let found = vec![changed, crate::merge_guard::force_push_ruleset(false)];
+
+        assert_eq!(
+            ruleset_lines(&m, None, &FakeRulesets(vec![(repo.clone(), Ok(found))])),
+            [
+                format!(
+                    "warning herd h rulesets: {} has no ruleset loopherd: default branch as \
+                     loopherd merge-guard makes it, so nothing on GitHub stops a push to the \
+                     default branch; fix: loopherd merge-guard h",
+                    repo.display()
+                ),
+                "warning herd h rulesets: rebase is on, but loopherd: no force-push stops \
+                 deploy keys too, so its lead can't force-push; fix: loopherd merge-guard h"
+                    .to_string(),
+            ]
+        );
+
+        let (m, repo) = on_one_repo(&[("h", CREDENTIALS)]);
+        let found = vec![
+            crate::merge_guard::default_branch_ruleset(),
+            crate::merge_guard::force_push_ruleset(true),
+        ];
+        assert_eq!(
+            ruleset_lines(&m, None, &FakeRulesets(vec![(repo, Ok(found))])),
+            [
+                "warning herd h rulesets: rebase is off, but loopherd: no force-push lets deploy \
+              keys force-push; fix: loopherd merge-guard h"
+            ]
+        );
+    }
+
+    #[test]
+    fn herds_on_one_repo_that_need_different_rulesets_are_warned() {
+        let (m, repo) = on_one_repo(&[
+            ("a", CREDENTIALS),
+            ("b", &format!("{CREDENTIALS}\nrebase = true")),
+            ("c", "merge = true"),
+            ("d", "rebase = true"),
+        ]);
+        let found = vec![
+            crate::merge_guard::default_branch_ruleset(),
+            crate::merge_guard::force_push_ruleset(false),
+        ];
+        let rules = FakeRulesets(vec![(repo.clone(), Ok(found))]);
+        let shared = repo.display();
+
+        assert_eq!(
+            ruleset_lines(&m, None, &rules),
+            [
+                "warning herd b rulesets: rebase is on, but loopherd: no force-push stops \
+                 deploy keys too, so its lead can't force-push; fix: loopherd merge-guard b"
+                    .to_string(),
+                format!(
+                    "warning herd b rulesets: herds a and b both run on {shared} but need \
+                     different force-push bypasses (rebase off in a, on in b), and one ruleset \
+                     can't enforce both; fix: give them the same rebase"
+                ),
+                format!(
+                    "warning herd c rulesets: its lead has merge on, but loopherd: default branch \
+                     on {shared} stops its merges; fix: loopherd herd set c lead.merge false, or \
+                     run herd c on a repo of its own"
+                ),
+                format!(
+                    "warning herd d rulesets: rebase is on, but loopherd: no force-push on \
+                     {shared} stops its force-pushes, made with your credentials; fix: \
+                     loopherd herd set d lead.rebase false, or run herd d on a repo of its own"
+                ),
+            ]
+        );
+        assert_eq!(
+            ruleset_lines(&m, Some("c"), &rules),
+            [format!(
+                "warning herd c rulesets: its lead has merge on, but loopherd: default branch \
+                 on {shared} stops its merges; fix: loopherd herd set c lead.merge false, or \
+                 run herd c on a repo of its own"
+            )]
+        );
+    }
+
+    #[test]
+    fn rulesets_that_cant_be_read_are_warned_once_per_repo() {
+        let (m, repo) = on_one_repo(&[("a", CREDENTIALS), ("b", CREDENTIALS)]);
+        let rules = FakeRulesets(vec![(repo.clone(), Err("gh api: HTTP 404".into()))]);
+
+        assert_eq!(
+            ruleset_lines(&m, None, &rules),
+            [format!(
+                "warning herds a, b rulesets: can't read the rulesets of {}: gh api: HTTP 404; \
+                 fix: check gh can reach the repo, then loopherd doctor",
+                repo.display()
+            )]
         );
     }
 

@@ -2033,6 +2033,10 @@ fn run_doctor(
     };
     let checks = doctor_install(settings).and_then(|install| {
         let mut checks = doctor::checks(&install, &setup(), herd.as_deref(), &CliHerdr)?;
+        if let Ok(paths) = Paths::from_env() {
+            let rules = github::GhCli::default();
+            checks.extend(doctor::ruleset_checks(&paths, herd.as_deref(), &rules));
+        }
         if trackers {
             let paths = Paths::from_env()?;
             let only = herd.as_deref();

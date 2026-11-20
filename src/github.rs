@@ -158,6 +158,29 @@ impl Merges for GhCli {
     }
 }
 
+impl crate::doctor::Rulesets for GhCli {
+    fn loopherd_rulesets(&self, repo: &Path) -> Result<Vec<serde_json::Value>> {
+        let slug = github_com_origin(repo)?.slug;
+        let list = format!("repos/{slug}/rulesets?includes_parents=false");
+        let listed: Vec<serde_json::Value> =
+            serde_json::from_str(&self.answer(repo, &["api", &list])?)
+                .context("read gh's list of rulesets")?;
+        let ours = [
+            crate::merge_guard::DEFAULT_BRANCH_RULESET,
+            crate::merge_guard::FORCE_PUSH_RULESET,
+        ];
+        listed
+            .iter()
+            .filter(|r| ours.iter().any(|name| r["name"] == *name))
+            .map(|r| {
+                let one = format!("repos/{slug}/rulesets/{}", r["id"]);
+                serde_json::from_str(&self.answer(repo, &["api", &one])?)
+                    .context("read gh's ruleset")
+            })
+            .collect()
+    }
+}
+
 impl PrHeads for GhCli {
     fn head_of(&self, pr: &str) -> Result<Option<PrHead>> {
         let args = [
