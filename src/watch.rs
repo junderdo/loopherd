@@ -4009,6 +4009,16 @@ mod tests {
     }
 
     #[test]
+    fn a_done_member_whose_role_is_from_another_version_frees_no_slot() {
+        let mut world = Checked::with_template("done = \"exit 0\"\nmerged = \"exit 0\"\n");
+        world.edit_herd(|herd| herd.replace("max = 2", "max = 1"));
+        world.ledger.0.get_mut("lh-1").unwrap().role =
+            Some(crate::ledger::Role::Unknown("reviewer".into()));
+        world.touch("tasks", "1\n2\n3\n");
+        assert_eq!(world.once("w9:p0"), None);
+    }
+
+    #[test]
     fn a_done_worker_frees_its_slot_unless_its_after_merge_is_due_or_its_merged_check_errors() {
         let none = None;
         let noted = Some(AfterMerge::Noted);
