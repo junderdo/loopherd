@@ -1223,13 +1223,13 @@ mod tests {
 
     #[test]
     fn user_settings_that_the_leads_own_settings_already_set_dont_count() {
-        let setup = Setup::with_lead("prompt = \"go\"");
+        let setup = Setup::with_lead("prompt = \"go\"\ninstall = true");
         let worktree = setup.worktree();
         let paths = home_with_settings(
             &setup,
             &format!(
                 r#"{{"sandbox": {{"enabled": false, "allowUnsandboxedCommands": true,
-                    "excludedCommands": ["loopherd retire *"],
+                    "excludedCommands": ["scripts/install *"],
                     "enableWeakerNestedSandbox": false,
                     "filesystem": {{"allowWrite": [{worktree:?}], "allowRead": ["/srv"]}}}},
                     "permissions": {{"allow": ["Bash(*)", "Read(//srv/**)"]}}}}"#
