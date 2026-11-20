@@ -340,6 +340,47 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_can_write_its_own_broker_requests_and_no_other_leads() {
+        let setup = Setup::with_lead(PROMPT);
+        let herdr = herdr();
+
+        lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        let (_, settings) = started_settings(&herdr);
+        let state = setup.root.join("state");
+        let own = state.join("broker/lead-h/requests");
+        let other = state.join("broker/lead-g/requests");
+        let allowed: Vec<PathBuf> = settings["sandbox"]["filesystem"]["allowWrite"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| PathBuf::from(p.as_str().unwrap()))
+            .collect();
+        assert!(allowed.contains(&own), "{allowed:?}");
+        assert!(
+            own.is_dir(),
+            "an allowWrite path that's missing opens nothing"
+        );
+        assert!(
+            !allowed.iter().any(|dir| other.starts_with(dir)),
+            "{allowed:?}"
+        );
+        let deny = &settings["permissions"]["deny"];
+        let file_tools = format!("Edit(/{}/**)", state.join("broker").display());
+        assert!(
+            deny.as_array().unwrap().iter().any(|r| r == &file_tools),
+            "{deny}"
+        );
+    }
+
+    #[test]
     fn a_lead_starts_in_the_sandbox_with_settings_written_outside_its_worktree() {
         let setup = Setup::with_lead(PROMPT);
         let herdr = herdr();
@@ -370,6 +411,7 @@ mod tests {
                             format!("{root}/proj/worktrees/lead-h"),
                             format!("{root}/state/reports"),
                             format!("{root}/state/handoffs"),
+                            format!("{root}/state/broker/lead-h/requests"),
                         ],
                         "denyWrite": [
                             format!("{root}/config"),
@@ -404,6 +446,7 @@ mod tests {
                         format!("Edit(/{root}/config/**)"),
                         "Edit(//home/me/.claude/**)",
                         format!("Edit(/{root}/state/paused/**)"),
+                        format!("Edit(/{root}/state/broker/**)"),
                         format!("Edit(/{root}/state/shepherd.json)"),
                         format!("Edit(/{root}/state/shepherd.json.lock)"),
                         format!("Edit(/{root}/state/ledger.json)"),
@@ -631,7 +674,7 @@ mod tests {
         let (_, settings) = started_settings(&herdr);
         let sandbox = &settings["sandbox"];
         assert_eq!(
-            sandbox["filesystem"]["allowWrite"][3],
+            sandbox["filesystem"]["allowWrite"][4],
             "/home/me/.local/bin"
         );
         assert_eq!(
