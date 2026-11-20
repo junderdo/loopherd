@@ -1244,8 +1244,13 @@ impl Recorded {
             github: issue
                 .and_then(|t| t.get("merged"))
                 .and_then(toml::Value::as_str)
-                .and_then(|merged| merged.split_once(" gh pr list --repo "))
-                .and_then(|(_, rest)| rest.split_whitespace().next())
+                .and_then(|merged| {
+                    let list = "gh pr list --repo ";
+                    let (at, _) = merged
+                        .match_indices(list)
+                        .find(|(at, _)| *at == 0 || merged[..*at].ends_with(' '))?;
+                    merged[at + list.len()..].split_whitespace().next()
+                })
                 .map(String::from),
             has_merged: issue.is_some_and(|t| t.contains_key("merged")),
         })
