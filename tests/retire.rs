@@ -1,6 +1,8 @@
 //! `loopherd retire` without `--close`, through the binary.
 //! Without a stub `herdr` on PATH, herdr can't be reached and no member is at work.
 
+mod fakes;
+
 use std::fs::{self, File};
 use std::os::fd::AsRawFd;
 use std::path::Path;
@@ -162,6 +164,12 @@ struct Broker(Child);
 
 impl Broker {
     fn start(state: &Path) -> Broker {
+        Broker::start_with(state, None, &[])
+    }
+
+    /// Starts the broker with `bin` first on its PATH and `env` set, as the
+    /// shell that started it had them.
+    fn start_with(state: &Path, bin: Option<&Path>, env: &[(&str, &str)]) -> Broker {
         let sandbox = state.join("config/sandbox");
         fs::create_dir_all(&sandbox).unwrap();
         fs::write(
@@ -169,13 +177,23 @@ impl Broker {
             r#"{"herd": "k", "args": []}"#,
         )
         .unwrap();
+        let herd = state.join("config/herds/k.toml");
+        if !herd.exists() {
+            fs::create_dir_all(herd.parent().unwrap()).unwrap();
+            fs::write(&herd, "repo = \"/\"\n").unwrap();
+        }
         let bin_dir = Path::new(env!("CARGO_BIN_EXE_loopherd")).parent().unwrap();
+        let first = bin.map(|b| format!("{}:", b.display())).unwrap_or_default();
         let child = Command::new(env!("CARGO_BIN_EXE_loopherd"))
             .args(["broker", "lead-k"])
             .env("XDG_STATE_HOME", state)
             .env("LOOPHERD_CONFIG_DIR", state.join("config"))
             .env("CLAUDE_CONFIG_DIR", state.join("claude"))
-            .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+            .env(
+                "PATH",
+                format!("{first}{}:/usr/bin:/bin", bin_dir.display()),
+            )
+            .envs(env.iter().copied())
             .env("HERDR_SOCKET_PATH", SOCKET)
             .env_remove("HERDR_PANE_ID")
             .stdin(Stdio::null())
@@ -491,4 +509,156 @@ fn rerunning_close_records_tokens_a_failed_retire_left_out_and_never_twice() {
             .starts_with(retired_at),
         "stamped at the retirement, where stats reads it: {text}"
     );
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+}
+
+/// Herd k on a GitHub repo, whose lead guards merges by credentials, with
+/// its deploy key and token, and retired worker lh-1, whose branch is still
+/// there to release.
+fn write_credentials_herd(state: &Path) {
+    let repo = state.join("repos/k");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "--quiet", "-b", "main"]);
+    git(
+        &repo,
+        &["commit", "--quiet", "--allow-empty", "-m", "start"],
+    );
+    git(&repo, &["branch", "lh-1"]);
+    let url = "https://github.com/acme/widgets.git";
+    git(&repo, &["remote", "add", "origin", url]);
+    fs::create_dir_all(state.join("config/herds")).unwrap();
+    let herd = format!(
+        "repo = {:?}\n[template.t]\nparams = []\nprompt = \"go\"\n\
+         [lead]\nprompt = \"go\"\nmerge_guard = \"credentials\"\n",
+        repo.display().to_string()
+    );
+    fs::write(state.join("config/herds/k.toml"), herd).unwrap();
+    fs::create_dir_all(state.join("config/credentials")).unwrap();
+    fs::write(state.join("config/credentials/k.key"), "a private key\n").unwrap();
+    fs::write(
+        state.join("config/credentials/k.token"),
+        "github_pat_lead\n",
+    )
+    .unwrap();
+    fs::create_dir_all(state.join("loopherd")).unwrap();
+    let ledger = format!(
+        r#"{{"lead-k": {{"name": "lead-k", "pane_id": "{LEAD_PANE}", "session_id": null,
+            "repo": "/", "worktree": null, "workspace": "w1", "prompt": null,
+            "prompt_sent": true, "created": "2026-11-01T00:00:00Z",
+            "socket": "{SOCKET}", "herd": "k", "role": "lead"}},
+          "lh-1": {{"name": "lh-1", "pane_id": "w1:p2", "session_id": null,
+            "repo": {repo:?}, "worktree": null, "branch": "lh-1", "workspace": "w1",
+            "prompt": null, "prompt_sent": true, "created": "2026-11-01T00:00:00Z",
+            "socket": "{SOCKET}", "herd": "k", "retired": true,
+            "retired_at": "2026-11-02T00:00:00Z"}}}}"#,
+        repo = repo.display().to_string()
+    );
+    fs::write(state.join("loopherd/ledger.json"), ledger).unwrap();
+}
+
+/// A `herdr` that shows no agents, and a `git` and `gh` that log each call
+/// reaching origin with the credentials it carries and fail it; other git
+/// calls go to the real git.
+fn write_fakes(bin: &Path) {
+    fs::create_dir_all(bin).unwrap();
+    let real_git = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let real_git = String::from_utf8_lossy(&real_git.stdout).trim().to_string();
+    let calls = bin.join("calls");
+    let log = format!(
+        r#"echo "$0 $* GH_TOKEN=$GH_TOKEN SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> {}"#,
+        calls.display()
+    );
+    fakes::executable(
+        &bin.join("git"),
+        format!(
+            "#!/bin/sh\n\
+             case \"$*\" in\n\
+             *ls-remote*|*fetch*|*push*) {log}; echo 'fatal: offline' >&2; exit 128 ;;\n\
+             esac\n\
+             exec {real_git} \"$@\"\n"
+        ),
+    );
+    fakes::executable(&bin.join("gh"), format!("#!/bin/sh\n{log}\nexit 1\n"));
+    fakes::executable(
+        &bin.join("herdr"),
+        "#!/bin/sh\n\
+         case \"$1 $2\" in\n\
+         \"status server\") echo '{\"running\": true}' ;;\n\
+         \"agent list\") echo '{\"result\": {\"agents\": []}}' ;;\n\
+         \"workspace list\") echo '{\"result\": {\"workspaces\": []}}' ;;\n\
+         *) echo '{\"result\": {}}' ;;\n\
+         esac\n",
+    );
+}
+
+#[test]
+fn a_credentials_herds_broker_reaches_origin_with_its_leads_token_not_its_starters() {
+    let state = tempfile::tempdir().unwrap();
+    write_credentials_herd(state.path());
+    let bin = state.path().join("bin");
+    write_fakes(&bin);
+    let starter = [
+        ("GH_TOKEN", "the_humans_token"),
+        ("SSH_AUTH_SOCK", "/run/the-humans-agent.sock"),
+    ];
+    let _broker = Broker::start_with(state.path(), Some(&bin), &starter);
+
+    let out = shell_in(state.path(), Some(LEAD_PANE), "loopherd release lh-1");
+
+    let calls = fs::read_to_string(bin.join("calls")).unwrap_or_default();
+    let ls_remote = calls
+        .lines()
+        .find(|line| line.contains("ls-remote"))
+        .unwrap_or_else(|| panic!("release never asked origin: {calls}\n{out:?}"));
+    assert!(
+        ls_remote.ends_with(" GH_TOKEN=github_pat_lead SSH_AUTH_SOCK="),
+        "{ls_remote}"
+    );
+    assert!(!calls.contains("the_humans_token"), "{calls}");
+    assert!(!calls.contains("the-humans-agent"), "{calls}");
+}
+
+#[test]
+fn a_credentials_herds_broker_without_its_token_fails_to_start_naming_the_fix() {
+    let state = tempfile::tempdir().unwrap();
+    write_credentials_herd(state.path());
+    fs::remove_file(state.path().join("config/credentials/k.token")).unwrap();
+    let sandbox = state.path().join("config/sandbox");
+    fs::create_dir_all(&sandbox).unwrap();
+    fs::write(
+        sandbox.join("lead-k.lead.json"),
+        r#"{"herd": "k", "args": []}"#,
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .args(["broker", "lead-k"])
+        .env("XDG_STATE_HOME", state.path())
+        .env("LOOPHERD_CONFIG_DIR", state.path().join("config"))
+        .env_remove("HERDR_PANE_ID")
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(
+            "lead-k's broker can't start: herd k guards merges by credentials: no token at "
+        ) && stderr.contains("run loopherd merge-guard k"),
+        "{stderr}"
+    );
+    assert!(!state.path().join("config/broker/lead-k.lock").exists());
 }

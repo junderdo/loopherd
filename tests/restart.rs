@@ -53,6 +53,8 @@ impl Broker {
             r#"{"herd": "h", "args": []}"#,
         )
         .unwrap();
+        fs::create_dir_all(state.join("config/herds")).unwrap();
+        fs::write(state.join("config/herds/h.toml"), "repo = \"/\"\n").unwrap();
         let child = command(state, &["broker", "lh-1"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

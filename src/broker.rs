@@ -608,6 +608,35 @@ pub fn serve(
     }
 }
 
+/// The environment `lead`'s broker takes on before it serves, so its git
+/// and gh reach origin with the lead's narrowed credentials, as in the
+/// lead's sandbox: none unless the herd its launch record names guards
+/// merges by credentials (D95). Errs, naming the fix, while they're missing.
+pub fn lead_env(paths: &Paths, lead: &str) -> Result<Vec<(String, String)>> {
+    use crate::herd::MergeGuard;
+    validate_name(lead)?;
+    let Some(kept) = sandbox::Lead::kept(paths, lead)? else {
+        return Ok(vec![]);
+    };
+    let herd = &kept.herd;
+    let guard = crate::herd::merge_guard(paths, herd).with_context(|| {
+        format!(
+            "{lead}'s broker can't start: whether herd {herd} guards merges by credentials \
+             is unknown"
+        )
+    })?;
+    if guard != Some(MergeGuard::Credentials) {
+        return Ok(vec![]);
+    }
+    let env = crate::credentials::lead_env(paths, herd).with_context(|| {
+        format!("{lead}'s broker can't start: herd {herd} guards merges by credentials")
+    })?;
+    Ok(env
+        .into_iter()
+        .map(|(name, value)| (name, value.as_str().unwrap_or_default().to_string()))
+        .collect())
+}
+
 struct Broker<'a> {
     lead: &'a str,
     herd: &'a str,
@@ -2424,5 +2453,94 @@ mod tests {
 
         assert_eq!(first, ["a.json", "b.json"]);
         assert_eq!(second, first);
+    }
+
+    /// Herd `c` on a GitHub repo, whose lead `lead-c` guards merges by
+    /// credentials, with its deploy key and `token`, if any.
+    fn credentials_herd(world: &World, token: Option<&str>) {
+        use crate::worktree::testing::git;
+        let repo = world.dir.path().join("repos/c");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--quiet"]).unwrap();
+        let url = "https://github.com/acme/widgets.git";
+        git(&repo, &["remote", "add", "origin", url]).unwrap();
+        let text = format!(
+            "repo = {:?}\n[template.t]\nparams = []\nprompt = \"go\"\n\
+             [lead]\nprompt = \"go\"\nmerge_guard = \"credentials\"\n",
+            repo.to_str().unwrap()
+        );
+        std::fs::write(world.paths.herds.join("c.toml"), text).unwrap();
+        let sandbox = world.paths.config_dir().join("sandbox");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        std::fs::write(
+            sandbox.join("lead-c.lead.json"),
+            r#"{"herd": "c", "args": []}"#,
+        )
+        .unwrap();
+        let files = crate::credentials::files(&world.paths, "c");
+        std::fs::create_dir_all(files.key.parent().unwrap()).unwrap();
+        std::fs::write(&files.key, "a private key\n").unwrap();
+        if let Some(token) = token {
+            std::fs::write(&files.token, token).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_credentials_herds_broker_takes_on_its_leads_token_and_drops_the_ssh_agent() {
+        let world = World::new();
+        credentials_herd(&world, Some("github_pat_1\n"));
+
+        let env = lead_env(&world.paths, "lead-c").unwrap();
+
+        let var = |name: &str| {
+            env.iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(var("GH_TOKEN"), Some("github_pat_1"));
+        assert_eq!(var("SSH_AUTH_SOCK"), Some(""));
+        assert_eq!(var("GIT_CONFIG_KEY_0"), Some("credential.helper"));
+        assert_eq!(var("GIT_CONFIG_VALUE_0"), Some(""));
+    }
+
+    #[test]
+    fn a_hook_guarded_or_unrecorded_leads_broker_keeps_its_starters_environment() {
+        let world = World::new();
+
+        assert_eq!(lead_env(&world.paths, "lead-h").unwrap(), []);
+        assert_eq!(lead_env(&world.paths, "lead-x").unwrap(), []);
+    }
+
+    #[test]
+    fn a_broker_whose_herd_file_cant_be_read_fails_to_start_rather_than_guess() {
+        let world = World::new();
+        std::fs::remove_file(world.paths.herds.join("h.toml")).unwrap();
+
+        let err = lead_env(&world.paths, "lead-h").unwrap_err();
+
+        assert!(
+            format!("{err:#}").starts_with(
+                "lead-h's broker can't start: whether herd h guards merges by credentials is unknown: "
+            ),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn a_credentials_herds_broker_without_its_token_fails_to_start_naming_the_fix() {
+        let world = World::new();
+        credentials_herd(&world, None);
+
+        let err = lead_env(&world.paths, "lead-c").unwrap_err();
+
+        let token = crate::credentials::files(&world.paths, "c").token;
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "lead-c's broker can't start: herd c guards merges by credentials: no token at {}; \
+                 run loopherd merge-guard c for how to create and store it",
+                token.display()
+            )
+        );
     }
 }
