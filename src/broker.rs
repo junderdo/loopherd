@@ -229,7 +229,7 @@ impl Dir {
         // SAFETY: fdopendir takes ownership of the dup, which closedir closes;
         // each entry is read before the next readdir.
         unsafe {
-            let fd = libc::dup(self.0.as_raw_fd());
+            let fd = libc::fcntl(self.0.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0);
             if fd < 0 {
                 return names;
             }
