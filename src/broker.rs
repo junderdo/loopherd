@@ -719,8 +719,8 @@ pub struct Host<'a> {
 ///
 /// Requests run in three lanes, each one at a time: herd changes (feed,
 /// add, restart, retire, release), status, and everything else, so a long
-/// feed holds up no tell. Once its lead retires it refuses every request
-/// it hasn't started, and returns when the ones it has end.
+/// feed holds up no tell. While its lead reads retired it refuses every
+/// request it hasn't started, and returns once none is in flight.
 pub fn serve<L: Ledger + Clone + Send>(
     host: &Host,
     ledger: &L,
@@ -754,18 +754,17 @@ pub fn serve<L: Ledger + Clone + Send>(
     let retired = AtomicBool::new(false);
     std::thread::scope(|scope| {
         let (done_tx, done) = mpsc::channel::<String>();
-        let mut lanes = vec![];
         let mut senders = vec![];
         for _ in [Lane::Quick, Lane::Herd, Lane::Status] {
             let (tx, jobs) = mpsc::channel::<Job>();
             let (mut ledger, done_tx) = (ledger.clone(), done_tx.clone());
             let (broker, replies, retired) = (&broker, &replies, &retired);
-            lanes.push(scope.spawn(move || {
+            scope.spawn(move || {
                 for job in jobs {
                     broker.take_up(&mut ledger, &job, replies, retired);
                     let _ = done_tx.send(job.name);
                 }
-            }));
+            });
             senders.push(tx);
         }
         let mut in_flight = HashSet::new();
@@ -773,12 +772,10 @@ pub fn serve<L: Ledger + Clone + Send>(
             for name in done.try_iter() {
                 in_flight.remove(&name);
             }
-            if !retired.load(Ordering::SeqCst) && !unretired(ledger, lead) {
-                retired.store(true, Ordering::SeqCst);
-                senders.clear();
-            }
-            let stopping = retired.load(Ordering::SeqCst);
-            if stopping && lanes.iter().all(|lane| lane.is_finished()) {
+            // Read every round: `lead` may relaunch a retired lead under its name.
+            let stopping = !unretired(ledger, lead);
+            retired.store(stopping, Ordering::SeqCst);
+            if stopping && in_flight.is_empty() {
                 return Ok(Served::Retired);
             }
             // Reopened each round: the lead can replace any folder on the way.
@@ -2809,6 +2806,29 @@ mod tests {
         assert!(!serving.is_finished());
         drop(release);
         assert_eq!(fed.join().unwrap().unwrap().2, 0);
+        let (served, _) = serving.join().unwrap();
+        assert_eq!(served.unwrap(), Served::Retired);
+    }
+
+    #[test]
+    fn a_lead_relaunched_under_its_name_mid_feed_is_served_by_the_same_broker() {
+        let (world, herdr, entered, release) = slow_feed();
+        let serving = world.serve(herdr);
+        let fed = feeding(&world, &entered);
+        world.retire("lead-h");
+        let refused = world.client().call(&tell("lh-1", "hi")).unwrap_err();
+        assert!(format!("{refused:#}").contains("is retired"), "{refused:#}");
+
+        world.launch("lead-h", "h");
+        let told = world.client().call(&tell("lh-1", "hi"));
+        drop(release);
+        assert_eq!(fed.join().unwrap().unwrap().2, 0);
+        let after_the_feed = world.client().call(&tell("lh-1", "again"));
+
+        assert_eq!(told.unwrap().2, 0);
+        assert_eq!(after_the_feed.unwrap().2, 0);
+        assert!(!serving.is_finished());
+        world.retire("lead-h");
         let (served, _) = serving.join().unwrap();
         assert_eq!(served.unwrap(), Served::Retired);
     }
