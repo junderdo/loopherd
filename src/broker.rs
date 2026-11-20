@@ -385,13 +385,22 @@ impl Broker<'_> {
             caller,
         };
         let mut kept = Kept::default();
-        match op.carry_out(&mut ctx, &mut kept) {
-            Ok(code) => Reply::Done {
-                out: kept.out.join("\n"),
-                err: kept.err.join("\n"),
-                code,
-            },
-            Err(e) => Reply::Failed(format!("{e:#}")),
+        let carried = op.carry_out(&mut ctx, &mut kept);
+        if let Err(e) = &carried
+            && kept.out.is_empty()
+            && kept.err.is_empty()
+        {
+            return Reply::Failed(format!("{e:#}"));
+        }
+        // What it printed before failing is part of the answer, as it is run directly.
+        let code = carried.unwrap_or_else(|e| {
+            kept.err(&format!("loopherd {}: {e:#}", op.command()));
+            1
+        });
+        Reply::Done {
+            out: kept.out.join("\n"),
+            err: kept.err.join("\n"),
+            code,
         }
     }
 
@@ -426,7 +435,7 @@ impl Broker<'_> {
                     "herd {other} isn't {lead}'s; {lead} reaches only herd {herd}"
                 )));
             }
-            Reach::Herd(_) => return self.template_refusal(op),
+            Reach::Herd(_) => return self.start_refusal(op),
             Reach::Member(target) => target,
         };
         let reach = format!("{lead} reaches only herd {herd}'s workers");
