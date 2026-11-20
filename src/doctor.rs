@@ -315,13 +315,14 @@ fn state_checks(
             .filter(|r| !r.retired && r.is_lead())
             .filter_map(|lead| lead_sandbox_check(&setup.paths, lead)),
     );
-    // A lead on another herdr has its broker under that herdr's config dir.
-    let here = reached.as_ref().map(|(_, socket)| socket.as_deref());
+    // A lead known to be on another herdr has its broker under that herdr's
+    // config dir; one whose herdr can't be told apart is checked, as revive starts it.
+    let here = reached.as_ref().and_then(|(_, socket)| socket.as_deref());
     checks.extend(
         members
             .iter()
             .filter(|r| !r.retired && r.is_lead())
-            .filter(|lead| here.is_none_or(|here| !elsewhere(here, lead)))
+            .filter(|lead| here.is_none_or(|here| !elsewhere(Some(here), lead)))
             .filter(|lead| !crate::broker::running(&setup.paths, &lead.name))
             .map(|lead| {
                 let name = &lead.name;
@@ -1749,18 +1750,23 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
 
-        let found: Vec<_> = problems(&m, &herdr())
-            .into_iter()
-            .filter(|p| p.contains("broker"))
-            .collect();
+        let brokers = |socket: Option<&str>| -> Vec<String> {
+            let mut herdr = herdr();
+            herdr.socket = socket.map(PathBuf::from);
+            problems(&m, &herdr)
+                .into_iter()
+                .filter(|p| p.contains("broker"))
+                .collect()
+        };
+        let down = |name: &str| {
+            format!(
+                "failure broker {name}: no broker is running for {name}, so its \
+                 loopherd commands fail; fix: loopherd revive --name {name}"
+            )
+        };
 
-        assert_eq!(
-            found,
-            [
-                "failure broker lead-down: no broker is running for lead-down, so its \
-              loopherd commands fail; fix: loopherd revive --name lead-down"
-            ]
-        );
+        assert_eq!(brokers(Some("/run/live.sock")), [down("lead-down")]);
+        assert_eq!(brokers(None), [down("lead-dev"), down("lead-down")]);
         let mut ledger = FileLedger::new(m.state().join("ledger.json"));
         ledger
             .update("lead-up", &mut |r| {
