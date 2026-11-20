@@ -357,7 +357,8 @@ fn reap(
             if live(req.procs, Some(owner)).is_some() {
                 lines.push(format!("after_merge {name}: running in feed {}", owner.pid));
             } else {
-                interrupted(ledger, req, name, owner, lines)?;
+                let why = "the feed running it exited before noting an outcome";
+                interrupted(ledger, req, name, owner, why, lines)?;
             }
             continue;
         }
@@ -600,6 +601,7 @@ fn interrupted(
     req: &FeedRequest,
     name: &str,
     owner: Process,
+    why: &str,
     lines: &mut Vec<String>,
 ) -> Result<()> {
     if req.dry_run {
@@ -620,17 +622,19 @@ fn interrupted(
         .context("ledger")?;
     if claimed {
         lines.push(format!("after_merge {name}: interrupted"));
-        let text = "after_merge interrupted: the feed running it exited before noting an outcome; \
-                    check what ran and finish its commands by hand";
-        note(req, name, text, lines);
+        let text = format!(
+            "after_merge interrupted: {why}; check what ran and finish its commands by hand"
+        );
+        note(req, name, &text, lines);
     }
     Ok(())
 }
 
 /// Notes interrupted every after_merge still pending on this feed's
 /// `req.owner`, for a feed that failed and whose process lives on, as a
-/// broker's does. Returns a line per member, and a warning if it can't.
-pub fn abandon(ledger: &mut dyn Ledger, req: &FeedRequest) -> Vec<String> {
+/// broker's does, saying `why` in each member's note. Returns a line per
+/// member, and a warning if it can't.
+pub fn abandon(ledger: &mut dyn Ledger, req: &FeedRequest, why: &str) -> Vec<String> {
     let mut lines = vec![];
     let pending = Some(AfterMerge::Pending { owner: req.owner });
     let names: Vec<String> = match ledger.entries() {
@@ -642,7 +646,7 @@ pub fn abandon(ledger: &mut dyn Ledger, req: &FeedRequest) -> Vec<String> {
         Err(e) => return vec![format!("warning: ledger: {e:#}; after_merge left pending")],
     };
     for name in names {
-        if let Err(e) = interrupted(ledger, req, &name, req.owner, &mut lines) {
+        if let Err(e) = interrupted(ledger, req, &name, req.owner, why, &mut lines) {
             lines.push(format!("warning: {name}: {e:#}; after_merge left pending"));
         }
     }
@@ -3235,7 +3239,7 @@ mod tests {
             ledger.0.get_mut(name).unwrap().after_merge = Some(AfterMerge::Pending { owner });
         }
 
-        let lines = abandon(&mut ledger, &setup.request(false, None));
+        let lines = abandon(&mut ledger, &setup.request(false, None), "it failed: boom");
 
         assert_eq!(lines, ["after_merge zpr-1: interrupted"]);
         assert_eq!(ledger.0["zpr-1"].after_merge, Some(AfterMerge::Noted));
@@ -3243,6 +3247,11 @@ mod tests {
             ledger.0["zpr-2"].after_merge,
             Some(AfterMerge::Pending { owner: elsewhere })
         );
-        assert!(setup.notes("zpr-1")[0].starts_with("after_merge interrupted: "));
+        assert_eq!(
+            setup.notes("zpr-1"),
+            [
+                "after_merge interrupted: it failed: boom; check what ran and finish its commands by hand"
+            ]
+        );
     }
 }

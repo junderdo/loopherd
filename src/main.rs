@@ -2268,11 +2268,8 @@ fn own_pane() -> Option<String> {
 }
 
 fn run_spawn(args: SpawnArgs) -> Result<i32> {
-    if own_broker().is_some() {
-        bail!(
-            "a lead can't run loopherd spawn: add and feed start its herd's workers from its herd file"
-        );
-    }
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    broker::refuse_spawn(own_broker().as_ref(), &ledger)?;
     let prompt = match &args.prompt_file {
         Some(path) => Some(Prompt {
             source: format!("--prompt-file {}", path.display()),

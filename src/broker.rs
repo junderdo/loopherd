@@ -193,13 +193,19 @@ fn feed(
         }
         Ok(fed.code)
     }));
+    let failed = match &ran {
+        Ok(Ok(_)) => None,
+        Ok(Err(e)) => Some(format!("the feed failed before noting an outcome: {e:#}")),
+        Err(_) => Some("the feed panicked before noting an outcome".to_string()),
+    };
     // A broker outlives its feeds, so no later feed would see these as interrupted.
-    if !matches!(ran, Ok(Ok(_))) && !dry_run {
-        for line in crate::feed::abandon(ctx.ledger, &req) {
+    if let Some(why) = failed.filter(|_| !dry_run) {
+        for line in crate::feed::abandon(ctx.ledger, &req, &why) {
             sink.err(&line);
         }
     }
-    ran.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    // An error, not a panic, so a broker's reply keeps the lines above.
+    ran.unwrap_or_else(|_| Err(anyhow!("the feed panicked")))
 }
 
 fn add(ctx: &mut Ctx, req: &AddRequest, dry_run: bool, sink: &mut dyn Sink) -> Result<i32> {
@@ -275,6 +281,7 @@ const REPLY_KEPT: Duration = Duration::from_secs(600);
 /// `ctx`, returning its exit code.
 pub fn run(ctx: &mut Ctx, client: Option<&Client>, op: &Op, sink: &mut dyn Sink) -> Result<i32> {
     let Some(client) = client else {
+        refuse_unrouted(&*ctx.ledger, op.command())?;
         return op.carry_out(ctx, sink);
     };
     let (out, err, code) = client.call(op)?;
@@ -285,6 +292,30 @@ pub fn run(ctx: &mut Ctx, client: Option<&Client>, op: &Op, sink: &mut dyn Sink)
         sink.err(&err);
     }
     Ok(code)
+}
+
+/// Refuses a lead's `loopherd spawn`, routed by `client`, and a spawn in a
+/// sandbox that found no lead to route by.
+pub fn refuse_spawn(client: Option<&Client>, ledger: &dyn Ledger) -> Result<()> {
+    if client.is_some() {
+        bail!(
+            "a lead can't run loopherd spawn: add and feed start its herd's workers from its herd file"
+        );
+    }
+    refuse_unrouted(ledger, "spawn")
+}
+
+/// Refuses `command` run directly where the ledger is read-only: in a lead's
+/// sandbox, yet the ledger places no lead in this pane, so no broker runs it.
+fn refuse_unrouted(ledger: &dyn Ledger, command: &str) -> Result<()> {
+    if ledger.read_only()? {
+        bail!(
+            "refused: this loopherd runs in a sandbox, where it can't {command} itself, and the \
+             ledger places no lead in this pane (as after the pane moved), so no lead's broker \
+             can; ask the shepherd, whose loopherd doctor checks each lead's broker"
+        );
+    }
+    Ok(())
 }
 
 /// What a broker runs operations with, beside the ledger and paths.
@@ -964,6 +995,47 @@ mod tests {
         fn client(&self) -> Client {
             Client::for_lead(&self.paths, "lead-h")
         }
+
+        /// The route from pane `id` inside a lead's sandbox, whose own pid
+        /// namespace hides the lead's Claude: by pane and socket alone.
+        fn route_from(&self, id: &str) -> Option<Client> {
+            let socket = Path::new(crate::herdr::fake::FAKE_SOCKET);
+            self.ledger()
+                .update("lead-h", &mut |r| {
+                    r.socket = Some(socket.into());
+                    Ok(())
+                })
+                .unwrap();
+            let pane = tool_hook::Pane {
+                id,
+                socket: Some(socket),
+                lineage: &[],
+            };
+            let procs = procs(&["bwrap", "--unshare-pid"]);
+            route(&self.paths, &self.ledger(), &procs, 50, Some(&pane))
+        }
+
+        /// Runs `f` with the state dir read-only, as in a lead's sandbox (D97).
+        fn read_only<T>(&self, f: impl FnOnce() -> T) -> T {
+            use std::os::unix::fs::PermissionsExt;
+            let root = self.dir.path();
+            let mode = |path: &Path, mode| {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+            };
+            std::fs::write(root.join("ledger.lock"), "").unwrap();
+            mode(&root.join("ledger.lock"), 0o444);
+            mode(root, 0o555);
+            let result = f();
+            mode(root, 0o755);
+            mode(&root.join("ledger.lock"), 0o644);
+            result
+        }
+    }
+
+    /// Root writes past file modes, so nothing is read-only to it.
+    fn is_root() -> bool {
+        // SAFETY: geteuid has no preconditions.
+        unsafe { libc::geteuid() == 0 }
     }
 
     fn host(herdr: &FakeHerdr) -> Host<'_> {
@@ -1206,12 +1278,11 @@ mod tests {
     fn in_a_sandboxed_lead_s_pane_tell_goes_through_its_broker_and_calls_no_herdr() {
         let world = World::new();
         world.add(member("lh-1", Some("h")));
-        let settings = sandbox::settings_file(&world.paths, "lead-h");
-        let procs = procs(&["claude", "--settings", settings.to_str().unwrap()]);
         let serving = world.serve(telling_herdr());
         let own = FakeHerdr::new(&[]);
 
-        let client = route(&world.paths, &world.ledger(), &procs, 50, None);
+        let client = world.route_from("p-lead-h");
+        assert!(client.is_some());
         let (_, kept) = run_here(&own, &world, client.as_ref(), &tell("lh-1", "hi")).unwrap();
 
         assert_eq!(kept.out, ["told lh-1; it's working"]);
@@ -1434,11 +1505,10 @@ mod tests {
     #[test]
     fn in_a_sandboxed_lead_s_pane_feed_and_add_go_through_its_broker_and_call_no_herdr() {
         let world = World::new();
-        let settings = sandbox::settings_file(&world.paths, "lead-h");
-        let procs = procs(&["claude", "--settings", settings.to_str().unwrap()]);
         let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
         let own = FakeHerdr::new(&[]);
-        let client = route(&world.paths, &world.ledger(), &procs, 50, None);
+        let client = world.route_from("p-lead-h");
+        assert!(client.is_some());
 
         let (fed, fed_out) = run_here(&own, &world, client.as_ref(), &feed("h")).unwrap();
         let (added, add_out) =
@@ -1451,6 +1521,189 @@ mod tests {
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
         assert!(herdr.calls() > 0);
+    }
+
+    #[test]
+    fn in_a_sandbox_a_pane_the_ledger_places_no_lead_in_is_refused_before_herdr() {
+        if is_root() {
+            return;
+        }
+        let world = World::new();
+        world.add(member("lh-1", Some("h")));
+        let own = FakeHerdr::new(&[("w1", "main")]);
+        // herdr renamed the lead's pane; its processes keep the old id.
+        let client = world.route_from("w1:p-moved");
+        assert!(client.is_none());
+
+        let refusals = world.read_only(|| {
+            let mut refusals: Vec<String> = [tell("lh-1", "hi"), feed("h"), add("h", "pr", &[])]
+                .iter()
+                .map(|op| format!("{:#}", run_here(&own, &world, None, op).err().unwrap()))
+                .collect();
+            let spawn = refuse_spawn(None, &world.ledger()).unwrap_err();
+            refusals.push(format!("{spawn:#}"));
+            refusals
+        });
+
+        for (refusal, command) in refusals.iter().zip(["tell", "feed", "add", "spawn"]) {
+            assert!(
+                refusal.starts_with(&format!(
+                    "refused: this loopherd runs in a sandbox, where it can't {command} itself"
+                )),
+                "{refusal}"
+            );
+        }
+        assert_eq!(own.calls(), 0);
+    }
+
+    #[test]
+    fn a_lead_s_spawn_is_refused_and_the_shepherd_s_passes() {
+        let world = World::new();
+        let lead = world.route_from("p-lead-h");
+        let shepherd = world.route_from("w1:p-shepherd");
+
+        let refused = refuse_spawn(lead.as_ref(), &world.ledger()).unwrap_err();
+
+        assert_eq!(
+            format!("{refused:#}"),
+            "a lead can't run loopherd spawn: add and feed start its herd's workers from its herd file"
+        );
+        assert!(shepherd.is_none());
+        refuse_spawn(shepherd.as_ref(), &world.ledger()).unwrap();
+    }
+
+    #[test]
+    fn a_broker_starts_workers_where_its_lead_is_and_gates_after_merge_by_the_launch_record() {
+        let world = World::new();
+        let repo = world.dir.path().join("repos/h");
+        let h = format!(
+            "repo = {repo:?}\nargs = [\"--model\", \"opus\"]\nafter_merge = [\"scripts/install\"]\n\
+             [template.pr]\nparams = [\"number\"]\nname = \"pr-{{number}}\"\nprompt = \"review {{number}}\"\n\
+             merged = \"test -f merged-{{number}}\"\n\
+             [queue]\ntemplate = \"pr\"\nsource = \"cat tasks\"\nmax = 5\n\
+             [lead]\nprompt = \"go\"\nsandbox = \"prefer\"\n"
+        );
+        std::fs::write(world.paths.herds.join("h.toml"), h).unwrap();
+        // The ledger, which a lead could write, names a herd whose lead may install.
+        world.herd("g");
+        let g = world.paths.herds.join("g.toml");
+        let text = std::fs::read_to_string(&g).unwrap();
+        std::fs::write(&g, format!("{text}install = true\n")).unwrap();
+        world
+            .ledger()
+            .update("lead-h", &mut |r| {
+                r.herd = Some("g".into());
+                r.workspace = "w2".into();
+                r.socket = Some(crate::herdr::fake::FAKE_SOCKET.into());
+                Ok(())
+            })
+            .unwrap();
+        std::fs::write(repo.join("tasks"), "1\n").unwrap();
+        let serving = world.serve(FakeHerdr::new(&[("w1", "main"), ("w2", "other")]));
+        let client = world.client();
+        let add = Op::Add {
+            herd: "h".into(),
+            template: "pr".into(),
+            params: vec!["7".into()],
+            claude_args: vec![],
+            dry_run: false,
+            ready_timeout_secs: 60,
+        };
+
+        let (_, _, fed) = client.call(&feed("h")).unwrap();
+        let (_, _, added) = client.call(&add).unwrap();
+        std::fs::write(repo.join("merged-1"), "").unwrap();
+        let (out, _, _) = client.call(&feed("h")).unwrap();
+
+        assert_eq!((fed, added), (0, 0));
+        assert!(
+            out.contains(
+                "after_merge pr-1: not run: `scripts/install` needs the install switch, off in h's [lead]"
+            ),
+            "{out}"
+        );
+        let entries = world.ledger().entries().unwrap();
+        assert_eq!(entries["pr-7"].herd.as_deref(), Some("h"));
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        let started = herdr.started();
+        assert_eq!(
+            started.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["pr-1", "pr-7"]
+        );
+        for worker in &started {
+            assert!(worker.pane_id.starts_with("w2:"), "{}", worker.pane_id);
+            assert_eq!(worker.args, ["--model", "opus"]);
+        }
+    }
+
+    /// A ledger that panics on recording a new member.
+    struct PanicsOnRecord(crate::ledger::MemLedger);
+
+    impl Ledger for PanicsOnRecord {
+        fn entries(&self) -> Result<std::collections::BTreeMap<String, AgentRecord>> {
+            self.0.entries()
+        }
+        fn record(&mut self, _: AgentRecord) -> Result<()> {
+            panic!("record");
+        }
+        fn update(
+            &mut self,
+            name: &str,
+            change: &mut dyn FnMut(&mut AgentRecord) -> Result<()>,
+        ) -> Result<AgentRecord> {
+            self.0.update(name, change)
+        }
+        fn remove_herd(
+            &mut self,
+            herd: &str,
+            before: &mut dyn FnMut(&[String]) -> Result<()>,
+        ) -> Result<crate::ledger::RemovedHerd> {
+            self.0.remove_herd(herd, before)
+        }
+        fn started(&mut self, name: &str, at: SystemTime, resumed: bool) -> Result<()> {
+            self.0.started(name, at, resumed)
+        }
+    }
+
+    #[test]
+    fn a_feed_that_panics_keeps_the_lines_noting_its_after_merge_interrupted() {
+        let world = World::new();
+        let repo = world.dir.path().join("repos/h");
+        let h = std::fs::read_to_string(world.paths.herds.join("h.toml")).unwrap();
+        let h = h.replace("source = \"true\"", "source = \"echo 1\"");
+        std::fs::write(world.paths.herds.join("h.toml"), h).unwrap();
+        let mut pending = member("lh-1", Some("h"));
+        pending.repo = repo;
+        pending.after_merge = Some(crate::ledger::AfterMerge::Pending { owner: me() });
+        let mut ledger = PanicsOnRecord(crate::ledger::MemLedger::default());
+        ledger.0.0.insert("lh-1".into(), pending);
+        let herdr = FakeHerdr::new(&[("w1", "main")]);
+        let mut ctx = Ctx {
+            herdr: &herdr,
+            ledger: &mut ledger,
+            paths: &world.paths,
+            procs: &crate::process::ProcFs,
+            claude_dir: None,
+            caller: Caller {
+                pane: None,
+                socket: None,
+                lineage: vec![],
+                workspace: Some("w1".into()),
+                process: me(),
+                lead: None,
+            },
+        };
+        let mut kept = Kept::default();
+
+        let err = feed("h").carry_out(&mut ctx, &mut kept).unwrap_err();
+
+        assert_eq!(format!("{err:#}"), "the feed panicked");
+        assert_eq!(kept.err, ["after_merge lh-1: interrupted"]);
+        assert_eq!(
+            ledger.0.0["lh-1"].after_merge,
+            Some(crate::ledger::AfterMerge::Noted)
+        );
     }
 
     #[test]
