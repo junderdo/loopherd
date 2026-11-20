@@ -93,6 +93,9 @@ impl Clock for RealClock {
     }
 }
 
+/// Takes on a lead's identity for its watch, given the lead's name.
+pub type AsLead<'a> = dyn Fn(&str) -> Result<()> + 'a;
+
 pub struct Request<'a> {
     /// Only members of these herds; empty is every member.
     pub herds: &'a [String],
@@ -107,6 +110,9 @@ pub struct Request<'a> {
     /// The lead whose sandboxed Claude is an ancestor of this watch, which
     /// may then be only that lead's own.
     pub caller: Option<&'a str>,
+    /// Run with the lead's name once this is known to be a lead's watch,
+    /// before its checks and before any thread starts; an error stops the watch.
+    pub as_lead: Option<&'a AsLead<'a>>,
     /// Where a lead's watch finds its herd file for its merged and
     /// claimable checks; `None` runs no checks.
     pub herd_files: Option<&'a Paths>,
@@ -170,6 +176,9 @@ pub fn watch(
     warn: &mut dyn FnMut(&str),
 ) -> Result<Option<Wake>> {
     let reader = reader(ledger, req, warn)?;
+    if let (Reader::Lead { name, .. }, Some(as_lead)) = (&reader, req.as_lead) {
+        as_lead(name)?;
+    }
     let only = only_watch(dir, &reader)?;
     let mut checks = match (&reader, req.herd_files) {
         (
@@ -1304,8 +1313,11 @@ fn reader(ledger: &dyn Ledger, req: &Request, warn: &mut dyn FnMut(&str)) -> Res
         };
         match routed {
             None => {
-                let pane = on_other_socket()
-                    .unwrap_or_else(|| format!("this pane isn't {caller}'s in the ledger"));
+                let retired = entries.get(caller).is_some_and(|e| e.retired);
+                let pane = on_other_socket().unwrap_or_else(|| match retired {
+                    true => format!("{caller} is retired in the ledger"),
+                    false => format!("this pane isn't {caller}'s in the ledger"),
+                });
                 return Err(why(format!("{pane}, so it would be the shepherd's watch")));
             }
             Some(lead) if lead.name != caller => {
@@ -1646,6 +1658,7 @@ mod tests {
 
     const EVERY: Request = Request {
         caller: None,
+        as_lead: None,
         procs: &crate::process::ProcFs,
         herds: &[],
         timeout: None,
@@ -1990,6 +2003,7 @@ mod tests {
 
     const ONCE: Request = Request {
         caller: None,
+        as_lead: None,
         procs: &crate::process::ProcFs,
         herds: &[],
         timeout: Some(Duration::ZERO),
@@ -3385,6 +3399,90 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn a_retired_leads_claude_is_told_its_lead_is_retired() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ledger, herdr) = socketed_lead(dir.path());
+        ledger.0.get_mut("lead-cards").unwrap().retired = true;
+        let req = Request {
+            own_socket: Some(Path::new("/run/live.sock")),
+            caller: Some("lead-cards"),
+            ..from_pane("w9:p0")
+        };
+
+        let err = watch(
+            &herdr,
+            &ledger,
+            dir.path(),
+            &req,
+            &mut steps(|_| {}),
+            &mut |_| {},
+        )
+        .err()
+        .unwrap();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "refused: lead-cards's Claude runs this watch, which may only be its own; \
+             lead-cards is retired in the ledger, so it would be the shepherd's watch"
+        );
+    }
+
+    #[test]
+    fn a_leads_watch_takes_on_the_lead_before_its_checks_and_the_shepherds_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = socketed_lead(dir.path());
+        let seen = std::cell::RefCell::new(vec![]);
+        let as_lead = |lead: &str| -> Result<()> {
+            seen.borrow_mut().push(lead.to_string());
+            Ok(())
+        };
+        let socket = Some(Path::new("/run/live.sock"));
+        let leads = Request {
+            own_socket: socket,
+            as_lead: Some(&as_lead),
+            ..from_pane("w9:p0")
+        };
+        let shepherds = Request {
+            own_socket: socket,
+            as_lead: Some(&as_lead),
+            ..ONCE
+        };
+
+        run(&herdr, &ledger, dir.path(), &leads, &mut steps(|_| {}));
+        run(&herdr, &ledger, dir.path(), &shepherds, &mut steps(|_| {}));
+
+        assert_eq!(*seen.borrow(), ["lead-cards"]);
+    }
+
+    #[test]
+    fn a_lead_that_cant_be_taken_on_stops_its_watch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = socketed_lead(dir.path());
+        let as_lead = |lead: &str| -> Result<()> { bail!("{lead}'s watch can't start: no token") };
+        let req = Request {
+            own_socket: Some(Path::new("/run/live.sock")),
+            as_lead: Some(&as_lead),
+            ..from_pane("w9:p0")
+        };
+
+        let err = watch(
+            &herdr,
+            &ledger,
+            dir.path(),
+            &req,
+            &mut steps(|_| {}),
+            &mut |_| {},
+        )
+        .err()
+        .unwrap();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "lead-cards's watch can't start: no token"
+        );
     }
 
     #[test]

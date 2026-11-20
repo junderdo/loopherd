@@ -869,23 +869,30 @@ fn a_leads_running_watch_leaves_git_config_writable_in_other_worktrees() {
         "--cwd",
         repo.to_str().unwrap(),
     ]);
-    let hooks = state.path().join("claude-settings.json");
-    let installed = Command::new(env!("CARGO_BIN_EXE_loopherd"))
-        .args(["install-hook", "--settings", hooks.to_str().unwrap()])
-        .output()
-        .unwrap();
-    assert!(installed.status.success(), "{installed:?}");
     let herds = config.join("herds");
     std::fs::create_dir_all(&herds).unwrap();
+    // The bare watch checks the human's ~/.claude/settings.json for loopherd's hooks.
+    let hooks = Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .args(["watch", "--timeout", "0"])
+        .env("XDG_STATE_HOME", state.path())
+        .env("LOOPHERD_CONFIG_DIR", &config)
+        .env("HERDR_SOCKET_PATH", &server.socket)
+        .env_remove("HERDR_PANE_ID")
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&hooks.stderr).contains("hooks are not all in"),
+        "install loopherd's hooks first: {hooks:?}"
+    );
     std::fs::write(
         herds.join(format!("{herd}.toml")),
         format!(
             "{}[lead]\nprompt = \"\"\"This is loopherd's live test of your watch. Make exactly \
-             one Bash tool call, with the command exactly as written and nothing added before \
-             or after it: loopherd watch --timeout 60 --settings {} Then reply with what it \
-             printed.\"\"\"\n",
+             two Bash tool calls, one after the other, each with the command exactly as \
+             written and nothing added before or after it. First: loopherd watch --timeout 1 \
+             --settings /nonexistent/settings.json Second: loopherd watch --timeout 60 Then \
+             reply with what each printed.\"\"\"\n",
             herd_head(repo.to_str().unwrap(), &herd),
-            hooks.display()
         ),
     )
     .unwrap();
@@ -930,6 +937,30 @@ fn a_leads_running_watch_leaves_git_config_writable_in_other_worktrees() {
         pid_ns("self"),
         "the lead's watch runs in its sandbox"
     );
+
+    // Only the watch's own ancestor walk refuses --settings: the pane routing alone can't.
+    let agent = server
+        .herdr()
+        .args(["agent", "get", &name])
+        .output()
+        .unwrap();
+    let agent: Value = serde_json::from_slice(&agent.stdout).unwrap();
+    let pane = agent["result"]["agent"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let screen = server
+        .herdr()
+        .args([
+            "pane", "read", &pane, "--source", "recent", "--format", "text",
+        ])
+        .output()
+        .unwrap();
+    let screen: String = String::from_utf8_lossy(&screen.stdout)
+        .split_whitespace()
+        .collect();
+    let refusal = format!("refused:{name}'sClauderunsthiswatch,whichchecksClaude'sownsettings");
+    assert!(screen.contains(&refusal), "{screen}");
 
     let probe = Command::new("git")
         .arg("-C")

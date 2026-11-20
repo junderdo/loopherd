@@ -840,12 +840,12 @@ What differs from the shepherd:
   tasks. `loopherd restart` (`--self` included), `prompt`, `feed`,
   `add`, `retire` and `release` run in your broker, outside the sandbox,
   in any form, one at a time, so a running `feed` holds up the others
-  until it ends. `loopherd watch` runs outside the sandbox only bare, as
-  its own Bash call (D104), and so does `scripts/install` with `install`
-  on: a `cd x &&`, a pipe or redirect, `$(…)` or a path to the binary
+  until it ends. Run `loopherd watch` bare, as its own Bash call, to run
+  it outside the sandbox (D104), and `scripts/install` too with
+  `install` on: a `cd x &&`, a redirect, `$(…)` or a path to the binary
   keeps it inside, where a long watch blocks `git config` writes across
-  the repo for its whole run. `revive` is the shepherd's or the
-  human's. `restart`, `prompt`, `retire` and `release` refuse anything
+  the repo for its whole run. Your watch refuses `--settings`. `revive`
+  is the shepherd's or the human's. `restart`, `prompt`, `retire` and `release` refuse anything
   but your own herd's members; `retire --close` and `release` also keep
   a worktree or refuse when the ledger puts one anywhere its herd file
   wouldn't, and your broker refuses `retire --force` and

@@ -982,7 +982,8 @@ fn run_release(name: &str, keep_branch: bool, drop_branch: bool) -> Result<i32> 
 fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32> {
     let refusal = "refused: revive is the shepherd's or the human's, and a lead runs this loopherd";
     let paths = Paths::from_env()?;
-    if !dry_run && sandbox::calling_lead(&paths, &process::ProcFs, std::process::id()).is_some() {
+    let caller = sandbox::calling_lead(&paths, &process::ProcFs, std::process::id());
+    if !dry_run && !matches!(caller, Ok(None)) {
         bail!(refusal);
     }
     let startup = match startup {
@@ -1665,9 +1666,16 @@ fn require_known(ledger: &FileLedger, herd: Option<&str>) -> Result<()> {
 }
 
 fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) -> Result<i32> {
-    let settings = match settings {
-        Some(settings) => settings,
-        None => install_hook::default_settings()?,
+    let herd_paths = Paths::from_env().context("herd")?;
+    let caller = sandbox::calling_lead(&herd_paths, &process::ProcFs, std::process::id())?;
+    let settings = match (settings, &caller) {
+        // Outside the sandbox, reading it would reach files the lead's sandbox denies.
+        (Some(_), Some(lead)) => bail!(
+            "refused: {lead}'s Claude runs this watch, which checks Claude's own settings; \
+             drop --settings"
+        ),
+        (Some(settings), None) => settings,
+        (None, _) => install_hook::default_settings()?,
     };
     if !install_hook::installed(&settings)? {
         bail!(
@@ -1675,8 +1683,10 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
             settings.display()
         );
     }
-    let herd_paths = Paths::from_env().context("herd")?;
     for herd in herds {
+        if !herd::is_name(herd) {
+            bail!("{herd:?} is not a herd name");
+        }
         if !herd_paths.herds.join(format!("{herd}.toml")).is_file() {
             eprintln!("loopherd watch: warning: no herd file for {herd}");
         }
@@ -1684,16 +1694,16 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let own_pane = own_pane();
     let own_socket = socket_from_env();
-    let caller = sandbox::calling_lead(&herd_paths, &process::ProcFs, std::process::id());
-    if let Some(lead) = &caller {
-        // Outside the sandbox, its checks and merge lookups would otherwise run as the human.
+    // Its checks and merge lookups run outside the sandbox, so as the lead, not the human.
+    let as_lead = |lead: &str| -> Result<()> {
         let env = broker::lead_env(&herd_paths, lead)
             .with_context(|| format!("{lead}'s watch can't start"))?;
         for (name, value) in env {
             // SAFETY: the watch has started no threads yet.
             unsafe { std::env::set_var(name, value) };
         }
-    }
+        Ok(())
+    };
     let req = watch::Request {
         herds,
         timeout: timeout.map(Duration::from_secs),
@@ -1702,6 +1712,7 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         own_lineage: &own_lineage(),
         own_socket: own_socket.as_deref(),
         caller: caller.as_deref(),
+        as_lead: Some(&as_lead),
         herd_files: Some(&herd_paths),
         check_timeout: remote_timeout,
         shepherd_handoff: None,
