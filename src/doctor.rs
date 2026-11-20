@@ -305,8 +305,85 @@ fn herd_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
                 format!("loopherd herd set {herd} lead.sandbox '\"require\"'"),
             ));
         }
+        checks.extend(loosened_checks(paths, &herd));
+        checks.extend(mcp_server_checks(paths, &herd));
     }
     checks
+}
+
+/// Each `[lead] mcp_servers` name the human's user scope doesn't configure,
+/// for which the lead isn't started under either mode.
+fn mcp_server_checks(paths: &Paths, herd: &str) -> Vec<Check> {
+    let Ok(wanted) = crate::herd::lead_mcp_servers(paths, herd) else {
+        return vec![];
+    };
+    if wanted.is_empty() {
+        return vec![];
+    }
+    let file = crate::sandbox::user_mcp_file(paths);
+    let name = format!("herd {herd} mcp_servers");
+    let configured = match crate::sandbox::user_mcp_servers(paths) {
+        Ok(configured) => configured,
+        Err(e) => {
+            return vec![failure(
+                &name,
+                format!("{e:#}, so its lead isn't started"),
+                format!("fix {}", file.display()),
+            )];
+        }
+    };
+    wanted
+        .into_iter()
+        .filter(|server| !configured.contains_key(server))
+        .map(|server| {
+            failure(
+                &name,
+                format!(
+                    "{server:?} isn't in your user scope in {}, so its lead isn't started",
+                    file.display()
+                ),
+                format!(
+                    "claude mcp add --scope user {server} …, or drop it from [lead] mcp_servers"
+                ),
+            )
+        })
+        .collect()
+}
+
+/// What the human's own Claude settings loosen in `herd`'s lead's sandbox,
+/// failing where that keeps the lead from starting.
+fn loosened_checks(paths: &Paths, herd: &str) -> Vec<Check> {
+    use crate::sandbox::WhenLoosened;
+    let loosened = crate::lead::lead_name(herd)
+        .and_then(|name| crate::sandbox::loosened(paths, &name, herd))
+        .and_then(|lines| Ok((lines, crate::sandbox::when_loosened(paths, herd)?)));
+    // A herd whose lead's settings can't be built has that reported by its own check.
+    let Ok((lines, when)) = loosened else {
+        return vec![];
+    };
+    let name = format!("herd {herd} sandbox settings");
+    lines
+        .into_iter()
+        .map(|line| match when {
+            WhenLoosened::Warn => warning(&name, line, "remove it".into()),
+            WhenLoosened::Refuse => failure(
+                &name,
+                line,
+                format!(
+                    "remove it, or loopherd herd set {herd} lead.sandbox '\"prefer\"' to start \
+                     its lead with it as a warning"
+                ),
+            ),
+            WhenLoosened::RefuseForCredentials => failure(
+                &name,
+                line,
+                format!(
+                    "remove it; a credentials lead never starts with it, so the other way is \
+                     loopherd herd set {herd} lead.merge_guard '\"hook\"'"
+                ),
+            ),
+        })
+        .collect()
 }
 
 /// The loopherd rulesets on a herd's GitHub repo.
@@ -2047,6 +2124,104 @@ mod tests {
               guarded by its tool hook alone, whenever the sandbox can't start; \
               fix: loopherd herd set h lead.sandbox '\"require\"'"
             ]
+        );
+    }
+
+    /// Writes the human's `~/.claude/settings.json`, returning its path.
+    fn user_settings(m: &Machine, text: &str) -> PathBuf {
+        let file = m.paths().home.join(".claude/settings.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, text).unwrap();
+        file
+    }
+
+    #[test]
+    fn user_settings_that_loosen_a_leads_sandbox_fail_under_require_and_warn_under_prefer() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        let lead = |mode: &str| {
+            format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge = true\nsandbox = \"{mode}\"\n",
+                repo.to_str().unwrap()
+            )
+        };
+        let file = user_settings(&m, r#"{"sandbox": {"excludedCommands": ["docker *"]}}"#);
+        let file = file.display();
+
+        m.herd_file("h", &lead("require"));
+        assert_eq!(
+            problems(&m, &herdr()),
+            [format!(
+                "failure herd h sandbox settings: {file}: sandbox.excludedCommands runs \
+                 \"docker *\" outside it; fix: remove it, or loopherd herd set h lead.sandbox \
+                 '\"prefer\"' to start its lead with it as a warning"
+            )]
+        );
+
+        m.herd_file("h", &lead("prefer"));
+        let problems = problems(&m, &herdr());
+        assert!(
+            problems.contains(&format!(
+                "warning herd h sandbox settings: {file}: sandbox.excludedCommands runs \
+                 \"docker *\" outside it; fix: remove it"
+            )),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn user_settings_that_loosen_a_leads_sandbox_show_even_while_its_credentials_are_missing() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge_guard = \"credentials\"\n",
+                repo.to_str().unwrap()
+            ),
+        );
+        let file = user_settings(&m, r#"{"sandbox": {"excludedCommands": ["docker *"]}}"#);
+
+        let problems = problems(&m, &herdr());
+
+        assert!(
+            problems.contains(&format!(
+                "failure herd h sandbox settings: {}: sandbox.excludedCommands runs \
+                 \"docker *\" outside it; fix: remove it; a credentials lead never starts with \
+                 it, so the other way is loopherd herd set h lead.merge_guard '\"hook\"'",
+                file.display()
+            )),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_leads_mcp_server_missing_from_the_user_scope_fails() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge = true\n\
+                 mcp_servers = [\"playwright\", \"trello\"]\n",
+                repo.to_str().unwrap()
+            ),
+        );
+        let file = m.paths().home.join(".claude.json");
+        std::fs::write(
+            &file,
+            r#"{"mcpServers": {"playwright": {"command": "npx"}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            problems(&m, &herdr()),
+            [format!(
+                "failure herd h mcp_servers: \"trello\" isn't in your user scope in {}, so its \
+                 lead isn't started; fix: claude mcp add --scope user trello …, or drop it \
+                 from [lead] mcp_servers",
+                file.display()
+            )]
         );
     }
 

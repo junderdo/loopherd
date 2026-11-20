@@ -485,6 +485,78 @@ impl Drop for RemoveWorktree {
 }
 
 #[test]
+fn a_lead_starts_with_no_mcp_tools() {
+    if !live_enabled() {
+        return;
+    }
+    let workspace = assert_dev_session();
+    let state = tempfile::tempdir().unwrap();
+    // This checkout is already trusted; a fresh repo would stop the lead at the trust dialog.
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let herd = format!("lh-live-mcp-{}", std::process::id());
+    let name = format!("lead-{herd}");
+    let checkout = repo.file_name().unwrap().to_str().unwrap();
+    let parent = repo.parent().unwrap();
+    let worktree = match parent.file_name() == repo.file_name() {
+        true => parent.join("worktrees"),
+        false => parent.join(format!("{checkout}-worktrees")),
+    }
+    .join(&name);
+    let _worktree = RemoveWorktree(repo.clone(), worktree.clone());
+    let config = state.path().join("loopherd/config");
+    let herds = config.join("herds");
+    std::fs::create_dir_all(&herds).unwrap();
+    let probe = worktree.join("mcp-probe");
+    std::fs::write(
+        herds.join(format!("{herd}.toml")),
+        format!(
+            "{}[lead]\nprompt = \"\"\"This is loopherd's live test of which MCP tools a lead \
+             gets. Make exactly one Bash tool call: echo, followed by the name of every tool \
+             you have whose name starts with mcp__, separated by spaces, or the word none if \
+             you have no such tool, redirected with > to {}. Then reply done.\"\"\"\n",
+            herd_head(repo.to_str().unwrap(), &workspace),
+            probe.display()
+        ),
+    )
+    .unwrap();
+    let _cleanup = CloseTab(name.clone());
+
+    let out = dev(env!("CARGO_BIN_EXE_loopherd"))
+        .env("XDG_STATE_HOME", state.path())
+        .env("LOOPHERD_CONFIG_DIR", &config)
+        .args(["lead", &herd, "--", "--permission-mode", "acceptEdits"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let entry = ledger_entry(state.path(), &name);
+    assert!(
+        entry["claude_args"]
+            .as_array()
+            .unwrap()
+            .contains(&"--strict-mcp-config".into()),
+        "{entry}"
+    );
+
+    let given_up = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    while !probe.exists() {
+        assert!(
+            std::time::Instant::now() < given_up,
+            "lead never wrote {}",
+            probe.display()
+        );
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    assert_eq!(std::fs::read_to_string(&probe).unwrap().trim(), "none");
+}
+
+#[test]
 fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     if !live_enabled() {
         return;
