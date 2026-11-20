@@ -615,6 +615,28 @@ fn interrupted(
     Ok(())
 }
 
+/// Notes interrupted every after_merge still pending on this feed's
+/// `req.owner`, for a feed that failed and whose process lives on, as a
+/// broker's does. Returns a line per member, and a warning if it can't.
+pub fn abandon(ledger: &mut dyn Ledger, req: &FeedRequest) -> Vec<String> {
+    let mut lines = vec![];
+    let pending = Some(AfterMerge::Pending { owner: req.owner });
+    let names: Vec<String> = match ledger.entries() {
+        Ok(entries) => entries
+            .into_values()
+            .filter(|r| r.after_merge == pending)
+            .map(|r| r.name)
+            .collect(),
+        Err(e) => return vec![format!("warning: ledger: {e:#}; after_merge left pending")],
+    };
+    for name in names {
+        if let Err(e) = interrupted(ledger, req, &name, req.owner, &mut lines) {
+            lines.push(format!("warning: {name}: {e:#}; after_merge left pending"));
+        }
+    }
+    lines
+}
+
 fn set_after_merge(ledger: &mut dyn Ledger, name: &str, state: AfterMerge) -> Result<()> {
     ledger.update(name, &mut |r| {
         r.after_merge = Some(state);
@@ -3113,5 +3135,29 @@ mod tests {
             "after_merge zpr-1: not run: `scripts/install` needs the install switch, off in prs's [lead]"
         );
         assert_eq!(setup.read("log"), None);
+    }
+
+    #[test]
+    fn a_failed_feed_notes_interrupted_only_the_after_merge_it_left_pending() {
+        let setup = Setup::after_merge(r#"["echo one >> log"]"#, "");
+        let herdr = herdr();
+        let mut ledger = fed_one(&setup, &herdr);
+        let mut other = ledger.0["zpr-1"].clone();
+        other.name = "zpr-2".into();
+        ledger.0.insert("zpr-2".into(), other);
+        let elsewhere = Process { pid: 8, start: 80 };
+        for (name, owner) in [("zpr-1", OWNER), ("zpr-2", elsewhere)] {
+            ledger.0.get_mut(name).unwrap().after_merge = Some(AfterMerge::Pending { owner });
+        }
+
+        let lines = abandon(&mut ledger, &setup.request(false, None));
+
+        assert_eq!(lines, ["after_merge zpr-1: interrupted"]);
+        assert_eq!(ledger.0["zpr-1"].after_merge, Some(AfterMerge::Noted));
+        assert_eq!(
+            ledger.0["zpr-2"].after_merge,
+            Some(AfterMerge::Pending { owner: elsewhere })
+        );
+        assert!(setup.notes("zpr-1")[0].starts_with("after_merge interrupted: "));
     }
 }

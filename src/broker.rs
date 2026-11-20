@@ -157,8 +157,6 @@ fn feed(
     ready_timeout_secs: u64,
     sink: &mut dyn Sink,
 ) -> Result<i32> {
-    // A dry run changes nothing, so it must not block a real one.
-    let lock = (!dry_run).then(|| ctx.paths.lock_feed()).transpose()?;
     let caller = &ctx.caller;
     let req = FeedRequest {
         herd: herd.into(),
@@ -175,18 +173,30 @@ fn feed(
         procs: ctx.procs,
         lead: caller.lead.clone(),
     };
-    let inherited = ctx.inherited_workspace()?;
-    let mut fed = crate::feed::feed(ctx.herdr, ctx.ledger, ctx.paths, &req, inherited.as_deref())?;
-    drop(lock);
-    for line in &fed.lines {
-        sink.out(line);
+    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // A dry run changes nothing, so it must not block a real one.
+        let lock = (!dry_run).then(|| ctx.paths.lock_feed()).transpose()?;
+        let inherited = ctx.inherited_workspace()?;
+        let mut fed =
+            crate::feed::feed(ctx.herdr, ctx.ledger, ctx.paths, &req, inherited.as_deref())?;
+        drop(lock);
+        for line in &fed.lines {
+            sink.out(line);
+        }
+        let printed = fed.lines.len();
+        run_after_merge(ctx.ledger, ctx.paths, &req, &mut fed)?;
+        for line in &fed.lines[printed..] {
+            sink.out(line);
+        }
+        Ok(fed.code)
+    }));
+    // A broker outlives its feeds, so no later feed would see these as interrupted.
+    if !matches!(ran, Ok(Ok(_))) && !dry_run {
+        for line in crate::feed::abandon(ctx.ledger, &req) {
+            sink.err(&line);
+        }
     }
-    let printed = fed.lines.len();
-    run_after_merge(ctx.ledger, ctx.paths, &req, &mut fed)?;
-    for line in &fed.lines[printed..] {
-        sink.out(line);
-    }
-    Ok(fed.code)
+    ran.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
 fn add(ctx: &mut Ctx, req: &AddRequest, dry_run: bool, sink: &mut dyn Sink) -> Result<i32> {
