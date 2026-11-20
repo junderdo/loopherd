@@ -74,6 +74,14 @@ pub enum Op {
     Label {
         question: String,
     },
+    /// `loopherd status`; a lead sees its own herd alone.
+    Status {
+        all: bool,
+        /// Refused from a lead: strays are herdr's agents outside every herd.
+        strays: bool,
+        json: bool,
+        color: bool,
+    },
 }
 
 /// What an operation acts on, for the broker's reach rule.
@@ -136,6 +144,7 @@ impl Op {
             Op::Retire { .. } => "retire",
             Op::Release { .. } => "release",
             Op::Label { .. } => "label its pane",
+            Op::Status { .. } => "status",
         }
     }
 
@@ -145,7 +154,8 @@ impl Op {
                 Reach::Member(name)
             }
             Op::Feed { herd, .. } | Op::Add { herd, .. } => Reach::Herd(herd),
-            Op::RestartSelf | Op::Label { .. } => Reach::Lead,
+            // Status reads the herd the launch record names, never one a request does.
+            Op::RestartSelf | Op::Label { .. } | Op::Status { .. } => Reach::Lead,
             Op::Retire { name, .. } | Op::Release { name, .. } => Reach::AnyMember(name),
         }
     }
@@ -155,6 +165,8 @@ impl Op {
     fn answer_within(&self, remote: Duration) -> Duration {
         match self {
             Op::Tell { .. } | Op::Prompt { .. } | Op::RestartSelf => Duration::from_secs(120),
+            // Its queue's source and backlog may each take the git timeout.
+            Op::Status { .. } => remote * 2 + Duration::from_secs(120),
             // The report is written already; a label isn't worth waiting out a feed for.
             Op::Label { .. } => Duration::from_secs(10),
             // Its settle timeout, with room for herdr and the member's view.
@@ -232,8 +244,68 @@ impl Op {
                 drop_branch,
             } => release(ctx, name, *keep_branch, *drop_branch, sink),
             Op::Label { question } => label(ctx, question, sink),
+            Op::Status {
+                all,
+                strays,
+                json,
+                color,
+            } => status(ctx, *all, *strays, *json, *color, sink),
         }
     }
+}
+
+/// `loopherd status`, or, for a lead, its own herd's.
+fn status(
+    ctx: &mut Ctx,
+    all: bool,
+    strays: bool,
+    json: bool,
+    color: bool,
+    sink: &mut dyn Sink,
+) -> Result<i32> {
+    use crate::status::{Format, Queues};
+    let format = match json {
+        true => Format::Json,
+        false => Format::Text { color },
+    };
+    let pauses = crate::pause::Pauses {
+        dir: ctx.paths.paused.clone(),
+        herds: Some(ctx.paths.herds.clone()),
+    };
+    let timeout = crate::worktree::remote_timeout().unwrap_or_else(|e| {
+        let default = humantime::format_duration(crate::worktree::REMOTE_TIMEOUT);
+        sink.err(&format!(
+            "loopherd status: warning: {e:#}; counting tasks with the default {default}"
+        ));
+        crate::worktree::REMOTE_TIMEOUT
+    });
+    let queues = Queues {
+        paths: ctx.paths,
+        timeout,
+    };
+    let ledger = &*ctx.ledger;
+    let out = match &ctx.caller.lead {
+        Some(lead) => crate::status::herd_status(
+            ctx.herdr,
+            ledger,
+            &pauses,
+            Some(&queues),
+            all,
+            format,
+            &lead.herd,
+        )?,
+        None => {
+            let options = crate::herd_view::Options { all, strays };
+            crate::status::status(ctx.herdr, ledger, &pauses, Some(&queues), options, format)?
+        }
+    };
+    if !out.stdout.is_empty() {
+        sink.out(out.stdout.trim_end_matches('\n'));
+    }
+    for line in out.stderr.lines() {
+        sink.err(&format!("loopherd status: {line}"));
+    }
+    Ok(out.code)
 }
 
 /// Labels the lead's pane with `question`, from the lead's own record.
@@ -806,6 +878,12 @@ impl Broker<'_> {
                 )));
             }
             Reach::Herd(_) => return self.start_refusal(op),
+            Reach::Lead if matches!(op, Op::Status { strays: true, .. }) => {
+                return Ok(Some(format!(
+                    "strays are herdr's agents outside every herd; {lead} sees only herd \
+                     {herd}, so run loopherd status without --strays"
+                )));
+            }
             Reach::Lead => return Ok(None),
             Reach::Member(target) | Reach::AnyMember(target) => target,
         };
@@ -2063,6 +2141,80 @@ mod tests {
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
         assert_eq!(herdr.prompts().len(), 1);
+    }
+
+    fn status_op(all: bool, strays: bool) -> Op {
+        Op::Status {
+            all,
+            strays,
+            json: false,
+            color: false,
+        }
+    }
+
+    #[test]
+    fn in_a_sandboxed_lead_s_pane_status_shows_its_herd_alone_through_its_broker() {
+        let world = World::new();
+        world.herd("g");
+        world.add(member("lh-1", Some("h")));
+        world.add(member("lh-9", Some("g")));
+        world.add(member("lh-8", None));
+        let mut retired = member("lh-7", Some("h"));
+        retired.retired = true;
+        world.add(retired);
+        let serving = world.serve(telling_herdr());
+        let own = FakeHerdr::new(&[]);
+        let client = world.route_from("p-lead-h");
+
+        let (code, status) =
+            run_here(&own, &world, client.as_ref(), &status_op(true, false)).unwrap();
+
+        let pauses = crate::pause::Pauses {
+            dir: world.paths.paused.clone(),
+            herds: Some(world.paths.herds.clone()),
+        };
+        let direct = crate::status::herd_status(
+            &telling_herdr(),
+            &world.ledger(),
+            &pauses,
+            None,
+            true,
+            crate::status::Format::Text { color: false },
+            "h",
+        )
+        .unwrap();
+        assert_eq!((code, status.out.join("\n") + "\n"), (0, direct.stdout));
+        let shown = status.out.join("\n");
+        for hidden in ["lh-9", "lh-8", "stray"] {
+            assert!(!shown.contains(hidden), "{shown}");
+        }
+        for seen in ["lh-1", "lh-7", "lead-h"] {
+            assert!(shown.contains(seen), "{shown}");
+        }
+        assert_eq!(own.calls(), 0);
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert_eq!(herdr.mutations(), 0);
+    }
+
+    #[test]
+    fn a_lead_s_status_strays_are_refused_and_the_shepherd_s_list_them() {
+        let world = World::new();
+        let serving = world.serve(telling_herdr());
+
+        let err = world.client().call(&status_op(false, true)).unwrap_err();
+        let herdr = telling_herdr();
+        let (_, kept) = run_here(&herdr, &world, None, &status_op(false, true)).unwrap();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "lead-h's broker refused status: strays are herdr's agents outside every herd; \
+             lead-h sees only herd h, so run loopherd status without --strays"
+        );
+        assert!(kept.out.join("\n").contains("+1 stray"), "{:?}", kept.out);
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert_eq!(herdr.calls(), 0);
     }
 
     #[test]

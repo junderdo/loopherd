@@ -48,13 +48,13 @@ pub fn read(
     pauses: &pause::Pauses,
     options: Options,
 ) -> Result<Read> {
-    read_with(herdr, ledger, Some(pauses), options, branch)
+    read_with(herdr, ledger, Some(pauses), options, None, branch)
 }
 
 /// [`read`] without each member's branch, which costs a git call per member,
 /// or the herds' pauses.
 pub fn read_statuses(herdr: &dyn Herdr, ledger: &dyn Ledger, options: Options) -> Result<Read> {
-    read_with(herdr, ledger, None, options, |_| None)
+    read_with(herdr, ledger, None, options, None, |_| None)
 }
 
 fn read_with(
@@ -62,9 +62,13 @@ fn read_with(
     ledger: &dyn Ledger,
     pauses: Option<&pause::Pauses>,
     options: Options,
+    only: Option<&str>,
     branch: impl Fn(&AgentRecord) -> Option<String>,
 ) -> Result<Read> {
-    let entries = ledger.entries()?;
+    let mut entries = ledger.entries()?;
+    if let Some(herd) = only {
+        entries.retain(|_, r| r.herd.as_deref() == Some(herd));
+    }
     let (agents, malformed, problem, code) = match herdr.agents() {
         Ok(agents) => (Some(agents), false, None, 0),
         Err(e) if e.downcast_ref::<MalformedReply>().is_some() => (
@@ -89,7 +93,10 @@ fn read_with(
     let mut problems: Vec<String> = problem.into_iter().collect();
     if let Some(pauses) = pauses {
         let in_ledger = entries.values().filter_map(|e| e.herd.clone());
-        let (readings, warning) = pauses.of(in_ledger);
+        let (mut readings, warning) = pauses.of(in_ledger);
+        if let Some(herd) = only {
+            readings.retain(|(name, _)| name == herd);
+        }
         problems.extend(warning);
         problems.extend(add_pauses(&mut view.herds, readings));
     }
@@ -151,11 +158,11 @@ pub struct Queues<'a> {
 /// Counts the tasks of each herd whose queue has a `backlog`, adding a herd
 /// the view left out. Herd files that can't be read or listed are left to
 /// `herds` and the pause warning.
-fn add_tasks(herds: &mut Vec<Herd>, queues: &Queues, ledger: &dyn Ledger) {
+fn add_tasks(herds: &mut Vec<Herd>, queues: &Queues, ledger: &dyn Ledger, only: Option<&str>) {
     let Ok(names) = herd::names(&queues.paths.herds) else {
         return;
     };
-    for name in names {
+    for name in names.into_iter().filter(|n| only.is_none_or(|h| h == n)) {
         let Ok(queue) = herd::queue(queues.paths, &name) else {
             continue;
         };
@@ -197,17 +204,51 @@ pub fn status(
     options: Options,
     format: Format,
 ) -> Result<Output> {
+    status_of(herdr, ledger, pauses, queues, options, format, None)
+}
+
+/// [`status`] as a lead sees it: herd `herd` alone, with its retired members
+/// for `all`, and no strays, which belong to no herd.
+pub fn herd_status(
+    herdr: &dyn Herdr,
+    ledger: &dyn Ledger,
+    pauses: &pause::Pauses,
+    queues: Option<&Queues>,
+    all: bool,
+    format: Format,
+    herd: &str,
+) -> Result<Output> {
+    let options = Options { all, strays: false };
+    status_of(herdr, ledger, pauses, queues, options, format, Some(herd))
+}
+
+fn status_of(
+    herdr: &dyn Herdr,
+    ledger: &dyn Ledger,
+    pauses: &pause::Pauses,
+    queues: Option<&Queues>,
+    options: Options,
+    format: Format,
+    only: Option<&str>,
+) -> Result<Output> {
     let Read {
         mut view,
         problem,
         code,
-    } = read(herdr, ledger, pauses, options)?;
+    } = read_with(herdr, ledger, Some(pauses), options, only, branch)?;
     if let Some(queues) = queues {
-        add_tasks(&mut view.herds, queues, ledger);
+        add_tasks(&mut view.herds, queues, ledger, only);
     }
-    let stdout = match format {
-        Format::Text { color } => text(&view, color),
-        Format::Json => serde_json::to_string_pretty(&view)? + "\n",
+    let stdout = match (format, only) {
+        (Format::Text { color }, _) => text(&view, color, only.is_none()),
+        (Format::Json, None) => serde_json::to_string_pretty(&view)? + "\n",
+        (Format::Json, Some(_)) => {
+            let mut json = serde_json::to_value(&view)?;
+            if let Some(fields) = json.as_object_mut() {
+                fields.remove("strays");
+            }
+            serde_json::to_string_pretty(&json)? + "\n"
+        }
     };
     Ok(Output {
         stdout,
@@ -273,7 +314,7 @@ pub fn sections(view: &View) -> Vec<(String, &[Member])> {
     sections
 }
 
-fn text(view: &View, color: bool) -> String {
+fn text(view: &View, color: bool, strays: bool) -> String {
     let sections = sections(view);
     let rows: Vec<Vec<Vec<String>>> = sections
         .iter()
@@ -307,7 +348,9 @@ fn text(view: &View, color: bool) -> String {
             };
         }
     }
-    out += &stray_lines(view);
+    if strays {
+        out += &stray_lines(view);
+    }
     if sections.iter().any(|(_, m)| m.iter().any(|m| m.gone)) {
         out += "gone: no live agent matches it; `loopherd revive` can bring it back\n";
     }
@@ -814,6 +857,43 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         assert_eq!(out.code, 0);
         assert_eq!(herdr.mutations(), 0);
         assert_eq!(ledger.0, before);
+    }
+
+    #[test]
+    fn a_herds_status_shows_that_herd_alone_without_strays_or_other_herds_pauses() {
+        let herdr = herdr();
+        let mut ledger = ledger();
+        let mut retired = entry("zpr-0", Some("prs"), "pr-0");
+        retired.retired = true;
+        let mut other = entry("zq-1", Some("other"), "q-1");
+        other.retired = true;
+        for e in [retired, other, entry("zq-2", Some("other"), "q-2")] {
+            ledger.0.insert(e.name.clone(), e);
+        }
+        let paused = root();
+        let pause = serde_json::json!({"since": "2026-11-05T09:00:00Z", "reason": "x"});
+        std::fs::write(paused.path().join("paused/other"), pause.to_string()).unwrap();
+        let pauses = Pauses::under(paused.path());
+
+        let text = herd_status(&herdr, &ledger, &pauses, None, true, PLAIN, "prs").unwrap();
+        let json = herd_status(&herdr, &ledger, &pauses, None, false, Format::Json, "prs");
+        let json: serde_json::Value = serde_json::from_str(&json.unwrap().stdout).unwrap();
+
+        assert_eq!(
+            text.stdout,
+            "\
+prs
+  zpr-2  blocked  -  pr-2  w1:tzpr-2/w1:pzpr-2
+  zpr-1  working  -  pr-1  w1:tzpr-1/w1:pzpr-1
+retired
+  zpr-0  retired  -  pr-0  w1:pzpr-0
+"
+        );
+        assert_eq!((text.stderr.as_str(), text.code), ("", 0));
+        assert_eq!(json["herds"].as_array().unwrap().len(), 1);
+        assert_eq!(json["herds"][0]["name"], "prs");
+        assert_eq!(json["ungrouped"], serde_json::json!([]));
+        assert!(json.get("strays").is_none(), "{json}");
     }
 
     #[test]
