@@ -13,7 +13,7 @@ use crate::report::{self, Body, Entry};
 use crate::sandbox::{self, Probe};
 use crate::spawn::{Checkout, MemberOf, Prompt, SHELL_TIMEOUT, SpawnRequest, Spawned, spawn};
 use crate::template::Template;
-use crate::worktree::ensure_detached_worktree;
+use crate::worktree::{ensure_detached_worktree, remove_worktree, worktree_path};
 
 pub struct LeadRequest {
     pub herd: String,
@@ -42,8 +42,23 @@ pub fn lead(
         args: spawn_req.claude_args.clone(),
     };
     // Before the sandbox, so its checks read the worktree's project settings.
+    let worktree = worktree_path(&spawn_req.repo, &spawn_req.name);
+    let fresh = !worktree.exists();
     ensure_detached_worktree(&spawn_req.repo, &spawn_req.name).context("worktree")?;
-    let launch = sandbox::prepare(paths, &spawn_req.name, &kept, req.sandbox).context("sandbox")?;
+    let launch = match sandbox::prepare(paths, &spawn_req.name, &kept, req.sandbox) {
+        Ok(launch) => launch,
+        // A retry would reuse the worktree as it is, not as origin then has it.
+        Err(e) if fresh => {
+            return Err(match remove_worktree(&spawn_req.repo, &worktree) {
+                Ok(()) => e.context("sandbox"),
+                Err(left) => e.context(format!(
+                    "sandbox (its new worktree {} is left: {left:#})",
+                    worktree.display()
+                )),
+            });
+        }
+        Err(e) => return Err(e.context("sandbox")),
+    };
     spawn_req.claude_args.extend(launch.args());
     let spawned = spawn(herdr, ledger, &spawn_req, inherited_workspace)?;
     let name = spawn_req.name;
@@ -1222,7 +1237,7 @@ mod tests {
             &setup,
             &format!(
                 r#"{{"sandbox": {{"enabled": false, "allowUnsandboxedCommands": true,
-                    "excludedCommands": ["loopherd feed"],
+                    "excludedCommands": ["loopherd retire *"],
                     "enableWeakerNestedSandbox": false,
                     "filesystem": {{"allowWrite": [{worktree:?}], "allowRead": ["/srv"]}}}},
                     "permissions": {{"allow": ["Bash(*)", "Read(//srv/**)"]}}}}"#
@@ -1358,12 +1373,13 @@ mod tests {
     }
 
     #[test]
-    fn user_rules_for_any_file_writing_tool_a_bypass_default_and_network_keys_count() {
+    fn user_rules_that_write_anywhere_a_bypass_default_and_network_keys_count() {
         let setup = Setup::with_lead("prompt = \"go\"");
         let paths = home_with_settings(
             &setup,
             r#"{"permissions": {"allow": ["Write", "NotebookEdit(//srv/**)", "MultiEdit(*)",
-                "Read(//srv/**)"], "defaultMode": "bypassPermissions"},
+                "Read(//srv/**)", "Edit(//**)", "Edit(//*)", "Edit(~/notes/*.md)"],
+                "defaultMode": "bypassPermissions"},
                 "sandbox": {"network": {"httpProxyPort": 8080, "socksProxyPort": 1080,
                 "allowLocalBinding": true, "allowMachLookup": ["com.apple.x"]}}}"#,
         );
@@ -1390,8 +1406,10 @@ mod tests {
                  {file}: sandbox.network.allowLocalBinding lets it bind local ports on macOS; \
                  {file}: sandbox.network.allowMachLookup opens macOS services to it; \
                  {file}: permissions.allow opens Write to writes; \
-                 {file}: permissions.allow opens NotebookEdit(//srv/**) to writes; \
                  {file}: permissions.allow opens MultiEdit(*) to writes; \
+                 {file}: permissions.allow opens Edit(//**) to writes; \
+                 {file}: permissions.allow opens Edit(//*) to writes; \
+                 {file}: permissions.allow opens Edit(~/notes/*.md) to writes; \
                  {file}: permissions.defaultMode bypassPermissions lets its file tools write \
                  anywhere; \
                  remove those, or set [lead] sandbox = \"prefer\" in herd h to start it with \
@@ -1401,14 +1419,15 @@ mod tests {
     }
 
     #[test]
-    fn the_project_settings_a_new_lead_worktree_checks_out_count_for_their_permissions() {
+    fn project_rules_that_reach_past_a_new_lead_worktree_count_and_its_worktree_is_removed() {
         let setup = Setup::with_lead("prompt = \"go\"");
         let seed = setup.root.join("seed");
         fs::create_dir_all(seed.join(".claude")).unwrap();
         fs::write(
             seed.join(".claude/settings.json"),
             r#"{"permissions": {"additionalDirectories": ["~/.local/bin"],
-                "allow": ["Edit(/src/**)", "Edit(/)"]},
+                "allow": ["Edit(/src/**)", "Edit(/)", "Edit(src/**/*.rs)", "Edit(//**)",
+                "Edit(/../x/**)", "Write(//srv/**)"]},
                 "sandbox": {"excludedCommands": ["docker *"]}}"#,
         )
         .unwrap();
@@ -1437,12 +1456,17 @@ mod tests {
             format!(
                 "sandbox: lead-h can't run sandboxed: your Claude settings loosen its sandbox: \
                  {file}: permissions.additionalDirectories opens ~/.local/bin to writes; \
-                 {file}: permissions.allow opens Edit(/src/**) to writes; \
+                 {file}: permissions.allow opens Edit(//**) to writes; \
+                 {file}: permissions.allow opens Edit(/../x/**) to writes; \
                  remove those, or set [lead] sandbox = \"prefer\" in herd h to start it with \
                  them as warnings"
             )
         );
         assert!(herdr.tabs().is_empty());
+        assert!(
+            !setup.worktree().exists(),
+            "a refused lead's new worktree is removed"
+        );
     }
 
     #[test]
@@ -1451,7 +1475,7 @@ mod tests {
         let worktree = ensure_detached_worktree(&setup.repo, "lead-h").unwrap();
         fs::create_dir_all(worktree.join(".claude")).unwrap();
         let file = worktree.join(".claude/settings.local.json");
-        fs::write(&file, r#"{"permissions": {"allow": ["Write(//srv/**)"]}}"#).unwrap();
+        fs::write(&file, r#"{"permissions": {"allow": ["Edit(//*)"]}}"#).unwrap();
 
         let err = lead(
             &herdr(),
@@ -1466,11 +1490,12 @@ mod tests {
             format!("{err:#}"),
             format!(
                 "sandbox: lead-h can't run sandboxed: your Claude settings loosen its sandbox: \
-                 {}: permissions.allow opens Write(//srv/**) to writes; remove those, or set \
+                 {}: permissions.allow opens Edit(//*) to writes; remove those, or set \
                  [lead] sandbox = \"prefer\" in herd h to start it with them as warnings",
                 file.display()
             )
         );
+        assert!(file.exists(), "a kept worktree stays");
     }
 
     #[test]

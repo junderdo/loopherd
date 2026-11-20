@@ -312,7 +312,7 @@ fn herd_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
 }
 
 /// Each `[lead] mcp_servers` name the human's user scope doesn't configure,
-/// for which the lead isn't started.
+/// for which the lead isn't started under either mode.
 fn mcp_server_checks(paths: &Paths, herd: &str) -> Vec<Check> {
     let Ok(wanted) = crate::herd::lead_mcp_servers(paths, herd) else {
         return vec![];
@@ -325,7 +325,7 @@ fn mcp_server_checks(paths: &Paths, herd: &str) -> Vec<Check> {
     let configured = match crate::sandbox::user_mcp_servers(paths) {
         Ok(configured) => configured,
         Err(e) => {
-            return vec![warning(
+            return vec![failure(
                 &name,
                 format!("{e:#}, so its lead isn't started"),
                 format!("fix {}", file.display()),
@@ -336,7 +336,7 @@ fn mcp_server_checks(paths: &Paths, herd: &str) -> Vec<Check> {
         .into_iter()
         .filter(|server| !configured.contains_key(server))
         .map(|server| {
-            warning(
+            failure(
                 &name,
                 format!(
                     "{server:?} isn't in your user scope in {}, so its lead isn't started",
@@ -2193,7 +2193,7 @@ mod tests {
     }
 
     #[test]
-    fn a_leads_mcp_server_missing_from_the_user_scope_is_warned() {
+    fn a_leads_mcp_server_missing_from_the_user_scope_fails() {
         let m = machine(&ALL);
         let repo = m.herd("h");
         m.herd_file(
@@ -2214,7 +2214,7 @@ mod tests {
         assert_eq!(
             problems(&m, &herdr()),
             [format!(
-                "warning herd h mcp_servers: \"trello\" isn't in your user scope in {}, so its \
+                "failure herd h mcp_servers: \"trello\" isn't in your user scope in {}, so its \
                  lead isn't started; fix: claude mcp add --scope user trello …, or drop it \
                  from [lead] mcp_servers",
                 file.display()

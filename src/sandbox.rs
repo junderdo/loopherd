@@ -575,6 +575,7 @@ fn loosenings(home: &Path, worktree: &Path, own: &Value) -> Vec<String> {
             &user,
             &user_file,
             &rules_root,
+            worktree,
             home,
             &own_writes,
         ));
@@ -585,6 +586,7 @@ fn loosenings(home: &Path, worktree: &Path, own: &Value) -> Vec<String> {
             found.extend(permission_loosenings(
                 &project,
                 &file,
+                worktree,
                 worktree,
                 home,
                 &own_writes,
@@ -673,6 +675,7 @@ fn permission_loosenings(
     settings: &Value,
     file: &Path,
     rules_root: &Path,
+    worktree: &Path,
     home: &Path,
     own_writes: &[PathBuf],
 ) -> Vec<String> {
@@ -688,16 +691,23 @@ fn permission_loosenings(
     for rule in entries(&settings["permissions"]["allow"]) {
         let (tool, spec) = match rule.split_once('(') {
             Some((tool, rest)) => match rest.strip_suffix(')') {
-                Some(spec) => (tool, Some(spec)),
+                Some(spec) => (tool, spec),
                 None => continue,
             },
-            None => (rule.as_str(), None),
+            None => (rule.as_str(), "*"),
         };
         if !WRITING_TOOLS.contains(&tool) {
             continue;
         }
-        let path = spec.and_then(|spec| rule_path(spec, rules_root, home));
-        if opens_writes(path, own_writes) {
+        let everywhere = matches!(spec, "*" | "**");
+        // Only Edit's rules take paths; another tool's rule with one matches nothing.
+        if !everywhere && tool != "Edit" {
+            continue;
+        }
+        let confined = !everywhere
+            && rule_dir(spec, rules_root, worktree, home)
+                .is_some_and(|dir| own_writes.iter().any(|own| dir.starts_with(own)));
+        if !confined {
             found.push(format!("{shown}: permissions.allow opens {rule} to writes"));
         }
     }
@@ -710,22 +720,29 @@ fn permission_loosenings(
     found
 }
 
-/// A file rule's directory: `//` absolute, `~/` home, `/` beneath
-/// `rules_root`. `None` for a relative path or a glob before its end.
-fn rule_path(spec: &str, rules_root: &Path, home: &Path) -> Option<PathBuf> {
-    let spec = spec.trim_end_matches("/**").trim_end_matches("/*");
-    if spec.contains('*') {
-        return None;
-    }
-    let path = if let Some(rest) = spec.strip_prefix("//") {
-        format!("/{rest}")
-    } else if spec.starts_with("~/") {
-        spec.to_string()
+/// The directory an `Edit(…)` rule's matches all lie beneath: its path up to
+/// the first wildcard. `//` starts at `/`, `~/` at home, `/` at `rules_root`,
+/// and a bare path at the lead's working directory, its worktree. `None` when
+/// it climbs with `..`.
+fn rule_dir(spec: &str, rules_root: &Path, worktree: &Path, home: &Path) -> Option<PathBuf> {
+    let (base, rest) = if let Some(rest) = spec.strip_prefix("//") {
+        (Path::new("/"), rest)
+    } else if let Some(rest) = spec.strip_prefix("~/") {
+        (home, rest)
+    } else if let Some(rest) = spec.strip_prefix('/') {
+        (rules_root, rest)
     } else {
-        let rest = spec.strip_prefix('/')?;
-        rules_root.join(rest).display().to_string()
+        (worktree, spec)
     };
-    absolute(&path, home)
+    let literal: PathBuf = rest
+        .split('/')
+        .take_while(|part| !part.contains(['*', '?', '[']))
+        .collect();
+    let dir = base.join(literal);
+    let climbs = dir
+        .components()
+        .any(|c| c == std::path::Component::ParentDir);
+    (!climbs).then_some(dir)
 }
 
 /// A settings list's entries; anything else that's set is one entry, as written.

@@ -680,6 +680,13 @@ pub fn ensure_detached_worktree(repo: &Path, slug: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Removes the worktree at `path`, with whatever it holds.
+pub fn remove_worktree(repo: &Path, path: &Path) -> Result<()> {
+    let path_str = path.to_str().context("worktree path is not UTF-8")?;
+    git(repo, &["worktree", "remove", "--force", path_str])?;
+    Ok(())
+}
+
 fn is_worktree(repo: &Path, path: &Path) -> Result<bool> {
     let Ok(wanted) = path.canonicalize() else {
         return Ok(false);
