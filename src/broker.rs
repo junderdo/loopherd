@@ -444,6 +444,8 @@ pub fn serve(
     poll: Duration,
 ) -> Result<Served> {
     validate_name(lead)?;
+    // Before the lock: a client writes as soon as it sees the lock held.
+    let _ = Dir::open(paths.state_dir(), &["broker", lead, "requests"]);
     let Some(_lock) = take_lock(paths, lead)? else {
         return Ok(Served::AlreadyRunning);
     };
@@ -1098,6 +1100,9 @@ mod tests {
             while !running(&self.paths, "lead-h") && !serving.is_finished() {
                 assert!(Instant::now() < given_up, "the broker never started");
                 std::thread::sleep(POLL);
+            }
+            if !serving.is_finished() {
+                assert!(requests_dir(&self.paths, "lead-h").is_dir());
             }
             serving
         }
