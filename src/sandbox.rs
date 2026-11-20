@@ -597,29 +597,55 @@ pub fn hook_only_warning(name: &str, why: &str) -> String {
 /// its herd's `[lead]`; the settings keep it from writing either. Fails under
 /// `require` when `probe` says the sandbox can't start, and for args that
 /// pass their own `--settings`, which would displace or double the lead's.
+/// `lead`'s args are fresh from its herd file and the command line.
 pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<Launch> {
+    start(paths, name, lead, probe, ArgsFrom::Fresh)
+}
+
+/// [`prepare`] for a lead resuming with the args it was started with.
+pub fn prepare_kept(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<Launch> {
+    start(paths, name, lead, probe, ArgsFrom::Kept)
+}
+
+/// Where the args a lead is judged by come from.
+#[derive(Clone, Copy)]
+enum ArgsFrom {
+    /// Its herd file's, then the command line's, as `lead` starts it.
+    Fresh,
+    /// Kept from when it was started, as `revive` and `restart` find it.
+    Kept,
+}
+
+/// Why `args` pass a flag loopherd's launch of lead `name` takes, refused under every mode.
+pub fn launch_flag_refusal(name: &str, args: &[String]) -> Option<String> {
     let passes = |flag: &str| {
-        lead.args
-            .iter()
+        args.iter()
             .any(|a| a == flag || a.starts_with(&format!("{flag}=")))
     };
     let drop = "drop it from [lead].args, the herd's args and the command line";
     if passes("--settings") {
-        bail!(
+        return Some(format!(
             "{name}'s args pass --settings, which its sandbox's settings file takes; \
              {drop}, and put those settings in ~/.claude/settings.json"
-        );
+        ));
     }
-    for flag in ["--mcp-config", "--strict-mcp-config"] {
-        if passes(flag) {
-            bail!(
+    ["--mcp-config", "--strict-mcp-config"]
+        .into_iter()
+        .find(|flag| passes(flag))
+        .map(|flag| {
+            format!(
                 "{name}'s args pass {flag}, which its launch takes; {drop}, and name the \
                  servers it may use in [lead] mcp_servers"
-            );
-        }
+            )
+        })
+}
+
+fn start(paths: &Paths, name: &str, lead: &Lead, probe: Probe, from: ArgsFrom) -> Result<Launch> {
+    if let Some(why) = launch_flag_refusal(name, &lead.args) {
+        bail!(why);
     }
-    let disallowed = disallowed_args(paths, &lead.herd, &lead.args)?;
-    if let Some(refusal) = disallowed_refusal(paths, name, &lead.herd, &disallowed)? {
+    let disallowed = disallowed_args(paths, &lead.herd, &lead.args, from)?;
+    if let Some(refusal) = disallowed_refusal(paths, name, &lead.herd, &disallowed, from)? {
         return Err(refusal);
     }
     let arg_warnings: Vec<String> = disallowed
@@ -825,13 +851,20 @@ fn disallowed_refusal(
     name: &str,
     herd: &str,
     disallowed: &[String],
+    from: ArgsFrom,
 ) -> Result<Option<anyhow::Error>> {
     if disallowed.is_empty() {
         return Ok(None);
     }
+    let fix = match from {
+        ArgsFrom::Fresh => "drop those".to_string(),
+        ArgsFrom::Kept => {
+            format!("retire it and start it again with loopherd lead {herd}, without those")
+        }
+    };
     let why = format!(
         "its args may loosen its sandbox or permissions: {}; a lead takes only {ALLOWED_ARGS}, \
-         so drop those",
+         so {fix}",
         disallowed.join("; ")
     );
     refusal_by_mode(paths, name, herd, &why)
@@ -845,14 +878,24 @@ pub const ALLOWED_ARGS: &str =
     "--model, --effort, --verbose and --permission-mode default, auto or plan";
 
 /// Each of a lead's `args`, without loopherd's own launch flags, that the
-/// allowlist doesn't cover, with its values and where it was set: the
-/// herd file's args they start with, else the command line. D100 says why
-/// it's an allowlist.
-fn disallowed_args(paths: &Paths, herd: &str, args: &[String]) -> Result<Vec<String>> {
-    let (configured, source) = herd::lead_args(paths, herd)?;
-    let sources = match args.strip_prefix(&configured[..]) {
-        Some(rest) => vec![(&configured[..], source), (rest, "the command line".into())],
-        None => vec![(args, "its recorded args".into())],
+/// allowlist doesn't cover, with its values and where it was set. D100 says
+/// why it's an allowlist.
+fn disallowed_args(
+    paths: &Paths,
+    herd: &str,
+    args: &[String],
+    from: ArgsFrom,
+) -> Result<Vec<String>> {
+    let sources = match from {
+        ArgsFrom::Kept => vec![(args, "the args it was started with".to_string())],
+        ArgsFrom::Fresh => {
+            let (configured, source) = herd::lead_args(paths, herd)?;
+            let rest = &args[configured.len().min(args.len())..];
+            vec![
+                (&args[..args.len() - rest.len()], source),
+                (rest, "the command line".into()),
+            ]
+        }
     };
     Ok(sources
         .into_iter()
@@ -864,10 +907,16 @@ fn disallowed_args(paths: &Paths, herd: &str, args: &[String]) -> Result<Vec<Str
         .collect())
 }
 
-/// What herd `herd`'s file passes its lead outside the allowlist, one line each.
+/// What herd `herd`'s file passes its lead outside the allowlist, one line
+/// each, but for loopherd's own launch flags, which [`launch_flag_refusal`] names.
 pub fn configured_disallowed_args(paths: &Paths, herd: &str) -> Result<Vec<String>> {
     let (configured, _) = herd::lead_args(paths, herd)?;
-    disallowed_args(paths, herd, &configured)
+    disallowed_args(
+        paths,
+        herd,
+        &without_launch_flags(&configured),
+        ArgsFrom::Fresh,
+    )
 }
 
 /// Each arg the allowlist doesn't cover, with the values that follow a flag.
@@ -1268,11 +1317,11 @@ pub fn check_running(
     let file = settings_file(paths, name);
     let resume = format!("quit its Claude and run loopherd revive --name {name}");
     let args = match Lead::kept(paths, name)? {
-        Some(kept) => kept.args,
+        Some(kept) => without_launch_flags(&kept.args),
         None => without_launch_flags(claude_args),
     };
-    let disallowed = disallowed_args(paths, herd, &args)?;
-    if let Some(refusal) = disallowed_refusal(paths, name, herd, &disallowed)? {
+    let disallowed = disallowed_args(paths, herd, &args, ArgsFrom::Kept)?;
+    if let Some(refusal) = disallowed_refusal(paths, name, herd, &disallowed, ArgsFrom::Kept)? {
         return Err(refusal);
     }
     let mut warnings: Vec<String> = disallowed

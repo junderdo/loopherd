@@ -1733,7 +1733,9 @@ mod tests {
 
         assert!(format!("{:#}", result.unwrap_err()).starts_with(
             "sandbox: lh-1 can't run sandboxed: its args may loosen its sandbox or \
-                 permissions: --add-dir /srv, from the command line;"
+                 permissions: --add-dir /srv, from the args it was started with; a lead takes \
+                 only --model, --effort, --verbose and --permission-mode default, auto or plan, \
+                 so retire it and start it again with loopherd lead h, without those,"
         ));
         assert!(w.herdr.prompts().is_empty());
     }
@@ -1762,10 +1764,27 @@ mod tests {
         assert!(
             out.contains(
                 "\nwarning: lh-1 starts with an arg that may loosen its sandbox or permissions: \
-                 --permission-mode bypassPermissions, from the command line"
+                 --permission-mode bypassPermissions, from the args it was started with"
             ),
             "{out}"
         );
+    }
+
+    #[test]
+    fn a_lead_kept_with_loopherds_own_mcp_flags_from_before_is_cleared_under_require() {
+        let w = World::new();
+        w.handed_off();
+        w.prepared();
+        fs::write(
+            w.paths().config_dir().join("sandbox/lh-1.lead.json"),
+            r#"{"herd": "h", "args": ["--mcp-config", "a.json", "--strict-mcp-config",
+                "--model", "opus"]}"#,
+        )
+        .unwrap();
+
+        let (result, _) = w.restart_as(false, true, None, &as_lead);
+
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[test]

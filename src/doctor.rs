@@ -428,6 +428,13 @@ fn loosened_checks(paths: &Paths, herd: &str) -> Vec<Check> {
 /// Each arg a herd's file passes its lead outside the allowlist, failing where
 /// that keeps the lead from starting.
 fn lead_arg_checks(paths: &Paths, herd: &str) -> Vec<Check> {
+    let name = format!("herd {herd} lead args");
+    if let Ok((args, _)) = crate::herd::lead_args(paths, herd)
+        && let Ok(lead) = crate::lead::lead_name(herd)
+        && let Some(why) = crate::sandbox::launch_flag_refusal(&lead, &args)
+    {
+        return vec![failure(&name, why, "drop it".into())];
+    }
     let Ok(lines) = crate::sandbox::configured_disallowed_args(paths, herd) else {
         return vec![];
     };
@@ -2488,6 +2495,36 @@ mod tests {
                   auto or plan)"
                     .to_string()
             ),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_herd_files_lead_settings_flag_fails_even_under_prefer() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge = true\nsandbox = \"prefer\"\n\
+                 args = [\"--settings\", \"x.json\"]\n",
+                repo.to_str().unwrap()
+            ),
+        );
+
+        let problems = problems(&m, &herdr());
+
+        assert!(
+            problems.iter().any(|p| p.starts_with(
+                "failure herd h lead args: lead-h's args pass --settings, which its sandbox's \
+                 settings file takes;"
+            )),
+            "{problems:?}"
+        );
+        assert!(
+            !problems
+                .iter()
+                .any(|p| p.starts_with("warning herd h lead args")),
             "{problems:?}"
         );
     }

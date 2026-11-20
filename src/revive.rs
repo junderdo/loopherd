@@ -717,7 +717,8 @@ fn revive_one(
     let mut sockets_unblocked = None;
     match &lead {
         None => {}
-        Some((lead, _)) => match sandbox::prepare(&req.paths, &record.name, lead, req.sandbox) {
+        Some((lead, _)) => match sandbox::prepare_kept(&req.paths, &record.name, lead, req.sandbox)
+        {
             Ok(launch) => {
                 warnings.extend(launch.warnings(&record.name));
                 unsandboxed = launch.hook_only().map(str::to_string);
@@ -2016,7 +2017,10 @@ mod tests {
         assert!(
             out.starts_with(
                 "failed lead-h: sandbox: lead-h can't run sandboxed: its args may loosen its \
-                 sandbox or permissions: --dangerously-skip-permissions, from the command line;"
+                 sandbox or permissions: --dangerously-skip-permissions, from the args it was \
+                 started with; a lead takes only --model, --effort, --verbose and \
+                 --permission-mode default, auto or plan, so retire it and start it again with \
+                 loopherd lead h, without those,"
             ),
             "{out}"
         );
