@@ -439,17 +439,12 @@ mod tests {
                             format!("{root}/state/reports/watch.fired"),
                         ],
                     },
-                    "excludedCommands": [
-                        "loopherd retire *",
-                        "loopherd release *",
-                    ],
+                    "excludedCommands": [],
                 },
                 "permissions": {
                     "denyInsteadOfPrompting": true,
                     "allow": [
                         "WebFetch(domain:*)",
-                        "Bash(loopherd retire *)",
-                        "Bash(loopherd release *)",
                     ],
                     "deny": [
                         format!("Edit(/{root}/config/**)"),
@@ -626,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn a_lead_restarts_and_prompts_members_through_its_broker_not_outside_the_sandbox() {
+    fn a_lead_restarts_prompts_retires_and_releases_through_its_broker_not_outside_the_sandbox() {
         let setup = Setup::with_lead(PROMPT);
         let herdr = herdr();
 
@@ -642,7 +637,12 @@ mod tests {
         let (_, settings) = started_settings(&herdr);
         let excluded = settings["sandbox"]["excludedCommands"].as_array().unwrap();
         let allow = settings["permissions"]["allow"].as_array().unwrap();
-        for command in ["loopherd restart *", "loopherd prompt *"] {
+        for command in [
+            "loopherd restart *",
+            "loopherd prompt *",
+            "loopherd retire *",
+            "loopherd release *",
+        ] {
             assert!(!excluded.contains(&command.into()), "{excluded:?}");
             assert!(
                 !allow.contains(&format!("Bash({command})").into()),
@@ -847,8 +847,6 @@ mod tests {
         assert_eq!(
             sandbox["excludedCommands"],
             serde_json::json!([
-                "loopherd retire *",
-                "loopherd release *",
                 "scripts/install",
                 "scripts/install *",
                 "./scripts/install",
@@ -856,7 +854,7 @@ mod tests {
             ])
         );
         assert_eq!(
-            settings["permissions"]["allow"][3], "Bash(scripts/install)",
+            settings["permissions"]["allow"][1], "Bash(scripts/install)",
             "an excluded command still goes through the permission flow"
         );
         assert_eq!(
@@ -1225,13 +1223,13 @@ mod tests {
 
     #[test]
     fn user_settings_that_the_leads_own_settings_already_set_dont_count() {
-        let setup = Setup::with_lead("prompt = \"go\"");
+        let setup = Setup::with_lead("prompt = \"go\"\ninstall = true");
         let worktree = setup.worktree();
         let paths = home_with_settings(
             &setup,
             &format!(
                 r#"{{"sandbox": {{"enabled": false, "allowUnsandboxedCommands": true,
-                    "excludedCommands": ["loopherd retire *"],
+                    "excludedCommands": ["scripts/install *"],
                     "enableWeakerNestedSandbox": false,
                     "filesystem": {{"allowWrite": [{worktree:?}], "allowRead": ["/srv"]}}}},
                     "permissions": {{"allow": ["Bash(*)", "Read(//srv/**)"]}}}}"#

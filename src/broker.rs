@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::context::SHEPHERD;
 use crate::feed::{FeedRequest, ForLead, run_after_merge};
+use crate::github::PullRequests;
 use crate::herd::{AddRequest, Paths};
 use crate::herdr::Herdr;
 use crate::ledger::{Ledger, Process};
@@ -59,11 +60,23 @@ pub enum Op {
     },
     /// The lead restarting itself once its turn after its handoff ends.
     RestartSelf,
+    Retire {
+        name: String,
+        close: bool,
+        force: bool,
+    },
+    Release {
+        name: String,
+        keep_branch: bool,
+        drop_branch: bool,
+    },
 }
 
 /// What an operation acts on, for the broker's reach rule.
 enum Reach<'a> {
     Member(&'a str),
+    /// A member, retired or not: retire --close reruns and release needs one retired.
+    AnyMember(&'a str),
     Herd(&'a str),
     /// The lead itself, found by its pane.
     Lead,
@@ -79,6 +92,7 @@ pub struct Ctx<'a> {
     pub caller: Caller,
     pub live: LiveSession,
     pub spawn_waiter: SpawnWaiter,
+    pub prs: &'a dyn PullRequests,
 }
 
 /// The session a Claude session lives on in, after any continuations.
@@ -115,6 +129,8 @@ impl Op {
             Op::Prompt { .. } => "prompt",
             Op::Restart { .. } => "restart",
             Op::RestartSelf => "restart --self",
+            Op::Retire { .. } => "retire",
+            Op::Release { .. } => "release",
         }
     }
 
@@ -125,6 +141,7 @@ impl Op {
             }
             Op::Feed { herd, .. } | Op::Add { herd, .. } => Reach::Herd(herd),
             Op::RestartSelf => Reach::Lead,
+            Op::Retire { name, .. } | Op::Release { name, .. } => Reach::AnyMember(name),
         }
     }
 
@@ -134,6 +151,9 @@ impl Op {
             Op::Tell { .. } | Op::Prompt { .. } | Op::RestartSelf => Duration::from_secs(120),
             // Its settle timeout, with room for herdr and the member's view.
             Op::Restart { .. } => Duration::from_secs(300),
+            Op::Retire { .. } | Op::Release { .. } => {
+                origin_wait(crate::worktree::remote_timeout())
+            }
             // Each member may take its ready timeout, then after_merge its own.
             Op::Feed { .. } => Duration::from_secs(4 * 60 * 60),
             Op::Add {
@@ -199,8 +219,22 @@ impl Op {
                 sink.out(&scheduled.message);
                 Ok(0)
             }
+            Op::Retire { name, close, force } => retire(ctx, name, *close, *force, sink),
+            Op::Release {
+                name,
+                keep_branch,
+                drop_branch,
+            } => release(ctx, name, *keep_branch, *drop_branch, sink),
         }
     }
+}
+
+/// How long a lead waits on an operation that asks origin a few things in
+/// turn, each within `remote`, the git timeout: release asks up to nine.
+fn origin_wait(remote: Result<Duration>) -> Duration {
+    // The broker's git reads its own timeout; a bad one here only sets this wait.
+    let remote = remote.unwrap_or(crate::worktree::REMOTE_TIMEOUT);
+    remote * 9 + Duration::from_secs(300)
 }
 
 /// Lead `lead`'s own unretired record, in this herdr; by name, since a stale
@@ -338,6 +372,99 @@ fn restart(ctx: &mut Ctx, name: &str, force: bool, sink: &mut dyn Sink) -> Resul
     Ok(0)
 }
 
+fn retire(ctx: &mut Ctx, name: &str, close: bool, force: bool, sink: &mut dyn Sink) -> Result<i32> {
+    use crate::ledger::Outcome;
+    use crate::retire::{refuse_own_lead, refuse_unfinished, retire_and_close};
+    let caller = &ctx.caller;
+    let pane = caller.pane.as_deref().map(|id| tool_hook::Pane {
+        id,
+        socket: caller.socket.as_deref(),
+        lineage: &caller.lineage,
+    });
+    refuse_own_lead(
+        &*ctx.ledger,
+        name,
+        pane.as_ref(),
+        ctx.procs,
+        caller.process.pid,
+    )?;
+    let mailboxes = ctx.paths.state_dir().join("reports");
+    if !force {
+        refuse_unfinished(
+            ctx.herdr,
+            &*ctx.ledger,
+            name,
+            &mailboxes,
+            caller.lead.is_some(),
+        )?;
+    }
+    let now = SystemTime::now();
+    if !close {
+        let record = crate::retire::retire(ctx.ledger, name, now, Outcome::Retired)?;
+        sink.out(&format!("retired {name}"));
+        let warnings = crate::notify::forget_marks(&mailboxes, name)
+            .into_iter()
+            .chain(crate::usage::record_at_retire(
+                &mailboxes,
+                ctx.claude_dir.as_deref(),
+                &record,
+                now,
+            ));
+        for warning in warnings {
+            sink.err(&warning);
+        }
+        return Ok(0);
+    }
+    let guard = ctx.guard();
+    let mut lines = vec![];
+    let result = retire_and_close(
+        ctx.herdr,
+        ctx.ledger,
+        &guard,
+        name,
+        now,
+        Outcome::Retired,
+        &mailboxes,
+        ctx.claude_dir.as_deref(),
+        pane.as_ref(),
+        &mut lines,
+    );
+    lines.iter().for_each(|line| sink.out(line));
+    result.map(|()| 0)
+}
+
+fn release(
+    ctx: &mut Ctx,
+    name: &str,
+    keep_branch: bool,
+    drop_branch: bool,
+    sink: &mut dyn Sink,
+) -> Result<i32> {
+    use crate::worktree::Fate;
+    // A feed spawning this name owns its fresh worktree before the ledger says so.
+    let _feed = ctx.paths.lock_feed()?;
+    let fate = match (keep_branch, drop_branch) {
+        (true, _) => Fate::Keep,
+        (_, true) => Fate::Drop,
+        _ => Fate::Clear,
+    };
+    let guard = ctx.guard();
+    let mut lines = vec![];
+    let result = crate::release::release(
+        ctx.herdr,
+        ctx.prs,
+        ctx.ledger,
+        &guard,
+        name,
+        fate,
+        SystemTime::now(),
+        &ctx.paths.state_dir().join("reports"),
+        &mut lines,
+    );
+    lines.iter().for_each(|line| sink.out(line));
+    result.map(|()| 0)
+}
+
 impl Ctx<'_> {
     /// Refuses, for a broker, entries outside its lead's herd.
     fn guard(&self) -> Guard {
@@ -448,6 +575,7 @@ pub struct Host<'a> {
     pub process: Process,
     pub live: LiveSession,
     pub spawn_waiter: SpawnWaiter,
+    pub prs: &'a dyn PullRequests,
 }
 
 /// Serves lead `lead`'s requests, polling every `poll`, until it is retired.
@@ -497,6 +625,46 @@ pub fn serve(
     }
 }
 
+/// The environment `lead`'s broker takes on before it serves, so its git
+/// and gh reach origin with the lead's narrowed credentials, as in the
+/// lead's sandbox: none unless the herd its launch record names guards
+/// merges by credentials (D95). Errs, naming the fix, while they're missing.
+pub fn lead_env(paths: &Paths, lead: &str) -> Result<Vec<(String, String)>> {
+    use crate::herd::MergeGuard;
+    validate_name(lead)?;
+    let Some(kept) = sandbox::Lead::kept(paths, lead)? else {
+        return Ok(vec![]);
+    };
+    let herd = &kept.herd;
+    let guard = crate::herd::merge_guard(paths, herd).with_context(|| {
+        format!(
+            "{lead}'s broker can't start: whether herd {herd} guards merges by credentials \
+             is unknown"
+        )
+    })?;
+    if guard != Some(MergeGuard::Credentials) {
+        return Ok(vec![]);
+    }
+    let env = crate::credentials::lead_env(paths, herd).with_context(|| {
+        format!("{lead}'s broker can't start: herd {herd} guards merges by credentials")
+    })?;
+    let mut env: Vec<(String, String)> = env
+        .into_iter()
+        .map(|(name, value)| (name, value.as_str().unwrap_or_default().to_string()))
+        .collect();
+    // Outside the sandbox the human's keys are readable: a core.sshCommand -i or
+    // a `Host *` IdentityFile would offer them, so ssh reads loopherd's config alone.
+    let ssh_config = crate::credentials::ssh_config(paths);
+    env.push((
+        "GIT_SSH_COMMAND".into(),
+        format!(
+            "ssh -F {} -o IdentitiesOnly=yes -o IdentityAgent=none",
+            crate::shell::quote(&ssh_config.to_string_lossy())
+        ),
+    ));
+    Ok(env)
+}
+
 struct Broker<'a> {
     lead: &'a str,
     herd: &'a str,
@@ -541,6 +709,7 @@ impl Broker<'_> {
             caller,
             live: self.host.live,
             spawn_waiter: self.host.spawn_waiter,
+            prs: self.host.prs,
         };
         let mut kept = Kept::default();
         let carried = op.carry_out(&mut ctx, &mut kept);
@@ -595,12 +764,30 @@ impl Broker<'_> {
             }
             Reach::Herd(_) => return self.start_refusal(op),
             Reach::Lead => return Ok(None),
-            Reach::Member(target) => target,
+            Reach::Member(target) | Reach::AnyMember(target) => target,
         };
+        let retired_too = matches!(op.reach(), Reach::AnyMember(_));
         if let Op::Restart { force: true, .. } = op {
             return Ok(Some(
                 "restart --force skips the checks that a member is finished since its handoff, \
                  so the human forces a restart; restart it once its stop reads finished"
+                    .into(),
+            ));
+        }
+        if let Op::Retire { force: true, .. } = op {
+            return Ok(Some(
+                "retire --force skips the check that a member is finished, so the human forces \
+                 a retire; retire it once its stop reads finished"
+                    .into(),
+            ));
+        }
+        if let Op::Release {
+            drop_branch: true, ..
+        } = op
+        {
+            return Ok(Some(
+                "release --drop-branch deletes commits not on the base, so the human drops a \
+                 branch; release it plain or with --keep-branch"
                     .into(),
             ));
         }
@@ -609,20 +796,20 @@ impl Broker<'_> {
             return Ok(Some(format!("{target} is the shepherd; {reach}")));
         }
         if target == lead {
-            let self_restart = match op {
+            let hint = match op {
                 Op::Restart { .. } => "; it restarts itself with loopherd restart --self",
+                Op::Retire { .. } => "; retiring a lead is the shepherd's or the human's job",
                 _ => "",
             };
             return Ok(Some(format!(
-                "{target} is the lead itself; {} reaches only herd {herd}'s workers{self_restart}",
+                "{target} is the lead itself; {} reaches only herd {herd}'s workers{hint}",
                 op.command()
             )));
         }
         let entries = ledger.entries()?;
-        let Some(record) = entries.get(target).filter(|r| !r.retired) else {
-            return Ok(Some(format!(
-                "no unretired member is named {target}; {reach}"
-            )));
+        let Some(record) = entries.get(target).filter(|r| retired_too || !r.retired) else {
+            let which = if retired_too { "" } else { "unretired " };
+            return Ok(Some(format!("no {which}member is named {target}; {reach}")));
         };
         Ok(match record.herd.as_deref() {
             None => Some(format!("{target} is in no herd; {reach}")),
@@ -1107,6 +1294,20 @@ mod tests {
             self.ledger().record(lead).unwrap();
         }
 
+        /// Moves herd h's repo out of the state dir's tree, which a lead's
+        /// guard treats as the lead's to write; the repo lasts as long as the dir.
+        fn move_repo(&self) -> (tempfile::TempDir, PathBuf) {
+            let elsewhere = tempfile::tempdir().unwrap();
+            let repo = elsewhere.path().join("h");
+            std::fs::create_dir_all(repo.join(".git")).unwrap();
+            let herd_file = self.paths.herds.join("h.toml");
+            let text = std::fs::read_to_string(&herd_file).unwrap();
+            let old_repo = self.dir.path().join("repos/h");
+            let text = text.replace(old_repo.to_str().unwrap(), repo.to_str().unwrap());
+            std::fs::write(&herd_file, text).unwrap();
+            (elsewhere, repo)
+        }
+
         fn ledger(&self) -> FileLedger {
             FileLedger::new(self.dir.path().join("ledger.json"))
         }
@@ -1202,12 +1403,16 @@ mod tests {
             process: me(),
             live: same_session,
             spawn_waiter: no_waiter,
+            prs: &NO_PRS,
         }
     }
 
     fn same_session(session: &str) -> String {
         session.into()
     }
+
+    const NO_PRS: crate::github::fake::FakePrs =
+        crate::github::fake::FakePrs(Ok(crate::github::PrLookup::None));
 
     fn no_waiter(_: &str, _: Lock) -> Result<()> {
         Ok(())
@@ -1243,6 +1448,7 @@ mod tests {
             },
             live: same_session,
             spawn_waiter: no_waiter,
+            prs: &NO_PRS,
         };
         let mut kept = Kept::default();
         let code = run(&mut ctx, client, op, &mut kept)?;
@@ -1352,6 +1558,261 @@ mod tests {
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
         assert_eq!(herdr.calls(), 0);
+    }
+
+    fn retire_op(name: &str, close: bool, force: bool) -> Op {
+        Op::Retire {
+            name: name.into(),
+            close,
+            force,
+        }
+    }
+
+    fn release_op(name: &str, drop_branch: bool) -> Op {
+        Op::Release {
+            name: name.into(),
+            keep_branch: false,
+            drop_branch,
+        }
+    }
+
+    #[test]
+    fn retire_and_release_reach_the_herd_s_workers_retired_or_not_and_nothing_else() {
+        let world = World::new();
+        world.herd("g");
+        world.add(member("lh-9", Some("g")));
+        world.add(member("lh-8", None));
+        let mut other_lead = member("lead-x", Some("h"));
+        other_lead.role = Some(Role::Lead);
+        world.add(other_lead);
+        let mut retired_lead = member("lead-y", Some("h"));
+        retired_lead.role = Some(Role::Lead);
+        retired_lead.retired = true;
+        world.add(retired_lead);
+        let mut retired_elsewhere = member("lh-10", Some("g"));
+        retired_elsewhere.retired = true;
+        world.add(retired_elsewhere);
+        let serving = world.serve(telling_herdr());
+        let reach = "lead-h reaches only herd h's workers";
+        for (target, why) in [
+            ("shepherd", format!("shepherd is the shepherd; {reach}")),
+            ("lh-9", format!("lh-9 is in herd g; {reach}")),
+            ("lh-8", format!("lh-8 is in no herd; {reach}")),
+            ("lead-x", format!("lead-x is a lead; {reach}")),
+            ("lead-y", format!("lead-y is a lead; {reach}")),
+            ("lh-10", format!("lh-10 is in herd g; {reach}")),
+            ("lh-6", format!("no member is named lh-6; {reach}")),
+            (
+                "lead-h",
+                "lead-h is the lead itself; {command} reaches only herd h's workers".into(),
+            ),
+        ] {
+            for op in [
+                retire_op(target, false, false),
+                retire_op(target, true, false),
+                release_op(target, false),
+            ] {
+                let command = op.command();
+                let hint = match (target, &op) {
+                    ("lead-h", Op::Retire { .. }) => {
+                        "; retiring a lead is the shepherd's or the human's job"
+                    }
+                    _ => "",
+                };
+                assert_eq!(
+                    format!("{:#}", world.client().call(&op).unwrap_err()),
+                    format!(
+                        "lead-h's broker refused {command}: {}{hint}",
+                        why.replace("{command}", command)
+                    )
+                );
+            }
+        }
+        world.add(member("lh-1", Some("h")));
+        for (op, why) in [
+            (
+                retire_op("lh-1", false, true),
+                "retire --force skips the check that a member is finished, so the human forces \
+                 a retire; retire it once its stop reads finished",
+            ),
+            (
+                retire_op("lh-1", true, true),
+                "retire --force skips the check that a member is finished, so the human forces \
+                 a retire; retire it once its stop reads finished",
+            ),
+            (
+                release_op("lh-1", true),
+                "release --drop-branch deletes commits not on the base, so the human drops a \
+                 branch; release it plain or with --keep-branch",
+            ),
+            (
+                Op::Release {
+                    name: "lh-1".into(),
+                    keep_branch: true,
+                    drop_branch: true,
+                },
+                "release --drop-branch deletes commits not on the base, so the human drops a \
+                 branch; release it plain or with --keep-branch",
+            ),
+        ] {
+            assert_eq!(
+                format!("{:#}", world.client().call(&op).unwrap_err()),
+                format!("lead-h's broker refused {}: {why}", op.command())
+            );
+        }
+        assert!(!world.ledger().entries().unwrap()["lh-1"].retired);
+
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert_eq!(herdr.calls(), 0);
+    }
+
+    #[test]
+    fn in_a_sandboxed_lead_s_pane_retire_and_release_go_through_its_broker_and_call_no_herdr() {
+        let world = World::new();
+        let (_elsewhere, repo) = world.move_repo();
+        let mut lh_1 = member("lh-1", Some("h"));
+        lh_1.repo = repo;
+        world.add(lh_1);
+        let serving = world.serve(FakeHerdr::new(&[]));
+        let own = FakeHerdr::new(&[]);
+        let client = world.route_from("p-lead-h");
+
+        let retired = run_here(
+            &own,
+            &world,
+            client.as_ref(),
+            &retire_op("lh-1", false, false),
+        );
+        let closed = run_here(
+            &own,
+            &world,
+            client.as_ref(),
+            &retire_op("lh-1", true, false),
+        );
+        let released = run_here(&own, &world, client.as_ref(), &release_op("lh-1", false));
+
+        let out = |done: Result<(i32, Kept)>| done.map(|(code, kept)| (code, kept.out));
+        assert_eq!(out(retired).unwrap(), (0, vec!["retired lh-1".to_string()]));
+        // A rerun of --close on a retired member, as after a failed close.
+        let (code, closed) = out(closed).unwrap();
+        assert_eq!(code, 0);
+        assert!(
+            closed[0].starts_with("lh-1 is already retired"),
+            "{closed:?}"
+        );
+        assert_eq!(
+            out(released).unwrap(),
+            (
+                0,
+                vec!["released lh-1: feed may spawn it again".to_string()]
+            )
+        );
+        assert!(world.ledger().entries().unwrap()["lh-1"].retired);
+        assert_eq!(own.calls(), 0);
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    /// Past the broker's reach check, as if it were ever loosened, the
+    /// handlers' own guard still holds a lead to its herd.
+    #[test]
+    fn a_lead_s_retire_close_and_release_guard_its_herd_behind_the_reach_check() {
+        let world = World::new();
+        world.herd("g");
+        let mut lh_9 = member("lh-9", Some("g"));
+        lh_9.retired = true;
+        world.add(lh_9);
+        let herdr = FakeHerdr::new(&[]);
+        let mut ledger = world.ledger();
+        let mut ctx = Ctx {
+            herdr: &herdr,
+            ledger: &mut ledger,
+            paths: &world.paths,
+            procs: &crate::process::ProcFs,
+            claude_dir: None,
+            caller: Caller {
+                pane: None,
+                socket: None,
+                lineage: vec![],
+                workspace: None,
+                process: me(),
+                lead: Some(ForLead {
+                    name: "lead-h".into(),
+                    herd: "h".into(),
+                }),
+            },
+            live: same_session,
+            spawn_waiter: no_waiter,
+            prs: &NO_PRS,
+        };
+        let mut kept = Kept::default();
+
+        let close = retire_op("lh-9", true, false).carry_out(&mut ctx, &mut kept);
+        let release = release_op("lh-9", false).carry_out(&mut ctx, &mut kept);
+
+        let why = "refused: lh-9 isn't a member of lead-h's herd, and lead-h runs this loopherd";
+        assert_eq!(format!("{:#}", close.unwrap_err()), why);
+        assert_eq!(format!("{:#}", release.unwrap_err()), why);
+    }
+
+    #[test]
+    fn a_broker_s_plain_retire_removes_marks_and_records_tokens_in_the_state_dir_s_mailboxes() {
+        let world = World::new();
+        let mut worker = member("lh-1", Some("h"));
+        worker.session_id = Some("s1".into());
+        world.add(worker);
+        let mailboxes = world.paths.state_dir().join("reports");
+        std::fs::create_dir_all(&mailboxes).unwrap();
+        std::fs::write(mailboxes.join("lh-1.notified"), "question t1\n").unwrap();
+        std::fs::write(mailboxes.join("lh-1.blocked"), "").unwrap();
+        let stop = r#"{"at": "2026-11-01T09:30:00Z", "kind": "stop", "session": "s1", "crons": 0, "background": {"shells": 0, "subagents": 0, "other": 0}}"#;
+        std::fs::write(mailboxes.join("lh-1.jsonl"), format!("{stop}\n")).unwrap();
+        let claude_dir = world.dir.path().join("claude");
+        let project = claude_dir.join("projects/-r");
+        std::fs::create_dir_all(&project).unwrap();
+        let line = r#"{"type": "assistant", "timestamp": "2026-11-01T09:10:00Z", "message": {"id": "m1", "model": "opus", "usage": {"input_tokens": 1, "cache_creation_input_tokens": 2, "cache_read_input_tokens": 3, "output_tokens": 4}}}"#;
+        std::fs::write(project.join("s1.jsonl"), format!("{line}\n")).unwrap();
+        let herdr = FakeHerdr::new(&[]);
+        let mut ledger = world.ledger();
+        let mut ctx = Ctx {
+            herdr: &herdr,
+            ledger: &mut ledger,
+            paths: &world.paths,
+            procs: &crate::process::ProcFs,
+            claude_dir: Some(claude_dir),
+            caller: Caller {
+                pane: Some("p-lead-h".into()),
+                socket: None,
+                lineage: vec![],
+                workspace: Some("w1".into()),
+                process: me(),
+                lead: Some(ForLead {
+                    name: "lead-h".into(),
+                    herd: "h".into(),
+                }),
+            },
+            live: same_session,
+            spawn_waiter: no_waiter,
+            prs: &NO_PRS,
+        };
+        let mut kept = Kept::default();
+
+        let code = retire_op("lh-1", false, false)
+            .carry_out(&mut ctx, &mut kept)
+            .unwrap();
+
+        assert_eq!(
+            (code, kept.out, kept.err),
+            (0, vec!["retired lh-1".into()], vec![])
+        );
+        assert!(!mailboxes.join("lh-1.notified").exists());
+        assert!(!mailboxes.join("lh-1.blocked").exists());
+        let text = std::fs::read_to_string(mailboxes.join("lh-1.jsonl")).unwrap();
+        let usage: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        assert_eq!(usage["kind"], "usage", "{text}");
+        assert_eq!(usage["models"]["opus"]["output"], 4);
+        assert!(world.ledger().entries().unwrap()["lh-1"].retired);
     }
 
     #[test]
@@ -1529,6 +1990,76 @@ mod tests {
         let herdr = telling_herdr();
         run_here(&herdr, &world, None, &tell("lh-1", "hi")).unwrap();
         assert_eq!(herdr.prompts().len(), 1);
+    }
+
+    #[test]
+    fn a_hook_only_lead_s_release_goes_through_its_broker_by_its_pane() {
+        let world = World::new();
+        let socket = Path::new("/run/h.sock");
+        world
+            .ledger()
+            .update("lead-h", &mut |r| {
+                r.socket = Some(socket.into());
+                Ok(())
+            })
+            .unwrap();
+        let (_elsewhere, repo) = world.move_repo();
+        let mut done = member("lh-1", Some("h"));
+        done.repo = repo;
+        done.retired = true;
+        world.add(done);
+        let serving = world.serve(FakeHerdr::new(&[]));
+        let pane = tool_hook::Pane {
+            id: "p-lead-h",
+            socket: Some(socket),
+            lineage: &[],
+        };
+        let client = route(
+            &world.paths,
+            &world.ledger(),
+            &procs(&["claude"]),
+            50,
+            Some(&pane),
+        );
+        let own = FakeHerdr::new(&[]);
+
+        let (code, kept) =
+            run_here(&own, &world, client.as_ref(), &release_op("lh-1", false)).unwrap();
+
+        assert_eq!(client.unwrap().lead, "lead-h");
+        let released = "released lh-1: feed may spawn it again".to_string();
+        assert_eq!((code, kept.out), (0, vec![released]));
+        assert_eq!(own.calls(), 0);
+        assert!(
+            world.ledger().entries().unwrap()["lh-1"]
+                .released_at
+                .is_some()
+        );
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert!(herdr.calls() > 0);
+    }
+
+    #[test]
+    fn the_shepherd_s_release_runs_in_its_own_process_where_the_ledger_is_writable() {
+        let world = World::new();
+        let (_elsewhere, repo) = world.move_repo();
+        let mut done = member("lh-1", Some("h"));
+        done.repo = repo;
+        done.retired = true;
+        world.add(done);
+        let own = FakeHerdr::new(&[]);
+        assert!(world.route_from("w1:p-shepherd").is_none());
+
+        let (code, _) = run_here(&own, &world, None, &release_op("lh-1", false)).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(own.calls() > 0);
+        assert!(
+            world.ledger().entries().unwrap()["lh-1"]
+                .released_at
+                .is_some()
+        );
     }
 
     #[test]
@@ -1895,6 +2426,8 @@ mod tests {
                 feed("h"),
                 add("h", "pr", &[]),
                 Op::RestartSelf,
+                retire_op("lh-1", false, false),
+                release_op("lh-1", false),
             ];
             let mut refusals: Vec<String> = ops
                 .iter()
@@ -1905,11 +2438,15 @@ mod tests {
             refusals
         });
 
-        for (refusal, command) in
-            refusals
-                .iter()
-                .zip(["tell", "feed", "add", "restart --self", "spawn"])
-        {
+        for (refusal, command) in refusals.iter().zip([
+            "tell",
+            "feed",
+            "add",
+            "restart --self",
+            "retire",
+            "release",
+            "spawn",
+        ]) {
             assert!(
                 refusal.starts_with(&format!(
                     "refused: this loopherd runs in a sandbox, where it can't run loopherd {command} itself"
@@ -2059,6 +2596,7 @@ mod tests {
             },
             live: same_session,
             spawn_waiter: no_waiter,
+            prs: &NO_PRS,
         };
         let mut kept = Kept::default();
 
@@ -2085,5 +2623,114 @@ mod tests {
 
         assert_eq!(first, ["a.json", "b.json"]);
         assert_eq!(second, first);
+    }
+
+    /// Herd `c` on a GitHub repo, whose lead `lead-c` guards merges by
+    /// credentials, with its deploy key and `token`, if any.
+    fn credentials_herd(world: &World, token: Option<&str>) {
+        use crate::worktree::testing::git;
+        let repo = world.dir.path().join("repos/c");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--quiet"]).unwrap();
+        let url = "https://github.com/acme/widgets.git";
+        git(&repo, &["remote", "add", "origin", url]).unwrap();
+        let text = format!(
+            "repo = {:?}\n[template.t]\nparams = []\nprompt = \"go\"\n\
+             [lead]\nprompt = \"go\"\nmerge_guard = \"credentials\"\n",
+            repo.to_str().unwrap()
+        );
+        std::fs::write(world.paths.herds.join("c.toml"), text).unwrap();
+        let sandbox = world.paths.config_dir().join("sandbox");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        std::fs::write(
+            sandbox.join("lead-c.lead.json"),
+            r#"{"herd": "c", "args": []}"#,
+        )
+        .unwrap();
+        let files = crate::credentials::files(&world.paths, "c");
+        std::fs::create_dir_all(files.key.parent().unwrap()).unwrap();
+        std::fs::write(&files.key, "a private key\n").unwrap();
+        if let Some(token) = token {
+            std::fs::write(&files.token, token).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_credentials_herds_broker_takes_on_its_leads_token_and_drops_the_ssh_agent() {
+        let world = World::new();
+        credentials_herd(&world, Some("github_pat_1\n"));
+
+        let env = lead_env(&world.paths, "lead-c").unwrap();
+
+        let var = |name: &str| {
+            env.iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(var("GH_TOKEN"), Some("github_pat_1"));
+        assert_eq!(var("SSH_AUTH_SOCK"), Some(""));
+        assert_eq!(var("GIT_CONFIG_KEY_0"), Some("credential.helper"));
+        assert_eq!(var("GIT_CONFIG_VALUE_0"), Some(""));
+        let ssh_config = world.paths.config_dir().join("ssh/config");
+        assert_eq!(
+            var("GIT_SSH_COMMAND"),
+            Some(
+                format!(
+                    "ssh -F '{}' -o IdentitiesOnly=yes -o IdentityAgent=none",
+                    ssh_config.display()
+                )
+                .as_str()
+            )
+        );
+    }
+
+    #[test]
+    fn a_hook_guarded_or_unrecorded_leads_broker_keeps_its_starters_environment() {
+        let world = World::new();
+
+        assert_eq!(lead_env(&world.paths, "lead-h").unwrap(), []);
+        assert_eq!(lead_env(&world.paths, "lead-x").unwrap(), []);
+    }
+
+    #[test]
+    fn a_lead_waits_on_retire_and_release_for_nine_remote_calls_and_room_for_herdr() {
+        let secs = |s| Duration::from_secs(s);
+
+        assert_eq!(origin_wait(Ok(secs(120))), secs(1380));
+        assert_eq!(origin_wait(Ok(secs(3600))), secs(9 * 3600 + 300));
+        assert_eq!(origin_wait(Err(anyhow!("bad timeout"))), secs(1380));
+    }
+
+    #[test]
+    fn a_broker_whose_herd_file_cant_be_read_fails_to_start_rather_than_guess() {
+        let world = World::new();
+        std::fs::remove_file(world.paths.herds.join("h.toml")).unwrap();
+
+        let err = lead_env(&world.paths, "lead-h").unwrap_err();
+
+        assert!(
+            format!("{err:#}").starts_with(
+                "lead-h's broker can't start: whether herd h guards merges by credentials is unknown: "
+            ),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn a_credentials_herds_broker_without_its_token_fails_to_start_naming_the_fix() {
+        let world = World::new();
+        credentials_herd(&world, None);
+
+        let err = lead_env(&world.paths, "lead-c").unwrap_err();
+
+        let token = crate::credentials::files(&world.paths, "c").token;
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "lead-c's broker can't start: herd c guards merges by credentials: no token at {}; \
+                 run loopherd merge-guard c for how to create and store it",
+                token.display()
+            )
+        );
     }
 }

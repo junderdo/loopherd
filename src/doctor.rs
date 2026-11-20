@@ -2054,6 +2054,7 @@ mod tests {
                 process: crate::ledger::Process { pid: 0, start: 0 },
                 live: |session| session.to_string(),
                 spawn_waiter: |_, _| Ok(()),
+                prs: &crate::github::fake::FakePrs(Ok(crate::github::PrLookup::None)),
             };
             crate::broker::serve(
                 &host,
