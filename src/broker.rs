@@ -812,7 +812,9 @@ fn is_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-fn requests_dir(paths: &Paths, lead: &str) -> PathBuf {
+/// Where lead `lead` hands its broker requests, the one folder of the
+/// broker's that the lead's sandbox lets it write.
+pub fn requests_dir(paths: &Paths, lead: &str) -> PathBuf {
     paths.state_dir().join("broker").join(lead).join("requests")
 }
 

@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::herd::{self, Paths};
+use crate::herd::{self, MergeGuard, Paths};
 use crate::ledger::AgentRecord;
 use crate::process::Procs;
 use crate::worktree::{same_dir, worktree_path};
@@ -346,7 +346,18 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
     let file = lead_file(paths, name);
     std::fs::write(&file, serde_json::to_string_pretty(lead)? + "\n")
         .with_context(|| format!("write {}", file.display()))?;
+    let by_credentials = herd::merge_guard(paths, &lead.herd)? == Some(MergeGuard::Credentials);
     if let Err(Unavailable { why, fix }) = probe() {
+        if by_credentials {
+            return Err(credentials_refusal(
+                name,
+                &format!(
+                    "its sandbox can't start ({why}), and without it the lead could read your \
+                     GitHub credentials; {fix}, or set [lead] merge_guard = \"hook\" in herd {}",
+                    lead.herd
+                ),
+            ));
+        }
         return match mode {
             SandboxMode::Prefer => Ok(Launch::HookOnly { why }),
             SandboxMode::Require => Err(refusal(
@@ -356,11 +367,29 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
             )),
         };
     }
-    create_state(paths.state_dir())?;
+    create_state(paths, name)?;
     let file = settings_file(paths, name);
     let text = serde_json::to_string_pretty(&settings(paths, name, &lead.herd)?)? + "\n";
-    std::fs::write(&file, text).with_context(|| format!("write {}", file.display()))?;
+    write_private(&file, &text).with_context(|| format!("write {}", file.display()))?;
     Ok(Launch::Sandboxed { settings: file })
+}
+
+/// A credentials lead's settings hold its token, so only the human reads them.
+fn write_private(file: &Path, text: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut open = std::fs::OpenOptions::new();
+    let created = open
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(file)?;
+    created.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    std::io::Write::write_all(&mut &created, text.as_bytes())
+}
+
+fn credentials_refusal(name: &str, why: &str) -> anyhow::Error {
+    anyhow::anyhow!("{name} can't start with merge_guard = \"credentials\": {why}")
 }
 
 /// How a running lead stands against its sandbox.
@@ -391,6 +420,15 @@ pub fn check_running(
         .any(|pair| pair[0] == "--settings" && pair[1] == shown)
     {
         let why = "it was started without its sandbox";
+        if herd::merge_guard(paths, herd)? == Some(MergeGuard::Credentials) {
+            return Err(credentials_refusal(
+                name,
+                &format!(
+                    "{why}, so it can read your GitHub credentials; {resume} to resume it \
+                     sandboxed"
+                ),
+            ));
+        }
         return match mode {
             SandboxMode::Prefer => Ok(Running::HookOnly(why.into())),
             SandboxMode::Require => Err(refusal(
@@ -455,22 +493,29 @@ const WRITABLE_STATE: [&str; 2] = ["reports", "handoffs"];
 /// replaced, so a deny on each file holds.
 const SHEPHERDS_WATCH: [&str; 2] = ["reports/watch.lock", "reports/watch.fired"];
 
-/// What in the state dir is the human's or the shepherd's, denied by name to
-/// the file tools, which the sandbox doesn't cover. `true` marks a directory.
-const KEPT_FROM_FILE_TOOLS: [(&str, bool); 5] = [
+/// What in the state dir is the human's, the shepherd's or a broker's,
+/// denied by name to the file tools, which the sandbox doesn't cover. `true`
+/// marks a directory.
+const KEPT_FROM_FILE_TOOLS: [(&str, bool); 6] = [
     ("paused", true),
+    ("broker", true),
     ("shepherd.json", false),
     ("shepherd.json.lock", false),
     ("ledger.json", false),
     ("ledger.lock", false),
 ];
 
-/// Makes what the lead's sandbox names in the state dir. An `allowWrite`
+/// Makes what lead `name`'s sandbox names in the state dir. An `allowWrite`
 /// entry for a missing path has no effect on Linux, and a `denyWrite` entry
 /// gets a placeholder that would sit in the way of the first real write.
-fn create_state(state: &Path) -> Result<()> {
-    for dir in WRITABLE_STATE {
-        let dir = state.join(dir);
+fn create_state(paths: &Paths, name: &str) -> Result<()> {
+    let state = paths.state_dir();
+    let requests = crate::broker::requests_dir(paths, name);
+    for dir in WRITABLE_STATE
+        .map(|dir| state.join(dir))
+        .into_iter()
+        .chain([requests])
+    {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     }
     for file in SHEPHERDS_WATCH {
@@ -495,6 +540,8 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
     let state = paths.state_dir();
     let mut allow_write = vec![worktree];
     allow_write.extend(WRITABLE_STATE.map(|dir| state.join(dir)));
+    // Only its own: a broker takes every request in its folder as its lead's.
+    allow_write.push(crate::broker::requests_dir(paths, name));
     if switches.install {
         allow_write.push(paths.home.join(".local/bin"));
     }
@@ -532,14 +579,47 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
     sandbox["excludedCommands"] = json!(excluded);
     let mut allow = vec!["WebFetch(domain:*)".to_string()];
     allow.extend(excluded.iter().map(|command| format!("Bash({command})")));
-    Ok(json!({
+    let mut env = None;
+    if herd::merge_guard(paths, herd)? == Some(MergeGuard::Credentials) {
+        if switches.install {
+            return Err(credentials_refusal(
+                name,
+                &format!(
+                    "install = true runs scripts/install outside the sandbox, from a worktree \
+                     the lead can edit; set [lead] install = false, or merge_guard = \"hook\", \
+                     in herd {herd}"
+                ),
+            ));
+        }
+        env = Some(
+            crate::credentials::lead_env(paths, herd)
+                .map_err(|e| credentials_refusal(name, &format!("{e:#}")))?,
+        );
+        let human =
+            crate::credentials::human_credentials(&paths.home, &|name| std::env::var_os(name));
+        // The file tools run outside the sandbox, so each path is denied to both.
+        sandbox["filesystem"]["denyRead"] = human
+            .iter()
+            .map(|(path, _)| path.display().to_string())
+            .collect();
+        sandbox["filesystem"]["allowRead"] = json!(crate::credentials::ssh_readable(&paths.home));
+        deny.extend(human.iter().map(|(path, is_dir)| {
+            let under = if *is_dir { "/**" } else { "" };
+            format!("Read(/{}{under})", path.display())
+        }));
+    }
+    let mut settings = json!({
         "sandbox": sandbox,
         "permissions": {
             "denyInsteadOfPrompting": true,
             "allow": allow,
             "deny": deny,
         },
-    }))
+    });
+    if let Some(env) = env {
+        settings["env"] = Value::Object(env);
+    }
+    Ok(settings)
 }
 
 /// A deny for the file tools; `//` marks the path absolute, not relative to the settings file.

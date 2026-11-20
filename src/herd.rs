@@ -61,13 +61,16 @@ struct LeadFile {
 }
 
 /// How a lead with `merge` off is kept from merging.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum MergeGuard {
     /// The lead's tool hook refuses its merges, but it holds the human's
     /// credentials, so the human is also told of every merge.
     #[default]
     Hook,
+    /// The lead holds a deploy key and a token that can't merge, and can't
+    /// read the human's credentials.
+    Credentials,
 }
 
 /// What a lead may do on its own; off means the human does it.
@@ -79,6 +82,15 @@ pub struct Switches {
     pub new_cards: bool,
     pub design_escalation: bool,
     pub blocked_dialogs: bool,
+}
+
+impl MergeGuard {
+    pub fn name(self) -> &'static str {
+        match self {
+            MergeGuard::Hook => "hook",
+            MergeGuard::Credentials => "credentials",
+        }
+    }
 }
 
 impl Switches {
@@ -780,17 +792,23 @@ pub fn lead_switches(paths: &Paths, herd: &str) -> Result<Switches> {
     Ok(lead_sandbox(paths, herd)?.0)
 }
 
-/// The repo whose merges the human hears of while `herd`'s lead runs: one
-/// whose `[lead]` has `merge` off and guards it by hook; else `None`.
-pub fn merge_alerts(paths: &Paths, herd: &str) -> Result<Option<PathBuf>> {
+/// How `herd`'s lead is kept from merging: `None` without a `[lead]`, or
+/// with `merge` on, which ignores `merge_guard`.
+pub fn merge_guard(paths: &Paths, herd: &str) -> Result<Option<MergeGuard>> {
     let file = load(&paths.herds, herd).context("herd")?;
     let Some(lead) = file.lead else {
         return Ok(None);
     };
     let merge = lead.switches().over(&lead_defaults(paths)?).merge;
-    Ok(match (merge, lead.merge_guard) {
-        (false, MergeGuard::Hook) => Some(expand_home(&file.repo, &paths.home)),
-        (true, _) => None,
+    Ok((!merge).then_some(lead.merge_guard))
+}
+
+/// The repo whose merges the human hears of while `herd`'s lead runs: one
+/// whose `[lead]` has `merge` off and guards it by hook; else `None`.
+pub fn merge_alerts(paths: &Paths, herd: &str) -> Result<Option<PathBuf>> {
+    Ok(match merge_guard(paths, herd)? {
+        Some(MergeGuard::Hook) => Some(repo(paths, herd)?),
+        Some(MergeGuard::Credentials) | None => None,
     })
 }
 
@@ -2589,23 +2607,39 @@ args = ["--model", "opus"]
                              [template.t]\nparams = []\nprompt = \"go\"\n";
 
     #[test]
-    fn merge_guard_takes_only_hook_and_fails_the_herd_file_otherwise() {
-        let herd = |guard: &str| format!("{LEAD_HERD}[lead]\nprompt = \"go\"\n{guard}");
+    fn merge_guard_is_hook_by_default_and_ignored_while_merge_is_on() {
+        let herd = |lead: &str| format!("{LEAD_HERD}[lead]\nprompt = \"go\"\n{lead}");
         let config = Config::with(&[
             ("unset", &herd("")),
             ("hook", &herd("merge_guard = \"hook\"\n")),
             ("credentials", &herd("merge_guard = \"credentials\"\n")),
+            (
+                "merging",
+                &herd("merge = true\nmerge_guard = \"credentials\"\n"),
+            ),
+            ("unknown", &herd("merge_guard = \"token\"\n")),
+            ("leadless", LEAD_HERD),
         ]);
         let paths = config.paths();
 
         for name in ["unset", "hook"] {
+            assert_eq!(merge_guard(&paths, name).unwrap(), Some(MergeGuard::Hook));
             assert_eq!(
                 merge_alerts(&paths, name).unwrap(),
                 Some(PathBuf::from("/r"))
             );
         }
-        let err = format!("{:#}", merge_alerts(&paths, "credentials").unwrap_err());
-        assert!(err.contains("unknown variant `credentials`"), "{err}");
+        assert_eq!(
+            merge_guard(&paths, "credentials").unwrap(),
+            Some(MergeGuard::Credentials)
+        );
+        assert_eq!(merge_alerts(&paths, "credentials").unwrap(), None);
+        for name in ["merging", "leadless"] {
+            assert_eq!(merge_guard(&paths, name).unwrap(), None);
+            assert_eq!(merge_alerts(&paths, name).unwrap(), None);
+        }
+        let err = format!("{:#}", merge_guard(&paths, "unknown").unwrap_err());
+        assert!(err.contains("unknown variant `token`"), "{err}");
     }
 
     #[test]

@@ -443,7 +443,21 @@ merge is sent; later ones run at most once a minute across its watches,
 only while `kinds` holds `merge_alert`, and a re-armed watch catches up on
 merges it missed. A lookup that fails warns on the watch's stderr. Not
 covered: pushes straight to the branch, and merges after the lead's watch
-stops for good (a drained lead).
+stops for good (a drained lead). A `credentials` lead can't merge, so it
+gets no alert.
+
+To guard a `merge = false` lead with split credentials instead, set
+`[lead] merge_guard = "credentials"` (or answer `init`'s question), then
+have the human run `loopherd merge-guard <herd>` with their own gh login.
+It makes the deploy key under `<config dir>/credentials/`, adds it to the
+repo, creates or updates the rulesets on the default branch and on
+force-pushes, writes `Host loopherd-<herd>` into `<config dir>/ssh/config`,
+and prints the rest for the human: `Include <config dir>/ssh/config` as the
+first line of `~/.ssh/config` (once; loopherd never writes `~/.ssh`), and
+the web-UI steps for the token stored at `<herd>.token`. The lead won't
+start without its key and token, or with `install = true`; `loopherd
+doctor` checks the key, the token, the Include, the `Host` block and the
+rulesets.
 
 `pane_label = true` (default false) also labels, in herdr's sidebar, the
 pane that must relay or answer: yours when your watch prints a `question`
@@ -822,7 +836,12 @@ What differs from the shepherd:
   herd file wouldn't, and `release --drop-branch` is the human's.
   `loopherd spawn --worktree` is the human's: its worktree sits beside
   yours, where you can't write; use `loopherd add` instead. Every host is
-  reachable, and gh uses the human's credentials as before. The sandbox
+  reachable, and gh uses the human's credentials as before, unless your
+  `[lead]` has `merge_guard = "credentials"` (D95): then gh uses a token
+  that can open and update pull requests but not merge or write contents,
+  git pushes over ssh with the herd's deploy key, and the files holding the
+  human's own GitHub credentials and ssh keys are unreadable. Pushes to the default
+  branch and force-pushes are refused by GitHub; ask the human. The sandbox
   is a guard rail the human set, not the whole boundary: when it refuses
   something, ask; don't route around it through herdr, a member or
   another tool.

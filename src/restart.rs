@@ -1517,6 +1517,28 @@ mod tests {
     }
 
     #[test]
+    fn a_credentials_lead_running_without_its_sandbox_is_not_cleared_even_under_prefer() {
+        let w = World::new();
+        w.handed_off();
+        fs::write(
+            w.paths().herds.join("h.toml"),
+            "repo = \"/src/repo\"\n[lead]\nprompt = \"go\"\nsandbox = \"prefer\"\n\
+             merge_guard = \"credentials\"\n",
+        )
+        .unwrap();
+
+        let (result, _) = w.restart_as(false, true, None, &unsandboxed);
+
+        assert_eq!(
+            format!("{:#}", result.unwrap_err()),
+            "sandbox: lh-1 can't start with merge_guard = \"credentials\": it was started \
+             without its sandbox, so it can read your GitHub credentials; quit its Claude and \
+             run loopherd revive --name lh-1 to resume it sandboxed"
+        );
+        assert!(w.herdr.prompts().is_empty());
+    }
+
+    #[test]
     fn a_lead_whose_prompt_file_is_gone_is_not_cleared() {
         let w = World::new();
         w.handed_off();

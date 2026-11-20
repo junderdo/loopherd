@@ -1,1 +1,1 @@
-merged = "GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh pr list --repo @OWNER_REPO@ --head {branch} --state merged --json number --jq 'length > 0' | grep -qx true"
+merged = "@GH@ pr list --repo @OWNER_REPO@ --head {branch} --state merged --json number --jq 'length > 0' | grep -qx true"

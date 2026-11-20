@@ -206,6 +206,7 @@ fn lead_name(herd: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -340,6 +341,47 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_can_write_its_own_broker_requests_and_no_other_leads() {
+        let setup = Setup::with_lead(PROMPT);
+        let herdr = herdr();
+
+        lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        let (_, settings) = started_settings(&herdr);
+        let state = setup.root.join("state");
+        let own = state.join("broker/lead-h/requests");
+        let other = state.join("broker/lead-g/requests");
+        let allowed: Vec<PathBuf> = settings["sandbox"]["filesystem"]["allowWrite"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| PathBuf::from(p.as_str().unwrap()))
+            .collect();
+        assert!(allowed.contains(&own), "{allowed:?}");
+        assert!(
+            own.is_dir(),
+            "an allowWrite path that's missing opens nothing"
+        );
+        assert!(
+            !allowed.iter().any(|dir| other.starts_with(dir)),
+            "{allowed:?}"
+        );
+        let deny = &settings["permissions"]["deny"];
+        let file_tools = format!("Edit(/{}/**)", state.join("broker").display());
+        assert!(
+            deny.as_array().unwrap().iter().any(|r| r == &file_tools),
+            "{deny}"
+        );
+    }
+
+    #[test]
     fn a_lead_starts_in_the_sandbox_with_settings_written_outside_its_worktree() {
         let setup = Setup::with_lead(PROMPT);
         let herdr = herdr();
@@ -370,6 +412,7 @@ mod tests {
                             format!("{root}/proj/worktrees/lead-h"),
                             format!("{root}/state/reports"),
                             format!("{root}/state/handoffs"),
+                            format!("{root}/state/broker/lead-h/requests"),
                         ],
                         "denyWrite": [
                             format!("{root}/config"),
@@ -398,6 +441,7 @@ mod tests {
                         format!("Edit(/{root}/config/**)"),
                         "Edit(//home/me/.claude/**)",
                         format!("Edit(/{root}/state/paused/**)"),
+                        format!("Edit(/{root}/state/broker/**)"),
                         format!("Edit(/{root}/state/shepherd.json)"),
                         format!("Edit(/{root}/state/shepherd.json.lock)"),
                         format!("Edit(/{root}/state/ledger.json)"),
@@ -625,7 +669,7 @@ mod tests {
         let (_, settings) = started_settings(&herdr);
         let sandbox = &settings["sandbox"];
         assert_eq!(
-            sandbox["filesystem"]["allowWrite"][3],
+            sandbox["filesystem"]["allowWrite"][4],
             "/home/me/.local/bin"
         );
         assert_eq!(
@@ -649,6 +693,247 @@ mod tests {
             sandbox["filesystem"]["denyWrite"][1], "/home/me/.claude",
             "the file tools stay out of ~/.claude"
         );
+    }
+
+    const CREDENTIALS: &str = "prompt = \"go\"\nmerge_guard = \"credentials\"";
+
+    /// Points origin at GitHub by name while git still fetches the local one.
+    fn origin_on_github(setup: &Setup, url: &str) {
+        let local = setup.root.join("origin.git").display().to_string();
+        testing::git(&setup.repo, &["remote", "set-url", "origin", url]).unwrap();
+        let rewrite = format!("url.{local}.insteadOf");
+        testing::git(&setup.repo, &["config", &rewrite, url]).unwrap();
+    }
+
+    fn store_credentials(setup: &Setup, key: bool, token: Option<&str>) {
+        let dir = setup.root.join("config/credentials");
+        fs::create_dir_all(&dir).unwrap();
+        if key {
+            fs::write(dir.join("h.key"), "a private key\n").unwrap();
+        }
+        if let Some(token) = token {
+            fs::write(dir.join("h.token"), token).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_credentials_lead_gets_its_deploy_key_and_token_and_cant_read_the_humans() {
+        let setup = Setup::with_lead(CREDENTIALS);
+        origin_on_github(&setup, "https://github.com/acme/widgets.git");
+        store_credentials(&setup, true, Some("github_pat_1\n"));
+        let herdr = herdr();
+
+        lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        let (path, settings) = started_settings(&herdr);
+        let fetch = "url.git@loopherd-h:acme/widgets.git.insteadOf";
+        let push = "url.git@loopherd-h:acme/widgets.git.pushInsteadOf";
+        assert_eq!(
+            settings["env"],
+            serde_json::json!({
+                "GH_TOKEN": "github_pat_1",
+                "SSH_AUTH_SOCK": "",
+                "GIT_CONFIG_COUNT": "5",
+                "GIT_CONFIG_KEY_0": "credential.helper",
+                "GIT_CONFIG_VALUE_0": "",
+                "GIT_CONFIG_KEY_1": fetch,
+                "GIT_CONFIG_VALUE_1": "https://github.com/acme/widgets.git",
+                "GIT_CONFIG_KEY_2": push,
+                "GIT_CONFIG_VALUE_2": "https://github.com/acme/widgets.git",
+                "GIT_CONFIG_KEY_3": fetch,
+                "GIT_CONFIG_VALUE_3": "git@github.com:acme/widgets.git",
+                "GIT_CONFIG_KEY_4": push,
+                "GIT_CONFIG_VALUE_4": "git@github.com:acme/widgets.git",
+            })
+        );
+        assert_eq!(
+            settings["sandbox"]["filesystem"]["allowRead"],
+            serde_json::json!(["/home/me/.ssh/config", "/home/me/.ssh/known_hosts"])
+        );
+        assert_eq!(
+            settings["sandbox"]["filesystem"]["denyRead"],
+            serde_json::json!([
+                "/home/me/.ssh",
+                "/home/me/.netrc",
+                "/home/me/.config/gh",
+                "/home/me/.git-credentials",
+                "/home/me/.config/git/credentials",
+                "/home/me/.cache/git/credential",
+            ])
+        );
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        assert_eq!(
+            deny[deny.len() - 6..],
+            serde_json::json!([
+                "Read(//home/me/.ssh/**)",
+                "Read(//home/me/.netrc)",
+                "Read(//home/me/.config/gh/**)",
+                "Read(//home/me/.git-credentials)",
+                "Read(//home/me/.config/git/credentials)",
+                "Read(//home/me/.cache/git/credential/**)",
+            ])
+            .as_array()
+            .unwrap()[..]
+        );
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the settings hold the token");
+    }
+
+    #[test]
+    fn a_hook_or_merging_lead_keeps_the_humans_credentials() {
+        for lead_table in [
+            "prompt = \"go\"",
+            "prompt = \"go\"\nmerge = true\nmerge_guard = \"credentials\"",
+        ] {
+            let setup = Setup::with_lead(lead_table);
+            let herdr = herdr();
+
+            lead(
+                &herdr,
+                &mut MemLedger::default(),
+                &setup.paths(),
+                &request(&[]),
+                Some("w1"),
+            )
+            .unwrap();
+
+            let (_, settings) = started_settings(&herdr);
+            assert_eq!(settings.get("env"), None, "{lead_table}");
+            assert_eq!(
+                settings["sandbox"]["filesystem"].get("denyRead"),
+                None,
+                "{lead_table}"
+            );
+            let deny = settings["permissions"]["deny"].to_string();
+            assert!(!deny.contains("Read("), "{lead_table}: {deny}");
+        }
+    }
+
+    #[test]
+    fn a_credentials_lead_without_its_key_or_token_isnt_started_and_is_told_the_fix() {
+        let config = |setup: &Setup, file: &str| {
+            setup
+                .root
+                .join("config/credentials")
+                .join(file)
+                .display()
+                .to_string()
+        };
+        let no_key = Setup::with_lead(CREDENTIALS);
+        store_credentials(&no_key, false, Some("github_pat_1"));
+        let no_token = Setup::with_lead(CREDENTIALS);
+        store_credentials(&no_token, true, None);
+        let empty_token = Setup::with_lead(CREDENTIALS);
+        store_credentials(&empty_token, true, Some("\n"));
+        let cases = [
+            (
+                &no_key,
+                format!(
+                    "sandbox: lead-h can't start with merge_guard = \"credentials\": no deploy \
+                     key at {}; run loopherd merge-guard h",
+                    config(&no_key, "h.key")
+                ),
+            ),
+            (
+                &no_token,
+                format!(
+                    "sandbox: lead-h can't start with merge_guard = \"credentials\": no token \
+                     at {}; run loopherd merge-guard h for how to create and store it",
+                    config(&no_token, "h.token")
+                ),
+            ),
+            (
+                &empty_token,
+                format!(
+                    "sandbox: lead-h can't start with merge_guard = \"credentials\": no token \
+                     at {}; run loopherd merge-guard h for how to create and store it",
+                    config(&empty_token, "h.token")
+                ),
+            ),
+        ];
+        for (setup, refusal) in cases {
+            origin_on_github(setup, "https://github.com/acme/widgets.git");
+            let herdr = herdr();
+
+            let err = lead(
+                &herdr,
+                &mut MemLedger::default(),
+                &setup.paths(),
+                &request(&[]),
+                Some("w1"),
+            )
+            .unwrap_err();
+
+            assert_eq!(format!("{err:#}"), refusal);
+            assert!(herdr.tabs().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_credentials_lead_isnt_started_without_its_sandbox_even_under_prefer() {
+        let setup = Setup::with_lead(&format!("{CREDENTIALS}\nsandbox = \"prefer\""));
+        origin_on_github(&setup, "https://github.com/acme/widgets.git");
+        store_credentials(&setup, true, Some("github_pat_1"));
+        let herdr = herdr();
+        let req = LeadRequest {
+            sandbox: || {
+                Err(Unavailable {
+                    why: "bubblewrap not installed".into(),
+                    fix: "install bubblewrap".into(),
+                })
+            },
+            ..request(&[])
+        };
+
+        let err = lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &req,
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "sandbox: lead-h can't start with merge_guard = \"credentials\": its sandbox \
+             can't start (bubblewrap not installed), and without it the lead could read your \
+             GitHub credentials; install bubblewrap, or set [lead] merge_guard = \"hook\" in \
+             herd h"
+        );
+        assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
+    fn a_credentials_lead_that_may_install_isnt_started() {
+        let setup = Setup::with_lead(&format!("{CREDENTIALS}\ninstall = true"));
+        origin_on_github(&setup, "https://github.com/acme/widgets.git");
+        store_credentials(&setup, true, Some("github_pat_1"));
+        let herdr = herdr();
+
+        let err = lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "sandbox: lead-h can't start with merge_guard = \"credentials\": install = true \
+             runs scripts/install outside the sandbox, from a worktree the lead can edit; set \
+             [lead] install = false, or merge_guard = \"hook\", in herd h"
+        );
+        assert!(herdr.tabs().is_empty());
     }
 
     #[test]
