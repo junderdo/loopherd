@@ -628,7 +628,8 @@ pub fn serve(
     let Some(_lock) = take_lock(paths, lead)? else {
         return Ok(Served::AlreadyRunning);
     };
-    // Its lead sizes waits on origin by the broker's git timeout, not its own.
+    // Its lead sizes waits on origin by the broker's git timeout, not its own. A plain
+    // write is safe: the lead's sandbox can't write config/broker to plant a link.
     if let Ok(remote) = crate::worktree::remote_timeout() {
         let _ = std::fs::write(lock_file(paths, lead), remote.as_secs().to_string());
     }
@@ -2283,6 +2284,31 @@ mod tests {
         );
         let left = std::fs::read_dir(requests_dir(&world.paths, "lead-h")).unwrap();
         assert_eq!(left.count(), 0);
+    }
+
+    #[test]
+    fn a_label_whose_broker_stopped_before_answering_says_the_report_went_out_anyway() {
+        let world = World::new();
+        let held = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+        std::fs::create_dir_all(requests_dir(&world.paths, "lead-h")).unwrap();
+        let stopping = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(held);
+        });
+
+        let err = world
+            .client()
+            .call(&Op::Label {
+                question: "which DB?".into(),
+            })
+            .unwrap_err();
+
+        stopping.join().unwrap();
+        assert_eq!(
+            format!("{err:#}"),
+            "lead-h's broker stopped, so the pane got no label; \
+             the report itself is sent, so don't send it again"
+        );
     }
 
     #[test]
