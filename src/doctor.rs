@@ -31,6 +31,8 @@ pub struct Install {
     pub running: PathBuf,
     /// Why Claude Code's sandbox can't start on this machine, if it can't.
     pub sandbox: Result<(), Unavailable>,
+    /// WSL2 lets this machine run Windows programs.
+    pub wsl_interop: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -79,6 +81,7 @@ pub fn checks(
         Ok(setup) => {
             checks.extend(config_checks(&setup.paths, &install.settings));
             checks.extend(herd_checks(&setup.paths, herd));
+            checks.extend(unix_socket_checks(install, &setup.paths, herd));
             checks.extend(state_checks(
                 setup,
                 herd,
@@ -304,6 +307,33 @@ fn herd_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
         checks.extend(mcp_server_checks(paths, &herd));
     }
     checks
+}
+
+/// Each herd whose `[lead] unix_sockets` reopens every Unix socket to its lead.
+fn unix_socket_checks(install: &Install, paths: &Paths, only: Option<&str>) -> Vec<Check> {
+    let herds = match only {
+        Some(herd) => vec![herd.to_string()],
+        None => crate::herd::names(&paths.herds).unwrap_or_default(),
+    };
+    let interop = match install.wsl_interop {
+        true => {
+            "; WSL2's Windows interop is enabled on this machine, so it can run Windows \
+                 programs outside its sandbox"
+        }
+        false => "",
+    };
+    herds
+        .into_iter()
+        .filter(|herd| crate::sandbox::sockets_open(paths, herd).unwrap_or(false))
+        .filter_map(|herd| {
+            let lead = crate::lead::lead_name(&herd).ok()?;
+            Some(warning(
+                &format!("herd {herd} unix_sockets"),
+                crate::sandbox::sockets_open_warning(&lead, &herd) + interop,
+                format!("loopherd herd unset {herd} lead.unix_sockets"),
+            ))
+        })
+        .collect()
 }
 
 /// Each `[lead] mcp_servers` name the human's user scope doesn't configure,
@@ -1270,6 +1300,7 @@ mod tests {
                 on_path: Some(exe.clone()),
                 running: exe,
                 sandbox: Ok(()),
+                wsl_interop: false,
             },
             setup: Ok(setup),
             dir,
@@ -2113,6 +2144,33 @@ mod tests {
               guarded by its tool hook alone, whenever the sandbox can't start; \
               fix: loopherd herd set h lead.sandbox '\"require\"'"
             ]
+        );
+    }
+
+    #[test]
+    fn a_herd_whose_lead_may_use_every_unix_socket_is_warned_of_and_of_windows_interop() {
+        let mut m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge = true\nunix_sockets = \"all\"\n",
+                repo.to_str().unwrap()
+            ),
+        );
+        let opened = "warning herd h unix_sockets: lead-h's sandbox lets it use any Unix socket, \
+                      as herd h's [lead] unix_sockets = \"all\" says, which reopens the herdr \
+                      socket, your ssh agent and WSL2's Windows interop to it";
+        let fix = "; fix: loopherd herd unset h lead.unix_sockets";
+        assert_eq!(problems(&m, &herdr()), [format!("{opened}{fix}")]);
+
+        m.install.wsl_interop = true;
+        assert_eq!(
+            problems(&m, &herdr()),
+            [format!(
+                "{opened}; WSL2's Windows interop is enabled on this machine, so it can run \
+                 Windows programs outside its sandbox{fix}"
+            )]
         );
     }
 

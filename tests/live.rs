@@ -788,10 +788,11 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     );
     let ran: Vec<&str> = probed[expected.len()..].lines().collect();
     assert_eq!(ran.first().copied(), Some("report\t0\t"), "{probed}");
-    // Nothing fires in a second: a quiet watch exits 2.
+    // Run from python, so it stays in the sandbox, which closes herdr's socket to it.
     assert!(
-        ran.get(1)
-            .is_some_and(|line| ["watch\t0\t", "watch\t2\t"].contains(line)),
+        ran.get(1).is_some_and(|line| line.starts_with("watch\t")
+            && line.contains("herdr unreachable")
+            && line.contains("Operation not permitted")),
         "{probed}"
     );
     // Run in the sandbox, which hides the lead's Claude from the parent-pid walk.

@@ -2162,6 +2162,7 @@ fn doctor_install(settings: Option<PathBuf>) -> Result<doctor::Install> {
         on_path: on_path("loopherd"),
         running: std::env::current_exe().context("find this binary")?,
         sandbox: sandbox::probe(),
+        wsl_interop: sandbox::wsl_interop(),
     })
 }
 
