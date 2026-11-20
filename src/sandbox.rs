@@ -1254,6 +1254,9 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
         // The Linux sandbox skips glob denies, so these reach only the file tools.
         deny.push(file_rule(&state.join("broker/*")));
         deny.push(file_rule(&state.join("handoffs/*")));
+    } else {
+        // The shepherd's resume still reads this, which may not exist to be listed below.
+        deny.push(file_rule(&handoff::flat(state, crate::context::SHEPHERD)));
     }
     let others = others_in_broker(paths, name)?
         .into_iter()

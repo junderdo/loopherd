@@ -51,6 +51,19 @@ pub fn set_aside(state: &Path, name: &str, handoff: &Path) -> Result<PathBuf> {
     Ok(prev)
 }
 
+/// Writes `text` as `name`'s handoff, replacing any there; returns its path.
+pub fn write(state: &Path, name: &str, text: &str) -> Result<PathBuf> {
+    let dir = dir(state, name);
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = path(state, name);
+    // Renamed into place, so a reader never sees half a handoff.
+    let part = dir.join(".handoff.md.part");
+    fs::write(&part, text).with_context(|| format!("write {}", part.display()))?;
+    fs::rename(&part, &path)
+        .with_context(|| format!("move {} to {}", part.display(), path.display()))?;
+    Ok(path)
+}
+
 /// Every file `name`'s handoffs may sit in, the older flat ones included.
 pub fn files(state: &Path, name: &str) -> [PathBuf; 4] {
     let handoffs = state.join("handoffs");
@@ -62,7 +75,8 @@ pub fn files(state: &Path, name: &str) -> [PathBuf; 4] {
     ]
 }
 
-fn flat(state: &Path, name: &str) -> PathBuf {
+/// Where an older release wrote `name`'s handoff, which [`find`] still reads.
+pub fn flat(state: &Path, name: &str) -> PathBuf {
     state.join("handoffs").join(format!("{name}.md"))
 }
 

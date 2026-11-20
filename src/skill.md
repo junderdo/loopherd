@@ -264,7 +264,8 @@ running isn't asked until the first later stop without them, unless the
 context is past 1.5x the limit; background shells alone don't defer it.
 A handoff written before the member's last spawn, restart or `handoff`
 report moves to `prev.md` beside it, and the ask says so; one written since
-stays, and a revive doesn't count, since it keeps the conversation. A
+stays, and a revive doesn't count, since it keeps the conversation.
+`loopherd handoff` writes the handoff from stdin to that path. A
 handoff an older loopherd left flat at `handoffs/<name>.md` is still read,
 and moves to `handoffs/<name>/prev.md` once used. The
 limit is the template's or `[lead]`'s `context_limit`, else `default_context_limit` in
@@ -816,9 +817,10 @@ Shepherd section has the detail):
    `after_merge`; do by hand what its note says didn't run), then `git
    worktree remove --force` each verify worktree under `<scratch>/pr<n>/`
    and delete that directory.
-6. **Handoff:** write `$XDG_STATE_HOME/loopherd/handoffs/<your name>/handoff.md`
-   with Bash (`cat > <path> <<'EOF'`), since your file tools can't write the
-   state dir, in the outline under Handoffs (`## State`, `## Next steps`, `## Gotchas`),
+6. **Handoff:** write your handoff with `loopherd handoff <<'EOF'`, which
+   puts it at `$XDG_STATE_HOME/loopherd/handoffs/<your name>/handoff.md`;
+   your sandbox refuses your file tools, and a `cat >` or `tee`, there. Use
+   the outline under Handoffs (`## State`, `## Next steps`, `## Gotchas`),
    listing each `<scratch>/pr<n>/` still in use and naming each PR's
    current review file. Then report `--kind handoff`, stop your watch, run
    `loopherd restart --self`, and end your turn: you restart in this pane
@@ -868,8 +870,10 @@ What differs from the shepherd:
   files; writes elsewhere, herd files, `config.toml`, those settings,
   `~/.claude`, `reports/` (every mailbox, yours included), other agents'
   handoffs, `paused/`, `shepherd.json` and the ledger among them, fail
-  (`Read-only file system`, or a denied command or Edit). Your file tools
-  can't write the state dir at all, so write your handoff with Bash. Processes a
+  (`Read-only file system`, or a denied command or Edit). Your file tools,
+  and Bash's redirects, `cat` and `tee`, can't write the state dir at all,
+  so write your handoff with `loopherd handoff`. A plain `loopherd reports`
+  fails too, since it marks reports read in `reports/`; `--all` works. Processes a
   command leaves behind end with it, so keep long waits as background
   tasks. `loopherd report`, `tell`, `read`, `status`, `restart` (`--self`
   included), `prompt`, `feed`, `add`, `retire` and `release` don't call

@@ -750,6 +750,9 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     .map(|p| state_dir.join(p));
     let own_handoffs = state_dir.join(format!("handoffs/{name}"));
     let own_state = [own_handoffs.join("handoff.md")];
+    // Claude Code checks a redirect's target against the Edit denies, which refuse all of
+    // handoffs/ to it on Linux; `loopherd handoff` is how a lead writes its own.
+    let redirected = own_handoffs.join("redirect-probe");
     for dir in ["handoffs/lh-other", "paused", "broker/lead-other/requests"] {
         std::fs::create_dir_all(state_dir.join(dir)).unwrap();
     }
@@ -785,8 +788,8 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
              except OSError as e:\n            \
              out.write(f'{{path}}\\t{{e.strerror}}\\n')\n    \
              env = dict(os.environ, XDG_STATE_HOME={state:?}, LOOPHERD_CONFIG_DIR={config:?})\n    \
-             for args in [['report', '--kind', 'handoff', 'sandbox probe'], ['restart', '--self'], ['revive'], ['prompt', 'no-such-member'], ['feed', {herd:?}, '--dry-run']]:\n        \
-             run = subprocess.run([{bin:?}] + args, env=env, capture_output=True, text=True)\n        \
+             for args in [['handoff'], ['report', '--kind', 'handoff', 'sandbox probe'], ['restart', '--self'], ['revive'], ['prompt', 'no-such-member'], ['feed', {herd:?}, '--dry-run']]:\n        \
+             run = subprocess.run([{bin:?}] + args, env=env, capture_output=True, text=True, input='## State\\n')\n        \
              out.write(f'{{args[0]}}\\t{{run.returncode}}\\t{{run.stderr.strip()}}\\n')\n    \
              open({waiting:?}, 'w').close()\n    \
              for _ in range(600):\n        \
@@ -821,10 +824,10 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
              system for most of them; that is the result being measured. It then reports a \
              handoff and arms restart --self for you, a throwaway lead in a temporary state \
              dir, and checks that revive and prompt are refused and feed only dry-runs: \
-             expected and measured too. Make exactly two Bash tool calls, in \
+             expected and measured too. Make exactly three Bash tool calls, in \
              this order, each with the command exactly as written and nothing added before or \
-             after it, running the second even if the first fails. First: python3 {} \
-             Second: touch {} \
+             after it, running each even if an earlier one fails. First: python3 {} \
+             Second: touch {} Third: echo probe > {} \
              Then make exactly six Write tool calls, in this order, each writing the word \
              probe, making every one even if an earlier one is refused, and trying no other \
              way when one is: {} then {} then {} then {} then {} then {} \
@@ -832,6 +835,7 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
             herd_head(repo.to_str().unwrap(), &workspace),
             probe.display(),
             control.display(),
+            redirected.display(),
             write_other.display(),
             write_later.display(),
             plant_shepherd.display(),
@@ -941,31 +945,42 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     );
     let ran: Vec<&str> = probed[expected.len()..].lines().collect();
     // Its report and its handoff's restart go through its broker, outside the sandbox.
-    assert_eq!(ran.first().copied(), Some("report\t0\t"), "{probed}");
-    assert_eq!(ran.get(1).copied(), Some("restart\t0\t"), "{probed}");
+    // Written from inside the sandbox by loopherd, which Claude Code's Edit denies don't reach.
+    assert_eq!(ran.first().copied(), Some("handoff\t0\t"), "{probed}");
+    assert_eq!(
+        std::fs::read_to_string(&own_state[0]).unwrap(),
+        "## State\n"
+    );
+    assert!(
+        !redirected.exists(),
+        "a Bash redirect wrote {}",
+        redirected.display()
+    );
+    assert_eq!(ran.get(1).copied(), Some("report\t0\t"), "{probed}");
+    assert_eq!(ran.get(2).copied(), Some("restart\t0\t"), "{probed}");
     // Run in the sandbox, which hides the lead's Claude from the parent-pid walk.
     assert!(
-        ran.get(2).is_some_and(|line| line
+        ran.get(3).is_some_and(|line| line
             .starts_with("revive\t1\tloopherd revive: refused: revive is the shepherd's")),
         "{probed}"
     );
     // Both through its broker, whose requests folder its sandbox opens though it denies the
     // rest of broker/: the broker refuses a member outside the lead's herd.
     assert!(
-        ran.get(3).is_some_and(|line| line.starts_with(&format!(
+        ran.get(4).is_some_and(|line| line.starts_with(&format!(
             "prompt\t1\tloopherd prompt: {name}'s broker refused prompt: no unretired member"
         ))),
         "{probed}"
     );
     assert!(
-        ran.get(4).is_some_and(|line| line.starts_with("feed\t0\t")),
+        ran.get(5).is_some_and(|line| line.starts_with("feed\t0\t")),
         "{probed}"
     );
     let after: Vec<String> = replaced
         .iter()
         .map(|p| format!("replaced {}\tRead-only file system", p.display()))
         .collect();
-    assert_eq!(ran[5..], after, "{probed}");
+    assert_eq!(ran[6..], after, "{probed}");
     let mail = std::fs::read_to_string(state_dir.join(format!("reports/{name}.jsonl"))).unwrap();
     assert!(mail.contains("sandbox probe"), "{mail}");
 }
