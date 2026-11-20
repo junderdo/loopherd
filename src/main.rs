@@ -1500,7 +1500,7 @@ fn run_broker(lead: &str) -> Result<i32> {
         // SAFETY: the broker has started no threads yet.
         unsafe { std::env::set_var(name, value) };
     }
-    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let host = broker::Host {
         herdr: &CliHerdr,
         procs: &process::ProcFs,
@@ -1510,7 +1510,7 @@ fn run_broker(lead: &str) -> Result<i32> {
         spawn_waiter,
         prs: &github::GhCli::default(),
     };
-    let served = broker::serve(&host, &mut ledger, &paths, lead, Duration::from_millis(100))?;
+    let served = broker::serve(&host, &ledger, &paths, lead, Duration::from_millis(100))?;
     if served == broker::Served::AlreadyRunning {
         eprintln!("loopherd broker: a broker already serves {lead}");
     }
