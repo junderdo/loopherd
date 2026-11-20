@@ -465,6 +465,10 @@ fn feed(
 }
 
 fn add(ctx: &mut Ctx, req: &AddRequest, dry_run: bool, sink: &mut dyn Sink) -> Result<i32> {
+    let planned = crate::herd::resolve(ctx.paths, req)?;
+    if let Some(why) = ctx.guard().spawn_refusal(&planned)? {
+        bail!("refused: {why}");
+    }
     let inherited = ctx.inherited_workspace()?;
     if dry_run {
         let plan = crate::herd::dry_run(ctx.herdr, ctx.paths, req, inherited.as_deref())?;
@@ -1830,9 +1834,11 @@ mod tests {
 
     const POLL: Duration = Duration::from_millis(10);
 
-    /// A config and state dir holding herd `h` with lead `lead-h`.
+    /// A config and state dir holding herd `h` with lead `lead-h`, and herds'
+    /// repos outside it, where a lead's guard lets git run.
     struct World {
         dir: tempfile::TempDir,
+        repos: tempfile::TempDir,
         paths: Paths,
     }
 
@@ -1840,14 +1846,15 @@ mod tests {
         fn new() -> World {
             let dir = tempfile::tempdir().unwrap();
             let paths = Paths::under(dir.path());
-            let world = World { dir, paths };
+            let repos = tempfile::tempdir().unwrap();
+            let world = World { dir, repos, paths };
             world.herd("h");
             world.launch("lead-h", "h");
             world
         }
 
         fn herd(&self, herd: &str) {
-            let repo = self.dir.path().join(format!("repos/{herd}"));
+            let repo = self.repos.path().join(herd);
             std::fs::create_dir_all(repo.join(".git")).unwrap();
             std::fs::create_dir_all(&self.paths.herds).unwrap();
             let text = format!(
@@ -1876,20 +1883,6 @@ mod tests {
             let mut lead = member(lead, Some(herd));
             lead.role = Some(Role::Lead);
             self.ledger().record(lead).unwrap();
-        }
-
-        /// Moves herd h's repo out of the state dir's tree, which a lead's
-        /// guard treats as the lead's to write; the repo lasts as long as the dir.
-        fn move_repo(&self) -> (tempfile::TempDir, PathBuf) {
-            let elsewhere = tempfile::tempdir().unwrap();
-            let repo = elsewhere.path().join("h");
-            std::fs::create_dir_all(repo.join(".git")).unwrap();
-            let herd_file = self.paths.herds.join("h.toml");
-            let text = std::fs::read_to_string(&herd_file).unwrap();
-            let old_repo = self.dir.path().join("repos/h");
-            let text = text.replace(old_repo.to_str().unwrap(), repo.to_str().unwrap());
-            std::fs::write(&herd_file, text).unwrap();
-            (elsewhere, repo)
         }
 
         fn ledger(&self) -> FileLedger {
@@ -2258,7 +2251,7 @@ mod tests {
     #[test]
     fn in_a_sandboxed_lead_s_pane_retire_and_release_go_through_its_broker_and_call_no_herdr() {
         let world = World::new();
-        let (_elsewhere, repo) = world.move_repo();
+        let repo = world.repos.path().join("h");
         let mut lh_1 = member("lh-1", Some("h"));
         lh_1.repo = repo;
         world.add(lh_1);
@@ -2777,7 +2770,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        let (_elsewhere, repo) = world.move_repo();
+        let repo = world.repos.path().join("h");
         let mut done = member("lh-1", Some("h"));
         done.repo = repo;
         done.retired = true;
@@ -2817,7 +2810,7 @@ mod tests {
     #[test]
     fn the_shepherd_s_release_runs_in_its_own_process_where_the_ledger_is_writable() {
         let world = World::new();
-        let (_elsewhere, repo) = world.move_repo();
+        let repo = world.repos.path().join("h");
         let mut done = member("lh-1", Some("h"));
         done.repo = repo;
         done.retired = true;
@@ -3321,6 +3314,130 @@ mod tests {
         assert_eq!(herdr.calls(), 0);
     }
 
+    /// Points herd h at a real git repo outside the state dir whose `[template.b]`
+    /// checks out branch `{n}`; the repo lasts as long as the dir.
+    fn branch_herd(world: &World) -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let repo = crate::worktree::testing::repo_with_origin(root.path());
+        let text = format!(
+            "repo = {:?}\n\
+             [template.b]\nparams = [\"n\"]\nname = \"b-{{n}}\"\nbranch = \"{{n}}\"\nprompt = \"go\"\n\
+             [template.same]\nparams = [\"n\"]\nname = \"{{n}}\"\nbranch = \"{{n}}\"\nprompt = \"go\"\n\
+             [queue]\ntemplate = \"b\"\nsource = \"echo lead-h\"\nmax = 2\n\
+             [lead]\nprompt = \"go\"\nsandbox = \"prefer\"\n",
+            repo.to_str().unwrap()
+        );
+        std::fs::write(world.paths.herds.join("h.toml"), &text).unwrap();
+        // Herd g shares the repo, so its lead's worktree sits beside h's.
+        std::fs::write(world.paths.herds.join("g.toml"), &text).unwrap();
+        world.launch("lead-g", "g");
+        (root, repo)
+    }
+
+    fn add_branch(n: &str, dry_run: bool) -> Op {
+        Op::Add {
+            herd: "h".into(),
+            template: "b".into(),
+            params: vec![n.into()],
+            claude_args: vec![],
+            dry_run,
+            ready_timeout_secs: 60,
+        }
+    }
+
+    #[test]
+    fn a_lead_s_add_is_refused_a_worktree_the_guard_refuses_any_member() {
+        let world = World::new();
+        let (_root, repo) = branch_herd(&world);
+        let elsewhere = tempfile::tempdir().unwrap();
+        let outside = elsewhere.path().join("outside");
+        crate::worktree::testing::git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "made",
+                outside.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        let lead_worktree = crate::worktree::worktree_path(&repo, "lead-h");
+        let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
+
+        for (n, why) in [
+            (
+                "lead-h",
+                format!(
+                    "adding b-lead-h names lead lead-h's worktree {}",
+                    lead_worktree.display()
+                ),
+            ),
+            (
+                "made",
+                format!(
+                    "adding b-made names worktree {}, which isn't beside herd h's \
+                     worktrees in {}",
+                    outside.display(),
+                    lead_worktree.parent().unwrap().display()
+                ),
+            ),
+        ] {
+            for dry_run in [true, false] {
+                let err = world.client().call(&add_branch(n, dry_run)).unwrap_err();
+                assert!(format!("{err:#}").ends_with(&why), "{n}: {err:#}");
+            }
+        }
+
+        let same = Op::Add {
+            herd: "h".into(),
+            template: "same".into(),
+            params: vec!["lead-g".into()],
+            claude_args: vec![],
+            dry_run: true,
+            ready_timeout_secs: 60,
+        };
+        let err = world.client().call(&same).unwrap_err();
+        let lead_g = crate::worktree::worktree_path(&repo, "lead-g");
+        let why = format!(
+            "adding lead-g names lead lead-g's worktree {}",
+            lead_g.display()
+        );
+        assert!(format!("{err:#}").ends_with(&why), "{err:#}");
+
+        let (out, _, code) = world.client().call(&add_branch("fine", true)).unwrap();
+        assert_eq!(code, 0);
+        assert!(out.lines().any(|l| l == "name b-fine"), "{out}");
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
+    fn a_lead_s_feed_reports_a_task_whose_worktree_the_guard_refuses_and_starts_nothing() {
+        let world = World::new();
+        let (_root, repo) = branch_herd(&world);
+        let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
+
+        let (out, _, code) = world.client().call(&feed("h")).unwrap();
+
+        let lead_worktree = crate::worktree::worktree_path(&repo, "lead-h");
+        assert_eq!(code, 1, "{out}");
+        assert!(
+            out.lines().any(|l| l
+                == format!(
+                    "error: lead-h: refused: adding b-lead-h names lead lead-h's worktree {}",
+                    lead_worktree.display()
+                )),
+            "{out}"
+        );
+        assert!(!lead_worktree.exists());
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert!(herdr.tabs().is_empty());
+    }
+
     #[test]
     fn in_a_sandboxed_lead_s_pane_feed_and_add_go_through_its_broker_and_call_no_herdr() {
         let world = World::new();
@@ -3524,7 +3641,7 @@ mod tests {
     #[test]
     fn a_broker_starts_workers_where_its_lead_is_and_gates_after_merge_by_the_launch_record() {
         let world = World::new();
-        let repo = world.dir.path().join("repos/h");
+        let repo = world.repos.path().join("h");
         let h = format!(
             "repo = {repo:?}\nargs = [\"--model\", \"opus\"]\nafter_merge = [\"scripts/install\"]\n\
              [template.pr]\nparams = [\"number\"]\nname = \"pr-{{number}}\"\nprompt = \"review {{number}}\"\n\
@@ -3618,7 +3735,7 @@ mod tests {
     #[test]
     fn a_feed_that_panics_keeps_the_lines_noting_its_after_merge_interrupted() {
         let world = World::new();
-        let repo = world.dir.path().join("repos/h");
+        let repo = world.repos.path().join("h");
         let h = std::fs::read_to_string(world.paths.herds.join("h.toml")).unwrap();
         let h = h.replace("source = \"true\"", "source = \"echo 1\"");
         std::fs::write(world.paths.herds.join("h.toml"), h).unwrap();
@@ -3677,7 +3794,7 @@ mod tests {
     /// credentials, with its deploy key and `token`, if any.
     fn credentials_herd(world: &World, token: Option<&str>) {
         use crate::worktree::testing::git;
-        let repo = world.dir.path().join("repos/c");
+        let repo = world.repos.path().join("c");
         std::fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "--quiet"]).unwrap();
         let url = "https://github.com/acme/widgets.git";

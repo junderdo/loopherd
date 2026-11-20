@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use crate::herd::{self, MergeGuard, Paths};
 use crate::ledger::AgentRecord;
 use crate::process::Procs;
+use crate::spawn::SpawnRequest;
 use crate::worktree::{same_dir, worktree_path};
 
 /// `[lead] sandbox`: what happens to a lead whose sandbox can't start.
@@ -388,6 +389,18 @@ fn lead_of_settings(file: &Path) -> Option<(PathBuf, String)> {
     is_settings.then(|| (at.to_path_buf(), name.to_string()))
 }
 
+/// Where a member's git would run, and how refusals name it.
+struct Placement<'a> {
+    subject: String,
+    name: &'a str,
+    /// The lead whose own worktree this may be: a lead's own ledger entry.
+    own_lead: Option<&'a str>,
+    herd: Option<&'a str>,
+    repo: &'a Path,
+    worktree: Option<&'a Path>,
+    branch: Option<&'a str>,
+}
+
 /// Checks a ledger entry, which any lead can write, before loopherd runs git
 /// outside the sandbox on its repo and worktree.
 pub struct Guard {
@@ -404,15 +417,16 @@ impl Guard {
     /// Why the lead running this loopherd, if one does, may not act on
     /// `record` at all: it isn't a member of the lead's own herd.
     pub fn caller_refusal(&self, record: &AgentRecord) -> Result<Option<String>> {
+        self.herd_refusal(&record.name, record.herd.as_deref())
+    }
+
+    fn herd_refusal(&self, name: &str, herd: Option<&str>) -> Result<Option<String>> {
         let Some(caller) = &self.caller else {
             return Ok(None);
         };
         let own = Lead::kept(&self.paths, caller)?.map(|lead| lead.herd);
-        Ok((own.is_none() || record.herd != own).then(|| {
-            format!(
-                "{} isn't a member of {caller}'s herd, and {caller} runs this loopherd",
-                record.name
-            )
+        Ok((own.is_none() || herd != own.as_deref()).then(|| {
+            format!("{name} isn't a member of {caller}'s herd, and {caller} runs this loopherd")
         }))
     }
 
@@ -424,10 +438,50 @@ impl Guard {
     /// worktree, or a repo in a lead's worktree or the state dir, where a lead
     /// could have written its git config.
     pub fn path_refusal(&self, record: &AgentRecord) -> Result<Option<String>> {
-        if let Some(why) = self.caller_refusal(record)? {
+        self.placement_refusal(&Placement {
+            subject: format!("{}'s ledger entry", record.name),
+            name: &record.name,
+            own_lead: Some(&record.name),
+            herd: record.herd.as_deref(),
+            repo: &record.repo,
+            worktree: record.worktree.as_deref(),
+            branch: record.branch.as_deref(),
+        })
+    }
+
+    /// [`Guard::path_refusal`] for the member `req` would spawn, at the
+    /// worktree it would get, which may be an existing one for its branch.
+    pub fn spawn_refusal(&self, req: &SpawnRequest) -> Result<Option<String>> {
+        let placed = |worktree| Placement {
+            subject: format!("adding {}", req.name),
+            name: &req.name,
+            own_lead: None,
+            herd: req.member_of.as_ref().map(|m| m.herd.as_str()),
+            repo: &req.repo,
+            worktree,
+            branch: req.branch(),
+        };
+        // Finding an existing worktree runs git, so the repo is checked first.
+        if let Some(why) = self.placement_refusal(&placed(None))? {
             return Ok(Some(why));
         }
-        let name = &record.name;
+        let worktree = req.planned_worktree()?;
+        self.placement_refusal(&placed(worktree.as_deref()))
+    }
+
+    fn placement_refusal(&self, placed: &Placement) -> Result<Option<String>> {
+        let Placement {
+            subject,
+            name,
+            own_lead,
+            herd,
+            repo: member_repo,
+            worktree,
+            branch,
+        } = placed;
+        if let Some(why) = self.herd_refusal(name, *herd)? {
+            return Ok(Some(why));
+        }
         let leads = lead_worktrees(&self.paths);
         let writable = leads
             .iter()
@@ -437,42 +491,39 @@ impl Guard {
             let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
             real(path).starts_with(real(dir))
         };
-        if let Some(dir) = writable.into_iter().find(|dir| inside(&record.repo, dir)) {
+        if let Some(dir) = writable.into_iter().find(|dir| inside(member_repo, dir)) {
             return Ok(Some(format!(
-                "{name}'s ledger entry names repo {}, inside {}, which a lead can write",
-                record.repo.display(),
+                "{subject} names repo {}, inside {}, which a lead can write",
+                member_repo.display(),
                 dir.display()
             )));
         }
-        let branch_path = record
-            .branch
-            .as_deref()
+        let branch_path = branch
             .filter(|b| !b.is_empty())
-            .map(|b| worktree_path(&record.repo, b));
-        for path in record.worktree.iter().chain(&branch_path) {
-            if let Some((lead, _)) = leads
-                .iter()
-                .find(|(lead, worktree)| lead != name && same_dir(path, worktree))
-            {
+            .map(|b| worktree_path(member_repo, b));
+        for path in worktree.iter().copied().chain(branch_path.as_deref()) {
+            if let Some((lead, _)) = leads.iter().find(|(lead, worktree)| {
+                Some(lead.as_str()) != *own_lead && same_dir(path, worktree)
+            }) {
                 return Ok(Some(format!(
-                    "{name}'s ledger entry names lead {lead}'s worktree {}",
+                    "{subject} names lead {lead}'s worktree {}",
                     path.display()
                 )));
             }
         }
-        let Some(herd) = &record.herd else {
+        let Some(herd) = herd else {
             return Ok(None);
         };
         let repo = match herd::repo(&self.paths, herd) {
             Err(err) if !self.for_lead() && is_not_found(&err) => return Ok(None),
             found => found.with_context(|| {
-                format!("herd {herd}'s file names no repo to check {name}'s ledger entry against")
+                format!("herd {herd}'s file names no repo to check {subject} against")
             })?,
         };
-        if !same_dir(&record.repo, &repo) {
+        if !same_dir(member_repo, &repo) {
             return Ok(Some(format!(
-                "{name}'s ledger entry names repo {}, not herd {herd}'s {}",
-                record.repo.display(),
+                "{subject} names repo {}, not herd {herd}'s {}",
+                member_repo.display(),
                 repo.display()
             )));
         }
@@ -488,9 +539,9 @@ impl Guard {
                     .zip(beside.parent())
                     .is_some_and(|(a, b)| same_dir(a, b))
         };
-        if let Some(worktree) = record.worktree.as_deref().filter(|w| !in_place(w)) {
+        if let Some(worktree) = worktree.filter(|w| !in_place(w)) {
             return Ok(Some(format!(
-                "{name}'s ledger entry names worktree {}, which isn't beside herd {herd}'s \
+                "{subject} names worktree {}, which isn't beside herd {herd}'s \
                  worktrees in {}",
                 worktree.display(),
                 beside.parent().unwrap_or(&repo).display()
