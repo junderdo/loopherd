@@ -1,11 +1,12 @@
 //! `loopherd retire` without `--close`, through the binary.
 //! Without a stub `herdr` on PATH, herdr can't be reached and no member is at work.
 
-use std::fs::{self, File};
-use std::os::fd::AsRawFd;
+mod brokers;
+
+use brokers::Broker;
+use std::fs;
 use std::path::Path;
-use std::process::{Child, Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, Output};
 
 fn write_ledger(state: &Path) {
     fs::create_dir_all(state.join("loopherd")).unwrap();
@@ -157,52 +158,17 @@ fn shell_in(state: &Path, pane: Option<&str>, script: &str) -> Output {
     cmd.output().unwrap()
 }
 
-/// Lead lead-k's broker, with the launch record `loopherd lead` keeps; killed on drop.
-struct Broker(Child);
-
-impl Broker {
-    fn start(state: &Path) -> Broker {
-        let sandbox = state.join("config/sandbox");
-        fs::create_dir_all(&sandbox).unwrap();
-        fs::write(
-            sandbox.join("lead-k.lead.json"),
-            r#"{"herd": "k", "args": []}"#,
-        )
-        .unwrap();
-        let bin_dir = Path::new(env!("CARGO_BIN_EXE_loopherd")).parent().unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_loopherd"))
-            .args(["broker", "lead-k"])
-            .env("XDG_STATE_HOME", state)
-            .env("LOOPHERD_CONFIG_DIR", state.join("config"))
-            .env("CLAUDE_CONFIG_DIR", state.join("claude"))
-            .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
-            .env("HERDR_SOCKET_PATH", SOCKET)
-            .env_remove("HERDR_PANE_ID")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let lock = state.join("config/broker/lead-k.lock");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !File::open(&lock).is_ok_and(|file| held(&file)) {
-            assert!(Instant::now() < deadline, "the broker never started");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        Broker(child)
-    }
-}
-
-impl Drop for Broker {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-fn held(file: &File) -> bool {
-    // SAFETY: flock on a descriptor `file` keeps open for the call.
-    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) != 0 }
+/// Lead lead-k's broker; killed on drop.
+fn start_broker(state: &Path) -> Broker {
+    let bin_dir = Path::new(env!("CARGO_BIN_EXE_loopherd")).parent().unwrap();
+    let mut loopherd = Command::new(env!("CARGO_BIN_EXE_loopherd"));
+    loopherd
+        .env("XDG_STATE_HOME", state)
+        .env("LOOPHERD_CONFIG_DIR", state.join("config"))
+        .env("CLAUDE_CONFIG_DIR", state.join("claude"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
+        .env("HERDR_SOCKET_PATH", SOCKET);
+    Broker::start(loopherd, &state.join("config"), "lead-k", "k")
 }
 
 const SELF_RETIRE_REFUSED: &str = "lead-k's broker refused retire: lead-k is the lead itself; retire reaches only herd k's workers";
@@ -218,7 +184,7 @@ fn assert_refused(state: &Path, out: &Output) {
 fn a_lead_cannot_retire_itself_in_its_own_pane() {
     let state = tempfile::tempdir().unwrap();
     write_herd_ledger(state.path());
-    let _broker = Broker::start(state.path());
+    let _broker = start_broker(state.path());
     for script in ["loopherd retire lead-k", "loopherd retire --close lead-k"] {
         let out = shell_in(state.path(), Some(LEAD_PANE), script);
         assert_refused(state.path(), &out);
@@ -229,7 +195,7 @@ fn a_lead_cannot_retire_itself_in_its_own_pane() {
 fn xargs_and_quoting_spellings_of_a_self_retire_are_refused() {
     let state = tempfile::tempdir().unwrap();
     write_herd_ledger(state.path());
-    let _broker = Broker::start(state.path());
+    let _broker = start_broker(state.path());
     let before_i = [
         "--max-args 1",
         "--max-procs 2",
@@ -274,7 +240,7 @@ fn a_lead_can_be_retired_from_another_pane() {
 fn a_lead_can_retire_its_own_workers() {
     let state = tempfile::tempdir().unwrap();
     write_herd_ledger(state.path());
-    let _broker = Broker::start(state.path());
+    let _broker = start_broker(state.path());
     let out = shell_in(state.path(), Some(LEAD_PANE), "loopherd retire lh-1");
     assert!(out.status.success(), "{out:?}");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "retired lh-1\n");
