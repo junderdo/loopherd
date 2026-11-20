@@ -1729,8 +1729,13 @@ mod tests {
                 Duration::from_millis(10),
             )
         });
+        let given_up = std::time::Instant::now() + Duration::from_secs(5);
         while !crate::broker::running(m.paths(), "lead-up") {
             assert!(!serving.is_finished(), "{:?}", serving.join());
+            assert!(
+                std::time::Instant::now() < given_up,
+                "the broker never started"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
 

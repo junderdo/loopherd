@@ -388,7 +388,7 @@ fn render_prompt(
     Ok(text)
 }
 
-fn validate_name(name: &str) -> Result<()> {
+pub fn validate_name(name: &str) -> Result<()> {
     let mut chars = name.chars();
     let valid = chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && name.len() <= 32

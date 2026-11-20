@@ -1335,14 +1335,14 @@ fn run_tell(name: &str, text: Option<String>, text_file: Option<PathBuf>) -> Res
         name: name.into(),
         text,
     };
-    println!("{}", broker::run(&CliHerdr, own_broker()?.as_ref(), &op)?);
+    println!("{}", broker::run(&CliHerdr, own_broker().as_ref(), &op)?);
     Ok(0)
 }
 
 /// The broker of the lead running this loopherd, if a lead runs it.
-fn own_broker() -> Result<Option<broker::Client>> {
-    let paths = Paths::from_env().context("herd")?;
-    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+fn own_broker() -> Option<broker::Client> {
+    let paths = Paths::from_env().ok()?;
+    let ledger = FileLedger::new(FileLedger::default_path().ok()?);
     let lineage = own_lineage();
     let socket = socket_from_env();
     let id = own_pane();
@@ -1351,14 +1351,13 @@ fn own_broker() -> Result<Option<broker::Client>> {
         socket: socket.as_deref(),
         lineage: &lineage,
     });
-    let lead = broker::lead_here(
+    broker::route(
         &paths,
         &ledger,
         &process::ProcFs,
         std::process::id(),
         pane.as_ref(),
-    )?;
-    Ok(lead.map(|lead| broker::Client::for_lead(&paths, &lead)))
+    )
 }
 
 fn run_restart(name: &str, force: bool) -> Result<i32> {

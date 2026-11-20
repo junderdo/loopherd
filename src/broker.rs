@@ -4,9 +4,10 @@
 //! The lead writes requests to its own folder in the state dir; the broker
 //! answers in the config dir, which the lead can read but not write.
 
+use std::ffi::CString;
 use std::fs::OpenOptions;
 use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -20,6 +21,7 @@ use crate::ledger::Ledger;
 use crate::lock::Lock;
 use crate::process::Procs;
 use crate::sandbox;
+use crate::spawn::validate_name;
 use crate::tool_hook;
 
 /// An operation a lead asks its broker for.
@@ -91,6 +93,7 @@ pub fn serve(
     lead: &str,
     poll: Duration,
 ) -> Result<Served> {
+    validate_name(lead)?;
     let Some(_lock) = take_lock(paths, lead)? else {
         return Ok(Served::AlreadyRunning);
     };
@@ -98,11 +101,8 @@ pub fn serve(
         .ok_or_else(|| anyhow!("{lead} has no launch record, so its broker has no herd"))?
         .herd;
     let broker = Broker { lead, herd: &herd };
-    let requests = requests_dir(paths, lead);
     let replies = replies_dir(paths, lead);
-    for dir in [&requests, &replies] {
-        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    }
+    std::fs::create_dir_all(&replies).with_context(|| format!("create {}", replies.display()))?;
     loop {
         let unretired = ledger
             .entries()
@@ -112,8 +112,11 @@ pub fn serve(
         if !unretired {
             return Ok(Served::Retired);
         }
-        for request in pending(&requests) {
-            broker.answer(herdr, ledger, &request, &replies);
+        // Reopened each round: the lead can replace any folder on the way.
+        if let Ok(requests) = Dir::open(paths.state_dir(), &["broker", lead, "requests"]) {
+            for name in requests.names() {
+                broker.answer(herdr, ledger, &requests, &name, &replies);
+            }
         }
         prune(&replies);
         std::thread::sleep(poll);
@@ -126,34 +129,28 @@ struct Broker<'a> {
 }
 
 impl Broker<'_> {
-    /// Writes a reply for the request at `path`, then removes it. A request
-    /// whose file name can't name a reply is only removed.
-    fn answer(&self, herdr: &dyn Herdr, ledger: &dyn Ledger, path: &Path, replies: &Path) {
-        let id = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .and_then(|n| n.strip_suffix(".json"))
-            .filter(|id| is_id(id))
-            .map(str::to_string);
-        if let Some(id) = id {
+    /// Writes a reply for request `name`, then removes it. A request whose
+    /// name can't name a reply is only removed.
+    fn answer(
+        &self,
+        herdr: &dyn Herdr,
+        ledger: &dyn Ledger,
+        requests: &Dir,
+        name: &str,
+        replies: &Path,
+    ) {
+        if let Some(id) = name.strip_suffix(".json").filter(|id| is_id(id)) {
             let reply = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.reply(herdr, ledger, path)
+                self.reply(herdr, ledger, requests, name)
             }))
             .unwrap_or_else(|_| Reply::Failed("the broker panicked on this request".into()));
-            let _ = write_atomically(
-                replies,
-                &id,
-                &serde_json::to_vec(&reply).unwrap_or_default(),
-            );
+            let _ = write_atomically(replies, id, &serde_json::to_vec(&reply).unwrap_or_default());
         }
-        let _ = match std::fs::symlink_metadata(path) {
-            Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(path),
-            _ => std::fs::remove_file(path),
-        };
+        requests.remove(name);
     }
 
-    fn reply(&self, herdr: &dyn Herdr, ledger: &dyn Ledger, path: &Path) -> Reply {
-        let op = match read_request(path) {
+    fn reply(&self, herdr: &dyn Herdr, ledger: &dyn Ledger, requests: &Dir, name: &str) -> Reply {
+        let op = match requests.read_request(name) {
             Ok(op) => op,
             Err(e) => return Reply::Refused(format!("{e:#}")),
         };
@@ -197,6 +194,90 @@ impl Broker<'_> {
     }
 }
 
+/// A folder opened one part at a time without following symlinks, so a
+/// lead that can write the parts can't point the broker anywhere else.
+struct Dir(OwnedFd);
+
+impl Dir {
+    /// Opens `root`/`parts`…, creating missing parts; `root` is trusted.
+    fn open(root: &Path, parts: &[&str]) -> std::io::Result<Dir> {
+        let mut dir = Dir(std::fs::File::open(root)?.into());
+        for part in parts {
+            let name = CString::new(*part)?;
+            // SAFETY: both calls take a descriptor `dir` keeps open and a C string.
+            let fd = unsafe {
+                libc::mkdirat(dir.0.as_raw_fd(), name.as_ptr(), 0o700);
+                libc::openat(
+                    dir.0.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: openat just returned this descriptor, owned by nothing else.
+            dir = Dir(unsafe { OwnedFd::from_raw_fd(fd) });
+        }
+        Ok(dir)
+    }
+
+    /// Entries ready to answer, oldest name first; dotfiles are still being written.
+    fn names(&self) -> Vec<String> {
+        let listed = std::fs::read_dir(format!("/proc/self/fd/{}", self.0.as_raw_fd()));
+        let mut names: Vec<_> = listed
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|name| !name.starts_with('.'))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Request `name`, refusing anything but a small regular file of one known op.
+    fn read_request(&self, name: &str) -> Result<Op> {
+        let c_name = CString::new(name)?;
+        // SAFETY: openat on a descriptor `self` keeps open and a C string.
+        let fd = unsafe {
+            libc::openat(
+                self.0.as_raw_fd(),
+                c_name.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            bail!("not a request: not a plain file");
+        }
+        // SAFETY: openat just returned this descriptor, owned by nothing else.
+        let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+        let meta = file.metadata().context("not a request")?;
+        if !meta.is_file() {
+            bail!("not a request: not a plain file");
+        }
+        if meta.len() > MAX_REQUEST {
+            bail!("not a request: over {MAX_REQUEST} bytes");
+        }
+        let mut text = vec![];
+        file.take(MAX_REQUEST + 1).read_to_end(&mut text)?;
+        let request: Request = serde_json::from_slice(&text).context("malformed request")?;
+        Ok(request.op)
+    }
+
+    /// Removes entry `name` itself, never what a symlink names; a folder only when empty.
+    fn remove(&self, name: &str) {
+        let Ok(c_name) = CString::new(name) else {
+            return;
+        };
+        // SAFETY: unlinkat on a descriptor `self` keeps open and a C string.
+        unsafe {
+            if libc::unlinkat(self.0.as_raw_fd(), c_name.as_ptr(), 0) != 0 {
+                libc::unlinkat(self.0.as_raw_fd(), c_name.as_ptr(), libc::AT_REMOVEDIR);
+            }
+        }
+    }
+}
+
 /// The lead's side of the transport: writes requests, reads replies.
 pub struct Client {
     lead: String,
@@ -218,13 +299,14 @@ impl Client {
     }
 
     /// Hands `op` to the broker and waits for its answer. Fails at once when
-    /// no broker runs, and as soon as one stops without answering.
+    /// no broker runs, and as soon as one stops without answering, then
+    /// withdraws the request so no later broker carries it out.
     pub fn call(&self, op: &Op) -> Result<String> {
         let lead = &self.lead;
-        let revive = format!("run loopherd revive --name {lead} to start it");
         if !held(&self.lock) {
             bail!(
-                "no broker is running for {lead}, so it can't {}: {revive}",
+                "no broker is running for {lead}, so it can't {}: \
+                 the shepherd's loopherd revive --name {lead} starts it",
                 op.command()
             );
         }
@@ -235,6 +317,15 @@ impl Client {
             &serde_json::to_vec(&Request { op: op.clone() })?,
         )
         .with_context(|| format!("hand {} to {lead}'s broker", op.command()))?;
+        let answer = self.answer(&id, op);
+        if answer.is_err() {
+            let _ = std::fs::remove_file(self.requests.join(format!("{id}.json")));
+        }
+        answer
+    }
+
+    fn answer(&self, id: &str, op: &Op) -> Result<String> {
+        let lead = &self.lead;
         let reply = self.replies.join(format!("{id}.json"));
         let given_up = Instant::now() + self.answer_within;
         loop {
@@ -251,7 +342,8 @@ impl Client {
             }
             if !held(&self.lock) {
                 bail!(
-                    "{lead}'s broker stopped before answering {}: {revive}",
+                    "{lead}'s broker stopped before answering {}: \
+                     the shepherd's loopherd revive --name {lead} starts it again",
                     op.command()
                 );
             }
@@ -273,31 +365,34 @@ struct Request {
     op: Op,
 }
 
-/// The lead running this loopherd, process `me`: the one whose sandboxed
-/// Claude is an ancestor, else the lead the ledger has in `pane`. Asks herdr nothing.
-pub fn lead_here(
+/// The broker of the lead running this loopherd, process `me`: the lead
+/// whose sandboxed Claude is an ancestor, else the unretired lead the ledger
+/// has in `pane`. Asks herdr nothing; a ledger it can't read names no lead.
+pub fn route(
     paths: &Paths,
     ledger: &dyn Ledger,
     procs: &dyn Procs,
     me: u32,
     pane: Option<&tool_hook::Pane>,
-) -> Result<Option<String>> {
-    if let Some(lead) = sandbox::calling_lead(paths, procs, me) {
-        return Ok(Some(lead));
-    }
-    let Some(pane) = pane else {
-        return Ok(None);
-    };
-    Ok(tool_hook::lead_in(ledger, pane)?.map(|record| record.name))
+) -> Option<Client> {
+    let lead = sandbox::calling_lead(paths, procs, me).or_else(|| {
+        let record = tool_hook::lead_in(ledger, pane?).ok()??;
+        (!record.retired).then_some(record.name)
+    })?;
+    Some(Client::for_lead(paths, &lead))
 }
 
 /// Starts lead `lead`'s broker unless one runs, saying whether it started one.
 pub type StartBroker = fn(&Paths, &str) -> Result<bool>;
 
+/// How long `start` waits for the broker it started to take its lock.
+const START_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Starts `loopherd broker <lead>` detached, in a session of its own, unless
-/// a broker already serves `lead`; a second one would exit at once anyway.
+/// a broker already serves `lead`, and waits until it serves.
 pub fn start(paths: &Paths, lead: &str) -> Result<bool> {
     use std::os::unix::process::CommandExt;
+    validate_name(lead)?;
     if running(paths, lead) {
         return Ok(false);
     }
@@ -317,10 +412,26 @@ pub fn start(paths: &Paths, lead: &str) -> Result<bool> {
             _ => Ok(()),
         });
     }
-    command
+    let mut child = command
         .spawn()
         .with_context(|| format!("start {} broker {lead}", exe.display()))?;
-    Ok(true)
+    let given_up = Instant::now() + START_TIMEOUT;
+    loop {
+        if running(paths, lead) {
+            return Ok(true);
+        }
+        if let Some(status) = child.try_wait()? {
+            bail!("it exited at once ({status}); run loopherd broker {lead} to see why");
+        }
+        if Instant::now() >= given_up {
+            bail!(
+                "it didn't take {} within {}",
+                lock_file(paths, lead).display(),
+                humantime::format_duration(START_TIMEOUT)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Whether a broker serves `lead` now.
@@ -336,6 +447,9 @@ fn held(lock: &Path) -> bool {
     matches!(Lock::try_take(file), Ok(None))
 }
 
+/// How long a starting broker retries its lock: a probe holds it for an instant.
+const LOCK_GRACE: Duration = Duration::from_secs(1);
+
 fn take_lock(paths: &Paths, lead: &str) -> Result<Option<Lock>> {
     let path = lock_file(paths, lead);
     if let Some(dir) = path.parent() {
@@ -347,41 +461,17 @@ fn take_lock(paths: &Paths, lead: &str) -> Result<Option<Lock>> {
         .write(true)
         .open(&path)
         .with_context(|| format!("open {}", path.display()))?;
-    Lock::try_take(file).with_context(|| format!("lock {}", path.display()))
-}
-
-/// The request at `path`, refusing anything but a small regular file of one known op.
-fn read_request(path: &Path) -> Result<Op> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .context("not a request: can't open it as a plain file")?;
-    let meta = file.metadata().context("not a request")?;
-    if !meta.is_file() {
-        bail!("not a request: not a plain file");
+    let given_up = Instant::now() + LOCK_GRACE;
+    loop {
+        let attempt = file
+            .try_clone()
+            .with_context(|| format!("open {}", path.display()))?;
+        let lock = Lock::try_take(attempt).with_context(|| format!("lock {}", path.display()))?;
+        if lock.is_some() || Instant::now() >= given_up {
+            return Ok(lock);
+        }
+        std::thread::sleep(Duration::from_millis(5));
     }
-    if meta.len() > MAX_REQUEST {
-        bail!("not a request: over {MAX_REQUEST} bytes");
-    }
-    let mut text = vec![];
-    file.take(MAX_REQUEST + 1).read_to_end(&mut text)?;
-    let request: Request = serde_json::from_slice(&text).context("malformed request")?;
-    Ok(request.op)
-}
-
-/// Request files ready to answer, oldest name first; dotfiles are still being written.
-fn pending(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return vec![];
-    };
-    let mut found: Vec<_> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
-        .map(|e| e.path())
-        .collect();
-    found.sort();
-    found
 }
 
 fn prune(replies: &Path) {
@@ -560,31 +650,6 @@ mod tests {
     }
 
     #[test]
-    fn a_lead_tells_its_own_worker_through_its_broker_and_calls_no_herdr_itself() {
-        let world = World::new();
-        world.add(member("lh-1", Some("h")));
-        let serving = world.serve(telling_herdr());
-        let own = FakeHerdr::new(&[]);
-
-        let out = run(
-            &own,
-            Some(&world.client()),
-            &tell("lh-1", "rebase onto main"),
-        )
-        .unwrap();
-
-        assert_eq!(out, "told lh-1; it's working");
-        assert_eq!(own.calls(), 0);
-        world.retire("lead-h");
-        let (served, herdr) = serving.join().unwrap();
-        assert_eq!(served.unwrap(), Served::Retired);
-        assert_eq!(
-            herdr.prompts(),
-            vec![("lh-1".into(), "rebase onto main".into())]
-        );
-    }
-
-    #[test]
     fn a_target_outside_the_herds_unretired_workers_is_refused_naming_why() {
         let world = World::new();
         world.herd("g");
@@ -689,10 +754,7 @@ mod tests {
                 other => panic!("{id}: {other:?}"),
             }
         };
-        assert_eq!(
-            refused("link"),
-            "not a request: can't open it as a plain file: Too many levels of symbolic links (os error 40)"
-        );
+        assert_eq!(refused("link"), "not a request: not a plain file");
         assert!(refused("garbage").starts_with("malformed request: "));
         assert!(refused("spawn").starts_with("malformed request: unknown variant `spawn`"));
         assert!(refused("extra").starts_with("malformed request: unknown field `lead`"));
@@ -734,18 +796,8 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             "no broker is running for lead-h, so it can't tell: \
-             run loopherd revive --name lead-h to start it"
+             the shepherd's loopherd revive --name lead-h starts it"
         );
-    }
-
-    #[test]
-    fn without_a_client_the_op_runs_against_herdr_directly() {
-        let herdr = telling_herdr();
-
-        let out = run(&herdr, None, &tell("lh-1", "hi")).unwrap();
-
-        assert_eq!(out, "told lh-1; it's working");
-        assert_eq!(herdr.prompts().len(), 1);
     }
 
     /// herdr → shell → claude → bash 40 → loopherd 50, where the Claude was started with `args`.
@@ -758,20 +810,32 @@ mod tests {
     }
 
     #[test]
-    fn the_lead_here_is_the_one_whose_sandboxed_claude_runs_this_loopherd() {
+    fn in_a_sandboxed_lead_s_pane_tell_goes_through_its_broker_and_calls_no_herdr() {
         let world = World::new();
+        world.add(member("lh-1", Some("h")));
         let settings = sandbox::settings_file(&world.paths, "lead-h");
         let procs = procs(&["claude", "--settings", settings.to_str().unwrap()]);
+        let serving = world.serve(telling_herdr());
+        let own = FakeHerdr::new(&[]);
 
-        let here = lead_here(&world.paths, &world.ledger(), &procs, 50, None).unwrap();
+        let client = route(&world.paths, &world.ledger(), &procs, 50, None);
+        let out = run(&own, client.as_ref(), &tell("lh-1", "hi")).unwrap();
 
-        assert_eq!(here.as_deref(), Some("lead-h"));
+        assert_eq!(out, "told lh-1; it's working");
+        assert_eq!(own.calls(), 0);
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert_eq!(herdr.prompts().len(), 1);
     }
 
     #[test]
-    fn a_hook_only_lead_is_found_by_its_pane_and_a_worker_is_no_lead() {
+    fn a_hook_only_lead_routes_by_its_pane_and_others_go_to_herdr_directly() {
         let world = World::new();
         let socket = Path::new("/run/h.sock");
+        let on_socket = |mut record: AgentRecord| {
+            record.socket = Some(socket.into());
+            record
+        };
         world
             .ledger()
             .update("lead-h", &mut |r| {
@@ -779,20 +843,135 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        let mut worker = member("lh-1", Some("h"));
-        worker.socket = Some(socket.into());
-        world.add(worker);
+        world.add(on_socket(member("lh-1", Some("h"))));
+        let mut gone = on_socket(member("lead-g", Some("g")));
+        gone.role = Some(Role::Lead);
+        gone.retired = true;
+        world.add(gone);
         let procs = procs(&["claude"]);
-        let here = |id: &str| {
+        let routed = |id: &str| {
             let pane = tool_hook::Pane {
                 id,
                 socket: Some(socket),
                 lineage: &[],
             };
-            lead_here(&world.paths, &world.ledger(), &procs, 50, Some(&pane)).unwrap()
+            route(&world.paths, &world.ledger(), &procs, 50, Some(&pane)).map(|c| c.lead)
         };
 
-        assert_eq!(here("p-lead-h").as_deref(), Some("lead-h"));
-        assert_eq!(here("p-lh-1"), None);
+        assert_eq!(routed("p-lead-h").as_deref(), Some("lead-h"));
+        assert_eq!(routed("p-lh-1"), None);
+        assert_eq!(routed("p-lead-g"), None);
+        let herdr = telling_herdr();
+        run(&herdr, None, &tell("lh-1", "hi")).unwrap();
+        assert_eq!(herdr.prompts().len(), 1);
+    }
+
+    #[test]
+    fn an_unreadable_ledger_routes_nowhere_rather_than_failing() {
+        let world = World::new();
+        std::fs::write(world.dir.path().join("ledger.json"), "{ nope").unwrap();
+        let pane = tool_hook::Pane {
+            id: "p-lead-h",
+            socket: Some(Path::new("/run/h.sock")),
+            lineage: &[],
+        };
+
+        let client = route(
+            &world.paths,
+            &world.ledger(),
+            &procs(&["claude"]),
+            50,
+            Some(&pane),
+        );
+
+        assert!(client.is_none());
+    }
+
+    #[test]
+    fn a_requests_folder_swapped_for_a_symlink_is_never_followed() {
+        let world = World::new();
+        let victim = world.dir.path().join("victim");
+        std::fs::create_dir_all(victim.join("projects")).unwrap();
+        std::fs::write(victim.join("notes.json"), "{}").unwrap();
+        let serving = world.serve(FakeHerdr::new(&[]));
+        let requests = requests_dir(&world.paths, "lead-h");
+        std::fs::remove_dir_all(&requests).unwrap();
+        std::os::unix::fs::symlink(&victim, &requests).unwrap();
+        let broker = world.dir.path().join("broker");
+        let moved = world.dir.path().join("broker-moved");
+        std::thread::sleep(POLL * 10);
+        std::fs::rename(&broker, &moved).unwrap();
+        std::os::unix::fs::symlink(&victim, &broker).unwrap();
+        std::fs::create_dir_all(victim.join("lead-h/requests")).unwrap();
+        std::fs::write(victim.join("lead-h/requests/kept.json"), "{}").unwrap();
+
+        std::thread::sleep(POLL * 10);
+
+        assert!(victim.join("projects").is_dir());
+        assert!(victim.join("notes.json").is_file());
+        assert!(victim.join("lead-h/requests/kept.json").is_file());
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_lead_name_that_is_not_a_member_name_gets_no_broker() {
+        let world = World::new();
+        for lead in ["../x", "/tmp/x", "Lead"] {
+            let served = serve(
+                &FakeHerdr::new(&[]),
+                &mut world.ledger(),
+                &world.paths,
+                lead,
+                POLL,
+            );
+            assert!(
+                format!("{:#}", served.unwrap_err()).contains("must match"),
+                "{lead}"
+            );
+            assert!(format!("{:#}", start(&world.paths, lead).unwrap_err()).contains("must match"));
+        }
+    }
+
+    #[test]
+    fn a_request_the_lead_gave_up_on_is_withdrawn() {
+        let world = World::new();
+        let _held = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+        let client = Client {
+            answer_within: Duration::from_millis(50),
+            ..world.client()
+        };
+        std::fs::create_dir_all(requests_dir(&world.paths, "lead-h")).unwrap();
+
+        let err = client.call(&tell("lh-1", "hi")).unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "lead-h's broker didn't answer tell within 50ms; check it with loopherd doctor"
+        );
+        let left = std::fs::read_dir(requests_dir(&world.paths, "lead-h")).unwrap();
+        assert_eq!(left.count(), 0);
+    }
+
+    #[test]
+    fn a_broker_starting_while_its_lock_is_probed_still_starts() {
+        let world = World::new();
+        let probing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let probe = {
+            let (paths, probing) = (world.paths.clone(), probing.clone());
+            std::thread::spawn(move || {
+                while probing.load(std::sync::atomic::Ordering::Relaxed) {
+                    running(&paths, "lead-h");
+                }
+            })
+        };
+
+        let serving = world.serve(FakeHerdr::new(&[]));
+
+        probing.store(false, std::sync::atomic::Ordering::Relaxed);
+        probe.join().unwrap();
+        assert!(!serving.is_finished());
+        world.retire("lead-h");
+        assert_eq!(serving.join().unwrap().0.unwrap(), Served::Retired);
     }
 }
