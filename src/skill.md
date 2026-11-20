@@ -609,8 +609,13 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   in its mailbox, and `(lead, unsandboxed)` in `loopherd view`. `restart`
   refuses, under `require`, a lead started without its sandbox (before it
   existed, or on `prefer`): quit its Claude and run `loopherd revive
-  --name <lead>` to resume it sandboxed. Set `prefer` only when the human
-  says so; doctor names those herds and leads.
+  --name <lead>` to resume it sandboxed. The human's own
+  `~/.claude/settings.json` can loosen every lead's sandbox
+  (`excludedCommands`, `allowWrite` and the like): `lead`, `revive` and
+  `restart` refuse such a lead under `require`, naming each file and key,
+  and start it with them as warnings under `prefer`; doctor reports them
+  too. Only the human edits that file; ask them. Set `prefer` only when the
+  human says so; doctor names those herds and leads.
 - **Change a herd file's values** with `loopherd herd set <herd> <key>
   <value>`, `loopherd herd get <herd> <key>` and `loopherd herd unset <herd>
   <key>`, not by hand-editing TOML. Keys are dotted (`queue.max`,

@@ -203,8 +203,10 @@ as its main checkout. Then, in order:
    doesn't change herd files, `config.toml` or `~/.claude` by mistake. It
    is a guard rail, not a cage: a lead can still act outside it through
    herdr, and on WSL2 through Windows interop ([D89](docs/decisions/D89.md)).
-   A lead whose sandbox can't start isn't started unless its `[lead]` sets
-   `sandbox = "prefer"`.
+   A lead whose sandbox can't start, or whose sandbox your own
+   `~/.claude/settings.json` loosens (an `excludedCommands` or `allowWrite`
+   entry, say), isn't started unless its `[lead]` sets `sandbox = "prefer"`,
+   which starts it with a warning instead ([D100](docs/decisions/D100.md)).
 
 The guide a shepherd or lead follows, from setting up a herd to cleaning up
 after merges, is the loopherd skill: `loopherd --skill` prints it

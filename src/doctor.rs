@@ -305,8 +305,35 @@ fn herd_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
                 format!("loopherd herd set {herd} lead.sandbox '\"require\"'"),
             ));
         }
+        checks.extend(loosened_checks(paths, &herd));
     }
     checks
+}
+
+/// What the human's own Claude settings loosen in `herd`'s lead's sandbox,
+/// failing where that keeps the lead from starting.
+fn loosened_checks(paths: &Paths, herd: &str) -> Vec<Check> {
+    let loosened = crate::lead::lead_name(herd)
+        .and_then(|name| crate::sandbox::loosened(paths, &name, herd))
+        .and_then(|lines| Ok((lines, crate::sandbox::refuses_loosened(paths, herd)?)));
+    let Ok((lines, refuses)) = loosened else {
+        return vec![];
+    };
+    let name = format!("herd {herd} sandbox settings");
+    lines
+        .into_iter()
+        .map(|line| match refuses {
+            true => failure(
+                &name,
+                line,
+                format!(
+                    "remove it, or loopherd herd set {herd} lead.sandbox '\"prefer\"' to start \
+                     its lead with it as a warning"
+                ),
+            ),
+            false => warning(&name, line, "remove it".into()),
+        })
+        .collect()
 }
 
 /// The loopherd rulesets on a herd's GitHub repo.
@@ -1938,6 +1965,48 @@ mod tests {
               guarded by its tool hook alone, whenever the sandbox can't start; \
               fix: loopherd herd set h lead.sandbox '\"require\"'"
             ]
+        );
+    }
+
+    /// Writes the human's `~/.claude/settings.json`, returning its path.
+    fn user_settings(m: &Machine, text: &str) -> PathBuf {
+        let file = m.paths().home.join(".claude/settings.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, text).unwrap();
+        file
+    }
+
+    #[test]
+    fn user_settings_that_loosen_a_leads_sandbox_fail_under_require_and_warn_under_prefer() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        let lead = |mode: &str| {
+            format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge = true\nsandbox = \"{mode}\"\n",
+                repo.to_str().unwrap()
+            )
+        };
+        let file = user_settings(&m, r#"{"sandbox": {"excludedCommands": ["docker *"]}}"#);
+        let file = file.display();
+
+        m.herd_file("h", &lead("require"));
+        assert_eq!(
+            problems(&m, &herdr()),
+            [format!(
+                "failure herd h sandbox settings: {file}: sandbox.excludedCommands runs \
+                 \"docker *\" outside it; fix: remove it, or loopherd herd set h lead.sandbox \
+                 '\"prefer\"' to start its lead with it as a warning"
+            )]
+        );
+
+        m.herd_file("h", &lead("prefer"));
+        let problems = problems(&m, &herdr());
+        assert!(
+            problems.contains(&format!(
+                "warning herd h sandbox settings: {file}: sandbox.excludedCommands runs \
+                 \"docker *\" outside it; fix: remove it"
+            )),
+            "{problems:?}"
         );
     }
 

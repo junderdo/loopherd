@@ -22,16 +22,17 @@ pub struct LeadRequest {
 }
 
 /// Spawns `lead-<herd>` in a detached worktree of the same name, in its
-/// sandbox, returning its name and the warning a hook-only start carries,
-/// which its ledger entry and mailbox keep too. Refuses while the herd has
-/// an unretired lead.
+/// sandbox, returning its name and the warnings its start carries (a hook-only
+/// start, or what loosens its sandbox under `prefer`), which its mailbox keeps
+/// too, and a hook-only start its ledger entry. Refuses while the herd has an
+/// unretired lead.
 pub fn lead(
     herdr: &dyn Herdr,
     ledger: &mut dyn Ledger,
     paths: &Paths,
     req: &LeadRequest,
     inherited_workspace: Option<&str>,
-) -> Result<(String, Spawned, Option<String>)> {
+) -> Result<(String, Spawned, Vec<String>)> {
     let mut spawn_req = resolve(ledger, paths, req)?;
     let kept = sandbox::Lead {
         herd: req.herd.clone(),
@@ -40,23 +41,27 @@ pub fn lead(
     let launch = sandbox::prepare(paths, &spawn_req.name, &kept, req.sandbox).context("sandbox")?;
     spawn_req.claude_args.extend(launch.args());
     let spawned = spawn(herdr, ledger, &spawn_req, inherited_workspace)?;
-    let (Some(why), Some(text)) = (launch.hook_only(), launch.warning(&spawn_req.name)) else {
-        return Ok((spawn_req.name, spawned, None));
-    };
+    let name = spawn_req.name;
     // The lead already runs, so what can't be noted only adds to the warning.
-    let mut warning = text.clone();
-    let flagged = ledger.update(&spawn_req.name, &mut |r| {
-        r.unsandboxed = Some(why.to_string());
-        Ok(())
-    });
-    if let Err(e) = flagged {
-        warning += &format!("; not flagged in the ledger: {e:#}");
+    let mut warnings = vec![];
+    for text in launch.warnings(&name) {
+        let mut warning = text.clone();
+        if let Some(why) = launch.hook_only() {
+            let flagged = ledger.update(&name, &mut |r| {
+                r.unsandboxed = Some(why.to_string());
+                Ok(())
+            });
+            if let Err(e) = flagged {
+                warning += &format!("; not flagged in the ledger: {e:#}");
+            }
+        }
+        let note = Entry::new(SystemTime::now(), Body::Note { text });
+        if let Err(e) = report::append(&paths.state_dir().join("reports"), &name, &note) {
+            warning += &format!("; not noted in its mailbox: {e:#}");
+        }
+        warnings.push(warning);
     }
-    let note = Entry::new(SystemTime::now(), Body::Note { text });
-    if let Err(e) = report::append(&paths.state_dir().join("reports"), &spawn_req.name, &note) {
-        warning += &format!("; not noted in its mailbox: {e:#}");
-    }
-    Ok((spawn_req.name, spawned, Some(warning)))
+    Ok((name, spawned, warnings))
 }
 
 /// `dry_run`'s plan, or `lead`'s spawn report, with the exit code.
@@ -72,12 +77,10 @@ pub fn run(
         let plan = self::dry_run(herdr, ledger, paths, req, inherited_workspace)?;
         return Ok((plan, 0));
     }
-    let (name, spawned, warning) = lead(herdr, ledger, paths, req, inherited_workspace)?;
+    let (name, spawned, warnings) = lead(herdr, ledger, paths, req, inherited_workspace)?;
     let (report, code) = spawned.report(&name);
-    match warning {
-        Some(warning) => Ok((format!("warning: {warning}\n{report}"), code)),
-        None => Ok((report, code)),
-    }
+    let warnings: String = warnings.iter().map(|w| format!("warning: {w}\n")).collect();
+    Ok((warnings + &report, code))
 }
 
 /// What `lead` would do, like `add --dry-run` with a `role` line.
@@ -178,7 +181,7 @@ fn with_review_rounds(mut prompt: Prompt) -> Result<Prompt> {
 }
 
 /// `lead-<herd>`, failing unless that is a valid member name.
-fn lead_name(herd: &str) -> Result<String> {
+pub fn lead_name(herd: &str) -> Result<String> {
     let valid = herd.len() <= 27
         && herd
             .chars()
@@ -920,6 +923,142 @@ mod tests {
              to run it guarded by its tool hook alone"
         );
         assert!(herdr.tabs().is_empty());
+    }
+
+    /// `setup`'s paths with a home whose `~/.claude/settings.json` is `settings`.
+    fn home_with_settings(setup: &Setup, settings: &str) -> Paths {
+        let home = setup.root.join("home");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(home.join(".claude/settings.json"), settings).unwrap();
+        Paths {
+            home,
+            ..setup.paths()
+        }
+    }
+
+    #[test]
+    fn require_refuses_a_lead_whose_user_settings_loosen_its_sandbox_naming_each_key() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let herdr = herdr();
+        let paths = home_with_settings(
+            &setup,
+            r#"{"sandbox": {"excludedCommands": ["docker *"],
+                "filesystem": {"allowWrite": ["/srv", "~/notes"], "disabled": true}}}"#,
+        );
+
+        let err = lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        let file = setup.root.join("home/.claude/settings.json");
+        let file = file.display();
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "sandbox: lead-h can't run sandboxed: your Claude settings loosen its sandbox: \
+                 {file}: sandbox.excludedCommands runs \"docker *\" outside it; \
+                 {file}: sandbox.filesystem.allowWrite opens /srv to writes; \
+                 {file}: sandbox.filesystem.allowWrite opens ~/notes to writes; \
+                 {file}: sandbox.filesystem.disabled turns its filesystem rules off; \
+                 remove those, or set [lead] sandbox = \"prefer\" in herd h to start it with \
+                 them as warnings"
+            )
+        );
+        assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
+    fn prefer_starts_a_lead_in_its_loosened_sandbox_warning_of_each_key() {
+        let setup = Setup::with_lead("prompt = \"go\"\nsandbox = \"prefer\"");
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        let paths =
+            home_with_settings(&setup, r#"{"sandbox": {"excludedCommands": ["docker *"]}}"#);
+
+        let (out, code) = run(
+            &herdr,
+            &mut ledger,
+            &paths,
+            &request(&[]),
+            false,
+            Some("w1"),
+        )
+        .unwrap();
+
+        let file = setup.root.join("home/.claude/settings.json");
+        let warning = format!(
+            "lead-h's sandbox is loosened by {}: sandbox.excludedCommands runs \"docker *\" \
+             outside it",
+            file.display()
+        );
+        assert_eq!(code, 0);
+        assert!(out.starts_with(&format!("warning: {warning}\n")), "{out}");
+        assert!(herdr.started()[0].args.contains(&"--settings".to_string()));
+        assert_eq!(ledger.0["lead-h"].unsandboxed, None);
+        let (mailbox, _) = report::history(&setup.root.join("state/reports"), "lead-h").unwrap();
+        assert!(
+            mailbox.iter().any(|e| e.body
+                == Body::Note {
+                    text: warning.clone()
+                }),
+            "{mailbox:?}"
+        );
+    }
+
+    #[test]
+    fn user_settings_that_stay_inside_what_the_lead_may_write_or_its_own_settings_set_dont_count() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let worktree = setup.worktree().join("target");
+        let paths = home_with_settings(
+            &setup,
+            &format!(
+                r#"{{"sandbox": {{"enabled": false, "allowUnsandboxedCommands": true,
+                    "excludedCommands": ["loopherd feed"],
+                    "enableWeakerNestedSandbox": false,
+                    "filesystem": {{"allowWrite": [{worktree:?}]}}}},
+                    "permissions": {{"allow": ["Bash(*)"]}}}}"#
+            ),
+        );
+
+        let started = lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        );
+
+        assert!(
+            started.as_ref().is_ok_and(|(_, _, w)| w.is_empty()),
+            "{started:?}"
+        );
+    }
+
+    #[test]
+    fn unparseable_user_settings_count_as_a_loosening() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let paths = home_with_settings(&setup, "{ not json");
+
+        let err = lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        let file = setup.root.join("home/.claude/settings.json");
+        let shown = format!("{err:#}");
+        assert!(
+            shown.contains(&format!("{}: can't parse it: ", file.display())),
+            "{shown}"
+        );
     }
 
     #[test]

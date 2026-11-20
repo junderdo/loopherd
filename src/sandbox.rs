@@ -289,17 +289,17 @@ impl Guard {
 pub enum Launch {
     Sandboxed {
         settings: PathBuf,
+        /// What the human's own settings loosen, under `prefer`.
+        loosened: Vec<String>,
     },
     /// `prefer`, with why the sandbox can't start.
-    HookOnly {
-        why: String,
-    },
+    HookOnly { why: String },
 }
 
 impl Launch {
     pub fn args(&self) -> Vec<String> {
         match self {
-            Launch::Sandboxed { settings } => {
+            Launch::Sandboxed { settings, .. } => {
                 vec!["--settings".into(), settings.display().to_string()]
             }
             Launch::HookOnly { .. } => vec![],
@@ -314,9 +314,15 @@ impl Launch {
         }
     }
 
-    /// The warning a hook-only start carries, if this is one.
-    pub fn warning(&self, name: &str) -> Option<String> {
-        self.hook_only().map(|why| hook_only_warning(name, why))
+    /// The warnings the start carries: why it's hook-only, or what loosens its sandbox.
+    pub fn warnings(&self, name: &str) -> Vec<String> {
+        match self {
+            Launch::Sandboxed { loosened, .. } => loosened
+                .iter()
+                .map(|line| loosened_warning(name, line))
+                .collect(),
+            Launch::HookOnly { why } => vec![hook_only_warning(name, why)],
+        }
     }
 }
 
@@ -367,11 +373,145 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
             )),
         };
     }
+    let own = settings(paths, name, &lead.herd)?;
+    let loosened = loosenings(&paths.home, &own);
+    if !loosened.is_empty() && refuses_loosened(paths, &lead.herd)? {
+        return Err(loosened_refusal(name, &lead.herd, &loosened));
+    }
     create_state(paths.state_dir())?;
     let file = settings_file(paths, name);
-    let text = serde_json::to_string_pretty(&settings(paths, name, &lead.herd)?)? + "\n";
+    let text = serde_json::to_string_pretty(&own)? + "\n";
     write_private(&file, &text).with_context(|| format!("write {}", file.display()))?;
-    Ok(Launch::Sandboxed { settings: file })
+    Ok(Launch::Sandboxed {
+        settings: file,
+        loosened,
+    })
+}
+
+/// What the human's own Claude settings loosen in lead `name`'s sandbox, one
+/// line per key, each naming its file.
+pub fn loosened(paths: &Paths, name: &str, herd: &str) -> Result<Vec<String>> {
+    Ok(loosenings(&paths.home, &settings(paths, name, herd)?))
+}
+
+/// Whether a loosened sandbox keeps `herd`'s lead from starting: under
+/// `require`, or with `merge_guard = "credentials"`, whose token a loosened
+/// sandbox could expose.
+pub fn refuses_loosened(paths: &Paths, herd: &str) -> Result<bool> {
+    let (_, mode) = herd::lead_sandbox(paths, herd)?;
+    Ok(mode == SandboxMode::Require
+        || herd::merge_guard(paths, herd)? == Some(MergeGuard::Credentials))
+}
+
+fn loosened_warning(name: &str, line: &str) -> String {
+    format!("{name}'s sandbox is loosened by {line}")
+}
+
+fn loosened_refusal(name: &str, herd: &str, loosened: &[String]) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{name} can't run sandboxed: your Claude settings loosen its sandbox: {}; remove \
+         those, or set [lead] sandbox = \"prefer\" in herd {herd} to start it with them as \
+         warnings",
+        loosened.join("; ")
+    )
+}
+
+/// Boolean keys that loosen a sandbox when set to anything but `false`.
+const LOOSENING_SWITCHES: [(&str, &str); 3] = [
+    (
+        "/sandbox/filesystem/disabled",
+        "turns its filesystem rules off",
+    ),
+    ("/sandbox/enableWeakerNestedSandbox", "weakens it"),
+    ("/sandbox/allowNestedUserNamespaces", "weakens it"),
+];
+
+/// What the human's `~/.claude/settings.json` adds to a lead's sandbox, whose
+/// own settings are `own`: one line per loosening entry, naming the file.
+/// Claude Code merges user settings' lists into `--settings`, and takes their
+/// booleans where `--settings` sets none. A repo's project and local settings
+/// don't reach a sandbox with `allowUnsandboxedCommands` off.
+fn loosenings(home: &Path, own: &Value) -> Vec<String> {
+    let file = home.join(".claude/settings.json");
+    let shown = file.display();
+    let user: Value = match std::fs::read_to_string(&file) {
+        Ok(text) => match serde_json::from_str(&text) {
+            Ok(user) => user,
+            Err(e) => return vec![format!("{shown}: can't parse it: {e}")],
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return vec![],
+        Err(e) => return vec![format!("{shown}: can't read it: {e}")],
+    };
+    let mut found = vec![];
+    let own_commands = entries(&own["sandbox"]["excludedCommands"]);
+    for command in entries(&user["sandbox"]["excludedCommands"]) {
+        if !own_commands.contains(&command) {
+            found.push(format!(
+                "{shown}: sandbox.excludedCommands runs {command:?} outside it"
+            ));
+        }
+    }
+    let own_writes: Vec<PathBuf> = entries(&own["sandbox"]["filesystem"]["allowWrite"])
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    for path in entries(&user["sandbox"]["filesystem"]["allowWrite"]) {
+        let inside = absolute(&path, home)
+            .is_some_and(|path| own_writes.iter().any(|own| path.starts_with(own)));
+        if !inside {
+            found.push(format!(
+                "{shown}: sandbox.filesystem.allowWrite opens {path} to writes"
+            ));
+        }
+    }
+    let own_reads = entries(&own["sandbox"]["filesystem"]["allowRead"]);
+    for path in entries(&user["sandbox"]["filesystem"]["allowRead"]) {
+        if !own_reads.contains(&path) {
+            found.push(format!(
+                "{shown}: sandbox.filesystem.allowRead opens {path} to reads"
+            ));
+        }
+    }
+    for (pointer, what) in LOOSENING_SWITCHES {
+        let set = user
+            .pointer(pointer)
+            .is_some_and(|v| v != &Value::Bool(false));
+        if set && own.pointer(pointer).is_none() {
+            let key = pointer.trim_start_matches('/').replace('/', ".");
+            found.push(format!("{shown}: {key} {what}"));
+        }
+    }
+    found
+}
+
+/// A settings list's entries; anything else that's set is one entry, as written.
+fn entries(value: &Value) -> Vec<String> {
+    match value {
+        Value::Null => vec![],
+        Value::Array(items) => items
+            .iter()
+            .map(|item| item.as_str().map_or_else(|| item.to_string(), String::from))
+            .collect(),
+        other => vec![other.to_string()],
+    }
+}
+
+/// A sandbox path as an absolute one, or `None` when it's relative or climbs with `..`.
+fn absolute(path: &str, home: &Path) -> Option<PathBuf> {
+    let path = match path.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            home.join(rest.trim_start_matches('/'))
+        }
+        _ => PathBuf::from(
+            path.strip_prefix('/')
+                .filter(|p| p.starts_with('/'))
+                .unwrap_or(path),
+        ),
+    };
+    let climbs = path
+        .components()
+        .any(|c| c == std::path::Component::ParentDir);
+    (path.is_absolute() && !climbs).then_some(path)
 }
 
 /// A credentials lead's settings hold its token, so only the human reads them.
@@ -395,16 +535,17 @@ fn credentials_refusal(name: &str, why: &str) -> anyhow::Error {
 /// How a running lead stands against its sandbox.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Running {
-    Sandboxed,
-    /// Sandboxed, by settings its herd's switches have since changed.
-    Stale(String),
+    /// With warnings: what loosens its sandbox under `prefer`, and whether its
+    /// herd's switches have changed since its settings were written.
+    Sandboxed(Vec<String>),
     /// Started without its settings, under `prefer`.
     HookOnly(String),
 }
 
 /// Checks a running lead was launched with its settings, as `claude_args`
-/// record, and that they match its herd's current switches. Under `require`
-/// one launched without them is refused.
+/// record, that they match its herd's current switches, and what the human's
+/// own settings loosen. Under `require` one launched without them, or loosened,
+/// is refused.
 pub fn check_running(
     paths: &Paths,
     name: &str,
@@ -439,16 +580,24 @@ pub fn check_running(
         };
     }
     let current = settings(paths, name, herd)?;
+    let loosened = loosenings(&paths.home, &current);
+    if !loosened.is_empty() && refuses_loosened(paths, herd)? {
+        return Err(loosened_refusal(name, herd, &loosened));
+    }
+    let mut warnings: Vec<String> = loosened
+        .iter()
+        .map(|line| loosened_warning(name, line))
+        .collect();
     let on_disk = std::fs::read_to_string(&file)
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok());
-    if on_disk.as_ref() == Some(&current) {
-        return Ok(Running::Sandboxed);
+    if on_disk.as_ref() != Some(&current) {
+        warnings.push(format!(
+            "{name}'s sandbox was set before herd {herd}'s current switches, \
+             which reach it only when its Claude starts again; {resume}"
+        ));
     }
-    Ok(Running::Stale(format!(
-        "{name}'s sandbox was set before herd {herd}'s current switches, \
-         which reach it only when its Claude starts again; {resume}"
-    )))
+    Ok(Running::Sandboxed(warnings))
 }
 
 fn refusal(name: &str, herd: &str, why: &str) -> anyhow::Error {

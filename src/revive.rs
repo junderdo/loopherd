@@ -706,7 +706,7 @@ fn revive_one(
         None => args.extend(record.claude_args.iter().cloned()),
         Some((lead, _)) => match sandbox::prepare(&req.paths, &record.name, lead, req.sandbox) {
             Ok(launch) => {
-                warnings.extend(launch.warning(&record.name));
+                warnings.extend(launch.warnings(&record.name));
                 unsandboxed = launch.hook_only().map(str::to_string);
                 args.extend(lead.args.iter().cloned());
                 args.extend(launch.args());
@@ -1819,6 +1819,41 @@ mod tests {
         );
         assert!(herdr.started().is_empty());
         assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
+    fn a_lead_whose_user_settings_loosen_its_sandbox_is_not_revived_under_require() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut ledger = ledger([lead("lead-h", cwd.path())]);
+        let home = own_reports_dir().join("home");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        let settings = home.join(".claude/settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"sandbox": {"excludedCommands": ["docker *"]}}"#,
+        )
+        .unwrap();
+        let req = ReviveRequest {
+            paths: Paths {
+                home,
+                ..own_paths()
+            },
+            ..request()
+        };
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 1);
+        assert!(
+            out.starts_with(&format!(
+                "failed lead-h: sandbox: lead-h can't run sandboxed: your Claude settings \
+                 loosen its sandbox: {}: sandbox.excludedCommands runs \"docker *\" outside it;",
+                settings.display()
+            )),
+            "{out}"
+        );
+        assert!(herdr.started().is_empty());
     }
 
     #[test]
