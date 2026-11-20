@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Result, anyhow, bail};
 
 use crate::context;
+use crate::handoff;
 use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::Process;
 use crate::lock::Lock;
@@ -342,7 +343,8 @@ fn restart_now(w: &Waiter, clock: &mut dyn Clock, notify: &mut dyn FnMut(&str)) 
         }
         clock.sleep(Duration::from_secs(1));
     };
-    let handoff = context::handoff_path(w.state, context::SHEPHERD);
+    let handoff = handoff::find(w.state, context::SHEPHERD)
+        .unwrap_or_else(|| handoff::path(w.state, context::SHEPHERD));
     let paste = format!(
         "continue as the loopherd shepherd from {}",
         handoff.display()
@@ -559,7 +561,7 @@ mod tests {
         fn new() -> World {
             let state = tempfile::tempdir().unwrap();
             shepherd_resume::record(state.path(), &place(), None, "s-old", at(RECORDED)).unwrap();
-            let handoff = context::handoff_path(state.path(), context::SHEPHERD);
+            let handoff = handoff::path(state.path(), context::SHEPHERD);
             fs::create_dir_all(handoff.parent().unwrap()).unwrap();
             fs::write(&handoff, "## Next steps\n").unwrap();
             fs::File::options()
@@ -721,7 +723,7 @@ mod tests {
         assert_eq!(saved["self_restart"]["state"], "restarted");
         assert_eq!(saved["used"], true);
         assert!(saved["last_self_restart"].is_string(), "{saved}");
-        assert!(w.path().join("handoffs/shepherd.prev.md").is_file());
+        assert!(w.path().join("handoffs/shepherd/prev.md").is_file());
         assert!(w.notified.borrow().is_empty());
     }
 
@@ -752,7 +754,7 @@ mod tests {
 
         assert_eq!(w.wait(|_| {}), Waited::Fallback);
 
-        let handoff = w.path().join("handoffs/shepherd.md");
+        let handoff = w.path().join("handoffs/shepherd/handoff.md");
         let line = format!(
             "continue as the loopherd shepherd from {}",
             handoff.display()
@@ -938,7 +940,7 @@ mod tests {
         }
 
         let w = World::new();
-        fs::remove_file(w.path().join("handoffs/shepherd.md")).unwrap();
+        fs::remove_file(w.path().join("handoffs/shepherd/handoff.md")).unwrap();
         let e = w.arm_at(ARMED, on()).err().unwrap();
         assert!(format!("{e:#}").contains("no handoff was written"), "{e:#}");
         assert!(w.saved().get("self_restart").is_none());
@@ -1017,7 +1019,7 @@ mod tests {
             w.herdr.label(PANE),
             Some(format!("shepherd: self-restart gave up: {said}"))
         );
-        assert!(w.path().join("handoffs/shepherd.md").is_file());
+        assert!(w.path().join("handoffs/shepherd/handoff.md").is_file());
     }
 
     #[test]

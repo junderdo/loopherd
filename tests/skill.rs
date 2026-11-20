@@ -349,7 +349,7 @@ fn the_shepherd_tells_the_human_to_clear_and_send_any_message_with_the_paste_lin
     let paste = own.find("`continue as the loopherd shepherd from ");
     assert!(clear.is_some() && clear < paste, "{own}");
     assert!(
-        own.contains("given that resume (naming the `.prev.md` path) or the pasted line"),
+        own.contains("given that resume (naming the `prev.md` path) or the pasted line"),
         "{own}"
     );
 }

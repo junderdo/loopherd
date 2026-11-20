@@ -398,7 +398,7 @@ pub fn validate_name(name: &str) -> Result<()> {
         bail!("{name:?} must match [a-z][a-z0-9_-]{{0,31}}");
     }
     if name == SHEPHERD {
-        bail!("{name} is reserved: the shepherd's handoff is handoffs/{SHEPHERD}.md");
+        bail!("{name} is reserved: the shepherd's handoff is handoffs/{SHEPHERD}/");
     }
     Ok(())
 }
@@ -554,7 +554,7 @@ mod tests {
         let err = run(&herdr, &mut MemLedger::default(), &request("shepherd")).unwrap_err();
         assert_eq!(
             format!("{err:#}"),
-            "name: shepherd is reserved: the shepherd's handoff is handoffs/shepherd.md"
+            "name: shepherd is reserved: the shepherd's handoff is handoffs/shepherd/"
         );
         assert!(herdr.tabs().is_empty());
         assert!(run(&herdr, &mut MemLedger::default(), &request("shepherd-2")).is_ok());

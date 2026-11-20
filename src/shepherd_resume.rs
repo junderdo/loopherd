@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::context;
+use crate::handoff;
 use crate::ledger::Process;
 use crate::lock::Lock;
 use crate::report::Stop;
@@ -94,7 +95,7 @@ fn record_path(state: &Path) -> PathBuf {
 }
 
 fn handoff_path(state: &Path) -> PathBuf {
-    context::handoff_path(state, context::SHEPHERD)
+    handoff::path(state, context::SHEPHERD)
 }
 
 /// Replaces any earlier record with an unused one for `session` at `place`,
@@ -277,7 +278,7 @@ impl NewResume {
     pub fn undo(self, state: &Path) -> Result<()> {
         let _lock = lock(state)?;
         let handoff = handoff_path(state);
-        let read = handoff.with_extension("prev.md");
+        let read = handoff::prev(state, context::SHEPHERD);
         fs::rename(&read, &handoff)
             .with_context(|| format!("move {} to {}", read.display(), handoff.display()))?;
         match last_record(state) {
@@ -320,10 +321,8 @@ pub fn new_shepherd_resume(state: &Path, socket: Option<&Path>) -> Result<Option
 /// Moves the handoff to `shepherd.prev.md` and returns the context that
 /// resumes the shepherd from it.
 fn resume_from_moved_handoff(state: &Path, written: SystemTime) -> Result<String> {
-    let handoff = handoff_path(state);
-    let read = handoff.with_extension("prev.md");
-    fs::rename(&handoff, &read)
-        .with_context(|| format!("move {} to {}", handoff.display(), read.display()))?;
+    let handoff = handoff::find(state, context::SHEPHERD).unwrap_or_else(|| handoff_path(state));
+    let read = handoff::set_aside(state, context::SHEPHERD, &handoff)?;
     Ok(format!(
         "You are the loopherd shepherd, resuming after your handoff. Run `loopherd --skill`, \
          read your handoff at {} (written {}), run `loopherd status` and \
@@ -336,7 +335,9 @@ fn resume_from_moved_handoff(state: &Path, written: SystemTime) -> Result<String
 
 /// When the handoff was written, if after the record's time `at`.
 fn handoff_written_after(state: &Path, at: &str) -> Result<Option<SystemTime>> {
-    let handoff = handoff_path(state);
+    let Some(handoff) = handoff::find(state, context::SHEPHERD) else {
+        return Ok(None);
+    };
     let written = match fs::metadata(&handoff).and_then(|m| m.modified()) {
         Ok(written) => written,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -418,6 +419,23 @@ mod tests {
     }
 
     #[test]
+    fn a_flat_handoff_an_older_release_wrote_is_resumed_from_and_moved_to_prev() {
+        let state = handed_off("2026-11-18T10:05:00Z");
+        let handoffs = state.path().join("handoffs");
+        fs::rename(handoff_path(state.path()), handoffs.join("shepherd.md")).unwrap();
+
+        let told = resume(state.path(), &place(), &start("clear"))
+            .unwrap()
+            .unwrap();
+
+        let prev = handoffs.join("shepherd/prev.md");
+        assert_eq!(fs::read_to_string(&prev).unwrap(), "## State\n");
+        assert!(!handoffs.join("shepherd.md").exists());
+        assert!(told.contains(&format!("read your handoff at {}", prev.display())));
+        assert!(told.contains("(written 2026-11-18T10:05:00Z)"));
+    }
+
+    #[test]
     fn a_clear_at_the_recorded_place_resumes_from_the_moved_handoff() {
         let state = handed_off("2026-11-18T10:05:00Z");
 
@@ -425,7 +443,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let prev = state.path().join("handoffs/shepherd.prev.md");
+        let prev = state.path().join("handoffs/shepherd/prev.md");
         assert!(prev.is_file());
         assert!(!handoff_path(state.path()).exists());
         assert!(told.contains(&format!("read your handoff at {}", prev.display())));
