@@ -7,9 +7,11 @@
 
 use std::fs::{self, File};
 use std::io::ErrorKind;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::herdr::Herdr;
 use crate::ledger::Ledger;
@@ -38,7 +40,9 @@ pub fn label_until_prompted(herdr: &dyn Herdr, dir: &Path, pane: &str, label: &s
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let _lock = lock(dir, pane)?;
     // Marked first: a mark with no label costs one needless clear; a label with no mark stays.
-    fs::write(&mark, "").with_context(|| format!("write {}", mark.display()))?;
+    open_regular(&mark)?
+        .set_len(0)
+        .with_context(|| format!("write {}", mark.display()))?;
     herdr.label_pane(pane, Some(label))
 }
 
@@ -110,7 +114,7 @@ pub fn clear(herdr: &dyn Herdr, dir: &Path, pane: &str) -> Result<()> {
     }
     herdr.label_pane(pane, None).inspect_err(|_| {
         // Marked again, so the next prompt or session start retries.
-        let _ = fs::write(&mark, "");
+        let _ = open_regular(&mark);
     })
 }
 
@@ -118,10 +122,51 @@ fn mark(dir: &Path, pane: &str) -> PathBuf {
     dir.join(format!(".pane-label-{pane}"))
 }
 
+/// How long a label change waits for another holding its pane's lock.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The pane's lock, within `LOCK_TIMEOUT`: the lead can write the mailboxes
+/// directory, so its broker mustn't wait on a lock the lead holds forever.
 fn lock(dir: &Path, pane: &str) -> Result<Lock> {
     let path = dir.join(format!(".pane-label-{pane}.lock"));
-    let file = File::create(&path).with_context(|| format!("create {}", path.display()))?;
-    Lock::wait(file).with_context(|| format!("lock {}", path.display()))
+    let given_up = Instant::now() + LOCK_TIMEOUT;
+    loop {
+        let file = open_regular(&path)?;
+        if let Some(lock) =
+            Lock::try_take(file).with_context(|| format!("lock {}", path.display()))?
+        {
+            return Ok(lock);
+        }
+        if Instant::now() >= given_up {
+            bail!(
+                "{} stayed locked for {}s",
+                path.display(),
+                LOCK_TIMEOUT.as_secs()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Opens or creates `path` for writing, refusing a symlink, a FIFO or
+/// anything else but a plain file: a lead can plant one in the mailboxes
+/// directory for its unsandboxed broker to write through.
+fn open_regular(path: &Path) -> Result<File> {
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    let meta = file
+        .metadata()
+        .with_context(|| format!("stat {}", path.display()))?;
+    if !meta.is_file() {
+        bail!("{} isn't a plain file", path.display());
+    }
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -195,6 +240,66 @@ mod tests {
             herdr.label("w9:p0").as_deref(),
             Some("lead-cards asks: merge with password: [redacted]?")
         );
+    }
+
+    fn ask(herdr: &FakeHerdr, dir: &Path) -> Result<()> {
+        lead_asked(herdr, &ledger(), dir, "w9:p0", "lead-cards", "which DB?")
+    }
+
+    #[test]
+    fn a_symlink_planted_at_the_mark_or_its_lock_is_not_written_through() {
+        for planted in [".pane-label-w9:p0", ".pane-label-w9:p0.lock"] {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("settings.json");
+            fs::write(&target, "the human's settings").unwrap();
+            std::os::unix::fs::symlink(&target, dir.path().join(planted)).unwrap();
+            let herdr = FakeHerdr::new(&[]);
+
+            let err = ask(&herdr, dir.path()).unwrap_err();
+
+            assert!(format!("{err:#}").contains(planted), "{err:#}");
+            assert_eq!(fs::read_to_string(&target).unwrap(), "the human's settings");
+            assert_eq!(herdr.label("w9:p0"), None);
+        }
+    }
+
+    #[test]
+    fn a_fifo_planted_at_the_mark_or_its_lock_is_refused_without_blocking() {
+        for planted in [".pane-label-w9:p0", ".pane-label-w9:p0.lock"] {
+            let dir = tempfile::tempdir().unwrap();
+            let fifo = std::ffi::CString::new(dir.path().join(planted).to_str().unwrap()).unwrap();
+            // SAFETY: mkfifo on a path this test owns.
+            assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+            // A reader, so opening the FIFO for writing would succeed and only the check refuses it.
+            let _reader = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(dir.path().join(planted))
+                .unwrap();
+            let herdr = FakeHerdr::new(&[]);
+
+            let err = ask(&herdr, dir.path()).unwrap_err();
+
+            assert!(format!("{err:#}").contains("isn't a plain file"), "{err:#}");
+            assert_eq!(herdr.label("w9:p0"), None);
+        }
+    }
+
+    #[test]
+    fn a_pane_lock_held_by_another_gives_up_rather_than_wait_forever() {
+        let dir = tempfile::tempdir().unwrap();
+        let _held = lock(dir.path(), "w9:p0").unwrap();
+        let herdr = FakeHerdr::new(&[]);
+        let started = Instant::now();
+
+        let err = ask(&herdr, dir.path()).unwrap_err();
+
+        assert!(started.elapsed() < LOCK_TIMEOUT * 2);
+        assert!(
+            format!("{err:#}").contains("stayed locked for 2s"),
+            "{err:#}"
+        );
+        assert_eq!(herdr.label("w9:p0"), None);
     }
 
     #[test]
