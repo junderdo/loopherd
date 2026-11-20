@@ -88,10 +88,13 @@ pub struct AgentRecord {
     /// new one replaced, kept for `stats`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub earlier: Vec<AgentRecord>,
+    /// Fields another loopherd version wrote, saved back unchanged (D99).
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
 /// How a retired run ended (D92).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Outcome {
     /// Feed retired it with its template's `merged` check passing.
@@ -102,34 +105,44 @@ pub enum Outcome {
     Released,
     /// A plain `loopherd retire`.
     Retired,
+    /// Written by another loopherd version; saved back unchanged (D99).
+    #[serde(untagged)]
+    Unknown(serde_json::Value),
 }
 
 impl Outcome {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Outcome::Merged => "merged",
             Outcome::Closed => "closed",
             Outcome::Released => "released",
             Outcome::Retired => "retired",
+            Outcome::Unknown(_) => "-",
         }
     }
 }
 
 /// A member's `after_merge`, once a feed has taken it on; it never runs twice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AfterMerge {
     /// Taken on by the feed `owner`, which hasn't noted its outcome yet.
     Pending { owner: Process },
     /// Its outcome is in the member's mailbox.
     Noted,
+    /// Written by another loopherd version; saved back unchanged (D99).
+    #[serde(untagged)]
+    Unknown(serde_json::Value),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     /// Runs its herd's routine loop unattended (D17).
     Lead,
+    /// Written by another loopherd version; saved back unchanged (D99).
+    #[serde(untagged)]
+    Unknown(serde_json::Value),
 }
 
 impl AgentRecord {
@@ -578,6 +591,7 @@ mod tests {
             after_merge: None,
             unsandboxed: None,
             earlier: vec![],
+            unknown: Default::default(),
         }
     }
 
@@ -937,6 +951,71 @@ mod tests {
         );
         let entries = FileLedger::new(path).entries().unwrap();
         assert_eq!(entries["lead-h"].role, Some(Role::Lead));
+    }
+
+    fn ledger_from_a_newer_version(dir: &Path) -> PathBuf {
+        let path = dir.join("ledger.json");
+        fs::write(
+            &path,
+            r#"{"lh-9": {"name": "lh-9", "pane_id": "w1:p1", "session_id": "abc",
+                "repo": "/src/repo", "worktree": null, "workspace": "w1",
+                "prompt": null, "prompt_sent": true, "created": "2026-10-31T00:00:00Z",
+                "retired": true, "outcome": "abandoned", "role": "reviewer",
+                "after_merge": {"failed": {"code": 2}}, "colour": "blue",
+                "earlier": [{"name": "lh-9", "pane_id": "w1:p0", "session_id": null,
+                    "repo": "/src/repo", "worktree": null, "workspace": "w1",
+                    "prompt": null, "prompt_sent": true,
+                    "created": "2026-10-30T00:00:00Z", "after_merge": "skipped",
+                    "shade": 3}]}}"#,
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn unknown_variants_load_as_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries = FileLedger::new(ledger_from_a_newer_version(dir.path()))
+            .entries()
+            .unwrap();
+        let entry = &entries["lh-9"];
+        assert_eq!(entry.outcome, Some(Outcome::Unknown("abandoned".into())));
+        assert_eq!(entry.role, Some(Role::Unknown("reviewer".into())));
+        assert_eq!(
+            entry.after_merge,
+            Some(AfterMerge::Unknown(
+                serde_json::json!({"failed": {"code": 2}})
+            ))
+        );
+        assert_eq!(
+            entry.earlier[0].after_merge,
+            Some(AfterMerge::Unknown("skipped".into()))
+        );
+        assert!(!entry.is_lead());
+    }
+
+    #[test]
+    fn unknown_fields_and_variants_survive_an_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = ledger_from_a_newer_version(dir.path());
+        FileLedger::new(path.clone())
+            .update("lh-9", &mut |r| {
+                r.released_at = Some("2026-11-01T00:00:00Z".into());
+                Ok(())
+            })
+            .unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let entry = &saved["lh-9"];
+        assert_eq!(entry["released_at"], "2026-11-01T00:00:00Z");
+        assert_eq!(entry["colour"], "blue");
+        assert_eq!(entry["outcome"], "abandoned");
+        assert_eq!(entry["role"], "reviewer");
+        assert_eq!(
+            entry["after_merge"],
+            serde_json::json!({"failed": {"code": 2}})
+        );
+        assert_eq!(entry["earlier"][0]["shade"], 3);
+        assert_eq!(entry["earlier"][0]["after_merge"], "skipped");
     }
 
     #[test]

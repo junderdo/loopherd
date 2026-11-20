@@ -231,10 +231,11 @@ pub fn spawn(
             .map(|m| m.params.iter().cloned().collect()),
         socket: Some(socket),
         process: None,
-        role: req.member_of.as_ref().and_then(|m| m.role),
+        role: req.member_of.as_ref().and_then(|m| m.role.clone()),
         after_merge: None,
         unsandboxed: None,
         earlier: vec![],
+        unknown: Default::default(),
     };
     let (agent, no_session) = match readiness {
         Readiness::Blocked => {

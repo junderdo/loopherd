@@ -342,6 +342,12 @@ fn reap(
             }
             continue;
         }
+        if let Some(AfterMerge::Unknown(_)) = member.after_merge {
+            lines.push(format!(
+                "after_merge {name}: left alone, its state is from another loopherd version"
+            ));
+            continue;
+        }
         let template = member.template.as_deref();
         let merged = template
             .and_then(|t| queue.merged.get(t))
@@ -599,7 +605,7 @@ fn interrupted(
 
 fn set_after_merge(ledger: &mut dyn Ledger, name: &str, state: AfterMerge) -> Result<()> {
     ledger.update(name, &mut |r| {
-        r.after_merge = Some(state);
+        r.after_merge = Some(state.clone());
         Ok(())
     })?;
     Ok(())
@@ -1069,6 +1075,7 @@ mod tests {
             after_merge: None,
             unsandboxed: None,
             earlier: vec![],
+            unknown: Default::default(),
         }
     }
 
@@ -2607,7 +2614,7 @@ mod tests {
             start: OWNER.start + 1,
         };
         let pending = Some(AfterMerge::Pending { owner: reused_pid });
-        ledger.0.get_mut("zpr-1").unwrap().after_merge = pending;
+        ledger.0.get_mut("zpr-1").unwrap().after_merge = pending.clone();
 
         let dry = setup.feed(&herdr, &mut ledger, true).unwrap();
         assert_eq!(dry.lines[0], "would note after_merge zpr-1: interrupted");
@@ -2634,6 +2641,30 @@ mod tests {
 
         setup.feed(&herdr, &mut ledger, false).unwrap();
         assert!(ledger.0["zpr-1"].retired);
+    }
+
+    #[test]
+    fn a_feed_leaves_a_member_whose_after_merge_state_it_doesnt_know() {
+        let setup = Setup::after_merge(r#"["echo ran >> log"]"#, "");
+        let herdr = herdr();
+        let mut ledger = fed_one(&setup, &herdr);
+        setup.touch("merged-1");
+        setup.touch("done-1");
+        let unknown = Some(AfterMerge::Unknown("skipped".into()));
+        ledger.0.get_mut("zpr-1").unwrap().after_merge = unknown.clone();
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "after_merge zpr-1: left alone, its state is from another loopherd version",
+                "prs: 0 retired, 0 added, 0 skipped, 0 errors",
+            ]
+        );
+        assert!(!ledger.0["zpr-1"].retired);
+        assert_eq!(ledger.0["zpr-1"].after_merge, unknown);
+        assert_eq!(setup.read("log"), None);
     }
 
     /// A feed's after_merge of `commands`, left pending for `members`.

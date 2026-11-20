@@ -166,7 +166,7 @@ pub fn retire(
         }
         record.retired = true;
         record.retired_at = Some(humantime::format_rfc3339_seconds(now).to_string());
-        record.outcome = Some(outcome);
+        record.outcome = Some(outcome.clone());
         Ok(())
     })
 }
@@ -687,6 +687,7 @@ mod tests {
             after_merge: None,
             unsandboxed: None,
             earlier: vec![],
+            unknown: Default::default(),
         }
     }
 
