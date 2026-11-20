@@ -230,11 +230,11 @@ impl Op {
 }
 
 /// How long a lead waits on an operation that asks origin a few things in
-/// turn, each within `remote`, the git timeout: release asks up to five.
+/// turn, each within `remote`, the git timeout: release asks up to nine.
 fn origin_wait(remote: Result<Duration>) -> Duration {
     // The broker's git reads its own timeout; a bad one here only sets this wait.
     let remote = remote.unwrap_or(crate::worktree::REMOTE_TIMEOUT);
-    remote * 5 + Duration::from_secs(300)
+    remote * 9 + Duration::from_secs(300)
 }
 
 /// Lead `lead`'s own unretired record, in this herdr; by name, since a stale
@@ -2693,12 +2693,12 @@ mod tests {
     }
 
     #[test]
-    fn a_lead_waits_on_retire_and_release_for_five_remote_calls_and_room_for_herdr() {
+    fn a_lead_waits_on_retire_and_release_for_nine_remote_calls_and_room_for_herdr() {
         let secs = |s| Duration::from_secs(s);
 
-        assert_eq!(origin_wait(Ok(secs(120))), secs(900));
-        assert_eq!(origin_wait(Ok(secs(3600))), secs(5 * 3600 + 300));
-        assert_eq!(origin_wait(Err(anyhow!("bad timeout"))), secs(900));
+        assert_eq!(origin_wait(Ok(secs(120))), secs(1380));
+        assert_eq!(origin_wait(Ok(secs(3600))), secs(9 * 3600 + 300));
+        assert_eq!(origin_wait(Err(anyhow!("bad timeout"))), secs(1380));
     }
 
     #[test]
