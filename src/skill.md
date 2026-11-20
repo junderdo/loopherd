@@ -261,13 +261,15 @@ Init never launches an agent.
 A member's Stop hook measures its context after each turn. Past its limit,
 it blocks that stop once per session and tells the member to save its work
 (a worker commits and pushes its branch and comments its progress on its
-task), write its handoff to `$XDG_STATE_HOME/loopherd/handoffs/<name>.md`,
+task), write its handoff to `$XDG_STATE_HOME/loopherd/handoffs/<name>/handoff.md`,
 report `--kind handoff`, and end its turn. A stop with subagents still
 running isn't asked until the first later stop without them, unless the
 context is past 1.5x the limit; background shells alone don't defer it.
 A handoff written before the member's last spawn, restart or `handoff`
-report moves to `<name>.prev.md`, and the ask says so; one written since
-stays, and a revive doesn't count, since it keeps the conversation. The
+report moves to `prev.md` beside it, and the ask says so; one written since
+stays, and a revive doesn't count, since it keeps the conversation. A
+handoff an older loopherd left flat at `handoffs/<name>.md` is still read,
+and moves to `handoffs/<name>/prev.md` once used. The
 limit is the template's or `[lead]`'s `context_limit`, else `default_context_limit` in
 `$LOOPHERD_CONFIG_DIR/config.toml`, else 250000, never over 80% of that
 file's `context_window` (default 200000). `loopherd setup --context` asks
@@ -306,7 +308,7 @@ arrives, restart the lead yourself; the locks make that safe beside a
 waiter. For anyone else, wait for its `finished` line, then `loopherd
 restart <name>`. It
 sends `/clear`, waits for the ledger to follow the new session, and prompts
-the member to read its handoff, which it moves to `<name>.prev.md` so no
+the member to read its handoff, which it moves to `prev.md` beside it so no
 later restart reuses it; same pane, worktree and branch. A lead's prompt
 also carries its switches and review-round limit, resolved from its herd
 file and `[lead_defaults]` at restart, and tells it to re-read `loopherd status` and `loopherd reports --all
@@ -382,7 +384,7 @@ and, once per session past your limit, adds `shepherd handoff <n>k over
    waits in the mailbox for the next watch. First restart any member
    whose `handoff` and `finished` lines you've already read and that is
    yours to restart, so the herd doesn't wait on the next shepherd.
-2. Write your handoff to `$XDG_STATE_HOME/loopherd/handoffs/shepherd.md`
+2. Write your handoff to `$XDG_STATE_HOME/loopherd/handoffs/shepherd/handoff.md`
    (`~/.local/state` when it's unset; no member may be named `shepherd`), in the outline above: what each
    member is doing and what you owe it (verifications running, PRs to
    check after merge), then next steps, then gotchas.
@@ -391,11 +393,11 @@ and, once per session past your limit, adds `shepherd handoff <n>k over
    > Run `/clear`, then send any message (e.g. `go`), and I resume from it.
    >
    > If I don't, paste this after the `/clear` instead:
-   > `continue as the loopherd shepherd from /home/<you>/.local/state/loopherd/handoffs/shepherd.md`
+   > `continue as the loopherd shepherd from /home/<you>/.local/state/loopherd/handoffs/shepherd/handoff.md`
 
    and end your turn. Never `/clear` yourself. The watch that told you
    recorded your pane, Claude and session, so the first `/clear` of this
-   session after your handoff is written moves it to `handoffs/shepherd.prev.md` and adds the
+   session after your handoff is written moves it to `handoffs/shepherd/prev.md` and adds the
    resume to the new session's context.
 
    With `[shepherd] self_restart = true` in `config.toml`
@@ -413,9 +415,9 @@ and, once per session past your limit, adds `shepherd handoff <n>k over
    yes run `restart --self` again. After a self-restart the resume says
    so; say it in your first message.
 
-In a fresh session, given that resume (naming the `.prev.md` path) or the
+In a fresh session, given that resume (naming the `prev.md` path) or the
 pasted line, run `loopherd --skill`, read the handoff at the path it names
-(or `shepherd.prev.md` beside it, if a resume already moved it there),
+(or `prev.md` beside it, if a resume already moved it there),
 `loopherd status` and `loopherd reports --all --tail 40` (for a fuller
 history, `--since <time>` or plain `--all`), then re-arm your watch and
 carry on from its next steps.
@@ -830,7 +832,7 @@ Shepherd section has the detail):
    `after_merge`; do by hand what its note says didn't run), then `git
    worktree remove --force` each verify worktree under `<scratch>/pr<n>/`
    and delete that directory.
-6. **Handoff:** write `$XDG_STATE_HOME/loopherd/handoffs/<your name>.md` in
+6. **Handoff:** write `$XDG_STATE_HOME/loopherd/handoffs/<your name>/handoff.md` in
    the outline under Handoffs (`## State`, `## Next steps`, `## Gotchas`),
    listing each `<scratch>/pr<n>/` still in use and naming each PR's
    current review file. Then report `--kind handoff`, stop your watch, run

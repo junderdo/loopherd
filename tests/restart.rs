@@ -11,8 +11,13 @@ use std::time::{Duration, Instant};
 const SOCKET: &str = "/run/herdr/herdr.sock";
 
 fn write_member(state: &Path) {
-    fs::create_dir_all(state.join("loopherd/handoffs")).unwrap();
-    fs::write(state.join("loopherd/handoffs/lh-1.md"), "## State\n").unwrap();
+    fs::create_dir_all(state.join("loopherd/handoffs/lh-1")).unwrap();
+    fs::create_dir_all(state.join("loopherd/handoffs/shepherd")).unwrap();
+    fs::write(
+        state.join("loopherd/handoffs/lh-1/handoff.md"),
+        "## State\n",
+    )
+    .unwrap();
     fs::write(
         state.join("loopherd/ledger.json"),
         format!(
@@ -87,7 +92,7 @@ fn self_restart_returns_at_once_and_leaves_a_detached_waiter_holding_the_claim()
     );
 
     // As if another restart consumed the handoff: the waiter exits and lets go.
-    fs::remove_file(state.path().join("loopherd/handoffs/lh-1.md")).unwrap();
+    fs::remove_file(state.path().join("loopherd/handoffs/lh-1/handoff.md")).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while waiter_holds_its_claim(state.path()) {
         assert!(Instant::now() < deadline, "the waiter never exited");
@@ -125,7 +130,8 @@ fn write_shepherd(state: &Path) {
         .split(' ')
         .nth(19)
         .unwrap();
-    fs::create_dir_all(state.join("loopherd/handoffs")).unwrap();
+    fs::create_dir_all(state.join("loopherd/handoffs/lh-1")).unwrap();
+    fs::create_dir_all(state.join("loopherd/handoffs/shepherd")).unwrap();
     fs::write(
         state.join("loopherd/shepherd.json"),
         format!(
@@ -134,7 +140,11 @@ fn write_shepherd(state: &Path) {
         ),
     )
     .unwrap();
-    fs::write(state.join("loopherd/handoffs/shepherd.md"), "## Next\n").unwrap();
+    fs::write(
+        state.join("loopherd/handoffs/shepherd/handoff.md"),
+        "## Next\n",
+    )
+    .unwrap();
     fs::create_dir_all(state.join("config")).unwrap();
     fs::write(
         state.join("config/config.toml"),

@@ -399,7 +399,7 @@ fn past_its_limit_the_stop_hook_prints_one_block_decision_and_files_nothing() {
     let decision: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(decision["decision"], "block");
     let reason = decision["reason"].as_str().unwrap();
-    let handoff = state.path().join("loopherd/handoffs/lh-2.md");
+    let handoff = state.path().join("loopherd/handoffs/lh-2/handoff.md");
     assert!(
         reason.contains("20005 tokens, past your limit of 10000"),
         "{reason}"

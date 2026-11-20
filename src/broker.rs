@@ -3515,8 +3515,8 @@ mod tests {
     /// Gives `name` a handoff file and a handoff report, as before `restart --self`.
     fn handed_off(world: &World, name: &str) {
         let state = world.paths.state_dir();
-        std::fs::create_dir_all(state.join("handoffs")).unwrap();
-        std::fs::write(crate::context::handoff_path(state, name), "next").unwrap();
+        std::fs::create_dir_all(crate::handoff::dir(state, name)).unwrap();
+        std::fs::write(crate::handoff::path(state, name), "next").unwrap();
         let handoff = crate::report::Entry::new(
             SystemTime::now(),
             crate::report::Body::Handoff { text: "h".into() },

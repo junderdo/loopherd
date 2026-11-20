@@ -453,8 +453,8 @@ fn a_clear_after_the_shepherds_handoff_resumes_it_once() {
         "{told:?}"
     );
     std::thread::sleep(Duration::from_millis(20));
-    fs::create_dir_all(state.join("handoffs")).unwrap();
-    fs::write(state.join("handoffs/shepherd.md"), "## State\n").unwrap();
+    fs::create_dir_all(state.join("handoffs/shepherd")).unwrap();
+    fs::write(state.join("handoffs/shepherd/handoff.md"), "## State\n").unwrap();
 
     let compact = sandbox.session_hook("w9:p1", &pid, &session_start("compact", "s1"));
     assert!(compact.stdout.is_empty(), "{compact:?}");
@@ -465,11 +465,11 @@ fn a_clear_after_the_shepherds_handoff_resumes_it_once() {
     let context = added["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .unwrap();
-    let prev = state.join("handoffs/shepherd.prev.md");
+    let prev = state.join("handoffs/shepherd/prev.md");
     assert!(context.contains(&prev.display().to_string()), "{context}");
     assert!(prev.is_file());
 
-    fs::write(state.join("handoffs/shepherd.md"), "## State\n").unwrap();
+    fs::write(state.join("handoffs/shepherd/handoff.md"), "## State\n").unwrap();
     let again = sandbox.session_hook("w9:p1", &pid, &session_start("clear", "s3"));
     assert!(again.stdout.is_empty(), "{again:?}");
     assert_eq!(stderr(&again), "");
@@ -489,15 +489,15 @@ fn a_clear_of_another_conversation_in_the_shepherds_claude_does_not_resume() {
         .output()
         .unwrap();
     std::thread::sleep(Duration::from_millis(20));
-    fs::create_dir_all(state.join("handoffs")).unwrap();
-    fs::write(state.join("handoffs/shepherd.md"), "## State\n").unwrap();
+    fs::create_dir_all(state.join("handoffs/shepherd")).unwrap();
+    fs::write(state.join("handoffs/shepherd/handoff.md"), "## State\n").unwrap();
 
     let resumed = sandbox.session_hook("w9:p1", &pid, &session_start("resume", "unrelated"));
     assert!(resumed.stdout.is_empty(), "{resumed:?}");
     let cleared = sandbox.session_hook("w9:p1", &pid, &session_start("clear", "s2"));
 
     assert!(cleared.stdout.is_empty(), "{cleared:?}");
-    assert!(state.join("handoffs/shepherd.md").is_file());
+    assert!(state.join("handoffs/shepherd/handoff.md").is_file());
 }
 
 #[test]
@@ -556,8 +556,8 @@ fn a_members_clear_is_unchanged_by_a_shepherd_record() {
         .output()
         .unwrap();
     std::thread::sleep(Duration::from_millis(20));
-    fs::create_dir_all(state.join("handoffs")).unwrap();
-    fs::write(state.join("handoffs/shepherd.md"), "## State\n").unwrap();
+    fs::create_dir_all(state.join("handoffs/shepherd")).unwrap();
+    fs::write(state.join("handoffs/shepherd/handoff.md"), "## State\n").unwrap();
 
     let out = sandbox.session_hook("w1:p1", "", &session_start("clear", "new"));
 
@@ -565,7 +565,7 @@ fn a_members_clear_is_unchanged_by_a_shepherd_record() {
     let ledger: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(state.join("ledger.json")).unwrap()).unwrap();
     assert_eq!(ledger["lh-1"]["session_id"], "new");
-    assert!(state.join("handoffs/shepherd.md").is_file());
+    assert!(state.join("handoffs/shepherd/handoff.md").is_file());
 }
 
 #[test]

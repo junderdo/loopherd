@@ -2979,14 +2979,14 @@ fn a_shepherd_with_self_restart_on_clears_and_resumes_itself_after_its_handoff()
         .to_string();
     let (pid, start) = claude_in(&pane);
 
-    std::fs::create_dir_all(state.join("loopherd/handoffs")).unwrap();
+    std::fs::create_dir_all(state.join("loopherd/handoffs/shepherd")).unwrap();
     let record = serde_json::json!({
         "pane": pane, "socket": dev_socket(), "process": {"pid": pid, "start": start},
         "session": session, "at": "2026-01-01T00:00:00Z", "used": false,
     });
     std::fs::write(state.join("loopherd/shepherd.json"), record.to_string()).unwrap();
     std::fs::write(
-        state.join("loopherd/handoffs/shepherd.md"),
+        state.join("loopherd/handoffs/shepherd/handoff.md"),
         "## Next steps\nReply with just the word resumed.\n",
     )
     .unwrap();
@@ -3046,7 +3046,7 @@ fn a_shepherd_with_self_restart_on_clears_and_resumes_itself_after_its_handoff()
     assert_eq!(record["used"], true, "{record}");
     assert!(record["self_restart"].get("why").is_none(), "{record}");
     assert!(record["last_self_restart"].is_string(), "{record}");
-    assert!(state.join("loopherd/handoffs/shepherd.prev.md").is_file());
+    assert!(state.join("loopherd/handoffs/shepherd/prev.md").is_file());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     // Sent, not left in the input box: `❯ go` in the transcript and a bare `❯` below it.
     let sent_go = |screen: &str| {

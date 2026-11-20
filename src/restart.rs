@@ -6,8 +6,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::context::handoff_path;
 use crate::continuation::follow_recorded;
+use crate::handoff;
 use crate::herd::Paths;
 use crate::herdr::{AgentStatus, Herdr};
 use crate::lead::{LeadPrompt, rendered};
@@ -94,12 +94,12 @@ pub fn restart(
             }
         }
     }
-    let handoff = handoff_path(req.state, name);
-    if !handoff.is_file() {
+    let Some(handoff) = handoff::find(req.state, name) else {
+        let path = handoff::path(req.state, name);
         return Err(
-            Refusal::NoHandoff(format!("{name} has no handoff at {}", handoff.display())).into(),
+            Refusal::NoHandoff(format!("{name} has no handoff at {}", path.display())).into(),
         );
-    }
+    };
     let agent = herdr
         .agents()?
         .into_iter()
@@ -209,9 +209,7 @@ pub fn restart(
         .session_id
         .unwrap_or(new);
     // Moved aside once the new session is confirmed, so no later restart resumes from it.
-    let read = handoff.with_extension("prev.md");
-    std::fs::rename(&handoff, &read)
-        .with_context(|| format!("move {} to {}", handoff.display(), read.display()))?;
+    let read = handoff::set_aside(req.state, name, &handoff)?;
     let shell = (current.pane_id != agent.pane_id && current.env_pane_id.is_none())
         .then(|| (req.pane_shell)(&agent.pane_id));
     ledger.update(name, &mut |current| {
@@ -329,7 +327,7 @@ fn poll_then_restart(
     every: Duration,
 ) -> Result<Result<Waited, String>> {
     let name = req.name;
-    let handoff = handoff_path(req.state, name);
+    let waiting_handoff = || handoff::find(req.state, name);
     let deadline = Instant::now() + give_up;
     // Room for a running restart to settle before the waiter stops on it.
     let busy_deadline = deadline + 2 * req.settle_timeout;
@@ -344,7 +342,7 @@ fn poll_then_restart(
         if saw_busy {
             // Locked, so the handoff check can't race the other restart's rename.
             match take(req.state, name, "restart")? {
-                Some(_free) if handoff.is_file() => {
+                Some(_free) if waiting_handoff().is_some() => {
                     return Ok(Err(format!(
                         "self-restart stopped: another restart of {name} ended without using its handoff, \
                          and may have sent /clear. Check its pane, then run loopherd restart {name} or \
@@ -363,9 +361,9 @@ fn poll_then_restart(
                 }
             }
         }
-        if !handoff.is_file() {
+        let Some(handoff) = waiting_handoff() else {
             return Ok(Ok(Waited::RestartedElsewhere));
-        }
+        };
         if since_handoff(&req.state.join("reports"), name)? == SinceHandoff::None {
             return Ok(Err(format!(
                 "self-restart stopped: {name} started again since its handoff (a revive?) and its handoff is \
@@ -459,9 +457,11 @@ pub fn schedule_member(member: &crate::ledger::AgentRecord, state: &Path) -> Res
     if !member.is_lead() {
         bail!("{name} isn't a lead; whoever reads its handoff line restarts it");
     }
-    let handoff = handoff_path(state, &name);
-    if !handoff.is_file() {
-        bail!("{name} has no handoff at {}", handoff.display());
+    if handoff::find(state, &name).is_none() {
+        bail!(
+            "{name} has no handoff at {}",
+            handoff::path(state, &name).display()
+        );
     }
     match since_handoff(&state.join("reports"), &name)? {
         SinceHandoff::None => bail!(
@@ -709,8 +709,8 @@ mod tests {
     impl World {
         fn new() -> World {
             let state = tempfile::tempdir().unwrap();
-            fs::create_dir_all(state.path().join("handoffs")).unwrap();
-            fs::write(state.path().join("handoffs/lh-1.md"), "## State\n").unwrap();
+            fs::create_dir_all(state.path().join("handoffs/lh-1")).unwrap();
+            fs::write(state.path().join("handoffs/lh-1/handoff.md"), "## State\n").unwrap();
             fs::create_dir_all(state.path().join("config/herds")).unwrap();
             fs::write(
                 state.path().join("config/herds/h.toml"),
@@ -935,10 +935,30 @@ mod tests {
         fn handoff(&self) -> String {
             self.state
                 .path()
-                .join("handoffs/lh-1.prev.md")
+                .join("handoffs/lh-1/prev.md")
                 .display()
                 .to_string()
         }
+    }
+
+    #[test]
+    fn a_flat_handoff_an_older_release_wrote_is_restarted_from_and_moved_to_prev() {
+        let w = World::new();
+        let handoffs = w.state.path().join("handoffs");
+        fs::rename(handoffs.join("lh-1/handoff.md"), handoffs.join("lh-1.md")).unwrap();
+        w.handed_off();
+
+        let (result, _) = w.restart(false, true);
+
+        assert_eq!(
+            result.unwrap(),
+            format!(
+                "restarted lh-1 in session new; prompted it to read {}",
+                w.handoff()
+            )
+        );
+        assert_eq!(fs::read_to_string(w.handoff()).unwrap(), "## State\n");
+        assert!(!handoffs.join("lh-1.md").exists());
     }
 
     #[test]
@@ -1024,7 +1044,7 @@ mod tests {
             "refused: lh-1 isn't a member of lead-o's herd, and lead-o runs this loopherd"
         );
         assert!(w.herdr.prompts().is_empty());
-        assert!(w.state.path().join("handoffs/lh-1.md").exists());
+        assert!(w.state.path().join("handoffs/lh-1/handoff.md").exists());
         assert_eq!(ledger.0["lh-1"].session_id, record("lh-1").session_id);
     }
 
@@ -1280,7 +1300,7 @@ mod tests {
     fn handoff_written_at(w: &World, at: &str) {
         fs::File::options()
             .write(true)
-            .open(w.state.path().join("handoffs/lh-1.md"))
+            .open(w.state.path().join("handoffs/lh-1/handoff.md"))
             .unwrap()
             .set_modified(humantime::parse_rfc3339(at).unwrap())
             .unwrap();
@@ -1341,7 +1361,7 @@ mod tests {
     fn without_a_handoff_file_nothing_is_sent() {
         let w = World::new();
         w.stop(0, None);
-        fs::remove_file(w.state.path().join("handoffs/lh-1.md")).unwrap();
+        fs::remove_file(w.state.path().join("handoffs/lh-1/handoff.md")).unwrap();
         let (result, _) = w.restart(true, true);
         assert!(format!("{:#}", result.unwrap_err()).starts_with("lh-1 has no handoff at "),);
         assert!(w.herdr.prompts().is_empty());
@@ -1355,7 +1375,7 @@ mod tests {
         let md = w
             .state
             .path()
-            .join("handoffs/lh-1.md")
+            .join("handoffs/lh-1/handoff.md")
             .display()
             .to_string();
         assert_eq!(
@@ -1939,7 +1959,7 @@ mod tests {
                      loopherd restart lh-1 again"
                 );
                 assert!(w.herdr.prompts().is_empty());
-                assert!(w.state.path().join("handoffs/lh-1.md").is_file());
+                assert!(w.state.path().join("handoffs/lh-1/handoff.md").is_file());
                 assert!(ledger.1.is_empty());
             }
         }
@@ -1980,7 +2000,7 @@ mod tests {
         let md = w
             .state
             .path()
-            .join("handoffs/lh-1.md")
+            .join("handoffs/lh-1/handoff.md")
             .display()
             .to_string();
         assert_eq!(
@@ -2052,7 +2072,7 @@ mod tests {
                 Some("w1:p1"),
                 &|w| {
                     w.put(Body::Handoff { text: "x".into() });
-                    fs::remove_file(w.state.path().join("handoffs/lh-1.md")).unwrap();
+                    fs::remove_file(w.state.path().join("handoffs/lh-1/handoff.md")).unwrap();
                 },
                 "lh-1 has no handoff at ",
             ),
@@ -2076,7 +2096,12 @@ mod tests {
             let err = format!("{:#}", schedule(&w, own_pane).err().expect(message));
             assert!(err.starts_with(message), "{err}");
             w.put(Body::Handoff { text: "x".into() });
-            if fs::write(w.state.path().join("handoffs/lh-1.md"), "## State\n").is_ok() {
+            if fs::write(
+                w.state.path().join("handoffs/lh-1/handoff.md"),
+                "## State\n",
+            )
+            .is_ok()
+            {
                 assert!(
                     schedule(&w, Some("w1:p1")).is_ok(),
                     "{message}: a waiter was left behind"
@@ -2142,7 +2167,7 @@ mod tests {
         let waited = w.wait(Duration::from_millis(30)).unwrap();
         assert!(matches!(waited, Waited::GaveUp));
         assert!(w.herdr.prompts().is_empty());
-        assert!(w.state.path().join("handoffs/lh-1.md").is_file());
+        assert!(w.state.path().join("handoffs/lh-1/handoff.md").is_file());
         assert_eq!(
             w.notes(),
             [
@@ -2160,8 +2185,8 @@ mod tests {
             s.spawn(|| {
                 std::thread::sleep(Duration::from_millis(20));
                 fs::rename(
-                    w.state.path().join("handoffs/lh-1.md"),
-                    w.state.path().join("handoffs/lh-1.prev.md"),
+                    w.state.path().join("handoffs/lh-1/handoff.md"),
+                    w.state.path().join("handoffs/lh-1/prev.md"),
                 )
                 .unwrap();
                 w.put(Body::Start { resumed: false });
@@ -2265,7 +2290,7 @@ mod tests {
         w.handed_off();
         let waited = w.wait_with(Duration::from_secs(5), true, None).unwrap();
         assert!(matches!(waited, Waited::GaveUp));
-        assert!(!w.state.path().join("handoffs/lh-1.md").exists());
+        assert!(!w.state.path().join("handoffs/lh-1/handoff.md").exists());
         assert_eq!(w.notes(), ["self-restart failed: the ledger is read-only"]);
     }
 

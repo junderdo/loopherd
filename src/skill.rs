@@ -185,7 +185,7 @@ mod tests {
             "`gh pr view <n> --json state`",
             "close out the task in the tracker",
             "`git worktree remove --force`",
-            "`$XDG_STATE_HOME/loopherd/handoffs/<your name>.md`",
+            "`$XDG_STATE_HOME/loopherd/handoffs/<your name>/handoff.md`",
             "`## State`",
             "`<scratch>/pr<n>/review-<round>.md`",
             "`pass <head sha>: <m> minor, <k> nit`",

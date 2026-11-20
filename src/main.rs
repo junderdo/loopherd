@@ -6,6 +6,7 @@ mod credentials;
 mod doctor;
 mod feed;
 mod github;
+mod handoff;
 mod herd;
 mod herd_view;
 mod herdr;
