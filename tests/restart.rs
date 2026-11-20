@@ -3,7 +3,7 @@
 use std::fs::{self, File};
 use std::os::fd::AsRawFd;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 const SOCKET: &str = "/run/herdr/herdr.sock";
@@ -25,23 +25,72 @@ fn write_member(state: &Path) {
 
 /// Run from lh-1's pane, with no herdr on PATH.
 fn run(state: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_loopherd"))
+    command(state, args).output().unwrap()
+}
+
+fn command(state: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_loopherd"));
+    command
         .args(args)
         .env("XDG_STATE_HOME", state)
         .env("LOOPHERD_CONFIG_DIR", state.join("config"))
         .env("CLAUDE_CONFIG_DIR", state.join("claude"))
         .env("PATH", "")
         .env("HERDR_PANE_ID", "w1:p1")
-        .env("HERDR_SOCKET_PATH", SOCKET)
-        .output()
+        .env("HERDR_SOCKET_PATH", SOCKET);
+    command
+}
+
+/// Lead lh-1's broker, with the launch record `loopherd lead` keeps; killed on drop.
+struct Broker(Child);
+
+impl Broker {
+    fn start(state: &Path) -> Broker {
+        let sandbox = state.join("config/sandbox");
+        fs::create_dir_all(&sandbox).unwrap();
+        fs::write(
+            sandbox.join("lh-1.lead.json"),
+            r#"{"herd": "h", "args": []}"#,
+        )
+        .unwrap();
+        let child = command(state, &["broker", "lh-1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let lock = state.join("config/broker/lh-1.lock");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !File::open(&lock).is_ok_and(|file| held(&file)) {
+            assert!(Instant::now() < deadline, "the broker never started");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Broker(child)
+    }
+}
+
+impl Drop for Broker {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Whether process `pid` has `path` open.
+fn has_open(pid: u32, path: &Path) -> bool {
+    fs::read_dir(format!("/proc/{pid}/fd"))
         .unwrap()
+        .filter_map(|fd| fs::read_link(fd.ok()?.path()).ok())
+        .any(|target| target == path)
+}
+
+fn held(file: &File) -> bool {
+    // SAFETY: flock on a descriptor `file` keeps open for the call.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) != 0 }
 }
 
 fn waiter_holds_its_claim(state: &Path) -> bool {
-    let file = File::open(state.join("loopherd/restarts/lh-1.waiter.lock")).unwrap();
-    // SAFETY: flock on a descriptor `file` keeps open for the call.
-    let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
-    !taken
+    held(&File::open(state.join("loopherd/restarts/lh-1.waiter.lock")).unwrap())
 }
 
 #[test]
@@ -50,6 +99,7 @@ fn self_restart_returns_at_once_and_leaves_a_detached_waiter_holding_the_claim()
     write_member(state.path());
     let out = run(state.path(), &["report", "--kind", "handoff", "at step 3"]);
     assert!(out.status.success(), "{out:?}");
+    let broker = Broker::start(state.path());
 
     // `output` waits for stdout to close, so a waiter holding it would hang here.
     let out = run(state.path(), &["restart", "--self"]);
@@ -59,6 +109,9 @@ fn self_restart_returns_at_once_and_leaves_a_detached_waiter_holding_the_claim()
         "{out:?}"
     );
     assert!(waiter_holds_its_claim(state.path()));
+    // The broker lives on, so only the waiter may keep the claim open.
+    let claim = state.path().join("loopherd/restarts/lh-1.waiter.lock");
+    assert!(!has_open(broker.0.id(), &claim.canonicalize().unwrap()));
 
     let again = run(state.path(), &["restart", "--self"]);
     assert_eq!(

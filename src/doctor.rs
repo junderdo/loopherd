@@ -2057,6 +2057,8 @@ mod tests {
                 procs: &crate::process::ProcFs,
                 claude_dir: None,
                 process: crate::ledger::Process { pid: 0, start: 0 },
+                live: |session| session.to_string(),
+                spawn_waiter: |_, _| Ok(()),
             };
             crate::broker::serve(
                 &host,

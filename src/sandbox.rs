@@ -890,14 +890,9 @@ fn lead_file(paths: &Paths, name: &str) -> PathBuf {
 }
 
 /// The loopherd commands a lead runs that write what its sandbox denies: its
-/// members' worktrees, beside its own, or the ledger. Its broker runs feed
-/// and add.
-const UNSANDBOXED_COMMANDS: [&str; 4] = [
-    "loopherd retire *",
-    "loopherd release *",
-    "loopherd restart *",
-    "loopherd prompt *",
-];
+/// members' worktrees, beside its own, or the ledger. Its broker runs feed,
+/// add, prompt and restart.
+const UNSANDBOXED_COMMANDS: [&str; 2] = ["loopherd retire *", "loopherd release *"];
 
 /// The state dir's directories a lead writes from its sandbox: `reports/`
 /// for its mailbox and its watch's files, `handoffs/` for its handoff. The
@@ -981,7 +976,6 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
             "denyWrite": deny_write.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         },
     });
-    // `restart *` takes in `restart --self`, whose waiter the sandbox would end with the call.
     let mut excluded = UNSANDBOXED_COMMANDS.to_vec();
     if switches.install {
         // ~/.claude is a protected path no allowWrite opens, and the installer writes there.
