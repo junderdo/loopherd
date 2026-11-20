@@ -26,6 +26,7 @@ use crate::herdr::Herdr;
 use crate::ledger::{Ledger, Process};
 use crate::lock::Lock;
 use crate::process::Procs;
+use crate::report::{Body, Kind};
 use crate::restart::RestartRequest;
 use crate::sandbox::{self, Guard};
 use crate::spawn::validate_name;
@@ -73,9 +74,11 @@ pub enum Op {
         keep_branch: bool,
         drop_branch: bool,
     },
-    /// Labels the lead's pane with the question it reported.
-    Label {
-        question: String,
+    /// The lead's own report, written to its mailbox; a question also
+    /// labels its pane.
+    Report {
+        kind: crate::report::Kind,
+        text: String,
     },
     /// `loopherd status`; a lead sees its own herd alone.
     Status {
@@ -151,7 +154,7 @@ impl Op {
             Op::RestartSelf => "restart --self",
             Op::Retire { .. } => "retire",
             Op::Release { .. } => "release",
-            Op::Label { .. } => "label its pane",
+            Op::Report { .. } => "report",
             Op::Status { .. } => "status",
             Op::Read { .. } => "read",
         }
@@ -165,7 +168,7 @@ impl Op {
             | Op::Read { name, .. } => Reach::Member(name),
             Op::Feed { herd, .. } | Op::Add { herd, .. } => Reach::Herd(herd),
             // Status reads the herd the launch record names, never one a request does.
-            Op::RestartSelf | Op::Label { .. } | Op::Status { .. } => Reach::Lead,
+            Op::RestartSelf | Op::Report { .. } | Op::Status { .. } => Reach::Lead,
             Op::Retire { name, .. } | Op::Release { name, .. } => Reach::AnyMember(name),
         }
     }
@@ -183,7 +186,7 @@ impl Op {
             | Op::Read { .. }
             | Op::Prompt { .. }
             | Op::RestartSelf
-            | Op::Label { .. } => Lane::Quick,
+            | Op::Report { .. } => Lane::Quick,
             Op::Status { .. } => Lane::Status,
         }
     }
@@ -192,13 +195,13 @@ impl Op {
     /// broker's git timeout.
     fn answer_within(&self, remote: Duration) -> Duration {
         match self {
-            Op::Tell { .. } | Op::Prompt { .. } | Op::RestartSelf | Op::Read { .. } => {
-                Duration::from_secs(120)
-            }
+            Op::Tell { .. }
+            | Op::Prompt { .. }
+            | Op::RestartSelf
+            | Op::Read { .. }
+            | Op::Report { .. } => Duration::from_secs(120),
             // Its queue's source and backlog may each take the git timeout.
             Op::Status { .. } => remote * 2 + Duration::from_secs(120),
-            // The report is written already; a label isn't worth waiting out a feed for.
-            Op::Label { .. } => Duration::from_secs(10),
             // Its settle timeout, with room for herdr and the member's view.
             Op::Restart { .. } => Duration::from_secs(300),
             Op::Retire { .. } | Op::Release { .. } => origin_wait(remote),
@@ -273,7 +276,7 @@ impl Op {
                 keep_branch,
                 drop_branch,
             } => release(ctx, name, *keep_branch, *drop_branch, sink),
-            Op::Label { question } => label(ctx, question, sink),
+            Op::Report { kind, text } => report(ctx, *kind, text, sink),
             // The broker refused strays already.
             Op::Status {
                 all, json, color, ..
@@ -337,18 +340,23 @@ fn status(ctx: &mut Ctx, all: bool, json: bool, color: bool, sink: &mut dyn Sink
     Ok(out.code)
 }
 
-/// Labels the lead's pane with `question`, from the lead's own record.
-fn label(ctx: &mut Ctx, question: &str, sink: &mut dyn Sink) -> Result<i32> {
+/// Writes the lead's report to its own mailbox, then labels its pane for a
+/// question, from the lead's own record.
+fn report(ctx: &mut Ctx, kind: Kind, text: &str, sink: &mut dyn Sink) -> Result<i32> {
     let lead = ctx
         .caller
         .lead
         .as_ref()
-        .context("only a lead's broker labels its pane")?;
+        .context("only a lead's broker writes its report")?;
     let record = own_record(ctx.herdr, &*ctx.ledger, &lead.name)?;
-    if !crate::notify::labels_panes(&crate::herd::config_file(ctx.paths)) {
+    let mailboxes = ctx.paths.state_dir().join("reports");
+    let entry = crate::report::Entry::new(SystemTime::now(), Body::report(kind, text));
+    crate::report::append(&mailboxes, &record.name, &entry)?;
+    if kind != Kind::Question || !crate::notify::labels_panes(&crate::herd::config_file(ctx.paths))
+    {
         return Ok(0);
     }
-    let mailboxes = ctx.paths.state_dir().join("reports");
+    let question = text;
     let pane = &record.pane_id;
     if let Err(e) = crate::pane_label::lead_asked(
         ctx.herdr,
@@ -1311,9 +1319,19 @@ impl Dir {
 
 const MALFORMED: &str = "malformed request";
 
-/// Why a label that failed asks for nothing more: its report went out first.
-const NO_LABEL: &str = "the pane got no label; the report itself is sent, so don't send it again";
+/// A broker older than its lead's loopherd refused a request it can't read.
+#[derive(Debug)]
+pub struct TooOld(String);
 
+impl std::fmt::Display for TooOld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TooOld {}
+
+/// Why a label that failed asks for nothing more: its report went out first.
 /// The lead's side of the transport: writes requests, reads replies.
 pub struct Client {
     lead: String,
@@ -1391,24 +1409,21 @@ impl Client {
                 return match reply {
                     Reply::Done { out, err, code } => Ok((out, err, code)),
                     // This client wrote a well-formed request, so only an older broker can't read it.
-                    Reply::Refused(why) if why.starts_with(MALFORMED) => Err(anyhow!(
+                    Reply::Refused(why) if why.starts_with(MALFORMED) => Err(TooOld(format!(
                         "{lead}'s broker predates this loopherd, so it can't {}; the shepherd must \
                          restart it with loopherd broker-restart {lead}",
                         op.command()
-                    )),
+                    ))
+                    .into()),
                     Reply::Refused(why) => {
                         Err(anyhow!("{lead}'s broker refused {}: {why}", op.command()))
                     }
                     Reply::Failed(why) => Err(anyhow!("{why}")),
                 };
             }
-            let labelling = matches!(op, Op::Label { .. });
             // Read first: a restart removes its stop only once the new broker holds the lock.
             let restarting = live_stop(&self.stop, &self.restart).is_some();
             if !restarting && !held(&self.lock) {
-                if labelling {
-                    bail!("{lead}'s broker stopped, so {NO_LABEL}");
-                }
                 bail!(
                     "{lead}'s broker stopped before answering {}: \
                      the shepherd's loopherd revive --name {lead} starts it again",
@@ -1420,9 +1435,6 @@ impl Client {
                 let _ = std::fs::remove_file(self.requests.join(format!("{id}.json")));
                 if reply.exists() {
                     continue;
-                }
-                if labelling {
-                    bail!("{lead}'s broker was busy, so {NO_LABEL}");
                 }
                 let waited = humantime::format_duration(answer_within);
                 let started = self.replies.join(format!("{id}.started")).exists();
@@ -2621,6 +2633,31 @@ mod tests {
         assert_eq!(herdr.prompts().len(), 1);
     }
 
+    #[test]
+    fn a_sandboxed_lead_s_report_is_written_to_its_own_mailbox_by_its_broker() {
+        let world = World::new();
+        let serving = world.serve(FakeHerdr::new(&[]));
+        let own = FakeHerdr::new(&[]);
+        let client = world.route_from("p-lead-h");
+        let report = Op::Report {
+            kind: crate::report::Kind::Handoff,
+            text: "at step 3".into(),
+        };
+
+        let (code, _) = run_here(&own, &world, client.as_ref(), &report).unwrap();
+
+        assert_eq!(code, 0);
+        let mailbox = world.paths.state_dir().join("reports/lead-h.jsonl");
+        let mailbox = std::fs::read_to_string(mailbox).unwrap();
+        assert!(
+            mailbox.contains(r#""kind":"handoff","text":"at step 3""#),
+            "{mailbox}"
+        );
+        assert_eq!(own.calls(), 0);
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
     fn status_op(all: bool, strays: bool) -> Op {
         Op::Status {
             all,
@@ -3122,56 +3159,6 @@ mod tests {
     }
 
     #[test]
-    fn a_label_a_busy_broker_never_answered_says_the_report_went_out_anyway() {
-        let world = World::new();
-        let _held = take_lock(&world.paths, "lead-h").unwrap().unwrap();
-        let client = Client {
-            answer_within: Some(Duration::from_millis(50)),
-            ..world.client()
-        };
-        std::fs::create_dir_all(requests_dir(&world.paths, "lead-h")).unwrap();
-
-        let err = client
-            .call(&Op::Label {
-                question: "which DB?".into(),
-            })
-            .unwrap_err();
-
-        assert_eq!(
-            format!("{err:#}"),
-            "lead-h's broker was busy, so the pane got no label; \
-             the report itself is sent, so don't send it again"
-        );
-        let left = std::fs::read_dir(requests_dir(&world.paths, "lead-h")).unwrap();
-        assert_eq!(left.count(), 0);
-    }
-
-    #[test]
-    fn a_label_whose_broker_stopped_before_answering_says_the_report_went_out_anyway() {
-        let world = World::new();
-        let held = take_lock(&world.paths, "lead-h").unwrap().unwrap();
-        std::fs::create_dir_all(requests_dir(&world.paths, "lead-h")).unwrap();
-        let stopping = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(100));
-            drop(held);
-        });
-
-        let err = world
-            .client()
-            .call(&Op::Label {
-                question: "which DB?".into(),
-            })
-            .unwrap_err();
-
-        stopping.join().unwrap();
-        assert_eq!(
-            format!("{err:#}"),
-            "lead-h's broker stopped, so the pane got no label; \
-             the report itself is sent, so don't send it again"
-        );
-    }
-
-    #[test]
     fn a_broker_older_than_its_lead_s_loopherd_is_named_with_how_to_restart_it() {
         let world = World::new();
         let _held = take_lock(&world.paths, "lead-h").unwrap().unwrap();
@@ -3207,6 +3194,7 @@ mod tests {
             "lead-h's broker predates this loopherd, so it can't prompt; the shepherd must \
              restart it with loopherd broker-restart lead-h"
         );
+        assert!(err.downcast_ref::<TooOld>().is_some());
         old.join().unwrap();
     }
 

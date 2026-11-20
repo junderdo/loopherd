@@ -214,7 +214,7 @@ fn a_lead_reports_only_as_itself() {
 }
 
 #[test]
-fn a_lead_whose_broker_is_down_still_reports_but_gets_no_label() {
+fn a_lead_whose_broker_is_down_writes_no_report_and_is_told_who_revives_it() {
     let mut world = World::new(ON);
     world.broker = None;
 
@@ -223,14 +223,15 @@ fn a_lead_whose_broker_is_down_still_reports_but_gets_no_label() {
         .output()
         .unwrap();
 
-    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.starts_with(
-            "loopherd report: warning: no broker is running for lead-cards, so it can't label its pane"
+        stderr.contains(
+            "no broker is running for lead-cards, so it can't report: \
+             the shepherd's loopherd revive --name lead-cards starts it"
         ),
         "{stderr}"
     );
-    assert!(world.mailbox("lead-cards").contains("which DB?"));
+    assert_eq!(world.mailbox("lead-cards"), "");
     assert_eq!(world.calls(), Vec::<String>::new());
 }

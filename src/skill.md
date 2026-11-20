@@ -885,14 +885,15 @@ What differs from the shepherd:
   `paused/`, `shepherd.json` and the ledger among them, fail
   (`Read-only file system`, or a denied command or Edit). Processes a
   command leaves behind end with it, so keep long waits as background
-  tasks. `loopherd tell`, `read`, `status`, `restart` (`--self`
+  tasks. `loopherd report`, `tell`, `read`, `status`, `restart` (`--self`
   included), `prompt`, `feed`, `add`, `retire` and `release` don't call
-  herdr themselves: they hand the operation to your broker, a process
+  herdr or write your mailbox themselves: they hand the operation to your broker, a process
   outside the sandbox that `loopherd lead` started for you, in any form,
   one at a time, so a running `feed` holds up the others until it ends.
   Your `status` shows your own herd alone, with no strays, and refuses
   `--strays`. With no broker running they fail at once, naming the
-  shepherd's `loopherd revive --name <you>`; report that as a question.
+  shepherd's `loopherd revive --name <you>`. Your `report` fails that way
+  too, so say so in your last message and end your turn.
   Your `watch` still calls herdr itself, not through your broker. Run
   `loopherd watch` bare, as its own Bash call, to run it outside the
   sandbox (D104), and `scripts/install` too with `install` on: a
