@@ -95,7 +95,11 @@ same mode governs what the human's own `~/.claude/settings.json` loosens
 (D100): `require` refuses the lead naming each file and key, `prefer`
 starts it sandboxed with them as warnings; doctor reports them. A lead
 gets no MCP servers but those its `[lead] mcp_servers` names, which run
-unsandboxed; only the human adds one. A lead's `tell`, `read`, `status`,
+unsandboxed; only the human adds one. A lead gets no Unix sockets, so no
+herdr socket, ssh agent or WSL2 interop, unless its herd sets
+`[lead] unix_sockets = "all"`, which `lead`, `revive` and doctor warn of
+(D105). What still gets past the sandbox: workers run unsandboxed (LH-284)
+and most of the state dir is writable (LH-298). A lead's `tell`, `read`, `status`,
 `feed`, `add`, `prompt`, `restart`, `retire` and `release` run in its
 broker, outside the sandbox and only on its own herd (D98); its watch
 still calls herdr itself, which LH-309 moves outside the sandbox; doctor fails

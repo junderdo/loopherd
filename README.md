@@ -201,8 +201,10 @@ as its main checkout. Then, in order:
    its questions to you. The lead runs in the Claude Code sandbox, which
    limits its writes to its own worktree and loopherd's state dir, so it
    doesn't change herd files, `config.toml` or `~/.claude` by mistake. It
-   is a guard rail, not a cage: a lead can still act outside it through
-   herdr, and on WSL2 through Windows interop ([D89](docs/decisions/D89.md)).
+   is a guard rail, not a cage ([D89](docs/decisions/D89.md)). It gets no
+   Unix sockets, so herdr, your ssh agent and WSL2's Windows interop are
+   closed to it, unless its `[lead]` sets `unix_sockets = "all"`, which
+   reopens all three ([D105](docs/decisions/D105.md)).
    Its `tell`, `read`, `status`, `feed`, `add`, `prompt`, `restart`,
    `retire` and `release` run in its broker, a process `loopherd lead`
    starts outside the sandbox, which acts only on the lead's own herd
