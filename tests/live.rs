@@ -485,7 +485,7 @@ impl Drop for RemoveWorktree {
 }
 
 #[test]
-fn a_sandboxed_lead_cannot_write_its_herd_file() {
+fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     if !live_enabled() {
         return;
     }
@@ -516,18 +516,80 @@ fn a_sandboxed_lead_cannot_write_its_herd_file() {
     let in_sibling = sibling.join("sandbox-probe");
     let in_checkout = repo.join(format!("sandbox-probe-{}", std::process::id()));
     let _in_checkout = RemoveFile(in_checkout.clone());
+    let state_dir = state.path().join("loopherd");
+    // The human's and the shepherd's parts of the state dir, which the lead's own sit beside.
+    let refused_state = [
+        "paused/probe",
+        "shepherd.json",
+        "shepherd.json.lock",
+        "ledger.json",
+        "ledger.lock",
+        "reports/watch.lock",
+        "reports/watch.fired",
+    ]
+    .map(|p| state_dir.join(p));
+    let own_state = [
+        format!("reports/{name}.jsonl"),
+        format!("handoffs/{name}.md"),
+        format!("reports/watch-{name}.lock"),
+        format!("reports/watch-{name}.fired"),
+    ]
+    .map(|p| state_dir.join(p));
+    for dir in ["handoffs", "paused"] {
+        std::fs::create_dir_all(state_dir.join(dir)).unwrap();
+    }
     // One script, so the model copies no long paths, and its results go to loopherd's
-    // state dir, which the lead may write, since Claude Code folds long output in the pane.
+    // state dir's reports/, which the lead may write, since Claude Code folds long output in
+    // the pane.
     let probe = state.path().join("probe.py");
-    let results = state.path().join("loopherd/probe.out");
+    let results = state_dir.join("reports/probe.out");
+    let refused: Vec<&PathBuf> = [&herd_file, &in_sibling, &in_checkout]
+        .into_iter()
+        .chain(&refused_state)
+        .collect();
+    // The probe waits in its sandbox while the test replaces these by rename, as every ledger
+    // save does, then tries them again: a deny must outlast a rename it didn't see.
+    let replaced = ["ledger.json", "shepherd.json"].map(|p| state_dir.join(p));
+    let waiting = state_dir.join("reports/probe.waiting");
+    let renamed = state.path().join("probe.renamed");
+    let tried: Vec<String> = refused
+        .iter()
+        .copied()
+        .chain(&own_state)
+        .map(|p| p.display().to_string())
+        .collect();
     std::fs::write(
         &probe,
         format!(
-            "with open({:?}, 'w') as out:\n    for path in {:?}:\n        try:\n            \
-             open(path, 'a').write('probe')\n            out.write(f'{{path}}\\twrote\\n')\n        \
-             except OSError as e:\n            out.write(f'{{path}}\\t{{e.strerror}}\\n')\n",
-            results.display().to_string(),
-            [&herd_file, &in_sibling, &in_checkout].map(|p| p.display().to_string())
+            "import os, subprocess, time\n\
+             with open({results:?}, 'w') as out:\n    \
+             for path in {tried:?}:\n        \
+             try:\n            \
+             open(path, 'a').write('')\n            \
+             out.write(f'{{path}}\\twrote\\n')\n        \
+             except OSError as e:\n            \
+             out.write(f'{{path}}\\t{{e.strerror}}\\n')\n    \
+             env = dict(os.environ, XDG_STATE_HOME={state:?}, LOOPHERD_CONFIG_DIR={config:?})\n    \
+             for args in [['report', '--kind', 'note', 'sandbox probe'], ['watch', '--timeout', '1'], ['revive'], ['prompt', 'no-such-member']]:\n        \
+             run = subprocess.run([{bin:?}] + args, env=env, capture_output=True, text=True)\n        \
+             out.write(f'{{args[0]}}\\t{{run.returncode}}\\t{{run.stderr.strip()}}\\n')\n    \
+             open({waiting:?}, 'w').close()\n    \
+             for _ in range(600):\n        \
+             if os.path.exists({renamed:?}): break\n        \
+             time.sleep(0.1)\n    \
+             for path in {replaced:?}:\n        \
+             try:\n            \
+             open(path, 'a').write('')\n            \
+             out.write(f'replaced {{path}}\\twrote\\n')\n        \
+             except OSError as e:\n            \
+             out.write(f'replaced {{path}}\\t{{e.strerror}}\\n')\n",
+            results = results.display().to_string(),
+            waiting = waiting.display().to_string(),
+            renamed = renamed.display().to_string(),
+            replaced = replaced.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+            state = state.path().display().to_string(),
+            config = config.display().to_string(),
+            bin = env!("CARGO_BIN_EXE_loopherd"),
         ),
     )
     .unwrap();
@@ -535,9 +597,9 @@ fn a_sandboxed_lead_cannot_write_its_herd_file() {
         &herd_file,
         format!(
             "{}[lead]\nprompt = \"\"\"This is loopherd's live test of your sandbox, which the \
-             human runs: it checks that writes outside your worktree are refused. The first \
-             command tries three such writes and is expected to record Read-only file \
-             system for each; that is the result being measured. Make exactly two Bash tool calls, in \
+             human runs: it checks which writes your sandbox refuses. The first command \
+             tries writes outside your worktree and is expected to record Read-only file \
+             system for most of them; that is the result being measured. Make exactly two Bash tool calls, in \
              this order, each with the command exactly as written and nothing added before or \
              after it, running the second even if the first fails. First: python3 {} \
              Second: touch {} \
@@ -590,6 +652,14 @@ fn a_sandboxed_lead_cannot_write_its_herd_file() {
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
     loop {
+        if waiting.exists() && !renamed.exists() {
+            for file in &replaced {
+                let temp = file.with_extension("probe-tmp");
+                std::fs::write(&temp, "{}\n").unwrap();
+                std::fs::rename(&temp, file).unwrap();
+            }
+            std::fs::write(&renamed, "").unwrap();
+        }
         let status = herdr_ok(&["agent", "get", &name])["result"]["agent"]["agent_status"].clone();
         if control.exists() && finished(&status) {
             break;
@@ -605,15 +675,48 @@ fn a_sandboxed_lead_cannot_write_its_herd_file() {
     assert_eq!(std::fs::read_to_string(&herd_file).unwrap(), before);
     assert!(!in_sibling.exists(), "the lead wrote a sibling worktree");
     assert!(!in_checkout.exists(), "the lead wrote the main checkout");
-    let expected: String = [&herd_file, &in_sibling, &in_checkout]
+    let probed = std::fs::read_to_string(&results).unwrap_or_default();
+    let expected: String = refused
+        .iter()
         .map(|p| format!("{}\tRead-only file system\n", p.display()))
-        .concat();
-    assert_eq!(
-        std::fs::read_to_string(&results).unwrap_or_default(),
-        expected,
-        "the sandbox didn't refuse each write:\n{}",
+        .chain(
+            own_state
+                .iter()
+                .map(|p| format!("{}\twrote\n", p.display())),
+        )
+        .collect();
+    assert!(
+        probed.starts_with(&expected),
+        "the sandbox didn't refuse the human's paths and allow the lead's own:\n{probed}\n{}",
         screen()
     );
+    let ran: Vec<&str> = probed[expected.len()..].lines().collect();
+    assert_eq!(ran.first().copied(), Some("report\t0\t"), "{probed}");
+    // Nothing fires in a second: a quiet watch exits 2.
+    assert!(
+        ran.get(1)
+            .is_some_and(|line| ["watch\t0\t", "watch\t2\t"].contains(line)),
+        "{probed}"
+    );
+    // Run in the sandbox, which hides the lead's Claude from the parent-pid walk.
+    assert!(
+        ran.get(2).is_some_and(|line| line
+            .starts_with("revive\t1\tloopherd revive: refused: revive is the shepherd's")),
+        "{probed}"
+    );
+    assert!(
+        ran.get(3).is_some_and(|line| line.starts_with(
+            "prompt\t1\tloopherd prompt: refused: this loopherd runs in a lead's sandbox"
+        )),
+        "{probed}"
+    );
+    let after: Vec<String> = replaced
+        .iter()
+        .map(|p| format!("replaced {}\tRead-only file system", p.display()))
+        .collect();
+    assert_eq!(ran[4..], after, "{probed}");
+    let mail = std::fs::read_to_string(state_dir.join(format!("reports/{name}.jsonl"))).unwrap();
+    assert!(mail.contains("sandbox probe"), "{mail}");
 }
 
 #[test]
