@@ -214,3 +214,19 @@ fn a_lead_s_pane_still_runs_the_commands_that_only_read() {
         "{plain_setup:?}"
     );
 }
+
+/// herdr runs the startup hook with its focused pane's id, which may be a lead's.
+#[test]
+fn revive_on_startup_runs_with_a_lead_s_pane_focused() {
+    let state = tempfile::tempdir().unwrap();
+    let socket = state.path().join("herdr.sock");
+    lead_s_state(state.path(), &socket);
+
+    let out = run_in_lead_pane(state.path(), &socket, &["revive", "--startup"]);
+
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).starts_with("revive on startup is off"),
+        "{out:?}"
+    );
+}

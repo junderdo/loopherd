@@ -741,7 +741,7 @@ fn main() -> ExitCode {
             .exit();
     };
     if let Some((name, why)) = refused_to_leads(&command)
-        && let Err(e) = refuse_from_lead(why)
+        && let Err(e) = refuse_from_lead(why, by_pane(&command))
     {
         eprintln!("loopherd {name}: {e:#}");
         return ExitCode::FAILURE;
@@ -918,7 +918,7 @@ fn refused_to_leads(command: &Command) -> Option<(&'static str, &'static str)> {
 /// Refuses the running command, `why` saying whose it is, in a lead's pane
 /// or sandbox. The shepherd's pane may carry a dead lead's old id after a
 /// herdr restart, so it is never a lead's.
-fn refuse_from_lead(why: &str) -> Result<()> {
+fn refuse_from_lead(why: &str, by_pane: bool) -> Result<()> {
     let Ok(path) = FileLedger::default_path() else {
         return Ok(());
     };
@@ -926,8 +926,20 @@ fn refuse_from_lead(why: &str) -> Result<()> {
     let shepherd = ledger
         .dir()
         .is_ok_and(|state| shepherd_here(&state, own_pane().as_deref()).is_some());
-    let lead = own_broker().filter(|_| !shepherd);
+    let lead = match by_pane {
+        true => own_broker(),
+        false => Paths::from_env().ok().and_then(|paths| {
+            broker::route(&paths, &ledger, &process::ProcFs, std::process::id(), None)
+        }),
+    };
+    let lead = lead.filter(|_| !shepherd);
     broker::refuse_from_lead(lead.as_ref(), &ledger, why)
+}
+
+/// herdr runs `revive --startup` with its focused pane's id, which may be a
+/// lead's, so only its lineage or a sandbox can make it a lead's.
+fn by_pane(command: &Command) -> bool {
+    !matches!(command, Command::Revive { startup: true, .. })
 }
 
 fn run_herd(action: HerdAction) -> Result<i32> {
