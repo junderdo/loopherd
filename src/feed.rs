@@ -347,12 +347,25 @@ fn reap(
     let workers = members.filter(|e| !e.retired && !e.is_lead());
     for member in workers.filter(|e| e.herd.as_deref() == Some(&req.herd)) {
         let name = &member.name;
+        if member.may_be_lead() {
+            lines.push(format!(
+                "{name}: left alone, its role is from another loopherd version"
+            ));
+            continue;
+        }
         if let Some(AfterMerge::Pending { owner }) = member.after_merge {
             if live(req.procs, Some(owner)).is_some() {
                 lines.push(format!("after_merge {name}: running in feed {}", owner.pid));
             } else {
-                interrupted(ledger, req, name, owner, lines)?;
+                let why = "the feed running it exited before noting an outcome";
+                interrupted(ledger, req, name, owner, why, lines)?;
             }
+            continue;
+        }
+        if let Some(AfterMerge::Unknown(_)) = member.after_merge {
+            lines.push(format!(
+                "after_merge {name}: left alone, its state is from another loopherd version"
+            ));
             continue;
         }
         let template = member.template.as_deref();
@@ -588,6 +601,7 @@ fn interrupted(
     req: &FeedRequest,
     name: &str,
     owner: Process,
+    why: &str,
     lines: &mut Vec<String>,
 ) -> Result<()> {
     if req.dry_run {
@@ -608,17 +622,19 @@ fn interrupted(
         .context("ledger")?;
     if claimed {
         lines.push(format!("after_merge {name}: interrupted"));
-        let text = "after_merge interrupted: the feed running it exited before noting an outcome; \
-                    check what ran and finish its commands by hand";
-        note(req, name, text, lines);
+        let text = format!(
+            "after_merge interrupted: {why}; check what ran and finish its commands by hand"
+        );
+        note(req, name, &text, lines);
     }
     Ok(())
 }
 
 /// Notes interrupted every after_merge still pending on this feed's
 /// `req.owner`, for a feed that failed and whose process lives on, as a
-/// broker's does. Returns a line per member, and a warning if it can't.
-pub fn abandon(ledger: &mut dyn Ledger, req: &FeedRequest) -> Vec<String> {
+/// broker's does, saying `why` in each member's note. Returns a line per
+/// member, and a warning if it can't.
+pub fn abandon(ledger: &mut dyn Ledger, req: &FeedRequest, why: &str) -> Vec<String> {
     let mut lines = vec![];
     let pending = Some(AfterMerge::Pending { owner: req.owner });
     let names: Vec<String> = match ledger.entries() {
@@ -630,7 +646,7 @@ pub fn abandon(ledger: &mut dyn Ledger, req: &FeedRequest) -> Vec<String> {
         Err(e) => return vec![format!("warning: ledger: {e:#}; after_merge left pending")],
     };
     for name in names {
-        if let Err(e) = interrupted(ledger, req, &name, req.owner, &mut lines) {
+        if let Err(e) = interrupted(ledger, req, &name, req.owner, why, &mut lines) {
             lines.push(format!("warning: {name}: {e:#}; after_merge left pending"));
         }
     }
@@ -639,7 +655,7 @@ pub fn abandon(ledger: &mut dyn Ledger, req: &FeedRequest) -> Vec<String> {
 
 fn set_after_merge(ledger: &mut dyn Ledger, name: &str, state: AfterMerge) -> Result<()> {
     ledger.update(name, &mut |r| {
-        r.after_merge = Some(state);
+        r.after_merge = Some(state.clone());
         Ok(())
     })?;
     Ok(())
@@ -1110,6 +1126,7 @@ mod tests {
             after_merge: None,
             unsandboxed: None,
             earlier: vec![],
+            unknown: Default::default(),
         }
     }
 
@@ -2249,6 +2266,28 @@ mod tests {
     }
 
     #[test]
+    fn a_member_whose_role_is_from_another_version_is_never_checked_or_retired() {
+        let setup = Setup::with_done("printf ''", 1, "touch checked; true");
+        let herdr = herdr().with_agent("lh-9");
+        let mut unknown = member("lh-9", Some("prs"), false);
+        unknown.role = Some(crate::ledger::Role::Unknown("reviewer".into()));
+        unknown.params = Some(Default::default());
+        let mut ledger = ledger(&[unknown]);
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "lh-9: left alone, its role is from another loopherd version",
+                "prs: 0 retired, 0 added, 0 skipped, 0 errors"
+            ]
+        );
+        assert!(!ledger.0["lh-9"].retired);
+        assert!(!setup.repo.path().join("checked").exists());
+    }
+
+    #[test]
     fn a_herd_without_a_queue_is_an_error() {
         let setup = Setup::new("echo 1", 1);
         fs::write(
@@ -2653,7 +2692,7 @@ mod tests {
             start: OWNER.start + 1,
         };
         let pending = Some(AfterMerge::Pending { owner: reused_pid });
-        ledger.0.get_mut("zpr-1").unwrap().after_merge = pending;
+        ledger.0.get_mut("zpr-1").unwrap().after_merge = pending.clone();
 
         let dry = setup.feed(&herdr, &mut ledger, true).unwrap();
         assert_eq!(dry.lines[0], "would note after_merge zpr-1: interrupted");
@@ -2680,6 +2719,30 @@ mod tests {
 
         setup.feed(&herdr, &mut ledger, false).unwrap();
         assert!(ledger.0["zpr-1"].retired);
+    }
+
+    #[test]
+    fn a_feed_leaves_a_member_whose_after_merge_state_it_doesnt_know() {
+        let setup = Setup::after_merge(r#"["echo ran >> log"]"#, "");
+        let herdr = herdr();
+        let mut ledger = fed_one(&setup, &herdr);
+        setup.touch("merged-1");
+        setup.touch("done-1");
+        let unknown = Some(AfterMerge::Unknown("skipped".into()));
+        ledger.0.get_mut("zpr-1").unwrap().after_merge = unknown.clone();
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "after_merge zpr-1: left alone, its state is from another loopherd version",
+                "prs: 0 retired, 0 added, 0 skipped, 0 errors",
+            ]
+        );
+        assert!(!ledger.0["zpr-1"].retired);
+        assert_eq!(ledger.0["zpr-1"].after_merge, unknown);
+        assert_eq!(setup.read("log"), None);
     }
 
     /// A feed's after_merge of `commands`, left pending for `members`.
@@ -3076,6 +3139,32 @@ mod tests {
     }
 
     #[test]
+    fn from_the_pane_of_a_role_from_another_version_after_merge_is_gated_as_a_leads() {
+        let setup = Setup::after_merge(
+            r#"["echo one >> log", "gh pr merge 7"]"#,
+            "[lead]\nprompt = \"go\"\n",
+        );
+        let herdr = herdr();
+        let mut ledger = with_lead(fed_one(&setup, &herdr), "prs");
+        ledger.0.get_mut("lead-prs").unwrap().role =
+            Some(crate::ledger::Role::Unknown("reviewer".into()));
+        setup.touch("merged-1");
+
+        let fed = setup
+            .feed_from(&herdr, &mut ledger, false, Some("w1:p0"))
+            .unwrap();
+
+        assert!(
+            fed.lines
+                .iter()
+                .any(|l| l.starts_with("after_merge zpr-1: not run: ")),
+            "{:?}",
+            fed.lines
+        );
+        assert_eq!(setup.read("log"), None);
+    }
+
+    #[test]
     fn from_a_lead_whose_herd_file_is_unreadable_every_gated_command_is_held_back() {
         let (_, notes, _setup) = held_back("scripts/install", "gone");
 
@@ -3150,7 +3239,7 @@ mod tests {
             ledger.0.get_mut(name).unwrap().after_merge = Some(AfterMerge::Pending { owner });
         }
 
-        let lines = abandon(&mut ledger, &setup.request(false, None));
+        let lines = abandon(&mut ledger, &setup.request(false, None), "it failed: boom");
 
         assert_eq!(lines, ["after_merge zpr-1: interrupted"]);
         assert_eq!(ledger.0["zpr-1"].after_merge, Some(AfterMerge::Noted));
@@ -3158,6 +3247,11 @@ mod tests {
             ledger.0["zpr-2"].after_merge,
             Some(AfterMerge::Pending { owner: elsewhere })
         );
-        assert!(setup.notes("zpr-1")[0].starts_with("after_merge interrupted: "));
+        assert_eq!(
+            setup.notes("zpr-1"),
+            [
+                "after_merge interrupted: it failed: boom; check what ran and finish its commands by hand"
+            ]
+        );
     }
 }
