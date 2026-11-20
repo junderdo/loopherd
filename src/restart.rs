@@ -119,7 +119,12 @@ pub fn restart(
     if !req.force
         && let Some(why) = unfinished(req.state, name, agent.status)?
     {
-        return Err(Refusal::NotReady(format!("{why}; pass --force to restart it anyway")).into());
+        // A lead can't force a restart; its broker refuses --force.
+        let why = match req.caller {
+            Some(_) => why,
+            None => format!("{why}; pass --force to restart it anyway"),
+        };
+        return Err(Refusal::NotReady(why).into());
     }
     // The record kept beside its sandbox settings, which the lead can't write, wins over the ledger.
     let herd = match sandbox::Lead::kept(req.paths, name).context("sandbox")? {
@@ -443,6 +448,12 @@ pub fn schedule_self(
                 "no member runs in pane {pane} of this herdr, and no shepherd handoff is recorded for this pane and Claude"
             )
         })?;
+    schedule_member(member, state)
+}
+
+/// Claims a self-restart for `member`, as [`schedule_self`] does once it has
+/// found the member in its own pane.
+pub fn schedule_member(member: &crate::ledger::AgentRecord, state: &Path) -> Result<Scheduled> {
     let name = member.name.clone();
     if !member.is_lead() {
         bail!("{name} isn't a lead; whoever reads its handoff line restarts it");
@@ -959,6 +970,22 @@ mod tests {
         let (result, _) = w.restart_as(false, true, None, &|r| r.herd = Some("h".into()));
 
         result.unwrap();
+    }
+
+    #[test]
+    fn a_lead_isn_t_told_to_pass_force_which_its_broker_refuses() {
+        let mut w = World::new();
+        w.kept_lead("lead-h", "h");
+        w.caller = Some("lead-h");
+        w.handed_off();
+        w.herdr.set_status("lh-1", AgentStatus::Working);
+
+        let (result, _) = w.restart_as(false, true, None, &|r| r.herd = Some("h".into()));
+
+        assert_eq!(
+            format!("{:#}", result.unwrap_err()),
+            "lh-1 is working in herdr"
+        );
     }
 
     #[test]

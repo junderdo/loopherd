@@ -181,27 +181,44 @@ impl Op {
             Op::Restart { name, force } => restart(ctx, name, *force, sink),
             Op::RestartSelf => {
                 let caller = &ctx.caller;
-                let scheduled = crate::restart::schedule_self(
-                    ctx.herdr,
-                    &*ctx.ledger,
-                    caller.pane.as_deref(),
-                    &caller.lineage,
-                    ctx.paths.state_dir(),
-                )?;
-                if let Some(lead) = caller.lead.as_ref().filter(|l| l.name != scheduled.name) {
-                    bail!(
-                        "the ledger has {} in {}'s pane; restart --self restarts only {}",
-                        scheduled.name,
-                        lead.name,
-                        lead.name
-                    );
-                }
+                let state = ctx.paths.state_dir();
+                let scheduled = match &caller.lead {
+                    Some(lead) => crate::restart::schedule_member(
+                        &own_record(ctx.herdr, &*ctx.ledger, &lead.name)?,
+                        state,
+                    )?,
+                    None => crate::restart::schedule_self(
+                        ctx.herdr,
+                        &*ctx.ledger,
+                        caller.pane.as_deref(),
+                        &caller.lineage,
+                        state,
+                    )?,
+                };
                 (ctx.spawn_waiter)(&scheduled.name, scheduled.waiter)?;
                 sink.out(&scheduled.message);
                 Ok(0)
             }
         }
     }
+}
+
+/// Lead `lead`'s own unretired record, in this herdr; by name, since a stale
+/// entry may share its pane id.
+fn own_record(
+    herdr: &dyn Herdr,
+    ledger: &dyn Ledger,
+    lead: &str,
+) -> Result<crate::ledger::AgentRecord> {
+    let record = ledger
+        .entries()?
+        .remove(lead)
+        .filter(|r| !r.retired)
+        .ok_or_else(|| anyhow!("{lead} has no unretired record in the ledger"))?;
+    if record.socket != herdr.socket() {
+        bail!("{lead} runs in another herdr than its broker's");
+    }
+    Ok(record)
 }
 
 /// The longest ready timeout a lead may ask for.
@@ -413,7 +430,7 @@ pub fn refuse_spawn(client: Option<&Client>, ledger: &dyn Ledger) -> Result<()> 
 fn refuse_unrouted(ledger: &dyn Ledger, command: &str) -> Result<()> {
     if ledger.read_only()? {
         bail!(
-            "refused: this loopherd runs in a sandbox, where it can't {command} itself, and the \
+            "refused: this loopherd runs in a sandbox, where it can't run loopherd {command} itself, and the \
              ledger places no lead in this pane (as after the pane moved), so no lead's broker \
              can; if a lead runs here, ask the shepherd to run loopherd revive --name <lead>, \
              since loopherd doctor doesn't see a moved pane"
@@ -581,10 +598,11 @@ impl Broker<'_> {
             Reach::Member(target) => target,
         };
         if let Op::Restart { force: true, .. } = op {
-            return Ok(Some(format!(
+            return Ok(Some(
                 "restart --force skips the checks that a member is finished since its handoff, \
-                 so the human forces a restart; {lead} restarts once its stop reads finished"
-            )));
+                 so the human forces a restart; restart it once its stop reads finished"
+                    .into(),
+            ));
         }
         let reach = format!("{lead} reaches only herd {herd}'s workers");
         if target == SHEPHERD {
@@ -745,7 +763,7 @@ impl Dir {
         }
         let mut text = vec![];
         file.take(MAX_REQUEST + 1).read_to_end(&mut text)?;
-        let request: Request = serde_json::from_slice(&text).context("malformed request")?;
+        let request: Request = serde_json::from_slice(&text).context(MALFORMED)?;
         Ok(request.op)
     }
 
@@ -762,6 +780,8 @@ impl Dir {
         }
     }
 }
+
+const MALFORMED: &str = "malformed request";
 
 /// The lead's side of the transport: writes requests, reads replies.
 pub struct Client {
@@ -821,6 +841,12 @@ impl Client {
                     .with_context(|| format!("read {lead}'s broker's reply"))?
                 {
                     Reply::Done { out, err, code } => Ok((out, err, code)),
+                    // This client wrote a well-formed request, so only an older broker can't read it.
+                    Reply::Refused(why) if why.starts_with(MALFORMED) => Err(anyhow!(
+                        "{lead}'s broker predates this loopherd, so it can't {}; the shepherd must \
+                         restart it (kill it, then loopherd revive --name {lead})",
+                        op.command()
+                    )),
                     Reply::Refused(why) => {
                         Err(anyhow!("{lead}'s broker refused {}: {why}", op.command()))
                     }
@@ -1319,8 +1345,8 @@ mod tests {
         assert_eq!(
             format!("{:#}", world.client().call(&forced).unwrap_err()),
             "lead-h's broker refused restart: restart --force skips the checks that a member is \
-             finished since its handoff, so the human forces a restart; lead-h restarts once its \
-             stop reads finished"
+             finished since its handoff, so the human forces a restart; restart it once its stop \
+             reads finished"
         );
 
         world.retire("lead-h");
@@ -1594,6 +1620,45 @@ mod tests {
     }
 
     #[test]
+    fn a_broker_older_than_its_lead_s_loopherd_is_named_with_how_to_restart_it() {
+        let world = World::new();
+        let _held = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+        let requests = requests_dir(&world.paths, "lead-h");
+        let replies = replies_dir(&world.paths, "lead-h");
+        std::fs::create_dir_all(&requests).unwrap();
+        std::fs::create_dir_all(&replies).unwrap();
+        // An older broker, which has no prompt op.
+        let old = std::thread::spawn(move || {
+            loop {
+                let name = std::fs::read_dir(&requests)
+                    .unwrap()
+                    .filter_map(|e| e.ok()?.file_name().into_string().ok())
+                    .find(|n| n.ends_with(".json"));
+                if let Some(name) = name {
+                    let why = "malformed request: unknown variant `prompt`, expected `tell`";
+                    let reply = serde_json::to_vec(&Reply::Refused(why.into())).unwrap();
+                    write_atomically(&replies, name.trim_end_matches(".json"), &reply).unwrap();
+                    return;
+                }
+                std::thread::sleep(POLL);
+            }
+        });
+        let prompt = Op::Prompt {
+            name: "lh-1".into(),
+            force: false,
+        };
+
+        let err = world.client().call(&prompt).unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "lead-h's broker predates this loopherd, so it can't prompt; the shepherd must \
+             restart it (kill it, then loopherd revive --name lead-h)"
+        );
+        old.join().unwrap();
+    }
+
+    #[test]
     fn a_broker_starting_while_its_lock_is_probed_still_starts() {
         let world = World::new();
         let probing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -1769,29 +1834,44 @@ mod tests {
     }
 
     #[test]
-    fn restart_self_from_a_broker_restarts_only_its_own_lead() {
+    fn a_stale_entry_on_the_lead_s_pane_doesn_t_stop_its_restart_self() {
         let world = World::new();
         let client = world.route_from("p-lead-h");
-        // Another lead's stale entry, sorting first, on the lead's pane.
-        let mut other = member("a-lead", Some("h"));
-        other.role = Some(Role::Lead);
-        other.pane_id = "p-lead-h".into();
-        other.socket = Some(crate::herdr::fake::FAKE_SOCKET.into());
-        world.add(other);
-        handed_off(&world, "a-lead");
+        // A worker's stale entry, sorting first, on a reused pane id.
+        let mut stale = member("a-fix", Some("h"));
+        stale.pane_id = "p-lead-h".into();
+        stale.socket = Some(crate::herdr::fake::FAKE_SOCKET.into());
+        world.add(stale);
+        handed_off(&world, "lead-h");
         let serving = world.serve(FakeHerdr::new(&[]));
+
+        let (out, _, code) = client.unwrap().call(&Op::RestartSelf).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(out.starts_with("lead-h restarts in this pane"), "{out}");
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn restart_self_is_refused_when_the_lead_s_record_names_another_herdr() {
+        let world = World::new();
+        let client = world.route_from("p-lead-h");
+        handed_off(&world, "lead-h");
+        let serving = world.serve(FakeHerdr::new(&[]));
+        world
+            .ledger()
+            .update("lead-h", &mut |r| {
+                r.socket = Some("/elsewhere.sock".into());
+                Ok(())
+            })
+            .unwrap();
 
         let err = client.unwrap().call(&Op::RestartSelf).unwrap_err();
 
         assert_eq!(
             format!("{err:#}"),
-            "the ledger has a-lead in lead-h's pane; restart --self restarts only lead-h"
-        );
-        let waiter = world.paths.state_dir().join("restarts/a-lead.waiter.lock");
-        let file = std::fs::File::open(waiter).unwrap();
-        assert!(
-            Lock::try_take(file).unwrap().is_some(),
-            "the claim was kept"
+            "lead-h runs in another herdr than its broker's"
         );
         world.retire("lead-h");
         serving.join().unwrap().0.unwrap();
@@ -1810,7 +1890,13 @@ mod tests {
         assert!(client.is_none());
 
         let refusals = world.read_only(|| {
-            let mut refusals: Vec<String> = [tell("lh-1", "hi"), feed("h"), add("h", "pr", &[])]
+            let ops = [
+                tell("lh-1", "hi"),
+                feed("h"),
+                add("h", "pr", &[]),
+                Op::RestartSelf,
+            ];
+            let mut refusals: Vec<String> = ops
                 .iter()
                 .map(|op| format!("{:#}", run_here(&own, &world, None, op).err().unwrap()))
                 .collect();
@@ -1819,10 +1905,14 @@ mod tests {
             refusals
         });
 
-        for (refusal, command) in refusals.iter().zip(["tell", "feed", "add", "spawn"]) {
+        for (refusal, command) in
+            refusals
+                .iter()
+                .zip(["tell", "feed", "add", "restart --self", "spawn"])
+        {
             assert!(
                 refusal.starts_with(&format!(
-                    "refused: this loopherd runs in a sandbox, where it can't {command} itself"
+                    "refused: this loopherd runs in a sandbox, where it can't run loopherd {command} itself"
                 )),
                 "{refusal}"
             );

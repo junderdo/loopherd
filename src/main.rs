@@ -1519,11 +1519,16 @@ fn spawn_waiter(name: &str, waiter: lock::Lock) -> Result<()> {
 
 /// This binary, or `loopherd` on PATH once a reinstall has moved a new one over it.
 fn runnable_exe() -> Result<PathBuf> {
-    let exe = std::env::current_exe().context("find the loopherd binary")?;
-    Ok(match exe.to_string_lossy().ends_with(" (deleted)") {
+    Ok(runnable(
+        std::env::current_exe().context("find the loopherd binary")?,
+    ))
+}
+
+fn runnable(exe: PathBuf) -> PathBuf {
+    match exe.to_string_lossy().ends_with(" (deleted)") {
         true => PathBuf::from("loopherd"),
         false => exe,
-    })
+    }
 }
 
 fn run_broker(lead: &str) -> Result<i32> {
@@ -2402,6 +2407,15 @@ fn inherited_workspace(ledger: &dyn Ledger) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_binary_a_reinstall_replaced_runs_as_loopherd_on_path() {
+        let gone = PathBuf::from("/home/u/.local/bin/loopherd (deleted)");
+        let here = PathBuf::from("/home/u/.local/bin/loopherd");
+
+        assert_eq!(runnable(gone), PathBuf::from("loopherd"));
+        assert_eq!(runnable(here.clone()), here);
+    }
 
     #[test]
     fn merges_are_looked_up_only_while_notify_sends_merge_alerts() {
