@@ -790,6 +790,7 @@ mod tests {
         "loopherd herd unset h lead.merge",
         "loopherd herd set h lead.review_rounds 9",
         "/home/me/.local/bin/loopherd herd set h lead.install true",
+        "loopherd herd set h lead.unix_sockets '\"all\"'",
         "cd /x && loopherd herd unset h queue.max",
         "loopherd herd remove h",
         "loopherd herd remove --dry-run h",

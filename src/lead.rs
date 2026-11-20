@@ -490,7 +490,7 @@ mod tests {
                     "enabled": true,
                     "failIfUnavailable": true,
                     "allowUnsandboxedCommands": false,
-                    "network": {"allowAllUnixSockets": true},
+                    "network": {"allowAllUnixSockets": false},
                     "filesystem": {
                         "allowWrite": [
                             format!("{root}/proj/worktrees/lead-h"),
@@ -558,6 +558,35 @@ mod tests {
             .iter()
             .map(|p| PathBuf::from(p.as_str().unwrap()))
             .collect()
+    }
+
+    #[test]
+    fn unix_sockets_all_opens_the_lead_s_sockets_with_a_warning_even_under_require() {
+        let setup = Setup::with_lead(&format!("{PROMPT}\nunix_sockets = \"all\""));
+        let herdr = herdr();
+
+        let (_, _, warnings) = lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        let (_, settings) = started_settings(&herdr);
+        assert_eq!(
+            settings["sandbox"]["network"],
+            serde_json::json!({"allowAllUnixSockets": true})
+        );
+        assert_eq!(
+            warnings,
+            [
+                "lead-h's sandbox lets it use any Unix socket, as herd h's [lead] unix_sockets = \
+              \"all\" says, which reopens the herdr socket, your ssh agent and WSL2's Windows \
+              interop to it"
+            ]
+        );
     }
 
     /// Starts lead-h and checks that neither its Bash nor its file tools may

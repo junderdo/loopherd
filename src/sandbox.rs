@@ -23,6 +23,13 @@ pub enum SandboxMode {
     Prefer,
 }
 
+/// `[lead] unix_sockets`: the Unix sockets a lead may use besides none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnixSockets {
+    All,
+}
+
 /// Why the sandbox can't start on this machine, and what would let it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unavailable {
@@ -94,6 +101,12 @@ pub fn probe() -> Result<(), Unavailable> {
             fix: fix.into(),
         }),
     }
+}
+
+/// Whether WSL2's binfmt_misc entry for Windows programs is enabled here.
+pub fn wsl_interop() -> bool {
+    std::fs::read_to_string("/proc/sys/fs/binfmt_misc/WSLInterop")
+        .is_ok_and(|text| text.lines().next() == Some("enabled"))
 }
 
 /// Checks `claude --version`'s output against [`MIN_CLAUDE`].
@@ -306,8 +319,8 @@ impl Guard {
 pub enum Launch {
     Sandboxed {
         settings: PathBuf,
-        /// What the human's own settings loosen, under `prefer`.
-        loosened: Vec<String>,
+        /// What loosens it: the human's own settings under `prefer`, or its herd's `unix_sockets`.
+        warnings: Vec<String>,
         mcp: PathBuf,
     },
     /// `prefer`, with why the sandbox can't start.
@@ -342,13 +355,23 @@ impl Launch {
     /// The warnings the start carries: why it's hook-only, or what loosens its sandbox.
     pub fn warnings(&self, name: &str) -> Vec<String> {
         match self {
-            Launch::Sandboxed { loosened, .. } => loosened
-                .iter()
-                .map(|line| loosened_warning(name, line))
-                .collect(),
+            Launch::Sandboxed { warnings, .. } => warnings.clone(),
             Launch::HookOnly { why, .. } => vec![hook_only_warning(name, why)],
         }
     }
+}
+
+/// Whether lead `name`'s herd opts it into every Unix socket.
+pub fn sockets_open(paths: &Paths, herd: &str) -> Result<bool> {
+    Ok(herd::lead_unix_sockets(paths, herd)? == Some(UnixSockets::All))
+}
+
+pub fn sockets_open_warning(name: &str, herd: &str) -> String {
+    format!(
+        "{name}'s sandbox lets it use any Unix socket, as herd {herd}'s [lead] unix_sockets = \
+         \"all\" says, which reopens the herdr socket, your ssh agent and WSL2's Windows \
+         interop to it"
+    )
 }
 
 pub fn hook_only_warning(name: &str, why: &str) -> String {
@@ -421,9 +444,16 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
     let file = settings_file(paths, name);
     let text = serde_json::to_string_pretty(&own)? + "\n";
     write_private(&file, &text).with_context(|| format!("write {}", file.display()))?;
+    let mut warnings: Vec<String> = loosened
+        .iter()
+        .map(|line| loosened_warning(name, line))
+        .collect();
+    if sockets_open(paths, &lead.herd)? {
+        warnings.push(sockets_open_warning(name, &lead.herd));
+    }
     Ok(Launch::Sandboxed {
         settings: file,
-        loosened,
+        warnings,
         mcp,
     })
 }
@@ -1013,8 +1043,8 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
         "enabled": true,
         "failIfUnavailable": true,
         "allowUnsandboxedCommands": false,
-        // Linux can't narrow this to herdr's socket: its seccomp filter can't see socket paths.
-        "network": {"allowAllUnixSockets": true},
+        // Set either way, so the human's own settings can't open them.
+        "network": {"allowAllUnixSockets": sockets_open(paths, herd)?},
         "filesystem": {
             "allowWrite": allow_write.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "denyWrite": deny_write.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
