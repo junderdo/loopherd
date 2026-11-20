@@ -70,8 +70,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
-use crate::feed::{FeedRequest, feed, run_after_merge};
-use crate::herd::{AddRequest, Paths, SwitchValues, add, dry_run, herds};
+use crate::herd::{Paths, SwitchValues, herds};
 use crate::herd_view::Options;
 use crate::herdr::events::SocketSubscriber;
 use crate::herdr::{CliHerdr, Herdr, socket_from_env};
@@ -1386,12 +1385,50 @@ fn run_tell(name: &str, text: Option<String>, text_file: Option<PathBuf>) -> Res
         }
         (None, None) => unreachable!("clap requires text or --text-file"),
     };
-    let op = broker::Op::Tell {
-        name: name.into(),
-        text,
+    run_op(
+        own_broker().as_ref(),
+        &broker::Op::Tell {
+            name: name.into(),
+            text,
+        },
+    )
+}
+
+/// Runs `op` through `client`, the lead's broker, or in this process when there is none.
+fn run_op(client: Option<&broker::Client>, op: &broker::Op) -> Result<i32> {
+    let paths = Paths::from_env().context("herd")?;
+    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let mut ctx = broker::Ctx {
+        herdr: &CliHerdr,
+        ledger: &mut ledger,
+        paths: &paths,
+        procs: &process::ProcFs,
+        claude_dir: install_hook::claude_dir().ok(),
+        caller: broker::Caller {
+            pane: own_pane(),
+            socket: socket_from_env(),
+            lineage: own_lineage(),
+            workspace: std::env::var("HERDR_WORKSPACE_ID")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            process: own_process()?,
+            lead: None,
+        },
     };
-    println!("{}", broker::run(&CliHerdr, own_broker().as_ref(), &op)?);
-    Ok(0)
+    broker::run(&mut ctx, client, op, &mut Printed)
+}
+
+/// Prints an operation's output as it comes.
+struct Printed;
+
+impl broker::Sink for Printed {
+    fn out(&mut self, text: &str) {
+        println!("{text}");
+    }
+
+    fn err(&mut self, text: &str) {
+        eprintln!("{text}");
+    }
 }
 
 /// The broker of the lead running this loopherd, if a lead runs it.
@@ -1522,13 +1559,13 @@ fn spawn_waiter(name: &str, waiter: lock::Lock) -> Result<()> {
 fn run_broker(lead: &str) -> Result<i32> {
     let paths = Paths::from_env().context("herd")?;
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    let served = broker::serve(
-        &CliHerdr,
-        &mut ledger,
-        &paths,
-        lead,
-        Duration::from_millis(100),
-    )?;
+    let host = broker::Host {
+        herdr: &CliHerdr,
+        procs: &process::ProcFs,
+        claude_dir: install_hook::claude_dir().ok(),
+        process: own_process()?,
+    };
+    let served = broker::serve(&host, &mut ledger, &paths, lead, Duration::from_millis(100))?;
     if served == broker::Served::AlreadyRunning {
         eprintln!("loopherd broker: a broker already serves {lead}");
     }
@@ -2231,6 +2268,8 @@ fn own_pane() -> Option<String> {
 }
 
 fn run_spawn(args: SpawnArgs) -> Result<i32> {
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    broker::refuse_spawn(own_broker().as_ref(), &ledger)?;
     let prompt = match &args.prompt_file {
         Some(path) => Some(Prompt {
             source: format!("--prompt-file {}", path.display()),
@@ -2269,30 +2308,15 @@ fn run_spawn(args: SpawnArgs) -> Result<i32> {
 }
 
 fn run_add(args: AddArgs) -> Result<i32> {
-    let paths = Paths::from_env().context("herd")?;
-    let req = AddRequest {
+    let op = broker::Op::Add {
         herd: args.herd,
         template: args.template,
         params: args.params,
         claude_args: args.claude_args,
-        ready_timeout: Duration::from_secs(args.ready_timeout),
+        dry_run: args.dry_run,
+        ready_timeout_secs: args.ready_timeout,
     };
-    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    let inherited = inherited_workspace(&ledger)?;
-    if args.dry_run {
-        println!(
-            "{}",
-            dry_run(&CliHerdr, &paths, &req, inherited.as_deref())?
-        );
-        return Ok(0);
-    }
-    let added = add(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
-    let (message, code) = added.spawned.report(&added.name);
-    println!("{message}");
-    if let Some(warning) = added.warning {
-        eprintln!("loopherd add: warning: {warning}");
-    }
-    Ok(code)
+    run_op(own_broker().as_ref(), &op)
 }
 
 fn run_lead(args: LeadArgs) -> Result<i32> {
@@ -2319,39 +2343,12 @@ fn run_lead(args: LeadArgs) -> Result<i32> {
 }
 
 fn run_feed(herd: String, dry_run: bool, ready_timeout: u64) -> Result<i32> {
-    let paths = Paths::from_env().context("herd")?;
-    // A dry run changes nothing, so it must not block a real one.
-    let lock = match dry_run {
-        true => None,
-        false => Some(paths.lock_feed()?),
-    };
-    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    let req = FeedRequest {
+    let op = broker::Op::Feed {
         herd,
         dry_run,
-        ready_timeout: Duration::from_secs(ready_timeout),
-        command_timeout: remote_timeout()?,
-        own_pane: std::env::var("HERDR_PANE_ID").ok(),
-        own_lineage: own_lineage(),
-        own_socket: socket_from_env(),
-        mailboxes: ledger.reports_dir()?,
-        claude_dir: install_hook::claude_dir().ok(),
-        after_merge_timeout: AFTER_MERGE_TIMEOUT,
-        owner: own_process()?,
-        procs: &process::ProcFs,
+        ready_timeout_secs: ready_timeout,
     };
-    let inherited = inherited_workspace(&ledger)?;
-    let mut fed = feed(&CliHerdr, &mut ledger, &paths, &req, inherited.as_deref())?;
-    drop(lock);
-    for line in &fed.lines {
-        println!("{line}");
-    }
-    let printed = fed.lines.len();
-    run_after_merge(&mut ledger, &paths, &req, &mut fed)?;
-    for line in &fed.lines[printed..] {
-        println!("{line}");
-    }
-    Ok(fed.code)
+    run_op(own_broker().as_ref(), &op)
 }
 
 fn own_process() -> Result<Process> {
@@ -2361,9 +2358,6 @@ fn own_process() -> Result<Process> {
         .context("read this process's start time")?;
     Ok(Process { pid, start })
 }
-
-/// Long enough for `scripts/install` to build a release binary.
-const AFTER_MERGE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 fn run_init(args: InitArgs) -> Result<i32> {
     let diff = args.diff;
