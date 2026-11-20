@@ -223,7 +223,7 @@ fn held(file: &File) -> bool {
     unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) != 0 }
 }
 
-const SELF_RETIRE_REFUSED: &str = "lead-k's broker refused retire: lead-k is the lead itself; retire reaches only herd k's workers";
+const SELF_RETIRE_REFUSED: &str = "lead-k's broker refused retire: lead-k is the lead itself; retire reaches only herd k's workers; retiring a lead is the shepherd's or the human's job";
 
 fn assert_refused(state: &Path, out: &Output) {
     assert!(!out.status.success(), "{out:?}");

@@ -785,12 +785,13 @@ impl Broker<'_> {
             return Ok(Some(format!("{target} is the shepherd; {reach}")));
         }
         if target == lead {
-            let self_restart = match op {
+            let hint = match op {
                 Op::Restart { .. } => "; it restarts itself with loopherd restart --self",
+                Op::Retire { .. } => "; retiring a lead is the shepherd's or the human's job",
                 _ => "",
             };
             return Ok(Some(format!(
-                "{target} is the lead itself; {} reaches only herd {herd}'s workers{self_restart}",
+                "{target} is the lead itself; {} reaches only herd {herd}'s workers{hint}",
                 op.command()
             )));
         }
@@ -1601,10 +1602,16 @@ mod tests {
                 release_op(target, false),
             ] {
                 let command = op.command();
+                let hint = match (target, &op) {
+                    ("lead-h", Op::Retire { .. }) => {
+                        "; retiring a lead is the shepherd's or the human's job"
+                    }
+                    _ => "",
+                };
                 assert_eq!(
                     format!("{:#}", world.client().call(&op).unwrap_err()),
                     format!(
-                        "lead-h's broker refused {command}: {}",
+                        "lead-h's broker refused {command}: {}{hint}",
                         why.replace("{command}", command)
                     )
                 );
