@@ -2,13 +2,15 @@
 
 use anyhow::{Result, anyhow};
 
-use crate::broker::MAX_READ_LINES;
 use crate::herdr::Herdr;
 use crate::ledger::Ledger;
 use crate::matching::live_agent;
 
 /// How many lines `loopherd read` gives unless asked for more.
 pub const DEFAULT_LINES: usize = 40;
+
+/// The most lines `loopherd read` gives.
+pub const MAX_READ_LINES: usize = 1000;
 
 /// The last `lines` lines of member `name`'s live agent, unwrapped, at most
 /// [`MAX_READ_LINES`]. Read-only.

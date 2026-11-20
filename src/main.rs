@@ -346,7 +346,7 @@ enum Command {
         name: String,
         /// How many lines, up to 1000.
         #[arg(long, default_value_t = read::DEFAULT_LINES as u64,
-              value_parser = clap::value_parser!(u64).range(1..=broker::MAX_READ_LINES as u64))]
+              value_parser = clap::value_parser!(u64).range(1..=read::MAX_READ_LINES as u64))]
         lines: u64,
     },
     /// Give a member that wrote its handoff a fresh session in the same pane:

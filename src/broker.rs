@@ -89,9 +89,6 @@ pub enum Op {
     },
 }
 
-/// The most lines `loopherd read` gives.
-pub const MAX_READ_LINES: usize = 1000;
-
 /// What an operation acts on, for the broker's reach rule.
 enum Reach<'a> {
     Member(&'a str),
