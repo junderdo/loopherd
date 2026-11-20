@@ -52,7 +52,8 @@ Backlog cards into members `lh-<n>` on `<type>/LH-<n>-<slug>`.
   finish the steps by hand. Once a merge that changes the broker is
   installed, run `loopherd broker-restart <lead>` for each lead in the
   background: it waits for the request its broker is serving, then starts
-  one on the new binary.
+  one on the new binary. `loopherd doctor`, which `scripts/install` runs
+  last, warns for each broker still on another binary.
 
 - **Triage** (the skill's Triage, D60): the herd file's `[queue] backlog`
   (see [examples/loopherd-cards-routed.toml](../examples/loopherd-cards-routed.toml))
