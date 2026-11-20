@@ -590,7 +590,7 @@ mod tests {
     use crate::ledger::{AgentRecord, MemLedger};
     use crate::report::{Background, Body, Entry, Stop, Tally, append};
     use crate::subagent_view::screens::{MAIN_VIEW, SUBAGENT_PICKER, SUBAGENT_PROMPT};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn record(name: &str) -> AgentRecord {
         AgentRecord {
@@ -1476,6 +1476,55 @@ mod tests {
 
         assert!(!result.unwrap().contains("warning"));
         assert_eq!(ledger.0["lh-1"].unsandboxed, None);
+    }
+
+    /// Plants the zero-byte, read-only files Claude's sandbox leaves in a
+    /// lead worktree's `.claude/` for protected paths that didn't exist.
+    fn plant_sandbox_placeholders(worktree: &Path) -> Vec<PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = worktree.join(".claude");
+        fs::create_dir_all(&dir).unwrap();
+        [
+            "settings.json",
+            "settings.local.json",
+            "agents",
+            "hooks",
+            "launch.json",
+        ]
+        .iter()
+        .map(|name| {
+            let file = dir.join(name);
+            fs::write(&file, "").unwrap();
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o444)).unwrap();
+            file
+        })
+        .collect()
+    }
+
+    #[test]
+    fn a_lead_whose_worktree_holds_sandbox_placeholders_is_restarted_and_they_stay() {
+        let w = World::new();
+        w.handed_off();
+        let repo = w.state.path().join("repo");
+        fs::write(
+            w.paths().herds.join("h.toml"),
+            format!("repo = \"{}\"\n[lead]\nprompt = \"go\"\n", repo.display()),
+        )
+        .unwrap();
+        w.prepared();
+        let worktree = crate::worktree::worktree_path(&repo, "lh-1");
+        let placeholders = plant_sandbox_placeholders(&worktree);
+
+        let (result, _) = w.restart_as(false, true, None, &|r| {
+            as_lead(r);
+            r.worktree = Some(worktree.clone());
+        });
+
+        let out = result.unwrap();
+        assert!(!out.contains("warning"), "{out}");
+        for file in placeholders {
+            assert_eq!(fs::read(&file).unwrap(), b"", "{} stays", file.display());
+        }
     }
 
     #[test]

@@ -614,11 +614,13 @@ fn loosenings(home: &Path, worktree: &Path, own: &Value) -> Vec<String> {
     found
 }
 
-/// A settings file's contents; `None` when it's missing, or, noted in
-/// `found`, when it can't be read or parsed.
+/// A settings file's contents; `None` when it's missing or empty, or, noted
+/// in `found`, when it can't be read or parsed. Claude's sandbox leaves a
+/// zero-byte placeholder for a protected settings file that didn't exist.
 fn read_settings(file: &Path, found: &mut Vec<String>) -> Option<Value> {
     let shown = file.display();
     match std::fs::read_to_string(file) {
+        Ok(text) if text.is_empty() => None,
         Ok(text) => match serde_json::from_str(&text) {
             Ok(settings) => Some(settings),
             Err(e) => {
