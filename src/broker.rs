@@ -150,17 +150,16 @@ impl Op {
         }
     }
 
-    /// How long a lead waits for its broker to answer.
-    fn answer_within(&self) -> Duration {
+    /// How long a lead waits for its broker to answer, `remote` being the
+    /// broker's git timeout.
+    fn answer_within(&self, remote: Duration) -> Duration {
         match self {
             Op::Tell { .. } | Op::Prompt { .. } | Op::RestartSelf => Duration::from_secs(120),
             // The report is written already; a label isn't worth waiting out a feed for.
             Op::Label { .. } => Duration::from_secs(10),
             // Its settle timeout, with room for herdr and the member's view.
             Op::Restart { .. } => Duration::from_secs(300),
-            Op::Retire { .. } | Op::Release { .. } => {
-                origin_wait(crate::worktree::remote_timeout())
-            }
+            Op::Retire { .. } | Op::Release { .. } => origin_wait(remote),
             // Each member may take its ready timeout, then after_merge its own.
             Op::Feed { .. } => Duration::from_secs(4 * 60 * 60),
             Op::Add {
@@ -266,11 +265,10 @@ fn label(ctx: &mut Ctx, question: &str, sink: &mut dyn Sink) -> Result<i32> {
 }
 
 /// How long a lead waits on an operation that asks origin a few things in
-/// turn, each within `remote`, the git timeout: release asks up to nine.
-fn origin_wait(remote: Result<Duration>) -> Duration {
-    // The broker's git reads its own timeout; a bad one here only sets this wait.
-    let remote = remote.unwrap_or(crate::worktree::REMOTE_TIMEOUT);
-    remote * 9 + Duration::from_secs(300)
+/// turn, each within `remote`, the git timeout: release usually asks nine,
+/// and a fetch may retry once or `remote set-head` join them, so twice that.
+fn origin_wait(remote: Duration) -> Duration {
+    remote * 18 + Duration::from_secs(300)
 }
 
 /// Lead `lead`'s own unretired record, in this herdr; by name, since a stale
@@ -630,6 +628,10 @@ pub fn serve(
     let Some(_lock) = take_lock(paths, lead)? else {
         return Ok(Served::AlreadyRunning);
     };
+    // Its lead sizes waits on origin by the broker's git timeout, not its own.
+    if let Ok(remote) = crate::worktree::remote_timeout() {
+        let _ = std::fs::write(lock_file(paths, lead), remote.as_secs().to_string());
+    }
     let herd = sandbox::Lead::kept(paths, lead)?
         .ok_or_else(|| anyhow!("{lead} has no launch record, so its broker has no herd"))?
         .herd;
@@ -1065,7 +1067,9 @@ impl Client {
     fn answer(&self, id: &str, op: &Op) -> Result<(String, String, i32)> {
         let lead = &self.lead;
         let reply = self.replies.join(format!("{id}.json"));
-        let answer_within = self.answer_within.unwrap_or_else(|| op.answer_within());
+        let answer_within = self
+            .answer_within
+            .unwrap_or_else(|| op.answer_within(broker_remote_timeout(&self.lock)));
         let given_up = Instant::now() + answer_within;
         loop {
             if let Ok(text) = std::fs::read(&reply) {
@@ -1183,6 +1187,18 @@ pub fn start(paths: &Paths, lead: &str) -> Result<bool> {
 /// Whether a broker serves `lead` now.
 pub fn running(paths: &Paths, lead: &str) -> bool {
     held(&lock_file(paths, lead))
+}
+
+/// The git timeout the broker holding `lock` recorded; an older broker's
+/// record is empty, so this loopherd's own stands in.
+fn broker_remote_timeout(lock: &Path) -> Duration {
+    std::fs::read_to_string(lock)
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| {
+            crate::worktree::remote_timeout().unwrap_or(crate::worktree::REMOTE_TIMEOUT)
+        })
 }
 
 fn held(lock: &Path) -> bool {
@@ -1955,6 +1971,36 @@ mod tests {
         assert_eq!(second.unwrap(), Served::AlreadyRunning);
         world.retire("lead-h");
         assert_eq!(serving.join().unwrap().0.unwrap(), Served::Retired);
+    }
+
+    #[test]
+    fn a_serving_broker_records_its_git_timeout_for_its_leads_waits() {
+        let world = World::new();
+        let serving = world.serve(FakeHerdr::new(&[]));
+
+        let lock = lock_file(&world.paths, "lead-h");
+        let recorded = broker_remote_timeout(&lock);
+
+        let own = crate::worktree::remote_timeout().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&lock).unwrap(),
+            own.as_secs().to_string()
+        );
+        assert_eq!(recorded, own);
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_lead_sizes_its_wait_by_the_brokers_git_timeout_else_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("lead-h.lock");
+        let own = crate::worktree::remote_timeout().unwrap();
+
+        std::fs::write(&lock, "7").unwrap();
+        assert_eq!(broker_remote_timeout(&lock), Duration::from_secs(7));
+        std::fs::write(&lock, "").unwrap();
+        assert_eq!(broker_remote_timeout(&lock), own);
     }
 
     #[test]
@@ -2739,12 +2785,11 @@ mod tests {
     }
 
     #[test]
-    fn a_lead_waits_on_retire_and_release_for_nine_remote_calls_and_room_for_herdr() {
+    fn a_lead_waits_on_retire_and_release_for_eighteen_remote_calls_and_room_for_herdr() {
         let secs = |s| Duration::from_secs(s);
 
-        assert_eq!(origin_wait(Ok(secs(120))), secs(1380));
-        assert_eq!(origin_wait(Ok(secs(3600))), secs(9 * 3600 + 300));
-        assert_eq!(origin_wait(Err(anyhow!("bad timeout"))), secs(1380));
+        assert_eq!(origin_wait(secs(120)), secs(18 * 120 + 300));
+        assert_eq!(origin_wait(secs(3600)), secs(18 * 3600 + 300));
     }
 
     #[test]
