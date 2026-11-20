@@ -570,7 +570,7 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
              except OSError as e:\n            \
              out.write(f'{{path}}\\t{{e.strerror}}\\n')\n    \
              env = dict(os.environ, XDG_STATE_HOME={state:?}, LOOPHERD_CONFIG_DIR={config:?})\n    \
-             for args in [['report', '--kind', 'note', 'sandbox probe'], ['watch', '--timeout', '1']]:\n        \
+             for args in [['report', '--kind', 'note', 'sandbox probe'], ['watch', '--timeout', '1'], ['revive'], ['prompt', 'no-such-member']]:\n        \
              run = subprocess.run([{bin:?}] + args, env=env, capture_output=True, text=True)\n        \
              out.write(f'{{args[0]}}\\t{{run.returncode}}\\t{{run.stderr.strip()}}\\n')\n    \
              open({waiting:?}, 'w').close()\n    \
@@ -698,11 +698,23 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
             .is_some_and(|line| ["watch\t0\t", "watch\t2\t"].contains(line)),
         "{probed}"
     );
+    // Run in the sandbox, which hides the lead's Claude from the parent-pid walk.
+    assert!(
+        ran.get(2).is_some_and(|line| line
+            .starts_with("revive\t1\tloopherd revive: refused: revive is the shepherd's")),
+        "{probed}"
+    );
+    assert!(
+        ran.get(3).is_some_and(|line| line.starts_with(
+            "prompt\t1\tloopherd prompt: refused: this loopherd runs in a lead's sandbox"
+        )),
+        "{probed}"
+    );
     let after: Vec<String> = replaced
         .iter()
         .map(|p| format!("replaced {}\tRead-only file system", p.display()))
         .collect();
-    assert_eq!(ran[2..], after, "{probed}");
+    assert_eq!(ran[4..], after, "{probed}");
     let mail = std::fs::read_to_string(state_dir.join(format!("reports/{name}.jsonl"))).unwrap();
     assert!(mail.contains("sandbox probe"), "{mail}");
 }

@@ -1028,10 +1028,10 @@ fn run_release(name: &str, keep_branch: bool, drop_branch: bool) -> Result<i32> 
 }
 
 fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32> {
+    let refusal = "refused: revive is the shepherd's or the human's, and a lead runs this loopherd";
     let paths = Paths::from_env()?;
-    // A sandboxed lead's revive would start Claudes before failing on the ledger.
     if !dry_run && sandbox::calling_lead(&paths, &process::ProcFs, std::process::id()).is_some() {
-        bail!("refused: revive is the shepherd's or the human's, and a lead runs this loopherd");
+        bail!(refusal);
     }
     let startup = match startup {
         false => None,
@@ -1051,6 +1051,11 @@ fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32>
         }
     };
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    // A sandboxed lead's revive would start Claudes before failing on the ledger. Its
+    // sandbox hides the lead from calling_lead, so a read-only ledger gives it away.
+    if !dry_run && ledger.read_only()? {
+        bail!(refusal);
+    }
     let req = ReviveRequest {
         name,
         dry_run,
@@ -1317,6 +1322,7 @@ fn open_in_browser(url: &str) -> Result<()> {
 
 fn run_prompt(name: &str, force: bool) -> Result<i32> {
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    refuse_inside_sandbox(&ledger, &format!("loopherd prompt {name}"))?;
     let paths = Paths::from_env()?;
     let caller = sandbox::calling_lead(&paths, &process::ProcFs, std::process::id());
     prompt(
@@ -1328,6 +1334,18 @@ fn run_prompt(name: &str, force: bool) -> Result<i32> {
     )?;
     println!("prompted {name}");
     Ok(0)
+}
+
+/// Refuses before anything reaches herdr when this run can't write the ledger: a lead's
+/// command that misses its sandbox exclusion runs inside, where its herd isn't checked.
+fn refuse_inside_sandbox(ledger: &FileLedger, command: &str) -> Result<()> {
+    if ledger.read_only()? {
+        bail!(
+            "refused: this loopherd runs in a lead's sandbox, which can't write the ledger; \
+             run `{command}` as a Bash command of its own, which runs outside the sandbox"
+        );
+    }
+    Ok(())
 }
 
 fn run_tell(name: &str, text: Option<String>, text_file: Option<PathBuf>) -> Result<i32> {
@@ -1347,6 +1365,7 @@ fn run_tell(name: &str, text: Option<String>, text_file: Option<PathBuf>) -> Res
 
 fn run_restart(name: &str, force: bool) -> Result<i32> {
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    refuse_inside_sandbox(&ledger, &format!("loopherd restart {name}"))?;
     let state = ledger.dir()?;
     let paths = Paths::from_env()?;
     let own_pane = own_pane();
