@@ -648,11 +648,12 @@ pub fn serve<L: Ledger + Clone + Send>(
     let Some(_lock) = take_lock(paths, lead)? else {
         return Ok(Served::AlreadyRunning);
     };
-    // Its lead sizes waits on origin by the broker's git timeout, not its own. A plain
-    // write is safe: the lead's sandbox can't write config/broker to plant a link.
-    if let Ok(remote) = crate::worktree::remote_timeout() {
-        let _ = std::fs::write(lock_file(paths, lead), remote.as_secs().to_string());
-    }
+    // Its lead sizes waits on origin by the broker's git timeout, not its own, and trusts
+    // a missing start mark only from a broker that writes them. A plain write is safe:
+    // the lead's sandbox can't write config/broker to plant a link.
+    let remote =
+        crate::worktree::remote_timeout().map_or(String::new(), |r| r.as_secs().to_string());
+    let _ = std::fs::write(lock_file(paths, lead), format!("{remote}\n{MARKS}\n"));
     let herd = sandbox::Lead::kept(paths, lead)?
         .ok_or_else(|| anyhow!("{lead} has no launch record, so its broker has no herd"))?
         .herd;
@@ -835,7 +836,12 @@ impl Broker<'_> {
             return;
         }
         let started = replies.join(format!("{id}.started"));
-        if std::fs::write(&started, "").is_err() {
+        if let Err(e) = std::fs::write(&started, "") {
+            let why = format!(
+                "the broker couldn't mark {} started, so it didn't run it: {e}",
+                op.command()
+            );
+            write_reply(replies, id, &Reply::Failed(why));
             requests.remove(name);
             return;
         }
@@ -1245,16 +1251,17 @@ impl Client {
                 if reply.exists() {
                     continue;
                 }
+                if labelling {
+                    bail!("{lead}'s broker was busy, so {NO_LABEL}");
+                }
                 let waited = humantime::format_duration(answer_within);
-                if self.replies.join(format!("{id}.started")).exists() {
+                let started = self.replies.join(format!("{id}.started")).exists();
+                if started || !marks_starts(&self.lock) {
                     bail!(
                         "{lead}'s broker didn't answer {} within {waited}; it may still be carrying it out, \
                          so check before asking again, and check the broker with loopherd doctor",
                         op.command(),
                     );
-                }
-                if labelling {
-                    bail!("{lead}'s broker was busy, so {NO_LABEL}");
                 }
                 bail!(
                     "{lead}'s broker didn't start {} within {waited}, so it was not started and is \
@@ -1352,11 +1359,18 @@ pub fn running(paths: &Paths, lead: &str) -> bool {
 fn broker_remote_timeout(lock: &Path) -> Duration {
     std::fs::read_to_string(lock)
         .ok()
-        .and_then(|text| text.trim().parse().ok())
+        .and_then(|text| text.lines().next()?.trim().parse().ok())
         .map(Duration::from_secs)
         .unwrap_or_else(|| {
             crate::worktree::remote_timeout().unwrap_or(crate::worktree::REMOTE_TIMEOUT)
         })
+}
+
+/// What a broker's lock holds once it marks each request it starts; an older one doesn't.
+const MARKS: &str = "marks";
+
+fn marks_starts(lock: &Path) -> bool {
+    std::fs::read_to_string(lock).is_ok_and(|text| text.lines().any(|line| line == MARKS))
 }
 
 fn held(lock: &Path) -> bool {
@@ -2164,7 +2178,7 @@ mod tests {
         let own = crate::worktree::remote_timeout().unwrap();
         assert_eq!(
             std::fs::read_to_string(&lock).unwrap(),
-            own.as_secs().to_string()
+            format!("{}\nmarks\n", own.as_secs())
         );
         assert_eq!(recorded, own);
         world.retire("lead-h");
@@ -2404,6 +2418,7 @@ mod tests {
     fn a_request_the_lead_gave_up_on_is_withdrawn() {
         let world = World::new();
         let _held = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+        std::fs::write(lock_file(&world.paths, "lead-h"), "300\nmarks\n").unwrap();
         let client = Client {
             answer_within: Some(Duration::from_millis(50)),
             ..world.client()
@@ -2422,44 +2437,50 @@ mod tests {
     }
 
     #[test]
-    fn a_request_the_broker_started_but_did_not_finish_in_time_may_still_be_running() {
+    fn a_broker_that_writes_no_start_marks_may_still_be_running_what_timed_out() {
         let world = World::new();
         let _held = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+        std::fs::write(lock_file(&world.paths, "lead-h"), "300").unwrap();
         let client = Client {
             answer_within: Some(Duration::from_millis(50)),
             ..world.client()
         };
         std::fs::create_dir_all(requests_dir(&world.paths, "lead-h")).unwrap();
-        let requests = requests_dir(&world.paths, "lead-h");
-        let replies = replies_dir(&world.paths, "lead-h");
-        std::fs::create_dir_all(&replies).unwrap();
-        // Marks the request started, as a broker does when it takes one up.
-        let starting = std::thread::spawn(move || {
-            let given_up = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < given_up {
-                let entry = std::fs::read_dir(&requests)
-                    .unwrap()
-                    .filter_map(|e| e.ok())
-                    .next();
-                if let Some(id) = entry.and_then(|e| {
-                    let name = e.file_name().into_string().ok()?;
-                    name.strip_suffix(".json").map(str::to_string)
-                }) {
-                    std::fs::write(replies.join(format!("{id}.started")), "").unwrap();
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        });
 
         let err = client.call(&tell("lh-1", "hi")).unwrap_err();
 
-        starting.join().unwrap();
         assert_eq!(
             format!("{err:#}"),
             "lead-h's broker didn't answer tell within 50ms; it may still be carrying it out, \
              so check before asking again, and check the broker with loopherd doctor"
         );
+        let lock = lock_file(&world.paths, "lead-h");
+        assert_eq!(broker_remote_timeout(&lock), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn a_feed_the_broker_started_but_did_not_finish_in_time_may_still_be_running() {
+        let (world, herdr, entered, release) = slow_feed();
+        let serving = world.serve(herdr);
+        let client = Client {
+            answer_within: Some(Duration::from_millis(300)),
+            ..world.client()
+        };
+
+        let err = client.call(&feed("h")).unwrap_err();
+
+        assert!(
+            entered.try_recv().is_ok(),
+            "the feed never reached start_claude"
+        );
+        assert_eq!(
+            format!("{err:#}"),
+            "lead-h's broker didn't answer feed within 300ms; it may still be carrying it out, \
+             so check before asking again, and check the broker with loopherd doctor"
+        );
+        drop(release);
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
     }
 
     /// A world whose herd h's queue holds PR 7, and a herdr whose `start_claude`
@@ -2540,9 +2561,23 @@ mod tests {
         );
         drop(release);
         assert_eq!(fed.join().unwrap().unwrap().2, 0);
-        assert!(entered.try_recv().is_err(), "a second start_claude ran");
         world.retire("lead-h");
         serving.join().unwrap().0.unwrap();
+        // Only the first feed was marked started or answered: the withdrawn two never ran.
+        let replies: Vec<_> = std::fs::read_dir(replies_dir(&world.paths, "lead-h"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(
+            replies.iter().filter(|n| n.ends_with(".json")).count(),
+            1,
+            "{replies:?}"
+        );
+        assert_eq!(
+            replies.iter().filter(|n| n.ends_with(".started")).count(),
+            1,
+            "{replies:?}"
+        );
     }
 
     #[test]
