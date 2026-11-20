@@ -939,6 +939,13 @@ fn run_setup(args: SetupArgs) -> Result<i32> {
             .map(|(input, output)| setup::Tty { input, output }),
     )?;
     lines.iter().for_each(|line| println!("{line}"));
+    if let Ok(sandbox::Sockets::Open(sandbox::Unavailable { why, fix })) = sandbox::probe() {
+        println!(
+            "note: Claude Code's sandbox can't block Unix sockets here ({why}), so a sandboxed \
+             lead can reach herdr, your ssh agent and WSL2's Windows interop; to close them: \
+             {fix}"
+        );
+    }
     Ok(0)
 }
 

@@ -3098,6 +3098,7 @@ args = ["--model", "opus"]
             role: lead.then_some(crate::ledger::Role::Lead),
             after_merge: None,
             unsandboxed: None,
+            sockets_unblocked: None,
             earlier: vec![],
             unknown: Default::default(),
         }

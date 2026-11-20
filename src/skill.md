@@ -639,7 +639,10 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   asks the human to add it. A lead has no Unix sockets unless its herd's
   `[lead] unix_sockets = "all"` (`loopherd herds` shows it), which reopens
   herdr, the ssh agent and WSL2 interop to it; `lead`, `revive` and doctor
-  warn of it, and only the human sets it. What still gets past the
+  warn of it, and only the human sets it. Where Claude Code's seccomp
+  filter can't block them (doctor says so, naming `npm install -g
+  @anthropic-ai/sandbox-runtime`), `require` refuses the lead and
+  `prefer` starts it as `(lead, sockets open)`. What still gets past the
   sandbox: workers run unsandboxed, so a lead can have one act for it,
   and most of the state dir stays writable to it. Set `prefer` only
   when the human says so; doctor names those herds and leads.
