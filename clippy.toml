@@ -1,0 +1,4 @@
+disallowed-methods = [
+  { path = "std::fs::File::lock", reason = "waits with no bound; use lock::Lock::wait" },
+  { path = "std::fs::File::lock_shared", reason = "waits with no bound; use lock::Lock::wait" },
+]

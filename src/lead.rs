@@ -503,6 +503,7 @@ mod tests {
                             format!("{root}/state/broker/lead-h/requests"),
                         ],
                         "denyWrite": [format!("{root}/config"), "/home/me/.claude"],
+                        "denyRead": [format!("{root}/state/locks")],
                     },
                     "excludedCommands": ["loopherd watch", "loopherd watch *"],
                 },
@@ -1127,6 +1128,7 @@ mod tests {
                 "/home/me/.git-credentials",
                 "/home/me/.config/git/credentials",
                 "/home/me/.cache/git/credential",
+                setup.paths().locks_dir().display().to_string(),
             ])
         );
         let deny = settings["permissions"]["deny"].as_array().unwrap();
@@ -1145,6 +1147,38 @@ mod tests {
         );
         let mode = fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "the settings hold the token");
+    }
+
+    #[test]
+    fn a_sandboxed_lead_cant_read_the_locks_its_broker_waits_on() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let herdr = herdr();
+
+        lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        let (_, settings) = started_settings(&herdr);
+        let locks = setup.paths().locks_dir();
+        let after_merge = locks.join("after-merge.lock");
+        let denied: Vec<PathBuf> = settings["sandbox"]["filesystem"]["denyRead"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|path| PathBuf::from(path.as_str().unwrap()))
+            .collect();
+        assert!(
+            denied.iter().any(|path| after_merge.starts_with(path)),
+            "{denied:?}"
+        );
+        assert!(locks.is_dir(), "a missing dir isn't denied on Linux");
+        let allowed = settings["sandbox"]["filesystem"]["allowRead"].to_string();
+        assert!(!allowed.contains("locks"), "{allowed}");
     }
 
     #[test]
@@ -1167,9 +1201,10 @@ mod tests {
 
             let (_, settings) = started_settings(&herdr);
             assert_eq!(settings.get("env"), None, "{lead_table}");
+            let locks = setup.paths().locks_dir().display().to_string();
             assert_eq!(
-                settings["sandbox"]["filesystem"].get("denyRead"),
-                None,
+                settings["sandbox"]["filesystem"]["denyRead"],
+                serde_json::json!([locks]),
                 "{lead_table}"
             );
             let deny = settings["permissions"]["deny"].to_string();
@@ -1412,6 +1447,29 @@ mod tests {
                 }),
             "{mailbox:?}"
         );
+    }
+
+    #[test]
+    fn a_user_allow_read_over_the_locks_counts_and_one_elsewhere_doesnt() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let state = setup.root.join("state");
+        let paths = home_with_settings(
+            &setup,
+            &format!(r#"{{"sandbox": {{"filesystem": {{"allowRead": ["/srv", {state:?}]}}}}}}"#),
+        );
+
+        let started = lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        );
+
+        let refused = format!("{:#}", started.unwrap_err());
+        let opens = format!("allowRead opens {} to reads", state.display());
+        assert!(refused.contains(&opens), "{refused}");
+        assert!(!refused.contains("/srv"), "{refused}");
     }
 
     #[test]

@@ -123,7 +123,7 @@ fn lock(file: &Path) -> Result<Lock> {
         .write(true)
         .open(&path)
         .with_context(|| format!("open {}", path.display()))?;
-    Lock::wait(opened).with_context(|| format!("lock {}", path.display()))
+    Lock::wait(opened, crate::lock::BRIEF).with_context(|| format!("lock {}", path.display()))
 }
 
 fn read(file: &Path) -> Result<DocumentMut> {

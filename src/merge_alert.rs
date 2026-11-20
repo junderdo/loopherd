@@ -259,7 +259,8 @@ impl MergeAlerts {
             .open(&lock)
             .with_context(|| format!("open {}", lock.display()))?;
         // Two watches of one lead share the temporary name below.
-        let _held = Lock::wait(file).with_context(|| format!("lock {}", lock.display()))?;
+        let _held = Lock::wait(file, crate::lock::BRIEF)
+            .with_context(|| format!("lock {}", lock.display()))?;
         // Renamed into place, so a watch killed mid-write leaves the old state.
         let new = path.with_extension("merges.new");
         fs::write(&new, text).with_context(|| format!("write {}", new.display()))?;

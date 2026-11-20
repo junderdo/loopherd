@@ -263,6 +263,12 @@ impl Paths {
         self.feed_lock.parent().unwrap_or(&self.feed_lock)
     }
 
+    /// The state dir's `locks/`, which a sandboxed lead can't read, so it
+    /// can't take a lock there and wedge the process that waits on it.
+    pub fn locks_dir(&self) -> PathBuf {
+        self.state_dir().join("locks")
+    }
+
     /// `$LOOPHERD_CONFIG_DIR/herds`, else `$XDG_CONFIG_HOME/loopherd/herds`,
     /// defaulting to `~/.config/loopherd/herds`.
     pub fn from_env() -> Result<Paths> {
