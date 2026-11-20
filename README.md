@@ -208,6 +208,9 @@ as its main checkout. Then, in order:
    has no seccomp filter to block them, `loopherd doctor` and
    `loopherd setup` name `npm install -g @anthropic-ai/sandbox-runtime`,
    and the lead isn't started unless its `[lead]` sets `sandbox = "prefer"`.
+   What still gets past it: workers run unsandboxed, so a lead can have
+   one act for it (LH-284), and most of the state dir stays writable to it
+   (LH-298).
    Its `tell`, `read`, `status`, `feed`, `add`, `prompt`, `restart`,
    `retire` and `release` run in its broker, a process `loopherd lead`
    starts outside the sandbox, which acts only on the lead's own herd
