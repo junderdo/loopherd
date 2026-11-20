@@ -152,7 +152,7 @@ fn force_push_ruleset(bypass: &str) -> String {
 }
 
 #[test]
-fn makes_the_key_adds_it_creates_both_rulesets_and_says_how_to_make_the_token() {
+fn makes_the_key_and_its_ssh_host_adds_it_creates_both_rulesets_and_says_how_to_finish() {
     let setup = Setup::new(CREDENTIALS, "[]", "[]");
 
     let out = setup.run();
@@ -180,9 +180,27 @@ fn makes_the_key_adds_it_creates_both_rulesets_and_says_how_to_make_the_token() 
             force_push_ruleset("[]")
         )
     );
+    let ssh_config = setup.root.join("config/ssh/config");
+    let mode = fs::metadata(&ssh_config).unwrap().permissions().mode();
+    assert_eq!(
+        mode & 0o777,
+        0o600,
+        "ssh refuses an include others can write"
+    );
+    assert_eq!(
+        fs::read_to_string(&ssh_config).unwrap(),
+        format!(
+            "Host loopherd-h\n  HostName github.com\n  User git\n  IdentityFile \"{}\"\n  \
+             IdentitiesOnly yes\n  IdentityAgent none\n",
+            key.display()
+        )
+    );
     let token = setup.root.join("config/credentials/h.token");
     for line in [
         format!("made the deploy key {}", key.display()),
+        format!("wrote Host loopherd-h into {}", ssh_config.display()),
+        "first line of ~/.ssh/config".to_string(),
+        "   Include ~/config/ssh/config".to_string(),
         "added it to acme/widgets as a write deploy key".to_string(),
         "created ruleset loopherd: default branch".to_string(),
         "created ruleset loopherd: no force-push".to_string(),
@@ -210,6 +228,20 @@ fn a_rerun_keeps_the_key_already_added_and_updates_the_rulesets_in_place() {
     let rulesets =
         r#"[{"id":7,"name":"loopherd: default branch"},{"id":8,"name":"loopherd: no force-push"}]"#;
     let setup = Setup::new(&format!("{CREDENTIALS}\nrebase = true"), &keys, rulesets);
+    fs::create_dir_all(setup.root.join(".ssh")).unwrap();
+    fs::write(
+        setup.root.join(".ssh/config"),
+        "Include ~/config/ssh/config\nHost github.com\n  User git\n",
+    )
+    .unwrap();
+    fs::create_dir_all(setup.root.join("config/ssh")).unwrap();
+    let other = "Host loopherd-other\n  HostName github.com\n";
+    let matched = "Match host other.example\n  User me\n";
+    fs::write(
+        setup.root.join("config/ssh/config"),
+        format!("{other}host = loopherd-h\n  HostName old.example\n{matched}"),
+    )
+    .unwrap();
     fs::create_dir_all(setup.key().parent().unwrap()).unwrap();
     fs::copy(first.key(), setup.key()).unwrap();
     fs::write(format!("{}.pub", setup.key().display()), &public).unwrap();
@@ -249,6 +281,12 @@ fn a_rerun_keeps_the_key_already_added_and_updates_the_rulesets_in_place() {
         stdout.contains("updated ruleset loopherd: no force-push"),
         "{stdout}"
     );
+    assert!(!stdout.contains("~/.ssh/config"), "{stdout}");
+    let hosts = fs::read_to_string(setup.root.join("config/ssh/config")).unwrap();
+    assert!(hosts.starts_with(other), "{hosts}");
+    assert!(hosts.ends_with(matched), "{hosts}");
+    assert!(!hosts.contains("old.example"), "{hosts}");
+    assert_eq!(hosts.matches("loopherd-h\n").count(), 1, "{hosts}");
 }
 
 #[test]

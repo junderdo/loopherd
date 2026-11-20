@@ -509,25 +509,35 @@ mod tests {
         .unwrap();
 
         let (path, settings) = started_settings(&herdr);
-        let key = setup.root.join("config/credentials/h.key");
+        let fetch = "url.git@loopherd-h:acme/widgets.git.insteadOf";
+        let push = "url.git@loopherd-h:acme/widgets.git.pushInsteadOf";
         assert_eq!(
             settings["env"],
             serde_json::json!({
                 "GH_TOKEN": "github_pat_1",
-                "GIT_CONFIG_COUNT": "2",
-                "GIT_CONFIG_KEY_0": "core.sshCommand",
-                "GIT_CONFIG_VALUE_0": format!(
-                    "ssh -F /dev/null -i '{}' -o IdentitiesOnly=yes -o IdentityAgent=none \
-                     -o BatchMode=yes -o ProxyCommand='loopherd ssh-proxy %h %p'",
-                    key.display()
-                ),
-                "GIT_CONFIG_KEY_1": "url.git@github.com:acme/widgets.git.insteadOf",
+                "SSH_AUTH_SOCK": "",
+                "GIT_CONFIG_COUNT": "5",
+                "GIT_CONFIG_KEY_0": "credential.helper",
+                "GIT_CONFIG_VALUE_0": "",
+                "GIT_CONFIG_KEY_1": fetch,
                 "GIT_CONFIG_VALUE_1": "https://github.com/acme/widgets.git",
+                "GIT_CONFIG_KEY_2": push,
+                "GIT_CONFIG_VALUE_2": "https://github.com/acme/widgets.git",
+                "GIT_CONFIG_KEY_3": fetch,
+                "GIT_CONFIG_VALUE_3": "git@github.com:acme/widgets.git",
+                "GIT_CONFIG_KEY_4": push,
+                "GIT_CONFIG_VALUE_4": "git@github.com:acme/widgets.git",
             })
+        );
+        assert_eq!(
+            settings["sandbox"]["filesystem"]["allowRead"],
+            serde_json::json!(["/home/me/.ssh/config", "/home/me/.ssh/known_hosts"])
         );
         assert_eq!(
             settings["sandbox"]["filesystem"]["denyRead"],
             serde_json::json!([
+                "/home/me/.ssh",
+                "/home/me/.netrc",
                 "/home/me/.config/gh",
                 "/home/me/.git-credentials",
                 "/home/me/.config/git/credentials",
@@ -537,6 +547,8 @@ mod tests {
         assert_eq!(
             settings["permissions"]["deny"].as_array().unwrap()[2..],
             serde_json::json!([
+                "Read(//home/me/.ssh/**)",
+                "Read(//home/me/.netrc)",
                 "Read(//home/me/.config/gh/**)",
                 "Read(//home/me/.git-credentials)",
                 "Read(//home/me/.config/git/credentials)",

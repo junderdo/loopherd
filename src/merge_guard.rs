@@ -39,6 +39,12 @@ pub fn setup(paths: &Paths, herd: &str) -> Result<Vec<String>> {
         make_key(&files.key, herd, &slug)?;
         lines.push(format!("made the deploy key {}", files.key.display()));
     }
+    if credentials::write_host_block(paths, herd)? {
+        lines.push(format!(
+            "wrote Host loopherd-{herd} into {}",
+            credentials::ssh_config(paths).display()
+        ));
+    }
     let public = format!("{}.pub", files.key.display());
     let public_text = std::fs::read_to_string(&public).with_context(|| format!("read {public}"))?;
     let added: Vec<DeployKey> =
@@ -85,6 +91,9 @@ pub fn setup(paths: &Paths, herd: &str) -> Result<Vec<String>> {
             Some(&body),
         )?;
         lines.push(format!("{done} ruleset {name}"));
+    }
+    if credentials::ssh_missing(paths, herd).is_some() {
+        lines.push(include_step(paths));
     }
     lines.push(token_steps(&slug, herd, &files.token));
     Ok(lines)
@@ -188,6 +197,15 @@ fn gh(args: &[&str], input: Option<&str>) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn include_step(paths: &Paths) -> String {
+    format!(
+        "\nThe lead's git reaches GitHub as Host loopherd-<herd>, from loopherd's own ssh config. \
+         Add this as the first line of ~/.ssh/config, once for every herd (loopherd never \
+         writes there):\n   {}",
+        credentials::include_line(paths)
+    )
 }
 
 fn token_steps(slug: &str, herd: &str, token: &Path) -> String {

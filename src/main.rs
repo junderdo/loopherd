@@ -38,7 +38,6 @@ mod shepherd_restart;
 mod shepherd_resume;
 mod skill;
 mod spawn;
-mod ssh_proxy;
 mod stats;
 mod status;
 mod stop_hook;
@@ -366,10 +365,6 @@ enum Command {
     /// The detached waiter `restart --self` starts.
     #[command(hide = true)]
     RestartWait { name: String },
-    /// ssh's ProxyCommand for a lead guarded by credentials: relays to
-    /// `host:port` through `$HTTPS_PROXY`, the sandbox's only way out.
-    #[command(hide = true)]
-    SshProxy { host: String, port: u16 },
     /// Leave a report for the shepherd from the member running in this pane.
     /// The one command members run against the real state dir.
     Report {
@@ -733,11 +728,6 @@ fn main() -> ExitCode {
         Command::Add(args) => ("add", run_add(args)),
         Command::Init(args) => ("init", run_init(args)),
         Command::MergeGuard { herd } => ("merge-guard", run_merge_guard(&herd)),
-        Command::SshProxy { host, port } => {
-            let proxy = std::env::var("HTTPS_PROXY").ok();
-            let relayed = ssh_proxy::relay(&host, port, proxy.as_deref());
-            ("ssh-proxy", relayed.map(|()| 0))
-        }
         Command::Herds { settings } => ("herds", run_herds(settings)),
         Command::Herd { action } => ("herd", run_herd(action)),
         Command::LeadDefaults { set } => ("lead-defaults", run_lead_defaults(set)),

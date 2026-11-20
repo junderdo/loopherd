@@ -525,6 +525,7 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
             .iter()
             .map(|(path, _)| path.display().to_string())
             .collect();
+        sandbox["filesystem"]["allowRead"] = json!(crate::credentials::ssh_readable(&paths.home));
         deny.extend(human.iter().map(|(path, is_dir)| {
             let under = if *is_dir { "/**" } else { "" };
             format!("Read(/{}{under})", path.display())

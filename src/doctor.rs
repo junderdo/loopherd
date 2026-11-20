@@ -283,11 +283,13 @@ fn herd_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
                 ),
             )),
             Ok(Some(MergeGuard::Credentials)) => {
-                if let Some(missing) = crate::credentials::missing(paths, &herd) {
-                    let (detail, fix) = missing.split_once("; run ").unwrap_or((&missing, ""));
+                let missing = crate::credentials::missing(paths, &herd)
+                    .or_else(|| crate::credentials::ssh_missing(paths, &herd));
+                if let Some(missing) = missing {
+                    let fix = missing.fix.strip_prefix("run ").unwrap_or(&missing.fix);
                     checks.push(warning(
                         &format!("herd {herd} credentials"),
-                        detail.into(),
+                        missing.what,
                         fix.into(),
                     ));
                 }
@@ -1962,7 +1964,7 @@ mod tests {
     }
 
     #[test]
-    fn a_credentials_lead_missing_its_key_or_token_is_warned() {
+    fn a_credentials_lead_missing_its_key_token_or_ssh_host_is_warned() {
         let m = machine(&ALL);
         let repo = m.herd("h");
         m.herd_file(
@@ -1993,6 +1995,42 @@ mod tests {
         );
 
         std::fs::write(dir.join("h.token"), "github_pat_1").unwrap();
+        let human = m.dir.path().join(".ssh/config");
+        assert_eq!(
+            problems(&m, &herdr()),
+            [format!(
+                "warning herd h credentials: {} doesn't include loopherd's ssh config before its \
+                 first Host; fix: add Include ~/config/ssh/config as its first line",
+                human.display()
+            )]
+        );
+
+        std::fs::create_dir_all(human.parent().unwrap()).unwrap();
+        std::fs::write(&human, "Host *\n  User me\nInclude ~/config/ssh/config\n").unwrap();
+        assert!(problems(&m, &herdr())[0].contains("doesn't include"));
+
+        std::fs::write(&human, "host=*\n  User me\nInclude ~/config/ssh/config\n").unwrap();
+        assert!(problems(&m, &herdr())[0].contains("doesn't include"));
+
+        let ours = m.dir.path().join("config/ssh/config");
+        std::fs::write(
+            &human,
+            format!(
+                "# mine\ninclude ~/.ssh/conf.d/* \"{}\"\nHost *\n",
+                ours.display()
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            problems(&m, &herdr()),
+            [format!(
+                "warning herd h credentials: no current Host loopherd-h in {}; fix: loopherd \
+                 merge-guard h",
+                m.dir.path().join("config/ssh/config").display()
+            )]
+        );
+
+        crate::credentials::write_host_block(m.paths(), "h").unwrap();
         assert_eq!(problems(&m, &herdr()), Vec::<String>::new());
     }
 
