@@ -1514,6 +1514,9 @@ fn restart_broker_with(
     let Some(_restarting) = take_lock_at(&restart_file(paths, lead))? else {
         bail!("another loopherd broker-restart {lead} is running");
     };
+    let stop = stop_file(paths, lead);
+    // A killed restart's leftover, which a broker given its pid would obey.
+    let _ = std::fs::remove_file(&stop);
     if !running(paths, lead) {
         let pid = start().with_context(|| format!("start {lead}'s broker"))?;
         sink.out(&format!("started {lead}'s broker: pid {pid}"));
@@ -1534,7 +1537,6 @@ fn restart_broker_with(
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let stop = stop_file(paths, lead);
     write_replacing(&stop, &old.to_string())?;
     sink.out(&format!(
         "asked {lead}'s broker (pid {old}) to stop once its request in flight is answered"
@@ -1581,7 +1583,7 @@ fn asked_to_stop(paths: &Paths, lead: &str) -> bool {
 /// The broker pid the stop at `stop` names, while a restart holds `restart`;
 /// a restart that was killed leaves a stop nothing obeys.
 fn live_stop(stop: &Path, restart: &Path) -> Option<u32> {
-    if !held(restart) {
+    if !restarting(restart) {
         return None;
     }
     std::fs::read_to_string(stop).ok()?.trim().parse().ok()
@@ -1632,6 +1634,17 @@ const MARKS: &str = "marks";
 
 fn marks_starts(lock: &Path) -> bool {
     std::fs::read_to_string(lock).is_ok_and(|text| text.lines().any(|line| line == MARKS))
+}
+
+/// Whether a restart holds `restart` exclusively. Probed shared, so probes
+/// running at once never mistake each other for a restart.
+fn restarting(restart: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(restart) else {
+        return false;
+    };
+    // SAFETY: flock on a descriptor `file` keeps open; closing it drops a shared lock taken here.
+    let probed = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
+    probed != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK)
 }
 
 fn held(lock: &Path) -> bool {
@@ -3917,5 +3930,35 @@ mod tests {
             said.out.last().unwrap(),
             &format!("restarted lead-h's broker: pid {pid} stopped, pid 4242 serves")
         );
+    }
+
+    #[test]
+    fn probes_racing_each_other_never_make_a_dead_restarts_stop_live() {
+        let world = World::new();
+        let restart = restart_file(&world.paths, "lead-h");
+        std::fs::create_dir_all(restart.parent().unwrap()).unwrap();
+        std::fs::write(&restart, "").unwrap();
+        std::fs::write(
+            stop_file(&world.paths, "lead-h"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        let until = Instant::now() + Duration::from_millis(500);
+
+        let probing: Vec<_> = (0..2)
+            .map(|_| {
+                let paths = world.paths.clone();
+                std::thread::spawn(move || {
+                    let mut live = 0;
+                    while Instant::now() < until {
+                        live += usize::from(asked_to_stop(&paths, "lead-h"));
+                    }
+                    live
+                })
+            })
+            .collect();
+
+        let live: usize = probing.into_iter().map(|p| p.join().unwrap()).sum();
+        assert_eq!(live, 0);
     }
 }
