@@ -1276,6 +1276,20 @@ mod tests {
             self.ledger().record(lead).unwrap();
         }
 
+        /// Moves herd h's repo out of the state dir's tree, which a lead's
+        /// guard treats as the lead's to write; the repo lasts as long as the dir.
+        fn move_repo(&self) -> (tempfile::TempDir, PathBuf) {
+            let elsewhere = tempfile::tempdir().unwrap();
+            let repo = elsewhere.path().join("h");
+            std::fs::create_dir_all(repo.join(".git")).unwrap();
+            let herd_file = self.paths.herds.join("h.toml");
+            let text = std::fs::read_to_string(&herd_file).unwrap();
+            let old_repo = self.dir.path().join("repos/h");
+            let text = text.replace(old_repo.to_str().unwrap(), repo.to_str().unwrap());
+            std::fs::write(&herd_file, text).unwrap();
+            (elsewhere, repo)
+        }
+
         fn ledger(&self) -> FileLedger {
             FileLedger::new(self.dir.path().join("ledger.json"))
         }
@@ -1632,15 +1646,7 @@ mod tests {
     #[test]
     fn in_a_sandboxed_lead_s_pane_retire_and_release_go_through_its_broker_and_call_no_herdr() {
         let world = World::new();
-        // Outside the state dir's tree, which the lead's guard treats as the lead's to write.
-        let elsewhere = tempfile::tempdir().unwrap();
-        let repo = elsewhere.path().join("h");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        let herd_file = world.paths.herds.join("h.toml");
-        let text = std::fs::read_to_string(&herd_file).unwrap();
-        let old_repo = world.dir.path().join("repos/h");
-        let text = text.replace(old_repo.to_str().unwrap(), repo.to_str().unwrap());
-        std::fs::write(&herd_file, text).unwrap();
+        let (_elsewhere, repo) = world.move_repo();
         let mut lh_1 = member("lh-1", Some("h"));
         lh_1.repo = repo;
         world.add(lh_1);
@@ -1724,6 +1730,65 @@ mod tests {
         let why = "refused: lh-9 isn't a member of lead-h's herd, and lead-h runs this loopherd";
         assert_eq!(format!("{:#}", close.unwrap_err()), why);
         assert_eq!(format!("{:#}", release.unwrap_err()), why);
+    }
+
+    #[test]
+    fn a_broker_s_plain_retire_removes_marks_and_records_tokens_in_the_state_dir_s_mailboxes() {
+        let world = World::new();
+        let mut worker = member("lh-1", Some("h"));
+        worker.session_id = Some("s1".into());
+        world.add(worker);
+        let mailboxes = world.paths.state_dir().join("reports");
+        std::fs::create_dir_all(&mailboxes).unwrap();
+        std::fs::write(mailboxes.join("lh-1.notified"), "question t1\n").unwrap();
+        std::fs::write(mailboxes.join("lh-1.blocked"), "").unwrap();
+        let stop = r#"{"at": "2026-11-01T09:30:00Z", "kind": "stop", "session": "s1", "crons": 0, "background": {"shells": 0, "subagents": 0, "other": 0}}"#;
+        std::fs::write(mailboxes.join("lh-1.jsonl"), format!("{stop}\n")).unwrap();
+        let claude_dir = world.dir.path().join("claude");
+        let project = claude_dir.join("projects/-r");
+        std::fs::create_dir_all(&project).unwrap();
+        let line = r#"{"type": "assistant", "timestamp": "2026-11-01T09:10:00Z", "message": {"id": "m1", "model": "opus", "usage": {"input_tokens": 1, "cache_creation_input_tokens": 2, "cache_read_input_tokens": 3, "output_tokens": 4}}}"#;
+        std::fs::write(project.join("s1.jsonl"), format!("{line}\n")).unwrap();
+        let herdr = FakeHerdr::new(&[]);
+        let mut ledger = world.ledger();
+        let mut ctx = Ctx {
+            herdr: &herdr,
+            ledger: &mut ledger,
+            paths: &world.paths,
+            procs: &crate::process::ProcFs,
+            claude_dir: Some(claude_dir),
+            caller: Caller {
+                pane: Some("p-lead-h".into()),
+                socket: None,
+                lineage: vec![],
+                workspace: Some("w1".into()),
+                process: me(),
+                lead: Some(ForLead {
+                    name: "lead-h".into(),
+                    herd: "h".into(),
+                }),
+            },
+            live: same_session,
+            spawn_waiter: no_waiter,
+            prs: &NO_PRS,
+        };
+        let mut kept = Kept::default();
+
+        let code = retire_op("lh-1", false, false)
+            .carry_out(&mut ctx, &mut kept)
+            .unwrap();
+
+        assert_eq!(
+            (code, kept.out, kept.err),
+            (0, vec!["retired lh-1".into()], vec![])
+        );
+        assert!(!mailboxes.join("lh-1.notified").exists());
+        assert!(!mailboxes.join("lh-1.blocked").exists());
+        let text = std::fs::read_to_string(mailboxes.join("lh-1.jsonl")).unwrap();
+        let usage: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        assert_eq!(usage["kind"], "usage", "{text}");
+        assert_eq!(usage["models"]["opus"]["output"], 4);
+        assert!(world.ledger().entries().unwrap()["lh-1"].retired);
     }
 
     #[test]
@@ -1901,6 +1966,76 @@ mod tests {
         let herdr = telling_herdr();
         run_here(&herdr, &world, None, &tell("lh-1", "hi")).unwrap();
         assert_eq!(herdr.prompts().len(), 1);
+    }
+
+    #[test]
+    fn a_hook_only_lead_s_release_goes_through_its_broker_by_its_pane() {
+        let world = World::new();
+        let socket = Path::new("/run/h.sock");
+        world
+            .ledger()
+            .update("lead-h", &mut |r| {
+                r.socket = Some(socket.into());
+                Ok(())
+            })
+            .unwrap();
+        let (_elsewhere, repo) = world.move_repo();
+        let mut done = member("lh-1", Some("h"));
+        done.repo = repo;
+        done.retired = true;
+        world.add(done);
+        let serving = world.serve(FakeHerdr::new(&[]));
+        let pane = tool_hook::Pane {
+            id: "p-lead-h",
+            socket: Some(socket),
+            lineage: &[],
+        };
+        let client = route(
+            &world.paths,
+            &world.ledger(),
+            &procs(&["claude"]),
+            50,
+            Some(&pane),
+        );
+        let own = FakeHerdr::new(&[]);
+
+        let (code, kept) =
+            run_here(&own, &world, client.as_ref(), &release_op("lh-1", false)).unwrap();
+
+        assert_eq!(client.unwrap().lead, "lead-h");
+        let released = "released lh-1: feed may spawn it again".to_string();
+        assert_eq!((code, kept.out), (0, vec![released]));
+        assert_eq!(own.calls(), 0);
+        assert!(
+            world.ledger().entries().unwrap()["lh-1"]
+                .released_at
+                .is_some()
+        );
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert!(herdr.calls() > 0);
+    }
+
+    #[test]
+    fn the_shepherd_s_release_runs_in_its_own_process_where_the_ledger_is_writable() {
+        let world = World::new();
+        let (_elsewhere, repo) = world.move_repo();
+        let mut done = member("lh-1", Some("h"));
+        done.repo = repo;
+        done.retired = true;
+        world.add(done);
+        let own = FakeHerdr::new(&[]);
+        assert!(world.route_from("w1:p-shepherd").is_none());
+
+        let (code, _) = run_here(&own, &world, None, &release_op("lh-1", false)).unwrap();
+
+        assert_eq!(code, 0);
+        assert!(own.calls() > 0);
+        assert!(
+            world.ledger().entries().unwrap()["lh-1"]
+                .released_at
+                .is_some()
+        );
     }
 
     #[test]
