@@ -1989,6 +1989,15 @@ mod tests {
         let serving = world.serve(FakeHerdr::new(&[]));
 
         let lock = lock_file(&world.paths, "lead-h");
+        // The broker records it just after taking the lock.
+        let given_up = Instant::now() + Duration::from_secs(5);
+        while std::fs::read_to_string(&lock).unwrap().is_empty() {
+            assert!(
+                Instant::now() < given_up,
+                "the broker never recorded its timeout"
+            );
+            std::thread::sleep(POLL);
+        }
         let recorded = broker_remote_timeout(&lock);
 
         let own = crate::worktree::remote_timeout().unwrap();
