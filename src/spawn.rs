@@ -288,6 +288,14 @@ impl SpawnRequest {
     pub fn branch(&self) -> Option<&str> {
         self.worktree.as_ref().and_then(Checkout::branch)
     }
+
+    /// The worktree spawn would use, with read-only git calls.
+    pub fn planned_worktree(&self) -> Result<Option<PathBuf>> {
+        self.worktree
+            .as_ref()
+            .map(|checkout| checkout.planned(&self.repo).context("worktree"))
+            .transpose()
+    }
 }
 
 /// What spawn would do, found with read-only herdr and git calls.
@@ -306,10 +314,7 @@ pub fn preview(
     inherited_workspace: Option<&str>,
 ) -> Result<Preview> {
     let (template, workspace, _) = check(herdr, req, inherited_workspace)?;
-    let worktree = match &req.worktree {
-        Some(checkout) => Some(checkout.planned(&req.repo).context("worktree")?),
-        None => None,
-    };
+    let worktree = req.planned_worktree()?;
     let cwd = worktree.as_ref().unwrap_or(&req.repo);
     let unborn = NewTab {
         tab_id: String::new(),
