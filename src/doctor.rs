@@ -306,8 +306,48 @@ fn herd_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
             ));
         }
         checks.extend(loosened_checks(paths, &herd));
+        checks.extend(mcp_server_checks(paths, &herd));
     }
     checks
+}
+
+/// Each `[lead] mcp_servers` name the human's user scope doesn't configure,
+/// for which the lead isn't started.
+fn mcp_server_checks(paths: &Paths, herd: &str) -> Vec<Check> {
+    let Ok(wanted) = crate::herd::lead_mcp_servers(paths, herd) else {
+        return vec![];
+    };
+    if wanted.is_empty() {
+        return vec![];
+    }
+    let file = crate::sandbox::user_mcp_file(paths);
+    let name = format!("herd {herd} mcp_servers");
+    let configured = match crate::sandbox::user_mcp_servers(paths) {
+        Ok(configured) => configured,
+        Err(e) => {
+            return vec![warning(
+                &name,
+                format!("{e:#}, so its lead isn't started"),
+                format!("fix {}", file.display()),
+            )];
+        }
+    };
+    wanted
+        .into_iter()
+        .filter(|server| !configured.contains_key(server))
+        .map(|server| {
+            warning(
+                &name,
+                format!(
+                    "{server:?} isn't in your user scope in {}, so its lead isn't started",
+                    file.display()
+                ),
+                format!(
+                    "claude mcp add --scope user {server} …, or drop it from [lead] mcp_servers"
+                ),
+            )
+        })
+        .collect()
 }
 
 /// What the human's own Claude settings loosen in `herd`'s lead's sandbox,
@@ -2116,6 +2156,62 @@ mod tests {
                  \"docker *\" outside it; fix: remove it"
             )),
             "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn user_settings_that_loosen_a_leads_sandbox_show_even_while_its_credentials_are_missing() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge_guard = \"credentials\"\n",
+                repo.to_str().unwrap()
+            ),
+        );
+        let file = user_settings(&m, r#"{"sandbox": {"excludedCommands": ["docker *"]}}"#);
+
+        let problems = problems(&m, &herdr());
+
+        assert!(
+            problems.contains(&format!(
+                "failure herd h sandbox settings: {}: sandbox.excludedCommands runs \
+                 \"docker *\" outside it; fix: remove it; a credentials lead never starts with \
+                 it, so the other way is loopherd herd set h lead.merge_guard '\"hook\"'",
+                file.display()
+            )),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_leads_mcp_server_missing_from_the_user_scope_is_warned() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge = true\n\
+                 mcp_servers = [\"playwright\", \"trello\"]\n",
+                repo.to_str().unwrap()
+            ),
+        );
+        let file = m.paths().home.join(".claude.json");
+        std::fs::write(
+            &file,
+            r#"{"mcpServers": {"playwright": {"command": "npx"}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            problems(&m, &herdr()),
+            [format!(
+                "warning herd h mcp_servers: \"trello\" isn't in your user scope in {}, so its \
+                 lead isn't started; fix: claude mcp add --scope user trello …, or drop it \
+                 from [lead] mcp_servers",
+                file.display()
+            )]
         );
     }
 

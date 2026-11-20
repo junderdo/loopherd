@@ -13,6 +13,7 @@ use crate::report::{self, Body, Entry};
 use crate::sandbox::{self, Probe};
 use crate::spawn::{Checkout, MemberOf, Prompt, SHELL_TIMEOUT, SpawnRequest, Spawned, spawn};
 use crate::template::Template;
+use crate::worktree::ensure_detached_worktree;
 
 pub struct LeadRequest {
     pub herd: String,
@@ -40,6 +41,8 @@ pub fn lead(
         herd: req.herd.clone(),
         args: spawn_req.claude_args.clone(),
     };
+    // Before the sandbox, so its checks read the worktree's project settings.
+    ensure_detached_worktree(&spawn_req.repo, &spawn_req.name).context("worktree")?;
     let launch = sandbox::prepare(paths, &spawn_req.name, &kept, req.sandbox).context("sandbox")?;
     spawn_req.claude_args.extend(launch.args());
     let spawned = spawn(herdr, ledger, &spawn_req, inherited_workspace)?;
@@ -1334,6 +1337,148 @@ mod tests {
         assert!(
             shown.contains(&format!("{}: can't parse it: ", file.display())),
             "{shown}"
+        );
+    }
+
+    #[test]
+    fn unreadable_user_settings_count_as_a_loosening() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let paths = Paths {
+            home: setup.root.join("home"),
+            ..setup.paths()
+        };
+        let file = setup.root.join("home/.claude/settings.json");
+        fs::create_dir_all(&file).unwrap();
+
+        let err = lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        let shown = format!("{err:#}");
+        assert!(
+            shown.contains(&format!("{}: can't read it: ", file.display())),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn user_rules_for_any_file_writing_tool_a_bypass_default_and_network_keys_count() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let paths = home_with_settings(
+            &setup,
+            r#"{"permissions": {"allow": ["Write", "NotebookEdit(//srv/**)", "MultiEdit(*)",
+                "Read(//srv/**)"], "defaultMode": "bypassPermissions"},
+                "sandbox": {"network": {"httpProxyPort": 8080, "socksProxyPort": 1080,
+                "allowLocalBinding": true, "allowMachLookup": ["com.apple.x"]}}}"#,
+        );
+
+        let err = lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        let file = setup.root.join("home/.claude/settings.json");
+        let file = file.display();
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "sandbox: lead-h can't run sandboxed: your Claude settings loosen its sandbox: \
+                 {file}: sandbox.network.httpProxyPort hands its network to your proxy, past \
+                 its own checks on local addresses; \
+                 {file}: sandbox.network.socksProxyPort hands its network to your proxy, past \
+                 its own checks on local addresses; \
+                 {file}: sandbox.network.allowLocalBinding lets it bind local ports on macOS; \
+                 {file}: sandbox.network.allowMachLookup opens macOS services to it; \
+                 {file}: permissions.allow opens Write to writes; \
+                 {file}: permissions.allow opens NotebookEdit(//srv/**) to writes; \
+                 {file}: permissions.allow opens MultiEdit(*) to writes; \
+                 {file}: permissions.defaultMode bypassPermissions lets its file tools write \
+                 anywhere; \
+                 remove those, or set [lead] sandbox = \"prefer\" in herd h to start it with \
+                 them as warnings"
+            )
+        );
+    }
+
+    #[test]
+    fn the_project_settings_a_new_lead_worktree_checks_out_count_for_their_permissions() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let seed = setup.root.join("seed");
+        fs::create_dir_all(seed.join(".claude")).unwrap();
+        fs::write(
+            seed.join(".claude/settings.json"),
+            r#"{"permissions": {"additionalDirectories": ["~/.local/bin"],
+                "allow": ["Edit(/src/**)", "Edit(/)"]},
+                "sandbox": {"excludedCommands": ["docker *"]}}"#,
+        )
+        .unwrap();
+        testing::git_in(&seed, &["add", ".claude"]);
+        testing::commit(&seed, "project settings");
+        let origin = setup.root.join("origin.git");
+        testing::git_in(
+            &seed,
+            &["push", "--quiet", origin.to_str().unwrap(), "main"],
+        );
+        let herdr = herdr();
+
+        let err = lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        let file = setup.worktree().join(".claude/settings.json");
+        let file = file.display();
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "sandbox: lead-h can't run sandboxed: your Claude settings loosen its sandbox: \
+                 {file}: permissions.additionalDirectories opens ~/.local/bin to writes; \
+                 {file}: permissions.allow opens Edit(/src/**) to writes; \
+                 remove those, or set [lead] sandbox = \"prefer\" in herd h to start it with \
+                 them as warnings"
+            )
+        );
+        assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
+    fn the_local_settings_in_a_kept_lead_worktree_count_for_their_permissions() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let worktree = ensure_detached_worktree(&setup.repo, "lead-h").unwrap();
+        fs::create_dir_all(worktree.join(".claude")).unwrap();
+        let file = worktree.join(".claude/settings.local.json");
+        fs::write(&file, r#"{"permissions": {"allow": ["Write(//srv/**)"]}}"#).unwrap();
+
+        let err = lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "sandbox: lead-h can't run sandboxed: your Claude settings loosen its sandbox: \
+                 {}: permissions.allow opens Write(//srv/**) to writes; remove those, or set \
+                 [lead] sandbox = \"prefer\" in herd h to start it with them as warnings",
+                file.display()
+            )
         );
     }
 

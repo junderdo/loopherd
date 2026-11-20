@@ -207,6 +207,8 @@ as its main checkout. Then, in order:
    `~/.claude/settings.json` loosens (an `excludedCommands` or `allowWrite`
    entry, say), isn't started unless its `[lead]` sets `sandbox = "prefer"`,
    which starts it with a warning instead ([D100](docs/decisions/D100.md)).
+   A `merge_guard = "credentials"` lead isn't started either way; set
+   `merge_guard = "hook"` to start it with the warnings.
    A lead starts with no MCP servers; list the ones it may use, by the
    name `claude mcp add --scope user` gave them, in `[lead] mcp_servers`.
    Those run outside the sandbox.

@@ -394,7 +394,8 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
         };
     }
     let own = settings(paths, name, &lead.herd)?;
-    let loosened = loosenings(&paths.home, &own);
+    let worktree = worktree_path(&herd::repo(paths, &lead.herd)?, name);
+    let loosened = loosenings(&paths.home, &worktree, &own);
     if let Some(refusal) = loosened_refusal(paths, name, &lead.herd, &loosened)? {
         return Err(refusal);
     }
@@ -419,22 +420,15 @@ fn mcp_config(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
     if wanted.is_empty() {
         return Ok(json!({"mcpServers": servers}));
     }
-    let file = paths.home.join(".claude.json");
-    let config: Value = match std::fs::read_to_string(&file) {
-        Ok(text) => {
-            serde_json::from_str(&text).with_context(|| format!("parse {}", file.display()))?
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Null,
-        Err(e) => return Err(e).with_context(|| format!("read {}", file.display())),
-    };
+    let configured = user_mcp_servers(paths)?;
     for server in wanted {
-        let Some(found) = config["mcpServers"].get(&server) else {
+        let Some(found) = configured.get(&server) else {
             bail!(
                 "{name} can't start: herd {herd}'s [lead] mcp_servers names {server:?}, which \
                  {} doesn't configure in your user scope; add it with claude mcp add --scope \
                  user, or drop it from mcp_servers (local and project scopes, claude.ai \
                  connectors and plugins' servers can't be given to a lead)",
-                file.display()
+                user_mcp_file(paths).display()
             );
         };
         servers.insert(server, found.clone());
@@ -442,10 +436,35 @@ fn mcp_config(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
     Ok(json!({"mcpServers": servers}))
 }
 
+pub fn user_mcp_file(paths: &Paths) -> PathBuf {
+    paths.home.join(".claude.json")
+}
+
+/// The MCP servers the human's user scope configures, by name; none when
+/// `~/.claude.json` is missing.
+pub fn user_mcp_servers(paths: &Paths) -> Result<serde_json::Map<String, Value>> {
+    let file = user_mcp_file(paths);
+    let config: Value = match std::fs::read_to_string(&file) {
+        Ok(text) => {
+            serde_json::from_str(&text).with_context(|| format!("parse {}", file.display()))?
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Null,
+        Err(e) => return Err(e).with_context(|| format!("read {}", file.display())),
+    };
+    Ok(match &config["mcpServers"] {
+        Value::Object(servers) => servers.clone(),
+        _ => serde_json::Map::new(),
+    })
+}
+
 /// What the human's own Claude settings loosen in lead `name`'s sandbox, one
 /// line per key, each naming its file.
+/// A lead whose own settings can't be built is judged against none, so a
+/// failure to build them doesn't hide these.
 pub fn loosened(paths: &Paths, name: &str, herd: &str) -> Result<Vec<String>> {
-    Ok(loosenings(&paths.home, &settings(paths, name, herd)?))
+    let own = settings(paths, name, herd).unwrap_or_else(|_| json!({}));
+    let worktree = worktree_path(&herd::repo(paths, herd)?, name);
+    Ok(loosenings(&paths.home, &worktree, &own))
 }
 
 /// What a loosened sandbox does to a lead's start.
@@ -499,8 +518,8 @@ fn loosened_refusal(
     })
 }
 
-/// Boolean keys that loosen a sandbox when set to anything but `false`.
-const LOOSENING_SWITCHES: [(&str, &str); 5] = [
+/// Keys that loosen a sandbox when set to anything but `false`.
+const LOOSENING_SWITCHES: [(&str, &str); 9] = [
     (
         "/sandbox/filesystem/disabled",
         "turns its filesystem rules off",
@@ -509,22 +528,106 @@ const LOOSENING_SWITCHES: [(&str, &str); 5] = [
     ("/sandbox/allowNestedUserNamespaces", "weakens it"),
     ("/sandbox/enableWeakerNetworkIsolation", "weakens it"),
     ("/sandbox/allowAppleEvents", "lets it drive other apps"),
+    (
+        "/sandbox/network/httpProxyPort",
+        "hands its network to your proxy, past its own checks on local addresses",
+    ),
+    (
+        "/sandbox/network/socksProxyPort",
+        "hands its network to your proxy, past its own checks on local addresses",
+    ),
+    (
+        "/sandbox/network/allowLocalBinding",
+        "lets it bind local ports on macOS",
+    ),
+    (
+        "/sandbox/network/allowMachLookup",
+        "opens macOS services to it",
+    ),
 ];
 
-/// What the human's `~/.claude/settings.json` adds to a lead's sandbox, whose
-/// own settings are `own`: one line per loosening entry, naming the file.
-/// D100 says which keys reach a sandbox locked by `--settings`, and why.
-fn loosenings(home: &Path, own: &Value) -> Vec<String> {
-    let file = home.join(".claude/settings.json");
+/// The tools whose `permissions.allow` rules open writes; the file tools run
+/// outside the sandbox.
+const WRITING_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+
+/// What the human's Claude settings add to a lead's sandbox, whose own
+/// settings are `own`: one line per loosening entry, naming its file. Of the
+/// worktree's project and local settings only the permissions count, since
+/// `--settings` locks their sandbox keys out. D100 says which keys reach a
+/// lead, and why.
+fn loosenings(home: &Path, worktree: &Path, own: &Value) -> Vec<String> {
+    let own_writes: Vec<PathBuf> = entries(&own["sandbox"]["filesystem"]["allowWrite"])
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    let user_file = home.join(".claude/settings.json");
+    let mut found = vec![];
+    if let Some(user) = read_settings(&user_file, &mut found) {
+        found.extend(sandbox_loosenings(
+            &user,
+            &user_file,
+            home,
+            own,
+            &own_writes,
+        ));
+        let rules_root = home.join(".claude");
+        found.extend(permission_loosenings(
+            &user,
+            &user_file,
+            &rules_root,
+            home,
+            &own_writes,
+        ));
+    }
+    for name in ["settings.json", "settings.local.json"] {
+        let file = worktree.join(".claude").join(name);
+        if let Some(project) = read_settings(&file, &mut found) {
+            found.extend(permission_loosenings(
+                &project,
+                &file,
+                worktree,
+                home,
+                &own_writes,
+            ));
+        }
+    }
+    found
+}
+
+/// A settings file's contents; `None` when it's missing, or, noted in
+/// `found`, when it can't be read or parsed.
+fn read_settings(file: &Path, found: &mut Vec<String>) -> Option<Value> {
     let shown = file.display();
-    let user: Value = match std::fs::read_to_string(&file) {
+    match std::fs::read_to_string(file) {
         Ok(text) => match serde_json::from_str(&text) {
-            Ok(user) => user,
-            Err(e) => return vec![format!("{shown}: can't parse it: {e}")],
+            Ok(settings) => Some(settings),
+            Err(e) => {
+                found.push(format!("{shown}: can't parse it: {e}"));
+                None
+            }
         },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return vec![],
-        Err(e) => return vec![format!("{shown}: can't read it: {e}")],
-    };
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            found.push(format!("{shown}: can't read it: {e}"));
+            None
+        }
+    }
+}
+
+/// Only an exact match with a path the lead may write is no loosening:
+/// beneath one, the lead could plant a symlink before it exists.
+fn opens_writes(path: Option<PathBuf>, own_writes: &[PathBuf]) -> bool {
+    !path.is_some_and(|path| own_writes.contains(&path))
+}
+
+fn sandbox_loosenings(
+    user: &Value,
+    file: &Path,
+    home: &Path,
+    own: &Value,
+    own_writes: &[PathBuf],
+) -> Vec<String> {
+    let shown = file.display();
     let mut found = vec![];
     let own_commands = entries(&own["sandbox"]["excludedCommands"]);
     for command in entries(&user["sandbox"]["excludedCommands"]) {
@@ -534,39 +637,11 @@ fn loosenings(home: &Path, own: &Value) -> Vec<String> {
             ));
         }
     }
-    let own_writes: Vec<PathBuf> = entries(&own["sandbox"]["filesystem"]["allowWrite"])
-        .into_iter()
-        .map(PathBuf::from)
-        .collect();
-    // Only an exact match counts: beneath one, the lead could plant a symlink before it exists.
-    let opens = |path: Option<PathBuf>| !path.is_some_and(|path| own_writes.contains(&path));
-    for (key, list) in [
-        (
-            "sandbox.filesystem.allowWrite",
-            &user["sandbox"]["filesystem"]["allowWrite"],
-        ),
-        (
-            "permissions.additionalDirectories",
-            &user["permissions"]["additionalDirectories"],
-        ),
-    ] {
-        for path in entries(list) {
-            if opens(absolute(&path, home)) {
-                found.push(format!("{shown}: {key} opens {path} to writes"));
-            }
-        }
-    }
-    for rule in entries(&user["permissions"]["allow"]) {
-        let edit = match rule.strip_prefix("Edit") {
-            Some("") => None,
-            Some(rest) => match rest.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
-                Some(spec) => Some(edit_rule_path(spec, home)),
-                None => continue,
-            },
-            None => continue,
-        };
-        if opens(edit.flatten()) {
-            found.push(format!("{shown}: permissions.allow opens {rule} to writes"));
+    for path in entries(&user["sandbox"]["filesystem"]["allowWrite"]) {
+        if opens_writes(absolute(&path, home), own_writes) {
+            found.push(format!(
+                "{shown}: sandbox.filesystem.allowWrite opens {path} to writes"
+            ));
         }
     }
     // allowRead only carves into denyRead, which a lead has only with credentials to hide.
@@ -592,9 +667,52 @@ fn loosenings(home: &Path, own: &Value) -> Vec<String> {
     found
 }
 
-/// An `Edit(…)` rule's directory in user settings: `//` absolute, `~/` home,
-/// `/` relative to `~/.claude`. `None` for a relative path or a glob before its end.
-fn edit_rule_path(spec: &str, home: &Path) -> Option<PathBuf> {
+/// What a settings file's permissions open to the file tools, which run
+/// outside the sandbox. `rules_root` is where its `/path` rules start.
+fn permission_loosenings(
+    settings: &Value,
+    file: &Path,
+    rules_root: &Path,
+    home: &Path,
+    own_writes: &[PathBuf],
+) -> Vec<String> {
+    let shown = file.display();
+    let mut found = vec![];
+    for path in entries(&settings["permissions"]["additionalDirectories"]) {
+        if opens_writes(absolute(&path, home), own_writes) {
+            found.push(format!(
+                "{shown}: permissions.additionalDirectories opens {path} to writes"
+            ));
+        }
+    }
+    for rule in entries(&settings["permissions"]["allow"]) {
+        let (tool, spec) = match rule.split_once('(') {
+            Some((tool, rest)) => match rest.strip_suffix(')') {
+                Some(spec) => (tool, Some(spec)),
+                None => continue,
+            },
+            None => (rule.as_str(), None),
+        };
+        if !WRITING_TOOLS.contains(&tool) {
+            continue;
+        }
+        let path = spec.and_then(|spec| rule_path(spec, rules_root, home));
+        if opens_writes(path, own_writes) {
+            found.push(format!("{shown}: permissions.allow opens {rule} to writes"));
+        }
+    }
+    if settings["permissions"]["defaultMode"] == "bypassPermissions" {
+        found.push(format!(
+            "{shown}: permissions.defaultMode bypassPermissions lets its file tools write \
+             anywhere"
+        ));
+    }
+    found
+}
+
+/// A file rule's directory: `//` absolute, `~/` home, `/` beneath
+/// `rules_root`. `None` for a relative path or a glob before its end.
+fn rule_path(spec: &str, rules_root: &Path, home: &Path) -> Option<PathBuf> {
     let spec = spec.trim_end_matches("/**").trim_end_matches("/*");
     if spec.contains('*') {
         return None;
@@ -605,7 +723,7 @@ fn edit_rule_path(spec: &str, home: &Path) -> Option<PathBuf> {
         spec.to_string()
     } else {
         let rest = spec.strip_prefix('/')?;
-        home.join(".claude").join(rest).display().to_string()
+        rules_root.join(rest).display().to_string()
     };
     absolute(&path, home)
 }
@@ -717,7 +835,8 @@ pub fn check_running(
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok());
     // Judged against what the running Claude started with, which may predate the switches.
-    let loosened = loosenings(&paths.home, on_disk.as_ref().unwrap_or(&current));
+    let worktree = worktree_path(&herd::repo(paths, herd)?, name);
+    let loosened = loosenings(&paths.home, &worktree, on_disk.as_ref().unwrap_or(&current));
     if let Some(refusal) = loosened_refusal(paths, name, herd, &loosened)? {
         return Err(refusal);
     }

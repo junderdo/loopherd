@@ -611,10 +611,12 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   existed, or on `prefer`): quit its Claude and run `loopherd revive
   --name <lead>` to resume it sandboxed. The human's own
   `~/.claude/settings.json` can loosen every lead's sandbox
-  (`excludedCommands`, `allowWrite` and the like): `lead`, `revive` and
+  (`excludedCommands`, `allowWrite` and the like), and the permissions in
+  a lead worktree's `.claude` settings its file tools: `lead`, `revive` and
   `restart` refuse such a lead under `require`, naming each file and key,
-  and start it with them as warnings under `prefer`; doctor reports them
-  too. Only the human edits that file; ask them. A lead has no MCP tools
+  and start it with them as warnings under `prefer`, except a
+  `merge_guard = "credentials"` lead, refused under both (`merge_guard =
+  "hook"` is the other way); doctor reports them too. Only the human edits that file; ask them. A lead has no MCP tools
   unless its herd's `[lead] mcp_servers` names servers from the human's
   user scope (`loopherd herds` shows them); a lead that needs one
   asks the human to add it. Set `prefer` only when the
