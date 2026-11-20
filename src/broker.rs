@@ -1012,6 +1012,9 @@ impl Dir {
 
 const MALFORMED: &str = "malformed request";
 
+/// Why a label that failed asks for nothing more: its report went out first.
+const NO_LABEL: &str = "the pane got no label; the report itself is sent, so don't send it again";
+
 /// The lead's side of the transport: writes requests, reads replies.
 pub struct Client {
     lead: String,
@@ -1089,7 +1092,11 @@ impl Client {
                     Reply::Failed(why) => Err(anyhow!("{why}")),
                 };
             }
+            let labelling = matches!(op, Op::Label { .. });
             if !held(&self.lock) {
+                if labelling {
+                    bail!("{lead}'s broker stopped, so {NO_LABEL}");
+                }
                 bail!(
                     "{lead}'s broker stopped before answering {}: \
                      the shepherd's loopherd revive --name {lead} starts it again",
@@ -1097,6 +1104,9 @@ impl Client {
                 );
             }
             if Instant::now() >= given_up {
+                if labelling {
+                    bail!("{lead}'s broker was busy, so {NO_LABEL}");
+                }
                 bail!(
                     "{lead}'s broker didn't answer {} within {}; it may still be carrying it out, \
                      so check before asking again, and check the broker with loopherd doctor",
@@ -2236,6 +2246,31 @@ mod tests {
             format!("{err:#}"),
             "lead-h's broker didn't answer tell within 50ms; it may still be carrying it out, \
              so check before asking again, and check the broker with loopherd doctor"
+        );
+        let left = std::fs::read_dir(requests_dir(&world.paths, "lead-h")).unwrap();
+        assert_eq!(left.count(), 0);
+    }
+
+    #[test]
+    fn a_label_a_busy_broker_never_answered_says_the_report_went_out_anyway() {
+        let world = World::new();
+        let _held = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+        let client = Client {
+            answer_within: Some(Duration::from_millis(50)),
+            ..world.client()
+        };
+        std::fs::create_dir_all(requests_dir(&world.paths, "lead-h")).unwrap();
+
+        let err = client
+            .call(&Op::Label {
+                question: "which DB?".into(),
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "lead-h's broker was busy, so the pane got no label; \
+             the report itself is sent, so don't send it again"
         );
         let left = std::fs::read_dir(requests_dir(&world.paths, "lead-h")).unwrap();
         assert_eq!(left.count(), 0);
