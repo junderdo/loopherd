@@ -473,7 +473,6 @@ mod tests {
         let mut resumed = FakeProcs::default();
         resumed.add(10, "/usr/bin/herdr", 1, 100);
         resumed.add(20, "/bin/bash", 10, 200);
-        resumed.add(31, CLAUDE, 20, 310);
 
         let opened = open(&herdr, &resumed, state.path(), None).unwrap();
 
@@ -484,6 +483,25 @@ mod tests {
                 how: How::Opened
             }
         );
+    }
+
+    #[test]
+    fn an_agent_list_herdr_cant_give_opens_right_of_the_current_pane_saying_why() {
+        let state = tempfile::tempdir().unwrap();
+        let (mut herdr, shepherd) = herdr_with_tab();
+        let current = herdr.split("w1:t1", Path::new("/src"));
+        herdr.malformed_agents = true;
+        record_shepherd(state.path(), &shepherd, FAKE_SOCKET);
+
+        let opened = open(&herdr, &FakeProcs::pane(), state.path(), Some(&current)).unwrap();
+
+        let why = beside_current_why(opened, &current);
+        assert!(
+            why.contains("not beside the shepherd's pane w1:p1"),
+            "{why}"
+        );
+        assert!(why.contains("agent list"), "{why}");
+        assert_eq!(note(&herdr), why);
     }
 
     #[test]
