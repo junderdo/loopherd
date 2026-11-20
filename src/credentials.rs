@@ -1,6 +1,7 @@
 //! The split credentials of a lead guarded by `merge_guard = "credentials"`:
 //! a deploy key for its git and a token for its gh that can't merge (D83, D95).
 
+use std::ffi::OsString;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -164,7 +165,17 @@ fn is_block_of(block: &str, alias: &str) -> bool {
 /// one. Returns whether the file changed.
 pub fn write_host_block(paths: &Paths, herd: &str) -> Result<bool> {
     let file = ssh_config(paths);
-    let text = std::fs::read_to_string(&file).unwrap_or_default();
+    let dir = file.parent().context("ssh config dir")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let lock_file = dir.join(".lock");
+    let lock = std::fs::File::create(&lock_file)
+        .with_context(|| format!("open {}", lock_file.display()))?;
+    let _held =
+        crate::lock::Lock::wait(lock).with_context(|| format!("lock {}", lock_file.display()))?;
+    let text = match std::fs::read_to_string(&file) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        read => read.with_context(|| format!("read {}", file.display()))?,
+    };
     let ours = host_block(paths, herd);
     let alias = host_alias(herd);
     let mut blocks = host_blocks(&text);
@@ -173,10 +184,8 @@ pub fn write_host_block(paths: &Paths, herd: &str) -> Result<bool> {
         Some(block) => *block = ours,
         None => blocks.push(ours),
     }
-    let dir = file.parent().context("ssh config dir")?;
-    std::fs::create_dir_all(dir)?;
     // ssh refuses an included file others can write, which would break all the human's ssh.
-    let temp = dir.join(".config.new");
+    let temp = dir.join(format!(".config.{}", std::process::id()));
     let mut out = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -184,7 +193,7 @@ pub fn write_host_block(paths: &Paths, herd: &str) -> Result<bool> {
         .mode(0o600)
         .open(&temp)?;
     out.write_all(blocks.concat().as_bytes())?;
-    std::fs::rename(&temp, &file)?;
+    std::fs::rename(&temp, &file).with_context(|| format!("write {}", file.display()))?;
     Ok(true)
 }
 
@@ -227,19 +236,86 @@ pub fn ssh_missing(paths: &Paths, herd: &str) -> Option<Missing> {
 }
 
 /// Where gh, git and ssh keep the human's GitHub credentials, each with
-/// whether it's a directory.
-pub fn human_credentials(home: &Path) -> [(PathBuf, bool); 6] {
-    [
+/// whether it's a directory: their default places, and those `env` moves
+/// them to (`XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `GH_CONFIG_DIR`).
+pub fn human_credentials(
+    home: &Path,
+    env: &dyn Fn(&str) -> Option<OsString>,
+) -> Vec<(PathBuf, bool)> {
+    let dir = |name: &str| env(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let config = dir("XDG_CONFIG_HOME").unwrap_or(home.join(".config"));
+    let cache = dir("XDG_CACHE_HOME").unwrap_or(home.join(".cache"));
+    let mut found = vec![
         (home.join(".ssh"), true),
         (home.join(".netrc"), false),
         (home.join(".config/gh"), true),
         (home.join(".git-credentials"), false),
         (home.join(".config/git/credentials"), false),
         (home.join(".cache/git/credential"), true),
-    ]
+    ];
+    let moved = [
+        (config.join("gh"), true),
+        (config.join("git/credentials"), false),
+        (cache.join("git/credential"), true),
+    ];
+    for path in moved
+        .into_iter()
+        .chain(dir("GH_CONFIG_DIR").map(|d| (d, true)))
+    {
+        if !found.contains(&path) {
+            found.push(path);
+        }
+    }
+    found
 }
 
 /// What ssh still reads under a denied `~/.ssh` to reach a `Host` alias.
 pub fn ssh_readable(home: &Path) -> [PathBuf; 2] {
     [home.join(".ssh/config"), home.join(".ssh/known_hosts")]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_humans_credentials_are_found_where_the_environment_moves_them() {
+        let home = Path::new("/home/me");
+        let env = |name: &str| match name {
+            "XDG_CONFIG_HOME" => Some("/home/me/.xdg".into()),
+            "XDG_CACHE_HOME" => Some("".into()),
+            "GH_CONFIG_DIR" => Some("/elsewhere/gh".into()),
+            _ => None,
+        };
+
+        let found = human_credentials(home, &env);
+
+        assert_eq!(
+            found[6..],
+            [
+                (PathBuf::from("/home/me/.xdg/gh"), true),
+                (PathBuf::from("/home/me/.xdg/git/credentials"), false),
+                (PathBuf::from("/elsewhere/gh"), true),
+            ]
+        );
+        assert_eq!(human_credentials(home, &|_| None).len(), 6);
+    }
+
+    #[test]
+    fn a_host_block_isnt_written_over_an_ssh_config_that_cant_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            herds: dir.path().join("config/herds"),
+            home: dir.path().to_path_buf(),
+            feed_lock: dir.path().join("feed.lock"),
+            paused: dir.path().join("paused"),
+        };
+        let file = ssh_config(&paths);
+        std::fs::create_dir_all(&file).unwrap();
+
+        let err = write_host_block(&paths, "h").unwrap_err();
+
+        assert_eq!(format!("{err}"), format!("read {}", file.display()));
+        assert!(file.is_dir());
+    }
 }
