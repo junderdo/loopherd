@@ -821,6 +821,164 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     assert!(mail.contains("sandbox probe"), "{mail}");
 }
 
+/// Unsets `loopherd.probe` in the repo's config when dropped.
+struct UnsetProbe(PathBuf);
+
+impl Drop for UnsetProbe {
+    fn drop(&mut self) {
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&self.0)
+            .args(["config", "--local", "--unset", "loopherd.probe"])
+            .output();
+    }
+}
+
+#[test]
+fn a_leads_running_watch_leaves_git_config_writable_in_other_worktrees() {
+    if !live_enabled() {
+        return;
+    }
+    let state = tempfile::tempdir().unwrap();
+    let config = state.path().join("loopherd/config");
+    // Its own server, with the human's home so Claude is signed in: the lead's bare
+    // `loopherd watch` reads its pane's environment, which the dev server can't point here.
+    let server = IsolatedServer::start_with(&[
+        ("HOME", std::env::var_os("HOME").unwrap().as_os_str()),
+        ("XDG_STATE_HOME", state.path().as_os_str()),
+        ("LOOPHERD_CONFIG_DIR", config.as_os_str()),
+    ]);
+    // This checkout is already trusted; a fresh repo would stop the lead at the trust dialog.
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let herd = format!("lh-live-gitcfg-{}", std::process::id());
+    let name = format!("lead-{herd}");
+    let checkout = repo.file_name().unwrap().to_str().unwrap();
+    let parent = repo.parent().unwrap();
+    let worktree = match parent.file_name() == repo.file_name() {
+        true => parent.join("worktrees"),
+        false => parent.join(format!("{checkout}-worktrees")),
+    }
+    .join(&name);
+    let _worktree = RemoveWorktree(repo.clone(), worktree.clone());
+    let _probe = UnsetProbe(repo.clone());
+    server.ok(&[
+        "workspace",
+        "create",
+        "--label",
+        &herd,
+        "--cwd",
+        repo.to_str().unwrap(),
+    ]);
+    let herds = config.join("herds");
+    std::fs::create_dir_all(&herds).unwrap();
+    // The bare watch checks the human's ~/.claude/settings.json for loopherd's hooks.
+    let hooks = Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .args(["watch", "--timeout", "0"])
+        .env("XDG_STATE_HOME", state.path())
+        .env("LOOPHERD_CONFIG_DIR", &config)
+        .env("HERDR_SOCKET_PATH", &server.socket)
+        .env_remove("HERDR_PANE_ID")
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&hooks.stderr).contains("hooks are not all in"),
+        "install loopherd's hooks first: {hooks:?}"
+    );
+    std::fs::write(
+        herds.join(format!("{herd}.toml")),
+        format!(
+            "{}[lead]\nprompt = \"\"\"This is loopherd's live test of your watch. Make exactly \
+             two Bash tool calls, one after the other, each with the command exactly as \
+             written and nothing added before or after it. First: loopherd watch --timeout 1 \
+             --settings /nonexistent/settings.json Second: loopherd watch --timeout 60 Then \
+             reply with what each printed.\"\"\"\n",
+            herd_head(repo.to_str().unwrap(), &herd),
+        ),
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .env("XDG_STATE_HOME", state.path())
+        .env("LOOPHERD_CONFIG_DIR", &config)
+        .env("HERDR_SOCKET_PATH", &server.socket)
+        .env_remove("HERDR_PANE_ID")
+        .args(["lead", &herd, "--", "--permission-mode", "acceptEdits"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The lock holds the pid the watch sees, which a sandbox's own pid namespace would renumber.
+    let watching = || {
+        server.loopherds().into_iter().find(|(pid, _)| {
+            let args = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            args.split(|b| *b == 0).nth(1) == Some(b"watch".as_slice())
+        })
+    };
+    let given_up = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    let watch = loop {
+        if let Some((pid, _)) = watching() {
+            break pid;
+        }
+        assert!(
+            std::time::Instant::now() < given_up,
+            "the lead's watch never started"
+        );
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    };
+    let pid_ns = |pid: &str| std::fs::read_link(format!("/proc/{pid}/ns/pid")).unwrap();
+    assert_eq!(
+        pid_ns(&watch.to_string()),
+        pid_ns("self"),
+        "the lead's watch runs in its sandbox"
+    );
+
+    // Only the watch's own ancestor walk refuses --settings: the pane routing alone can't.
+    let agent = server
+        .herdr()
+        .args(["agent", "get", &name])
+        .output()
+        .unwrap();
+    let agent: Value = serde_json::from_slice(&agent.stdout).unwrap();
+    let pane = agent["result"]["agent"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let screen = server
+        .herdr()
+        .args([
+            "pane", "read", &pane, "--source", "recent", "--format", "text",
+        ])
+        .output()
+        .unwrap();
+    let screen: String = String::from_utf8_lossy(&screen.stdout)
+        .split_whitespace()
+        .collect();
+    let refusal = format!("refused:{name}'sClauderunsthiswatch,whichchecksClaude'sownsettings");
+    assert!(screen.contains(&refusal), "{screen}");
+
+    let probe = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["config", "--local", "loopherd.probe", "1"])
+        .output()
+        .unwrap();
+    assert!(
+        watching().is_some(),
+        "the lead's watch ended before the probe"
+    );
+    assert!(
+        probe.status.success(),
+        "{}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+}
+
 #[test]
 fn a_sandboxed_lead_s_feed_tell_read_and_status_go_through_its_broker_and_stop_at_its_herd() {
     if !live_enabled() {
@@ -1517,6 +1675,11 @@ struct IsolatedServer {
 
 impl IsolatedServer {
     fn start() -> Self {
+        Self::start_with(&[])
+    }
+
+    /// Starts the server with `env` on top of its own, which its panes inherit.
+    fn start_with(env: &[(&str, &std::ffi::OsStr)]) -> Self {
         // Short, so the socket path fits in sun_path.
         let home = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
         let socket = home.path().join("herdr.sock");
@@ -1532,6 +1695,7 @@ impl IsolatedServer {
             .env("PATH", path)
             .env("LOOPHERD_CONFIG_DIR", home.path().join("loopherd-config"))
             .env_remove("CLAUDE_PID")
+            .envs(env.iter().copied())
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

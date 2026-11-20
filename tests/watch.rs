@@ -970,3 +970,179 @@ fn a_leads_watch_with_no_shepherds_watch_sends_the_leads_own_question_once() {
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(fs::read_to_string(&out).unwrap(), sent);
 }
+
+/// lead-cards in pane w1:p0 of the herdr at /run/live.sock, and lead-prs in w1:p8.
+fn two_leads(sandbox: &Sandbox) {
+    sandbox.install_hook();
+    fs::write(
+        sandbox.dir.path().join("state/loopherd/ledger.json"),
+        r#"{"lead-cards": {"name": "lead-cards", "pane_id": "w1:p0", "session_id": null,
+            "repo": "/", "worktree": null, "workspace": "w1", "prompt": null,
+            "prompt_sent": true, "created": "2026-11-01T00:00:00Z",
+            "herd": "cards", "role": "lead", "socket": "/run/live.sock"},
+            "lead-prs": {"name": "lead-prs", "pane_id": "w1:p8", "session_id": null,
+            "repo": "/", "worktree": null, "workspace": "w1", "prompt": null,
+            "prompt_sent": true, "created": "2026-11-01T00:00:00Z",
+            "herd": "prs", "role": "lead", "socket": "/run/live.sock"}}"#,
+    )
+    .unwrap();
+}
+
+/// `loopherd watch <args>` from lead-cards' pane, found by pane and socket
+/// alone: no ancestor is a lead's Claude.
+fn in_lead_pane(sandbox: &Sandbox, args: &[&str]) -> Output {
+    let timeout: &[&str] = match args.contains(&"--timeout") {
+        true => &[],
+        false => &["--timeout", "0"],
+    };
+    sandbox
+        .loopherd(&[&["watch"], timeout, args].concat())
+        .env("HERDR_PANE_ID", "w1:p0")
+        .env("HERDR_SOCKET_PATH", "/run/live.sock")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn in_a_leads_pane_its_own_herd_a_timeout_and_a_settings_file_keep_it_the_leads_watch() {
+    let sandbox = Sandbox::new();
+    two_leads(&sandbox);
+    let settings = sandbox.settings();
+    let lock = sandbox
+        .dir
+        .path()
+        .join("state/loopherd/reports/watch-lead-cards.lock");
+
+    for args in [
+        vec![],
+        vec!["cards"],
+        vec!["--timeout", "1"],
+        vec!["--settings", settings.to_str().unwrap()],
+    ] {
+        let _ = fs::remove_file(&lock);
+        let out = in_lead_pane(&sandbox, &args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        assert!(lock.is_file(), "{args:?} wasn't lead-cards' watch");
+        assert!(
+            !sandbox
+                .dir
+                .path()
+                .join("state/loopherd/reports/watch.lock")
+                .exists(),
+            "{args:?} ran the shepherd's watch"
+        );
+    }
+}
+
+#[test]
+fn in_a_leads_pane_another_herd_is_refused_naming_why() {
+    let sandbox = Sandbox::new();
+    two_leads(&sandbox);
+
+    for args in [vec!["prs"], vec!["cards", "prs"]] {
+        let out = in_lead_pane(&sandbox, &args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {out:?}");
+        assert!(
+            stderr(&out).contains("lead-cards leads cards; its watch can't read prs"),
+            "{args:?}: {}",
+            stderr(&out)
+        );
+    }
+}
+
+/// `loopherd watch --timeout 0 <args>` under a shell whose command line
+/// carries lead-cards' sandbox settings, as its Claude runs an excluded
+/// command, with `pane` as its pane on /run/live.sock.
+fn under_leads_claude(sandbox: &Sandbox, pane: Option<&str>, args: &str) -> Output {
+    let settings = sandbox.dir.path().join("config/sandbox/lead-cards.json");
+    let loopherd = sandbox.loopherd(&[]);
+    let mut shell = Command::new("/bin/sh");
+    // The trailing exit keeps sh from exec'ing loopherd in its own place.
+    shell
+        .arg("-c")
+        .arg(format!("\"$LOOPHERD\" watch --timeout 0 {args}; exit $?"))
+        .args(["sh", "--settings"])
+        .arg(&settings)
+        .env("LOOPHERD", env!("CARGO_BIN_EXE_loopherd"));
+    for (key, value) in loopherd.get_envs() {
+        match value {
+            Some(value) => shell.env(key, value),
+            None => shell.env_remove(key),
+        };
+    }
+    if let Some(pane) = pane {
+        shell
+            .env("HERDR_PANE_ID", pane)
+            .env("HERDR_SOCKET_PATH", "/run/live.sock");
+    }
+    shell.output().unwrap()
+}
+
+#[test]
+fn under_a_leads_claude_only_that_leads_own_watch_runs() {
+    let sandbox = Sandbox::new();
+    two_leads(&sandbox);
+    let reports = sandbox.dir.path().join("state/loopherd/reports");
+
+    let own = under_leads_claude(&sandbox, Some("w1:p0"), "");
+    assert_eq!(own.status.code(), Some(2), "{own:?}");
+    assert!(reports.join("watch-lead-cards.lock").is_file());
+
+    let refusals = [
+        (
+            None,
+            "this pane isn't lead-cards's in the ledger, so it would be the shepherd's watch",
+        ),
+        (Some("w1:p8"), "this pane is lead-prs's"),
+    ];
+    for (pane, why) in refusals {
+        let out = under_leads_claude(&sandbox, pane, "");
+        assert_eq!(out.status.code(), Some(1), "{pane:?}: {out:?}");
+        assert!(
+            stderr(&out).contains(&format!(
+                "refused: lead-cards's Claude runs this watch, which may only be its own; {why}"
+            )),
+            "{pane:?}: {}",
+            stderr(&out)
+        );
+    }
+    assert!(!reports.join("watch.lock").exists());
+    assert!(!reports.join("watch-lead-prs.lock").exists());
+}
+
+#[test]
+fn under_a_credentials_leads_claude_the_watch_wont_start_without_the_leads_credentials() {
+    let sandbox = Sandbox::new();
+    two_leads(&sandbox);
+    let config = sandbox.dir.path().join("config");
+    fs::create_dir_all(config.join("herds")).unwrap();
+    fs::write(
+        config.join("herds/cards.toml"),
+        "repo = \"/\"\nworkspace = \"w1\"\n[lead]\nprompt = \"go\"\nmerge_guard = \"credentials\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(config.join("sandbox")).unwrap();
+    fs::write(
+        config.join("sandbox/lead-cards.lead.json"),
+        r#"{"herd": "cards", "args": []}"#,
+    )
+    .unwrap();
+
+    let out = under_leads_claude(&sandbox, Some("w1:p0"), "");
+
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        stderr(&out).contains(
+            "lead-cards's watch can't start: herd cards guards merges by credentials: no "
+        ),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        !sandbox
+            .dir
+            .path()
+            .join("state/loopherd/reports/watch-lead-cards.lock")
+            .exists()
+    );
+}
