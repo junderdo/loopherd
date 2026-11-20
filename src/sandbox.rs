@@ -367,6 +367,7 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
             )),
         };
     }
+    create_state(paths.state_dir())?;
     let file = settings_file(paths, name);
     let text = serde_json::to_string_pretty(&settings(paths, name, &lead.herd)?)? + "\n";
     write_private(&file, &text).with_context(|| format!("write {}", file.display()))?;
@@ -472,15 +473,56 @@ fn lead_file(paths: &Paths, name: &str) -> PathBuf {
         .join(format!("{name}.lead.json"))
 }
 
-/// The loopherd commands a lead runs that make or remove its members'
-/// worktrees, beside its own and so outside what it may write.
-const WORKTREE_COMMANDS: [&str; 5] = [
+/// The loopherd commands a lead runs that write what its sandbox denies: its
+/// members' worktrees, beside its own, or the ledger.
+const UNSANDBOXED_COMMANDS: [&str; 7] = [
     "loopherd feed",
     "loopherd feed *",
     "loopherd add *",
     "loopherd retire *",
     "loopherd release *",
+    "loopherd restart *",
+    "loopherd prompt *",
 ];
+
+/// The state dir's directories a lead writes from its sandbox: `reports/`
+/// for its mailbox and its watch's files, `handoffs/` for its handoff. The
+/// rest stays read-only to it as a directory, since a deny on one file holds
+/// only until something outside the sandbox renames over that file.
+const WRITABLE_STATE: [&str; 2] = ["reports", "handoffs"];
+
+/// The shepherd's watch files in `reports/`. Written in place, never
+/// replaced, so a deny on each file holds.
+const SHEPHERDS_WATCH: [&str; 2] = ["reports/watch.lock", "reports/watch.fired"];
+
+/// What in the state dir is the human's or the shepherd's, denied by name to
+/// the file tools, which the sandbox doesn't cover. `true` marks a directory.
+const KEPT_FROM_FILE_TOOLS: [(&str, bool); 5] = [
+    ("paused", true),
+    ("shepherd.json", false),
+    ("shepherd.json.lock", false),
+    ("ledger.json", false),
+    ("ledger.lock", false),
+];
+
+/// Makes what the lead's sandbox names in the state dir. An `allowWrite`
+/// entry for a missing path has no effect on Linux, and a `denyWrite` entry
+/// gets a placeholder that would sit in the way of the first real write.
+fn create_state(state: &Path) -> Result<()> {
+    for dir in WRITABLE_STATE {
+        let dir = state.join(dir);
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    }
+    for file in SHEPHERDS_WATCH {
+        let file = state.join(file);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&file)
+            .with_context(|| format!("create {}", file.display()))?;
+    }
+    Ok(())
+}
 
 /// Lead `name`'s settings, from its herd file alone: its worktree is where
 /// `lead` puts it in the herd's repo, whatever the ledger says.
@@ -490,11 +532,21 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
     let config = paths.config_dir();
     let claude = paths.home.join(".claude");
     let worktree = worktree_path(&repo, name);
-    let mut allow_write = vec![worktree.as_path(), paths.state_dir()];
-    let local_bin = paths.home.join(".local/bin");
+    let state = paths.state_dir();
+    let mut allow_write = vec![worktree];
+    allow_write.extend(WRITABLE_STATE.map(|dir| state.join(dir)));
     if switches.install {
-        allow_write.push(&local_bin);
+        allow_write.push(paths.home.join(".local/bin"));
     }
+    let shepherds_watch = SHEPHERDS_WATCH.map(|file| state.join(file));
+    let mut deny_write = vec![config.to_path_buf(), claude.clone()];
+    deny_write.extend(shepherds_watch.iter().cloned());
+    let mut deny = vec![edit_rule(config), edit_rule(&claude)];
+    deny.extend(KEPT_FROM_FILE_TOOLS.map(|(path, dir)| match dir {
+        true => edit_rule(&state.join(path)),
+        false => file_rule(&state.join(path)),
+    }));
+    deny.extend(shepherds_watch.iter().map(|file| file_rule(file)));
     let mut sandbox = json!({
         "enabled": true,
         "failIfUnavailable": true,
@@ -503,12 +555,11 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
         "network": {"allowAllUnixSockets": true},
         "filesystem": {
             "allowWrite": allow_write.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
-            "denyWrite": [config.display().to_string(), claude.display().to_string()],
+            "denyWrite": deny_write.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         },
     });
-    // The sandbox ends every process a command leaves behind, the self-restart's waiter too.
-    let mut excluded = vec!["loopherd restart --self"];
-    excluded.extend(WORKTREE_COMMANDS);
+    // `restart *` takes in `restart --self`, whose waiter the sandbox would end with the call.
+    let mut excluded = UNSANDBOXED_COMMANDS.to_vec();
     if switches.install {
         // ~/.claude is a protected path no allowWrite opens, and the installer writes there.
         excluded.extend([
@@ -521,7 +572,6 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
     sandbox["excludedCommands"] = json!(excluded);
     let mut allow = vec!["WebFetch(domain:*)".to_string()];
     allow.extend(excluded.iter().map(|command| format!("Bash({command})")));
-    let mut deny = vec![edit_rule(config), edit_rule(&claude)];
     let mut env = None;
     if herd::merge_guard(paths, herd)? == Some(MergeGuard::Credentials) {
         if switches.install {
@@ -568,6 +618,10 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
 /// A deny for the file tools; `//` marks the path absolute, not relative to the settings file.
 fn edit_rule(dir: &Path) -> String {
     format!("Edit(/{}/**)", dir.display())
+}
+
+fn file_rule(file: &Path) -> String {
+    format!("Edit(/{})", file.display())
 }
 
 #[cfg(test)]

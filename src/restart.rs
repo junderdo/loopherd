@@ -34,6 +34,9 @@ pub struct RestartRequest<'a> {
     pub state: &'a Path,
     /// Where a lead's switches and review-round limit are read from.
     pub paths: &'a Paths,
+    /// The lead whose sandboxed Claude runs this loopherd, if one does: it
+    /// may restart only its own herd's members.
+    pub caller: Option<&'a str>,
     /// How long to wait for the SessionStart hook to record the new session.
     pub settle_timeout: Duration,
     pub poll: Duration,
@@ -60,6 +63,10 @@ pub fn restart(
         .ok_or_else(|| anyhow!("{name} is not in the ledger"))?;
     if record.retired {
         bail!("{name} is retired");
+    }
+    let guard = sandbox::Guard::new(req.paths.clone(), req.caller.map(String::from));
+    if let Some(why) = guard.caller_refusal(&record)? {
+        bail!("refused: {why}");
     }
     let socket = herdr.socket();
     match &record.socket {
@@ -681,6 +688,8 @@ mod tests {
     struct World {
         state: tempfile::TempDir,
         herdr: FakeHerdr,
+        /// The lead whose sandboxed Claude runs the restart, if one does.
+        caller: Option<&'static str>,
     }
 
     impl World {
@@ -697,7 +706,19 @@ mod tests {
             World {
                 state,
                 herdr: FakeHerdr::new(&[("w1", "loopherd")]).with_agent("lh-1"),
+                caller: None,
             }
+        }
+
+        /// Keeps lead `name` of `herd` in the config dir, as `lead` does.
+        fn kept_lead(&self, name: &str, herd: &str) {
+            let dir = self.paths().config_dir().join("sandbox");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join(format!("{name}.lead.json")),
+                format!("{{\"herd\": \"{herd}\", \"args\": []}}"),
+            )
+            .unwrap();
         }
 
         fn stop(&self, shells: u32, error: Option<&str>) {
@@ -786,6 +807,7 @@ mod tests {
                 own_pane,
                 state: self.state.path(),
                 paths: &self.paths(),
+                caller: self.caller,
                 settle_timeout: Duration::from_millis(50),
                 poll: Duration::from_millis(1),
                 live,
@@ -826,6 +848,7 @@ mod tests {
                 pane_shell: &|_| Ok(Some(crate::process::PANE_SHELL)),
                 state: self.state.path(),
                 paths: &self.paths(),
+                caller: None,
                 settle_timeout: Duration::from_millis(50),
                 poll: Duration::from_millis(1),
                 live: &|s| s.to_string(),
@@ -923,6 +946,36 @@ mod tests {
             Some(crate::process::PANE_SHELL)
         );
         assert_eq!(ledger.1, ["lh-1"]);
+    }
+
+    #[test]
+    fn a_lead_restarts_a_member_of_its_own_herd() {
+        let mut w = World::new();
+        w.kept_lead("lead-h", "h");
+        w.caller = Some("lead-h");
+        w.handed_off();
+
+        let (result, _) = w.restart_as(false, true, None, &|r| r.herd = Some("h".into()));
+
+        result.unwrap();
+    }
+
+    #[test]
+    fn a_lead_cant_restart_a_member_of_another_herd_and_nothing_is_cleared() {
+        let mut w = World::new();
+        w.kept_lead("lead-o", "o");
+        w.caller = Some("lead-o");
+        w.handed_off();
+
+        let (result, ledger) = w.restart_as(false, true, None, &|r| r.herd = Some("h".into()));
+
+        assert_eq!(
+            format!("{:#}", result.unwrap_err()),
+            "refused: lh-1 isn't a member of lead-o's herd, and lead-o runs this loopherd"
+        );
+        assert!(w.herdr.prompts().is_empty());
+        assert!(w.state.path().join("handoffs/lh-1.md").exists());
+        assert_eq!(ledger.0["lh-1"].session_id, record("lh-1").session_id);
     }
 
     #[test]
