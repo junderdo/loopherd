@@ -13,6 +13,10 @@ use serde_json::Value;
 #[path = "../src/herdr/events.rs"]
 mod events;
 
+mod brokers;
+
+use brokers::Broker;
+
 const HERDR_IDS: [&str; 4] = [
     "HERDR_ENV",
     "HERDR_WORKSPACE_ID",
@@ -591,8 +595,13 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     let state_dir = state.path().join("loopherd");
     let write_other = state_dir.join("broker/lead-other/requests/write-probe");
     let write_later = state_dir.join("broker/lead-later/requests/write-probe");
-    let write_control = state_dir.join("reports/write-probe");
-    // The human's and the shepherd's parts of the state dir, which the lead's own sit beside.
+    // The shepherd's handoff an older release left flat, which its resume still reads.
+    let plant_shepherd = state_dir.join("handoffs/shepherd.md");
+    let write_mailbox = state_dir.join("reports/lh-other.jsonl");
+    let write_later_handoff = state_dir.join("handoffs/lh-later/handoff.md");
+    let write_control = worktree.join("write-probe");
+    // The human's, the shepherd's and other agents' parts of the state dir, its own mailbox
+    // included: its broker writes that.
     let refused_state = [
         "paused/probe",
         "shepherd.json",
@@ -601,24 +610,25 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
         "ledger.lock",
         "reports/watch.lock",
         "reports/watch.fired",
+        &format!("reports/{name}.jsonl"),
+        "reports/lh-other.jsonl",
+        "handoffs/shepherd/handoff.md",
+        "handoffs/shepherd.md",
+        "handoffs/lh-other/handoff.md",
+        "handoffs/lh-other.md",
         "broker/lead-other/requests/probe",
     ]
     .map(|p| state_dir.join(p));
-    let own_state = [
-        format!("reports/{name}.jsonl"),
-        format!("handoffs/{name}.md"),
-        format!("reports/watch-{name}.lock"),
-        format!("reports/watch-{name}.fired"),
-    ]
-    .map(|p| state_dir.join(p));
-    for dir in ["handoffs", "paused", "broker/lead-other/requests"] {
+    let own_handoffs = state_dir.join(format!("handoffs/{name}"));
+    let own_state = [own_handoffs.join("handoff.md")];
+    for dir in ["handoffs/lh-other", "paused", "broker/lead-other/requests"] {
         std::fs::create_dir_all(state_dir.join(dir)).unwrap();
     }
-    // One script, so the model copies no long paths, and its results go to loopherd's
-    // state dir's reports/, which the lead may write, since Claude Code folds long output in
-    // the pane.
+    // One script, so the model copies no long paths, and its results go to the lead's own
+    // handoff dir, the one part of the state dir it may write, since Claude Code folds long
+    // output in the pane.
     let probe = state.path().join("probe.py");
-    let results = state_dir.join("reports/probe.out");
+    let results = own_handoffs.join("probe.out");
     let refused: Vec<&PathBuf> = [&herd_file, &in_sibling, &in_checkout]
         .into_iter()
         .chain(&refused_state)
@@ -626,7 +636,7 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     // The probe waits in its sandbox while the test replaces these by rename, as every ledger
     // save does, then tries them again: a deny must outlast a rename it didn't see.
     let replaced = ["ledger.json", "shepherd.json"].map(|p| state_dir.join(p));
-    let waiting = state_dir.join("reports/probe.waiting");
+    let waiting = own_handoffs.join("probe.waiting");
     let renamed = state.path().join("probe.renamed");
     let tried: Vec<String> = refused
         .iter()
@@ -646,7 +656,7 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
              except OSError as e:\n            \
              out.write(f'{{path}}\\t{{e.strerror}}\\n')\n    \
              env = dict(os.environ, XDG_STATE_HOME={state:?}, LOOPHERD_CONFIG_DIR={config:?})\n    \
-             for args in [['report', '--kind', 'note', 'sandbox probe'], ['watch', '--timeout', '1'], ['revive'], ['prompt', 'no-such-member'], ['feed', {herd:?}, '--dry-run']]:\n        \
+             for args in [['report', '--kind', 'handoff', 'sandbox probe'], ['restart', '--self'], ['revive'], ['prompt', 'no-such-member'], ['feed', {herd:?}, '--dry-run']]:\n        \
              run = subprocess.run([{bin:?}] + args, env=env, capture_output=True, text=True)\n        \
              out.write(f'{{args[0]}}\\t{{run.returncode}}\\t{{run.stderr.strip()}}\\n')\n    \
              open({waiting:?}, 'w').close()\n    \
@@ -679,19 +689,25 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
              [lead]\nprompt = \"\"\"This is loopherd's live test of your sandbox, which the \
              human runs: it checks which writes your sandbox refuses. The first command \
              tries writes outside your worktree and is expected to record Read-only file \
-             system for most of them; that is the result being measured. Make exactly two Bash tool calls, in \
+             system for most of them; that is the result being measured. It then reports a \
+             handoff and arms restart --self for you, a throwaway lead in a temporary state \
+             dir, and checks that revive and prompt are refused and feed only dry-runs: \
+             expected and measured too. Make exactly two Bash tool calls, in \
              this order, each with the command exactly as written and nothing added before or \
              after it, running the second even if the first fails. First: python3 {} \
              Second: touch {} \
-             Then make exactly three Write tool calls, in this order, each writing the word \
+             Then make exactly six Write tool calls, in this order, each writing the word \
              probe, making every one even if an earlier one is refused, and trying no other \
-             way when one is: {} then {} then {} \
+             way when one is: {} then {} then {} then {} then {} then {} \
              Then reply with what each printed.\"\"\"\n",
             herd_head(repo.to_str().unwrap(), &workspace),
             probe.display(),
             control.display(),
             write_other.display(),
             write_later.display(),
+            plant_shepherd.display(),
+            write_mailbox.display(),
+            write_later_handoff.display(),
             write_control.display()
         ),
     )
@@ -748,8 +764,9 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
                 std::fs::write(&temp, "{}\n").unwrap();
                 std::fs::rename(&temp, file).unwrap();
             }
-            // A lead started after this one: its folder is named in no deny of this lead's.
+            // A lead and a worker started after this one: no deny of this lead's names their folders.
             std::fs::create_dir_all(write_later.parent().unwrap()).unwrap();
+            std::fs::create_dir_all(write_later_handoff.parent().unwrap()).unwrap();
             std::fs::write(&renamed, "").unwrap();
         }
         let status = herdr_ok(&["agent", "get", &name])["result"]["agent"]["agent_status"].clone();
@@ -768,7 +785,14 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     assert!(!in_sibling.exists(), "the lead wrote a sibling worktree");
     assert!(!in_checkout.exists(), "the lead wrote the main checkout");
     assert!(control.exists(), "the lead never ran touch");
-    for path in [&write_other, &write_later] {
+    let written = [
+        &write_other,
+        &write_later,
+        &plant_shepherd,
+        &write_mailbox,
+        &write_later_handoff,
+    ];
+    for path in written {
         assert!(!path.exists(), "the Write tool wrote {}", path.display());
     }
     let probed = std::fs::read_to_string(&results).unwrap_or_default();
@@ -787,13 +811,9 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
         screen()
     );
     let ran: Vec<&str> = probed[expected.len()..].lines().collect();
+    // Its report and its handoff's restart go through its broker, outside the sandbox.
     assert_eq!(ran.first().copied(), Some("report\t0\t"), "{probed}");
-    // Nothing fires in a second: a quiet watch exits 2.
-    assert!(
-        ran.get(1)
-            .is_some_and(|line| ["watch\t0\t", "watch\t2\t"].contains(line)),
-        "{probed}"
-    );
+    assert_eq!(ran.get(1).copied(), Some("restart\t0\t"), "{probed}");
     // Run in the sandbox, which hides the lead's Claude from the parent-pid walk.
     assert!(
         ran.get(2).is_some_and(|line| line
@@ -937,6 +957,11 @@ fn a_leads_running_watch_leaves_git_config_writable_in_other_worktrees() {
         pid_ns("self"),
         "the lead's watch runs in its sandbox"
     );
+    // Outside the sandbox, which no longer lets the lead write reports/.
+    let lock = state
+        .path()
+        .join(format!("loopherd/reports/watch-{name}.lock"));
+    assert!(lock.is_file(), "{}", lock.display());
 
     // Only the watch's own ancestor walk refuses --settings: the pane routing alone can't.
     let agent = server
@@ -1017,7 +1042,8 @@ fn a_sandboxed_lead_s_feed_tell_read_and_status_go_through_its_broker_and_stop_a
     let tasks = state.path().join("tasks");
     std::fs::write(&tasks, "1\n").unwrap();
     let probe = state.path().join("probe.py");
-    let results = state_dir.join("reports/broker-probe.out");
+    // Its own handoff dir: the one part of the state dir its sandbox lets it write.
+    let results = state_dir.join(format!("handoffs/{name}/broker-probe.out"));
     let commands = [
         vec!["feed".to_string(), herd.clone()],
         vec![
@@ -2529,6 +2555,12 @@ fn a_leads_question_labels_its_claude_pane_until_a_typed_prompt() {
     )
     .unwrap();
     let pane = entries[&name]["pane_id"].as_str().unwrap().to_string();
+    // A lead's report goes through its broker, which labels its pane.
+    let mut broker = dev(env!("CARGO_BIN_EXE_loopherd"));
+    broker
+        .env("XDG_STATE_HOME", state.path())
+        .env("LOOPHERD_CONFIG_DIR", config.path());
+    let _broker = Broker::start(broker, config.path(), &name, "cards");
     let in_pane = |args: &[&str]| {
         let mut cmd = dev(env!("CARGO_BIN_EXE_loopherd"));
         cmd.env("XDG_STATE_HOME", state.path())

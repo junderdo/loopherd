@@ -1680,7 +1680,7 @@ mod tests {
         let mut ledger = ledger([lead("lead-h", cwd.path())]);
         let req = request();
         let state = req.paths.state_dir();
-        let dirs = ["broker/lead-h/requests", "reports", "handoffs"].map(|d| state.join(d));
+        let dirs = ["broker/lead-h/requests", "handoffs/lead-h"].map(|d| state.join(d));
         let seen = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
         let record = (seen.clone(), dirs.clone());
         herdr.on_start = Some(Box::new(move || {
@@ -1690,7 +1690,7 @@ mod tests {
 
         run(&herdr, &mut ledger, &req);
 
-        assert_eq!(*seen.lock().unwrap(), [true, true, true], "{dirs:?}");
+        assert_eq!(*seen.lock().unwrap(), [true, true], "{dirs:?}");
     }
 
     #[test]
