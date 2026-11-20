@@ -1058,7 +1058,12 @@ fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32>
 
 fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
     use std::io::IsTerminal;
-    if let Some(client) = own_broker() {
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    // After a herdr restart the shepherd's pane may carry a dead lead's old id.
+    let shepherd = ledger
+        .dir()
+        .is_ok_and(|state| shepherd_here(&state, own_pane().as_deref()).is_some());
+    if let Some(client) = own_broker().filter(|_| !shepherd) {
         let op = broker::Op::Status {
             all,
             strays,
@@ -1067,7 +1072,6 @@ fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
         };
         return run_op(Some(&client), &op);
     }
-    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     broker::refuse_unrouted(&ledger, "status")?;
     let format = match json {
         true => Format::Json,

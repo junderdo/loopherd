@@ -211,3 +211,31 @@ fn status_in_a_sandbox_whose_pane_holds_no_lead_is_refused_before_herdr() {
     );
     assert_eq!(world.calls(), "");
 }
+
+#[test]
+fn the_shepherds_status_runs_directly_in_a_pane_whose_id_a_lead_once_had() {
+    let world = World::new();
+    // The test process stands in for the shepherd's Claude, as loopherd's parent.
+    let stat = fs::read_to_string("/proc/self/stat").unwrap();
+    let (_, fields) = stat.rsplit_once(')').unwrap();
+    let start: u64 = fields.split_whitespace().nth(19).unwrap().parse().unwrap();
+    let pid = std::process::id();
+    let record = format!(
+        r#"{{"pane": "w1:p1", "socket": "{SOCKET}", "process": {{"pid": {pid}, "start": {start}}},
+        "session": "s-1", "at": "2026-11-19T00:00:00Z", "used": true}}"#
+    );
+    fs::write(
+        world.root.path().join("state/loopherd/shepherd.json"),
+        record,
+    )
+    .unwrap();
+
+    let mut status = world.loopherd(Some("w1:p1"), &["status"]);
+    let bin = world.root.path().join("bin");
+    set_env(&mut status, world.root.path(), Some(&bin));
+    let out = status.env("CLAUDE_PID", pid.to_string()).output().unwrap();
+
+    let shown = stdout(&out);
+    assert!(shown.contains("lh-9"), "{shown}");
+    assert!(shown.contains("strays"), "{shown}");
+}
