@@ -257,7 +257,7 @@ fn lock_mailbox(path: &Path) -> Result<Lock> {
         .append(true)
         .open(path)
         .with_context(|| format!("open {}", path.display()))?;
-    Lock::wait(file).with_context(|| format!("lock {}", path.display()))
+    Lock::wait(file, crate::lock::BRIEF).with_context(|| format!("lock {}", path.display()))
 }
 
 /// True for an empty file too.
@@ -818,7 +818,7 @@ impl Cursor {
             .write(true)
             .open(&path)
             .with_context(|| format!("open {}", path.display()))?;
-        Lock::wait(file).with_context(|| format!("lock {}", path.display()))
+        Lock::wait(file, crate::lock::BRIEF).with_context(|| format!("lock {}", path.display()))
     }
 
     fn load(self, dir: &Path) -> Result<Offsets> {

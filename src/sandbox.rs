@@ -940,15 +940,24 @@ fn sandbox_loosenings(
             ));
         }
     }
-    // allowRead only carves into denyRead, which a lead has only with credentials to hide.
-    if !own["sandbox"]["filesystem"]["denyRead"].is_null() {
-        let own_reads = entries(&own["sandbox"]["filesystem"]["allowRead"]);
-        for path in entries(&user["sandbox"]["filesystem"]["allowRead"]) {
-            if !own_reads.contains(&path) {
-                found.push(format!(
-                    "{shown}: sandbox.filesystem.allowRead opens {path} to reads"
-                ));
-            }
+    // allowRead carves into denyRead. Credentials to hide make any of it suspect;
+    // otherwise only a carve into what is denied counts.
+    let credentials = !own["sandbox"]["filesystem"]["allowRead"].is_null();
+    let own_reads = entries(&own["sandbox"]["filesystem"]["allowRead"]);
+    let denied: Vec<PathBuf> = entries(&own["sandbox"]["filesystem"]["denyRead"])
+        .iter()
+        .filter_map(|path| absolute(path, home))
+        .collect();
+    for path in entries(&user["sandbox"]["filesystem"]["allowRead"]) {
+        let opens = absolute(&path, home).is_none_or(|path| {
+            denied
+                .iter()
+                .any(|deny| deny.starts_with(&path) || path.starts_with(deny))
+        });
+        if !own_reads.contains(&path) && (credentials || opens) {
+            found.push(format!(
+                "{shown}: sandbox.filesystem.allowRead opens {path} to reads"
+            ));
         }
     }
     for (pointer, what) in LOOSENING_SWITCHES {
@@ -1224,7 +1233,7 @@ pub fn create_state(paths: &Paths, name: &str) -> Result<()> {
     for dir in WRITABLE_STATE
         .map(|dir| state.join(dir))
         .into_iter()
-        .chain([requests])
+        .chain([requests, paths.locks_dir()])
         .chain(leads)
     {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
@@ -1292,6 +1301,8 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
         "filesystem": {
             "allowWrite": allow_write.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "denyWrite": deny_write.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+            // On Linux a file it can only read is still one it can flock.
+            "denyRead": [paths.locks_dir().display().to_string()],
         },
     });
     // loopherd's own commands that write past the sandbox run in the lead's broker (D98).
@@ -1328,10 +1339,12 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
         let human =
             crate::credentials::human_credentials(&paths.home, &|name| std::env::var_os(name));
         // The file tools run outside the sandbox, so each path is denied to both.
-        sandbox["filesystem"]["denyRead"] = human
+        let mut deny_read: Vec<String> = human
             .iter()
             .map(|(path, _)| path.display().to_string())
             .collect();
+        deny_read.push(paths.locks_dir().display().to_string());
+        sandbox["filesystem"]["denyRead"] = json!(deny_read);
         sandbox["filesystem"]["allowRead"] = json!(crate::credentials::ssh_readable(&paths.home));
         deny.extend(human.iter().map(|(path, is_dir)| {
             let under = if *is_dir { "/**" } else { "" };

@@ -425,6 +425,8 @@ fn feed(
         mailboxes: ctx.paths.state_dir().join("reports"),
         claude_dir: ctx.claude_dir.clone(),
         after_merge_timeout: AFTER_MERGE_TIMEOUT,
+        // Another feed holds the lock across all its members' commands.
+        after_merge_wait: FEED_WITHIN,
         owner: caller.process,
         procs: ctx.procs,
         lead: caller.lead.clone(),
