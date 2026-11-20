@@ -92,6 +92,11 @@ impl Config {
     }
 }
 
+/// `config`'s `[notify] pane_label`; a broken table labels nothing, as it sends nothing.
+pub fn labels_panes(config: &Path) -> bool {
+    load(config).is_ok_and(|c| c.is_some_and(|c| c.labels_panes()))
+}
+
 /// `config`'s `[notify]` table; `None` when it is missing or not enabled.
 /// A table with an unknown key, kind or placeholder is an error, enabled or not.
 pub fn load(config: &Path) -> Result<Option<Config>> {

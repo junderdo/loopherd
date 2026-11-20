@@ -70,6 +70,10 @@ pub enum Op {
         keep_branch: bool,
         drop_branch: bool,
     },
+    /// Labels the lead's pane with the question it reported.
+    Label {
+        question: String,
+    },
 }
 
 /// What an operation acts on, for the broker's reach rule.
@@ -131,6 +135,7 @@ impl Op {
             Op::RestartSelf => "restart --self",
             Op::Retire { .. } => "retire",
             Op::Release { .. } => "release",
+            Op::Label { .. } => "label its pane",
         }
     }
 
@@ -140,7 +145,7 @@ impl Op {
                 Reach::Member(name)
             }
             Op::Feed { herd, .. } | Op::Add { herd, .. } => Reach::Herd(herd),
-            Op::RestartSelf => Reach::Lead,
+            Op::RestartSelf | Op::Label { .. } => Reach::Lead,
             Op::Retire { name, .. } | Op::Release { name, .. } => Reach::AnyMember(name),
         }
     }
@@ -149,6 +154,8 @@ impl Op {
     fn answer_within(&self) -> Duration {
         match self {
             Op::Tell { .. } | Op::Prompt { .. } | Op::RestartSelf => Duration::from_secs(120),
+            // The report is written already; a label isn't worth waiting out a feed for.
+            Op::Label { .. } => Duration::from_secs(10),
             // Its settle timeout, with room for herdr and the member's view.
             Op::Restart { .. } | Op::Retire { .. } | Op::Release { .. } => Duration::from_secs(300),
             // Each member may take its ready timeout, then after_merge its own.
@@ -222,8 +229,37 @@ impl Op {
                 keep_branch,
                 drop_branch,
             } => release(ctx, name, *keep_branch, *drop_branch, sink),
+            Op::Label { question } => label(ctx, question, sink),
         }
     }
+}
+
+/// Labels the lead's pane with `question`, from the lead's own record.
+fn label(ctx: &mut Ctx, question: &str, sink: &mut dyn Sink) -> Result<i32> {
+    let lead = ctx
+        .caller
+        .lead
+        .as_ref()
+        .context("only a lead's broker labels its pane")?;
+    let record = own_record(ctx.herdr, &*ctx.ledger, &lead.name)?;
+    if !crate::notify::labels_panes(&crate::herd::config_file(ctx.paths)) {
+        return Ok(0);
+    }
+    let mailboxes = ctx.paths.state_dir().join("reports");
+    let pane = &record.pane_id;
+    if let Err(e) = crate::pane_label::lead_asked(
+        ctx.herdr,
+        &*ctx.ledger,
+        &mailboxes,
+        pane,
+        &record.name,
+        question,
+    ) {
+        sink.err(&format!(
+            "loopherd report: warning: label pane {pane}: {e:#}"
+        ));
+    }
+    Ok(0)
 }
 
 /// Lead `lead`'s own unretired record, in this herdr; by name, since a stale
@@ -923,6 +959,11 @@ pub struct Client {
 }
 
 impl Client {
+    /// The lead this client hands operations to.
+    pub fn lead(&self) -> &str {
+        &self.lead
+    }
+
     pub fn for_lead(paths: &Paths, lead: &str) -> Client {
         Client {
             lead: lead.into(),

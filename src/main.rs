@@ -1568,6 +1568,15 @@ fn notify_self_restart(text: &str, config: &Path, mailboxes: &Path) {
 }
 
 fn run_report(kind: Kind, as_name: Option<String>, text: &str) -> Result<i32> {
+    let broker = own_broker();
+    let as_name = match (&broker, as_name) {
+        (Some(broker), Some(other)) if other != broker.lead() => {
+            let lead = broker.lead();
+            bail!("{lead} reports only as itself; {other}'s reports are {other}'s own");
+        }
+        (Some(broker), _) => Some(broker.lead().to_string()),
+        (None, as_name) => as_name,
+    };
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let own_pane = own_pane();
     let own_socket = socket_from_env();
@@ -1580,18 +1589,25 @@ fn run_report(kind: Kind, as_name: Option<String>, text: &str) -> Result<i32> {
     let mailboxes = ledger.reports_dir()?;
     let name = report(&ledger, &mailboxes, &who, kind, text, SystemTime::now())?;
     let config = Paths::from_env().map(|p| p.herds.with_file_name("config.toml"));
-    if let (Kind::Question, Some(pane), Ok(config)) = (kind, &own_pane, config)
-        && labels_panes(&config)
+    let labels = config.is_ok_and(|config| notify::labels_panes(&config));
+    if kind != Kind::Question || !labels {
+        return Ok(0);
+    }
+    if let Some(broker) = broker {
+        let label = broker::Op::Label {
+            question: text.into(),
+        };
+        if let Err(e) = run_op(Some(&broker), &label) {
+            eprintln!("loopherd report: warning: {e:#}");
+        }
+        return Ok(0);
+    }
+    if let Some(pane) = &own_pane
         && let Err(e) = pane_label::lead_asked(&CliHerdr, &ledger, &mailboxes, pane, &name, text)
     {
         eprintln!("loopherd report: warning: label pane {pane}: {e:#}");
     }
     Ok(0)
-}
-
-/// `[notify] pane_label`; a broken table labels nothing, as it sends nothing.
-fn labels_panes(config: &Path) -> bool {
-    notify::load(config).is_ok_and(|c| c.is_some_and(|c| c.labels_panes()))
 }
 
 fn since_now(value: &str) -> Result<SystemTime> {
@@ -1687,7 +1703,7 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         shepherd_handoff: Some(&handoff),
         notify_own: Some(&notify_own),
         merges: merge_lookups(&config, &gh),
-        pane_label: labels_panes(&config),
+        pane_label: notify::labels_panes(&config),
         ..req
     };
     let woke = watch::watch(
@@ -2075,10 +2091,8 @@ fn doctor_install(settings: Option<PathBuf>) -> Result<doctor::Install> {
         None => install_hook::default_settings()?,
     };
     // No config dir, or a [notify] that doesn't load, leaves pane labels off.
-    let pane_label = herd::herds_dir().is_some_and(|herds| {
-        notify::load(&herds.with_file_name("config.toml"))
-            .is_ok_and(|n| n.is_some_and(|n| n.labels_panes()))
-    });
+    let pane_label = herd::herds_dir()
+        .is_some_and(|herds| notify::labels_panes(&herds.with_file_name("config.toml")));
     Ok(doctor::Install {
         settings,
         settings_given,
