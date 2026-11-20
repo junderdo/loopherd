@@ -748,7 +748,9 @@ fn revive_one(
     }
     let args = [
         vec!["--resume".to_string(), session.clone()],
-        lead_args.clone().unwrap_or_else(|| record.claude_args.clone()),
+        lead_args
+            .clone()
+            .unwrap_or_else(|| record.claude_args.clone()),
     ]
     .concat();
     let (pane_id, tab_id, new_tab) = match reusable {
@@ -1854,7 +1856,10 @@ mod tests {
         assert_eq!(revived.claude_args, herdr.started()[0].args[2..]);
         assert_eq!(
             crate::doctor::lead_sandbox_check(&req.paths, revived).map(|c| c.detail),
-            Some(sandbox::hook_only_warning("lead-h", "bubblewrap not installed"))
+            Some(sandbox::hook_only_warning(
+                "lead-h",
+                "bubblewrap not installed"
+            ))
         );
     }
 
