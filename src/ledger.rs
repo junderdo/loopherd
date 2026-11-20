@@ -123,8 +123,9 @@ impl Outcome {
 }
 
 /// A member's `after_merge`, once a feed has taken it on; it never runs twice.
+/// A payload with a field this version lacks loads as `Unknown`, kept whole.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
 pub enum AfterMerge {
     /// Taken on by the feed `owner`, which hasn't noted its outcome yet.
     Pending { owner: Process },
@@ -998,6 +999,23 @@ mod tests {
             Some(AfterMerge::Unknown("skipped".into()))
         );
         assert!(!entry.is_lead());
+    }
+
+    #[test]
+    fn a_pending_after_merge_with_a_field_this_version_lacks_loads_as_unknown() {
+        let pending =
+            serde_json::json!({"pending": {"owner": {"pid": 7, "start": 1}, "since": "x"}});
+        let mut json = serde_json::to_value(record("a", true)).unwrap();
+        json["after_merge"] = pending.clone();
+        let parsed: AgentRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            parsed.after_merge,
+            Some(AfterMerge::Unknown(pending.clone()))
+        );
+        assert_eq!(
+            serde_json::to_value(&parsed).unwrap()["after_merge"],
+            pending
+        );
     }
 
     #[test]
