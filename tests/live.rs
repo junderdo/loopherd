@@ -1,4 +1,4 @@
-//! End-to-end runs of `loopherd spawn`, `add`, `revive`, `retire --close`, `feed`, the Stop hook, `watch`, the shepherd's self-restart and the herd view's event subscriber against the real `loopherd-dev` herdr
+//! End-to-end runs of `loopherd spawn`, `add`, `revive`, `retire --close`, `feed`, a sandboxed lead's broker, the Stop hook, `watch`, the shepherd's self-restart and the herd view's event subscriber against the real `loopherd-dev` herdr
 //! session, `herdr plugin link` of `herdr-plugin/` into a throwaway herdr home, and its view popup on a throwaway herdr server. Skipped unless `LOOPHERD_LIVE=1`; start the session first with
 //! `scripts/herdr-dev --start`, then run through it:
 //! `LOOPHERD_LIVE=1 scripts/herdr-dev cargo test --test live`.
@@ -976,6 +976,173 @@ fn a_leads_running_watch_leaves_git_config_writable_in_other_worktrees() {
         probe.status.success(),
         "{}",
         String::from_utf8_lossy(&probe.stderr)
+    );
+}
+
+#[test]
+fn a_sandboxed_lead_s_feed_tell_read_and_status_go_through_its_broker_and_stop_at_its_herd() {
+    if !live_enabled() {
+        return;
+    }
+    let workspace = assert_dev_session();
+    let state = tempfile::tempdir().unwrap();
+    // This checkout is already trusted; a fresh repo would stop the lead at the trust dialog.
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let herd = format!("lh-live-brk-{}", std::process::id());
+    let name = format!("lead-{herd}");
+    let worker = format!("{herd}-1");
+    let outsider = format!("lh-live-out-{}", std::process::id());
+    let checkout = repo.file_name().unwrap().to_str().unwrap();
+    let parent = repo.parent().unwrap();
+    let worktree = match parent.file_name() == repo.file_name() {
+        true => parent.join("worktrees"),
+        false => parent.join(format!("{checkout}-worktrees")),
+    }
+    .join(&name);
+    let _worktree = RemoveWorktree(repo.clone(), worktree.clone());
+    let state_dir = state.path().join("loopherd");
+    let config = state_dir.join("config");
+    let herds = config.join("herds");
+    std::fs::create_dir_all(&herds).unwrap();
+    // Another herd's member; the broker refuses it from the ledger, before any herdr call.
+    std::fs::write(
+        state_dir.join("ledger.json"),
+        format!(
+            r#"{{"{outsider}": {{"name": "{outsider}", "pane_id": "w0:p0", "session_id": null,
+            "repo": "/", "worktree": null, "workspace": "w0", "prompt": null,
+            "prompt_sent": true, "created": "2026-11-01T00:00:00Z", "herd": "other"}}}}"#
+        ),
+    )
+    .unwrap();
+    let tasks = state.path().join("tasks");
+    std::fs::write(&tasks, "1\n").unwrap();
+    let probe = state.path().join("probe.py");
+    let results = state_dir.join("reports/broker-probe.out");
+    let commands = [
+        vec!["feed".to_string(), herd.clone()],
+        vec![
+            "tell".into(),
+            worker.clone(),
+            "Reply with just the word ok.".into(),
+        ],
+        vec!["read".into(), worker.clone(), "--lines".into(), "5".into()],
+        vec!["read".into(), outsider.clone()],
+        vec!["tell".into(), outsider.clone(), "hi".into()],
+        vec!["status".into()],
+        vec!["status".into(), "--strays".into()],
+    ];
+    std::fs::write(
+        &probe,
+        format!(
+            "import json, os, subprocess\n\
+             env = dict(os.environ, XDG_STATE_HOME={state:?}, LOOPHERD_CONFIG_DIR={config:?})\n\
+             for args in {commands}:\n    \
+             run = subprocess.run([{bin:?}] + args, env=env, capture_output=True, text=True)\n    \
+             with open({results:?}, 'a') as out:\n        \
+             out.write(json.dumps({{'code': run.returncode, 'out': run.stdout, 'err': run.stderr}}) + '\\n')\n",
+            state = state.path().display().to_string(),
+            config = config.display().to_string(),
+            commands = serde_json::to_string(&commands).unwrap(),
+            bin = env!("CARGO_BIN_EXE_loopherd"),
+            results = results.display().to_string(),
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        herds.join(format!("{herd}.toml")),
+        format!(
+            "{}[template.echo]\nparams = [\"n\"]\nname = \"{{herd}}-{{n}}\"\n\
+             prompt = \"Reply with just the word ok.\"\n\
+             [queue]\ntemplate = \"echo\"\nsource = \"cat {}\"\nmax = 1\n\
+             [lead]\nprompt = \"\"\"This is loopherd's live test of your broker, which the \
+             human runs. Make exactly one Bash tool call, with the command exactly as written \
+             and nothing added before or after it: python3 {} Then reply done.\"\"\"\n",
+            herd_head(repo.to_str().unwrap(), &workspace),
+            tasks.display(),
+            probe.display()
+        ),
+    )
+    .unwrap();
+    let _lead_tab = CloseTab(name.clone());
+    let _worker_tab = CloseTab(worker.clone());
+
+    let out = dev(env!("CARGO_BIN_EXE_loopherd"))
+        .env("XDG_STATE_HOME", state.path())
+        .env("LOOPHERD_CONFIG_DIR", &config)
+        .args(["lead", &herd, "--", "--permission-mode", "acceptEdits"])
+        .args(["--allowedTools", "Bash(python3:*)"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let given_up = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let ran = || -> Vec<Value> {
+        std::fs::read_to_string(&results)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    };
+    while ran().len() < commands.len() {
+        assert!(
+            std::time::Instant::now() < given_up,
+            "the lead ran {} of its commands: {:?}",
+            ran().len(),
+            ran()
+        );
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    let ran = ran();
+    let code = |i: usize| ran[i]["code"].as_i64().unwrap();
+    let text = |i: usize, key: &str| ran[i][key].as_str().unwrap().to_string();
+    assert_eq!(code(0), 0, "{:?}", ran[0]);
+    assert!(
+        text(0, "out").contains(&format!("added {worker}")),
+        "{:?}",
+        ran[0]
+    );
+    assert_eq!(ledger_entry(state.path(), &worker)["herd"], herd.as_str());
+    assert_eq!(code(1), 0, "{:?}", ran[1]);
+    assert!(
+        text(1, "out").starts_with(&format!("told {worker}")),
+        "{:?}",
+        ran[1]
+    );
+    assert_eq!(code(2), 0, "{:?}", ran[2]);
+    assert!(!text(2, "out").trim().is_empty(), "{:?}", ran[2]);
+    for (i, command) in [(3, "read"), (4, "tell")] {
+        assert_eq!(code(i), 1, "{:?}", ran[i]);
+        assert!(
+            text(i, "err").contains(&format!(
+                "{name}'s broker refused {command}: {outsider} is in herd other; \
+                 {name} reaches only herd {herd}'s workers"
+            )),
+            "{:?}",
+            ran[i]
+        );
+    }
+    assert_eq!(code(5), 0, "{:?}", ran[5]);
+    let status = text(5, "out");
+    assert!(status.starts_with(&format!("{herd}\n")), "{status}");
+    for seen in [&name, &worker] {
+        assert!(status.contains(seen.as_str()), "{status}");
+    }
+    for hidden in [outsider.as_str(), "other", "stray"] {
+        assert!(!status.contains(hidden), "{status}");
+    }
+    assert_eq!(code(6), 1, "{:?}", ran[6]);
+    assert!(
+        text(6, "err").contains(&format!(
+            "{name}'s broker refused status: strays are herdr's agents outside every herd"
+        )),
+        "{:?}",
+        ran[6]
     );
 }
 

@@ -176,7 +176,7 @@ Init never launches an agent.
    check it with `loopherd reports --all`. A plain `loopherd reports` while
    a watch is armed consumes reports the watch would have printed, so look
    with `reports --all`. For a member that left no report, read its screen
-   (`herdr agent read <name> --source recent-unwrapped --lines 40`).
+   with `loopherd read <name>` (its last 40 lines; `--lines <n>` up to 1000).
 4. **Verify** a finished member's output with a read-only reviewer
    subagent against the task's acceptance criteria. Ask for it by role:
    the `reviewer` agent type, else `loopherd-reviewer`, else a
@@ -189,29 +189,43 @@ Init never launches an agent.
    is your session's own temp directory: its detached worktrees, its build
    target dirs and any copies (mutation runs), so one removal cleans up.
    Have it write its findings to `<scratch>/pr<n>/review-<round>.md`,
-   each with severity, failure scenario and file:line, and return only
-   one line: `pass <head sha>`, or `fail <head sha>: <b> blocking, <m>
-   minor` plus the file's path. Its reply lands in your context and the
-   file doesn't, so read the file only to forward findings or to write a
-   merge question. Parallel reviews of one PR write
-   `review-<round>-<axis>.md`. Members can't read your scratch dir, so
-   forward a member's findings as a PR comment (`gh pr comment <n>
-   --body-file <file>`), then `loopherd tell` the member to read that comment.
-   Keep the files until the PR merges or closes.
+   each with severity (blocking, minor or nit), failure scenario and
+   file:line, and return only one line: `pass <head sha>: <m> minor, <n>
+   nit` when nothing is blocking, else `fail <head sha>: <b> blocking, <m>
+   minor, <n> nit`, plus the file's path. Its reply lands in your context
+   and the file doesn't, so read the file only to forward findings, to
+   file a pass's minors and nits, or to write a merge question. Parallel
+   reviews of one PR write `review-<round>-<axis>.md`. Members can't read
+   your scratch dir, so forward only a failing round's blocking findings,
+   in a PR comment holding just those: copy them to
+   `<scratch>/pr<n>/review-<round>-blocking.md`, run `gh pr comment <n>
+   --body-file` on that file, then `loopherd tell` the member to read that
+   comment. Post nits in a separate PR comment marked non-blocking. Keep
+   the files until the PR merges or closes.
    For anything that deletes or closes, have it hunt for safety gaps and
    name the test covering each rule. Report as soon as it lands; the human
    often merges fast.
 
    A finding is blocking when it's inside the task's acceptance criteria,
    or a correctness or safety bug the PR introduces; give the reviewer this
-   bar, so its `<b> blocking` counts only these. Blocking findings, and
-   any other finding that should be fixed and fits within the task's scope,
-   go back to the member in the PR comment. Out-of-scope findings become
-   new tasks (or, when no task is warranted, a PR comment marked
-   non-blocking); the PR doesn't wait on them. Each round after the first
-   checks the previous round's findings and the diff since that round's
-   head, not the whole PR: hand the reviewer `review-<round - 1>.md` and
-   `git diff <its head sha>..<new head>`, so fixes don't open findings in
+   bar, so its `<b> blocking` counts only these. Every other finding,
+   whatever its severity, is handled as a minor or, when trivial, a nit
+   (a pre-existing bug the PR didn't introduce is a minor). Only blocking
+   findings fail a round, and only they go back to the member while it
+   fails, in the PR comment above. Minor findings from any round never
+   hold the merge: they go to one follow-up task per PR (a lead with
+   `new_cards` off lists the follow-up minors in a question to the human
+   instead), or, when the member has a next PR in the same card's stack,
+   into that PR's scope. Nits go on the PR as a comment marked
+   non-blocking and are not tasks; the PR doesn't wait on them. Each
+   round after the first checks the previous round's blocking findings
+   and the diff since that round's head, not the whole PR: hand
+   the reviewer `review-<round - 1>.md` and `git diff <its head
+   sha>..<new head>`, and give it a narrower bar: is each previous
+   blocking finding fixed, and does the fix diff introduce a new
+   correctness or safety bug? Its `<b> blocking` counts only those. A new
+   minor or nit it notices is reported as non-blocking and handled as
+   above; it never fails the round, so fixes don't open findings in
    settled code. `<round>` counts per PR across handoffs; the handoff's
    current review file carries it. After round 3, start no other round:
    ask the human whether to merge as-is, narrow the scope, or change
@@ -722,6 +736,8 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
 
 ### Talking to members
 
+- `loopherd read <name> [--lines <n>]` prints a member's last lines of
+  output (40 by default, up to 1000), not raw `herdr agent read`.
 - `loopherd tell <name> "<text>"` (or `--text-file <file>`), not raw
   `herdr agent prompt`. It refuses, sending nothing, while the member's
   pane shows a subagent's view (text would reach the subagent instead):
@@ -769,16 +785,22 @@ Shepherd section has the detail):
    if it reads right.
 2. **Watch:** keep `loopherd watch --timeout 3600` in the background (see
    Heartbeat).
-3. **On wake:** read the watch's lines and the member's reports.
+3. **On wake:** read the watch's lines and the member's reports; for a
+   member that left none, `loopherd read <name>` shows its screen, not raw
+   `herdr agent read`.
 4. **Verify** a `done` member's output with a read-only reviewer subagent
    against the task's acceptance criteria, with a temp `XDG_STATE_HOME` and
    `LOOPHERD_CONFIG_DIR`, building under `<scratch>/pr<n>/`. It writes its
    findings to `<scratch>/pr<n>/review-<round>.md` and returns one line:
-   `pass <head sha>`, or `fail <head sha>: <b> blocking, <m> minor` plus
-   the file's path. Read the file only to forward findings or ask a merge
-   question. Members can't read your scratch dir: forward findings as a PR
-   comment (`gh pr comment <n> --body-file <file>`), then `loopherd tell`
-   the member to read it. Keep the files until the PR merges or closes.
+   `pass <head sha>: <m> minor, <n> nit` when nothing is blocking, else
+   `fail <head sha>: <b> blocking, <m> minor, <n> nit`, plus the file's
+   path. Read the file only to forward findings, to file a pass's minors
+   and nits, or to write a merge question. Members can't read your scratch
+   dir: forward only a failing round's blocking findings, in a PR comment
+   holding just those (`gh pr comment <n> --body-file
+   <scratch>/pr<n>/review-<round>-blocking.md`), then `loopherd tell` the
+   member to read it. Post nits in a separate PR comment marked
+   non-blocking. Keep the files until the PR merges or closes.
 5. **After merge** (`gh pr view <n> --json state`): close out the task in
    the tracker, unblock dependents, run `loopherd feed <herd>` (it runs
    `after_merge`; do by hand what its note says didn't run), then `git
@@ -807,7 +829,7 @@ What differs from the shepherd:
   | `merge` | merge a verified PR |
   | `install` | install loopherd and its hooks while feeding |
   | `rebase` | have a member rebase and force-push |
-  | `new_cards` | create tasks for out-of-scope gaps |
+  | `new_cards` | create follow-up tasks for minor or out-of-scope findings |
   | `design_escalation` | settle a design question a member raises |
   | `blocked_dialogs` | answer a member's blocking dialog |
 
@@ -837,16 +859,23 @@ What differs from the shepherd:
   `paused/`, `shepherd.json` and the ledger among them, fail
   (`Read-only file system`, or a denied command or Edit). Processes a
   command leaves behind end with it, so keep long waits as background
-  tasks. `loopherd restart` (`--self` included), `prompt`, `feed`,
-  `add`, `retire` and `release` run in your broker, outside the sandbox,
-  in any form, one at a time, so a running `feed` holds up the others
-  until it ends. Run `loopherd watch` bare, as its own Bash call, to run
-  it outside the sandbox (D104), and `scripts/install` too with
-  `install` on: a `cd x &&`, a redirect, `$(…)` or a path to the binary
-  keeps it inside, where a long watch blocks `git config` writes across
-  the repo for its whole run. Your watch refuses `--settings`. `revive`
-  is the shepherd's or the human's. `restart`, `prompt`, `retire` and `release` refuse anything
-  but your own herd's members; `retire --close` and `release` also keep
+  tasks. `loopherd tell`, `read`, `status`, `restart` (`--self`
+  included), `prompt`, `feed`, `add`, `retire` and `release` don't call
+  herdr themselves: they hand the operation to your broker, a process
+  outside the sandbox that `loopherd lead` started for you, in any form,
+  one at a time, so a running `feed` holds up the others until it ends.
+  Your `status` shows your own herd alone, with no strays, and refuses
+  `--strays`. With no broker running they fail at once, naming the
+  shepherd's `loopherd revive --name <you>`; report that as a question.
+  Your `watch` still calls herdr itself, not through your broker. Run
+  `loopherd watch` bare, as its own Bash call, to run it outside the
+  sandbox (D104), and `scripts/install` too with `install` on: a
+  `cd x &&`, a redirect, `$(…)` or a path to the binary keeps it inside,
+  where a long watch blocks `git config` writes across the repo for its
+  whole run. Your watch refuses `--settings`. `revive` is the shepherd's
+  or the human's. `tell`, `read`, `restart` and `prompt` reach only your
+  own herd's unretired workers, and `retire` and `release` only your
+  herd's workers, retired or not; `retire --close` and `release` also keep
   a worktree or refuse when the ledger puts one anywhere its herd file
   wouldn't, and your broker refuses `retire --force` and
   `release --drop-branch`, which are the human's.
@@ -901,19 +930,28 @@ What differs from the shepherd:
   the report.
 - **Review rounds.** A finding is blocking when it's inside the task's
   acceptance criteria, or a correctness or safety bug the PR introduces;
-  give the reviewer this bar. Blocking and other in-scope findings go back
-  to the worker; out-of-scope ones become tasks. Each round after the
-  first checks only the last round's findings and the diff since its head:
-  hand the reviewer `review-<round - 1>.md` and `git diff <its head
-  sha>..<new head>`. A first review uses the reviewer as defined; later
-  rounds pass `model: sonnet` to the subagent. `<round>` counts per PR across handoffs; your
-  handoff's current review file carries it. After your herd's
-  review-round limit (in your prompt; 3 when unset) start no other round;
-  send `loopherd report --kind question`
-  asking whether to merge as-is, narrow the scope, or change approach,
-  with the PR link and the open blocking findings, then end your turn.
-  With `new_cards` off, list out-of-scope findings in a question rather
-  than creating tasks.
+  give the reviewer this bar. Every other finding, whatever its severity,
+  is handled as a minor or, when trivial, a nit. Only blocking findings
+  fail a round, and only they go back to the member while it fails, in a
+  PR comment holding just those. Post nits in a separate PR comment marked
+  non-blocking; they are not tasks. Minor findings from any round never
+  hold the merge: they go to one follow-up task per PR, or, when the
+  member has a next PR in the same card's stack, into that PR's scope.
+  With `new_cards` off, list the follow-up minors in a question to the
+  human rather than creating a task. Each round after the first checks
+  the previous round's blocking findings and only the diff since its
+  head: hand the reviewer `review-<round - 1>.md` and `git diff <its head
+  sha>..<new head>`, and give it a narrower bar: is each previous
+  blocking finding fixed, and does the fix diff introduce a new
+  correctness or safety bug? Its `<b> blocking` counts only those; a new
+  minor or nit is reported as non-blocking, handled as above, and never
+  fails the round. A first review uses the reviewer as defined; later
+  rounds pass `model: sonnet` to the subagent. `<round>` counts per PR
+  across handoffs; your handoff's current review file carries it. After
+  your herd's review-round limit (in your prompt; 3 when unset) start no
+  other round; send `loopherd report --kind question` asking whether to
+  merge as-is, narrow the scope, or change approach, with the PR link and
+  the open blocking findings, then end your turn.
 - **Heartbeat.** Keep `loopherd watch --timeout 3600` as a background task,
   run bare, exactly so. Run from your pane, it's your watch: it reads your
   herd's workers only, never you, and naming any other herd is an error.
@@ -924,7 +962,8 @@ What differs from the shepherd:
   naming why. In any other form it runs sandboxed, and from the wrong
   pane prints `warning: pane <pane> holds lead <you> on socket
   <recorded>, but this watch's socket is <this>; running the shepherd's
-  watch`, then fails on the shepherd's watch lock. If you're retired, it exits with an error and
+  watch`, then fails: your sandbox denies the shepherd's watch lock. If
+  you're retired, it exits with an error and
   leaves your herd's events for the shepherd. Every 60s it also runs your
   herd's checks and wakes you with `<member> merged` (the template's
   `merged` passes, and its `done` doesn't or its after_merge is still due):
