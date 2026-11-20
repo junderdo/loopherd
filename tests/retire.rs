@@ -578,7 +578,7 @@ fn write_fakes(bin: &Path) {
     let real_git = String::from_utf8_lossy(&real_git.stdout).trim().to_string();
     let calls = bin.join("calls");
     let log = format!(
-        r#"echo "$0 $* GH_TOKEN=$GH_TOKEN SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> {}"#,
+        r#"echo "$0 $* GH_TOKEN=$GH_TOKEN SSH_AUTH_SOCK=$SSH_AUTH_SOCK GIT_SSH_COMMAND=$GIT_SSH_COMMAND" >> {}"#,
         calls.display()
     );
     fakes::executable(
@@ -613,6 +613,7 @@ fn a_credentials_herds_broker_reaches_origin_with_its_leads_token_not_its_starte
     let starter = [
         ("GH_TOKEN", "the_humans_token"),
         ("SSH_AUTH_SOCK", "/run/the-humans-agent.sock"),
+        ("GIT_SSH_COMMAND", "ssh -i /home/human/.ssh/id_personal"),
     ];
     let _broker = Broker::start_with(state.path(), Some(&bin), &starter);
 
@@ -623,10 +624,16 @@ fn a_credentials_herds_broker_reaches_origin_with_its_leads_token_not_its_starte
         .lines()
         .find(|line| line.contains("ls-remote"))
         .unwrap_or_else(|| panic!("release never asked origin: {calls}\n{out:?}"));
+    let ssh_config = state.path().join("config/ssh/config");
     assert!(
-        ls_remote.ends_with(" GH_TOKEN=github_pat_lead SSH_AUTH_SOCK="),
+        ls_remote.ends_with(&format!(
+            " GH_TOKEN=github_pat_lead SSH_AUTH_SOCK= GIT_SSH_COMMAND=ssh -F '{}' \
+             -o IdentitiesOnly=yes -o IdentityAgent=none",
+            ssh_config.display()
+        )),
         "{ls_remote}"
     );
+    assert!(!calls.contains("id_personal"), "{calls}");
     assert!(!calls.contains("the_humans_token"), "{calls}");
     assert!(!calls.contains("the-humans-agent"), "{calls}");
 }

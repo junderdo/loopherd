@@ -648,10 +648,21 @@ pub fn lead_env(paths: &Paths, lead: &str) -> Result<Vec<(String, String)>> {
     let env = crate::credentials::lead_env(paths, herd).with_context(|| {
         format!("{lead}'s broker can't start: herd {herd} guards merges by credentials")
     })?;
-    Ok(env
+    let mut env: Vec<(String, String)> = env
         .into_iter()
         .map(|(name, value)| (name, value.as_str().unwrap_or_default().to_string()))
-        .collect())
+        .collect();
+    // Outside the sandbox the human's keys are readable: a core.sshCommand -i or
+    // a `Host *` IdentityFile would offer them, so ssh reads loopherd's config alone.
+    let ssh_config = crate::credentials::ssh_config(paths);
+    env.push((
+        "GIT_SSH_COMMAND".into(),
+        format!(
+            "ssh -F {} -o IdentitiesOnly=yes -o IdentityAgent=none",
+            crate::shell::quote(&ssh_config.to_string_lossy())
+        ),
+    ));
+    Ok(env)
 }
 
 struct Broker<'a> {
@@ -2660,6 +2671,17 @@ mod tests {
         assert_eq!(var("SSH_AUTH_SOCK"), Some(""));
         assert_eq!(var("GIT_CONFIG_KEY_0"), Some("credential.helper"));
         assert_eq!(var("GIT_CONFIG_VALUE_0"), Some(""));
+        let ssh_config = world.paths.config_dir().join("ssh/config");
+        assert_eq!(
+            var("GIT_SSH_COMMAND"),
+            Some(
+                format!(
+                    "ssh -F '{}' -o IdentitiesOnly=yes -o IdentityAgent=none",
+                    ssh_config.display()
+                )
+                .as_str()
+            )
+        );
     }
 
     #[test]
