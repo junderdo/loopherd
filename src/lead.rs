@@ -64,16 +64,21 @@ pub fn lead(
     let name = spawn_req.name;
     // The lead already runs, so what can't be noted only adds to the warning.
     let mut warnings = vec![];
+    let (hook_only, sockets) = (launch.hook_only(), launch.sockets_unblocked());
+    let flagged = match hook_only.or(sockets) {
+        None => Ok(()),
+        Some(_) => ledger
+            .update(&name, &mut |r| {
+                r.unsandboxed = hook_only.map(str::to_string);
+                r.sockets_unblocked = sockets.map(str::to_string);
+                Ok(())
+            })
+            .map(drop),
+    };
     for text in launch.warnings(&name) {
         let mut warning = text.clone();
-        if let Some(why) = launch.hook_only() {
-            let flagged = ledger.update(&name, &mut |r| {
-                r.unsandboxed = Some(why.to_string());
-                Ok(())
-            });
-            if let Err(e) = flagged {
-                warning += &format!("; not flagged in the ledger: {e:#}");
-            }
+        if let Err(e) = &flagged {
+            warning += &format!("; not flagged in the ledger: {e:#}");
         }
         let note = Entry::new(SystemTime::now(), Body::Note { text });
         if let Err(e) = report::append(&paths.state_dir().join("reports"), &name, &note) {
@@ -232,7 +237,7 @@ mod tests {
     use crate::herd::Paths;
     use crate::herdr::fake::FakeHerdr;
     use crate::ledger::{AgentRecord, MemLedger, Role};
-    use crate::sandbox::Unavailable;
+    use crate::sandbox::{Sockets, Unavailable};
     use crate::worktree::testing;
 
     struct Setup {
@@ -296,7 +301,7 @@ mod tests {
             herd: "h".into(),
             claude_args: claude_args.iter().map(|a| a.to_string()).collect(),
             ready_timeout: Duration::from_secs(60),
-            sandbox: || Ok(()),
+            sandbox: || Ok(Sockets::Blocked),
             broker: |_, _| Ok(true),
         }
     }
@@ -490,7 +495,7 @@ mod tests {
                     "enabled": true,
                     "failIfUnavailable": true,
                     "allowUnsandboxedCommands": false,
-                    "network": {"allowAllUnixSockets": true},
+                    "network": {"allowAllUnixSockets": false},
                     "filesystem": {
                         "allowWrite": [
                             format!("{root}/proj/worktrees/lead-h"),
@@ -555,6 +560,35 @@ mod tests {
             .iter()
             .map(|p| PathBuf::from(p.as_str().unwrap()))
             .collect()
+    }
+
+    #[test]
+    fn unix_sockets_all_opens_the_lead_s_sockets_with_a_warning_even_under_require() {
+        let setup = Setup::with_lead(&format!("{PROMPT}\nunix_sockets = \"all\""));
+        let herdr = herdr();
+
+        let (_, _, warnings) = lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        let (_, settings) = started_settings(&herdr);
+        assert_eq!(
+            settings["sandbox"]["network"],
+            serde_json::json!({"allowAllUnixSockets": true})
+        );
+        assert_eq!(
+            warnings,
+            [
+                "lead-h's sandbox lets it use any Unix socket, as herd h's [lead] unix_sockets = \
+              \"all\" says, which reopens the herdr socket, your ssh agent and WSL2's Windows \
+              interop to it"
+            ]
+        );
     }
 
     /// Starts lead-h and checks that neither its Bash nor its file tools may
@@ -785,6 +819,59 @@ mod tests {
         let (path, mcp) = started_mcp(&herdr);
         assert_eq!(path, setup.root.join("config/sandbox/lead-h.mcp.json"));
         assert_eq!(mcp, serde_json::json!({"mcpServers": {}}));
+    }
+
+    fn no_socket_filter() -> Result<Sockets, Unavailable> {
+        Ok(Sockets::Open(Unavailable {
+            why: "Claude Code finds no seccomp filter".into(),
+            fix: "npm install -g @anthropic-ai/sandbox-runtime".into(),
+        }))
+    }
+
+    #[test]
+    fn a_sandbox_that_cant_block_unix_sockets_refuses_on_require_and_is_flagged_on_prefer() {
+        let start = |lead_lines: &str| {
+            let setup = Setup::with_lead(lead_lines);
+            let herdr = herdr();
+            let mut ledger = MemLedger::default();
+            let req = LeadRequest {
+                sandbox: no_socket_filter,
+                ..request(&[])
+            };
+            let started = lead(&herdr, &mut ledger, &setup.paths(), &req, Some("w1"))
+                .map(|(_, _, warnings)| warnings);
+            let flagged = ledger
+                .0
+                .get("lead-h")
+                .and_then(|r| r.sockets_unblocked.clone());
+            (started, flagged)
+        };
+
+        let (refused, _) = start(PROMPT);
+        assert_eq!(
+            format!("{:#}", refused.unwrap_err()),
+            "sandbox: lead-h can't run sandboxed: its sandbox can't block Unix sockets: \
+             Claude Code finds no seccomp filter; npm install -g @anthropic-ai/sandbox-runtime, \
+             or set [lead] sandbox = \"prefer\" in herd h to start it with them open"
+        );
+
+        let (warnings, flagged) = start(&format!("{PROMPT}\nsandbox = \"prefer\""));
+        assert_eq!(
+            warnings.unwrap(),
+            [
+                "lead-h's sandbox can't block Unix sockets (Claude Code finds no seccomp filter), \
+              so herdr, your ssh agent and WSL2's Windows interop stay open to it; \
+              npm install -g @anthropic-ai/sandbox-runtime"
+            ]
+        );
+        assert_eq!(
+            flagged.as_deref(),
+            Some("Claude Code finds no seccomp filter")
+        );
+
+        let (warnings, flagged) = start(&format!("{PROMPT}\nunix_sockets = \"all\""));
+        assert_eq!(warnings.unwrap().len(), 1, "only the opt-in's warning");
+        assert_eq!(flagged, None);
     }
 
     #[test]
@@ -1968,6 +2055,7 @@ mod tests {
             role: None,
             after_merge: None,
             unsandboxed: None,
+            sockets_unblocked: None,
             earlier: vec![],
             ..ledger.0["lead-a"].clone()
         };
@@ -2000,6 +2088,7 @@ mod tests {
             role: None,
             after_merge: None,
             unsandboxed: None,
+            sockets_unblocked: None,
             earlier: vec![],
             prompt: Some("a plain spawn".into()),
             ..ledger.0["lead-h"].clone()

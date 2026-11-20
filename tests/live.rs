@@ -560,6 +560,135 @@ fn a_lead_starts_with_no_mcp_tools() {
     assert_eq!(std::fs::read_to_string(&probe).unwrap().trim(), "none");
 }
 
+/// What lead `herd`'s Bash got from herdr's socket, its herd file's `[lead]`
+/// adding `lead_line`: `herdr agent list`'s and a doomed `herdr agent start`'s
+/// output, each with its exit code.
+fn herdr_from_a_lead(herd: &str, lead_line: &str) -> String {
+    let workspace = assert_dev_session();
+    let state = tempfile::tempdir().unwrap();
+    // This checkout is already trusted; a fresh repo would stop the lead at the trust dialog.
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let name = format!("lead-{herd}");
+    let checkout = repo.file_name().unwrap().to_str().unwrap();
+    let parent = repo.parent().unwrap();
+    let worktree = match parent.file_name() == repo.file_name() {
+        true => parent.join("worktrees"),
+        false => parent.join(format!("{checkout}-worktrees")),
+    }
+    .join(&name);
+    let _worktree = RemoveWorktree(repo.clone(), worktree.clone());
+    let config = state.path().join("loopherd/config");
+    let herds = config.join("herds");
+    std::fs::create_dir_all(&herds).unwrap();
+    let out_file = worktree.join("socket-probe");
+    let script = state.path().join("probe.sh");
+    // No such pane, so a start that reaches herdr fails there and starts nothing.
+    std::fs::write(
+        &script,
+        format!(
+            "out={out:?}\n\
+             herdr agent list >/dev/null 2>\"$out.err\"; echo \"list $? $(tail -1 \"$out.err\")\" >\"$out.tmp\"\n\
+             herdr agent start probe --kind claude --pane w0:no-such-pane 2>\"$out.err\"; \
+             echo \"start $? $(tail -1 \"$out.err\")\" >>\"$out.tmp\"\n\
+             mv \"$out.tmp\" \"$out\"\n",
+            out = out_file.display().to_string(),
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        herds.join(format!("{herd}.toml")),
+        format!(
+            "{}[lead]\n{lead_line}\nprompt = \"\"\"This is loopherd's live test of whether \
+             your sandbox closes herdr's socket, which the human runs; a failure is a result, \
+             not something to fix. Make exactly one Bash tool call, with this command exactly \
+             as written: sh {} Then reply done.\"\"\"\n",
+            herd_head(repo.to_str().unwrap(), &workspace),
+            script.display()
+        ),
+    )
+    .unwrap();
+    let _cleanup = CloseTab(name.clone());
+    let read_rule = format!("Read(/{}/**)", state.path().display());
+
+    let out = dev(env!("CARGO_BIN_EXE_loopherd"))
+        .env("XDG_STATE_HOME", state.path())
+        .env("LOOPHERD_CONFIG_DIR", &config)
+        .args(["lead", herd, "--", "--permission-mode", "acceptEdits"])
+        .args(["--allowedTools", "Bash(sh:*)", &read_rule])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let given_up = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    while !out_file.exists() {
+        assert!(
+            std::time::Instant::now() < given_up,
+            "lead {name} never wrote {}",
+            out_file.display()
+        );
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    std::fs::read_to_string(&out_file).unwrap()
+}
+
+#[test]
+fn a_sandboxed_lead_can_reach_herdr_s_socket_only_when_its_herd_opens_unix_sockets() {
+    if !live_enabled() {
+        return;
+    }
+    let doctor = Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .args(["doctor", "--json"])
+        .env("XDG_STATE_HOME", tempfile::tempdir().unwrap().path())
+        .env("LOOPHERD_CONFIG_DIR", tempfile::tempdir().unwrap().path())
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    let sandbox = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "sandbox")
+        .unwrap();
+    if sandbox["status"] != "ok" {
+        eprintln!(
+            "skipped: the sandbox can't close Unix sockets here: {}; {}",
+            sandbox["detail"], sandbox["fix"]
+        );
+        return;
+    }
+    let pid = std::process::id();
+
+    let closed = herdr_from_a_lead(&format!("lh-live-sock-{pid}"), "");
+    let open = herdr_from_a_lead(&format!("lh-live-sockall-{pid}"), "unix_sockets = \"all\"");
+
+    let lines: Vec<&str> = closed.lines().collect();
+    assert!(
+        lines.len() == 2
+            && lines
+                .iter()
+                .all(|line| !line.contains(" 0 ") && line.contains("Operation not permitted")),
+        "a lead reached herdr's socket with sockets closed:\n{closed}"
+    );
+    let lines: Vec<&str> = open.lines().collect();
+    assert!(
+        lines
+            .first()
+            .is_some_and(|line| line.starts_with("list 0 ")),
+        "a lead with unix_sockets = \"all\" couldn't list herdr's agents:\n{open}"
+    );
+    assert!(
+        lines.get(1).is_some_and(
+            |line| line.starts_with("start ") && !line.contains("Operation not permitted")
+        ),
+        "a lead with unix_sockets = \"all\" didn't reach herdr to start an agent:\n{open}"
+    );
+}
+
 #[test]
 fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     if !live_enabled() {

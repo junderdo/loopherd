@@ -24,6 +24,13 @@ pub enum SandboxMode {
     Prefer,
 }
 
+/// `[lead] unix_sockets`: the Unix sockets a lead may use besides none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnixSockets {
+    All,
+}
+
 /// Why the sandbox can't start on this machine, and what would let it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unavailable {
@@ -31,7 +38,15 @@ pub struct Unavailable {
     pub fix: String,
 }
 
-pub type Probe = fn() -> Result<(), Unavailable>;
+/// Whether a sandbox that starts keeps Unix sockets closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sockets {
+    Blocked,
+    /// Its seccomp filter is missing or lets a connect through.
+    Open(Unavailable),
+}
+
+pub type Probe = fn() -> Result<Sockets, Unavailable>;
 
 /// Older Claude Code prompts where these settings deny, or lets a repo's
 /// settings loosen the sandbox.
@@ -39,11 +54,12 @@ const MIN_CLAUDE: [u64; 3] = [2, 1, 319];
 
 /// The machine's answer: Claude Code new enough for these settings, and on
 /// Linux and WSL2, bubblewrap and socat on PATH with bubblewrap able to make
-/// a sandbox. macOS has its sandbox built in.
+/// a sandbox, and whether its seccomp filter blocks a Unix-socket connect.
+/// macOS has its sandbox built in.
 ///
 /// Claude Code has no way to run its own check short of starting a session,
 /// so this tries what that check needs.
-pub fn probe() -> Result<(), Unavailable> {
+pub fn probe() -> Result<Sockets, Unavailable> {
     let version = std::process::Command::new("claude")
         .arg("--version")
         .output()
@@ -53,7 +69,7 @@ pub fn probe() -> Result<(), Unavailable> {
         })?;
     claude_new_enough(&String::from_utf8_lossy(&version.stdout))?;
     if cfg!(target_os = "macos") {
-        return Ok(());
+        return Ok(Sockets::Blocked);
     }
     if !cfg!(target_os = "linux") {
         return Err(Unavailable {
@@ -81,7 +97,7 @@ pub fn probe() -> Result<(), Unavailable> {
     let fix = "run under WSL2, not WSL1, and let bubblewrap make user namespaces \
                (kernel.unprivileged_userns_clone, or an AppArmor profile for bwrap)";
     match tried {
-        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) if out.status.success() => Ok(socket_filter()),
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let last = stderr.lines().last().unwrap_or("no message").trim();
@@ -95,6 +111,160 @@ pub fn probe() -> Result<(), Unavailable> {
             fix: fix.into(),
         }),
     }
+}
+
+/// How the human gives Claude Code a seccomp filter where it has none.
+pub const FILTER_FIX: &str = "npm install -g @anthropic-ai/sandbox-runtime";
+
+/// What one run of socat under a candidate seccomp filter showed.
+#[derive(Debug, PartialEq, Eq)]
+enum Tried {
+    Blocked,
+    ConnectedThrough,
+    /// The filter failed to set itself up, socat unrun: its own error line.
+    FailedSetup(String),
+    /// Not a filter at all, such as a Claude Code that doesn't dispatch on `ARGV0`.
+    NotAFilter,
+}
+
+/// Only socat's own denial counts as blocked: the filter's setup errors
+/// (`apply-seccomp: …`) also end in `Operation not permitted`.
+fn tried(succeeded: bool, stderr: &str) -> Tried {
+    if let Some(line) = stderr
+        .lines()
+        .find(|line| line.trim_start().starts_with("apply-seccomp:"))
+    {
+        return Tried::FailedSetup(line.trim().into());
+    }
+    let socat = |said: &str| {
+        stderr
+            .lines()
+            .any(|line| line.contains("socat[") && line.contains(said))
+    };
+    if succeeded && socat("successfully connected") {
+        Tried::ConnectedThrough
+    } else if !succeeded && socat("Operation not permitted") {
+        Tried::Blocked
+    } else {
+        Tried::NotAFilter
+    }
+}
+
+/// Tries a Unix-socket connect under each seccomp filter Claude Code's
+/// sandbox could apply, with socat, which the sandbox needs anyway.
+fn socket_filter() -> Sockets {
+    let open = |why: String, fix: String| Sockets::Open(Unavailable { why, fix });
+    let tmp_fix = || "set TMPDIR to a writable dir on a local filesystem".to_string();
+    let Ok(dir) = tempfile::tempdir() else {
+        return open("no temp dir to try its seccomp filter in".into(), tmp_fix());
+    };
+    let socket = dir.path().join("probe.sock");
+    let Ok(_listener) = std::os::unix::net::UnixListener::bind(&socket) else {
+        return open(
+            "no Unix socket to try its seccomp filter on".into(),
+            tmp_fix(),
+        );
+    };
+    let mut failed = None;
+    for mut filter in seccomp_filters() {
+        let child = filter
+            .args(["socat", "-d", "-d", "-u", "OPEN:/dev/null"])
+            .arg(format!("UNIX-CONNECT:{}", socket.display()))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
+        let result = match child.ok().and_then(|child| finish(child, 10)) {
+            Some(out) => tried(out.status.success(), &String::from_utf8_lossy(&out.stderr)),
+            None => Tried::NotAFilter,
+        };
+        match result {
+            Tried::Blocked => return Sockets::Blocked,
+            Tried::ConnectedThrough => {
+                return open(
+                    "its seccomp filter let a Unix-socket connect through".into(),
+                    format!("update Claude Code, or {FILTER_FIX}"),
+                );
+            }
+            Tried::FailedSetup(line) => {
+                failed.get_or_insert(line);
+            }
+            Tried::NotAFilter => {}
+        }
+    }
+    match failed {
+        None => open(
+            "Claude Code finds no seccomp filter to block them with".into(),
+            FILTER_FIX.into(),
+        ),
+        Some(line) => open(
+            format!("its seccomp filter can't set itself up: {line}"),
+            "let it make user namespaces, as bubblewrap does \
+             (kernel.unprivileged_userns_clone, or an AppArmor profile for claude)"
+                .into(),
+        ),
+    }
+}
+
+/// Commands that run a program under a seccomp filter Claude Code could
+/// use: its native binary's own, chosen by `ARGV0`, which a version
+/// manager's shim passes on, then an npm install's helper where Claude Code
+/// looks for it.
+fn seccomp_filters() -> Vec<std::process::Command> {
+    let Some(claude) = crate::on_path("claude") else {
+        return vec![];
+    };
+    let mut native = std::process::Command::new(&claude);
+    native.env("ARGV0", "apply-seccomp");
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        _ => return vec![native],
+    };
+    let helper = Path::new("vendor/seccomp").join(arch).join("apply-seccomp");
+    let package = claude
+        .canonicalize()
+        .ok()
+        .and_then(|real| real.parent().map(Path::to_path_buf));
+    let global = std::process::Command::new("npm")
+        .args(["root", "-g"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+        .filter(|root| root.is_absolute())
+        .map(|root| root.join("@anthropic-ai/sandbox-runtime"));
+    let near = package
+        .into_iter()
+        .flat_map(|dir| [dir.clone(), dir.join("../.."), dir.join("..")]);
+    std::iter::once(native)
+        .chain(
+            near.chain(global)
+                .map(|dir| dir.join(&helper))
+                .filter(|path| path.is_file())
+                .map(std::process::Command::new),
+        )
+        .collect()
+}
+
+/// `child`'s output, or `None` once it has run `secs` seconds, when it's killed.
+fn finish(mut child: std::process::Child, secs: u64) -> Option<std::process::Output> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while child.try_wait().ok()?.is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    child.wait_with_output().ok()
+}
+
+/// Whether WSL2's binfmt_misc entry for Windows programs is enabled here.
+pub fn wsl_interop() -> bool {
+    std::fs::read_to_string("/proc/sys/fs/binfmt_misc/WSLInterop")
+        .is_ok_and(|text| text.lines().next() == Some("enabled"))
 }
 
 /// Checks `claude --version`'s output against [`MIN_CLAUDE`].
@@ -340,8 +510,10 @@ impl Guard {
 pub enum Launch {
     Sandboxed {
         settings: PathBuf,
-        /// What the human's own settings loosen, under `prefer`.
-        loosened: Vec<String>,
+        /// What loosens it: the human's own settings under `prefer`, or its herd's `unix_sockets`.
+        warnings: Vec<String>,
+        /// Why it can't block Unix sockets, started so under `prefer`.
+        sockets_unblocked: Option<String>,
         mcp: PathBuf,
     },
     /// `prefer`, with why the sandbox can't start.
@@ -373,16 +545,43 @@ impl Launch {
         }
     }
 
+    /// Why the lead's sandbox can't block Unix sockets, if it can't.
+    pub fn sockets_unblocked(&self) -> Option<&str> {
+        match self {
+            Launch::Sandboxed {
+                sockets_unblocked, ..
+            } => sockets_unblocked.as_deref(),
+            Launch::HookOnly { .. } => None,
+        }
+    }
+
     /// The warnings the start carries: why it's hook-only, or what loosens its sandbox.
     pub fn warnings(&self, name: &str) -> Vec<String> {
         match self {
-            Launch::Sandboxed { loosened, .. } => loosened
-                .iter()
-                .map(|line| loosened_warning(name, line))
-                .collect(),
+            Launch::Sandboxed { warnings, .. } => warnings.clone(),
             Launch::HookOnly { why, .. } => vec![hook_only_warning(name, why)],
         }
     }
+}
+
+/// Whether lead `name`'s herd opts it into every Unix socket.
+pub fn sockets_open(paths: &Paths, herd: &str) -> Result<bool> {
+    Ok(herd::lead_unix_sockets(paths, herd)? == Some(UnixSockets::All))
+}
+
+pub fn sockets_open_warning(name: &str, herd: &str) -> String {
+    format!(
+        "{name}'s sandbox lets it use any Unix socket, as herd {herd}'s [lead] unix_sockets = \
+         \"all\" says, which reopens the herdr socket, your ssh agent and WSL2's Windows \
+         interop to it"
+    )
+}
+
+pub fn sockets_unblocked_warning(name: &str, why: &str) -> String {
+    format!(
+        "{name}'s sandbox can't block Unix sockets ({why}), so herdr, your ssh agent and \
+         WSL2's Windows interop stay open to it"
+    )
 }
 
 pub fn hook_only_warning(name: &str, why: &str) -> String {
@@ -424,7 +623,8 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
     let text = serde_json::to_string_pretty(&mcp_config(paths, name, &lead.herd)?)? + "\n";
     write_private(&mcp, &text).with_context(|| format!("write {}", mcp.display()))?;
     let by_credentials = herd::merge_guard(paths, &lead.herd)? == Some(MergeGuard::Credentials);
-    if let Err(Unavailable { why, fix }) = probe() {
+    let sockets = probe();
+    if let Err(Unavailable { why, fix }) = sockets.clone() {
         if by_credentials {
             return Err(credentials_refusal(
                 name,
@@ -444,6 +644,29 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
             )),
         };
     }
+    let mut sockets_unblocked = None;
+    if let Ok(Sockets::Open(Unavailable { why, fix })) = sockets
+        && !sockets_open(paths, &lead.herd)?
+    {
+        let herd = &lead.herd;
+        match when_loosened(paths, herd)? {
+            WhenLoosened::Warn => sockets_unblocked = Some((why, fix)),
+            WhenLoosened::Refuse => bail!(
+                "{name} can't run sandboxed: its sandbox can't block Unix sockets: {why}; \
+                 {fix}, or set [lead] sandbox = \"prefer\" in herd {herd} to start it with \
+                 them open"
+            ),
+            WhenLoosened::RefuseForCredentials => {
+                return Err(credentials_refusal(
+                    name,
+                    &format!(
+                        "its sandbox can't block Unix sockets ({why}), so it could use your ssh \
+                         agent; {fix}, or set [lead] merge_guard = \"hook\" in herd {herd}"
+                    ),
+                ));
+            }
+        }
+    }
     let worktree = worktree_path(&herd::repo(paths, &lead.herd)?, name);
     let writable = [worktree.as_path(), paths.state_dir()];
     if let Some(entry) = plantable_path_entry(std::env::var_os("PATH").as_deref(), &writable) {
@@ -462,9 +685,20 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
     let file = settings_file(paths, name);
     let text = serde_json::to_string_pretty(&own)? + "\n";
     write_private(&file, &text).with_context(|| format!("write {}", file.display()))?;
+    let mut warnings: Vec<String> = loosened
+        .iter()
+        .map(|line| loosened_warning(name, line))
+        .collect();
+    if sockets_open(paths, &lead.herd)? {
+        warnings.push(sockets_open_warning(name, &lead.herd));
+    }
+    if let Some((why, fix)) = &sockets_unblocked {
+        warnings.push(format!("{}; {fix}", sockets_unblocked_warning(name, why)));
+    }
     Ok(Launch::Sandboxed {
         settings: file,
-        loosened,
+        warnings,
+        sockets_unblocked: sockets_unblocked.map(|(why, _)| why),
         mcp,
     })
 }
@@ -1032,8 +1266,8 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
         "enabled": true,
         "failIfUnavailable": true,
         "allowUnsandboxedCommands": false,
-        // Linux can't narrow this to herdr's socket: its seccomp filter can't see socket paths.
-        "network": {"allowAllUnixSockets": true},
+        // Set either way, so the human's own settings can't open them.
+        "network": {"allowAllUnixSockets": sockets_open(paths, herd)?},
         "filesystem": {
             "allowWrite": allow_write.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "denyWrite": deny_write.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
@@ -1229,6 +1463,33 @@ mod tests {
                 theirs.display(),
                 paths.config_dir().display()
             )
+        );
+    }
+
+    #[test]
+    fn only_socats_own_denial_counts_as_a_blocked_socket() {
+        let denied = "2026/11/20 09:40:00 socat[7] E socket(1, 1, 0): Operation not permitted\n";
+        assert_eq!(tried(false, denied), Tried::Blocked);
+        assert_eq!(
+            tried(
+                false,
+                "apply-seccomp: unshare(CLONE_NEWUSER): Operation not permitted\n"
+            ),
+            Tried::FailedSetup(
+                "apply-seccomp: unshare(CLONE_NEWUSER): Operation not permitted".into()
+            )
+        );
+        let connected = "2026/11/20 09:40:00 socat[7] N successfully connected from local \
+                         address AF=1\n";
+        assert_eq!(tried(true, connected), Tried::ConnectedThrough);
+        assert_eq!(tried(true, "2.1.329 (Claude Code)\n"), Tried::NotAFilter);
+        assert_eq!(
+            tried(false, "error: unknown option '-u'\n"),
+            Tried::NotAFilter
+        );
+        assert_eq!(
+            tried(false, "mise ERROR no tasks defined\n"),
+            Tried::NotAFilter
         );
     }
 
