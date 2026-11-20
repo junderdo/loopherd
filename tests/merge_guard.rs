@@ -224,7 +224,7 @@ fn a_rerun_keeps_the_key_already_added_and_updates_the_rulesets_in_place() {
         .take(2)
         .collect::<Vec<_>>()
         .join(" ");
-    let keys = format!(r#"[{{"id":3,"key":"{key_text}"}}]"#);
+    let keys = format!(r#"[{{"id":3,"key":"{key_text}","read_only":false}}]"#);
     let rulesets =
         r#"[{"id":7,"name":"loopherd: default branch"},{"id":8,"name":"loopherd: no force-push"}]"#;
     let setup = Setup::new(&format!("{CREDENTIALS}\nrebase = true"), &keys, rulesets);
@@ -287,6 +287,53 @@ fn a_rerun_keeps_the_key_already_added_and_updates_the_rulesets_in_place() {
     assert!(hosts.ends_with(matched), "{hosts}");
     assert!(!hosts.contains("old.example"), "{hosts}");
     assert_eq!(hosts.matches("loopherd-h\n").count(), 1, "{hosts}");
+}
+
+#[test]
+fn a_deploy_key_added_read_only_is_refused_with_how_to_replace_it() {
+    let first = Setup::new(CREDENTIALS, "[]", "[]");
+    assert!(first.run().status.success());
+    let public = fs::read_to_string(format!("{}.pub", first.key().display())).unwrap();
+    let key_text = public
+        .split_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let keys = format!(r#"[{{"id":3,"key":"{key_text}","read_only":true}}]"#);
+    let setup = Setup::new(CREDENTIALS, &keys, "[]");
+    fs::create_dir_all(setup.key().parent().unwrap()).unwrap();
+    fs::copy(first.key(), setup.key()).unwrap();
+    fs::write(format!("{}.pub", setup.key().display()), &public).unwrap();
+
+    let out = setup.run();
+
+    assert!(!out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "loopherd merge-guard: acme/widgets has the deploy key read-only, so the lead can't \
+         push; delete it with gh repo deploy-key delete 3 --repo acme/widgets, then run \
+         loopherd merge-guard h again\n"
+    );
+    assert_eq!(setup.calls(), "gh api repos/acme/widgets/keys\n");
+}
+
+#[test]
+fn a_deploy_key_without_its_public_half_says_how_to_make_it() {
+    let setup = Setup::new(CREDENTIALS, "[]", "[]");
+    fs::create_dir_all(setup.key().parent().unwrap()).unwrap();
+    fs::write(setup.key(), "a private key\n").unwrap();
+
+    let out = setup.run();
+
+    let key = setup.key().display().to_string();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!(
+            "loopherd merge-guard: the deploy key {key} has no {key}.pub; make it with \
+             ssh-keygen -y -f {key} > {key}.pub\n"
+        )
+    );
+    assert_eq!(setup.calls(), "");
 }
 
 #[test]

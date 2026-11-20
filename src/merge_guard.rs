@@ -46,11 +46,26 @@ pub fn setup(paths: &Paths, herd: &str) -> Result<Vec<String>> {
         ));
     }
     let public = format!("{}.pub", files.key.display());
-    let public_text = std::fs::read_to_string(&public).with_context(|| format!("read {public}"))?;
+    let public_text = match std::fs::read_to_string(&public) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(
+            "the deploy key {} has no {public}; make it with ssh-keygen -y -f {} > {public}",
+            files.key.display(),
+            files.key.display()
+        ),
+        read => read.with_context(|| format!("read {public}"))?,
+    };
     let added: Vec<DeployKey> =
         serde_json::from_str(&gh(&["api", &format!("repos/{slug}/keys")], None)?)
             .context("read gh's list of deploy keys")?;
-    if added.iter().any(|k| same_key(&k.key, &public_text)) {
+    if let Some(key) = added.iter().find(|k| same_key(&k.key, &public_text)) {
+        if key.read_only {
+            bail!(
+                "{slug} has the deploy key read-only, so the lead can't push; delete it with \
+                 gh repo deploy-key delete {} --repo {slug}, then run loopherd merge-guard {herd} \
+                 again",
+                key.id
+            );
+        }
         lines.push(format!("{slug} already has the deploy key"));
     } else {
         let title = format!("loopherd lead-{herd}");
@@ -132,7 +147,9 @@ pub fn force_push_ruleset(rebase: bool) -> Value {
 
 #[derive(Deserialize)]
 struct DeployKey {
+    id: u64,
     key: String,
+    read_only: bool,
 }
 
 #[derive(Deserialize)]
@@ -215,8 +232,9 @@ fn token_steps(slug: &str, herd: &str, token: &Path) -> String {
          1. Open https://github.com/settings/personal-access-tokens/new\n\
          2. Name it loopherd lead-{herd}, resource owner {owner}, expiration No expiration.\n\
          3. Repository access: Only select repositories, {slug}.\n\
-         4. Permissions: Pull requests: Read and write, Contents: Read-only (Metadata: \
-         Read-only comes with them). Nothing else.\n\
+         4. Permissions: Pull requests: Read and write, Contents: Read-only, and for a herd \
+         whose tasks are GitHub issues, Issues: Read and write (Metadata: Read-only comes \
+         with them). Nothing else.\n\
          5. Generate it, then store it where only you can read it: run\n   \
          (umask 077 && cat > {token})\n   \
          paste the token, press Enter and Ctrl-D.\n\
