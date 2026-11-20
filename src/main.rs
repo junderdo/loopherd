@@ -648,6 +648,10 @@ struct InitArgs {
     /// Write no [lead] table and no lead prompt.
     #[arg(long)]
     no_lead: bool,
+    /// How a lead with merge off is kept from merging; asked on a terminal,
+    /// else hook. credentials needs `loopherd merge-guard <herd>` afterwards.
+    #[arg(long, value_enum, conflicts_with = "no_lead")]
+    merge_guard: Option<herd::MergeGuard>,
     /// The workers' handoff limit in tokens; unset, config.toml's default applies.
     #[arg(long, value_name = "TOKENS")]
     context_limit: Option<u64>,
@@ -2318,6 +2322,7 @@ fn init_or_diff(args: InitArgs) -> Result<i32> {
         },
         max: args.max.map(|max| max as u64),
         lead: args.no_lead.then_some(false),
+        merge_guard: args.merge_guard,
         context_limit: args.context_limit,
     };
     if args.diff {

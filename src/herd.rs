@@ -61,7 +61,7 @@ struct LeadFile {
 }
 
 /// How a lead with `merge` off is kept from merging.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum MergeGuard {
     /// The lead's tool hook refuses its merges, but it holds the human's
@@ -82,6 +82,15 @@ pub struct Switches {
     pub new_cards: bool,
     pub design_escalation: bool,
     pub blocked_dialogs: bool,
+}
+
+impl MergeGuard {
+    pub fn name(self) -> &'static str {
+        match self {
+            MergeGuard::Hook => "hook",
+            MergeGuard::Credentials => "credentials",
+        }
+    }
 }
 
 impl Switches {

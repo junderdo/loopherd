@@ -1691,7 +1691,7 @@ impl Fixture {
     fn init_on_terminal(&self, extra: &[&str], input: &str) -> Output {
         let mut args = vec!["--check", "cargo test"];
         args.extend(extra);
-        self.on_terminal(&args, &format!("\n\n{input}\n\n\n\n\n\n\n"))
+        self.on_terminal(&args, &format!("\n\n{input}\n\n\n\n\n\n\n\n"))
     }
 
     /// `loopherd init <args>` with stdin and stderr on a terminal, typing `input`.
@@ -2032,7 +2032,7 @@ fn on_a_terminal_init_shows_each_inferred_value_takes_edits_and_re_asks_bad_ones
 fn on_a_terminal_declining_the_summary_writes_nothing() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\n\nn\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\n\n\nn\n");
 
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stdout).contains("nothing written"));
@@ -2045,7 +2045,7 @@ fn on_a_terminal_declining_the_summary_writes_nothing() {
 #[test]
 fn on_a_terminal_without_a_build_file_init_asks_for_checks_until_one_is_given() {
     let fixture = Fixture::new(&["acme"]);
-    let typed = "\n\n\n\n\nmake lint\nmake test\n\n\n\n\n\n\n\n";
+    let typed = "\n\n\n\n\nmake lint\nmake test\n\n\n\n\n\n\n\n\n";
 
     let out = fixture.on_terminal(&[], typed);
 
@@ -2085,6 +2085,7 @@ fn on_a_terminal_declining_the_suggested_checks_edits_each_then_adds_more() {
         "cargo nextest run",
         "just check",
         "", // no more checks
+        "",
         "",
         "",
         "",
@@ -2170,7 +2171,7 @@ fn on_a_terminal_a_taken_herd_name_or_lead_prompt_is_asked_again() {
 fn on_a_terminal_a_branch_that_cant_go_in_the_prompt_is_asked_again() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\nma\x27\x27\x27in\ntrunk\n\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\n\nma\x27\x27\x27in\ntrunk\n\n");
 
     assert_ok(&out);
     assert!(text(&out.stdout).contains("can't go in the worker prompt"));
@@ -2182,7 +2183,7 @@ fn on_a_terminal_a_branch_that_cant_go_in_the_prompt_is_asked_again() {
 fn on_a_terminal_an_unmatched_account_is_asked_from_the_logged_in_ones() {
     let fixture = Fixture::new(&["bot", "other"]);
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\n\nnobody\nother\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\nnobody\nother\n");
 
     assert_ok(&out);
     let shown = text(&out.stdout);
@@ -2288,7 +2289,7 @@ fn on_a_terminal_the_summary_says_an_unset_limit_takes_the_default() {
 fn on_a_terminal_a_limit_of_exactly_80_percent_is_taken_and_one_more_asked_again() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\n160001\n160000\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n160001\n160000\n");
 
     assert_ok(&out);
     let shown = text(&out.stdout);
@@ -2324,7 +2325,7 @@ fn a_context_limit_of_exactly_80_percent_of_the_window_is_taken() {
 fn on_a_terminal_a_branch_with_whitespace_is_asked_again() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\nma in\ntrunk\n\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\n\nma in\ntrunk\n\n");
 
     assert_ok(&out);
     assert!(
@@ -2343,7 +2344,7 @@ fn on_a_terminal_a_repo_answer_outside_git_is_asked_again_naming_no_flag() {
 
     let out = fixture.on_terminal(
         &["--check", "cargo test"],
-        &format!("{}\n\n\n\n\n\n\n\n\n\n\n", outside.display()),
+        &format!("{}\n\n\n\n\n\n\n\n\n\n\n\n", outside.display()),
     );
 
     assert_ok(&out);
@@ -2505,7 +2506,7 @@ fn on_a_terminal_a_repo_answer_git_refuses_to_read_shows_gits_reason() {
             ("GIT_CONFIG_VALUE_0", &repo),
         ],
         &["--check", "cargo test"],
-        &format!("{}\n\n\n\n\n\n\n\n\n\n\n", other.display()),
+        &format!("{}\n\n\n\n\n\n\n\n\n\n\n\n", other.display()),
     );
 
     assert_ok(&out);
@@ -3109,7 +3110,7 @@ fn on_a_terminal_declining_the_summary_leaves_an_existing_agents_md_as_it_was() 
     let fixture = Fixture::new(&["acme"]);
     fs::write(fixture.repo().join("AGENTS.md"), "# Widgets\n").unwrap();
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\n\nn\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\n\n\nn\n");
 
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     assert!(text(&out.stdout).contains("nothing written"));
@@ -5259,7 +5260,7 @@ fn on_a_terminal_a_detached_head_without_origin_head_asks_for_the_default_branch
     let mut args = vec!["--check", "cargo test"];
     args.extend(OTHER);
 
-    let out = fixture.on_terminal(&args, "\n\n\n\n\n\nmain\n\n");
+    let out = fixture.on_terminal(&args, "\n\n\n\n\n\n\nmain\n\n");
 
     assert_ok(&out);
     let shown = text(&out.stdout);
@@ -5473,5 +5474,76 @@ fn another_trackers_backlog_is_left_to_fill_in_and_named_in_the_steps() {
         text(&out.stdout).contains("[queue] source, [queue] backlog, [template.issue] done"),
         "{}",
         text(&out.stdout)
+    );
+}
+
+#[test]
+fn a_lead_with_merge_off_is_guarded_by_hook_unless_init_is_told_credentials() {
+    let hook = Fixture::new(&["acme"]);
+    assert_ok(&hook.init(&[]));
+    assert_eq!(
+        herd_toml(&hook)["lead"]["merge_guard"].as_str(),
+        Some("hook")
+    );
+
+    let credentials = Fixture::new(&["acme"]);
+    let out = credentials.init(&["--merge-guard", "credentials"]);
+
+    assert_ok(&out);
+    assert_eq!(
+        herd_toml(&credentials)["lead"]["merge_guard"].as_str(),
+        Some("credentials")
+    );
+    let stdout = text(&out.stdout);
+    let setup = stdout.find("loopherd merge-guard widgets").expect(&stdout);
+    let lead = stdout.find("loopherd lead widgets").expect(&stdout);
+    assert!(setup < lead, "{stdout}");
+}
+
+#[test]
+fn a_lead_with_merge_on_gets_no_merge_guard_and_refuses_one_given() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::write(
+        fixture.config().join("config.toml"),
+        "[lead_defaults]\nmerge = true\n",
+    )
+    .unwrap();
+
+    let refused = fixture.init(&["--merge-guard", "credentials"]);
+
+    assert_refused(
+        &fixture,
+        &refused,
+        "loopherd init: --merge-guard is for a lead with merge off, and [lead_defaults] \
+         turns merge on\n",
+    );
+    assert_ok(&fixture.init(&[]));
+    let lead = herd_toml(&fixture)["lead"].clone();
+    assert_eq!(lead.get("merge_guard"), None, "{lead}");
+}
+
+#[test]
+fn on_a_terminal_init_explains_merge_guard_and_takes_credentials() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init_on_terminal(&[], "\n\n\n\nbogus\ncredentials\n");
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains("The lead has merge off. How is it kept from merging?"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("answer hook or credentials, not \"bogus\""),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("lead    yes, merge_guard credentials"),
+        "{shown}"
+    );
+    assert_eq!(
+        herd_toml(&fixture)["lead"]["merge_guard"].as_str(),
+        Some("credentials")
     );
 }

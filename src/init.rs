@@ -7,7 +7,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::herd::{self, Paths};
+use crate::herd::{self, MergeGuard, Paths};
 use crate::worktree::{checkout_root, same_dir};
 
 mod agents;
@@ -82,6 +82,7 @@ pub struct Request<'a> {
     pub tracker: Option<Tracker>,
     pub max: Option<u64>,
     pub lead: Option<bool>,
+    pub merge_guard: Option<MergeGuard>,
     pub context_limit: Option<u64>,
 }
 
@@ -105,6 +106,8 @@ struct Herd {
     lead: bool,
     /// The lead's switch lines, from `[lead_defaults]`.
     switches: String,
+    /// How a lead with merge off is kept from merging; `None` with merge on.
+    merge_guard: Option<MergeGuard>,
     context_limit: Option<u64>,
     /// The limit that applies when `context_limit` is unset.
     config_limit: String,
@@ -306,9 +309,13 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         prompt_text(check)?;
     }
     let config = paths.herds.with_file_name("config.toml");
-    let switches = crate::config::lead_defaults(&config)?
+    let defaults = crate::config::lead_defaults(&config)?
         .unwrap_or_default()
-        .over(&Default::default())
+        .over(&Default::default());
+    if defaults.merge && req.merge_guard.is_some() {
+        bail!("--merge-guard is for a lead with merge off, and [lead_defaults] turns merge on");
+    }
+    let switches = defaults
         .named()
         .map(|(name, on)| format!("{name} = {on}"))
         .join("\n");
@@ -354,6 +361,19 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
             false => bail!("{refusal}; pass --no-lead to write the herd without a lead"),
         }
     };
+    let merge_guard = match lead && !defaults.merge {
+        true => Some(merge_guard(
+            ask,
+            req.merge_guard,
+            recorded.as_ref().and_then(|r| r.merge_guard),
+        )?),
+        false => None,
+    };
+    if merge_guard == Some(MergeGuard::Credentials) && github.is_none() {
+        bail!(
+            "merge_guard = \"credentials\" needs the herd's repo on GitHub; pass --repo <owner>/<name>"
+        );
+    }
     let config_file = crate::config::read(&config)?;
     let cap = crate::context::limit_cap(&config)?;
     let unset = config_file
@@ -543,12 +563,46 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         max,
         lead,
         switches,
+        merge_guard,
         context_limit,
         config_limit,
         docs,
         agents_steps: plan.steps,
     })
 }
+
+/// Asks, on a terminal, how a lead with merge off is kept from merging.
+fn merge_guard(
+    ask: &ask::Asker,
+    given: Option<MergeGuard>,
+    recorded: Option<MergeGuard>,
+) -> Result<MergeGuard> {
+    if ask.terminal && given.is_none() {
+        eprintln!("{MERGE_GUARD_HELP}");
+    }
+    let given = given.map(MergeGuard::name);
+    let default = recorded.unwrap_or_default().name();
+    ask.value(
+        "merge_guard",
+        given,
+        Some(default),
+        "",
+        |answer| match answer.trim() {
+            "hook" => Ok(MergeGuard::Hook),
+            "credentials" => Ok(MergeGuard::Credentials),
+            other => bail!("answer hook or credentials, not {other:?}"),
+        },
+    )
+}
+
+const MERGE_GUARD_HELP: &str = "The lead has merge off. How is it kept from merging?
+  hook         Its tool hook refuses merges and force-pushes, but it holds your
+               GitHub credentials, so a hijacked lead could get past it. You're
+               told of every merge while it runs. Nothing to set up.
+  credentials  It pushes with a deploy key and runs gh with a token that can't
+               merge, rulesets stop merges and force-pushes on GitHub, and it
+               can't read your credentials. Needs loopherd merge-guard <herd> and
+               a token you make in GitHub's web UI, once per repo.";
 
 /// The lead and members are lead-<herd> and <herd>-<n>, both [a-z][a-z0-9_-]{0,31}.
 fn herd_name(name: &str) -> Result<String> {
@@ -701,7 +755,11 @@ fn summary(herd: &Herd) -> String {
         name = herd.name,
         repo = herd.repo.display(),
         max = herd.max,
-        lead = if herd.lead { "yes" } else { "no" },
+        lead = match (herd.lead, herd.merge_guard) {
+            (false, _) => "no".to_string(),
+            (true, None) => "yes".to_string(),
+            (true, Some(guard)) => format!("yes, merge_guard {}", guard.name()),
+        },
         checks = herd.checks.join("; "),
     )
 }
@@ -783,6 +841,10 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
         Some(_) => github_text,
         None => otherwise,
     };
+    let switches = match herd.merge_guard {
+        Some(guard) => format!("{}\nmerge_guard = \"{}\"", herd.switches, guard.name()),
+        None => herd.switches.clone(),
+    };
     let mut values = vec![
         ("OWNER_REPO", slug),
         ("ACCOUNT", account),
@@ -794,7 +856,7 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
         ("MAX", &max),
         ("CONTEXT_LIMIT", &context_limit),
         ("LEAD_PROMPT", &lead_prompt),
-        ("SWITCHES", &herd.switches),
+        ("SWITCHES", &switches),
         ("READY_FOR_AGENT", &labels.ready_for_agent),
         ("NEEDS_INFO", &needs_info),
         ("READY_FOR_HUMAN", &labels.ready_for_human),
@@ -956,6 +1018,11 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
         "loopherd herds".into(),
         format!("loopherd feed {name} --dry-run"),
     ]);
+    if herd.merge_guard == Some(MergeGuard::Credentials) {
+        steps.push(format!(
+            "loopherd merge-guard {name}, then make and store the lead's token as it says"
+        ));
+    }
     if herd.lead {
         steps.push(format!("loopherd lead {name}"));
     }
@@ -1098,6 +1165,7 @@ fn herd_running(paths: &Paths, repo: &Path) -> Result<Option<String>> {
 /// The answers an earlier init left in its herd file, for `--diff` to render with.
 struct Recorded {
     lead: bool,
+    merge_guard: Option<MergeGuard>,
     max: Option<u64>,
     context_limit: Option<u64>,
     /// The worker prompt's checklist items that are a bare `check`; a reworded one is skipped.
@@ -1140,6 +1208,10 @@ impl Recorded {
         Some(Recorded {
             branch,
             lead: herd.contains_key("lead"),
+            merge_guard: match herd.get("lead").and_then(|l| l.get("merge_guard")) {
+                Some(value) => value.clone().try_into().ok(),
+                None => None,
+            },
             max: number(herd.get("queue").and_then(|q| q.get("max"))),
             context_limit: number(issue.and_then(|t| t.get("context_limit"))),
             checks,
