@@ -3089,4 +3089,29 @@ mod tests {
             assert_eq!(setup.read("log").unwrap(), "one\ninstalled --no-extras\n");
         }
     }
+
+    #[test]
+    fn a_feed_run_for_a_lead_gates_after_merge_by_its_launch_records_herd_from_no_pane() {
+        let commands = r#"["echo one >> log", "scripts/install"]"#;
+        let setup = Setup::after_merge(commands, "[lead]\nprompt = \"go\"\n");
+        let herdr = herdr();
+        let mut ledger = with_lead(fed_one(&setup, &herdr), "forged");
+        setup.touch("merged-1");
+        let req = FeedRequest {
+            lead: Some(ForLead {
+                name: "lead-prs".into(),
+                herd: "prs".into(),
+            }),
+            ..setup.request(false, None)
+        };
+
+        let mut fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
+        run_after_merge(&mut ledger, &setup.paths(), &req, &mut fed).unwrap();
+
+        assert_eq!(
+            fed.lines[0],
+            "after_merge zpr-1: not run: `scripts/install` needs the install switch, off in prs's [lead]"
+        );
+        assert_eq!(setup.read("log"), None);
+    }
 }

@@ -434,15 +434,10 @@ fn lead_file(paths: &Paths, name: &str) -> PathBuf {
         .join(format!("{name}.lead.json"))
 }
 
-/// The loopherd commands a lead runs that make or remove its members'
-/// worktrees, beside its own and so outside what it may write.
-const WORKTREE_COMMANDS: [&str; 5] = [
-    "loopherd feed",
-    "loopherd feed *",
-    "loopherd add *",
-    "loopherd retire *",
-    "loopherd release *",
-];
+/// The loopherd commands a lead runs that remove or clear its members'
+/// worktrees, beside its own and so outside what it may write. Its broker
+/// runs feed and add.
+const WORKTREE_COMMANDS: [&str; 2] = ["loopherd retire *", "loopherd release *"];
 
 /// Lead `name`'s settings, from its herd file alone: its worktree is where
 /// `lead` puts it in the herd's repo, whatever the ledger says.

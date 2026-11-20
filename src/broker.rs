@@ -647,7 +647,8 @@ impl Client {
             }
             if Instant::now() >= given_up {
                 bail!(
-                    "{lead}'s broker didn't answer {} within {}; check it with loopherd doctor",
+                    "{lead}'s broker didn't answer {} within {}; it may still be carrying it out, \
+                     so check before asking again, and check the broker with loopherd doctor",
                     op.command(),
                     humantime::format_duration(answer_within)
                 );
@@ -1293,7 +1294,8 @@ mod tests {
 
         assert_eq!(
             format!("{err:#}"),
-            "lead-h's broker didn't answer tell within 50ms; check it with loopherd doctor"
+            "lead-h's broker didn't answer tell within 50ms; it may still be carrying it out, \
+             so check before asking again, and check the broker with loopherd doctor"
         );
         let left = std::fs::read_dir(requests_dir(&world.paths, "lead-h")).unwrap();
         assert_eq!(left.count(), 0);
