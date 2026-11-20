@@ -39,6 +39,9 @@ pub struct Member {
     /// Why this lead runs without its sandbox, guarded by its tool hook alone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unsandboxed: Option<String>,
+    /// Why this lead's sandbox can't block Unix sockets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sockets_unblocked: Option<String>,
     /// The template it was spawned from, if recorded.
     pub template: Option<String>,
     /// Retired, and released so `feed` may spawn its name again.
@@ -264,6 +267,7 @@ pub(crate) fn member(
         tab: live.map(|a| a.tab_id.clone()),
         lead: record.is_lead(),
         unsandboxed: record.unsandboxed.clone(),
+        sockets_unblocked: record.sockets_unblocked.clone(),
         template: record.template.clone(),
         released: record.released_at.is_some(),
         retired: record.retired.then(|| {
@@ -309,6 +313,7 @@ mod tests {
             role: None,
             after_merge: None,
             unsandboxed: None,
+            sockets_unblocked: None,
             earlier: vec![],
             unknown: Default::default(),
         }

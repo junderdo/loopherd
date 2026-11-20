@@ -14,7 +14,10 @@ pub fn member(member: &Member, mail: &Mail, time: &str, theme: Theme) -> Vec<Lin
     let status = crate::status::label(member);
     let role = match (member.lead, &member.unsandboxed) {
         (true, Some(why)) => format!("lead, unsandboxed: {why}"),
-        (true, None) => "lead".into(),
+        (true, None) => match &member.sockets_unblocked {
+            Some(why) => format!("lead, Unix sockets open: {why}"),
+            None => "lead".into(),
+        },
         (false, _) => "worker".into(),
     };
     let mut lines = vec![
