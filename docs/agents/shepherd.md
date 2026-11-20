@@ -95,7 +95,11 @@ same mode governs what the human's own `~/.claude/settings.json` loosens
 (D100): `require` refuses the lead naming each file and key, `prefer`
 starts it sandboxed with them as warnings; doctor reports them. A lead
 gets no MCP servers but those its `[lead] mcp_servers` names, which run
-unsandboxed; only the human adds one. Doctor
+unsandboxed; only the human adds one. A lead's loopherd commands that
+reach herdr (`tell`, `read`, `status`, `feed` and the rest) run in its
+broker, outside the sandbox and only on its own herd (D98); doctor fails
+for a lead with no broker running, and `loopherd revive --name <lead>`
+from an unsandboxed shell starts it. Doctor
 names each running lead without its sandbox; `loopherd revive --name
 <lead>` after quitting its Claude resumes it in one. A lead started
 before loopherd kept its record (`<config dir>/sandbox/<lead>.lead.json`)

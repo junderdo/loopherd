@@ -176,7 +176,7 @@ Init never launches an agent.
    check it with `loopherd reports --all`. A plain `loopherd reports` while
    a watch is armed consumes reports the watch would have printed, so look
    with `reports --all`. For a member that left no report, read its screen
-   (`herdr agent read <name> --source recent-unwrapped --lines 40`).
+   with `loopherd read <name>` (its last 40 lines; `--lines <n>` up to 1000).
 4. **Verify** a finished member's output with a read-only reviewer
    subagent against the task's acceptance criteria. Ask for it by role:
    the `reviewer` agent type, else `loopherd-reviewer`, else a
@@ -722,6 +722,8 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
 
 ### Talking to members
 
+- `loopherd read <name> [--lines <n>]` prints a member's last lines of
+  output (40 by default, up to 1000), not raw `herdr agent read`.
 - `loopherd tell <name> "<text>"` (or `--text-file <file>`), not raw
   `herdr agent prompt`. It refuses, sending nothing, while the member's
   pane shows a subagent's view (text would reach the subagent instead):
@@ -769,7 +771,9 @@ Shepherd section has the detail):
    if it reads right.
 2. **Watch:** keep `loopherd watch --timeout 3600` in the background (see
    Heartbeat).
-3. **On wake:** read the watch's lines and the member's reports.
+3. **On wake:** read the watch's lines and the member's reports; for a
+   member that left none, `loopherd read <name>` shows its screen, not raw
+   `herdr agent read`.
 4. **Verify** a `done` member's output with a read-only reviewer subagent
    against the task's acceptance criteria, with a temp `XDG_STATE_HOME` and
    `LOOPHERD_CONFIG_DIR`, building under `<scratch>/pr<n>/`. It writes its
@@ -837,14 +841,19 @@ What differs from the shepherd:
   `paused/`, `shepherd.json` and the ledger among them, fail
   (`Read-only file system`, or a denied command or Edit). Processes a
   command leaves behind end with it, so keep long waits as background
-  tasks. `loopherd restart` (`--self` included), `prompt`, `feed`,
-  `add`, `retire` and `release` run in your broker, outside the sandbox,
-  in any form, one at a time, so a running `feed` holds up the others
-  until it ends. With `install` on, `scripts/install` runs outside the
+  tasks. Your loopherd commands that reach herdr don't call it
+  themselves: `loopherd tell`, `read`, `status`, `restart` (`--self`
+  included), `prompt`, `feed`, `add`, `retire` and `release` hand the
+  operation to your broker, a process outside the sandbox that `loopherd
+  lead` started for you, in any form, one at a time, so a running `feed`
+  holds up the others until it ends. Your `status` shows your own herd
+  alone, with no strays, and refuses `--strays`. With no broker running
+  they fail at once, naming the shepherd's `loopherd revive --name <you>`;
+  report that as a question. With `install` on, `scripts/install` runs outside the
   sandbox only bare, as its own Bash call: a `cd x &&`, a pipe or
   redirect, or `$(…)` keeps it inside. `revive` is the shepherd's or the
-  human's. `restart`, `prompt`, `retire` and `release` refuse anything
-  but your own herd's members; `retire --close` and `release` also keep
+  human's. `tell`, `read`, `restart`, `prompt`, `retire` and `release`
+  refuse anything but your own herd's members; `retire --close` and `release` also keep
   a worktree or refuse when the ledger puts one anywhere its herd file
   wouldn't, and your broker refuses `retire --force` and
   `release --drop-branch`, which are the human's.
