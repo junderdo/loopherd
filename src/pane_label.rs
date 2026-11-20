@@ -7,7 +7,7 @@
 
 use std::fs::{self, File};
 use std::io::ErrorKind;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -40,9 +40,7 @@ pub fn label_until_prompted(herdr: &dyn Herdr, dir: &Path, pane: &str, label: &s
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let _lock = lock(dir, pane)?;
     // Marked first: a mark with no label costs one needless clear; a label with no mark stays.
-    open_regular(&mark)?
-        .set_len(0)
-        .with_context(|| format!("write {}", mark.display()))?;
+    open_regular(&mark)?;
     herdr.label_pane(pane, Some(label))
 }
 
@@ -148,9 +146,9 @@ fn lock(dir: &Path, pane: &str) -> Result<Lock> {
     }
 }
 
-/// Opens or creates `path` for writing, refusing a symlink, a FIFO or
-/// anything else but a plain file: a lead can plant one in the mailboxes
-/// directory for its unsandboxed broker to write through.
+/// Opens or creates `path` for writing, refusing a symlink, a FIFO, a hard
+/// link or anything else but a plain file: a lead can plant one in the
+/// mailboxes directory for its unsandboxed broker to write through.
 fn open_regular(path: &Path) -> Result<File> {
     let file = fs::OpenOptions::new()
         .write(true)
@@ -163,7 +161,7 @@ fn open_regular(path: &Path) -> Result<File> {
     let meta = file
         .metadata()
         .with_context(|| format!("stat {}", path.display()))?;
-    if !meta.is_file() {
+    if !meta.is_file() || meta.nlink() > 1 {
         bail!("{} isn't a plain file", path.display());
     }
     Ok(file)
@@ -258,6 +256,39 @@ mod tests {
             let err = ask(&herdr, dir.path()).unwrap_err();
 
             assert!(format!("{err:#}").contains(planted), "{err:#}");
+            assert_eq!(fs::read_to_string(&target).unwrap(), "the human's settings");
+            assert_eq!(herdr.label("w9:p0"), None);
+        }
+    }
+
+    #[test]
+    fn a_dangling_symlink_planted_at_the_mark_or_its_lock_creates_nothing() {
+        for planted in [".pane-label-w9:p0", ".pane-label-w9:p0.lock"] {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("made-by-the-broker");
+            std::os::unix::fs::symlink(&target, dir.path().join(planted)).unwrap();
+            let herdr = FakeHerdr::new(&[]);
+
+            let err = ask(&herdr, dir.path()).unwrap_err();
+
+            assert!(format!("{err:#}").contains(planted), "{err:#}");
+            assert!(!target.exists());
+            assert_eq!(herdr.label("w9:p0"), None);
+        }
+    }
+
+    #[test]
+    fn a_hard_link_planted_at_the_mark_or_its_lock_is_refused_and_left_whole() {
+        for planted in [".pane-label-w9:p0", ".pane-label-w9:p0.lock"] {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("settings.json");
+            fs::write(&target, "the human's settings").unwrap();
+            fs::hard_link(&target, dir.path().join(planted)).unwrap();
+            let herdr = FakeHerdr::new(&[]);
+
+            let err = ask(&herdr, dir.path()).unwrap_err();
+
+            assert!(format!("{err:#}").contains("isn't a plain file"), "{err:#}");
             assert_eq!(fs::read_to_string(&target).unwrap(), "the human's settings");
             assert_eq!(herdr.label("w9:p0"), None);
         }
