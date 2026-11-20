@@ -134,6 +134,14 @@ impl Lead {
 /// The worktree of every lead kept in loopherd's config dir, by name. A kept
 /// record or herd file that can't be read is skipped: one bad file mustn't
 /// stop every retire.
+fn is_not_found(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
 fn lead_worktrees(paths: &Paths) -> Vec<(String, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(paths.config_dir().join("sandbox")) else {
         return vec![];
@@ -206,8 +214,9 @@ impl Guard {
 
     /// Why loopherd won't run git on `record`'s repo, its worktree, or the
     /// worktree its branch would be given, if it won't. A herd's member must
-    /// be where its herd file puts members: its repo the herd's, its worktree
-    /// beside the herd's other worktrees. No entry may name another lead's
+    /// be in its herd's repo, and when a lead runs this, its worktree must sit
+    /// beside the herd's other worktrees. An entry whose herd file is gone is
+    /// the human's to act on, as a hand-spawned one. No entry may name another lead's
     /// worktree, or a repo in a lead's worktree or the state dir, where a lead
     /// could have written its git config.
     pub fn path_refusal(&self, record: &AgentRecord) -> Result<Option<String>> {
@@ -250,15 +259,22 @@ impl Guard {
         let Some(herd) = &record.herd else {
             return Ok(None);
         };
-        let repo = herd::repo(&self.paths, herd).with_context(|| {
-            format!("herd {herd}'s file names no repo to check {name}'s ledger entry against")
-        })?;
+        let repo = match herd::repo(&self.paths, herd) {
+            Err(err) if !self.for_lead() && is_not_found(&err) => return Ok(None),
+            found => found.with_context(|| {
+                format!("herd {herd}'s file names no repo to check {name}'s ledger entry against")
+            })?,
+        };
         if !same_dir(&record.repo, &repo) {
             return Ok(Some(format!(
                 "{name}'s ledger entry names repo {}, not herd {herd}'s {}",
                 record.repo.display(),
                 repo.display()
             )));
+        }
+        // ensure_worktree reuses a branch's worktree wherever the human made it.
+        if !self.for_lead() {
+            return Ok(None);
         }
         let beside = worktree_path(&repo, "x");
         let in_place = |worktree: &Path| {

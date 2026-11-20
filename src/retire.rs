@@ -1498,9 +1498,10 @@ mod tests {
     }
 
     #[test]
-    fn close_keeps_a_worktree_the_entry_places_away_from_its_herds_worktrees() {
+    fn a_leads_close_keeps_a_worktree_the_entry_places_away_from_its_herds_worktrees() {
         let root = tempfile::tempdir().unwrap();
-        let (herdr, mut ledger, repo, guard) = herd_member(root.path(), None);
+        let (herdr, mut ledger, repo, guard) = herd_member(root.path(), Some("lead-h"));
+        keep_lead(root.path(), "lead-h", "h");
         let elsewhere = root.path().join("elsewhere/feat-new");
         ledger.0.get_mut("a").unwrap().worktree = Some(elsewhere.clone());
 

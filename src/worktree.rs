@@ -58,6 +58,9 @@ fn git_common_dir(dir: &Path) -> Result<PathBuf> {
             String::from_utf8_lossy(&asked.stderr).trim()
         );
     }
+    let dir = dir
+        .canonicalize()
+        .with_context(|| format!("{} is not a directory", dir.display()))?;
     let checkout = dir
         .ancestors()
         .find(|d| d.join(".git").exists())
@@ -1023,56 +1026,102 @@ fn core_ssh_command_unset(repo: &Path) -> bool {
     matches!(status, Ok(s) if s.code() == Some(1))
 }
 
-/// The common git dir of the checkout at `repo`, read from its `.git` without
+/// The git dir of the checkout at `checkout`, read from its `.git` without
 /// asking git, which would follow a `commondir` file anyone who can write the
-/// shared `.git` (a sandboxed lead) can plant. Fails for a repo that reads a
-/// `config.worktree`, which that writer could also plant.
+/// shared `.git` (a sandboxed lead) can plant.
+fn git_dir(checkout: &Path) -> Result<PathBuf> {
+    let dot_git = checkout.join(".git");
+    if dot_git.is_dir() {
+        return Ok(dot_git);
+    }
+    let text = std::fs::read_to_string(&dot_git)
+        .with_context(|| format!("{} is not a git checkout", checkout.display()))?;
+    Ok(checkout.join(
+        text.strip_prefix("gitdir:")
+            .with_context(|| format!("{} has no gitdir line", dot_git.display()))?
+            .trim(),
+    ))
+}
+
+/// The common git dir of the checkout at `repo`; see [`git_dir`].
 fn common_dir(repo: &Path) -> Result<PathBuf> {
-    let dot_git = repo.join(".git");
-    let common = if dot_git.is_dir() {
-        dot_git
-    } else {
-        let text = std::fs::read_to_string(&dot_git)
-            .with_context(|| format!("{} is not a git checkout", repo.display()))?;
-        let git_dir = repo.join(
-            text.strip_prefix("gitdir:")
-                .with_context(|| format!("{} has no gitdir line", dot_git.display()))?
-                .trim(),
-        );
-        match git_dir.parent() {
-            Some(worktrees) if worktrees.file_name() == Some("worktrees".as_ref()) => worktrees
-                .parent()
-                .context("worktrees dir at the filesystem root")?
-                .to_path_buf(),
-            _ => git_dir,
-        }
-    };
+    let git_dir = git_dir(repo)?;
+    Ok(match git_dir.parent() {
+        Some(worktrees) if worktrees.file_name() == Some("worktrees".as_ref()) => worktrees
+            .parent()
+            .context("worktrees dir at the filesystem root")?
+            .to_path_buf(),
+        _ => git_dir,
+    })
+}
+
+/// What git reads from a `config.worktree` when sparse checkout wrote it.
+const SPARSE_KEYS: [&str; 3] = [
+    "core.sparsecheckout",
+    "core.sparsecheckoutcone",
+    "index.sparse",
+];
+
+/// Fails when git run in `dir` would read a `config.worktree` setting
+/// anything but sparse checkout: a sandboxed lead can write those files.
+fn refuse_worktree_config(common: &Path, dir: &Path) -> Result<()> {
     let config = common.join("config");
-    let worktree_config = Command::new("git")
-        .args(["config", "--file"])
-        .arg(&config)
-        .args(["--bool", "--get", "extensions.worktreeConfig"])
-        .output()
-        .context("run git")?;
-    if String::from_utf8_lossy(&worktree_config.stdout).trim() == "true" {
+    let on = config_values(&config, &["--bool", "--get", "extensions.worktreeConfig"])?;
+    if on.trim() != "true" {
+        return Ok(());
+    }
+    let Some(checkout) = dir.canonicalize().ok().and_then(|dir| {
+        dir.ancestors()
+            .find(|d| d.join(".git").exists())
+            .map(Path::to_path_buf)
+    }) else {
+        return Ok(());
+    };
+    let file = git_dir(&checkout)?.join("config.worktree");
+    if !file.exists() {
+        return Ok(());
+    }
+    let keys = config_values(&file, &["--name-only", "--list"])?;
+    if let Some(key) = keys.lines().find(|key| !SPARSE_KEYS.contains(key)) {
         bail!(
-            "{} sets extensions.worktreeConfig, so git there reads config.worktree files \
-             a sandboxed lead can write; loopherd won't run git in it",
-            config.display()
+            "{} sets {key}, which a sandboxed lead could have written; \
+             loopherd won't run git in {}",
+            file.display(),
+            dir.display()
         );
     }
-    Ok(common)
+    Ok(())
+}
+
+/// `git config --file file args`'s stdout; empty when nothing matches.
+fn config_values(file: &Path, args: &[&str]) -> Result<String> {
+    let out = Command::new("git")
+        .args(["config", "--file"])
+        .arg(file)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .context("run git")?;
+    if !out.status.success() && out.status.code() != Some(1) {
+        bail!(
+            "git config --file {}: {}",
+            file.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// git run in `dir`, a checkout of `repo`, reading config and hooks from
 /// `repo`'s own common git dir only. A worktree's `.git` file or admin dir
 /// can't point it at a config, hence a command, of someone else's choosing.
 pub(crate) fn git_command(repo: &Path, dir: &Path) -> Result<Command> {
+    let repo = std::path::absolute(repo).with_context(|| format!("repo: {}", repo.display()))?;
+    let common = common_dir(&repo)?;
+    refuse_worktree_config(&common, dir)?;
     let mut command = Command::new("git");
-    command
-        .arg("-C")
-        .arg(dir)
-        .env("GIT_COMMON_DIR", common_dir(repo)?);
+    command.arg("-C").arg(dir).env("GIT_COMMON_DIR", common);
     Ok(command)
 }
 
@@ -2584,6 +2633,79 @@ mod tests {
         assert_eq!(warnings, 1, "{stderr}");
     }
 
+    const RELATIVE_CWD: &str = "LOOPHERD_TEST_RELATIVE_CWD";
+
+    /// The stdout of `test`, run alone in a child whose cwd is `cwd`.
+    fn run_child_in(cwd: &Path, test: &str) -> String {
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "--nocapture", test])
+            .env(RELATIVE_CWD, "1")
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// Runs only as the child of the test below, from a repo's subdirectory.
+    #[test]
+    fn prints_the_checkout_root_of_dot() {
+        if std::env::var_os(RELATIVE_CWD).is_some() {
+            println!("root={}", checkout_root(Path::new(".")).unwrap().display());
+        }
+    }
+
+    #[test]
+    fn checkout_root_of_dot_from_a_subdirectory_is_the_repo_root() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let sub = repo.join("a/b");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let out = run_child_in(&sub, "worktree::tests::prints_the_checkout_root_of_dot");
+
+        let want = format!("root={}\n", repo.canonicalize().unwrap().display());
+        assert!(out.contains(&want), "{out}");
+    }
+
+    /// Runs only as the child of the test below, from a repo's main checkout.
+    #[test]
+    fn prints_the_branch_of_worktree_feat_x_named_from_dot() {
+        if std::env::var_os(RELATIVE_CWD).is_some() {
+            let worktree = Path::new("../worktrees/feat-x").canonicalize().unwrap();
+            let branch = git_at(Path::new("."), &worktree, &["branch", "--show-current"]);
+            println!("branch={}", branch.unwrap().trim());
+        }
+    }
+
+    #[test]
+    fn git_in_a_worktree_of_a_repo_named_by_a_relative_path_reads_that_repo() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        ensure_worktree(&repo, "feat/x").unwrap();
+
+        let out = run_child_in(
+            &repo,
+            "worktree::tests::prints_the_branch_of_worktree_feat_x_named_from_dot",
+        );
+
+        assert!(out.contains("branch=feat/x\n"), "{out}");
+    }
+
+    #[test]
+    fn a_sparse_checkout_repo_gets_worktrees_made_and_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        git(&repo, &["sparse-checkout", "init", "--cone"]).unwrap();
+        assert!(repo.join(".git/config.worktree").exists());
+
+        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+        let removed = remove_if_merged(&repo, &wt);
+
+        assert!(removed.is_ok(), "{removed:?}");
+        assert!(!wt.exists());
+    }
+
     #[test]
     fn repo_root_from_a_subdirectory_is_the_main_checkout() {
         let root = tempfile::tempdir().unwrap();
@@ -2627,7 +2749,7 @@ mod tests {
         assert!(!ran.exists(), "{result:?}");
         let err = result.unwrap_err();
         assert!(
-            format!("{err:#}").contains("sets extensions.worktreeConfig"),
+            format!("{err:#}").contains("sets core.fsmonitor"),
             "{err:#}"
         );
         assert!(wt.exists());
