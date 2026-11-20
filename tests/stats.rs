@@ -1445,6 +1445,25 @@ fn each_row_shows_how_its_run_ended_and_a_dash_for_runs_retired_before_outcomes(
 }
 
 #[test]
+fn an_outcome_from_another_version_shows_a_dash_and_counts_unrecorded() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[Member::new("lh-1", "2026-11-01T00:00:00Z")
+            .ended("2026-11-01T02:00:00Z", Some("abandoned"))],
+    );
+
+    let out = stdout(&run(state.path(), &[]));
+
+    let row = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("lh-1"))
+        .unwrap_or_else(|| panic!("{out}"));
+    assert_eq!(row.split_whitespace().last(), Some("-"), "{out}");
+    assert!(out.contains("1 members: 0 merged, 1 unrecorded;"), "{out}");
+}
+
+#[test]
 fn medians_and_maxima_cover_only_merged_runs_and_the_summary_counts_the_rest_apart() {
     let state = tempfile::tempdir().unwrap();
     a_run_of_each_outcome(state.path());

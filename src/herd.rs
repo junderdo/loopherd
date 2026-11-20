@@ -2993,6 +2993,7 @@ args = ["--model", "opus"]
             after_merge: None,
             unsandboxed: None,
             earlier: vec![],
+            unknown: Default::default(),
         }
     }
 

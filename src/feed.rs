@@ -334,12 +334,24 @@ fn reap(
     let workers = members.filter(|e| !e.retired && !e.is_lead());
     for member in workers.filter(|e| e.herd.as_deref() == Some(&req.herd)) {
         let name = &member.name;
+        if member.may_be_lead() {
+            lines.push(format!(
+                "{name}: left alone, its role is from another loopherd version"
+            ));
+            continue;
+        }
         if let Some(AfterMerge::Pending { owner }) = member.after_merge {
             if live(req.procs, Some(owner)).is_some() {
                 lines.push(format!("after_merge {name}: running in feed {}", owner.pid));
             } else {
                 interrupted(ledger, req, name, owner, lines)?;
             }
+            continue;
+        }
+        if let Some(AfterMerge::Unknown(_)) = member.after_merge {
+            lines.push(format!(
+                "after_merge {name}: left alone, its state is from another loopherd version"
+            ));
             continue;
         }
         let template = member.template.as_deref();
@@ -599,7 +611,7 @@ fn interrupted(
 
 fn set_after_merge(ledger: &mut dyn Ledger, name: &str, state: AfterMerge) -> Result<()> {
     ledger.update(name, &mut |r| {
-        r.after_merge = Some(state);
+        r.after_merge = Some(state.clone());
         Ok(())
     })?;
     Ok(())
@@ -1069,6 +1081,7 @@ mod tests {
             after_merge: None,
             unsandboxed: None,
             earlier: vec![],
+            unknown: Default::default(),
         }
     }
 
@@ -2204,6 +2217,28 @@ mod tests {
     }
 
     #[test]
+    fn a_member_whose_role_is_from_another_version_is_never_checked_or_retired() {
+        let setup = Setup::with_done("printf ''", 1, "touch checked; true");
+        let herdr = herdr().with_agent("lh-9");
+        let mut unknown = member("lh-9", Some("prs"), false);
+        unknown.role = Some(crate::ledger::Role::Unknown("reviewer".into()));
+        unknown.params = Some(Default::default());
+        let mut ledger = ledger(&[unknown]);
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "lh-9: left alone, its role is from another loopherd version",
+                "prs: 0 retired, 0 added, 0 skipped, 0 errors"
+            ]
+        );
+        assert!(!ledger.0["lh-9"].retired);
+        assert!(!setup.repo.path().join("checked").exists());
+    }
+
+    #[test]
     fn a_herd_without_a_queue_is_an_error() {
         let setup = Setup::new("echo 1", 1);
         fs::write(
@@ -2607,7 +2642,7 @@ mod tests {
             start: OWNER.start + 1,
         };
         let pending = Some(AfterMerge::Pending { owner: reused_pid });
-        ledger.0.get_mut("zpr-1").unwrap().after_merge = pending;
+        ledger.0.get_mut("zpr-1").unwrap().after_merge = pending.clone();
 
         let dry = setup.feed(&herdr, &mut ledger, true).unwrap();
         assert_eq!(dry.lines[0], "would note after_merge zpr-1: interrupted");
@@ -2634,6 +2669,30 @@ mod tests {
 
         setup.feed(&herdr, &mut ledger, false).unwrap();
         assert!(ledger.0["zpr-1"].retired);
+    }
+
+    #[test]
+    fn a_feed_leaves_a_member_whose_after_merge_state_it_doesnt_know() {
+        let setup = Setup::after_merge(r#"["echo ran >> log"]"#, "");
+        let herdr = herdr();
+        let mut ledger = fed_one(&setup, &herdr);
+        setup.touch("merged-1");
+        setup.touch("done-1");
+        let unknown = Some(AfterMerge::Unknown("skipped".into()));
+        ledger.0.get_mut("zpr-1").unwrap().after_merge = unknown.clone();
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "after_merge zpr-1: left alone, its state is from another loopherd version",
+                "prs: 0 retired, 0 added, 0 skipped, 0 errors",
+            ]
+        );
+        assert!(!ledger.0["zpr-1"].retired);
+        assert_eq!(ledger.0["zpr-1"].after_merge, unknown);
+        assert_eq!(setup.read("log"), None);
     }
 
     /// A feed's after_merge of `commands`, left pending for `members`.
@@ -3027,6 +3086,32 @@ mod tests {
                 )]
             );
         }
+    }
+
+    #[test]
+    fn from_the_pane_of_a_role_from_another_version_after_merge_is_gated_as_a_leads() {
+        let setup = Setup::after_merge(
+            r#"["echo one >> log", "gh pr merge 7"]"#,
+            "[lead]\nprompt = \"go\"\n",
+        );
+        let herdr = herdr();
+        let mut ledger = with_lead(fed_one(&setup, &herdr), "prs");
+        ledger.0.get_mut("lead-prs").unwrap().role =
+            Some(crate::ledger::Role::Unknown("reviewer".into()));
+        setup.touch("merged-1");
+
+        let fed = setup
+            .feed_from(&herdr, &mut ledger, false, Some("w1:p0"))
+            .unwrap();
+
+        assert!(
+            fed.lines
+                .iter()
+                .any(|l| l.starts_with("after_merge zpr-1: not run: ")),
+            "{:?}",
+            fed.lines
+        );
+        assert_eq!(setup.read("log"), None);
     }
 
     #[test]
