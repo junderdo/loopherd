@@ -4,15 +4,26 @@ use anyhow::{Result, anyhow, bail};
 
 use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::Ledger;
+use crate::sandbox::Guard;
 use crate::subagent_view::{TEXT_REACHES_SUBAGENT, ensure_main_view};
 
 /// Sends `name`'s stored prompt to its live agent and marks it sent,
-/// refusing a pane that shows a subagent's view.
-pub fn prompt(herdr: &dyn Herdr, ledger: &mut dyn Ledger, name: &str, force: bool) -> Result<()> {
+/// refusing a pane that shows a subagent's view, and any member outside the
+/// herd of the lead `guard` says runs this loopherd.
+pub fn prompt(
+    herdr: &dyn Herdr,
+    ledger: &mut dyn Ledger,
+    name: &str,
+    force: bool,
+    guard: &Guard,
+) -> Result<()> {
     let record = ledger
         .entries()?
         .remove(name)
         .ok_or_else(|| anyhow!("{name} is not in the ledger"))?;
+    if let Some(why) = guard.caller_refusal(&record)? {
+        bail!("refused: {why}");
+    }
     if record.prompt_sent && !force {
         bail!("{name}'s prompt was already sent; pass --force to send it again");
     }
@@ -50,6 +61,7 @@ pub fn prompt(herdr: &dyn Herdr, ledger: &mut dyn Ledger, name: &str, force: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::herd::Paths;
     use crate::herdr::fake::FakeHerdr;
     use crate::ledger::{AgentRecord, MemLedger};
     use crate::subagent_view::screens::{SUBAGENT_PICKER, SUBAGENT_PROMPT};
@@ -91,11 +103,77 @@ mod tests {
         MemLedger([(record.name.clone(), record)].into(), vec![])
     }
 
+    fn no_lead() -> Guard {
+        Guard::new(Paths::under(std::path::Path::new("/nonexistent")), None)
+    }
+
+    /// The guard of lead `lead` of herd `herd` running this loopherd, kept under `root`.
+    fn lead_of(root: &std::path::Path, lead: &str, herd: &str) -> Guard {
+        let paths = Paths::under(root);
+        let dir = paths.config_dir().join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{lead}.lead.json")),
+            format!("{{\"herd\": \"{herd}\", \"args\": []}}"),
+        )
+        .unwrap();
+        Guard::new(paths, Some(lead.into()))
+    }
+
+    #[test]
+    fn a_lead_prompts_a_member_of_its_own_herd() {
+        let root = tempfile::tempdir().unwrap();
+        let herdr = FakeHerdr::new(&[]).with_agent("a");
+        let mut ledger = ledger_with(AgentRecord {
+            herd: Some("h".into()),
+            ..record("a")
+        });
+
+        prompt(
+            &herdr,
+            &mut ledger,
+            "a",
+            false,
+            &lead_of(root.path(), "lead-h", "h"),
+        )
+        .unwrap();
+
+        assert!(ledger.0["a"].prompt_sent);
+    }
+
+    #[test]
+    fn a_lead_cant_prompt_a_member_of_another_herd() {
+        let root = tempfile::tempdir().unwrap();
+        let herdr = FakeHerdr::new(&[]).with_agent("a");
+        let ledger = ledger_with(AgentRecord {
+            herd: Some("h".into()),
+            ..record("a")
+        });
+        let before = ledger.0.clone();
+        let mut ledger = ledger;
+
+        let err = prompt(
+            &herdr,
+            &mut ledger,
+            "a",
+            false,
+            &lead_of(root.path(), "lead-o", "o"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "refused: a isn't a member of lead-o's herd, and lead-o runs this loopherd"
+        );
+        assert_eq!(ledger.0, before);
+        assert!(herdr.prompts().is_empty());
+    }
+
     #[test]
     fn sends_the_stored_prompt_and_marks_it_sent() {
         let herdr = FakeHerdr::new(&[]).with_agent("a");
         let mut ledger = ledger_with(record("a"));
-        prompt(&herdr, &mut ledger, "a", false).unwrap();
+        prompt(&herdr, &mut ledger, "a", false, &no_lead()).unwrap();
         assert_eq!(herdr.prompts(), vec![("a".into(), "start work".into())]);
         assert!(ledger.0["a"].prompt_sent);
     }
@@ -103,7 +181,7 @@ mod tests {
     fn assert_refused(herdr: &FakeHerdr, ledger: MemLedger, name: &str, force: bool, msg: &str) {
         let before = ledger.0.clone();
         let mut ledger = ledger;
-        let err = prompt(herdr, &mut ledger, name, force).unwrap_err();
+        let err = prompt(herdr, &mut ledger, name, force, &no_lead()).unwrap_err();
         assert_eq!(format!("{err:#}"), msg);
         assert_eq!(ledger.0, before);
         assert!(herdr.prompts().is_empty());
@@ -145,7 +223,7 @@ mod tests {
             ..record("a")
         };
         let mut ledger = ledger_with(sent);
-        prompt(&herdr, &mut ledger, "a", true).unwrap();
+        prompt(&herdr, &mut ledger, "a", true, &no_lead()).unwrap();
         assert_eq!(herdr.prompts(), vec![("a".into(), "start work".into())]);
         assert!(ledger.0["a"].prompt_sent);
     }

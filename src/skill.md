@@ -798,19 +798,23 @@ What differs from the shepherd:
   that ping for merges the human makes. Grilling is always the human's.
 - **Sandbox.** Your Claude runs in the Claude Code sandbox, from
   settings loopherd writes for you to `<config dir>/sandbox/<you>.json`
-  (D89, building D83). Bash can write only to your own worktree,
-  loopherd's state dir and temp files; writes elsewhere, herd files,
-  `config.toml`, those settings and `~/.claude` among them, fail
+  (D89, building D83; D97). Bash can write only to your own worktree,
+  `reports/` and `handoffs/` in loopherd's state dir (not the shepherd's
+  `reports/watch.lock` or `watch.fired`), and temp files; writes
+  elsewhere, herd files, `config.toml`, those settings, `~/.claude`,
+  `paused/`, `shepherd.json` and the ledger among them, fail
   (`Read-only file system`, or a denied command or Edit). Processes a
   command leaves behind end with it, so keep long waits as background
-  tasks. `loopherd restart --self`, `feed`, `add`, `retire` and
-  `release`, and with `install` on `scripts/install`, run outside the
-  sandbox, but only run bare, as their own Bash call: a `cd x &&`, a pipe
-  or redirect, `$(…)` or a path to `loopherd` keeps one inside it, where
-  it can't make or remove members' worktrees. `retire --close` and
-  `release` refuse anything but your own herd's members, keep a worktree
-  or refuse when the ledger puts one anywhere its herd file wouldn't, and
-  `release --drop-branch` is the human's.
+  tasks. `loopherd restart` (`--self` included), `prompt`, `feed`, `add`,
+  `retire` and `release`, and with `install` on `scripts/install`, run
+  outside the sandbox, but only run bare, as their own Bash call: a
+  `cd x &&`, a pipe or redirect, `$(…)` or a path to `loopherd` keeps one
+  inside it, where it can't write the ledger or make or remove members'
+  worktrees. `revive` is the shepherd's or the human's. `restart`,
+  `prompt`, `retire --close` and `release` refuse anything but your own
+  herd's members; `retire --close` and `release`
+  also keep a worktree or refuse when the ledger puts one anywhere its
+  herd file wouldn't, and `release --drop-branch` is the human's.
   `loopherd spawn --worktree` is the human's: its worktree sits beside
   yours, where you can't write; use `loopherd add` instead. Every host is
   reachable, and gh uses the human's credentials as before. The sandbox
@@ -878,9 +882,9 @@ What differs from the shepherd:
   it from your own pane in your own herdr, or it runs as the shepherd's
   watch instead: a pane that matches you but not your socket prints
   `warning: pane <pane> holds lead <you> on socket <recorded>, but this
-  watch's socket is <this>; running the shepherd's watch` on start. Stop it
-  if you see that: it holds the shepherd's lock and wakes you with other
-  herds' events. If you're retired, it exits with an error and
+  watch's socket is <this>; running the shepherd's watch` on start, then
+  fails: your sandbox denies the shepherd's watch lock. Run it from your
+  own herdr instead. If you're retired, it exits with an error and
   leaves your herd's events for the shepherd. Every 60s it also runs your
   herd's checks and wakes you with `<member> merged` (the template's
   `merged` passes, and its `done` doesn't or its after_merge is still due):

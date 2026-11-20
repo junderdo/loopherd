@@ -1028,6 +1028,11 @@ fn run_release(name: &str, keep_branch: bool, drop_branch: bool) -> Result<i32> 
 }
 
 fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32> {
+    let paths = Paths::from_env()?;
+    // A sandboxed lead's revive would start Claudes before failing on the ledger.
+    if !dry_run && sandbox::calling_lead(&paths, &process::ProcFs, std::process::id()).is_some() {
+        bail!("refused: revive is the shepherd's or the human's, and a lead runs this loopherd");
+    }
     let startup = match startup {
         false => None,
         true => {
@@ -1312,7 +1317,15 @@ fn open_in_browser(url: &str) -> Result<()> {
 
 fn run_prompt(name: &str, force: bool) -> Result<i32> {
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    prompt(&CliHerdr, &mut ledger, name, force)?;
+    let paths = Paths::from_env()?;
+    let caller = sandbox::calling_lead(&paths, &process::ProcFs, std::process::id());
+    prompt(
+        &CliHerdr,
+        &mut ledger,
+        name,
+        force,
+        &sandbox::Guard::new(paths, caller),
+    )?;
     println!("prompted {name}");
     Ok(0)
 }
@@ -1337,6 +1350,7 @@ fn run_restart(name: &str, force: bool) -> Result<i32> {
     let state = ledger.dir()?;
     let paths = Paths::from_env()?;
     let own_pane = own_pane();
+    let caller = sandbox::calling_lead(&paths, &process::ProcFs, std::process::id());
     let req = restart::RestartRequest {
         name,
         force,
@@ -1345,6 +1359,7 @@ fn run_restart(name: &str, force: bool) -> Result<i32> {
         pane_shell: &pane_shell,
         state: &state,
         paths: &paths,
+        caller: caller.as_deref(),
         settle_timeout: Duration::from_secs(30),
         poll: Duration::from_millis(250),
         live: &live_session,
@@ -1458,6 +1473,7 @@ fn run_restart_wait(name: &str) -> Result<i32> {
         pane_shell: &pane_shell,
         state: &state,
         paths: &paths,
+        caller: None,
         settle_timeout: Duration::from_secs(30),
         poll: Duration::from_millis(250),
         live: &live_session,
