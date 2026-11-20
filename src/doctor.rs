@@ -2178,7 +2178,7 @@ mod tests {
         elsewhere.socket = Some("/run/dev.sock".into());
         m.ledger(&[lead("lead-down"), lead("lead-up"), retired, elsewhere]);
         let paths = m.paths().clone();
-        let mut ledger = FileLedger::new(m.state().join("ledger.json"));
+        let ledger = FileLedger::new(m.state().join("ledger.json"));
         let serving = std::thread::spawn(move || {
             let herdr = herdr();
             let host = crate::broker::Host {
@@ -2190,13 +2190,7 @@ mod tests {
                 spawn_waiter: |_, _| Ok(()),
                 prs: &crate::github::fake::FakePrs(Ok(crate::github::PrLookup::None)),
             };
-            crate::broker::serve(
-                &host,
-                &mut ledger,
-                &paths,
-                "lead-up",
-                Duration::from_millis(10),
-            )
+            crate::broker::serve(&host, &ledger, &paths, "lead-up", Duration::from_millis(10))
         });
         let given_up = std::time::Instant::now() + Duration::from_secs(5);
         while !crate::broker::running(m.paths(), "lead-up") {

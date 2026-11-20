@@ -303,6 +303,7 @@ fn remove_herd_from(
 }
 
 /// A JSON file of entries keyed by agent name.
+#[derive(Clone)]
 pub struct FileLedger {
     path: PathBuf,
 }

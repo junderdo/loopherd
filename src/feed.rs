@@ -329,7 +329,7 @@ fn reap(
     };
     let caller = match &req.lead {
         Some(lead) => Some(lead.name.clone()),
-        None => sandbox::calling_lead(paths, req.procs, req.owner.pid),
+        None => sandbox::calling_lead(paths, req.procs, req.owner.pid)?,
     };
     let guard = Guard::new(paths.clone(), caller);
     let mut held_back = None;

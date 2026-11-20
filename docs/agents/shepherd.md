@@ -104,7 +104,7 @@ as `(lead, sockets open)`; installing the package is the human's. What still get
 and most of the state dir is writable (LH-298). A lead's `tell`, `read`, `status`,
 `feed`, `add`, `prompt`, `restart`, `retire` and `release` run in its
 broker, outside the sandbox and only on its own herd (D98); its watch
-still calls herdr itself, which LH-309 moves outside the sandbox; doctor fails
+still calls herdr itself, run bare outside the sandbox (D104); doctor fails
 for a lead with no broker running, and `loopherd revive --name <lead>`
 from an unsandboxed shell starts it. Doctor
 names each running lead without its sandbox; `loopherd revive --name
