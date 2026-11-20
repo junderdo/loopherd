@@ -458,7 +458,8 @@ pub fn first_to_notify_each(
         .append(true)
         .open(&path)
         .with_context(|| format!("open {}", path.display()))?;
-    let mut marks = Lock::wait(file).with_context(|| format!("lock {}", path.display()))?;
+    let mut marks =
+        Lock::wait(file, crate::lock::BRIEF).with_context(|| format!("lock {}", path.display()))?;
     let mut text = String::new();
     marks
         .read_to_string(&mut text)

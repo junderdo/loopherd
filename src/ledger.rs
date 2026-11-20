@@ -383,7 +383,7 @@ impl FileLedger {
             .write(true)
             .open(&path)
             .with_context(|| format!("open {}", path.display()))?;
-        Lock::wait(file).with_context(|| format!("lock {}", path.display()))
+        Lock::wait(file, crate::lock::BRIEF).with_context(|| format!("lock {}", path.display()))
     }
 
     fn load(&self) -> Result<BTreeMap<String, AgentRecord>> {
