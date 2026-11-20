@@ -353,3 +353,50 @@ fn lead_defaults_prints_nothing_while_the_table_sets_only_review_rounds() {
     config.env(&mut cmd);
     assert_eq!(succeeded(&cmd.output().unwrap()), "");
 }
+
+fn on_path(program: &str) -> bool {
+    Command::new("sh")
+        .args(["-c", &format!("command -v {program}")])
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+#[test]
+fn setup_names_the_package_when_claude_code_has_no_seccomp_filter_and_installs_nothing() {
+    if !cfg!(target_os = "linux") || !on_path("bwrap") || !on_path("socat") {
+        eprintln!("skipped: needs Linux with bubblewrap and socat");
+        return;
+    }
+    let config = Config::new(Some(
+        "context_window = 1000000\n\n[lead_defaults]\nmerge = true\n",
+    ));
+    // A claude that isn't Claude Code's native binary, with no npm package beside it.
+    let bin = config.dir.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let claude = bin.join("claude");
+    fs::write(&claude, "#!/bin/sh\necho '2.1.329 (Claude Code)'\n").unwrap();
+    fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let empty_npm = config.dir.join("npm-root");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_loopherd"));
+    cmd.arg("setup")
+        .stdin(Stdio::null())
+        .env("PATH", path)
+        .env("npm_config_prefix", &empty_npm);
+    config.env(&mut cmd);
+    let out = cmd.output().unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout.contains(
+            "note: Claude Code's sandbox can't block Unix sockets here (Claude Code finds no \
+             seccomp filter to block them with), so a sandboxed lead can reach herdr, your ssh \
+             agent and WSL2's Windows interop; to close them: npm install -g \
+             @anthropic-ai/sandbox-runtime"
+        ),
+        "{stdout}"
+    );
+    assert!(!empty_npm.exists(), "setup installed something");
+}
