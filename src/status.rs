@@ -376,6 +376,9 @@ pub fn row(member: &Member) -> Vec<String> {
     };
     let name = match (member.lead, member.released) {
         (true, _) if member.unsandboxed.is_some() => format!("{} (lead, unsandboxed)", member.name),
+        (true, _) if member.sockets_unblocked.is_some() => {
+            format!("{} (lead, sockets open)", member.name)
+        }
         (true, _) => format!("{} (lead)", member.name),
         (false, true) => format!("{} (released)", member.name),
         (false, false) => member.name.clone(),
@@ -476,6 +479,7 @@ mod tests {
             role: None,
             after_merge: None,
             unsandboxed: None,
+            sockets_unblocked: None,
             earlier: vec![],
             unknown: Default::default(),
         }
@@ -922,6 +926,37 @@ retired
         assert!(
             out.stdout
                 .contains("  lead-prs (lead, unsandboxed)  working"),
+            "{}",
+            out.stdout
+        );
+    }
+
+    #[test]
+    fn a_lead_whose_sandbox_cant_block_unix_sockets_is_marked_sockets_open() {
+        let herdr = herdr().with_raw_agent(agent(
+            Some("lead-prs"),
+            "w1:plead-prs",
+            AgentStatus::Working,
+        ));
+        let mut ledger = ledger();
+        let mut lead = entry("lead-prs", Some("prs"), "lead-prs");
+        lead.role = Some(crate::ledger::Role::Lead);
+        lead.sockets_unblocked = Some("Claude Code finds no seccomp filter".into());
+        ledger.0.insert(lead.name.clone(), lead);
+
+        let out = status(
+            &herdr,
+            &ledger,
+            &not_paused(),
+            None,
+            Options::default(),
+            PLAIN,
+        )
+        .unwrap();
+
+        assert!(
+            out.stdout
+                .contains("  lead-prs (lead, sockets open)  working"),
             "{}",
             out.stdout
         );

@@ -1807,7 +1807,7 @@ mod tests {
                 herd: herd.into(),
                 args: vec![],
             };
-            fn no_sandbox() -> Result<(), Unavailable> {
+            fn no_sandbox() -> Result<sandbox::Sockets, Unavailable> {
                 Err(Unavailable {
                     why: "none here".into(),
                     fix: "none".into(),
