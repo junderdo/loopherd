@@ -223,6 +223,12 @@ pub fn ssh_missing(paths: &Paths, herd: &str) -> Option<Missing> {
             fix: format!("add {include} as its first line"),
         });
     }
+    host_block_missing(paths, herd)
+}
+
+/// What keeps ssh, reading loopherd's ssh config, from reaching GitHub
+/// through `herd`'s alias: the config lacking the herd's current block.
+pub fn host_block_missing(paths: &Paths, herd: &str) -> Option<Missing> {
     let text = std::fs::read_to_string(ssh_config(paths)).unwrap_or_default();
     let ours = host_block(paths, herd);
     (!host_blocks(&text).contains(&ours)).then(|| Missing {
