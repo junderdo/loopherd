@@ -13,6 +13,7 @@ use crate::report::{self, Body, Entry};
 use crate::sandbox::{self, Probe};
 use crate::spawn::{Checkout, MemberOf, Prompt, SHELL_TIMEOUT, SpawnRequest, Spawned, spawn};
 use crate::template::Template;
+use crate::worktree::{ensure_detached_worktree, remove_worktree, worktree_path};
 
 pub struct LeadRequest {
     pub herd: String,
@@ -24,50 +25,69 @@ pub struct LeadRequest {
 }
 
 /// Spawns `lead-<herd>` in a detached worktree of the same name, in its
-/// sandbox, returning its name and the warning a hook-only start carries,
-/// which its ledger entry and mailbox keep too. Refuses while the herd has
-/// an unretired lead.
+/// sandbox, returning its name and its start's warnings: a hook-only start, or
+/// what loosens its sandbox under `prefer`. Each is noted in its mailbox, and a
+/// hook-only start flagged in the ledger. Refuses while the herd has an
+/// unretired lead.
 pub fn lead(
     herdr: &dyn Herdr,
     ledger: &mut dyn Ledger,
     paths: &Paths,
     req: &LeadRequest,
     inherited_workspace: Option<&str>,
-) -> Result<(String, Spawned, Option<String>)> {
+) -> Result<(String, Spawned, Vec<String>)> {
     let mut spawn_req = resolve(ledger, paths, req)?;
     let kept = sandbox::Lead {
         herd: req.herd.clone(),
         args: spawn_req.claude_args.clone(),
     };
-    let launch = sandbox::prepare(paths, &spawn_req.name, &kept, req.sandbox).context("sandbox")?;
+    // Before the sandbox, so its checks read the worktree's project settings.
+    let worktree = worktree_path(&spawn_req.repo, &spawn_req.name);
+    let fresh = !worktree.exists();
+    ensure_detached_worktree(&spawn_req.repo, &spawn_req.name).context("worktree")?;
+    let launch = match sandbox::prepare(paths, &spawn_req.name, &kept, req.sandbox) {
+        Ok(launch) => launch,
+        // A retry would reuse the worktree as it is, not as origin then has it.
+        Err(e) if fresh => {
+            return Err(match remove_worktree(&spawn_req.repo, &worktree) {
+                Ok(()) => e.context("sandbox"),
+                Err(left) => e.context(format!(
+                    "sandbox (its new worktree {} is left: {left:#})",
+                    worktree.display()
+                )),
+            });
+        }
+        Err(e) => return Err(e.context("sandbox")),
+    };
     spawn_req.claude_args.extend(launch.args());
     let spawned = spawn(herdr, ledger, &spawn_req, inherited_workspace)?;
-    let name = &spawn_req.name;
+    let name = spawn_req.name;
+    // The lead already runs, so what can't be noted only adds to the warning.
     let mut warnings = vec![];
-    if let (Some(why), Some(text)) = (launch.hook_only(), launch.warning(name)) {
-        // The lead already runs, so what can't be noted only adds to the warning.
+    for text in launch.warnings(&name) {
         let mut warning = text.clone();
-        let flagged = ledger.update(name, &mut |r| {
-            r.unsandboxed = Some(why.to_string());
-            Ok(())
-        });
-        if let Err(e) = flagged {
-            warning += &format!("; not flagged in the ledger: {e:#}");
+        if let Some(why) = launch.hook_only() {
+            let flagged = ledger.update(&name, &mut |r| {
+                r.unsandboxed = Some(why.to_string());
+                Ok(())
+            });
+            if let Err(e) = flagged {
+                warning += &format!("; not flagged in the ledger: {e:#}");
+            }
         }
         let note = Entry::new(SystemTime::now(), Body::Note { text });
-        if let Err(e) = report::append(&paths.state_dir().join("reports"), name, &note) {
+        if let Err(e) = report::append(&paths.state_dir().join("reports"), &name, &note) {
             warning += &format!("; not noted in its mailbox: {e:#}");
         }
         warnings.push(warning);
     }
-    if let Err(e) = (req.broker)(paths, name) {
+    if let Err(e) = (req.broker)(paths, &name) {
         warnings.push(format!(
             "{name}'s broker didn't start ({e:#}), so its loopherd commands fail until \
              loopherd revive --name {name} starts it"
         ));
     }
-    let warning = (!warnings.is_empty()).then(|| warnings.join("\nwarning: "));
-    Ok((spawn_req.name, spawned, warning))
+    Ok((name, spawned, warnings))
 }
 
 /// `dry_run`'s plan, or `lead`'s spawn report, with the exit code.
@@ -83,12 +103,10 @@ pub fn run(
         let plan = self::dry_run(herdr, ledger, paths, req, inherited_workspace)?;
         return Ok((plan, 0));
     }
-    let (name, spawned, warning) = lead(herdr, ledger, paths, req, inherited_workspace)?;
+    let (name, spawned, warnings) = lead(herdr, ledger, paths, req, inherited_workspace)?;
     let (report, code) = spawned.report(&name);
-    match warning {
-        Some(warning) => Ok((format!("warning: {warning}\n{report}"), code)),
-        None => Ok((report, code)),
-    }
+    let warnings: String = warnings.iter().map(|w| format!("warning: {w}\n")).collect();
+    Ok((warnings + &report, code))
 }
 
 /// What `lead` would do, like `add --dry-run` with a `role` line.
@@ -189,7 +207,7 @@ fn with_review_rounds(mut prompt: Prompt) -> Result<Prompt> {
 }
 
 /// `lead-<herd>`, failing unless that is a valid member name.
-fn lead_name(herd: &str) -> Result<String> {
+pub fn lead_name(herd: &str) -> Result<String> {
     let valid = herd.len() <= 27
         && herd
             .chars()
@@ -454,7 +472,15 @@ mod tests {
         );
         assert_eq!(
             ledger.0["lead-h"].claude_args,
-            ["--model", "opus", "--settings", &path.display().to_string()]
+            [
+                "--model",
+                "opus",
+                "--settings",
+                &path.display().to_string(),
+                "--strict-mcp-config",
+                "--mcp-config",
+                &path.with_extension("mcp.json").display().to_string(),
+            ]
         );
         assert_eq!(ledger.0["lead-h"].unsandboxed, None);
         assert_eq!(
@@ -625,6 +651,156 @@ mod tests {
             assert!(
                 allow.contains(&format!("Bash({command})").into()),
                 "{allow:?}"
+            );
+        }
+    }
+
+    /// The `--mcp-config` a lead's Claude was started with, parsed, after `--strict-mcp-config`.
+    fn started_mcp(herdr: &FakeHerdr) -> (PathBuf, serde_json::Value) {
+        let args = &herdr.started()[0].args;
+        let at = args.iter().position(|a| a == "--mcp-config").unwrap();
+        assert!(
+            args.contains(&"--strict-mcp-config".to_string()),
+            "{args:?}"
+        );
+        let path = PathBuf::from(&args[at + 1]);
+        let text = fs::read_to_string(&path).unwrap();
+        (path, serde_json::from_str(&text).unwrap())
+    }
+
+    #[test]
+    fn a_lead_starts_with_no_mcp_servers_from_any_scope() {
+        let setup = Setup::with_lead(PROMPT);
+        let herdr = herdr();
+
+        lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        let (path, mcp) = started_mcp(&herdr);
+        assert_eq!(path, setup.root.join("config/sandbox/lead-h.mcp.json"));
+        assert_eq!(mcp, serde_json::json!({"mcpServers": {}}));
+    }
+
+    #[test]
+    fn a_lead_on_prefer_without_its_sandbox_still_starts_with_no_mcp_servers() {
+        let setup = Setup::with_lead("prompt = \"go\"\nsandbox = \"prefer\"");
+        let herdr = herdr();
+        let req = LeadRequest {
+            sandbox: || {
+                Err(Unavailable {
+                    why: "bubblewrap not installed".into(),
+                    fix: "install bubblewrap".into(),
+                })
+            },
+            ..request(&[])
+        };
+
+        lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &req,
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert_eq!(started_mcp(&herdr).1, serde_json::json!({"mcpServers": {}}));
+    }
+
+    #[test]
+    fn a_lead_gets_the_mcp_servers_its_herd_names_from_the_humans_user_scope_only() {
+        let setup = Setup::with_lead("prompt = \"go\"\nmcp_servers = [\"docs\", \"browser\"]");
+        let herdr = herdr();
+        let home = setup.root.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let repo = setup.repo.display().to_string();
+        fs::write(
+            home.join(".claude.json"),
+            serde_json::json!({
+                "mcpServers": {
+                    "docs": {"type": "http", "url": "https://docs.example/mcp"},
+                    "browser": {"command": "browser-mcp"},
+                    "mail": {"command": "mail-mcp"},
+                },
+                "projects": {repo: {"mcpServers": {"browser": {"command": "planted"}}}},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let paths = Paths {
+            home,
+            ..setup.paths()
+        };
+
+        lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            started_mcp(&herdr).1,
+            serde_json::json!({"mcpServers": {
+                "docs": {"type": "http", "url": "https://docs.example/mcp"},
+                "browser": {"command": "browser-mcp"},
+            }})
+        );
+    }
+
+    #[test]
+    fn a_lead_naming_an_mcp_server_the_human_hasnt_configured_is_refused() {
+        let setup = Setup::with_lead("prompt = \"go\"\nmcp_servers = [\"docs\"]");
+        let herdr = herdr();
+
+        let err = lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "sandbox: lead-h can't start: herd h's [lead] mcp_servers names \"docs\", which \
+             /home/me/.claude.json doesn't configure in your user scope; add it with claude mcp \
+             add --scope user, or drop it from mcp_servers (local and project scopes, claude.ai \
+             connectors and plugins' servers can't be given to a lead)"
+        );
+        assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
+    fn a_lead_given_its_own_mcp_config_is_refused_since_its_launch_takes_that_flag() {
+        let setup = Setup::with_lead(PROMPT);
+        for flag in ["--mcp-config", "--strict-mcp-config", "--mcp-config=x.json"] {
+            let herdr = herdr();
+
+            let err = lead(
+                &herdr,
+                &mut MemLedger::default(),
+                &setup.paths(),
+                &request(&[flag]),
+                Some("w1"),
+            )
+            .unwrap_err();
+
+            assert!(
+                format!("{err:#}").starts_with(&format!(
+                    "sandbox: lead-h's args pass {}, which its launch takes;",
+                    flag.split('=').next().unwrap()
+                )),
+                "{err:#}"
             );
         }
     }
@@ -966,6 +1142,360 @@ mod tests {
              to run it guarded by its tool hook alone"
         );
         assert!(herdr.tabs().is_empty());
+    }
+
+    /// `setup`'s paths with a home whose `~/.claude/settings.json` is `settings`.
+    fn home_with_settings(setup: &Setup, settings: &str) -> Paths {
+        let home = setup.root.join("home");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(home.join(".claude/settings.json"), settings).unwrap();
+        Paths {
+            home,
+            ..setup.paths()
+        }
+    }
+
+    #[test]
+    fn require_refuses_a_lead_whose_user_settings_loosen_its_sandbox_naming_each_key() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let herdr = herdr();
+        let paths = home_with_settings(
+            &setup,
+            r#"{"sandbox": {"excludedCommands": ["docker *"],
+                "filesystem": {"allowWrite": ["/srv", "~/notes"], "disabled": true}}}"#,
+        );
+
+        let err = lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        let file = setup.root.join("home/.claude/settings.json");
+        let file = file.display();
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "sandbox: lead-h can't run sandboxed: your Claude settings loosen its sandbox: \
+                 {file}: sandbox.excludedCommands runs \"docker *\" outside it; \
+                 {file}: sandbox.filesystem.allowWrite opens /srv to writes; \
+                 {file}: sandbox.filesystem.allowWrite opens ~/notes to writes; \
+                 {file}: sandbox.filesystem.disabled turns its filesystem rules off; \
+                 remove those, or set [lead] sandbox = \"prefer\" in herd h to start it with \
+                 them as warnings"
+            )
+        );
+        assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
+    fn prefer_starts_a_lead_in_its_loosened_sandbox_warning_of_each_key() {
+        let setup = Setup::with_lead("prompt = \"go\"\nsandbox = \"prefer\"");
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        let paths =
+            home_with_settings(&setup, r#"{"sandbox": {"excludedCommands": ["docker *"]}}"#);
+
+        let (out, code) = run(
+            &herdr,
+            &mut ledger,
+            &paths,
+            &request(&[]),
+            false,
+            Some("w1"),
+        )
+        .unwrap();
+
+        let file = setup.root.join("home/.claude/settings.json");
+        let warning = format!(
+            "lead-h's sandbox is loosened by {}: sandbox.excludedCommands runs \"docker *\" \
+             outside it",
+            file.display()
+        );
+        assert_eq!(code, 0);
+        assert!(out.starts_with(&format!("warning: {warning}\n")), "{out}");
+        assert!(herdr.started()[0].args.contains(&"--settings".to_string()));
+        assert_eq!(ledger.0["lead-h"].unsandboxed, None);
+        let (mailbox, _) = report::history(&setup.root.join("state/reports"), "lead-h").unwrap();
+        assert!(
+            mailbox.iter().any(|e| e.body
+                == Body::Note {
+                    text: warning.clone()
+                }),
+            "{mailbox:?}"
+        );
+    }
+
+    #[test]
+    fn user_settings_that_the_leads_own_settings_already_set_dont_count() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let worktree = setup.worktree();
+        let paths = home_with_settings(
+            &setup,
+            &format!(
+                r#"{{"sandbox": {{"enabled": false, "allowUnsandboxedCommands": true,
+                    "excludedCommands": ["loopherd retire *"],
+                    "enableWeakerNestedSandbox": false,
+                    "filesystem": {{"allowWrite": [{worktree:?}], "allowRead": ["/srv"]}}}},
+                    "permissions": {{"allow": ["Bash(*)", "Read(//srv/**)"]}}}}"#
+            ),
+        );
+
+        let started = lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        );
+
+        assert!(
+            started.as_ref().is_ok_and(|(_, _, w)| w.is_empty()),
+            "{started:?}"
+        );
+    }
+
+    #[test]
+    fn user_permissions_that_open_writes_count_even_beneath_what_the_lead_may_write() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let beneath = setup.worktree().join("link").display().to_string();
+        let paths = home_with_settings(
+            &setup,
+            &format!(
+                r#"{{"sandbox": {{"filesystem": {{"allowWrite": [{beneath:?}]}}}},
+                    "permissions": {{"additionalDirectories": ["~/notes"],
+                    "allow": ["Edit(//srv/**)", "Edit"]}}}}"#
+            ),
+        );
+
+        let err = lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        let file = setup.root.join("home/.claude/settings.json");
+        let file = file.display();
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "sandbox: lead-h can't run sandboxed: your Claude settings loosen its sandbox: \
+                 {file}: sandbox.filesystem.allowWrite opens {beneath} to writes; \
+                 {file}: permissions.additionalDirectories opens ~/notes to writes; \
+                 {file}: permissions.allow opens Edit(//srv/**) to writes; \
+                 {file}: permissions.allow opens Edit to writes; \
+                 remove those, or set [lead] sandbox = \"prefer\" in herd h to start it with \
+                 them as warnings"
+            )
+        );
+    }
+
+    #[test]
+    fn a_credentials_lead_whose_user_settings_loosen_its_sandbox_isnt_started_even_under_prefer() {
+        let setup = Setup::with_lead(&format!("{CREDENTIALS}\nsandbox = \"prefer\""));
+        origin_on_github(&setup, "https://github.com/acme/widgets.git");
+        store_credentials(&setup, true, Some("github_pat_1"));
+        let paths =
+            home_with_settings(&setup, r#"{"sandbox": {"excludedCommands": ["docker *"]}}"#);
+
+        let err = lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "sandbox: lead-h can't start with merge_guard = \"credentials\": your Claude \
+                 settings loosen its sandbox: {}: sandbox.excludedCommands runs \"docker *\" \
+                 outside it; remove those, or set [lead] merge_guard = \"hook\" in herd h",
+                setup.root.join("home/.claude/settings.json").display()
+            )
+        );
+    }
+
+    #[test]
+    fn unparseable_user_settings_count_as_a_loosening() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let paths = home_with_settings(&setup, "{ not json");
+
+        let err = lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        let file = setup.root.join("home/.claude/settings.json");
+        let shown = format!("{err:#}");
+        assert!(
+            shown.contains(&format!("{}: can't parse it: ", file.display())),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn unreadable_user_settings_count_as_a_loosening() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let paths = Paths {
+            home: setup.root.join("home"),
+            ..setup.paths()
+        };
+        let file = setup.root.join("home/.claude/settings.json");
+        fs::create_dir_all(&file).unwrap();
+
+        let err = lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        let shown = format!("{err:#}");
+        assert!(
+            shown.contains(&format!("{}: can't read it: ", file.display())),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn user_rules_that_write_anywhere_a_bypass_default_and_network_keys_count() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let paths = home_with_settings(
+            &setup,
+            r#"{"permissions": {"allow": ["Write", "NotebookEdit(//srv/**)", "MultiEdit(*)",
+                "Read(//srv/**)", "Edit(//**)", "Edit(//*)", "Edit(~/notes/*.md)"],
+                "defaultMode": "bypassPermissions"},
+                "sandbox": {"network": {"httpProxyPort": 8080, "socksProxyPort": 1080,
+                "allowLocalBinding": true, "allowMachLookup": ["com.apple.x"]}}}"#,
+        );
+
+        let err = lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        let file = setup.root.join("home/.claude/settings.json");
+        let file = file.display();
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "sandbox: lead-h can't run sandboxed: your Claude settings loosen its sandbox: \
+                 {file}: sandbox.network.httpProxyPort hands its network to your proxy, past \
+                 its own checks on local addresses; \
+                 {file}: sandbox.network.socksProxyPort hands its network to your proxy, past \
+                 its own checks on local addresses; \
+                 {file}: sandbox.network.allowLocalBinding lets it bind local ports on macOS; \
+                 {file}: sandbox.network.allowMachLookup opens macOS services to it; \
+                 {file}: permissions.allow opens Write to writes; \
+                 {file}: permissions.allow opens MultiEdit(*) to writes; \
+                 {file}: permissions.allow opens Edit(//**) to writes; \
+                 {file}: permissions.allow opens Edit(//*) to writes; \
+                 {file}: permissions.allow opens Edit(~/notes/*.md) to writes; \
+                 {file}: permissions.defaultMode bypassPermissions lets its file tools write \
+                 anywhere; \
+                 remove those, or set [lead] sandbox = \"prefer\" in herd h to start it with \
+                 them as warnings"
+            )
+        );
+    }
+
+    #[test]
+    fn project_rules_that_reach_past_a_new_lead_worktree_count_and_its_worktree_is_removed() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let seed = setup.root.join("seed");
+        fs::create_dir_all(seed.join(".claude")).unwrap();
+        fs::write(
+            seed.join(".claude/settings.json"),
+            r#"{"permissions": {"additionalDirectories": ["~/.local/bin"],
+                "allow": ["Edit(/src/**)", "Edit(/)", "Edit(src/**/*.rs)", "Edit(//**)",
+                "Edit(/../x/**)", "Write(//srv/**)"]},
+                "sandbox": {"excludedCommands": ["docker *"]}}"#,
+        )
+        .unwrap();
+        testing::git_in(&seed, &["add", ".claude"]);
+        testing::commit(&seed, "project settings");
+        let origin = setup.root.join("origin.git");
+        testing::git_in(
+            &seed,
+            &["push", "--quiet", origin.to_str().unwrap(), "main"],
+        );
+        let herdr = herdr();
+
+        let err = lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        let file = setup.worktree().join(".claude/settings.json");
+        let file = file.display();
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "sandbox: lead-h can't run sandboxed: your Claude settings loosen its sandbox: \
+                 {file}: permissions.additionalDirectories opens ~/.local/bin to writes; \
+                 {file}: permissions.allow opens Edit(//**) to writes; \
+                 {file}: permissions.allow opens Edit(/../x/**) to writes; \
+                 remove those, or set [lead] sandbox = \"prefer\" in herd h to start it with \
+                 them as warnings"
+            )
+        );
+        assert!(herdr.tabs().is_empty());
+        assert!(
+            !setup.worktree().exists(),
+            "a refused lead's new worktree is removed"
+        );
+    }
+
+    #[test]
+    fn the_local_settings_in_a_kept_lead_worktree_count_for_their_permissions() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let worktree = ensure_detached_worktree(&setup.repo, "lead-h").unwrap();
+        fs::create_dir_all(worktree.join(".claude")).unwrap();
+        let file = worktree.join(".claude/settings.local.json");
+        fs::write(&file, r#"{"permissions": {"allow": ["Edit(//*)"]}}"#).unwrap();
+
+        let err = lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "sandbox: lead-h can't run sandboxed: your Claude settings loosen its sandbox: \
+                 {}: permissions.allow opens Edit(//*) to writes; remove those, or set \
+                 [lead] sandbox = \"prefer\" in herd h to start it with them as warnings",
+                file.display()
+            )
+        );
+        assert!(file.exists(), "a kept worktree stays");
     }
 
     #[test]
