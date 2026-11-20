@@ -1021,7 +1021,7 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
         },
     });
     // loopherd's own commands that write past the sandbox run in the lead's broker (D98).
-    // A sandboxed watch would hold the sandbox's .git/config.lock placeholder for its whole run (D103).
+    // A sandboxed watch would hold the sandbox's .git/config.lock placeholder for its whole run (D104).
     let mut excluded: Vec<&str> = vec!["loopherd watch", "loopherd watch *"];
     if switches.install {
         // ~/.claude is a protected path no allowWrite opens, and the installer writes there.

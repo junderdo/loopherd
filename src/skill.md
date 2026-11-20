@@ -841,7 +841,7 @@ What differs from the shepherd:
   `add`, `retire` and `release` run in your broker, outside the sandbox,
   in any form, one at a time, so a running `feed` holds up the others
   until it ends. `loopherd watch` runs outside the sandbox only bare, as
-  its own Bash call (D103), and so does `scripts/install` with `install`
+  its own Bash call (D104), and so does `scripts/install` with `install`
   on: a `cd x &&`, a pipe or redirect, `$(…)` or a path to the binary
   keeps it inside, where a long watch blocks `git config` writes across
   the repo for its whole run. `revive` is the shepherd's or the
