@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::handoff;
 use crate::herd::{self, MergeGuard, Paths};
 use crate::ledger::AgentRecord;
 use crate::process::Procs;
@@ -1249,20 +1250,12 @@ fn lead_file(paths: &Paths, name: &str) -> PathBuf {
         .join(format!("{name}.lead.json"))
 }
 
-/// The state dir's directories a lead writes from its sandbox: `reports/`
-/// for its mailbox and its watch's files, `handoffs/` for its handoff. The
-/// rest stays read-only to it as a directory, since a deny on one file holds
-/// only until something outside the sandbox renames over that file.
-const WRITABLE_STATE: [&str; 2] = ["reports", "handoffs"];
-
-/// The shepherd's watch files in `reports/`. Written in place, never
-/// replaced, so a deny on each file holds.
-const SHEPHERDS_WATCH: [&str; 2] = ["reports/watch.lock", "reports/watch.fired"];
-
 /// What in the state dir is the human's or the shepherd's, denied by name
 /// to the file tools, which the sandbox doesn't cover. `true` marks a
-/// directory.
-const KEPT_FROM_FILE_TOOLS: [(&str, bool); 5] = [
+/// directory. Every mailbox and watch file is in `reports/`, which the
+/// lead's report and watch write from outside its sandbox.
+const KEPT_FROM_FILE_TOOLS: [(&str, bool); 6] = [
+    ("reports", true),
     ("paused", true),
     ("shepherd.json", false),
     ("shepherd.json.lock", false),
@@ -1271,37 +1264,28 @@ const KEPT_FROM_FILE_TOOLS: [(&str, bool); 5] = [
 ];
 
 /// Makes what lead `name`'s sandbox names in the state dir. An `allowWrite`
-/// entry for a missing path has no effect on Linux, and a `denyWrite` entry
-/// gets a placeholder that would sit in the way of the first real write.
+/// entry for a missing path has no effect on Linux, and a deny on a missing
+/// path gets a placeholder that would sit in the way of the first real write.
 pub fn create_state(paths: &Paths, name: &str) -> Result<()> {
     let state = paths.state_dir();
     let requests = crate::broker::requests_dir(paths, name);
-    // Every herd's lead folder, so a lead started later sits in one a literal deny names.
-    let leads = herd::names(&paths.herds)?
+    // Every herd's lead and the shepherd, so one started later sits in a folder a literal deny names.
+    let leads: Vec<String> = herd::names(&paths.herds)?
         .into_iter()
         .filter_map(|herd| crate::lead::lead_name(&herd).ok())
-        .map(|lead| state.join("broker").join(lead));
-    for dir in WRITABLE_STATE
-        .map(|dir| state.join(dir))
+        .collect();
+    let brokers = leads.iter().map(|lead| state.join("broker").join(lead));
+    let handoffs = leads
+        .iter()
+        .map(String::as_str)
+        .chain([name, crate::context::SHEPHERD])
+        .map(|agent| handoff::dir(state, agent));
+    for dir in [requests, paths.locks_dir()]
         .into_iter()
-        .chain([requests, paths.locks_dir()])
-        .chain(leads)
+        .chain(brokers)
+        .chain(handoffs)
     {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    }
-    for file in SHEPHERDS_WATCH {
-        let file = state.join(file);
-        // Left as it is when it exists: the sandbox's placeholder for it is read-only.
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&file)
-        {
-            Err(e) if e.kind() != ErrorKind::AlreadyExists => {
-                return Err(e).with_context(|| format!("create {}", file.display()));
-            }
-            _ => {}
-        }
     }
     Ok(())
 }
@@ -1315,34 +1299,40 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
     let claude = paths.home.join(".claude");
     let worktree = worktree_path(&repo, name);
     let state = paths.state_dir();
-    let mut allow_write = vec![worktree];
-    allow_write.extend(WRITABLE_STATE.map(|dir| state.join(dir)));
     // Only its own: a broker takes every request in its folder as its lead's.
-    allow_write.push(crate::broker::requests_dir(paths, name));
+    let mut allow_write = vec![
+        worktree,
+        handoff::dir(state, name),
+        crate::broker::requests_dir(paths, name),
+    ];
     if switches.install {
         allow_write.push(paths.home.join(".local/bin"));
     }
-    let shepherds_watch = SHEPHERDS_WATCH.map(|file| state.join(file));
-    let mut deny_write = vec![config.to_path_buf(), claude.clone()];
-    deny_write.extend(shepherds_watch.iter().cloned());
+    let deny_write = [config.to_path_buf(), claude.clone()];
     let mut deny = vec![edit_rule(config), edit_rule(&claude)];
     deny.extend(KEPT_FROM_FILE_TOOLS.map(|(path, dir)| match dir {
         true => edit_rule(&state.join(path)),
         false => file_rule(&state.join(path)),
     }));
-    deny.extend(shepherds_watch.iter().map(|file| file_rule(file)));
     if cfg!(target_os = "linux") {
-        // The Linux sandbox skips glob denies, so this one reaches only the file tools.
+        // The Linux sandbox skips glob denies, so these reach only the file tools.
         deny.push(file_rule(&state.join("broker/*")));
+        deny.push(file_rule(&state.join("handoffs/*")));
+    } else {
+        // The shepherd's resume still reads this, which may not exist to be listed below.
+        deny.push(file_rule(&handoff::flat(state, crate::context::SHEPHERD)));
     }
-    deny.extend(
-        others_in_broker(paths, name)?
-            .iter()
-            .map(|(path, dir)| match dir {
-                true => edit_rule(path),
-                false => file_rule(path),
-            }),
-    );
+    // On Linux the glob covers the file tools, and a named path that later goes
+    // missing would get the sandbox's empty placeholder, which reads as a handoff.
+    let handoffs = match cfg!(target_os = "linux") {
+        true => vec![],
+        false => others_in_handoffs(paths, name)?,
+    };
+    let others = others_in_broker(paths, name)?.into_iter().chain(handoffs);
+    deny.extend(others.map(|(path, dir)| match dir {
+        true => edit_rule(&path),
+        false => file_rule(&path),
+    }));
     let mut sandbox = json!({
         "enabled": true,
         "failIfUnavailable": true,
@@ -1422,35 +1412,50 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
 /// On Linux a glob deny covers the rest; elsewhere the sandbox would apply it.
 fn others_in_broker(paths: &Paths, name: &str) -> Result<Vec<(PathBuf, bool)>> {
     let broker = paths.state_dir().join("broker");
-    let own = broker.join(name);
+    let mut found = entries_but(&broker, name)?;
+    found.extend(entries_but(&broker.join(name), "requests")?);
+    found.sort();
+    Ok(found)
+}
+
+/// What in `<state>/handoffs/` isn't lead `name`'s own directory, each
+/// named, as [`others_in_broker`] does for `broker/`.
+fn others_in_handoffs(paths: &Paths, name: &str) -> Result<Vec<(PathBuf, bool)>> {
+    entries_but(&paths.state_dir().join("handoffs"), name)
+}
+
+/// The entries of `dir` but `skip`, sorted, each marked `true` when a directory.
+fn entries_but(dir: &Path, skip: &str) -> Result<Vec<(PathBuf, bool)>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            return Ok(vec![]);
+        }
+        Err(e) => return Err(e).with_context(|| format!("list {}", dir.display())),
+    };
     let mut found = vec![];
-    for (dir, skip) in [(&broker, name), (&own, "requests")] {
-        let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
-                continue;
-            }
-            Err(e) => return Err(e).with_context(|| format!("list {}", dir.display())),
-        };
-        for entry in entries {
-            let entry = entry.with_context(|| format!("list {}", dir.display()))?;
-            if entry.file_name() != skip {
-                let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
-                found.push((entry.path(), is_dir));
-            }
+    for entry in entries {
+        let entry = entry.with_context(|| format!("list {}", dir.display()))?;
+        if entry.file_name() != skip {
+            let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+            found.push((entry.path(), is_dir));
         }
     }
     found.sort();
     Ok(found)
 }
 
-/// `settings` without the denies naming paths in `<state>/broker/` one by
-/// one, which change as leads and herds come and go, not with the switches.
+/// `settings` without the denies naming paths in `<state>/broker/` and
+/// `<state>/handoffs/` one by one, which change as agents and herds come and
+/// go, not with the switches.
 fn switch_settings(settings: &Value, paths: &Paths) -> Value {
-    let broker = format!("Edit(/{}/", paths.state_dir().join("broker").display());
+    let dirs = ["broker", "handoffs"]
+        .map(|dir| format!("Edit(/{}/", paths.state_dir().join(dir).display()));
     let named = |rule: &str| {
-        rule.strip_prefix(&broker)
-            .is_some_and(|rest| !rest.trim_end_matches("/**)").contains('*'))
+        dirs.iter().any(|dir| {
+            rule.strip_prefix(dir.as_str())
+                .is_some_and(|rest| !rest.trim_end_matches("/**)").contains('*'))
+        })
     };
     let mut settings = settings.clone();
     if let Some(deny) = settings["permissions"]["deny"].as_array_mut() {

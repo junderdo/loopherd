@@ -749,3 +749,54 @@ fn reports_help_documents_since_and_tail() {
         assert!(help.contains(flag), "{flag} missing from:\n{help}");
     }
 }
+
+#[test]
+fn a_member_writes_its_handoff_from_stdin_into_its_own_handoff_dir() {
+    use std::io::Write;
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+
+    let mut child = loopherd(state.path(), Some("w1:p2"), &["handoff"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"## State\nat step 3\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert_eq!(out.status.code(), Some(0));
+    let handoff = state.path().join("loopherd/handoffs/lh-2/handoff.md");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("wrote {}\n", handoff.display())
+    );
+    assert_eq!(
+        fs::read_to_string(handoff).unwrap(),
+        "## State\nat step 3\n"
+    );
+}
+
+#[test]
+fn a_stray_pane_writes_no_handoff() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+
+    let out = loopherd(state.path(), Some("w1:p7"), &["handoff"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!("loopherd handoff: pane w1:p7 of {SOCKET} is not a member\n")
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(!state.path().join("loopherd/handoffs").exists());
+}

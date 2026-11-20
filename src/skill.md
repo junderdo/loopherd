@@ -267,7 +267,8 @@ running isn't asked until the first later stop without them, unless the
 context is past 1.5x the limit; background shells alone don't defer it.
 A handoff written before the member's last spawn, restart or `handoff`
 report moves to `prev.md` beside it, and the ask says so; one written since
-stays, and a revive doesn't count, since it keeps the conversation. A
+stays, and a revive doesn't count, since it keeps the conversation.
+`loopherd handoff` writes the handoff from stdin to that path. A
 handoff an older loopherd left flat at `handoffs/<name>.md` is still read,
 and moves to `handoffs/<name>/prev.md` once used. The
 limit is the template's or `[lead]`'s `context_limit`, else `default_context_limit` in
@@ -832,7 +833,9 @@ Shepherd section has the detail):
    `after_merge`; do by hand what its note says didn't run), then `git
    worktree remove --force` each verify worktree under `<scratch>/pr<n>/`
    and delete that directory.
-6. **Handoff:** write `$XDG_STATE_HOME/loopherd/handoffs/<your name>/handoff.md` in
+6. **Handoff:** write your handoff with `loopherd handoff <<'EOF'`, which
+   puts it at `$XDG_STATE_HOME/loopherd/handoffs/<your name>/handoff.md`;
+   your sandbox refuses your file tools, and a `cat >` or `tee`, there. Use
    the outline under Handoffs (`## State`, `## Next steps`, `## Gotchas`),
    listing each `<scratch>/pr<n>/` still in use and naming each PR's
    current review file. Then report `--kind handoff`, stop your watch, run
@@ -878,12 +881,15 @@ What differs from the shepherd:
   that ping for merges the human makes. Grilling is always the human's.
 - **Sandbox.** Your Claude runs in the Claude Code sandbox, from
   settings loopherd writes for you to `<config dir>/sandbox/<you>.json`
-  (D89, building D83; D97). Bash can write only to your own worktree,
-  `reports/` and `handoffs/` in loopherd's state dir (not the shepherd's
-  `reports/watch.lock` or `watch.fired`), and temp files; writes
-  elsewhere, herd files, `config.toml`, those settings, `~/.claude`,
-  `paused/`, `shepherd.json` and the ledger among them, fail
-  (`Read-only file system`, or a denied command or Edit). Processes a
+  (D89, building D83; D97, D111). Bash can write only to your own
+  worktree, your own `handoffs/<you>/` in loopherd's state dir, and temp
+  files; writes elsewhere, herd files, `config.toml`, those settings,
+  `~/.claude`, `reports/` (every mailbox, yours included), other agents'
+  handoffs, `paused/`, `shepherd.json` and the ledger among them, fail
+  (`Read-only file system`, or a denied command or Edit). Your file tools,
+  and Bash's redirects, `cat` and `tee`, can't write the state dir at all,
+  so write your handoff with `loopherd handoff`. A plain `loopherd reports`
+  fails too, since it marks reports read in `reports/`; `--all` works. Processes a
   command leaves behind end with it, so keep long waits as background
   tasks. `loopherd report`, `tell`, `read`, `status`, `restart` (`--self`
   included), `prompt`, `feed`, `add`, `retire` and `release` don't call
@@ -898,8 +904,7 @@ What differs from the shepherd:
   `loopherd watch` bare, as its own Bash call, to run it outside the
   sandbox (D104), and `scripts/install` too with `install` on: a
   `cd x &&`, a redirect, `$(…)` or a path to the binary keeps it inside,
-  where a long watch blocks `git config` writes across the repo for its
-  whole run. Your watch refuses `--settings`. `revive` is the shepherd's
+  where it can't write its files in `reports/`. Your watch refuses `--settings`. `revive` is the shepherd's
   or the human's. `tell`, `read`, `restart` and `prompt` reach only your
   own herd's unretired workers, and `retire` and `release` only your
   herd's workers, retired or not; `retire --close` and `release` also keep

@@ -279,15 +279,17 @@ fn reason(
 ) -> String {
     // A lead's watch is a background shell; left running, its stop reads
     // paused and restart refuses it.
-    let (save, plan, restart) = match member.is_lead() {
+    let (save, how, plan, restart) = match member.is_lead() {
         true => (
             "stop your own `loopherd watch` (TaskStop it, or kill it) so your stop reads finished, then ",
+            " with `loopherd handoff <<'EOF'`, since your sandbox refuses your file tools there",
             "your plan as next steps, re-arming your watch first",
             ", then `loopherd restart --self`, and end your turn. It restarts you fresh from that file \
              in this pane once this turn ends.",
         ),
         false => (
             "commit and push your branch, comment your progress on your task in the project's tracker, then ",
+            "",
             "your plan as next steps",
             ", and end your turn. Whoever reads your reports restarts you fresh from that file; \
              don't restart yourself.",
@@ -304,7 +306,7 @@ fn reason(
         .unwrap_or_default();
     format!(
         "loopherd: your context is at {tokens} tokens, past your limit of {limit}. \
-         Stop your current work: {save}write your handoff to {} (your state, {plan}, \
+         Stop your current work: {save}write your handoff to {}{how} (your state, {plan}, \
          gotchas; nothing already in the tracker or the ledger), run \
          `loopherd report --kind handoff \"<one line on where you are>\"`{restart}{moved}",
         handoff.display()
@@ -725,6 +727,15 @@ mod tests {
             "{reason}"
         );
         assert!(!reason.contains("branch"), "{reason}");
+        let handoff = w.state().join("handoffs/lead-cards/handoff.md");
+        assert!(
+            reason.contains(&format!(
+                "write your handoff to {} with `loopherd handoff <<'EOF'`, since your sandbox \
+                 refuses your file tools there (your state,",
+                handoff.display()
+            )),
+            "{reason}"
+        );
         assert!(
             reason.contains("your plan as next steps, re-arming your watch first"),
             "{reason}"

@@ -393,6 +393,9 @@ enum Command {
         as_name: Option<String>,
         text: String,
     },
+    /// Write the handoff of the member running in this pane from stdin, to
+    /// its own `handoffs/<name>/handoff.md` in the state dir.
+    Handoff,
     /// Print members' unread reports, questions first, and mark them read.
     Reports {
         /// Only these members, retired ones included.
@@ -822,6 +825,7 @@ fn main() -> ExitCode {
             as_name,
             text,
         } => ("report", run_report(kind, as_name, &text)),
+        Command::Handoff => ("handoff", run_handoff()),
         Command::Reports {
             names,
             herd,
@@ -1755,6 +1759,32 @@ fn run_report(kind: Kind, as_name: Option<String>, text: &str) -> Result<i32> {
     {
         eprintln!("loopherd report: warning: label pane {pane}: {e:#}");
     }
+    Ok(0)
+}
+
+fn run_handoff() -> Result<i32> {
+    let mut text = String::new();
+    std::io::stdin()
+        .read_to_string(&mut text)
+        .context("read the handoff from stdin")?;
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let name = match own_broker() {
+        Some(broker) => broker.lead().to_string(),
+        None => {
+            let own_pane = own_pane();
+            let own_socket = socket_from_env();
+            let who = Reporter {
+                own_pane: own_pane.as_deref(),
+                own_lineage: &own_lineage(),
+                own_socket: own_socket.as_deref(),
+                as_name: None,
+            };
+            report::reporter(&ledger, &who)?
+        }
+    };
+    let reports = ledger.reports_dir()?;
+    let state = reports.parent().context("the state dir")?;
+    println!("wrote {}", handoff::write(state, &name, &text)?.display());
     Ok(0)
 }
 

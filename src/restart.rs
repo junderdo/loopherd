@@ -1581,7 +1581,7 @@ mod tests {
         w.prepared();
         let state = w.paths().state_dir().to_path_buf();
         fs::remove_dir_all(state.join("broker")).unwrap();
-        let dirs = ["broker/lh-1/requests", "reports", "handoffs"].map(|d| state.join(d));
+        let dirs = ["broker/lh-1/requests", "handoffs/lh-1"].map(|d| state.join(d));
         let seen = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
         let record = (seen.clone(), dirs.clone());
         w.herdr.on_prompt = Some(Box::new(move |text| {
@@ -1594,7 +1594,7 @@ mod tests {
         let (result, _) = w.restart_as(false, true, None, &as_lead);
 
         result.unwrap();
-        assert_eq!(*seen.lock().unwrap(), [true, true, true], "{dirs:?}");
+        assert_eq!(*seen.lock().unwrap(), [true, true], "{dirs:?}");
     }
 
     #[test]
@@ -1651,20 +1651,6 @@ mod tests {
                 .contains("lh-1's sandbox was set before herd h's current switches"),
             "{result:?}"
         );
-    }
-
-    #[test]
-    fn a_read_only_placeholder_for_the_shepherd_s_watch_file_doesn_t_stop_a_restart() {
-        use std::os::unix::fs::PermissionsExt;
-        let w = World::new();
-        w.handed_off();
-        w.prepared();
-        let lock = w.paths().state_dir().join("reports/watch.lock");
-        fs::set_permissions(&lock, fs::Permissions::from_mode(0o444)).unwrap();
-
-        let (result, _) = w.restart_as(false, true, None, &as_lead);
-
-        result.unwrap();
     }
 
     #[test]
