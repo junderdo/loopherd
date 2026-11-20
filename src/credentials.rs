@@ -170,8 +170,8 @@ pub fn write_host_block(paths: &Paths, herd: &str) -> Result<bool> {
     let lock_file = dir.join(".lock");
     let lock = std::fs::File::create(&lock_file)
         .with_context(|| format!("open {}", lock_file.display()))?;
-    let _held =
-        crate::lock::Lock::wait(lock).with_context(|| format!("lock {}", lock_file.display()))?;
+    let _held = crate::lock::Lock::wait(lock, crate::lock::BRIEF)
+        .with_context(|| format!("lock {}", lock_file.display()))?;
     let text = match std::fs::read_to_string(&file) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         read => read.with_context(|| format!("read {}", file.display()))?,
