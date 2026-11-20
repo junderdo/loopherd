@@ -401,6 +401,87 @@ mod tests {
         assert!(has_branch(&s.repo, "feat/x"));
     }
 
+    /// A retired `name` on `branch`, whose worktree was made by hand outside
+    /// the herd's worktrees dir and which `ensure_worktree` then reused.
+    fn retired_in_a_reused_worktree(s: &mut Setup, name: &str, branch: &str) -> PathBuf {
+        let wt = s.root.path().join("elsewhere").join(name);
+        let path = wt.to_str().unwrap();
+        git_in(&s.repo, &["worktree", "add", "--quiet", "-b", branch, path]);
+        assert_eq!(ensure_worktree(&s.repo, branch).unwrap(), wt);
+        let mut r = record(name, s.repo.clone(), true);
+        r.worktree = Some(wt.clone());
+        r.branch = Some(branch.into());
+        s.add(r);
+        wt
+    }
+
+    #[test]
+    fn the_human_releases_a_member_in_a_reused_worktree_outside_the_herds_worktrees() {
+        let mut s = Setup::new();
+        let wt = retired_in_a_reused_worktree(&mut s, "zpr-1", "feat/zpr-1");
+
+        s.release("zpr-1", Fate::Clear).unwrap();
+
+        assert!(!wt.exists());
+        assert!(!has_branch(&s.repo, "feat/zpr-1"));
+    }
+
+    #[test]
+    fn the_human_releases_a_member_whose_herd_file_is_gone() {
+        let mut s = Setup::new();
+        let wt = s.retired_on("zpr-1", "feat/zpr-1");
+        std::fs::remove_file(s.root.path().join("loopherd/herds/prs.toml")).unwrap();
+
+        s.release("zpr-1", Fate::Clear).unwrap();
+
+        assert!(!wt.exists());
+    }
+
+    #[test]
+    fn a_lead_may_not_release_its_member_whose_herd_file_is_gone() {
+        let mut s = Setup::new();
+        let wt = s.retired_on("zpr-1", "feat/zpr-1");
+        std::fs::remove_file(s.root.path().join("loopherd/herds/prs.toml")).unwrap();
+        let sandbox = s.root.path().join("loopherd/sandbox");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        std::fs::write(
+            sandbox.join("lead-prs.lead.json"),
+            r#"{"herd": "prs", "args": []}"#,
+        )
+        .unwrap();
+        s.caller = Some("lead-prs".into());
+
+        let err = s.release("zpr-1", Fate::Clear).unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("herd prs's file names no repo"),
+            "{err:#}"
+        );
+        assert!(wt.exists());
+    }
+
+    #[test]
+    fn a_lead_may_not_release_its_member_in_a_worktree_outside_the_herds_worktrees() {
+        let mut s = Setup::new();
+        let wt = retired_in_a_reused_worktree(&mut s, "zpr-1", "feat/zpr-1");
+        let sandbox = s.root.path().join("loopherd/sandbox");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        std::fs::write(
+            sandbox.join("lead-prs.lead.json"),
+            r#"{"herd": "prs", "args": []}"#,
+        )
+        .unwrap();
+        s.caller = Some("lead-prs".into());
+
+        let err = s.release("zpr-1", Fate::Clear).unwrap_err();
+
+        assert!(
+            err.to_string().contains("which isn't beside herd prs's"),
+            "{err}"
+        );
+        assert!(wt.exists());
+    }
+
     #[test]
     fn refuses_a_branch_whose_worktree_would_be_a_leads_and_a_leads_drop_branch() {
         let mut s = Setup::new();
