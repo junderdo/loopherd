@@ -131,15 +131,25 @@ fn flat_section(printed: &str, start: &str, end: &str) -> String {
     body.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-const SEND_BACK_ONLY_BLOCKING: [&str; 8] = [
+const SEND_BACK_ONLY_BLOCKING: [&str; 13] = [
     "A finding is blocking when it's inside the task's acceptance criteria, or a correctness or safety bug the PR introduces",
+    "Every other finding, whatever its severity, is handled as a minor",
     "Only blocking findings fail a round, and only they go back to the member while it fails",
+    "in a PR comment holding just those",
+    "Post nits in a separate PR comment marked non-blocking",
+    "the follow-up minors in a question to the human",
+    "Its `<b> blocking` counts only those",
+    "checks the previous round's blocking findings",
     "never hold the merge",
     "one follow-up task per PR",
     "when the member has a next PR in the same card's stack, into that PR's scope",
-    "Nits go on the PR as a comment marked non-blocking and are not tasks",
     "is each previous blocking finding fixed, and does the fix diff introduce a new correctness or safety bug?",
     "never fails the round",
+];
+
+const PASS_WHEN_NOTHING_BLOCKS: [&str; 2] = [
+    "`pass <head sha>: <m> minor, <n> nit` when nothing is blocking",
+    "the file only to forward findings, to file a pass's minors and nits, or to write a merge question",
 ];
 
 #[test]
@@ -148,6 +158,7 @@ fn verify_sends_back_only_blocking_findings_narrows_later_rounds_and_caps_rounds
     let printed = String::from_utf8(skill(home.path())).unwrap();
     let verify = flat_section(&printed, "4. **Verify**", "5. **After merge**");
     for rule in SEND_BACK_ONLY_BLOCKING.into_iter().chain([
+        "Nits go on the PR as a comment marked non-blocking and are not tasks",
         "the diff since that round's head, not the whole PR",
         "After round 3, start no other round",
         "merge as-is, narrow the scope, or change approach",
@@ -156,15 +167,36 @@ fn verify_sends_back_only_blocking_findings_narrows_later_rounds_and_caps_rounds
         assert!(verify.contains(rule), "Verify misses {rule:?}");
     }
     assert!(!verify.contains("fits within the task's scope"), "{verify}");
+    let brief = flat_section(&printed, "**Task life, in brief**", "5. **After merge**");
+    for (section, text) in [("Verify", &verify), ("Task life", &brief)] {
+        for rule in PASS_WHEN_NOTHING_BLOCKS {
+            assert!(text.contains(rule), "{section} misses {rule:?}");
+        }
+        assert!(
+            !text.contains("forward findings as a PR"),
+            "{section}: {text}"
+        );
+        assert!(
+            !text.contains("forward a member's findings"),
+            "{section}: {text}"
+        );
+    }
+    assert!(
+        brief.contains("forward only a failing round's blocking findings"),
+        "{brief}"
+    );
     let lead = flat_section(&printed, "\n## Lead\n", "\n## ");
     for rule in SEND_BACK_ONLY_BLOCKING.into_iter().chain([
         "**Review rounds.**",
+        "Post nits in a separate PR comment marked non-blocking; they are not tasks",
         "After your herd's review-round limit (in your prompt; 3 when unset) start no other round",
         "`loopherd report --kind question`",
     ]) {
         assert!(lead.contains(rule), "Lead misses {rule:?}");
     }
     assert!(!lead.contains("other in-scope findings go back"), "{lead}");
+    assert!(!lead.contains("out-of-scope ones become tasks"), "{lead}");
+    assert!(!printed.contains("out-of-scope gaps"), "{printed}");
     assert!(!lead.contains("After round 3"), "{lead}");
 }
 
