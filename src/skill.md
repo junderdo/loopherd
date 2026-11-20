@@ -685,7 +685,7 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   to re-arm its own.
 - **After a merge that changes the broker**, once it is installed, run
   `loopherd broker-restart <lead>` for each lead, from your own shell, never
-  a lead's. It asks the broker to stop once its request in flight is
+  a lead's or an `after_merge`, as a background task: it can wait out a feed. It asks the broker to stop once its request in flight is
   answered, then starts one on the installed binary, which serves what is
   still queued; with none running it starts one. A broker still busy after
   4 hours is left running and the command fails naming its pid. A lead's

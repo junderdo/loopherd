@@ -144,3 +144,23 @@ fn broker_restart_from_a_leads_pane_is_refused_and_leaves_its_broker_alone() {
     assert!(!broker.wait_exited(Duration::from_millis(300)));
     assert!(world.serving());
 }
+
+#[test]
+fn broker_restart_run_by_a_brokers_own_request_is_refused() {
+    let world = World::new();
+    let mut broker = world.broker();
+
+    let refused = world
+        .loopherd(None, &["broker-restart", "lead-k"])
+        .env("LOOPHERD_BROKER_OF", "lead-k")
+        .output()
+        .unwrap();
+
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("refused: broker-restart is the shepherd's"),
+        "{refused:?}"
+    );
+    assert!(!broker.wait_exited(Duration::from_millis(300)));
+}

@@ -1502,8 +1502,9 @@ fn runnable(exe: PathBuf) -> PathBuf {
 
 fn run_broker(lead: &str) -> Result<i32> {
     let paths = Paths::from_env().context("herd")?;
-    let env =
+    let mut env =
         broker::lead_env(&paths, lead).with_context(|| format!("{lead}'s broker can't start"))?;
+    env.push((broker::BROKER_ENV.into(), lead.into()));
     for (name, value) in env {
         // SAFETY: the broker has started no threads yet.
         unsafe { std::env::set_var(name, value) };
@@ -1529,8 +1530,9 @@ fn run_broker_restart(lead: &str) -> Result<i32> {
     let paths = Paths::from_env()?;
     let caller = sandbox::calling_lead(&paths, &process::ProcFs, std::process::id());
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    // A lead's broker would be stopping itself mid-request.
-    if !matches!(caller, Ok(None)) || own_broker().is_some() || ledger.read_only()? {
+    // A broker, or a command its request runs, would wait on itself.
+    let in_a_broker = std::env::var_os(broker::BROKER_ENV).is_some();
+    if in_a_broker || !matches!(caller, Ok(None)) || own_broker().is_some() || ledger.read_only()? {
         bail!(
             "refused: broker-restart is the shepherd's or the human's, and a lead runs this loopherd"
         );
