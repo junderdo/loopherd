@@ -690,6 +690,9 @@ pub fn lead_env(paths: &Paths, lead: &str) -> Result<Vec<(String, String)>> {
         .collect();
     // Outside the sandbox the human's keys are readable: a core.sshCommand -i or
     // a `Host *` IdentityFile would offer them, so ssh reads loopherd's config alone.
+    if let Some(missing) = crate::credentials::host_block_missing(paths, herd) {
+        bail!("{lead}'s broker can't start: herd {herd} guards merges by credentials: {missing}");
+    }
     let ssh_config = crate::credentials::ssh_config(paths);
     // Setting it turns off loopherd's own BatchMode, so a prompt would hang until the git timeout.
     env.push((
@@ -2695,6 +2698,7 @@ mod tests {
         if let Some(token) = token {
             std::fs::write(&files.token, token).unwrap();
         }
+        crate::credentials::write_host_block(&world.paths, "c").unwrap();
     }
 
     #[test]
@@ -2772,6 +2776,25 @@ mod tests {
                 "lead-c's broker can't start: herd c guards merges by credentials: no token at {}; \
                  run loopherd merge-guard c for how to create and store it",
                 token.display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_credentials_herds_broker_without_its_host_block_fails_to_start_naming_the_fix() {
+        let world = World::new();
+        credentials_herd(&world, Some("github_pat_1\n"));
+        let ssh_config = crate::credentials::ssh_config(&world.paths);
+        std::fs::remove_file(&ssh_config).unwrap();
+
+        let err = lead_env(&world.paths, "lead-c").unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "lead-c's broker can't start: herd c guards merges by credentials: \
+                 no current Host loopherd-c in {}; run loopherd merge-guard c",
+                ssh_config.display()
             )
         );
     }

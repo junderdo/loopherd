@@ -504,7 +504,18 @@ fn write_credentials_herd(state: &Path) {
     );
     fs::write(state.join("config/herds/k.toml"), herd).unwrap();
     fs::create_dir_all(state.join("config/credentials")).unwrap();
-    fs::write(state.join("config/credentials/k.key"), "a private key\n").unwrap();
+    let key = state.join("config/credentials/k.key");
+    fs::write(&key, "a private key\n").unwrap();
+    fs::create_dir_all(state.join("config/ssh")).unwrap();
+    fs::write(
+        state.join("config/ssh/config"),
+        format!(
+            "Host loopherd-k\n  HostName github.com\n  User git\n  IdentityFile \"{}\"\n  \
+             IdentitiesOnly yes\n  IdentityAgent none\n",
+            key.display()
+        ),
+    )
+    .unwrap();
     fs::write(
         state.join("config/credentials/k.token"),
         "github_pat_lead\n",
