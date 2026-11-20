@@ -211,33 +211,51 @@ mod tests {
         assert!(Lock::wait(open(&path), Duration::ZERO).is_ok());
     }
 
+    /// Lines outside a trailing `mod tests` block whose flock may block.
+    /// `File::lock` and `lock_shared` are clippy's `disallowed_methods`.
+    fn unbounded_flocks(text: &str) -> Vec<(usize, &str)> {
+        let mut found = vec![];
+        let mut depth = 0i32;
+        for (n, line) in text.lines().enumerate() {
+            if depth == 0 && line.trim_start().starts_with("mod tests {") {
+                depth = 1;
+                continue;
+            }
+            if depth > 0 {
+                depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+                continue;
+            }
+            let flock = line.contains("LOCK_EX") || line.contains("LOCK_SH");
+            if (flock && !line.contains("LOCK_NB")) || line.contains("lock_exclusive") {
+                found.push((n + 1, line));
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn the_check_reads_past_an_early_test_item_and_skips_only_the_tests() {
+        let text = "#[cfg(test)]\nmod fakes;\n\nfn take() {\n    unsafe { libc::flock(0, libc::LOCK_EX) };\n}\n\n#[cfg(test)]\nmod tests {\n    fn t() {\n        libc::LOCK_EX;\n    }\n}\n\nfn after() { libc::LOCK_SH; }\n";
+
+        let found: Vec<usize> = unbounded_flocks(text).iter().map(|(n, _)| *n).collect();
+
+        assert_eq!(found, [5, 15]);
+    }
+
     /// Every flock in loopherd is non-blocking, so each wait is [`Lock::wait`]'s bounded poll.
     #[test]
     fn no_unbounded_lock_wait_remains_in_the_source() {
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let blocks = |line: &str| {
-            let flock = line.contains("LOCK_EX") || line.contains("LOCK_SH");
-            (flock && !line.contains("LOCK_NB"))
-                || line.contains("lock_exclusive")
-                || line.contains("File::lock")
-        };
         let mut found = vec![];
-        let mut dirs = vec![src];
+        let mut dirs = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
         while let Some(dir) = dirs.pop() {
             for entry in std::fs::read_dir(&dir).unwrap() {
                 let path = entry.unwrap().path();
                 if path.is_dir() {
                     dirs.push(path);
-                    continue;
-                }
-                if path.extension().is_none_or(|e| e != "rs") {
-                    continue;
-                }
-                let text = std::fs::read_to_string(&path).unwrap();
-                let code = text.split("#[cfg(test)]").next().unwrap();
-                for (n, line) in code.lines().enumerate() {
-                    if blocks(line) {
-                        found.push(format!("{}:{}: {line}", path.display(), n + 1));
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    for (n, line) in unbounded_flocks(&text) {
+                        found.push(format!("{}:{n}: {line}", path.display()));
                     }
                 }
             }

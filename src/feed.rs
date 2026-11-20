@@ -42,6 +42,8 @@ pub struct FeedRequest<'a> {
     pub claude_dir: Option<PathBuf>,
     /// How long each after_merge command may run.
     pub after_merge_timeout: Duration,
+    /// How long to wait for another feed's after_merge to finish.
+    pub after_merge_wait: Duration,
     /// This feed's process, recorded on the after_merge it takes on.
     pub owner: Process,
     /// Tells whether another feed's recorded process still runs.
@@ -277,6 +279,7 @@ fn unclaimed(
         mailboxes: PathBuf::new(),
         claude_dir: None,
         after_merge_timeout: Duration::ZERO,
+        after_merge_wait: Duration::ZERO,
         owner: Process { pid: 0, start: 0 },
         procs: &crate::process::ProcFs,
         lead: None,
@@ -695,12 +698,8 @@ pub fn run_after_merge(
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = dir.join("after-merge.lock");
     let file = std::fs::File::create(&path).with_context(|| format!("open {}", path.display()))?;
-    // Another feed's after_merge may run several commands, each up to this limit.
-    let bound = req
-        .after_merge_timeout
-        .saturating_mul(2)
-        .max(crate::lock::BRIEF);
-    let _lock = Lock::wait(file, bound).with_context(|| format!("lock {}", path.display()))?;
+    let _lock = Lock::wait(file, req.after_merge_wait)
+        .with_context(|| format!("lock {}", path.display()))?;
     for name in &pending.members {
         let (line, text) =
             match run_commands(&pending.commands, &pending.repo, req.after_merge_timeout) {
@@ -1048,6 +1047,7 @@ mod tests {
                 mailboxes: self.config.path().join("reports"),
                 claude_dir: None,
                 after_merge_timeout: Duration::from_secs(2),
+                after_merge_wait: Duration::from_secs(10),
                 owner: OWNER,
                 procs: &*LIVE,
                 lead: None,
@@ -1831,6 +1831,7 @@ mod tests {
             mailboxes: config.path().join("reports"),
             claude_dir: None,
             after_merge_timeout: Duration::from_secs(5),
+            after_merge_wait: Duration::from_secs(5),
             owner: OWNER,
             procs: &*LIVE,
             lead: None,
@@ -1957,6 +1958,7 @@ mod tests {
             mailboxes: PathBuf::from("/nonexistent/reports"),
             claude_dir: None,
             after_merge_timeout: Duration::from_secs(5),
+            after_merge_wait: Duration::from_secs(5),
             owner: OWNER,
             procs: &*LIVE,
             lead: None,
@@ -2020,6 +2022,7 @@ mod tests {
             mailboxes: PathBuf::from("/nonexistent/reports"),
             claude_dir: None,
             after_merge_timeout: Duration::from_secs(5),
+            after_merge_wait: Duration::from_secs(5),
             owner: OWNER,
             procs: &*LIVE,
             lead: None,
@@ -2156,6 +2159,7 @@ mod tests {
             mailboxes: PathBuf::from("/nonexistent/reports"),
             claude_dir: None,
             after_merge_timeout: Duration::from_secs(5),
+            after_merge_wait: Duration::from_secs(5),
             owner: OWNER,
             procs: &*LIVE,
             lead: None,
@@ -2482,6 +2486,7 @@ mod tests {
                     mailboxes: PathBuf::from("/nonexistent/reports"),
                     claude_dir: None,
                     after_merge_timeout: Duration::from_secs(5),
+                    after_merge_wait: Duration::from_secs(5),
                     owner: OWNER,
                     procs: &*LIVE,
                     lead: None,
@@ -2785,6 +2790,55 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "never {what}");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn after_merge_outwaits_a_hold_longer_than_twice_one_commands_limit() {
+        let setup = Setup::new("true", 1);
+        let mut fed = pending_fed(&setup, &["echo ran >> log"], &["zpr-1"]);
+        let mut req = setup.request(false, None);
+        req.after_merge_timeout = Duration::from_millis(20);
+        req.after_merge_wait = Duration::from_secs(10);
+        let lock = setup.paths().locks_dir().join("after-merge.lock");
+        fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        let held = Lock::try_take(fs::File::create(&lock).unwrap())
+            .unwrap()
+            .unwrap();
+
+        let releasing = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(held);
+        });
+
+        let mut ledger = ledger(&[member("zpr-1", Some("prs"), false)]);
+        let ran = run_after_merge(&mut ledger, &setup.paths(), &req, &mut fed);
+        releasing.join().unwrap();
+
+        ran.unwrap();
+        assert_eq!(setup.read("log").unwrap(), "ran\n");
+    }
+
+    #[test]
+    fn after_merge_held_past_its_wait_fails_naming_the_lock() {
+        let setup = Setup::new("true", 1);
+        let mut fed = pending_fed(&setup, &["echo ran >> log"], &["zpr-1"]);
+        let mut req = setup.request(false, None);
+        req.after_merge_wait = Duration::from_millis(100);
+        let lock = setup.paths().locks_dir().join("after-merge.lock");
+        fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        let _held = Lock::try_take(fs::File::create(&lock).unwrap())
+            .unwrap()
+            .unwrap();
+
+        let mut ledger = ledger(&[member("zpr-1", Some("prs"), false)]);
+        let e = run_after_merge(&mut ledger, &setup.paths(), &req, &mut fed).unwrap_err();
+
+        let e = format!("{e:#}");
+        assert!(
+            e.starts_with(&format!("lock {}: held past 100ms", lock.display())),
+            "{e}"
+        );
+        assert_eq!(setup.read("log"), None, "ran without the lock");
     }
 
     #[test]
