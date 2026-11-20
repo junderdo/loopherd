@@ -76,6 +76,10 @@ impl World {
     /// Runs loopherd with `args` in `pane`, or outside any pane, where only the
     /// shepherd's runs see the stub herdr.
     fn run(&self, pane: Option<&str>, args: &[&str]) -> Output {
+        self.loopherd(pane, args).output().unwrap()
+    }
+
+    fn loopherd(&self, pane: Option<&str>, args: &[&str]) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_loopherd"));
         let bin = self.root.path().join("bin");
         set_env(&mut cmd, self.root.path(), pane.is_none().then_some(&bin));
@@ -83,7 +87,8 @@ impl World {
             Some(pane) => cmd.env("HERDR_PANE_ID", pane),
             None => cmd.env_remove("HERDR_PANE_ID"),
         };
-        cmd.args(args).output().unwrap()
+        cmd.args(args);
+        cmd
     }
 
     fn calls(&self) -> String {
@@ -169,5 +174,40 @@ fn read_refuses_more_lines_than_its_cap() {
     let read = world.run(None, &["read", "lh-9", "--lines", "1001"]);
 
     assert_eq!(read.status.code(), Some(2));
+    assert_eq!(world.calls(), "");
+}
+
+#[test]
+fn status_in_a_sandbox_whose_pane_holds_no_lead_is_refused_before_herdr() {
+    use std::os::unix::fs::PermissionsExt;
+    // Root writes past file modes, so nothing is read-only to it.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    /// Makes the state dir writable again, so it can be removed.
+    struct Restore(PathBuf);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+    let world = World::new();
+    let state = world.root.path().join("state/loopherd");
+    let _restore = Restore(state.clone());
+    let _ = fs::set_permissions(state.join("ledger.lock"), fs::Permissions::from_mode(0o444));
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let mut status = world.loopherd(Some("w1:p9"), &["status"]);
+    let bin = world.root.path().join("bin");
+    set_env(&mut status, world.root.path(), Some(&bin));
+    let out = status.output().unwrap();
+
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(
+            "refused: this loopherd runs in a sandbox, where it can't run loopherd status itself"
+        ),
+        "{out:?}"
+    );
     assert_eq!(world.calls(), "");
 }

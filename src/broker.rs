@@ -668,7 +668,7 @@ pub fn refuse_spawn(client: Option<&Client>, ledger: &dyn Ledger) -> Result<()> 
 
 /// Refuses `command` run directly where the ledger is read-only: in a lead's
 /// sandbox, yet the ledger places no lead in this pane, so no broker runs it.
-fn refuse_unrouted(ledger: &dyn Ledger, command: &str) -> Result<()> {
+pub fn refuse_unrouted(ledger: &dyn Ledger, command: &str) -> Result<()> {
     if ledger.read_only()? {
         bail!(
             "refused: this loopherd runs in a sandbox, where it can't run loopherd {command} itself, and the \

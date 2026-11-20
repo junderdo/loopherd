@@ -1068,6 +1068,7 @@ fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
         return run_op(Some(&client), &op);
     }
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    broker::refuse_unrouted(&ledger, "status")?;
     let format = match json {
         true => Format::Json,
         false => Format::Text {
