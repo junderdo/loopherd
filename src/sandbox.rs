@@ -115,82 +115,135 @@ pub fn probe() -> Result<Sockets, Unavailable> {
 /// How the human gives Claude Code a seccomp filter where it has none.
 pub const FILTER_FIX: &str = "npm install -g @anthropic-ai/sandbox-runtime";
 
-/// Tries a Unix-socket connect under the seccomp filter Claude Code's
-/// sandbox would apply, with socat, which the sandbox needs anyway.
-fn socket_filter() -> Sockets {
-    let open = |why: String| {
-        Sockets::Open(Unavailable {
-            why,
-            fix: FILTER_FIX.into(),
-        })
+/// What one run of socat under a candidate seccomp filter showed.
+#[derive(Debug, PartialEq, Eq)]
+enum Tried {
+    Blocked,
+    ConnectedThrough,
+    /// The filter failed to set itself up, socat unrun: its own error line.
+    FailedSetup(String),
+    /// Not a filter at all, such as a Claude Code that doesn't dispatch on `ARGV0`.
+    NotAFilter,
+}
+
+/// Only socat's own denial counts as blocked: the filter's setup errors
+/// (`apply-seccomp: …`) also end in `Operation not permitted`.
+fn tried(succeeded: bool, stderr: &str) -> Tried {
+    if let Some(line) = stderr
+        .lines()
+        .find(|line| line.trim_start().starts_with("apply-seccomp:"))
+    {
+        return Tried::FailedSetup(line.trim().into());
+    }
+    let socat = |said: &str| {
+        stderr
+            .lines()
+            .any(|line| line.contains("socat[") && line.contains(said))
     };
-    let Some(mut filter) = seccomp_filter() else {
-        return open("Claude Code finds no seccomp filter to block them with".into());
-    };
-    let Ok(dir) = tempfile::tempdir() else {
-        return open("no temp dir to try its seccomp filter in".into());
-    };
-    let socket = dir.path().join("probe.sock");
-    let Ok(_listener) = std::os::unix::net::UnixListener::bind(&socket) else {
-        return open("no Unix socket to try its seccomp filter on".into());
-    };
-    let child = filter
-        .args(["socat", "-u", "OPEN:/dev/null"])
-        .arg(format!("UNIX-CONNECT:{}", socket.display()))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn();
-    let Some(out) = child.ok().and_then(|child| finish(child, 10)) else {
-        return open("its seccomp filter didn't run".into());
-    };
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    match out.status.success() {
-        false if stderr.contains("Operation not permitted") => Sockets::Blocked,
-        true => open("its seccomp filter let a Unix-socket connect through".into()),
-        false => {
-            let last = stderr.lines().last().unwrap_or("no message").trim();
-            open(format!("its seccomp filter didn't run: {last}"))
-        }
+    if succeeded && socat("successfully connected") {
+        Tried::ConnectedThrough
+    } else if !succeeded && socat("Operation not permitted") {
+        Tried::Blocked
+    } else {
+        Tried::NotAFilter
     }
 }
 
-/// The command that runs a program under Claude Code's seccomp filter: its
-/// native binary's own, or an npm install's, where Claude Code looks for it.
-fn seccomp_filter() -> Option<std::process::Command> {
-    let claude = crate::on_path("claude")?.canonicalize().ok()?;
-    let mut magic = [0u8; 4];
-    let native = std::fs::File::open(&claude)
-        .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut magic))
-        .is_ok_and(|()| &magic == b"\x7fELF");
-    if native {
-        let mut command = std::process::Command::new(claude);
-        command.env("ARGV0", "apply-seccomp");
-        return Some(command);
+/// Tries a Unix-socket connect under each seccomp filter Claude Code's
+/// sandbox could apply, with socat, which the sandbox needs anyway.
+fn socket_filter() -> Sockets {
+    let open = |why: String, fix: String| Sockets::Open(Unavailable { why, fix });
+    let tmp_fix = || "set TMPDIR to a writable dir on a local filesystem".to_string();
+    let Ok(dir) = tempfile::tempdir() else {
+        return open("no temp dir to try its seccomp filter in".into(), tmp_fix());
+    };
+    let socket = dir.path().join("probe.sock");
+    let Ok(_listener) = std::os::unix::net::UnixListener::bind(&socket) else {
+        return open(
+            "no Unix socket to try its seccomp filter on".into(),
+            tmp_fix(),
+        );
+    };
+    let mut failed = None;
+    for mut filter in seccomp_filters() {
+        let child = filter
+            .args(["socat", "-d", "-d", "-u", "OPEN:/dev/null"])
+            .arg(format!("UNIX-CONNECT:{}", socket.display()))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
+        let result = match child.ok().and_then(|child| finish(child, 10)) {
+            Some(out) => tried(out.status.success(), &String::from_utf8_lossy(&out.stderr)),
+            None => Tried::NotAFilter,
+        };
+        match result {
+            Tried::Blocked => return Sockets::Blocked,
+            Tried::ConnectedThrough => {
+                return open(
+                    "its seccomp filter let a Unix-socket connect through".into(),
+                    format!("update Claude Code, or {FILTER_FIX}"),
+                );
+            }
+            Tried::FailedSetup(line) => {
+                failed.get_or_insert(line);
+            }
+            Tried::NotAFilter => {}
+        }
     }
+    match failed {
+        None => open(
+            "Claude Code finds no seccomp filter to block them with".into(),
+            FILTER_FIX.into(),
+        ),
+        Some(line) => open(
+            format!("its seccomp filter can't set itself up: {line}"),
+            "let it make user namespaces, as bubblewrap does \
+             (kernel.unprivileged_userns_clone, or an AppArmor profile for claude)"
+                .into(),
+        ),
+    }
+}
+
+/// Commands that run a program under a seccomp filter Claude Code could
+/// use: its native binary's own, chosen by `ARGV0`, which a version
+/// manager's shim passes on, then an npm install's helper where Claude Code
+/// looks for it.
+fn seccomp_filters() -> Vec<std::process::Command> {
+    let Some(claude) = crate::on_path("claude") else {
+        return vec![];
+    };
+    let mut native = std::process::Command::new(&claude);
+    native.env("ARGV0", "apply-seccomp");
     let arch = match std::env::consts::ARCH {
         "x86_64" => "x64",
         "aarch64" => "arm64",
-        _ => return None,
+        _ => return vec![native],
     };
     let helper = Path::new("vendor/seccomp").join(arch).join("apply-seccomp");
-    let package = claude.parent()?;
+    let package = claude
+        .canonicalize()
+        .ok()
+        .and_then(|real| real.parent().map(Path::to_path_buf));
     let global = std::process::Command::new("npm")
         .args(["root", "-g"])
         .output()
         .ok()
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        .map(|root| Path::new(&root).join("@anthropic-ai/sandbox-runtime"));
-    [
-        package.to_path_buf(),
-        package.join("../.."),
-        package.join(".."),
-    ]
-    .into_iter()
-    .chain(global)
-    .map(|dir| dir.join(&helper))
-    .find(|path| path.is_file())
-    .map(std::process::Command::new)
+        .filter(|out| out.status.success())
+        .map(|out| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+        .filter(|root| root.is_absolute())
+        .map(|root| root.join("@anthropic-ai/sandbox-runtime"));
+    let near = package
+        .into_iter()
+        .flat_map(|dir| [dir.clone(), dir.join("../.."), dir.join("..")]);
+    std::iter::once(native)
+        .chain(
+            near.chain(global)
+                .map(|dir| dir.join(&helper))
+                .filter(|path| path.is_file())
+                .map(std::process::Command::new),
+        )
+        .collect()
 }
 
 /// `child`'s output, or `None` once it has run `secs` seconds, when it's killed.
@@ -1329,6 +1382,33 @@ mod tests {
         let elsewhere = root.path().join("lead-h.json").display().to_string();
         procs.set_cmdline(30, &["claude", "--settings", &elsewhere]);
         assert_eq!(calling_lead(&paths, &procs, 50), None);
+    }
+
+    #[test]
+    fn only_socats_own_denial_counts_as_a_blocked_socket() {
+        let denied = "2026/11/20 09:40:00 socat[7] E socket(1, 1, 0): Operation not permitted\n";
+        assert_eq!(tried(false, denied), Tried::Blocked);
+        assert_eq!(
+            tried(
+                false,
+                "apply-seccomp: unshare(CLONE_NEWUSER): Operation not permitted\n"
+            ),
+            Tried::FailedSetup(
+                "apply-seccomp: unshare(CLONE_NEWUSER): Operation not permitted".into()
+            )
+        );
+        let connected = "2026/11/20 09:40:00 socat[7] N successfully connected from local \
+                         address AF=1\n";
+        assert_eq!(tried(true, connected), Tried::ConnectedThrough);
+        assert_eq!(tried(true, "2.1.329 (Claude Code)\n"), Tried::NotAFilter);
+        assert_eq!(
+            tried(false, "error: unknown option '-u'\n"),
+            Tried::NotAFilter
+        );
+        assert_eq!(
+            tried(false, "mise ERROR no tasks defined\n"),
+            Tried::NotAFilter
+        );
     }
 
     #[test]

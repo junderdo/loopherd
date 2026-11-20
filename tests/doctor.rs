@@ -53,7 +53,7 @@ fn sandbox_with(status: &str) -> Sandbox {
     fs::create_dir_all(&filter).unwrap();
     executable(
         &filter.join("apply-seccomp"),
-        "#!/bin/sh\necho 'socket(1, 1, 0): Operation not permitted' >&2\nexit 1\n",
+        "#!/bin/sh\necho '2026/11/20 09:40:00 socat[7] E socket(1, 1, 0): Operation not permitted' >&2\nexit 1\n",
     );
     executable(
         &bin.join("herdr"),
