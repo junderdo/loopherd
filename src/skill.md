@@ -852,8 +852,9 @@ What differs from the shepherd:
   Your `watch` still calls herdr itself, not through your broker. With
   `install` on, `scripts/install` runs outside the sandbox only bare, as its own Bash call: a `cd x &&`, a pipe or
   redirect, or `$(…)` keeps it inside. `revive` is the shepherd's or the
-  human's. `tell`, `read`, `restart`, `prompt`, `retire` and `release`
-  refuse anything but your own herd's members; `retire --close` and `release` also keep
+  human's. `tell`, `read`, `restart` and `prompt` reach only your own
+  herd's unretired workers, and `retire` and `release` only your herd's
+  workers, retired or not; `retire --close` and `release` also keep
   a worktree or refuse when the ledger puts one anywhere its herd file
   wouldn't, and your broker refuses `retire --force` and
   `release --drop-branch`, which are the human's.
