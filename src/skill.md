@@ -841,16 +841,16 @@ What differs from the shepherd:
   `paused/`, `shepherd.json` and the ledger among them, fail
   (`Read-only file system`, or a denied command or Edit). Processes a
   command leaves behind end with it, so keep long waits as background
-  tasks. Your loopherd commands that reach herdr don't call it
-  themselves: `loopherd tell`, `read`, `status`, `restart` (`--self`
-  included), `prompt`, `feed`, `add`, `retire` and `release` hand the
-  operation to your broker, a process outside the sandbox that `loopherd
-  lead` started for you, in any form, one at a time, so a running `feed`
-  holds up the others until it ends. Your `status` shows your own herd
-  alone, with no strays, and refuses `--strays`. With no broker running
-  they fail at once, naming the shepherd's `loopherd revive --name <you>`;
-  report that as a question. With `install` on, `scripts/install` runs outside the
-  sandbox only bare, as its own Bash call: a `cd x &&`, a pipe or
+  tasks. `loopherd tell`, `read`, `status`, `restart` (`--self`
+  included), `prompt`, `feed`, `add`, `retire` and `release` don't call
+  herdr themselves: they hand the operation to your broker, a process
+  outside the sandbox that `loopherd lead` started for you, in any form,
+  one at a time, so a running `feed` holds up the others until it ends.
+  Your `status` shows your own herd alone, with no strays, and refuses
+  `--strays`. With no broker running they fail at once, naming the
+  shepherd's `loopherd revive --name <you>`; report that as a question.
+  Your `watch` still calls herdr itself, not through your broker. With
+  `install` on, `scripts/install` runs outside the sandbox only bare, as its own Bash call: a `cd x &&`, a pipe or
   redirect, or `$(…)` keeps it inside. `revive` is the shepherd's or the
   human's. `tell`, `read`, `restart`, `prompt`, `retire` and `release`
   refuse anything but your own herd's members; `retire --close` and `release` also keep

@@ -203,8 +203,8 @@ as its main checkout. Then, in order:
    doesn't change herd files, `config.toml` or `~/.claude` by mistake. It
    is a guard rail, not a cage: a lead can still act outside it through
    herdr, and on WSL2 through Windows interop ([D89](docs/decisions/D89.md)).
-   Its loopherd commands that reach herdr (`tell`, `read`, `status`,
-   `feed` and the rest) run in its broker, a process `loopherd lead`
+   Its `tell`, `read`, `status`, `feed`, `add`, `prompt`, `restart`,
+   `retire` and `release` run in its broker, a process `loopherd lead`
    starts outside the sandbox, which acts only on the lead's own herd
    ([D98](docs/decisions/D98.md)). With the broker down they fail, naming
    `loopherd revive --name <lead>`, which starts it again.
