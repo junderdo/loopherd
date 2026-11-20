@@ -134,7 +134,7 @@ pub enum Body {
 }
 
 impl Body {
-    fn report(kind: Kind, text: &str) -> Body {
+    pub fn report(kind: Kind, text: &str) -> Body {
         let text = text.to_string();
         match kind {
             Kind::Done => Body::Done { text },

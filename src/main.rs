@@ -1610,15 +1610,17 @@ fn notify_self_restart(text: &str, config: &Path, mailboxes: &Path) {
 }
 
 fn run_report(kind: Kind, as_name: Option<String>, text: &str) -> Result<i32> {
-    let broker = own_broker();
-    let as_name = match (&broker, as_name) {
-        (Some(broker), Some(other)) if other != broker.lead() => {
+    if let Some(broker) = own_broker() {
+        if let Some(other) = as_name.filter(|other| other != broker.lead()) {
             let lead = broker.lead();
             bail!("{lead} reports only as itself; {other}'s reports are {other}'s own");
         }
-        (Some(broker), _) => Some(broker.lead().to_string()),
-        (None, as_name) => as_name,
-    };
+        let op = broker::Op::Report {
+            kind,
+            text: text.into(),
+        };
+        return run_op(Some(&broker), &op);
+    }
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let own_pane = own_pane();
     let own_socket = socket_from_env();
@@ -1633,15 +1635,6 @@ fn run_report(kind: Kind, as_name: Option<String>, text: &str) -> Result<i32> {
     let config = Paths::from_env().map(|p| p.herds.with_file_name("config.toml"));
     let labels = config.is_ok_and(|config| notify::labels_panes(&config));
     if kind != Kind::Question || !labels {
-        return Ok(0);
-    }
-    if let Some(broker) = broker {
-        let label = broker::Op::Label {
-            question: text.into(),
-        };
-        if let Err(e) = run_op(Some(&broker), &label) {
-            eprintln!("loopherd report: warning: {e:#}");
-        }
         return Ok(0);
     }
     if let Some(pane) = &own_pane
