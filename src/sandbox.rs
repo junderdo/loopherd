@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::herd::{self, Paths};
+use crate::herd::{self, MergeGuard, Paths};
 use crate::ledger::AgentRecord;
 use crate::process::Procs;
 use crate::worktree::{same_dir, worktree_path};
@@ -346,7 +346,18 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
     let file = lead_file(paths, name);
     std::fs::write(&file, serde_json::to_string_pretty(lead)? + "\n")
         .with_context(|| format!("write {}", file.display()))?;
+    let by_credentials = herd::merge_guard(paths, &lead.herd)? == Some(MergeGuard::Credentials);
     if let Err(Unavailable { why, fix }) = probe() {
+        if by_credentials {
+            return Err(credentials_refusal(
+                name,
+                &format!(
+                    "its sandbox can't start ({why}), and without it the lead could read your \
+                     GitHub credentials; {fix}, or set [lead] merge_guard = \"hook\" in herd {}",
+                    lead.herd
+                ),
+            ));
+        }
         return match mode {
             SandboxMode::Prefer => Ok(Launch::HookOnly { why }),
             SandboxMode::Require => Err(refusal(
@@ -358,8 +369,26 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
     }
     let file = settings_file(paths, name);
     let text = serde_json::to_string_pretty(&settings(paths, name, &lead.herd)?)? + "\n";
-    std::fs::write(&file, text).with_context(|| format!("write {}", file.display()))?;
+    write_private(&file, &text).with_context(|| format!("write {}", file.display()))?;
     Ok(Launch::Sandboxed { settings: file })
+}
+
+/// A credentials lead's settings hold its token, so only the human reads them.
+fn write_private(file: &Path, text: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut open = std::fs::OpenOptions::new();
+    let created = open
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(file)?;
+    created.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    std::io::Write::write_all(&mut &created, text.as_bytes())
+}
+
+fn credentials_refusal(name: &str, why: &str) -> anyhow::Error {
+    anyhow::anyhow!("{name} can't start with merge_guard = \"credentials\": {why}")
 }
 
 /// How a running lead stands against its sandbox.
@@ -483,14 +512,36 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
     sandbox["excludedCommands"] = json!(excluded);
     let mut allow = vec!["WebFetch(domain:*)".to_string()];
     allow.extend(excluded.iter().map(|command| format!("Bash({command})")));
-    Ok(json!({
+    let mut deny = vec![edit_rule(config), edit_rule(&claude)];
+    let mut env = None;
+    if herd::merge_guard(paths, herd)? == Some(MergeGuard::Credentials) {
+        env = Some(
+            crate::credentials::lead_env(paths, herd)
+                .map_err(|e| credentials_refusal(name, &format!("{e:#}")))?,
+        );
+        let human = crate::credentials::human_credentials(&paths.home);
+        // The file tools run outside the sandbox, so each path is denied to both.
+        sandbox["filesystem"]["denyRead"] = human
+            .iter()
+            .map(|(path, _)| path.display().to_string())
+            .collect();
+        deny.extend(human.iter().map(|(path, is_dir)| {
+            let under = if *is_dir { "/**" } else { "" };
+            format!("Read(/{}{under})", path.display())
+        }));
+    }
+    let mut settings = json!({
         "sandbox": sandbox,
         "permissions": {
             "denyInsteadOfPrompting": true,
             "allow": allow,
-            "deny": [edit_rule(config), edit_rule(&claude)],
+            "deny": deny,
         },
-    }))
+    });
+    if let Some(env) = env {
+        settings["env"] = Value::Object(env);
+    }
+    Ok(settings)
 }
 
 /// A deny for the file tools; `//` marks the path absolute, not relative to the settings file.

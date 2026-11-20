@@ -252,6 +252,26 @@ fn full_name(repo: &Path) -> Result<String> {
     }
 }
 
+/// A repo's origin on github.com.
+pub struct Origin {
+    /// As the repo's config spells it, before any `insteadOf` rewrite.
+    pub url: String,
+    /// `owner/repo`.
+    pub slug: String,
+}
+
+/// `repo`'s origin, which must be on github.com.
+pub fn github_com_origin(repo: &Path) -> Result<Origin> {
+    let url = crate::worktree::git(repo, &["config", "--get", "remote.origin.url"])
+        .with_context(|| format!("read origin of {}", repo.display()))?
+        .trim()
+        .to_string();
+    match github_repo(&url) {
+        Some((host, slug)) if is_github_com(&host) => Ok(Origin { url, slug }),
+        _ => bail!("origin {url} of {} isn't a github.com repo", repo.display()),
+    }
+}
+
 fn no_gh() -> PrLookup {
     PrLookup::Unknown("no GitHub CLI (gh) on PATH".into())
 }
