@@ -1459,7 +1459,9 @@ fn runnable(exe: PathBuf) -> PathBuf {
 
 fn run_broker(lead: &str) -> Result<i32> {
     let paths = Paths::from_env().context("herd")?;
-    for (name, value) in broker::lead_env(&paths, lead)? {
+    let env =
+        broker::lead_env(&paths, lead).with_context(|| format!("{lead}'s broker can't start"))?;
+    for (name, value) in env {
         // SAFETY: the broker has started no threads yet.
         unsafe { std::env::set_var(name, value) };
     }
@@ -1666,6 +1668,16 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let own_pane = own_pane();
     let own_socket = socket_from_env();
+    let caller = sandbox::calling_lead(&herd_paths, &process::ProcFs, std::process::id());
+    if let Some(lead) = &caller {
+        // Outside the sandbox, its checks and merge lookups would otherwise run as the human.
+        let env = broker::lead_env(&herd_paths, lead)
+            .with_context(|| format!("{lead}'s watch can't start"))?;
+        for (name, value) in env {
+            // SAFETY: the watch has started no threads yet.
+            unsafe { std::env::set_var(name, value) };
+        }
+    }
     let req = watch::Request {
         herds,
         timeout: timeout.map(Duration::from_secs),
@@ -1673,6 +1685,7 @@ fn run_watch(herds: &[String], timeout: Option<u64>, settings: Option<PathBuf>) 
         own_pane: own_pane.as_deref(),
         own_lineage: &own_lineage(),
         own_socket: own_socket.as_deref(),
+        caller: caller.as_deref(),
         herd_files: Some(&herd_paths),
         check_timeout: remote_timeout,
         shepherd_handoff: None,

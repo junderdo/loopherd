@@ -840,9 +840,11 @@ What differs from the shepherd:
   tasks. `loopherd restart` (`--self` included), `prompt`, `feed`,
   `add`, `retire` and `release` run in your broker, outside the sandbox,
   in any form, one at a time, so a running `feed` holds up the others
-  until it ends. With `install` on, `scripts/install` runs outside the
-  sandbox only bare, as its own Bash call: a `cd x &&`, a pipe or
-  redirect, or `$(…)` keeps it inside. `revive` is the shepherd's or the
+  until it ends. `loopherd watch` runs outside the sandbox only bare, as
+  its own Bash call (D103), and so does `scripts/install` with `install`
+  on: a `cd x &&`, a pipe or redirect, `$(…)` or a path to the binary
+  keeps it inside, where a long watch blocks `git config` writes across
+  the repo for its whole run. `revive` is the shepherd's or the
   human's. `restart`, `prompt`, `retire` and `release` refuse anything
   but your own herd's members; `retire --close` and `release` also keep
   a worktree or refuse when the ledger puts one anywhere its herd file
@@ -912,16 +914,17 @@ What differs from the shepherd:
   with the PR link and the open blocking findings, then end your turn.
   With `new_cards` off, list out-of-scope findings in a question rather
   than creating tasks.
-- **Heartbeat.** Keep `loopherd watch --timeout 3600` as a background task.
-  Run from your pane, it's your watch: it reads your herd's workers only,
-  never you, and naming any other herd is an error. It holds `watch-<your
-  name>.lock`, so it runs beside the shepherd's watch, which reads you. Run
-  it from your own pane in your own herdr, or it runs as the shepherd's
-  watch instead: a pane that matches you but not your socket prints
-  `warning: pane <pane> holds lead <you> on socket <recorded>, but this
-  watch's socket is <this>; running the shepherd's watch` on start, then
-  fails: your sandbox denies the shepherd's watch lock. Run it from your
-  own herdr instead. If you're retired, it exits with an error and
+- **Heartbeat.** Keep `loopherd watch --timeout 3600` as a background task,
+  run bare, exactly so. Run from your pane, it's your watch: it reads your
+  herd's workers only, never you, and naming any other herd is an error.
+  It holds `watch-<your name>.lock`, so it runs beside the shepherd's
+  watch, which reads you. Run it from your own pane in your own herdr: one
+  your Claude runs from a pane the ledger doesn't give you fails with
+  `refused: <you>'s Claude runs this watch, which may only be its own; …`
+  naming why. In any other form it runs sandboxed, and from the wrong
+  pane prints `warning: pane <pane> holds lead <you> on socket
+  <recorded>, but this watch's socket is <this>; running the shepherd's
+  watch`, then fails on the shepherd's watch lock. If you're retired, it exits with an error and
   leaves your herd's events for the shepherd. Every 60s it also runs your
   herd's checks and wakes you with `<member> merged` (the template's
   `merged` passes, and its `done` doesn't or its after_merge is still due):

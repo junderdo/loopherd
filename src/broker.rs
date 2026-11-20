@@ -625,10 +625,11 @@ pub fn serve(
     }
 }
 
-/// The environment `lead`'s broker takes on before it serves, so its git
-/// and gh reach origin with the lead's narrowed credentials, as in the
-/// lead's sandbox: none unless the herd its launch record names guards
-/// merges by credentials (D95). Errs, naming the fix, while they're missing.
+/// The environment `lead`'s broker, and its unsandboxed watch, take on
+/// before running anything, so their git and gh reach origin with the
+/// lead's narrowed credentials, as in the lead's sandbox: none unless the
+/// herd its launch record names guards merges by credentials (D95). Errs,
+/// naming the fix, while they're missing.
 pub fn lead_env(paths: &Paths, lead: &str) -> Result<Vec<(String, String)>> {
     use crate::herd::MergeGuard;
     validate_name(lead)?;
@@ -636,18 +637,13 @@ pub fn lead_env(paths: &Paths, lead: &str) -> Result<Vec<(String, String)>> {
         return Ok(vec![]);
     };
     let herd = &kept.herd;
-    let guard = crate::herd::merge_guard(paths, herd).with_context(|| {
-        format!(
-            "{lead}'s broker can't start: whether herd {herd} guards merges by credentials \
-             is unknown"
-        )
-    })?;
+    let guard = crate::herd::merge_guard(paths, herd)
+        .with_context(|| format!("whether herd {herd} guards merges by credentials is unknown"))?;
     if guard != Some(MergeGuard::Credentials) {
         return Ok(vec![]);
     }
-    let env = crate::credentials::lead_env(paths, herd).with_context(|| {
-        format!("{lead}'s broker can't start: herd {herd} guards merges by credentials")
-    })?;
+    let env = crate::credentials::lead_env(paths, herd)
+        .with_context(|| format!("herd {herd} guards merges by credentials"))?;
     let mut env: Vec<(String, String)> = env
         .into_iter()
         .map(|(name, value)| (name, value.as_str().unwrap_or_default().to_string()))
@@ -2709,9 +2705,8 @@ mod tests {
         let err = lead_env(&world.paths, "lead-h").unwrap_err();
 
         assert!(
-            format!("{err:#}").starts_with(
-                "lead-h's broker can't start: whether herd h guards merges by credentials is unknown: "
-            ),
+            format!("{err:#}")
+                .starts_with("whether herd h guards merges by credentials is unknown: "),
             "{err:#}"
         );
     }
@@ -2727,7 +2722,7 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             format!(
-                "lead-c's broker can't start: herd c guards merges by credentials: no token at {}; \
+                "herd c guards merges by credentials: no token at {}; \
                  run loopherd merge-guard c for how to create and store it",
                 token.display()
             )

@@ -8,7 +8,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::context::ShepherdHandoff;
 use crate::feed::{claimable, claimable_count, run_check, run_in_repo, run_source};
@@ -104,6 +104,9 @@ pub struct Request<'a> {
     /// The caller and its ancestors, which carry a moved member's old pane id.
     pub own_lineage: &'a [Process],
     pub own_socket: Option<&'a Path>,
+    /// The lead whose sandboxed Claude is an ancestor of this watch, which
+    /// may then be only that lead's own.
+    pub caller: Option<&'a str>,
     /// Where a lead's watch finds its herd file for its merged and
     /// claimable checks; `None` runs no checks.
     pub herd_files: Option<&'a Paths>,
@@ -1276,26 +1279,47 @@ enum Reader {
 /// A lead's when the caller's pane holds one, else the shepherd's. A lead
 /// may only name its own herd.
 fn reader(ledger: &dyn Ledger, req: &Request, warn: &mut dyn FnMut(&str)) -> Result<Reader> {
-    let Some(pane) = req.own_pane else {
-        return Ok(Reader::Shepherd);
-    };
     let entries = ledger.entries()?;
-    let lead = match member_of_own_pane(&entries, pane, req.own_lineage, req.own_socket) {
-        Some(entry) if entry.is_lead() => entry,
-        Some(_) => return Ok(Reader::Shepherd),
-        None => {
-            // Pane ids repeat across herdrs, but this may be a lead whose recorded socket is stale.
-            let on_pane = |e: &&AgentRecord| {
-                !e.retired && e.is_lead() && e.is_own_pane(pane, req.own_lineage)
-            };
-            if let Some(lead) = entries.values().find(on_pane) {
-                warn(&format!(
-                    "warning: pane {pane} holds lead {} on socket {}, \
-                     but this watch's socket is {}; running the shepherd's watch",
-                    lead.name,
-                    shown(lead.socket.as_deref()),
-                    shown(req.own_socket),
-                ));
+    let member = req
+        .own_pane
+        .and_then(|pane| member_of_own_pane(&entries, pane, req.own_lineage, req.own_socket));
+    let routed = member.filter(|entry| entry.is_lead());
+    // Pane ids repeat across herdrs, but this may be a lead whose recorded socket is stale.
+    let on_other_socket = || {
+        let pane = req.own_pane?;
+        let on_pane =
+            |e: &&AgentRecord| !e.retired && e.is_lead() && e.is_own_pane(pane, req.own_lineage);
+        entries.values().find(on_pane).map(|lead| {
+            format!(
+                "pane {pane} holds lead {} on socket {}, but this watch's socket is {}",
+                lead.name,
+                shown(lead.socket.as_deref()),
+                shown(req.own_socket),
+            )
+        })
+    };
+    if let Some(caller) = req.caller {
+        let why = |rest: String| {
+            anyhow!("refused: {caller}'s Claude runs this watch, which may only be its own; {rest}")
+        };
+        match routed {
+            None => {
+                let pane = on_other_socket()
+                    .unwrap_or_else(|| format!("this pane isn't {caller}'s in the ledger"));
+                return Err(why(format!("{pane}, so it would be the shepherd's watch")));
+            }
+            Some(lead) if lead.name != caller => {
+                return Err(why(format!("this pane is {}'s", lead.name)));
+            }
+            Some(_) => {}
+        }
+    }
+    let lead = match (member, routed) {
+        (_, Some(lead)) => lead,
+        (Some(_), None) => return Ok(Reader::Shepherd),
+        (None, None) => {
+            if let Some(stale) = on_other_socket() {
+                warn(&format!("warning: {stale}; running the shepherd's watch"));
             }
             return Ok(Reader::Shepherd);
         }
@@ -1621,6 +1645,7 @@ mod tests {
     }
 
     const EVERY: Request = Request {
+        caller: None,
         procs: &crate::process::ProcFs,
         herds: &[],
         timeout: None,
@@ -1964,6 +1989,7 @@ mod tests {
     }
 
     const ONCE: Request = Request {
+        caller: None,
         procs: &crate::process::ProcFs,
         herds: &[],
         timeout: Some(Duration::ZERO),
@@ -3289,6 +3315,91 @@ mod tests {
         .unwrap();
 
         assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// Why `req`'s watch over `led_world` with a socketed lead refused to start.
+    fn refused(req: &Request) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ledger, herdr) = socketed_lead(dir.path());
+        ledger
+            .0
+            .insert("lead-prs".into(), lead("lead-prs", "w9:p8", "prs"));
+        ledger.0.get_mut("lead-prs").unwrap().socket = Some("/run/live.sock".into());
+        let mut warnings = vec![];
+        let Err(err) = watch(
+            &herdr,
+            &ledger,
+            dir.path(),
+            req,
+            &mut steps(|_| {}),
+            &mut |w| warnings.push(w.to_string()),
+        ) else {
+            panic!("a lead's Claude ran a watch other than its own");
+        };
+        assert!(warnings.is_empty(), "{warnings:?}");
+        format!("{err:#}")
+    }
+
+    #[test]
+    fn a_watch_a_leads_claude_runs_from_its_own_pane_is_the_leads_watch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = socketed_lead(dir.path());
+        let req = Request {
+            own_socket: Some(Path::new("/run/live.sock")),
+            caller: Some("lead-cards"),
+            ..from_pane("w9:p0")
+        };
+
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &req, &mut steps(|_| {})).unwrap(),
+            ["lh-1 note 2026-11-01 09:00 UTC hi"]
+        );
+    }
+
+    #[test]
+    fn a_leads_claude_may_not_run_the_shepherds_watch() {
+        let shepherds = [
+            (
+                Request {
+                    caller: Some("lead-cards"),
+                    ..ONCE
+                },
+                "this pane isn't lead-cards's in the ledger",
+            ),
+            (
+                Request {
+                    own_socket: Some(Path::new("/run/dev.sock")),
+                    caller: Some("lead-cards"),
+                    ..from_pane("w9:p0")
+                },
+                "pane w9:p0 holds lead lead-cards on socket /run/live.sock, \
+                 but this watch's socket is /run/dev.sock",
+            ),
+        ];
+        for (req, why) in shepherds {
+            assert_eq!(
+                refused(&req),
+                format!(
+                    "refused: lead-cards's Claude runs this watch, which may only be its own; \
+                     {why}, so it would be the shepherd's watch"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn a_leads_claude_may_not_run_another_leads_watch() {
+        let req = Request {
+            own_socket: Some(Path::new("/run/live.sock")),
+            caller: Some("lead-cards"),
+            ..from_pane("w9:p8")
+        };
+
+        assert_eq!(
+            refused(&req),
+            "refused: lead-cards's Claude runs this watch, which may only be its own; \
+             this pane is lead-prs's"
+        );
     }
 
     #[test]
