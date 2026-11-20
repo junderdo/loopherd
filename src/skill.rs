@@ -188,8 +188,8 @@ mod tests {
             "`$XDG_STATE_HOME/loopherd/handoffs/<your name>/handoff.md`",
             "`## State`",
             "`<scratch>/pr<n>/review-<round>.md`",
-            "`pass <head sha>: <m> minor, <n> nit`",
-            "`fail <head sha>: <b> blocking, <m> minor, <n> nit`",
+            "`pass <head sha>: <m> minor, <k> nit`",
+            "`fail <head sha>: <b> blocking, <m> minor, <k> nit`",
             "`gh pr comment <n> --body-file <scratch>/pr<n>/review-<round>-blocking.md`",
             "until the PR merges or closes",
             "current review file",
@@ -206,8 +206,8 @@ mod tests {
         let verify = section("4. **Verify**", "5. **After merge**");
         for rule in [
             "<scratch>/pr<n>/review-<round>.md",
-            "`pass <head sha>: <m> minor, <n> nit`",
-            "`fail <head sha>: <b> blocking, <m> minor, <n> nit`",
+            "`pass <head sha>: <m> minor, <k> nit`",
+            "`fail <head sha>: <b> blocking, <m> minor, <k> nit`",
             "review-<round>-<axis>.md",
             "`<scratch>/pr<n>/review-<round>-blocking.md`",
             "`gh pr comment <n> --body-file`",

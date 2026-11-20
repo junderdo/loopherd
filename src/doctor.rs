@@ -87,6 +87,7 @@ pub fn checks(
                 setup,
                 herd,
                 reached.map(|socket| (herdr, socket)),
+                &crate::broker::Binary::at(install.running.clone()),
             ));
         }
         Err(e) if herd.is_some() => bail!("can't find herd files: {e:#}"),
@@ -661,12 +662,13 @@ fn disagreements(repo: &Path, leads: &[RepoLead], found: &[Value]) -> Vec<(Strin
     out
 }
 
-/// The ledger, pause files and mailboxes, and, when herdr was reached, each
-/// unretired member's pane on its socket.
+/// The ledger, pause files and mailboxes, each lead's broker against
+/// `binary`, and, when herdr was reached, each unretired member's pane on its socket.
 fn state_checks(
     setup: &Setup,
     only: Option<&str>,
     reached: Option<(&dyn Herdr, Option<PathBuf>)>,
+    binary: &crate::broker::Binary,
 ) -> Vec<Check> {
     let mut checks = pause_checks(&setup.paths, only);
     let entries = match setup.ledger.entries() {
@@ -703,21 +705,43 @@ fn state_checks(
             .iter()
             .filter(|r| !r.retired && r.is_lead())
             .filter(|lead| here.is_none_or(|here| !elsewhere(Some(here), lead)))
-            .filter(|lead| !crate::broker::running(&setup.paths, &lead.name))
-            .map(|lead| {
-                let name = &lead.name;
-                failure(
-                    &format!("broker {name}"),
-                    format!("no broker is running for {name}, so its loopherd commands fail"),
-                    format!("loopherd revive --name {name}"),
-                )
-            }),
+            .filter_map(|lead| broker_check(&setup.paths, &lead.name, binary)),
     );
     if let Some((herdr, socket)) = reached {
         let unretired: Vec<_> = members.iter().filter(|r| !r.retired).collect();
         checks.extend(pane_checks(herdr, socket.as_deref(), &unretired));
     }
     checks
+}
+
+/// Fails while no broker serves `lead`; warns while one runs a binary other than `binary`.
+fn broker_check(paths: &Paths, lead: &str, binary: &crate::broker::Binary) -> Option<Check> {
+    let name = format!("broker {lead}");
+    if !crate::broker::running(paths, lead) {
+        return Some(failure(
+            &name,
+            format!("no broker is running for {lead}, so its loopherd commands fail"),
+            format!("loopherd revive --name {lead}"),
+        ));
+    }
+    let runs = match crate::broker::recorded_binary(paths, lead) {
+        Some(recorded) if recorded == *binary => return None,
+        Some(recorded) => format!(
+            "loopherd {} at {}",
+            recorded.version,
+            recorded.path.display()
+        ),
+        None => "a loopherd from before brokers recorded their binary".into(),
+    };
+    Some(warning(
+        &name,
+        format!(
+            "{lead}'s broker runs {runs}, not this one ({} at {}), so its lead's commands may fail",
+            binary.version,
+            binary.path.display()
+        ),
+        format!("loopherd broker-restart {lead}"),
+    ))
 }
 
 fn pause_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
@@ -2147,6 +2171,93 @@ mod tests {
     }
 
     #[test]
+    fn a_broker_on_another_binary_warns_naming_broker_restart() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nsandbox = \"prefer\"\n",
+                repo.to_str().unwrap()
+            ),
+        );
+        let kept = crate::sandbox::Lead {
+            herd: "h".into(),
+            args: vec![],
+        };
+        let mut leads = vec![];
+        for name in ["lead-new", "lead-other", "lead-old"] {
+            crate::sandbox::prepare(m.paths(), name, &kept, || {
+                Ok(crate::sandbox::Sockets::Blocked)
+            })
+            .unwrap();
+            let mut lead = member(name, "h", "w1:p1", None);
+            lead.role = Some(crate::ledger::Role::Lead);
+            let settings = crate::sandbox::settings_file(m.paths(), name);
+            lead.claude_args = vec!["--settings".into(), settings.display().to_string()];
+            leads.push(lead);
+        }
+        m.ledger(&leads);
+        let lock = |name: &str| {
+            let lock = m
+                .paths()
+                .config_dir()
+                .join("broker")
+                .join(format!("{name}.lock"));
+            std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&lock)
+                .unwrap();
+            (lock, crate::lock::Lock::try_take(file).unwrap().unwrap())
+        };
+        let running = m.install.running.clone();
+        let version = env!("LOOPHERD_VERSION");
+        let (new, _new) = lock("lead-new");
+        std::fs::write(
+            &new,
+            format!(
+                "300\nmarks\nversion {version}\nbinary {}\n",
+                running.display()
+            ),
+        )
+        .unwrap();
+        let (other, _other) = lock("lead-other");
+        std::fs::write(
+            &other,
+            "300\nmarks\nversion 0.0.1 (abc1234)\nbinary /old/loopherd\n",
+        )
+        .unwrap();
+        let (old, _old) = lock("lead-old");
+        std::fs::write(&old, "300\nmarks\n").unwrap();
+
+        let brokers: Vec<String> = problems(&m, &herdr())
+            .into_iter()
+            .filter(|p| p.contains("broker"))
+            .collect();
+
+        assert_eq!(
+            brokers,
+            [
+                format!(
+                    "warning broker lead-old: lead-old's broker runs a loopherd from before \
+                     brokers recorded their binary, not this one ({version} at {}), so its \
+                     lead's commands may fail; fix: loopherd broker-restart lead-old",
+                    running.display()
+                ),
+                format!(
+                    "warning broker lead-other: lead-other's broker runs loopherd 0.0.1 \
+                     (abc1234) at /old/loopherd, not this one ({version} at {}), so its lead's \
+                     commands may fail; fix: loopherd broker-restart lead-other",
+                    running.display()
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn an_unretired_lead_on_this_herdr_with_no_broker_fails_naming_revive() {
         let m = machine(&ALL);
         let repo = m.herd("h");
@@ -2207,7 +2318,7 @@ mod tests {
             herdr.socket = socket.map(PathBuf::from);
             problems(&m, &herdr)
                 .into_iter()
-                .filter(|p| p.contains("broker"))
+                .filter(|p| p.starts_with("failure broker"))
                 .collect()
         };
         let down = |name: &str| {
