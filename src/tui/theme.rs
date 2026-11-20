@@ -348,6 +348,7 @@ mod tests {
             tab: None,
             lead: false,
             unsandboxed: None,
+            sockets_unblocked: None,
             template: None,
             released: false,
             retired: None,

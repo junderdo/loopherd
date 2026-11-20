@@ -82,6 +82,10 @@ pub struct AgentRecord {
     /// alone; `None` when sandboxed, and for a worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unsandboxed: Option<String>,
+    /// Why this lead's sandbox can't block Unix sockets, where it started
+    /// so under `prefer`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sockets_unblocked: Option<String>,
     /// How far `feed` has got with its herd's `after_merge` for this member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_merge: Option<AfterMerge>,
@@ -611,6 +615,7 @@ mod tests {
             role: None,
             after_merge: None,
             unsandboxed: None,
+            sockets_unblocked: None,
             earlier: vec![],
             unknown: Default::default(),
         }
@@ -961,6 +966,7 @@ mod tests {
             role: Some(Role::Lead),
             after_merge: None,
             unsandboxed: None,
+            sockets_unblocked: None,
             earlier: vec![],
             ..record("lead-h", true)
         };

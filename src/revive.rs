@@ -115,6 +115,7 @@ pub fn revive(
             workspace_id,
             session_id,
             unsandboxed,
+            sockets_unblocked,
             lead_args,
             ..
         } = &outcome
@@ -143,6 +144,7 @@ pub fn revive(
                 current.socket = current.socket.take().or_else(|| here.clone());
                 current.process = None;
                 current.unsandboxed = unsandboxed.clone();
+                current.sockets_unblocked = sockets_unblocked.clone();
                 if let Some(args) = lead_args {
                     current.claude_args = args.clone();
                 }
@@ -481,6 +483,7 @@ enum Outcome {
         rearm: Rearm,
         /// Why a lead runs without its sandbox; `None` when sandboxed, and for a worker.
         unsandboxed: Option<String>,
+        sockets_unblocked: Option<String>,
         /// What a lead was launched with after `--resume`; `None` for a worker,
         /// which keeps its recorded args.
         lead_args: Option<Vec<String>>,
@@ -730,12 +733,14 @@ fn revive_one(
     }
     let mut lead_args = None;
     let mut unsandboxed = None;
+    let mut sockets_unblocked = None;
     match &lead {
         None => {}
         Some((lead, _)) => match sandbox::prepare(&req.paths, &record.name, lead, req.sandbox) {
             Ok(launch) => {
                 warnings.extend(launch.warnings(&record.name));
                 unsandboxed = launch.hook_only().map(str::to_string);
+                sockets_unblocked = launch.sockets_unblocked().map(str::to_string);
                 lead_args = Some([lead.args.clone(), launch.args()].concat());
             }
             Err(error) => {
@@ -774,6 +779,7 @@ fn revive_one(
             blocked: false,
             rearm: Rearm::NotSent,
             unsandboxed,
+            sockets_unblocked,
             lead_args,
         },
         Ok(StartOutcome::Blocked) => Outcome::Started {
@@ -784,6 +790,7 @@ fn revive_one(
             blocked: true,
             rearm: Rearm::NotSent,
             unsandboxed,
+            sockets_unblocked,
             lead_args,
         },
         Err(error) => {
@@ -855,7 +862,7 @@ mod tests {
             startup: None,
             server: None,
             paths: own_paths(),
-            sandbox: || Ok(()),
+            sandbox: || Ok(crate::sandbox::Sockets::Blocked),
             broker: |_, _| Ok(false),
         }
     }
@@ -920,6 +927,7 @@ mod tests {
             role: None,
             after_merge: None,
             unsandboxed: None,
+            sockets_unblocked: None,
             earlier: vec![],
             unknown: Default::default(),
         }
@@ -1515,7 +1523,10 @@ mod tests {
             herd: "h".into(),
             args: record.claude_args.clone(),
         };
-        sandbox::prepare(&own_paths(), name, &kept, || Ok(())).unwrap();
+        sandbox::prepare(&own_paths(), name, &kept, || {
+            Ok(crate::sandbox::Sockets::Blocked)
+        })
+        .unwrap();
         record
     }
 
@@ -1530,6 +1541,7 @@ mod tests {
             role: Some(crate::ledger::Role::Lead),
             after_merge: None,
             unsandboxed: None,
+            sockets_unblocked: None,
             earlier: vec![],
             herd: Some("h".into()),
             ..record(name, cwd)
@@ -1757,7 +1769,10 @@ mod tests {
             herd: "h".into(),
             args: vec!["--model".into(), "opus".into()],
         };
-        sandbox::prepare(&req.paths, "lead-h", &kept, || Ok(())).unwrap();
+        sandbox::prepare(&req.paths, "lead-h", &kept, || {
+            Ok(crate::sandbox::Sockets::Blocked)
+        })
+        .unwrap();
         let worktree = worktree_path(&own_repo(), "lead-h");
         std::fs::create_dir_all(&worktree).unwrap();
         let home = tempfile::tempdir().unwrap();
@@ -1880,6 +1895,45 @@ mod tests {
                 "lead-h",
                 "bubblewrap not installed"
             ))
+        );
+    }
+
+    #[test]
+    fn a_lead_revived_on_prefer_where_its_sandbox_cant_block_unix_sockets_is_flagged() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut ledger = ledger([lead("lead-h", cwd.path())]);
+        let req = ReviveRequest {
+            sandbox: || {
+                Ok(sandbox::Sockets::Open(Unavailable {
+                    why: "Claude Code finds no seccomp filter".into(),
+                    fix: "npm install -g @anthropic-ai/sandbox-runtime".into(),
+                }))
+            },
+            ..request()
+        };
+        std::fs::write(
+            req.paths.herds.join("h.toml"),
+            format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nsandbox = \"prefer\"\n",
+                own_repo()
+            ),
+        )
+        .unwrap();
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 0, "{out}");
+        assert!(herdr.started()[0].args.contains(&"--settings".to_string()));
+        assert!(
+            out.contains("lead-h's sandbox can't block Unix sockets"),
+            "{out}"
+        );
+        let revived = &ledger.0["lead-h"];
+        assert_eq!(revived.unsandboxed, None);
+        assert_eq!(
+            revived.sockets_unblocked.as_deref(),
+            Some("Claude Code finds no seccomp filter")
         );
     }
 

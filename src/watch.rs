@@ -1559,6 +1559,7 @@ mod tests {
             role: None,
             after_merge: None,
             unsandboxed: None,
+            sockets_unblocked: None,
             earlier: vec![],
             unknown: Default::default(),
         }
@@ -2358,6 +2359,7 @@ mod tests {
             role: Some(crate::ledger::Role::Lead),
             after_merge: None,
             unsandboxed: None,
+            sockets_unblocked: None,
             earlier: vec![],
             ..member(name, pane, Some(herd))
         }

@@ -621,6 +621,7 @@ mod tests {
             role: None,
             after_merge: None,
             unsandboxed: None,
+            sockets_unblocked: None,
             earlier: vec![],
             unknown: Default::default(),
         }
@@ -915,7 +916,10 @@ mod tests {
                 herd: "h".into(),
                 args: vec![],
             };
-            sandbox::prepare(&self.paths(), "lh-1", &lead, || Ok(())).unwrap();
+            sandbox::prepare(&self.paths(), "lh-1", &lead, || {
+                Ok(crate::sandbox::Sockets::Blocked)
+            })
+            .unwrap();
         }
 
         fn paths(&self) -> Paths {

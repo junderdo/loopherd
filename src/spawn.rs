@@ -234,6 +234,7 @@ pub fn spawn(
         role: req.member_of.as_ref().and_then(|m| m.role.clone()),
         after_merge: None,
         unsandboxed: None,
+        sockets_unblocked: None,
         earlier: vec![],
         unknown: Default::default(),
     };

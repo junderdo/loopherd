@@ -43,6 +43,18 @@ fn sandbox_with(status: &str) -> Sandbox {
         &bin.join("claude"),
         "#!/bin/sh\necho '2.1.319 (Claude Code)'\n",
     );
+    // Where an npm-installed Claude Code looks for its seccomp filter, refusing as it would.
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x64"
+    };
+    let filter = bin.join("vendor/seccomp").join(arch);
+    fs::create_dir_all(&filter).unwrap();
+    executable(
+        &filter.join("apply-seccomp"),
+        "#!/bin/sh\necho 'socket(1, 1, 0): Operation not permitted' >&2\nexit 1\n",
+    );
     executable(
         &bin.join("herdr"),
         format!(
