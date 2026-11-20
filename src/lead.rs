@@ -368,33 +368,48 @@ mod tests {
                     "filesystem": {
                         "allowWrite": [
                             format!("{root}/proj/worktrees/lead-h"),
-                            format!("{root}/state"),
+                            format!("{root}/state/reports"),
+                            format!("{root}/state/handoffs"),
                         ],
-                        "denyWrite": [format!("{root}/config"), "/home/me/.claude"],
+                        "denyWrite": [
+                            format!("{root}/config"),
+                            "/home/me/.claude",
+                            format!("{root}/state/reports/watch.lock"),
+                            format!("{root}/state/reports/watch.fired"),
+                        ],
                     },
                     "excludedCommands": [
-                        "loopherd restart --self",
                         "loopherd feed",
                         "loopherd feed *",
                         "loopherd add *",
                         "loopherd retire *",
                         "loopherd release *",
+                        "loopherd restart *",
+                        "loopherd prompt *",
                     ],
                 },
                 "permissions": {
                     "denyInsteadOfPrompting": true,
                     "allow": [
                         "WebFetch(domain:*)",
-                        "Bash(loopherd restart --self)",
                         "Bash(loopherd feed)",
                         "Bash(loopherd feed *)",
                         "Bash(loopherd add *)",
                         "Bash(loopherd retire *)",
                         "Bash(loopherd release *)",
+                        "Bash(loopherd restart *)",
+                        "Bash(loopherd prompt *)",
                     ],
                     "deny": [
                         format!("Edit(/{root}/config/**)"),
                         "Edit(//home/me/.claude/**)",
+                        format!("Edit(/{root}/state/paused/**)"),
+                        format!("Edit(/{root}/state/shepherd.json)"),
+                        format!("Edit(/{root}/state/shepherd.json.lock)"),
+                        format!("Edit(/{root}/state/ledger.json)"),
+                        format!("Edit(/{root}/state/ledger.lock)"),
+                        format!("Edit(/{root}/state/reports/watch.lock)"),
+                        format!("Edit(/{root}/state/reports/watch.fired)"),
                     ],
                 },
             })
@@ -412,6 +427,168 @@ mod tests {
             }),
             "kept where the lead can't write, for revive to trust over the ledger"
         );
+    }
+
+    /// The paths a lead's settings list under `key` in the sandbox's filesystem.
+    fn listed(settings: &serde_json::Value, key: &str) -> Vec<PathBuf> {
+        settings["sandbox"]["filesystem"][key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| PathBuf::from(p.as_str().unwrap()))
+            .collect()
+    }
+
+    /// Starts lead-h and checks that neither its Bash nor its file tools may
+    /// write `path` in the state dir: Bash because no `allowWrite` entry holds
+    /// it, or because a `denyWrite` entry names it, which then exists so the
+    /// sandbox leaves no placeholder there.
+    fn assert_denied(path: &str, dir: bool) {
+        let setup = Setup::with_lead(PROMPT);
+        let herdr = herdr();
+        let paths = setup.paths();
+
+        lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        let (_, settings) = started_settings(&herdr);
+        let full = paths.state_dir().join(path);
+        let allowed = listed(&settings, "allowWrite")
+            .iter()
+            .any(|dir| full.starts_with(dir));
+        let named = listed(&settings, "denyWrite").contains(&full);
+        assert!(!allowed || named, "Bash may write {}", full.display());
+        assert!(!named || full.exists(), "{}", full.display());
+        let shown = full.display();
+        let rule = match dir {
+            true => format!("Edit(/{shown}/**)"),
+            false => format!("Edit(/{shown})"),
+        };
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        assert!(deny.contains(&rule.into()), "{deny:?}");
+    }
+
+    #[test]
+    fn a_lead_cant_unpause_its_herd() {
+        assert_denied("paused", true);
+    }
+
+    #[test]
+    fn a_lead_cant_rewrite_the_shepherds_record() {
+        assert_denied("shepherd.json", false);
+    }
+
+    #[test]
+    fn a_lead_cant_hold_the_shepherds_record_lock() {
+        assert_denied("shepherd.json.lock", false);
+    }
+
+    #[test]
+    fn a_lead_cant_rewrite_the_ledger() {
+        assert_denied("ledger.json", false);
+    }
+
+    #[test]
+    fn a_lead_cant_hold_the_ledger_lock() {
+        assert_denied("ledger.lock", false);
+    }
+
+    #[test]
+    fn a_lead_cant_hold_the_shepherds_watch_lock() {
+        assert_denied("reports/watch.lock", false);
+    }
+
+    #[test]
+    fn a_lead_cant_rewrite_what_the_shepherds_watch_announced() {
+        assert_denied("reports/watch.fired", false);
+    }
+
+    #[test]
+    fn a_lead_writes_its_mailbox_watch_files_and_handoff_in_dirs_made_before_it_starts() {
+        let setup = Setup::with_lead(PROMPT);
+        let herdr = herdr();
+        let paths = setup.paths();
+
+        lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        let (_, settings) = started_settings(&herdr);
+        let allowed = listed(&settings, "allowWrite");
+        for dir in ["reports", "handoffs"] {
+            let dir = paths.state_dir().join(dir);
+            assert!(allowed.contains(&dir), "{allowed:?}");
+            assert!(dir.is_dir(), "{}", dir.display());
+        }
+        assert!(
+            !allowed.contains(&paths.state_dir().to_path_buf()),
+            "{allowed:?}"
+        );
+    }
+
+    #[test]
+    fn starting_a_lead_keeps_the_shepherds_watch_files_already_there() {
+        let setup = Setup::with_lead(PROMPT);
+        let paths = setup.paths();
+        let reports = paths.state_dir().join("reports");
+        fs::create_dir_all(&reports).unwrap();
+        fs::write(reports.join("watch.fired"), "shepherd\nlh-1 done\n").unwrap();
+        fs::write(reports.join("watch.lock"), "4242").unwrap();
+
+        lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(reports.join("watch.fired")).unwrap(),
+            "shepherd\nlh-1 done\n"
+        );
+        assert_eq!(
+            fs::read_to_string(reports.join("watch.lock")).unwrap(),
+            "4242"
+        );
+    }
+
+    #[test]
+    fn a_lead_restarts_and_prompts_members_outside_the_sandbox_since_both_write_the_ledger() {
+        let setup = Setup::with_lead(PROMPT);
+        let herdr = herdr();
+
+        lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        let (_, settings) = started_settings(&herdr);
+        let excluded = settings["sandbox"]["excludedCommands"].as_array().unwrap();
+        let allow = settings["permissions"]["allow"].as_array().unwrap();
+        for command in ["loopherd restart *", "loopherd prompt *"] {
+            assert!(excluded.contains(&command.into()), "{excluded:?}");
+            assert!(
+                allow.contains(&format!("Bash({command})").into()),
+                "{allow:?}"
+            );
+        }
     }
 
     #[test]
@@ -454,18 +631,19 @@ mod tests {
         let (_, settings) = started_settings(&herdr);
         let sandbox = &settings["sandbox"];
         assert_eq!(
-            sandbox["filesystem"]["allowWrite"][2],
+            sandbox["filesystem"]["allowWrite"][3],
             "/home/me/.local/bin"
         );
         assert_eq!(
             sandbox["excludedCommands"],
             serde_json::json!([
-                "loopherd restart --self",
                 "loopherd feed",
                 "loopherd feed *",
                 "loopherd add *",
                 "loopherd retire *",
                 "loopherd release *",
+                "loopherd restart *",
+                "loopherd prompt *",
                 "scripts/install",
                 "scripts/install *",
                 "./scripts/install",
@@ -473,7 +651,7 @@ mod tests {
             ])
         );
         assert_eq!(
-            settings["permissions"]["allow"][7], "Bash(scripts/install)",
+            settings["permissions"]["allow"][8], "Bash(scripts/install)",
             "an excluded command still goes through the permission flow"
         );
         assert_eq!(

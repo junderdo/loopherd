@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -309,6 +309,31 @@ impl FileLedger {
     /// The members' mailboxes, beside the ledger.
     pub fn reports_dir(&self) -> Result<PathBuf> {
         Ok(self.dir()?.join("reports"))
+    }
+
+    /// Whether this process is refused writing the ledger, as one in a
+    /// lead's sandbox is (D97). Takes no lock.
+    pub fn read_only(&self) -> Result<bool> {
+        let path = self.path.with_extension("lock");
+        let opened = fs::create_dir_all(self.dir()?).and_then(|()| {
+            fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+        });
+        match opened {
+            Ok(_) => Ok(false),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::ReadOnlyFilesystem | io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                Ok(true)
+            }
+            Err(e) => Err(e).with_context(|| format!("open {}", path.display())),
+        }
     }
 
     /// Held by every writer for its read-modify-write; readers see whole
