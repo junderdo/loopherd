@@ -1,6 +1,6 @@
-//! A lead's `status` through its broker, with a stub `herdr` on PATH that
-//! logs each call. The lead's own PATH has no `herdr`, so only its broker
-//! can reach one.
+//! A lead's `status` and `read` through its broker, and the shepherd's `read`,
+//! with a stub `herdr` on PATH that logs each call. The lead's own PATH has
+//! no `herdr`, so only its broker can reach one.
 
 mod brokers;
 mod fakes;
@@ -59,7 +59,7 @@ impl World {
             format!(
                 "#!/bin/sh\necho \"$@\" >> {}\ncase \"$1 $2\" in\n\
                  'agent list') echo '{{\"result\": {{\"agents\": [{}]}}}}' ;;\n\
-                 esac\n",
+                 'agent read') printf 'one\\ntwo\\n' ;;\nesac\n",
                 root.path().join("calls").display(),
                 agents.join(", ")
             ),
@@ -109,6 +109,39 @@ fn stdout(out: &Output) -> String {
 }
 
 #[test]
+fn the_shepherds_read_asks_herdr_for_the_members_recent_unwrapped_lines() {
+    let world = World::new();
+
+    let read = world.run(None, &["read", "lh-9", "--lines", "5"]);
+
+    assert_eq!(stdout(&read), "one\ntwo\n");
+    assert_eq!(
+        world.calls(),
+        "agent list\nagent read w1:p3 --source recent-unwrapped --lines 5 --format text\n"
+    );
+}
+
+#[test]
+fn a_leads_read_goes_through_its_broker_for_its_own_herds_workers_alone() {
+    let world = World::new();
+
+    let read = world.run(Some("w1:p1"), &["read", "lh-1"]);
+    let outside = world.run(Some("w1:p1"), &["read", "lh-9"]);
+
+    assert_eq!(stdout(&read), "one\ntwo\n");
+    assert_eq!(
+        world.calls(),
+        "agent list\nagent read w1:p2 --source recent-unwrapped --lines 40 --format text\n"
+    );
+    assert!(!outside.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&outside.stderr),
+        "loopherd read: lead-k's broker refused read: lh-9 is in herd g; \
+         lead-k reaches only herd k's workers\n"
+    );
+}
+
+#[test]
 fn a_leads_status_goes_through_its_broker_and_shows_its_own_herd_alone() {
     let world = World::new();
 
@@ -127,4 +160,14 @@ fn a_leads_status_goes_through_its_broker_and_shows_its_own_herd_alone() {
         ),
         "{strays:?}"
     );
+}
+
+#[test]
+fn read_refuses_more_lines_than_its_cap() {
+    let world = World::new();
+
+    let read = world.run(None, &["read", "lh-9", "--lines", "1001"]);
+
+    assert_eq!(read.status.code(), Some(2));
+    assert_eq!(world.calls(), "");
 }

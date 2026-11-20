@@ -82,7 +82,15 @@ pub enum Op {
         json: bool,
         color: bool,
     },
+    /// A member's last `lines` lines of output.
+    Read {
+        name: String,
+        lines: usize,
+    },
 }
+
+/// The most lines `loopherd read` gives.
+pub const MAX_READ_LINES: usize = 1000;
 
 /// What an operation acts on, for the broker's reach rule.
 enum Reach<'a> {
@@ -145,14 +153,16 @@ impl Op {
             Op::Release { .. } => "release",
             Op::Label { .. } => "label its pane",
             Op::Status { .. } => "status",
+            Op::Read { .. } => "read",
         }
     }
 
     fn reach(&self) -> Reach<'_> {
         match self {
-            Op::Tell { name, .. } | Op::Prompt { name, .. } | Op::Restart { name, .. } => {
-                Reach::Member(name)
-            }
+            Op::Tell { name, .. }
+            | Op::Prompt { name, .. }
+            | Op::Restart { name, .. }
+            | Op::Read { name, .. } => Reach::Member(name),
             Op::Feed { herd, .. } | Op::Add { herd, .. } => Reach::Herd(herd),
             // Status reads the herd the launch record names, never one a request does.
             Op::RestartSelf | Op::Label { .. } | Op::Status { .. } => Reach::Lead,
@@ -164,7 +174,9 @@ impl Op {
     /// broker's git timeout.
     fn answer_within(&self, remote: Duration) -> Duration {
         match self {
-            Op::Tell { .. } | Op::Prompt { .. } | Op::RestartSelf => Duration::from_secs(120),
+            Op::Tell { .. } | Op::Prompt { .. } | Op::RestartSelf | Op::Read { .. } => {
+                Duration::from_secs(120)
+            }
             // Its queue's source and backlog may each take the git timeout.
             Op::Status { .. } => remote * 2 + Duration::from_secs(120),
             // The report is written already; a label isn't worth waiting out a feed for.
@@ -250,6 +262,11 @@ impl Op {
                 json,
                 color,
             } => status(ctx, *all, *strays, *json, *color, sink),
+            Op::Read { name, lines } => {
+                let read = crate::read::read(ctx.herdr, &*ctx.ledger, name, *lines)?;
+                sink.out(read.trim_end_matches('\n'));
+                Ok(0)
+            }
         }
     }
 }
@@ -1675,6 +1692,10 @@ mod tests {
                     name: target.into(),
                     force: false,
                 },
+                Op::Read {
+                    name: target.into(),
+                    lines: 40,
+                },
             ] {
                 let err = world.client().call(&op).unwrap_err();
                 let command = op.command();
@@ -2191,6 +2212,29 @@ mod tests {
         for seen in ["lh-1", "lh-7", "lead-h"] {
             assert!(shown.contains(seen), "{shown}");
         }
+        assert_eq!(own.calls(), 0);
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert_eq!(herdr.mutations(), 0);
+    }
+
+    #[test]
+    fn in_a_sandboxed_lead_s_pane_read_goes_through_its_broker_and_calls_no_herdr() {
+        let world = World::new();
+        world.add(member("lh-1", Some("h")));
+        let herdr = telling_herdr();
+        herdr.set_screen("w9:p9", "one\ntwo\nthree\n");
+        let serving = world.serve(herdr);
+        let own = FakeHerdr::new(&[]);
+        let client = world.route_from("p-lead-h");
+        let read = Op::Read {
+            name: "lh-1".into(),
+            lines: 2,
+        };
+
+        let (code, kept) = run_here(&own, &world, client.as_ref(), &read).unwrap();
+
+        assert_eq!((code, kept.out), (0, vec!["two\nthree".to_string()]));
         assert_eq!(own.calls(), 0);
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
