@@ -1768,6 +1768,8 @@ mod tests {
         .unwrap();
         std::fs::write(mailboxes.join(format!("{member}.blocked")), "").unwrap();
         std::fs::write(mailboxes.join(format!("{member}.block-recorded")), "").unwrap();
+        std::fs::write(mailboxes.join(format!("{member}.merges")), "{}").unwrap();
+        std::fs::write(mailboxes.join(format!("{member}.merges.lock")), "").unwrap();
     }
 
     fn files_in(dir: &Path) -> Vec<String> {
@@ -1793,7 +1795,14 @@ mod tests {
         assert!(ledger.0["a"].retired);
         assert_eq!(
             files_in(&mailboxes),
-            ["a.jsonl", "b.block-recorded", "b.blocked", "b.notified"]
+            [
+                "a.jsonl",
+                "b.block-recorded",
+                "b.blocked",
+                "b.merges",
+                "b.merges.lock",
+                "b.notified"
+            ]
         );
     }
 
