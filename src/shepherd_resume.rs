@@ -140,7 +140,7 @@ fn lock(state: &Path) -> Result<Lock> {
     let path = state.join("shepherd.json.lock");
     fs::create_dir_all(state).with_context(|| format!("create {}", state.display()))?;
     let file = fs::File::create(&path).with_context(|| format!("open {}", path.display()))?;
-    Lock::wait(file).with_context(|| format!("lock {}", path.display()))
+    Lock::wait(file, crate::lock::BRIEF).with_context(|| format!("lock {}", path.display()))
 }
 
 /// Runs `change` on the record at `place`, used or not, under its lock, and
