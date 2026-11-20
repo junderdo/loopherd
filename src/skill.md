@@ -189,29 +189,43 @@ Init never launches an agent.
    is your session's own temp directory: its detached worktrees, its build
    target dirs and any copies (mutation runs), so one removal cleans up.
    Have it write its findings to `<scratch>/pr<n>/review-<round>.md`,
-   each with severity, failure scenario and file:line, and return only
-   one line: `pass <head sha>`, or `fail <head sha>: <b> blocking, <m>
-   minor` plus the file's path. Its reply lands in your context and the
-   file doesn't, so read the file only to forward findings or to write a
-   merge question. Parallel reviews of one PR write
-   `review-<round>-<axis>.md`. Members can't read your scratch dir, so
-   forward a member's findings as a PR comment (`gh pr comment <n>
-   --body-file <file>`), then `loopherd tell` the member to read that comment.
-   Keep the files until the PR merges or closes.
+   each with severity (blocking, minor or nit), failure scenario and
+   file:line, and return only one line: `pass <head sha>: <m> minor, <n>
+   nit` when nothing is blocking, else `fail <head sha>: <b> blocking, <m>
+   minor, <n> nit`, plus the file's path. Its reply lands in your context
+   and the file doesn't, so read the file only to forward findings, to
+   file a pass's minors and nits, or to write a merge question. Parallel
+   reviews of one PR write `review-<round>-<axis>.md`. Members can't read
+   your scratch dir, so forward only a failing round's blocking findings,
+   in a PR comment holding just those: copy them to
+   `<scratch>/pr<n>/review-<round>-blocking.md`, run `gh pr comment <n>
+   --body-file` on that file, then `loopherd tell` the member to read that
+   comment. Post nits in a separate PR comment marked non-blocking. Keep
+   the files until the PR merges or closes.
    For anything that deletes or closes, have it hunt for safety gaps and
    name the test covering each rule. Report as soon as it lands; the human
    often merges fast.
 
    A finding is blocking when it's inside the task's acceptance criteria,
    or a correctness or safety bug the PR introduces; give the reviewer this
-   bar, so its `<b> blocking` counts only these. Blocking findings, and
-   any other finding that should be fixed and fits within the task's scope,
-   go back to the member in the PR comment. Out-of-scope findings become
-   new tasks (or, when no task is warranted, a PR comment marked
-   non-blocking); the PR doesn't wait on them. Each round after the first
-   checks the previous round's findings and the diff since that round's
-   head, not the whole PR: hand the reviewer `review-<round - 1>.md` and
-   `git diff <its head sha>..<new head>`, so fixes don't open findings in
+   bar, so its `<b> blocking` counts only these. Every other finding,
+   whatever its severity, is handled as a minor or, when trivial, a nit
+   (a pre-existing bug the PR didn't introduce is a minor). Only blocking
+   findings fail a round, and only they go back to the member while it
+   fails, in the PR comment above. Minor findings from any round never
+   hold the merge: they go to one follow-up task per PR (a lead with
+   `new_cards` off lists the follow-up minors in a question to the human
+   instead), or, when the member has a next PR in the same card's stack,
+   into that PR's scope. Nits go on the PR as a comment marked
+   non-blocking and are not tasks; the PR doesn't wait on them. Each
+   round after the first checks the previous round's blocking findings
+   and the diff since that round's head, not the whole PR: hand
+   the reviewer `review-<round - 1>.md` and `git diff <its head
+   sha>..<new head>`, and give it a narrower bar: is each previous
+   blocking finding fixed, and does the fix diff introduce a new
+   correctness or safety bug? Its `<b> blocking` counts only those. A new
+   minor or nit it notices is reported as non-blocking and handled as
+   above; it never fails the round, so fixes don't open findings in
    settled code. `<round>` counts per PR across handoffs; the handoff's
    current review file carries it. After round 3, start no other round:
    ask the human whether to merge as-is, narrow the scope, or change
@@ -774,11 +788,15 @@ Shepherd section has the detail):
    against the task's acceptance criteria, with a temp `XDG_STATE_HOME` and
    `LOOPHERD_CONFIG_DIR`, building under `<scratch>/pr<n>/`. It writes its
    findings to `<scratch>/pr<n>/review-<round>.md` and returns one line:
-   `pass <head sha>`, or `fail <head sha>: <b> blocking, <m> minor` plus
-   the file's path. Read the file only to forward findings or ask a merge
-   question. Members can't read your scratch dir: forward findings as a PR
-   comment (`gh pr comment <n> --body-file <file>`), then `loopherd tell`
-   the member to read it. Keep the files until the PR merges or closes.
+   `pass <head sha>: <m> minor, <n> nit` when nothing is blocking, else
+   `fail <head sha>: <b> blocking, <m> minor, <n> nit`, plus the file's
+   path. Read the file only to forward findings, to file a pass's minors
+   and nits, or to write a merge question. Members can't read your scratch
+   dir: forward only a failing round's blocking findings, in a PR comment
+   holding just those (`gh pr comment <n> --body-file
+   <scratch>/pr<n>/review-<round>-blocking.md`), then `loopherd tell` the
+   member to read it. Post nits in a separate PR comment marked
+   non-blocking. Keep the files until the PR merges or closes.
 5. **After merge** (`gh pr view <n> --json state`): close out the task in
    the tracker, unblock dependents, run `loopherd feed <herd>` (it runs
    `after_merge`; do by hand what its note says didn't run), then `git
@@ -807,7 +825,7 @@ What differs from the shepherd:
   | `merge` | merge a verified PR |
   | `install` | install loopherd and its hooks while feeding |
   | `rebase` | have a member rebase and force-push |
-  | `new_cards` | create tasks for out-of-scope gaps |
+  | `new_cards` | create follow-up tasks for minor or out-of-scope findings |
   | `design_escalation` | settle a design question a member raises |
   | `blocked_dialogs` | answer a member's blocking dialog |
 
@@ -899,19 +917,28 @@ What differs from the shepherd:
   the report.
 - **Review rounds.** A finding is blocking when it's inside the task's
   acceptance criteria, or a correctness or safety bug the PR introduces;
-  give the reviewer this bar. Blocking and other in-scope findings go back
-  to the worker; out-of-scope ones become tasks. Each round after the
-  first checks only the last round's findings and the diff since its head:
-  hand the reviewer `review-<round - 1>.md` and `git diff <its head
-  sha>..<new head>`. A first review uses the reviewer as defined; later
-  rounds pass `model: sonnet` to the subagent. `<round>` counts per PR across handoffs; your
-  handoff's current review file carries it. After your herd's
-  review-round limit (in your prompt; 3 when unset) start no other round;
-  send `loopherd report --kind question`
-  asking whether to merge as-is, narrow the scope, or change approach,
-  with the PR link and the open blocking findings, then end your turn.
-  With `new_cards` off, list out-of-scope findings in a question rather
-  than creating tasks.
+  give the reviewer this bar. Every other finding, whatever its severity,
+  is handled as a minor or, when trivial, a nit. Only blocking findings
+  fail a round, and only they go back to the member while it fails, in a
+  PR comment holding just those. Post nits in a separate PR comment marked
+  non-blocking; they are not tasks. Minor findings from any round never
+  hold the merge: they go to one follow-up task per PR, or, when the
+  member has a next PR in the same card's stack, into that PR's scope.
+  With `new_cards` off, list the follow-up minors in a question to the
+  human rather than creating a task. Each round after the first checks
+  the previous round's blocking findings and only the diff since its
+  head: hand the reviewer `review-<round - 1>.md` and `git diff <its head
+  sha>..<new head>`, and give it a narrower bar: is each previous
+  blocking finding fixed, and does the fix diff introduce a new
+  correctness or safety bug? Its `<b> blocking` counts only those; a new
+  minor or nit is reported as non-blocking, handled as above, and never
+  fails the round. A first review uses the reviewer as defined; later
+  rounds pass `model: sonnet` to the subagent. `<round>` counts per PR
+  across handoffs; your handoff's current review file carries it. After
+  your herd's review-round limit (in your prompt; 3 when unset) start no
+  other round; send `loopherd report --kind question` asking whether to
+  merge as-is, narrow the scope, or change approach, with the PR link and
+  the open blocking findings, then end your turn.
 - **Heartbeat.** Keep `loopherd watch --timeout 3600` as a background task.
   Run from your pane, it's your watch: it reads your herd's workers only,
   never you, and naming any other herd is an error. It holds `watch-<your

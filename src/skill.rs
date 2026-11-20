@@ -188,9 +188,9 @@ mod tests {
             "`$XDG_STATE_HOME/loopherd/handoffs/<your name>.md`",
             "`## State`",
             "`<scratch>/pr<n>/review-<round>.md`",
-            "`pass <head sha>`",
-            "`fail <head sha>: <b> blocking, <m> minor`",
-            "`gh pr comment <n> --body-file <file>`",
+            "`pass <head sha>: <m> minor, <n> nit`",
+            "`fail <head sha>: <b> blocking, <m> minor, <n> nit`",
+            "`gh pr comment <n> --body-file <scratch>/pr<n>/review-<round>-blocking.md`",
             "until the PR merges or closes",
             "current review file",
             "`review-<round - 1>.md`",
@@ -206,10 +206,11 @@ mod tests {
         let verify = section("4. **Verify**", "5. **After merge**");
         for rule in [
             "<scratch>/pr<n>/review-<round>.md",
-            "`pass <head sha>`",
-            "`fail <head sha>: <b> blocking, <m> minor`",
+            "`pass <head sha>: <m> minor, <n> nit`",
+            "`fail <head sha>: <b> blocking, <m> minor, <n> nit`",
             "review-<round>-<axis>.md",
-            "gh pr comment <n> --body-file <file>",
+            "`<scratch>/pr<n>/review-<round>-blocking.md`",
+            "`gh pr comment <n> --body-file`",
             "can't read your scratch dir",
         ] {
             assert!(verify.contains(rule), "Verify misses {rule:?}");

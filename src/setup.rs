@@ -29,7 +29,10 @@ const SWITCH_HELP: [(&str, &str); 6] = [
     ("merge", "merge a PR its reviewer verified"),
     ("install", "run scripts/install and loopherd install-hook"),
     ("rebase", "have a member rebase and force-push"),
-    ("new_cards", "create cards for out-of-scope gaps"),
+    (
+        "new_cards",
+        "create cards for minor or out-of-scope findings",
+    ),
     (
         "design_escalation",
         "settle a design question a member raises",
