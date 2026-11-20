@@ -410,13 +410,14 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
             )),
         };
     }
+    // Before its settings, which name what it makes.
+    create_state(paths, name)?;
     let own = settings(paths, name, &lead.herd)?;
     let worktree = worktree_path(&herd::repo(paths, &lead.herd)?, name);
     let loosened = loosenings(&paths.home, &worktree, &own);
     if let Some(refusal) = loosened_refusal(paths, name, &lead.herd, &loosened)? {
         return Err(refusal);
     }
-    create_state(paths, name)?;
     let file = settings_file(paths, name);
     let text = serde_json::to_string_pretty(&own)? + "\n";
     write_private(&file, &text).with_context(|| format!("write {}", file.display()))?;
@@ -939,20 +940,32 @@ const KEPT_FROM_FILE_TOOLS: [(&str, bool); 5] = [
 pub fn create_state(paths: &Paths, name: &str) -> Result<()> {
     let state = paths.state_dir();
     let requests = crate::broker::requests_dir(paths, name);
+    // Every herd's lead folder, so a lead started later sits in one a literal deny names.
+    let leads = herd::names(&paths.herds)?
+        .into_iter()
+        .filter_map(|herd| crate::lead::lead_name(&herd).ok())
+        .map(|lead| state.join("broker").join(lead));
     for dir in WRITABLE_STATE
         .map(|dir| state.join(dir))
         .into_iter()
         .chain([requests])
+        .chain(leads)
     {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     }
     for file in SHEPHERDS_WATCH {
         let file = state.join(file);
-        std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
+        // Left as it is when it exists: the sandbox's placeholder for it is read-only.
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
             .open(&file)
-            .with_context(|| format!("create {}", file.display()))?;
+        {
+            Err(e) if e.kind() != ErrorKind::AlreadyExists => {
+                return Err(e).with_context(|| format!("create {}", file.display()));
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -982,6 +995,10 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
         false => file_rule(&state.join(path)),
     }));
     deny.extend(shepherds_watch.iter().map(|file| file_rule(file)));
+    if cfg!(target_os = "linux") {
+        // The Linux sandbox skips glob denies, so this one reaches only the file tools.
+        deny.push(file_rule(&state.join("broker/*")));
+    }
     deny.extend(
         others_in_broker(paths, name)?
             .iter()
@@ -1061,8 +1078,7 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
 /// What in `<state>/broker/` isn't lead `name`'s `requests/`, each named, as
 /// the file tools' denies. An `Edit` deny is also a sandbox write deny, which
 /// beats `allowWrite`, so one on all of `broker/` would close `requests/`.
-/// The sandbox skips glob denies on Linux, and the file tools' globs can't
-/// negate, so a lead started later isn't covered until this one restarts.
+/// On Linux a glob deny covers the rest; elsewhere the sandbox would apply it.
 fn others_in_broker(paths: &Paths, name: &str) -> Result<Vec<(PathBuf, bool)>> {
     let broker = paths.state_dir().join("broker");
     let own = broker.join(name);
@@ -1087,13 +1103,17 @@ fn others_in_broker(paths: &Paths, name: &str) -> Result<Vec<(PathBuf, bool)>> {
     Ok(found)
 }
 
-/// `settings` without the file tools' denies in `<state>/broker/`, which
-/// change as other leads start, not with the herd's switches.
+/// `settings` without the denies naming paths in `<state>/broker/` one by
+/// one, which change as leads and herds come and go, not with the switches.
 fn switch_settings(settings: &Value, paths: &Paths) -> Value {
     let broker = format!("Edit(/{}/", paths.state_dir().join("broker").display());
+    let named = |rule: &str| {
+        rule.strip_prefix(&broker)
+            .is_some_and(|rest| !rest.trim_end_matches("/**)").contains('*'))
+    };
     let mut settings = settings.clone();
     if let Some(deny) = settings["permissions"]["deny"].as_array_mut() {
-        deny.retain(|rule| !rule.as_str().is_some_and(|r| r.starts_with(&broker)));
+        deny.retain(|rule| !rule.as_str().is_some_and(named));
     }
     settings
 }

@@ -358,30 +358,47 @@ mod tests {
         (path, serde_json::from_str(&text).unwrap())
     }
 
+    /// Whether an `Edit` rule in `deny` that the sandbox takes as a write deny
+    /// covers `path`. The Linux sandbox skips glob rules.
+    fn denied_to_sandbox(deny: &serde_json::Value, path: &Path) -> bool {
+        edit_rules(deny)
+            .filter(|spec| !spec.trim_end_matches("/**").contains('*'))
+            .any(|spec| covers(&spec, path))
+    }
+
     /// Whether an `Edit` rule in `deny` keeps the file tools from writing `path`.
     fn denied_to_file_tools(deny: &serde_json::Value, path: &Path) -> bool {
-        deny.as_array().unwrap().iter().any(|rule| {
+        edit_rules(deny).any(|spec| covers(&spec, path))
+    }
+
+    fn edit_rules(deny: &serde_json::Value) -> impl Iterator<Item = String> + '_ {
+        deny.as_array().unwrap().iter().filter_map(|rule| {
             let rule = rule.as_str().unwrap();
-            let Some(spec) = rule
-                .strip_prefix("Edit(/")
-                .and_then(|r| r.strip_suffix(')'))
-            else {
-                return false;
-            };
-            match spec.strip_suffix("/**") {
-                Some(dir) => path.starts_with(dir),
-                None => path == Path::new(spec),
-            }
+            let spec = rule.strip_prefix("Edit(/")?.strip_suffix(')')?;
+            Some(spec.to_string())
         })
+    }
+
+    /// A rule names a path and everything under it; `*` stands for one name.
+    fn covers(spec: &str, path: &Path) -> bool {
+        let spec = Path::new(spec.trim_end_matches("/**"));
+        let path: Vec<_> = path.components().collect();
+        let spec: Vec<_> = spec.components().collect();
+        spec.len() <= path.len()
+            && spec
+                .iter()
+                .zip(&path)
+                .all(|(s, p)| s.as_os_str() == "*" || s == p)
     }
 
     #[test]
     fn a_lead_can_write_its_own_broker_requests_and_no_other_leads() {
         let setup = Setup::with_lead(PROMPT);
+        setup.copy_herd("g");
         let herdr = herdr();
         let state = setup.root.join("state");
-        let other = state.join("broker/lead-g/requests");
-        fs::create_dir_all(&other).unwrap();
+        let running = state.join("broker/lead-r/requests");
+        fs::create_dir_all(&running).unwrap();
         let stray = state.join("broker/lead-h/stray");
         fs::create_dir_all(stray.parent().unwrap()).unwrap();
         fs::write(&stray, "").unwrap();
@@ -405,16 +422,22 @@ mod tests {
             .collect();
         assert!(allowed.contains(&own), "{allowed:?}");
         assert!(
-            !allowed.iter().any(|dir| other.starts_with(dir)),
+            !allowed.iter().any(|dir| running.starts_with(dir)),
             "{allowed:?}"
         );
         let deny = &settings["permissions"]["deny"];
         assert!(
-            !denied_to_file_tools(deny, &own.join(".1.part")),
+            !denied_to_sandbox(deny, &own.join(".1.part")),
             "an Edit deny is also a sandbox write deny, which beats allowWrite: {deny}"
         );
-        assert!(denied_to_file_tools(deny, &other.join("x")), "{deny}");
-        assert!(denied_to_file_tools(deny, &stray), "{deny}");
+        // Herd g's lead hasn't started: its folder is made now, so a deny on it needs no glob.
+        let unstarted = state.join("broker/lead-g");
+        assert!(unstarted.is_dir());
+        for path in [&running.join("x"), &unstarted.join("requests/x"), &stray] {
+            assert!(denied_to_sandbox(deny, path), "{} {deny}", path.display());
+        }
+        let later = state.join("broker/lead-later/requests/x");
+        assert!(denied_to_file_tools(deny, &later), "{deny}");
     }
 
     #[test]
@@ -499,6 +522,7 @@ mod tests {
                         format!("Edit(/{root}/state/ledger.lock)"),
                         format!("Edit(/{root}/state/reports/watch.lock)"),
                         format!("Edit(/{root}/state/reports/watch.fired)"),
+                        format!("Edit(/{root}/state/broker/*)"),
                     ],
                 },
             })

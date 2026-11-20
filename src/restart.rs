@@ -1556,6 +1556,45 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_started_with_all_of_broker_denied_is_told_its_sandbox_is_stale() {
+        let w = World::new();
+        w.handed_off();
+        w.prepared();
+        let mut settings: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(w.settings()).unwrap()).unwrap();
+        let blanket = format!("Edit(/{}/broker/**)", w.paths().state_dir().display());
+        settings["permissions"]["deny"]
+            .as_array_mut()
+            .unwrap()
+            .push(blanket.into());
+        fs::write(w.settings(), settings.to_string()).unwrap();
+
+        let (result, _) = w.restart_as(false, true, None, &as_lead);
+
+        assert!(
+            result
+                .as_ref()
+                .unwrap()
+                .contains("lh-1's sandbox was set before herd h's current switches"),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_read_only_placeholder_for_the_shepherd_s_watch_file_doesn_t_stop_a_restart() {
+        use std::os::unix::fs::PermissionsExt;
+        let w = World::new();
+        w.handed_off();
+        w.prepared();
+        let lock = w.paths().state_dir().join("reports/watch.lock");
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o444)).unwrap();
+
+        let (result, _) = w.restart_as(false, true, None, &as_lead);
+
+        result.unwrap();
+    }
+
+    #[test]
     fn a_lead_the_ledger_calls_a_worker_is_still_checked_as_the_lead_loopherd_kept() {
         let w = World::new();
         w.handed_off();

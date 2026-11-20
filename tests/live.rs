@@ -589,6 +589,9 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     let in_checkout = repo.join(format!("sandbox-probe-{}", std::process::id()));
     let _in_checkout = RemoveFile(in_checkout.clone());
     let state_dir = state.path().join("loopherd");
+    let write_other = state_dir.join("broker/lead-other/requests/write-probe");
+    let write_later = state_dir.join("broker/lead-later/requests/write-probe");
+    let write_control = state_dir.join("reports/write-probe");
     // The human's and the shepherd's parts of the state dir, which the lead's own sit beside.
     let refused_state = [
         "paused/probe",
@@ -680,15 +683,25 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
              this order, each with the command exactly as written and nothing added before or \
              after it, running the second even if the first fails. First: python3 {} \
              Second: touch {} \
+             Then make exactly three Write tool calls, in this order, each writing the word \
+             probe, making every one even if an earlier one is refused, and trying no other \
+             way when one is: {} then {} then {} \
              Then reply with what each printed.\"\"\"\n",
             herd_head(repo.to_str().unwrap(), &workspace),
             probe.display(),
-            control.display()
+            control.display(),
+            write_other.display(),
+            write_later.display(),
+            write_control.display()
         ),
     )
     .unwrap();
     let before = std::fs::read_to_string(&herd_file).unwrap();
     let _cleanup = CloseTab(name.clone());
+    // Opens the state dir to the file tools, so only loopherd's Edit denies refuse these writes;
+    // reading the probe lets a cautious model check it before running it.
+    let write_rule = format!("Edit(/{}/**)", state_dir.display());
+    let read_rule = format!("Read(/{}/**)", state.path().display());
 
     let out = dev(env!("CARGO_BIN_EXE_loopherd"))
         .env("XDG_STATE_HOME", state.path())
@@ -696,7 +709,7 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
         // The permission layer can't tell where python3 writes, so with this rule it lets the
         // write through to the sandbox, which is what this measures.
         .args(["lead", &herd, "--", "--permission-mode", "acceptEdits"])
-        .args(["--allowedTools", "Bash(python3:*)"])
+        .args(["--allowedTools", "Bash(python3:*)", &write_rule, &read_rule])
         .output()
         .unwrap();
     assert_eq!(
@@ -735,10 +748,12 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
                 std::fs::write(&temp, "{}\n").unwrap();
                 std::fs::rename(&temp, file).unwrap();
             }
+            // A lead started after this one: its folder is named in no deny of this lead's.
+            std::fs::create_dir_all(write_later.parent().unwrap()).unwrap();
             std::fs::write(&renamed, "").unwrap();
         }
         let status = herdr_ok(&["agent", "get", &name])["result"]["agent"]["agent_status"].clone();
-        if control.exists() && finished(&status) {
+        if write_control.exists() && finished(&status) {
             break;
         }
         if std::time::Instant::now() >= given_up {
@@ -752,6 +767,10 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     assert_eq!(std::fs::read_to_string(&herd_file).unwrap(), before);
     assert!(!in_sibling.exists(), "the lead wrote a sibling worktree");
     assert!(!in_checkout.exists(), "the lead wrote the main checkout");
+    assert!(control.exists(), "the lead never ran touch");
+    for path in [&write_other, &write_later] {
+        assert!(!path.exists(), "the Write tool wrote {}", path.display());
+    }
     let probed = std::fs::read_to_string(&results).unwrap_or_default();
     let expected: String = refused
         .iter()
