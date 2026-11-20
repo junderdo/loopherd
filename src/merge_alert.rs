@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::github::{self, Merges};
 use crate::herd::{self, Paths};
+use crate::lock::Lock;
 use crate::notify::{self, Kind, Waiting};
 use crate::report::{self, Body};
 
@@ -250,6 +251,15 @@ impl MergeAlerts {
         let text = serde_json::to_string(state)?;
         fs::create_dir_all(&self.mailboxes)
             .with_context(|| format!("create {}", self.mailboxes.display()))?;
+        let lock = path.with_extension("merges.lock");
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock)
+            .with_context(|| format!("open {}", lock.display()))?;
+        // Two watches of one lead share the temporary name below.
+        let _held = Lock::wait(file).with_context(|| format!("lock {}", lock.display()))?;
         // Renamed into place, so a watch killed mid-write leaves the old state.
         let new = path.with_extension("merges.new");
         fs::write(&new, text).with_context(|| format!("write {}", new.display()))?;
@@ -403,6 +413,36 @@ mod tests {
             });
 
             assert_eq!(sent, ["50 merges while unwatched"]);
+        }
+    }
+
+    #[test]
+    fn two_watches_saving_the_window_at_once_both_save() {
+        let world = World::new();
+        let state = || State {
+            created: CREATED.into(),
+            since: parse(FIRST).unwrap(),
+            polled: parse(FIRST).unwrap(),
+            branch: None,
+            branched: None,
+        };
+        for _ in 0..RACES {
+            let barrier = Barrier::new(2);
+
+            let saved: Vec<Result<()>> = thread::scope(|s| {
+                let watches = [(); 2].map(|()| {
+                    s.spawn(|| {
+                        let watch = world.watch();
+                        barrier.wait();
+                        watch.save(&state())
+                    })
+                });
+                watches.into_iter().map(|w| w.join().unwrap()).collect()
+            });
+
+            for result in saved {
+                result.unwrap();
+            }
         }
     }
 
