@@ -98,7 +98,9 @@ gets no MCP servers but those its `[lead] mcp_servers` names, which run
 unsandboxed; only the human adds one. A lead gets no Unix sockets, so no
 herdr socket, ssh agent or WSL2 interop, unless its herd sets
 `[lead] unix_sockets = "all"`, which `lead`, `revive` and doctor warn of
-(D105). What still gets past the sandbox: workers run unsandboxed (LH-284)
+(D105). Where the sandbox can't block them (no seccomp filter; doctor
+names the npm package), `require` refuses the lead and `prefer` starts it
+as `(lead, sockets open)`; installing the package is the human's. What still gets past the sandbox: workers run unsandboxed (LH-284)
 and most of the state dir is writable (LH-298). A lead's `tell`, `read`, `status`,
 `feed`, `add`, `prompt`, `restart`, `retire` and `release` run in its
 broker, outside the sandbox and only on its own herd (D98); its watch

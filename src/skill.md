@@ -639,7 +639,10 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   asks the human to add it. A lead has no Unix sockets unless its herd's
   `[lead] unix_sockets = "all"` (`loopherd herds` shows it), which reopens
   herdr, the ssh agent and WSL2 interop to it; `lead`, `revive` and doctor
-  warn of it, and only the human sets it. Set `prefer` only when the
+  warn of it, and only the human sets it. Where Claude Code's seccomp
+  filter can't block them (doctor says so, naming `npm install -g
+  @anthropic-ai/sandbox-runtime`), `require` refuses the lead and
+  `prefer` starts it as `(lead, sockets open)`. Set `prefer` only when the
   human says so; doctor names those herds and leads.
 - **Change a herd file's values** with `loopherd herd set <herd> <key>
   <value>`, `loopherd herd get <herd> <key>` and `loopherd herd unset <herd>
