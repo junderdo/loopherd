@@ -150,7 +150,10 @@ impl Op {
         match self {
             Op::Tell { .. } | Op::Prompt { .. } | Op::RestartSelf => Duration::from_secs(120),
             // Its settle timeout, with room for herdr and the member's view.
-            Op::Restart { .. } | Op::Retire { .. } | Op::Release { .. } => Duration::from_secs(300),
+            Op::Restart { .. } => Duration::from_secs(300),
+            Op::Retire { .. } | Op::Release { .. } => {
+                origin_wait(crate::worktree::remote_timeout())
+            }
             // Each member may take its ready timeout, then after_merge its own.
             Op::Feed { .. } => Duration::from_secs(4 * 60 * 60),
             Op::Add {
@@ -224,6 +227,14 @@ impl Op {
             } => release(ctx, name, *keep_branch, *drop_branch, sink),
         }
     }
+}
+
+/// How long a lead waits on an operation that asks origin a few things in
+/// turn, each within `remote`, the git timeout: release asks up to five.
+fn origin_wait(remote: Result<Duration>) -> Duration {
+    // The broker's git reads its own timeout; a bad one here only sets this wait.
+    let remote = remote.unwrap_or(crate::worktree::REMOTE_TIMEOUT);
+    remote * 5 + Duration::from_secs(300)
 }
 
 /// Lead `lead`'s own unretired record, in this herdr; by name, since a stale
@@ -2509,6 +2520,15 @@ mod tests {
 
         assert_eq!(lead_env(&world.paths, "lead-h").unwrap(), []);
         assert_eq!(lead_env(&world.paths, "lead-x").unwrap(), []);
+    }
+
+    #[test]
+    fn a_lead_waits_on_retire_and_release_for_five_remote_calls_and_room_for_herdr() {
+        let secs = |s| Duration::from_secs(s);
+
+        assert_eq!(origin_wait(Ok(secs(120))), secs(900));
+        assert_eq!(origin_wait(Ok(secs(3600))), secs(5 * 3600 + 300));
+        assert_eq!(origin_wait(Err(anyhow!("bad timeout"))), secs(900));
     }
 
     #[test]
