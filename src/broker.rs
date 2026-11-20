@@ -190,6 +190,9 @@ impl Broker<'_> {
             None => Some(format!("{target} is in no herd; {reach}")),
             Some(other) if other != herd => Some(format!("{target} is in herd {other}; {reach}")),
             Some(_) if record.is_lead() => Some(format!("{target} is a lead; {reach}")),
+            Some(_) if record.may_be_lead() => Some(format!(
+                "{target}'s role is from another loopherd version; {reach}"
+            )),
             Some(_) => None,
         })
     }
@@ -681,6 +684,9 @@ mod tests {
         world.herd("g");
         world.add(member("lh-9", Some("g")));
         world.add(member("lh-8", None));
+        let mut unknown_role = member("lh-5", Some("h"));
+        unknown_role.role = Some(crate::ledger::Role::Unknown("reviewer".into()));
+        world.add(unknown_role);
         let mut retired = member("lh-7", Some("h"));
         retired.retired = true;
         world.add(retired);
@@ -691,6 +697,10 @@ mod tests {
             ("shepherd", format!("shepherd is the shepherd; {reach}")),
             ("lh-9", format!("lh-9 is in herd g; {reach}")),
             ("lh-8", format!("lh-8 is in no herd; {reach}")),
+            (
+                "lh-5",
+                format!("lh-5's role is from another loopherd version; {reach}"),
+            ),
             (
                 "lh-7",
                 format!("no unretired member is named lh-7; {reach}"),

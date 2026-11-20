@@ -29,7 +29,7 @@ pub fn refuse_own_lead(
     procs: &dyn Procs,
     me: u32,
 ) -> Result<()> {
-    let Some(entry) = ledger.entries()?.remove(name).filter(|e| e.is_lead()) else {
+    let Some(entry) = ledger.entries()?.remove(name).filter(|e| e.may_be_lead()) else {
         return Ok(());
     };
     let in_pane = pane.is_some_and(|pane| {
@@ -166,7 +166,7 @@ pub fn retire(
         }
         record.retired = true;
         record.retired_at = Some(humantime::format_rfc3339_seconds(now).to_string());
-        record.outcome = Some(outcome);
+        record.outcome = Some(outcome.clone());
         Ok(())
     })
 }
@@ -687,6 +687,7 @@ mod tests {
             after_merge: None,
             unsandboxed: None,
             earlier: vec![],
+            unknown: Default::default(),
         }
     }
 
@@ -723,6 +724,24 @@ mod tests {
     #[test]
     fn a_lead_retiring_itself_with_the_pane_env_unset_is_refused() {
         let ledger = lead_running_as(30, 300);
+
+        let err = refuse_own_lead(
+            &ledger,
+            "lead-k",
+            None,
+            &loopherd_under_the_pane_claude(),
+            LOOPHERD,
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("lead-k is the lead running this loopherd"));
+    }
+
+    #[test]
+    fn a_member_whose_role_is_from_another_version_retiring_itself_is_refused() {
+        let mut ledger = lead_running_as(30, 300);
+        ledger.0.get_mut("lead-k").unwrap().role =
+            Some(crate::ledger::Role::Unknown("reviewer".into()));
 
         let err = refuse_own_lead(
             &ledger,

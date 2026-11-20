@@ -111,7 +111,7 @@ fn resolve(ledger: &dyn Ledger, paths: &Paths, req: &LeadRequest) -> Result<Spaw
     let entries = ledger.entries().context("ledger")?;
     let existing = entries
         .values()
-        .find(|e| !e.retired && e.is_lead() && e.herd.as_deref() == Some(&req.herd));
+        .find(|e| !e.retired && e.may_be_lead() && e.herd.as_deref() == Some(&req.herd));
     if let Some(existing) = existing {
         bail!(
             "{} already has a lead, {}; retire it first",
@@ -1494,6 +1494,27 @@ mod tests {
             "herd: h has no [lead]"
         );
         assert!(!setup.worktree().exists());
+    }
+
+    #[test]
+    fn a_lead_is_refused_while_a_member_with_a_role_from_another_version_holds_the_herd() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let mut ledger = MemLedger::default();
+        lead(
+            &herdr(),
+            &mut ledger,
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+        ledger.0.get_mut("lead-h").unwrap().role =
+            Some(crate::ledger::Role::Unknown("reviewer".into()));
+
+        assert_eq!(
+            lead_err(&setup, &mut ledger),
+            "h already has a lead, lead-h; retire it first"
+        );
     }
 
     #[test]

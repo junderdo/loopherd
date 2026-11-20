@@ -43,7 +43,7 @@ pub fn release(
     if !record.retired {
         bail!("refused: {name} is not retired; only a retired member's task can be fed again");
     }
-    if record.is_lead() {
+    if record.may_be_lead() {
         bail!("refused: {name} is a lead, which feed never spawns; use `loopherd lead`");
     }
     if let Some(socket) = &record.socket {
@@ -295,6 +295,7 @@ mod tests {
             after_merge: None,
             unsandboxed: None,
             earlier: vec![],
+            unknown: Default::default(),
         }
     }
 
@@ -559,6 +560,21 @@ mod tests {
         let mut lead = record("lead-prs", s.repo.clone(), true);
         lead.role = Some(Role::Lead);
         s.add(lead);
+
+        let err = s.release("lead-prs", Fate::Clear).unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "refused: lead-prs is a lead, which feed never spawns; use `loopherd lead`"
+        );
+    }
+
+    #[test]
+    fn refuses_a_member_whose_role_is_from_another_version() {
+        let mut s = Setup::new();
+        let mut unknown = record("lead-prs", s.repo.clone(), true);
+        unknown.role = Some(Role::Unknown("reviewer".into()));
+        s.add(unknown);
 
         let err = s.release("lead-prs", Fate::Clear).unwrap_err();
 

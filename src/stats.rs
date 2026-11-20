@@ -86,7 +86,8 @@ pub struct Outcomes {
     pub closed: usize,
     pub released: usize,
     pub retired: usize,
-    /// Retired before retire recorded an outcome.
+    /// Retired before retire recorded an outcome, or with one this version
+    /// doesn't know.
     pub unrecorded: usize,
 }
 
@@ -256,12 +257,12 @@ pub fn stats(
 fn summarize(retired: &[&Retired]) -> Summary {
     let mut outcomes = Outcomes::default();
     for run in retired {
-        *match run.outcome {
+        *match &run.outcome {
             Some(Outcome::Merged) => &mut outcomes.merged,
             Some(Outcome::Closed) => &mut outcomes.closed,
             Some(Outcome::Released) => &mut outcomes.released,
             Some(Outcome::Retired) => &mut outcomes.retired,
-            None => &mut outcomes.unrecorded,
+            None | Some(Outcome::Unknown(_)) => &mut outcomes.unrecorded,
         } += 1;
     }
     let merged = || {
@@ -431,7 +432,7 @@ pub fn render(herds: &[Herd]) -> String {
                     duration(r.total_secs),
                     count(r.tokens.as_ref().map(|t| usage::total(t).read())),
                     count(r.tokens.as_ref().map(|t| usage::total(t).output)),
-                    r.outcome.map_or("-", Outcome::as_str).to_string(),
+                    r.outcome.as_ref().map_or("-", Outcome::as_str).to_string(),
                 ]
             }));
             out.push_str(&table(&rows));
