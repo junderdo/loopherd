@@ -822,7 +822,7 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
 }
 
 #[test]
-fn a_sandboxed_lead_s_feed_tell_and_read_go_through_its_broker_and_stop_at_its_herd() {
+fn a_sandboxed_lead_s_feed_tell_read_and_status_go_through_its_broker_and_stop_at_its_herd() {
     if !live_enabled() {
         return;
     }
@@ -870,6 +870,8 @@ fn a_sandboxed_lead_s_feed_tell_and_read_go_through_its_broker_and_stop_at_its_h
         vec!["read".into(), worker.clone(), "--lines".into(), "5".into()],
         vec!["read".into(), outsider.clone()],
         vec!["tell".into(), outsider.clone(), "hi".into()],
+        vec!["status".into()],
+        vec!["status".into(), "--strays".into()],
     ];
     std::fs::write(
         &probe,
@@ -967,6 +969,23 @@ fn a_sandboxed_lead_s_feed_tell_and_read_go_through_its_broker_and_stop_at_its_h
             ran[i]
         );
     }
+    assert_eq!(code(5), 0, "{:?}", ran[5]);
+    let status = text(5, "out");
+    assert!(status.starts_with(&format!("{herd}\n")), "{status}");
+    for seen in [&name, &worker] {
+        assert!(status.contains(seen.as_str()), "{status}");
+    }
+    for hidden in [outsider.as_str(), "other", "stray"] {
+        assert!(!status.contains(hidden), "{status}");
+    }
+    assert_eq!(code(6), 1, "{:?}", ran[6]);
+    assert!(
+        text(6, "err").contains(&format!(
+            "{name}'s broker refused status: strays are herdr's agents outside every herd"
+        )),
+        "{:?}",
+        ran[6]
+    );
 }
 
 #[test]
