@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 
+use crate::broker::StartBroker;
 use crate::herd::{Paths, Switches, lead_config, plan};
 use crate::herdr::Herdr;
 use crate::ledger::{Ledger, Role};
@@ -19,6 +20,7 @@ pub struct LeadRequest {
     pub claude_args: Vec<String>,
     pub ready_timeout: Duration,
     pub sandbox: Probe,
+    pub broker: StartBroker,
 }
 
 /// Spawns `lead-<herd>` in a detached worktree of the same name, in its
@@ -60,6 +62,12 @@ pub fn lead(
             warning += &format!("; not noted in its mailbox: {e:#}");
         }
         warnings.push(warning);
+    }
+    if let Err(e) = (req.broker)(paths, &name) {
+        warnings.push(format!(
+            "{name}'s broker didn't start ({e:#}), so its loopherd commands fail until \
+             loopherd revive --name {name} starts it"
+        ));
     }
     Ok((name, spawned, warnings))
 }
@@ -271,6 +279,7 @@ mod tests {
             claude_args: claude_args.iter().map(|a| a.to_string()).collect(),
             ready_timeout: Duration::from_secs(60),
             sandbox: || Ok(()),
+            broker: |_, _| Ok(true),
         }
     }
 
@@ -332,6 +341,47 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_can_write_its_own_broker_requests_and_no_other_leads() {
+        let setup = Setup::with_lead(PROMPT);
+        let herdr = herdr();
+
+        lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        let (_, settings) = started_settings(&herdr);
+        let state = setup.root.join("state");
+        let own = state.join("broker/lead-h/requests");
+        let other = state.join("broker/lead-g/requests");
+        let allowed: Vec<PathBuf> = settings["sandbox"]["filesystem"]["allowWrite"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| PathBuf::from(p.as_str().unwrap()))
+            .collect();
+        assert!(allowed.contains(&own), "{allowed:?}");
+        assert!(
+            own.is_dir(),
+            "an allowWrite path that's missing opens nothing"
+        );
+        assert!(
+            !allowed.iter().any(|dir| other.starts_with(dir)),
+            "{allowed:?}"
+        );
+        let deny = &settings["permissions"]["deny"];
+        let file_tools = format!("Edit(/{}/**)", state.join("broker").display());
+        assert!(
+            deny.as_array().unwrap().iter().any(|r| r == &file_tools),
+            "{deny}"
+        );
+    }
+
+    #[test]
     fn a_lead_starts_in_the_sandbox_with_settings_written_outside_its_worktree() {
         let setup = Setup::with_lead(PROMPT);
         let herdr = herdr();
@@ -362,6 +412,7 @@ mod tests {
                             format!("{root}/proj/worktrees/lead-h"),
                             format!("{root}/state/reports"),
                             format!("{root}/state/handoffs"),
+                            format!("{root}/state/broker/lead-h/requests"),
                         ],
                         "denyWrite": [
                             format!("{root}/config"),
@@ -396,6 +447,7 @@ mod tests {
                         format!("Edit(/{root}/config/**)"),
                         "Edit(//home/me/.claude/**)",
                         format!("Edit(/{root}/state/paused/**)"),
+                        format!("Edit(/{root}/state/broker/**)"),
                         format!("Edit(/{root}/state/shepherd.json)"),
                         format!("Edit(/{root}/state/shepherd.json.lock)"),
                         format!("Edit(/{root}/state/ledger.json)"),
@@ -781,7 +833,7 @@ mod tests {
         let (_, settings) = started_settings(&herdr);
         let sandbox = &settings["sandbox"];
         assert_eq!(
-            sandbox["filesystem"]["allowWrite"][3],
+            sandbox["filesystem"]["allowWrite"][4],
             "/home/me/.local/bin"
         );
         assert_eq!(
@@ -1319,6 +1371,62 @@ mod tests {
                     text: warning.into()
                 }),
             "{mailbox:?}"
+        );
+    }
+
+    #[test]
+    fn a_started_lead_gets_its_broker_started() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let req = LeadRequest {
+            broker: |paths, lead| {
+                let dir = paths.state_dir();
+                fs::create_dir_all(dir)?;
+                fs::write(dir.join("broker-started"), lead)?;
+                Ok(true)
+            },
+            ..request(&[])
+        };
+
+        let (_, code) = run(
+            &herdr(),
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &req,
+            false,
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        let started = fs::read_to_string(setup.root.join("state/broker-started")).unwrap();
+        assert_eq!(started, "lead-h");
+    }
+
+    #[test]
+    fn a_broker_that_does_not_start_is_a_warning_naming_revive() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let req = LeadRequest {
+            broker: |_, _| anyhow::bail!("no binary"),
+            ..request(&[])
+        };
+
+        let (out, code) = run(
+            &herdr(),
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &req,
+            false,
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        assert!(
+            out.starts_with(
+                "warning: lead-h's broker didn't start (no binary), so its loopherd commands \
+                 fail until loopherd revive --name lead-h starts it\n"
+            ),
+            "{out}"
         );
     }
 

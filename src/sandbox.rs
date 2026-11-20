@@ -398,7 +398,7 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
     if let Some(refusal) = loosened_refusal(paths, name, &lead.herd, &loosened)? {
         return Err(refusal);
     }
-    create_state(paths.state_dir())?;
+    create_state(paths, name)?;
     let file = settings_file(paths, name);
     let text = serde_json::to_string_pretty(&own)? + "\n";
     write_private(&file, &text).with_context(|| format!("write {}", file.display()))?;
@@ -775,22 +775,29 @@ const WRITABLE_STATE: [&str; 2] = ["reports", "handoffs"];
 /// replaced, so a deny on each file holds.
 const SHEPHERDS_WATCH: [&str; 2] = ["reports/watch.lock", "reports/watch.fired"];
 
-/// What in the state dir is the human's or the shepherd's, denied by name to
-/// the file tools, which the sandbox doesn't cover. `true` marks a directory.
-const KEPT_FROM_FILE_TOOLS: [(&str, bool); 5] = [
+/// What in the state dir is the human's, the shepherd's or a broker's,
+/// denied by name to the file tools, which the sandbox doesn't cover. `true`
+/// marks a directory.
+const KEPT_FROM_FILE_TOOLS: [(&str, bool); 6] = [
     ("paused", true),
+    ("broker", true),
     ("shepherd.json", false),
     ("shepherd.json.lock", false),
     ("ledger.json", false),
     ("ledger.lock", false),
 ];
 
-/// Makes what the lead's sandbox names in the state dir. An `allowWrite`
+/// Makes what lead `name`'s sandbox names in the state dir. An `allowWrite`
 /// entry for a missing path has no effect on Linux, and a `denyWrite` entry
 /// gets a placeholder that would sit in the way of the first real write.
-fn create_state(state: &Path) -> Result<()> {
-    for dir in WRITABLE_STATE {
-        let dir = state.join(dir);
+fn create_state(paths: &Paths, name: &str) -> Result<()> {
+    let state = paths.state_dir();
+    let requests = crate::broker::requests_dir(paths, name);
+    for dir in WRITABLE_STATE
+        .map(|dir| state.join(dir))
+        .into_iter()
+        .chain([requests])
+    {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     }
     for file in SHEPHERDS_WATCH {
@@ -815,6 +822,8 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
     let state = paths.state_dir();
     let mut allow_write = vec![worktree];
     allow_write.extend(WRITABLE_STATE.map(|dir| state.join(dir)));
+    // Only its own: a broker takes every request in its folder as its lead's.
+    allow_write.push(crate::broker::requests_dir(paths, name));
     if switches.install {
         allow_write.push(paths.home.join(".local/bin"));
     }

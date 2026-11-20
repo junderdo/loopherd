@@ -25,6 +25,12 @@ asks the human, through the shepherd, for anything switched off. The shepherd
 restarts it when it hands off.
 _Avoid_: tech lead, supervisor
 
+**Broker**:
+A process loopherd starts beside each lead, outside its sandbox, that runs the
+lead's loopherd commands that need herdr and refuses anything outside the lead's
+own herd.
+_Avoid_: proxy, daemon
+
 **Member**:
 An agent session that loopherd started and tracks, each with its own terminal
 pane, worktree and branch. A member is either a worker or a lead. It usually
