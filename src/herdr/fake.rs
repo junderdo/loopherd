@@ -110,6 +110,7 @@ struct State {
     /// `agent` fails, as when herdr stops answering after a start.
     agent_unreadable: bool,
     mutations: u32,
+    calls: u32,
 }
 
 /// An opened plugin pane's entrypoint, placement and env, sorted by key.
@@ -224,6 +225,15 @@ impl FakeHerdr {
     /// Calls that create, close, start or prompt anything.
     pub fn mutations(&self) -> u32 {
         self.state.lock().unwrap().mutations
+    }
+
+    /// Every call to herdr, reads included.
+    pub fn calls(&self) -> u32 {
+        self.state.lock().unwrap().calls
+    }
+
+    fn called(&self) {
+        self.state.lock().unwrap().calls += 1;
     }
 
     fn mutating(&self) {
@@ -516,6 +526,7 @@ impl FakeHerdr {
 
 impl Herdr for FakeHerdr {
     fn workspaces(&self) -> Result<Vec<Workspace>> {
+        self.called();
         if self.is_down() {
             bail!("herdr server not running");
         }
@@ -523,6 +534,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn agents_within(&self, timeout: Duration) -> Result<Option<Vec<Agent>>> {
+        self.called();
         if let Some(gate) = &self.agents_gate {
             let opened = gate.lock().unwrap().recv_timeout(timeout);
             if opened == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
@@ -533,6 +545,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn agents(&self) -> Result<Vec<Agent>> {
+        self.called();
         if let Some(gate) = &self.agents_gate {
             let _ = gate.lock().unwrap().recv();
         }
@@ -540,6 +553,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn agent(&self, name: &str) -> Result<Agent> {
+        self.called();
         if self.state.lock().unwrap().agent_unreadable {
             bail!("herdr agent get {name} failed");
         }
@@ -553,6 +567,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn tabs_in(&self, workspace_id: &str) -> Result<Vec<Tab>> {
+        self.called();
         Ok(self
             .state
             .lock()
@@ -568,6 +583,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn panes_in(&self, workspace_id: &str) -> Result<Vec<Pane>> {
+        self.called();
         Ok(self
             .state
             .lock()
@@ -580,6 +596,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn pane(&self, pane_id: &str) -> Result<Pane> {
+        self.called();
         if self.is_down() {
             bail!("herdr server not running");
         }
@@ -591,6 +608,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn visible_tab(&self) -> Result<Option<String>> {
+        self.called();
         if self.is_down() {
             bail!("herdr server not running");
         }
@@ -598,6 +616,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn at_shell_prompt(&self, pane_id: &str) -> Result<bool> {
+        self.called();
         let mut state = self.state.lock().unwrap();
         let pane = state
             .panes
@@ -613,6 +632,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn shell_pid(&self, pane_id: &str) -> Result<Option<u32>> {
+        self.called();
         let mut state = self.state.lock().unwrap();
         let flaky = self.fail_shell_pid_of.as_deref() == Some(pane_id);
         if flaky {
@@ -628,6 +648,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn visible_text(&self, pane_id: &str) -> Result<String> {
+        self.called();
         if self.is_down() {
             bail!("herdr server not running");
         }
@@ -646,6 +667,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<NewTab> {
+        self.called();
         self.mutating();
         if self.fail_create_tab {
             bail!("tab create refused");
@@ -661,6 +683,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn close_tab(&self, tab_id: &str) -> Result<()> {
+        self.called();
         self.mutating();
         if self.fail_close_tab {
             bail!("tab close refused");
@@ -673,6 +696,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn split_down(&self, pane_id: &str, cwd: &Path, env: &[(&str, &str)]) -> Result<String> {
+        self.called();
         self.mutating();
         if self.is_down() {
             bail!("herdr server not running");
@@ -699,6 +723,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn close_pane(&self, pane_id: &str) -> Result<()> {
+        self.called();
         self.mutating();
         let mut state = self.state.lock().unwrap();
         state.panes.retain(|p| p.id != pane_id);
@@ -713,6 +738,7 @@ impl Herdr for FakeHerdr {
         _timeout: Duration,
         args: &[String],
     ) -> Result<StartOutcome> {
+        self.called();
         self.mutating();
         if self.startup == Startup::Fails {
             bail!("claude exited during startup");
@@ -776,6 +802,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn wait(&self, name: &str, until: &[AgentStatus], _timeout: Duration) -> Result<WaitOutcome> {
+        self.called();
         if self.fail_wait {
             bail!("wait refused");
         }
@@ -791,6 +818,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn prompt(&self, name: &str, text: &str) -> Result<()> {
+        self.called();
         self.mutating();
         if self.find(name)?.status == AgentStatus::Blocked {
             bail!("agent {name} is blocked");
@@ -814,6 +842,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn focus(&self, pane_id: &str) -> Result<()> {
+        self.called();
         if self.is_down() {
             bail!("herdr server not running");
         }
@@ -835,6 +864,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn focus_plugin_pane(&self, pane_id: &str) -> Result<()> {
+        self.called();
         if self.is_down() {
             bail!("herdr server not running");
         }
@@ -860,6 +890,7 @@ impl Herdr for FakeHerdr {
         placement: &Placement,
         env: &[(&str, &str)],
     ) -> Result<()> {
+        self.called();
         if self.is_down() {
             bail!("herdr server not running");
         }
@@ -901,6 +932,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn label_pane(&self, pane_id: &str, label: Option<&str>) -> Result<()> {
+        self.called();
         if self.is_down() {
             bail!("herdr server not running");
         }
@@ -918,6 +950,7 @@ impl Herdr for FakeHerdr {
     }
 
     fn plugin(&self, id: &str, _timeout: Duration) -> Result<Option<Plugin>> {
+        self.called();
         if self.is_down() {
             bail!("herdr server not running");
         }
@@ -925,10 +958,12 @@ impl Herdr for FakeHerdr {
     }
 
     fn socket(&self) -> Option<PathBuf> {
+        self.called();
         self.socket.clone()
     }
 
     fn server(&self, _timeout: Duration) -> Result<Server> {
+        self.called();
         let socket = self.socket.clone();
         Ok(match (&self.server, self.is_down()) {
             (Some(server), _) => server.clone(),

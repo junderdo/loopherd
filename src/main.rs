@@ -1,3 +1,4 @@
+mod broker;
 mod config;
 mod context;
 mod continuation;
@@ -354,6 +355,9 @@ enum Command {
     /// The detached waiter `restart --self` starts.
     #[command(hide = true)]
     RestartWait { name: String },
+    /// The detached broker `lead` and `revive` start for a lead (D98).
+    #[command(hide = true)]
+    Broker { lead: String },
     /// Leave a report for the shepherd from the member running in this pane.
     /// The one command members run against the real state dir.
     Report {
@@ -749,6 +753,7 @@ fn main() -> ExitCode {
         } => ("restart", run_restart(&name, force)),
         Command::Restart { .. } => ("restart", run_restart_self()),
         Command::RestartWait { name } => ("restart-wait", run_restart_wait(&name)),
+        Command::Broker { lead } => ("broker", run_broker(&lead)),
         Command::Status { all, strays, json } => ("status", run_status(all, strays, json)),
         Command::Stats {
             herd,
@@ -1058,6 +1063,7 @@ fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32>
         startup,
         paths: Paths::from_env()?,
         sandbox: sandbox::probe,
+        broker: broker::start,
     };
     let (message, code) = revive(
         &CliHerdr,
@@ -1325,11 +1331,34 @@ fn run_tell(name: &str, text: Option<String>, text_file: Option<PathBuf>) -> Res
         }
         (None, None) => unreachable!("clap requires text or --text-file"),
     };
-    println!(
-        "{}",
-        tell::tell(&CliHerdr, name, &text, Duration::from_secs(10))?
-    );
+    let op = broker::Op::Tell {
+        name: name.into(),
+        text,
+    };
+    println!("{}", broker::run(&CliHerdr, own_broker()?.as_ref(), &op)?);
     Ok(0)
+}
+
+/// The broker of the lead running this loopherd, if a lead runs it.
+fn own_broker() -> Result<Option<broker::Client>> {
+    let paths = Paths::from_env().context("herd")?;
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let lineage = own_lineage();
+    let socket = socket_from_env();
+    let id = own_pane();
+    let pane = id.as_deref().map(|id| tool_hook::Pane {
+        id,
+        socket: socket.as_deref(),
+        lineage: &lineage,
+    });
+    let lead = broker::lead_here(
+        &paths,
+        &ledger,
+        &process::ProcFs,
+        std::process::id(),
+        pane.as_ref(),
+    )?;
+    Ok(lead.map(|lead| broker::Client::for_lead(&paths, &lead)))
 }
 
 fn run_restart(name: &str, force: bool) -> Result<i32> {
@@ -1431,6 +1460,22 @@ fn spawn_waiter(name: &str, waiter: lock::Lock) -> Result<()> {
     // Dropping unlocks the open file the waiter shares; exiting only closes ours.
     std::mem::forget(waiter);
     Ok(())
+}
+
+fn run_broker(lead: &str) -> Result<i32> {
+    let paths = Paths::from_env().context("herd")?;
+    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let served = broker::serve(
+        &CliHerdr,
+        &mut ledger,
+        &paths,
+        lead,
+        Duration::from_millis(100),
+    )?;
+    if served == broker::Served::AlreadyRunning {
+        eprintln!("loopherd broker: a broker already serves {lead}");
+    }
+    Ok(0)
 }
 
 fn run_restart_wait(name: &str) -> Result<i32> {
@@ -2195,6 +2240,7 @@ fn run_lead(args: LeadArgs) -> Result<i32> {
         claude_args: args.claude_args,
         ready_timeout: Duration::from_secs(args.ready_timeout),
         sandbox: sandbox::probe,
+        broker: broker::start,
     };
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let inherited = inherited_workspace(&ledger)?;

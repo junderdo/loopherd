@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 
+use crate::broker::StartBroker;
 use crate::herd::{Paths, Switches, lead_config, plan};
 use crate::herdr::Herdr;
 use crate::ledger::{Ledger, Role};
@@ -19,6 +20,7 @@ pub struct LeadRequest {
     pub claude_args: Vec<String>,
     pub ready_timeout: Duration,
     pub sandbox: Probe,
+    pub broker: StartBroker,
 }
 
 /// Spawns `lead-<herd>` in a detached worktree of the same name, in its
@@ -40,23 +42,32 @@ pub fn lead(
     let launch = sandbox::prepare(paths, &spawn_req.name, &kept, req.sandbox).context("sandbox")?;
     spawn_req.claude_args.extend(launch.args());
     let spawned = spawn(herdr, ledger, &spawn_req, inherited_workspace)?;
-    let (Some(why), Some(text)) = (launch.hook_only(), launch.warning(&spawn_req.name)) else {
-        return Ok((spawn_req.name, spawned, None));
-    };
-    // The lead already runs, so what can't be noted only adds to the warning.
-    let mut warning = text.clone();
-    let flagged = ledger.update(&spawn_req.name, &mut |r| {
-        r.unsandboxed = Some(why.to_string());
-        Ok(())
-    });
-    if let Err(e) = flagged {
-        warning += &format!("; not flagged in the ledger: {e:#}");
+    let name = &spawn_req.name;
+    let mut warnings = vec![];
+    if let (Some(why), Some(text)) = (launch.hook_only(), launch.warning(name)) {
+        // The lead already runs, so what can't be noted only adds to the warning.
+        let mut warning = text.clone();
+        let flagged = ledger.update(name, &mut |r| {
+            r.unsandboxed = Some(why.to_string());
+            Ok(())
+        });
+        if let Err(e) = flagged {
+            warning += &format!("; not flagged in the ledger: {e:#}");
+        }
+        let note = Entry::new(SystemTime::now(), Body::Note { text });
+        if let Err(e) = report::append(&paths.state_dir().join("reports"), name, &note) {
+            warning += &format!("; not noted in its mailbox: {e:#}");
+        }
+        warnings.push(warning);
     }
-    let note = Entry::new(SystemTime::now(), Body::Note { text });
-    if let Err(e) = report::append(&paths.state_dir().join("reports"), &spawn_req.name, &note) {
-        warning += &format!("; not noted in its mailbox: {e:#}");
+    if let Err(e) = (req.broker)(paths, name) {
+        warnings.push(format!(
+            "{name}'s broker didn't start ({e:#}), so its loopherd commands fail until \
+             loopherd revive --name {name} starts it"
+        ));
     }
-    Ok((spawn_req.name, spawned, Some(warning)))
+    let warning = (!warnings.is_empty()).then(|| warnings.join("\nwarning: "));
+    Ok((spawn_req.name, spawned, warning))
 }
 
 /// `dry_run`'s plan, or `lead`'s spawn report, with the exit code.
@@ -267,6 +278,7 @@ mod tests {
             claude_args: claude_args.iter().map(|a| a.to_string()).collect(),
             ready_timeout: Duration::from_secs(60),
             sandbox: || Ok(()),
+            broker: |_, _| Ok(true),
         }
     }
 
@@ -536,6 +548,62 @@ mod tests {
                     text: warning.into()
                 }),
             "{mailbox:?}"
+        );
+    }
+
+    #[test]
+    fn a_started_lead_gets_its_broker_started() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let req = LeadRequest {
+            broker: |paths, lead| {
+                let dir = paths.state_dir();
+                fs::create_dir_all(dir)?;
+                fs::write(dir.join("broker-started"), lead)?;
+                Ok(true)
+            },
+            ..request(&[])
+        };
+
+        let (_, code) = run(
+            &herdr(),
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &req,
+            false,
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        let started = fs::read_to_string(setup.root.join("state/broker-started")).unwrap();
+        assert_eq!(started, "lead-h");
+    }
+
+    #[test]
+    fn a_broker_that_does_not_start_is_a_warning_naming_revive() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let req = LeadRequest {
+            broker: |_, _| anyhow::bail!("no binary"),
+            ..request(&[])
+        };
+
+        let (out, code) = run(
+            &herdr(),
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &req,
+            false,
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        assert!(
+            out.starts_with(
+                "warning: lead-h's broker didn't start (no binary), so its loopherd commands \
+                 fail until loopherd revive --name lead-h starts it\n"
+            ),
+            "{out}"
         );
     }
 

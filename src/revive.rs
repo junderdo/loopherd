@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 
+use crate::broker::StartBroker;
 use crate::herd::Paths;
 use crate::herdr::{
     Agent, AgentStatus, Herdr, Pane, StartOutcome, Workspace, wait_for_shell_prompt,
@@ -49,6 +50,7 @@ pub struct ReviveRequest {
     /// Where a lead's herd file is read and its sandbox settings written.
     pub paths: Paths,
     pub sandbox: Probe,
+    pub broker: StartBroker,
 }
 
 /// One line per entry, and whether any entry failed.
@@ -188,6 +190,14 @@ pub fn revive(
             }
         }
         warnings.extend(handoff_warnings);
+        if record.is_lead()
+            && !record.retired
+            && !req.dry_run
+            && let Err(e) = (req.broker)(&req.paths, &record.name)
+        {
+            warnings.push(format!("its broker didn't start: {e:#}"));
+            revived.failed = true;
+        }
         if noted
             && !matches!(
                 outcome.rearm(),
@@ -820,6 +830,7 @@ mod tests {
             server: None,
             paths: own_paths(),
             sandbox: || Ok(()),
+            broker: |_, _| Ok(false),
         }
     }
 
@@ -1883,6 +1894,61 @@ mod tests {
         let (out, _) = run(&herdr, &mut ledger, &request());
         assert_eq!(out, "skipped lead-h: retired");
         assert!(herdr.prompts().is_empty());
+    }
+
+    #[test]
+    fn each_unretired_lead_gets_its_broker_started_when_none_runs() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr()
+            .with_live_agent(Some("lead-a"), Some("sess-lead-a"), "w1:p4")
+            .with_live_agent(Some("x"), Some("sess-x"), "w1:p5");
+        let mut ledger = ledger([
+            lead("lead-a", cwd.path()),
+            AgentRecord {
+                retired: true,
+                ..lead("lead-r", cwd.path())
+            },
+            record("x", cwd.path()),
+        ]);
+        let req = ReviveRequest {
+            broker: |paths, lead| {
+                let file = paths.state_dir().join("brokers-started");
+                let mut started = std::fs::read_to_string(&file).unwrap_or_default();
+                started += &format!("{lead}\n");
+                std::fs::create_dir_all(paths.state_dir())?;
+                std::fs::write(&file, started)?;
+                Ok(true)
+            },
+            ..request()
+        };
+
+        let (_, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 0);
+        let started = std::fs::read_to_string(own_paths().state_dir().join("brokers-started"));
+        assert_eq!(started.unwrap(), "lead-a\n");
+    }
+
+    #[test]
+    fn a_broker_revive_cannot_start_is_a_failure_naming_why() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr().with_live_agent(Some("lead-h"), Some("sess-lead-h"), "w1:p4");
+        let mut ledger = ledger([lead("lead-h", cwd.path())]);
+        let req = ReviveRequest {
+            broker: |_, _| anyhow::bail!("no binary"),
+            ..request()
+        };
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(
+            (out.as_str(), code),
+            (
+                "warning lead-h: its broker didn't start: no binary\n\
+                 alive lead-h w1:p4 (prompted to re-arm its watch)",
+                1
+            )
+        );
     }
 
     #[test]

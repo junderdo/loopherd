@@ -8,6 +8,9 @@ use anyhow::{Result, anyhow, bail};
 use crate::herdr::{AgentStatus, Herdr, WaitOutcome};
 use crate::subagent_view::{TEXT_REACHES_SUBAGENT, ensure_main_view};
 
+/// How long `tell` waits for the member to go working.
+pub const WORKING_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Sends `text` to `name` after checking its pane shows the main
 /// conversation, then waits up to `timeout` for it to go `working`. Once the
 /// text is sent it returns `Ok`, so a caller never resends it.
