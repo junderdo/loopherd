@@ -674,6 +674,16 @@ impl Herdr for FakeHerdr {
             .unwrap_or_default())
     }
 
+    fn recent_text(&self, pane_id: &str, lines: usize) -> Result<String> {
+        let screen = self.visible_text(pane_id)?;
+        let kept: Vec<&str> = screen.lines().collect();
+        let from = kept.len().saturating_sub(lines);
+        Ok(kept[from..]
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect())
+    }
+
     fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<NewTab> {
         self.called();
         self.mutating();

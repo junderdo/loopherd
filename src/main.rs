@@ -25,6 +25,7 @@ mod pause;
 mod pr_link;
 mod process;
 mod prompt;
+mod read;
 mod release;
 mod report;
 mod restart;
@@ -338,6 +339,15 @@ enum Command {
         text: Option<String>,
         #[arg(long)]
         text_file: Option<PathBuf>,
+    },
+    /// Print a live member's last lines of output, unwrapped, as `herdr agent
+    /// read --source recent-unwrapped` does. Read-only.
+    Read {
+        name: String,
+        /// How many lines, up to 1000.
+        #[arg(long, default_value_t = read::DEFAULT_LINES as u64,
+              value_parser = clap::value_parser!(u64).range(1..=read::MAX_READ_LINES as u64))]
+        lines: u64,
     },
     /// Give a member that wrote its handoff a fresh session in the same pane:
     /// sends it /clear, waits for the ledger to follow the new session, then
@@ -758,6 +768,16 @@ fn main() -> ExitCode {
             text,
             text_file,
         } => ("tell", run_tell(&name, text, text_file)),
+        Command::Read { name, lines } => (
+            "read",
+            run_op(
+                own_broker().as_ref(),
+                &broker::Op::Read {
+                    name,
+                    lines: lines as usize,
+                },
+            ),
+        ),
         Command::Restart {
             name: Some(name),
             force,
@@ -1039,6 +1059,20 @@ fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32>
 fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
     use std::io::IsTerminal;
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    // After a herdr restart the shepherd's pane may carry a dead lead's old id.
+    let shepherd = ledger
+        .dir()
+        .is_ok_and(|state| shepherd_here(&state, own_pane().as_deref()).is_some());
+    if let Some(client) = own_broker().filter(|_| !shepherd) {
+        let op = broker::Op::Status {
+            all,
+            strays,
+            json,
+            color: std::io::stdout().is_terminal(),
+        };
+        return run_op(Some(&client), &op);
+    }
+    broker::refuse_unrouted(&ledger, "status")?;
     let format = match json {
         true => Format::Json,
         false => Format::Text {

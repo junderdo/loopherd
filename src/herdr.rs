@@ -132,6 +132,8 @@ pub trait Herdr {
     fn shell_pid(&self, pane_id: &str) -> Result<Option<u32>>;
     /// The pane's visible screen as plain text. Read-only.
     fn visible_text(&self, pane_id: &str) -> Result<String>;
+    /// The agent in `pane_id`'s last `lines` lines of output, unwrapped, as plain text. Read-only.
+    fn recent_text(&self, pane_id: &str, lines: usize) -> Result<String>;
     /// Creates a tab without focusing it.
     fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<NewTab>;
     fn close_tab(&self, tab_id: &str) -> Result<()>;
@@ -538,6 +540,42 @@ impl Herdr for CliHerdr {
             );
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    // `agent read` prints plain text, or a JSON error envelope when it fails.
+    fn recent_text(&self, pane_id: &str, lines: usize) -> Result<String> {
+        let lines = lines.to_string();
+        let args = [
+            "agent",
+            "read",
+            pane_id,
+            "--source",
+            "recent-unwrapped",
+            "--lines",
+            &lines,
+            "--format",
+            "text",
+        ];
+        let out = self
+            .command(&args)
+            .output()
+            .with_context(|| format!("run herdr {}", args.join(" ")))?;
+        if out.status.success() {
+            return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+        }
+        match serde_json::from_slice::<ErrorEnvelope>(&out.stdout)
+            .or_else(|_| serde_json::from_slice::<ErrorEnvelope>(&out.stderr))
+        {
+            Ok(env) => bail!(
+                "herdr agent read: {} ({})",
+                env.error.message,
+                env.error.code
+            ),
+            Err(_) => bail!(
+                "herdr agent read failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        }
     }
 
     fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<NewTab> {
