@@ -1491,6 +1491,49 @@ mod tests {
     }
 
     #[test]
+    fn empty_placeholder_settings_in_a_kept_lead_worktree_count_as_none() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let worktree = ensure_detached_worktree(&setup.repo, "lead-h").unwrap();
+        fs::create_dir_all(worktree.join(".claude")).unwrap();
+        for name in ["settings.json", "settings.local.json"] {
+            fs::write(worktree.join(".claude").join(name), "").unwrap();
+        }
+
+        lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn malformed_settings_in_a_kept_lead_worktree_still_refuse_under_require() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let worktree = ensure_detached_worktree(&setup.repo, "lead-h").unwrap();
+        fs::create_dir_all(worktree.join(".claude")).unwrap();
+        let file = worktree.join(".claude/settings.json");
+        fs::write(&file, "{ not json").unwrap();
+
+        let err = lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        let shown = format!("{err:#}");
+        assert!(
+            shown.contains(&format!("{}: can't parse it: ", file.display())),
+            "{shown}"
+        );
+    }
+
+    #[test]
     fn prefer_starts_a_lead_whose_sandbox_cant_start_with_a_warning_in_its_mailbox() {
         let setup = Setup::with_lead("prompt = \"go\"\nsandbox = \"prefer\"");
         let herdr = herdr();
