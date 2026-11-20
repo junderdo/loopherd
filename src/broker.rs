@@ -747,7 +747,14 @@ pub fn serve<L: Ledger + Clone + Send>(
     // the lead's sandbox can't write config/broker to plant a link.
     let remote =
         crate::worktree::remote_timeout().map_or(String::new(), |r| r.as_secs().to_string());
-    let _ = std::fs::write(lock_file(paths, lead), format!("{remote}\n{MARKS}\n"));
+    let binary = std::env::current_exe().map_or(String::new(), |exe| {
+        let Binary { path, version } = Binary::at(exe);
+        format!("{VERSION}{version}\n{BINARY}{}\n", path.display())
+    });
+    let _ = std::fs::write(
+        lock_file(paths, lead),
+        format!("{remote}\n{MARKS}\n{binary}"),
+    );
     write_replacing(&pid_file(paths, lead), &std::process::id().to_string())?;
     let _pid = RemovedOnExit(pid_file(paths, lead));
     let herd = sandbox::Lead::kept(paths, lead)?
@@ -1351,9 +1358,15 @@ impl Client {
         let given_up = Instant::now() + answer_within;
         loop {
             if let Ok(text) = std::fs::read(&reply) {
-                return match serde_json::from_slice(&text)
-                    .with_context(|| format!("read {lead}'s broker's reply"))?
-                {
+                let reply = serde_json::from_slice(&text).with_context(|| {
+                    format!(
+                        "{lead}'s broker answered {} in a form this loopherd can't read, so it may \
+                         run an older loopherd; the shepherd can restart it with loopherd \
+                         broker-restart {lead}",
+                        op.command()
+                    )
+                })?;
+                return match reply {
                     Reply::Done { out, err, code } => Ok((out, err, code)),
                     // This client wrote a well-formed request, so only an older broker can't read it.
                     Reply::Refused(why) if why.starts_with(MALFORMED) => Err(anyhow!(
@@ -1631,6 +1644,37 @@ fn broker_remote_timeout(lock: &Path) -> Duration {
 
 /// What a broker's lock holds once it marks each request it starts; an older one doesn't.
 const MARKS: &str = "marks";
+
+const VERSION: &str = "version ";
+const BINARY: &str = "binary ";
+
+/// A loopherd binary, which a broker records in its lock so a newer one can tell it is stale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Binary {
+    pub path: PathBuf,
+    /// What `loopherd --version` prints, which names its commit off a release tag.
+    pub version: String,
+}
+
+impl Binary {
+    /// This loopherd's build, at `path`.
+    pub fn at(path: PathBuf) -> Binary {
+        Binary {
+            path,
+            version: env!("LOOPHERD_VERSION").into(),
+        }
+    }
+}
+
+/// The binary `lead`'s broker recorded; `None` from one that predates recording it.
+pub fn recorded_binary(paths: &Paths, lead: &str) -> Option<Binary> {
+    let text = std::fs::read_to_string(lock_file(paths, lead)).ok()?;
+    let field = |prefix: &str| text.lines().find_map(|line| line.strip_prefix(prefix));
+    Some(Binary {
+        version: field(VERSION)?.into(),
+        path: field(BINARY)?.into(),
+    })
+}
 
 fn marks_starts(lock: &Path) -> bool {
     std::fs::read_to_string(lock).is_ok_and(|text| text.lines().any(|line| line == MARKS))
@@ -2472,13 +2516,44 @@ mod tests {
         let recorded = broker_remote_timeout(&lock);
 
         let own = crate::worktree::remote_timeout().unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&lock).unwrap(),
-            format!("{}\nmarks\n", own.as_secs())
+        assert!(
+            std::fs::read_to_string(&lock)
+                .unwrap()
+                .starts_with(&format!("{}\nmarks\n", own.as_secs()))
         );
         assert_eq!(recorded, own);
         world.retire("lead-h");
         serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_serving_broker_records_the_binary_it_runs() {
+        let world = World::new();
+        let serving = world.serve(FakeHerdr::new(&[]));
+        let given_up = Instant::now() + Duration::from_secs(5);
+        while recorded_binary(&world.paths, "lead-h").is_none() {
+            assert!(
+                Instant::now() < given_up,
+                "the broker never recorded its binary"
+            );
+            std::thread::sleep(POLL);
+        }
+
+        let recorded = recorded_binary(&world.paths, "lead-h").unwrap();
+
+        assert_eq!(recorded, Binary::at(std::env::current_exe().unwrap()));
+        assert_eq!(recorded.version, env!("LOOPHERD_VERSION"));
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_broker_that_records_no_binary_predates_recording_it() {
+        let world = World::new();
+        let _held = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+        std::fs::write(lock_file(&world.paths, "lead-h"), "300\nmarks\n").unwrap();
+
+        assert_eq!(recorded_binary(&world.paths, "lead-h"), None);
     }
 
     #[test]
@@ -3120,6 +3195,42 @@ mod tests {
             format!("{err:#}"),
             "lead-h's broker predates this loopherd, so it can't prompt; the shepherd must \
              restart it with loopherd broker-restart lead-h"
+        );
+        old.join().unwrap();
+    }
+
+    #[test]
+    fn a_reply_the_client_cannot_read_names_a_stale_broker_and_its_restart() {
+        let world = World::new();
+        let _held = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+        let requests = requests_dir(&world.paths, "lead-h");
+        let replies = replies_dir(&world.paths, "lead-h");
+        std::fs::create_dir_all(&requests).unwrap();
+        std::fs::create_dir_all(&replies).unwrap();
+        // An older broker, answering in a form this loopherd doesn't know.
+        let old = std::thread::spawn(move || {
+            loop {
+                let name = std::fs::read_dir(&requests)
+                    .unwrap()
+                    .filter_map(|e| e.ok()?.file_name().into_string().ok())
+                    .find(|n| n.ends_with(".json"));
+                if let Some(name) = name {
+                    let reply = br#"{"ok":"sent"}"#;
+                    write_atomically(&replies, name.trim_end_matches(".json"), reply).unwrap();
+                    return;
+                }
+                std::thread::sleep(POLL);
+            }
+        });
+
+        let err = world.client().call(&tell("lh-1", "hi")).unwrap_err();
+
+        assert!(
+            format!("{err:#}").starts_with(
+                "lead-h's broker answered tell in a form this loopherd can't read, so it may run \
+                 an older loopherd; the shepherd can restart it with loopherd broker-restart lead-h: "
+            ),
+            "{err:#}"
         );
         old.join().unwrap();
     }
