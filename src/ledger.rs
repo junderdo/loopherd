@@ -161,6 +161,12 @@ impl AgentRecord {
     pub fn is_lead(&self) -> bool {
         self.role == Some(Role::Lead)
     }
+
+    /// A lead, or a role from another loopherd version that may be one: lead
+    /// guards apply to it and feed never reaps it (D99).
+    pub fn may_be_lead(&self) -> bool {
+        matches!(self.role, Some(Role::Lead | Role::Unknown(_)))
+    }
 }
 
 /// A process by PID and start time, so a reused PID isn't mistaken for it.

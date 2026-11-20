@@ -551,7 +551,7 @@ impl Checks<'_> {
             each: self.timeout,
         };
         let workers = ledger.entries()?.into_values().filter(|e| {
-            !e.retired && !e.is_lead() && e.herd.as_deref() == Some(self.herd.as_str())
+            !e.retired && !e.may_be_lead() && e.herd.as_deref() == Some(self.herd.as_str())
         });
         let after_merge = queue.as_ref().is_some_and(|q| !q.after_merge.is_empty());
         let mut events = vec![];

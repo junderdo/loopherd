@@ -334,6 +334,12 @@ fn reap(
     let workers = members.filter(|e| !e.retired && !e.is_lead());
     for member in workers.filter(|e| e.herd.as_deref() == Some(&req.herd)) {
         let name = &member.name;
+        if member.may_be_lead() {
+            lines.push(format!(
+                "{name}: left alone, its role is from another loopherd version"
+            ));
+            continue;
+        }
         if let Some(AfterMerge::Pending { owner }) = member.after_merge {
             if live(req.procs, Some(owner)).is_some() {
                 lines.push(format!("after_merge {name}: running in feed {}", owner.pid));
@@ -2211,6 +2217,28 @@ mod tests {
     }
 
     #[test]
+    fn a_member_whose_role_is_from_another_version_is_never_checked_or_retired() {
+        let setup = Setup::with_done("printf ''", 1, "touch checked; true");
+        let herdr = herdr().with_agent("lh-9");
+        let mut unknown = member("lh-9", Some("prs"), false);
+        unknown.role = Some(crate::ledger::Role::Unknown("reviewer".into()));
+        unknown.params = Some(Default::default());
+        let mut ledger = ledger(&[unknown]);
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "lh-9: left alone, its role is from another loopherd version",
+                "prs: 0 retired, 0 added, 0 skipped, 0 errors"
+            ]
+        );
+        assert!(!ledger.0["lh-9"].retired);
+        assert!(!setup.repo.path().join("checked").exists());
+    }
+
+    #[test]
     fn a_herd_without_a_queue_is_an_error() {
         let setup = Setup::new("echo 1", 1);
         fs::write(
@@ -3058,6 +3086,32 @@ mod tests {
                 )]
             );
         }
+    }
+
+    #[test]
+    fn from_the_pane_of_a_role_from_another_version_after_merge_is_gated_as_a_leads() {
+        let setup = Setup::after_merge(
+            r#"["echo one >> log", "gh pr merge 7"]"#,
+            "[lead]\nprompt = \"go\"\n",
+        );
+        let herdr = herdr();
+        let mut ledger = with_lead(fed_one(&setup, &herdr), "prs");
+        ledger.0.get_mut("lead-prs").unwrap().role =
+            Some(crate::ledger::Role::Unknown("reviewer".into()));
+        setup.touch("merged-1");
+
+        let fed = setup
+            .feed_from(&herdr, &mut ledger, false, Some("w1:p0"))
+            .unwrap();
+
+        assert!(
+            fed.lines
+                .iter()
+                .any(|l| l.starts_with("after_merge zpr-1: not run: ")),
+            "{:?}",
+            fed.lines
+        );
+        assert_eq!(setup.read("log"), None);
     }
 
     #[test]
