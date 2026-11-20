@@ -557,6 +557,24 @@ fn state_checks(
             .filter(|r| !r.retired && r.is_lead())
             .filter_map(|lead| lead_sandbox_check(&setup.paths, lead)),
     );
+    // A lead known to be on another herdr has its broker under that herdr's
+    // config dir; one whose herdr can't be told apart is checked, as revive starts it.
+    let here = reached.as_ref().and_then(|(_, socket)| socket.as_deref());
+    checks.extend(
+        members
+            .iter()
+            .filter(|r| !r.retired && r.is_lead())
+            .filter(|lead| here.is_none_or(|here| !elsewhere(Some(here), lead)))
+            .filter(|lead| !crate::broker::running(&setup.paths, &lead.name))
+            .map(|lead| {
+                let name = &lead.name;
+                failure(
+                    &format!("broker {name}"),
+                    format!("no broker is running for {name}, so its loopherd commands fail"),
+                    format!("loopherd revive --name {name}"),
+                )
+            }),
+    );
     if let Some((herdr, socket)) = reached {
         let unretired: Vec<_> = members.iter().filter(|r| !r.retired).collect();
         checks.extend(pane_checks(herdr, socket.as_deref(), &unretired));
@@ -616,6 +634,16 @@ fn mailbox_check(dir: &Path, name: &str) -> Option<Check> {
     Some(failure(&format!("mailbox {name}"), detail, fix))
 }
 
+/// Whether `record` is on another herdr than the one at `here`. With herdr's
+/// socket unknown, a recorded one can't be shown to be this herdr's.
+fn elsewhere(here: Option<&Path>, record: &crate::ledger::AgentRecord) -> bool {
+    match (here, &record.socket) {
+        (Some(here), Some(there)) => !same_file(here, there),
+        (None, Some(_)) => true,
+        (_, None) => false,
+    }
+}
+
 /// Each member on `here`'s herdr whose pane is gone warns; those on another
 /// socket are counted, not checked.
 fn pane_checks(
@@ -644,13 +672,8 @@ fn pane_checks(
         }
     };
     let on = here.map_or("herdr's default socket".into(), |s| s.display().to_string());
-    // With herdr's socket unknown, a recorded one can't be shown to be this herdr's.
-    let elsewhere = |r: &&crate::ledger::AgentRecord| match (here, &r.socket) {
-        (Some(here), Some(there)) => !same_file(here, there),
-        (None, Some(_)) => true,
-        (_, None) => false,
-    };
-    let (other, local): (Vec<_>, Vec<_>) = members.iter().copied().partition(elsewhere);
+    let (other, local): (Vec<_>, Vec<_>) =
+        members.iter().copied().partition(|r| elsewhere(here, r));
     let mut checks: Vec<Check> = local
         .iter()
         .filter(|r| crate::matching::live_agent(r, &agents).is_none())
@@ -1918,6 +1941,82 @@ mod tests {
                  loopherd revive --name lead-pre",
             ]
         );
+    }
+
+    #[test]
+    fn an_unretired_lead_on_this_herdr_with_no_broker_fails_naming_revive() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nsandbox = \"prefer\"\n",
+                repo.to_str().unwrap()
+            ),
+        );
+        let kept = crate::sandbox::Lead {
+            herd: "h".into(),
+            args: vec![],
+        };
+        crate::sandbox::prepare(m.paths(), "lead-up", &kept, || Ok(())).unwrap();
+        let settings = crate::sandbox::settings_file(m.paths(), "lead-up");
+        let lead = |name: &str| {
+            let mut lead = member(name, "h", "w1:p1", None);
+            lead.role = Some(crate::ledger::Role::Lead);
+            lead.claude_args = vec!["--settings".into(), settings.display().to_string()];
+            lead
+        };
+        let mut retired = lead("lead-old");
+        retired.retired = true;
+        let mut elsewhere = lead("lead-dev");
+        elsewhere.socket = Some("/run/dev.sock".into());
+        m.ledger(&[lead("lead-down"), lead("lead-up"), retired, elsewhere]);
+        let paths = m.paths().clone();
+        let mut ledger = FileLedger::new(m.state().join("ledger.json"));
+        let serving = std::thread::spawn(move || {
+            crate::broker::serve(
+                &herdr(),
+                &mut ledger,
+                &paths,
+                "lead-up",
+                Duration::from_millis(10),
+            )
+        });
+        let given_up = std::time::Instant::now() + Duration::from_secs(5);
+        while !crate::broker::running(m.paths(), "lead-up") {
+            assert!(!serving.is_finished(), "{:?}", serving.join());
+            assert!(
+                std::time::Instant::now() < given_up,
+                "the broker never started"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let brokers = |socket: Option<&str>| -> Vec<String> {
+            let mut herdr = herdr();
+            herdr.socket = socket.map(PathBuf::from);
+            problems(&m, &herdr)
+                .into_iter()
+                .filter(|p| p.contains("broker"))
+                .collect()
+        };
+        let down = |name: &str| {
+            format!(
+                "failure broker {name}: no broker is running for {name}, so its \
+                 loopherd commands fail; fix: loopherd revive --name {name}"
+            )
+        };
+
+        assert_eq!(brokers(Some("/run/live.sock")), [down("lead-down")]);
+        assert_eq!(brokers(None), [down("lead-dev"), down("lead-down")]);
+        let mut ledger = FileLedger::new(m.state().join("ledger.json"));
+        ledger
+            .update("lead-up", &mut |r| {
+                r.retired = true;
+                Ok(())
+            })
+            .unwrap();
+        serving.join().unwrap().unwrap();
     }
 
     #[test]
