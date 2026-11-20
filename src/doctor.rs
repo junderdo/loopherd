@@ -1974,8 +1974,15 @@ mod tests {
         let paths = m.paths().clone();
         let mut ledger = FileLedger::new(m.state().join("ledger.json"));
         let serving = std::thread::spawn(move || {
+            let herdr = herdr();
+            let host = crate::broker::Host {
+                herdr: &herdr,
+                procs: &crate::process::ProcFs,
+                claude_dir: None,
+                process: crate::ledger::Process { pid: 0, start: 0 },
+            };
             crate::broker::serve(
-                &herdr(),
+                &host,
                 &mut ledger,
                 &paths,
                 "lead-up",

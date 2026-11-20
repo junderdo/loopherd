@@ -474,11 +474,9 @@ fn lead_file(paths: &Paths, name: &str) -> PathBuf {
 }
 
 /// The loopherd commands a lead runs that write what its sandbox denies: its
-/// members' worktrees, beside its own, or the ledger.
-const UNSANDBOXED_COMMANDS: [&str; 7] = [
-    "loopherd feed",
-    "loopherd feed *",
-    "loopherd add *",
+/// members' worktrees, beside its own, or the ledger. Its broker runs feed
+/// and add.
+const UNSANDBOXED_COMMANDS: [&str; 4] = [
     "loopherd retire *",
     "loopherd release *",
     "loopherd restart *",
