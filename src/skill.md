@@ -881,7 +881,7 @@ What differs from the shepherd:
   that ping for merges the human makes. Grilling is always the human's.
 - **Sandbox.** Your Claude runs in the Claude Code sandbox, from
   settings loopherd writes for you to `<config dir>/sandbox/<you>.json`
-  (D89, building D83; D97, D109). Bash can write only to your own
+  (D89, building D83; D97, D111). Bash can write only to your own
   worktree, your own `handoffs/<you>/` in loopherd's state dir, and temp
   files; writes elsewhere, herd files, `config.toml`, those settings,
   `~/.claude`, `reports/` (every mailbox, yours included), other agents'
