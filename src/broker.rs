@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::context::SHEPHERD;
 use crate::feed::{FeedRequest, ForLead, run_after_merge};
+use crate::github::PullRequests;
 use crate::herd::{AddRequest, Paths};
 use crate::herdr::Herdr;
 use crate::ledger::{Ledger, Process};
@@ -59,11 +60,23 @@ pub enum Op {
     },
     /// The lead restarting itself once its turn after its handoff ends.
     RestartSelf,
+    Retire {
+        name: String,
+        close: bool,
+        force: bool,
+    },
+    Release {
+        name: String,
+        keep_branch: bool,
+        drop_branch: bool,
+    },
 }
 
 /// What an operation acts on, for the broker's reach rule.
 enum Reach<'a> {
     Member(&'a str),
+    /// A member, retired or not: retire --close reruns and release needs one retired.
+    AnyMember(&'a str),
     Herd(&'a str),
     /// The lead itself, found by its pane.
     Lead,
@@ -79,6 +92,7 @@ pub struct Ctx<'a> {
     pub caller: Caller,
     pub live: LiveSession,
     pub spawn_waiter: SpawnWaiter,
+    pub prs: &'a dyn PullRequests,
 }
 
 /// The session a Claude session lives on in, after any continuations.
@@ -115,6 +129,8 @@ impl Op {
             Op::Prompt { .. } => "prompt",
             Op::Restart { .. } => "restart",
             Op::RestartSelf => "restart --self",
+            Op::Retire { .. } => "retire",
+            Op::Release { .. } => "release",
         }
     }
 
@@ -125,6 +141,7 @@ impl Op {
             }
             Op::Feed { herd, .. } | Op::Add { herd, .. } => Reach::Herd(herd),
             Op::RestartSelf => Reach::Lead,
+            Op::Retire { name, .. } | Op::Release { name, .. } => Reach::AnyMember(name),
         }
     }
 
@@ -133,7 +150,7 @@ impl Op {
         match self {
             Op::Tell { .. } | Op::Prompt { .. } | Op::RestartSelf => Duration::from_secs(120),
             // Its settle timeout, with room for herdr and the member's view.
-            Op::Restart { .. } => Duration::from_secs(300),
+            Op::Restart { .. } | Op::Retire { .. } | Op::Release { .. } => Duration::from_secs(300),
             // Each member may take its ready timeout, then after_merge its own.
             Op::Feed { .. } => Duration::from_secs(4 * 60 * 60),
             Op::Add {
@@ -199,6 +216,12 @@ impl Op {
                 sink.out(&scheduled.message);
                 Ok(0)
             }
+            Op::Retire { name, close, force } => retire(ctx, name, *close, *force, sink),
+            Op::Release {
+                name,
+                keep_branch,
+                drop_branch,
+            } => release(ctx, name, *keep_branch, *drop_branch, sink),
         }
     }
 }
@@ -338,6 +361,93 @@ fn restart(ctx: &mut Ctx, name: &str, force: bool, sink: &mut dyn Sink) -> Resul
     Ok(0)
 }
 
+fn retire(ctx: &mut Ctx, name: &str, close: bool, force: bool, sink: &mut dyn Sink) -> Result<i32> {
+    use crate::ledger::Outcome;
+    use crate::retire::{refuse_own_lead, refuse_unfinished, retire_and_close};
+    let caller = &ctx.caller;
+    let pane = caller.pane.as_deref().map(|id| tool_hook::Pane {
+        id,
+        socket: caller.socket.as_deref(),
+        lineage: &caller.lineage,
+    });
+    refuse_own_lead(
+        &*ctx.ledger,
+        name,
+        pane.as_ref(),
+        ctx.procs,
+        caller.process.pid,
+    )?;
+    let mailboxes = ctx.paths.state_dir().join("reports");
+    if !force {
+        refuse_unfinished(ctx.herdr, &*ctx.ledger, name, &mailboxes)?;
+    }
+    let now = SystemTime::now();
+    if !close {
+        let record = crate::retire::retire(ctx.ledger, name, now, Outcome::Retired)?;
+        sink.out(&format!("retired {name}"));
+        let warnings = crate::notify::forget_marks(&mailboxes, name)
+            .into_iter()
+            .chain(crate::usage::record_at_retire(
+                &mailboxes,
+                ctx.claude_dir.as_deref(),
+                &record,
+                now,
+            ));
+        for warning in warnings {
+            sink.err(&warning);
+        }
+        return Ok(0);
+    }
+    let guard = ctx.guard();
+    let mut lines = vec![];
+    let result = retire_and_close(
+        ctx.herdr,
+        ctx.ledger,
+        &guard,
+        name,
+        now,
+        Outcome::Retired,
+        &mailboxes,
+        ctx.claude_dir.as_deref(),
+        pane.as_ref(),
+        &mut lines,
+    );
+    lines.iter().for_each(|line| sink.out(line));
+    result.map(|()| 0)
+}
+
+fn release(
+    ctx: &mut Ctx,
+    name: &str,
+    keep_branch: bool,
+    drop_branch: bool,
+    sink: &mut dyn Sink,
+) -> Result<i32> {
+    use crate::worktree::Fate;
+    // A feed spawning this name owns its fresh worktree before the ledger says so.
+    let _feed = ctx.paths.lock_feed()?;
+    let fate = match (keep_branch, drop_branch) {
+        (true, _) => Fate::Keep,
+        (_, true) => Fate::Drop,
+        _ => Fate::Clear,
+    };
+    let guard = ctx.guard();
+    let mut lines = vec![];
+    let result = crate::release::release(
+        ctx.herdr,
+        ctx.prs,
+        ctx.ledger,
+        &guard,
+        name,
+        fate,
+        SystemTime::now(),
+        &ctx.paths.state_dir().join("reports"),
+        &mut lines,
+    );
+    lines.iter().for_each(|line| sink.out(line));
+    result.map(|()| 0)
+}
+
 impl Ctx<'_> {
     /// Refuses, for a broker, entries outside its lead's herd.
     fn guard(&self) -> Guard {
@@ -448,6 +558,7 @@ pub struct Host<'a> {
     pub process: Process,
     pub live: LiveSession,
     pub spawn_waiter: SpawnWaiter,
+    pub prs: &'a dyn PullRequests,
 }
 
 /// Serves lead `lead`'s requests, polling every `poll`, until it is retired.
@@ -541,6 +652,7 @@ impl Broker<'_> {
             caller,
             live: self.host.live,
             spawn_waiter: self.host.spawn_waiter,
+            prs: self.host.prs,
         };
         let mut kept = Kept::default();
         let carried = op.carry_out(&mut ctx, &mut kept);
@@ -595,12 +707,30 @@ impl Broker<'_> {
             }
             Reach::Herd(_) => return self.start_refusal(op),
             Reach::Lead => return Ok(None),
-            Reach::Member(target) => target,
+            Reach::Member(target) | Reach::AnyMember(target) => target,
         };
+        let retired_too = matches!(op.reach(), Reach::AnyMember(_));
         if let Op::Restart { force: true, .. } = op {
             return Ok(Some(
                 "restart --force skips the checks that a member is finished since its handoff, \
                  so the human forces a restart; restart it once its stop reads finished"
+                    .into(),
+            ));
+        }
+        if let Op::Retire { force: true, .. } = op {
+            return Ok(Some(
+                "retire --force skips the check that a member is finished, so the human forces \
+                 a retire; retire it once its stop reads finished"
+                    .into(),
+            ));
+        }
+        if let Op::Release {
+            drop_branch: true, ..
+        } = op
+        {
+            return Ok(Some(
+                "release --drop-branch deletes commits not on the base, so the human drops a \
+                 branch; release it plain or with --keep-branch"
                     .into(),
             ));
         }
@@ -619,10 +749,9 @@ impl Broker<'_> {
             )));
         }
         let entries = ledger.entries()?;
-        let Some(record) = entries.get(target).filter(|r| !r.retired) else {
-            return Ok(Some(format!(
-                "no unretired member is named {target}; {reach}"
-            )));
+        let Some(record) = entries.get(target).filter(|r| retired_too || !r.retired) else {
+            let which = if retired_too { "" } else { "unretired " };
+            return Ok(Some(format!("no {which}member is named {target}; {reach}")));
         };
         Ok(match record.herd.as_deref() {
             None => Some(format!("{target} is in no herd; {reach}")),
@@ -1202,12 +1331,16 @@ mod tests {
             process: me(),
             live: same_session,
             spawn_waiter: no_waiter,
+            prs: &NO_PRS,
         }
     }
 
     fn same_session(session: &str) -> String {
         session.into()
     }
+
+    const NO_PRS: crate::github::fake::FakePrs =
+        crate::github::fake::FakePrs(Ok(crate::github::PrLookup::None));
 
     fn no_waiter(_: &str, _: Lock) -> Result<()> {
         Ok(())
@@ -1243,6 +1376,7 @@ mod tests {
             },
             live: same_session,
             spawn_waiter: no_waiter,
+            prs: &NO_PRS,
         };
         let mut kept = Kept::default();
         let code = run(&mut ctx, client, op, &mut kept)?;
@@ -1352,6 +1486,204 @@ mod tests {
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
         assert_eq!(herdr.calls(), 0);
+    }
+
+    fn retire_op(name: &str, close: bool, force: bool) -> Op {
+        Op::Retire {
+            name: name.into(),
+            close,
+            force,
+        }
+    }
+
+    fn release_op(name: &str, drop_branch: bool) -> Op {
+        Op::Release {
+            name: name.into(),
+            keep_branch: false,
+            drop_branch,
+        }
+    }
+
+    #[test]
+    fn retire_and_release_reach_the_herd_s_workers_retired_or_not_and_nothing_else() {
+        let world = World::new();
+        world.herd("g");
+        world.add(member("lh-9", Some("g")));
+        world.add(member("lh-8", None));
+        let mut other_lead = member("lead-x", Some("h"));
+        other_lead.role = Some(Role::Lead);
+        world.add(other_lead);
+        let mut retired_lead = member("lead-y", Some("h"));
+        retired_lead.role = Some(Role::Lead);
+        retired_lead.retired = true;
+        world.add(retired_lead);
+        let mut retired_elsewhere = member("lh-10", Some("g"));
+        retired_elsewhere.retired = true;
+        world.add(retired_elsewhere);
+        let serving = world.serve(telling_herdr());
+        let reach = "lead-h reaches only herd h's workers";
+        for (target, why) in [
+            ("shepherd", format!("shepherd is the shepherd; {reach}")),
+            ("lh-9", format!("lh-9 is in herd g; {reach}")),
+            ("lh-8", format!("lh-8 is in no herd; {reach}")),
+            ("lead-x", format!("lead-x is a lead; {reach}")),
+            ("lead-y", format!("lead-y is a lead; {reach}")),
+            ("lh-10", format!("lh-10 is in herd g; {reach}")),
+            ("lh-6", format!("no member is named lh-6; {reach}")),
+            (
+                "lead-h",
+                "lead-h is the lead itself; {command} reaches only herd h's workers".into(),
+            ),
+        ] {
+            for op in [
+                retire_op(target, false, false),
+                retire_op(target, true, false),
+                release_op(target, false),
+            ] {
+                let command = op.command();
+                assert_eq!(
+                    format!("{:#}", world.client().call(&op).unwrap_err()),
+                    format!(
+                        "lead-h's broker refused {command}: {}",
+                        why.replace("{command}", command)
+                    )
+                );
+            }
+        }
+        world.add(member("lh-1", Some("h")));
+        for (op, why) in [
+            (
+                retire_op("lh-1", false, true),
+                "retire --force skips the check that a member is finished, so the human forces \
+                 a retire; retire it once its stop reads finished",
+            ),
+            (
+                retire_op("lh-1", true, true),
+                "retire --force skips the check that a member is finished, so the human forces \
+                 a retire; retire it once its stop reads finished",
+            ),
+            (
+                release_op("lh-1", true),
+                "release --drop-branch deletes commits not on the base, so the human drops a \
+                 branch; release it plain or with --keep-branch",
+            ),
+            (
+                Op::Release {
+                    name: "lh-1".into(),
+                    keep_branch: true,
+                    drop_branch: true,
+                },
+                "release --drop-branch deletes commits not on the base, so the human drops a \
+                 branch; release it plain or with --keep-branch",
+            ),
+        ] {
+            assert_eq!(
+                format!("{:#}", world.client().call(&op).unwrap_err()),
+                format!("lead-h's broker refused {}: {why}", op.command())
+            );
+        }
+        assert!(!world.ledger().entries().unwrap()["lh-1"].retired);
+
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert_eq!(herdr.calls(), 0);
+    }
+
+    #[test]
+    fn in_a_sandboxed_lead_s_pane_retire_and_release_go_through_its_broker_and_call_no_herdr() {
+        let world = World::new();
+        // Outside the state dir's tree, which the lead's guard treats as the lead's to write.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let repo = elsewhere.path().join("h");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let herd_file = world.paths.herds.join("h.toml");
+        let text = std::fs::read_to_string(&herd_file).unwrap();
+        let old_repo = world.dir.path().join("repos/h");
+        let text = text.replace(old_repo.to_str().unwrap(), repo.to_str().unwrap());
+        std::fs::write(&herd_file, text).unwrap();
+        let mut lh_1 = member("lh-1", Some("h"));
+        lh_1.repo = repo;
+        world.add(lh_1);
+        let serving = world.serve(FakeHerdr::new(&[]));
+        let own = FakeHerdr::new(&[]);
+        let client = world.route_from("p-lead-h");
+
+        let retired = run_here(
+            &own,
+            &world,
+            client.as_ref(),
+            &retire_op("lh-1", false, false),
+        );
+        let closed = run_here(
+            &own,
+            &world,
+            client.as_ref(),
+            &retire_op("lh-1", true, false),
+        );
+        let released = run_here(&own, &world, client.as_ref(), &release_op("lh-1", false));
+
+        let out = |done: Result<(i32, Kept)>| done.map(|(code, kept)| (code, kept.out));
+        assert_eq!(out(retired).unwrap(), (0, vec!["retired lh-1".to_string()]));
+        // A rerun of --close on a retired member, as after a failed close.
+        let (code, closed) = out(closed).unwrap();
+        assert_eq!(code, 0);
+        assert!(
+            closed[0].starts_with("lh-1 is already retired"),
+            "{closed:?}"
+        );
+        assert_eq!(
+            out(released).unwrap(),
+            (
+                0,
+                vec!["released lh-1: feed may spawn it again".to_string()]
+            )
+        );
+        assert!(world.ledger().entries().unwrap()["lh-1"].retired);
+        assert_eq!(own.calls(), 0);
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    /// Past the broker's reach check, as if it were ever loosened, the
+    /// handlers' own guard still holds a lead to its herd.
+    #[test]
+    fn a_lead_s_retire_close_and_release_guard_its_herd_behind_the_reach_check() {
+        let world = World::new();
+        world.herd("g");
+        let mut lh_9 = member("lh-9", Some("g"));
+        lh_9.retired = true;
+        world.add(lh_9);
+        let herdr = FakeHerdr::new(&[]);
+        let mut ledger = world.ledger();
+        let mut ctx = Ctx {
+            herdr: &herdr,
+            ledger: &mut ledger,
+            paths: &world.paths,
+            procs: &crate::process::ProcFs,
+            claude_dir: None,
+            caller: Caller {
+                pane: None,
+                socket: None,
+                lineage: vec![],
+                workspace: None,
+                process: me(),
+                lead: Some(ForLead {
+                    name: "lead-h".into(),
+                    herd: "h".into(),
+                }),
+            },
+            live: same_session,
+            spawn_waiter: no_waiter,
+            prs: &NO_PRS,
+        };
+        let mut kept = Kept::default();
+
+        let close = retire_op("lh-9", true, false).carry_out(&mut ctx, &mut kept);
+        let release = release_op("lh-9", false).carry_out(&mut ctx, &mut kept);
+
+        let why = "refused: lh-9 isn't a member of lead-h's herd, and lead-h runs this loopherd";
+        assert_eq!(format!("{:#}", close.unwrap_err()), why);
+        assert_eq!(format!("{:#}", release.unwrap_err()), why);
     }
 
     #[test]
@@ -1895,6 +2227,8 @@ mod tests {
                 feed("h"),
                 add("h", "pr", &[]),
                 Op::RestartSelf,
+                retire_op("lh-1", false, false),
+                release_op("lh-1", false),
             ];
             let mut refusals: Vec<String> = ops
                 .iter()
@@ -1905,11 +2239,15 @@ mod tests {
             refusals
         });
 
-        for (refusal, command) in
-            refusals
-                .iter()
-                .zip(["tell", "feed", "add", "restart --self", "spawn"])
-        {
+        for (refusal, command) in refusals.iter().zip([
+            "tell",
+            "feed",
+            "add",
+            "restart --self",
+            "retire",
+            "release",
+            "spawn",
+        ]) {
             assert!(
                 refusal.starts_with(&format!(
                     "refused: this loopherd runs in a sandbox, where it can't run loopherd {command} itself"
@@ -2059,6 +2397,7 @@ mod tests {
             },
             live: same_session,
             spawn_waiter: no_waiter,
+            prs: &NO_PRS,
         };
         let mut kept = Kept::default();
 

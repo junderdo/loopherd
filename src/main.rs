@@ -75,15 +75,13 @@ use crate::herd_view::Options;
 use crate::herdr::events::SocketSubscriber;
 use crate::herdr::{CliHerdr, Herdr, socket_from_env};
 use crate::lead::LeadRequest;
-use crate::ledger::{FileLedger, Ledger, Outcome, Process};
+use crate::ledger::{FileLedger, Ledger, Process};
 use crate::process::Procs;
-use crate::release::release;
 use crate::report::{Filter, Kind, Reporter, report, reports};
-use crate::retire::{refuse_own_lead, refuse_unfinished, retire, retire_and_close};
 use crate::revive::{ReviveRequest, revive};
 use crate::spawn::{Checkout, Prompt, SHELL_TIMEOUT, SpawnRequest, spawn};
 use crate::status::{Format, Queues};
-use crate::worktree::{Fate, REMOTE_TIMEOUT, remote_timeout, repo_root};
+use crate::worktree::{REMOTE_TIMEOUT, remote_timeout, repo_root};
 
 #[derive(Parser)]
 #[command(
@@ -960,98 +958,25 @@ fn run_resume(herds: &HerdsArg) -> Result<i32> {
 }
 
 fn run_retire(name: &str, close: bool, force: bool) -> Result<i32> {
-    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    let pane_id = std::env::var("HERDR_PANE_ID").ok();
-    let socket = socket_from_env();
-    let lineage = own_lineage();
-    let pane = pane_id.as_deref().map(|id| tool_hook::Pane {
-        id,
-        socket: socket.as_deref(),
-        lineage: &lineage,
-    });
-    refuse_own_lead(
-        &ledger,
-        name,
-        pane.as_ref(),
-        &process::ProcFs,
-        std::process::id(),
-    )?;
-    if !force {
-        refuse_unfinished(&CliHerdr, &ledger, name, &ledger.reports_dir()?)?;
-    }
-    if !close {
-        let now = SystemTime::now();
-        let record = retire(&mut ledger, name, now, Outcome::Retired)?;
-        println!("retired {name}");
-        let mailboxes = ledger.reports_dir()?;
-        let claude_dir = install_hook::claude_dir().ok();
-        let warnings =
-            notify::forget_marks(&mailboxes, name)
-                .into_iter()
-                .chain(usage::record_at_retire(
-                    &mailboxes,
-                    claude_dir.as_deref(),
-                    &record,
-                    now,
-                ));
-        for warning in warnings {
-            eprintln!("{warning}");
-        }
-        return Ok(0);
-    }
-    let mailboxes = ledger.reports_dir()?;
-    let paths = Paths::from_env().context("herd")?;
-    let caller = sandbox::calling_lead(&paths, &process::ProcFs, std::process::id());
-    let guard = sandbox::Guard::new(paths, caller);
-    let claude_dir = install_hook::claude_dir().ok();
-    let mut lines = vec![];
-    let result = retire_and_close(
-        &CliHerdr,
-        &mut ledger,
-        &guard,
-        name,
-        SystemTime::now(),
-        Outcome::Retired,
-        &mailboxes,
-        claude_dir.as_deref(),
-        pane.as_ref(),
-        &mut lines,
-    );
-    for line in lines {
-        println!("{line}");
-    }
-    result.map(|()| 0)
+    run_op(
+        own_broker().as_ref(),
+        &broker::Op::Retire {
+            name: name.into(),
+            close,
+            force,
+        },
+    )
 }
 
 fn run_release(name: &str, keep_branch: bool, drop_branch: bool) -> Result<i32> {
-    // A feed spawning this name owns its fresh worktree before the ledger says so.
-    let paths = Paths::from_env().context("herd")?;
-    let _feed = paths.lock_feed()?;
-    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    let fate = match (keep_branch, drop_branch) {
-        (true, _) => Fate::Keep,
-        (_, true) => Fate::Drop,
-        _ => Fate::Clear,
-    };
-    let mailboxes = ledger.reports_dir()?;
-    let caller = sandbox::calling_lead(&paths, &process::ProcFs, std::process::id());
-    let guard = sandbox::Guard::new(paths, caller);
-    let mut lines = vec![];
-    let result = release(
-        &CliHerdr,
-        &github::GhCli::default(),
-        &mut ledger,
-        &guard,
-        name,
-        fate,
-        SystemTime::now(),
-        &mailboxes,
-        &mut lines,
-    );
-    for line in lines {
-        println!("{line}");
-    }
-    result.map(|()| 0)
+    run_op(
+        own_broker().as_ref(),
+        &broker::Op::Release {
+            name: name.into(),
+            keep_branch,
+            drop_branch,
+        },
+    )
 }
 
 fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32> {
@@ -1397,6 +1322,7 @@ fn run_op(client: Option<&broker::Client>, op: &broker::Op) -> Result<i32> {
         },
         live: live_session,
         spawn_waiter,
+        prs: &github::GhCli::default(),
     };
     broker::run(&mut ctx, client, op, &mut Printed)
 }
@@ -1541,6 +1467,7 @@ fn run_broker(lead: &str) -> Result<i32> {
         process: own_process()?,
         live: live_session,
         spawn_waiter,
+        prs: &github::GhCli::default(),
     };
     let served = broker::serve(&host, &mut ledger, &paths, lead, Duration::from_millis(100))?;
     if served == broker::Served::AlreadyRunning {

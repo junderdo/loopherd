@@ -473,11 +473,6 @@ fn lead_file(paths: &Paths, name: &str) -> PathBuf {
         .join(format!("{name}.lead.json"))
 }
 
-/// The loopherd commands a lead runs that write what its sandbox denies: its
-/// members' worktrees, beside its own, or the ledger. Its broker runs feed,
-/// add, prompt and restart.
-const UNSANDBOXED_COMMANDS: [&str; 2] = ["loopherd retire *", "loopherd release *"];
-
 /// The state dir's directories a lead writes from its sandbox: `reports/`
 /// for its mailbox and its watch's files, `handoffs/` for its handoff. The
 /// rest stays read-only to it as a directory, since a deny on one file holds
@@ -560,7 +555,8 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
             "denyWrite": deny_write.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         },
     });
-    let mut excluded = UNSANDBOXED_COMMANDS.to_vec();
+    // loopherd's own commands that write past the sandbox run in the lead's broker (D98).
+    let mut excluded: Vec<&str> = vec![];
     if switches.install {
         // ~/.claude is a protected path no allowWrite opens, and the installer writes there.
         excluded.extend([
