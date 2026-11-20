@@ -650,21 +650,21 @@ mod tests {
     }
 
     #[test]
-    fn a_lead_gets_the_mcp_servers_its_herd_names_from_the_humans_user_and_local_scopes() {
+    fn a_lead_gets_the_mcp_servers_its_herd_names_from_the_humans_user_scope_only() {
         let setup = Setup::with_lead("prompt = \"go\"\nmcp_servers = [\"docs\", \"browser\"]");
         let herdr = herdr();
         let home = setup.root.join("home");
         fs::create_dir_all(&home).unwrap();
-        let worktree = setup.worktree().display().to_string();
+        let repo = setup.repo.display().to_string();
         fs::write(
             home.join(".claude.json"),
             serde_json::json!({
                 "mcpServers": {
                     "docs": {"type": "http", "url": "https://docs.example/mcp"},
-                    "browser": {"command": "old-browser"},
+                    "browser": {"command": "browser-mcp"},
                     "mail": {"command": "mail-mcp"},
                 },
-                "projects": {worktree: {"mcpServers": {"browser": {"command": "browser-mcp"}}}},
+                "projects": {repo: {"mcpServers": {"browser": {"command": "planted"}}}},
             })
             .to_string(),
         )
@@ -709,9 +709,9 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             "sandbox: lead-h can't start: herd h's [lead] mcp_servers names \"docs\", which \
-             /home/me/.claude.json doesn't configure for you or for the lead's worktree; add it \
-             with claude mcp add --scope user, or drop it from mcp_servers (claude.ai connectors \
-             and plugins' servers can't be given to a lead)"
+             /home/me/.claude.json doesn't configure in your user scope; add it with claude mcp \
+             add --scope user, or drop it from mcp_servers (local and project scopes, claude.ai \
+             connectors and plugins' servers can't be given to a lead)"
         );
         assert!(herdr.tabs().is_empty());
     }

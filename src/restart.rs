@@ -146,9 +146,9 @@ pub fn restart(
     let (unsandboxed, warnings) = match running {
         None => (None, vec![]),
         Some(Running::Sandboxed(warnings)) => (None, warnings),
-        Some(Running::HookOnly(why)) => {
-            let warning = sandbox::hook_only_warning(name, &why);
-            (Some(why), vec![warning])
+        Some(Running::HookOnly(why, mut warnings)) => {
+            warnings.push(sandbox::hook_only_warning(name, &why));
+            (Some(why), warnings)
         }
     };
     let pane = &agent.pane_id;
@@ -1589,10 +1589,16 @@ mod tests {
 
         let (result, ledger) = w.restart_as(false, true, None, &unsandboxed);
 
-        assert!(result.unwrap().ends_with(
-            "\nwarning: lh-1 runs without its sandbox (it was started without its sandbox), \
+        let out = result.unwrap();
+        assert!(
+            out.ends_with(
+                "\nwarning: lh-1 was started with every MCP server you configure, not only its \
+                 herd's [lead] mcp_servers; quit its Claude and run loopherd revive --name lh-1\n\
+                 warning: lh-1 runs without its sandbox (it was started without its sandbox), \
                  guarded by its tool hook alone"
-        ));
+            ),
+            "{out}"
+        );
         assert_eq!(
             ledger.0["lh-1"].unsandboxed.as_deref(),
             Some("it was started without its sandbox")

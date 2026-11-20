@@ -571,7 +571,11 @@ fn kept_lead(
 ) -> Result<Option<(sandbox::Lead, PathBuf)>> {
     let name = &record.name;
     let lead = match sandbox::Lead::kept(paths, name)? {
-        Some(lead) => lead,
+        // A record kept before leads' MCP flags were loopherd's may still hold them.
+        Some(lead) => sandbox::Lead {
+            args: without_settings(&lead.args),
+            ..lead
+        },
         None if !record.is_lead() => return Ok(None),
         None if adopt != Some(name.as_str()) => bail!(
             "{name} is a lead loopherd kept no record of, so its ledger entry alone \
@@ -595,12 +599,14 @@ fn kept_lead(
 /// `args` without `--settings` and the MCP flags, which a lead's revive writes afresh.
 fn without_settings(args: &[String]) -> Vec<String> {
     let mut kept = vec![];
-    let mut args = args.iter();
+    let mut args = args.iter().peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--settings" | "--mcp-config" => {
+            "--settings" => {
                 args.next();
             }
+            // It takes every value up to the next flag.
+            "--mcp-config" => while args.next_if(|a| !a.starts_with('-')).is_some() {},
             "--strict-mcp-config" => {}
             _ if arg.starts_with("--settings=") || arg.starts_with("--mcp-config=") => {}
             _ => kept.push(arg.clone()),
@@ -1876,6 +1882,48 @@ mod tests {
             "{out}"
         );
         assert!(herdr.started().is_empty());
+    }
+
+    #[test]
+    fn a_lead_kept_with_its_own_mcp_config_from_before_resumes_without_it() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut ledger = ledger([lead("lead-h", cwd.path())]);
+        let req = request();
+        let kept = sandbox::Lead {
+            herd: "h".into(),
+            args: [
+                "--mcp-config",
+                "a.json",
+                "b.json",
+                "--strict-mcp-config",
+                "--model",
+                "opus",
+            ]
+            .map(String::from)
+            .into(),
+        };
+        std::fs::write(
+            req.paths.config_dir().join("sandbox/lead-h.lead.json"),
+            serde_json::to_string(&kept).unwrap(),
+        )
+        .unwrap();
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 0, "{out}");
+        let args = &herdr.started()[0].args;
+        assert_eq!(
+            args[..4],
+            ["--resume", "sess-lead-h", "--model", "opus"],
+            "{args:?}"
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.ends_with("a.json") || a.ends_with("b.json")),
+            "{args:?}"
+        );
     }
 
     #[test]

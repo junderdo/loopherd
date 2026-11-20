@@ -410,9 +410,9 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
 }
 
 /// The only MCP servers lead `name` gets, by `--strict-mcp-config`: those its
-/// herd's `[lead] mcp_servers` names, as the human's `~/.claude.json`
-/// configures them for the lead's worktree (local scope) or for the human
-/// (user scope). Never from the worktree's `.mcp.json`, which the lead can write.
+/// herd's `[lead] mcp_servers` names, from the human's user scope in
+/// `~/.claude.json`. Local and project scope are the repo's, which members
+/// and the lead can write.
 fn mcp_config(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
     let wanted = herd::lead_mcp_servers(paths, herd)?;
     let mut servers = serde_json::Map::new();
@@ -427,15 +427,13 @@ fn mcp_config(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Null,
         Err(e) => return Err(e).with_context(|| format!("read {}", file.display())),
     };
-    let worktree = worktree_path(&herd::repo(paths, herd)?, name);
-    let local = &config["projects"][worktree.display().to_string()]["mcpServers"];
     for server in wanted {
-        let Some(found) = local.get(&server).or(config["mcpServers"].get(&server)) else {
+        let Some(found) = config["mcpServers"].get(&server) else {
             bail!(
                 "{name} can't start: herd {herd}'s [lead] mcp_servers names {server:?}, which \
-                 {} doesn't configure for you or for the lead's worktree; add it with claude \
-                 mcp add --scope user, or drop it from mcp_servers (claude.ai connectors and \
-                 plugins' servers can't be given to a lead)",
+                 {} doesn't configure in your user scope; add it with claude mcp add --scope \
+                 user, or drop it from mcp_servers (local and project scopes, claude.ai \
+                 connectors and plugins' servers can't be given to a lead)",
                 file.display()
             );
         };
@@ -666,8 +664,8 @@ pub enum Running {
     /// With warnings: what loosens its sandbox under `prefer`, and whether its
     /// herd's switches have changed since its settings were written.
     Sandboxed(Vec<String>),
-    /// Started without its settings, under `prefer`.
-    HookOnly(String),
+    /// Started without its settings, under `prefer`: why, and other warnings.
+    HookOnly(String, Vec<String>),
 }
 
 /// Checks a running lead was launched with its settings, as `claude_args`
@@ -684,6 +682,13 @@ pub fn check_running(
     let file = settings_file(paths, name);
     let shown = file.display().to_string();
     let resume = format!("quit its Claude and run loopherd revive --name {name}");
+    let mut warnings = vec![];
+    if !claude_args.iter().any(|a| a == "--strict-mcp-config") {
+        warnings.push(format!(
+            "{name} was started with every MCP server you configure, not only its herd's \
+             [lead] mcp_servers; {resume}"
+        ));
+    }
     if !claude_args
         .windows(2)
         .any(|pair| pair[0] == "--settings" && pair[1] == shown)
@@ -699,7 +704,7 @@ pub fn check_running(
             ));
         }
         return match mode {
-            SandboxMode::Prefer => Ok(Running::HookOnly(why.into())),
+            SandboxMode::Prefer => Ok(Running::HookOnly(why.into(), warnings)),
             SandboxMode::Require => Err(refusal(
                 name,
                 herd,
@@ -716,20 +721,11 @@ pub fn check_running(
     if let Some(refusal) = loosened_refusal(paths, name, herd, &loosened)? {
         return Err(refusal);
     }
-    let mut warnings: Vec<String> = loosened
-        .iter()
-        .map(|line| loosened_warning(name, line))
-        .collect();
+    warnings.extend(loosened.iter().map(|line| loosened_warning(name, line)));
     if on_disk.as_ref() != Some(&current) {
         warnings.push(format!(
             "{name}'s sandbox was set before herd {herd}'s current switches, \
              which reach it only when its Claude starts again; {resume}"
-        ));
-    }
-    if !claude_args.iter().any(|a| a == "--strict-mcp-config") {
-        warnings.push(format!(
-            "{name} was started with every MCP server you configure, not only its herd's \
-             [lead] mcp_servers; {resume}"
         ));
     }
     Ok(Running::Sandboxed(warnings))

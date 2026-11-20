@@ -616,7 +616,7 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   and start it with them as warnings under `prefer`; doctor reports them
   too. Only the human edits that file; ask them. A lead has no MCP tools
   unless its herd's `[lead] mcp_servers` names servers from the human's
-  user or local scope (`loopherd herds` shows them); a lead that needs one
+  user scope (`loopherd herds` shows them); a lead that needs one
   asks the human to add it. Set `prefer` only when the
   human says so; doctor names those herds and leads.
 - **Change a herd file's values** with `loopherd herd set <herd> <key>
