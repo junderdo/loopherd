@@ -589,7 +589,9 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   `[lead] sandbox = "require"` (the default) a lead whose sandbox can't
   start isn't started, and `lead`, `restart` and `revive` say why
   (`loopherd doctor` checks it: bubblewrap and socat on Linux and WSL2);
-  `"prefer"` starts it guarded by its hook alone, with a warning, a note
+  `"prefer"` starts it guarded by its hook alone, which catches only
+  plainly written commands, so its herd files, config and switches are
+  protected against plain forms only. It starts with a warning, a note
   in its mailbox, and `(lead, unsandboxed)` in `loopherd view`. `restart`
   refuses, under `require`, a lead started without its sandbox (before it
   existed, or on `prefer`): quit its Claude and run `loopherd revive
@@ -789,7 +791,10 @@ What differs from the shepherd:
   ask instead. A herd file or `config.toml` it can't read blocks all three. A `feed` from
   your pane runs none of `after_merge` when the hook would deny any command
   in it, leaving a `note` naming why; that run counts as done, so run the
-  commands it held back by hand or ask the human to. It denies
+  commands it held back by hand or ask the human to. The hook reads only
+  commands written out plainly, to catch a slip; it is not the boundary,
+  so a form it doesn't read (a `bash -c`, a variable, a script) is no more
+  yours to run. It denies
   broadly: `gh pr merge --help`, `git rebase --abort` and any `curl` to a
   PR's merge endpoint are denied too, so ask the human to run a `rebase
   --abort`, and check merges with `gh pr view <n> --json state`. With
@@ -826,8 +831,7 @@ What differs from the shepherd:
   lead-defaults` are fine. Ask for a change instead.
 - **Retiring a lead is the shepherd's or the human's.** `loopherd retire`
   refuses to retire you from your own pane, and the hook also denies
-  `loopherd retire` of a `lead-` name, or of a name it can't read such as
-  `"$m"`, there; retire members by their spelled-out name. It always
+  `loopherd retire` of a `lead-` name there. It always
   denies `loopherd retire --force` there too: retire a member once it is
   idle and has reported, or once herdr no longer lists it.
   Your gates outlast your retirement: a retired lead's pane is still
