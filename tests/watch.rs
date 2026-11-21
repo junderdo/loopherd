@@ -17,7 +17,7 @@ impl Sandbox {
     fn new() -> Sandbox {
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("state/loopherd");
-        fs::create_dir_all(state.join("reports")).unwrap();
+        fs::create_dir_all(state.join("reports/lh-1")).unwrap();
         fs::write(
             state.join("ledger.json"),
             r#"{"lh-1": {"name": "lh-1", "pane_id": "w1:p1", "tab_id": "w1:t1", "session_id": null,
@@ -26,7 +26,7 @@ impl Sandbox {
         )
         .unwrap();
         fs::write(
-            state.join("reports/lh-1.jsonl"),
+            state.join("reports/lh-1/mailbox.jsonl"),
             r#"{"at":"2026-11-02T09:00:00Z","kind":"stop","background":{"shells":1,"subagents":0,"other":0},"crons":0}
 "#,
         )
@@ -241,7 +241,7 @@ fn a_second_concurrent_watch_exits_naming_the_lock() {
     sandbox.install_hook();
     // Empty the mailbox so the first watch stays armed.
     let reports = sandbox.dir.path().join("state/loopherd/reports");
-    fs::write(reports.join("lh-1.jsonl"), "").unwrap();
+    fs::write(reports.join("lh-1/mailbox.jsonl"), "").unwrap();
     let mut first = sandbox
         .loopherd(&["watch", "--timeout", "30"])
         .stdout(Stdio::null())
@@ -573,7 +573,7 @@ fn a_timed_out_watch_still_tells_the_shepherd() {
     let sandbox = Sandbox::new();
     sandbox.install_hook();
     let reports = sandbox.dir.path().join("state/loopherd/reports");
-    fs::write(reports.join("lh-1.jsonl"), "").unwrap();
+    fs::write(reports.join("lh-1/mailbox.jsonl"), "").unwrap();
     let pid = as_shepherds_claude(&sandbox, "s1", 170_000);
 
     let out = sandbox
@@ -720,7 +720,7 @@ impl Sandbox {
     }
 
     fn mailbox(&self) -> PathBuf {
-        self.path("state/loopherd/reports/lh-1.jsonl")
+        self.path("state/loopherd/reports/lh-1/mailbox.jsonl")
     }
 
     fn script(&self, name: &str, body: &str) -> PathBuf {

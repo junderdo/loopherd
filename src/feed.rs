@@ -1105,7 +1105,10 @@ mod tests {
 
         /// The text of each note in `name`'s mailbox.
         fn notes(&self, name: &str) -> Vec<String> {
-            let mailbox = self.config.path().join(format!("reports/{name}.jsonl"));
+            let mailbox = self
+                .config
+                .path()
+                .join(format!("reports/{name}/mailbox.jsonl"));
             let Ok(text) = fs::read_to_string(mailbox) else {
                 return vec![];
             };
@@ -1956,7 +1959,7 @@ mod tests {
         let fed = feed(&herdr(), &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
 
         assert!(ledger.0["zpr-1"].retired, "{:?}", fed.lines);
-        let mailbox = fs::read_to_string(req.mailboxes.join("zpr-1.jsonl")).unwrap();
+        let mailbox = fs::read_to_string(req.mailboxes.join("zpr-1/mailbox.jsonl")).unwrap();
         let entry: serde_json::Value = serde_json::from_str(mailbox.trim_end()).unwrap();
         assert_eq!(entry["kind"], "usage");
         assert_eq!(

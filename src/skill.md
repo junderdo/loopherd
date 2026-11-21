@@ -650,14 +650,17 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   a lead has no Unix sockets unless its herd's
   `[lead] unix_sockets = "all"` (`loopherd herds` shows it), which reopens
   herdr, the ssh agent and WSL2 interop to it; `lead`, `revive` and doctor
-  warn of it, and only the human sets it. Where Claude Code's seccomp
+  warn of it, and only the human sets it. A `merge_guard = "credentials"`
+  lead can't have it: `lead` and `revive` refuse the pair and `loopherd
+  herds` calls the herd file invalid. Where Claude Code's seccomp
   filter can't block them (doctor says so, naming `npm install -g
   @anthropic-ai/sandbox-runtime`), `require` refuses the lead and
   `prefer` starts it as `(lead, sockets open)`; `restart` applies the
   same rule. A `merge_guard = "credentials"` lead is refused under both.
   Under `unix_sockets = "all"` the socket check is skipped: the lead isn't
   refused or flagged for open sockets. What still gets past the sandbox:
-  workers run unsandboxed, so a lead can have one act for it, and most of
+  workers run unsandboxed, so a lead can have one act for it (a
+  `credentials` lead starts warned of it), and most of
   the state dir stays writable to it. Set `prefer` only
   when the human says so; doctor names those herds and leads.
 - **Change a herd file's values** with `loopherd herd set <herd> <key>

@@ -380,7 +380,7 @@ mod tests {
     }
 
     fn mailbox(dir: &Path, name: &str) -> String {
-        std::fs::read_to_string(dir.join(format!("{name}.jsonl"))).unwrap_or_default()
+        std::fs::read_to_string(dir.join(format!("{name}/mailbox.jsonl"))).unwrap_or_default()
     }
 
     #[test]

@@ -2660,11 +2660,11 @@ mod tests {
         worker.session_id = Some("s1".into());
         world.add(worker);
         let mailboxes = world.paths.state_dir().join("reports");
-        std::fs::create_dir_all(&mailboxes).unwrap();
+        std::fs::create_dir_all(mailboxes.join("lh-1")).unwrap();
         std::fs::write(mailboxes.join("lh-1.notified"), "question t1\n").unwrap();
         std::fs::write(mailboxes.join("lh-1.blocked"), "").unwrap();
         let stop = r#"{"at": "2026-11-01T09:30:00Z", "kind": "stop", "session": "s1", "crons": 0, "background": {"shells": 0, "subagents": 0, "other": 0}}"#;
-        std::fs::write(mailboxes.join("lh-1.jsonl"), format!("{stop}\n")).unwrap();
+        std::fs::write(mailboxes.join("lh-1/mailbox.jsonl"), format!("{stop}\n")).unwrap();
         let claude_dir = world.dir.path().join("claude");
         let project = claude_dir.join("projects/-r");
         std::fs::create_dir_all(&project).unwrap();
@@ -2705,7 +2705,7 @@ mod tests {
         );
         assert!(!mailboxes.join("lh-1.notified").exists());
         assert!(!mailboxes.join("lh-1.blocked").exists());
-        let text = std::fs::read_to_string(mailboxes.join("lh-1.jsonl")).unwrap();
+        let text = std::fs::read_to_string(mailboxes.join("lh-1/mailbox.jsonl")).unwrap();
         let usage: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
         assert_eq!(usage["kind"], "usage", "{text}");
         assert_eq!(usage["models"]["opus"]["output"], 4);
@@ -2937,7 +2937,7 @@ mod tests {
         let (code, _) = run_here(&own, &world, client.as_ref(), &report).unwrap();
 
         assert_eq!(code, 0);
-        let mailbox = world.paths.state_dir().join("reports/lead-h.jsonl");
+        let mailbox = world.paths.state_dir().join("reports/lead-h/mailbox.jsonl");
         let mailbox = std::fs::read_to_string(mailbox).unwrap();
         assert!(
             mailbox.contains(r#""kind":"handoff","text":"at step 3""#),

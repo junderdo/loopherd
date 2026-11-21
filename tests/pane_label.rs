@@ -73,7 +73,7 @@ impl World {
         let path = self
             .root
             .path()
-            .join(format!("state/loopherd/reports/{name}.jsonl"));
+            .join(format!("state/loopherd/reports/{name}/mailbox.jsonl"));
         fs::read_to_string(path).unwrap_or_default()
     }
 
