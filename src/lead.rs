@@ -2793,6 +2793,134 @@ mod tests {
         assert!(sandbox.join("lead-h.json").exists(), "{out:?}");
     }
 
+    /// Output of `loopherd retire [--close] --force lead-h`, run outside any pane.
+    fn retire_lead(
+        herdr: &FakeHerdr,
+        ledger: &mut MemLedger,
+        setup: &Setup,
+        close: bool,
+    ) -> Vec<String> {
+        use crate::broker::{Caller, Ctx, Op, Sink};
+        use crate::process::Procs;
+        struct Lines(Vec<String>);
+        impl Sink for Lines {
+            fn out(&mut self, text: &str) {
+                self.0.push(text.into());
+            }
+            fn err(&mut self, text: &str) {
+                self.0.push(text.into());
+            }
+        }
+        let pid = std::process::id();
+        let paths = setup.paths();
+        let mut ctx = Ctx {
+            herdr,
+            ledger,
+            paths: &paths,
+            procs: &crate::process::ProcFs,
+            claude_dir: None,
+            caller: Caller {
+                pane: None,
+                socket: None,
+                lineage: vec![],
+                workspace: None,
+                process: crate::ledger::Process {
+                    pid,
+                    start: crate::process::ProcFs.start(pid).unwrap(),
+                },
+                lead: None,
+            },
+            live: |session| session.into(),
+            spawn_waiter: |_, _| Ok(()),
+            prs: &crate::github::fake::FakePrs(Ok(crate::github::PrLookup::None)),
+        };
+        let op = Op::Retire {
+            name: "lead-h".into(),
+            close,
+            force: true,
+        };
+        let mut lines = Lines(vec![]);
+        crate::broker::run(&mut ctx, None, &op, &mut lines).unwrap();
+        lines.0
+    }
+
+    fn launched_lead(herdr: &FakeHerdr, setup: &Setup) -> MemLedger {
+        let mut ledger = MemLedger::default();
+        lead(
+            herdr,
+            &mut ledger,
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+        ledger
+    }
+
+    #[test]
+    fn retire_close_finding_a_leads_tab_gone_removes_its_settings() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let herdr = herdr();
+        let mut ledger = launched_lead(&herdr, &setup);
+        herdr.close_tab(&herdr.tabs()[0].id).unwrap();
+
+        let out = retire_lead(&herdr, &mut ledger, &setup, true);
+
+        let sandbox = setup.root.join("config/sandbox");
+        assert!(out.contains(&"tab already gone".to_string()), "{out:?}");
+        assert!(!sandbox.join("lead-h.mcp.json").exists(), "{out:?}");
+        assert!(!sandbox.join("lead-h.json").exists(), "{out:?}");
+        assert!(sandbox.join("lead-h.lead.json").exists(), "{out:?}");
+    }
+
+    #[test]
+    fn a_plain_retire_keeps_a_leads_settings_until_a_later_close() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let herdr = herdr();
+        let mut ledger = launched_lead(&herdr, &setup);
+        let sandbox = setup.root.join("config/sandbox");
+
+        let retired = retire_lead(&herdr, &mut ledger, &setup, false);
+
+        assert!(ledger.0["lead-h"].retired);
+        assert!(!sandbox.join("lead-h.mcp.json").exists(), "{retired:?}");
+        assert!(sandbox.join("lead-h.json").exists(), "{retired:?}");
+
+        let closed = retire_lead(&herdr, &mut ledger, &setup, true);
+
+        assert!(
+            closed[0].starts_with("lead-h is already retired"),
+            "{closed:?}"
+        );
+        assert!(herdr.tabs().is_empty(), "{closed:?}");
+        assert!(!sandbox.join("lead-h.mcp.json").exists(), "{closed:?}");
+        assert!(!sandbox.join("lead-h.json").exists(), "{closed:?}");
+        assert!(sandbox.join("lead-h.lead.json").exists(), "{closed:?}");
+    }
+
+    #[test]
+    fn a_lead_file_retire_cannot_remove_is_kept_with_a_warning() {
+        // Root writes past file modes, so nothing is read-only to it.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let herdr = herdr();
+        let mut ledger = launched_lead(&herdr, &setup);
+        let sandbox = setup.root.join("config/sandbox");
+        let mode = |mode| fs::set_permissions(&sandbox, fs::Permissions::from_mode(mode)).unwrap();
+
+        mode(0o555);
+        let out = retire_lead(&herdr, &mut ledger, &setup, false);
+        mode(0o755);
+
+        let mcp = sandbox.join("lead-h.mcp.json");
+        let warning = format!("warning: kept {}: ", mcp.display());
+        assert!(out.iter().any(|line| line.starts_with(&warning)), "{out:?}");
+        assert!(mcp.exists(), "{out:?}");
+    }
+
     #[test]
     fn leading_over_a_retired_lead_keeps_its_run_as_an_earlier_one() {
         let setup = Setup::with_lead("prompt = \"go\"");
