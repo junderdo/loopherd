@@ -496,8 +496,9 @@ enum Command {
         /// Edit this file instead of $CLAUDE_CONFIG_DIR/settings.json or ~/.claude/settings.json.
         #[arg(long)]
         settings: Option<PathBuf>,
-        /// Write the skill to <dir>/loopherd/SKILL.md; defaults to the skills directory
-        /// beside the settings file.
+        /// Write the skill straight to <dir>/loopherd/SKILL.md. Without it, the skill goes
+        /// in ~/.agents/skills/loopherd, linked from skills/loopherd beside the settings
+        /// file; with --settings, both sit in the settings file's directory.
         #[arg(long, value_name = "dir")]
         skills_dir: Option<PathBuf>,
     },
@@ -2289,6 +2290,7 @@ fn run_doctor(
 
 fn doctor_install(settings: Option<PathBuf>) -> Result<doctor::Install> {
     let settings_given = settings.is_some();
+    let skill = skill_layout(None, settings.as_deref())?;
     let settings = match settings {
         Some(path) => path,
         None => install_hook::default_settings()?,
@@ -2299,6 +2301,7 @@ fn doctor_install(settings: Option<PathBuf>) -> Result<doctor::Install> {
     Ok(doctor::Install {
         settings,
         settings_given,
+        skill,
         pane_label,
         on_path: on_path("loopherd"),
         running: std::env::current_exe().context("find this binary")?,
@@ -2317,26 +2320,66 @@ fn on_path(name: &str) -> Option<PathBuf> {
         })
 }
 
+/// The skill layout `install-hook` and `doctor` use for these flags.
+fn skill_layout(skills_dir: Option<PathBuf>, settings: Option<&Path>) -> Result<skill::Layout> {
+    let home = || {
+        Ok(PathBuf::from(
+            std::env::var_os("HOME").context("HOME is not set")?,
+        ))
+    };
+    skill::Layout::resolve(skills_dir, settings, home, install_hook::claude_dir)
+}
+
+fn install_hook_command(settings_given: bool, settings: &Path) -> String {
+    match settings_given {
+        true => format!(
+            "loopherd install-hook --settings {}",
+            shell::quote(&settings.to_string_lossy())
+        ),
+        false => "loopherd install-hook".into(),
+    }
+}
+
 fn run_install_hook(
     remove: bool,
     settings: Option<PathBuf>,
     skills_dir: Option<PathBuf>,
 ) -> Result<i32> {
+    let settings_given = settings.is_some();
+    let layout = skill_layout(skills_dir, settings.as_deref())?;
     let settings = match settings {
         Some(path) => path,
         None => install_hook::default_settings()?,
     };
-    let skills_dir = match skills_dir {
-        Some(dir) => dir,
-        None => settings.with_file_name("skills"),
-    };
     // First, so a skill that can't be written leaves the settings untouched.
-    let skill = skill::path(&skills_dir);
-    match remove {
-        true if skill::remove(&skills_dir)? => println!("removed {}", skill.display()),
-        true => println!("no skill at {}", skill.display()),
-        false if skill::install(&skills_dir)? => println!("installed {}", skill.display()),
-        false => println!("{} already up to date", skill.display()),
+    let skill = layout.skill();
+    let outcome = match remove {
+        true => skill::uninstall(&layout)?,
+        false => skill::install(&layout)?,
+    };
+    match (remove, outcome.skill) {
+        (true, true) => println!("removed {}", skill.display()),
+        (true, false) => println!("no skill at {}", skill.display()),
+        (false, true) => println!("installed {}", skill.display()),
+        (false, false) => println!("{} already up to date", skill.display()),
+    }
+    if let skill::Layout::Linked { link, .. } = &layout {
+        let link = link.join("loopherd");
+        match (outcome.link, &outcome.left_alone, remove) {
+            (true, _, false) => println!(
+                "linked {} to {}",
+                link.display(),
+                skill.parent().unwrap().display()
+            ),
+            (true, _, true) => println!("removed {}", link.display()),
+            (false, Some(why), true) => println!("left {} alone: it {why}", link.display()),
+            (false, Some(why), false) => println!(
+                "left {} alone: it {why}; move it aside, then rerun `{}`",
+                link.display(),
+                install_hook_command(settings_given, &settings),
+            ),
+            (false, None, _) => {}
+        }
     }
     let outcome = match remove {
         true => install_hook::remove(&settings, SystemTime::now())?,
