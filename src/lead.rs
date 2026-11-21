@@ -1894,7 +1894,8 @@ mod tests {
                 "Read(//srv/**)", "Edit(//**)", "Edit(//*)", "Edit(~/notes/*.md)"],
                 "defaultMode": "bypassPermissions"},
                 "sandbox": {"network": {"httpProxyPort": 8080, "socksProxyPort": 1080,
-                "allowLocalBinding": true, "allowMachLookup": ["com.apple.x"]}}}"#,
+                "allowLocalBinding": true, "allowMachLookup": ["com.apple.x"],
+                "allowUnixSockets": ["/var/run/docker.sock"]}}}"#,
         );
 
         let err = lead(
@@ -1918,6 +1919,8 @@ mod tests {
                  its own checks on local addresses; \
                  {file}: sandbox.network.allowLocalBinding lets it bind local ports on macOS; \
                  {file}: sandbox.network.allowMachLookup opens macOS services to it; \
+                 {file}: sandbox.network.allowUnixSockets reopens those socket paths on \
+                 macOS; \
                  {file}: permissions.allow opens Write to writes; \
                  {file}: permissions.allow opens MultiEdit(*) to writes; \
                  {file}: permissions.allow opens Edit(//**) to writes; \
