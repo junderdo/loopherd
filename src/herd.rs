@@ -871,16 +871,16 @@ pub fn lead_sandbox(paths: &Paths, herd: &str) -> Result<(Switches, SandboxMode)
     Ok((lead.switches().over(&lead_defaults(paths)?), lead.sandbox))
 }
 
-/// The args a herd's lead starts with before the command line's, and where
-/// they're set: `[lead].args`, else the herd's `args`.
-pub fn lead_args(paths: &Paths, herd: &str) -> Result<(Vec<String>, String)> {
+/// The args a herd's lead starts with before the command line's: `[lead].args`,
+/// else the herd's `args`, which `true` marks as also its workers'.
+pub fn lead_args(paths: &Paths, herd: &str) -> Result<(Vec<String>, bool)> {
     let file = load(&paths.herds, herd).context("herd")?;
     let lead = file
         .lead
         .with_context(|| format!("herd: {herd} has no [lead]"))?;
     Ok(match lead.args {
-        Some(args) => (args, "[lead].args".into()),
-        None => (file.args, format!("herd {herd}'s args")),
+        Some(args) => (args, false),
+        None => (file.args, true),
     })
 }
 

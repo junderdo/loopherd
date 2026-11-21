@@ -227,6 +227,12 @@ as its main checkout. Then, in order:
    which starts it with a warning instead ([D100](docs/decisions/D100.md)).
    A `merge_guard = "credentials"` lead isn't started either way; set
    `merge_guard = "hook"` to start it with the warnings.
+   A lead's Claude args (`[lead].args`, else the herd's `args`, then the
+   command line) may be only `--model`, `--effort`, `--verbose` and
+   `--permission-mode` with `default`, `manual`, `auto` or `plan`; any
+   other is refused or warned of the same way. Under `require`, a lead
+   started with an arg now off that list can't be restarted or revived
+   until you retire it and run `loopherd lead` again.
    A lead starts with no MCP servers; list the ones it may use, by the
    name `claude mcp add --scope user` gave them, in `[lead] mcp_servers`.
    Those run outside the sandbox.
