@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::handoff;
 use crate::herd::{self, MergeGuard, Paths};
-use crate::ledger::AgentRecord;
+use crate::ledger::{AgentRecord, Ledger};
 use crate::process::Procs;
 use crate::spawn::SpawnRequest;
 use crate::worktree::{same_dir, worktree_path};
@@ -530,7 +530,9 @@ impl Guard {
 
     /// [`Guard::path_refusal`] for the member `req` would spawn, at the
     /// worktree it would get, which may be an existing one for its branch.
-    pub fn spawn_refusal(&self, req: &SpawnRequest) -> Result<Option<String>> {
+    /// A lead may reuse an existing worktree only when an entry of its herd
+    /// in `ledger` records it.
+    pub fn spawn_refusal(&self, req: &SpawnRequest, ledger: &dyn Ledger) -> Result<Option<String>> {
         let placed = |worktree| Placement {
             subject: format!("adding {}", req.name),
             name: &req.name,
@@ -545,7 +547,28 @@ impl Guard {
             return Ok(Some(why));
         }
         let worktree = req.planned_worktree()?;
-        self.placement_refusal(&placed(worktree.as_deref()))
+        if let Some(why) = self.placement_refusal(&placed(worktree.as_deref()))? {
+            return Ok(Some(why));
+        }
+        let reused = worktree.filter(|w| self.for_lead() && w.exists());
+        let (Some(worktree), Some(herd)) = (reused, &req.member_of) else {
+            return Ok(None);
+        };
+        let recorded = ledger.entries()?.values().any(|entry| {
+            entry.herd.as_deref() == Some(herd.herd.as_str())
+                && entry
+                    .worktree
+                    .as_deref()
+                    .is_some_and(|w| same_dir(w, &worktree))
+        });
+        Ok((!recorded).then(|| {
+            format!(
+                "adding {} would reuse worktree {}, which no ledger entry of herd {} records",
+                req.name,
+                worktree.display(),
+                herd.herd
+            )
+        }))
     }
 
     fn placement_refusal(&self, placed: &Placement) -> Result<Option<String>> {
