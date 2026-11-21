@@ -18,6 +18,7 @@ use crate::process::{Procs, is_herdr};
 use crate::report::{Body, Entry, append};
 use crate::sandbox::{self, Probe};
 use crate::subagent_view::{ShowsSubagentView, TEXT_REACHES_SUBAGENT, ensure_main_view};
+use crate::worker_sandbox;
 use crate::worktree::{same_dir, worktree_path};
 
 /// Sent to a lead whose watch isn't running: after a restart nothing else wakes it (D17).
@@ -738,7 +739,31 @@ fn revive_one(
     let mut unsandboxed = None;
     let mut sockets_unblocked = None;
     match &lead {
-        None => {}
+        None => match worker_sandbox::Member::kept(&req.paths, &record.name) {
+            Ok(None) => {}
+            Ok(Some(member)) => {
+                let worktree = record.worktree.as_deref();
+                match worker_sandbox::prepare(&req.paths, &record.name, &member, worktree, probe) {
+                    Ok(launch) => {
+                        warnings.extend(launch.warnings(&record.name));
+                        unsandboxed = launch.unsandboxed().map(str::to_string);
+                        lead_args = Some([member.args, launch.args()].concat());
+                    }
+                    Err(error) => {
+                        return Outcome::Failed {
+                            step: "sandbox",
+                            error,
+                        };
+                    }
+                }
+            }
+            Err(error) => {
+                return Outcome::Failed {
+                    step: "sandbox",
+                    error,
+                };
+            }
+        },
         Some((lead, _)) => match sandbox::prepare_kept(&req.paths, &record.name, lead, probe) {
             Ok(launch) => {
                 warnings.extend(launch.warnings(&record.name));
@@ -966,6 +991,124 @@ mod tests {
             session_id: Some("stub".into()),
             ..record(name, cwd)
         }
+    }
+
+    /// Herd `h` with `[worker]` set to `worker`, and worker `w1` kept by its
+    /// sandbox with `--model opus`, its ledger entry at `cwd` claiming other args.
+    fn kept_worker(req: &ReviveRequest, worker: &str, cwd: &Path) -> AgentRecord {
+        std::fs::write(
+            req.paths.herds.join("h.toml"),
+            format!(
+                "repo = {:?}\n[template.t]\nparams = []\nprompt = \"go\"\n[worker]\n{worker}\n",
+                own_repo()
+            ),
+        )
+        .unwrap();
+        let dir = req.paths.config_dir().join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("w1.member.json"),
+            r#"{"herd": "h", "template": "t", "args": ["--model", "opus"]}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("w1.json"), "{}").unwrap();
+        AgentRecord {
+            herd: Some("h".into()),
+            template: Some("t".into()),
+            claude_args: vec!["--dangerously-skip-permissions".into()],
+            worktree: Some(cwd.into()),
+            ..record("w1", cwd)
+        }
+    }
+
+    #[test]
+    fn a_sandboxed_worker_resumes_with_its_kept_args_and_settings_rewritten_from_its_herd() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let req = request();
+        let worker = kept_worker(
+            &req,
+            "sandbox = \"require\"\nunix_sockets = \"all\"",
+            cwd.path(),
+        );
+        let mut ledger = ledger([worker]);
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 0, "{out}");
+        let settings = req.paths.config_dir().join("sandbox/w1.json");
+        let args = [
+            "--model".to_string(),
+            "opus".into(),
+            "--settings".into(),
+            settings.display().to_string(),
+        ];
+        assert_eq!(
+            herdr.started()[0].args,
+            [
+                vec!["--resume".to_string(), "sess-w1".into()],
+                args.to_vec()
+            ]
+            .concat()
+        );
+        assert_eq!(ledger.0["w1"].claude_args, args);
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(written["sandbox"]["network"]["allowAllUnixSockets"], true);
+    }
+
+    #[test]
+    fn a_required_worker_whose_sandbox_cant_start_isnt_revived() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let req = ReviveRequest {
+            sandbox: || {
+                Err(Unavailable {
+                    why: "bubblewrap isn't installed".into(),
+                    fix: "install bubblewrap".into(),
+                })
+            },
+            ..request()
+        };
+        let mut ledger = ledger([kept_worker(&req, "sandbox = \"require\"", cwd.path())]);
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_ne!(code, 0, "{out}");
+        assert!(out.contains("w1 can't start sandboxed"), "{out}");
+        assert!(herdr.started().is_empty());
+    }
+
+    #[test]
+    fn a_preferred_worker_whose_sandbox_cant_start_is_revived_unsandboxed_and_flagged() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let req = ReviveRequest {
+            sandbox: || {
+                Err(Unavailable {
+                    why: "bubblewrap isn't installed".into(),
+                    fix: "install bubblewrap".into(),
+                })
+            },
+            ..request()
+        };
+        let mut ledger = ledger([kept_worker(&req, "sandbox = \"prefer\"", cwd.path())]);
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            out.contains("w1 runs unsandboxed (bubblewrap isn't installed)"),
+            "{out}"
+        );
+        assert_eq!(
+            herdr.started()[0].args,
+            ["--resume", "sess-w1", "--model", "opus"]
+        );
+        assert_eq!(
+            ledger.0["w1"].unsandboxed.as_deref(),
+            Some("bubblewrap isn't installed")
+        );
     }
 
     #[test]
