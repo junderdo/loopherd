@@ -1558,6 +1558,23 @@ mod tests {
     }
 
     #[test]
+    fn a_sandboxed_worker_whose_herd_is_gone_is_refused_naming_the_herd() {
+        let w = World::new();
+        w.handed_off();
+        let worker = as_worker(&w, "sandbox = \"require\"", true);
+        fs::remove_file(w.paths().herds.join("h.toml")).unwrap();
+
+        let (result, _) = w.restart_as(false, true, None, &worker);
+
+        assert_eq!(
+            format!("{:#}", result.unwrap_err()),
+            "sandbox: lh-1 was started in herd h's worker sandbox, and herd h is gone; restore \
+             its herd file, or run loopherd retire lh-1"
+        );
+        assert!(w.herdr.prompts().is_empty());
+    }
+
+    #[test]
     fn a_preferred_worker_started_without_its_sandbox_is_restarted_with_a_warning() {
         let w = World::new();
         w.handed_off();

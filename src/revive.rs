@@ -1088,6 +1088,27 @@ mod tests {
     }
 
     #[test]
+    fn a_sandboxed_worker_whose_herd_is_gone_isnt_revived() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let req = request();
+        let mut ledger = ledger([kept_worker(&req, "sandbox = \"require\"", cwd.path())]);
+        std::fs::remove_file(req.paths.herds.join("h.toml")).unwrap();
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_ne!(code, 0, "{out}");
+        assert!(
+            out.contains(
+                "w1 was started in herd h's worker sandbox, and herd h is gone; restore its \
+                 herd file, or run loopherd retire w1"
+            ),
+            "{out}"
+        );
+        assert!(herdr.started().is_empty());
+    }
+
+    #[test]
     fn a_sandboxed_worker_resumes_with_its_kept_args_and_settings_rewritten_from_its_herd() {
         let cwd = tempfile::tempdir().unwrap();
         let herdr = herdr();

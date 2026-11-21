@@ -158,7 +158,7 @@ pub fn prepare(
     member: &Member,
     probe: &dyn Fn() -> Result<Sockets, Unavailable>,
 ) -> Result<Launch> {
-    let worker = herd::worker(paths, &member.herd)?;
+    let worker = herd_worker(paths, name, &member.herd)?;
     if worker.sandbox == WorkerSandbox::Off {
         return Ok(Launch::Off);
     }
@@ -286,7 +286,7 @@ pub fn running_unsandboxed(
     let name = &record.name;
     let (herd, mode) = match Member::kept(paths, name)? {
         Some(member) => {
-            let mode = herd::worker(paths, &member.herd)?.sandbox;
+            let mode = herd_worker(paths, name, &member.herd)?.sandbox;
             (member.herd, mode)
         }
         // A member loopherd never sandboxed, whose herd file may since have gone.
@@ -328,6 +328,24 @@ pub fn check_running(paths: &Paths, record: &AgentRecord) -> Result<(Option<Stri
     }
     let warning = format!("{name} runs unsandboxed ({why})");
     Ok((Some(why), vec![warning]))
+}
+
+/// Herd `herd`'s `[worker]`, which worker `name` was kept under.
+fn herd_worker(paths: &Paths, name: &str, herd: &str) -> Result<herd::Worker> {
+    herd::worker(paths, herd).map_err(|e| {
+        let gone = e.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+        });
+        match gone {
+            true => anyhow::anyhow!(
+                "{name} was started in herd {herd}'s worker sandbox, and herd {herd} is gone; \
+                 restore its herd file, or run loopherd retire {name}"
+            ),
+            false => e,
+        }
+    })
 }
 
 pub fn settings_file(paths: &Paths, name: &str) -> PathBuf {

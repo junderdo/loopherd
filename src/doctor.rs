@@ -188,7 +188,16 @@ pub(crate) fn lead_sandbox_check(paths: &Paths, lead: &AgentRecord) -> Option<Ch
 /// A running worker without the sandbox its herd's `[worker]` turns on.
 fn worker_sandbox_check(paths: &Paths, worker: &AgentRecord) -> Option<Check> {
     let name = &worker.name;
-    let (why, _, _) = crate::worker_sandbox::running_unsandboxed(paths, worker).ok()??;
+    let (why, _, _) = match crate::worker_sandbox::running_unsandboxed(paths, worker) {
+        Ok(running) => running?,
+        Err(e) => {
+            return Some(warning(
+                &format!("worker {name}"),
+                format!("its sandbox isn't checked: {e:#}"),
+                "fix that, then run loopherd doctor again".into(),
+            ));
+        }
+    };
     Some(warning(
         &format!("worker {name}"),
         format!("{name} runs unsandboxed ({why})"),
@@ -2851,6 +2860,33 @@ mod tests {
                  sandbox); fix: quit its Claude and run loopherd revive --name w-old",
                 "warning worker w-pre: w-pre runs unsandboxed (bubblewrap not installed); fix: \
                  quit its Claude and run loopherd revive --name w-pre",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_running_sandboxed_worker_whose_herd_is_gone_is_named() {
+        let m = machine(&ALL);
+        let dir = m.paths().config_dir().join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("w-gone.member.json"),
+            r#"{"herd": "gone", "template": "t", "args": []}"#,
+        )
+        .unwrap();
+        m.ledger(&[member("w-gone", "gone", "w1:p1", None)]);
+
+        let found: Vec<_> = problems(&m, &herdr())
+            .into_iter()
+            .filter(|p| p.starts_with("warning worker "))
+            .collect();
+
+        assert_eq!(
+            found,
+            [
+                "warning worker w-gone: its sandbox isn't checked: w-gone was started in herd \
+                 gone's worker sandbox, and herd gone is gone; restore its herd file, or run \
+                 loopherd retire w-gone; fix: fix that, then run loopherd doctor again"
             ]
         );
     }
