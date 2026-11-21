@@ -1914,8 +1914,8 @@ mod tests {
             member("lh-2", "w9:p2", None),
         ]);
         let herdr = FakeHerdr::new(&[]);
-        let unreadable = dir.path().join("lh-1.jsonl");
-        fs::create_dir(&unreadable).unwrap();
+        let unreadable = dir.path().join("lh-1/mailbox.jsonl");
+        fs::create_dir_all(&unreadable).unwrap();
         let mut clock = steps(|poll| match poll {
             1 | 2 => {}
             3 => send(&ledger, dir.path(), "lh-2", Kind::Question, "which DB?"),
@@ -2294,7 +2294,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (ledger, herdr) = working_pair();
         put(dir.path(), "lh-1", stop(0, 0));
-        let path = dir.path().join("lh-1.jsonl");
+        let path = dir.path().join("lh-1/mailbox.jsonl");
         let mut bytes = std::fs::read(&path).unwrap();
         bytes.extend(b"not json\n");
         std::fs::write(&path, bytes).unwrap();
@@ -2887,7 +2887,7 @@ mod tests {
             .with_live_agent(Some("lh-2"), None, "w9:p2");
         herdr.set_status("lh-1", AgentStatus::Idle);
         herdr.set_status("lh-2", AgentStatus::Idle);
-        fs::create_dir(dir.path().join("lh-1.jsonl")).unwrap();
+        fs::create_dir_all(dir.path().join("lh-1/mailbox.jsonl")).unwrap();
         let mut clock = steps(|poll| match poll {
             1 => herdr.set_status("lh-1", AgentStatus::Blocked),
             2 => herdr.remove_agent("lh-1"),
@@ -5577,7 +5577,7 @@ mod tests {
 
         let unreadable = Checked::drained();
         let reports = unreadable.config.path().join("reports");
-        fs::create_dir_all(reports.join("lead-cards.jsonl")).unwrap();
+        fs::create_dir_all(reports.join("lead-cards/mailbox.jsonl")).unwrap();
         assert_eq!(unreadable.shepherd(), None, "an unreadable mailbox");
     }
 

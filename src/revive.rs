@@ -2001,6 +2001,37 @@ mod tests {
     }
 
     #[test]
+    fn a_credentials_lead_with_every_unix_socket_open_is_not_revived_under_either_mode() {
+        for mode in ["require", "prefer"] {
+            let cwd = tempfile::tempdir().unwrap();
+            let herdr = herdr();
+            let mut ledger = ledger([lead("lead-h", cwd.path())]);
+            let req = request();
+            std::fs::write(
+                req.paths.herds.join("h.toml"),
+                format!(
+                    "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge_guard = \"credentials\"\n\
+                     sandbox = \"{mode}\"\nunix_sockets = \"all\"\n",
+                    own_repo()
+                ),
+            )
+            .unwrap();
+
+            let (out, code) = run(&herdr, &mut ledger, &req);
+
+            assert_eq!(code, 1, "{mode}: {out}");
+            assert!(
+                out.starts_with(
+                    "failed lead-h: sandbox: lead-h can't start with merge_guard = \
+                     \"credentials\": unix_sockets = \"all\" opens your ssh agent"
+                ),
+                "{mode}: {out}"
+            );
+            assert!(herdr.started().is_empty(), "{mode}");
+        }
+    }
+
+    #[test]
     fn a_revived_worker_keeps_its_own_settings() {
         let cwd = tempfile::tempdir().unwrap();
         let herdr = herdr();

@@ -638,7 +638,7 @@ fn notes(world: &World) -> Vec<String> {
     let mailbox = world
         .root
         .path()
-        .join("state/loopherd/reports/lead-k.jsonl");
+        .join("state/loopherd/reports/lead-k/mailbox.jsonl");
     fs::read_to_string(mailbox)
         .unwrap_or_default()
         .lines()

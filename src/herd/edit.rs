@@ -100,7 +100,8 @@ fn edit(
         return Ok(false);
     }
     let text = LineEnding::of(&original).apply(&doc.to_string());
-    check(&text, paths).with_context(|| format!("refused, {} is unchanged", file.display()))?;
+    check(herd, &text, paths)
+        .with_context(|| format!("refused, {} is unchanged", file.display()))?;
     let written = || format!("write {}", file.display());
     let dir = file.parent().context("herd file has no directory")?;
     let mut temp = tempfile::NamedTempFile::new_in(dir).with_context(written)?;
@@ -438,6 +439,6 @@ merge = false
                 format!("\"lead {{herd}} {round}\"")
             );
         }
-        crate::herd::check(&text(&paths), &paths).unwrap();
+        crate::herd::check("h", &text(&paths), &paths).unwrap();
     }
 }

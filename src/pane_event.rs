@@ -465,7 +465,7 @@ mod tests {
     }
 
     fn kinds(dir: &Path) -> Vec<String> {
-        let path = dir.join("lh-1.jsonl");
+        let path = dir.join("lh-1/mailbox.jsonl");
         fs::read_to_string(path)
             .unwrap_or_default()
             .lines()

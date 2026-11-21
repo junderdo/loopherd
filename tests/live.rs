@@ -751,7 +751,7 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     let write_later = state_dir.join("broker/lead-later/requests/write-probe");
     // The shepherd's handoff an older release left flat, which its resume still reads.
     let plant_shepherd = state_dir.join("handoffs/shepherd.md");
-    let write_mailbox = state_dir.join("reports/lh-other.jsonl");
+    let write_mailbox = state_dir.join("reports/lh-other/mailbox.jsonl");
     let write_later_handoff = state_dir.join("handoffs/lh-later/handoff.md");
     let write_control = worktree.join("write-probe");
     // The human's, the shepherd's and other agents' parts of the state dir, its own mailbox
@@ -764,7 +764,8 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
         "ledger.lock",
         "reports/watch.lock",
         "reports/watch.fired",
-        &format!("reports/{name}.jsonl"),
+        &format!("reports/{name}/mailbox.jsonl"),
+        "reports/lh-other/mailbox.jsonl",
         "reports/lh-other.jsonl",
         "handoffs/shepherd/handoff.md",
         "handoffs/shepherd.md",
@@ -778,7 +779,12 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     // Claude Code checks a redirect's target against the Edit denies, which refuse all of
     // handoffs/ to it on Linux; `loopherd handoff` is how a lead writes its own.
     let redirected = own_handoffs.join("redirect-probe");
-    for dir in ["handoffs/lh-other", "paused", "broker/lead-other/requests"] {
+    for dir in [
+        "handoffs/lh-other",
+        "reports/lh-other",
+        "paused",
+        "broker/lead-other/requests",
+    ] {
         std::fs::create_dir_all(state_dir.join(dir)).unwrap();
     }
     // One script, so the model copies no long paths, and its results go to the lead's own
@@ -1015,7 +1021,8 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
         .map(|p| format!("replaced {}\tRead-only file system", p.display()))
         .collect();
     assert_eq!(ran[6..], after, "{probed}");
-    let mail = std::fs::read_to_string(state_dir.join(format!("reports/{name}.jsonl"))).unwrap();
+    let mail =
+        std::fs::read_to_string(state_dir.join(format!("reports/{name}/mailbox.jsonl"))).unwrap();
     assert!(mail.contains("sandbox probe"), "{mail}");
 }
 
@@ -2481,7 +2488,7 @@ fn guard_rejects_a_dev_socket_symlinked_to_the_live_socket() {
 }
 
 fn mailbox_lines(state: &Path, name: &str) -> Vec<Value> {
-    std::fs::read_to_string(state.join(format!("loopherd/reports/{name}.jsonl")))
+    std::fs::read_to_string(state.join(format!("loopherd/reports/{name}/mailbox.jsonl")))
         .unwrap_or_default()
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())

@@ -883,13 +883,10 @@ fn pause_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
 /// A failure when `name`'s mailbox can't be read or has a line that doesn't parse.
 fn mailbox_check(dir: &Path, name: &str) -> Option<Check> {
     let (detail, fix) = match crate::report::history(dir, name) {
-        Err(e) => {
-            let path = dir.join(format!("{name}.jsonl"));
-            (
-                message(&e),
-                format!("make {} a readable file", path.display()),
-            )
-        }
+        Err(e) => (
+            message(&e),
+            format!("make {} readable", crate::report::shown_mailbox(dir, name)),
+        ),
         Ok((_, warnings)) => {
             let detail = match warnings.as_slice() {
                 [] => return None,
@@ -2258,6 +2255,33 @@ mod tests {
         assert!(line.ends_with(&fix), "{out}");
         assert_eq!(out.lines().count(), 2, "{out}");
         assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn a_credentials_herd_with_every_unix_socket_open_fails() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge_guard = \"credentials\"\n\
+                 unix_sockets = \"all\"\n",
+                repo.to_str().unwrap()
+            ),
+        );
+
+        let checks = m.checks(None, &herdr()).unwrap();
+
+        let herd = checks.iter().find(|c| c.name == "herd h").unwrap();
+        assert_eq!(herd.status, Status::Failure);
+        assert!(
+            herd.detail.starts_with(
+                "invalid h.toml: lead: can't start with merge_guard = \"credentials\": \
+                 unix_sockets = \"all\" opens"
+            ),
+            "{}",
+            herd.detail
+        );
     }
 
     fn without_bubblewrap(m: &mut Machine) {
@@ -3632,7 +3656,7 @@ mod tests {
         let m = machine(&ALL);
         let herdr = herdr().with_live_agent(Some("a"), None, "w1:p1");
         m.ledger(&[member("a", "h", "w1:p1", None)]);
-        let mailbox = m.state().join("reports/a.jsonl");
+        let mailbox = m.state().join("reports/a/mailbox.jsonl");
         std::fs::create_dir_all(&mailbox).unwrap();
         let problems = problems(&m, &herdr);
         assert_eq!(problems.len(), 1, "{problems:?}");
@@ -3641,10 +3665,7 @@ mod tests {
             "{problems:?}"
         );
         assert!(
-            problems[0].ends_with(&format!(
-                "; fix: make {} a readable file",
-                mailbox.display()
-            )),
+            problems[0].ends_with(&format!("; fix: make {} readable", mailbox.display())),
             "{problems:?}"
         );
     }

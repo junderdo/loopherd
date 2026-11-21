@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use super::{Paths, expand_home, file_of, herd_files};
-use crate::handoff;
 use crate::herdr::Herdr;
 use crate::ledger::{AgentRecord, Ledger, herd_runs};
 use crate::retire::open_tab;
+use crate::{handoff, report};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Removal {
@@ -79,7 +79,7 @@ pub fn remove(
     for path in member_files(state, &names, mailboxes).iter().chain(&own) {
         present(path)?;
     }
-    for dir in names.iter().map(|n| handoff::dir(state, n)) {
+    for dir in member_dirs(state, &names, mailboxes) {
         if dir.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
             bail!("refused: {} is a symlink", dir.display());
         }
@@ -205,14 +205,29 @@ fn member_files(state: &Path, names: &[String], mailboxes: bool) -> Vec<PathBuf>
     let mut files = Vec::new();
     for name in names {
         if mailboxes {
-            files.push(state.join("reports").join(format!("{name}.jsonl")));
+            let reports = state.join("reports");
+            files.push(report::mailbox_path(&reports, name));
+            files.push(report::flat_mailbox_path(&reports, name));
         }
         files.extend(handoff::files(state, name));
     }
     files
 }
 
-/// Deletes each member's files, then its handoff dir once that is empty.
+/// Each member's handoff dir, and its mailbox dir when `mailboxes`.
+fn member_dirs(state: &Path, names: &[String], mailboxes: bool) -> Vec<PathBuf> {
+    let mailbox_dirs = names
+        .iter()
+        .filter(|_| mailboxes)
+        .map(|n| state.join("reports").join(n));
+    names
+        .iter()
+        .map(|n| handoff::dir(state, n))
+        .chain(mailbox_dirs)
+        .collect()
+}
+
+/// Deletes each member's files, then its handoff and mailbox dirs once empty.
 fn delete_members(
     state: &Path,
     names: &[String],
@@ -222,7 +237,7 @@ fn delete_members(
     out: &mut Vec<String>,
 ) -> Result<()> {
     delete_all(&member_files(state, names, mailboxes), verb, how, out)?;
-    for dir in names.iter().map(|n| handoff::dir(state, n)) {
+    for dir in member_dirs(state, names, mailboxes) {
         if !present(&dir)? {
             continue;
         }
@@ -439,9 +454,8 @@ mod tests {
         s.write("paused/old", "{}");
         s.member("lead-old", "old", true, true);
         s.member("a", "old", true, false);
-        for name in ["lead-old", "a"] {
-            s.write(&format!("state/reports/{name}.jsonl"), "{}\n");
-        }
+        s.write("state/reports/a/mailbox.jsonl", "{}\n");
+        s.write("state/reports/lead-old.jsonl", "{}\n");
         s.write("state/handoffs/a/handoff.md", "now\n");
         s.write("state/handoffs/a/prev.md", "before\n");
         // Flat, as an older release left them.
@@ -461,7 +475,7 @@ mod tests {
         "herds/old.toml",
         "herds/old-lead.md",
         "paused/old",
-        "state/reports/a.jsonl",
+        "state/reports/a",
         "state/reports/lead-old.jsonl",
         "state/handoffs/a",
         "state/handoffs/lead-old.md",
@@ -492,13 +506,14 @@ mod tests {
         assert_eq!(
             out,
             format!(
-                "removed {root}/state/reports/a.jsonl\n\
+                "removed {root}/state/reports/a/mailbox.jsonl\n\
                  removed {root}/state/handoffs/a/handoff.md\n\
                  removed {root}/state/handoffs/a/prev.md\n\
                  removed {root}/state/reports/lead-old.jsonl\n\
                  removed {root}/state/handoffs/lead-old.md\n\
                  removed {root}/state/handoffs/lead-old.prev.md\n\
                  removed {root}/state/handoffs/a\n\
+                 removed {root}/state/reports/a\n\
                  removed ledger entry a\n\
                  removed ledger entry lead-old\n\
                  removed {root}/paused/old\n\
