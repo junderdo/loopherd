@@ -1274,7 +1274,8 @@ fn sandbox_loosenings(
         }
     }
     // allowRead carves into denyRead. Credentials to hide make any of it suspect;
-    // otherwise only a carve into what is denied counts.
+    // otherwise only a carve at or beneath a denied path counts: over an ancestor
+    // Claude keeps the narrower deny, and a relative path can't reach one.
     let credentials = !own["sandbox"]["filesystem"]["allowRead"].is_null();
     let own_reads = entries(&own["sandbox"]["filesystem"]["allowRead"]);
     let denied: Vec<PathBuf> = entries(&own["sandbox"]["filesystem"]["denyRead"])
@@ -1282,11 +1283,11 @@ fn sandbox_loosenings(
         .filter_map(|path| absolute(path, home))
         .collect();
     for path in entries(&user["sandbox"]["filesystem"]["allowRead"]) {
-        let opens = absolute(&path, home).is_none_or(|path| {
-            denied
-                .iter()
-                .any(|deny| deny.starts_with(&path) || path.starts_with(deny))
-        });
+        let opens = match absolute(&path, home) {
+            Some(path) => denied.iter().any(|deny| path.starts_with(deny)),
+            // Absolute but climbing with `..`, so it could land anywhere.
+            None => path.starts_with('/') || path.starts_with('~'),
+        };
         if !own_reads.contains(&path) && (credentials || opens) {
             found.push(format!(
                 "{shown}: sandbox.filesystem.allowRead opens {path} to reads"
