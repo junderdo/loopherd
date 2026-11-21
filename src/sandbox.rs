@@ -1691,14 +1691,17 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
         // The shepherd's resume still reads this, which may not exist to be listed below.
         deny.push(file_rule(&handoff::flat(state, crate::context::SHEPHERD)));
     }
-    // On Linux the glob covers the file tools, and a named path that later goes
-    // missing would get the sandbox's empty placeholder, which reads as a handoff.
-    let handoffs = match cfg!(target_os = "linux") {
+    // On Linux the globs cover the file tools, and a named path that later goes
+    // missing would get the sandbox's empty placeholder, which may read as a handoff.
+    let others = match cfg!(target_os = "linux") {
         true => vec![],
-        false => others_in_handoffs(paths, name)?,
+        false => [
+            others_in_broker(paths, name)?,
+            others_in_handoffs(paths, name)?,
+        ]
+        .concat(),
     };
-    let others = others_in_broker(paths, name)?.into_iter().chain(handoffs);
-    deny.extend(others.map(|(path, dir)| match dir {
+    deny.extend(others.into_iter().map(|(path, dir)| match dir {
         true => edit_rule(&path),
         false => file_rule(&path),
     }));
@@ -1796,7 +1799,7 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
 /// What in `<state>/broker/` isn't lead `name`'s `requests/`, each named, as
 /// the file tools' denies. An `Edit` deny is also a sandbox write deny, which
 /// beats `allowWrite`, so one on all of `broker/` would close `requests/`.
-/// On Linux a glob deny covers the rest; elsewhere the sandbox would apply it.
+/// Not on Linux, where a glob deny covers the rest.
 fn others_in_broker(paths: &Paths, name: &str) -> Result<Vec<(PathBuf, bool)>> {
     let broker = paths.state_dir().join("broker");
     let mut found = entries_but(&broker, name)?;
