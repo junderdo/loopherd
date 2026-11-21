@@ -68,8 +68,10 @@ scripts/install
 ```
 
 On a terminal it also offers loopherd's agent types (`builder`,
-`reviewer`, `researcher`, `scout`) and the `mattpocock-skills` plugin, each
-default no. `scripts/install --help` lists its flags.
+`reviewer`, `researcher`, `scout`), the `mattpocock-skills` plugin and
+loopherd's herdr plugin (below), each default no. `--with-agents`,
+`--with-skills` and `--with-herdr-plugin` install one without asking;
+`scripts/install --help` lists its flags.
 
 **Update:** `git pull && scripts/install`.
 
@@ -98,6 +100,10 @@ lead the commands its switches leave to you. `install-hook` backs up
 ### herdr plugin
 
 Optional, once loopherd is installed (above). Needs herdr 0.7.5 or later.
+A source install asks "Install loopherd's herdr plugin?" when herdr is on
+`PATH` and the plugin is missing or older than the checkout's, and
+`scripts/install --with-herdr-plugin` installs or updates it without
+asking. Or by hand:
 
 ```bash
 herdr plugin install junderdo/loopherd/herdr-plugin
