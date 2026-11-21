@@ -2000,6 +2000,32 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_whose_worktree_holds_zero_byte_settings_placeholders_is_revived_into_its_sandbox() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut ledger = ledger([lead("lead-h", cwd.path())]);
+        let claude = worktree_path(&own_repo(), "lead-h").join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        for name in ["settings.json", "settings.local.json"] {
+            std::fs::write(claude.join(name), "").unwrap();
+        }
+        let req = request();
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 0, "{out}");
+        assert!(!out.contains("can't parse it"), "{out}");
+        let settings = sandbox::settings_file(&req.paths, "lead-h");
+        assert!(
+            herdr.started()[0]
+                .args
+                .contains(&settings.display().to_string()),
+            "{:?}",
+            herdr.started()
+        );
+    }
+
+    #[test]
     fn a_lead_with_an_arg_outside_the_allowlist_is_not_revived_under_require() {
         let cwd = tempfile::tempdir().unwrap();
         let herdr = herdr();

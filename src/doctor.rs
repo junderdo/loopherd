@@ -2464,6 +2464,32 @@ mod tests {
     }
 
     #[test]
+    fn zero_byte_sandbox_placeholders_for_a_leads_settings_are_no_finding() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge = true\n",
+                repo.to_str().unwrap()
+            ),
+        );
+        user_settings(&m, "");
+        let claude = crate::worktree::worktree_path(&repo, "lead-h").join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        for name in ["settings.json", "settings.local.json"] {
+            std::fs::write(claude.join(name), "").unwrap();
+        }
+
+        let problems = problems(&m, &herdr());
+
+        assert!(
+            !problems.iter().any(|p| p.contains("can't parse it")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
     fn a_herd_files_lead_arg_outside_the_allowlist_fails_under_require_and_warns_under_prefer() {
         let m = machine(&ALL);
         let repo = m.herd("h");
