@@ -1587,6 +1587,9 @@ pub fn route(
 /// Starts lead `lead`'s broker unless one runs, saying whether it started one.
 pub type StartBroker = fn(&Paths, &str) -> Result<bool>;
 
+/// Restarts a lead's broker, or starts one when none runs, as [`restart_broker`] does.
+pub type RestartBroker = fn(&Paths, &str) -> Result<()>;
+
 /// How long `start` waits for the broker it started to take its lock.
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 
