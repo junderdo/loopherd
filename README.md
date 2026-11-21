@@ -207,7 +207,10 @@ as its main checkout. Then, in order:
    reopens all three ([D105](docs/decisions/D105.md)). Where Claude Code
    has no seccomp filter to block them, `loopherd doctor` and
    `loopherd setup` name `npm install -g @anthropic-ai/sandbox-runtime`,
-   and the lead isn't started unless its `[lead]` sets `sandbox = "prefer"`.
+   and the lead isn't started or restarted unless its `[lead]` sets
+   `sandbox = "prefer"`; one with `merge_guard = "credentials"` isn't
+   started or restarted even then. Under `unix_sockets = "all"` the socket
+   check is skipped: the lead isn't refused or flagged for open sockets.
    What still gets past it: workers run unsandboxed, so a lead can have
    one act for it (LH-284), and most of the state dir stays writable to it
    (LH-298).
@@ -229,7 +232,8 @@ as its main checkout. Then, in order:
 The guide a shepherd or lead follows, from setting up a herd to cleaning up
 after merges, is the loopherd skill: `loopherd --skill` prints it
 (`--section lead` prints one section), and `install-hook` installs it for
-Claude.
+Claude: the file in `~/.agents/skills/loopherd/`, and `~/.claude/skills/loopherd`
+a relative symlink to it, as the `skills` CLI lays out a skill.
 
 ### What `init` writes
 
