@@ -34,6 +34,8 @@ pub struct Install {
     pub sandbox: Result<Sockets, Unavailable>,
     /// WSL2 lets this machine run Windows programs.
     pub wsl_interop: bool,
+    /// Where `install-hook` puts the skill for these settings.
+    pub skill: crate::skill::Layout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -74,6 +76,7 @@ pub fn checks(
         crate::herd::require(&setup.paths, herd)?;
     }
     let mut checks = hook_checks(install);
+    checks.extend(skill_check(install));
     checks.push(running_binary(install));
     checks.push(sandbox_check(install, setup));
     let (herdr_checks, reached) = herdr_checks(herdr);
@@ -902,22 +905,8 @@ fn message(e: &anyhow::Error) -> String {
 
 fn hook_checks(install: &Install) -> Vec<Check> {
     let settings = install.settings.display();
-    // By name, a stale loopherd first on PATH would point the hooks back at itself.
-    let stale_on_path = install
-        .on_path
-        .as_ref()
-        .filter(|on_path| !same_file(&install.running, on_path));
-    let loopherd = match stale_on_path {
-        Some(_) => crate::shell::quote(&install.running.to_string_lossy()),
-        None => "loopherd".to_string(),
-    };
-    let install_hook = match install.settings_given {
-        true => format!(
-            "{loopherd} install-hook --settings {}",
-            crate::shell::quote(&install.settings.to_string_lossy())
-        ),
-        false => format!("{loopherd} install-hook"),
-    };
+    let stale_on_path = stale_on_path(install);
+    let install_hook = install_hook(install);
     let hooks = match crate::install_hook::hooks(&install.settings) {
         Ok(hooks) => hooks,
         Err(e) => {
@@ -974,6 +963,54 @@ fn hook_checks(install: &Install) -> Vec<Check> {
         },
     });
     checks
+}
+
+/// A loopherd first on PATH other than this one; by name it would point
+/// the hooks back at itself.
+fn stale_on_path(install: &Install) -> Option<&PathBuf> {
+    install
+        .on_path
+        .as_ref()
+        .filter(|on_path| !same_file(&install.running, on_path))
+}
+
+fn install_hook(install: &Install) -> String {
+    let loopherd = match stale_on_path(install) {
+        Some(_) => crate::shell::quote(&install.running.to_string_lossy()),
+        None => "loopherd".to_string(),
+    };
+    match install.settings_given {
+        true => format!(
+            "{loopherd} install-hook --settings {}",
+            crate::shell::quote(&install.settings.to_string_lossy())
+        ),
+        false => format!("{loopherd} install-hook"),
+    }
+}
+
+/// Whether Claude's skills dir links to the skill `install-hook` writes.
+fn skill_check(install: &Install) -> Option<Check> {
+    use crate::skill::{Layout, Link};
+    let Layout::Linked { real, link } = &install.skill else {
+        return None;
+    };
+    let at = link.join("loopherd");
+    let skill = install.skill.skill();
+    let fix = install_hook(install);
+    Some(match crate::skill::link_state(real, link) {
+        Link::Ours if at.join("SKILL.md").is_file() => ok(
+            "skill",
+            format!("{} links to {}", at.display(), skill.display()),
+        ),
+        Link::Ours => warning("skill", format!("no {}", skill.display()), fix),
+        Link::Missing => warning("skill", format!("no {}", at.display()), fix),
+        Link::OldCopy => warning("skill", format!("{} isn't a symlink", at.display()), fix),
+        Link::Foreign(why) => warning(
+            "skill",
+            format!("{} {why}", at.display()),
+            format!("move {} aside, then {fix}", at.display()),
+        ),
+    })
 }
 
 fn dir_of(binary: &Path) -> &Path {
@@ -1376,6 +1413,11 @@ mod tests {
         write_hooks(&settings, &exe, events);
         std::fs::create_dir_all(dir.path().join("config")).unwrap();
         std::fs::write(dir.path().join("config/config.toml"), CONFIG).unwrap();
+        let skill = crate::skill::Layout::Linked {
+            real: dir.path().join(".agents/skills"),
+            link: dir.path().join("skills"),
+        };
+        crate::skill::install(&skill).unwrap();
         let setup = Setup {
             paths: Paths {
                 herds: dir.path().join("config/herds"),
@@ -1394,6 +1436,7 @@ mod tests {
                 running: exe,
                 sandbox: Ok(Sockets::Blocked),
                 wsl_interop: false,
+                skill: skill.clone(),
             },
             setup: Ok(setup),
             dir,
@@ -1445,7 +1488,80 @@ mod tests {
         let m = machine(&ALL);
         assert_eq!(
             run(&m, &herdr()),
-            ("doctor: 15 ok, 0 warnings, 0 failures\n".into(), 0)
+            ("doctor: 16 ok, 0 warnings, 0 failures\n".into(), 0)
+        );
+    }
+
+    fn skill_link(m: &Machine) -> PathBuf {
+        m.dir.path().join("skills/loopherd")
+    }
+
+    fn skill_warning(m: &Machine) -> String {
+        let (out, code) = run(m, &herdr());
+        assert_eq!(code, 0, "{out}");
+        out.lines()
+            .skip_while(|l| !l.contains("skill"))
+            .take(2)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn a_missing_skill_link_warns_naming_install_hook() {
+        let m = machine(&ALL);
+        std::fs::remove_file(skill_link(&m)).unwrap();
+        let warning = skill_warning(&m);
+        assert!(
+            warning.contains(&format!("no {}", skill_link(&m).display())),
+            "{warning}"
+        );
+        assert!(warning.contains("loopherd install-hook"), "{warning}");
+    }
+
+    #[test]
+    fn a_skill_dir_that_isnt_a_symlink_warns_naming_install_hook() {
+        let m = machine(&ALL);
+        std::fs::remove_file(skill_link(&m)).unwrap();
+        std::fs::create_dir(skill_link(&m)).unwrap();
+        std::fs::write(skill_link(&m).join("SKILL.md"), crate::skill::SKILL).unwrap();
+        let warning = skill_warning(&m);
+        assert!(warning.contains("isn't a symlink"), "{warning}");
+        assert!(warning.contains("loopherd install-hook"), "{warning}");
+    }
+
+    #[test]
+    fn a_dangling_skill_link_warns_even_when_its_target_reads_right() {
+        let m = machine(&ALL);
+        let real = m.dir.path().join("dotfiles");
+        std::fs::create_dir_all(real.join("skills")).unwrap();
+        std::fs::remove_file(skill_link(&m)).unwrap();
+        std::fs::remove_dir(m.dir.path().join("skills")).unwrap();
+        std::os::unix::fs::symlink(real.join("skills"), m.dir.path().join("skills")).unwrap();
+        std::os::unix::fs::symlink("../.agents/skills/loopherd", skill_link(&m)).unwrap();
+        assert!(!skill_link(&m).join("SKILL.md").exists());
+
+        let warning = skill_warning(&m);
+
+        assert!(warning.starts_with("warning skill:"), "{warning}");
+        assert!(warning.contains("loopherd install-hook"), "{warning}");
+    }
+
+    #[test]
+    fn a_skill_link_pointing_elsewhere_warns_to_move_it_aside() {
+        let m = machine(&ALL);
+        std::fs::remove_file(skill_link(&m)).unwrap();
+        std::os::unix::fs::symlink("/elsewhere/loopherd", skill_link(&m)).unwrap();
+        let warning = skill_warning(&m);
+        assert!(
+            warning.contains("points to /elsewhere/loopherd"),
+            "{warning}"
+        );
+        assert!(
+            warning.contains(&format!(
+                "move {} aside, then loopherd install-hook",
+                skill_link(&m).display()
+            )),
+            "{warning}"
         );
     }
 
@@ -1459,7 +1575,7 @@ mod tests {
                 out,
                 format!(
                     "failure {missing} hook: not in {}; fix: loopherd install-hook\n\
-                     doctor: 14 ok, 0 warnings, 1 failures\n",
+                     doctor: 15 ok, 0 warnings, 1 failures\n",
                     m.install.settings.display()
                 ),
             );
@@ -1477,7 +1593,7 @@ mod tests {
         assert_eq!(
             run(&m, &herdr()),
             (
-                format!("warning {line}doctor: 14 ok, 1 warnings, 0 failures\n"),
+                format!("warning {line}doctor: 15 ok, 1 warnings, 0 failures\n"),
                 0
             )
         );
@@ -1485,7 +1601,7 @@ mod tests {
         assert_eq!(
             run(&m, &herdr()),
             (
-                format!("failure {line}doctor: 14 ok, 0 warnings, 1 failures\n"),
+                format!("failure {line}doctor: 15 ok, 0 warnings, 1 failures\n"),
                 1
             )
         );
@@ -1511,7 +1627,7 @@ mod tests {
         m.install.settings = m.dir.path().join("absent.json");
         let (out, code) = run(&m, &herdr());
         assert!(
-            out.ends_with("doctor: 10 ok, 1 warnings, 4 failures\n"),
+            out.ends_with("doctor: 11 ok, 1 warnings, 4 failures\n"),
             "{out}"
         );
         assert_eq!(code, 1);
@@ -1531,7 +1647,7 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.ends_with("doctor: 9 ok, 0 warnings, 1 failures\n"),
+            out.ends_with("doctor: 10 ok, 0 warnings, 1 failures\n"),
             "{out}"
         );
         assert_eq!(code, 1);
@@ -1556,7 +1672,7 @@ mod tests {
             format!(
                 "failure hook binary: hooks call {}, not the loopherd on PATH ({}); \
                  fix: loopherd install-hook\n\
-                 doctor: 14 ok, 0 warnings, 1 failures\n",
+                 doctor: 15 ok, 0 warnings, 1 failures\n",
                 old.display(),
                 path_exe.display()
             )
@@ -1578,7 +1694,7 @@ mod tests {
                  fix: put {running_dir} before {stale_dir} on PATH, then '{running}' install-hook\n\
                  warning running binary: this is {running}, not the loopherd on PATH ({stale}); \
                  fix: run the loopherd on PATH\n\
-                 doctor: 13 ok, 1 warnings, 1 failures\n",
+                 doctor: 14 ok, 1 warnings, 1 failures\n",
                 running = running.display(),
                 stale = stale.display(),
                 running_dir = running.parent().unwrap().display(),
@@ -1614,7 +1730,7 @@ mod tests {
             format!(
                 "warning running binary: this is {}, not the loopherd on PATH ({}); \
                  fix: run the loopherd on PATH\n\
-                 doctor: 14 ok, 1 warnings, 0 failures\n",
+                 doctor: 15 ok, 1 warnings, 0 failures\n",
                 dev.display(),
                 m.install.on_path.as_ref().unwrap().display()
             )
@@ -1632,7 +1748,7 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         m.install.on_path = Some(link);
         assert_eq!(run(&m, &herdr()).1, 0);
-        assert!(run(&m, &herdr()).0.starts_with("doctor: 15 ok"));
+        assert!(run(&m, &herdr()).0.starts_with("doctor: 16 ok"));
     }
 
     #[test]
@@ -1644,7 +1760,7 @@ mod tests {
         assert_eq!(
             out,
             "failure herdr: no herdr server answers on /run/fake/herdr.sock; fix: herdr\n\
-             doctor: 12 ok, 0 warnings, 1 failures\n"
+             doctor: 13 ok, 0 warnings, 1 failures\n"
         );
         assert_eq!(code, 1);
     }
@@ -1669,7 +1785,7 @@ mod tests {
                     format!(
                         "failure herdr version: {version} is older than {MIN_HERDR}; \
                          fix: upgrade herdr to {MIN_HERDR} or later and restart its server\n\
-                         doctor: 14 ok, 0 warnings, 1 failures\n"
+                         doctor: 15 ok, 0 warnings, 1 failures\n"
                     )
                 ),
             }
@@ -1681,6 +1797,7 @@ mod tests {
         let m = machine(&ALL);
         let checks = checks(&m.install, &m.setup, None, &herdr()).unwrap();
         let exe = m.install.running.display();
+        let dir = m.dir.path().display();
         let settings = m.install.settings.display();
         let config = m.config().display().to_string();
         assert_eq!(
@@ -1692,6 +1809,7 @@ mod tests {
                  ok PreToolUse hook: in {settings}\n\
                  ok UserPromptSubmit hook: in {settings}\n\
                  ok hook binary: hooks call {exe}\n\
+                 ok skill: {dir}/skills/loopherd links to {dir}/.agents/skills/loopherd/SKILL.md\n\
                  ok running binary: {exe}\n\
                  ok sandbox: can start\n\
                  ok herdr: answers on /run/fake/herdr.sock\n\
@@ -1701,7 +1819,7 @@ mod tests {
                  ok lead defaults: set in {config}\n\
                  ok context limits: set in {config}\n\
                  ok ledger: 0 entries\n\
-                 doctor: 15 ok, 0 warnings, 0 failures\n"
+                 doctor: 16 ok, 0 warnings, 0 failures\n"
             )
         );
     }
@@ -1713,9 +1831,9 @@ mod tests {
         let data: Value = serde_json::from_str(&json(&checks)).unwrap();
         assert_eq!(
             (&data["ok"], &data["warnings"], &data["failures"]),
-            (&json!(14), &json!(1), &json!(0))
+            (&json!(15), &json!(1), &json!(0))
         );
-        assert_eq!(data["checks"].as_array().unwrap().len(), 15);
+        assert_eq!(data["checks"].as_array().unwrap().len(), 16);
         assert_eq!(
             data["checks"][4],
             json!({
@@ -1770,7 +1888,7 @@ mod tests {
             out,
             format!(
                 "failure Stop hook: not in {}; fix: loopherd install-hook\n\
-                 doctor: 14 ok, 0 warnings, 1 failures\n",
+                 doctor: 15 ok, 0 warnings, 1 failures\n",
                 m.install.settings.display()
             )
         );
@@ -1818,7 +1936,7 @@ mod tests {
                 "warning herdr plugin: loopherd's herdr plugin isn't installed, so its \
                  actions, popups and event hooks are unavailable; \
                  fix: herdr plugin install junderdo/loopherd/herdr-plugin\n\
-                 doctor: 14 ok, 1 warnings, 0 failures\n"
+                 doctor: 15 ok, 1 warnings, 0 failures\n"
                     .into(),
                 0
             )
@@ -1833,7 +1951,7 @@ mod tests {
                 "warning herdr plugin: loopherd's herdr plugin is disabled, so its \
                  actions, popups and event hooks are unavailable; \
                  fix: herdr plugin enable loopherd\n\
-                 doctor: 14 ok, 1 warnings, 0 failures\n"
+                 doctor: 15 ok, 1 warnings, 0 failures\n"
                     .into(),
                 0
             )
@@ -1848,7 +1966,7 @@ mod tests {
             format!(
                 "warning herdr plugin: plugin 0.0.1 differs from loopherd {VERSION}; \
                  fix: herdr plugin update loopherd\n\
-                 doctor: 14 ok, 1 warnings, 0 failures\n"
+                 doctor: 15 ok, 1 warnings, 0 failures\n"
             )
         );
         assert_eq!(code, 0);
@@ -1871,7 +1989,7 @@ mod tests {
                 format!(
                     "warning herdr plugin: plugin 999.0.0 differs from loopherd {VERSION}; \
                      fix: update loopherd to 999.0.0\n\
-                     doctor: 14 ok, 1 warnings, 0 failures\n"
+                     doctor: 15 ok, 1 warnings, 0 failures\n"
                 )
             );
             assert_eq!(code, 0);
@@ -2012,7 +2130,7 @@ mod tests {
                 format!(
                     "warning lead defaults: unset in {config}; fix: loopherd setup\n\
                      warning context limits: unset in {config}; fix: loopherd setup\n\
-                     doctor: 13 ok, 2 warnings, 0 failures\n"
+                     doctor: 14 ok, 2 warnings, 0 failures\n"
                 ),
                 0
             )
@@ -3012,7 +3130,7 @@ mod tests {
             (
                 "warning member gone: no live agent matches it (pane w1:p2) on /run/fake/herdr.sock; \
                  fix: loopherd revive --name gone, or loopherd retire gone\n\
-                 doctor: 16 ok, 1 warnings, 0 failures\n"
+                 doctor: 17 ok, 1 warnings, 0 failures\n"
                     .into(),
                 0
             )
@@ -3041,7 +3159,7 @@ mod tests {
     fn strays_are_not_reported() {
         let m = machine(&ALL);
         let herdr = herdr().with_live_agent(Some("stray"), None, "w1:p9");
-        assert_eq!(run(&m, &herdr).0, "doctor: 15 ok, 0 warnings, 0 failures\n");
+        assert_eq!(run(&m, &herdr).0, "doctor: 16 ok, 0 warnings, 0 failures\n");
     }
 
     #[test]
@@ -3105,7 +3223,7 @@ mod tests {
             (
                 "warning config and state: not checked: HOME is not set; \
                  fix: set HOME\n\
-                 doctor: 11 ok, 1 warnings, 0 failures\n"
+                 doctor: 12 ok, 1 warnings, 0 failures\n"
                     .into(),
                 0
             )

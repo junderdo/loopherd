@@ -23,7 +23,8 @@ scripts/install
 
 It needs `jq`. It builds, copies the binary to `~/.local/bin/loopherd` through
 a temp file and a rename, so a failed build keeps the last good one, and runs
-`loopherd install-hook`, which installs the hooks and the skill. Then:
+`loopherd install-hook`, which installs the hooks and the skill
+(`~/.agents/skills/loopherd`, linked from `~/.claude/skills/loopherd`). Then:
 
 ```bash
 loopherd feed loopherd-cards --dry-run
@@ -75,6 +76,37 @@ Backlog cards into members `lh-<n>` on `<type>/LH-<n>-<slug>`.
 
   `<shortLink>` is the last part of the card's URL in `scripts/trello show`.
 
+## Grilling
+
+A `wayfinding:grilling` card runs in its own tab with a fresh Claude, never in
+your pane, so the grill stays out of your context. From your own pane:
+
+```bash
+herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd <main checkout> --label grill-LH-<n> --no-focus
+herdr agent start grill-lh-<n> --kind claude --pane <.result.root_pane.pane_id from tab create>
+prompt=$(mktemp)
+cat > "$prompt" <<'PROMPT'
+<the filled prompt>
+PROMPT
+herdr agent prompt grill-lh-<n> "$(cat "$prompt")"
+```
+
+The quoted heredoc keeps the prompt's backticks and `$(…)` from running in
+your shell; never pass the prompt inline in double quotes.
+
+Wait for the new tab's shell prompt before `agent start` (see Launch agent in
+[herdr.md](../research/herdr.md)). Fill the prompt from
+[grill-prompt.md](grill-prompt.md): `<CARD>`, `<NAME>`, `<CARD_URL>`,
+`<REPO>`, `<SLUG>`, and `<BACKGROUND>`, the decisions and cards the card leans
+on. Then tell the human to switch to tab `grill-LH-<n>`.
+
+The grill session isn't in the ledger. After its PR merges it closes the card
+out and sends you `<card> merged and closed out: …`; close its tab then
+(`herdr tab close <tab>`). If the human reports the merge instead, its pane
+already closed, do the close-out yourself: move the card to Done, run
+`scripts/trello unblock`, remove its worktree and local branch, and close the
+tab if it's still open.
+
 ## Lead
 
 [examples/loopherd-cards-lead.toml](../examples/loopherd-cards-lead.toml) is
@@ -104,13 +136,16 @@ herdr socket, ssh agent or WSL2 interop, unless its herd sets
 `[lead] unix_sockets = "all"`, which `lead`, `revive` and doctor warn of
 (D105). Where the sandbox can't block them (no seccomp filter; doctor
 names the npm package), `require` refuses the lead and `prefer` starts it
-as `(lead, sockets open)`; installing the package is the human's. What still gets past the sandbox: workers run unsandboxed (LH-284)
-and most of the state dir is writable (LH-298). A lead's `tell`, `read`, `status`,
-`feed`, `add`, `prompt`, `restart`, `retire` and `release` run in its
-broker, outside the sandbox and only on its own herd (D98); its watch
-still calls herdr itself, run bare outside the sandbox (D104); doctor fails
-for a lead with no broker running, and `loopherd revive --name <lead>`
-from an unsandboxed shell starts it. Doctor
+as `(lead, sockets open)`; `restart` applies the same rule. A `credentials`
+lead is refused under both. Under `unix_sockets = "all"` the socket check
+is skipped: the lead isn't refused or flagged for open sockets. Installing
+the package is the human's. What still gets past the sandbox: workers run
+unsandboxed (LH-284) and most of the state dir is writable (LH-298). A lead's
+`tell`, `read`, `status`, `feed`, `add`, `prompt`, `restart`, `retire` and
+`release` run in its broker, outside the sandbox and only on its own herd
+(D98); its watch still calls herdr itself, run bare outside the sandbox
+(D104); doctor fails for a lead with no broker running, and
+`loopherd revive --name <lead>` from an unsandboxed shell starts it. Doctor
 names each running lead without its sandbox; `loopherd revive --name
 <lead>` after quitting its Claude resumes it in one. A lead started
 before loopherd kept its record (`<config dir>/sandbox/<lead>.lead.json`)

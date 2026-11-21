@@ -103,12 +103,22 @@ pub fn revive(
     if let Some(here) = &req.startup {
         entries.retain(|_, r| r.socket.as_ref() == Some(here));
     }
+    let probed = std::cell::OnceCell::new();
+    let probe = || probed.get_or_init(req.sandbox).clone();
     for mut record in entries.into_values() {
         if !record.retired {
             record.session_id = record.session_id.map(|s| live(&s));
         }
         let mut warnings = vec![];
-        let mut outcome = revive_one(herdr, req, here.as_deref(), &agents, &record, &mut warnings);
+        let mut outcome = revive_one(
+            herdr,
+            req,
+            &probe,
+            here.as_deref(),
+            &agents,
+            &record,
+            &mut warnings,
+        );
         if let Outcome::Started {
             pane_id,
             tab_id,
@@ -632,6 +642,7 @@ fn elsewhere(here: Option<&Path>, record: &AgentRecord) -> bool {
 fn revive_one(
     herdr: &dyn Herdr,
     req: &ReviveRequest,
+    probe: &dyn Fn() -> Result<sandbox::Sockets, sandbox::Unavailable>,
     here: Option<&Path>,
     agents: &[Agent],
     record: &AgentRecord,
@@ -728,8 +739,7 @@ fn revive_one(
     let mut sockets_unblocked = None;
     match &lead {
         None => {}
-        Some((lead, _)) => match sandbox::prepare_kept(&req.paths, &record.name, lead, req.sandbox)
-        {
+        Some((lead, _)) => match sandbox::prepare_kept(&req.paths, &record.name, lead, probe) {
             Ok(launch) => {
                 warnings.extend(launch.warnings(&record.name));
                 unsandboxed = launch.hook_only().map(str::to_string);
@@ -1765,6 +1775,26 @@ mod tests {
     }
 
     #[test]
+    fn reviving_two_leads_probes_the_sandbox_once() {
+        static PROBES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut ledger = ledger([lead("lead-a", cwd.path()), lead("lead-b", cwd.path())]);
+        let req = ReviveRequest {
+            sandbox: || {
+                PROBES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(crate::sandbox::Sockets::Blocked)
+            },
+            ..request()
+        };
+
+        run(&herdr, &mut ledger, &req);
+
+        assert_eq!(herdr.started().len(), 2);
+        assert_eq!(PROBES.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn a_lead_revived_into_its_sandbox_is_recorded_as_running_in_it() {
         let cwd = tempfile::tempdir().unwrap();
         let herdr = herdr();
@@ -1782,7 +1812,14 @@ mod tests {
             None
         );
         assert_eq!(
-            sandbox::check_running(&req.paths, "lead-h", "h", &revived.claude_args).unwrap(),
+            sandbox::check_running(
+                &req.paths,
+                "lead-h",
+                "h",
+                &revived.claude_args,
+                revived.sockets_unblocked.as_deref()
+            )
+            .unwrap(),
             sandbox::Running::Sandboxed(vec![])
         );
     }
