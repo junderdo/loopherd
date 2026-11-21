@@ -1236,6 +1236,12 @@ impl Broker<'_> {
             None => Some(format!("{target} is in no herd; {reach}")),
             Some(other) if other != herd => Some(format!("{target} is in herd {other}; {reach}")),
             Some(_) if record.is_lead() => Some(format!("{target} is a lead; {reach}")),
+            Some(_) if record.attended.is_some() && !matches!(op, Op::Read { .. }) => {
+                Some(format!(
+                    "{target} is attended: the human works in its pane, so {lead} leaves it to them \
+                 until its merge (D112)"
+                ))
+            }
             Some(_) if record.may_be_lead() => Some(format!(
                 "{target}'s role is from another loopherd version; {reach}"
             )),
@@ -1272,13 +1278,18 @@ impl Broker<'_> {
                 self.lead
             )));
         }
-        let known = crate::herd::has_template(self.paths, herd, template).context("herd")?;
-        Ok((!known).then(|| {
-            format!(
-                "herd {herd} has no template {template}; {} adds only its herd's templates",
-                self.lead
-            )
-        }))
+        let lead = self.lead;
+        Ok(
+            match crate::herd::template_attended(self.paths, herd, template).context("herd")? {
+                None => Some(format!(
+                    "herd {herd} has no template {template}; {lead} adds only its herd's templates"
+                )),
+                Some(true) => Some(format!(
+                    "template {template} is attended, so only the shepherd or the human adds it (D112)"
+                )),
+                Some(false) => None,
+            },
+        )
     }
 }
 
@@ -2328,6 +2339,92 @@ mod tests {
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
         assert_eq!(herdr.calls(), 0);
+    }
+
+    /// Herd h's file with an attended `grill` template whose `done` check passes.
+    fn with_grill(world: &World) {
+        let herd_file = world.paths.herds.join("h.toml");
+        let mut text = std::fs::read_to_string(&herd_file).unwrap();
+        text = text.replace(
+            "[queue]",
+            "[template.grill]\nparams = [\"card\"]\nname = \"grill-{card}\"\nprompt = \"grill {card}\"\n\
+             done = \"true\"\nattended = true\n[queue]",
+        );
+        std::fs::write(&herd_file, text).unwrap();
+    }
+
+    fn grill(name: &str) -> AgentRecord {
+        let mut grill = member(name, Some("h"));
+        grill.template = Some("grill".into());
+        grill.params = Some([("card".to_string(), "1".to_string())].into());
+        grill.attended = Some(Default::default());
+        grill
+    }
+
+    #[test]
+    fn a_lead_s_broker_leaves_an_attended_member_and_template_to_the_human() {
+        let world = World::new();
+        with_grill(&world);
+        world.add(grill("grill-1"));
+        let serving = world.serve(telling_herdr());
+        let why = "grill-1 is attended: the human works in its pane, so lead-h leaves it to them \
+                   until its merge (D112)";
+
+        for op in [
+            tell("grill-1", "hi"),
+            Op::Prompt {
+                name: "grill-1".into(),
+                force: false,
+            },
+            Op::Restart {
+                name: "grill-1".into(),
+                force: false,
+            },
+            retire_op("grill-1", true, false),
+            release_op("grill-1", false),
+        ] {
+            assert_eq!(
+                format!("{:#}", world.client().call(&op).unwrap_err()),
+                format!("lead-h's broker refused {}: {why}", op.command())
+            );
+        }
+        let add = Op::Add {
+            herd: "h".into(),
+            template: "grill".into(),
+            params: vec!["2".into()],
+            claude_args: vec![],
+            dry_run: false,
+            ready_timeout_secs: 60,
+            no_focus: false,
+        };
+        assert_eq!(
+            format!("{:#}", world.client().call(&add).unwrap_err()),
+            "lead-h's broker refused add: template grill is attended, so only the shepherd or \
+             the human adds it (D112)"
+        );
+
+        assert!(!world.ledger().entries().unwrap()["grill-1"].retired);
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert_eq!(herdr.calls(), 0);
+    }
+
+    #[test]
+    fn a_lead_s_feed_still_reaps_an_attended_member_once_its_done_check_passes() {
+        let world = World::new();
+        with_grill(&world);
+        world.add(grill("grill-1"));
+        let serving = world.serve(FakeHerdr::new(&[]));
+
+        let (out, _, code) = world.client().call(&feed("h")).unwrap();
+
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            world.ledger().entries().unwrap()["grill-1"].retired,
+            "{out}"
+        );
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
     }
 
     fn retire_op(name: &str, close: bool, force: bool) -> Op {

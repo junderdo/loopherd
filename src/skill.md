@@ -792,7 +792,8 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   second Ctrl+C can exit the agent.
 - A `blocked` member waits on a dialog only the human answers (a trust
   prompt, a permission). Tell the human; loopherd and you never answer it,
-  unless you're a lead with `blocked_dialogs` on.
+  unless you're a lead with `blocked_dialogs` on, and never for an attended
+  member, whose pane the human sits in.
 - Verify what a member says it can't cover; that is where blockers hide.
 
 ### Gotchas
@@ -894,6 +895,10 @@ What differs from the shepherd:
   `merge` off, your watch also tells the human of every merge to the repo's
   default branch (`[lead] merge_guard = "hook"`, the default), so expect
   that ping for merges the human makes. Grilling is always the human's.
+- **Attended members** are the human's (D112). Your broker refuses `tell`,
+  `prompt`, `restart`, `retire` and `release` on one, and `add` of an
+  attended template; your watch shows only its `merged` and `gone`. After
+  its merge, move its card to Done and run `feed`, which reaps it.
 - **Sandbox.** Your Claude runs in the Claude Code sandbox, from
   settings loopherd writes for you to `<config dir>/sandbox/<you>.json`
   (D89, building D83; D97, D111). Bash can write only to your own
