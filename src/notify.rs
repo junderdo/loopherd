@@ -996,7 +996,7 @@ mod tests {
     }
 
     fn mailbox(dir: &Path) -> Vec<crate::report::Body> {
-        let text = fs::read_to_string(dir.join("lh-3.jsonl")).unwrap_or_default();
+        let text = fs::read_to_string(dir.join("lh-3/mailbox.jsonl")).unwrap_or_default();
         text.lines()
             .map(|l| {
                 serde_json::from_str::<crate::report::Entry>(l)
@@ -2113,11 +2113,11 @@ mod tests {
     #[test]
     fn a_note_that_cannot_be_written_leaves_the_next_failure_noted() {
         let dir = tempfile::tempdir().unwrap();
-        fs::create_dir(dir.path().join("lh-3.jsonl")).unwrap();
+        fs::create_dir_all(dir.path().join("lh-3/mailbox.jsonl")).unwrap();
         let fail = stub("exit 3");
 
         assert!(run(&fail, dir.path(), SOON, SystemTime::now()).is_err());
-        fs::remove_dir(dir.path().join("lh-3.jsonl")).unwrap();
+        fs::remove_dir(dir.path().join("lh-3/mailbox.jsonl")).unwrap();
         run(&fail, dir.path(), SOON, SystemTime::now()).unwrap();
 
         assert_eq!(

@@ -90,6 +90,32 @@ fn a_member_reports_and_the_shepherd_reads_it_once() {
 }
 
 #[test]
+fn a_flat_mailbox_left_by_an_older_release_is_read_before_the_new_reports() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    let reports = state.path().join("loopherd/reports");
+    fs::create_dir_all(&reports).unwrap();
+    let old = r#"{"at":"2026-11-10T10:00:00Z","kind":"done","text":"PR #8"}"#;
+    fs::write(reports.join("lh-1.jsonl"), format!("{old}\n")).unwrap();
+
+    run(state.path(), None, &["report", "--as", "lh-1", "PR #9"]);
+    let out = run(state.path(), None, &["reports"]);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    let lines: Vec<_> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "{stdout}");
+    assert_eq!(lines[0], "lh-1 done 2026-11-10 10:00 UTC PR #8");
+    assert!(lines[1].ends_with(" PR #9"), "{stdout}");
+    assert_eq!(
+        fs::read_to_string(reports.join("lh-1.jsonl")).unwrap(),
+        format!("{old}\n")
+    );
+    let new = fs::read_to_string(reports.join("lh-1/mailbox.jsonl")).unwrap();
+    assert!(new.contains("PR #9") && !new.contains("PR #8"), "{new}");
+}
+
+#[test]
 fn reports_and_watch_label_each_time_utc_and_keep_an_uncut_time_as_stored() {
     let state = tempfile::tempdir().unwrap();
     write_ledger(state.path());
@@ -162,7 +188,8 @@ fn concurrent_reports_from_two_processes_do_not_interleave() {
         assert!(child.wait().unwrap().success());
     }
 
-    let text = fs::read_to_string(state.path().join("loopherd/reports/lh-1.jsonl")).unwrap();
+    let text =
+        fs::read_to_string(state.path().join("loopherd/reports/lh-1/mailbox.jsonl")).unwrap();
     assert_eq!(text.lines().count(), 16);
     for line in text.lines() {
         let report: serde_json::Value = serde_json::from_str(line).unwrap();
@@ -176,7 +203,7 @@ fn a_bad_line_warns_on_stderr_and_does_not_jam_the_mailbox() {
     let state = tempfile::tempdir().unwrap();
     write_ledger(state.path());
     run(state.path(), None, &["report", "--as", "lh-1", "one"]);
-    let mailbox = state.path().join("loopherd/reports/lh-1.jsonl");
+    let mailbox = state.path().join("loopherd/reports/lh-1/mailbox.jsonl");
     let mut text = fs::read_to_string(&mailbox).unwrap();
     text.push_str("{\"at\":");
     fs::write(&mailbox, text).unwrap();
@@ -519,8 +546,8 @@ fn an_unreadable_mailbox_warns_and_every_other_members_reports_still_print() {
     let state = tempfile::tempdir().unwrap();
     write_ledger(state.path());
     run(state.path(), None, &["report", "--as", "lh-1", "PR #9"]);
-    let unreadable = state.path().join("loopherd/reports/lh-2.jsonl");
-    fs::create_dir(&unreadable).unwrap();
+    let unreadable = state.path().join("loopherd/reports/lh-2/mailbox.jsonl");
+    fs::create_dir_all(&unreadable).unwrap();
     let warning = format!(
         "warning: could not read {}: Is a directory (os error 21)\n",
         unreadable.display()
@@ -549,7 +576,7 @@ fn an_unreadable_mailboxs_reports_are_read_once_it_is_readable_again() {
     write_ledger(state.path());
     run(state.path(), None, &["report", "--as", "lh-1", "one"]);
     run(state.path(), None, &["report", "--as", "lh-2", "two"]);
-    let mailbox = state.path().join("loopherd/reports/lh-2.jsonl");
+    let mailbox = state.path().join("loopherd/reports/lh-2/mailbox.jsonl");
     let mode = |m| fs::set_permissions(&mailbox, fs::Permissions::from_mode(m)).unwrap();
     mode(0o000);
 
@@ -581,8 +608,8 @@ fn watch_warns_about_an_unreadable_mailbox_and_wakes_on_another_members_report()
     write_ledger(state.path());
     install_hook(state.path());
     run(state.path(), None, &["report", "--as", "lh-1", "PR #9"]);
-    let unreadable = state.path().join("loopherd/reports/lh-2.jsonl");
-    fs::create_dir(&unreadable).unwrap();
+    let unreadable = state.path().join("loopherd/reports/lh-2/mailbox.jsonl");
+    fs::create_dir_all(&unreadable).unwrap();
 
     let out = run(state.path(), None, &["watch", "--timeout", "0"]);
 

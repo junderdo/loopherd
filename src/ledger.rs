@@ -1071,7 +1071,7 @@ mod tests {
         ledger.started("lh-1", at, false).unwrap();
         ledger.started("lh-1", at, true).unwrap();
         assert_eq!(
-            fs::read_to_string(dir.path().join("loopherd/reports/lh-1.jsonl")).unwrap(),
+            fs::read_to_string(dir.path().join("loopherd/reports/lh-1/mailbox.jsonl")).unwrap(),
             "{\"at\":\"2026-11-02T09:00:00.000000000Z\",\"kind\":\"start\"}\n\
              {\"at\":\"2026-11-02T09:00:00.000000000Z\",\"kind\":\"start\",\"resumed\":true}\n"
         );

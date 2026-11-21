@@ -314,8 +314,8 @@ esac
 
 fn write_mailbox(state: &Path, lines: &[&str]) {
     let reports = state.join("loopherd/reports");
-    fs::create_dir_all(&reports).unwrap();
-    fs::write(reports.join("lh-1.jsonl"), lines.join("\n") + "\n").unwrap();
+    fs::create_dir_all(reports.join("lh-1")).unwrap();
+    fs::write(reports.join("lh-1/mailbox.jsonl"), lines.join("\n") + "\n").unwrap();
 }
 
 const STARTED: &str = r#"{"at": "2026-11-01T09:00:00Z", "kind": "start"}"#;
@@ -401,7 +401,7 @@ fn write_transcript(state: &Path) {
 }
 
 fn last_entry(state: &Path) -> serde_json::Value {
-    let text = fs::read_to_string(state.join("loopherd/reports/lh-1.jsonl")).unwrap();
+    let text = fs::read_to_string(state.join("loopherd/reports/lh-1/mailbox.jsonl")).unwrap();
     serde_json::from_str(text.lines().last().unwrap()).unwrap()
 }
 
@@ -455,7 +455,8 @@ fn rerunning_close_records_tokens_a_failed_retire_left_out_and_never_twice() {
         assert!(out.status.success(), "{out:?}");
     }
 
-    let text = fs::read_to_string(state.path().join("loopherd/reports/lh-1.jsonl")).unwrap();
+    let text =
+        fs::read_to_string(state.path().join("loopherd/reports/lh-1/mailbox.jsonl")).unwrap();
     assert_eq!(text.matches("\"kind\":\"usage\"").count(), 1, "{text}");
     let ledger: serde_json::Value = serde_json::from_str(&ledger_text(state.path())).unwrap();
     let retired_at = ledger["lh-1"]["retired_at"]

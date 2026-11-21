@@ -810,13 +810,10 @@ fn pause_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
 /// A failure when `name`'s mailbox can't be read or has a line that doesn't parse.
 fn mailbox_check(dir: &Path, name: &str) -> Option<Check> {
     let (detail, fix) = match crate::report::history(dir, name) {
-        Err(e) => {
-            let path = dir.join(format!("{name}.jsonl"));
-            (
-                message(&e),
-                format!("make {} a readable file", path.display()),
-            )
-        }
+        Err(e) => (
+            message(&e),
+            format!("make {} readable", crate::report::shown_mailbox(dir, name)),
+        ),
         Ok((_, warnings)) => {
             let detail = match warnings.as_slice() {
                 [] => return None,
@@ -3266,7 +3263,7 @@ mod tests {
         let m = machine(&ALL);
         let herdr = herdr().with_live_agent(Some("a"), None, "w1:p1");
         m.ledger(&[member("a", "h", "w1:p1", None)]);
-        let mailbox = m.state().join("reports/a.jsonl");
+        let mailbox = m.state().join("reports/a/mailbox.jsonl");
         std::fs::create_dir_all(&mailbox).unwrap();
         let problems = problems(&m, &herdr);
         assert_eq!(problems.len(), 1, "{problems:?}");
@@ -3275,10 +3272,7 @@ mod tests {
             "{problems:?}"
         );
         assert!(
-            problems[0].ends_with(&format!(
-                "; fix: make {} a readable file",
-                mailbox.display()
-            )),
+            problems[0].ends_with(&format!("; fix: make {} readable", mailbox.display())),
             "{problems:?}"
         );
     }
