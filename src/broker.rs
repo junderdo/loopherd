@@ -4647,6 +4647,35 @@ mod tests {
     }
 
     #[test]
+    fn a_broker_handed_its_leads_held_lock_serves_under_it() {
+        let world = World::new();
+        let path = lock_file(&world.paths, "lead-h");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let handed = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        // The exec'ing image's copy: the lock stays held until serve adopts it.
+        let _held = Lock::try_take(handed.try_clone().unwrap())
+            .unwrap()
+            .unwrap();
+        world.retire("lead-h");
+
+        let served = serve(
+            &host(&FakeHerdr::new(&[])),
+            &world.ledger(),
+            &world.paths,
+            "lead-h",
+            POLL,
+            Some(handed),
+        );
+
+        assert_eq!(served.unwrap(), Served::Retired);
+    }
+
+    #[test]
     fn a_broker_restart_with_no_broker_running_just_starts_one() {
         let world = World::new();
         let mut started = None;

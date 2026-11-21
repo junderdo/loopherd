@@ -531,6 +531,37 @@ fn a_broker_moves_onto_a_reinstalled_loopherd_after_its_next_request_keeping_its
     assert_eq!(world.read_as_lead(), "served\n");
 }
 
+#[test]
+fn a_broker_keeps_its_lock_held_through_the_exec_onto_a_reinstall() {
+    let world = World::new();
+    let installed = world.install();
+    let _broker = world.broker_from(&installed);
+    world.wait_until_runs(file_id(&installed));
+    let dev_build = Path::new(env!("CARGO_BIN_EXE_loopherd"));
+    let seen = world.root.path().join("seen");
+    let wrapper = world.root.path().join("wrapper");
+    executable(
+        &wrapper,
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = broker ]; then\n\
+             if flock -n {lock} true; then echo free; else echo held; fi >> {seen}\n\
+             fi\n\
+             exec {dev_build} \"$@\"\n",
+            lock = world.config().join("broker/lead-k.lock").display(),
+            seen = seen.display(),
+            dev_build = dev_build.display(),
+        ),
+    );
+
+    world.install_from(&wrapper);
+    assert_eq!(world.read_as_lead(), "served\n");
+
+    world.wait_until_runs(file_id(dev_build));
+    assert_eq!(fs::read_to_string(&seen).unwrap(), "held\n");
+    assert_eq!(world.read_as_lead(), "served\n");
+}
+
 impl World {
     /// Makes herdr's `agent read` wait for a `release` file, returning
     /// `(started, release)`: the file it touches on entry, and the one it waits for.
