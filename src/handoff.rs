@@ -41,30 +41,37 @@ pub fn find(state: &Path, name: &str) -> Option<PathBuf> {
     }
 }
 
-/// Moves `handoff`, as [`find`] gave it, to [`prev`]; returns where it went.
-/// The other layout's file, if any, is older: it moves to the flat
-/// `<name>.prev.md`, replacing any there, so it can't come back as the next
-/// handoff. That move only warns on failure, so it can't fail a restart.
-pub fn set_aside(state: &Path, name: &str, handoff: &Path) -> Result<PathBuf> {
+/// A handoff moved to [`prev`] by [`set_aside`].
+pub struct SetAside {
+    pub prev: PathBuf,
+    /// Why the other layout's older file couldn't be moved aside, if it couldn't.
+    pub warning: Option<String>,
+}
+
+/// Moves `handoff`, as [`find`] gave it, to [`prev`]. The other layout's
+/// file, if any, is older: it moves to the flat `<name>.prev.md`, replacing
+/// any there, so it can't come back as the next handoff. That move only
+/// warns on failure, so it can't fail a restart.
+pub fn set_aside(state: &Path, name: &str, handoff: &Path) -> Result<SetAside> {
     let other = match handoff == path(state, name) {
         true => flat(state, name),
         false => path(state, name),
     };
     let aside = flat_prev(state, name);
-    match fs::rename(&other, &aside) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => eprintln!(
-            "warning: couldn't move the older {} to {}: {e}",
+    let warning = match fs::rename(&other, &aside) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Some(format!(
+            "couldn't move the older {} to {}: {e}",
             other.display(),
             aside.display()
-        ),
-        _ => {}
-    }
+        )),
+        _ => None,
+    };
     let prev = prev(state, name);
     let dir = dir(state, name);
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     fs::rename(handoff, &prev)
         .with_context(|| format!("move {} to {}", handoff.display(), prev.display()))?;
-    Ok(prev)
+    Ok(SetAside { prev, warning })
 }
 
 /// Writes `text` as `name`'s handoff, replacing any there; returns its path.
@@ -142,7 +149,9 @@ mod tests {
         fs::create_dir_all(state.join("handoffs")).unwrap();
         fs::write(state.join("handoffs/lh-1.md"), "old").unwrap();
 
-        let moved = set_aside(state, "lh-1", &find(state, "lh-1").unwrap()).unwrap();
+        let moved = set_aside(state, "lh-1", &find(state, "lh-1").unwrap())
+            .unwrap()
+            .prev;
 
         assert_eq!(moved, state.join("handoffs/lh-1/prev.md"));
         assert_eq!(fs::read_to_string(moved).unwrap(), "old");
@@ -160,7 +169,9 @@ mod tests {
             "2026-11-20T11:00:00Z",
         );
 
-        let moved = set_aside(state, "lh-1", &find(state, "lh-1").unwrap()).unwrap();
+        let moved = set_aside(state, "lh-1", &find(state, "lh-1").unwrap())
+            .unwrap()
+            .prev;
 
         assert_eq!(fs::read_to_string(moved).unwrap(), "fresh");
         let aside = state.join("handoffs/lh-1.prev.md");
@@ -179,7 +190,9 @@ mod tests {
         );
         written_at(&path(state, "lh-1"), "fresh", "2026-11-20T11:00:00Z");
 
-        let moved = set_aside(state, "lh-1", &find(state, "lh-1").unwrap()).unwrap();
+        let moved = set_aside(state, "lh-1", &find(state, "lh-1").unwrap())
+            .unwrap()
+            .prev;
 
         assert_eq!(fs::read_to_string(moved).unwrap(), "fresh");
         let aside = state.join("handoffs/lh-1.prev.md");
@@ -199,12 +212,20 @@ mod tests {
         written_at(&path(state, "lh-1"), "fresh", "2026-11-20T11:00:00Z");
         fs::create_dir_all(state.join("handoffs/lh-1.prev.md/x")).unwrap();
 
-        let moved = set_aside(state, "lh-1", &find(state, "lh-1").unwrap()).unwrap();
+        let aside = set_aside(state, "lh-1", &find(state, "lh-1").unwrap()).unwrap();
 
-        assert_eq!(fs::read_to_string(moved).unwrap(), "fresh");
+        assert_eq!(fs::read_to_string(aside.prev).unwrap(), "fresh");
         assert_eq!(
             fs::read_to_string(state.join("handoffs/lh-1.md")).unwrap(),
             "stale"
+        );
+        let warning = aside.warning.unwrap();
+        assert!(
+            warning.starts_with(&format!(
+                "couldn't move the older {}",
+                state.join("handoffs/lh-1.md").display()
+            )),
+            "{warning}"
         );
     }
 }

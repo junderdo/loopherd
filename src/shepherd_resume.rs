@@ -322,12 +322,16 @@ pub fn new_shepherd_resume(state: &Path, socket: Option<&Path>) -> Result<Option
 /// resumes the shepherd from it.
 fn resume_from_moved_handoff(state: &Path, written: SystemTime) -> Result<String> {
     let handoff = handoff::find(state, context::SHEPHERD).unwrap_or_else(|| handoff_path(state));
-    let read = handoff::set_aside(state, context::SHEPHERD, &handoff)?;
+    let aside = handoff::set_aside(state, context::SHEPHERD, &handoff)?;
+    let read = aside.prev;
+    let warning = aside
+        .warning
+        .map_or(String::new(), |w| format!(" loopherd warning: {w}"));
     Ok(format!(
         "You are the loopherd shepherd, resuming after your handoff. Run `loopherd --skill`, \
          read your handoff at {} (written {}), run `loopherd status` and \
          `loopherd reports --all --tail 40` (for a fuller history, `--since <time>` or plain \
-         `--all`), re-arm your watch, and continue from the handoff's next steps.",
+         `--all`), re-arm your watch, and continue from the handoff's next steps.{warning}",
         read.display(),
         humantime::format_rfc3339_seconds(written),
     ))

@@ -185,7 +185,11 @@ fn ask(
     // Rotate before marking, so a failed rotation leaves the ask for the next stop.
     let moved = match handoff::find(state, &member.name) {
         Some(last) if !written_this_run(&last, state, &member.name)? => {
-            Some(handoff::set_aside(state, &member.name, &last)?)
+            let aside = handoff::set_aside(state, &member.name, &last)?;
+            if let Some(warning) = aside.warning {
+                eprintln!("loopherd stop-hook: warning: {warning}");
+            }
+            Some(aside.prev)
         }
         _ => None,
     };

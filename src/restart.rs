@@ -217,7 +217,8 @@ pub fn restart(
         .session_id
         .unwrap_or(new);
     // Moved aside once the new session is confirmed, so no later restart resumes from it.
-    let read = handoff::set_aside(req.state, name, &handoff)?;
+    let aside = handoff::set_aside(req.state, name, &handoff)?;
+    let read = aside.prev;
     let shell = (current.pane_id != agent.pane_id && current.env_pane_id.is_none())
         .then(|| (req.pane_shell)(&agent.pane_id));
     ledger.update(name, &mut |current| {
@@ -245,7 +246,11 @@ pub fn restart(
         }
         _ => String::new(),
     };
-    let warning: String = warnings.iter().map(|w| format!("\nwarning: {w}")).collect();
+    let warning: String = warnings
+        .iter()
+        .chain(&aside.warning)
+        .map(|w| format!("\nwarning: {w}"))
+        .collect();
     Ok(format!(
         "restarted {name} in session {live}; prompted it to read {}{unread}{warning}",
         read.display()
