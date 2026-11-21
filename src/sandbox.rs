@@ -1272,7 +1272,7 @@ fn permission_loosenings(
 /// The directory an `Edit(…)` rule's matches all lie beneath: its path up to
 /// the first wildcard. `//` starts at `/`, `~/` at home, `/` at `rules_root`,
 /// and a bare path at the lead's working directory, its worktree. `None` when
-/// it climbs with `..`.
+/// any segment is `..`, even past a wildcard.
 fn rule_dir(spec: &str, rules_root: &Path, worktree: &Path, home: &Path) -> Option<PathBuf> {
     let (base, rest) = if let Some(rest) = spec.strip_prefix("//") {
         (Path::new("/"), rest)
@@ -1283,15 +1283,14 @@ fn rule_dir(spec: &str, rules_root: &Path, worktree: &Path, home: &Path) -> Opti
     } else {
         (worktree, spec)
     };
+    if rest.split('/').any(|part| part == "..") {
+        return None;
+    }
     let literal: PathBuf = rest
         .split('/')
         .take_while(|part| !part.contains(['*', '?', '[']))
         .collect();
-    let dir = base.join(literal);
-    let climbs = dir
-        .components()
-        .any(|c| c == std::path::Component::ParentDir);
-    (!climbs).then_some(dir)
+    Some(base.join(literal))
 }
 
 /// A settings list's entries; anything else that's set is one entry, as written.
@@ -1735,6 +1734,33 @@ mod tests {
             ]
         );
         assert!(dir.join("lead-x.lead.json").exists());
+    }
+
+    #[test]
+    fn an_edit_rule_is_confined_only_when_no_segment_climbs_and_it_lies_beneath_an_own_write() {
+        let home = Path::new("/home/me");
+        let worktree = Path::new("/a/wt");
+        let own_writes = [worktree.to_path_buf(), home.join(".local/bin")];
+        let cases = [
+            ("Edit(//a/wt2/**)", false),
+            ("Edit(/src/../../**)", false),
+            ("Edit(src/*/../../../**)", false),
+            ("Edit(src/**/..)", false),
+            ("Edit(src/**)", true),
+            ("Edit(~/.local/bin/**)", true),
+        ];
+        for (rule, confined) in cases {
+            let settings = serde_json::json!({"permissions": {"allow": [rule]}});
+            let found = permission_loosenings(
+                &settings,
+                Path::new("settings.json"),
+                worktree,
+                worktree,
+                home,
+                &own_writes,
+            );
+            assert_eq!(found.is_empty(), confined, "{rule}: {found:?}");
+        }
     }
 
     #[test]
