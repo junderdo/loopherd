@@ -80,34 +80,39 @@ Backlog cards into members `lh-<n>` on `<type>/LH-<n>-<slug>`.
 
 ## Grilling
 
-A `wayfinding:grilling` card runs in its own tab with a fresh Claude, never in
-your pane, so the grill stays out of your context. From your own pane:
+A `wayfinding:grilling` card runs as an attended member of `loopherd-cards`
+(D112), from the `[template.grill]` in
+[examples/loopherd-cards-grill.toml](../examples/loopherd-cards-grill.toml),
+whose prompt is [grill-prompt.md](grill-prompt.md). When the human asks to
+grill a card, run from your own pane:
 
 ```bash
-herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd <main checkout> --label grill-LH-<n> --no-focus
-herdr agent start grill-lh-<n> --kind claude --pane <.result.root_pane.pane_id from tab create>
-prompt=$(mktemp)
-cat > "$prompt" <<'PROMPT'
-<the filled prompt>
-PROMPT
-herdr agent prompt grill-lh-<n> "$(cat "$prompt")"
+loopherd add loopherd-cards grill <n> docs <slug>
 ```
 
-The quoted heredoc keeps the prompt's backticks and `$(…)` from running in
-your shell; never pass the prompt inline in double quotes.
+`add` makes the tab, worktree and branch, starts and prompts the grill, and
+takes the human there; the grill sends them back to your pane when the
+conversation ends. Send background beyond the card, one line each for the
+decisions (`docs/decisions/D<n>.md`), cards and files it should read and what
+each settles, from a file:
 
-Wait for the new tab's shell prompt before `agent start` (see Launch agent in
-[herdr.md](../research/herdr.md)). Fill the prompt from
-[grill-prompt.md](grill-prompt.md): `<CARD>`, `<NAME>`, `<CARD_URL>`,
-`<REPO>`, `<SLUG>`, and `<BACKGROUND>`, the decisions and cards the card leans
-on. Then tell the human to switch to tab `grill-LH-<n>`.
+```bash
+background=$(mktemp)
+cat > "$background" <<'BACKGROUND'
+<the background>
+BACKGROUND
+loopherd tell grill-<n> --text-file "$background"
+```
 
-The grill session isn't in the ledger. After its PR merges it closes the card
-out and sends you `<card> merged and closed out: …`; close its tab then
-(`herdr tab close <tab>`). If the human reports the merge instead, its pane
-already closed, do the close-out yourself: move the card to Done, run
-`scripts/trello unblock`, remove its worktree and local branch, and close the
-tab if it's still open.
+The quoted heredoc keeps the background's backticks and `$(…)` from running in
+your shell; never pass it inline in double quotes.
+
+After its PR merges, the grill moves the card to Done, runs
+`scripts/trello unblock` and sends you `LH-<n> merged and closed out: …`. The
+herd's watch prints `grill-<n> merged`; feed's `after_merge` and the reap
+(`retire --close`) close its pane, worktree and branch. If the grill's pane
+closed before its close-out, move the card to Done and run
+`scripts/trello unblock` yourself; the reap still runs.
 
 ## Lead
 
