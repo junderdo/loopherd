@@ -1934,6 +1934,28 @@ mod tests {
     }
 
     #[test]
+    fn a_credentials_lead_whose_workers_are_sandboxed_isnt_warned_of_your_gh() {
+        for worker in ["require", "prefer"] {
+            let setup =
+                Setup::with_lead(&format!("{CREDENTIALS}\n[worker]\nsandbox = \"{worker}\""));
+            origin_on_github(&setup, "https://github.com/acme/widgets.git");
+            store_credentials(&setup, true, Some("github_pat_1"));
+            let herdr = herdr();
+
+            let (_, _, warnings) = lead(
+                &herdr,
+                &mut MemLedger::default(),
+                &setup.paths(),
+                &request(&[]),
+                Some("w1"),
+            )
+            .unwrap();
+
+            assert_eq!(warnings, Vec::<String>::new(), "{worker}");
+        }
+    }
+
+    #[test]
     fn require_refuses_a_lead_whose_sandbox_cant_start_and_says_why() {
         let setup = Setup::with_lead("prompt = \"go\"");
         let herdr = herdr();
