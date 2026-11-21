@@ -218,7 +218,10 @@ pub fn spawn(
             return Ok((spawned, vec![]));
         }
     };
-    let worktree = req.planned_worktree()?;
+    // A branch checked out in the main checkout plans the main checkout itself.
+    let worktree = req
+        .planned_worktree()?
+        .filter(|dir| !crate::worktree::same_dir(dir, &req.repo));
     let launch = prepare(paths, &req.name, &member, worktree.as_deref(), probe)?;
     let mut req = req.clone();
     req.claude_args.extend(launch.args());

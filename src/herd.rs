@@ -1700,6 +1700,35 @@ args = ["--model", "opus"]
     }
 
     #[test]
+    fn add_refuses_a_required_worker_whose_branch_is_checked_out_in_the_main_checkout() {
+        let (config, root) = worker_config("sandbox = \"require\"");
+        let repo = root.path().join("proj/proj");
+        let checkout = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["checkout", "--quiet", "feature/existing"])
+            .status()
+            .unwrap();
+        assert!(checkout.success());
+        let herdr = herdr();
+
+        let err = add(
+            &herdr,
+            &mut MemLedger::default(),
+            &config.paths(),
+            &request("prs", "pr", &["1050"]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("it has no worktree of its own"),
+            "{err:#}"
+        );
+        assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
     fn add_starts_a_preferred_worker_unsandboxed_flagged_and_warned() {
         let (config, _repo) = worker_config("sandbox = \"prefer\"");
         let herdr = herdr();
