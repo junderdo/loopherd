@@ -212,10 +212,9 @@ fn status_in_a_sandbox_whose_pane_holds_no_lead_is_refused_before_herdr() {
     assert_eq!(world.calls(), "");
 }
 
-#[test]
-fn the_shepherds_status_runs_directly_in_a_pane_whose_id_a_lead_once_had() {
-    let world = World::new();
-    // The test process stands in for the shepherd's Claude, as loopherd's parent.
+/// Records the test process as the shepherd's Claude in w1:p1, lead-k's pane
+/// id, and runs loopherd there as the shepherd with `args`.
+fn run_as_shepherd_in_lead_ks_pane(world: &World, args: &[&str]) -> Output {
     let stat = fs::read_to_string("/proc/self/stat").unwrap();
     let (_, fields) = stat.rsplit_once(')').unwrap();
     let start: u64 = fields.split_whitespace().nth(19).unwrap().parse().unwrap();
@@ -229,13 +228,32 @@ fn the_shepherds_status_runs_directly_in_a_pane_whose_id_a_lead_once_had() {
         record,
     )
     .unwrap();
-
-    let mut status = world.loopherd(Some("w1:p1"), &["status"]);
+    let mut cmd = world.loopherd(Some("w1:p1"), args);
     let bin = world.root.path().join("bin");
-    set_env(&mut status, world.root.path(), Some(&bin));
-    let out = status.env("CLAUDE_PID", pid.to_string()).output().unwrap();
+    set_env(&mut cmd, world.root.path(), Some(&bin));
+    cmd.env("CLAUDE_PID", pid.to_string()).output().unwrap()
+}
+
+#[test]
+fn the_shepherds_status_runs_directly_in_a_pane_whose_id_a_lead_once_had() {
+    let world = World::new();
+
+    let out = run_as_shepherd_in_lead_ks_pane(&world, &["status"]);
 
     let shown = stdout(&out);
     assert!(shown.contains("lh-9"), "{shown}");
     assert!(shown.contains("strays"), "{shown}");
+}
+
+#[test]
+fn the_shepherds_read_runs_directly_in_a_pane_whose_id_a_lead_once_had() {
+    let world = World::new();
+
+    let out = run_as_shepherd_in_lead_ks_pane(&world, &["read", "lh-9", "--lines", "5"]);
+
+    assert_eq!(stdout(&out), "one\ntwo\n");
+    assert_eq!(
+        world.calls(),
+        "agent list\nagent read w1:p3 --source recent-unwrapped --lines 5 --format text\n"
+    );
 }

@@ -661,6 +661,7 @@ mod tests {
         assert!(ok, "git init");
         let detached = AgentRecord {
             branch: Some(String::new()),
+            repo: worktree.clone(),
             worktree: Some(worktree),
             ..record("lh-1")
         };
