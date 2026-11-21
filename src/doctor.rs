@@ -205,6 +205,22 @@ fn worker_sandbox_check(paths: &Paths, worker: &AgentRecord) -> Option<Check> {
     ))
 }
 
+/// A lead whose launch record keeps no `PATH`, so its watch and broker run
+/// under whatever `PATH` they inherit.
+fn lead_path_check(paths: &Paths, lead: &str) -> Option<Check> {
+    let kept = crate::sandbox::Lead::kept(paths, lead).ok()??;
+    kept.path.is_none().then(|| {
+        warning(
+            &format!("lead {lead}"),
+            format!(
+                "{lead}'s launch record keeps no PATH, so its watch and broker run gh, git \
+                 and its herd's checks from whatever PATH they inherit"
+            ),
+            format!("quit its Claude and run loopherd revive --name {lead}"),
+        )
+    })
+}
+
 fn config_checks(paths: &Paths, settings: &Path) -> Vec<Check> {
     let config = crate::herd::config_file(paths);
     let by_hand = format!("fix {} by hand", config.display());
@@ -773,6 +789,12 @@ fn state_checks(
             .iter()
             .filter(|r| !r.retired && !r.may_be_lead())
             .filter_map(|worker| worker_sandbox_check(&setup.paths, worker)),
+    );
+    checks.extend(
+        members
+            .iter()
+            .filter(|r| !r.retired && r.is_lead())
+            .filter_map(|lead| lead_path_check(&setup.paths, &lead.name)),
     );
     // A lead known to be on another herdr has its broker under that herdr's
     // config dir; one whose herdr can't be told apart is checked, as revive starts it.
@@ -2456,6 +2478,41 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_whose_launch_record_keeps_no_path_warns_naming_its_revive() {
+        let m = machine(&ALL);
+        let sandbox = m.paths().config_dir().join("sandbox");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        let mut leads = vec![];
+        for (name, record) in [
+            ("lead-old", r#"{"herd": "h", "args": []}"#),
+            (
+                "lead-new",
+                r#"{"herd": "h", "args": [], "path": "/usr/bin:/bin"}"#,
+            ),
+        ] {
+            std::fs::write(sandbox.join(format!("{name}.lead.json")), record).unwrap();
+            let mut lead = member(name, "h", "w1:p1", None);
+            lead.role = Some(crate::ledger::Role::Lead);
+            leads.push(lead);
+        }
+        m.ledger(&leads);
+
+        let found: Vec<_> = problems(&m, &herdr())
+            .into_iter()
+            .filter(|p| p.contains("keeps no PATH"))
+            .collect();
+
+        assert_eq!(
+            found,
+            [
+                "warning lead lead-old: lead-old's launch record keeps no PATH, so its watch and \
+              broker run gh, git and its herd's checks from whatever PATH they inherit; fix: \
+              quit its Claude and run loopherd revive --name lead-old"
+            ]
+        );
+    }
+
+    #[test]
     fn a_broker_on_another_build_than_paths_warns_naming_the_shepherds_restart() {
         let mut m = machine(&ALL);
         let on_path = m.dir.path().join("bin/loopherd");
@@ -2477,6 +2534,7 @@ mod tests {
         let kept = crate::sandbox::Lead {
             herd: "h".into(),
             args: vec![],
+            path: None,
         };
         let mut leads = vec![];
         for name in ["lead-new", "lead-rebuilt", "lead-other", "lead-old"] {
@@ -2578,6 +2636,7 @@ mod tests {
         let kept = crate::sandbox::Lead {
             herd: "h".into(),
             args: vec![],
+            path: None,
         };
         crate::sandbox::prepare(m.paths(), "lead-h", &kept, || {
             Ok(crate::sandbox::Sockets::Blocked)
@@ -2679,6 +2738,7 @@ mod tests {
         let kept = crate::sandbox::Lead {
             herd: "h".into(),
             args: vec![],
+            path: None,
         };
         crate::sandbox::prepare(m.paths(), "lead-h", &kept, || {
             Ok(crate::sandbox::Sockets::Blocked)
@@ -2729,6 +2789,7 @@ mod tests {
         let kept = crate::sandbox::Lead {
             herd: "h".into(),
             args: vec![],
+            path: None,
         };
         crate::sandbox::prepare(m.paths(), "lead-up", &kept, || {
             Ok(crate::sandbox::Sockets::Blocked)

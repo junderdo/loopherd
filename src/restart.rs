@@ -924,6 +924,7 @@ mod tests {
             let lead = sandbox::Lead {
                 herd: "h".into(),
                 args: vec![],
+                path: None,
             };
             sandbox::prepare(&self.paths(), "lh-1", &lead, || {
                 Ok(crate::sandbox::Sockets::Blocked)
@@ -1829,6 +1830,7 @@ mod tests {
         let lead = sandbox::Lead {
             herd: "h".into(),
             args: vec!["--add-dir".into(), "/srv".into()],
+            path: None,
         };
         sandbox::prepare(&w.paths(), "lh-1", &lead, || {
             Ok(crate::sandbox::Sockets::Blocked)
@@ -1859,6 +1861,7 @@ mod tests {
         let lead = sandbox::Lead {
             herd: "h".into(),
             args: vec!["--permission-mode".into(), "bypassPermissions".into()],
+            path: None,
         };
         sandbox::prepare(&w.paths(), "lh-1", &lead, || {
             Ok(crate::sandbox::Sockets::Blocked)

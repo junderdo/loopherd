@@ -266,3 +266,31 @@ fn the_shepherds_restart_is_refused_with_the_switch_off() {
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(said.contains("self_restart is off"), "{said}");
 }
+
+#[test]
+fn self_restart_under_a_planted_path_leaves_the_kept_path_as_it_was() {
+    let state = tempfile::tempdir().unwrap();
+    write_member(state.path());
+    let _broker = start_broker(state.path());
+    let record = state.path().join("config/sandbox/lh-1.lead.json");
+    let kept = r#"{"herd": "h", "args": [], "path": "/usr/bin:/bin"}"#;
+    fs::write(&record, kept).unwrap();
+    let out = run(state.path(), &["report", "--kind", "handoff", "at step 3"]);
+    assert!(out.status.success(), "{out:?}");
+
+    let planted = state.path().join("planted");
+    fs::create_dir_all(&planted).unwrap();
+    let out = command(state.path(), &["restart", "--self"])
+        .env("PATH", format!("{}:/usr/bin:/bin", planted.display()))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    fs::remove_file(state.path().join("loopherd/handoffs/lh-1/handoff.md")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while waiter_holds_its_claim(state.path()) {
+        assert!(Instant::now() < deadline, "the waiter never exited");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    assert_eq!(fs::read_to_string(&record).unwrap(), kept);
+}

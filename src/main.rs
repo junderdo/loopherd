@@ -1139,6 +1139,9 @@ fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32>
         paths: Paths::from_env()?,
         sandbox: sandbox::probe,
         broker: broker::start,
+        restart_broker: |paths, lead| {
+            broker::restart_broker(paths, lead, &runnable_exe()?, &mut Printed)
+        },
     };
     let (message, code) = revive(
         &CliHerdr,
