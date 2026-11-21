@@ -679,9 +679,23 @@ fn revive_one(
             };
         }
     };
-    let cwd = match &lead {
-        Some((_, worktree)) => worktree,
-        None => record.worktree.as_ref().unwrap_or(&record.repo),
+    let worker = match lead {
+        Some(_) => None,
+        None => match worker_sandbox::to_resume(&req.paths, record) {
+            Ok(member) => member,
+            Err(error) => {
+                return Outcome::Failed {
+                    step: "sandbox",
+                    error,
+                };
+            }
+        },
+    };
+    // A sandbox always lets its cwd be written, so a kept worker's is its kept worktree.
+    let kept_worktree = worker.as_ref().and_then(|m| m.worktree.as_ref());
+    let cwd = match (&lead, kept_worktree) {
+        (Some((_, worktree)), _) | (None, Some(worktree)) => worktree,
+        (None, None) => record.worktree.as_ref().unwrap_or(&record.repo),
     };
     if !cwd.is_dir() {
         return Outcome::Skipped(format!("cwd {} is gone", cwd.display()));
@@ -754,14 +768,13 @@ fn revive_one(
     let mut unsandboxed = None;
     let mut sockets_unblocked = None;
     match &lead {
-        None => match worker_sandbox::to_resume(&req.paths, record) {
-            Ok(None) => {}
-            Ok(Some(member)) => {
-                match worker_sandbox::prepare(&req.paths, &record.name, &member, probe) {
+        None => {
+            if let Some(member) = &worker {
+                match worker_sandbox::prepare(&req.paths, &record.name, member, probe) {
                     Ok(launch) => {
                         warnings.extend(launch.warnings(&record.name));
                         unsandboxed = launch.unsandboxed().map(str::to_string);
-                        lead_args = Some([member.args, launch.args()].concat());
+                        lead_args = Some([member.args.clone(), launch.args()].concat());
                     }
                     Err(error) => {
                         return Outcome::Failed {
@@ -771,13 +784,7 @@ fn revive_one(
                     }
                 }
             }
-            Err(error) => {
-                return Outcome::Failed {
-                    step: "sandbox",
-                    error,
-                };
-            }
-        },
+        }
         Some((lead, _)) => match sandbox::prepare_kept(&req.paths, &record.name, lead, probe) {
             Ok(launch) => {
                 warnings.extend(launch.warnings(&record.name));
@@ -1056,7 +1063,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sandboxed_worker_may_write_its_kept_worktree_not_the_one_its_ledger_entry_claims() {
+    fn a_sandboxed_worker_resumes_in_and_may_write_its_kept_worktree_not_the_ledgers() {
         let cwd = tempfile::tempdir().unwrap();
         let claimed = tempfile::tempdir().unwrap();
         let herdr = herdr();
@@ -1071,6 +1078,7 @@ mod tests {
 
         assert_eq!(code, 0, "{out}");
         assert_eq!(allow_write(&req), cwd.path().display().to_string());
+        assert_eq!(herdr.tabs()[0].cwd, cwd.path());
     }
 
     #[test]
