@@ -1417,6 +1417,9 @@ mod tests {
             serde_json::json!({
                 "GH_TOKEN": "github_pat_1",
                 "SSH_AUTH_SOCK": "",
+                "GITHUB_TOKEN": "",
+                "GH_ENTERPRISE_TOKEN": "",
+                "GITHUB_ENTERPRISE_TOKEN": "",
                 "GIT_CONFIG_COUNT": "5",
                 "GIT_CONFIG_KEY_0": "credential.helper",
                 "GIT_CONFIG_VALUE_0": "",
@@ -1430,12 +1433,26 @@ mod tests {
                 "GIT_CONFIG_VALUE_4": "git@github.com:acme/widgets.git",
             })
         );
+        let config = setup.root.join("config").display().to_string();
+        let under = |path: &str| format!("{config}/{path}");
         assert_eq!(
             settings["sandbox"]["filesystem"]["allowRead"],
-            serde_json::json!(["/home/me/.ssh/config", "/home/me/.ssh/known_hosts"])
+            serde_json::json!([
+                "/home/me/.ssh/config",
+                "/home/me/.ssh/known_hosts",
+                under("herds"),
+                under("config.toml"),
+                under("trello.env"),
+                under("ssh/config"),
+                under("credentials/h.key"),
+                under("broker"),
+            ])
         );
+        let deny_read = settings["sandbox"]["filesystem"]["denyRead"]
+            .as_array()
+            .unwrap();
         assert_eq!(
-            settings["sandbox"]["filesystem"]["denyRead"],
+            deny_read[..7],
             serde_json::json!([
                 "/home/me/.ssh",
                 "/home/me/.netrc",
@@ -1443,12 +1460,20 @@ mod tests {
                 "/home/me/.git-credentials",
                 "/home/me/.config/git/credentials",
                 "/home/me/.cache/git/credential",
-                setup.paths().locks_dir().display().to_string(),
+                config,
             ])
+            .as_array()
+            .unwrap()[..]
         );
+        let locks = setup.paths().locks_dir().display().to_string();
+        assert_eq!(deny_read.last(), Some(&serde_json::json!(locks)));
         let deny = settings["permissions"]["deny"].as_array().unwrap();
+        let reads: Vec<&serde_json::Value> = deny
+            .iter()
+            .filter(|rule| rule.as_str().is_some_and(|r| r.starts_with("Read(")))
+            .collect();
         assert_eq!(
-            deny[deny.len() - 6..],
+            reads[..7],
             serde_json::json!([
                 "Read(//home/me/.ssh/**)",
                 "Read(//home/me/.netrc)",
@@ -1456,10 +1481,15 @@ mod tests {
                 "Read(//home/me/.git-credentials)",
                 "Read(//home/me/.config/git/credentials)",
                 "Read(//home/me/.cache/git/credential/**)",
+                format!("Read(/{config}/**)"),
             ])
             .as_array()
-            .unwrap()[..]
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>()[..]
         );
+        // The rest are this machine's drvfs mounts, each denied to both.
+        assert_eq!(reads.len() - 7, deny_read.len() - 8, "{deny_read:?}");
         let mode = fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "the settings hold the token");
     }
