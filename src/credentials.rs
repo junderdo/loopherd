@@ -55,6 +55,9 @@ pub fn lead_env(paths: &Paths, herd: &str) -> Result<Map<String, Value>> {
     let mut env = vec![
         ("GH_TOKEN".to_string(), token.trim().to_string()),
         ("SSH_AUTH_SOCK".to_string(), String::new()),
+        ("GITHUB_TOKEN".to_string(), String::new()),
+        ("GH_ENTERPRISE_TOKEN".to_string(), String::new()),
+        ("GITHUB_ENTERPRISE_TOKEN".to_string(), String::new()),
         ("GIT_CONFIG_COUNT".to_string(), config.len().to_string()),
     ];
     for (i, (key, value)) in config.into_iter().enumerate() {
@@ -276,8 +279,84 @@ pub fn human_credentials(
 }
 
 /// What ssh still reads under a denied `~/.ssh` to reach a `Host` alias.
-pub fn ssh_readable(home: &Path) -> [PathBuf; 2] {
+fn ssh_readable(home: &Path) -> [PathBuf; 2] {
     [home.join(".ssh/config"), home.join(".ssh/known_hosts")]
+}
+
+/// What a sandboxed member of credentials herd `herd` runs with, and what
+/// of the human's GitHub credentials, other herds' and members' is kept
+/// from it.
+pub struct Confined {
+    pub env: Map<String, Value>,
+    /// Denied to the sandbox and the file tools alike, each marked `true` when a directory.
+    pub deny_read: Vec<(PathBuf, bool)>,
+    /// Opened back inside `deny_read`, to the sandbox alone.
+    pub allow_read: Vec<PathBuf>,
+}
+
+/// [`Confined`] for a member of `herd`, the human's credentials found by
+/// `env` and Windows drives by `mounts`, the text of `/proc/mounts`. Errs,
+/// naming the fix, while the herd's key or token is missing.
+pub fn confined(
+    paths: &Paths,
+    herd: &str,
+    env: &dyn Fn(&str) -> Option<OsString>,
+    mounts: &str,
+) -> Result<Confined> {
+    let config = paths.config_dir();
+    let mut deny_read = human_credentials(&paths.home, env);
+    deny_read.push((config.to_path_buf(), true));
+    deny_read.extend(drvfs_mounts(mounts).into_iter().map(|dir| (dir, true)));
+    let mut allow_read = ssh_readable(&paths.home).to_vec();
+    allow_read.extend(["herds", "config.toml", "trello.env"].map(|path| config.join(path)));
+    allow_read.push(ssh_config(paths));
+    allow_read.push(files(paths, herd).key);
+    Ok(Confined {
+        env: lead_env(paths, herd)?,
+        deny_read,
+        allow_read,
+    })
+}
+
+/// Where `/proc/mounts` has a Windows drive mounted: WSL2 lists drvfs as
+/// `9p` with `aname=drvfs`, WSL1 as `drvfs`.
+fn drvfs_mounts(mounts: &str) -> Vec<PathBuf> {
+    mounts
+        .lines()
+        .filter_map(|line| {
+            let [_, dir, kind, options] = line.split_whitespace().take(4).collect::<Vec<_>>()[..]
+            else {
+                return None;
+            };
+            let drvfs = kind == "drvfs"
+                || kind == "9p" && options.split([',', ';']).any(|o| o == "aname=drvfs");
+            drvfs.then(|| PathBuf::from(unescape_mount(dir)))
+        })
+        .collect()
+}
+
+/// A `/proc/mounts` field with its octal escapes (`\040` for a space) undone.
+fn unescape_mount(field: &str) -> String {
+    let mut out = String::new();
+    let mut rest = field;
+    while let Some(at) = rest.find('\\') {
+        out.push_str(&rest[..at]);
+        let code = rest
+            .get(at + 1..at + 4)
+            .and_then(|d| u8::from_str_radix(d, 8).ok());
+        match code {
+            Some(byte) => {
+                out.push(char::from(byte));
+                rest = &rest[at + 4..];
+            }
+            None => {
+                out.push('\\');
+                rest = &rest[at + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -305,6 +384,60 @@ mod tests {
             ]
         );
         assert_eq!(human_credentials(home, &|_| None).len(), 6);
+    }
+
+    /// Herd `h` on a GitHub repo, with its deploy key and token, kept under `root`.
+    fn credentials_herd(root: &Path) -> Paths {
+        let paths = Paths {
+            herds: root.join("config/herds"),
+            home: PathBuf::from("/home/me"),
+            feed_lock: root.join("feed.lock"),
+            paused: root.join("paused"),
+        };
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        crate::worktree::testing::git(&repo, &["init", "--quiet"]).unwrap();
+        let url = "https://github.com/acme/widgets.git";
+        crate::worktree::testing::git(&repo, &["remote", "add", "origin", url]).unwrap();
+        std::fs::create_dir_all(&paths.herds).unwrap();
+        std::fs::write(
+            paths.herds.join("h.toml"),
+            format!("repo = {:?}\n", repo.to_str().unwrap()),
+        )
+        .unwrap();
+        let files = files(&paths, "h");
+        std::fs::create_dir_all(files.key.parent().unwrap()).unwrap();
+        std::fs::write(&files.key, "a private key\n").unwrap();
+        std::fs::write(&files.token, "github_pat_1\n").unwrap();
+        paths
+    }
+
+    #[test]
+    fn every_windows_drive_is_denied_and_a_machine_without_one_adds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = credentials_herd(dir.path());
+        let mounts = "\
+/dev/sdc / ext4 rw,relatime 0 0
+none /mnt/wsl tmpfs rw,relatime 0 0
+C:\\134 /mnt/c 9p rw,noatime,aname=drvfs;path=C:\\;uid=1000;symlinkroot=/mnt/ 0 0
+C:\\134Program\\040Files /Docker/host\\040files 9p rw,aname=drvfs;path=C:\\Program Files 0 0
+D: /mnt/d drvfs rw,noatime 0 0
+server:/share /mnt/nfs 9p rw,aname=other 0 0
+";
+        let denied = |mounts: &str| {
+            let confined = confined(&paths, "h", &|_| None, mounts).unwrap();
+            confined.deny_read[7..].to_vec()
+        };
+
+        assert_eq!(
+            denied(mounts),
+            [
+                (PathBuf::from("/mnt/c"), true),
+                (PathBuf::from("/Docker/host files"), true),
+                (PathBuf::from("/mnt/d"), true),
+            ]
+        );
+        assert_eq!(denied("/dev/sdc / ext4 rw,relatime 0 0\n"), []);
     }
 
     #[test]

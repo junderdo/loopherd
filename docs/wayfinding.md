@@ -132,6 +132,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D117](decisions/D117.md) | Amends D98. A broker lane holds at most 8 waiting requests and refuses more as busy; the lock record is cleared on exit, so `start` waits out an exiting broker and no stale `marks` line outlives it; retirement is read per request; an idle retiring broker answers waiting requests "is retired". |
 | [D118](decisions/D118.md) | Amends D19. install-hook writes the skill to `~/.agents/skills/loopherd` and links `~/.claude/skills/loopherd` to it relatively, replacing only its own old copy and leaving anything else there alone; `--settings` keeps both in the settings file's directory; doctor warns on a missing or foreign link. |
 | [D119](decisions/D119.md) | Amends D108. A broker also records its executable's dev/ino (`file` line); doctor compares brokers with the `loopherd` on PATH by that identity, else with itself, and names the restart as the shepherd's; `broker-restart` resolves its executable before the drain wait, so a reinstall during it still starts a broker. |
+| [D120](decisions/D120.md) | Amends D114. A credentials lead's sandbox also reads `<config dir>/broker/`, where its broker's lock, stop and restart files and replies live; workers, with no broker, don't get it. |
 
 ## Emerging model
 
