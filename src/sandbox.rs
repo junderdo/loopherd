@@ -415,6 +415,31 @@ impl Guard {
         Guard { paths, caller }
     }
 
+    /// Removes a retired lead's MCP config, and its settings once `ended`
+    /// says its Claude has, so a running Claude keeps its sandbox. Only a
+    /// launched lead has them, and a lead caller removes nothing: it could
+    /// have forged the entry. Returns a line per file removed or failed.
+    pub fn forget_launch(&self, name: &str, ended: bool) -> Vec<String> {
+        // A name like `lead-x.lead` would otherwise map to lead-x's files.
+        if self.caller.is_some() || !lead_file(&self.paths, name).is_file() {
+            return vec![];
+        }
+        let mcp = self
+            .paths
+            .config_dir()
+            .join("sandbox")
+            .join(format!("{name}.mcp.json"));
+        let settings = ended.then(|| settings_file(&self.paths, name));
+        std::iter::once(mcp)
+            .chain(settings)
+            .filter_map(|file| match std::fs::remove_file(&file) {
+                Ok(()) => Some(format!("removed {}", file.display())),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => Some(format!("warning: kept {}: {e}", file.display())),
+            })
+            .collect()
+    }
+
     /// Why the lead running this loopherd, if one does, may not act on
     /// `record` at all: it isn't a member of the lead's own herd.
     pub fn caller_refusal(&self, record: &AgentRecord) -> Result<Option<String>> {
@@ -1694,6 +1719,42 @@ fn file_rule(file: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_retire_removes_only_a_launched_leads_files_never_another_leads_by_a_dotted_name() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        let dir = paths.config_dir().join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = ["lead-x.json", "lead-x.mcp.json", "lead-x.lead.json"];
+        let guard = Guard::new(paths.clone(), None);
+
+        for name in ["lead-x.lead", "lead-x.mcp", "lh-1"] {
+            for file in files {
+                std::fs::write(dir.join(file), "{}").unwrap();
+            }
+
+            assert_eq!(
+                guard.forget_launch(name, true),
+                Vec::<String>::new(),
+                "{name}"
+            );
+            for file in files {
+                assert!(dir.join(file).exists(), "{name} removed {file}");
+            }
+        }
+
+        let removed = guard.forget_launch("lead-x", true);
+
+        assert_eq!(
+            removed,
+            [
+                format!("removed {}", dir.join("lead-x.mcp.json").display()),
+                format!("removed {}", dir.join("lead-x.json").display()),
+            ]
+        );
+        assert!(dir.join("lead-x.lead.json").exists());
+    }
 
     #[test]
     fn an_edit_rule_is_confined_only_when_no_segment_climbs_and_it_lies_beneath_an_own_write() {
