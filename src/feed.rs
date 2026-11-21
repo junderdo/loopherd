@@ -858,7 +858,8 @@ fn failure(output: &Output) -> String {
 }
 
 /// The task's template and params. A template word naming none of the
-/// queue's templates, or a wrong param count, is a bad line; nothing else is.
+/// queue's templates, an attended one, or a wrong param count, is a bad
+/// line; nothing else is.
 fn task_params<'q>(queue: &'q Queue, task: &str) -> Result<(&'q str, Vec<String>)> {
     let mut words = task.split_whitespace();
     let (template, names) = if queue.routed {
@@ -876,6 +877,9 @@ fn task_params<'q>(queue: &'q Queue, task: &str) -> Result<(&'q str, Vec<String>
             .first_key_value()
             .context("the queue has no template")?
     };
+    if queue.attended.contains(template) {
+        bail!("template {template} is attended, so only add starts it");
+    }
     let params: Vec<String> = words.map(String::from).collect();
     if params.len() != names.len() {
         bail!(
@@ -2373,6 +2377,31 @@ mod tests {
                 "error: 7: the queue has no template 7 (it has: card, research)",
                 "added lh-2",
                 "prs: 0 retired, 1 added, 0 skipped, 3 errors",
+            ]
+        );
+        assert_eq!(fed.code, LINE_ERRORS_EXIT);
+    }
+
+    #[test]
+    fn a_routed_task_naming_an_attended_template_is_a_bad_line() {
+        let setup = Setup::routed("printf 'research 1\\ncard 2\\n'", 5);
+        let herd_file = setup.config.path().join("herds/prs.toml");
+        let herd = fs::read_to_string(&herd_file).unwrap().replace(
+            "[template.research]\n",
+            "[template.research]\nattended = true\n",
+        );
+        fs::write(&herd_file, herd).unwrap();
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "error: research 1: template research is attended, so only add starts it",
+                "added lh-2",
+                "prs: 0 retired, 1 added, 0 skipped, 1 error",
             ]
         );
         assert_eq!(fed.code, LINE_ERRORS_EXIT);

@@ -1,6 +1,6 @@
 //! Herd files (D7, D9) and `loopherd add`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -222,6 +222,9 @@ struct TemplateFile {
     /// watch wakes on it.
     merged: Option<String>,
     context_limit: Option<u64>,
+    /// The human sits in its member's pane; only `add` starts one (D112).
+    #[serde(default)]
+    attended: bool,
 }
 
 /// [`Paths::from_env`]'s herds dir; `None` when it needs `$HOME` and that is unset.
@@ -446,6 +449,8 @@ pub struct Queue {
     /// Whether each task's first word names its template, rather than the
     /// queue having one.
     pub routed: bool,
+    /// The listed templates marked `attended`, which feed never spawns.
+    pub attended: BTreeSet<String>,
     pub source: String,
     pub backlog: Option<String>,
     pub max: usize,
@@ -486,12 +491,16 @@ fn queue_in(file: &HerdFile, paths: &Paths, herd: &str) -> Result<Option<Queue>>
         return Ok(None);
     };
     let mut templates = BTreeMap::new();
+    let mut attended = BTreeSet::new();
     for name in queue.names() {
         let template = file
             .template
             .get(name)
             .with_context(|| format!("queue: {herd} has no template {name}"))?;
         templates.insert(name.clone(), template.params.clone());
+        if template.attended {
+            attended.insert(name.clone());
+        }
     }
     Ok(Some(Queue {
         done: checks_of(file, "done", |t| t.done.as_deref())?,
@@ -499,6 +508,7 @@ fn queue_in(file: &HerdFile, paths: &Paths, herd: &str) -> Result<Option<Queue>>
         after_merge: file.after_merge.clone(),
         templates,
         routed: queue.templates.is_some(),
+        attended,
         source: queue.source.clone(),
         backlog: queue.backlog.clone(),
         max: queue.max as usize,
@@ -1150,7 +1160,8 @@ fn describe(
     );
     let usages = parsed.template.iter().map(|(template, t)| {
         let params: String = t.params.iter().map(|p| format!(" <{p}>")).collect();
-        format!("  loopherd add {herd} {template}{params}")
+        let attended = if t.attended { "  (attended)" } else { "" };
+        format!("  loopherd add {herd} {template}{params}{attended}")
     });
     let feed = parsed.queue.as_ref().map(|q| {
         let template = match &q.templates {
@@ -1195,6 +1206,17 @@ fn describe(
         .map(|(name, _)| {
             format!("  warning: template {name} has no merged check, so after_merge never runs for its members")
         });
+    let queued_attended = parsed.queue.iter().flat_map(|q| q.names()).filter(|name| {
+        parsed
+            .template
+            .get(name.as_str())
+            .is_some_and(|t| t.attended)
+    });
+    let queued_attended = queued_attended.map(|name| {
+        format!(
+            "  warning: template {name} is attended, so feed never spawns it from [queue] templates"
+        )
+    });
     std::iter::once(header)
         .chain(usages)
         .chain(lead)
@@ -1202,6 +1224,7 @@ fn describe(
         .chain(backlog)
         .chain(after_merge)
         .chain(unmerged)
+        .chain(queued_attended)
         .collect()
 }
 
@@ -2143,6 +2166,29 @@ args = ["--model", "opus"]
             [
                 "  after_merge: git pull --ff-only; scripts/install",
                 "  warning: template chat has no merged check, so after_merge never runs for its members",
+            ]
+        );
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn herds_marks_an_attended_template_and_warns_when_its_queue_lists_it() {
+        let herd = "repo = \"/r\"\n\
+                    [queue]\ntemplates = [\"card\", \"grill\"]\nsource = \"true\"\nmax = 2\n\
+                    [template.card]\nparams = [\"key\"]\nprompt = \"go\"\n\
+                    [template.grill]\nparams = [\"key\"]\nprompt = \"go\"\nattended = true\n";
+        let config = Config::with(&[("prs", herd)]);
+
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+
+        let lines: Vec<&str> = report.lines().skip(1).collect();
+        assert_eq!(
+            lines,
+            [
+                "  loopherd add prs card <key>",
+                "  loopherd add prs grill <key>  (attended)",
+                "  loopherd feed prs  (templates card, grill, max 2)",
+                "  warning: template grill is attended, so feed never spawns it from [queue] templates",
             ]
         );
         assert_eq!(code, 0);
