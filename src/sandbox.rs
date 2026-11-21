@@ -416,11 +416,12 @@ impl Guard {
     }
 
     /// Removes a retired lead's MCP config, and its settings once `ended`
-    /// says its Claude has, so a running Claude keeps its sandbox. A lead
-    /// caller removes nothing: it could have forged the entry. Returns a line
-    /// per file removed or failed.
+    /// says its Claude has, so a running Claude keeps its sandbox. Only a
+    /// launched lead has them, and a lead caller removes nothing: it could
+    /// have forged the entry. Returns a line per file removed or failed.
     pub fn forget_launch(&self, name: &str, ended: bool) -> Vec<String> {
-        if self.caller.is_some() {
+        // A name like `lead-x.lead` would otherwise map to lead-x's files.
+        if self.caller.is_some() || !lead_file(&self.paths, name).is_file() {
             return vec![];
         }
         let mcp = self
@@ -1699,6 +1700,42 @@ fn file_rule(file: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_retire_removes_only_a_launched_leads_files_never_another_leads_by_a_dotted_name() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        let dir = paths.config_dir().join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = ["lead-x.json", "lead-x.mcp.json", "lead-x.lead.json"];
+        let guard = Guard::new(paths.clone(), None);
+
+        for name in ["lead-x.lead", "lead-x.mcp", "lh-1"] {
+            for file in files {
+                std::fs::write(dir.join(file), "{}").unwrap();
+            }
+
+            assert_eq!(
+                guard.forget_launch(name, true),
+                Vec::<String>::new(),
+                "{name}"
+            );
+            for file in files {
+                assert!(dir.join(file).exists(), "{name} removed {file}");
+            }
+        }
+
+        let removed = guard.forget_launch("lead-x", true);
+
+        assert_eq!(
+            removed,
+            [
+                format!("removed {}", dir.join("lead-x.mcp.json").display()),
+                format!("removed {}", dir.join("lead-x.json").display()),
+            ]
+        );
+        assert!(dir.join("lead-x.lead.json").exists());
+    }
 
     #[test]
     fn the_calling_lead_is_the_one_whose_settings_an_ancestor_claude_was_started_with() {

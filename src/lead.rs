@@ -2304,6 +2304,43 @@ mod tests {
     }
 
     #[test]
+    fn retire_close_from_another_herdr_session_keeps_a_retired_leads_settings() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let mut ledger = MemLedger::default();
+        lead(
+            &herdr(),
+            &mut ledger,
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+        ledger.0.get_mut("lead-h").unwrap().retired = true;
+        let mut elsewhere = herdr();
+        elsewhere.socket = Some("/run/other.sock".into());
+
+        let mut out = vec![];
+        crate::retire::retire_and_close(
+            &elsewhere,
+            &mut ledger,
+            &crate::sandbox::Guard::new(setup.paths(), None),
+            "lead-h",
+            std::time::SystemTime::now(),
+            crate::ledger::Outcome::Retired,
+            std::path::Path::new("/nonexistent/reports"),
+            None,
+            None,
+            &mut out,
+        )
+        .unwrap();
+
+        let sandbox = setup.root.join("config/sandbox");
+        assert!(out.contains(&"tab already gone".to_string()), "{out:?}");
+        assert!(!sandbox.join("lead-h.mcp.json").exists(), "{out:?}");
+        assert!(sandbox.join("lead-h.json").exists(), "{out:?}");
+    }
+
+    #[test]
     fn retire_close_keeping_a_leads_tab_keeps_the_settings_its_claude_still_runs_on() {
         let setup = Setup::with_lead("prompt = \"go\"");
         let herdr = herdr();
