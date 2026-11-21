@@ -676,12 +676,26 @@ pub fn hook_only_warning(name: &str, why: &str) -> String {
 /// pass their own `--settings`, which would displace or double the lead's.
 /// `lead`'s args are fresh from its herd file and the command line.
 pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<Launch> {
-    start(paths, name, lead, probe, ArgsFrom::Fresh)
+    start(
+        paths,
+        name,
+        lead,
+        probe,
+        ArgsFrom::Fresh,
+        std::env::var_os("PATH").as_deref(),
+    )
 }
 
 /// [`prepare`] for a lead resuming with the args it was started with.
 pub fn prepare_kept(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<Launch> {
-    start(paths, name, lead, probe, ArgsFrom::Kept)
+    start(
+        paths,
+        name,
+        lead,
+        probe,
+        ArgsFrom::Kept,
+        std::env::var_os("PATH").as_deref(),
+    )
 }
 
 /// Where the args a lead is judged by come from.
@@ -717,7 +731,14 @@ pub fn launch_flag_refusal(name: &str, args: &[String]) -> Option<String> {
         })
 }
 
-fn start(paths: &Paths, name: &str, lead: &Lead, probe: Probe, from: ArgsFrom) -> Result<Launch> {
+fn start(
+    paths: &Paths,
+    name: &str,
+    lead: &Lead,
+    probe: Probe,
+    from: ArgsFrom,
+    path: Option<&std::ffi::OsStr>,
+) -> Result<Launch> {
     if let Some(why) = launch_flag_refusal(name, &lead.args) {
         bail!(why);
     }
@@ -731,13 +752,15 @@ fn start(paths: &Paths, name: &str, lead: &Lead, probe: Probe, from: ArgsFrom) -
         .collect();
     let (_, mode) = herd::lead_sandbox(paths, &lead.herd)?;
     let dir = paths.config_dir().join("sandbox");
-    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let file = lead_file(paths, name);
-    std::fs::write(&file, serde_json::to_string_pretty(lead)? + "\n")
-        .with_context(|| format!("write {}", file.display()))?;
     let mcp = dir.join(format!("{name}.mcp.json"));
-    let text = serde_json::to_string_pretty(&mcp_config(paths, name, &lead.herd)?)? + "\n";
-    write_private(&mcp, &text).with_context(|| format!("write {}", mcp.display()))?;
+    let mcp_text = serde_json::to_string_pretty(&mcp_config(paths, name, &lead.herd)?)? + "\n";
+    let keep_launch = || -> Result<()> {
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        let file = lead_file(paths, name);
+        std::fs::write(&file, serde_json::to_string_pretty(lead)? + "\n")
+            .with_context(|| format!("write {}", file.display()))?;
+        write_private(&mcp, &mcp_text).with_context(|| format!("write {}", mcp.display()))
+    };
     let by_credentials = herd::merge_guard(paths, &lead.herd)? == Some(MergeGuard::Credentials);
     let sockets = probe();
     if let Err(Unavailable { why, fix }) = sockets.clone() {
@@ -752,7 +775,7 @@ fn start(paths: &Paths, name: &str, lead: &Lead, probe: Probe, from: ArgsFrom) -
             ));
         }
         return match mode {
-            SandboxMode::Prefer => Ok(Launch::HookOnly {
+            SandboxMode::Prefer => keep_launch().map(|()| Launch::HookOnly {
                 why,
                 warnings: arg_warnings,
                 mcp,
@@ -789,12 +812,13 @@ fn start(paths: &Paths, name: &str, lead: &Lead, probe: Probe, from: ArgsFrom) -
     }
     let worktree = worktree_path(&herd::repo(paths, &lead.herd)?, name);
     let writable = [worktree.as_path(), paths.state_dir()];
-    if let Some(entry) = plantable_path_entry(std::env::var_os("PATH").as_deref(), &writable) {
+    if let Some(entry) = plantable_path_entry(path, &writable) {
         bail!(
             "{name} can't start: PATH has {entry}, where it could plant the loopherd its \
              watch runs outside its sandbox; drop that entry from PATH"
         );
     }
+    keep_launch()?;
     // Before its settings, which name what it makes.
     create_state(paths, name)?;
     let own = settings(paths, name, &lead.herd)?;
@@ -1781,6 +1805,43 @@ mod tests {
         let elsewhere = root.path().join("lead-h.json").display().to_string();
         procs.set_cmdline(30, &["claude", "--settings", &elsewhere]);
         assert_eq!(calling_lead(&paths, &procs, 50).unwrap(), None);
+    }
+
+    #[test]
+    fn a_plantable_path_refuses_the_start_before_any_launch_file_is_written() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        std::fs::create_dir_all(&paths.herds).unwrap();
+        let repo = root.path().join("repo");
+        std::fs::write(
+            paths.herds.join("h.toml"),
+            format!("repo = {repo:?}\nworkspace = \"w1\"\n[lead]\nprompt = \"go\"\n"),
+        )
+        .unwrap();
+        let lead = Lead {
+            herd: "h".into(),
+            args: vec![],
+        };
+
+        let err = start(
+            &paths,
+            "lead-h",
+            &lead,
+            || Ok(Sockets::Blocked),
+            ArgsFrom::Fresh,
+            Some("/usr/bin::/bin".as_ref()),
+        )
+        .err()
+        .unwrap();
+
+        assert!(
+            format!("{err:#}").contains("PATH has an empty entry"),
+            "{err:#}"
+        );
+        for file in ["lead-h.lead.json", "lead-h.mcp.json", "lead-h.json"] {
+            let file = paths.config_dir().join("sandbox").join(file);
+            assert!(!file.exists(), "{} was written", file.display());
+        }
     }
 
     #[test]
