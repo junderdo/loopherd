@@ -1,6 +1,6 @@
 //! Herd files (D7, D9) and `loopherd add`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::herdr::Herdr;
-use crate::ledger::{AgentRecord, FileLedger, Ledger};
+use crate::ledger::{AgentRecord, Attended, FileLedger, Ledger};
 use crate::lock::Lock;
 use crate::sandbox::{SandboxMode, UnixSockets};
 use crate::spawn::{
@@ -222,6 +222,9 @@ struct TemplateFile {
     /// watch wakes on it.
     merged: Option<String>,
     context_limit: Option<u64>,
+    /// The human sits in its member's pane; only `add` starts one (D112).
+    #[serde(default)]
+    attended: bool,
 }
 
 /// [`Paths::from_env`]'s herds dir; `None` when it needs `$HOME` and that is unset.
@@ -328,13 +331,18 @@ pub struct AddRequest {
     /// Passed to claude after the herd's and the template's args.
     pub claude_args: Vec<String>,
     pub ready_timeout: Duration,
+    /// The caller's herdr pane, recorded on an attended member to return to.
+    pub return_pane: Option<String>,
+    /// Whether an attended member's pane is focused once it is up and prompted.
+    pub focus: bool,
 }
 
 #[derive(Debug)]
 pub struct Added {
     pub name: String,
     pub spawned: Spawned,
-    /// Set when the member took the herd past its queue's `max`.
+    /// Set when the member took the herd past its queue's `max`, or its
+    /// pane couldn't be focused.
     pub warning: Option<String>,
 }
 
@@ -342,7 +350,8 @@ pub struct Added {
 ///
 /// Into a herd with a `[queue]`, fails while `feed` holds the feed lock
 /// past [`Paths::lock_feed`]'s 1s wait, and adds past the
-/// queue's `max` with a warning: `add` is the human's override.
+/// queue's `max` with a warning: `add` is the human's override. An attended
+/// member holds no slot, so skips both.
 pub fn add(
     herdr: &dyn Herdr,
     ledger: &mut dyn Ledger,
@@ -351,23 +360,37 @@ pub fn add(
     inherited_workspace: Option<&str>,
 ) -> Result<Added> {
     let spawn_req = resolve(paths, req)?;
-    let max = load(&paths.herds, &req.herd)
-        .context("herd")?
-        .queue
-        .map(|q| q.max as usize);
+    let attended = spawn_req
+        .member_of
+        .as_ref()
+        .is_some_and(|m| m.attended.is_some());
+    let max = match attended {
+        true => None,
+        false => load(&paths.herds, &req.herd)
+            .context("herd")?
+            .queue
+            .map(|q| q.max as usize),
+    };
     let _feed = max.map(|_| paths.lock_feed()).transpose()?;
     let held = match max {
         Some(_) => members(ledger, &req.herd)?,
         None => 0,
     };
     let spawned = spawn(herdr, ledger, &spawn_req, inherited_workspace)?;
-    let warning = max.filter(|&max| held >= max).map(|max| {
+    let mut warning = max.filter(|&max| held >= max).map(|max| {
         format!(
             "{} now has {} members, past its queue max of {max}",
             req.herd,
             held + 1
         )
     });
+    if attended
+        && req.focus
+        && !spawned.blocked
+        && let Err(e) = herdr.focus(&spawned.pane_id)
+    {
+        warning = Some(format!("focus {}: {e:#}", spawned.pane_id));
+    }
     Ok(Added {
         name: spawn_req.name,
         spawned,
@@ -375,7 +398,8 @@ pub fn add(
     })
 }
 
-/// How many unretired ledger entries belong to `herd`, not counting its lead.
+/// How many unretired ledger entries belong to `herd`, not counting its
+/// lead or attended members.
 pub fn members(ledger: &dyn Ledger, herd: &str) -> Result<usize> {
     let entries = ledger.entries().context("ledger")?;
     Ok(entries
@@ -395,7 +419,7 @@ pub fn known(dir: &Path, ledger: &dyn Ledger, herd: &str) -> Result<bool> {
 
 /// Whether `record` counts against its herd's queue `max`.
 pub fn holds_slot(record: &AgentRecord) -> bool {
-    !record.retired && !record.is_lead()
+    !record.retired && !record.is_lead() && record.attended.is_none()
 }
 
 /// What `add` would do, one `key value` line each, then the prompt.
@@ -446,6 +470,8 @@ pub struct Queue {
     /// Whether each task's first word names its template, rather than the
     /// queue having one.
     pub routed: bool,
+    /// The listed templates marked `attended`, which feed never spawns.
+    pub attended: BTreeSet<String>,
     pub source: String,
     pub backlog: Option<String>,
     pub max: usize,
@@ -486,12 +512,16 @@ fn queue_in(file: &HerdFile, paths: &Paths, herd: &str) -> Result<Option<Queue>>
         return Ok(None);
     };
     let mut templates = BTreeMap::new();
+    let mut attended = BTreeSet::new();
     for name in queue.names() {
         let template = file
             .template
             .get(name)
             .with_context(|| format!("queue: {herd} has no template {name}"))?;
         templates.insert(name.clone(), template.params.clone());
+        if template.attended {
+            attended.insert(name.clone());
+        }
     }
     Ok(Some(Queue {
         done: checks_of(file, "done", |t| t.done.as_deref())?,
@@ -499,6 +529,7 @@ fn queue_in(file: &HerdFile, paths: &Paths, herd: &str) -> Result<Option<Queue>>
         after_merge: file.after_merge.clone(),
         templates,
         routed: queue.templates.is_some(),
+        attended,
         source: queue.source.clone(),
         backlog: queue.backlog.clone(),
         max: queue.max as usize,
@@ -646,6 +677,13 @@ pub fn resolve(paths: &Paths, req: &AddRequest) -> Result<SpawnRequest> {
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
     values.insert("herd", &req.herd);
+    let attended = template.attended.then(|| Attended {
+        return_pane: req.return_pane.clone(),
+    });
+    let shepherd_pane = attended.as_ref().map(|a| {
+        let pane = a.return_pane.clone().unwrap_or_default();
+        ("shepherd_pane".to_string(), pane)
+    });
 
     let name = match &checked.name {
         Some(pattern) => pattern.render(&values)?,
@@ -678,8 +716,9 @@ pub fn resolve(paths: &Paths, req: &AddRequest) -> Result<SpawnRequest> {
             herd: req.herd.clone(),
             template: Some(req.template.clone()),
             params,
-            values: vec![],
+            values: shepherd_pane.into_iter().collect(),
             role: None,
+            attended,
         }),
     })
 }
@@ -733,7 +772,13 @@ fn check_fields(template: &TemplateFile, paths: &Paths) -> Result<CheckedTemplat
     if prompt.text.trim().is_empty() {
         bail!("{} is empty", prompt.source);
     }
-    pattern(Some(&prompt.text), &template.params, &BUILT_INS).context(prompt.source.clone())?;
+    let attended_keys: &[&str] = if template.attended {
+        &["shepherd_pane"]
+    } else {
+        &[]
+    };
+    let prompt_keys = [&BUILT_INS[..], attended_keys].concat();
+    pattern(Some(&prompt.text), &template.params, &prompt_keys).context(prompt.source.clone())?;
     pattern(template.done.as_deref(), &template.params, &BUILT_INS).context("done")?;
     pattern(template.merged.as_deref(), &template.params, &BUILT_INS).context("merged")?;
     Ok(CheckedTemplate {
@@ -1150,7 +1195,8 @@ fn describe(
     );
     let usages = parsed.template.iter().map(|(template, t)| {
         let params: String = t.params.iter().map(|p| format!(" <{p}>")).collect();
-        format!("  loopherd add {herd} {template}{params}")
+        let attended = if t.attended { "  (attended)" } else { "" };
+        format!("  loopherd add {herd} {template}{params}{attended}")
     });
     let feed = parsed.queue.as_ref().map(|q| {
         let template = match &q.templates {
@@ -1195,6 +1241,17 @@ fn describe(
         .map(|(name, _)| {
             format!("  warning: template {name} has no merged check, so after_merge never runs for its members")
         });
+    let queued_attended = parsed.queue.iter().flat_map(|q| q.names()).filter(|name| {
+        parsed
+            .template
+            .get(name.as_str())
+            .is_some_and(|t| t.attended)
+    });
+    let queued_attended = queued_attended.map(|name| {
+        format!(
+            "  warning: template {name} is attended, so feed never spawns it from [queue] templates"
+        )
+    });
     std::iter::once(header)
         .chain(usages)
         .chain(lead)
@@ -1202,6 +1259,7 @@ fn describe(
         .chain(backlog)
         .chain(after_merge)
         .chain(unmerged)
+        .chain(queued_attended)
         .collect()
 }
 
@@ -1422,6 +1480,8 @@ args = ["--model", "opus"]
             params: params.iter().map(|p| p.to_string()).collect(),
             claude_args: vec![],
             ready_timeout: Duration::from_secs(60),
+            return_pane: None,
+            focus: true,
         }
     }
 
@@ -1730,6 +1790,96 @@ args = ["--model", "opus"]
         let Added { name, .. } =
             add(&herdr, &mut ledger, &config.paths(), req, Some("w1")).unwrap();
         (herdr, ledger, name)
+    }
+
+    const GRILL_HERD: &str = "repo = \"/r\"\n[template.grill]\nparams = [\"key\"]\n\
+                              prompt = \"grill {key}, then focus {shepherd_pane}\"\nattended = true\n";
+
+    fn attended_request(return_pane: Option<&str>, focus: bool) -> AddRequest {
+        AddRequest {
+            return_pane: return_pane.map(String::from),
+            focus,
+            ..request("h", "grill", &["lh-1"])
+        }
+    }
+
+    #[test]
+    fn add_of_an_attended_template_records_its_return_pane_and_focuses_the_new_pane() {
+        let config = Config::with(&[("h", GRILL_HERD)]);
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+
+        let added = add(
+            &herdr,
+            &mut ledger,
+            &config.paths(),
+            &attended_request(Some("w1:p9"), true),
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert_eq!(herdr.focused(), [added.spawned.pane_id]);
+        assert_eq!(herdr.prompts()[0].1, "grill lh-1, then focus w1:p9");
+        let record = &ledger.entries().unwrap()["grill-lh-1"];
+        assert_eq!(
+            record.attended,
+            Some(Attended {
+                return_pane: Some("w1:p9".into())
+            })
+        );
+    }
+
+    #[test]
+    fn add_of_an_attended_template_outside_herdr_records_no_return_pane() {
+        let config = Config::with(&[("h", GRILL_HERD)]);
+        let (herdr, ledger, name) = add_ok(&config, &attended_request(None, true));
+
+        assert_eq!(herdr.prompts()[0].1, "grill lh-1, then focus ");
+        let record = &ledger.entries().unwrap()[&name];
+        assert_eq!(record.attended, Some(Attended { return_pane: None }));
+    }
+
+    #[test]
+    fn add_of_an_attended_template_leaves_focus_alone_with_no_focus_or_when_blocked() {
+        let config = Config::with(&[("h", GRILL_HERD)]);
+        let (unfocused, _, _) = add_ok(&config, &attended_request(Some("w1:p9"), false));
+        assert_eq!(unfocused.focused(), Vec::<String>::new());
+
+        let mut blocked = herdr();
+        blocked.startup = crate::herdr::fake::Startup::BlockedForever;
+        let mut ledger = MemLedger::default();
+        let req = AddRequest {
+            ready_timeout: Duration::ZERO,
+            ..attended_request(Some("w1:p9"), true)
+        };
+        let added = add(&blocked, &mut ledger, &config.paths(), &req, Some("w1")).unwrap();
+        assert!(added.spawned.blocked);
+        assert_eq!(blocked.focused(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn add_of_a_plain_template_neither_focuses_nor_marks_it_attended() {
+        let herd = "repo = \"/r\"\n[template.card]\nparams = []\nprompt = \"go\"\n";
+        let config = Config::with(&[("h", herd)]);
+        let req = AddRequest {
+            return_pane: Some("w1:p9".into()),
+            ..request("h", "card", &[])
+        };
+        let (herdr, ledger, name) = add_ok(&config, &req);
+
+        assert_eq!(herdr.focused(), Vec::<String>::new());
+        assert_eq!(ledger.entries().unwrap()[&name].attended, None);
+    }
+
+    #[test]
+    fn only_an_attended_template_may_use_shepherd_pane() {
+        let herd =
+            "repo = \"/r\"\n[template.card]\nparams = []\nprompt = \"back to {shepherd_pane}\"\n";
+        let config = Config::with(&[("h", herd)]);
+
+        let err = add_err(&config, &request("h", "card", &[]));
+
+        assert!(err.contains("unknown placeholder {shepherd_pane}"), "{err}");
     }
 
     #[test]
@@ -2143,6 +2293,29 @@ args = ["--model", "opus"]
             [
                 "  after_merge: git pull --ff-only; scripts/install",
                 "  warning: template chat has no merged check, so after_merge never runs for its members",
+            ]
+        );
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn herds_marks_an_attended_template_and_warns_when_its_queue_lists_it() {
+        let herd = "repo = \"/r\"\n\
+                    [queue]\ntemplates = [\"card\", \"grill\"]\nsource = \"true\"\nmax = 2\n\
+                    [template.card]\nparams = [\"key\"]\nprompt = \"go\"\n\
+                    [template.grill]\nparams = [\"key\"]\nprompt = \"go\"\nattended = true\n";
+        let config = Config::with(&[("prs", herd)]);
+
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+
+        let lines: Vec<&str> = report.lines().skip(1).collect();
+        assert_eq!(
+            lines,
+            [
+                "  loopherd add prs card <key>",
+                "  loopherd add prs grill <key>  (attended)",
+                "  loopherd feed prs  (templates card, grill, max 2)",
+                "  warning: template grill is attended, so feed never spawns it from [queue] templates",
             ]
         );
         assert_eq!(code, 0);
@@ -3172,6 +3345,7 @@ args = ["--model", "opus"]
             socket: None,
             process: None,
             role: lead.then_some(crate::ledger::Role::Lead),
+            attended: None,
             after_merge: None,
             unsandboxed: None,
             sockets_unblocked: None,

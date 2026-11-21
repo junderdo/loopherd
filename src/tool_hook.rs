@@ -922,6 +922,7 @@ mod tests {
             socket: Some(PathBuf::from(SOCKET)),
             process: None,
             role,
+            attended: None,
             after_merge: None,
             unsandboxed: None,
             sockets_unblocked: None,

@@ -627,6 +627,7 @@ mod tests {
             socket: Some(FAKE_SOCKET.into()),
             process: None,
             role: None,
+            attended: None,
             after_merge: None,
             unsandboxed: None,
             sockets_unblocked: None,

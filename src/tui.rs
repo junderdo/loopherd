@@ -1181,6 +1181,7 @@ mod tests {
             socket: None,
             process: None,
             role: None,
+            attended: None,
             after_merge: None,
             unsandboxed: None,
             sockets_unblocked: None,
@@ -3212,6 +3213,23 @@ max = 3
             "{shown:#?}"
         );
         assert!(shown[4..].iter().all(String::is_empty), "{shown:#?}");
+    }
+
+    #[test]
+    fn an_attended_member_is_marked_attended_in_its_row_and_detail() {
+        let (herdr, mut ledger, now) = (herdr(), ledger(), Instant::now());
+        ledger.0.get_mut("b").unwrap().attended = Some(Default::default());
+        let mail = quiet_mail(&ledger);
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+
+        let terminal = render_at(&app, now, 120, 24);
+
+        assert!(
+            lines(&terminal).iter().any(|l| l.contains("b (attended)")),
+            "{:#?}",
+            lines(&terminal)
+        );
+        assert_eq!(pane_text(&terminal, "b")[1], "attended");
     }
 
     #[test]

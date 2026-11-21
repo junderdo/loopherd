@@ -170,6 +170,7 @@ fn resolve(ledger: &dyn Ledger, paths: &Paths, req: &LeadRequest) -> Result<Spaw
                 ("review_rounds".into(), config.review_rounds.to_string()),
             ],
             role: Some(Role::Lead),
+            attended: None,
         }),
     })
 }

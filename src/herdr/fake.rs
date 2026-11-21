@@ -299,7 +299,8 @@ impl FakeHerdr {
         self.state.lock().unwrap().prompts.clone()
     }
 
-    /// Panes passed to `focus`, in order. Focusing isn't a mutation.
+    /// Panes passed to `focus`, in order, the last being `focused_pane`.
+    /// Focusing isn't a mutation.
     pub fn focused(&self) -> Vec<String> {
         self.state.lock().unwrap().focused.clone()
     }
@@ -885,6 +886,14 @@ impl Herdr for FakeHerdr {
         }
         self.state.lock().unwrap().focused.push(pane_id.to_string());
         Ok(())
+    }
+
+    fn focused_pane(&self) -> Result<Option<String>> {
+        self.called();
+        if self.is_down() {
+            bail!("herdr server not running");
+        }
+        Ok(self.state.lock().unwrap().focused.last().cloned())
     }
 
     fn focus_plugin_pane(&self, pane_id: &str) -> Result<()> {

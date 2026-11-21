@@ -36,6 +36,8 @@ pub struct Member {
     pub tab: Option<String>,
     /// Its herd's lead, not a worker.
     pub lead: bool,
+    /// A member the human sits in, started from an attended template.
+    pub attended: bool,
     /// Why this lead runs without its sandbox, guarded by its tool hook alone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unsandboxed: Option<String>,
@@ -266,6 +268,7 @@ pub(crate) fn member(
         pane: live.map_or(&record.pane_id, |a| &a.pane_id).clone(),
         tab: live.map(|a| a.tab_id.clone()),
         lead: record.is_lead(),
+        attended: record.attended.is_some(),
         unsandboxed: record.unsandboxed.clone(),
         sockets_unblocked: record.sockets_unblocked.clone(),
         template: record.template.clone(),
@@ -311,6 +314,7 @@ mod tests {
             socket: None,
             process: None,
             role: None,
+            attended: None,
             after_merge: None,
             unsandboxed: None,
             sockets_unblocked: None,
