@@ -710,7 +710,7 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   to re-arm its own.
 - **After a merge that changes the broker**, nothing: once it is
   installed, each lead's broker moves onto the new `loopherd` on its PATH
-  by itself, between requests (D121).
+  by itself, between requests (D122).
   `loopherd broker-restart <lead>` is for when that fails: a note in the
   lead's mailbox saying its broker couldn't move, a lead's
   `<lead>'s broker predates this loopherd` error, its `can't read` reply

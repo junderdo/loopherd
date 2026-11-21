@@ -51,7 +51,7 @@ Backlog cards into members `lh-<n>` on `<type>/LH-<n>-<slug>`.
   `scripts/install` can take minutes. If a feed dies partway, the next feed
   notes the after_merge as interrupted, with no outcome; check what ran and
   finish the steps by hand. Once a merge that changes the broker is
-  installed, each lead's broker moves onto it by itself (D121).
+  installed, each lead's broker moves onto it by itself (D122).
   `loopherd doctor`, which `scripts/install` runs last, warns for each
   broker still on another binary, and a broker that couldn't move notes its
   lead's mailbox: for those, run `loopherd broker-restart <lead>` in the
