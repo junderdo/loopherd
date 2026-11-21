@@ -706,7 +706,7 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   still queued; with none running it starts one. A broker still busy after
   4 hours is left running and the command fails naming its pid. A lead's
   `<lead>'s broker predates this loopherd` error, its `can't read` reply
-  error, and `loopherd doctor`'s warning that a broker runs another binary
+  error, and `loopherd doctor`'s warning that a broker runs another build than the loopherd on PATH
   (which `scripts/install` shows) all ask for the same command.
 - **After a herdr restart** run `loopherd revive` (`--dry-run` first). It
   resumes non-retired members by session ID, and prompts each lead whose

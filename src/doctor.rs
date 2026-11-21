@@ -90,7 +90,7 @@ pub fn checks(
                 setup,
                 herd,
                 reached.map(|socket| (herdr, socket)),
-                &crate::broker::Binary::at(install.running.clone()),
+                &BrokersOwn::of(install),
             ));
         }
         Err(e) if herd.is_some() => bail!("can't find herd files: {e:#}"),
@@ -704,7 +704,7 @@ fn state_checks(
     setup: &Setup,
     only: Option<&str>,
     reached: Option<(&dyn Herdr, Option<PathBuf>)>,
-    binary: &crate::broker::Binary,
+    binary: &BrokersOwn,
 ) -> Vec<Check> {
     let mut checks = pause_checks(&setup.paths, only);
     let entries = match setup.ledger.entries() {
@@ -750,8 +750,46 @@ fn state_checks(
     checks
 }
 
-/// Fails while no broker serves `lead`; warns while one runs a binary other than `binary`.
-fn broker_check(paths: &Paths, lead: &str, binary: &crate::broker::Binary) -> Option<Check> {
+/// The loopherd a broker should run: the one on PATH, which `broker-restart`
+/// and leads run, else this one.
+struct BrokersOwn {
+    path: PathBuf,
+    on_path: bool,
+}
+
+impl BrokersOwn {
+    fn of(install: &Install) -> BrokersOwn {
+        match install.on_path.as_ref().map(|p| p.canonicalize()) {
+            Some(Ok(path)) => BrokersOwn {
+                path,
+                on_path: true,
+            },
+            _ => BrokersOwn {
+                path: install.running.clone(),
+                on_path: false,
+            },
+        }
+    }
+
+    fn runs(&self, recorded: &crate::broker::Binary) -> bool {
+        match crate::broker::FileId::of(&self.path) {
+            Some(file) => recorded.file == file,
+            None => recorded.path == self.path,
+        }
+    }
+}
+
+impl std::fmt::Display for BrokersOwn {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self.on_path {
+            true => write!(f, "the loopherd on PATH ({})", self.path.display()),
+            false => write!(f, "this one ({})", self.path.display()),
+        }
+    }
+}
+
+/// Fails while no broker serves `lead`; warns while one runs another build than `own`.
+fn broker_check(paths: &Paths, lead: &str, own: &BrokersOwn) -> Option<Check> {
     let name = format!("broker {lead}");
     if !crate::broker::running(paths, lead) {
         return Some(failure(
@@ -761,22 +799,24 @@ fn broker_check(paths: &Paths, lead: &str, binary: &crate::broker::Binary) -> Op
         ));
     }
     let runs = match crate::broker::recorded_binary(paths, lead) {
-        Some(recorded) if recorded == *binary => return None,
+        Some(recorded) if own.runs(&recorded) => return None,
+        Some(recorded) if recorded.path == own.path => format!(
+            "an earlier build of {} (loopherd {})",
+            own.path.display(),
+            recorded.version
+        ),
         Some(recorded) => format!(
-            "loopherd {} at {}",
+            "loopherd {} at {}, not {own}",
             recorded.version,
             recorded.path.display()
         ),
-        None => "a loopherd from before brokers recorded their binary".into(),
+        None => format!("a loopherd from before brokers recorded their build, not {own}"),
     };
+    // A lead's install also runs doctor, and a lead is refused broker-restart.
     Some(warning(
         &name,
-        format!(
-            "{lead}'s broker runs {runs}, not this one ({} at {}), so its lead's commands may fail",
-            binary.version,
-            binary.path.display()
-        ),
-        format!("loopherd broker-restart {lead}"),
+        format!("{lead}'s broker runs {runs}, so its lead's commands may fail"),
+        format!("the shepherd runs loopherd broker-restart {lead}"),
     ))
 }
 
@@ -1349,6 +1389,7 @@ mod tests {
     use crate::herdr::fake::FakeHerdr;
     use crate::ledger::AgentRecord;
     use serde_json::json;
+    use std::os::unix::fs::MetadataExt;
 
     const EVENTS: [(&str, &str); 5] = [
         ("Stop", "stop-hook"),
@@ -2322,8 +2363,16 @@ mod tests {
     }
 
     #[test]
-    fn a_broker_on_another_binary_warns_naming_broker_restart() {
-        let m = machine(&ALL);
+    fn a_broker_on_another_build_than_paths_warns_naming_the_shepherds_restart() {
+        let mut m = machine(&ALL);
+        let on_path = m.dir.path().join("bin/loopherd");
+        let running = m.dir.path().join("target/release/loopherd");
+        for exe in [&on_path, &running] {
+            std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            std::fs::write(exe, "loopherd").unwrap();
+        }
+        m.install.on_path = Some(on_path.clone());
+        m.install.running = running;
         let repo = m.herd("h");
         m.herd_file(
             "h",
@@ -2337,7 +2386,7 @@ mod tests {
             args: vec![],
         };
         let mut leads = vec![];
-        for name in ["lead-new", "lead-other", "lead-old"] {
+        for name in ["lead-new", "lead-rebuilt", "lead-other", "lead-old"] {
             crate::sandbox::prepare(m.paths(), name, &kept, || {
                 Ok(crate::sandbox::Sockets::Blocked)
             })
@@ -2349,7 +2398,8 @@ mod tests {
             leads.push(lead);
         }
         m.ledger(&leads);
-        let lock = |name: &str| {
+        let mut held = vec![];
+        let mut lock = |name: &str, record: String| {
             let lock = m
                 .paths()
                 .config_dir()
@@ -2362,27 +2412,98 @@ mod tests {
                 .write(true)
                 .open(&lock)
                 .unwrap();
-            (lock, crate::lock::Lock::try_take(file).unwrap().unwrap())
+            held.push(crate::lock::Lock::try_take(file).unwrap().unwrap());
+            std::fs::write(&lock, format!("300\nmarks\n{record}")).unwrap();
         };
-        let running = m.install.running.clone();
         let version = env!("LOOPHERD_VERSION");
-        let (new, _new) = lock("lead-new");
-        std::fs::write(
-            &new,
+        let meta = std::fs::metadata(&on_path).unwrap();
+        let (dev, ino) = (meta.dev(), meta.ino());
+        let on_path = on_path.display();
+        lock(
+            "lead-new",
+            format!("version {version}\nbinary {on_path}\nfile {dev} {ino}\n"),
+        );
+        lock(
+            "lead-rebuilt",
             format!(
-                "300\nmarks\nversion {version}\nbinary {}\n",
-                running.display()
+                "version {version}\nbinary {on_path}\nfile {dev} {}\n",
+                ino + 1
             ),
-        )
+        );
+        lock(
+            "lead-other",
+            "version 0.0.1 (abc1234)\nbinary /old/loopherd\nfile 1 2\n".into(),
+        );
+        lock("lead-old", format!("version {version}\nbinary {on_path}\n"));
+
+        let brokers: Vec<String> = problems(&m, &herdr())
+            .into_iter()
+            .filter(|p| p.contains("broker"))
+            .collect();
+
+        let fix = |lead: &str| format!("fix: the shepherd runs loopherd broker-restart {lead}");
+        assert_eq!(
+            brokers,
+            [
+                format!(
+                    "warning broker lead-old: lead-old's broker runs a loopherd from before \
+                     brokers recorded their build, not the loopherd on PATH ({on_path}), so its \
+                     lead's commands may fail; {}",
+                    fix("lead-old")
+                ),
+                format!(
+                    "warning broker lead-other: lead-other's broker runs loopherd 0.0.1 \
+                     (abc1234) at /old/loopherd, not the loopherd on PATH ({on_path}), so its \
+                     lead's commands may fail; {}",
+                    fix("lead-other")
+                ),
+                format!(
+                    "warning broker lead-rebuilt: lead-rebuilt's broker runs an earlier build of \
+                     {on_path} (loopherd {version}), so its lead's commands may fail; {}",
+                    fix("lead-rebuilt")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn with_no_loopherd_on_path_a_broker_is_checked_against_the_running_binary() {
+        let mut m = machine(&ALL);
+        let running = m.dir.path().join("target/release/loopherd");
+        std::fs::create_dir_all(running.parent().unwrap()).unwrap();
+        std::fs::write(&running, "loopherd").unwrap();
+        m.install.on_path = None;
+        m.install.running = running.clone();
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nsandbox = \"prefer\"\n",
+                repo.to_str().unwrap()
+            ),
+        );
+        let kept = crate::sandbox::Lead {
+            herd: "h".into(),
+            args: vec![],
+        };
+        crate::sandbox::prepare(m.paths(), "lead-h", &kept, || {
+            Ok(crate::sandbox::Sockets::Blocked)
+        })
         .unwrap();
-        let (other, _other) = lock("lead-other");
+        let mut lead = member("lead-h", "h", "w1:p1", None);
+        lead.role = Some(crate::ledger::Role::Lead);
+        let settings = crate::sandbox::settings_file(m.paths(), "lead-h");
+        lead.claude_args = vec!["--settings".into(), settings.display().to_string()];
+        m.ledger(&[lead]);
+        let lock = m.paths().config_dir().join("broker/lead-h.lock");
+        std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        let file = std::fs::File::create(&lock).unwrap();
+        let _held = crate::lock::Lock::try_take(file).unwrap().unwrap();
         std::fs::write(
-            &other,
-            "300\nmarks\nversion 0.0.1 (abc1234)\nbinary /old/loopherd\n",
+            &lock,
+            "300\nmarks\nversion 0.0.1 (abc1234)\nbinary /old/loopherd\nfile 1 2\n",
         )
         .unwrap();
-        let (old, _old) = lock("lead-old");
-        std::fs::write(&old, "300\nmarks\n").unwrap();
 
         let brokers: Vec<String> = problems(&m, &herdr())
             .into_iter()
@@ -2391,20 +2512,12 @@ mod tests {
 
         assert_eq!(
             brokers,
-            [
-                format!(
-                    "warning broker lead-old: lead-old's broker runs a loopherd from before \
-                     brokers recorded their binary, not this one ({version} at {}), so its \
-                     lead's commands may fail; fix: loopherd broker-restart lead-old",
-                    running.display()
-                ),
-                format!(
-                    "warning broker lead-other: lead-other's broker runs loopherd 0.0.1 \
-                     (abc1234) at /old/loopherd, not this one ({version} at {}), so its lead's \
-                     commands may fail; fix: loopherd broker-restart lead-other",
-                    running.display()
-                ),
-            ]
+            [format!(
+                "warning broker lead-h: lead-h's broker runs loopherd 0.0.1 (abc1234) at \
+                 /old/loopherd, not this one ({}), so its lead's commands may fail; \
+                 fix: the shepherd runs loopherd broker-restart lead-h",
+                running.display()
+            )]
         );
     }
 
