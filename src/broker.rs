@@ -768,6 +768,20 @@ pub struct Host<'a> {
     pub live: LiveSession,
     pub spawn_waiter: SpawnWaiter,
     pub prs: &'a (dyn PullRequests + Sync),
+    /// Moves the broker onto a reinstalled loopherd; `None` keeps it on its own.
+    pub follow: Option<Follow<'a>>,
+}
+
+/// How a broker follows a reinstall of the loopherd on its PATH.
+pub struct Follow<'a> {
+    /// The loopherd its PATH resolves to now, canonicalized.
+    pub installed: &'a (dyn Fn() -> Option<PathBuf> + Sync),
+    /// Replaces this process with `exe` serving `lead` under `lock`, as
+    /// [`reexec`] does; returns only when it couldn't.
+    pub reexec: &'a (dyn Fn(&Path, &str, &Lock) -> anyhow::Error + Sync),
+    /// How long an idle broker goes between looks; it also looks after each
+    /// request, but never while one is in flight.
+    pub every: Duration,
 }
 
 /// Serves lead `lead`'s requests, polling every `poll`, until it is retired.
@@ -780,25 +794,42 @@ pub struct Host<'a> {
 /// holds at most [`LANE_WAITING`] requests waiting and refuses more as busy.
 /// While its lead reads retired it refuses every request it hasn't started,
 /// and returns once none is in flight.
+///
+/// `inherited` is the lock a broker it replaced handed it across `exec`.
+/// When `host.follow` finds a new loopherd installed while no request is in
+/// flight, the broker re-execs it; one that can't take over is noted in the
+/// lead's mailbox once, and the broker serves on.
 pub fn serve<L: Ledger + Clone + Send>(
     host: &Host,
     ledger: &L,
     paths: &Paths,
     lead: &str,
     poll: Duration,
+    inherited: Option<std::fs::File>,
 ) -> Result<Served> {
     validate_name(lead)?;
     // Before the lock: a client writes as soon as it sees the lock held.
     let _ = Dir::open(paths.state_dir(), &["broker", lead, "requests"]);
-    let Some(_lock) = take_lock(paths, lead)? else {
-        return Ok(Served::AlreadyRunning);
+    let lock = match inherited.and_then(|file| adopt_lock(paths, lead, file)) {
+        Some(lock) => lock,
+        None => match take_lock(paths, lead)? {
+            Some(lock) => lock,
+            None => return Ok(Served::AlreadyRunning),
+        },
     };
     // Its lead sizes waits on origin by the broker's git timeout, not its own, and trusts
     // a missing start mark only from a broker that writes them. A plain write is safe:
     // the lead's sandbox can't write config/broker to plant a link.
     let remote =
         crate::worktree::remote_timeout().map_or(String::new(), |r| r.as_secs().to_string());
-    let binary = Binary::running().map_or(String::new(), |b| {
+    let running = Binary::running();
+    let mut installs = host.follow.as_ref().map(|follow| Installs {
+        follow,
+        running: running.as_ref().map(|b| b.file),
+        failed: None,
+        looked: Instant::now(),
+    });
+    let binary = running.map_or(String::new(), |b| {
         format!(
             "{VERSION}{}\n{BINARY}{}\n{FILE}{} {}\n",
             b.version,
@@ -844,8 +875,10 @@ pub fn serve<L: Ledger + Clone + Send>(
         }
         let mut in_flight: HashMap<String, Lane> = HashMap::new();
         loop {
+            let mut answered = false;
             for name in done.try_iter() {
                 in_flight.remove(&name);
+                answered = true;
             }
             // Read every round: `lead` may relaunch a retired lead under its name.
             let stopping = !unretired(ledger, lead);
@@ -874,6 +907,13 @@ pub fn serve<L: Ledger + Clone + Send>(
                 std::thread::sleep(poll);
                 continue;
             }
+            // Only between requests, so a move never holds up a lane behind a long feed.
+            if let Some(installs) = installs.as_mut()
+                && in_flight.is_empty()
+                && (answered || installs.due())
+            {
+                installs.move_onto_newer(paths, lead, &lock);
+            }
             // Reopened each round: the lead can replace any folder on the way.
             if let Ok(requests) = Dir::open(paths.state_dir(), &["broker", lead, "requests"]) {
                 let requests = Arc::new(requests);
@@ -900,6 +940,47 @@ pub fn serve<L: Ledger + Clone + Send>(
             std::thread::sleep(poll);
         }
     })
+}
+
+/// What a broker following installs knows of the loopherd on its PATH.
+struct Installs<'a> {
+    follow: &'a Follow<'a>,
+    running: Option<FileId>,
+    /// An install that couldn't take over, not tried again.
+    failed: Option<FileId>,
+    looked: Instant,
+}
+
+impl Installs<'_> {
+    fn due(&self) -> bool {
+        self.looked.elapsed() >= self.follow.every
+    }
+
+    /// Re-execs the loopherd on PATH when it is another file than this
+    /// broker runs and not one that already failed to take over. Returns
+    /// only when it didn't move, noting the lead's mailbox if it tried.
+    fn move_onto_newer(&mut self, paths: &Paths, lead: &str, lock: &Lock) {
+        self.looked = Instant::now();
+        let Some(exe) = (self.follow.installed)() else {
+            return;
+        };
+        let Some(file) = FileId::of(&exe) else {
+            return;
+        };
+        if Some(file) == self.running || Some(file) == self.failed {
+            return;
+        }
+        let e = (self.follow.reexec)(&exe, lead, lock);
+        self.failed = Some(file);
+        let text = format!(
+            "{lead}'s broker couldn't move onto the loopherd installed at {}, so it serves on \
+             its old build until that changes again: {e:#}; the shepherd runs \
+             loopherd broker-restart {lead}",
+            exe.display()
+        );
+        let note = crate::report::Entry::new(SystemTime::now(), Body::Note { text });
+        let _ = crate::report::append(&paths.state_dir().join("reports"), lead, &note);
+    }
 }
 
 /// An unreadable ledger is no proof of retirement.
@@ -1660,6 +1741,94 @@ fn serving_once_started(paths: &Paths, lead: &str, mut child: std::process::Chil
     }
 }
 
+/// Names the descriptor of the lock a broker hands the loopherd it re-execs.
+pub const LOCK_FD_ENV: &str = "LOOPHERD_BROKER_LOCK_FD";
+
+/// How long a new install has to answer `--version` before a broker moves onto it.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Replaces this process with `exe` serving `lead`, handing it `lock` so no
+/// client sees the lead without a broker. First runs `exe --version`, so a
+/// binary that is missing, can't run or exits at once leaves this one
+/// serving. Returns only when `exe` couldn't take over.
+pub fn reexec(exe: &Path, lead: &str, lock: &Lock) -> anyhow::Error {
+    use std::os::unix::process::CommandExt;
+    if let Err(e) = probe(exe) {
+        return e;
+    }
+    let fd = lock.as_raw_fd();
+    // SAFETY: fcntl only changes close-on-exec on a descriptor `lock` keeps open.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, 0) } != 0 {
+        return anyhow!(std::io::Error::last_os_error()).context("hand over the broker's lock");
+    }
+    let e = std::process::Command::new(exe)
+        .args(["broker", lead])
+        .env(LOCK_FD_ENV, fd.to_string())
+        .exec();
+    // SAFETY: as above; children started later must not hold the lock.
+    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    // A failed exec leaves SIGPIPE at its default, which Rust's runtime had ignored.
+    // SAFETY: setting a signal's disposition to ignore has no preconditions.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+    anyhow!(e).context(format!("exec {}", exe.display()))
+}
+
+fn probe(exe: &Path) -> Result<()> {
+    let mut child = std::process::Command::new(exe)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("run {}", exe.display()))?;
+    let given_up = Instant::now() + PROBE_TIMEOUT;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            if !status.success() {
+                bail!("{} --version exited at once ({status})", exe.display());
+            }
+            return Ok(());
+        }
+        if Instant::now() >= given_up {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "{} --version didn't answer within {}",
+                exe.display(),
+                humantime::format_duration(PROBE_TIMEOUT)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The lock file the broker that re-execed this process handed it, named
+/// by [`LOCK_FD_ENV`], which this removes so nothing it starts sees it.
+/// Call before any thread starts.
+pub fn inherited_lock() -> Option<std::fs::File> {
+    let fd: i32 = std::env::var(LOCK_FD_ENV).ok()?.parse().ok()?;
+    // SAFETY: no thread runs yet to read the environment.
+    unsafe { std::env::remove_var(LOCK_FD_ENV) };
+    // SAFETY: F_GETFD only reads the flags, failing on a descriptor that isn't open.
+    if fd <= 2 || unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+        return None;
+    }
+    // SAFETY: open and handed over for this process to own; set close-on-exec again at once.
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    Some(file)
+}
+
+/// `file` as `lead`'s lock, when it is that lock file and holds its flock.
+fn adopt_lock(paths: &Paths, lead: &str, file: std::fs::File) -> Option<Lock> {
+    let held = file.metadata().ok()?;
+    let lock = std::fs::metadata(lock_file(paths, lead)).ok()?;
+    if (held.dev(), held.ino()) != (lock.dev(), lock.ino()) {
+        return None;
+    }
+    Lock::try_take(file).ok().flatten()
+}
+
 /// Stops lead `lead`'s broker once its request in flight is answered, then
 /// starts one from this loopherd's binary; with none running, just starts one.
 /// Requests still queued wait for the new broker. Gives up, leaving the old
@@ -2093,7 +2262,7 @@ mod tests {
             let paths = self.paths.clone();
             let ledger = self.ledger();
             let serving = std::thread::spawn(move || {
-                let served = serve(&host(&herdr), &ledger, &paths, "lead-h", poll);
+                let served = serve(&host(&herdr), &ledger, &paths, "lead-h", poll, None);
                 (served, herdr)
             });
             let given_up = Instant::now() + Duration::from_secs(5);
@@ -2177,6 +2346,7 @@ mod tests {
             live: same_session,
             spawn_waiter: no_waiter,
             prs: &NO_PRS,
+            follow: None,
         }
     }
 
@@ -2895,6 +3065,7 @@ mod tests {
             &world.paths,
             "lead-h",
             POLL,
+            None,
         );
 
         assert_eq!(second.unwrap(), Served::AlreadyRunning);
@@ -3323,6 +3494,7 @@ mod tests {
                 &world.paths,
                 lead,
                 POLL,
+                None,
             );
             assert!(
                 format!("{:#}", served.unwrap_err()).contains("must match"),
@@ -3453,6 +3625,71 @@ mod tests {
         world.retire("lead-h");
         let (served, _) = serving.join().unwrap();
         assert_eq!(served.unwrap(), Served::Retired);
+    }
+
+    #[test]
+    fn a_new_install_waits_for_the_feed_in_flight_and_a_tell_is_answered_meanwhile() {
+        let (world, herdr, entered, release) = slow_feed();
+        let installed = world.paths.state_dir().join("bin/loopherd");
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::write(&installed, "").unwrap();
+        let tried = Mutex::new(vec![]);
+        let reinstalled = AtomicBool::new(false);
+        let installed_now = || {
+            reinstalled
+                .load(Ordering::SeqCst)
+                .then(|| installed.clone())
+        };
+        let reexec = |exe: &Path, _: &str, _: &Lock| {
+            tried.lock().unwrap().push(exe.to_path_buf());
+            anyhow!("refused in this test")
+        };
+        let mut host = host(&herdr);
+        host.follow = Some(Follow {
+            installed: &installed_now,
+            reexec: &reexec,
+            every: Duration::from_millis(20),
+        });
+        let ledger = world.ledger();
+        std::thread::scope(|scope| {
+            let serving = scope.spawn(|| serve(&host, &ledger, &world.paths, "lead-h", POLL, None));
+            // A failed assertion would otherwise leave the scope waiting on a broker that serves on.
+            struct RetireOnDrop<'a>(&'a World);
+            impl Drop for RetireOnDrop<'_> {
+                fn drop(&mut self) {
+                    self.0.retire("lead-h");
+                }
+            }
+            let _retire = RetireOnDrop(&world);
+            while !running(&world.paths, "lead-h") {
+                std::thread::sleep(POLL);
+            }
+            let fed = feeding(&world, &entered);
+            reinstalled.store(true, Ordering::SeqCst);
+            let client = Client {
+                answer_within: Some(Duration::from_secs(5)),
+                ..world.client()
+            };
+
+            std::thread::sleep(Duration::from_millis(200));
+            let told = client.call(&tell("lh-1", "hi"));
+
+            assert_eq!(told.unwrap().2, 0);
+            assert!(tried.lock().unwrap().is_empty());
+            drop(release);
+            assert_eq!(fed.join().unwrap().unwrap().2, 0);
+            let given_up = Instant::now() + Duration::from_secs(5);
+            while tried.lock().unwrap().is_empty() {
+                assert!(
+                    Instant::now() < given_up,
+                    "the broker never tried the install"
+                );
+                std::thread::sleep(POLL);
+            }
+            world.retire("lead-h");
+            assert_eq!(serving.join().unwrap().unwrap(), Served::Retired);
+        });
+        assert_eq!(*tried.lock().unwrap(), vec![installed]);
     }
 
     #[test]
@@ -4515,6 +4752,73 @@ mod tests {
         assert!(!stop_file(&world.paths, "lead-h").exists());
         world.retire("lead-h");
         assert_eq!(new.unwrap().join().unwrap().0.unwrap(), Served::Retired);
+    }
+
+    #[test]
+    fn an_idle_broker_looks_for_a_new_install_and_re_execs_it_holding_its_lock() {
+        let world = World::new();
+        let installed = world.paths.state_dir().join("bin/loopherd");
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::write(&installed, "").unwrap();
+        let tried = Mutex::new(vec![]);
+        let herdr = FakeHerdr::new(&[]);
+        let mut host = host(&herdr);
+        let installed_now = || Some(installed.clone());
+        let reexec = |exe: &Path, lead: &str, lock: &Lock| {
+            let lock_held = FileId::of(&lock_file(&world.paths, lead))
+                == lock.metadata().ok().map(|m| FileId {
+                    dev: m.dev(),
+                    ino: m.ino(),
+                });
+            tried
+                .lock()
+                .unwrap()
+                .push((exe.to_path_buf(), lead.to_string(), lock_held));
+            world.retire("lead-h");
+            anyhow!("refused in this test")
+        };
+        host.follow = Some(Follow {
+            installed: &installed_now,
+            reexec: &reexec,
+            every: Duration::from_millis(50),
+        });
+
+        let served = serve(&host, &world.ledger(), &world.paths, "lead-h", POLL, None);
+
+        assert_eq!(served.unwrap(), Served::Retired);
+        assert_eq!(
+            *tried.lock().unwrap(),
+            vec![(installed.clone(), "lead-h".to_string(), true)]
+        );
+    }
+
+    #[test]
+    fn a_broker_handed_its_leads_held_lock_serves_under_it() {
+        let world = World::new();
+        let path = lock_file(&world.paths, "lead-h");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let handed = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        // The exec'ing image's copy: the lock stays held until serve adopts it.
+        let _held = Lock::try_take(handed.try_clone().unwrap())
+            .unwrap()
+            .unwrap();
+        world.retire("lead-h");
+
+        let served = serve(
+            &host(&FakeHerdr::new(&[])),
+            &world.ledger(),
+            &world.paths,
+            "lead-h",
+            POLL,
+            Some(handed),
+        );
+
+        assert_eq!(served.unwrap(), Served::Retired);
     }
 
     #[test]
