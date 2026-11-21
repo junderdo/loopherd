@@ -534,7 +534,10 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   `claimable unknown (<error>)` (or `unready unknown`) and `status` still
   succeeds. `--json` gives each herd `claimable` and `unready`, integers or
   null without a `backlog`, with `claimable_error` or `unready_error` beside
-  a failed one (D60, D61).
+  a failed one (D60, D61). A member of an `attended = true` template, one
+  the human sits in, reads `(attended)` and `--json` gives it `attended`:
+  it holds no slot, and a watch wakes on its `gone` alone, a lead's watch
+  also on its `merged` (D112).
 - `loopherd reports` prints unread reports, questions first, and marks them
   read; `loopherd reports --all` prints every report and stop and marks
   none read. Both take member names or `--herd <herd>`. `--all` also takes
@@ -647,14 +650,17 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   a lead has no Unix sockets unless its herd's
   `[lead] unix_sockets = "all"` (`loopherd herds` shows it), which reopens
   herdr, the ssh agent and WSL2 interop to it; `lead`, `revive` and doctor
-  warn of it, and only the human sets it. Where Claude Code's seccomp
+  warn of it, and only the human sets it. A `merge_guard = "credentials"`
+  lead can't have it: `lead` and `revive` refuse the pair and `loopherd
+  herds` calls the herd file invalid. Where Claude Code's seccomp
   filter can't block them (doctor says so, naming `npm install -g
   @anthropic-ai/sandbox-runtime`), `require` refuses the lead and
   `prefer` starts it as `(lead, sockets open)`; `restart` applies the
   same rule. A `merge_guard = "credentials"` lead is refused under both.
   Under `unix_sockets = "all"` the socket check is skipped: the lead isn't
   refused or flagged for open sockets. What still gets past the sandbox:
-  workers run unsandboxed, so a lead can have one act for it, and most of
+  workers run unsandboxed, so a lead can have one act for it (a
+  `credentials` lead starts warned of it), and most of
   the state dir stays writable to it. Set `prefer` only
   when the human says so; doctor names those herds and leads.
 - **Change a herd file's values** with `loopherd herd set <herd> <key>
@@ -707,7 +713,10 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   a lead's or an `after_merge`, as a background task: it can wait out a feed. It asks the broker to stop once its request in flight is
   answered, then starts one on the installed binary, which serves what is
   still queued; with none running it starts one. A broker still busy after
-  4 hours is left running and the command fails naming its pid. A lead's
+  4 hours is left running and the command fails naming its pid. While it
+  drains, every lane stops taking requests, so the lead's `tell`, `read`
+  and `status` wait on the feed in flight, and one that waits past its
+  own bound (2 minutes for `tell`) is withdrawn and must be asked again. A lead's
   `<lead>'s broker predates this loopherd` error, its `can't read` reply
   error, and `loopherd doctor`'s warning that a broker doesn't run the
   loopherd on PATH (which `scripts/install` shows) all ask for the same

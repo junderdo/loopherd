@@ -78,6 +78,9 @@ pub struct AgentRecord {
     /// `None` is a worker.
     #[serde(default)]
     pub role: Option<Role>,
+    /// Set on a member of an attended template, whose pane the human sits in (D112).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attended: Option<Attended>,
     /// Why this lead runs without its sandbox, guarded by its tool hook
     /// alone; `None` when sandboxed, and for a worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -139,6 +142,14 @@ pub enum AfterMerge {
     /// Written by another loopherd version; saved back unchanged (D99).
     #[serde(untagged)]
     Unknown(serde_json::Value),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attended {
+    /// The pane `add` ran from, focused again when the member is reaped;
+    /// `None` when `add` ran outside herdr.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_pane: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -614,6 +625,7 @@ mod tests {
             socket: None,
             process: None,
             role: None,
+            attended: None,
             after_merge: None,
             unsandboxed: None,
             sockets_unblocked: None,
@@ -1071,7 +1083,7 @@ mod tests {
         ledger.started("lh-1", at, false).unwrap();
         ledger.started("lh-1", at, true).unwrap();
         assert_eq!(
-            fs::read_to_string(dir.path().join("loopherd/reports/lh-1.jsonl")).unwrap(),
+            fs::read_to_string(dir.path().join("loopherd/reports/lh-1/mailbox.jsonl")).unwrap(),
             "{\"at\":\"2026-11-02T09:00:00.000000000Z\",\"kind\":\"start\"}\n\
              {\"at\":\"2026-11-02T09:00:00.000000000Z\",\"kind\":\"start\",\"resumed\":true}\n"
         );

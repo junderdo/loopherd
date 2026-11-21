@@ -108,7 +108,8 @@ pub struct Measured {
 /// Measures the context of the stop `input` describes, and gives the reason
 /// to block it when `member`'s context is over `limit`: once per session,
 /// never on a stop a Stop hook already continued. Before asking, moves any
-/// handoff from last time to its `prev.md`. A failed `limit` falls back
+/// handoff from last time to its `prev.md`. An attended member is only
+/// measured. A failed `limit` falls back
 /// to the built-in one and is passed to `note` once per session.
 pub fn handoff_block(
     member: &AgentRecord,
@@ -126,7 +127,10 @@ pub fn handoff_block(
     let tokens = live.as_deref().and_then(tokens_in);
     let measured = |limit| tokens.map(|tokens| Measured { tokens, limit });
     let session = input["session_id"].as_str().filter(|s| is_plain_name(s));
-    let askable = input["hook_event_name"] == "Stop" && input["stop_hook_active"] != true;
+    // The human sits in an attended member's pane, so its context is theirs to manage.
+    let askable = input["hook_event_name"] == "Stop"
+        && input["stop_hook_active"] != true
+        && member.attended.is_none();
     let Some(session) = session.filter(|_| askable) else {
         return Check {
             reason: Ok(None),
@@ -601,6 +605,7 @@ mod tests {
             socket: None,
             process: None,
             role,
+            attended: None,
             after_merge: None,
             unsandboxed: None,
             sockets_unblocked: None,
@@ -767,6 +772,26 @@ mod tests {
         let who = member("lh-1", None);
         assert_eq!(w.block(&who, &w.stop("s1", &t, ""), 100), None);
         assert!(w.block(&who, &w.stop("s1", &t, ""), 99).is_some());
+    }
+
+    #[test]
+    fn an_attended_member_is_measured_but_never_blocked() {
+        let w = World::new();
+        let t = w.transcript(&[assistant(0, 0, 150, false)]);
+        let mut who = member("grill-1", None);
+        who.attended = Some(Default::default());
+
+        let check = handoff_block(
+            &who,
+            &w.stop("s1", &t, ""),
+            Ok(100),
+            &w.state(),
+            &|_| Ok(()),
+        );
+
+        assert_eq!(check.reason.unwrap(), None);
+        assert_eq!(check.measured.map(|m| m.tokens), Some(150));
+        assert!(!w.state().join("handoff-asked/s1").exists());
     }
 
     const SUBAGENT: &str = r#","background_tasks":[{"type":"subagent","status":"running"}]"#;

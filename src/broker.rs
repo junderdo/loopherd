@@ -53,6 +53,9 @@ pub enum Op {
         claude_args: Vec<String>,
         dry_run: bool,
         ready_timeout_secs: u64,
+        /// Leaves focus where it is after starting an attended member.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_focus: bool,
     },
     Prompt {
         name: String,
@@ -233,6 +236,7 @@ impl Op {
                 claude_args,
                 dry_run,
                 ready_timeout_secs,
+                no_focus,
             } => {
                 let req = AddRequest {
                     herd: herd.clone(),
@@ -240,6 +244,8 @@ impl Op {
                     params: params.clone(),
                     claude_args: claude_args.clone(),
                     ready_timeout: Duration::from_secs(*ready_timeout_secs),
+                    return_pane: ctx.caller.pane.clone(),
+                    focus: !no_focus,
                 };
                 add(ctx, &req, *dry_run, sink)
             }
@@ -406,15 +412,14 @@ const AFTER_MERGE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// How long a lead waits on a feed through its broker.
 const FEED_WITHIN: Duration = Duration::from_secs(4 * 60 * 60);
 
-fn feed(
-    ctx: &mut Ctx,
+fn feed_request<'a>(
+    ctx: &Ctx<'a>,
     herd: &str,
     dry_run: bool,
     ready_timeout_secs: u64,
-    sink: &mut dyn Sink,
-) -> Result<i32> {
+) -> Result<FeedRequest<'a>> {
     let caller = &ctx.caller;
-    let req = FeedRequest {
+    Ok(FeedRequest {
         herd: herd.into(),
         dry_run,
         ready_timeout: Duration::from_secs(ready_timeout_secs),
@@ -430,7 +435,17 @@ fn feed(
         owner: caller.process,
         procs: ctx.procs,
         lead: caller.lead.clone(),
-    };
+    })
+}
+
+fn feed(
+    ctx: &mut Ctx,
+    herd: &str,
+    dry_run: bool,
+    ready_timeout_secs: u64,
+    sink: &mut dyn Sink,
+) -> Result<i32> {
+    let req = feed_request(ctx, herd, dry_run, ready_timeout_secs)?;
     let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // A dry run changes nothing, so it must not block a real one.
         let lock = (!dry_run).then(|| ctx.paths.lock_feed()).transpose()?;
@@ -761,9 +776,10 @@ pub struct Host<'a> {
 ///
 /// Requests run in three lanes, each one at a time: herd changes (feed,
 /// add, restart, retire, release), status, and everything else, so a long
-/// feed holds up no tell. A lane holds at most [`LANE_WAITING`] requests
-/// waiting and refuses more as busy. While its lead reads retired it refuses
-/// every request it hasn't started, and returns once none is in flight.
+/// feed holds up no tell, except while a restart drains the broker. A lane
+/// holds at most [`LANE_WAITING`] requests waiting and refuses more as busy.
+/// While its lead reads retired it refuses every request it hasn't started,
+/// and returns once none is in flight.
 pub fn serve<L: Ledger + Clone + Send>(
     host: &Host,
     ledger: &L,
@@ -1600,20 +1616,31 @@ fn spawn(paths: &Paths, lead: &str, exe: &Path) -> Result<u32> {
             _ => Ok(()),
         });
     }
-    let mut child = command
+    let child = command
         .spawn()
         .with_context(|| format!("start {} broker {lead}", exe.display()))?;
+    serving_once_started(paths, lead, child)
+}
+
+/// Waits until `child`, started as `lead`'s broker, serves, returning its pid.
+fn serving_once_started(paths: &Paths, lead: &str, mut child: std::process::Child) -> Result<u32> {
     let given_up = Instant::now() + START_TIMEOUT;
     loop {
-        if running(paths, lead) && serving_pid(paths, lead) == Some(child.id()) {
-            return Ok(child.id());
-        }
-        if let Some(status) = child.try_wait()? {
-            bail!("it exited at once ({status}); run loopherd broker {lead} to see why");
+        let serving = serving_pid(paths, lead).filter(|_| running(paths, lead));
+        let exited = child.try_wait()?;
+        match (serving, exited) {
+            (Some(pid), _) if pid == child.id() => return Ok(pid),
+            // Another broker serves, as when this one lost the lock to it.
+            (Some(pid), Some(_)) => return Ok(pid),
+            (None, Some(status)) if !running(paths, lead) => bail!(
+                "it exited at once ({status}); run loopherd broker {lead} to see why, \
+                 then loopherd broker-restart {lead} to start it"
+            ),
+            _ => {}
         }
         if Instant::now() >= given_up {
             bail!(
-                "it didn't take {} within {}",
+                "it didn't take {} within {}; run loopherd broker-restart {lead} to try again",
                 lock_file(paths, lead).display(),
                 humantime::format_duration(START_TIMEOUT)
             );
@@ -1642,20 +1669,25 @@ fn restart_broker_with(
 ) -> Result<()> {
     validate_name(lead)?;
     // Held until it returns: what makes its stop live, to brokers and to leads in any pid namespace.
-    let Some(_restarting) = take_lock_at(&restart_file(paths, lead))? else {
-        bail!("another loopherd broker-restart {lead} is running");
+    let restart = restart_file(paths, lead);
+    let Some(_restarting) = take_lock_at(&restart)? else {
+        bail!(
+            "another loopherd broker-restart {lead} is running, or a process (a sandboxed lead's \
+             loopherd, say) holds {} locked",
+            restart.display()
+        );
     };
     let stop = stop_file(paths, lead);
     // A killed restart's leftover, which a broker given its pid would obey.
     let _ = std::fs::remove_file(&stop);
-    if !running(paths, lead) {
-        let pid = start().with_context(|| format!("start {lead}'s broker"))?;
-        sink.out(&format!("started {lead}'s broker: pid {pid}"));
-        return Ok(());
-    }
-    // A broker that just took its lock writes its pid a moment later.
+    // A broker that just took its lock writes its pid a moment later, and one exiting has removed it.
     let given_up = Instant::now() + START_TIMEOUT;
     let old = loop {
+        if !running(paths, lead) {
+            let pid = start().with_context(|| format!("start {lead}'s broker"))?;
+            sink.out(&format!("started {lead}'s broker: pid {pid}"));
+            return Ok(());
+        }
         if let Some(pid) = serving_pid(paths, lead) {
             break pid;
         }
@@ -1672,16 +1704,18 @@ fn restart_broker_with(
     sink.out(&format!(
         "asked {lead}'s broker (pid {old}) to stop once its request in flight is answered"
     ));
+    // Not "while the lock is held": a revive's broker may take it as soon as the old one exits.
+    let old_serves = || running(paths, lead) && serving_pid(paths, lead) == Some(old);
     let given_up = Instant::now() + within;
-    while running(paths, lead) {
+    while old_serves() {
         if Instant::now() >= given_up {
             let _ = std::fs::remove_file(&stop);
             // A broker that stopped at the bound holds its lock until its lanes are joined.
             let grace = Instant::now() + STOP_GRACE;
-            while running(paths, lead) && Instant::now() < grace {
+            while old_serves() && Instant::now() < grace {
                 std::thread::sleep(Duration::from_millis(20));
             }
-            if running(paths, lead) {
+            if old_serves() {
                 bail!(
                     "{lead}'s broker (pid {old}) didn't stop within {}, so it is left running; \
                      run loopherd broker-restart {lead} again once its request is answered",
@@ -2446,6 +2480,35 @@ mod tests {
         serving.join().unwrap().0.unwrap();
     }
 
+    #[test]
+    fn a_broker_feed_waits_on_after_merge_as_long_as_its_lead_waits_on_the_feed() {
+        let world = World::new();
+        let herdr = FakeHerdr::new(&[]);
+        let mut ledger = world.ledger();
+        let ctx = Ctx {
+            herdr: &herdr,
+            ledger: &mut ledger,
+            paths: &world.paths,
+            procs: &crate::process::ProcFs,
+            claude_dir: None,
+            caller: Caller {
+                pane: None,
+                socket: None,
+                lineage: vec![],
+                workspace: None,
+                process: me(),
+                lead: None,
+            },
+            live: same_session,
+            spawn_waiter: no_waiter,
+            prs: &NO_PRS,
+        };
+
+        let req = feed_request(&ctx, "h", false, 60).unwrap();
+
+        assert_eq!(req.after_merge_wait, Duration::from_secs(4 * 60 * 60));
+    }
+
     /// Past the broker's reach check, as if it were ever loosened, the
     /// handlers' own guard still holds a lead to its herd.
     #[test]
@@ -2593,11 +2656,11 @@ mod tests {
         worker.session_id = Some("s1".into());
         world.add(worker);
         let mailboxes = world.paths.state_dir().join("reports");
-        std::fs::create_dir_all(&mailboxes).unwrap();
+        std::fs::create_dir_all(mailboxes.join("lh-1")).unwrap();
         std::fs::write(mailboxes.join("lh-1.notified"), "question t1\n").unwrap();
         std::fs::write(mailboxes.join("lh-1.blocked"), "").unwrap();
         let stop = r#"{"at": "2026-11-01T09:30:00Z", "kind": "stop", "session": "s1", "crons": 0, "background": {"shells": 0, "subagents": 0, "other": 0}}"#;
-        std::fs::write(mailboxes.join("lh-1.jsonl"), format!("{stop}\n")).unwrap();
+        std::fs::write(mailboxes.join("lh-1/mailbox.jsonl"), format!("{stop}\n")).unwrap();
         let claude_dir = world.dir.path().join("claude");
         let project = claude_dir.join("projects/-r");
         std::fs::create_dir_all(&project).unwrap();
@@ -2638,7 +2701,7 @@ mod tests {
         );
         assert!(!mailboxes.join("lh-1.notified").exists());
         assert!(!mailboxes.join("lh-1.blocked").exists());
-        let text = std::fs::read_to_string(mailboxes.join("lh-1.jsonl")).unwrap();
+        let text = std::fs::read_to_string(mailboxes.join("lh-1/mailbox.jsonl")).unwrap();
         let usage: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
         assert_eq!(usage["kind"], "usage", "{text}");
         assert_eq!(usage["models"]["opus"]["output"], 4);
@@ -2870,7 +2933,7 @@ mod tests {
         let (code, _) = run_here(&own, &world, client.as_ref(), &report).unwrap();
 
         assert_eq!(code, 0);
-        let mailbox = world.paths.state_dir().join("reports/lead-h.jsonl");
+        let mailbox = world.paths.state_dir().join("reports/lead-h/mailbox.jsonl");
         let mailbox = std::fs::read_to_string(mailbox).unwrap();
         assert!(
             mailbox.contains(r#""kind":"handoff","text":"at step 3""#),
@@ -3619,6 +3682,7 @@ mod tests {
             claude_args: claude_args.iter().map(|a| a.to_string()).collect(),
             dry_run: true,
             ready_timeout_secs: 60,
+            no_focus: false,
         }
     }
 
@@ -3693,6 +3757,7 @@ mod tests {
             claude_args: vec![],
             dry_run,
             ready_timeout_secs: 60,
+            no_focus: false,
         }
     }
 
@@ -3748,6 +3813,7 @@ mod tests {
             claude_args: vec![],
             dry_run: true,
             ready_timeout_secs: 60,
+            no_focus: false,
         };
         let err = world.client().call(&same).unwrap_err();
         let lead_g = crate::worktree::worktree_path(&repo, "lead-g");
@@ -4025,6 +4091,7 @@ mod tests {
             claude_args: vec![],
             dry_run: false,
             ready_timeout_secs: 60,
+            no_focus: false,
         };
 
         let (_, _, fed) = client.call(&feed("h")).unwrap();
@@ -4374,6 +4441,139 @@ mod tests {
         assert_eq!(said.out, ["started lead-h's broker: pid 4242"]);
         world.retire("lead-h");
         assert_eq!(started.unwrap().join().unwrap().0.unwrap(), Served::Retired);
+    }
+
+    #[test]
+    fn a_broker_restart_with_no_broker_running_clears_a_stop_left_by_a_killed_restart() {
+        let world = World::new();
+        let stop = stop_file(&world.paths, "lead-h");
+        std::fs::create_dir_all(stop.parent().unwrap()).unwrap();
+        std::fs::write(&stop, "999999").unwrap();
+        let mut stop_at_start = None;
+
+        restart_broker_with(
+            &world.paths,
+            "lead-h",
+            Duration::from_secs(10),
+            &mut Kept::default(),
+            &mut || {
+                stop_at_start = Some(stop.exists());
+                Ok(4242)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(stop_at_start, Some(false));
+        assert!(!stop.exists());
+    }
+
+    #[test]
+    fn a_broker_restart_that_finds_a_broker_it_cant_stop_clears_a_stop_left_by_a_killed_restart() {
+        let world = World::new();
+        // A broker older than pid files: it holds its lock and records no pid.
+        let _old = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+        let stop = stop_file(&world.paths, "lead-h");
+        std::fs::write(&stop, "999999").unwrap();
+
+        let err = restart_broker_with(
+            &world.paths,
+            "lead-h",
+            Duration::from_secs(10),
+            &mut Kept::default(),
+            &mut || panic!("no new broker starts while the old one runs"),
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("predates"), "{err:#}");
+        assert!(!stop.exists());
+    }
+
+    #[test]
+    fn a_broker_that_exits_before_the_restart_reads_its_pid_is_replaced() {
+        let world = World::new();
+        // Exiting: its pid file is gone, and its lanes still join.
+        let lock = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+        let exiting = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(lock);
+        });
+        let mut said = Kept::default();
+
+        restart_broker_with(
+            &world.paths,
+            "lead-h",
+            Duration::from_secs(10),
+            &mut said,
+            &mut || Ok(4242),
+        )
+        .unwrap();
+
+        exiting.join().unwrap();
+        assert_eq!(said.out, ["started lead-h's broker: pid 4242"]);
+    }
+
+    #[test]
+    fn a_broker_restart_waits_for_the_old_broker_to_exit_not_for_the_lock_to_be_free() {
+        let world = World::new();
+        let old = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+        let pid_file = pid_file(&world.paths, "lead-h");
+        std::fs::write(&pid_file, std::process::id().to_string()).unwrap();
+        let (lock_file, stop_file) = (
+            lock_file(&world.paths, "lead-h"),
+            stop_file(&world.paths, "lead-h"),
+        );
+        // Once asked to stop, the old broker exits and a revive's broker, pid 1, takes the lock.
+        let revived = std::thread::spawn(move || {
+            while !stop_file.exists() {
+                std::thread::sleep(POLL);
+            }
+            std::fs::remove_file(&pid_file).unwrap();
+            drop(old);
+            let revived = take_lock_at(&lock_file).unwrap().unwrap();
+            std::fs::write(&pid_file, "1").unwrap();
+            revived
+        });
+        let mut said = Kept::default();
+
+        let began = Instant::now();
+        // A bound far past the gap, so a restart that waits on the lock runs into it.
+        let restarted = restart_broker_with(
+            &world.paths,
+            "lead-h",
+            Duration::from_secs(60),
+            &mut said,
+            &mut || Ok(1),
+        );
+
+        let _revived = revived.join().unwrap();
+        restarted.unwrap();
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            began.elapsed()
+        );
+        let pid = std::process::id();
+        assert_eq!(
+            said.out.last().unwrap(),
+            &format!("restarted lead-h's broker: pid {pid} stopped, pid 1 serves")
+        );
+    }
+
+    #[test]
+    fn a_broker_start_that_loses_the_lock_to_another_broker_gives_that_one_s_pid() {
+        let world = World::new();
+        let _other = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+        std::fs::write(
+            pid_file(&world.paths, "lead-h"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        // A broker that found the lock taken exits at once, successfully.
+        let lost = std::process::Command::new("true").spawn().unwrap();
+
+        let serving = serving_once_started(&world.paths, "lead-h", lost);
+
+        assert_eq!(serving.unwrap(), std::process::id());
     }
 
     #[test]

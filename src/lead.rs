@@ -170,6 +170,7 @@ fn resolve(ledger: &dyn Ledger, paths: &Paths, req: &LeadRequest) -> Result<Spaw
                 ("review_rounds".into(), config.review_rounds.to_string()),
             ],
             role: Some(Role::Lead),
+            attended: None,
         }),
     })
 }
@@ -759,6 +760,7 @@ mod tests {
         let others = [
             "reports/lead-h.jsonl",
             "reports/lh-1.jsonl",
+            "reports/lh-1/mailbox.jsonl",
             "reports/watch.lock",
             "reports/.cursor",
             "handoffs/shepherd/handoff.md",
@@ -1674,6 +1676,64 @@ mod tests {
     }
 
     #[test]
+    fn a_credentials_lead_with_every_unix_socket_open_isnt_started_under_either_mode() {
+        for mode in ["require", "prefer"] {
+            let setup = Setup::with_lead(&format!(
+                "{CREDENTIALS}\nsandbox = \"{mode}\"\nunix_sockets = \"all\""
+            ));
+            origin_on_github(&setup, "https://github.com/acme/widgets.git");
+            store_credentials(&setup, true, Some("github_pat_1"));
+            let herdr = herdr();
+
+            let err = lead(
+                &herdr,
+                &mut MemLedger::default(),
+                &setup.paths(),
+                &request(&[]),
+                Some("w1"),
+            )
+            .unwrap_err();
+
+            assert_eq!(
+                format!("{err:#}"),
+                "sandbox: lead-h can't start with merge_guard = \"credentials\": \
+                 unix_sockets = \"all\" opens your ssh agent, Git Credential Manager through \
+                 WSL2 interop and the Secret Service keyring to it, each of which acts as you; \
+                 run loopherd herd unset h lead.unix_sockets, or loopherd herd set h \
+                 lead.merge_guard '\"hook\"'",
+                "{mode}"
+            );
+            assert!(herdr.tabs().is_empty(), "{mode}");
+        }
+    }
+
+    #[test]
+    fn a_credentials_lead_starts_warned_that_its_workers_hold_your_gh() {
+        let setup = Setup::with_lead(CREDENTIALS);
+        origin_on_github(&setup, "https://github.com/acme/widgets.git");
+        store_credentials(&setup, true, Some("github_pat_1"));
+        let herdr = herdr();
+
+        let (_, _, warnings) = lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            warnings,
+            [
+                "lead-h's workers run unsandboxed with your gh credentials, so it could have \
+              one merge or force-push as you; only the lead holds herd h's deploy key and \
+              token"
+            ]
+        );
+    }
+
+    #[test]
     fn require_refuses_a_lead_whose_sandbox_cant_start_and_says_why() {
         let setup = Setup::with_lead("prompt = \"go\"");
         let herdr = herdr();
@@ -1791,12 +1851,21 @@ mod tests {
     }
 
     #[test]
-    fn a_user_allow_read_over_the_locks_counts_and_one_elsewhere_doesnt() {
+    fn a_user_allow_read_that_may_reach_the_locks_counts_and_an_ancestor_relative_or_elsewhere_doesnt()
+     {
         let setup = Setup::with_lead("prompt = \"go\"");
         let state = setup.root.join("state");
+        let locks = state.join("locks/after-merge.lock");
+        let climbs = state.join("x/../locks");
+        // Relative to ~/.claude, which is <root>/home/.claude here.
+        let climbs_from_claude = "../../state/locks";
         let paths = home_with_settings(
             &setup,
-            &format!(r#"{{"sandbox": {{"filesystem": {{"allowRead": ["/srv", {state:?}]}}}}}}"#),
+            &format!(
+                r#"{{"sandbox": {{"filesystem": {{"allowRead":
+                    ["/srv", {state:?}, "notes", {locks:?}, {climbs:?},
+                    {climbs_from_claude:?}]}}}}}}"#
+            ),
         );
 
         let started = lead(
@@ -1808,8 +1877,21 @@ mod tests {
         );
 
         let refused = format!("{:#}", started.unwrap_err());
-        let opens = format!("allowRead opens {} to reads", state.display());
-        assert!(refused.contains(&opens), "{refused}");
+        let opens = |path: &str| format!("allowRead opens {path} to reads");
+        assert!(
+            refused.contains(&opens(&locks.display().to_string())),
+            "{refused}"
+        );
+        assert!(
+            refused.contains(&opens(&climbs.display().to_string())),
+            "{refused}"
+        );
+        assert!(refused.contains(&opens(climbs_from_claude)), "{refused}");
+        assert!(
+            !refused.contains(&opens(&state.display().to_string())),
+            "{refused}"
+        );
+        assert!(!refused.contains(&opens("notes")), "{refused}");
         assert!(!refused.contains("/srv"), "{refused}");
     }
 

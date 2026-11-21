@@ -73,22 +73,11 @@ fn try_flock(file: &File) -> io::Result<bool> {
     }
 }
 
-/// `" by pid <n>"` for each process `/proc/locks` lists holding `file`'s
-/// flock, or `"; holder unknown"`.
-fn held_by(file: &File) -> String {
-    let pids = holders(file);
-    if pids.is_empty() {
-        return "; holder unknown".to_string();
-    }
-    let pids: Vec<String> = pids.iter().map(u32::to_string).collect();
-    format!(" by pid {}", pids.join(", "))
-}
-
 #[cfg(target_os = "linux")]
-fn holders(file: &File) -> Vec<u32> {
+fn held_by(file: &File) -> String {
     use std::os::unix::fs::MetadataExt;
     let Ok(meta) = file.metadata() else {
-        return vec![];
+        return "; holder unknown".to_string();
     };
     let dev = meta.dev();
     let id = format!(
@@ -97,9 +86,18 @@ fn holders(file: &File) -> Vec<u32> {
         libc::minor(dev),
         meta.ino()
     );
-    let Ok(locks) = std::fs::read_to_string("/proc/locks") else {
-        return vec![];
-    };
+    let listed = std::fs::read_to_string("/proc/locks").map(|locks| holders(&locks, &id));
+    named(listed, meta.ino())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn held_by(_: &File) -> String {
+    "; holder unknown".to_string()
+}
+
+/// The pids `/proc/locks` text lists holding a flock on `id`, `<major>:<minor>:<inode>`.
+#[cfg(target_os = "linux")]
+fn holders(locks: &str, id: &str) -> Vec<u32> {
     // A blocked waiter's line carries "->"; it doesn't hold the lock.
     locks
         .lines()
@@ -114,9 +112,20 @@ fn holders(file: &File) -> Vec<u32> {
         .collect()
 }
 
-#[cfg(not(target_os = "linux"))]
-fn holders(_: &File) -> Vec<u32> {
-    vec![]
+/// A holder can drop the lock, or hold it from another pid namespace, between
+/// the failed try and the read of `/proc/locks`.
+#[cfg(target_os = "linux")]
+fn named(listed: io::Result<Vec<u32>>, inode: u64) -> String {
+    match listed {
+        Ok(pids) if pids.is_empty() => {
+            format!("; holder not found in /proc/locks for inode {inode}")
+        }
+        Ok(pids) => {
+            let pids: Vec<String> = pids.iter().map(u32::to_string).collect();
+            format!(" by pid {}", pids.join(", "))
+        }
+        Err(e) => format!("; holder unknown, can't read /proc/locks: {e}"),
+    }
 }
 
 fn flock(file: &File, op: libc::c_int) -> io::Result<()> {
@@ -202,6 +211,27 @@ mod tests {
             assert!(e.to_string().contains(&holder), "{e}");
         }
         assert!(e.to_string().starts_with("held past 100ms"), "{e}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_holder_missing_from_proc_locks_is_said_with_the_inode() {
+        let locks = "1: FLOCK  ADVISORY  WRITE 4242 08:20:77 0 EOF\n";
+
+        let named = named(Ok(holders(locks, "08:20:99")), 99);
+
+        assert_eq!(named, "; holder not found in /proc/locks for inode 99");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_holder_listed_in_proc_locks_is_named_and_a_waiter_isnt() {
+        let locks = "1: FLOCK  ADVISORY  WRITE 4242 08:20:77 0 EOF\n\
+                     1: -> FLOCK  ADVISORY  WRITE 5151 08:20:77 0 EOF\n";
+
+        let named = named(Ok(holders(locks, "08:20:77")), 77);
+
+        assert_eq!(named, " by pid 4242");
     }
 
     #[test]

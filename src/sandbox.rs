@@ -896,6 +896,13 @@ fn start(
     if sockets_open(paths, &lead.herd)? {
         warnings.push(sockets_open_warning(name, &lead.herd));
     }
+    if by_credentials {
+        warnings.push(format!(
+            "{name}'s workers run unsandboxed with your gh credentials, so it could have one \
+             merge or force-push as you; only the lead holds herd {}'s deploy key and token",
+            lead.herd
+        ));
+    }
     if let Some((why, fix)) = &sockets_unblocked {
         warnings.push(format!("{}; {fix}", sockets_unblocked_warning(name, why)));
     }
@@ -1274,7 +1281,8 @@ fn sandbox_loosenings(
         }
     }
     // allowRead carves into denyRead. Credentials to hide make any of it suspect;
-    // otherwise only a carve into what is denied counts.
+    // otherwise only a carve at or beneath a denied path counts: over an ancestor
+    // Claude keeps the narrower deny. A relative entry resolves against ~/.claude.
     let credentials = !own["sandbox"]["filesystem"]["allowRead"].is_null();
     let own_reads = entries(&own["sandbox"]["filesystem"]["allowRead"]);
     let denied: Vec<PathBuf> = entries(&own["sandbox"]["filesystem"]["denyRead"])
@@ -1282,11 +1290,17 @@ fn sandbox_loosenings(
         .filter_map(|path| absolute(path, home))
         .collect();
     for path in entries(&user["sandbox"]["filesystem"]["allowRead"]) {
-        let opens = absolute(&path, home).is_none_or(|path| {
-            denied
-                .iter()
-                .any(|deny| deny.starts_with(&path) || path.starts_with(deny))
-        });
+        let relative = !path.starts_with('/') && !path.starts_with('~');
+        let resolved = if relative {
+            absolute(&home.join(".claude").join(&path).to_string_lossy(), home)
+        } else {
+            absolute(&path, home)
+        };
+        let opens = match resolved {
+            Some(path) => denied.iter().any(|deny| path.starts_with(deny)),
+            // A `..` or a `~user` could land anywhere.
+            None => true,
+        };
         if !own_reads.contains(&path) && (credentials || opens) {
             found.push(format!(
                 "{shown}: sandbox.filesystem.allowRead opens {path} to reads"
@@ -1726,6 +1740,12 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
                      the lead can edit; set [lead] install = false, or merge_guard = \"hook\", \
                      in herd {herd}"
                 ),
+            ));
+        }
+        if sockets_open(paths, herd)? {
+            return Err(credentials_refusal(
+                name,
+                &herd::credentials_with_sockets(herd),
             ));
         }
         let mounts = match std::fs::read("/proc/mounts") {

@@ -200,6 +200,7 @@ mod tests {
             socket: None,
             process: None,
             role,
+            attended: None,
             after_merge: None,
             unsandboxed: None,
             sockets_unblocked: None,

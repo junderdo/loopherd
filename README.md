@@ -204,7 +204,9 @@ as its main checkout. Then, in order:
    is a guard rail, not a cage ([D89](docs/decisions/D89.md)). Where
    Claude Code's seccomp filter is present it gets no Unix sockets, so
    herdr, your ssh agent and WSL2's Windows interop are closed to it, unless its `[lead]` sets `unix_sockets = "all"`, which
-   reopens all three ([D105](docs/decisions/D105.md)). Where Claude Code
+   reopens all three ([D105](docs/decisions/D105.md)); a lead with
+   `merge_guard = "credentials"` is refused it
+   ([D114](docs/decisions/D114.md)). Where Claude Code
    has no seccomp filter to block them, `loopherd doctor` and
    `loopherd setup` name `npm install -g @anthropic-ai/sandbox-runtime`,
    and the lead isn't started or restarted unless its `[lead]` sets
@@ -285,6 +287,15 @@ plain word (`[A-Za-z0-9][A-Za-z0-9._-]*`, no `..`). A `[queue]`, a `[lead]`
 table and the rest are what `init` writes; start from its output or from
 [docs/examples/](docs/examples/).
 
+A template with `attended = true` starts a member the human sits in, such
+as a grill tied to a card (D112). Only `add` starts one: it focuses the new
+pane (`--no-focus` skips that), records the caller's pane and fills a
+`{shepherd_pane}` placeholder with it, and `retire --close` focuses that pane
+again if the human is still in the member's (`herdr agent focus` takes only
+an agent's pane, so run `add` from one). It holds no `max` slot, is never
+asked to hand off, and is left out of `stats`. A watch wakes on its `gone`
+alone, and a lead's watch also on its `merged`.
+
 ## Tour
 
 `loopherd --help` and `loopherd <command> --help` give every flag.
@@ -308,7 +319,7 @@ table and the rest are what `init` writes; start from its output or from
 |---|---|
 | `lead <herd>` | Start the herd's lead, `lead-<herd>`, in a detached worktree. |
 | `feed <herd>` | Retire members whose `done` check passes, then fill free slots from the queue's source (`--dry-run`). |
-| `add <herd> <template> <params…>` | Spawn one member from a template (`--dry-run`). |
+| `add <herd> <template> <params…>` | Spawn one member from a template (`--dry-run`; `--no-focus` for an attended one). |
 | `spawn --name <name>` | Spawn a member without a herd file (`--repo`, `--worktree`, `--prompt`). |
 | `pause <herd>` / `resume <herd>` | Stop `feed` spawning for a herd (`--reason`, `--all`), and lift it. |
 | `report "<text>"` | From a member's pane, leave a report for whoever watches it (`--kind done\|question\|note`). |

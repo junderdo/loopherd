@@ -304,6 +304,7 @@ mod tests {
             socket: socket.map(PathBuf::from),
             process: None,
             role: None,
+            attended: None,
             after_merge: None,
             unsandboxed: None,
             sockets_unblocked: None,
@@ -379,7 +380,7 @@ mod tests {
     }
 
     fn mailbox(dir: &Path, name: &str) -> String {
-        std::fs::read_to_string(dir.join(format!("{name}.jsonl"))).unwrap_or_default()
+        std::fs::read_to_string(dir.join(format!("{name}/mailbox.jsonl"))).unwrap_or_default()
     }
 
     #[test]

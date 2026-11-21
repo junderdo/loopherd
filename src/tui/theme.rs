@@ -347,6 +347,7 @@ mod tests {
             pane: "w1:p1".into(),
             tab: None,
             lead: false,
+            attended: false,
             unsandboxed: None,
             sockets_unblocked: None,
             template: None,

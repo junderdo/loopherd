@@ -154,6 +154,8 @@ pub trait Herdr {
     fn prompt(&self, name: &str, text: &str) -> Result<()>;
     /// Brings the agent in `pane_id` to the front of the human's herdr client.
     fn focus(&self, pane_id: &str) -> Result<()>;
+    /// The pane the human's herdr client has focused, if any.
+    fn focused_pane(&self) -> Result<Option<String>>;
     /// Brings the loopherd plugin pane `pane_id` to the front, switching tab
     /// and workspace. Refused for a pane that isn't a plugin's.
     fn focus_plugin_pane(&self, pane_id: &str) -> Result<()>;
@@ -676,6 +678,18 @@ impl Herdr for CliHerdr {
 
     fn focus(&self, pane_id: &str) -> Result<()> {
         self.call_ok(&["agent", "focus", pane_id]).map(drop)
+    }
+
+    fn focused_pane(&self) -> Result<Option<String>> {
+        #[derive(Deserialize)]
+        struct FocusJson {
+            pane_id: String,
+            #[serde(default)]
+            focused: bool,
+        }
+        let result = self.call_ok(&["pane", "list"])?;
+        let list: Vec<FocusJson> = parse(&result["panes"], "pane list")?;
+        Ok(list.into_iter().find(|p| p.focused).map(|p| p.pane_id))
     }
 
     fn focus_plugin_pane(&self, pane_id: &str) -> Result<()> {

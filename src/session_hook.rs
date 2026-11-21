@@ -134,6 +134,7 @@ mod tests {
             socket: socket.map(PathBuf::from),
             process: None,
             role: None,
+            attended: None,
             after_merge: None,
             unsandboxed: None,
             sockets_unblocked: None,

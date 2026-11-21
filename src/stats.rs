@@ -97,7 +97,7 @@ pub struct Spread {
     pub max_secs: Option<u64>,
 }
 
-/// Herds by name, from members with a herd; leads are left out.
+/// Herds by name, from members with a herd; leads and attended members are left out.
 pub fn stats(
     ledger: &dyn Ledger,
     reports_dir: &Path,
@@ -113,7 +113,7 @@ pub fn stats(
         let Some(herd) = record.herd.clone() else {
             continue;
         };
-        if query.herd.is_some_and(|h| h != herd) {
+        if query.herd.is_some_and(|h| h != herd) || record.attended.is_some() {
             continue;
         }
         if record.is_lead() {
