@@ -615,7 +615,9 @@ impl Checks<'_> {
                 None => due && matches!(merged, Some(Ok(true) | Err(_))),
             };
             freed += usize::from(holds_slot(&worker) && done == Some(Ok(true)) && !kept);
-            if merged == Some(Ok(true)) && (due || matches!(done, None | Some(Ok(false)))) {
+            // An attended member's stops wake nothing, so its merge must, done or not.
+            let announced = due || worker.attended.is_some();
+            if merged == Some(Ok(true)) && (announced || matches!(done, None | Some(Ok(false)))) {
                 events.push(Event::new(format!("{} {}", worker.name, line::MERGED)));
             }
         }
@@ -4776,9 +4778,9 @@ mod tests {
         }
         world.touch("tasks", "1\n2\n3\n");
         world.touch("merged-9", "");
-        assert_eq!(world.once("w9:p0").unwrap(), ["lh-9 merged"]);
-
         world.touch("done-9", "");
+
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-9 merged"]);
         assert_eq!(world.once("w9:p0"), None);
     }
 

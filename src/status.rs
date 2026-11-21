@@ -375,8 +375,8 @@ pub fn row(member: &Member) -> Vec<String> {
             format!("{} (lead, sockets open)", member.name)
         }
         (true, _) => format!("{} (lead)", member.name),
-        _ if member.attended => format!("{} (attended)", member.name),
         (false, true) => format!("{} (released)", member.name),
+        _ if member.attended => format!("{} (attended)", member.name),
         (false, false) => member.name.clone(),
     };
     vec![

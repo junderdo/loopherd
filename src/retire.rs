@@ -309,12 +309,14 @@ pub fn retire_and_close(
 /// member's pane: a reap hours after the merge mustn't pull them off other work.
 fn return_focus(herdr: &dyn Herdr, record: &AgentRecord) -> Option<String> {
     let back = record.attended.as_ref()?.return_pane.as_deref()?;
-    let moved = match herdr.focused_pane() {
-        Ok(focused) if focused.as_deref() == Some(&record.pane_id) => herdr.focus(back),
-        Ok(_) => return None,
-        Err(e) => Err(e),
+    let focused = match herdr.focused_pane() {
+        Ok(focused) => focused,
+        Err(e) => return Some(format!("warning: read the focused pane: {e:#}")),
     };
-    Some(match moved {
+    if focused.as_deref() != Some(&record.pane_id) {
+        return None;
+    }
+    Some(match herdr.focus(back) {
         Ok(()) => format!("focused {back}"),
         Err(e) => format!("warning: focus {back}: {e:#}"),
     })
