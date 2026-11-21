@@ -132,7 +132,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D117](decisions/D117.md) | Amends D98. A broker lane holds at most 8 waiting requests and refuses more as busy; the lock record is cleared on exit, so `start` waits out an exiting broker and no stale `marks` line outlives it; retirement is read per request; an idle retiring broker answers waiting requests "is retired". |
 | [D118](decisions/D118.md) | Amends D19. install-hook writes the skill to `~/.agents/skills/loopherd` and links `~/.claude/skills/loopherd` to it relatively, replacing only its own old copy and leaving anything else there alone; `--settings` keeps both in the settings file's directory; doctor warns on a missing or foreign link. |
 | [D119](decisions/D119.md) | Amends D108. A broker also records its executable's dev/ino (`file` line); doctor compares brokers with the `loopherd` on PATH by that identity, else with itself, and names the restart as the shepherd's; `broker-restart` resolves its executable before the drain wait, so a reinstall during it still starts a broker. |
-| [D120](decisions/D120.md) | Amends D97 and D107. Each agent's mailbox is `reports/<name>/mailbox.jsonl`, written only there; readers read an older release's flat `reports/<name>.jsonl` first as its prefix, so cursors stay valid; `herd remove` deletes both and the empty directory. |
+| [D120](decisions/D120.md) | Amends D97 and D107. Each agent's mailbox is `reports/<name>/mailbox.jsonl`, written only there; readers read an older release's flat `reports/<name>.jsonl` first, each file under its own cursor key, so an older writer still appending to it shifts nothing; `herd remove` deletes both and the empty directory. |
 
 ## Emerging model
 

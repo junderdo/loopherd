@@ -251,7 +251,7 @@ pub fn append_unless(
     already: impl Fn(&[Entry]) -> bool,
 ) -> Result<bool> {
     let (path, mut file) = open_mailbox(dir, name)?;
-    let bytes = read_mailbox(dir, name)?;
+    let bytes = complete_lines(dir, name)?;
     let mut found = vec![];
     parse(dir, name, &bytes, &mut found, &mut vec![]);
     let entries: Vec<Entry> = found.into_iter().map(|(_, e)| e).collect();
@@ -524,9 +524,9 @@ pub fn since_handoff(dir: &Path, name: &str) -> Result<SinceHandoff> {
     if !has_mailbox(dir, name) {
         return Ok(SinceHandoff::None);
     }
-    let (bytes, end) = complete_lines(dir, name)?;
+    let bytes = complete_lines(dir, name)?;
     let mut entries = vec![];
-    parse(dir, name, &bytes[..end], &mut entries, &mut vec![]);
+    parse(dir, name, &bytes, &mut entries, &mut vec![]);
     let mut last = None;
     for (_, entry) in entries.into_iter().rev() {
         match entry.body {
@@ -547,10 +547,10 @@ pub fn history(dir: &Path, name: &str) -> Result<(Vec<Entry>, Vec<String>)> {
     if !has_mailbox(dir, name) {
         return Ok((vec![], vec![]));
     }
-    let (bytes, end) = complete_lines(dir, name)?;
+    let bytes = complete_lines(dir, name)?;
     let mut found = vec![];
     let mut warnings = vec![];
-    parse(dir, name, &bytes[..end], &mut found, &mut warnings);
+    parse(dir, name, &bytes, &mut found, &mut warnings);
     Ok((found.into_iter().map(|(_, e)| e).collect(), warnings))
 }
 
@@ -616,7 +616,7 @@ fn read_all(dir: &Path, names: &[String]) -> Found {
     let mut warnings = vec![];
     for name in names {
         match complete_lines(dir, name) {
-            Ok((bytes, end)) => parse(dir, name, &bytes[..end], &mut found, &mut warnings),
+            Ok(bytes) => parse(dir, name, &bytes, &mut found, &mut warnings),
             Err(e) => warnings.push(format!("{e:#}")),
         }
     }
@@ -624,32 +624,41 @@ fn read_all(dir: &Path, names: &[String]) -> Found {
     (found, warnings)
 }
 
-/// The mailbox's bytes and where its last complete line ends; a line still
-/// being appended has no newline yet.
-fn complete_lines(dir: &Path, name: &str) -> Result<(Vec<u8>, usize)> {
-    let bytes = read_mailbox(dir, name)?;
-    let end = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
-    Ok((bytes, end))
+/// The mailbox's complete lines, each file's in turn; a line still being
+/// appended has no newline yet.
+fn complete_lines(dir: &Path, name: &str) -> Result<Vec<u8>> {
+    Ok(segments(dir, name)?
+        .into_iter()
+        .flat_map(|segment| segment.bytes)
+        .collect())
 }
 
-/// The flat file an older release wrote, if any, then the new one.
-fn read_mailbox(dir: &Path, name: &str) -> Result<Vec<u8>> {
-    let read =
-        |path: &Path| fs::read(path).with_context(|| format!("could not read {}", path.display()));
+/// One file of a mailbox, cut at its last complete line, under its own
+/// cursor key, so growth in one file can't shift the other's offsets.
+struct Segment {
+    key: String,
+    bytes: Vec<u8>,
+}
+
+/// The flat file an older release wrote, if any, then the new one; with
+/// neither, the new one's read error.
+fn segments(dir: &Path, name: &str) -> Result<Vec<Segment>> {
+    let read = |path: &Path, key: String| {
+        let mut bytes =
+            fs::read(path).with_context(|| format!("could not read {}", path.display()))?;
+        bytes.truncate(bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1));
+        anyhow::Ok(Segment { key, bytes })
+    };
     let (flat, path) = (flat_mailbox_path(dir, name), mailbox_path(dir, name));
-    if !flat.exists() {
-        return read(&path);
+    let mut found = vec![];
+    if flat.exists() {
+        found.push(read(&flat, name.to_string())?);
     }
-    let mut bytes = read(&flat)?;
-    if !path.exists() {
-        return Ok(bytes);
+    if !flat.exists() || path.exists() {
+        // Agent names hold no `/`, so this key can't be another agent's.
+        found.push(read(&path, format!("{name}/mailbox.jsonl"))?);
     }
-    // A torn last line in the frozen flat file must not swallow the first new one.
-    if bytes.last().is_some_and(|&b| b != b'\n') {
-        bytes.push(b'\n');
-    }
-    bytes.extend(read(&path)?);
-    Ok(bytes)
+    Ok(found)
 }
 
 fn parse(
@@ -848,18 +857,23 @@ impl Cursor {
             }
         };
         for name in names {
-            let (bytes, end) = match complete_lines(dir, name) {
-                Ok(read) => read,
+            let segments = match segments(dir, name) {
+                Ok(segments) => segments,
                 Err(e) => {
                     unreadable.push(format!("{e:#}"));
                     continue;
                 }
             };
-            let from = offsets.read_to(name);
-            // Past the end: the file was truncated or replaced, so all of it is new.
-            let start = if from > end { 0 } else { from };
-            visit(name, &bytes[..start], &bytes[start..end]);
-            pending.moves.push((name.clone(), from, end));
+            let (mut read, mut unread) = (vec![], vec![]);
+            for Segment { key, bytes } in segments {
+                let from = offsets.read_to(&key);
+                // Past the end: the file was truncated or replaced, so all of it is new.
+                let start = if from > bytes.len() { 0 } else { from };
+                read.extend_from_slice(&bytes[..start]);
+                unread.extend_from_slice(&bytes[start..]);
+                pending.moves.push((key, from, bytes.len()));
+            }
+            visit(name, &read, &unread);
         }
         Ok((pending, unreadable))
     }
@@ -904,7 +918,6 @@ impl Offsets {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
     use crate::ledger::{AgentRecord, MemLedger};
 
@@ -1526,28 +1539,118 @@ mod tests {
         );
     }
 
+    fn note(at: &str, text: &str) -> String {
+        format!("{{\"at\":\"{at}\",\"kind\":\"note\",\"text\":\"{text}\"}}\n")
+    }
+
+    fn unread_texts(ledger: &MemLedger, dir: &Path) -> Vec<String> {
+        let read = reports(ledger, dir, &UNREAD).unwrap();
+        assert_eq!(read.warnings, Vec::<String>::new());
+        read.entries
+            .iter()
+            .filter_map(|(_, e)| e.report().map(|(_, text)| text.to_string()))
+            .collect()
+    }
+
     #[test]
-    fn a_torn_last_line_in_a_flat_mailbox_does_not_swallow_the_first_new_report() {
+    fn an_older_release_still_appending_to_the_flat_mailbox_has_each_report_read_once() {
         let dir = tempfile::tempdir().unwrap();
         let ledger = ledger(vec![member("lh-1", "w1:p1", None, false)]);
-        std::fs::write(
-            flat_mailbox_path(dir.path(), "lh-1"),
-            "{\"at\":\"2026-11-01T09:30",
-        )
-        .unwrap();
-
+        let flat = flat_mailbox_path(dir.path(), "lh-1");
+        std::fs::write(&flat, note("2026-11-01T09:00:00Z", "flat-one")).unwrap();
         send(
             &ledger,
             dir.path(),
             "lh-1",
-            Kind::Done,
-            "new",
-            "2026-11-01T10:00:00Z",
+            Kind::Note,
+            "new-one",
+            "2026-11-01T09:10:00Z",
+        );
+        assert_eq!(unread_texts(&ledger, dir.path()), ["flat-one", "new-one"]);
+
+        let flat_two = note("2026-11-01T09:20:00Z", "flat-two");
+        let (torn, rest) = flat_two.split_at(20);
+        append(&flat, torn);
+        assert_eq!(unread_texts(&ledger, dir.path()), Vec::<String>::new());
+        append(&flat, rest);
+        send(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            Kind::Note,
+            "new-two",
+            "2026-11-01T09:30:00Z",
         );
 
-        let read = reports(&ledger, dir.path(), &UNREAD).unwrap();
-        assert_eq!(read.lines, ["lh-1 done 2026-11-01 10:00 UTC new"]);
-        assert_eq!(read.warnings.len(), 1, "{:?}", read.warnings);
+        assert_eq!(unread_texts(&ledger, dir.path()), ["flat-two", "new-two"]);
+    }
+
+    #[test]
+    fn deleting_the_flat_mailbox_leaves_the_new_ones_reports_read_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![member("lh-1", "w1:p1", None, false)]);
+        let flat = flat_mailbox_path(dir.path(), "lh-1");
+        std::fs::write(&flat, note("2026-11-01T09:00:00Z", "flat-one")).unwrap();
+        send(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            Kind::Note,
+            "new-one",
+            "2026-11-01T09:10:00Z",
+        );
+        assert_eq!(unread_texts(&ledger, dir.path()), ["flat-one", "new-one"]);
+
+        std::fs::remove_file(&flat).unwrap();
+        send(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            Kind::Note,
+            "new-two",
+            "2026-11-01T09:30:00Z",
+        );
+
+        assert_eq!(unread_texts(&ledger, dir.path()), ["new-two"]);
+    }
+
+    #[test]
+    fn append_unless_sees_an_entry_only_the_flat_mailbox_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            flat_mailbox_path(dir.path(), "lh-1"),
+            note("2026-11-01T09:00:00Z", "once"),
+        )
+        .unwrap();
+        let entry = Entry::new(at("2026-11-01T10:00:00Z"), Body::report(Kind::Note, "once"));
+        let has_once = |entries: &[Entry]| {
+            entries
+                .iter()
+                .any(|e| e.report() == Some((Kind::Note, "once")))
+        };
+
+        assert!(!append_unless(dir.path(), "lh-1", &entry, has_once).unwrap());
+        assert_eq!(history(dir.path(), "lh-1").unwrap().0.len(), 1);
+    }
+
+    #[test]
+    fn a_handoff_only_the_flat_mailbox_holds_is_found_with_the_stop_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let stop = r#"{"at":"2026-11-01T10:00:00Z","kind":"stop","session":"s1","crons":0,"background":{"shells":0,"subagents":0,"other":0}}"#;
+        std::fs::write(
+            flat_mailbox_path(dir.path(), "lh-1"),
+            format!(
+                "{}{}{stop}\n",
+                r#"{"at":"2026-11-01T08:00:00Z","kind":"start"}"#.to_string() + "\n",
+                r#"{"at":"2026-11-01T09:00:00Z","kind":"handoff","text":"bye"}"#.to_string() + "\n",
+            ),
+        )
+        .unwrap();
+
+        match since_handoff(dir.path(), "lh-1").unwrap() {
+            SinceHandoff::Stopped(stop) => assert_eq!(stop.session.as_deref(), Some("s1")),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
