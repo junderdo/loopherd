@@ -210,6 +210,7 @@ pub fn feed(
             {
                 lines.push(format!("not started: {task}: {}", e.root_cause()));
                 errors += 1;
+                free += 1;
             }
             Err(e) => {
                 lines.push(format!("error: {task}: {e:#}; stopping"));
@@ -1517,6 +1518,38 @@ mod tests {
         assert_eq!(fed.code, 1);
         assert!(ledger.0.is_empty());
         assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
+    fn a_worker_its_sandbox_refuses_gives_its_slot_back() {
+        let setup = Setup::new("printf '1\\n2\\n'", 1);
+        let file = setup.config.path().join("herds/prs.toml");
+        let herd = fs::read_to_string(&file).unwrap() + "[worker]\nsandbox = \"require\"\n";
+        fs::write(file, herd).unwrap();
+        let req = FeedRequest {
+            sandbox: sandbox_unavailable,
+            ..setup.request(false, None)
+        };
+
+        let fed = feed(
+            &herdr(),
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &req,
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert!(
+            fed.lines[0].starts_with("not started: 1: "),
+            "{:?}",
+            fed.lines
+        );
+        assert!(
+            fed.lines[1].starts_with("not started: 2: "),
+            "{:?}",
+            fed.lines
+        );
     }
 
     #[test]
