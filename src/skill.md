@@ -704,7 +704,7 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   to re-arm its own.
 - **After a merge that changes the broker**, nothing: once it is
   installed, each lead's broker moves onto the new `loopherd` on its PATH
-  by itself, after answering its request in flight (D120).
+  by itself, between requests (D120).
   `loopherd broker-restart <lead>` is for when that fails: a note in the
   lead's mailbox saying its broker couldn't move, a lead's
   `<lead>'s broker predates this loopherd` error, its `can't read` reply
@@ -715,6 +715,9 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   is answered, then starts one on the installed binary, which serves what
   is still queued; with none running it starts one. A broker still busy
   after 4 hours is left running and the command fails naming its pid.
+  While it drains, every lane stops taking requests, so the lead's `tell`,
+  `read` and `status` wait on the feed in flight, and one that waits past
+  its own bound (2 minutes for `tell`) is withdrawn and must be asked again.
 - **After a herdr restart** run `loopherd revive` (`--dry-run` first). It
   resumes non-retired members by session ID, and prompts each lead whose
   watch isn't running to re-arm it. It never prompts workers. It skips a
