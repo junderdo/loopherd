@@ -2148,30 +2148,31 @@ pub fn requests_dir(paths: &Paths, lead: &str) -> PathBuf {
 }
 
 fn replies_dir(paths: &Paths, lead: &str) -> PathBuf {
-    broker_dir(paths).join(lead).join("replies")
+    dir(paths).join(lead).join("replies")
 }
 
-fn broker_dir(paths: &Paths) -> PathBuf {
+/// Each broker's lock, pid, stop and restart files, and its replies.
+pub fn dir(paths: &Paths) -> PathBuf {
     paths.config_dir().join("broker")
 }
 
 fn lock_file(paths: &Paths, lead: &str) -> PathBuf {
-    broker_dir(paths).join(format!("{lead}.lock"))
+    dir(paths).join(format!("{lead}.lock"))
 }
 
 fn pid_file(paths: &Paths, lead: &str) -> PathBuf {
-    broker_dir(paths).join(format!("{lead}.pid"))
+    dir(paths).join(format!("{lead}.pid"))
 }
 
 /// Locked by `broker-restart` while it runs.
 fn restart_file(paths: &Paths, lead: &str) -> PathBuf {
-    broker_dir(paths).join(format!("{lead}.restart"))
+    dir(paths).join(format!("{lead}.restart"))
 }
 
 /// Names the pid of the broker `broker-restart` is stopping; in the config
 /// dir, so a lead can read it but not write it.
 fn stop_file(paths: &Paths, lead: &str) -> PathBuf {
-    broker_dir(paths).join(format!("{lead}.stop"))
+    dir(paths).join(format!("{lead}.stop"))
 }
 
 #[cfg(test)]

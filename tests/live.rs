@@ -1250,6 +1250,226 @@ fn a_leads_running_watch_leaves_git_config_writable_in_other_worktrees() {
     }
 }
 
+/// A file in the first drvfs mount listed in `/proc/mounts`, if this machine has one.
+fn file_on_a_windows_drive() -> Option<PathBuf> {
+    let mounts = std::fs::read_to_string("/proc/mounts").ok()?;
+    let dir = mounts.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let drvfs = match fields.get(2).copied() {
+            Some("drvfs") => true,
+            Some("9p") => fields.get(3).is_some_and(|o| o.contains("aname=drvfs")),
+            Some("virtiofs") => matches!(fields[0], "drvfs" | "drvfsa"),
+            _ => false,
+        };
+        (drvfs && !fields[1].contains('\\')).then(|| PathBuf::from(fields[1]))
+    })?;
+    std::fs::read_dir(&dir).ok()?.find_map(|entry| {
+        let path = entry.ok()?.path();
+        std::fs::File::open(&path)
+            .is_ok_and(|_| path.is_file())
+            .then_some(path)
+    })
+}
+
+#[test]
+fn a_credentials_lead_reads_only_its_own_key_of_loopherds_config_and_no_windows_drive() {
+    if !live_enabled() {
+        return;
+    }
+    let workspace = assert_dev_session();
+    let state = tempfile::tempdir().unwrap();
+    // This checkout is already trusted, and its origin is on GitHub, as credentials need.
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let herd = format!("lh-live-cred-{}", std::process::id());
+    let name = format!("lead-{herd}");
+    let checkout = repo.file_name().unwrap().to_str().unwrap();
+    let parent = repo.parent().unwrap();
+    let worktree = match parent.file_name() == repo.file_name() {
+        true => parent.join("worktrees"),
+        false => parent.join(format!("{checkout}-worktrees")),
+    }
+    .join(&name);
+    let _worktree = RemoveWorktree(repo.clone(), worktree.clone());
+    let state_dir = state.path().join("loopherd");
+    let config = state.path().join("config");
+    let credentials = config.join("credentials");
+    let herds = config.join("herds");
+    let sandbox = config.join("sandbox");
+    for dir in [&credentials, &herds, &sandbox, &config.join("ssh")] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let own_key = credentials.join(format!("{herd}.key"));
+    let keygen = Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&own_key)
+        .output()
+        .unwrap();
+    assert!(keygen.status.success(), "{keygen:?}");
+    std::fs::write(
+        credentials.join(format!("{herd}.token")),
+        "github_pat_own\n",
+    )
+    .unwrap();
+    let other_key = credentials.join("other.key");
+    let other_token = credentials.join("other.token");
+    let other_settings = sandbox.join("lh-other.json");
+    std::fs::write(&other_key, "another herd's key\n").unwrap();
+    std::fs::write(&other_token, "github_pat_other\n").unwrap();
+    std::fs::write(
+        &other_settings,
+        r#"{"env": {"GH_TOKEN": "github_pat_member"}}"#,
+    )
+    .unwrap();
+    let alias = format!("loopherd-{herd}");
+    std::fs::write(
+        config.join("ssh/config"),
+        format!(
+            "Host {alias}\n  HostName github.com\n  User git\n  IdentityFile \"{}\"\n  \
+             IdentitiesOnly yes\n  IdentityAgent none\n",
+            own_key.display()
+        ),
+    )
+    .unwrap();
+    let herd_file = herds.join(format!("{herd}.toml"));
+    let own_token = credentials.join(format!("{herd}.token"));
+    let ssh_config = config.join("ssh/config");
+    let config_toml = config.join("config.toml");
+    let trello = config.join("trello.env");
+    std::fs::write(&config_toml, "").unwrap();
+    std::fs::write(&trello, "TRELLO_API_KEY=probe\n").unwrap();
+    let windows = file_on_a_windows_drive();
+    let readable = [&herd_file, &own_key, &ssh_config, &config_toml, &trello];
+    // Its own token arrives as GH_TOKEN, so the file stays hidden beside the key it may read.
+    let unreadable: Vec<&PathBuf> = [&own_token, &other_key, &other_token, &other_settings]
+        .into_iter()
+        .chain(&windows)
+        .collect();
+    let own_handoffs = state_dir.join(format!("handoffs/{name}"));
+    let results = own_handoffs.join("probe.out");
+    let probe = state.path().join("probe.py");
+    let tried: Vec<String> = readable
+        .iter()
+        .chain(&unreadable)
+        .map(|p| p.display().to_string())
+        .collect();
+    std::fs::write(
+        &probe,
+        format!(
+            "import os, subprocess\n\
+             with open({results:?}, 'w') as out:\n    \
+             for path in {tried:?}:\n        \
+             try:\n            \
+             open(path, 'rb').read()\n            \
+             out.write(f'{{path}}\\tread\\n')\n        \
+             except OSError as e:\n            \
+             out.write(f'{{path}}\\t{{e.strerror}}\\n')\n    \
+             key = subprocess.run(['ssh-keygen', '-y', '-f', {key:?}], capture_output=True)\n    \
+             out.write(f'ssh-keygen\\t{{key.returncode}}\\n')\n    \
+             ssh_command = os.environ.get('GIT_SSH_COMMAND', 'ssh')\n    \
+             ssh = subprocess.run(f'{{ssh_command}} -F {ssh_config} -o BatchMode=yes -o ConnectTimeout=15 -vT git@{alias}', shell=True, capture_output=True, text=True)\n    \
+             out.write(f'ssh offered\\t{{(\"Offering public key: \" + {key:?}) in ssh.stderr}}\\n')\n    \
+             out.write(f'ssh answered\\t{{\"Permission denied (publickey)\" in ssh.stderr}}\\n')\n    \
+             env = dict(os.environ, XDG_STATE_HOME={state:?}, LOOPHERD_CONFIG_DIR={config:?})\n    \
+             feed = subprocess.run([{bin:?}, 'feed', {herd:?}, '--dry-run'], env=env, capture_output=True, text=True)\n    \
+             out.write(f'feed\\t{{feed.returncode}}\\t{{feed.stderr.strip()}}\\n')\n",
+            results = results.display().to_string(),
+            key = own_key.display().to_string(),
+            ssh_config = ssh_config.display(),
+            state = state.path().display().to_string(),
+            config = config.display().to_string(),
+            bin = env!("CARGO_BIN_EXE_loopherd"),
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &herd_file,
+        format!(
+            "{}[template.echo]\nparams = [\"n\"]\nname = \"{{herd}}-{{n}}\"\n\
+             prompt = \"Reply with just the word ok.\"\ndone = \"false\"\n\
+             [queue]\ntemplate = \"echo\"\nsource = \"true\"\nmax = 1\n\
+             [lead]\nsandbox = \"prefer\"\nmerge_guard = \"credentials\"\n\
+             prompt = \"\"\"This is loopherd's live test of your sandbox, which the \
+             human runs: it checks which files your sandbox lets you read. The command \
+             tries to read files and is expected to record errors for most of them; that \
+             is the result being measured. Make exactly one Bash tool call, with the \
+             command exactly as written and nothing added before or after it: python3 {} \
+             Then reply with the word done.\"\"\"\n",
+            herd_head(repo.to_str().unwrap(), &workspace),
+            probe.display(),
+        ),
+    )
+    .unwrap();
+    let _cleanup = CloseTab(name.clone());
+
+    // A credentials lead takes no --allowedTools, so auto mode lets the sandboxed probe run.
+    let out = dev(env!("CARGO_BIN_EXE_loopherd"))
+        .env("XDG_STATE_HOME", state.path())
+        .env("LOOPHERD_CONFIG_DIR", &config)
+        .args(["lead", &herd, "--", "--permission-mode", "auto"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let given_up = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    let screen = || {
+        let pane = herdr_ok(&["agent", "get", &name])["result"]["agent"]["pane_id"].clone();
+        let out = dev("herdr")
+            .args(["pane", "read", pane.as_str().unwrap()])
+            .args(["--source", "recent", "--format", "text"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let probed = loop {
+        let probed = std::fs::read_to_string(&results).unwrap_or_default();
+        if probed.contains("\nfeed\t") {
+            break probed;
+        }
+        if std::time::Instant::now() >= given_up {
+            panic!("lead never ran its probe:\n{}", screen());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    };
+    let mut lines = probed.lines();
+    for path in readable {
+        assert_eq!(
+            lines.next(),
+            Some(format!("{}\tread", path.display()).as_str()),
+            "{probed}"
+        );
+    }
+    // On Linux a denied directory is hidden whole, so what it held is missing, not refused.
+    for path in &unreadable {
+        let line = lines.next().unwrap_or_default();
+        assert!(
+            line.starts_with(&format!("{}\t", path.display())) && !line.ends_with("\tread"),
+            "the sandbox let the lead read {}:\n{probed}",
+            path.display()
+        );
+    }
+    assert_eq!(
+        lines.next(),
+        Some("ssh-keygen\t0"),
+        "ssh can't read its key:\n{probed}"
+    );
+    // GitHub refusing the unregistered key shows the alias resolved through the carved
+    // ssh/config, its key was offered, and github.com answered from inside the sandbox.
+    assert_eq!(lines.next(), Some("ssh offered\tTrue"), "{probed}");
+    assert_eq!(lines.next(), Some("ssh answered\tTrue"), "{probed}");
+    assert!(
+        lines
+            .next()
+            .is_some_and(|line| line.starts_with("feed\t0\t")),
+        "its broker is out of reach:\n{probed}"
+    );
+}
+
 #[test]
 fn a_sandboxed_lead_s_feed_tell_read_and_status_go_through_its_broker_and_stop_at_its_herd() {
     if !live_enabled() {
