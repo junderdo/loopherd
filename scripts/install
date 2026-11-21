@@ -19,8 +19,8 @@ and the context window and handoff limits. Last, unless --remove, it runs
 fail the install.
 Other arguments go to `loopherd install-hook`.
 
-  scripts/install                      hooks in ~/.claude/settings.json, skill in ~/.claude/skills
-  scripts/install --settings <file>    hooks in <file>, skill in skills/ beside it
+  scripts/install                      hooks in ~/.claude/settings.json, skill in ~/.agents/skills linked from ~/.claude/skills
+  scripts/install --settings <file>    hooks in <file>, skill in .agents/skills beside it linked from skills/
   scripts/install --no-splash          skip the opening animation (or set LOOPHERD_NO_SPLASH=1)
   scripts/install --with-agents        also install the agent types, asking nothing else
   scripts/install --with-skills        also install the mattpocock-skills plugin, asking nothing else

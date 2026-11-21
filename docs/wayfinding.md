@@ -128,6 +128,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D113](decisions/D113.md) | A template param a `name`, `branch` or `worktree` pattern uses must be a plain word (`[A-Za-z0-9][A-Za-z0-9._-]*`, no `..`), for every `add` and `feed`; a lead's `add` and `feed` run the member-path guard on the repo and worktree each worker would start in. |
 | [D114](decisions/D114.md) | Amends D95, D105 and D107. A `credentials` herd refuses `unix_sockets = "all"` for its lead and workers and, once the worker sandbox exists, workers that aren't `require`; its members read only their own key in the config dir, no Windows drives, and no inherited GitHub token variables; the watch and broker run a fixed `PATH`; setup and doctor paginate their GitHub listings. |
 | [D115](decisions/D115.md) | Amends D89 and D100. Retiring a lead removes its `<lead>.mcp.json` at every retire and its settings `<lead>.json` once `retire --close` sees its tab closed or gone; its `<lead>.lead.json` stays. A lead's broker removes none of them. |
+| [D116](decisions/D116.md) | Amends D19. install-hook writes the skill to `~/.agents/skills/loopherd` and links `~/.claude/skills/loopherd` to it relatively, replacing only its own old copy and leaving anything else there alone; `--settings` keeps both in the settings file's directory; doctor warns on a missing or foreign link. |
 
 ## Emerging model
 

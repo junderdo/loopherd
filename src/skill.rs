@@ -3,7 +3,7 @@
 
 use std::fs;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -42,13 +42,190 @@ fn section_starts() -> Vec<(usize, &'static str)> {
     starts
 }
 
-/// Where the skill goes under a Claude skills directory.
+/// Where `install-hook` puts the skill (D116).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Layout {
+    /// `<dir>/loopherd/SKILL.md`, written in place: `--skills-dir`.
+    Direct(PathBuf),
+    /// The skill in `<real>/loopherd`, and `<link>/loopherd` a relative
+    /// symlink to it, the way the `skills` CLI installs a skill.
+    Linked { real: PathBuf, link: PathBuf },
+}
+
+impl Layout {
+    /// `--skills-dir` wins; `--settings` keeps both dirs in its file's
+    /// directory; otherwise `$HOME/.agents/skills` linked from `<claude dir>/skills`.
+    pub fn resolve(
+        skills_dir: Option<PathBuf>,
+        settings: Option<&Path>,
+        home: impl FnOnce() -> Result<PathBuf>,
+        claude_dir: impl FnOnce() -> Result<PathBuf>,
+    ) -> Result<Layout> {
+        if let Some(dir) = skills_dir {
+            return Ok(Layout::Direct(dir));
+        }
+        let (agents_home, claude) = match settings {
+            Some(settings) => {
+                let settings = std::path::absolute(settings)
+                    .with_context(|| format!("resolve {}", settings.display()))?;
+                let dir = settings
+                    .parent()
+                    .expect("a file has a parent")
+                    .to_path_buf();
+                (dir.clone(), dir)
+            }
+            None => (home()?, claude_dir()?),
+        };
+        Ok(Layout::Linked {
+            real: agents_home.join(".agents/skills"),
+            link: claude.join("skills"),
+        })
+    }
+
+    /// The skill file loopherd writes.
+    pub fn skill(&self) -> PathBuf {
+        match self {
+            Layout::Direct(dir) | Layout::Linked { real: dir, .. } => path(dir),
+        }
+    }
+}
+
+/// What sits at `<link dir>/loopherd`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Link {
+    Ours,
+    Missing,
+    /// A real directory holding only loopherd's SKILL.md, from before D116.
+    OldCopy,
+    /// Anything else: the human's, never touched.
+    Foreign(String),
+}
+
+/// Classifies `<link dir>/loopherd` against `<real dir>/loopherd`.
+pub fn link_state(real: &Path, link: &Path) -> Link {
+    let (real, link) = (real.join(NAME), link.join(NAME));
+    let meta = match fs::symlink_metadata(&link) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Link::Missing,
+        Err(e) => return Link::Foreign(format!("can't be read: {e}")),
+    };
+    if meta.is_symlink() {
+        let target = fs::read_link(&link).unwrap_or_default();
+        let same = target == relative(link.parent().unwrap(), &real)
+            || matches!(
+                (fs::canonicalize(&link), fs::canonicalize(&real)),
+                (Ok(a), Ok(b)) if a == b
+            );
+        return match same {
+            true => Link::Ours,
+            false => Link::Foreign(format!("points to {}", target.display())),
+        };
+    }
+    if !meta.is_dir() {
+        return Link::Foreign("isn't a directory or symlink".into());
+    }
+    match holds_only_our_skill(&link) {
+        true => Link::OldCopy,
+        false => Link::Foreign("holds files that aren't loopherd's SKILL.md".into()),
+    }
+}
+
+/// What `install` and `remove` did.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Outcome {
+    /// The skill file was written, or removed.
+    pub skill: bool,
+    /// The link was made, replaced or removed.
+    pub link: bool,
+    /// Why `<link dir>/loopherd` was left alone.
+    pub left_alone: Option<String>,
+}
+
+pub fn install(layout: &Layout) -> Result<Outcome> {
+    let (real, link) = match layout {
+        Layout::Direct(dir) => return Ok(direct(write(dir)?)),
+        Layout::Linked { real, link } => (real, link),
+    };
+    let skill = write(real)?;
+    let at = link.join(NAME);
+    let mut outcome = direct(skill);
+    match link_state(real, link) {
+        Link::Ours => {}
+        Link::Foreign(why) => outcome.left_alone = Some(why),
+        state => {
+            if state == Link::OldCopy {
+                remove(link)?;
+            }
+            fs::create_dir_all(link).with_context(|| format!("create {}", link.display()))?;
+            std::os::unix::fs::symlink(relative(link, &real.join(NAME)), &at)
+                .with_context(|| format!("link {}", at.display()))?;
+            outcome.link = true;
+        }
+    }
+    Ok(outcome)
+}
+
+pub fn uninstall(layout: &Layout) -> Result<Outcome> {
+    let (real, link) = match layout {
+        Layout::Direct(dir) => return Ok(direct(remove(dir)?)),
+        Layout::Linked { real, link } => (real, link),
+    };
+    let at = link.join(NAME);
+    let mut outcome = direct(false);
+    match link_state(real, link) {
+        Link::Ours => {
+            fs::remove_file(&at).with_context(|| format!("remove {}", at.display()))?;
+            outcome.link = true;
+        }
+        Link::OldCopy => outcome.link = remove(link)?,
+        Link::Missing => {}
+        Link::Foreign(why) => outcome.left_alone = Some(why),
+    }
+    outcome.skill = remove(real)?;
+    Ok(outcome)
+}
+
+fn direct(skill: bool) -> Outcome {
+    Outcome {
+        skill,
+        link: false,
+        left_alone: None,
+    }
+}
+
+const NAME: &str = "loopherd";
+
+fn holds_only_our_skill(dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    let names: Vec<_> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name())
+        .collect();
+    names == ["SKILL.md"]
+        && fs::symlink_metadata(dir.join("SKILL.md")).is_ok_and(|m| m.is_file())
+        && fs::read_to_string(dir.join("SKILL.md"))
+            .is_ok_and(|text| text.starts_with("---\nname: loopherd\n"))
+}
+
+/// `to` relative to the directory `from`, both absolute, by their components.
+fn relative(from: &Path, to: &Path) -> PathBuf {
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    std::iter::repeat_n(Component::ParentDir, from.len() - common)
+        .chain(to[common..].iter().copied())
+        .collect()
+}
+
+/// Where the skill goes under a skills directory.
 pub fn path(skills_dir: &Path) -> PathBuf {
-    skills_dir.join("loopherd").join("SKILL.md")
+    skills_dir.join(NAME).join("SKILL.md")
 }
 
 /// Writes the skill, overwriting what's there. Returns whether it changed.
-pub fn install(skills_dir: &Path) -> Result<bool> {
+fn write(skills_dir: &Path) -> Result<bool> {
     let path = path(skills_dir);
     match fs::read(&path) {
         Ok(bytes) if bytes == SKILL.as_bytes() => return Ok(false),
@@ -67,7 +244,7 @@ pub fn install(skills_dir: &Path) -> Result<bool> {
 
 /// Deletes the skill and its directory if that leaves it empty. Returns
 /// whether there was one.
-pub fn remove(skills_dir: &Path) -> Result<bool> {
+fn remove(skills_dir: &Path) -> Result<bool> {
     let path = path(skills_dir);
     match fs::remove_file(&path) {
         Ok(()) => {}
@@ -297,9 +474,9 @@ mod tests {
     #[test]
     fn install_writes_the_skill_byte_equal_and_reruns_change_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(install(dir.path()).unwrap());
+        assert!(write(dir.path()).unwrap());
         assert_eq!(fs::read(path(dir.path())).unwrap(), SKILL.as_bytes());
-        assert!(!install(dir.path()).unwrap());
+        assert!(!write(dir.path()).unwrap());
         assert_eq!(fs::read(path(dir.path())).unwrap(), SKILL.as_bytes());
     }
 
@@ -308,7 +485,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("loopherd")).unwrap();
         fs::write(path(dir.path()), "old").unwrap();
-        assert!(install(dir.path()).unwrap());
+        assert!(write(dir.path()).unwrap());
         assert_eq!(fs::read(path(dir.path())).unwrap(), SKILL.as_bytes());
     }
 
@@ -320,7 +497,7 @@ mod tests {
         fs::create_dir_all(dir.path().join("loopherd")).unwrap();
         std::os::unix::fs::symlink(&target, path(dir.path())).unwrap();
 
-        assert!(install(dir.path()).unwrap());
+        assert!(write(dir.path()).unwrap());
 
         assert_eq!(fs::read_to_string(&target).unwrap(), "mine");
         assert_eq!(fs::read(path(dir.path())).unwrap(), SKILL.as_bytes());
@@ -330,7 +507,7 @@ mod tests {
     #[test]
     fn remove_deletes_the_skill_and_its_empty_directory() {
         let dir = tempfile::tempdir().unwrap();
-        install(dir.path()).unwrap();
+        write(dir.path()).unwrap();
         assert!(remove(dir.path()).unwrap());
         assert!(!dir.path().join("loopherd").exists());
         assert!(!remove(dir.path()).unwrap());
@@ -339,10 +516,67 @@ mod tests {
     #[test]
     fn remove_keeps_other_files_beside_the_skill() {
         let dir = tempfile::tempdir().unwrap();
-        install(dir.path()).unwrap();
+        write(dir.path()).unwrap();
         fs::write(dir.path().join("loopherd/notes.md"), "mine").unwrap();
         assert!(remove(dir.path()).unwrap());
         assert!(!path(dir.path()).exists());
         assert!(dir.path().join("loopherd/notes.md").exists());
+    }
+
+    fn linked(dir: &Path) -> Layout {
+        Layout::Linked {
+            real: dir.join(".agents/skills"),
+            link: dir.join(".claude/skills"),
+        }
+    }
+
+    #[test]
+    fn a_skill_md_that_isnt_loopherds_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().join(".claude/skills/loopherd");
+        fs::create_dir_all(&at).unwrap();
+        fs::write(at.join("SKILL.md"), "---\nname: other\n---\n").unwrap();
+
+        let outcome = install(&linked(dir.path())).unwrap();
+
+        assert!(outcome.left_alone.is_some(), "{outcome:?}");
+        assert_eq!(
+            fs::read_to_string(at.join("SKILL.md")).unwrap(),
+            "---\nname: other\n---\n"
+        );
+    }
+
+    #[test]
+    fn a_file_where_the_link_goes_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".claude/skills")).unwrap();
+        fs::write(dir.path().join(".claude/skills/loopherd"), "mine").unwrap();
+
+        let outcome = install(&linked(dir.path())).unwrap();
+
+        assert_eq!(
+            outcome.left_alone.as_deref(),
+            Some("isn't a directory or symlink")
+        );
+    }
+
+    #[test]
+    fn an_absolute_link_to_the_skill_counts_as_ours() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = linked(dir.path());
+        install(&layout).unwrap();
+        let at = dir.path().join(".claude/skills/loopherd");
+        fs::remove_file(&at).unwrap();
+        std::os::unix::fs::symlink(dir.path().join(".agents/skills/loopherd"), &at).unwrap();
+
+        assert_eq!(
+            link_state(
+                &dir.path().join(".agents/skills"),
+                &dir.path().join(".claude/skills")
+            ),
+            Link::Ours
+        );
+        assert!(uninstall(&layout).unwrap().link);
+        assert!(fs::symlink_metadata(&at).is_err());
     }
 }
