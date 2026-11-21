@@ -989,7 +989,6 @@ fn start(
              watch runs outside its sandbox; drop that entry from PATH"
         );
     }
-    keep_launch()?;
     // Before its settings, which name what it makes.
     create_state(paths, name)?;
     let own = settings(paths, name, &lead.herd)?;
@@ -997,6 +996,7 @@ fn start(
     if let Some(refusal) = loosened_refusal(paths, name, &lead.herd, &loosened)? {
         return Err(refusal);
     }
+    keep_launch()?;
     let file = settings_file(paths, name);
     let text = serde_json::to_string_pretty(&own)? + "\n";
     write_private(&file, &text).with_context(|| format!("write {}", file.display()))?;
@@ -2218,6 +2218,44 @@ mod tests {
             format!("{err:#}").contains("PATH has an empty entry"),
             "{err:#}"
         );
+        for file in ["lead-h.lead.json", "lead-h.mcp.json", "lead-h.json"] {
+            let file = paths.config_dir().join("sandbox").join(file);
+            assert!(!file.exists(), "{} was written", file.display());
+        }
+    }
+
+    #[test]
+    fn a_credentials_refusal_from_its_settings_leaves_no_launch_file() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        std::fs::create_dir_all(&paths.herds).unwrap();
+        let repo = root.path().join("repo");
+        std::fs::write(
+            paths.herds.join("h.toml"),
+            format!(
+                "repo = {repo:?}\nworkspace = \"w1\"\n[lead]\nprompt = \"go\"\n\
+                 merge_guard = \"credentials\"\ninstall = true\n"
+            ),
+        )
+        .unwrap();
+        let lead = Lead {
+            herd: "h".into(),
+            args: vec![],
+            path: None,
+        };
+
+        let err = start(
+            &paths,
+            "lead-h",
+            &lead,
+            &|| Ok(Sockets::Blocked),
+            ArgsFrom::Fresh,
+            Some("/usr/bin:/bin".as_ref()),
+        )
+        .err()
+        .unwrap();
+
+        assert!(format!("{err:#}").contains("install = true"), "{err:#}");
         for file in ["lead-h.lead.json", "lead-h.mcp.json", "lead-h.json"] {
             let file = paths.config_dir().join("sandbox").join(file);
             assert!(!file.exists(), "{} was written", file.display());

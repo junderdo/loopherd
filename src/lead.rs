@@ -37,6 +37,8 @@ pub fn lead(
     inherited_workspace: Option<&str>,
 ) -> Result<(String, Spawned, Vec<String>)> {
     let mut spawn_req = resolve(ledger, paths, req)?;
+    // Spawn's refusals, before the worktree and the launch files they would leave.
+    crate::spawn::preview(herdr, &spawn_req, inherited_workspace)?;
     let kept = sandbox::Lead {
         herd: req.herd.clone(),
         args: spawn_req.claude_args.clone(),
@@ -324,6 +326,67 @@ mod tests {
 
     fn herdr() -> FakeHerdr {
         FakeHerdr::new(&[("w1", "loopherd")])
+    }
+
+    /// Asserts `lead` was refused with `refused`, leaving no launch file or new worktree.
+    fn assert_refused_leaving_nothing(setup: &Setup, result: Result<impl Sized>, refused: &str) {
+        let err = result.err().expect("lead was refused");
+        assert!(format!("{err:#}").contains(refused), "{err:#}");
+        for file in ["lead-h.lead.json", "lead-h.mcp.json", "lead-h.json"] {
+            let file = setup.root.join("config/sandbox").join(file);
+            assert!(!file.exists(), "{} was written", file.display());
+        }
+        assert!(!setup.worktree().exists(), "its worktree was made");
+    }
+
+    #[test]
+    fn a_lead_refused_for_a_missing_workspace_leaves_nothing() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let mut ledger = MemLedger::default();
+
+        let result = lead(
+            &herdr(),
+            &mut ledger,
+            &setup.paths(),
+            &request(&[]),
+            Some("nope"),
+        );
+
+        assert_refused_leaving_nothing(&setup, result, "workspace");
+    }
+
+    #[test]
+    fn a_lead_refused_for_a_name_already_live_in_herdr_leaves_nothing() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let mut ledger = MemLedger::default();
+
+        let result = lead(
+            &herdr().with_agent("lead-h"),
+            &mut ledger,
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        );
+
+        assert_refused_leaving_nothing(&setup, result, "already a live agent");
+    }
+
+    #[test]
+    fn a_lead_refused_for_herdr_naming_no_socket_leaves_nothing() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let mut herdr = herdr();
+        herdr.socket = None;
+        let mut ledger = MemLedger::default();
+
+        let result = lead(
+            &herdr,
+            &mut ledger,
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        );
+
+        assert_refused_leaving_nothing(&setup, result, "socket");
     }
 
     const PROMPT: &str =
