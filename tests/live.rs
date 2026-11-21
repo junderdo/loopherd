@@ -1109,7 +1109,12 @@ fn a_sandboxed_worker_writes_only_its_own_worktree_mailbox_and_handoff() {
         .env("XDG_STATE_HOME", state.path())
         .env("LOOPHERD_CONFIG_DIR", &config)
         .args(["add", &herd, "probe", "1", "--"])
-        .args(["--permission-mode", "auto", "--allowedTools", "Bash(python3:*)"])
+        .args([
+            "--permission-mode",
+            "auto",
+            "--allowedTools",
+            "Bash(python3:*)",
+        ])
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1153,7 +1158,11 @@ fn a_sandboxed_worker_writes_only_its_own_worktree_mailbox_and_handoff() {
         .collect();
     assert!(probed.starts_with(&expected), "{probed}");
     let ran: Vec<&str> = probed[expected.len()..].lines().collect();
-    assert_eq!(ran, ["report\t0\t", "handoff\t0\t", "commit\t0\t"], "{probed}");
+    assert_eq!(
+        ran,
+        ["report\t0\t", "handoff\t0\t", "commit\t0\t"],
+        "{probed}"
+    );
     assert_eq!(std::fs::read_to_string(&herd_file).unwrap(), before);
     let mail =
         std::fs::read_to_string(state_dir.join(format!("reports/{name}/mailbox.jsonl"))).unwrap();
