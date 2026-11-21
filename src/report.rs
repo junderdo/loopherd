@@ -904,7 +904,6 @@ impl Offsets {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
 
     use super::*;
     use crate::ledger::{AgentRecord, MemLedger};
