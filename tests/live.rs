@@ -1071,9 +1071,12 @@ fn a_leads_running_watch_leaves_git_config_writable_in_other_worktrees() {
         .env_remove("HERDR_PANE_ID")
         .output()
         .unwrap();
-    assert!(
-        !String::from_utf8_lossy(&hooks.stderr).contains("hooks are not all in"),
-        "install loopherd's hooks first: {hooks:?}"
+    // Under another lead's Claude the watch refuses before it checks the hooks, so only
+    // reaching its timeout, exit 2, shows they're in.
+    assert_eq!(
+        hooks.status.code(),
+        Some(2),
+        "install loopherd's hooks first, and run this outside any lead's Claude: {hooks:?}"
     );
     std::fs::write(
         herds.join(format!("{herd}.toml")),
@@ -1126,37 +1129,13 @@ fn a_leads_running_watch_leaves_git_config_writable_in_other_worktrees() {
     assert_eq!(
         pid_ns(&watch.to_string()),
         pid_ns("self"),
-        "the lead's watch runs in its sandbox"
+        "the lead's watch should run outside its sandbox, in this test's pid namespace"
     );
     // Outside the sandbox, which no longer lets the lead write reports/.
     let lock = state
         .path()
         .join(format!("loopherd/reports/watch-{name}.lock"));
     assert!(lock.is_file(), "{}", lock.display());
-
-    // Only the watch's own ancestor walk refuses --settings: the pane routing alone can't.
-    let agent = server
-        .herdr()
-        .args(["agent", "get", &name])
-        .output()
-        .unwrap();
-    let agent: Value = serde_json::from_slice(&agent.stdout).unwrap();
-    let pane = agent["result"]["agent"]["pane_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let screen = server
-        .herdr()
-        .args([
-            "pane", "read", &pane, "--source", "recent", "--format", "text",
-        ])
-        .output()
-        .unwrap();
-    let screen: String = String::from_utf8_lossy(&screen.stdout)
-        .split_whitespace()
-        .collect();
-    let refusal = format!("refused:{name}'sClauderunsthiswatch,whichchecksClaude'sownsettings");
-    assert!(screen.contains(&refusal), "{screen}");
 
     let probe = Command::new("git")
         .arg("-C")
@@ -1173,6 +1152,40 @@ fn a_leads_running_watch_leaves_git_config_writable_in_other_worktrees() {
         "{}",
         String::from_utf8_lossy(&probe.stderr)
     );
+
+    // Only the watch's own ancestor walk refuses --settings: the pane routing alone can't.
+    let agent = server
+        .herdr()
+        .args(["agent", "get", &name])
+        .output()
+        .unwrap();
+    let agent: Value = serde_json::from_slice(&agent.stdout).unwrap();
+    let pane = agent["result"]["agent"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let screen = || {
+        let out = server
+            .herdr()
+            .args([
+                "pane", "read", &pane, "--source", "recent", "--format", "text",
+            ])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .collect::<String>()
+    };
+    let refusal = format!("refused:{name}'sClauderunsthiswatch,whichchecksClaude'sownsettings");
+    // The lead may run both calls at once, so the refusal can render after the watch starts.
+    loop {
+        let shown = screen();
+        if shown.contains(&refusal) {
+            break;
+        }
+        assert!(std::time::Instant::now() < given_up, "{shown}");
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
 }
 
 #[test]
