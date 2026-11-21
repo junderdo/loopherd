@@ -1152,11 +1152,7 @@ fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32>
 fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
     use std::io::IsTerminal;
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    // After a herdr restart the shepherd's pane may carry a dead lead's old id.
-    let shepherd = ledger
-        .dir()
-        .is_ok_and(|state| shepherd_here(&state, own_pane().as_deref()).is_some());
-    if let Some(client) = own_broker().filter(|_| !shepherd) {
+    if let Some(client) = own_broker() {
         let op = broker::Op::Status {
             all,
             strays,
@@ -1467,13 +1463,21 @@ impl broker::Sink for Printed {
     }
 }
 
-/// The broker of the lead running this loopherd, if a lead runs it.
+/// The broker of the lead running this loopherd, if a lead runs it. The
+/// shepherd's pane may carry a dead lead's old id after a herdr restart, so
+/// it is never a lead's.
 fn own_broker() -> Option<broker::Client> {
     let paths = Paths::from_env().ok()?;
     let ledger = FileLedger::new(FileLedger::default_path().ok()?);
+    let id = own_pane();
+    let shepherd = ledger
+        .dir()
+        .is_ok_and(|state| shepherd_here(&state, id.as_deref()).is_some());
+    if shepherd {
+        return None;
+    }
     let lineage = own_lineage();
     let socket = socket_from_env();
-    let id = own_pane();
     let pane = id.as_deref().map(|id| tool_hook::Pane {
         id,
         socket: socket.as_deref(),

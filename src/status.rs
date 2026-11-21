@@ -1,7 +1,5 @@
 //! `loopherd status`: ledger members grouped by herd with herdr's live status.
 
-use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -259,17 +257,14 @@ fn status_of(
 
 /// The worktree's checked-out branch, `detached`, or `None` when there's no
 /// worktree or git can't say. The repo's own branch says nothing about the agent's.
+/// The worktree may be a lead's to write, so git runs in its guarded form.
 pub(crate) fn branch(record: &AgentRecord) -> Option<String> {
-    branch_at(record.worktree.as_deref()?)
-}
-
-fn branch_at(dir: &Path) -> Option<String> {
+    let dir = record.worktree.as_deref()?;
     if !dir.is_dir() {
         return None;
     }
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let out = crate::worktree::git_command(&record.repo, dir)
+        .ok()?
         .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
         // These override -C, so every row would show the same branch.
         .env_remove("GIT_DIR")
@@ -449,6 +444,7 @@ mod tests {
     use crate::herdr::{Agent, AgentStatus};
     use crate::ledger::{AgentRecord, MemLedger};
     use crate::pause::Pauses;
+    use std::path::Path;
 
     fn entry(name: &str, herd: Option<&str>, worktree: &str) -> AgentRecord {
         AgentRecord {
@@ -1255,12 +1251,27 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         let root = tempfile::tempdir().unwrap();
         let repo = crate::worktree::testing::repo_with_origin(root.path());
         let mut on_branch = entry("a", None, "x");
+        on_branch.repo = repo.clone();
         on_branch.worktree = Some(repo.clone());
         assert_eq!(branch(&on_branch).as_deref(), Some("main"));
 
         crate::worktree::testing::git_in(&repo, &["checkout", "--quiet", "--detach"]);
         assert_eq!(branch(&on_branch).as_deref(), Some("detached"));
         assert_eq!(branch(&entry("b", None, "missing")), None);
+    }
+
+    #[test]
+    fn a_worktree_whose_git_config_a_lead_could_have_set_shows_no_branch() {
+        use crate::worktree::testing::{git_in, repo_with_origin};
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        git_in(&repo, &["config", "extensions.worktreeConfig", "true"]);
+        git_in(&repo, &["config", "--worktree", "core.fsmonitor", "true"]);
+        let mut e = entry("a", None, "x");
+        e.repo = repo.clone();
+        e.worktree = Some(repo);
+
+        assert_eq!(branch(&e), None);
     }
 
     #[test]
@@ -1312,7 +1323,8 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         let root = tempfile::tempdir().unwrap();
         let mut ledger = MemLedger::default();
         let mut e = entry("lh-1", None, "unused");
-        e.worktree = Some(crate::worktree::testing::repo_with_origin(root.path()));
+        e.repo = crate::worktree::testing::repo_with_origin(root.path());
+        e.worktree = Some(e.repo.clone());
         ledger.0.insert(e.name.clone(), e);
         let herdr = FakeHerdr::new(&[("w1", "main")]).with_raw_agent(agent(
             Some("lh-1"),
