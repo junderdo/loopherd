@@ -712,8 +712,9 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   and `status` wait on the feed in flight, and one that waits past its
   own bound (2 minutes for `tell`) is withdrawn and must be asked again. A lead's
   `<lead>'s broker predates this loopherd` error, its `can't read` reply
-  error, and `loopherd doctor`'s warning that a broker runs another binary
-  (which `scripts/install` shows) all ask for the same command.
+  error, and `loopherd doctor`'s warning that a broker doesn't run the
+  loopherd on PATH (which `scripts/install` shows) all ask for the same
+  command.
 - **After a herdr restart** run `loopherd revive` (`--dry-run` first). It
   resumes non-retired members by session ID, and prompts each lead whose
   watch isn't running to re-arm it. It never prompts workers. It skips a

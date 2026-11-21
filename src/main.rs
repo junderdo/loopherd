@@ -1616,6 +1616,8 @@ fn run_broker(lead: &str) -> Result<i32> {
 }
 
 fn run_broker_restart(lead: &str) -> Result<i32> {
+    // Before anything else: a reinstall after this still leaves a path to start the new broker from.
+    let exe = runnable_exe()?;
     let paths = Paths::from_env()?;
     let caller = sandbox::calling_lead(&paths, &process::ProcFs, std::process::id());
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
@@ -1626,7 +1628,7 @@ fn run_broker_restart(lead: &str) -> Result<i32> {
             "refused: broker-restart is the shepherd's or the human's, and a lead runs this loopherd"
         );
     }
-    broker::restart_broker(&paths, lead, &mut Printed)?;
+    broker::restart_broker(&paths, lead, &exe, &mut Printed)?;
     Ok(0)
 }
 

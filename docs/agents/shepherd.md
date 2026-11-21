@@ -76,6 +76,37 @@ Backlog cards into members `lh-<n>` on `<type>/LH-<n>-<slug>`.
 
   `<shortLink>` is the last part of the card's URL in `scripts/trello show`.
 
+## Grilling
+
+A `wayfinding:grilling` card runs in its own tab with a fresh Claude, never in
+your pane, so the grill stays out of your context. From your own pane:
+
+```bash
+herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd <main checkout> --label grill-LH-<n> --no-focus
+herdr agent start grill-lh-<n> --kind claude --pane <.result.root_pane.pane_id from tab create>
+prompt=$(mktemp)
+cat > "$prompt" <<'PROMPT'
+<the filled prompt>
+PROMPT
+herdr agent prompt grill-lh-<n> "$(cat "$prompt")"
+```
+
+The quoted heredoc keeps the prompt's backticks and `$(…)` from running in
+your shell; never pass the prompt inline in double quotes.
+
+Wait for the new tab's shell prompt before `agent start` (see Launch agent in
+[herdr.md](../research/herdr.md)). Fill the prompt from
+[grill-prompt.md](grill-prompt.md): `<CARD>`, `<NAME>`, `<CARD_URL>`,
+`<REPO>`, `<SLUG>`, and `<BACKGROUND>`, the decisions and cards the card leans
+on. Then tell the human to switch to tab `grill-LH-<n>`.
+
+The grill session isn't in the ledger. After its PR merges it closes the card
+out and sends you `<card> merged and closed out: …`; close its tab then
+(`herdr tab close <tab>`). If the human reports the merge instead, its pane
+already closed, do the close-out yourself: move the card to Done, run
+`scripts/trello unblock`, remove its worktree and local branch, and close the
+tab if it's still open.
+
 ## Lead
 
 [examples/loopherd-cards-lead.toml](../examples/loopherd-cards-lead.toml) is

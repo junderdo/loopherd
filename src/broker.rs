@@ -783,9 +783,14 @@ pub fn serve<L: Ledger + Clone + Send>(
     // the lead's sandbox can't write config/broker to plant a link.
     let remote =
         crate::worktree::remote_timeout().map_or(String::new(), |r| r.as_secs().to_string());
-    let binary = std::env::current_exe().map_or(String::new(), |exe| {
-        let Binary { path, version } = Binary::at(exe);
-        format!("{VERSION}{version}\n{BINARY}{}\n", path.display())
+    let binary = Binary::running().map_or(String::new(), |b| {
+        format!(
+            "{VERSION}{}\n{BINARY}{}\n{FILE}{} {}\n",
+            b.version,
+            b.path.display(),
+            b.file.dev,
+            b.file.ino
+        )
     });
     let record = LockRecord {
         path: lock_file(paths, lead),
@@ -1558,7 +1563,8 @@ const START_TIMEOUT: Duration = Duration::from_secs(5);
 /// Starts `loopherd broker <lead>` detached, in a session of its own, unless
 /// a broker already serves `lead`, and waits until it serves.
 pub fn start(paths: &Paths, lead: &str) -> Result<bool> {
-    start_with(paths, lead, &mut || spawn(paths, lead))
+    let exe = std::env::current_exe().context("find the loopherd binary")?;
+    start_with(paths, lead, &mut || spawn(paths, lead, &exe))
 }
 
 fn start_with(paths: &Paths, lead: &str, spawn: &mut dyn FnMut() -> Result<u32>) -> Result<bool> {
@@ -1578,10 +1584,9 @@ fn start_with(paths: &Paths, lead: &str, spawn: &mut dyn FnMut() -> Result<u32>)
 }
 
 /// Starts `loopherd broker <lead>` detached and waits until it serves, returning its pid.
-fn spawn(paths: &Paths, lead: &str) -> Result<u32> {
+fn spawn(paths: &Paths, lead: &str, exe: &Path) -> Result<u32> {
     use std::os::unix::process::CommandExt;
-    let exe = std::env::current_exe().context("find the loopherd binary")?;
-    let mut command = std::process::Command::new(&exe);
+    let mut command = std::process::Command::new(exe);
     command
         .args(["broker", lead])
         .env_remove("HERDR_PANE_ID")
@@ -1632,9 +1637,12 @@ fn serving_once_started(paths: &Paths, lead: &str, mut child: std::process::Chil
 /// Stops lead `lead`'s broker once its request in flight is answered, then
 /// starts one from this loopherd's binary; with none running, just starts one.
 /// Requests still queued wait for the new broker. Gives up, leaving the old
-/// one running, after as long as its lead waits on a feed.
-pub fn restart_broker(paths: &Paths, lead: &str, sink: &mut dyn Sink) -> Result<()> {
-    restart_broker_with(paths, lead, FEED_WITHIN, sink, &mut || spawn(paths, lead))
+/// one running, after as long as its lead waits on a feed. `exe` is resolved
+/// by the caller up front, since a reinstall during the wait renames over it.
+pub fn restart_broker(paths: &Paths, lead: &str, exe: &Path, sink: &mut dyn Sink) -> Result<()> {
+    restart_broker_with(paths, lead, FEED_WITHIN, sink, &mut || {
+        spawn(paths, lead, exe)
+    })
 }
 
 fn restart_broker_with(
@@ -1776,6 +1784,7 @@ const MARKS: &str = "marks";
 
 const VERSION: &str = "version ";
 const BINARY: &str = "binary ";
+const FILE: &str = "file ";
 
 /// A loopherd binary, which a broker records in its lock so a newer one can tell it is stale.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1783,15 +1792,39 @@ pub struct Binary {
     pub path: PathBuf,
     /// What `loopherd --version` prints, which names its commit off a release tag.
     pub version: String,
+    /// Tells two builds apart that print one version, such as two dirty builds of a commit.
+    pub file: FileId,
 }
 
 impl Binary {
-    /// This loopherd's build, at `path`.
-    pub fn at(path: PathBuf) -> Binary {
-        Binary {
+    /// The binary this process runs.
+    fn running() -> Option<Binary> {
+        let path = std::env::current_exe().ok()?;
+        // /proc's is the running file even once a reinstall replaced its path; macOS has no /proc.
+        let file = FileId::of(Path::new("/proc/self/exe")).or_else(|| FileId::of(&path))?;
+        Some(Binary {
             path,
             version: env!("LOOPHERD_VERSION").into(),
-        }
+            file,
+        })
+    }
+}
+
+/// A file's device and inode, which a rebuild or reinstall changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileId {
+    dev: u64,
+    ino: u64,
+}
+
+impl FileId {
+    /// The file at `path`, following links.
+    pub fn of(path: &Path) -> Option<FileId> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(FileId {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        })
     }
 }
 
@@ -1799,9 +1832,14 @@ impl Binary {
 pub fn recorded_binary(paths: &Paths, lead: &str) -> Option<Binary> {
     let text = std::fs::read_to_string(lock_file(paths, lead)).ok()?;
     let field = |prefix: &str| text.lines().find_map(|line| line.strip_prefix(prefix));
+    let (dev, ino) = field(FILE)?.split_once(' ')?;
     Some(Binary {
         version: field(VERSION)?.into(),
         path: field(BINARY)?.into(),
+        file: FileId {
+            dev: dev.parse().ok()?,
+            ino: ino.parse().ok()?,
+        },
     })
 }
 
@@ -2765,7 +2803,9 @@ mod tests {
 
         let recorded = recorded_binary(&world.paths, "lead-h").unwrap();
 
-        assert_eq!(recorded, Binary::at(std::env::current_exe().unwrap()));
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(recorded.path, exe);
+        assert_eq!(recorded.file, FileId::of(&exe).unwrap());
         assert_eq!(recorded.version, env!("LOOPHERD_VERSION"));
         world.retire("lead-h");
         serving.join().unwrap().0.unwrap();
