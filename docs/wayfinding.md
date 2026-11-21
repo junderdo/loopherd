@@ -131,6 +131,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D116](decisions/D116.md) | Amends D60 and D17. `running low` fires at claimable ≤ `[queue] low_at` (default `2 × max`, at least `max`); a `follow_ups_ready` switch files a reviewer's in-scope follow-ups ready but blocked on their parent, with a veto; a `slot = false` template field; and a `groom` member, started on `running low` in place of D60's subagent, edits and comments on cards and reports a numbered batch the shepherd applies on the human's approval. |
 | [D117](decisions/D117.md) | Amends D98. A broker lane holds at most 8 waiting requests and refuses more as busy; the lock record is cleared on exit, so `start` waits out an exiting broker and no stale `marks` line outlives it; retirement is read per request; an idle retiring broker answers waiting requests "is retired". |
 | [D118](decisions/D118.md) | Amends D19. install-hook writes the skill to `~/.agents/skills/loopherd` and links `~/.claude/skills/loopherd` to it relatively, replacing only its own old copy and leaving anything else there alone; `--settings` keeps both in the settings file's directory; doctor warns on a missing or foreign link. |
+| [D119](decisions/D119.md) | Amends D97 and D107. Each agent's mailbox is `reports/<name>/mailbox.jsonl`, written only there; readers read an older release's flat `reports/<name>.jsonl` first as its prefix, so cursors stay valid; `herd remove` deletes both and the empty directory. |
 
 ## Emerging model
 
