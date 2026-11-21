@@ -514,14 +514,18 @@ impl Guard {
 
     /// Removes a retired lead's MCP config, and its settings once `ended`
     /// says its Claude has, so a running Claude keeps its sandbox; a
-    /// sandboxed worker's settings and kept record, once ended. A lead caller
+    /// sandboxed worker's settings, MCP config and kept record, once ended. A lead caller
     /// removes no lead's files: it could have forged the entry. Returns a
     /// line per file removed or failed.
     pub fn forget_launch(&self, name: &str, ended: bool) -> Vec<String> {
         // A lead can't write the config dir, so a member record there is no forgery of its.
         let member = crate::worker_sandbox::member_file(&self.paths, name);
         if member.is_file() {
-            let files = [settings_file(&self.paths, name), member];
+            let files = [
+                settings_file(&self.paths, name),
+                mcp_file(&self.paths, name),
+                member,
+            ];
             return match ended {
                 true => removed(files),
                 false => vec![],
@@ -534,11 +538,7 @@ impl Guard {
         if !lead_file(&self.paths, name).is_file() {
             return vec![];
         }
-        let mcp = self
-            .paths
-            .config_dir()
-            .join("sandbox")
-            .join(format!("{name}.mcp.json"));
+        let mcp = mcp_file(&self.paths, name);
         let settings = ended.then(|| settings_file(&self.paths, name));
         removed(std::iter::once(mcp).chain(settings))
     }
@@ -872,32 +872,42 @@ pub fn launch_flag_refusals(
     args: &[String],
     herd_args: Option<(&str, &[String])>,
 ) -> Vec<String> {
-    let passes = |args: &[String], flag: &str| {
-        args.iter()
-            .any(|a| a == flag || a.starts_with(&format!("{flag}=")))
-    };
     let drop = |flag: &str| match herd_args {
-        Some((herd, shared)) if passes(shared, flag) => herd_args_fix(herd, "it"),
+        Some((herd, shared)) if launch_flags_in(shared).contains(&flag) => {
+            herd_args_fix(herd, "it")
+        }
         _ => "drop it from [lead].args, the herd's args and the command line".into(),
     };
-    let settings = passes(args, "--settings").then(|| {
-        format!(
-            "{name}'s args pass --settings, which its sandbox's settings file takes; \
-             {}, and put those settings in ~/.claude/settings.json",
-            drop("--settings")
-        )
-    });
-    let mcp = ["--mcp-config", "--strict-mcp-config"]
+    launch_flags_in(args)
         .into_iter()
-        .filter(|flag| passes(args, flag))
-        .map(|flag| {
-            format!(
-                "{name}'s args pass {flag}, which its launch takes; {}, and name the \
-                 servers it may use in [lead] mcp_servers",
-                drop(flag)
-            )
-        });
-    settings.into_iter().chain(mcp).collect()
+        .map(|flag| launch_flag_refusal(name, flag, &drop(flag), "[lead]"))
+        .collect()
+}
+
+/// Which of loopherd's own launch flags `args` pass.
+pub fn launch_flags_in(args: &[String]) -> Vec<&'static str> {
+    ["--settings", "--mcp-config", "--strict-mcp-config"]
+        .into_iter()
+        .filter(|flag| {
+            args.iter()
+                .any(|a| a == flag || a.starts_with(&format!("{flag}=")))
+        })
+        .collect()
+}
+
+/// Why member `name` can't pass `flag`, with how to `drop` it; `table` is
+/// the herd file table whose `mcp_servers` names its servers.
+pub fn launch_flag_refusal(name: &str, flag: &str, drop: &str, table: &str) -> String {
+    match flag {
+        "--settings" => format!(
+            "{name}'s args pass --settings, which its sandbox's settings file takes; {drop}, \
+             and put those settings in ~/.claude/settings.json"
+        ),
+        _ => format!(
+            "{name}'s args pass {flag}, which its launch takes; {drop}, and name the servers \
+             it may use in {table} mcp_servers"
+        ),
+    }
 }
 
 /// The warnings `lead`'s fresh args start it with, failing where they'd
@@ -942,7 +952,7 @@ fn start(
     let arg_warnings = arg_warnings(paths, name, lead, from)?;
     let (_, mode) = herd::lead_sandbox(paths, &lead.herd)?;
     let dir = paths.config_dir().join("sandbox");
-    let mcp = dir.join(format!("{name}.mcp.json"));
+    let mcp = mcp_file(paths, name);
     let mcp_text = serde_json::to_string_pretty(&mcp_config(paths, name, &lead.herd)?)? + "\n";
     let keep_launch = || -> Result<()> {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
@@ -1056,24 +1066,58 @@ fn start(
 /// and the lead can write.
 fn mcp_config(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
     let wanted = herd::lead_mcp_servers(paths, herd)?;
+    user_scope_mcp_config(paths, &wanted)?.map_err(|server| {
+        anyhow::anyhow!(unknown_mcp_server(
+            paths, name, herd, "[lead]", &server, "a lead"
+        ))
+    })
+}
+
+/// An `--mcp-config` holding only the `wanted` servers, from the human's
+/// user scope; `Err` names the first one it doesn't configure.
+pub fn user_scope_mcp_config(
+    paths: &Paths,
+    wanted: &[String],
+) -> Result<std::result::Result<Value, String>> {
     let mut servers = serde_json::Map::new();
     if wanted.is_empty() {
-        return Ok(json!({"mcpServers": servers}));
+        return Ok(Ok(json!({"mcpServers": servers})));
     }
     let configured = user_mcp_servers(paths)?;
     for server in wanted {
-        let Some(found) = configured.get(&server) else {
-            bail!(
-                "{name} can't start: herd {herd}'s [lead] mcp_servers names {server:?}, which \
-                 {} doesn't configure in your user scope; add it with claude mcp add --scope \
-                 user, or drop it from mcp_servers (local and project scopes, claude.ai \
-                 connectors and plugins' servers can't be given to a lead)",
-                user_mcp_file(paths).display()
-            );
+        let Some(found) = configured.get(server) else {
+            return Ok(Err(server.clone()));
         };
-        servers.insert(server, found.clone());
+        servers.insert(server.clone(), found.clone());
     }
-    Ok(json!({"mcpServers": servers}))
+    Ok(Ok(json!({"mcpServers": servers})))
+}
+
+/// Why member `name` can't start with `server`, which herd `herd`'s `table`
+/// names and the human's user scope doesn't configure.
+pub fn unknown_mcp_server(
+    paths: &Paths,
+    name: &str,
+    herd: &str,
+    table: &str,
+    server: &str,
+    whom: &str,
+) -> String {
+    format!(
+        "{name} can't start: herd {herd}'s {table} mcp_servers names {server:?}, which {} \
+         doesn't configure in your user scope; add it with claude mcp add --scope user, or \
+         drop it from mcp_servers (local and project scopes, claude.ai connectors and \
+         plugins' servers can't be given to {whom})",
+        user_mcp_file(paths).display()
+    )
+}
+
+/// The `--mcp-config` file a sandboxed member's Claude is started with.
+pub fn mcp_file(paths: &Paths, name: &str) -> PathBuf {
+    paths
+        .config_dir()
+        .join("sandbox")
+        .join(format!("{name}.mcp.json"))
 }
 
 pub fn user_mcp_file(paths: &Paths) -> PathBuf {
@@ -1127,7 +1171,7 @@ pub fn when_loosened(paths: &Paths, herd: &str) -> Result<WhenLoosened> {
     })
 }
 
-fn loosened_warning(name: &str, line: &str) -> String {
+pub fn loosened_warning(name: &str, line: &str) -> String {
     format!("{name}'s sandbox is loosened by {line}")
 }
 
@@ -1187,7 +1231,7 @@ pub fn herd_args_fix(herd: &str, args: &str) -> String {
     )
 }
 
-fn disallowed_warning(name: &str, line: &str) -> String {
+pub fn disallowed_warning(name: &str, line: &str) -> String {
     format!("{name} starts with an arg that may loosen its sandbox or permissions: {line}")
 }
 
@@ -1250,7 +1294,7 @@ pub fn configured_disallowed_args(paths: &Paths, herd: &str) -> Result<Vec<Strin
 }
 
 /// Each arg the allowlist doesn't cover, with the values that follow a flag.
-fn outside_allowlist(args: &[String]) -> Vec<String> {
+pub fn outside_allowlist(args: &[String]) -> Vec<String> {
     let mut found = vec![];
     let mut at = 0;
     while at < args.len() {
@@ -1350,7 +1394,7 @@ const WRITING_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 /// worktree's project and local settings only the permissions count, since
 /// `--settings` locks their sandbox keys out. D100 says which keys reach a
 /// lead, and why.
-fn loosenings(home: &Path, worktree: &Path, own: &Value) -> Vec<String> {
+pub fn loosenings(home: &Path, worktree: &Path, own: &Value) -> Vec<String> {
     let own_writes: Vec<PathBuf> = entries(&own["sandbox"]["filesystem"]["allowWrite"])
         .into_iter()
         .map(PathBuf::from)
@@ -2086,13 +2130,13 @@ mod tests {
     }
 
     #[test]
-    fn a_retire_by_anyone_removes_a_sandboxed_workers_settings_and_record_once_its_claude_has_ended()
+    fn a_retire_by_anyone_removes_a_sandboxed_workers_settings_mcp_config_and_record_once_its_claude_has_ended()
      {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::under(root.path());
         let dir = paths.config_dir().join("sandbox");
         std::fs::create_dir_all(&dir).unwrap();
-        let files = ["w1.json", "w1.member.json"];
+        let files = ["w1.json", "w1.mcp.json", "w1.member.json"];
         for file in files {
             std::fs::write(dir.join(file), "{}").unwrap();
         }

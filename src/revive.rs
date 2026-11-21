@@ -770,7 +770,13 @@ fn revive_one(
     match &lead {
         None => {
             if let Some(member) = &worker {
-                match worker_sandbox::prepare(&req.paths, &record.name, member, probe) {
+                match worker_sandbox::prepare(
+                    &req.paths,
+                    &record.name,
+                    member,
+                    worker_sandbox::ArgsFrom::Kept,
+                    probe,
+                ) {
                     Ok(launch) => {
                         warnings.extend(launch.warnings(&record.name));
                         unsandboxed = launch.unsandboxed().map(str::to_string);
@@ -1055,6 +1061,10 @@ mod tests {
         }
     }
 
+    fn mcp_file(req: &ReviveRequest) -> PathBuf {
+        req.paths.config_dir().join("sandbox/w1.mcp.json")
+    }
+
     fn allow_write(req: &ReviveRequest) -> serde_json::Value {
         let settings = req.paths.config_dir().join("sandbox/w1.json");
         let written: serde_json::Value =
@@ -1101,6 +1111,9 @@ mod tests {
                 "opus".into(),
                 "--settings".into(),
                 settings.display().to_string(),
+                "--strict-mcp-config".into(),
+                "--mcp-config".into(),
+                mcp_file(&req).display().to_string(),
             ]
         );
         assert_eq!(allow_write(&req), cwd.path().display().to_string());
@@ -1153,6 +1166,9 @@ mod tests {
             "opus".into(),
             "--settings".into(),
             settings.display().to_string(),
+            "--strict-mcp-config".into(),
+            "--mcp-config".into(),
+            mcp_file(&req).display().to_string(),
         ];
         assert_eq!(
             herdr.started()[0].args,
@@ -1214,7 +1230,15 @@ mod tests {
         );
         assert_eq!(
             herdr.started()[0].args,
-            ["--resume", "sess-w1", "--model", "opus"]
+            [
+                "--resume",
+                "sess-w1",
+                "--model",
+                "opus",
+                "--strict-mcp-config",
+                "--mcp-config",
+                &mcp_file(&req).display().to_string(),
+            ]
         );
         assert_eq!(
             ledger.0["w1"].unsandboxed.as_deref(),

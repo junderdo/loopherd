@@ -396,8 +396,56 @@ fn herd_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
         }
         checks.extend(loosened_checks(paths, &herd));
         checks.extend(lead_arg_checks(paths, &herd));
-        checks.extend(mcp_server_checks(paths, &herd));
+        if let Ok(wanted) = crate::herd::lead_mcp_servers(paths, &herd) {
+            let check = format!("herd {herd} mcp_servers");
+            checks.extend(mcp_server_checks(
+                paths, &check, &wanted, "[lead]", "its lead",
+            ));
+        }
+        checks.extend(worker_guard_checks(paths, &herd));
     }
+    checks
+}
+
+/// What would refuse or warn a sandboxed worker of `herd` before `feed`
+/// starts one: its herd file's args and `[worker] mcp_servers`.
+fn worker_guard_checks(paths: &Paths, herd: &str) -> Vec<Check> {
+    let Ok(worker) = crate::herd::worker(paths, herd) else {
+        return vec![];
+    };
+    if worker.sandbox == WorkerSandbox::Off {
+        return vec![];
+    }
+    let check = format!("herd {herd} worker mcp_servers");
+    let mut checks = mcp_server_checks(
+        paths,
+        &check,
+        &worker.mcp_servers,
+        "[worker]",
+        "a sandboxed worker",
+    );
+    let Ok(found) = crate::worker_sandbox::configured_arg_findings(paths, herd) else {
+        return checks;
+    };
+    let name = format!("herd {herd} worker args");
+    let flags = found.flags.into_iter();
+    checks.extend(flags.map(|(line, fix)| failure(&name, line, fix)));
+    let disallowed = found.disallowed;
+    let fix = format!(
+        "drop it (a sandboxed worker takes only {})",
+        crate::sandbox::ALLOWED_ARGS
+    );
+    checks.extend(disallowed.into_iter().map(|line| match worker.sandbox {
+        WorkerSandbox::Require => failure(
+            &name,
+            line,
+            format!(
+                "{fix}, or loopherd herd set {herd} worker.sandbox '\"prefer\"' to start its \
+                 workers with it as a warning"
+            ),
+        ),
+        _ => warning(&name, line, fix.clone()),
+    }));
     checks
 }
 
@@ -428,39 +476,41 @@ fn unix_socket_checks(install: &Install, paths: &Paths, only: Option<&str>) -> V
         .collect()
 }
 
-/// Each `[lead] mcp_servers` name the human's user scope doesn't configure,
-/// for which the lead isn't started under either mode.
-fn mcp_server_checks(paths: &Paths, herd: &str) -> Vec<Check> {
-    let Ok(wanted) = crate::herd::lead_mcp_servers(paths, herd) else {
-        return vec![];
-    };
+/// Each name in `table`'s `mcp_servers` the human's user scope doesn't
+/// configure, for which `whom` isn't started under either mode.
+fn mcp_server_checks(
+    paths: &Paths,
+    check: &str,
+    wanted: &[String],
+    table: &str,
+    whom: &str,
+) -> Vec<Check> {
     if wanted.is_empty() {
         return vec![];
     }
     let file = crate::sandbox::user_mcp_file(paths);
-    let name = format!("herd {herd} mcp_servers");
     let configured = match crate::sandbox::user_mcp_servers(paths) {
         Ok(configured) => configured,
         Err(e) => {
             return vec![failure(
-                &name,
-                format!("{e:#}, so its lead isn't started"),
+                check,
+                format!("{e:#}, so {whom} isn't started"),
                 format!("fix {}", file.display()),
             )];
         }
     };
     wanted
-        .into_iter()
-        .filter(|server| !configured.contains_key(server))
+        .iter()
+        .filter(|server| !configured.contains_key(*server))
         .map(|server| {
             failure(
-                &name,
+                check,
                 format!(
-                    "{server:?} isn't in your user scope in {}, so its lead isn't started",
+                    "{server:?} isn't in your user scope in {}, so {whom} isn't started",
                     file.display()
                 ),
                 format!(
-                    "claude mcp add --scope user {server} …, or drop it from [lead] mcp_servers"
+                    "claude mcp add --scope user {server} …, or drop it from {table} mcp_servers"
                 ),
             )
         })
@@ -3254,6 +3304,80 @@ mod tests {
                  from [lead] mcp_servers",
                 file.display()
             )]
+        );
+    }
+
+    #[test]
+    fn a_sandboxed_workers_mcp_server_missing_from_the_user_scope_fails_and_an_off_herds_isnt() {
+        let m = machine(&ALL);
+        for (herd, worker) in [("h", "require"), ("plain", "off")] {
+            let repo = m.herd(herd);
+            m.herd_file(
+                herd,
+                &format!(
+                    "repo = {:?}\n[template.t]\nparams = []\nprompt = \"go\"\n\
+                     [worker]\nsandbox = \"{worker}\"\nmcp_servers = [\"trello\"]\n",
+                    repo.to_str().unwrap()
+                ),
+            );
+        }
+        let file = m.paths().home.join(".claude.json");
+
+        assert_eq!(
+            problems(&m, &herdr()),
+            [format!(
+                "failure herd h worker mcp_servers: \"trello\" isn't in your user scope in {}, \
+                 so a sandboxed worker isn't started; fix: claude mcp add --scope user trello \
+                 …, or drop it from [worker] mcp_servers",
+                file.display()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_sandboxed_workers_args_outside_the_allowlist_fail_under_require_and_warn_under_prefer() {
+        let m = machine(&ALL);
+        for (herd, worker) in [("req", "require"), ("pre", "prefer"), ("plain", "off")] {
+            let repo = m.herd(herd);
+            m.herd_file(
+                herd,
+                &format!(
+                    "repo = {:?}\nargs = [\"--add-dir\", \"/a\"]\n[template.t]\nparams = []\n\
+                     prompt = \"go\"\nargs = [\"--settings\", \"s.json\"]\n\
+                     [worker]\nsandbox = \"{worker}\"\n",
+                    repo.to_str().unwrap()
+                ),
+            );
+        }
+
+        let problems = problems(&m, &herdr());
+
+        let allowed = crate::sandbox::ALLOWED_ARGS;
+        assert_eq!(
+            problems
+                .iter()
+                .filter(|p| p.contains("worker args"))
+                .cloned()
+                .collect::<Vec<_>>(),
+            [
+                "failure herd pre worker args: --settings, from template t's args, which a \
+                 sandboxed worker's launch takes; fix: drop it, and put those settings in \
+                 ~/.claude/settings.json"
+                    .to_string(),
+                format!(
+                    "warning herd pre worker args: --add-dir /a, from herd pre's args; fix: drop \
+                     it (a sandboxed worker takes only {allowed})"
+                ),
+                "failure herd req worker args: --settings, from template t's args, which a \
+                 sandboxed worker's launch takes; fix: drop it, and put those settings in \
+                 ~/.claude/settings.json"
+                    .to_string(),
+                format!(
+                    "failure herd req worker args: --add-dir /a, from herd req's args; fix: drop \
+                     it (a sandboxed worker takes only {allowed}), or loopherd herd set req \
+                     worker.sandbox '\"prefer\"' to start its workers with it as a warning"
+                ),
+            ]
         );
     }
 

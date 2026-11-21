@@ -71,6 +71,9 @@ struct WorkerFile {
     #[serde(default)]
     sandbox: WorkerSandbox,
     unix_sockets: Option<UnixSockets>,
+    /// MCP servers, by name, from the human's own Claude config; a sandboxed worker gets no others.
+    #[serde(default)]
+    mcp_servers: Vec<String>,
 }
 
 /// How a lead with `merge` off is kept from merging.
@@ -922,11 +925,12 @@ pub fn lead_unix_sockets(paths: &Paths, herd: &str) -> Result<Option<UnixSockets
     Ok(lead.unix_sockets)
 }
 
-/// A herd's `[worker]` switches: sandbox and Unix sockets.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// A herd's `[worker]`: sandbox, Unix sockets and MCP servers.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Worker {
     pub sandbox: WorkerSandbox,
     pub unix_sockets: Option<UnixSockets>,
+    pub mcp_servers: Vec<String>,
 }
 
 /// A herd's `[worker]`; off with no Unix sockets when the herd has none.
@@ -936,7 +940,33 @@ pub fn worker(paths: &Paths, herd: &str) -> Result<Worker> {
     Ok(Worker {
         sandbox: worker.sandbox,
         unix_sockets: worker.unix_sockets,
+        mcp_servers: worker.mcp_servers,
     })
+}
+
+/// The args a herd member from `template` starts with before the command
+/// line's: the herd's `args`, then the template's.
+pub fn member_args(
+    paths: &Paths,
+    herd: &str,
+    template: &str,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let mut file = load(&paths.herds, herd).context("herd")?;
+    let template = file
+        .template
+        .remove(template)
+        .with_context(|| format!("herd: {herd} has no template {template}"))?;
+    Ok((file.args, template.args))
+}
+
+/// The herd's `args` and each template's, each named by where it's set.
+pub fn args_by_source(paths: &Paths, herd: &str) -> Result<Vec<(Vec<String>, String)>> {
+    let file = load(&paths.herds, herd).context("herd")?;
+    let templates =
+        (file.template.into_iter()).map(|(name, t)| (t.args, format!("template {name}'s args")));
+    Ok(std::iter::once((file.args, format!("herd {herd}'s args")))
+        .chain(templates)
+        .collect())
 }
 
 /// A herd's lead's switches, without reading its prompt.
@@ -1202,6 +1232,9 @@ fn check(herd: &str, text: &str, paths: &Paths) -> Result<HerdFile> {
             );
         }
     }
+    if let Some(worker) = &parsed.worker {
+        check_mcp_servers(&worker.mcp_servers).context("worker")?;
+    }
     Ok(parsed)
 }
 
@@ -1300,15 +1333,23 @@ fn describe(
             },
         ]
     });
-    let workers = parsed.worker.as_ref().map(|worker| {
+    let workers = parsed.worker.as_ref().into_iter().flat_map(|worker| {
         let sockets = match worker.unix_sockets {
             Some(UnixSockets::All) => "all",
             None => "none",
         };
-        format!(
+        let servers = match worker.mcp_servers.is_empty() {
+            true => "none".to_string(),
+            false => worker.mcp_servers.join(", "),
+        };
+        // Only a sandboxed worker's MCP servers are limited.
+        let mcp = (worker.sandbox != WorkerSandbox::Off)
+            .then(|| format!("  worker mcp_servers: {servers}"));
+        std::iter::once(format!(
             "  workers: sandbox {}, unix_sockets {sockets}",
             worker.sandbox.name()
-        )
+        ))
+        .chain(mcp)
     });
     let after_merge = (!parsed.after_merge.is_empty())
         .then(|| format!("  after_merge: {}", parsed.after_merge.join("; ")));
@@ -1625,6 +1666,77 @@ args = ["--model", "opus"]
     }
 
     #[test]
+    fn add_refuses_a_required_worker_its_new_worktrees_checked_out_settings_loosen() {
+        let (config, root) = worker_config("sandbox = \"require\"");
+        let seed = root.path().join("seed");
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&seed)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["checkout", "--quiet", "feature/existing"]);
+        fs::create_dir_all(seed.join(".claude")).unwrap();
+        fs::write(
+            seed.join(".claude/settings.json"),
+            r#"{"permissions": {"allow": ["Write"]}}"#,
+        )
+        .unwrap();
+        git(&["add", ".claude"]);
+        git(&["commit", "--quiet", "-m", "loosen"]);
+        let origin = root.path().join("origin.git");
+        git(&[
+            "push",
+            "--quiet",
+            origin.to_str().unwrap(),
+            "feature/existing",
+        ]);
+        let repo = root.path().join("proj/proj");
+        let fetched = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["fetch", "--quiet", "origin"])
+            .status()
+            .unwrap();
+        assert!(fetched.success());
+        let paths = config.paths();
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+
+        let err = add(
+            &herdr,
+            &mut ledger,
+            &paths,
+            &request("prs", "pr", &["1050"]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.downcast_ref::<crate::worker_sandbox::NotStarted>()
+                .is_some(),
+            "{err:#}"
+        );
+        let worktree = crate::worktree::planned_worktree(&repo, "feature/existing").unwrap();
+        assert!(
+            format!("{err:#}").contains(&format!(
+                "your Claude settings loosen its sandbox: {}: permissions.allow opens Write to \
+                 writes",
+                worktree.join(".claude/settings.json").display()
+            )),
+            "{err:#}"
+        );
+        assert!(!worktree.exists(), "the new worktree is removed");
+        assert!(herdr.started().is_empty());
+        assert!(ledger.0.is_empty());
+    }
+
+    #[test]
     fn add_starts_a_sandboxed_herds_worker_with_its_settings() {
         let (config, _repo) = worker_config("sandbox = \"require\"");
         let paths = config.paths();
@@ -1649,7 +1761,14 @@ args = ["--model", "opus"]
                 "--model",
                 "opus",
                 "--settings",
-                &settings.display().to_string()
+                &settings.display().to_string(),
+                "--strict-mcp-config",
+                "--mcp-config",
+                &paths
+                    .config_dir()
+                    .join("sandbox/zpr-1050.mcp.json")
+                    .display()
+                    .to_string(),
             ]
         );
         assert_eq!(rec.unsandboxed, None);
@@ -3371,6 +3490,39 @@ args = ["--model", "opus"]
     }
 
     #[test]
+    fn herds_shows_the_mcp_servers_a_herds_workers_may_use_and_refuses_a_blank_or_repeated_name() {
+        let herd = |servers: &str| {
+            format!("{LEAD_HERD}[worker]\nsandbox = \"require\"\nmcp_servers = [{servers}]\n")
+        };
+        let config = Config::with(&[
+            ("named", &herd("\"docs\", \"browser\"")),
+            (
+                "none",
+                &format!("{LEAD_HERD}[worker]\nsandbox = \"prefer\"\n"),
+            ),
+            ("blank", &herd("\" \"")),
+            ("twice", &herd("\"docs\", \"docs\"")),
+        ]);
+
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+
+        assert_eq!(code, 1, "{report}");
+        assert!(
+            report.contains("  worker mcp_servers: docs, browser\n"),
+            "{report}"
+        );
+        assert!(report.contains("  worker mcp_servers: none\n"), "{report}");
+        assert!(
+            report.contains("worker: mcp_servers names a blank server"),
+            "{report}"
+        );
+        assert!(
+            report.contains("worker: mcp_servers names \"docs\" twice"),
+            "{report}"
+        );
+    }
+
+    #[test]
     fn herds_shows_which_unix_sockets_each_lead_may_use_and_refuses_any_but_all() {
         let lead = |line: &str| format!("{LEAD_HERD}[lead]\nprompt = \"go\"\n{line}\n");
         let config = Config::with(&[
@@ -3434,6 +3586,11 @@ args = ["--model", "opus"]
             workers("sandbox require, unix_sockets all")
         );
         assert_eq!(shown("plain"), None);
+        assert_eq!(
+            report.matches("  worker mcp_servers: none").count(),
+            2,
+            "only the herds whose workers are sandboxed: {report}"
+        );
         assert!(report.contains("invalid bad-mode.toml"), "{report}");
         assert!(report.contains("invalid bad-sockets.toml"), "{report}");
     }
