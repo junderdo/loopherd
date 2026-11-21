@@ -844,7 +844,16 @@ pub fn serve<L: Ledger + Clone + Send>(
             // Reopened each round: the lead can replace any folder on the way.
             if let Ok(requests) = Dir::open(paths.state_dir(), &["broker", lead, "requests"]) {
                 let requests = Arc::new(requests);
-                for name in requests.names() {
+                let names = requests.names();
+                // Reread after listing, so a retire or relaunch just before a
+                // request was written decides it, not this round's earlier read.
+                let stopping = if names.is_empty() {
+                    stopping
+                } else {
+                    !unretired(ledger, lead)
+                };
+                retired.store(stopping, Ordering::SeqCst);
+                for name in names {
                     if in_flight.contains(&name) {
                         continue;
                     }
