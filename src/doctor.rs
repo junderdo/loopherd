@@ -458,16 +458,17 @@ fn lead_arg_checks(paths: &Paths, herd: &str) -> Vec<Check> {
     ) else {
         return vec![];
     };
-    let mut checks: Vec<Check> = crate::sandbox::launch_flag_refusals(&lead, &args)
-        .into_iter()
-        .map(|why| failure(&name, why, "drop it".into()))
-        .collect();
-    let Ok(lines) = crate::sandbox::configured_disallowed_args(paths, herd) else {
-        return checks;
-    };
     let fix = match shared {
         true => crate::sandbox::herd_args_fix(herd, "it"),
         false => "drop it".into(),
+    };
+    let herd_args = shared.then_some((herd, args.as_slice()));
+    let mut checks: Vec<Check> = crate::sandbox::launch_flag_refusals(&lead, &args, herd_args)
+        .into_iter()
+        .map(|why| failure(&name, why, fix.clone()))
+        .collect();
+    let Ok(lines) = crate::sandbox::configured_disallowed_args(paths, herd) else {
+        return checks;
     };
     let fix = format!("{fix} (a lead takes only {})", crate::sandbox::ALLOWED_ARGS);
     checks.extend(finding_checks(paths, herd, "lead args", lines, &fix));
@@ -3010,6 +3011,33 @@ mod tests {
             !problems
                 .iter()
                 .any(|p| p.starts_with("warning herd h lead args")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_launch_flag_in_the_herds_args_points_to_lead_args_not_dropping_it() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\nargs = [\"--settings\", \"x.json\"]\n\
+                 [lead]\nprompt = \"go\"\nmerge = true\n",
+                repo.to_str().unwrap()
+            ),
+        );
+
+        let problems = problems(&m, &herdr());
+
+        let fixes = "give herd h a [lead].args without it, since its workers take the herd's \
+                     args too, and put those settings in ~/.claude/settings.json; fix: give herd \
+                     h a [lead].args without it, since its workers take the herd's args too";
+        assert!(
+            problems.iter().any(|p| p.starts_with(
+                "failure herd h lead args: lead-h's args pass --settings, which its sandbox's \
+                 settings file takes;"
+            ) && p.ends_with(fixes)),
             "{problems:?}"
         );
     }

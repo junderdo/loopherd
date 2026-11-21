@@ -1308,6 +1308,34 @@ mod tests {
     }
 
     #[test]
+    fn a_launch_flag_from_the_herds_args_points_to_lead_args_not_dropping_it() {
+        let setup = Setup::with_lead(PROMPT);
+        let file = setup.root.join("config/herds/h.toml");
+        let text = fs::read_to_string(&file).unwrap().replacen(
+            "args = [\"--model\", \"opus\"]",
+            "args = [\"--mcp-config\", \"workers-mcp.json\"]",
+            1,
+        );
+        fs::write(&file, text).unwrap();
+
+        let err = dry_run(
+            &herdr(),
+            &MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "sandbox: lead-h's args pass --mcp-config, which its launch takes; give herd h a \
+             [lead].args without it, since its workers take the herd's args too, and name the \
+             servers it may use in [lead] mcp_servers"
+        );
+    }
+
+    #[test]
     fn dry_run_refuses_a_disallowed_arg_under_require_and_warns_under_prefer() {
         let setup = Setup::with_lead(PROMPT);
         let err = dry_run(

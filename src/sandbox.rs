@@ -804,26 +804,37 @@ enum ArgsFrom {
     Kept,
 }
 
-/// Why `args` pass each flag loopherd's launch of lead `name` takes, refused under every mode.
-pub fn launch_flag_refusals(name: &str, args: &[String]) -> Vec<String> {
-    let passes = |flag: &str| {
+/// Why `args` pass each flag loopherd's launch of lead `name` takes, refused
+/// under every mode. `herd_args` is herd and args where the lead takes its
+/// herd's shared args, which its workers take too.
+pub fn launch_flag_refusals(
+    name: &str,
+    args: &[String],
+    herd_args: Option<(&str, &[String])>,
+) -> Vec<String> {
+    let passes = |args: &[String], flag: &str| {
         args.iter()
             .any(|a| a == flag || a.starts_with(&format!("{flag}=")))
     };
-    let drop = "drop it from [lead].args, the herd's args and the command line";
-    let settings = passes("--settings").then(|| {
+    let drop = |flag: &str| match herd_args {
+        Some((herd, shared)) if passes(shared, flag) => herd_args_fix(herd, "it"),
+        _ => "drop it from [lead].args, the herd's args and the command line".into(),
+    };
+    let settings = passes(args, "--settings").then(|| {
         format!(
             "{name}'s args pass --settings, which its sandbox's settings file takes; \
-             {drop}, and put those settings in ~/.claude/settings.json"
+             {}, and put those settings in ~/.claude/settings.json",
+            drop("--settings")
         )
     });
     let mcp = ["--mcp-config", "--strict-mcp-config"]
         .into_iter()
-        .filter(|flag| passes(flag))
+        .filter(|flag| passes(args, flag))
         .map(|flag| {
             format!(
-                "{name}'s args pass {flag}, which its launch takes; {drop}, and name the \
-                 servers it may use in [lead] mcp_servers"
+                "{name}'s args pass {flag}, which its launch takes; {}, and name the \
+                 servers it may use in [lead] mcp_servers",
+                drop(flag)
             )
         });
     settings.into_iter().chain(mcp).collect()
@@ -836,7 +847,18 @@ pub fn fresh_arg_warnings(paths: &Paths, name: &str, lead: &Lead) -> Result<Vec<
 }
 
 fn arg_warnings(paths: &Paths, name: &str, lead: &Lead, from: ArgsFrom) -> Result<Vec<String>> {
-    if let Some(why) = launch_flag_refusals(name, &lead.args).into_iter().next() {
+    let shared = match from {
+        ArgsFrom::Fresh => match herd::lead_args(paths, &lead.herd)? {
+            (configured, true) => Some(configured),
+            (_, false) => None,
+        },
+        ArgsFrom::Kept => None,
+    };
+    let herd_args = shared.as_deref().map(|args| (lead.herd.as_str(), args));
+    if let Some(why) = launch_flag_refusals(name, &lead.args, herd_args)
+        .into_iter()
+        .next()
+    {
         bail!(why);
     }
     let disallowed = disallowed_args(paths, &lead.herd, &lead.args, from)?;
