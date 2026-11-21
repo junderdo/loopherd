@@ -4204,7 +4204,9 @@ mod tests {
         let (_root, repo) = branch_herd(&world);
         let human_s = checked_out(&repo, "mine");
         let g_s = checked_out(&repo, "theirs");
-        world.add(worker_at("g-theirs", "g", &repo, &g_s));
+        let mut g_retired = worker_at("g-theirs", "g", &repo, &g_s);
+        g_retired.retired = true;
+        world.add(g_retired);
         let own = checked_out(&repo, "ours");
         world.add(worker_at("b-ours", "h", &repo, &own));
         let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
@@ -4224,6 +4226,46 @@ mod tests {
 
         assert_eq!(code, 0, "{out}");
         assert!(out.lines().any(|l| l == "name b-ours"), "{out}");
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert!(herdr.tabs().is_empty());
+    }
+
+    /// Herd h's retired `b-earlier` and herd g's live `g-shared` both record
+    /// the worktree of branch `shared`, which feeding h would start.
+    fn shared_with_g(world: &World, repo: &Path) -> PathBuf {
+        let herd_file = world.paths.herds.join("h.toml");
+        let text = std::fs::read_to_string(&herd_file).unwrap();
+        std::fs::write(&herd_file, text.replace("echo lead-h", "echo shared")).unwrap();
+        let shared = checked_out(repo, "shared");
+        let mut retired = worker_at("b-earlier", "h", repo, &shared);
+        retired.retired = true;
+        world.add(retired);
+        world.add(worker_at("g-shared", "g", repo, &shared));
+        shared
+    }
+
+    #[test]
+    fn a_lead_s_add_and_feed_won_t_reuse_a_worktree_another_herd_s_live_worker_holds() {
+        let world = World::new();
+        let (_root, repo) = branch_herd(&world);
+        let shared = shared_with_g(&world, &repo);
+        let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
+        let why = format!(
+            "adding b-shared would reuse worktree {}, which herd g's g-shared holds",
+            shared.display()
+        );
+
+        let err = world
+            .client()
+            .call(&add_branch("shared", true))
+            .unwrap_err();
+        let (out, _, code) = world.client().call(&feed("h")).unwrap();
+
+        assert!(format!("{err:#}").ends_with(&why), "{err:#}");
+        assert_eq!(code, 1, "{out}");
+        let refused = format!("error: shared: refused: {why}");
+        assert!(out.lines().any(|l| l == refused), "{out}");
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
         assert!(herdr.tabs().is_empty());

@@ -592,14 +592,27 @@ impl Guard {
         let (Some(worktree), Some(herd)) = (reused, &req.member_of) else {
             return Ok(None);
         };
-        let recorded = ledger.entries()?.values().any(|entry| {
-            entry.herd.as_deref() == Some(herd.herd.as_str())
-                && entry
-                    .worktree
-                    .as_deref()
-                    .is_some_and(|w| same_dir(w, &worktree))
+        let entries = ledger.entries()?;
+        let mut at_worktree = entries.values().filter(|entry| {
+            entry
+                .worktree
+                .as_deref()
+                .is_some_and(|w| same_dir(w, &worktree))
         });
-        Ok((!recorded).then(|| {
+        let own = |entry: &&AgentRecord| entry.herd.as_deref() == Some(herd.herd.as_str());
+        if let Some(holder) = at_worktree.clone().find(|e| !e.retired && !own(e)) {
+            let of = holder
+                .herd
+                .as_deref()
+                .map_or("no herd's".into(), |h| format!("herd {h}'s"));
+            return Ok(Some(format!(
+                "adding {} would reuse worktree {}, which {of} {} holds",
+                req.name,
+                worktree.display(),
+                holder.name
+            )));
+        }
+        Ok((!at_worktree.any(|e| own(&e))).then(|| {
             format!(
                 "adding {} would reuse worktree {}, which no ledger entry of herd {} records",
                 req.name,
