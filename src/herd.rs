@@ -11,11 +11,10 @@ use serde::Deserialize;
 use crate::herdr::Herdr;
 use crate::ledger::{AgentRecord, Attended, FileLedger, Ledger};
 use crate::lock::Lock;
-use crate::sandbox::{SandboxMode, UnixSockets};
-use crate::spawn::{
-    Checkout, MemberOf, Prompt, SHELL_TIMEOUT, SpawnRequest, Spawned, preview, spawn,
-};
+use crate::sandbox::{Probe, SandboxMode, UnixSockets};
+use crate::spawn::{Checkout, MemberOf, Prompt, SHELL_TIMEOUT, SpawnRequest, Spawned, preview};
 use crate::template::Template;
+use crate::worker_sandbox::WorkerSandbox;
 
 mod edit;
 mod remove;
@@ -34,6 +33,7 @@ struct HerdFile {
     template: BTreeMap<String, TemplateFile>,
     queue: Option<QueueFile>,
     lead: Option<LeadFile>,
+    worker: Option<WorkerFile>,
     /// Commands `feed` runs in `repo` once per member, after it merges.
     #[serde(default)]
     after_merge: Vec<String>,
@@ -61,6 +61,15 @@ struct LeadFile {
     /// MCP servers, by name, from the human's own Claude config; a lead gets no others.
     #[serde(default)]
     mcp_servers: Vec<String>,
+    unix_sockets: Option<UnixSockets>,
+}
+
+/// A herd's workers: every member but its lead.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkerFile {
+    #[serde(default)]
+    sandbox: WorkerSandbox,
     unix_sockets: Option<UnixSockets>,
 }
 
@@ -335,6 +344,8 @@ pub struct AddRequest {
     pub return_pane: Option<String>,
     /// Whether an attended member's pane is focused once it is up and prompted.
     pub focus: bool,
+    /// Asked only when the herd's `[worker] sandbox` is on.
+    pub sandbox: Probe,
 }
 
 #[derive(Debug)]
@@ -376,14 +387,23 @@ pub fn add(
         Some(_) => members(ledger, &req.herd)?,
         None => 0,
     };
-    let spawned = spawn(herdr, ledger, &spawn_req, inherited_workspace)?;
-    let mut warning = max.filter(|&max| held >= max).map(|max| {
+    let (spawned, sandbox_warnings) = crate::worker_sandbox::spawn(
+        herdr,
+        ledger,
+        paths,
+        &spawn_req,
+        inherited_workspace,
+        req.sandbox,
+    )?;
+    let past_max = max.filter(|&max| held >= max).map(|max| {
         format!(
             "{} now has {} members, past its queue max of {max}",
             req.herd,
             held + 1
         )
     });
+    let warnings: Vec<String> = sandbox_warnings.into_iter().chain(past_max).collect();
+    let mut warning = (!warnings.is_empty()).then(|| warnings.join("; "));
     if attended
         && req.focus
         && !spawned.blocked
@@ -898,6 +918,23 @@ pub fn lead_unix_sockets(paths: &Paths, herd: &str) -> Result<Option<UnixSockets
     Ok(lead.unix_sockets)
 }
 
+/// A herd's `[worker]` switches: sandbox and Unix sockets.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Worker {
+    pub sandbox: WorkerSandbox,
+    pub unix_sockets: Option<UnixSockets>,
+}
+
+/// A herd's `[worker]`; off with no Unix sockets when the herd has none.
+pub fn worker(paths: &Paths, herd: &str) -> Result<Worker> {
+    let file = load(&paths.herds, herd).context("herd")?;
+    let worker = file.worker.unwrap_or_default();
+    Ok(Worker {
+        sandbox: worker.sandbox,
+        unix_sockets: worker.unix_sockets,
+    })
+}
+
 /// A herd's lead's switches, without reading its prompt.
 pub fn lead_switches(paths: &Paths, herd: &str) -> Result<Switches> {
     Ok(lead_sandbox(paths, herd)?.0)
@@ -1259,6 +1296,16 @@ fn describe(
             },
         ]
     });
+    let workers = parsed.worker.as_ref().map(|worker| {
+        let sockets = match worker.unix_sockets {
+            Some(UnixSockets::All) => "all",
+            None => "none",
+        };
+        format!(
+            "  workers: sandbox {}, unix_sockets {sockets}",
+            worker.sandbox.name()
+        )
+    });
     let after_merge = (!parsed.after_merge.is_empty())
         .then(|| format!("  after_merge: {}", parsed.after_merge.join("; ")));
     let unmerged = parsed
@@ -1282,6 +1329,7 @@ fn describe(
     std::iter::once(header)
         .chain(usages)
         .chain(lead)
+        .chain(workers)
         .chain(feed)
         .chain(backlog)
         .chain(after_merge)
@@ -1509,6 +1557,7 @@ args = ["--model", "opus"]
             ready_timeout: Duration::from_secs(60),
             return_pane: None,
             focus: true,
+            sandbox: || Ok(crate::sandbox::Sockets::Blocked),
         }
     }
 
@@ -1549,6 +1598,118 @@ args = ["--model", "opus"]
         let rec = &ledger.0["zpr-1050"];
         assert_eq!(rec.herd.as_deref(), Some("prs"));
         assert_eq!(rec.template.as_deref(), Some("pr"));
+    }
+
+    fn worker_herd(worker: &str) -> String {
+        format!("{PR_HERD}\n[worker]\n{worker}\n")
+    }
+
+    fn unavailable() -> std::result::Result<crate::sandbox::Sockets, crate::sandbox::Unavailable> {
+        Err(crate::sandbox::Unavailable {
+            why: "bubblewrap isn't installed".into(),
+            fix: "install bubblewrap".into(),
+        })
+    }
+
+    #[test]
+    fn add_starts_a_sandboxed_herds_worker_with_its_settings() {
+        let config = Config::with(&[("prs", &worker_herd("sandbox = \"require\""))]);
+        let paths = config.paths();
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+
+        add(
+            &herdr,
+            &mut ledger,
+            &paths,
+            &request("prs", "pr", &["1050"]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        let settings = paths.config_dir().join("sandbox/zpr-1050.json");
+        assert!(settings.is_file());
+        let rec = &ledger.0["zpr-1050"];
+        assert_eq!(
+            rec.claude_args,
+            [
+                "--permission-mode",
+                "auto",
+                "--model",
+                "opus",
+                "--settings",
+                &settings.display().to_string()
+            ]
+        );
+        assert_eq!(rec.unsandboxed, None);
+    }
+
+    #[test]
+    fn a_sandboxed_worker_whose_spawn_fails_leaves_no_settings_behind() {
+        let config = Config::with(&[("prs", &worker_herd("sandbox = \"require\""))]);
+        let paths = config.paths();
+        let mut herdr = herdr();
+        herdr.startup = crate::herdr::fake::Startup::Fails;
+
+        add(
+            &herdr,
+            &mut MemLedger::default(),
+            &paths,
+            &request("prs", "pr", &["1"]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            fs::read_dir(paths.config_dir().join("sandbox"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn add_refuses_a_required_worker_whose_sandbox_cant_start() {
+        let config = Config::with(&[("prs", &worker_herd("sandbox = \"require\""))]);
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        let req = AddRequest {
+            sandbox: unavailable,
+            ..request("prs", "pr", &["1050"])
+        };
+
+        let err = add(&herdr, &mut ledger, &config.paths(), &req, Some("w1")).unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("zpr-1050 can't start sandboxed"),
+            "{err:#}"
+        );
+        assert!(herdr.tabs().is_empty());
+        assert!(ledger.0.is_empty());
+    }
+
+    #[test]
+    fn add_starts_a_preferred_worker_unsandboxed_flagged_and_warned() {
+        let config = Config::with(&[("prs", &worker_herd("sandbox = \"prefer\""))]);
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        let req = AddRequest {
+            sandbox: unavailable,
+            ..request("prs", "pr", &["1050"])
+        };
+
+        let added = add(&herdr, &mut ledger, &config.paths(), &req, Some("w1")).unwrap();
+
+        let rec = &ledger.0["zpr-1050"];
+        assert_eq!(
+            rec.unsandboxed.as_deref(),
+            Some("bubblewrap isn't installed")
+        );
+        assert!(!rec.claude_args.iter().any(|a| a == "--settings"));
+        assert_eq!(
+            added.warning.as_deref(),
+            Some("zpr-1050 runs unsandboxed (bubblewrap isn't installed); install bubblewrap")
+        );
     }
 
     fn queue_herd(max: i64) -> String {
@@ -3165,6 +3326,48 @@ args = ["--model", "opus"]
         assert_eq!(shown("none"), "  unix_sockets: none");
         assert!(report.contains("invalid some.toml"), "{report}");
         assert!(report.contains("unknown variant `herdr`"), "{report}");
+    }
+
+    #[test]
+    fn herds_shows_each_herds_worker_sandbox_and_refuses_unknown_values() {
+        let herd = |worker: &str| format!("{LEAD_HERD}[worker]\n{worker}\n");
+        let config = Config::with(&[
+            ("off", &herd("")),
+            ("prefer", &herd("sandbox = \"prefer\"")),
+            (
+                "require",
+                &herd("sandbox = \"require\"\nunix_sockets = \"all\""),
+            ),
+            ("bad-mode", &herd("sandbox = \"on\"")),
+            ("bad-sockets", &herd("unix_sockets = \"herdr\"")),
+            ("plain", LEAD_HERD),
+        ]);
+
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+
+        assert_eq!(code, 1, "{report}");
+        let shown = |herd: &str| {
+            let at = report.find(&format!("\n{herd}  repo")).unwrap() + 1;
+            report[at..]
+                .lines()
+                .skip(1)
+                .take_while(|line| line.starts_with("  "))
+                .find(|line| line.starts_with("  workers:"))
+                .map(str::to_string)
+        };
+        let workers = |line: &str| Some(format!("  workers: {line}"));
+        assert_eq!(shown("off"), workers("sandbox off, unix_sockets none"));
+        assert_eq!(
+            shown("prefer"),
+            workers("sandbox prefer, unix_sockets none")
+        );
+        assert_eq!(
+            shown("require"),
+            workers("sandbox require, unix_sockets all")
+        );
+        assert_eq!(shown("plain"), None);
+        assert!(report.contains("invalid bad-mode.toml"), "{report}");
+        assert!(report.contains("invalid bad-sockets.toml"), "{report}");
     }
 
     #[test]

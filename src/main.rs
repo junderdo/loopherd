@@ -57,6 +57,7 @@ mod usage;
 mod version;
 mod view_pane;
 mod watch;
+mod worker_sandbox;
 mod worktree;
 
 use std::io::{Read, Write};
