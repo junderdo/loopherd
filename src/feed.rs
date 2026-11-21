@@ -907,6 +907,8 @@ fn task_request(
             params,
             claude_args: vec![],
             ready_timeout: req.ready_timeout,
+            return_pane: None,
+            focus: false,
         },
     )
 }
@@ -1146,6 +1148,7 @@ mod tests {
             socket: None,
             process: None,
             role: None,
+            attended: None,
             after_merge: None,
             unsandboxed: None,
             sockets_unblocked: None,

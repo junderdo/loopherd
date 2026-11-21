@@ -53,6 +53,9 @@ pub enum Op {
         claude_args: Vec<String>,
         dry_run: bool,
         ready_timeout_secs: u64,
+        /// Leaves focus where it is after starting an attended member.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_focus: bool,
     },
     Prompt {
         name: String,
@@ -233,6 +236,7 @@ impl Op {
                 claude_args,
                 dry_run,
                 ready_timeout_secs,
+                no_focus,
             } => {
                 let req = AddRequest {
                     herd: herd.clone(),
@@ -240,6 +244,8 @@ impl Op {
                     params: params.clone(),
                     claude_args: claude_args.clone(),
                     ready_timeout: Duration::from_secs(*ready_timeout_secs),
+                    return_pane: ctx.caller.pane.clone(),
+                    focus: !no_focus,
                 };
                 add(ctx, &req, *dry_run, sink)
             }
@@ -3578,6 +3584,7 @@ mod tests {
             claude_args: claude_args.iter().map(|a| a.to_string()).collect(),
             dry_run: true,
             ready_timeout_secs: 60,
+            no_focus: false,
         }
     }
 
@@ -3652,6 +3659,7 @@ mod tests {
             claude_args: vec![],
             dry_run,
             ready_timeout_secs: 60,
+            no_focus: false,
         }
     }
 
@@ -3707,6 +3715,7 @@ mod tests {
             claude_args: vec![],
             dry_run: true,
             ready_timeout_secs: 60,
+            no_focus: false,
         };
         let err = world.client().call(&same).unwrap_err();
         let lead_g = crate::worktree::worktree_path(&repo, "lead-g");
@@ -3984,6 +3993,7 @@ mod tests {
             claude_args: vec![],
             dry_run: false,
             ready_timeout_secs: 60,
+            no_focus: false,
         };
 
         let (_, _, fed) = client.call(&feed("h")).unwrap();

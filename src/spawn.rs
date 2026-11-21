@@ -10,7 +10,7 @@ use crate::context::SHEPHERD;
 use crate::herdr::{
     Agent, AgentStatus, Herdr, NewTab, StartOutcome, WaitOutcome, Workspace, wait_for_shell_prompt,
 };
-use crate::ledger::{AgentRecord, Ledger, Process, Role};
+use crate::ledger::{AgentRecord, Attended, Ledger, Process, Role};
 use crate::report::member_of_own_pane;
 use crate::template::Template;
 use crate::worktree::{ensure_detached_worktree, ensure_worktree, planned_worktree, worktree_path};
@@ -92,6 +92,7 @@ pub struct MemberOf {
     /// Prompt placeholders the ledger doesn't record.
     pub values: Vec<(String, String)>,
     pub role: Option<Role>,
+    pub attended: Option<Attended>,
 }
 
 /// Prompt text and the flag it came from, which errors name.
@@ -232,6 +233,7 @@ pub fn spawn(
         socket: Some(socket),
         process: None,
         role: req.member_of.as_ref().and_then(|m| m.role.clone()),
+        attended: req.member_of.as_ref().and_then(|m| m.attended.clone()),
         after_merge: None,
         unsandboxed: None,
         sockets_unblocked: None,
@@ -1114,6 +1116,7 @@ mod tests {
             params: vec![("number".into(), "1050".into())],
             values: vec![],
             role: None,
+            attended: None,
         }
     }
 
