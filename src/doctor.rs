@@ -452,20 +452,26 @@ fn loosened_checks(paths: &Paths, herd: &str) -> Vec<Check> {
 /// that keeps the lead from starting.
 fn lead_arg_checks(paths: &Paths, herd: &str) -> Vec<Check> {
     let name = format!("herd {herd} lead args");
-    if let Ok((args, _)) = crate::herd::lead_args(paths, herd)
-        && let Ok(lead) = crate::lead::lead_name(herd)
-        && let Some(why) = crate::sandbox::launch_flag_refusal(&lead, &args)
-    {
-        return vec![failure(&name, why, "drop it".into())];
-    }
-    let Ok(lines) = crate::sandbox::configured_disallowed_args(paths, herd) else {
+    let (Ok((args, shared)), Ok(lead)) = (
+        crate::herd::lead_args(paths, herd),
+        crate::lead::lead_name(herd),
+    ) else {
         return vec![];
     };
-    let drop = format!(
-        "drop it (a lead takes only {})",
-        crate::sandbox::ALLOWED_ARGS
-    );
-    finding_checks(paths, herd, "lead args", lines, &drop)
+    let mut checks: Vec<Check> = crate::sandbox::launch_flag_refusals(&lead, &args)
+        .into_iter()
+        .map(|why| failure(&name, why, "drop it".into()))
+        .collect();
+    let Ok(lines) = crate::sandbox::configured_disallowed_args(paths, herd) else {
+        return checks;
+    };
+    let fix = match shared {
+        true => crate::sandbox::herd_args_fix(herd, "it"),
+        false => "drop it".into(),
+    };
+    let fix = format!("{fix} (a lead takes only {})", crate::sandbox::ALLOWED_ARGS);
+    checks.extend(finding_checks(paths, herd, "lead args", lines, &fix));
+    checks
 }
 
 fn finding_checks(
@@ -2956,7 +2962,8 @@ mod tests {
         assert_eq!(
             problems(&m, &herdr()),
             [
-                "failure herd h lead args: --add-dir /srv, from herd h's args; fix: drop it (a lead \
+                "failure herd h lead args: --add-dir /srv, from herd h's args; fix: give herd h \
+              a [lead].args without it, since its workers take the herd's args too (a lead \
               takes only --model, --effort, --verbose and --permission-mode default, manual, auto \
               or plan), or loopherd herd set h lead.sandbox '\"prefer\"' to start its lead with it \
               as a warning"
@@ -2967,7 +2974,8 @@ mod tests {
         let problems = problems(&m, &herdr());
         assert!(
             problems.contains(
-                &"warning herd h lead args: --add-dir /srv, from herd h's args; fix: drop it (a \
+                &"warning herd h lead args: --add-dir /srv, from herd h's args; fix: give herd \
+                  h a [lead].args without it, since its workers take the herd's args too (a \
                   lead takes only --model, --effort, --verbose and --permission-mode default, manual, \
                   auto or plan)"
                     .to_string()
@@ -3004,6 +3012,37 @@ mod tests {
                 .any(|p| p.starts_with("warning herd h lead args")),
             "{problems:?}"
         );
+    }
+
+    #[test]
+    fn every_disallowed_lead_arg_is_reported_beside_each_launch_flag() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge = true\n\
+                 args = [\"--settings\", \"x.json\", \"--strict-mcp-config\", \
+                 \"--add-dir\", \"/srv\", \"--verbose\", \"--frobnicate\"]\n",
+                repo.to_str().unwrap()
+            ),
+        );
+
+        let problems: Vec<String> = problems(&m, &herdr())
+            .into_iter()
+            .filter(|p| p.starts_with("failure herd h lead args"))
+            .collect();
+
+        let starts = [
+            "failure herd h lead args: lead-h's args pass --settings,",
+            "failure herd h lead args: lead-h's args pass --strict-mcp-config,",
+            "failure herd h lead args: --add-dir /srv, from [lead].args; fix: drop it (",
+            "failure herd h lead args: --frobnicate, from [lead].args; fix: drop it (",
+        ];
+        assert_eq!(problems.len(), starts.len(), "{problems:?}");
+        for (problem, start) in problems.iter().zip(starts) {
+            assert!(problem.starts_with(start), "{problems:?}");
+        }
     }
 
     #[test]
