@@ -1748,24 +1748,36 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
                 &herd::credentials_with_sockets(herd),
             ));
         }
-        env = Some(
-            crate::credentials::lead_env(paths, herd)
-                .map_err(|e| credentials_refusal(name, &format!("{e:#}")))?,
-        );
-        let human =
-            crate::credentials::human_credentials(&paths.home, &|name| std::env::var_os(name));
+        let mounts = match std::fs::read("/proc/mounts") {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                return Err(credentials_refusal(
+                    name,
+                    &format!("its Windows drives can't be found to hide: read /proc/mounts: {e}"),
+                ));
+            }
+        };
+        let confined =
+            crate::credentials::confined(paths, herd, &|name| std::env::var_os(name), &mounts)
+                .map_err(|e| credentials_refusal(name, &format!("{e:#}")))?;
         // The file tools run outside the sandbox, so each path is denied to both.
-        let mut deny_read: Vec<String> = human
+        let mut deny_read: Vec<String> = confined
+            .deny_read
             .iter()
             .map(|(path, _)| path.display().to_string())
             .collect();
         deny_read.push(paths.locks_dir().display().to_string());
+        // Its broker's lock, stop file and replies, which its own loopherd reads.
+        let mut allow_read = confined.allow_read;
+        allow_read.push(crate::broker::dir(paths));
         sandbox["filesystem"]["denyRead"] = json!(deny_read);
-        sandbox["filesystem"]["allowRead"] = json!(crate::credentials::ssh_readable(&paths.home));
-        deny.extend(human.iter().map(|(path, is_dir)| {
+        sandbox["filesystem"]["allowRead"] = json!(allow_read);
+        deny.extend(confined.deny_read.iter().map(|(path, is_dir)| {
             let under = if *is_dir { "/**" } else { "" };
             format!("Read(/{}{under})", path.display())
         }));
+        env = Some(confined.env);
     }
     let mut settings = json!({
         "sandbox": sandbox,
