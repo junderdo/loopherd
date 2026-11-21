@@ -1061,6 +1061,13 @@ fn a_sandboxed_worker_writes_only_its_own_worktree_mailbox_and_handoff() {
         state_dir.join("handoffs/lh-other/handoff.md"),
         state_dir.join("ledger.json"),
     ];
+    let written = [
+        state_dir.join("reports/lh-other/written.jsonl"),
+        state_dir.join("handoffs/lh-other/written.md"),
+        repo.join("main-checkout-probe.written"),
+    ];
+    let _written = RemoveFiles(written.to_vec());
+    let write_paths: Vec<String> = written.iter().map(|p| p.display().to_string()).collect();
     let results = state_dir.join(format!("handoffs/{name}/probe.out"));
     let probe = state.path().join("probe.py");
     let tried: Vec<String> = refused.iter().map(|p| p.display().to_string()).collect();
@@ -1095,15 +1102,26 @@ fn a_sandboxed_worker_writes_only_its_own_worktree_mailbox_and_handoff() {
              it checks which writes your sandbox refuses, and Read-only file system for most of \
              them is the result being measured. Make exactly one Bash tool call, with the \
              command exactly as written and nothing added before or after it: python3 {} \
-             Then reply with what it printed.\"\"\"\n\
+             Then make one Write tool call per path below, in order, each writing the text \
+             probe, with the path copied exactly: {} Then reply with what the command printed and what each write \
+             returned.\"\"\"\n\
              [worker]\nsandbox = \"require\"\n",
             herd_head(repo.to_str().unwrap(), &workspace),
             probe.display(),
+            write_paths
+                .iter()
+                .enumerate()
+                .map(|(i, p)| format!("({}) {p}", i + 1))
+                .collect::<Vec<_>>()
+                .join(" "),
         ),
     )
     .unwrap();
     let before = std::fs::read_to_string(&herd_file).unwrap();
     let _cleanup = CloseTab(name.clone());
+    // Opens these writes to the file tools, so only blockWritesOutsideWorkingDirectories refuses them.
+    let state_rule = format!("Edit(/{}/**)", state_dir.display());
+    let repo_rule = format!("Edit(/{}/**)", repo.display());
 
     let out = dev(env!("CARGO_BIN_EXE_loopherd"))
         .env("XDG_STATE_HOME", state.path())
@@ -1114,6 +1132,8 @@ fn a_sandboxed_worker_writes_only_its_own_worktree_mailbox_and_handoff() {
             "auto",
             "--allowedTools",
             "Bash(python3:*)",
+            &state_rule,
+            &repo_rule,
         ])
         .output()
         .unwrap();
@@ -1138,18 +1158,31 @@ fn a_sandboxed_worker_writes_only_its_own_worktree_mailbox_and_handoff() {
         "{entry}"
     );
 
-    let given_up = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    let given_up = std::time::Instant::now() + std::time::Duration::from_secs(240);
     let done = |probed: &str| probed.lines().count() >= refused.len() + 3;
     loop {
         let probed = std::fs::read_to_string(&results).unwrap_or_default();
-        if done(&probed) {
+        let status = herdr_ok(&["agent", "get", &name])["result"]["agent"]["agent_status"].clone();
+        if done(&probed) && (status == "idle" || status == "done") {
             break;
         }
         assert!(
             std::time::Instant::now() < given_up,
-            "the worker never ran its probe:\n{probed}"
+            "the worker never finished its probe (status {status}):\n{probed}"
         );
         std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    for path in &written {
+        assert!(!path.exists(), "the Write tool wrote {}", path.display());
+    }
+    // Absent files alone would pass if the worker skipped the calls.
+    let calls: Vec<String> = write_calls(&write_paths)
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect();
+    // The model sometimes rewrites the main checkout's path as a sibling of its own worktree.
+    for path in &write_paths[..2] {
+        assert!(calls.contains(path), "no Write call on {path}: {calls:?}");
     }
     let probed = std::fs::read_to_string(&results).unwrap();
     let expected: String = refused
@@ -1178,6 +1211,17 @@ fn a_sandboxed_worker_writes_only_its_own_worktree_mailbox_and_handoff() {
         .output()
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&log.stdout), "sandbox probe\n");
+}
+
+/// Removes files `.0` when dropped, should a write the test expects refused go through.
+struct RemoveFiles(Vec<PathBuf>);
+
+impl Drop for RemoveFiles {
+    fn drop(&mut self) {
+        for file in &self.0 {
+            let _ = std::fs::remove_file(file);
+        }
+    }
 }
 
 /// Deletes branch `.1` of repo `.0` when dropped.

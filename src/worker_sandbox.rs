@@ -425,6 +425,9 @@ fn settings(paths: &Paths, name: &str, herd: &str, worktree: &Path) -> Result<Va
         },
         "permissions": {
             "denyInsteadOfPrompting": true,
+            // Its cwd, the worktree, and these are all its file tools may write, whatever its mode.
+            "blockWritesOutsideWorkingDirectories": true,
+            "additionalDirectories": paths_of(&own),
             "allow": allow,
             "deny": deny,
         },
@@ -574,6 +577,25 @@ mod tests {
         );
         assert!(state.join("handoffs/w1").is_dir());
         assert!(state.join("reports/w1").is_dir());
+    }
+
+    #[test]
+    fn a_workers_file_tools_may_write_only_its_worktree_handoffs_and_mailbox_in_any_mode() {
+        let h = herd("sandbox = \"require\"");
+        let worktree = h.repo.parent().unwrap().join("worktrees/feat-x");
+        let state = h.paths.state_dir().to_path_buf();
+
+        prepare(&h.paths, "w1", &member(Some(&worktree)), &blocked).unwrap();
+
+        let permissions = &read_json(&settings_file(&h.paths, "w1"))["permissions"];
+        assert_eq!(permissions["blockWritesOutsideWorkingDirectories"], true);
+        assert_eq!(
+            strings(&permissions["additionalDirectories"]),
+            [
+                state.join("handoffs/w1").display().to_string(),
+                state.join("reports/w1").display().to_string(),
+            ]
+        );
     }
 
     #[test]
