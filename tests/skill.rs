@@ -59,27 +59,209 @@ fn install_hook_writes_the_skill_to_skills_dir_and_remove_deletes_it() {
     loopherd(home.path(), &args(&["--remove"]));
     assert!(!installed.exists());
     assert!(!home.path().join(".claude").exists());
+    assert!(!home.path().join(".agents").exists());
+}
+
+fn loopherd_in(home: &Path, claude_config_dir: Option<&Path>, args: &[&str]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_loopherd"));
+    command.args(args).env("HOME", home);
+    match claude_config_dir {
+        Some(dir) => command.env("CLAUDE_CONFIG_DIR", dir),
+        None => command.env_remove("CLAUDE_CONFIG_DIR"),
+    };
+    let out = command.output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    out
+}
+
+fn stdout(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn hooks_installed(settings: &Path) -> bool {
+    fs::read_to_string(settings).is_ok_and(|s| s.contains("loopherd") && s.contains("\"Stop\""))
 }
 
 #[test]
-fn the_skill_defaults_to_the_skills_dir_beside_the_settings_file() {
+fn install_hook_writes_the_skill_to_agents_and_links_claudes_skills_dir_to_it() {
     let home = tempfile::tempdir().unwrap();
-    let settings = home.path().join("claude/settings.json");
-    let settings = settings.to_str().unwrap();
-    loopherd(home.path(), &["install-hook", "--settings", settings]);
-    let installed = home.path().join("claude/skills/loopherd/SKILL.md");
-    assert_eq!(fs::read(&installed).unwrap(), skill(home.path()));
+    let real = home.path().join(".agents/skills/loopherd");
+    let link = home.path().join(".claude/skills/loopherd");
+
+    loopherd(home.path(), &["install-hook"]);
+    assert_eq!(fs::read(real.join("SKILL.md")).unwrap(), skill(home.path()));
+    assert_eq!(
+        fs::read_link(&link).unwrap(),
+        Path::new("../../.agents/skills/loopherd")
+    );
+    assert_eq!(fs::read(link.join("SKILL.md")).unwrap(), skill(home.path()));
+
+    let again = stdout(&loopherd(home.path(), &["install-hook"]));
+    assert!(!again.contains("installed"), "{again}");
+    assert!(!again.contains("linked"), "{again}");
+    assert_eq!(
+        fs::read_link(&link).unwrap(),
+        Path::new("../../.agents/skills/loopherd")
+    );
+
+    loopherd(home.path(), &["install-hook", "--remove"]);
+    assert!(fs::symlink_metadata(&link).is_err());
+    assert!(!real.exists());
+    assert!(home.path().join(".agents/skills").exists());
+}
+
+#[test]
+fn the_link_sits_in_claude_config_dirs_skills_dir() {
+    let home = tempfile::tempdir().unwrap();
+    let claude = home.path().join("cfg/claude");
+    loopherd_in(home.path(), Some(&claude), &["install-hook"]);
+    let link = claude.join("skills/loopherd");
+    assert_eq!(
+        fs::read_link(&link).unwrap(),
+        Path::new("../../../.agents/skills/loopherd")
+    );
+    assert_eq!(fs::read(link.join("SKILL.md")).unwrap(), skill(home.path()));
     assert!(!home.path().join(".claude").exists());
 }
 
 #[test]
-fn install_hook_writes_to_claudes_home_skills_dir_by_default() {
+fn the_link_resolves_when_claudes_dir_is_a_symlink() {
     let home = tempfile::tempdir().unwrap();
+    let dotfiles = home.path().join("dotfiles/claude");
+    fs::create_dir_all(&dotfiles).unwrap();
+    std::os::unix::fs::symlink(&dotfiles, home.path().join(".claude")).unwrap();
+
     loopherd(home.path(), &["install-hook"]);
-    let installed = home.path().join(".claude/skills/loopherd/SKILL.md");
-    assert_eq!(fs::read(&installed).unwrap(), skill(home.path()));
+    let link = home.path().join(".claude/skills/loopherd");
+    assert_eq!(fs::read(link.join("SKILL.md")).unwrap(), skill(home.path()));
+
+    let again = stdout(&loopherd(home.path(), &["install-hook"]));
+    assert!(!again.contains("left"), "{again}");
+    assert_eq!(fs::read(link.join("SKILL.md")).unwrap(), skill(home.path()));
+
     loopherd(home.path(), &["install-hook", "--remove"]);
-    assert!(!installed.exists());
+    assert!(fs::symlink_metadata(&link).is_err());
+}
+
+#[test]
+fn the_link_resolves_when_claude_config_dir_is_a_symlink() {
+    let home = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let claude = home.path().join("cfg");
+    std::os::unix::fs::symlink(elsewhere.path(), &claude).unwrap();
+
+    loopherd_in(home.path(), Some(&claude), &["install-hook"]);
+
+    let link = claude.join("skills/loopherd");
+    assert_eq!(fs::read(link.join("SKILL.md")).unwrap(), skill(home.path()));
+}
+
+#[test]
+fn an_old_real_copy_of_the_skill_is_replaced_by_the_link() {
+    let home = tempfile::tempdir().unwrap();
+    let link = home.path().join(".claude/skills/loopherd");
+    fs::create_dir_all(&link).unwrap();
+    fs::write(
+        link.join("SKILL.md"),
+        "---\nname: loopherd\ndescription: old\n---\nold\n",
+    )
+    .unwrap();
+
+    loopherd(home.path(), &["install-hook"]);
+
+    assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+    assert_eq!(fs::read(link.join("SKILL.md")).unwrap(), skill(home.path()));
+}
+
+#[test]
+fn a_directory_holding_other_files_is_left_alone_and_said_so() {
+    let home = tempfile::tempdir().unwrap();
+    let link = home.path().join(".claude/skills/loopherd");
+    fs::create_dir_all(&link).unwrap();
+    fs::write(link.join("SKILL.md"), "---\nname: loopherd\n---\n").unwrap();
+    fs::write(link.join("notes.md"), "mine").unwrap();
+
+    let out = stdout(&loopherd(home.path(), &["install-hook"]));
+
+    assert!(!fs::symlink_metadata(&link).unwrap().is_symlink());
+    assert_eq!(fs::read_to_string(link.join("notes.md")).unwrap(), "mine");
+    assert!(
+        out.contains(&format!("left {} alone", link.display())),
+        "{out}"
+    );
+    assert!(out.contains("then rerun `loopherd install-hook`"), "{out}");
+    assert!(hooks_installed(&home.path().join(".claude/settings.json")));
+    assert!(
+        home.path()
+            .join(".agents/skills/loopherd/SKILL.md")
+            .exists()
+    );
+
+    loopherd(home.path(), &["install-hook", "--remove"]);
+    assert_eq!(fs::read_to_string(link.join("notes.md")).unwrap(), "mine");
+    assert!(link.join("SKILL.md").exists());
+}
+
+#[test]
+fn a_symlink_pointing_elsewhere_is_left_alone_by_install_and_remove() {
+    let home = tempfile::tempdir().unwrap();
+    let mine = home.path().join("dotfiles/loopherd");
+    fs::create_dir_all(&mine).unwrap();
+    let skills = home.path().join(".claude/skills");
+    fs::create_dir_all(&skills).unwrap();
+    let link = skills.join("loopherd");
+    std::os::unix::fs::symlink(&mine, &link).unwrap();
+
+    let out = stdout(&loopherd(home.path(), &["install-hook"]));
+    assert_eq!(fs::read_link(&link).unwrap(), mine);
+    assert!(
+        out.contains(&format!("left {} alone", link.display())),
+        "{out}"
+    );
+    assert!(out.contains(&mine.display().to_string()), "{out}");
+    assert!(hooks_installed(&home.path().join(".claude/settings.json")));
+
+    loopherd(home.path(), &["install-hook", "--remove"]);
+    assert_eq!(fs::read_link(&link).unwrap(), mine);
+    assert!(mine.exists());
+}
+
+#[test]
+fn settings_keeps_the_real_dir_and_link_in_the_settings_files_dir_and_leaves_home_alone() {
+    let home = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let settings = elsewhere.path().join("claude/settings.json");
+    let settings = settings.to_str().unwrap();
+
+    loopherd(home.path(), &["install-hook", "--settings", settings]);
+
+    let real = elsewhere.path().join("claude/.agents/skills/loopherd");
+    let link = elsewhere.path().join("claude/skills/loopherd");
+    assert_eq!(fs::read(real.join("SKILL.md")).unwrap(), skill(home.path()));
+    assert_eq!(
+        fs::read_link(&link).unwrap(),
+        Path::new("../.agents/skills/loopherd")
+    );
+    assert!(!elsewhere.path().join(".agents").exists());
+
+    loopherd(
+        home.path(),
+        &["install-hook", "--settings", settings, "--remove"],
+    );
+    assert!(fs::symlink_metadata(&link).is_err());
+    assert!(!real.exists());
+    assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn the_skills_lock_file_is_left_untouched() {
+    let home = tempfile::tempdir().unwrap();
+    let lock = home.path().join(".agents/.skill-lock.json");
+    fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    fs::write(&lock, "{\"skills\":{}}").unwrap();
+    loopherd(home.path(), &["install-hook"]);
+    loopherd(home.path(), &["install-hook", "--remove"]);
+    assert_eq!(fs::read_to_string(&lock).unwrap(), "{\"skills\":{}}");
 }
 
 #[test]
