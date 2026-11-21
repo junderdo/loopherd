@@ -1761,12 +1761,21 @@ mod tests {
     }
 
     #[test]
-    fn a_user_allow_read_over_the_locks_counts_and_one_elsewhere_doesnt() {
+    fn a_user_allow_read_that_may_reach_the_locks_counts_and_an_ancestor_relative_or_elsewhere_doesnt()
+     {
         let setup = Setup::with_lead("prompt = \"go\"");
         let state = setup.root.join("state");
+        let locks = state.join("locks/after-merge.lock");
+        let climbs = state.join("x/../locks");
+        // Relative to ~/.claude, which is <root>/home/.claude here.
+        let climbs_from_claude = "../../state/locks";
         let paths = home_with_settings(
             &setup,
-            &format!(r#"{{"sandbox": {{"filesystem": {{"allowRead": ["/srv", {state:?}]}}}}}}"#),
+            &format!(
+                r#"{{"sandbox": {{"filesystem": {{"allowRead":
+                    ["/srv", {state:?}, "notes", {locks:?}, {climbs:?},
+                    {climbs_from_claude:?}]}}}}}}"#
+            ),
         );
 
         let started = lead(
@@ -1778,8 +1787,21 @@ mod tests {
         );
 
         let refused = format!("{:#}", started.unwrap_err());
-        let opens = format!("allowRead opens {} to reads", state.display());
-        assert!(refused.contains(&opens), "{refused}");
+        let opens = |path: &str| format!("allowRead opens {path} to reads");
+        assert!(
+            refused.contains(&opens(&locks.display().to_string())),
+            "{refused}"
+        );
+        assert!(
+            refused.contains(&opens(&climbs.display().to_string())),
+            "{refused}"
+        );
+        assert!(refused.contains(&opens(climbs_from_claude)), "{refused}");
+        assert!(
+            !refused.contains(&opens(&state.display().to_string())),
+            "{refused}"
+        );
+        assert!(!refused.contains(&opens("notes")), "{refused}");
         assert!(!refused.contains("/srv"), "{refused}");
     }
 
