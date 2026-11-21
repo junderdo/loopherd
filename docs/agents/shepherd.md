@@ -131,7 +131,10 @@ default, then refuses to start the lead; `prefer` starts it guarded by its
 hook alone, flagged in `loopherd view`, and only the human sets it. The
 same mode governs what the human's own `~/.claude/settings.json` loosens
 (D100): `require` refuses the lead naming each file and key, `prefer`
-starts it sandboxed with them as warnings; doctor reports them. A lead
+starts it sandboxed with them as warnings; doctor reports them. A lead's
+args are allowlisted the same way (D100); under `require`, a lead started
+with an arg now off the list can't be restarted or revived until the human
+retires it and runs `loopherd lead` again. A lead
 gets no MCP servers but those its `[lead] mcp_servers` names, which run
 unsandboxed; only the human adds one. A lead gets no Unix sockets, so no
 herdr socket, ssh agent or WSL2 interop, unless its herd sets
