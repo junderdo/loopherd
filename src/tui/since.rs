@@ -86,6 +86,7 @@ mod tests {
             pane: format!("w1:p{name}"),
             tab: None,
             lead: false,
+            attended: false,
             unsandboxed: None,
             sockets_unblocked: None,
             template: None,

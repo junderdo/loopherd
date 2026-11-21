@@ -18,6 +18,7 @@ pub fn member(member: &Member, mail: &Mail, time: &str, theme: Theme) -> Vec<Lin
             Some(why) => format!("lead, Unix sockets open: {why}"),
             None => "lead".into(),
         },
+        (false, _) if member.attended => "attended".into(),
         (false, _) => "worker".into(),
     };
     let mut lines = vec![

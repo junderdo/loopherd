@@ -3216,6 +3216,23 @@ max = 3
     }
 
     #[test]
+    fn an_attended_member_is_marked_attended_in_its_row_and_detail() {
+        let (herdr, mut ledger, now) = (herdr(), ledger(), Instant::now());
+        ledger.0.get_mut("b").unwrap().attended = Some(Default::default());
+        let mail = quiet_mail(&ledger);
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+
+        let terminal = render_at(&app, now, 120, 24);
+
+        assert!(
+            lines(&terminal).iter().any(|l| l.contains("b (attended)")),
+            "{:#?}",
+            lines(&terminal)
+        );
+        assert_eq!(pane_text(&terminal, "b")[1], "attended");
+    }
+
+    #[test]
     fn a_stop_says_finished_failed_or_what_is_unknown_without_claiming_a_pause() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let failed = Body::Stop(report::Stop {

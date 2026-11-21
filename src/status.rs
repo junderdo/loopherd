@@ -375,6 +375,7 @@ pub fn row(member: &Member) -> Vec<String> {
             format!("{} (lead, sockets open)", member.name)
         }
         (true, _) => format!("{} (lead)", member.name),
+        _ if member.attended => format!("{} (attended)", member.name),
         (false, true) => format!("{} (released)", member.name),
         (false, false) => member.name.clone(),
     };
@@ -995,6 +996,39 @@ prs
     }
 
     #[test]
+    fn an_attended_member_is_marked_attended_in_text_and_json() {
+        let herdr =
+            herdr().with_raw_agent(agent(Some("grill-1"), "w1:pgrill-1", AgentStatus::Idle));
+        let mut ledger = ledger();
+        let mut grill = entry("grill-1", Some("prs"), "grill-1");
+        grill.attended = Some(Default::default());
+        ledger.0.insert(grill.name.clone(), grill);
+        let run = |format| {
+            let out = status(
+                &herdr,
+                &ledger,
+                &not_paused(),
+                None,
+                Options::default(),
+                format,
+            );
+            out.unwrap().stdout
+        };
+
+        let text = run(PLAIN);
+        let json: serde_json::Value = serde_json::from_str(&run(Format::Json)).unwrap();
+
+        assert!(text.contains("  grill-1 (attended)  idle"), "{text}");
+        let members = json["herds"][0]["members"].as_array().unwrap();
+        let attended = |name: &str| {
+            let member = members.iter().find(|m| m["name"] == name).unwrap();
+            member["attended"].clone()
+        };
+        assert_eq!(attended("grill-1"), true);
+        assert_eq!(attended("zpr-2"), false);
+    }
+
+    #[test]
     fn with_herdr_unreachable_prints_the_ledger_as_unknown_warns_and_exits_2() {
         let mut herdr = herdr();
         herdr.unreachable = true;
@@ -1180,7 +1214,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         let json: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
         let member = |name: &str, status: &str, gone: bool, wt: &str, pane: &str, tab| {
             serde_json::json!({"name": name, "status": status, "gone": gone, "branch": null,
-                "worktree": wt, "pane": pane, "tab": tab, "lead": false, "template": null, "released": false, "retired": null})
+                "worktree": wt, "pane": pane, "tab": tab, "lead": false, "attended": false, "template": null, "released": false, "retired": null})
         };
         let mut zpr_1 = member(
             "zpr-1",
