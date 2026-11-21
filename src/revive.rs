@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::broker::StartBroker;
+use crate::broker::{RestartBroker, StartBroker};
 use crate::herd::Paths;
 use crate::herdr::{
     Agent, AgentStatus, Herdr, Pane, StartOutcome, Workspace, wait_for_shell_prompt,
@@ -51,6 +51,9 @@ pub struct ReviveRequest {
     pub paths: Paths,
     pub sandbox: Probe,
     pub broker: StartBroker,
+    /// Run instead of `broker` for a lead whose recorded `PATH` revive
+    /// changed, so a broker already running takes it on.
+    pub restart_broker: RestartBroker,
 }
 
 /// One line per entry, and whether any entry failed.
@@ -110,6 +113,13 @@ pub fn revive(
             record.session_id = record.session_id.map(|s| live(&s));
         }
         let mut warnings = vec![];
+        let kept_path = || {
+            sandbox::Lead::kept(&req.paths, &record.name)
+                .ok()
+                .flatten()
+                .and_then(|lead| lead.path)
+        };
+        let path_before = kept_path();
         let mut outcome = revive_one(
             herdr,
             req,
@@ -206,11 +216,15 @@ pub fn revive(
             }
         }
         warnings.extend(handoff_warnings);
+        let path_changed = kept_path() != path_before;
         if record.is_lead()
             && !record.retired
             && !req.dry_run
             && !elsewhere(here.as_deref(), &record)
-            && let Err(e) = (req.broker)(&req.paths, &record.name)
+            && let Err(e) = match path_changed {
+                true => (req.restart_broker)(&req.paths, &record.name),
+                false => (req.broker)(&req.paths, &record.name).map(|_| ()),
+            }
         {
             warnings.push(format!("its broker didn't start: {e:#}"));
             revived.failed = true;
@@ -618,6 +632,7 @@ fn kept_lead(
                 .clone()
                 .with_context(|| format!("{name} is a lead with no herd recorded"))?,
             args: sandbox::without_launch_flags(&record.claude_args),
+            path: None,
         },
     };
     if matches!(name.as_str(), "" | "." | "..") || name.contains('/') {
@@ -867,6 +882,7 @@ mod tests {
             paths: own_paths(),
             sandbox: || Ok(crate::sandbox::Sockets::Blocked),
             broker: |_, _| Ok(false),
+            restart_broker: |_, _| Ok(()),
         }
     }
 
@@ -1558,6 +1574,7 @@ mod tests {
         let kept = sandbox::Lead {
             herd: "h".into(),
             args: record.claude_args.clone(),
+            path: None,
         };
         sandbox::prepare(&own_paths(), name, &kept, || {
             Ok(crate::sandbox::Sockets::Blocked)
@@ -1831,6 +1848,7 @@ mod tests {
         let kept = sandbox::Lead {
             herd: "h".into(),
             args: vec!["--model".into(), "opus".into()],
+            path: None,
         };
         sandbox::prepare(&req.paths, "lead-h", &kept, || {
             Ok(crate::sandbox::Sockets::Blocked)
@@ -2166,6 +2184,39 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_with_an_arg_outside_the_allowlist_is_revived_with_a_warning_under_prefer() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut adopted = unkept_lead("lead-h", cwd.path());
+        adopted.claude_args = vec!["--add-dir".into(), "/srv".into()];
+        let mut ledger = ledger([adopted]);
+        let req = ReviveRequest {
+            name: Some("lead-h".into()),
+            ..request()
+        };
+        std::fs::write(
+            req.paths.herds.join("h.toml"),
+            format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nsandbox = \"prefer\"\n",
+                own_repo()
+            ),
+        )
+        .unwrap();
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            out.contains(
+                "lead-h starts with an arg that may loosen its sandbox or permissions: \
+                 --add-dir /srv, from the args it was started with"
+            ),
+            "{out}"
+        );
+        assert_eq!(herdr.started().len(), 1);
+    }
+
+    #[test]
     fn a_lead_kept_with_its_own_mcp_config_from_before_resumes_without_it() {
         let cwd = tempfile::tempdir().unwrap();
         let herdr = herdr();
@@ -2183,6 +2234,7 @@ mod tests {
             ]
             .map(String::from)
             .into(),
+            path: None,
         };
         std::fs::write(
             req.paths.config_dir().join("sandbox/lead-h.lead.json"),
@@ -2302,6 +2354,45 @@ mod tests {
         assert_eq!(code, 0);
         let started = std::fs::read_to_string(own_paths().state_dir().join("brokers-started"));
         assert_eq!(started.unwrap(), "lead-a\n");
+    }
+
+    #[test]
+    fn a_lead_whose_kept_path_revive_changes_has_its_broker_restarted_not_just_started() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr().with_live_agent(Some("lead-a"), Some("sess-lead-a"), "w1:p4");
+        let mut ledger = ledger([lead("lead-a", cwd.path()), lead("lead-old", cwd.path())]);
+        let old = sandbox::Lead {
+            herd: "h".into(),
+            args: vec![],
+            path: None,
+        };
+        std::fs::write(
+            own_paths().config_dir().join("sandbox/lead-old.lead.json"),
+            serde_json::to_string(&old).unwrap(),
+        )
+        .unwrap();
+        fn note(paths: &Paths, line: String) -> Result<()> {
+            let file = paths.state_dir().join("brokers");
+            let mut lines = std::fs::read_to_string(&file).unwrap_or_default();
+            lines += &line;
+            std::fs::create_dir_all(paths.state_dir())?;
+            Ok(std::fs::write(&file, lines)?)
+        }
+        let req = ReviveRequest {
+            broker: |paths, lead| note(paths, format!("started {lead}\n")).map(|()| true),
+            restart_broker: |paths, lead| note(paths, format!("restarted {lead}\n")),
+            ..request()
+        };
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 0, "{out}");
+        let brokers = std::fs::read_to_string(own_paths().state_dir().join("brokers")).unwrap();
+        assert_eq!(brokers, "started lead-a\nrestarted lead-old\n");
+        let kept = sandbox::Lead::kept(&own_paths(), "lead-old")
+            .unwrap()
+            .unwrap();
+        assert!(kept.path.is_some(), "revive records the PATH");
     }
 
     #[test]

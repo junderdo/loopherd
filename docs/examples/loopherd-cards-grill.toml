@@ -1,0 +1,18 @@
+# Append to ~/.config/loopherd/herds/loopherd-cards.toml, and link the main
+# checkout's docs/ beside it so prompt_file reads the repo's current grill
+# prompt (prompt_file is relative to the herds directory):
+#   ln -s <main checkout>/docs ~/.config/loopherd/herds/docs
+#
+# The shepherd starts a grill for a wayfinding:grilling card with
+# `loopherd add loopherd-cards grill <n> docs <slug>`, which focuses its pane
+# (D112). Never list it in [queue] templates: feed doesn't spawn attended
+# templates. The herd's watch prints only its `merged` and `gone`; feed's
+# after_merge and this `done` check then reap it with `retire --close`.
+[template.grill]
+params = ["card", "type", "slug"]
+attended = true
+name = "grill-{card}"
+branch = "{type}/LH-{card}-{slug}"
+done = "scripts/trello show LH-{card} | grep -qx 'list: Done'"
+merged = "GH_TOKEN=$(gh auth token --user <gh-user>) gh pr list --head {branch} --state merged --json number --jq length | grep -qx 1"
+prompt_file = "docs/agents/grill-prompt.md"

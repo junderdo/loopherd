@@ -1,6 +1,7 @@
 //! The Claude Code sandbox a lead runs in, written from its switches (D83, D89).
 
 use std::io::ErrorKind;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -9,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::handoff;
 use crate::herd::{self, MergeGuard, Paths};
-use crate::ledger::AgentRecord;
+use crate::ledger::{AgentRecord, Ledger};
 use crate::process::Procs;
 use crate::spawn::SpawnRequest;
 use crate::worktree::{same_dir, worktree_path};
@@ -335,12 +336,18 @@ fn claude_new_enough(version: &str) -> Result<(), Unavailable> {
 }
 
 /// What loopherd keeps of a lead in its config dir, where the lead can't
-/// write: its herd, and the args its Claude starts with besides its settings.
-/// `revive` trusts this over the ledger, which the lead can write.
+/// write: its herd, the args its Claude starts with besides its settings, and
+/// the `PATH` its unsandboxed watch and broker run under. `revive` trusts this
+/// over the ledger, which the lead can write.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lead {
     pub herd: String,
     pub args: Vec<String>,
+    /// The human's `PATH` as `lead` or `revive` last started it, less every
+    /// entry the lead could plant a binary in. [`prepare`] sets it, whatever
+    /// the caller passes; `None` in a record from before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 impl Lead {
@@ -432,6 +439,37 @@ fn plantable_path_entry(path: Option<&std::ffi::OsStr>, writable: &[&Path]) -> O
             Some(format!("{}, inside {}", dir.display(), inside.display()))
         }
     })
+}
+
+/// `path` less every entry a lead could plant a binary in: those
+/// [`plantable_path_entry`] names, and any in the temp dir or under a
+/// world-writable dir, such as its sandbox's temp dir. `None` when unset or not UTF-8.
+fn recorded_path(path: Option<&std::ffi::OsStr>, writable: &[&Path]) -> Option<String> {
+    let temp = std::env::temp_dir();
+    let kept: Vec<&str> = path?
+        .to_str()?
+        .split(':')
+        .filter(|entry| {
+            let dir = Path::new(entry);
+            plantable_path_entry(Some(dir.as_os_str()), writable).is_none()
+                && !dir.starts_with(&temp)
+                && !under_world_writable(dir)
+        })
+        .collect();
+    Some(kept.join(":"))
+}
+
+/// Whether `dir`, or where it resolves to, sits in a dir anyone may write.
+fn under_world_writable(dir: &Path) -> bool {
+    let resolved = dir.canonicalize().ok();
+    [Some(dir), resolved.as_deref()]
+        .into_iter()
+        .flatten()
+        .flat_map(Path::ancestors)
+        .any(|d| {
+            d.metadata()
+                .is_ok_and(|m| m.permissions().mode() & 0o002 != 0)
+        })
 }
 
 /// The sandbox dir and lead name a lead's settings file `file` names.
@@ -530,7 +568,9 @@ impl Guard {
 
     /// [`Guard::path_refusal`] for the member `req` would spawn, at the
     /// worktree it would get, which may be an existing one for its branch.
-    pub fn spawn_refusal(&self, req: &SpawnRequest) -> Result<Option<String>> {
+    /// A lead may reuse an existing worktree only when an entry of its herd
+    /// in `ledger` records it.
+    pub fn spawn_refusal(&self, req: &SpawnRequest, ledger: &dyn Ledger) -> Result<Option<String>> {
         let placed = |worktree| Placement {
             subject: format!("adding {}", req.name),
             name: &req.name,
@@ -545,7 +585,41 @@ impl Guard {
             return Ok(Some(why));
         }
         let worktree = req.planned_worktree()?;
-        self.placement_refusal(&placed(worktree.as_deref()))
+        if let Some(why) = self.placement_refusal(&placed(worktree.as_deref()))? {
+            return Ok(Some(why));
+        }
+        let reused = worktree.filter(|w| self.for_lead() && w.exists());
+        let (Some(worktree), Some(herd)) = (reused, &req.member_of) else {
+            return Ok(None);
+        };
+        let entries = ledger.entries()?;
+        let mut at_worktree = entries.values().filter(|entry| {
+            entry
+                .worktree
+                .as_deref()
+                .is_some_and(|w| same_dir(w, &worktree))
+        });
+        let own = |entry: &&AgentRecord| entry.herd.as_deref() == Some(herd.herd.as_str());
+        if let Some(holder) = at_worktree.clone().find(|e| !e.retired && !own(e)) {
+            let of = holder
+                .herd
+                .as_deref()
+                .map_or("no herd's".into(), |h| format!("herd {h}'s"));
+            return Ok(Some(format!(
+                "adding {} would reuse worktree {}, which {of} {} holds",
+                req.name,
+                worktree.display(),
+                holder.name
+            )));
+        }
+        Ok((!at_worktree.any(|e| own(&e))).then(|| {
+            format!(
+                "adding {} would reuse worktree {}, which no ledger entry of herd {} records",
+                req.name,
+                worktree.display(),
+                herd.herd
+            )
+        }))
     }
 
     fn placement_refusal(&self, placed: &Placement) -> Result<Option<String>> {
@@ -766,28 +840,71 @@ enum ArgsFrom {
     Kept,
 }
 
-/// Why `args` pass a flag loopherd's launch of lead `name` takes, refused under every mode.
-pub fn launch_flag_refusal(name: &str, args: &[String]) -> Option<String> {
-    let passes = |flag: &str| {
+/// Why `args` pass each flag loopherd's launch of lead `name` takes, refused
+/// under every mode. `herd_args` is herd and args where the lead takes its
+/// herd's shared args, which its workers take too.
+pub fn launch_flag_refusals(
+    name: &str,
+    args: &[String],
+    herd_args: Option<(&str, &[String])>,
+) -> Vec<String> {
+    let passes = |args: &[String], flag: &str| {
         args.iter()
             .any(|a| a == flag || a.starts_with(&format!("{flag}=")))
     };
-    let drop = "drop it from [lead].args, the herd's args and the command line";
-    if passes("--settings") {
-        return Some(format!(
+    let drop = |flag: &str| match herd_args {
+        Some((herd, shared)) if passes(shared, flag) => herd_args_fix(herd, "it"),
+        _ => "drop it from [lead].args, the herd's args and the command line".into(),
+    };
+    let settings = passes(args, "--settings").then(|| {
+        format!(
             "{name}'s args pass --settings, which its sandbox's settings file takes; \
-             {drop}, and put those settings in ~/.claude/settings.json"
-        ));
-    }
-    ["--mcp-config", "--strict-mcp-config"]
+             {}, and put those settings in ~/.claude/settings.json",
+            drop("--settings")
+        )
+    });
+    let mcp = ["--mcp-config", "--strict-mcp-config"]
         .into_iter()
-        .find(|flag| passes(flag))
+        .filter(|flag| passes(args, flag))
         .map(|flag| {
             format!(
-                "{name}'s args pass {flag}, which its launch takes; {drop}, and name the \
-                 servers it may use in [lead] mcp_servers"
+                "{name}'s args pass {flag}, which its launch takes; {}, and name the \
+                 servers it may use in [lead] mcp_servers",
+                drop(flag)
             )
-        })
+        });
+    settings.into_iter().chain(mcp).collect()
+}
+
+/// The warnings `lead`'s fresh args start it with, failing where they'd
+/// refuse its start, as `lead --dry-run` checks them.
+pub fn fresh_arg_warnings(paths: &Paths, name: &str, lead: &Lead) -> Result<Vec<String>> {
+    arg_warnings(paths, name, lead, ArgsFrom::Fresh)
+}
+
+fn arg_warnings(paths: &Paths, name: &str, lead: &Lead, from: ArgsFrom) -> Result<Vec<String>> {
+    let shared = match from {
+        ArgsFrom::Fresh => match herd::lead_args(paths, &lead.herd)? {
+            (configured, true) => Some(configured),
+            (_, false) => None,
+        },
+        ArgsFrom::Kept => None,
+    };
+    let herd_args = shared.as_deref().map(|args| (lead.herd.as_str(), args));
+    if let Some(why) = launch_flag_refusals(name, &lead.args, herd_args)
+        .into_iter()
+        .next()
+    {
+        bail!(why);
+    }
+    let disallowed = disallowed_args(paths, &lead.herd, &lead.args, from)?;
+    if let Some(refusal) = disallowed_refusal(paths, name, &lead.herd, &disallowed, from)? {
+        return Err(refusal);
+    }
+    Ok(disallowed
+        .iter()
+        .map(|arg| disallowed_warning(name, &arg.line))
+        .collect())
 }
 
 fn start(
@@ -798,25 +915,20 @@ fn start(
     from: ArgsFrom,
     path: Option<&std::ffi::OsStr>,
 ) -> Result<Launch> {
-    if let Some(why) = launch_flag_refusal(name, &lead.args) {
-        bail!(why);
-    }
-    let disallowed = disallowed_args(paths, &lead.herd, &lead.args, from)?;
-    if let Some(refusal) = disallowed_refusal(paths, name, &lead.herd, &disallowed, from)? {
-        return Err(refusal);
-    }
-    let arg_warnings: Vec<String> = disallowed
-        .iter()
-        .map(|line| disallowed_warning(name, line))
-        .collect();
+    let arg_warnings = arg_warnings(paths, name, lead, from)?;
     let (_, mode) = herd::lead_sandbox(paths, &lead.herd)?;
     let dir = paths.config_dir().join("sandbox");
     let mcp = dir.join(format!("{name}.mcp.json"));
     let mcp_text = serde_json::to_string_pretty(&mcp_config(paths, name, &lead.herd)?)? + "\n";
     let keep_launch = || -> Result<()> {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        let worktree = worktree_path(&herd::repo(paths, &lead.herd)?, name);
+        let kept = Lead {
+            path: recorded_path(path, &[worktree.as_path(), paths.state_dir()]),
+            ..lead.clone()
+        };
         let file = lead_file(paths, name);
-        std::fs::write(&file, serde_json::to_string_pretty(lead)? + "\n")
+        std::fs::write(&file, serde_json::to_string_pretty(&kept)? + "\n")
             .with_context(|| format!("write {}", file.display()))?;
         write_private(&mcp, &mcp_text).with_context(|| format!("write {}", mcp.display()))
     };
@@ -1017,13 +1129,16 @@ fn disallowed_refusal(
     paths: &Paths,
     name: &str,
     herd: &str,
-    disallowed: &[String],
+    disallowed: &[Disallowed],
     from: ArgsFrom,
 ) -> Result<Option<anyhow::Error>> {
     if disallowed.is_empty() {
         return Ok(None);
     }
     let fix = match from {
+        ArgsFrom::Fresh if disallowed.iter().any(|arg| arg.from_herd_args) => {
+            herd_args_fix(herd, "those")
+        }
         ArgsFrom::Fresh => "drop those".to_string(),
         ArgsFrom::Kept => {
             format!("retire it and start it again with loopherd lead {herd}, without those")
@@ -1032,9 +1147,20 @@ fn disallowed_refusal(
     let why = format!(
         "its args may loosen its sandbox or permissions: {}; a lead takes only {ALLOWED_ARGS}, \
          so {fix}",
-        disallowed.join("; ")
+        disallowed
+            .iter()
+            .map(|arg| arg.line.as_str())
+            .collect::<Vec<_>>()
+            .join("; ")
     );
     refusal_by_mode(paths, name, herd, &why)
+}
+
+/// How to keep `args` from a lead whose herd's args also start its workers.
+pub fn herd_args_fix(herd: &str, args: &str) -> String {
+    format!(
+        "give herd {herd} a [lead].args without {args}, since its workers take the herd's args too"
+    )
 }
 
 fn disallowed_warning(name: &str, line: &str) -> String {
@@ -1044,46 +1170,59 @@ fn disallowed_warning(name: &str, line: &str) -> String {
 pub const ALLOWED_ARGS: &str =
     "--model, --effort, --verbose and --permission-mode default, manual, auto or plan";
 
+/// An arg outside the allowlist, shown with its values and where it was set.
+struct Disallowed {
+    line: String,
+    from_herd_args: bool,
+}
+
 /// Each of a lead's `args`, without loopherd's own launch flags, that the
-/// allowlist doesn't cover, with its values and where it was set. D100 says
-/// why it's an allowlist.
+/// allowlist doesn't cover. D100 says why it's an allowlist.
 fn disallowed_args(
     paths: &Paths,
     herd: &str,
     args: &[String],
     from: ArgsFrom,
-) -> Result<Vec<String>> {
+) -> Result<Vec<Disallowed>> {
     let sources = match from {
-        ArgsFrom::Kept => vec![(args, "the args it was started with".to_string())],
+        ArgsFrom::Kept => vec![(args, "the args it was started with".to_string(), false)],
         ArgsFrom::Fresh => {
-            let (configured, source) = herd::lead_args(paths, herd)?;
+            let (configured, shared) = herd::lead_args(paths, herd)?;
             let rest = &args[configured.len().min(args.len())..];
+            let source = match shared {
+                true => format!("herd {herd}'s args"),
+                false => "[lead].args".into(),
+            };
             vec![
-                (&args[..args.len() - rest.len()], source),
-                (rest, "the command line".into()),
+                (&args[..args.len() - rest.len()], source, shared),
+                (rest, "the command line".into(), false),
             ]
         }
     };
     Ok(sources
         .into_iter()
-        .flat_map(|(args, source)| {
+        .flat_map(|(args, source, from_herd_args)| {
             outside_allowlist(args)
                 .into_iter()
-                .map(move |arg| format!("{arg}, from {source}"))
+                .map(move |arg| Disallowed {
+                    line: format!("{arg}, from {source}"),
+                    from_herd_args,
+                })
         })
         .collect())
 }
 
 /// What herd `herd`'s file passes its lead outside the allowlist, one line
-/// each, but for loopherd's own launch flags, which [`launch_flag_refusal`] names.
+/// each, but for loopherd's own launch flags, which [`launch_flag_refusals`] names.
 pub fn configured_disallowed_args(paths: &Paths, herd: &str) -> Result<Vec<String>> {
     let (configured, _) = herd::lead_args(paths, herd)?;
-    disallowed_args(
+    let disallowed = disallowed_args(
         paths,
         herd,
         &without_launch_flags(&configured),
         ArgsFrom::Fresh,
-    )
+    )?;
+    Ok(disallowed.into_iter().map(|arg| arg.line).collect())
 }
 
 /// Each arg the allowlist doesn't cover, with the values that follow a flag.
@@ -1505,7 +1644,7 @@ pub fn check_running(
     }
     let mut warnings: Vec<String> = disallowed
         .iter()
-        .map(|line| disallowed_warning(name, line))
+        .map(|arg| disallowed_warning(name, &arg.line))
         .collect();
     if !claude_args.iter().any(|a| a == "--strict-mcp-config") {
         warnings.push(format!(
@@ -1868,6 +2007,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_allowed_permission_mode_passes_in_both_forms_and_no_other_does() {
+        let args = |line: &str| line.split(' ').map(String::from).collect::<Vec<_>>();
+        for mode in ["default", "manual", "auto", "plan"] {
+            let spaced = args(&format!("--permission-mode {mode}"));
+            let inline = args(&format!("--permission-mode={mode}"));
+            assert_eq!(allowed_len(&spaced), Some(2), "{mode}");
+            assert_eq!(allowed_len(&inline), Some(1), "{mode}");
+            assert!(outside_allowlist(&spaced).is_empty(), "{mode}");
+            assert!(outside_allowlist(&inline).is_empty(), "{mode}");
+        }
+        for mode in ["acceptEdits", "dontAsk", "bypassPermissions", ""] {
+            let spaced = args(&format!("--permission-mode {mode}"));
+            let inline = args(&format!("--permission-mode={mode}"));
+            assert_eq!(allowed_len(&spaced), None, "{mode}");
+            assert_eq!(allowed_len(&inline), None, "{mode}");
+        }
+    }
+
+    #[test]
     fn a_retire_removes_only_a_launched_leads_files_never_another_leads_by_a_dotted_name() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::under(root.path());
@@ -1951,6 +2109,58 @@ mod tests {
     }
 
     #[test]
+    fn the_kept_path_drops_every_entry_a_lead_could_plant_in() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        std::fs::create_dir_all(&paths.herds).unwrap();
+        let repo = root.path().join("repo");
+        std::fs::write(
+            paths.herds.join("h.toml"),
+            format!(
+                "repo = {repo:?}\nworkspace = \"w1\"\n[lead]\nprompt = \"go\"\nsandbox = \"prefer\"\n"
+            ),
+        )
+        .unwrap();
+        let lead = Lead {
+            herd: "h".into(),
+            args: vec![],
+            path: Some("/planted".into()),
+        };
+        let worktree = worktree_path(&repo, "lead-h");
+        let temp = std::env::temp_dir().join("x");
+        let given = [
+            "/usr/bin",
+            "",
+            "bin",
+            "/dev/shm/bin",
+            temp.to_str().unwrap(),
+            worktree.join("bin").to_str().unwrap(),
+            paths.state_dir().join("bin").to_str().unwrap(),
+            "/bin",
+        ]
+        .join(":");
+
+        // `prefer` with no sandbox keeps the record before refusing any entry.
+        start(
+            &paths,
+            "lead-h",
+            &lead,
+            &|| {
+                Err(Unavailable {
+                    why: "none".into(),
+                    fix: "none".into(),
+                })
+            },
+            ArgsFrom::Fresh,
+            Some(given.as_ref()),
+        )
+        .unwrap();
+
+        let kept = Lead::kept(&paths, "lead-h").unwrap().unwrap();
+        assert_eq!(kept.path.as_deref(), Some("/usr/bin:/bin"));
+    }
+
+    #[test]
     fn a_plantable_path_refuses_the_start_before_any_launch_file_is_written() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::under(root.path());
@@ -1964,6 +2174,7 @@ mod tests {
         let lead = Lead {
             herd: "h".into(),
             args: vec![],
+            path: None,
         };
 
         let err = start(

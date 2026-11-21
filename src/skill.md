@@ -643,7 +643,13 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   a `merge_guard = "credentials"` lead, refused under both (`merge_guard =
   "hook"` is the other way); doctor reports them too. Only the human
   edits `~/.claude/settings.json`, and a repo's `.claude` settings change
-  through a reviewed PR; ask the human. A lead has no MCP tools
+  through a reviewed PR; ask the human. A lead's Claude args, from
+  `[lead].args`, else the herd's `args`, then the command line, may be
+  only `--model`, `--effort`, `--verbose` and `--permission-mode` with
+  `default`, `manual`, `auto` or `plan` (each also as `--flag=value`);
+  any other is treated as a loosening is, and `lead --dry-run` checks
+  them too. To keep an arg the workers need from the lead, give it its
+  own `[lead].args` rather than editing the herd's `args`. A lead has no MCP tools
   unless its herd's `[lead] mcp_servers` names servers from the human's
   user scope (`loopherd herds` shows them); a lead that needs one
   asks the human to add it. Where Claude Code's seccomp filter is present,

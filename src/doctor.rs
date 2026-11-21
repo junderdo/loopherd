@@ -184,6 +184,22 @@ pub(crate) fn lead_sandbox_check(paths: &Paths, lead: &AgentRecord) -> Option<Ch
     ))
 }
 
+/// A lead whose launch record keeps no `PATH`, so its watch and broker run
+/// under whatever `PATH` they inherit.
+fn lead_path_check(paths: &Paths, lead: &str) -> Option<Check> {
+    let kept = crate::sandbox::Lead::kept(paths, lead).ok()??;
+    kept.path.is_none().then(|| {
+        warning(
+            &format!("lead {lead}"),
+            format!(
+                "{lead}'s launch record keeps no PATH, so its watch and broker run gh, git \
+                 and its herd's checks from whatever PATH they inherit"
+            ),
+            format!("quit its Claude and run loopherd revive --name {lead}"),
+        )
+    })
+}
+
 fn config_checks(paths: &Paths, settings: &Path) -> Vec<Check> {
     let config = crate::herd::config_file(paths);
     let by_hand = format!("fix {} by hand", config.display());
@@ -436,20 +452,27 @@ fn loosened_checks(paths: &Paths, herd: &str) -> Vec<Check> {
 /// that keeps the lead from starting.
 fn lead_arg_checks(paths: &Paths, herd: &str) -> Vec<Check> {
     let name = format!("herd {herd} lead args");
-    if let Ok((args, _)) = crate::herd::lead_args(paths, herd)
-        && let Ok(lead) = crate::lead::lead_name(herd)
-        && let Some(why) = crate::sandbox::launch_flag_refusal(&lead, &args)
-    {
-        return vec![failure(&name, why, "drop it".into())];
-    }
-    let Ok(lines) = crate::sandbox::configured_disallowed_args(paths, herd) else {
+    let (Ok((args, shared)), Ok(lead)) = (
+        crate::herd::lead_args(paths, herd),
+        crate::lead::lead_name(herd),
+    ) else {
         return vec![];
     };
-    let drop = format!(
-        "drop it (a lead takes only {})",
-        crate::sandbox::ALLOWED_ARGS
-    );
-    finding_checks(paths, herd, "lead args", lines, &drop)
+    let fix = match shared {
+        true => crate::sandbox::herd_args_fix(herd, "it"),
+        false => "drop it".into(),
+    };
+    let herd_args = shared.then_some((herd, args.as_slice()));
+    let mut checks: Vec<Check> = crate::sandbox::launch_flag_refusals(&lead, &args, herd_args)
+        .into_iter()
+        .map(|why| failure(&name, why, fix.clone()))
+        .collect();
+    let Ok(lines) = crate::sandbox::configured_disallowed_args(paths, herd) else {
+        return checks;
+    };
+    let fix = format!("{fix} (a lead takes only {})", crate::sandbox::ALLOWED_ARGS);
+    checks.extend(finding_checks(paths, herd, "lead args", lines, &fix));
+    checks
 }
 
 fn finding_checks(
@@ -736,6 +759,12 @@ fn state_checks(
             .iter()
             .filter(|r| !r.retired && r.is_lead())
             .filter_map(|lead| lead_sandbox_check(&setup.paths, lead)),
+    );
+    checks.extend(
+        members
+            .iter()
+            .filter(|r| !r.retired && r.is_lead())
+            .filter_map(|lead| lead_path_check(&setup.paths, &lead.name)),
     );
     // A lead known to be on another herdr has its broker under that herdr's
     // config dir; one whose herdr can't be told apart is checked, as revive starts it.
@@ -2419,6 +2448,41 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_whose_launch_record_keeps_no_path_warns_naming_its_revive() {
+        let m = machine(&ALL);
+        let sandbox = m.paths().config_dir().join("sandbox");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        let mut leads = vec![];
+        for (name, record) in [
+            ("lead-old", r#"{"herd": "h", "args": []}"#),
+            (
+                "lead-new",
+                r#"{"herd": "h", "args": [], "path": "/usr/bin:/bin"}"#,
+            ),
+        ] {
+            std::fs::write(sandbox.join(format!("{name}.lead.json")), record).unwrap();
+            let mut lead = member(name, "h", "w1:p1", None);
+            lead.role = Some(crate::ledger::Role::Lead);
+            leads.push(lead);
+        }
+        m.ledger(&leads);
+
+        let found: Vec<_> = problems(&m, &herdr())
+            .into_iter()
+            .filter(|p| p.contains("keeps no PATH"))
+            .collect();
+
+        assert_eq!(
+            found,
+            [
+                "warning lead lead-old: lead-old's launch record keeps no PATH, so its watch and \
+              broker run gh, git and its herd's checks from whatever PATH they inherit; fix: \
+              quit its Claude and run loopherd revive --name lead-old"
+            ]
+        );
+    }
+
+    #[test]
     fn a_broker_on_another_build_than_paths_warns_naming_the_shepherds_restart() {
         let mut m = machine(&ALL);
         let on_path = m.dir.path().join("bin/loopherd");
@@ -2440,6 +2504,7 @@ mod tests {
         let kept = crate::sandbox::Lead {
             herd: "h".into(),
             args: vec![],
+            path: None,
         };
         let mut leads = vec![];
         for name in ["lead-new", "lead-rebuilt", "lead-other", "lead-old"] {
@@ -2541,6 +2606,7 @@ mod tests {
         let kept = crate::sandbox::Lead {
             herd: "h".into(),
             args: vec![],
+            path: None,
         };
         crate::sandbox::prepare(m.paths(), "lead-h", &kept, || {
             Ok(crate::sandbox::Sockets::Blocked)
@@ -2642,6 +2708,7 @@ mod tests {
         let kept = crate::sandbox::Lead {
             herd: "h".into(),
             args: vec![],
+            path: None,
         };
         crate::sandbox::prepare(m.paths(), "lead-h", &kept, || {
             Ok(crate::sandbox::Sockets::Blocked)
@@ -2692,6 +2759,7 @@ mod tests {
         let kept = crate::sandbox::Lead {
             herd: "h".into(),
             args: vec![],
+            path: None,
         };
         crate::sandbox::prepare(m.paths(), "lead-up", &kept, || {
             Ok(crate::sandbox::Sockets::Blocked)
@@ -2895,7 +2963,8 @@ mod tests {
         assert_eq!(
             problems(&m, &herdr()),
             [
-                "failure herd h lead args: --add-dir /srv, from herd h's args; fix: drop it (a lead \
+                "failure herd h lead args: --add-dir /srv, from herd h's args; fix: give herd h \
+              a [lead].args without it, since its workers take the herd's args too (a lead \
               takes only --model, --effort, --verbose and --permission-mode default, manual, auto \
               or plan), or loopherd herd set h lead.sandbox '\"prefer\"' to start its lead with it \
               as a warning"
@@ -2906,7 +2975,8 @@ mod tests {
         let problems = problems(&m, &herdr());
         assert!(
             problems.contains(
-                &"warning herd h lead args: --add-dir /srv, from herd h's args; fix: drop it (a \
+                &"warning herd h lead args: --add-dir /srv, from herd h's args; fix: give herd \
+                  h a [lead].args without it, since its workers take the herd's args too (a \
                   lead takes only --model, --effort, --verbose and --permission-mode default, manual, \
                   auto or plan)"
                     .to_string()
@@ -2943,6 +3013,64 @@ mod tests {
                 .any(|p| p.starts_with("warning herd h lead args")),
             "{problems:?}"
         );
+    }
+
+    #[test]
+    fn a_launch_flag_in_the_herds_args_points_to_lead_args_not_dropping_it() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\nargs = [\"--settings\", \"x.json\"]\n\
+                 [lead]\nprompt = \"go\"\nmerge = true\n",
+                repo.to_str().unwrap()
+            ),
+        );
+
+        let problems = problems(&m, &herdr());
+
+        let fixes = "give herd h a [lead].args without it, since its workers take the herd's \
+                     args too, and put those settings in ~/.claude/settings.json; fix: give herd \
+                     h a [lead].args without it, since its workers take the herd's args too";
+        assert!(
+            problems.iter().any(|p| p.starts_with(
+                "failure herd h lead args: lead-h's args pass --settings, which its sandbox's \
+                 settings file takes;"
+            ) && p.ends_with(fixes)),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn every_disallowed_lead_arg_is_reported_beside_each_launch_flag() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge = true\n\
+                 args = [\"--settings\", \"x.json\", \"--strict-mcp-config\", \
+                 \"--add-dir\", \"/srv\", \"--verbose\", \"--frobnicate\"]\n",
+                repo.to_str().unwrap()
+            ),
+        );
+
+        let problems: Vec<String> = problems(&m, &herdr())
+            .into_iter()
+            .filter(|p| p.starts_with("failure herd h lead args"))
+            .collect();
+
+        let starts = [
+            "failure herd h lead args: lead-h's args pass --settings,",
+            "failure herd h lead args: lead-h's args pass --strict-mcp-config,",
+            "failure herd h lead args: --add-dir /srv, from [lead].args; fix: drop it (",
+            "failure herd h lead args: --frobnicate, from [lead].args; fix: drop it (",
+        ];
+        assert_eq!(problems.len(), starts.len(), "{problems:?}");
+        for (problem, start) in problems.iter().zip(starts) {
+            assert!(problem.starts_with(start), "{problems:?}");
+        }
     }
 
     #[test]

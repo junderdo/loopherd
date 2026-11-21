@@ -871,16 +871,16 @@ pub fn lead_sandbox(paths: &Paths, herd: &str) -> Result<(Switches, SandboxMode)
     Ok((lead.switches().over(&lead_defaults(paths)?), lead.sandbox))
 }
 
-/// The args a herd's lead starts with before the command line's, and where
-/// they're set: `[lead].args`, else the herd's `args`.
-pub fn lead_args(paths: &Paths, herd: &str) -> Result<(Vec<String>, String)> {
+/// The args a herd's lead starts with before the command line's: `[lead].args`,
+/// else the herd's `args`, which `true` marks as also its workers'.
+pub fn lead_args(paths: &Paths, herd: &str) -> Result<(Vec<String>, bool)> {
     let file = load(&paths.herds, herd).context("herd")?;
     let lead = file
         .lead
         .with_context(|| format!("herd: {herd} has no [lead]"))?;
     Ok(match lead.args {
-        Some(args) => (args, "[lead].args".into()),
-        None => (file.args, format!("herd {herd}'s args")),
+        Some(args) => (args, false),
+        None => (file.args, true),
     })
 }
 
@@ -3351,6 +3351,45 @@ args = ["--model", "opus"]
         let config = Config::with(&[("cards", &herd)]);
         let (checks, _) = lead_checks(&config.paths(), "cards").unwrap();
         assert!(checks.merged.contains_key("card"));
+    }
+
+    #[test]
+    fn the_documented_loopherd_cards_grill_adds_an_attended_member_on_the_cards_branch() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = crate::worktree::testing::repo_with_origin(root.path());
+        let table = include_str!("../docs/examples/loopherd-cards-grill.toml");
+        let herd = format!("repo = {:?}\n{table}", repo.display().to_string());
+        let config = Config::with(&[("loopherd-cards", &herd)]);
+        let prompt_dir = config.path().join("herds/docs/agents");
+        fs::create_dir_all(&prompt_dir).unwrap();
+        fs::write(
+            prompt_dir.join("grill-prompt.md"),
+            include_str!("../docs/agents/grill-prompt.md"),
+        )
+        .unwrap();
+        let req = AddRequest {
+            return_pane: Some("w1:p9".into()),
+            ..request("loopherd-cards", "grill", &["345", "docs", "side-sessions"])
+        };
+
+        let (herdr, ledger, name) = add_ok(&config, &req);
+
+        assert_eq!(name, "grill-345");
+        let record = &ledger.entries().unwrap()["grill-345"];
+        assert_eq!(record.branch.as_deref(), Some("docs/LH-345-side-sessions"));
+        assert_eq!(
+            record.attended,
+            Some(Attended {
+                return_pane: Some("w1:p9".into())
+            })
+        );
+        let prompt = &herdr.prompts()[0].1;
+        assert!(prompt.contains("scripts/trello show LH-345"), "{prompt}");
+        assert!(prompt.contains("herdr agent focus w1:p9"), "{prompt}");
+        assert!(!prompt.contains("git worktree remove"), "{prompt}");
+        let (checks, _) = lead_checks(&config.paths(), "loopherd-cards").unwrap();
+        assert!(checks.done.contains_key("grill"));
+        assert!(checks.merged.contains_key("grill"));
     }
 
     #[test]
