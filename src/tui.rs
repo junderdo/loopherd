@@ -3076,6 +3076,7 @@ max = 3
         let worktree = on_branch();
         let b = ledger.0.get_mut("b").unwrap();
         b.template = Some("feat".into());
+        b.repo = worktree.path().into();
         b.worktree = Some(worktree.path().into());
         let (herdr, t0) = (herdr(), Instant::now());
         let mail = quiet_mail(&ledger);

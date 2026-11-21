@@ -130,9 +130,9 @@ fn status_reads_each_worktrees_branch_despite_git_env_vars() {
     repo_on(&other, "elsewhere");
     let ledger = format!(
         r#"{{"lh-1": {{"name": "lh-1", "pane_id": "w1:p1", "session_id": "s1",
-        "repo": "/nonexistent/repo", "worktree": "{}", "workspace": "w1",
+        "repo": "{wt}", "worktree": "{wt}", "workspace": "w1",
         "prompt": null, "prompt_sent": true, "created": "2026-11-01T00:00:00Z"}}}}"#,
-        wt.display()
+        wt = wt.display()
     );
     fs::create_dir_all(state.path().join("loopherd")).unwrap();
     fs::write(state.path().join("loopherd/ledger.json"), ledger).unwrap();

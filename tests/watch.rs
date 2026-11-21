@@ -1146,3 +1146,54 @@ fn under_a_credentials_leads_claude_the_watch_wont_start_without_the_leads_crede
             .exists()
     );
 }
+
+#[test]
+fn under_a_leads_claude_the_watch_refuses_settings() {
+    let sandbox = Sandbox::new();
+    two_leads(&sandbox);
+
+    let out = under_leads_claude(
+        &sandbox,
+        Some("w1:p0"),
+        "--settings /nonexistent/settings.json",
+    );
+
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        stderr(&out).contains(
+            "refused: lead-cards's Claude runs this watch, which checks Claude's own settings; \
+             drop --settings"
+        ),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        !sandbox
+            .dir
+            .path()
+            .join("state/loopherd/reports/watch-lead-cards.lock")
+            .exists()
+    );
+}
+
+#[test]
+fn a_herd_that_isnt_a_name_is_refused_before_its_herd_file_is_looked_for() {
+    let sandbox = Sandbox::new();
+    sandbox.install_hook();
+
+    let out = sandbox.watch(&[
+        "--timeout",
+        "0",
+        "--settings",
+        sandbox.settings().to_str().unwrap(),
+        "../../outside",
+    ]);
+
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        stderr(&out).contains("\"../../outside\" is not a herd name"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!stderr(&out).contains("no herd file"), "{}", stderr(&out));
+}
