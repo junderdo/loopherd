@@ -1610,7 +1610,7 @@ fn serving_once_started(paths: &Paths, lead: &str, mut child: std::process::Chil
         let exited = child.try_wait()?;
         match (serving, exited) {
             (Some(pid), _) if pid == child.id() => return Ok(pid),
-            // It lost the lock to a broker started at the same time, which serves instead.
+            // Another broker serves, as when this one lost the lock to it.
             (Some(pid), Some(_)) => return Ok(pid),
             (None, Some(status)) if !running(paths, lead) => bail!(
                 "it exited at once ({status}); run loopherd broker {lead} to see why, \

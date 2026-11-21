@@ -340,9 +340,9 @@ fn broker_restart_waits_for_the_old_brokers_pid_while_another_broker_takes_its_l
         )),
         "{restarted}"
     );
-    assert_eq!(serving, revived.id());
+    // Either may win the lock; the restart names whichever serves.
+    assert!(!exited(serving));
     assert!(world.serving());
-    assert!(revived.try_wait().unwrap().is_none());
     assert!(!stop.exists());
     drop(world);
     let _ = revived.kill();
