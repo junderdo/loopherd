@@ -29,7 +29,7 @@ Then invoke the `grilling` skill and grill the human on the card.
 
 Outcome:
 - Work in your own worktree on branch `docs/<CARD>-<SLUG>`, created from the
-  main checkout with
+  main checkout with `git fetch`, then
   `git worktree add --no-track -b docs/<CARD>-<SLUG> ../worktrees/docs-<CARD>-<SLUG> origin/main`.
 - Write the decision as `docs/decisions/D<n>.md` (`## Decision` and `## Why`)
   plus its one-line row in `docs/wayfinding.md`. Take the next D number free
@@ -55,5 +55,6 @@ on the human's word, check it the same way. When it reads MERGED:
    and `git branch -D docs/<CARD>-<SLUG>`.
 3. Send the shepherd one line:
    `herdr agent prompt shepherd "<CARD> merged and closed out: <PR URL>, D<n>, filed <cards or none>"`.
-Then tell the human the pane can close.
+If that prompt fails, tell the human to relay the line to the shepherd. Then
+tell the human the pane can close.
 ```

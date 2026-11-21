@@ -83,9 +83,16 @@ your pane, so the grill stays out of your context. From your own pane:
 
 ```bash
 herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd <main checkout> --label grill-LH-<n> --no-focus
-herdr agent start grill-lh-<n> --kind claude --pane <root_pane from tab create>
-herdr agent prompt grill-lh-<n> "<prompt>"
+herdr agent start grill-lh-<n> --kind claude --pane <.result.root_pane.pane_id from tab create>
+prompt=$(mktemp)
+cat > "$prompt" <<'PROMPT'
+<the filled prompt>
+PROMPT
+herdr agent prompt grill-lh-<n> "$(cat "$prompt")"
 ```
+
+The quoted heredoc keeps the prompt's backticks and `$(…)` from running in
+your shell; never pass the prompt inline in double quotes.
 
 Wait for the new tab's shell prompt before `agent start` (see Launch agent in
 [herdr.md](../research/herdr.md)). Fill the prompt from
