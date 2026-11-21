@@ -406,15 +406,14 @@ const AFTER_MERGE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// How long a lead waits on a feed through its broker.
 const FEED_WITHIN: Duration = Duration::from_secs(4 * 60 * 60);
 
-fn feed(
-    ctx: &mut Ctx,
+fn feed_request<'a>(
+    ctx: &Ctx<'a>,
     herd: &str,
     dry_run: bool,
     ready_timeout_secs: u64,
-    sink: &mut dyn Sink,
-) -> Result<i32> {
+) -> Result<FeedRequest<'a>> {
     let caller = &ctx.caller;
-    let req = FeedRequest {
+    Ok(FeedRequest {
         herd: herd.into(),
         dry_run,
         ready_timeout: Duration::from_secs(ready_timeout_secs),
@@ -430,7 +429,17 @@ fn feed(
         owner: caller.process,
         procs: ctx.procs,
         lead: caller.lead.clone(),
-    };
+    })
+}
+
+fn feed(
+    ctx: &mut Ctx,
+    herd: &str,
+    dry_run: bool,
+    ready_timeout_secs: u64,
+    sink: &mut dyn Sink,
+) -> Result<i32> {
+    let req = feed_request(ctx, herd, dry_run, ready_timeout_secs)?;
     let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // A dry run changes nothing, so it must not block a real one.
         let lock = (!dry_run).then(|| ctx.paths.lock_feed()).transpose()?;
@@ -2405,6 +2414,35 @@ mod tests {
         assert_eq!(own.calls(), 0);
         world.retire("lead-h");
         serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_broker_feed_waits_on_after_merge_as_long_as_its_lead_waits_on_the_feed() {
+        let world = World::new();
+        let herdr = FakeHerdr::new(&[]);
+        let mut ledger = world.ledger();
+        let ctx = Ctx {
+            herdr: &herdr,
+            ledger: &mut ledger,
+            paths: &world.paths,
+            procs: &crate::process::ProcFs,
+            claude_dir: None,
+            caller: Caller {
+                pane: None,
+                socket: None,
+                lineage: vec![],
+                workspace: None,
+                process: me(),
+                lead: None,
+            },
+            live: same_session,
+            spawn_waiter: no_waiter,
+            prs: &NO_PRS,
+        };
+
+        let req = feed_request(&ctx, "h", false, 60).unwrap();
+
+        assert_eq!(req.after_merge_wait, Duration::from_secs(4 * 60 * 60));
     }
 
     /// Past the broker's reach check, as if it were ever loosened, the
