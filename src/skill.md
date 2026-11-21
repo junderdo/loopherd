@@ -919,10 +919,12 @@ What differs from the shepherd:
   that can open and update pull requests but not merge or write contents,
   git pushes over ssh with the herd's deploy key, and the files holding the
   human's own GitHub credentials and ssh keys are unreadable. Pushes to the default
-  branch and force-pushes are refused by GitHub; ask the human. The sandbox
-  gives you no Unix sockets, so `herdr`, an ssh agent and WSL2's Windows
-  programs fail inside it (`Operation not permitted`), unless your herd
-  sets `[lead] unix_sockets = "all"`, which only the human does. Workers
+  branch and force-pushes are refused by GitHub; ask the human. Where
+  Claude Code's seccomp filter can block them, the sandbox gives you no
+  Unix sockets, so `herdr`, an ssh agent and WSL2's Windows programs fail
+  inside it (`Operation not permitted`), unless your herd sets
+  `[lead] unix_sockets = "all"`, which only the human does. A lead started
+  as `(lead, sockets open)` has them all. Workers
   run unsandboxed and most of the state dir stays writable to you;
   neither is yours to use against the sandbox. The sandbox
   is a guard rail the human set, not the whole boundary: when it refuses
