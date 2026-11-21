@@ -131,9 +131,16 @@ pub fn dry_run(
     inherited_workspace: Option<&str>,
 ) -> Result<String> {
     let spawn_req = resolve(ledger, paths, req)?;
+    let kept = sandbox::Lead {
+        herd: req.herd.clone(),
+        args: spawn_req.claude_args.clone(),
+        path: None,
+    };
+    let warnings = sandbox::fresh_arg_warnings(paths, &spawn_req.name, &kept).context("sandbox")?;
     let (facts, prompt) = plan(herdr, &spawn_req, inherited_workspace)?;
+    let warnings = warnings.into_iter().map(|w| format!("warning: {w}"));
     let rest = ["role lead".into(), "prompt".into(), prompt];
-    Ok([facts, rest.into()].concat().join("\n"))
+    Ok([warnings.collect(), facts, rest.into()].concat().join("\n"))
 }
 
 fn resolve(ledger: &dyn Ledger, paths: &Paths, req: &LeadRequest) -> Result<SpawnRequest> {
@@ -1175,10 +1182,26 @@ mod tests {
 
     #[test]
     fn require_refuses_a_lead_any_arg_outside_the_allowlist_naming_it_and_its_source() {
-        let refused: [(&[&str], &str); 6] = [
+        let refused: [(&[&str], &str); 10] = [
             (
                 &["--permission-mode", "bypassPermissions"],
                 "--permission-mode bypassPermissions",
+            ),
+            (
+                &["--permission-mode=bypassPermissions"],
+                "--permission-mode=bypassPermissions",
+            ),
+            (
+                &["--permission-mode", "acceptEdits"],
+                "--permission-mode acceptEdits",
+            ),
+            (
+                &["--permission-mode", "dontAsk"],
+                "--permission-mode dontAsk",
+            ),
+            (
+                &["--model", "--dangerously-skip-permissions"],
+                "--model, from the command line; --dangerously-skip-permissions",
             ),
             (
                 &["--dangerously-skip-permissions"],
@@ -1252,6 +1275,102 @@ mod tests {
                 "{err:#}"
             );
         }
+    }
+
+    #[test]
+    fn a_refused_arg_from_the_herds_args_points_to_lead_args_not_dropping_it() {
+        let setup = Setup::with_lead(PROMPT);
+        let file = setup.root.join("config/herds/h.toml");
+        let text = fs::read_to_string(&file).unwrap().replacen(
+            "args = [\"--model\", \"opus\"]",
+            "args = [\"--add-dir\", \"/srv\"]",
+            1,
+        );
+        fs::write(&file, text).unwrap();
+
+        let err = lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "sandbox: lead-h can't run sandboxed: its args may loosen its sandbox or \
+             permissions: --add-dir /srv, from herd h's args; a lead takes only --model, \
+             --effort, --verbose and --permission-mode default, manual, auto or plan, so give \
+             herd h a [lead].args without those, since its workers take the herd's args too, \
+             or set [lead] sandbox = \"prefer\" in herd h to start it with them as warnings"
+        );
+    }
+
+    #[test]
+    fn a_launch_flag_from_the_herds_args_points_to_lead_args_not_dropping_it() {
+        let setup = Setup::with_lead(PROMPT);
+        let file = setup.root.join("config/herds/h.toml");
+        let text = fs::read_to_string(&file).unwrap().replacen(
+            "args = [\"--model\", \"opus\"]",
+            "args = [\"--mcp-config\", \"workers-mcp.json\"]",
+            1,
+        );
+        fs::write(&file, text).unwrap();
+
+        let err = dry_run(
+            &herdr(),
+            &MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "sandbox: lead-h's args pass --mcp-config, which its launch takes; give herd h a \
+             [lead].args without it, since its workers take the herd's args too, and name the \
+             servers it may use in [lead] mcp_servers"
+        );
+    }
+
+    #[test]
+    fn dry_run_refuses_a_disallowed_arg_under_require_and_warns_under_prefer() {
+        let setup = Setup::with_lead(PROMPT);
+        let err = dry_run(
+            &herdr(),
+            &MemLedger::default(),
+            &setup.paths(),
+            &request(&["--add-dir", "/srv"]),
+            Some("w1"),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").starts_with(
+                "sandbox: lead-h can't run sandboxed: its args may loosen its sandbox or \
+                 permissions: --add-dir /srv, from the command line;"
+            ),
+            "{err:#}"
+        );
+
+        let setup = Setup::with_lead("prompt = \"go\"\nsandbox = \"prefer\"");
+        let plan = dry_run(
+            &herdr(),
+            &MemLedger::default(),
+            &setup.paths(),
+            &request(&["--add-dir", "/srv"]),
+            Some("w1"),
+        )
+        .unwrap();
+        assert!(
+            plan.starts_with(
+                "warning: lead-h starts with an arg that may loosen its sandbox or \
+                 permissions: --add-dir /srv, from the command line\nname lead-h\n"
+            ),
+            "{plan}"
+        );
+        assert!(!setup.worktree().exists());
     }
 
     #[test]

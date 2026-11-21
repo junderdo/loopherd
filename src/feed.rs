@@ -161,10 +161,12 @@ pub fn feed(
         }
         if let Some(lead) = &req.lead {
             let guard = crate::sandbox::Guard::new(paths.clone(), Some(lead.name.clone()));
-            let refusal = guard.spawn_refusal(&spawn_req).and_then(|why| match why {
-                Some(why) => Err(anyhow::anyhow!("refused: {why}")),
-                None => Ok(()),
-            });
+            let refusal = guard
+                .spawn_refusal(&spawn_req, &*ledger)
+                .and_then(|why| match why {
+                    Some(why) => Err(anyhow::anyhow!("refused: {why}")),
+                    None => Ok(()),
+                });
             if let Err(e) = refusal {
                 lines.push(format!("error: {task}: {e:#}"));
                 errors += 1;

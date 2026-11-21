@@ -2422,6 +2422,39 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_with_an_arg_outside_the_allowlist_is_revived_with_a_warning_under_prefer() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let mut adopted = unkept_lead("lead-h", cwd.path());
+        adopted.claude_args = vec!["--add-dir".into(), "/srv".into()];
+        let mut ledger = ledger([adopted]);
+        let req = ReviveRequest {
+            name: Some("lead-h".into()),
+            ..request()
+        };
+        std::fs::write(
+            req.paths.herds.join("h.toml"),
+            format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nsandbox = \"prefer\"\n",
+                own_repo()
+            ),
+        )
+        .unwrap();
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            out.contains(
+                "lead-h starts with an arg that may loosen its sandbox or permissions: \
+                 --add-dir /srv, from the args it was started with"
+            ),
+            "{out}"
+        );
+        assert_eq!(herdr.started().len(), 1);
+    }
+
+    #[test]
     fn a_lead_kept_with_its_own_mcp_config_from_before_resumes_without_it() {
         let cwd = tempfile::tempdir().unwrap();
         let herdr = herdr();

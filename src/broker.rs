@@ -491,7 +491,7 @@ fn feed(
 
 fn add(ctx: &mut Ctx, req: &AddRequest, dry_run: bool, sink: &mut dyn Sink) -> Result<i32> {
     let planned = crate::herd::resolve(ctx.paths, req)?;
-    if let Some(why) = ctx.guard().spawn_refusal(&planned)? {
+    if let Some(why) = ctx.guard().spawn_refusal(&planned, &*ctx.ledger)? {
         bail!("refused: {why}");
     }
     let inherited = ctx.inherited_workspace()?;
@@ -4173,6 +4173,200 @@ mod tests {
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
         assert!(herdr.tabs().is_empty());
+    }
+
+    /// Checks out `branch` at its usual place beside the repo's other worktrees.
+    fn checked_out(repo: &Path, branch: &str) -> PathBuf {
+        let path = crate::worktree::worktree_path(repo, branch);
+        crate::worktree::testing::git(
+            repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                path.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        path
+    }
+
+    fn worker_at(name: &str, herd: &str, repo: &Path, worktree: &Path) -> AgentRecord {
+        let mut worker = member(name, Some(herd));
+        worker.repo = repo.into();
+        worker.worktree = Some(worktree.into());
+        worker
+    }
+
+    #[test]
+    fn a_lead_s_add_reuses_only_a_worktree_its_own_herd_s_ledger_records() {
+        let world = World::new();
+        let (_root, repo) = branch_herd(&world);
+        let human_s = checked_out(&repo, "mine");
+        let g_s = checked_out(&repo, "theirs");
+        let mut g_retired = worker_at("g-theirs", "g", &repo, &g_s);
+        g_retired.retired = true;
+        world.add(g_retired);
+        let own = checked_out(&repo, "ours");
+        world.add(worker_at("b-ours", "h", &repo, &own));
+        let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
+
+        for (n, worktree) in [("mine", &human_s), ("theirs", &g_s)] {
+            for dry_run in [true, false] {
+                let err = world.client().call(&add_branch(n, dry_run)).unwrap_err();
+                let why = format!(
+                    "adding b-{n} would reuse worktree {}, which no ledger entry \
+                     of herd h records",
+                    worktree.display()
+                );
+                assert!(format!("{err:#}").ends_with(&why), "{n}: {err:#}");
+            }
+        }
+        let (out, _, code) = world.client().call(&add_branch("ours", true)).unwrap();
+
+        assert_eq!(code, 0, "{out}");
+        assert!(out.lines().any(|l| l == "name b-ours"), "{out}");
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert!(herdr.tabs().is_empty());
+    }
+
+    /// Herd h's retired `b-earlier` and herd g's live `g-shared` both record
+    /// the worktree of branch `shared`, which feeding h would start.
+    fn shared_with_g(world: &World, repo: &Path) -> PathBuf {
+        let herd_file = world.paths.herds.join("h.toml");
+        let text = std::fs::read_to_string(&herd_file).unwrap();
+        std::fs::write(&herd_file, text.replace("echo lead-h", "echo shared")).unwrap();
+        let shared = checked_out(repo, "shared");
+        let mut retired = worker_at("b-earlier", "h", repo, &shared);
+        retired.retired = true;
+        world.add(retired);
+        world.add(worker_at("g-shared", "g", repo, &shared));
+        shared
+    }
+
+    #[test]
+    fn a_lead_s_add_and_feed_won_t_reuse_a_worktree_another_herd_s_live_worker_holds() {
+        let world = World::new();
+        let (_root, repo) = branch_herd(&world);
+        let shared = shared_with_g(&world, &repo);
+        let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
+        let why = format!(
+            "adding b-shared would reuse worktree {}, which herd g's g-shared holds",
+            shared.display()
+        );
+
+        let err = world
+            .client()
+            .call(&add_branch("shared", true))
+            .unwrap_err();
+        let (out, _, code) = world.client().call(&feed("h")).unwrap();
+
+        assert!(format!("{err:#}").ends_with(&why), "{err:#}");
+        assert_eq!(code, 1, "{out}");
+        let refused = format!("error: shared: refused: {why}");
+        assert!(out.lines().any(|l| l == refused), "{out}");
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
+    fn a_lead_s_feed_won_t_start_a_task_in_a_worktree_the_human_checked_out() {
+        let world = World::new();
+        let (_root, repo) = branch_herd(&world);
+        let herd_file = world.paths.herds.join("h.toml");
+        let text = std::fs::read_to_string(&herd_file).unwrap();
+        std::fs::write(&herd_file, text.replace("echo lead-h", "echo mine")).unwrap();
+        let human_s = checked_out(&repo, "mine");
+        let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
+
+        let (out, _, code) = world.client().call(&feed("h")).unwrap();
+
+        assert_eq!(code, 1, "{out}");
+        let refused = format!(
+            "error: mine: refused: adding b-mine would reuse worktree {}, which no ledger \
+             entry of herd h records",
+            human_s.display()
+        );
+        assert!(out.lines().any(|l| l == refused), "{out}");
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert!(herdr.tabs().is_empty());
+    }
+
+    /// Points herd h's repo at `repo`, which need not be a git repo, with a
+    /// `[template.b]` on branch `{n}`.
+    fn herd_at(world: &World, repo: &Path) {
+        let text = format!(
+            "repo = {:?}\n\
+             [template.b]\nparams = [\"n\"]\nname = \"b-{{n}}\"\nbranch = \"{{n}}\"\nprompt = \"go\"\n\
+             [queue]\ntemplate = \"b\"\nsource = \"true\"\nmax = 2\n\
+             [lead]\nprompt = \"go\"\nsandbox = \"prefer\"\n",
+            repo.to_str().unwrap()
+        );
+        std::fs::write(world.paths.herds.join("h.toml"), text).unwrap();
+    }
+
+    #[test]
+    fn a_lead_s_add_to_a_herd_whose_repo_a_lead_can_write_is_refused_before_git_runs() {
+        let world = World::new();
+        let state = world.paths.state_dir().to_path_buf();
+        let (_root, repo) = branch_herd(&world);
+        let lead_g = crate::worktree::worktree_path(&repo, "lead-g");
+        let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
+
+        // Neither is a git repo, so git listing their worktrees would fail first.
+        for (writable, inside) in [(state.join("repo"), state), (lead_g.join("repo"), lead_g)] {
+            std::fs::create_dir_all(&writable).unwrap();
+            herd_at(&world, &writable);
+
+            let err = world.client().call(&add_branch("x", true)).unwrap_err();
+
+            let why = format!(
+                "adding b-x names repo {}, inside {}, which a lead can write",
+                writable.display(),
+                inside.display()
+            );
+            assert!(format!("{err:#}").ends_with(&why), "{err:#}");
+        }
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_lead_s_add_of_a_detached_worktree_named_like_its_lead_is_refused() {
+        let world = World::new();
+        let (_root, repo) = branch_herd(&world);
+        let herd_file = world.paths.herds.join("h.toml");
+        let mut text = std::fs::read_to_string(&herd_file).unwrap();
+        text.push_str(
+            "[template.d]\nparams = [\"n\"]\nname = \"d-{n}\"\nworktree = \"{n}\"\nprompt = \"go\"\n",
+        );
+        std::fs::write(&herd_file, text).unwrap();
+        let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
+        let detached = Op::Add {
+            herd: "h".into(),
+            template: "d".into(),
+            params: vec!["lead-h".into()],
+            claude_args: vec![],
+            dry_run: true,
+            ready_timeout_secs: 60,
+            no_focus: false,
+        };
+
+        let err = world.client().call(&detached).unwrap_err();
+
+        let lead_worktree = crate::worktree::worktree_path(&repo, "lead-h");
+        let why = format!(
+            "adding d-lead-h names lead lead-h's worktree {}",
+            lead_worktree.display()
+        );
+        assert!(format!("{err:#}").ends_with(&why), "{err:#}");
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
     }
 
     #[test]
