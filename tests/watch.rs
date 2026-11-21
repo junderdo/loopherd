@@ -1197,3 +1197,54 @@ fn a_herd_that_isnt_a_name_is_refused_before_its_herd_file_is_looked_for() {
     );
     assert!(!stderr(&out).contains("no herd file"), "{}", stderr(&out));
 }
+
+#[test]
+fn a_leads_watch_runs_its_checks_under_its_recorded_path_not_the_one_it_inherits() {
+    let sandbox = Sandbox::new();
+    two_leads(&sandbox);
+    let root = sandbox.dir.path();
+    let config = root.join("config");
+    fs::create_dir_all(config.join("herds")).unwrap();
+    fs::write(
+        config.join("herds/cards.toml"),
+        "repo = \"/\"\nworkspace = \"w1\"\n\
+         [template.t]\nparams = [\"n\"]\nname = \"t-{n}\"\nprompt = \"go\"\n\
+         [queue]\ntemplate = \"t\"\nsource = \"gh\"\nmax = 1\n\
+         [lead]\nprompt = \"go\"\n",
+    )
+    .unwrap();
+    let (planted, kept) = (root.join("planted"), root.join("kept"));
+    for dir in [&planted, &kept] {
+        fs::create_dir_all(dir).unwrap();
+        executable(
+            &dir.join("gh"),
+            format!("#!/bin/sh\ntouch {}/ran\n", dir.display()),
+        );
+    }
+    fs::create_dir_all(config.join("sandbox")).unwrap();
+    fs::write(
+        config.join("sandbox/lead-cards.lead.json"),
+        format!(
+            r#"{{"herd": "cards", "args": [], "path": "{}:/usr/bin:/bin"}}"#,
+            kept.display()
+        ),
+    )
+    .unwrap();
+
+    let out = sandbox
+        .loopherd(&["watch", "--timeout", "0"])
+        .env(
+            "PATH",
+            format!("{}:{}:/usr/bin:/bin", planted.display(), kept.display()),
+        )
+        .env("HERDR_PANE_ID", "w1:p0")
+        .env("HERDR_SOCKET_PATH", "/run/live.sock")
+        .output()
+        .unwrap();
+
+    assert!(kept.join("ran").exists(), "{out:?}");
+    assert!(
+        !planted.join("ran").exists(),
+        "the gh earlier on its PATH ran"
+    );
+}

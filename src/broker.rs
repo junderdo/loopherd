@@ -942,28 +942,32 @@ struct Job {
 }
 
 /// The environment `lead`'s broker, and its unsandboxed watch, take on
-/// before running anything, so their git and gh reach origin with the
-/// lead's narrowed credentials, as in the lead's sandbox: none unless the
-/// herd its launch record names guards merges by credentials (D95). Errs,
-/// naming the fix, while they're missing.
+/// before running anything. The `PATH` its launch record keeps, so nothing
+/// the lead sets picks the gh, git or checks they run. And the lead's
+/// narrowed credentials, as in its sandbox, so their git and gh reach origin
+/// as it: none unless the herd its launch record names guards merges by
+/// credentials (D95). Errs, naming the fix, while they're missing.
 pub fn lead_env(paths: &Paths, lead: &str) -> Result<Vec<(String, String)>> {
     use crate::herd::MergeGuard;
     validate_name(lead)?;
     let Some(kept) = sandbox::Lead::kept(paths, lead)? else {
         return Ok(vec![]);
     };
+    let mut env: Vec<(String, String)> =
+        kept.path.map(|p| ("PATH".into(), p)).into_iter().collect();
     let herd = &kept.herd;
     let guard = crate::herd::merge_guard(paths, herd)
         .with_context(|| format!("whether herd {herd} guards merges by credentials is unknown"))?;
     if guard != Some(MergeGuard::Credentials) {
-        return Ok(vec![]);
+        return Ok(env);
     }
-    let env = crate::credentials::lead_env(paths, herd)
+    let credentials = crate::credentials::lead_env(paths, herd)
         .with_context(|| format!("herd {herd} guards merges by credentials"))?;
-    let mut env: Vec<(String, String)> = env
-        .into_iter()
-        .map(|(name, value)| (name, value.as_str().unwrap_or_default().to_string()))
-        .collect();
+    env.extend(
+        credentials
+            .into_iter()
+            .map(|(name, value)| (name, value.as_str().unwrap_or_default().to_string())),
+    );
     // Outside the sandbox the human's keys are readable: a core.sshCommand -i or
     // a `Host *` IdentityFile would offer them, so ssh reads loopherd's config alone.
     if let Some(missing) = crate::credentials::host_block_missing(paths, herd) {
@@ -2048,6 +2052,7 @@ mod tests {
             let kept = sandbox::Lead {
                 herd: herd.into(),
                 args: vec![],
+                path: None,
             };
             fn no_sandbox() -> Result<sandbox::Sockets, Unavailable> {
                 Err(Unavailable {
@@ -4226,7 +4231,7 @@ mod tests {
         std::fs::create_dir_all(&sandbox).unwrap();
         std::fs::write(
             sandbox.join("lead-c.lead.json"),
-            r#"{"herd": "c", "args": []}"#,
+            r#"{"herd": "c", "args": [], "path": "/usr/bin:/bin"}"#,
         )
         .unwrap();
         let files = crate::credentials::files(&world.paths, "c");
@@ -4250,6 +4255,7 @@ mod tests {
                 .find(|(n, _)| n == name)
                 .map(|(_, value)| value.as_str())
         };
+        assert_eq!(var("PATH"), Some("/usr/bin:/bin"));
         assert_eq!(var("GH_TOKEN"), Some("github_pat_1"));
         assert_eq!(var("SSH_AUTH_SOCK"), Some(""));
         assert_eq!(var("GIT_CONFIG_KEY_0"), Some("credential.helper"));
@@ -4268,8 +4274,24 @@ mod tests {
     }
 
     #[test]
-    fn a_hook_guarded_or_unrecorded_leads_broker_keeps_its_starters_environment() {
+    fn a_hook_guarded_leads_broker_takes_on_only_its_recorded_path() {
         let world = World::new();
+        let kept = sandbox::Lead::kept(&world.paths, "lead-h")
+            .unwrap()
+            .unwrap();
+        let recorded = kept.path.expect("launching records the PATH");
+
+        assert_eq!(
+            lead_env(&world.paths, "lead-h").unwrap(),
+            [("PATH".to_string(), recorded)]
+        );
+    }
+
+    #[test]
+    fn an_unrecorded_lead_or_a_record_without_a_path_keeps_its_starters_environment() {
+        let world = World::new();
+        let file = world.paths.config_dir().join("sandbox/lead-h.lead.json");
+        std::fs::write(&file, r#"{"herd": "h", "args": []}"#).unwrap();
 
         assert_eq!(lead_env(&world.paths, "lead-h").unwrap(), []);
         assert_eq!(lead_env(&world.paths, "lead-x").unwrap(), []);

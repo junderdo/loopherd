@@ -618,6 +618,7 @@ fn kept_lead(
                 .clone()
                 .with_context(|| format!("{name} is a lead with no herd recorded"))?,
             args: sandbox::without_launch_flags(&record.claude_args),
+            path: None,
         },
     };
     if matches!(name.as_str(), "" | "." | "..") || name.contains('/') {
@@ -1558,6 +1559,7 @@ mod tests {
         let kept = sandbox::Lead {
             herd: "h".into(),
             args: record.claude_args.clone(),
+            path: None,
         };
         sandbox::prepare(&own_paths(), name, &kept, || {
             Ok(crate::sandbox::Sockets::Blocked)
@@ -1831,6 +1833,7 @@ mod tests {
         let kept = sandbox::Lead {
             herd: "h".into(),
             args: vec!["--model".into(), "opus".into()],
+            path: None,
         };
         sandbox::prepare(&req.paths, "lead-h", &kept, || {
             Ok(crate::sandbox::Sockets::Blocked)
@@ -2152,6 +2155,7 @@ mod tests {
             ]
             .map(String::from)
             .into(),
+            path: None,
         };
         std::fs::write(
             req.paths.config_dir().join("sandbox/lead-h.lead.json"),

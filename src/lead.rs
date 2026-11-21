@@ -40,6 +40,7 @@ pub fn lead(
     let kept = sandbox::Lead {
         herd: req.herd.clone(),
         args: spawn_req.claude_args.clone(),
+        path: None,
     };
     // Before the sandbox, so its checks read the worktree's project settings.
     let worktree = worktree_path(&spawn_req.repo, &spawn_req.name);
@@ -603,14 +604,15 @@ mod tests {
             ]
         );
         assert_eq!(ledger.0["lead-h"].unsandboxed, None);
+        let kept = sandbox::Lead::kept(&setup.paths(), "lead-h")
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            sandbox::Lead::kept(&setup.paths(), "lead-h").unwrap(),
-            Some(sandbox::Lead {
-                herd: "h".into(),
-                args: vec!["--model".into(), "opus".into()],
-            }),
+            (kept.herd.as_str(), kept.args),
+            ("h", vec!["--model".to_string(), "opus".to_string()]),
             "kept where the lead can't write, for revive to trust over the ledger"
         );
+        assert!(kept.path.is_some(), "the PATH its watch runs under is kept");
     }
 
     /// The paths a lead's settings list under `key` in the sandbox's filesystem.
