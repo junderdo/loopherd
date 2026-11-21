@@ -1680,6 +1680,34 @@ args = ["--model", "opus"]
     }
 
     #[test]
+    fn re_adding_a_retired_worker_whose_claude_still_runs_leaves_its_sandbox_files() {
+        let (config, _repo) = worker_config("sandbox = \"require\"");
+        let paths = config.paths();
+        let dir = paths.config_dir().join("sandbox");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("zpr-1050.json"), "held").unwrap();
+        fs::write(dir.join("zpr-1050.member.json"), "held").unwrap();
+        let herdr = herdr().with_agent("zpr-1050");
+
+        let err = add(
+            &herdr,
+            &mut MemLedger::default(),
+            &paths,
+            &request("prs", "pr", &["1050"]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("already a live agent"),
+            "{err:#}"
+        );
+        for file in ["zpr-1050.json", "zpr-1050.member.json"] {
+            assert_eq!(fs::read_to_string(dir.join(file)).unwrap(), "held");
+        }
+    }
+
+    #[test]
     fn add_refuses_a_required_worker_whose_sandbox_cant_start() {
         let (config, _repo) = worker_config("sandbox = \"require\"");
         let herdr = herdr();

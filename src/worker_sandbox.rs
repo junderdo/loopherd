@@ -246,6 +246,8 @@ pub fn spawn(
         }
     };
     // A branch checked out in the main checkout plans the main checkout itself.
+    // A retired worker's Claude may still run on the files `prepare` rewrites.
+    crate::spawn::ensure_name_free(herdr, &req.name).context("name")?;
     let launch = prepare(paths, &req.name, &member, probe)?;
     let mut req = req.clone();
     req.claude_args.extend(launch.args());

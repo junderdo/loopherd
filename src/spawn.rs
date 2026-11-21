@@ -411,7 +411,7 @@ pub fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn ensure_name_free(herdr: &dyn Herdr, name: &str) -> Result<()> {
+pub fn ensure_name_free(herdr: &dyn Herdr, name: &str) -> Result<()> {
     if let Some(agent) = herdr
         .agents()?
         .into_iter()
