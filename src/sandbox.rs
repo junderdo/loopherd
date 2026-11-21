@@ -694,14 +694,20 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
         paths,
         name,
         lead,
-        probe,
+        &probe,
         ArgsFrom::Fresh,
         std::env::var_os("PATH").as_deref(),
     )
 }
 
 /// [`prepare`] for a lead resuming with the args it was started with.
-pub fn prepare_kept(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<Launch> {
+/// `probe` is asked at most once, and only for a lead that gets that far.
+pub fn prepare_kept(
+    paths: &Paths,
+    name: &str,
+    lead: &Lead,
+    probe: &dyn Fn() -> Result<Sockets, Unavailable>,
+) -> Result<Launch> {
     start(
         paths,
         name,
@@ -749,7 +755,7 @@ fn start(
     paths: &Paths,
     name: &str,
     lead: &Lead,
-    probe: Probe,
+    probe: &dyn Fn() -> Result<Sockets, Unavailable>,
     from: ArgsFrom,
     path: Option<&std::ffi::OsStr>,
 ) -> Result<Launch> {
@@ -1890,7 +1896,7 @@ mod tests {
             &paths,
             "lead-h",
             &lead,
-            || Ok(Sockets::Blocked),
+            &|| Ok(Sockets::Blocked),
             ArgsFrom::Fresh,
             Some("/usr/bin::/bin".as_ref()),
         )
