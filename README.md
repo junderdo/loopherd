@@ -207,7 +207,10 @@ as its main checkout. Then, in order:
    reopens all three ([D105](docs/decisions/D105.md)). Where Claude Code
    has no seccomp filter to block them, `loopherd doctor` and
    `loopherd setup` name `npm install -g @anthropic-ai/sandbox-runtime`,
-   and the lead isn't started unless its `[lead]` sets `sandbox = "prefer"`.
+   and the lead isn't started or restarted unless its `[lead]` sets
+   `sandbox = "prefer"`; one with `merge_guard = "credentials"` isn't
+   started or restarted even then. Under `unix_sockets = "all"` the socket
+   check is skipped: the lead isn't refused or flagged for open sockets.
    What still gets past it: workers run unsandboxed, so a lead can have
    one act for it (LH-284), and most of the state dir stays writable to it
    (LH-298).

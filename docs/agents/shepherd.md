@@ -105,13 +105,16 @@ herdr socket, ssh agent or WSL2 interop, unless its herd sets
 `[lead] unix_sockets = "all"`, which `lead`, `revive` and doctor warn of
 (D105). Where the sandbox can't block them (no seccomp filter; doctor
 names the npm package), `require` refuses the lead and `prefer` starts it
-as `(lead, sockets open)`; installing the package is the human's. What still gets past the sandbox: workers run unsandboxed (LH-284)
-and most of the state dir is writable (LH-298). A lead's `tell`, `read`, `status`,
-`feed`, `add`, `prompt`, `restart`, `retire` and `release` run in its
-broker, outside the sandbox and only on its own herd (D98); its watch
-still calls herdr itself, run bare outside the sandbox (D104); doctor fails
-for a lead with no broker running, and `loopherd revive --name <lead>`
-from an unsandboxed shell starts it. Doctor
+as `(lead, sockets open)`; `restart` applies the same rule. A `credentials`
+lead is refused under both. Under `unix_sockets = "all"` the socket check
+is skipped: the lead isn't refused or flagged for open sockets. Installing
+the package is the human's. What still gets past the sandbox: workers run
+unsandboxed (LH-284) and most of the state dir is writable (LH-298). A lead's
+`tell`, `read`, `status`, `feed`, `add`, `prompt`, `restart`, `retire` and
+`release` run in its broker, outside the sandbox and only on its own herd
+(D98); its watch still calls herdr itself, run bare outside the sandbox
+(D104); doctor fails for a lead with no broker running, and
+`loopherd revive --name <lead>` from an unsandboxed shell starts it. Doctor
 names each running lead without its sandbox; `loopherd revive --name
 <lead>` after quitting its Claude resumes it in one. A lead started
 before loopherd kept its record (`<config dir>/sandbox/<lead>.lead.json`)
