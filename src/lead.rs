@@ -442,7 +442,19 @@ mod tests {
             assert!(denied_to_sandbox(deny, path), "{} {deny}", path.display());
         }
         let later = state.join("broker/lead-later/requests/x");
-        assert!(denied_to_file_tools(deny, &later), "{deny}");
+        if cfg!(target_os = "linux") {
+            assert!(denied_to_file_tools(deny, &later), "{deny}");
+        } else {
+            assert!(!has_broker_glob(deny), "{deny}");
+        }
+    }
+
+    /// Whether `deny` holds a glob rule under the state dir's `broker/`, which
+    /// is untested outside Linux's sandbox.
+    fn has_broker_glob(deny: &serde_json::Value) -> bool {
+        edit_rules(deny).any(|spec| {
+            spec.contains("/state/broker/") && spec.trim_end_matches("/**").contains('*')
+        })
     }
 
     #[test]
@@ -471,6 +483,32 @@ mod tests {
     }
 
     #[test]
+    fn the_broker_folders_a_lead_s_start_makes_are_private() {
+        let setup = Setup::with_lead(PROMPT);
+        setup.copy_herd("g");
+
+        lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        let broker = setup.root.join("state/broker");
+        for dir in [
+            broker.clone(),
+            broker.join("lead-h"),
+            broker.join("lead-h/requests"),
+            broker.join("lead-g"),
+        ] {
+            let mode = fs::metadata(&dir).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{}", dir.display());
+        }
+    }
+
+    #[test]
     fn a_lead_starts_in_the_sandbox_with_settings_written_outside_its_worktree() {
         let setup = Setup::with_lead(PROMPT);
         let herdr = herdr();
@@ -485,8 +523,25 @@ mod tests {
         )
         .unwrap();
 
-        let (path, settings) = started_settings(&herdr);
+        let (path, mut settings) = started_settings(&herdr);
         let root = setup.root.display();
+        let by_platform = serde_json::Value::from(
+            settings["permissions"]["deny"]
+                .as_array_mut()
+                .unwrap()
+                .split_off(8),
+        );
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                by_platform,
+                serde_json::json!([
+                    format!("Edit(/{root}/state/broker/*)"),
+                    format!("Edit(/{root}/state/handoffs/*)"),
+                ])
+            );
+        } else {
+            assert!(!has_broker_glob(&by_platform), "{by_platform}");
+        }
         assert_eq!(path, setup.root.join("config/sandbox/lead-h.json"));
         assert_eq!(
             settings,
@@ -523,8 +578,6 @@ mod tests {
                         format!("Edit(/{root}/state/shepherd.json.lock)"),
                         format!("Edit(/{root}/state/ledger.json)"),
                         format!("Edit(/{root}/state/ledger.lock)"),
-                        format!("Edit(/{root}/state/broker/*)"),
-                        format!("Edit(/{root}/state/handoffs/*)"),
                     ],
                 },
             })
