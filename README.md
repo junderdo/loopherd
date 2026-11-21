@@ -232,7 +232,8 @@ as its main checkout. Then, in order:
 The guide a shepherd or lead follows, from setting up a herd to cleaning up
 after merges, is the loopherd skill: `loopherd --skill` prints it
 (`--section lead` prints one section), and `install-hook` installs it for
-Claude.
+Claude: the file in `~/.agents/skills/loopherd/`, and `~/.claude/skills/loopherd`
+a relative symlink to it, as the `skills` CLI lays out a skill.
 
 ### What `init` writes
 

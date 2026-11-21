@@ -74,7 +74,8 @@ Init never launches an agent.
    `loopherd report` and Claude calls it from its hooks. `loopherd
    install-hook` adds the Stop, StopFailure, SessionStart, PreToolUse and
    UserPromptSubmit hooks to Claude's user settings (backed up first;
-   re-running changes nothing) and installs this skill. `watch` needs the
+   re-running changes nothing) and installs this skill in
+   `~/.agents/skills/loopherd`, linked from `~/.claude/skills/loopherd`. `watch` needs the
    first three, not the last two. Running Claude sessions pick up a newly added hook without
    a restart. Then `loopherd feed <herd> --dry-run` and, if it reads right,
    `loopherd feed <herd>`. The herd file (`<herd>.toml` in
