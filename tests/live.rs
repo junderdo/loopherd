@@ -488,6 +488,27 @@ impl Drop for RemoveWorktree {
     }
 }
 
+/// Doctor's failing `sandbox settings` findings for `herd`'s lead, joined, or
+/// `None` when nothing in the human's settings would refuse it.
+fn sandbox_settings_refusal(config: &Path, herd: &str) -> Option<String> {
+    let doctor = Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .args(["doctor", "--json"])
+        .env("XDG_STATE_HOME", tempfile::tempdir().unwrap().path())
+        .env("LOOPHERD_CONFIG_DIR", config)
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    let check = format!("herd {herd} sandbox settings");
+    let findings: Vec<String> = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["name"] == check.as_str() && c["status"] == "failure")
+        .map(|c| c["detail"].as_str().unwrap_or_default().to_string())
+        .collect();
+    (!findings.is_empty()).then(|| findings.join("; "))
+}
+
 #[test]
 fn a_lead_starts_with_no_mcp_tools() {
     if !live_enabled() {
@@ -523,6 +544,11 @@ fn a_lead_starts_with_no_mcp_tools() {
         ),
     )
     .unwrap();
+    // The lead reads the human's real ~/.claude/settings.json, which can loosen its sandbox.
+    if let Some(loosened) = sandbox_settings_refusal(&config, &herd) {
+        eprintln!("skipped: your Claude settings would refuse this lead: {loosened}");
+        return;
+    }
     let _cleanup = CloseTab(name.clone());
 
     let out = dev(env!("CARGO_BIN_EXE_loopherd"))
