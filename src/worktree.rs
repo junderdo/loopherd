@@ -1051,7 +1051,7 @@ fn git_dir(checkout: &Path) -> Result<PathBuf> {
 }
 
 /// The common git dir of the checkout at `repo`; see [`git_dir`].
-fn common_dir(repo: &Path) -> Result<PathBuf> {
+pub fn common_dir(repo: &Path) -> Result<PathBuf> {
     let git_dir = git_dir(repo)?;
     Ok(match git_dir.parent() {
         Some(worktrees) if worktrees.file_name() == Some("worktrees".as_ref()) => worktrees

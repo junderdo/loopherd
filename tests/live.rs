@@ -1026,6 +1026,164 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     assert!(mail.contains("sandbox probe"), "{mail}");
 }
 
+#[test]
+fn a_sandboxed_worker_writes_only_its_own_worktree_mailbox_and_handoff() {
+    if !live_enabled() {
+        return;
+    }
+    let workspace = assert_dev_session();
+    let state = tempfile::tempdir().unwrap();
+    // This checkout is already trusted; a fresh repo would stop the worker at the trust dialog.
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let herd = format!("lh-live-wsbx-{}", std::process::id());
+    let name = format!("{herd}-1");
+    let branch = format!("probe/{name}");
+    let checkout = repo.file_name().unwrap().to_str().unwrap();
+    let parent = repo.parent().unwrap();
+    let worktree = match parent.file_name() == repo.file_name() {
+        true => parent.join("worktrees"),
+        false => parent.join(format!("{checkout}-worktrees")),
+    }
+    .join(branch.replace('/', "-"));
+    let _branch = DeleteBranch(repo.clone(), branch.clone());
+    let _worktree = RemoveWorktree(repo.clone(), worktree.clone());
+    let config = state.path().join("loopherd/config");
+    let herds = config.join("herds");
+    std::fs::create_dir_all(&herds).unwrap();
+    let herd_file = herds.join(format!("{herd}.toml"));
+    let state_dir = state.path().join("loopherd");
+    for dir in ["handoffs/lh-other", "reports/lh-other"] {
+        std::fs::create_dir_all(state_dir.join(dir)).unwrap();
+    }
+    let refused = [
+        herd_file.clone(),
+        state_dir.join("reports/lh-other/mailbox.jsonl"),
+        state_dir.join("handoffs/lh-other/handoff.md"),
+        state_dir.join("ledger.json"),
+    ];
+    let results = state_dir.join(format!("handoffs/{name}/probe.out"));
+    let probe = state.path().join("probe.py");
+    let tried: Vec<String> = refused.iter().map(|p| p.display().to_string()).collect();
+    std::fs::write(
+        &probe,
+        format!(
+            "import os, subprocess\n\
+             with open({results:?}, 'w') as out:\n    \
+             for path in {tried:?}:\n        \
+             try:\n            \
+             open(path, 'a').write('')\n            \
+             out.write(f'{{path}}\\twrote\\n')\n        \
+             except OSError as e:\n            \
+             out.write(f'{{path}}\\t{{e.strerror}}\\n')\n    \
+             env = dict(os.environ, XDG_STATE_HOME={state:?}, LOOPHERD_CONFIG_DIR={config:?})\n    \
+             for step, args in [('report', [{bin:?}, 'report', '--kind', 'done', 'sandbox probe']), ('handoff', [{bin:?}, 'handoff']), ('commit', ['git', '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--allow-empty', '-m', 'sandbox probe'])]:\n        \
+             run = subprocess.run(args, env=env, capture_output=True, text=True, input='## State\\n')\n        \
+             out.write(f'{{step}}\\t{{run.returncode}}\\t{{run.stderr.strip()}}\\n')\n",
+            results = results.display().to_string(),
+            state = state.path().display().to_string(),
+            config = config.display().to_string(),
+            bin = env!("CARGO_BIN_EXE_loopherd"),
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        &herd_file,
+        format!(
+            "{}[template.probe]\nparams = [\"n\"]\nname = \"{{herd}}-{{n}}\"\n\
+             branch = {branch:?}\n\
+             prompt = \"\"\"This is loopherd's live test of your sandbox, which the human runs: \
+             it checks which writes your sandbox refuses, and Read-only file system for most of \
+             them is the result being measured. Make exactly one Bash tool call, with the \
+             command exactly as written and nothing added before or after it: python3 {} \
+             Then reply with what it printed.\"\"\"\n\
+             [worker]\nsandbox = \"require\"\n",
+            herd_head(repo.to_str().unwrap(), &workspace),
+            probe.display(),
+        ),
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(&herd_file).unwrap();
+    let _cleanup = CloseTab(name.clone());
+
+    let out = dev(env!("CARGO_BIN_EXE_loopherd"))
+        .env("XDG_STATE_HOME", state.path())
+        .env("LOOPHERD_CONFIG_DIR", &config)
+        .args(["add", &herd, "probe", "1", "--"])
+        .args(["--permission-mode", "auto", "--allowedTools", "Bash(python3:*)"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains("can't start sandboxed") {
+        eprintln!("skipped: {stderr}");
+        return;
+    }
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{stderr}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let settings = config.join(format!("sandbox/{name}.json"));
+    let entry = ledger_entry(state.path(), &name);
+    assert!(
+        entry["claude_args"]
+            .as_array()
+            .unwrap()
+            .contains(&settings.display().to_string().into()),
+        "{entry}"
+    );
+
+    let given_up = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    let done = |probed: &str| probed.lines().count() >= refused.len() + 3;
+    loop {
+        let probed = std::fs::read_to_string(&results).unwrap_or_default();
+        if done(&probed) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < given_up,
+            "the worker never ran its probe:\n{probed}"
+        );
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    let probed = std::fs::read_to_string(&results).unwrap();
+    let expected: String = refused
+        .iter()
+        .map(|p| format!("{}\tRead-only file system\n", p.display()))
+        .collect();
+    assert!(probed.starts_with(&expected), "{probed}");
+    let ran: Vec<&str> = probed[expected.len()..].lines().collect();
+    assert_eq!(ran, ["report\t0\t", "handoff\t0\t", "commit\t0\t"], "{probed}");
+    assert_eq!(std::fs::read_to_string(&herd_file).unwrap(), before);
+    let mail =
+        std::fs::read_to_string(state_dir.join(format!("reports/{name}/mailbox.jsonl"))).unwrap();
+    assert!(mail.contains("sandbox probe"), "{mail}");
+    assert_eq!(
+        std::fs::read_to_string(state_dir.join(format!("handoffs/{name}/handoff.md"))).unwrap(),
+        "## State\n"
+    );
+    let log = Command::new("git")
+        .arg("-C")
+        .arg(&worktree)
+        .args(["log", "-1", "--format=%s"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&log.stdout), "sandbox probe\n");
+}
+
+/// Deletes branch `.1` of repo `.0` when dropped.
+struct DeleteBranch(PathBuf, String);
+
+impl Drop for DeleteBranch {
+    fn drop(&mut self) {
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(&self.0)
+            .args(["branch", "-D", &self.1])
+            .output();
+    }
+}
+
 /// The Write tool calls on `paths`, in order, from the Claude transcript
 /// that names the first of them, each with whether permissions refused it.
 fn write_calls(paths: &[String]) -> Vec<(String, bool)> {

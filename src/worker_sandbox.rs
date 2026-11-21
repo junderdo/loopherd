@@ -315,7 +315,9 @@ fn own_dirs(paths: &Paths, name: &str) -> [PathBuf; 2] {
 
 fn settings(paths: &Paths, name: &str, herd: &str, worktree: &Path) -> Result<Value> {
     let worker = herd::worker(paths, herd)?;
-    let git = herd::repo(paths, herd)?.join(".git");
+    let repo = herd::repo(paths, herd)?;
+    // A repo that isn't one yet fails the spawn's own git calls.
+    let git = crate::worktree::common_dir(&repo).unwrap_or_else(|_| repo.join(".git"));
     let state = paths.state_dir();
     let config = paths.config_dir();
     let claude = paths.home.join(".claude");
