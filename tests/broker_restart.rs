@@ -530,3 +530,18 @@ fn an_install_that_exits_at_once_is_noted_once_and_the_old_broker_serves_until_t
     assert_eq!(world.read_as_lead(), "served\n");
     world.wait_until_runs(fixed);
 }
+
+#[test]
+fn a_broker_started_from_another_loopherd_than_paths_stays_on_it() {
+    let world = World::new();
+    let dev_build = Path::new(env!("CARGO_BIN_EXE_loopherd"));
+    world.install();
+    let _broker = world.broker_from(dev_build);
+    world.wait_until_runs(file_id(dev_build));
+
+    assert_eq!(world.read_as_lead(), "served\n");
+    std::thread::sleep(Duration::from_millis(1500));
+
+    assert_eq!(world.recorded_file(), Some(file_id(dev_build)));
+    assert_eq!(world.read_as_lead(), "served\n");
+}

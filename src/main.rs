@@ -1600,6 +1600,7 @@ fn run_broker(lead: &str) -> Result<i32> {
         unsafe { std::env::set_var(name, value) };
     }
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let started_from = std::env::current_exe().ok();
     let host = broker::Host {
         herdr: &CliHerdr,
         procs: &process::ProcFs,
@@ -1609,9 +1610,9 @@ fn run_broker(lead: &str) -> Result<i32> {
         spawn_waiter,
         prs: &github::GhCli::default(),
         follow: Some(broker::Follow {
-            installed: &|| on_path("loopherd")?.canonicalize().ok(),
+            installed: &|| installed_as(started_from.as_deref()?),
             reexec: &broker::reexec,
-            every: Duration::from_secs(30),
+            every: Duration::from_secs(1),
         }),
     };
     let served = broker::serve(
@@ -1626,6 +1627,13 @@ fn run_broker(lead: &str) -> Result<i32> {
         eprintln!("loopherd broker: a broker already serves {lead}");
     }
     Ok(0)
+}
+
+/// The loopherd on PATH, canonicalized, when it is installed at `exe`: a
+/// broker started from a dev build or a test's binary stays on it.
+fn installed_as(exe: &Path) -> Option<PathBuf> {
+    let installed = on_path("loopherd")?.canonicalize().ok()?;
+    (installed == exe.canonicalize().ok()?).then_some(installed)
 }
 
 fn run_broker_restart(lead: &str) -> Result<i32> {
@@ -2322,6 +2330,8 @@ fn doctor_install(settings: Option<PathBuf>) -> Result<doctor::Install> {
         running: std::env::current_exe().context("find this binary")?,
         sandbox: sandbox::probe(),
         wsl_interop: sandbox::wsl_interop(),
+        in_broker_of: std::env::var(broker::BROKER_ENV).ok(),
+        broker_move_grace: Duration::from_secs(3),
     })
 }
 

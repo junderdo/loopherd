@@ -764,7 +764,8 @@ pub struct Follow<'a> {
     /// Replaces this process with `exe` serving `lead` under `lock`, as
     /// [`reexec`] does; returns only when it couldn't.
     pub reexec: &'a (dyn Fn(&Path, &str, &Lock) -> anyhow::Error + Sync),
-    /// How long an idle broker goes between looks; it also looks after each request.
+    /// How long an idle broker goes between looks; it also looks after each
+    /// request, but never while one is in flight.
     pub every: Duration,
 }
 
@@ -779,9 +780,9 @@ pub struct Follow<'a> {
 /// every request it hasn't started, and returns once none is in flight.
 ///
 /// `inherited` is the lock a broker it replaced handed it across `exec`.
-/// When `host.follow` finds a new loopherd installed, the broker drains as
-/// for `broker-restart` and re-execs it; one that can't take over is noted
-/// in the lead's mailbox once, and the broker serves on.
+/// When `host.follow` finds a new loopherd installed while no request is in
+/// flight, the broker re-execs it; one that can't take over is noted in the
+/// lead's mailbox once, and the broker serves on.
 pub fn serve<L: Ledger + Clone + Send>(
     host: &Host,
     ledger: &L,
@@ -857,7 +858,6 @@ pub fn serve<L: Ledger + Clone + Send>(
             senders.push(tx);
         }
         let mut in_flight: HashMap<String, Lane> = HashMap::new();
-        let mut moving = false;
         loop {
             let mut answered = false;
             for name in done.try_iter() {
@@ -883,26 +883,20 @@ pub fn serve<L: Ledger + Clone + Send>(
             }
             // Not kept: a restart that gives up withdraws its stop, and serving resumes.
             let asked = asked_to_stop(paths, lead);
-            if let Some(installs) = installs.as_mut()
-                && !moving
-                && (answered || installs.due())
-            {
-                moving = installs.newer().is_some();
-            }
-            broker_stopping.store(asked || moving, Ordering::SeqCst);
-            if asked || moving {
-                if !in_flight.is_empty() {
-                    std::thread::sleep(poll);
-                    continue;
-                }
-                if asked {
+            broker_stopping.store(asked, Ordering::SeqCst);
+            if asked {
+                if in_flight.is_empty() {
                     return Ok(Served::Stopped);
                 }
-                moving = false;
-                broker_stopping.store(false, Ordering::SeqCst);
-                if let Some(installs) = installs.as_mut() {
-                    installs.move_onto_newest(paths, lead, &lock);
-                }
+                std::thread::sleep(poll);
+                continue;
+            }
+            // Only between requests, so a move never holds up a lane behind a long feed.
+            if let Some(installs) = installs.as_mut()
+                && in_flight.is_empty()
+                && (answered || installs.due())
+            {
+                installs.move_onto_newer(paths, lead, &lock);
             }
             // Reopened each round: the lead can replace any folder on the way.
             if let Ok(requests) = Dir::open(paths.state_dir(), &["broker", lead, "requests"]) {
@@ -946,21 +940,20 @@ impl Installs<'_> {
         self.looked.elapsed() >= self.follow.every
     }
 
-    /// The loopherd on PATH, when it is another file than this broker runs
-    /// and not one that already failed to take over.
-    fn newer(&mut self) -> Option<(PathBuf, FileId)> {
+    /// Re-execs the loopherd on PATH when it is another file than this
+    /// broker runs and not one that already failed to take over. Returns
+    /// only when it didn't move, noting the lead's mailbox if it tried.
+    fn move_onto_newer(&mut self, paths: &Paths, lead: &str, lock: &Lock) {
         self.looked = Instant::now();
-        let path = (self.follow.installed)()?;
-        let file = FileId::of(&path)?;
-        (Some(file) != self.running && Some(file) != self.failed).then_some((path, file))
-    }
-
-    /// Re-execs the newest install, read again now so a second reinstall
-    /// during the drain wins. Returns only when it couldn't take over.
-    fn move_onto_newest(&mut self, paths: &Paths, lead: &str, lock: &Lock) {
-        let Some((exe, file)) = self.newer() else {
+        let Some(exe) = (self.follow.installed)() else {
             return;
         };
+        let Some(file) = FileId::of(&exe) else {
+            return;
+        };
+        if Some(file) == self.running || Some(file) == self.failed {
+            return;
+        }
         let e = (self.follow.reexec)(&exe, lead, lock);
         self.failed = Some(file);
         let text = format!(
@@ -1736,6 +1729,9 @@ pub fn reexec(exe: &Path, lead: &str, lock: &Lock) -> anyhow::Error {
         .exec();
     // SAFETY: as above; children started later must not hold the lock.
     unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    // A failed exec leaves SIGPIPE at its default, which Rust's runtime had ignored.
+    // SAFETY: setting a signal's disposition to ignore has no preconditions.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
     anyhow!(e).context(format!("exec {}", exe.display()))
 }
 
@@ -3468,6 +3464,71 @@ mod tests {
         world.retire("lead-h");
         let (served, _) = serving.join().unwrap();
         assert_eq!(served.unwrap(), Served::Retired);
+    }
+
+    #[test]
+    fn a_new_install_waits_for_the_feed_in_flight_and_a_tell_is_answered_meanwhile() {
+        let (world, herdr, entered, release) = slow_feed();
+        let installed = world.paths.state_dir().join("bin/loopherd");
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        std::fs::write(&installed, "").unwrap();
+        let tried = Mutex::new(vec![]);
+        let reinstalled = AtomicBool::new(false);
+        let installed_now = || {
+            reinstalled
+                .load(Ordering::SeqCst)
+                .then(|| installed.clone())
+        };
+        let reexec = |exe: &Path, _: &str, _: &Lock| {
+            tried.lock().unwrap().push(exe.to_path_buf());
+            anyhow!("refused in this test")
+        };
+        let mut host = host(&herdr);
+        host.follow = Some(Follow {
+            installed: &installed_now,
+            reexec: &reexec,
+            every: Duration::from_millis(20),
+        });
+        let ledger = world.ledger();
+        std::thread::scope(|scope| {
+            let serving = scope.spawn(|| serve(&host, &ledger, &world.paths, "lead-h", POLL, None));
+            // A failed assertion would otherwise leave the scope waiting on a broker that serves on.
+            struct RetireOnDrop<'a>(&'a World);
+            impl Drop for RetireOnDrop<'_> {
+                fn drop(&mut self) {
+                    self.0.retire("lead-h");
+                }
+            }
+            let _retire = RetireOnDrop(&world);
+            while !running(&world.paths, "lead-h") {
+                std::thread::sleep(POLL);
+            }
+            let fed = feeding(&world, &entered);
+            reinstalled.store(true, Ordering::SeqCst);
+            let client = Client {
+                answer_within: Some(Duration::from_secs(5)),
+                ..world.client()
+            };
+
+            std::thread::sleep(Duration::from_millis(200));
+            let told = client.call(&tell("lh-1", "hi"));
+
+            assert_eq!(told.unwrap().2, 0);
+            assert!(tried.lock().unwrap().is_empty());
+            drop(release);
+            assert_eq!(fed.join().unwrap().unwrap().2, 0);
+            let given_up = Instant::now() + Duration::from_secs(5);
+            while tried.lock().unwrap().is_empty() {
+                assert!(
+                    Instant::now() < given_up,
+                    "the broker never tried the install"
+                );
+                std::thread::sleep(POLL);
+            }
+            world.retire("lead-h");
+            assert_eq!(serving.join().unwrap().unwrap(), Served::Retired);
+        });
+        assert_eq!(*tried.lock().unwrap(), vec![installed]);
     }
 
     #[test]
