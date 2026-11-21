@@ -652,9 +652,10 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   @anthropic-ai/sandbox-runtime`), `require` refuses the lead and
   `prefer` starts it as `(lead, sockets open)`; `restart` applies the
   same rule. A `merge_guard = "credentials"` lead is refused under both.
-  Under `unix_sockets = "all"` the check refuses and flags nothing. What
-  still gets past the sandbox: workers run unsandboxed, so a lead can have one act for it,
-  and most of the state dir stays writable to it. Set `prefer` only
+  Under `unix_sockets = "all"` the socket check is skipped: the lead isn't
+  refused or flagged for open sockets. What still gets past the sandbox:
+  workers run unsandboxed, so a lead can have one act for it, and most of
+  the state dir stays writable to it. Set `prefer` only
   when the human says so; doctor names those herds and leads.
 - **Change a herd file's values** with `loopherd herd set <herd> <key>
   <value>`, `loopherd herd get <herd> <key>` and `loopherd herd unset <herd>
