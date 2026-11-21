@@ -318,18 +318,24 @@ pub fn confined(
     })
 }
 
-/// Where `/proc/mounts` has a Windows drive mounted: WSL2 lists drvfs as
-/// `9p` with `aname=drvfs`, WSL1 as `drvfs`.
+/// Where `/proc/mounts` has a Windows drive mounted: WSL1 lists drvfs as
+/// `drvfs`, WSL2 as `9p` with `aname=drvfs`, or with virtiofs on as
+/// `virtiofs` from its `drvfs` or `drvfsa` tag.
 fn drvfs_mounts(mounts: &str) -> Vec<PathBuf> {
     mounts
         .lines()
         .filter_map(|line| {
-            let [_, dir, kind, options] = line.split_whitespace().take(4).collect::<Vec<_>>()[..]
+            let [source, dir, kind, options] =
+                line.split_whitespace().take(4).collect::<Vec<_>>()[..]
             else {
                 return None;
             };
-            let drvfs = kind == "drvfs"
-                || kind == "9p" && options.split([',', ';']).any(|o| o == "aname=drvfs");
+            let drvfs = match kind {
+                "drvfs" => true,
+                "9p" => options.split([',', ';']).any(|o| o == "aname=drvfs"),
+                "virtiofs" => matches!(source, "drvfs" | "drvfsa"),
+                _ => false,
+            };
             drvfs.then(|| PathBuf::from(unescape_mount(dir)))
         })
         .collect()
@@ -422,6 +428,9 @@ none /mnt/wsl tmpfs rw,relatime 0 0
 C:\\134 /mnt/c 9p rw,noatime,aname=drvfs;path=C:\\;uid=1000;symlinkroot=/mnt/ 0 0
 C:\\134Program\\040Files /Docker/host\\040files 9p rw,aname=drvfs;path=C:\\Program Files 0 0
 D: /mnt/d drvfs rw,noatime 0 0
+drvfs /run/wsl/virtiofs-mounts/drvfs virtiofs rw,relatime 0 0
+drvfsa /mnt/e virtiofs rw,relatime 0 0
+shared /mnt/shared virtiofs rw,relatime 0 0
 server:/share /mnt/nfs 9p rw,aname=other 0 0
 ";
         let denied = |mounts: &str| {
@@ -435,6 +444,8 @@ server:/share /mnt/nfs 9p rw,aname=other 0 0
                 (PathBuf::from("/mnt/c"), true),
                 (PathBuf::from("/Docker/host files"), true),
                 (PathBuf::from("/mnt/d"), true),
+                (PathBuf::from("/run/wsl/virtiofs-mounts/drvfs"), true),
+                (PathBuf::from("/mnt/e"), true),
             ]
         );
         assert_eq!(denied("/dev/sdc / ext4 rw,relatime 0 0\n"), []);

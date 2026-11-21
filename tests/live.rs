@@ -1248,9 +1248,12 @@ fn file_on_a_windows_drive() -> Option<PathBuf> {
     let mounts = std::fs::read_to_string("/proc/mounts").ok()?;
     let dir = mounts.lines().find_map(|line| {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        let drvfs = fields.get(2) == Some(&"drvfs")
-            || fields.get(2) == Some(&"9p")
-                && fields.get(3).is_some_and(|o| o.contains("aname=drvfs"));
+        let drvfs = match fields.get(2).copied() {
+            Some("drvfs") => true,
+            Some("9p") => fields.get(3).is_some_and(|o| o.contains("aname=drvfs")),
+            Some("virtiofs") => matches!(fields[0], "drvfs" | "drvfsa"),
+            _ => false,
+        };
         (drvfs && !fields[1].contains('\\')).then(|| PathBuf::from(fields[1]))
     })?;
     std::fs::read_dir(&dir).ok()?.find_map(|entry| {
@@ -1355,11 +1358,17 @@ fn a_credentials_lead_reads_only_its_own_key_of_loopherds_config_and_no_windows_
              out.write(f'{{path}}\\t{{e.strerror}}\\n')\n    \
              key = subprocess.run(['ssh-keygen', '-y', '-f', {key:?}], capture_output=True)\n    \
              out.write(f'ssh-keygen\\t{{key.returncode}}\\n')\n    \
+             ssh_command = os.environ.get('GIT_SSH_COMMAND', 'ssh')\n    \
+             ssh = subprocess.run(f'{{ssh_command}} -F {ssh_config} -o BatchMode=yes -o ConnectTimeout=15 -vT {remote}', shell=True, capture_output=True, text=True)\n    \
+             out.write(f'ssh offered\\t{{(\"Offering public key: \" + {key:?}) in ssh.stderr}}\\n')\n    \
+             out.write(f'ssh answered\\t{{\"Permission denied (publickey)\" in ssh.stderr}}\\n')\n    \
              env = dict(os.environ, XDG_STATE_HOME={state:?}, LOOPHERD_CONFIG_DIR={config:?})\n    \
              feed = subprocess.run([{bin:?}, 'feed', {herd:?}, '--dry-run'], env=env, capture_output=True, text=True)\n    \
              out.write(f'feed\\t{{feed.returncode}}\\t{{feed.stderr.strip()}}\\n')\n",
             results = results.display().to_string(),
             key = own_key.display().to_string(),
+            ssh_config = ssh_config.display(),
+            remote = format!("git@{alias}"),
             state = state.path().display().to_string(),
             config = config.display().to_string(),
             bin = env!("CARGO_BIN_EXE_loopherd"),
@@ -1443,6 +1452,10 @@ fn a_credentials_lead_reads_only_its_own_key_of_loopherds_config_and_no_windows_
         Some("ssh-keygen\t0"),
         "ssh can't read its key:\n{probed}"
     );
+    // GitHub refusing the unregistered key shows the alias resolved through the carved
+    // ssh/config, its key was offered, and github.com answered from inside the sandbox.
+    assert_eq!(lines.next(), Some("ssh offered\tTrue"), "{probed}");
+    assert_eq!(lines.next(), Some("ssh answered\tTrue"), "{probed}");
     assert!(
         lines
             .next()
