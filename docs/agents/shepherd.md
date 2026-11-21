@@ -94,7 +94,18 @@ loopherd add loopherd-cards grill <n> docs <slug>
 takes the human there; the grill sends them back to your pane when the
 conversation ends. Send background beyond the card, one line each for the
 decisions (`docs/decisions/D<n>.md`), cards and files it should read and what
-each settles, with `loopherd tell grill-<n> "<background>"`.
+each settles, from a file:
+
+```bash
+background=$(mktemp)
+cat > "$background" <<'BACKGROUND'
+<the background>
+BACKGROUND
+loopherd tell grill-<n> --text-file "$background"
+```
+
+The quoted heredoc keeps the background's backticks and `$(…)` from running in
+your shell; never pass it inline in double quotes.
 
 After its PR merges, the grill moves the card to Done, runs
 `scripts/trello unblock` and sends you `LH-<n> merged and closed out: …`. The
