@@ -1765,11 +1765,14 @@ mod tests {
         let state = setup.root.join("state");
         let locks = state.join("locks/after-merge.lock");
         let climbs = state.join("x/../locks");
+        // Relative to ~/.claude, which is <root>/home/.claude here.
+        let climbs_from_claude = "../../state/locks";
         let paths = home_with_settings(
             &setup,
             &format!(
                 r#"{{"sandbox": {{"filesystem": {{"allowRead":
-                    ["/srv", {state:?}, "notes", {locks:?}, {climbs:?}]}}}}}}"#
+                    ["/srv", {state:?}, "notes", {locks:?}, {climbs:?},
+                    {climbs_from_claude:?}]}}}}}}"#
             ),
         );
 
@@ -1791,6 +1794,7 @@ mod tests {
             refused.contains(&opens(&climbs.display().to_string())),
             "{refused}"
         );
+        assert!(refused.contains(&opens(climbs_from_claude)), "{refused}");
         assert!(
             !refused.contains(&opens(&state.display().to_string())),
             "{refused}"

@@ -1275,7 +1275,7 @@ fn sandbox_loosenings(
     }
     // allowRead carves into denyRead. Credentials to hide make any of it suspect;
     // otherwise only a carve at or beneath a denied path counts: over an ancestor
-    // Claude keeps the narrower deny, and a relative path can't reach one.
+    // Claude keeps the narrower deny. A relative entry resolves against ~/.claude.
     let credentials = !own["sandbox"]["filesystem"]["allowRead"].is_null();
     let own_reads = entries(&own["sandbox"]["filesystem"]["allowRead"]);
     let denied: Vec<PathBuf> = entries(&own["sandbox"]["filesystem"]["denyRead"])
@@ -1283,10 +1283,16 @@ fn sandbox_loosenings(
         .filter_map(|path| absolute(path, home))
         .collect();
     for path in entries(&user["sandbox"]["filesystem"]["allowRead"]) {
-        let opens = match absolute(&path, home) {
+        let relative = !path.starts_with('/') && !path.starts_with('~');
+        let resolved = if relative {
+            absolute(&home.join(".claude").join(&path).to_string_lossy(), home)
+        } else {
+            absolute(&path, home)
+        };
+        let opens = match resolved {
             Some(path) => denied.iter().any(|deny| path.starts_with(deny)),
-            // Absolute but climbing with `..`, so it could land anywhere.
-            None => path.starts_with('/') || path.starts_with('~'),
+            // A `..` or a `~user` could land anywhere.
+            None => true,
         };
         if !own_reads.contains(&path) && (credentials || opens) {
             found.push(format!(
