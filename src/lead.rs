@@ -1137,13 +1137,15 @@ mod tests {
 
     #[test]
     fn a_lead_starts_with_each_allowed_arg_and_no_warning() {
-        let allowed: [&[&str]; 9] = [
+        let allowed: [&[&str]; 11] = [
             &["--model", "sonnet"],
             &["--model=sonnet"],
             &["--effort", "max"],
             &["--effort=high"],
             &["--verbose"],
             &["--permission-mode", "default"],
+            &["--permission-mode", "manual"],
+            &["--permission-mode=manual"],
             &["--permission-mode", "auto"],
             &["--permission-mode", "plan"],
             &["--permission-mode=plan"],
@@ -1204,7 +1206,7 @@ mod tests {
                 format!(
                     "sandbox: lead-h can't run sandboxed: its args may loosen its sandbox or \
                      permissions: {shown}, from the command line; a lead takes only --model, \
-                     --effort, --verbose and --permission-mode default, auto or plan, so drop \
+                     --effort, --verbose and --permission-mode default, manual, auto or plan, so drop \
                      those, or set [lead] sandbox = \"prefer\" in herd h to start it with them \
                      as warnings"
                 )

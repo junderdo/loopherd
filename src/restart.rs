@@ -1748,7 +1748,7 @@ mod tests {
         assert!(format!("{:#}", result.unwrap_err()).starts_with(
             "sandbox: lh-1 can't run sandboxed: its args may loosen its sandbox or \
                  permissions: --add-dir /srv, from the args it was started with; a lead takes \
-                 only --model, --effort, --verbose and --permission-mode default, auto or plan, \
+                 only --model, --effort, --verbose and --permission-mode default, manual, auto or plan, \
                  so retire it and start it again with loopherd lead h, without those,"
         ));
         assert!(w.herdr.prompts().is_empty());
