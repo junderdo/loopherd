@@ -1714,9 +1714,9 @@ max = 3
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let mail = quiet_mail(&ledger);
         post(mail.path(), "c", question("which base?"));
-        std::fs::remove_file(mail.path().join("a.jsonl")).unwrap();
+        std::fs::remove_file(mail.path().join("a/mailbox.jsonl")).unwrap();
         let locked = std::fs::Permissions::from_mode(0o000);
-        std::fs::set_permissions(mail.path().join("old.jsonl"), locked).unwrap();
+        std::fs::set_permissions(mail.path().join("old/mailbox.jsonl"), locked).unwrap();
         let terminal = render_tall(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
         assert_eq!(
             banner(&terminal),
@@ -1744,10 +1744,10 @@ max = 3
         let mail = quiet_mail(&ledger);
         let mut a = std::fs::OpenOptions::new()
             .append(true)
-            .open(mail.path().join("a.jsonl"))
+            .open(mail.path().join("a/mailbox.jsonl"))
             .unwrap();
         std::io::Write::write_all(&mut a, "not json\n".repeat(8).as_bytes()).unwrap();
-        std::fs::remove_file(mail.path().join("c.jsonl")).unwrap();
+        std::fs::remove_file(mail.path().join("c/mailbox.jsonl")).unwrap();
         let terminal = render(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
         let shown = text(&terminal);
         assert!(
@@ -3928,7 +3928,7 @@ max = 3
         let mail = quiet_mail(&ledger);
         post_at(mail.path(), "a", "2026-11-16T10:05:00Z", note("old"));
         let mut app = app_with_mail(&herdr, &ledger, mail.path(), now);
-        std::fs::remove_file(mail.path().join("a.jsonl")).unwrap();
+        std::fs::remove_file(mail.path().join("a/mailbox.jsonl")).unwrap();
         post(mail.path(), "a", Body::Start { resumed: false });
         post_at(mail.path(), "a", "2026-11-16T11:00:00Z", note("brand new"));
         refresh_with_mail(&mut app, &herdr, &ledger, mail.path(), now);

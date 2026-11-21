@@ -330,7 +330,7 @@ fn the_installed_hook_records_a_members_stop_and_exits_0_even_when_loopherd_fail
         r#"{"background_tasks":[],"session_crons":[]}"#,
     );
     assert_eq!(out.status.code(), Some(0));
-    let mailbox = fs::read_to_string(state.join("loopherd/reports/lh-1.jsonl")).unwrap();
+    let mailbox = fs::read_to_string(state.join("loopherd/reports/lh-1/mailbox.jsonl")).unwrap();
     assert!(mailbox.contains(r#""kind":"stop""#), "{mailbox}");
 
     fs::write(state.join("loopherd/ledger.json"), "not json").unwrap();

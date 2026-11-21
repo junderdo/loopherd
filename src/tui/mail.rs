@@ -29,7 +29,7 @@ impl Mail {
         }
         for member in active(view) {
             let name = &member.name;
-            if !dir.join(format!("{name}.jsonl")).is_file() {
+            if !crate::report::has_mailbox(dir, name) {
                 mail.warnings.push(format!("warning: {name}: no mailbox"));
                 continue;
             }

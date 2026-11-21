@@ -760,6 +760,7 @@ mod tests {
         let others = [
             "reports/lead-h.jsonl",
             "reports/lh-1.jsonl",
+            "reports/lh-1/mailbox.jsonl",
             "reports/watch.lock",
             "reports/.cursor",
             "handoffs/shepherd/handoff.md",

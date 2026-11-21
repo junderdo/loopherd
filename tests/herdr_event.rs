@@ -286,10 +286,16 @@ fn a_malformed_or_missing_event_exits_0_with_the_error() {
 #[test]
 fn a_mailbox_it_cannot_write_exits_0_with_the_error() {
     let dir = sandbox();
-    fs::create_dir_all(dir.path().join("state/loopherd/reports/lh-1.jsonl")).unwrap();
+    fs::create_dir_all(dir.path().join("state/loopherd/reports/lh-1/mailbox.jsonl")).unwrap();
 
-    failed_quietly(&closed(dir.path(), "pane.closed", "w1:p1"), "lh-1.jsonl");
-    failed_quietly(&status(dir.path(), "w1:p1", "blocked"), "lh-1.jsonl");
+    failed_quietly(
+        &closed(dir.path(), "pane.closed", "w1:p1"),
+        "lh-1/mailbox.jsonl",
+    );
+    failed_quietly(
+        &status(dir.path(), "w1:p1", "blocked"),
+        "lh-1/mailbox.jsonl",
+    );
     let mark = dir
         .path()
         .join("state/loopherd/reports/lh-1.block-recorded");
@@ -300,11 +306,11 @@ fn a_mailbox_it_cannot_write_exits_0_with_the_error() {
 fn a_closed_workspace_records_every_member_it_can_and_names_the_ones_it_cannot() {
     let dir = sandbox();
     let reports = dir.path().join("state/loopherd/reports");
-    fs::create_dir_all(reports.join("lh-0.jsonl")).unwrap();
+    fs::create_dir_all(reports.join("lh-0/mailbox.jsonl")).unwrap();
 
-    failed_quietly(&workspace_closed(dir.path(), "w1"), "lh-0.jsonl");
+    failed_quietly(&workspace_closed(dir.path(), "w1"), "lh-0/mailbox.jsonl");
 
-    let lh1 = fs::read_to_string(reports.join("lh-1.jsonl")).unwrap();
+    let lh1 = fs::read_to_string(reports.join("lh-1/mailbox.jsonl")).unwrap();
     assert!(lh1.contains(r#""kind":"gone""#), "{lh1}");
 }
 
