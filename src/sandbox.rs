@@ -477,12 +477,10 @@ impl Guard {
     /// Removes a retired lead's MCP config, and its settings once `ended`
     /// says its Claude has, so a running Claude keeps its sandbox; a
     /// sandboxed worker's settings and kept record, once ended. A lead caller
-    /// removes nothing: it could have forged the entry. Returns a line per
-    /// file removed or failed.
+    /// removes no lead's files: it could have forged the entry. Returns a
+    /// line per file removed or failed.
     pub fn forget_launch(&self, name: &str, ended: bool) -> Vec<String> {
-        if self.caller.is_some() {
-            return vec![];
-        }
+        // A lead can't write the config dir, so a member record there is no forgery of its.
         let member = crate::worker_sandbox::member_file(&self.paths, name);
         if member.is_file() {
             let files = [settings_file(&self.paths, name), member];
@@ -490,6 +488,9 @@ impl Guard {
                 true => removed(files),
                 false => vec![],
             };
+        }
+        if self.caller.is_some() {
+            return vec![];
         }
         // A name like `lead-x.lead` would otherwise map to lead-x's files.
         if !lead_file(&self.paths, name).is_file() {
@@ -1912,7 +1913,8 @@ mod tests {
     }
 
     #[test]
-    fn a_retire_removes_a_sandboxed_workers_settings_and_record_once_its_claude_has_ended() {
+    fn a_retire_by_anyone_removes_a_sandboxed_workers_settings_and_record_once_its_claude_has_ended()
+     {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::under(root.path());
         let dir = paths.config_dir().join("sandbox");
@@ -1922,11 +1924,7 @@ mod tests {
             std::fs::write(dir.join(file), "{}").unwrap();
         }
 
-        assert_eq!(
-            Guard::new(paths.clone(), Some("lead-h".into())).forget_launch("w1", true),
-            Vec::<String>::new()
-        );
-        let guard = Guard::new(paths.clone(), None);
+        let guard = Guard::new(paths.clone(), Some("lead-h".into()));
         assert_eq!(guard.forget_launch("w1", false), Vec::<String>::new());
         for file in files {
             assert!(dir.join(file).exists(), "{file}");

@@ -393,7 +393,7 @@ pub fn add(
         paths,
         &spawn_req,
         inherited_workspace,
-        req.sandbox,
+        &req.sandbox,
     )?;
     let past_max = max.filter(|&max| held >= max).map(|max| {
         format!(
@@ -1600,8 +1600,17 @@ args = ["--model", "opus"]
         assert_eq!(rec.template.as_deref(), Some("pr"));
     }
 
-    fn worker_herd(worker: &str) -> String {
-        format!("{PR_HERD}\n[worker]\n{worker}\n")
+    /// Herd `prs` in a git repo with an origin, whose template `pr` checks
+    /// out `feature/existing`, with `[worker]` set to `worker`.
+    fn worker_config(worker: &str) -> (Config, tempfile::TempDir) {
+        let root = tempfile::tempdir().unwrap();
+        let repo = crate::worktree::testing::repo_with_origin(root.path());
+        let herd = format!(
+            "repo = {repo:?}\n[template.pr]\nparams = [\"number\"]\nname = \"zpr-{{number}}\"\n\
+             branch = \"feature/existing\"\nprompt = \"go\"\nargs = [\"--model\", \"opus\"]\n\
+             [worker]\n{worker}\n"
+        );
+        (Config::with(&[("prs", &herd)]), root)
     }
 
     fn unavailable() -> std::result::Result<crate::sandbox::Sockets, crate::sandbox::Unavailable> {
@@ -1613,7 +1622,7 @@ args = ["--model", "opus"]
 
     #[test]
     fn add_starts_a_sandboxed_herds_worker_with_its_settings() {
-        let config = Config::with(&[("prs", &worker_herd("sandbox = \"require\""))]);
+        let (config, _repo) = worker_config("sandbox = \"require\"");
         let paths = config.paths();
         let herdr = herdr();
         let mut ledger = MemLedger::default();
@@ -1633,8 +1642,6 @@ args = ["--model", "opus"]
         assert_eq!(
             rec.claude_args,
             [
-                "--permission-mode",
-                "auto",
                 "--model",
                 "opus",
                 "--settings",
@@ -1646,7 +1653,7 @@ args = ["--model", "opus"]
 
     #[test]
     fn a_sandboxed_worker_whose_spawn_fails_leaves_no_settings_behind() {
-        let config = Config::with(&[("prs", &worker_herd("sandbox = \"require\""))]);
+        let (config, _repo) = worker_config("sandbox = \"require\"");
         let paths = config.paths();
         let mut herdr = herdr();
         herdr.startup = crate::herdr::fake::Startup::Fails;
@@ -1670,7 +1677,7 @@ args = ["--model", "opus"]
 
     #[test]
     fn add_refuses_a_required_worker_whose_sandbox_cant_start() {
-        let config = Config::with(&[("prs", &worker_herd("sandbox = \"require\""))]);
+        let (config, _repo) = worker_config("sandbox = \"require\"");
         let herdr = herdr();
         let mut ledger = MemLedger::default();
         let req = AddRequest {
@@ -1690,7 +1697,7 @@ args = ["--model", "opus"]
 
     #[test]
     fn add_starts_a_preferred_worker_unsandboxed_flagged_and_warned() {
-        let config = Config::with(&[("prs", &worker_herd("sandbox = \"prefer\""))]);
+        let (config, _repo) = worker_config("sandbox = \"prefer\"");
         let herdr = herdr();
         let mut ledger = MemLedger::default();
         let req = AddRequest {

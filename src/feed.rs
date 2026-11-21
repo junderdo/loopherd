@@ -123,6 +123,8 @@ pub fn feed(
     let mut free = queue.max.saturating_sub(held);
     let mut taken = taken(ledger.entries().context("ledger")?);
 
+    let probed = std::cell::OnceCell::new();
+    let probe = || probed.get_or_init(req.sandbox).clone();
     let (mut added, mut skipped, mut line_errors) = (0, 0, 0);
     let mut code = 0;
     for task in output.lines().map(str::trim) {
@@ -181,7 +183,7 @@ pub fn feed(
             paths,
             &spawn_req,
             inherited_workspace,
-            req.sandbox,
+            &probe,
         );
         match started {
             Ok((spawned, sandbox_warnings)) => {
@@ -1485,7 +1487,7 @@ mod tests {
     }
 
     #[test]
-    fn a_required_worker_whose_sandbox_cant_start_is_not_started_and_the_feed_goes_on() {
+    fn a_required_worker_its_sandbox_refuses_is_not_started_and_the_feed_goes_on() {
         let setup = worker_setup("printf '1\\n2\\n'", "sandbox = \"require\"");
         let herdr = herdr();
         let mut ledger = MemLedger::default();
@@ -1498,9 +1500,10 @@ mod tests {
 
         let refused = |n: &str| {
             format!(
-                "not started: {n}: zpr-{n} can't start sandboxed: its sandbox can't start: \
-                 bubblewrap isn't installed; install bubblewrap, or set [worker] sandbox = \
-                 \"prefer\" in herd prs to start it unsandboxed"
+                "not started: {n}: zpr-{n} can't start sandboxed: it has no worktree of its own, \
+                 and its sandbox won't open the main checkout; give herd prs's template pr a \
+                 branch, or set [worker] sandbox = \"prefer\" in herd prs to start it \
+                 unsandboxed"
             )
         };
         assert_eq!(
@@ -1517,7 +1520,7 @@ mod tests {
     }
 
     #[test]
-    fn a_preferred_worker_whose_sandbox_cant_start_is_fed_unsandboxed_and_flagged() {
+    fn a_preferred_worker_its_sandbox_refuses_is_fed_unsandboxed_and_flagged() {
         let setup = worker_setup("printf '1\\n'", "sandbox = \"prefer\"");
         let herdr = herdr();
         let mut ledger = MemLedger::default();
@@ -1532,14 +1535,14 @@ mod tests {
             fed.lines,
             [
                 "added zpr-1",
-                "warning: zpr-1: zpr-1 runs unsandboxed (bubblewrap isn't installed); install \
-                 bubblewrap",
+                "warning: zpr-1: zpr-1 runs unsandboxed (it has no worktree of its own, and its \
+                 sandbox won't open the main checkout); give herd prs's template pr a branch",
                 "prs: 0 retired, 1 added, 0 skipped, 0 errors",
             ]
         );
         assert_eq!(
             ledger.0["zpr-1"].unsandboxed.as_deref(),
-            Some("bubblewrap isn't installed")
+            Some("it has no worktree of its own, and its sandbox won't open the main checkout")
         );
     }
 

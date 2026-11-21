@@ -9,9 +9,9 @@ use serde_json::{Value, json};
 use crate::handoff;
 use crate::herd::{self, Paths};
 use crate::herdr::Herdr;
-use crate::ledger::Ledger;
+use crate::ledger::{AgentRecord, Ledger};
 use crate::sandbox::{
-    Probe, Sockets, Unavailable, UnixSockets, edit_rule, entries_but, file_rule, write_private,
+    Sockets, Unavailable, UnixSockets, edit_rule, entries_but, file_rule, write_private,
 };
 use crate::spawn::{MemberOf, SpawnRequest, Spawned};
 
@@ -45,6 +45,20 @@ pub struct Member {
     pub herd: String,
     pub template: String,
     pub args: Vec<String>,
+}
+
+impl Member {
+    /// The record `prepare` kept for worker `name`, if any.
+    pub fn kept(paths: &Paths, name: &str) -> Result<Option<Member>> {
+        let file = member_file(paths, name);
+        match std::fs::read_to_string(&file) {
+            Ok(text) => serde_json::from_str(&text)
+                .map(Some)
+                .with_context(|| format!("parse {}", file.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("read {}", file.display())),
+        }
+    }
 }
 
 pub fn member_file(paths: &Paths, name: &str) -> PathBuf {
@@ -100,49 +114,72 @@ impl Launch {
     }
 }
 
+/// A worker its sandbox refused before anything was started for it.
+#[derive(Debug)]
+pub struct NotStarted(pub String);
+
+impl std::fmt::Display for NotStarted {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NotStarted {}
+
 /// Keeps `member` and writes worker `name`'s settings in loopherd's config
-/// dir, from its herd's `[worker]`, when that turns the sandbox on.
+/// dir, from its herd's `[worker]`, when that turns the sandbox on. Under
+/// `require`, a sandbox that can't start fails with [`NotStarted`].
 pub fn prepare(
     paths: &Paths,
     name: &str,
     member: &Member,
-    worktree: &Path,
+    worktree: Option<&Path>,
     probe: &dyn Fn() -> Result<Sockets, Unavailable>,
 ) -> Result<Launch> {
     let worker = herd::worker(paths, &member.herd)?;
     if worker.sandbox == WorkerSandbox::Off {
         return Ok(Launch::Off);
     }
+    let herd = &member.herd;
     // Why, as a refusal says it and as the ledger flags it, and the fix.
-    let unavailable = match probe() {
-        Err(Unavailable { why, fix }) => {
+    let unavailable = match (worktree, probe()) {
+        (None, _) => {
+            let why = "it has no worktree of its own, and its sandbox won't open the main checkout";
+            let fix = format!("give herd {herd}'s template {} a branch", member.template);
+            Some((why.to_string(), why.to_string(), fix))
+        }
+        (_, Err(Unavailable { why, fix })) => {
             Some((format!("its sandbox can't start: {why}"), why, fix))
         }
-        Ok(Sockets::Open(Unavailable { why, fix })) if worker.unix_sockets.is_none() => {
+        (_, Ok(Sockets::Open(Unavailable { why, fix }))) if worker.unix_sockets.is_none() => {
             let why = format!("its sandbox can't block Unix sockets: {why}");
             Some((why.clone(), why, fix))
         }
-        Ok(_) => None,
+        (_, Ok(_)) => None,
     };
-    let herd = &member.herd;
-    let own = settings(paths, name, herd, worktree)?;
-    let keep = || -> Result<()> {
-        let dir = paths.config_dir().join("sandbox");
-        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-        let kept = member_file(paths, name);
-        std::fs::write(&kept, serde_json::to_string_pretty(member)? + "\n")
-            .with_context(|| format!("write {}", kept.display()))
-    };
-    match (unavailable, worker.sandbox) {
-        (Some((why, _, fix)), WorkerSandbox::Require) => bail!(
+    if let (Some((why, _, fix)), WorkerSandbox::Require) = (&unavailable, worker.sandbox) {
+        return Err(NotStarted(format!(
             "{name} can't start sandboxed: {why}; {fix}, or set [worker] sandbox = \"prefer\" \
              in herd {herd} to start it unsandboxed"
-        ),
-        (Some((_, why, fix)), _) => {
-            keep()?;
-            return Ok(Launch::Unsandboxed { why, fix });
-        }
-        (None, _) => keep()?,
+        ))
+        .into());
+    }
+    let own = match (&unavailable, worktree) {
+        (None, Some(worktree)) => Some(settings(paths, name, herd, worktree)?),
+        _ => None,
+    };
+    let dir = paths.config_dir().join("sandbox");
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let kept = member_file(paths, name);
+    std::fs::write(&kept, serde_json::to_string_pretty(member)? + "\n")
+        .with_context(|| format!("write {}", kept.display()))?;
+    let Some(own) = own else {
+        let (_, why, fix) = unavailable.expect("no settings only when unavailable");
+        return Ok(Launch::Unsandboxed { why, fix });
+    };
+    // An allowWrite entry for a missing path has no effect on Linux.
+    for dir in own_dirs(paths, name) {
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     }
     let file = settings_file(paths, name);
     let text = serde_json::to_string_pretty(&own)? + "\n";
@@ -150,60 +187,55 @@ pub fn prepare(
     Ok(Launch::Sandboxed { settings: file })
 }
 
-/// A worker refused by its sandbox before anything was started for it.
-#[derive(Debug)]
-pub struct NotStarted;
-
-impl std::fmt::Display for NotStarted {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.write_str("not started")
-    }
-}
-
 /// Spawns herd member `req`, in its herd's worker sandbox when `[worker]
 /// sandbox` turns it on, and flags one started without it in the ledger.
-/// Returns the start's warnings. A refusal by the sandbox carries
-/// [`NotStarted`] in its chain.
+/// Returns the start's warnings. A refusal by the sandbox is [`NotStarted`].
 pub fn spawn(
     herdr: &dyn Herdr,
     ledger: &mut dyn Ledger,
     paths: &Paths,
     req: &SpawnRequest,
     inherited_workspace: Option<&str>,
-    probe: Probe,
+    probe: &dyn Fn() -> Result<Sockets, Unavailable>,
 ) -> Result<(Spawned, Vec<String>)> {
-    let Some(MemberOf {
-        herd,
-        template: Some(template),
-        ..
-    }) = &req.member_of
-    else {
-        return Ok((
-            crate::spawn::spawn(herdr, ledger, req, inherited_workspace)?,
-            vec![],
-        ));
+    let recorded = |ledger: &dyn Ledger| -> Result<bool> {
+        let entries = ledger.entries().context("ledger")?;
+        Ok(entries.get(&req.name).is_some_and(|r| !r.retired))
     };
-    let member = Member {
-        herd: herd.clone(),
-        template: template.clone(),
-        args: req.claude_args.clone(),
+    let member = match &req.member_of {
+        // A name in use fails spawn's own check, before its holder's files are touched.
+        Some(MemberOf {
+            herd,
+            template: Some(template),
+            ..
+        }) if !recorded(ledger)? => Member {
+            herd: herd.clone(),
+            template: template.clone(),
+            args: req.claude_args.clone(),
+        },
+        _ => {
+            let spawned = crate::spawn::spawn(herdr, ledger, req, inherited_workspace)?;
+            return Ok((spawned, vec![]));
+        }
     };
-    let cwd = req.planned_worktree()?.unwrap_or_else(|| req.repo.clone());
-    let launch = prepare(paths, &req.name, &member, &cwd, &probe).context(NotStarted)?;
+    let worktree = req.planned_worktree()?;
+    let launch = prepare(paths, &req.name, &member, worktree.as_deref(), probe)?;
     let mut req = req.clone();
     req.claude_args.extend(launch.args());
     let spawned = match crate::spawn::spawn(herdr, ledger, &req, inherited_workspace) {
         Ok(spawned) => spawned,
-        Err(e) if launch != Launch::Off => {
-            for file in [
-                settings_file(paths, &req.name),
-                member_file(paths, &req.name),
-            ] {
-                let _ = std::fs::remove_file(file);
+        Err(e) => {
+            // Kept once anything records the worker, whose Claude may run.
+            if launch != Launch::Off && !recorded(ledger).unwrap_or(true) {
+                for file in [
+                    settings_file(paths, &req.name),
+                    member_file(paths, &req.name),
+                ] {
+                    let _ = std::fs::remove_file(file);
+                }
             }
             return Err(e);
         }
-        Err(e) => return Err(e),
     };
     let mut warnings = launch.warnings(&req.name);
     if let Some(why) = launch.unsandboxed() {
@@ -218,8 +250,54 @@ pub fn spawn(
     Ok((spawned, warnings))
 }
 
+/// Checks running worker `record` against its herd's `[worker] sandbox`
+/// without writing anything: its recorded args must pass it its settings.
+/// Returns why it runs unsandboxed under `prefer`, and the warnings;
+/// `require` refuses one started without them.
+pub fn check_running(paths: &Paths, record: &AgentRecord) -> Result<(Option<String>, Vec<String>)> {
+    let name = &record.name;
+    let (herd, mode) = match Member::kept(paths, name)? {
+        Some(member) => {
+            let mode = herd::worker(paths, &member.herd)?.sandbox;
+            (member.herd, mode)
+        }
+        // A member loopherd never sandboxed, whose herd file may since have gone.
+        None => match &record.herd {
+            Some(herd) if !record.may_be_lead() => {
+                let mode = herd::worker(paths, herd).map_or(WorkerSandbox::Off, |w| w.sandbox);
+                (herd.clone(), mode)
+            }
+            _ => return Ok((None, vec![])),
+        },
+    };
+    if mode == WorkerSandbox::Off
+        || crate::sandbox::launched_with_settings(paths, name, &record.claude_args)
+    {
+        return Ok((None, vec![]));
+    }
+    let why = record
+        .unsandboxed
+        .clone()
+        .unwrap_or_else(|| "it was started without its sandbox".into());
+    if mode == WorkerSandbox::Require {
+        bail!(
+            "{name} can't run sandboxed: {why}; quit its Claude and run loopherd revive --name \
+             {name} to resume it sandboxed, or set [worker] sandbox = \"prefer\" in herd {herd} \
+             to run it unsandboxed"
+        );
+    }
+    let warning = format!("{name} runs unsandboxed ({why})");
+    Ok((Some(why), vec![warning]))
+}
+
 pub fn settings_file(paths: &Paths, name: &str) -> PathBuf {
     crate::sandbox::settings_file(paths, name)
+}
+
+/// Worker `name`'s handoff and mailbox directories, the state it may write.
+fn own_dirs(paths: &Paths, name: &str) -> [PathBuf; 2] {
+    let state = paths.state_dir();
+    [handoff::dir(state, name), state.join("reports").join(name)]
 }
 
 fn settings(paths: &Paths, name: &str, herd: &str, worktree: &Path) -> Result<Value> {
@@ -228,11 +306,8 @@ fn settings(paths: &Paths, name: &str, herd: &str, worktree: &Path) -> Result<Va
     let state = paths.state_dir();
     let config = paths.config_dir();
     let claude = paths.home.join(".claude");
-    let allow_write = [
-        worktree.to_path_buf(),
-        handoff::dir(state, name),
-        state.join("reports").join(name),
-    ];
+    let own = own_dirs(paths, name);
+    let allow_write = [worktree.to_path_buf(), own[0].clone(), own[1].clone()];
     let deny_write = [
         config.to_path_buf(),
         claude.clone(),
@@ -257,12 +332,11 @@ fn settings(paths: &Paths, name: &str, herd: &str, worktree: &Path) -> Result<Va
         ]
         .map(|file| file_rule(&state.join(file))),
     );
-    for dir in ["reports", "handoffs"].map(|dir| state.join(dir)) {
-        if cfg!(target_os = "linux") {
-            // The Linux sandbox skips glob denies, so these reach only the file tools.
-            deny.push(file_rule(&dir.join("*")));
-            deny.push(edit_rule(&dir.join("*")));
-        } else {
+    // A glob over these would cover the worker's own directory too, and on
+    // Linux a named deny whose path later goes missing gets the sandbox's
+    // placeholder there; elsewhere the sandbox makes none.
+    if !cfg!(target_os = "linux") {
+        for dir in ["reports", "handoffs"].map(|dir| state.join(dir)) {
             let others = entries_but(&dir, name)?;
             deny.extend(others.iter().map(|(path, is_dir)| match is_dir {
                 true => edit_rule(path),
@@ -270,6 +344,8 @@ fn settings(paths: &Paths, name: &str, herd: &str, worktree: &Path) -> Result<Va
             }));
         }
     }
+    let mut allow = vec!["WebFetch(domain:*)".to_string()];
+    allow.extend(own.iter().map(|dir| edit_rule(dir)));
     let paths_of = |list: &[PathBuf]| -> Vec<String> {
         list.iter().map(|p| p.display().to_string()).collect()
     };
@@ -287,6 +363,7 @@ fn settings(paths: &Paths, name: &str, herd: &str, worktree: &Path) -> Result<Va
         },
         "permissions": {
             "denyInsteadOfPrompting": true,
+            "allow": allow,
             "deny": deny,
         },
     }))
@@ -350,7 +427,7 @@ mod tests {
         let state = h.paths.state_dir().to_path_buf();
         let config = h.paths.config_dir().to_path_buf();
 
-        let launch = prepare(&h.paths, "w1", &member(), &worktree, &blocked).unwrap();
+        let launch = prepare(&h.paths, "w1", &member(), Some(&worktree), &blocked).unwrap();
 
         let file = config.join("sandbox/w1.json");
         assert_eq!(
@@ -399,7 +476,7 @@ mod tests {
         let worktree = h.repo.parent().unwrap().join("worktrees/feat-x");
         let state = h.paths.state_dir().to_path_buf();
 
-        prepare(&h.paths, "w1", &member(), &worktree, &blocked).unwrap();
+        prepare(&h.paths, "w1", &member(), Some(&worktree), &blocked).unwrap();
 
         let settings = read_json(&settings_file(&h.paths, "w1"));
         let deny = strings(&settings["permissions"]["deny"]);
@@ -418,18 +495,43 @@ mod tests {
         ] {
             assert!(deny.contains(&rule), "{rule}: {deny:?}");
         }
-        if cfg!(target_os = "linux") {
-            for dir in ["reports", "handoffs"] {
-                let rule = format!("Edit(/{}/*/**)", state.join(dir).display());
-                assert!(deny.contains(&rule), "{rule}: {deny:?}");
-            }
-        }
         assert!(
             !deny
                 .iter()
                 .any(|rule| rule.contains("/reports/w1") || rule.contains("/handoffs/w1")),
             "{deny:?}"
         );
+        assert_eq!(
+            strings(&settings["permissions"]["allow"]),
+            [
+                "WebFetch(domain:*)".to_string(),
+                format!("Edit(/{}/**)", state.join("handoffs/w1").display()),
+                format!("Edit(/{}/**)", state.join("reports/w1").display()),
+            ]
+        );
+        assert!(state.join("handoffs/w1").is_dir());
+        assert!(state.join("reports/w1").is_dir());
+    }
+
+    #[test]
+    fn a_worker_without_a_worktree_is_refused_under_require_and_unsandboxed_under_prefer() {
+        let h = herd("sandbox = \"require\"");
+        let err = prepare(&h.paths, "w1", &member(), None, &blocked).unwrap_err();
+        assert!(err.downcast_ref::<NotStarted>().is_some());
+        assert_eq!(
+            format!("{err:#}"),
+            "w1 can't start sandboxed: it has no worktree of its own, and its sandbox won't \
+             open the main checkout; give herd h's template t a branch, or set [worker] \
+             sandbox = \"prefer\" in herd h to start it unsandboxed"
+        );
+
+        let h = herd("sandbox = \"prefer\"");
+        let launch = prepare(&h.paths, "w1", &member(), None, &blocked).unwrap();
+        assert_eq!(
+            launch.unsandboxed(),
+            Some("it has no worktree of its own, and its sandbox won't open the main checkout")
+        );
+        assert!(!settings_file(&h.paths, "w1").exists());
     }
 
     #[test]
@@ -437,7 +539,7 @@ mod tests {
         let h = herd("sandbox = \"prefer\"");
         let worktree = h.repo.parent().unwrap().join("worktrees/feat-x");
 
-        prepare(&h.paths, "w1", &member(), &worktree, &blocked).unwrap();
+        prepare(&h.paths, "w1", &member(), Some(&worktree), &blocked).unwrap();
 
         let file = h.paths.config_dir().join("sandbox/w1.member.json");
         assert_eq!(
@@ -452,7 +554,7 @@ mod tests {
             let h = herd(worker);
             let worktree = h.repo.parent().unwrap().join("worktrees/feat-x");
 
-            let launch = prepare(&h.paths, "w1", &member(), &worktree, &blocked).unwrap();
+            let launch = prepare(&h.paths, "w1", &member(), Some(&worktree), &blocked).unwrap();
 
             assert_eq!(launch, Launch::Off);
             assert_eq!(launch.args(), Vec::<String>::new());
@@ -465,7 +567,7 @@ mod tests {
         let h = herd("sandbox = \"require\"\nunix_sockets = \"all\"");
         let worktree = h.repo.parent().unwrap().join("worktrees/feat-x");
 
-        prepare(&h.paths, "w1", &member(), &worktree, &blocked).unwrap();
+        prepare(&h.paths, "w1", &member(), Some(&worktree), &blocked).unwrap();
 
         let settings = read_json(&settings_file(&h.paths, "w1"));
         assert_eq!(settings["sandbox"]["network"]["allowAllUnixSockets"], true);
@@ -490,7 +592,7 @@ mod tests {
         let h = herd("sandbox = \"require\"");
         let worktree = h.repo.parent().unwrap().join("worktrees/feat-x");
 
-        let err = prepare(&h.paths, "w1", &member(), &worktree, &unavailable).unwrap_err();
+        let err = prepare(&h.paths, "w1", &member(), Some(&worktree), &unavailable).unwrap_err();
 
         assert_eq!(
             format!("{err:#}"),
@@ -506,7 +608,7 @@ mod tests {
         let h = herd("sandbox = \"prefer\"");
         let worktree = h.repo.parent().unwrap().join("worktrees/feat-x");
 
-        let launch = prepare(&h.paths, "w1", &member(), &worktree, &unavailable).unwrap();
+        let launch = prepare(&h.paths, "w1", &member(), Some(&worktree), &unavailable).unwrap();
 
         assert_eq!(
             launch,
@@ -528,7 +630,7 @@ mod tests {
     fn a_sandbox_that_cant_block_sockets_is_refused_under_require_and_warned_under_prefer() {
         let h = herd("sandbox = \"require\"");
         let worktree = h.repo.parent().unwrap().join("worktrees/feat-x");
-        let err = prepare(&h.paths, "w1", &member(), &worktree, &sockets_open).unwrap_err();
+        let err = prepare(&h.paths, "w1", &member(), Some(&worktree), &sockets_open).unwrap_err();
         assert_eq!(
             format!("{err:#}"),
             "w1 can't start sandboxed: its sandbox can't block Unix sockets: no seccomp \
@@ -537,7 +639,7 @@ mod tests {
         );
 
         let h = herd("sandbox = \"prefer\"");
-        let launch = prepare(&h.paths, "w1", &member(), &worktree, &sockets_open).unwrap();
+        let launch = prepare(&h.paths, "w1", &member(), Some(&worktree), &sockets_open).unwrap();
         assert_eq!(
             launch,
             Launch::Unsandboxed {
@@ -547,7 +649,7 @@ mod tests {
         );
 
         let h = herd("sandbox = \"require\"\nunix_sockets = \"all\"");
-        let launch = prepare(&h.paths, "w1", &member(), &worktree, &sockets_open).unwrap();
+        let launch = prepare(&h.paths, "w1", &member(), Some(&worktree), &sockets_open).unwrap();
         assert_eq!(launch.args()[0], "--settings");
     }
 }
