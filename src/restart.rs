@@ -155,7 +155,7 @@ pub fn restart(
         }
     };
     let (unsandboxed, warnings) = match running {
-        None => (None, vec![]),
+        None => crate::worker_sandbox::check_running(req.paths, &record).context("sandbox")?,
         Some(Running::Sandboxed(warnings)) => {
             sandbox::create_state(req.paths, name).context("sandbox")?;
             (None, warnings)
@@ -1509,6 +1509,98 @@ mod tests {
         r.role = Some(crate::ledger::Role::Lead);
         r.herd = Some("h".into());
         r.worktree = Some("/src/worktrees/lh-1".into());
+    }
+
+    /// lh-1 as a worker of herd `h`, whose `[worker]` is `worker`, kept by
+    /// its sandbox; `launched` says whether its Claude got its settings.
+    fn as_worker(w: &World, worker: &str, launched: bool) -> impl Fn(&mut AgentRecord) {
+        fs::write(
+            w.paths().herds.join("h.toml"),
+            format!(
+                "repo = \"/src/repo\"\n[template.t]\nparams = []\nprompt = \"go\"\n\
+                 [worker]\n{worker}\n"
+            ),
+        )
+        .unwrap();
+        let dir = w.paths().config_dir().join("sandbox");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("lh-1.member.json"),
+            r#"{"herd": "h", "template": "t", "args": []}"#,
+        )
+        .unwrap();
+        let settings = w.settings().display().to_string();
+        move |r: &mut AgentRecord| {
+            r.herd = Some("h".into());
+            r.template = Some("t".into());
+            r.claude_args = match launched {
+                true => vec!["--settings".into(), settings.clone()],
+                false => vec![],
+            };
+        }
+    }
+
+    #[test]
+    fn a_worker_running_in_its_sandbox_is_restarted() {
+        let w = World::new();
+        w.handed_off();
+        let worker = as_worker(&w, "sandbox = \"require\"", true);
+
+        let (result, _) = w.restart_as(false, true, None, &worker);
+
+        assert!(!result.unwrap().contains("warning"));
+        assert!(!w.settings().exists(), "restart writes no settings");
+    }
+
+    #[test]
+    fn a_required_worker_started_without_its_sandbox_is_refused_and_nothing_is_cleared() {
+        let w = World::new();
+        w.handed_off();
+        let worker = as_worker(&w, "sandbox = \"require\"", false);
+
+        let (result, _) = w.restart_as(false, true, None, &worker);
+
+        assert_eq!(
+            format!("{:#}", result.unwrap_err()),
+            "sandbox: lh-1 can't run sandboxed: it was started without its sandbox; quit its \
+             Claude and run loopherd revive --name lh-1 to resume it sandboxed, or set [worker] \
+             sandbox = \"prefer\" in herd h to run it unsandboxed"
+        );
+        assert!(w.herdr.prompts().is_empty());
+    }
+
+    #[test]
+    fn a_sandboxed_worker_whose_herd_is_gone_is_refused_naming_the_herd() {
+        let w = World::new();
+        w.handed_off();
+        let worker = as_worker(&w, "sandbox = \"require\"", true);
+        fs::remove_file(w.paths().herds.join("h.toml")).unwrap();
+
+        let (result, _) = w.restart_as(false, true, None, &worker);
+
+        assert_eq!(
+            format!("{:#}", result.unwrap_err()),
+            "sandbox: lh-1 was started in herd h's worker sandbox, and herd h is gone; restore \
+             its herd file, or run loopherd retire lh-1"
+        );
+        assert!(w.herdr.prompts().is_empty());
+    }
+
+    #[test]
+    fn a_preferred_worker_started_without_its_sandbox_is_restarted_with_a_warning() {
+        let w = World::new();
+        w.handed_off();
+        let worker = as_worker(&w, "sandbox = \"prefer\"", false);
+
+        let (result, _) = w.restart_as(false, true, None, &worker);
+
+        assert!(
+            result
+                .as_ref()
+                .unwrap()
+                .ends_with("\nwarning: lh-1 runs unsandboxed (it was started without its sandbox)"),
+            "{result:?}"
+        );
     }
 
     #[test]

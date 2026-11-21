@@ -3197,6 +3197,20 @@ max = 3
     }
 
     #[test]
+    fn a_worker_running_without_its_sandbox_shows_why_under_its_role() {
+        let (herdr, mut ledger, now) = (herdr(), ledger(), Instant::now());
+        let b = ledger.0.get_mut("b").unwrap();
+        b.unsandboxed = Some("bubblewrap not installed".into());
+        let mail = quiet_mail(&ledger);
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        let shown = pane_text(&render_at(&app, now, 120, 24), "b");
+        assert_eq!(
+            shown[1], "worker, unsandboxed: bubblewrap not installed",
+            "{shown:#?}"
+        );
+    }
+
+    #[test]
     fn a_member_with_an_empty_mailbox_shows_no_stop_report_or_blank_lines() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let mail = quiet_mail(&ledger);

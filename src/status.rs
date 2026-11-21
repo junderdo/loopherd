@@ -376,6 +376,7 @@ pub fn row(member: &Member) -> Vec<String> {
         }
         (true, _) => format!("{} (lead)", member.name),
         (false, true) => format!("{} (released)", member.name),
+        (false, false) if member.unsandboxed.is_some() => format!("{} (unsandboxed)", member.name),
         _ if member.attended => format!("{} (attended)", member.name),
         (false, false) => member.name.clone(),
     };
@@ -896,6 +897,31 @@ retired
         assert_eq!(json["herds"][0]["name"], "prs");
         assert_eq!(json["ungrouped"], serde_json::json!([]));
         assert!(json.get("strays").is_none(), "{json}");
+    }
+
+    #[test]
+    fn a_worker_running_without_its_sandbox_is_marked_unsandboxed() {
+        let herdr = herdr().with_raw_agent(agent(Some("zpr-1"), "w1:pzpr-1", AgentStatus::Working));
+        let mut ledger = ledger();
+        let mut worker = entry("zpr-1", Some("prs"), "zpr-1");
+        worker.unsandboxed = Some("bubblewrap not installed".into());
+        ledger.0.insert(worker.name.clone(), worker);
+
+        let out = status(
+            &herdr,
+            &ledger,
+            &not_paused(),
+            None,
+            Options::default(),
+            PLAIN,
+        )
+        .unwrap();
+
+        assert!(
+            out.stdout.contains("  zpr-1 (unsandboxed)  working"),
+            "{}",
+            out.stdout
+        );
     }
 
     #[test]

@@ -409,6 +409,10 @@ pub fn calling_lead(paths: &Paths, procs: &dyn Procs, me: u32) -> Result<Option<
             let Some((at, name)) = lead_of_settings(&file) else {
                 continue;
             };
+            // A sandboxed worker's settings sit beside the leads'.
+            if at.join(format!("{name}.member.json")).is_file() {
+                continue;
+            }
             if at == dir {
                 return Ok(Some(name));
             }
@@ -476,8 +480,10 @@ fn under_world_writable(dir: &Path) -> bool {
 fn lead_of_settings(file: &Path) -> Option<(PathBuf, String)> {
     let name = file.file_name()?.to_str()?.strip_suffix(".json")?;
     let at = file.parent()?;
-    let is_settings =
-        at.file_name()? == "sandbox" && !name.ends_with(".lead") && !name.ends_with(".mcp");
+    let is_settings = at.file_name()? == "sandbox"
+        && ![".lead", ".mcp", ".member"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix));
     is_settings.then(|| (at.to_path_buf(), name.to_string()))
 }
 
@@ -507,12 +513,25 @@ impl Guard {
     }
 
     /// Removes a retired lead's MCP config, and its settings once `ended`
-    /// says its Claude has, so a running Claude keeps its sandbox. Only a
-    /// launched lead has them, and a lead caller removes nothing: it could
-    /// have forged the entry. Returns a line per file removed or failed.
+    /// says its Claude has, so a running Claude keeps its sandbox; a
+    /// sandboxed worker's settings and kept record, once ended. A lead caller
+    /// removes no lead's files: it could have forged the entry. Returns a
+    /// line per file removed or failed.
     pub fn forget_launch(&self, name: &str, ended: bool) -> Vec<String> {
+        // A lead can't write the config dir, so a member record there is no forgery of its.
+        let member = crate::worker_sandbox::member_file(&self.paths, name);
+        if member.is_file() {
+            let files = [settings_file(&self.paths, name), member];
+            return match ended {
+                true => removed(files),
+                false => vec![],
+            };
+        }
+        if self.caller.is_some() {
+            return vec![];
+        }
         // A name like `lead-x.lead` would otherwise map to lead-x's files.
-        if self.caller.is_some() || !lead_file(&self.paths, name).is_file() {
+        if !lead_file(&self.paths, name).is_file() {
             return vec![];
         }
         let mcp = self
@@ -521,14 +540,7 @@ impl Guard {
             .join("sandbox")
             .join(format!("{name}.mcp.json"));
         let settings = ended.then(|| settings_file(&self.paths, name));
-        std::iter::once(mcp)
-            .chain(settings)
-            .filter_map(|file| match std::fs::remove_file(&file) {
-                Ok(()) => Some(format!("removed {}", file.display())),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                Err(e) => Some(format!("warning: kept {}: {e}", file.display())),
-            })
-            .collect()
+        removed(std::iter::once(mcp).chain(settings))
     }
 
     /// Why the lead running this loopherd, if one does, may not act on
@@ -707,6 +719,18 @@ impl Guard {
     pub fn for_lead(&self) -> bool {
         self.caller.is_some()
     }
+}
+
+/// Removes each of `files`, a line per file removed or failed.
+fn removed(files: impl IntoIterator<Item = PathBuf>) -> Vec<String> {
+    files
+        .into_iter()
+        .filter_map(|file| match std::fs::remove_file(&file) {
+            Ok(()) => Some(format!("removed {}", file.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => Some(format!("warning: kept {}: {e}", file.display())),
+        })
+        .collect()
 }
 
 /// How a lead's Claude is started.
@@ -1564,7 +1588,7 @@ fn absolute(path: &str, home: &Path) -> Option<PathBuf> {
 }
 
 /// A credentials lead's settings hold its token, so only the human reads them.
-fn write_private(file: &Path, text: &str) -> std::io::Result<()> {
+pub fn write_private(file: &Path, text: &str) -> std::io::Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let mut open = std::fs::OpenOptions::new();
     let created = open
@@ -1954,7 +1978,7 @@ fn others_in_handoffs(paths: &Paths, name: &str) -> Result<Vec<(PathBuf, bool)>>
 }
 
 /// The entries of `dir` but `skip`, sorted, each marked `true` when a directory.
-fn entries_but(dir: &Path, skip: &str) -> Result<Vec<(PathBuf, bool)>> {
+pub fn entries_but(dir: &Path, skip: &str) -> Result<Vec<(PathBuf, bool)>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
@@ -1994,11 +2018,11 @@ fn switch_settings(settings: &Value, paths: &Paths) -> Value {
 }
 
 /// A deny for the file tools; `//` marks the path absolute, not relative to the settings file.
-fn edit_rule(dir: &Path) -> String {
+pub fn edit_rule(dir: &Path) -> String {
     format!("Edit(/{}/**)", dir.display())
 }
 
-fn file_rule(file: &Path) -> String {
+pub fn file_rule(file: &Path) -> String {
     format!("Edit(/{})", file.display())
 }
 
@@ -2062,6 +2086,32 @@ mod tests {
     }
 
     #[test]
+    fn a_retire_by_anyone_removes_a_sandboxed_workers_settings_and_record_once_its_claude_has_ended()
+     {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        let dir = paths.config_dir().join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = ["w1.json", "w1.member.json"];
+        for file in files {
+            std::fs::write(dir.join(file), "{}").unwrap();
+        }
+
+        let guard = Guard::new(paths.clone(), Some("lead-h".into()));
+        assert_eq!(guard.forget_launch("w1", false), Vec::<String>::new());
+        for file in files {
+            assert!(dir.join(file).exists(), "{file}");
+        }
+
+        let removed = guard.forget_launch("w1", true);
+
+        assert_eq!(
+            removed,
+            files.map(|file| format!("removed {}", dir.join(file).display()))
+        );
+    }
+
+    #[test]
     fn an_edit_rule_is_confined_only_when_no_segment_climbs_and_it_lies_beneath_an_own_write() {
         let home = Path::new("/home/me");
         let worktree = Path::new("/a/wt");
@@ -2086,6 +2136,21 @@ mod tests {
             );
             assert_eq!(found.is_empty(), confined, "{rule}: {found:?}");
         }
+    }
+
+    #[test]
+    fn a_workers_settings_dont_make_it_a_calling_lead() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        let dir = paths.config_dir().join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("w1.member.json"), "{}").unwrap();
+        let settings = settings_file(&paths, "w1").display().to_string();
+        let mut procs = crate::process::FakeProcs::pane();
+        procs.set_cmdline(30, &["claude", "--settings", &settings]);
+        procs.add(40, "/usr/bin/loopherd", 30, 400);
+
+        assert_eq!(calling_lead(&paths, &procs, 40).unwrap(), None);
     }
 
     #[test]

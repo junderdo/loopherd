@@ -246,6 +246,7 @@ impl Op {
                     ready_timeout: Duration::from_secs(*ready_timeout_secs),
                     return_pane: ctx.caller.pane.clone(),
                     focus: !no_focus,
+                    sandbox: crate::sandbox::probe,
                 };
                 add(ctx, &req, *dry_run, sink)
             }
@@ -435,6 +436,7 @@ fn feed_request<'a>(
         owner: caller.process,
         procs: ctx.procs,
         lead: caller.lead.clone(),
+        sandbox: crate::sandbox::probe,
     })
 }
 

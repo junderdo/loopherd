@@ -17,7 +17,7 @@ use crate::report::{Body, Entry, append};
 use crate::retire::retire_and_close;
 use crate::sandbox::{self, Guard};
 use crate::shell::run_within;
-use crate::spawn::{BLOCKED_EXIT, spawn};
+use crate::spawn::BLOCKED_EXIT;
 use crate::tool_hook::{Pane, Switch, lead_in, needs};
 
 /// Feed's exit code when every error was a malformed source line.
@@ -50,6 +50,8 @@ pub struct FeedRequest<'a> {
     pub procs: &'a dyn Procs,
     /// The lead a broker runs this feed for, which no pane names.
     pub lead: Option<ForLead>,
+    /// Asked only when the herd's `[worker] sandbox` is on.
+    pub sandbox: crate::sandbox::Probe,
 }
 
 /// A lead, with the herd its launch record names.
@@ -121,6 +123,8 @@ pub fn feed(
     let mut free = queue.max.saturating_sub(held);
     let mut taken = taken(ledger.entries().context("ledger")?);
 
+    let probed = std::cell::OnceCell::new();
+    let probe = || probed.get_or_init(req.sandbox).clone();
     let (mut added, mut skipped, mut line_errors) = (0, 0, 0);
     let mut code = 0;
     for task in output.lines().map(str::trim) {
@@ -175,13 +179,21 @@ pub fn feed(
             added += 1;
             continue;
         }
-        match spawn(herdr, ledger, &spawn_req, inherited_workspace) {
-            Ok(spawned) => {
+        let started = crate::worker_sandbox::spawn(
+            herdr,
+            ledger,
+            paths,
+            &spawn_req,
+            inherited_workspace,
+            &probe,
+        );
+        match started {
+            Ok((spawned, sandbox_warnings)) => {
                 lines.push(format!("added {name}"));
                 lines.extend(
-                    spawned
-                        .warnings()
+                    sandbox_warnings
                         .iter()
+                        .chain(&spawned.warnings())
                         .map(|w| format!("warning: {name}: {w}")),
                 );
                 added += 1;
@@ -193,6 +205,14 @@ pub fn feed(
                     code = BLOCKED_EXIT;
                     break;
                 }
+            }
+            Err(e)
+                if e.downcast_ref::<crate::worker_sandbox::NotStarted>()
+                    .is_some() =>
+            {
+                lines.push(format!("not started: {task}: {}", e.root_cause()));
+                errors += 1;
+                free += 1;
             }
             Err(e) => {
                 lines.push(format!("error: {task}: {e:#}; stopping"));
@@ -297,6 +317,7 @@ fn unclaimed(
         owner: Process { pid: 0, start: 0 },
         procs: &crate::process::ProcFs,
         lead: None,
+        sandbox: || Ok(crate::sandbox::Sockets::Blocked),
     };
     let mut names = vec![];
     for task in tasks.lines().map(str::trim) {
@@ -915,6 +936,7 @@ fn task_request(
             ready_timeout: req.ready_timeout,
             return_pane: None,
             focus: false,
+            sandbox: req.sandbox,
         },
     )
 }
@@ -1076,6 +1098,7 @@ mod tests {
                 procs: &*LIVE,
                 lead: None,
                 own_lineage: vec![],
+                sandbox: || Ok(crate::sandbox::Sockets::Blocked),
             }
         }
 
@@ -1447,6 +1470,115 @@ mod tests {
         let err = setup.feed(&herdr, &mut ledger, false).unwrap_err();
         assert_eq!(format!("{err:#}"), "herdr: herdr server not running");
         assert!(ledger.0.is_empty());
+    }
+
+    /// A herd `prs` from `Setup::new` whose `[worker]` is `worker`.
+    fn worker_setup(source: &str, worker: &str) -> Setup {
+        let setup = Setup::new(source, 5);
+        let file = setup.config.path().join("herds/prs.toml");
+        let herd = fs::read_to_string(&file).unwrap() + &format!("[worker]\n{worker}\n");
+        fs::write(file, herd).unwrap();
+        setup
+    }
+
+    fn sandbox_unavailable()
+    -> std::result::Result<crate::sandbox::Sockets, crate::sandbox::Unavailable> {
+        Err(crate::sandbox::Unavailable {
+            why: "bubblewrap isn't installed".into(),
+            fix: "install bubblewrap".into(),
+        })
+    }
+
+    #[test]
+    fn a_required_worker_its_sandbox_refuses_is_not_started_and_the_feed_goes_on() {
+        let setup = worker_setup("printf '1\\n2\\n'", "sandbox = \"require\"");
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        let req = FeedRequest {
+            sandbox: sandbox_unavailable,
+            ..setup.request(false, None)
+        };
+
+        let fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
+
+        let refused = |n: &str| {
+            format!(
+                "not started: {n}: zpr-{n} can't start sandboxed: it has no worktree of its own, \
+                 and its sandbox won't open the main checkout; give herd prs's template pr a \
+                 branch, or set [worker] sandbox = \"prefer\" in herd prs to start it \
+                 unsandboxed"
+            )
+        };
+        assert_eq!(
+            fed.lines,
+            [
+                refused("1"),
+                refused("2"),
+                "prs: 0 retired, 0 added, 0 skipped, 2 errors".to_string()
+            ]
+        );
+        assert_eq!(fed.code, 1);
+        assert!(ledger.0.is_empty());
+        assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
+    fn a_worker_its_sandbox_refuses_gives_its_slot_back() {
+        let setup = Setup::new("printf '1\\n2\\n'", 1);
+        let file = setup.config.path().join("herds/prs.toml");
+        let herd = fs::read_to_string(&file).unwrap() + "[worker]\nsandbox = \"require\"\n";
+        fs::write(file, herd).unwrap();
+        let req = FeedRequest {
+            sandbox: sandbox_unavailable,
+            ..setup.request(false, None)
+        };
+
+        let fed = feed(
+            &herdr(),
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &req,
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert!(
+            fed.lines[0].starts_with("not started: 1: "),
+            "{:?}",
+            fed.lines
+        );
+        assert!(
+            fed.lines[1].starts_with("not started: 2: "),
+            "{:?}",
+            fed.lines
+        );
+    }
+
+    #[test]
+    fn a_preferred_worker_its_sandbox_refuses_is_fed_unsandboxed_and_flagged() {
+        let setup = worker_setup("printf '1\\n'", "sandbox = \"prefer\"");
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        let req = FeedRequest {
+            sandbox: sandbox_unavailable,
+            ..setup.request(false, None)
+        };
+
+        let fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "added zpr-1",
+                "warning: zpr-1: zpr-1 runs unsandboxed (it has no worktree of its own, and its \
+                 sandbox won't open the main checkout); give herd prs's template pr a branch",
+                "prs: 0 retired, 1 added, 0 skipped, 0 errors",
+            ]
+        );
+        assert_eq!(
+            ledger.0["zpr-1"].unsandboxed.as_deref(),
+            Some("it has no worktree of its own, and its sandbox won't open the main checkout")
+        );
     }
 
     #[test]
@@ -1863,6 +1995,7 @@ mod tests {
             owner: OWNER,
             procs: &*LIVE,
             lead: None,
+            sandbox: || Ok(crate::sandbox::Sockets::Blocked),
         };
         let herdr = herdr();
         let mut ledger = MemLedger::default();
@@ -1991,6 +2124,7 @@ mod tests {
             procs: &*LIVE,
             lead: None,
             own_lineage: vec![],
+            sandbox: || Ok(crate::sandbox::Sockets::Blocked),
         };
 
         let fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
@@ -2054,6 +2188,7 @@ mod tests {
             owner: OWNER,
             procs: &*LIVE,
             lead: None,
+            sandbox: || Ok(crate::sandbox::Sockets::Blocked),
         };
 
         let fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
@@ -2191,6 +2326,7 @@ mod tests {
             owner: OWNER,
             procs: &*LIVE,
             lead: None,
+            sandbox: || Ok(crate::sandbox::Sockets::Blocked),
         };
 
         let fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
@@ -2595,6 +2731,7 @@ mod tests {
                     owner: OWNER,
                     procs: &*LIVE,
                     lead: None,
+                    sandbox: || Ok(crate::sandbox::Sockets::Blocked),
                 };
                 task_request(&setup.paths(), &req, template, params)
                     .unwrap()

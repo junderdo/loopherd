@@ -18,8 +18,9 @@ pub fn member(member: &Member, mail: &Mail, time: &str, theme: Theme) -> Vec<Lin
             Some(why) => format!("lead, Unix sockets open: {why}"),
             None => "lead".into(),
         },
-        (false, _) if member.attended => "attended".into(),
-        (false, _) => "worker".into(),
+        (false, Some(why)) => format!("worker, unsandboxed: {why}"),
+        (false, None) if member.attended => "attended".into(),
+        (false, None) => "worker".into(),
     };
     let mut lines = vec![
         Line::raw(format!("{status} {time}").trim_end().to_string()),
@@ -214,4 +215,39 @@ pub fn ellipsized(line: Line<'static>, width: usize) -> Line<'static> {
 
 fn columns(s: &str) -> usize {
     Span::raw(s).width()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::herdr::AgentStatus;
+
+    #[test]
+    fn an_attended_worker_running_unsandboxed_is_marked_unsandboxed_as_status_marks_it() {
+        let worker = Member {
+            name: "grill-1".into(),
+            status: AgentStatus::Idle,
+            gone: false,
+            branch: None,
+            worktree: None,
+            worktree_path: None,
+            pane: "w1:p1".into(),
+            tab: None,
+            lead: false,
+            attended: true,
+            unsandboxed: Some("bubblewrap not installed".into()),
+            sockets_unblocked: None,
+            template: None,
+            released: false,
+            retired: None,
+        };
+
+        let lines = member(&worker, &Mail::default(), "", Theme::from_env(None, true));
+
+        assert_eq!(
+            lines[1].to_string(),
+            "worker, unsandboxed: bubblewrap not installed"
+        );
+        assert_eq!(crate::status::row(&worker)[0], "grill-1 (unsandboxed)");
+    }
 }
