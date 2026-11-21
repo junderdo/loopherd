@@ -75,9 +75,16 @@ pub fn lead(
             })
             .map(drop),
     };
+    let flagging = match (hook_only, sockets) {
+        (Some(why), _) => Some(sandbox::hook_only_warning(&name, why)),
+        (None, Some(why)) => Some(sandbox::sockets_unblocked_warning(&name, why)),
+        (None, None) => None,
+    };
     for text in launch.warnings(&name) {
         let mut warning = text.clone();
-        if let Err(e) = &flagged {
+        if let Err(e) = &flagged
+            && flagging.as_ref().is_some_and(|f| text.starts_with(f))
+        {
             warning += &format!("; not flagged in the ledger: {e:#}");
         }
         let note = Entry::new(SystemTime::now(), Body::Note { text });
@@ -980,6 +987,38 @@ mod tests {
     }
 
     #[test]
+    fn a_ledger_that_cant_flag_the_lead_is_noted_only_on_the_warning_it_would_flag() {
+        let setup = Setup::with_lead("prompt = \"go\"\nsandbox = \"prefer\"");
+        let herdr = herdr();
+        let paths =
+            home_with_settings(&setup, r#"{"sandbox": {"excludedCommands": ["docker *"]}}"#);
+        let req = LeadRequest {
+            sandbox: no_socket_filter,
+            ..request(&[])
+        };
+        let mut ledger = crate::ledger::NoUpdate(MemLedger::default());
+
+        let (_, _, warnings) = lead(&herdr, &mut ledger, &paths, &req, Some("w1")).unwrap();
+
+        let file = setup.root.join("home/.claude/settings.json");
+        assert_eq!(
+            warnings,
+            [
+                format!(
+                    "lead-h's sandbox is loosened by {}: sandbox.excludedCommands runs \
+                     \"docker *\" outside it",
+                    file.display()
+                ),
+                "lead-h's sandbox can't block Unix sockets (Claude Code finds no seccomp filter), \
+                 so herdr, your ssh agent and WSL2's Windows interop stay open to it; \
+                 npm install -g @anthropic-ai/sandbox-runtime; not flagged in the ledger: \
+                 disk full"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn a_lead_on_prefer_without_its_sandbox_still_starts_with_no_mcp_servers() {
         let setup = Setup::with_lead("prompt = \"go\"\nsandbox = \"prefer\"");
         let herdr = herdr();
@@ -1099,13 +1138,15 @@ mod tests {
 
     #[test]
     fn a_lead_starts_with_each_allowed_arg_and_no_warning() {
-        let allowed: [&[&str]; 9] = [
+        let allowed: [&[&str]; 11] = [
             &["--model", "sonnet"],
             &["--model=sonnet"],
             &["--effort", "max"],
             &["--effort=high"],
             &["--verbose"],
             &["--permission-mode", "default"],
+            &["--permission-mode", "manual"],
+            &["--permission-mode=manual"],
             &["--permission-mode", "auto"],
             &["--permission-mode", "plan"],
             &["--permission-mode=plan"],
@@ -1166,7 +1207,7 @@ mod tests {
                 format!(
                     "sandbox: lead-h can't run sandboxed: its args may loosen its sandbox or \
                      permissions: {shown}, from the command line; a lead takes only --model, \
-                     --effort, --verbose and --permission-mode default, auto or plan, so drop \
+                     --effort, --verbose and --permission-mode default, manual, auto or plan, so drop \
                      those, or set [lead] sandbox = \"prefer\" in herd h to start it with them \
                      as warnings"
                 )

@@ -7,9 +7,10 @@ mod fakes;
 use brokers::{Broker, held};
 use fakes::executable;
 use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Read};
 use std::os::fd::AsRawFd;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 const SOCKET: &str = "/run/herdr-test.sock";
@@ -56,7 +57,11 @@ impl World {
     }
 
     fn loopherd(&self, pane: Option<&str>, args: &[&str]) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_loopherd"));
+        self.loopherd_at(Path::new(env!("CARGO_BIN_EXE_loopherd")), pane, args)
+    }
+
+    fn loopherd_at(&self, program: &Path, pane: Option<&str>, args: &[&str]) -> Command {
+        let mut cmd = Command::new(program);
         cmd.env("XDG_STATE_HOME", self.root.path().join("state"))
             .env("LOOPHERD_CONFIG_DIR", self.config())
             .env("CLAUDE_CONFIG_DIR", self.root.path().join("claude"))
@@ -142,6 +147,63 @@ fn broker_restart_replaces_a_running_broker_with_one_from_this_binary() {
     assert_ne!(new_pid, old_pid);
     assert!(!exited(new_pid));
     assert!(world.serving());
+}
+
+#[test]
+fn a_reinstall_while_broker_restart_waits_still_leaves_a_broker_serving() {
+    let world = World::new();
+    let (started, release) = (
+        world.root.path().join("started"),
+        world.root.path().join("release"),
+    );
+    let herdr = world.root.path().join("bin/herdr");
+    let stub = fs::read_to_string(&herdr).unwrap();
+    let gated = format!(
+        "touch {}; until [ -e {} ]; do sleep 0.02; done; echo served",
+        started.display(),
+        release.display()
+    );
+    executable(&herdr, stub.replace("echo served", &gated));
+    let installed = world.root.path().join("install/loopherd");
+    let reinstall = || {
+        let part = installed.with_extension("part");
+        fs::copy(env!("CARGO_BIN_EXE_loopherd"), &part).unwrap();
+        fs::rename(&part, &installed).unwrap();
+    };
+    fs::create_dir(installed.parent().unwrap()).unwrap();
+    reinstall();
+    let _old = world.broker();
+    let in_flight = world
+        .loopherd(Some("w1:p1"), &["read", "lh-1"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let given_up = Instant::now() + Duration::from_secs(10);
+    while !started.exists() {
+        assert!(Instant::now() < given_up, "the read never reached herdr");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let mut restart = world
+        .loopherd_at(&installed, None, &["broker-restart", "lead-k"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut out = BufReader::new(restart.stdout.take().unwrap());
+    let mut asked = String::new();
+    out.read_line(&mut asked).unwrap();
+    assert!(asked.starts_with("asked lead-k's broker"), "{asked}");
+    reinstall();
+    fs::write(&release, "").unwrap();
+
+    let mut rest = String::new();
+    out.read_to_string(&mut rest).unwrap();
+    let status = restart.wait_with_output().unwrap();
+    assert!(status.status.success(), "{rest}{status:?}");
+    assert!(rest.contains(" serves\n"), "{rest}");
+    assert!(world.serving());
+    assert_eq!(stdout(&in_flight.wait_with_output().unwrap()), "served\n");
 }
 
 #[test]

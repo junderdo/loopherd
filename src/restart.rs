@@ -143,8 +143,14 @@ pub fn restart(
             let worktree = record.worktree.as_ref().unwrap_or(&record.repo);
             let prompt = rendered(req.paths, herd, name, worktree)
                 .with_context(|| format!("{name}'s prompt, from herd {herd}"))?;
-            let running = sandbox::check_running(req.paths, name, herd, &record.claude_args)
-                .context("sandbox")?;
+            let running = sandbox::check_running(
+                req.paths,
+                name,
+                herd,
+                &record.claude_args,
+                record.sockets_unblocked.as_deref(),
+            )
+            .context("sandbox")?;
             (Some(prompt), Some(running))
         }
     };
@@ -1742,7 +1748,7 @@ mod tests {
         assert!(format!("{:#}", result.unwrap_err()).starts_with(
             "sandbox: lh-1 can't run sandboxed: its args may loosen its sandbox or \
                  permissions: --add-dir /srv, from the args it was started with; a lead takes \
-                 only --model, --effort, --verbose and --permission-mode default, auto or plan, \
+                 only --model, --effort, --verbose and --permission-mode default, manual, auto or plan, \
                  so retire it and start it again with loopherd lead h, without those,"
         ));
         assert!(w.herdr.prompts().is_empty());
@@ -1914,6 +1920,94 @@ mod tests {
              run loopherd revive --name lh-1 to resume it sandboxed"
         );
         assert!(w.herdr.prompts().is_empty());
+    }
+
+    fn sockets_unblocked(r: &mut AgentRecord) {
+        as_lead(r);
+        r.sockets_unblocked = Some("Claude Code finds no seccomp filter".into());
+    }
+
+    fn herd_file(w: &World, lead: &str) {
+        fs::write(
+            w.paths().herds.join("h.toml"),
+            format!("repo = \"/src/repo\"\n[lead]\nprompt = \"go\"\n{lead}"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_lead_started_with_sockets_open_is_not_cleared_under_require() {
+        let w = World::new();
+        w.handed_off();
+        w.prepared();
+
+        let (result, _) = w.restart_as(false, true, None, &sockets_unblocked);
+
+        assert_eq!(
+            format!("{:#}", result.unwrap_err()),
+            "sandbox: lh-1 can't run sandboxed: it was started with a sandbox that can't block \
+             Unix sockets (Claude Code finds no seccomp filter); quit its Claude and run \
+             loopherd revive --name lh-1 to resume it with them blocked, or set [lead] sandbox = \
+             \"prefer\" in herd h to run it with them open"
+        );
+        assert!(w.herdr.prompts().is_empty());
+    }
+
+    #[test]
+    fn a_credentials_lead_started_with_sockets_open_is_not_cleared_even_under_prefer() {
+        let w = World::new();
+        w.handed_off();
+        herd_file(&w, "sandbox = \"prefer\"\n");
+        w.prepared();
+        herd_file(&w, "sandbox = \"prefer\"\nmerge_guard = \"credentials\"\n");
+
+        let (result, _) = w.restart_as(false, true, None, &sockets_unblocked);
+
+        assert_eq!(
+            format!("{:#}", result.unwrap_err()),
+            "sandbox: lh-1 can't start with merge_guard = \"credentials\": it was started with \
+             a sandbox that can't block Unix sockets (Claude Code finds no seccomp filter), so \
+             it could use your ssh agent; quit its Claude and run loopherd revive --name lh-1 \
+             to resume it with them blocked, or set [lead] merge_guard = \"hook\" in herd h"
+        );
+        assert!(w.herdr.prompts().is_empty());
+    }
+
+    #[test]
+    fn a_lead_on_prefer_started_with_sockets_open_is_restarted_with_a_warning() {
+        let w = World::new();
+        w.handed_off();
+        herd_file(&w, "sandbox = \"prefer\"\n");
+        w.prepared();
+
+        let (result, ledger) = w.restart_as(false, true, None, &sockets_unblocked);
+
+        let out = result.unwrap();
+        assert!(
+            out.ends_with(
+                "\nwarning: lh-1's sandbox can't block Unix sockets (Claude Code finds no \
+                 seccomp filter), so herdr, your ssh agent and WSL2's Windows interop stay open \
+                 to it"
+            ),
+            "{out}"
+        );
+        assert_eq!(
+            ledger.0["lh-1"].sockets_unblocked.as_deref(),
+            Some("Claude Code finds no seccomp filter")
+        );
+    }
+
+    #[test]
+    fn a_lead_started_with_sockets_open_is_restarted_under_require_when_its_herd_opens_them() {
+        let w = World::new();
+        w.handed_off();
+        herd_file(&w, "unix_sockets = \"all\"\n");
+        w.prepared();
+
+        let (result, _) = w.restart_as(false, true, None, &sockets_unblocked);
+
+        let out = result.unwrap();
+        assert!(!out.contains("can't block Unix sockets"), "{out}");
     }
 
     #[test]
