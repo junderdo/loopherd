@@ -2228,6 +2228,33 @@ mod tests {
         assert_eq!(code, 1);
     }
 
+    #[test]
+    fn a_credentials_herd_with_every_unix_socket_open_fails() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge_guard = \"credentials\"\n\
+                 unix_sockets = \"all\"\n",
+                repo.to_str().unwrap()
+            ),
+        );
+
+        let checks = m.checks(None, &herdr()).unwrap();
+
+        let herd = checks.iter().find(|c| c.name == "herd h").unwrap();
+        assert_eq!(herd.status, Status::Failure);
+        assert!(
+            herd.detail.starts_with(
+                "invalid h.toml: lead: can't start with merge_guard = \"credentials\": \
+                 unix_sockets = \"all\" opens"
+            ),
+            "{}",
+            herd.detail
+        );
+    }
+
     fn without_bubblewrap(m: &mut Machine) {
         m.install.sandbox = Err(Unavailable {
             why: "bubblewrap not installed".into(),

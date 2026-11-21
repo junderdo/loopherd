@@ -1644,6 +1644,64 @@ mod tests {
     }
 
     #[test]
+    fn a_credentials_lead_with_every_unix_socket_open_isnt_started_under_either_mode() {
+        for mode in ["require", "prefer"] {
+            let setup = Setup::with_lead(&format!(
+                "{CREDENTIALS}\nsandbox = \"{mode}\"\nunix_sockets = \"all\""
+            ));
+            origin_on_github(&setup, "https://github.com/acme/widgets.git");
+            store_credentials(&setup, true, Some("github_pat_1"));
+            let herdr = herdr();
+
+            let err = lead(
+                &herdr,
+                &mut MemLedger::default(),
+                &setup.paths(),
+                &request(&[]),
+                Some("w1"),
+            )
+            .unwrap_err();
+
+            assert_eq!(
+                format!("{err:#}"),
+                "sandbox: lead-h can't start with merge_guard = \"credentials\": \
+                 unix_sockets = \"all\" opens your ssh agent, Git Credential Manager through \
+                 WSL2 interop and the Secret Service keyring to it, each of which acts as you; \
+                 run loopherd herd unset h lead.unix_sockets, or loopherd herd set h \
+                 lead.merge_guard '\"hook\"'",
+                "{mode}"
+            );
+            assert!(herdr.tabs().is_empty(), "{mode}");
+        }
+    }
+
+    #[test]
+    fn a_credentials_lead_starts_warned_that_its_workers_hold_your_gh() {
+        let setup = Setup::with_lead(CREDENTIALS);
+        origin_on_github(&setup, "https://github.com/acme/widgets.git");
+        store_credentials(&setup, true, Some("github_pat_1"));
+        let herdr = herdr();
+
+        let (_, _, warnings) = lead(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            warnings,
+            [
+                "lead-h's workers run unsandboxed with your gh credentials, so it could have \
+              one merge or force-push as you; only the lead holds herd h's deploy key and \
+              token"
+            ]
+        );
+    }
+
+    #[test]
     fn require_refuses_a_lead_whose_sandbox_cant_start_and_says_why() {
         let setup = Setup::with_lead("prompt = \"go\"");
         let herdr = herdr();
