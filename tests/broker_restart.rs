@@ -7,9 +7,10 @@ mod fakes;
 use brokers::{Broker, held};
 use fakes::executable;
 use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Read};
 use std::os::fd::AsRawFd;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 const SOCKET: &str = "/run/herdr-test.sock";
@@ -151,9 +152,18 @@ fn broker_restart_replaces_a_running_broker_with_one_from_this_binary() {
 #[test]
 fn a_reinstall_while_broker_restart_waits_still_leaves_a_broker_serving() {
     let world = World::new();
+    let (started, release) = (
+        world.root.path().join("started"),
+        world.root.path().join("release"),
+    );
     let herdr = world.root.path().join("bin/herdr");
     let stub = fs::read_to_string(&herdr).unwrap();
-    executable(&herdr, stub.replace("echo served", "sleep 1; echo served"));
+    let gated = format!(
+        "touch {}; until [ -e {} ]; do sleep 0.02; done; echo served",
+        started.display(),
+        release.display()
+    );
+    executable(&herdr, stub.replace("echo served", &gated));
     let installed = world.root.path().join("install/loopherd");
     let reinstall = || {
         let part = installed.with_extension("part");
@@ -165,22 +175,33 @@ fn a_reinstall_while_broker_restart_waits_still_leaves_a_broker_serving() {
     let _old = world.broker();
     let in_flight = world
         .loopherd(Some("w1:p1"), &["read", "lh-1"])
-        .stdout(std::process::Stdio::piped())
+        .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    std::thread::sleep(Duration::from_millis(300));
+    let given_up = Instant::now() + Duration::from_secs(10);
+    while !started.exists() {
+        assert!(Instant::now() < given_up, "the read never reached herdr");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 
-    let restart = world
+    let mut restart = world
         .loopherd_at(&installed, None, &["broker-restart", "lead-k"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    std::thread::sleep(Duration::from_millis(300));
+    let mut out = BufReader::new(restart.stdout.take().unwrap());
+    let mut asked = String::new();
+    out.read_line(&mut asked).unwrap();
+    assert!(asked.starts_with("asked lead-k's broker"), "{asked}");
     reinstall();
+    fs::write(&release, "").unwrap();
 
-    let restarted = stdout(&restart.wait_with_output().unwrap());
-    assert!(restarted.contains(" serves\n"), "{restarted}");
+    let mut rest = String::new();
+    out.read_to_string(&mut rest).unwrap();
+    let status = restart.wait_with_output().unwrap();
+    assert!(status.status.success(), "{rest}{status:?}");
+    assert!(rest.contains(" serves\n"), "{rest}");
     assert!(world.serving());
     assert_eq!(stdout(&in_flight.wait_with_output().unwrap()), "served\n");
 }

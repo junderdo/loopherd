@@ -1625,12 +1625,11 @@ fn spawn(paths: &Paths, lead: &str, exe: &Path) -> Result<u32> {
 /// Stops lead `lead`'s broker once its request in flight is answered, then
 /// starts one from this loopherd's binary; with none running, just starts one.
 /// Requests still queued wait for the new broker. Gives up, leaving the old
-/// one running, after as long as its lead waits on a feed.
-pub fn restart_broker(paths: &Paths, lead: &str, sink: &mut dyn Sink) -> Result<()> {
-    // Resolved before the wait: a reinstall during it leaves this process's path reading `(deleted)`.
-    let exe = std::env::current_exe().context("find the loopherd binary")?;
+/// one running, after as long as its lead waits on a feed. `exe` is resolved
+/// by the caller up front, since a reinstall during the wait renames over it.
+pub fn restart_broker(paths: &Paths, lead: &str, exe: &Path, sink: &mut dyn Sink) -> Result<()> {
     restart_broker_with(paths, lead, FEED_WITHIN, sink, &mut || {
-        spawn(paths, lead, &exe)
+        spawn(paths, lead, exe)
     })
 }
 
@@ -1781,11 +1780,13 @@ pub struct Binary {
 impl Binary {
     /// The binary this process runs.
     fn running() -> Option<Binary> {
+        let path = std::env::current_exe().ok()?;
+        // /proc's is the running file even once a reinstall replaced its path; macOS has no /proc.
+        let file = FileId::of(Path::new("/proc/self/exe")).or_else(|| FileId::of(&path))?;
         Some(Binary {
-            path: std::env::current_exe().ok()?,
+            path,
             version: env!("LOOPHERD_VERSION").into(),
-            // The running file even once a reinstall replaced its path.
-            file: FileId::of(Path::new("/proc/self/exe"))?,
+            file,
         })
     }
 }
