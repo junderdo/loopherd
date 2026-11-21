@@ -617,6 +617,13 @@ fn kept_lead(
     Ok(Some((lead, worktree)))
 }
 
+/// Whether `record`'s last mailbox entry is `gone`; an unreadable mailbox isn't.
+fn last_is_gone(reports: &Path, record: &AgentRecord) -> bool {
+    crate::report::history(reports, &record.name).is_ok_and(
+        |(entries, _)| matches!(entries.last(), Some(e) if matches!(e.body, Body::Gone { .. })),
+    )
+}
+
 /// Whether `record` is on another herdr than `here`, so this revive leaves it alone.
 fn elsewhere(here: Option<&Path>, record: &AgentRecord) -> bool {
     matches!((here, &record.socket), (Some(here), Some(there)) if !same_dir(here, there))
@@ -661,6 +668,10 @@ fn revive_one(
             blocked: live.status == AgentStatus::Blocked,
             rearm: Rearm::NotSent,
         };
+    }
+    // A pane the human closed before the merge is one they were done with.
+    if record.attended.is_some() && req.name.is_none() && last_is_gone(&req.reports_dir, record) {
+        return Outcome::Skipped("attended, and its pane was closed".into());
     }
     if let Some(holder) = agents
         .iter()
@@ -961,6 +972,38 @@ mod tests {
             vec!["--resume", "live", "--model", "opus"]
         );
         assert_eq!(ledger.0["a"].session_id.as_deref(), Some("live"));
+    }
+
+    #[test]
+    fn an_attended_member_closed_before_the_restart_is_skipped_unless_named() {
+        let cwd = tempfile::tempdir().unwrap();
+        let closed = AgentRecord {
+            attended: Some(Default::default()),
+            ..stub("grill-1", cwd.path())
+        };
+        let gone = Body::Gone {
+            tab: None,
+            workspace: None,
+        };
+        let at = humantime::parse_rfc3339("2026-11-01T09:00:00Z").unwrap();
+        append(&own_reports_dir(), "grill-1", &Entry::new(at, gone)).unwrap();
+        let mut ledger = ledger([closed]);
+
+        let herdr = herdr();
+        let (out, _) = revive(&herdr, &herdr_server(), &mut ledger, &request(), &continued)
+            .unwrap()
+            .report();
+        assert_eq!(out, "skipped grill-1: attended, and its pane was closed");
+        assert!(herdr.started().is_empty());
+
+        let named = ReviveRequest {
+            name: Some("grill-1".into()),
+            ..request()
+        };
+        let (out, _) = revive(&herdr, &herdr_server(), &mut ledger, &named, &continued)
+            .unwrap()
+            .report();
+        assert_eq!(out, "resumed grill-1 w1:p1");
     }
 
     #[test]
