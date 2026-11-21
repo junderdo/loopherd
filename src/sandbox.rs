@@ -1,6 +1,7 @@
 //! The Claude Code sandbox a lead runs in, written from its switches (D83, D89).
 
 use std::io::ErrorKind;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -335,12 +336,18 @@ fn claude_new_enough(version: &str) -> Result<(), Unavailable> {
 }
 
 /// What loopherd keeps of a lead in its config dir, where the lead can't
-/// write: its herd, and the args its Claude starts with besides its settings.
-/// `revive` trusts this over the ledger, which the lead can write.
+/// write: its herd, the args its Claude starts with besides its settings, and
+/// the `PATH` its unsandboxed watch and broker run under. `revive` trusts this
+/// over the ledger, which the lead can write.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lead {
     pub herd: String,
     pub args: Vec<String>,
+    /// The human's `PATH` as `lead` or `revive` last started it, less every
+    /// entry the lead could plant a binary in. [`prepare`] sets it, whatever
+    /// the caller passes; `None` in a record from before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 impl Lead {
@@ -432,6 +439,37 @@ fn plantable_path_entry(path: Option<&std::ffi::OsStr>, writable: &[&Path]) -> O
             Some(format!("{}, inside {}", dir.display(), inside.display()))
         }
     })
+}
+
+/// `path` less every entry a lead could plant a binary in: those
+/// [`plantable_path_entry`] names, and any in the temp dir or under a
+/// world-writable dir, such as its sandbox's temp dir. `None` when unset or not UTF-8.
+fn recorded_path(path: Option<&std::ffi::OsStr>, writable: &[&Path]) -> Option<String> {
+    let temp = std::env::temp_dir();
+    let kept: Vec<&str> = path?
+        .to_str()?
+        .split(':')
+        .filter(|entry| {
+            let dir = Path::new(entry);
+            plantable_path_entry(Some(dir.as_os_str()), writable).is_none()
+                && !dir.starts_with(&temp)
+                && !under_world_writable(dir)
+        })
+        .collect();
+    Some(kept.join(":"))
+}
+
+/// Whether `dir`, or where it resolves to, sits in a dir anyone may write.
+fn under_world_writable(dir: &Path) -> bool {
+    let resolved = dir.canonicalize().ok();
+    [Some(dir), resolved.as_deref()]
+        .into_iter()
+        .flatten()
+        .flat_map(Path::ancestors)
+        .any(|d| {
+            d.metadata()
+                .is_ok_and(|m| m.permissions().mode() & 0o002 != 0)
+        })
 }
 
 /// The sandbox dir and lead name a lead's settings file `file` names.
@@ -838,8 +876,13 @@ fn start(
     let mcp_text = serde_json::to_string_pretty(&mcp_config(paths, name, &lead.herd)?)? + "\n";
     let keep_launch = || -> Result<()> {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        let worktree = worktree_path(&herd::repo(paths, &lead.herd)?, name);
+        let kept = Lead {
+            path: recorded_path(path, &[worktree.as_path(), paths.state_dir()]),
+            ..lead.clone()
+        };
         let file = lead_file(paths, name);
-        std::fs::write(&file, serde_json::to_string_pretty(lead)? + "\n")
+        std::fs::write(&file, serde_json::to_string_pretty(&kept)? + "\n")
             .with_context(|| format!("write {}", file.display()))?;
         write_private(&mcp, &mcp_text).with_context(|| format!("write {}", mcp.display()))
     };
@@ -1971,6 +2014,58 @@ mod tests {
     }
 
     #[test]
+    fn the_kept_path_drops_every_entry_a_lead_could_plant_in() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        std::fs::create_dir_all(&paths.herds).unwrap();
+        let repo = root.path().join("repo");
+        std::fs::write(
+            paths.herds.join("h.toml"),
+            format!(
+                "repo = {repo:?}\nworkspace = \"w1\"\n[lead]\nprompt = \"go\"\nsandbox = \"prefer\"\n"
+            ),
+        )
+        .unwrap();
+        let lead = Lead {
+            herd: "h".into(),
+            args: vec![],
+            path: Some("/planted".into()),
+        };
+        let worktree = worktree_path(&repo, "lead-h");
+        let temp = std::env::temp_dir().join("x");
+        let given = [
+            "/usr/bin",
+            "",
+            "bin",
+            "/dev/shm/bin",
+            temp.to_str().unwrap(),
+            worktree.join("bin").to_str().unwrap(),
+            paths.state_dir().join("bin").to_str().unwrap(),
+            "/bin",
+        ]
+        .join(":");
+
+        // `prefer` with no sandbox keeps the record before refusing any entry.
+        start(
+            &paths,
+            "lead-h",
+            &lead,
+            &|| {
+                Err(Unavailable {
+                    why: "none".into(),
+                    fix: "none".into(),
+                })
+            },
+            ArgsFrom::Fresh,
+            Some(given.as_ref()),
+        )
+        .unwrap();
+
+        let kept = Lead::kept(&paths, "lead-h").unwrap().unwrap();
+        assert_eq!(kept.path.as_deref(), Some("/usr/bin:/bin"));
+    }
+
+    #[test]
     fn a_plantable_path_refuses_the_start_before_any_launch_file_is_written() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::under(root.path());
@@ -1984,6 +2079,7 @@ mod tests {
         let lead = Lead {
             herd: "h".into(),
             args: vec![],
+            path: None,
         };
 
         let err = start(
