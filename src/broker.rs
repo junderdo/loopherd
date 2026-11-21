@@ -361,8 +361,8 @@ fn report(ctx: &mut Ctx, kind: Kind, text: &str, sink: &mut dyn Sink) -> Result<
     {
         return Ok(0);
     }
-    let labelled = own_record(ctx.herdr, &*ctx.ledger, &lead.name).and_then(|record| {
-        crate::pane_label::lead_asked(
+    let labelled = match own_record(ctx.herdr, &*ctx.ledger, &lead.name) {
+        Ok(record) => crate::pane_label::lead_asked(
             ctx.herdr,
             &*ctx.ledger,
             &mailboxes,
@@ -370,8 +370,9 @@ fn report(ctx: &mut Ctx, kind: Kind, text: &str, sink: &mut dyn Sink) -> Result<
             &record.name,
             text,
         )
-        .with_context(|| format!("label pane {}", record.pane_id))
-    });
+        .with_context(|| format!("label pane {}", record.pane_id)),
+        Err(e) => Err(e.context("the report went out, but its pane gets no label")),
+    };
     if let Err(e) = labelled {
         sink.err(&format!("loopherd report: warning: {e:#}"));
     }
@@ -1616,8 +1617,10 @@ impl Client {
                 let started = self.replies.join(format!("{id}.started")).exists();
                 if started || !marks_starts(&self.lock) {
                     let check = match op {
-                        Op::Report { .. } => "check loopherd reports before reporting again",
-                        _ => "check before asking again",
+                        Op::Report { .. } => {
+                            format!("check loopherd reports --all {lead} before reporting again")
+                        }
+                        _ => "check before asking again".into(),
                     };
                     bail!(
                         "{lead}'s broker didn't answer {} within {waited}; it may still be carrying it out, \
@@ -3241,6 +3244,43 @@ mod tests {
         serving.join().unwrap().0.unwrap();
     }
 
+    #[test]
+    fn a_lead_s_question_whose_record_names_another_herdr_is_written_and_warns_of_no_label() {
+        let world = World::new();
+        std::fs::write(
+            crate::herd::config_file(&world.paths),
+            "[notify]\nenabled = true\nherdr = false\npane_label = true\n",
+        )
+        .unwrap();
+        let client = world.route_from("p-lead-h");
+        let serving = world.serve(FakeHerdr::new(&[]));
+        world
+            .ledger()
+            .update("lead-h", &mut |r| {
+                r.socket = Some("/elsewhere.sock".into());
+                Ok(())
+            })
+            .unwrap();
+        let report = Op::Report {
+            kind: Kind::Question,
+            text: "which DB?".into(),
+        };
+
+        let (_, err, code) = client.unwrap().call(&report).unwrap();
+
+        assert_eq!(code, 0);
+        assert_eq!(
+            err,
+            "loopherd report: warning: the report went out, but its pane gets no label: \
+             lead-h runs in another herdr than its broker's"
+        );
+        let mailbox = world.paths.state_dir().join("reports/lead-h/mailbox.jsonl");
+        let mailbox = std::fs::read_to_string(mailbox).unwrap();
+        assert!(mailbox.contains("which DB?"), "{mailbox}");
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
     fn status_op(all: bool, strays: bool) -> Op {
         Op::Status {
             all,
@@ -3596,8 +3636,8 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             "lead-h's broker didn't answer report within 50ms; it may still be carrying it out, \
-             so check loopherd reports before reporting again, and check the broker with \
-             loopherd doctor"
+             so check loopherd reports --all lead-h before reporting again, and check the broker \
+             with loopherd doctor"
         );
     }
 
