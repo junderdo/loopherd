@@ -879,6 +879,39 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     .unwrap();
     let before = std::fs::read_to_string(&herd_file).unwrap();
     let _cleanup = CloseTab(name.clone());
+    // The human's own hooks write the real state dir, so the probe's restart --self would wait
+    // forever on a stop. `lead` reuses a worktree that exists, so these hooks come with it.
+    let added = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["worktree", "add", "--quiet", "--detach"])
+        .arg(&worktree)
+        .arg("HEAD")
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "{added:?}");
+    let hook = |event: &str| {
+        serde_json::json!([{"hooks": [{
+            "type": "command",
+            "command": format!(
+                "XDG_STATE_HOME='{}' LOOPHERD_CONFIG_DIR='{}' '{}' {event} || true",
+                state.path().display(),
+                config.display(),
+                env!("CARGO_BIN_EXE_loopherd")
+            ),
+            "timeout": 10,
+        }]}])
+    };
+    std::fs::create_dir_all(worktree.join(".claude")).unwrap();
+    std::fs::write(
+        worktree.join(".claude/settings.local.json"),
+        serde_json::json!({"hooks": {
+            "Stop": hook("stop-hook"),
+            "SessionStart": hook("session-hook"),
+        }})
+        .to_string(),
+    )
+    .unwrap();
     // Opens the state dir to the file tools, so only loopherd's Edit denies refuse these writes;
     // reading the probe lets a cautious model check it before running it.
     let write_rule = format!("Edit(/{}/**)", state_dir.display());
@@ -923,11 +956,16 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
             .unwrap();
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
+    // Read mid-turn, before the restart --self armed by the probe can fire at the turn's end.
+    let mut first_session = None;
     loop {
         if waiting.exists() && !renamed.exists() {
+            first_session = Some(ledger_entry(state.path(), &name)["session_id"].clone());
+            // Same content, so the lead keeps its record for the restart its probe armed.
             for file in &replaced {
                 let temp = file.with_extension("probe-tmp");
-                std::fs::write(&temp, "{}\n").unwrap();
+                let text = std::fs::read(file).unwrap_or_else(|_| b"{}\n".to_vec());
+                std::fs::write(&temp, text).unwrap();
                 std::fs::rename(&temp, file).unwrap();
             }
             // A lead and a worker started after this one: no deny of this lead's names their folders.
@@ -987,10 +1025,6 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     // Its report and its handoff's restart go through its broker, outside the sandbox.
     // Written from inside the sandbox by loopherd, which Claude Code's Edit denies don't reach.
     assert_eq!(ran.first().copied(), Some("handoff\t0\t"), "{probed}");
-    assert_eq!(
-        std::fs::read_to_string(&own_state[0]).unwrap(),
-        "## State\n"
-    );
     assert!(
         !redirected.exists(),
         "a Bash redirect wrote {}",
@@ -998,10 +1032,12 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     );
     assert_eq!(ran.get(1).copied(), Some("report\t0\t"), "{probed}");
     assert_eq!(ran.get(2).copied(), Some("restart\t0\t"), "{probed}");
-    // Run in the sandbox, which hides the lead's Claude from the parent-pid walk.
+    // Refused by the lead's pane, since the sandbox hides its Claude from the parent-pid walk.
     assert!(
-        ran.get(3).is_some_and(|line| line
-            .starts_with("revive\t1\tloopherd revive: refused: revive is the shepherd's")),
+        ran.get(3).is_some_and(|line| line.starts_with(&format!(
+            "revive\t1\tloopherd revive: refused: lead {name} runs this loopherd, and reviving \
+             members is the shepherd's"
+        ))),
         "{probed}"
     );
     // Both through its broker, whose requests folder its sandbox opens though it denies the
@@ -1024,6 +1060,28 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     let mail =
         std::fs::read_to_string(state_dir.join(format!("reports/{name}/mailbox.jsonl"))).unwrap();
     assert!(mail.contains("sandbox probe"), "{mail}");
+    // restart --self restarts the lead at the end of its turn, and moves its handoff to
+    // prev.md only once the new session is confirmed.
+    let prev = own_handoffs.join("prev.md");
+    let given_up = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    while !prev.exists() {
+        assert!(
+            std::time::Instant::now() < given_up,
+            "the lead never restarted from its handoff:\n{}\n{}",
+            screen(),
+            std::fs::read_to_string(state_dir.join(format!("reports/{name}/mailbox.jsonl")))
+                .unwrap_or_default(),
+        );
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    assert_eq!(std::fs::read_to_string(&prev).unwrap(), "## State\n");
+    assert!(!own_state[0].exists(), "the handoff stayed in place");
+    let first_session = first_session.expect("the probe never paused mid-turn");
+    let session = ledger_entry(state.path(), &name)["session_id"].clone();
+    assert!(
+        session.is_string() && session != first_session,
+        "the lead's session didn't change: {first_session} then {session}"
+    );
 }
 
 /// The Write tool calls on `paths`, in order, from the Claude transcript
