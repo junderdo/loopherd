@@ -1035,7 +1035,7 @@ fn disallowed_warning(name: &str, line: &str) -> String {
 }
 
 pub const ALLOWED_ARGS: &str =
-    "--model, --effort, --verbose and --permission-mode default, auto or plan";
+    "--model, --effort, --verbose and --permission-mode default, manual, auto or plan";
 
 /// Each of a lead's `args`, without loopherd's own launch flags, that the
 /// allowlist doesn't cover, with its values and where it was set. D100 says
@@ -1109,7 +1109,7 @@ fn allowed_len(args: &[String]) -> Option<usize> {
     };
     let fits = |value: &str| match flag {
         "--model" | "--effort" => !value.is_empty() && !value.starts_with('-'),
-        "--permission-mode" => ["default", "auto", "plan"].contains(&value),
+        "--permission-mode" => ["default", "manual", "auto", "plan"].contains(&value),
         _ => false,
     };
     match (flag, inline) {
