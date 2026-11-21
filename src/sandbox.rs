@@ -1521,20 +1521,40 @@ pub fn create_state(paths: &Paths, name: &str) -> Result<()> {
         .into_iter()
         .filter_map(|herd| crate::lead::lead_name(&herd).ok())
         .collect();
-    let brokers = leads.iter().map(|lead| state.join("broker").join(lead));
+    let broker = state.join("broker");
     let handoffs = leads
         .iter()
         .map(String::as_str)
         .chain([name, crate::context::SHEPHERD])
         .map(|agent| handoff::dir(state, agent));
-    for dir in [requests, paths.locks_dir()]
+    for dir in [state.to_path_buf(), paths.locks_dir()]
         .into_iter()
-        .chain(brokers)
         .chain(handoffs)
     {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     }
+    let brokers = leads.iter().map(|lead| broker.join(lead));
+    for dir in std::iter::once(requests).chain(brokers) {
+        create_private_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
+    }
     Ok(())
+}
+
+/// Makes `dir` and its missing parents with mode 0700 whatever the umask, as
+/// the broker makes its own; what exists is left as it is.
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if dir.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = dir.parent() {
+        create_private_dir(parent)?;
+    }
+    match std::fs::create_dir(dir) {
+        Ok(()) => std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 /// Lead `name`'s settings, from its herd file alone: its worktree is where

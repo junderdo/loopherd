@@ -955,6 +955,13 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     for path in written {
         assert!(!path.exists(), "the Write tool wrote {}", path.display());
     }
+    // Absent files alone would pass if the lead skipped these two calls.
+    let broker_writes = [&write_other, &write_later].map(|p| p.display().to_string());
+    assert_eq!(
+        write_calls(&broker_writes),
+        broker_writes.map(|path| (path, true)),
+        "each broker Write call, and whether it was refused by permission settings"
+    );
     let probed = std::fs::read_to_string(&results).unwrap_or_default();
     let expected: String = refused
         .iter()
@@ -1010,6 +1017,54 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     assert_eq!(ran[6..], after, "{probed}");
     let mail = std::fs::read_to_string(state_dir.join(format!("reports/{name}.jsonl"))).unwrap();
     assert!(mail.contains("sandbox probe"), "{mail}");
+}
+
+/// The Write tool calls on `paths`, in order, from the Claude transcript
+/// that names the first of them, each with whether permissions refused it.
+fn write_calls(paths: &[String]) -> Vec<(String, bool)> {
+    let projects = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".claude/projects");
+    let transcript = std::fs::read_dir(&projects)
+        .unwrap()
+        .flatten()
+        .filter_map(|project| std::fs::read_dir(project.path()).ok())
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|e| e == "jsonl"))
+        .find_map(|path| {
+            std::fs::read_to_string(&path)
+                .ok()
+                .filter(|text| text.contains(&paths[0]))
+        })
+        .expect("no Claude transcript names the probe's writes");
+    let blocks: Vec<Value> = transcript
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|entry| entry["message"]["content"].as_array().cloned())
+        .flatten()
+        .collect();
+    let refused: std::collections::HashSet<&str> = blocks
+        .iter()
+        .filter(|b| b["type"] == "tool_result" && b["is_error"] == true)
+        .filter(|b| {
+            b["content"]
+                .to_string()
+                .contains("denied by your permission settings")
+        })
+        .filter_map(|b| b["tool_use_id"].as_str())
+        .collect();
+    blocks
+        .iter()
+        .filter(|b| b["type"] == "tool_use" && b["name"] == "Write")
+        .filter_map(|b| Some((b["id"].as_str()?, b["input"]["file_path"].as_str()?)))
+        .filter(|(_, path)| paths.iter().any(|p| p == path))
+        // A transcript can repeat a message, so each call counts once.
+        .filter({
+            let mut seen = std::collections::HashSet::new();
+            move |(id, _)| seen.insert(*id)
+        })
+        .map(|(id, path)| (path.to_string(), refused.contains(id)))
+        .collect()
 }
 
 /// Unsets `loopherd.probe` in the repo's config when dropped.
