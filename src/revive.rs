@@ -1738,7 +1738,14 @@ mod tests {
             None
         );
         assert_eq!(
-            sandbox::check_running(&req.paths, "lead-h", "h", &revived.claude_args).unwrap(),
+            sandbox::check_running(
+                &req.paths,
+                "lead-h",
+                "h",
+                &revived.claude_args,
+                revived.sockets_unblocked.as_deref()
+            )
+            .unwrap(),
             sandbox::Running::Sandboxed(vec![])
         );
     }

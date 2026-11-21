@@ -1424,12 +1424,14 @@ pub fn without_launch_flags(args: &[String]) -> Vec<String> {
 /// Checks a running lead was launched with its settings, as `claude_args`
 /// record, that they match its herd's current switches, and what the human's
 /// own settings loosen, and that its args are allowlisted. Under `require` one
-/// launched without them, loosened, or with other args is refused.
+/// launched without them, loosened, with other args, or with Unix sockets
+/// open, as `sockets_unblocked` records, is refused.
 pub fn check_running(
     paths: &Paths,
     name: &str,
     herd: &str,
     claude_args: &[String],
+    sockets_unblocked: Option<&str>,
 ) -> Result<Running> {
     let (_, mode) = herd::lead_sandbox(paths, herd)?;
     let file = settings_file(paths, name);
@@ -1471,6 +1473,29 @@ pub fn check_running(
                 &format!("{why}; {resume} to resume it sandboxed"),
             )),
         };
+    }
+    if let Some(why) = sockets_unblocked
+        && !sockets_open(paths, herd)?
+    {
+        let started =
+            format!("it was started with a sandbox that can't block Unix sockets ({why})");
+        let revive = format!("{resume} to resume it with them blocked");
+        match when_loosened(paths, herd)? {
+            WhenLoosened::Warn => warnings.push(sockets_unblocked_warning(name, why)),
+            WhenLoosened::Refuse => bail!(
+                "{name} can't run sandboxed: {started}; {revive}, or set [lead] sandbox = \
+                 \"prefer\" in herd {herd} to run it with them open"
+            ),
+            WhenLoosened::RefuseForCredentials => {
+                return Err(credentials_refusal(
+                    name,
+                    &format!(
+                        "{started}, so it could use your ssh agent; {revive}, or set [lead] \
+                         merge_guard = \"hook\" in herd {herd}"
+                    ),
+                ));
+            }
+        }
     }
     let current = settings(paths, name, herd)?;
     let on_disk = std::fs::read_to_string(&file)
