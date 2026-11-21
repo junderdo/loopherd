@@ -131,6 +131,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D116](decisions/D116.md) | Amends D60 and D17. `running low` fires at claimable ≤ `[queue] low_at` (default `2 × max`, at least `max`); a `follow_ups_ready` switch files a reviewer's in-scope follow-ups ready but blocked on their parent, with a veto; a `slot = false` template field; and a `groom` member, started on `running low` in place of D60's subagent, edits and comments on cards and reports a numbered batch the shepherd applies on the human's approval. |
 | [D117](decisions/D117.md) | Amends D98. A broker lane holds at most 8 waiting requests and refuses more as busy; the lock record is cleared on exit, so `start` waits out an exiting broker and no stale `marks` line outlives it; retirement is read per request; an idle retiring broker answers waiting requests "is retired". |
 | [D118](decisions/D118.md) | Amends D19. install-hook writes the skill to `~/.agents/skills/loopherd` and links `~/.claude/skills/loopherd` to it relatively, replacing only its own old copy and leaving anything else there alone; `--settings` keeps both in the settings file's directory; doctor warns on a missing or foreign link. |
+| [D119](decisions/D119.md) | Amends D108. A broker also records its executable's dev/ino (`file` line); doctor compares brokers with the `loopherd` on PATH by that identity, else with itself, and names the restart as the shepherd's; `broker-restart` resolves its executable before the drain wait, so a reinstall during it still starts a broker. |
 
 ## Emerging model
 
