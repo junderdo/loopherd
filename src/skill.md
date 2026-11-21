@@ -917,8 +917,10 @@ What differs from the shepherd:
   tasks. `loopherd report`, `tell`, `read`, `status`, `restart` (`--self`
   included), `prompt`, `feed`, `add`, `retire` and `release` don't call
   herdr or write your mailbox themselves: they hand the operation to your broker, a process
-  outside the sandbox that `loopherd lead` started for you, in any form,
-  one at a time, so a running `feed` holds up the others until it ends.
+  outside the sandbox that `loopherd lead` started for you, in any form.
+  `feed`, `add`, `restart`, `retire` and `release` run one at a time, so a
+  running `feed` holds up the others; `report`, `tell`, `read`, `prompt`
+  and `restart --self` run beside it, and `status` beside both.
   Your `status` shows your own herd alone, with no strays, and refuses
   `--strays`. With no broker running they fail at once, naming the
   shepherd's `loopherd revive --name <you>`. Your `report` fails that way
