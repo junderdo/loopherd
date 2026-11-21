@@ -42,7 +42,7 @@ fn section_starts() -> Vec<(usize, &'static str)> {
     starts
 }
 
-/// Where `install-hook` puts the skill (D116).
+/// Where `install-hook` puts the skill.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Layout {
     /// `<dir>/loopherd/SKILL.md`, written in place: `--skills-dir`.
@@ -95,7 +95,7 @@ impl Layout {
 pub enum Link {
     Ours,
     Missing,
-    /// A real directory holding only loopherd's SKILL.md, from before D116.
+    /// A real directory holding only loopherd's SKILL.md, from before the symlinked layout.
     OldCopy,
     /// Anything else: the human's, never touched.
     Foreign(String),

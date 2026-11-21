@@ -988,7 +988,7 @@ fn install_hook(install: &Install) -> String {
     }
 }
 
-/// Whether Claude's skills dir links to the skill `install-hook` writes (D116).
+/// Whether Claude's skills dir links to the skill `install-hook` writes.
 fn skill_check(install: &Install) -> Option<Check> {
     use crate::skill::{Layout, Link};
     let Layout::Linked { real, link } = &install.skill else {
