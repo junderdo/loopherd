@@ -2062,14 +2062,14 @@ mod tests {
     fn an_edit_rule_is_confined_only_when_no_segment_climbs_and_it_lies_beneath_an_own_write() {
         let home = Path::new("/home/me");
         let worktree = Path::new("/a/wt");
-        let own_writes = [worktree.to_path_buf(), home.join(".local/bin")];
+        let own_writes = [worktree.to_path_buf(), home.join("own")];
         let cases = [
             ("Edit(//a/wt2/**)", false),
             ("Edit(/src/../../**)", false),
             ("Edit(src/*/../../../**)", false),
             ("Edit(src/**/..)", false),
             ("Edit(src/**)", true),
-            ("Edit(~/.local/bin/**)", true),
+            ("Edit(~/own/**)", true),
         ];
         for (rule, confined) in cases {
             let settings = serde_json::json!({"permissions": {"allow": [rule]}});
@@ -2083,6 +2083,32 @@ mod tests {
             );
             assert_eq!(found.is_empty(), confined, "{rule}: {found:?}");
         }
+    }
+
+    #[test]
+    fn an_install_leads_own_settings_confine_an_edit_rule_beneath_local_bin() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            home: root.path().join("home"),
+            ..Paths::under(root.path())
+        };
+        std::fs::create_dir_all(&paths.herds).unwrap();
+        std::fs::write(
+            paths.herds.join("h.toml"),
+            "repo = \"/src/repo\"\nworkspace = \"w1\"\n[lead]\nprompt = \"go\"\ninstall = true\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(paths.home.join(".claude")).unwrap();
+        std::fs::write(
+            paths.home.join(".claude/settings.json"),
+            r#"{"permissions": {"allow": ["Edit(~/.local/bin/**)"]}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            loosened(&paths, "lead-h", "h").unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
