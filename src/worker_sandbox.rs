@@ -39,12 +39,16 @@ impl WorkerSandbox {
 }
 
 /// What loopherd keeps of a sandboxed worker in its config dir, where the
-/// worker can't write. `revive` trusts this over the ledger, which it can.
+/// worker can't write. `revive` trusts this over the ledger, which a worker
+/// started unsandboxed under `prefer` could have rewritten.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Member {
     pub herd: String,
     pub template: String,
     pub args: Vec<String>,
+    /// The worktree its sandbox lets it write.
+    #[serde(default)]
+    pub worktree: Option<PathBuf>,
 }
 
 impl Member {
@@ -59,6 +63,25 @@ impl Member {
             Err(e) => Err(e).with_context(|| format!("read {}", file.display())),
         }
     }
+}
+
+/// The member `revive` resumes worker `record` as: the one `prepare` kept, or,
+/// for one started while its herd's `[worker]` sandbox was off, one from its
+/// ledger record once the sandbox is on. `None` resumes it as recorded.
+pub fn to_resume(paths: &Paths, record: &AgentRecord) -> Result<Option<Member>> {
+    if let Some(member) = Member::kept(paths, &record.name)? {
+        return Ok(Some(member));
+    }
+    let (Some(herd), Some(template)) = (&record.herd, &record.template) else {
+        return Ok(None);
+    };
+    let on = herd::worker(paths, herd).is_ok_and(|w| w.sandbox != WorkerSandbox::Off);
+    Ok((on && !record.may_be_lead()).then(|| Member {
+        herd: herd.clone(),
+        template: template.clone(),
+        args: record.claude_args.clone(),
+        worktree: record.worktree.clone(),
+    }))
 }
 
 pub fn member_file(paths: &Paths, name: &str) -> PathBuf {
@@ -133,7 +156,6 @@ pub fn prepare(
     paths: &Paths,
     name: &str,
     member: &Member,
-    worktree: Option<&Path>,
     probe: &dyn Fn() -> Result<Sockets, Unavailable>,
 ) -> Result<Launch> {
     let worker = herd::worker(paths, &member.herd)?;
@@ -141,6 +163,10 @@ pub fn prepare(
         return Ok(Launch::Off);
     }
     let herd = &member.herd;
+    // A branch checked out in the main checkout plans the main checkout itself.
+    let repo = herd::repo(paths, herd)?;
+    let worktree =
+        (member.worktree.as_deref()).filter(|dir| !crate::worktree::same_dir(dir, &repo));
     // Why, as a refusal says it and as the ledger flags it, and the fix.
     let unavailable = match (worktree, probe()) {
         (None, _) => {
@@ -212,6 +238,7 @@ pub fn spawn(
             herd: herd.clone(),
             template: template.clone(),
             args: req.claude_args.clone(),
+            worktree: req.planned_worktree()?,
         },
         _ => {
             let spawned = crate::spawn::spawn(herdr, ledger, req, inherited_workspace)?;
@@ -219,10 +246,7 @@ pub fn spawn(
         }
     };
     // A branch checked out in the main checkout plans the main checkout itself.
-    let worktree = req
-        .planned_worktree()?
-        .filter(|dir| !crate::worktree::same_dir(dir, &req.repo));
-    let launch = prepare(paths, &req.name, &member, worktree.as_deref(), probe)?;
+    let launch = prepare(paths, &req.name, &member, probe)?;
     let mut req = req.clone();
     req.claude_args.extend(launch.args());
     let spawned = match crate::spawn::spawn(herdr, ledger, &req, inherited_workspace) {
@@ -417,11 +441,12 @@ mod tests {
         }
     }
 
-    fn member() -> Member {
+    fn member(worktree: Option<&Path>) -> Member {
         Member {
             herd: "h".into(),
             template: "t".into(),
             args: vec!["--model".into(), "opus".into()],
+            worktree: worktree.map(Path::to_path_buf),
         }
     }
 
@@ -445,7 +470,7 @@ mod tests {
         let state = h.paths.state_dir().to_path_buf();
         let config = h.paths.config_dir().to_path_buf();
 
-        let launch = prepare(&h.paths, "w1", &member(), Some(&worktree), &blocked).unwrap();
+        let launch = prepare(&h.paths, "w1", &member(Some(&worktree)), &blocked).unwrap();
 
         let file = config.join("sandbox/w1.json");
         assert_eq!(
@@ -494,7 +519,7 @@ mod tests {
         let worktree = h.repo.parent().unwrap().join("worktrees/feat-x");
         let state = h.paths.state_dir().to_path_buf();
 
-        prepare(&h.paths, "w1", &member(), Some(&worktree), &blocked).unwrap();
+        prepare(&h.paths, "w1", &member(Some(&worktree)), &blocked).unwrap();
 
         let settings = read_json(&settings_file(&h.paths, "w1"));
         let deny = strings(&settings["permissions"]["deny"]);
@@ -534,7 +559,7 @@ mod tests {
     #[test]
     fn a_worker_without_a_worktree_is_refused_under_require_and_unsandboxed_under_prefer() {
         let h = herd("sandbox = \"require\"");
-        let err = prepare(&h.paths, "w1", &member(), None, &blocked).unwrap_err();
+        let err = prepare(&h.paths, "w1", &member(None), &blocked).unwrap_err();
         assert!(err.downcast_ref::<NotStarted>().is_some());
         assert_eq!(
             format!("{err:#}"),
@@ -544,7 +569,7 @@ mod tests {
         );
 
         let h = herd("sandbox = \"prefer\"");
-        let launch = prepare(&h.paths, "w1", &member(), None, &blocked).unwrap();
+        let launch = prepare(&h.paths, "w1", &member(None), &blocked).unwrap();
         assert_eq!(
             launch.unsandboxed(),
             Some("it has no worktree of its own, and its sandbox won't open the main checkout")
@@ -557,12 +582,17 @@ mod tests {
         let h = herd("sandbox = \"prefer\"");
         let worktree = h.repo.parent().unwrap().join("worktrees/feat-x");
 
-        prepare(&h.paths, "w1", &member(), Some(&worktree), &blocked).unwrap();
+        prepare(&h.paths, "w1", &member(Some(&worktree)), &blocked).unwrap();
 
         let file = h.paths.config_dir().join("sandbox/w1.member.json");
         assert_eq!(
             read_json(&file),
-            json!({"herd": "h", "template": "t", "args": ["--model", "opus"]})
+            json!({
+                "herd": "h",
+                "template": "t",
+                "args": ["--model", "opus"],
+                "worktree": worktree,
+            })
         );
     }
 
@@ -572,7 +602,7 @@ mod tests {
             let h = herd(worker);
             let worktree = h.repo.parent().unwrap().join("worktrees/feat-x");
 
-            let launch = prepare(&h.paths, "w1", &member(), Some(&worktree), &blocked).unwrap();
+            let launch = prepare(&h.paths, "w1", &member(Some(&worktree)), &blocked).unwrap();
 
             assert_eq!(launch, Launch::Off);
             assert_eq!(launch.args(), Vec::<String>::new());
@@ -585,7 +615,7 @@ mod tests {
         let h = herd("sandbox = \"require\"\nunix_sockets = \"all\"");
         let worktree = h.repo.parent().unwrap().join("worktrees/feat-x");
 
-        prepare(&h.paths, "w1", &member(), Some(&worktree), &blocked).unwrap();
+        prepare(&h.paths, "w1", &member(Some(&worktree)), &blocked).unwrap();
 
         let settings = read_json(&settings_file(&h.paths, "w1"));
         assert_eq!(settings["sandbox"]["network"]["allowAllUnixSockets"], true);
@@ -610,7 +640,7 @@ mod tests {
         let h = herd("sandbox = \"require\"");
         let worktree = h.repo.parent().unwrap().join("worktrees/feat-x");
 
-        let err = prepare(&h.paths, "w1", &member(), Some(&worktree), &unavailable).unwrap_err();
+        let err = prepare(&h.paths, "w1", &member(Some(&worktree)), &unavailable).unwrap_err();
 
         assert_eq!(
             format!("{err:#}"),
@@ -626,7 +656,7 @@ mod tests {
         let h = herd("sandbox = \"prefer\"");
         let worktree = h.repo.parent().unwrap().join("worktrees/feat-x");
 
-        let launch = prepare(&h.paths, "w1", &member(), Some(&worktree), &unavailable).unwrap();
+        let launch = prepare(&h.paths, "w1", &member(Some(&worktree)), &unavailable).unwrap();
 
         assert_eq!(
             launch,
@@ -648,7 +678,7 @@ mod tests {
     fn a_sandbox_that_cant_block_sockets_is_refused_under_require_and_warned_under_prefer() {
         let h = herd("sandbox = \"require\"");
         let worktree = h.repo.parent().unwrap().join("worktrees/feat-x");
-        let err = prepare(&h.paths, "w1", &member(), Some(&worktree), &sockets_open).unwrap_err();
+        let err = prepare(&h.paths, "w1", &member(Some(&worktree)), &sockets_open).unwrap_err();
         assert_eq!(
             format!("{err:#}"),
             "w1 can't start sandboxed: its sandbox can't block Unix sockets: no seccomp \
@@ -657,7 +687,7 @@ mod tests {
         );
 
         let h = herd("sandbox = \"prefer\"");
-        let launch = prepare(&h.paths, "w1", &member(), Some(&worktree), &sockets_open).unwrap();
+        let launch = prepare(&h.paths, "w1", &member(Some(&worktree)), &sockets_open).unwrap();
         assert_eq!(
             launch,
             Launch::Unsandboxed {
@@ -667,7 +697,7 @@ mod tests {
         );
 
         let h = herd("sandbox = \"require\"\nunix_sockets = \"all\"");
-        let launch = prepare(&h.paths, "w1", &member(), Some(&worktree), &sockets_open).unwrap();
+        let launch = prepare(&h.paths, "w1", &member(Some(&worktree)), &sockets_open).unwrap();
         assert_eq!(launch.args()[0], "--settings");
     }
 }

@@ -739,11 +739,10 @@ fn revive_one(
     let mut unsandboxed = None;
     let mut sockets_unblocked = None;
     match &lead {
-        None => match worker_sandbox::Member::kept(&req.paths, &record.name) {
+        None => match worker_sandbox::to_resume(&req.paths, record) {
             Ok(None) => {}
             Ok(Some(member)) => {
-                let worktree = record.worktree.as_deref();
-                match worker_sandbox::prepare(&req.paths, &record.name, &member, worktree, probe) {
+                match worker_sandbox::prepare(&req.paths, &record.name, &member, probe) {
                     Ok(launch) => {
                         warnings.extend(launch.warnings(&record.name));
                         unsandboxed = launch.unsandboxed().map(str::to_string);
@@ -993,9 +992,9 @@ mod tests {
         }
     }
 
-    /// Herd `h` with `[worker]` set to `worker`, and worker `w1` kept by its
-    /// sandbox with `--model opus`, its ledger entry at `cwd` claiming other args.
-    fn kept_worker(req: &ReviveRequest, worker: &str, cwd: &Path) -> AgentRecord {
+    /// Herd `h` with `[worker]` set to `worker`, and worker `w1` in it at
+    /// `cwd`, as its ledger entry records it.
+    fn unkept_worker(req: &ReviveRequest, worker: &str, cwd: &Path) -> AgentRecord {
         std::fs::write(
             req.paths.herds.join("h.toml"),
             format!(
@@ -1004,21 +1003,88 @@ mod tests {
             ),
         )
         .unwrap();
-        let dir = req.paths.config_dir().join("sandbox");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("w1.member.json"),
-            r#"{"herd": "h", "template": "t", "args": ["--model", "opus"]}"#,
-        )
-        .unwrap();
-        std::fs::write(dir.join("w1.json"), "{}").unwrap();
         AgentRecord {
             herd: Some("h".into()),
             template: Some("t".into()),
-            claude_args: vec!["--dangerously-skip-permissions".into()],
+            claude_args: vec!["--model".into(), "opus".into()],
             worktree: Some(cwd.into()),
             ..record("w1", cwd)
         }
+    }
+
+    /// [`unkept_worker`], kept by its sandbox with `--model opus` and worktree
+    /// `cwd`, its ledger entry claiming other args.
+    fn kept_worker(req: &ReviveRequest, worker: &str, cwd: &Path) -> AgentRecord {
+        let record = unkept_worker(req, worker, cwd);
+        let dir = req.paths.config_dir().join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let member = serde_json::json!({
+            "herd": "h",
+            "template": "t",
+            "args": ["--model", "opus"],
+            "worktree": cwd,
+        });
+        std::fs::write(dir.join("w1.member.json"), member.to_string()).unwrap();
+        std::fs::write(dir.join("w1.json"), "{}").unwrap();
+        AgentRecord {
+            claude_args: vec!["--dangerously-skip-permissions".into()],
+            ..record
+        }
+    }
+
+    fn allow_write(req: &ReviveRequest) -> serde_json::Value {
+        let settings = req.paths.config_dir().join("sandbox/w1.json");
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(settings).unwrap()).unwrap();
+        written["sandbox"]["filesystem"]["allowWrite"][0].clone()
+    }
+
+    #[test]
+    fn a_sandboxed_worker_may_write_its_kept_worktree_not_the_one_its_ledger_entry_claims() {
+        let cwd = tempfile::tempdir().unwrap();
+        let claimed = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let req = request();
+        let worker = AgentRecord {
+            worktree: Some(claimed.path().into()),
+            ..kept_worker(&req, "sandbox = \"require\"", cwd.path())
+        };
+        let mut ledger = ledger([worker]);
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(allow_write(&req), cwd.path().display().to_string());
+    }
+
+    #[test]
+    fn a_worker_added_before_its_herds_sandbox_was_required_resumes_sandboxed() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let req = request();
+        let mut ledger = ledger([unkept_worker(&req, "sandbox = \"require\"", cwd.path())]);
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 0, "{out}");
+        let settings = req.paths.config_dir().join("sandbox/w1.json");
+        assert_eq!(
+            herdr.started()[0].args,
+            [
+                "--resume".to_string(),
+                "sess-w1".into(),
+                "--model".into(),
+                "opus".into(),
+                "--settings".into(),
+                settings.display().to_string(),
+            ]
+        );
+        assert_eq!(allow_write(&req), cwd.path().display().to_string());
+        assert!(
+            crate::worker_sandbox::Member::kept(&req.paths, "w1")
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
