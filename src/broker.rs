@@ -4,7 +4,7 @@
 //! The lead writes requests to its own folder in the state dir; the broker
 //! answers in the config dir, which the lead can read but not write.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::fs::OpenOptions;
 use std::io::Read;
@@ -761,8 +761,9 @@ pub struct Host<'a> {
 ///
 /// Requests run in three lanes, each one at a time: herd changes (feed,
 /// add, restart, retire, release), status, and everything else, so a long
-/// feed holds up no tell. While its lead reads retired it refuses every
-/// request it hasn't started, and returns once none is in flight.
+/// feed holds up no tell. A lane holds at most [`LANE_WAITING`] requests
+/// waiting and refuses more as busy. While its lead reads retired it refuses
+/// every request it hasn't started, and returns once none is in flight.
 pub fn serve<L: Ledger + Clone + Send>(
     host: &Host,
     ledger: &L,
@@ -785,10 +786,11 @@ pub fn serve<L: Ledger + Clone + Send>(
         let Binary { path, version } = Binary::at(exe);
         format!("{VERSION}{version}\n{BINARY}{}\n", path.display())
     });
-    let _ = std::fs::write(
-        lock_file(paths, lead),
-        format!("{remote}\n{MARKS}\n{binary}"),
-    );
+    let record = LockRecord {
+        path: lock_file(paths, lead),
+        text: format!("{remote}\n{MARKS}\n{binary}"),
+    };
+    record.write();
     write_replacing(&pid_file(paths, lead), &std::process::id().to_string())?;
     let _pid = RemovedOnExit(pid_file(paths, lead));
     let herd = sandbox::Lead::kept(paths, lead)?
@@ -802,7 +804,6 @@ pub fn serve<L: Ledger + Clone + Send>(
     };
     let replies = replies_dir(paths, lead);
     std::fs::create_dir_all(&replies).with_context(|| format!("create {}", replies.display()))?;
-    let retired = AtomicBool::new(false);
     let broker_stopping = AtomicBool::new(false);
     std::thread::scope(|scope| {
         let (done_tx, done) = mpsc::channel::<String>();
@@ -810,25 +811,36 @@ pub fn serve<L: Ledger + Clone + Send>(
         for _ in [Lane::Quick, Lane::Herd, Lane::Status] {
             let (tx, jobs) = mpsc::channel::<Job>();
             let (mut ledger, done_tx) = (ledger.clone(), done_tx.clone());
-            let (broker, replies, retired) = (&broker, &replies, &retired);
+            let (broker, replies) = (&broker, &replies);
             let stopping = &broker_stopping;
             scope.spawn(move || {
                 for job in jobs {
-                    broker.take_up(&mut ledger, &job, replies, retired, stopping);
+                    broker.take_up(&mut ledger, &job, replies, stopping);
                     let _ = done_tx.send(job.name);
                 }
             });
             senders.push(tx);
         }
-        let mut in_flight = HashSet::new();
+        let mut in_flight: HashMap<String, Lane> = HashMap::new();
         loop {
             for name in done.try_iter() {
                 in_flight.remove(&name);
             }
             // Read every round: `lead` may relaunch a retired lead under its name.
             let stopping = !unretired(ledger, lead);
-            retired.store(stopping, Ordering::SeqCst);
             if stopping && in_flight.is_empty() {
+                // Cleared before the last read, so a relaunch that saw the record finds this broker serving.
+                record.clear();
+                if unretired(ledger, lead) {
+                    record.write();
+                    continue;
+                }
+                if let Ok(requests) = Dir::open(paths.state_dir(), &["broker", lead, "requests"]) {
+                    let requests = Arc::new(requests);
+                    for name in requests.names() {
+                        broker.job(&requests, &name, &replies, &|| true);
+                    }
+                }
                 return Ok(Served::Retired);
             }
             // Not kept: a restart that gives up withdraws its stop, and serving resumes.
@@ -844,15 +856,23 @@ pub fn serve<L: Ledger + Clone + Send>(
             // Reopened each round: the lead can replace any folder on the way.
             if let Ok(requests) = Dir::open(paths.state_dir(), &["broker", lead, "requests"]) {
                 let requests = Arc::new(requests);
+                // Rechecked per request: one written after a relaunch must not read the round's retirement.
+                let retired = || stopping && !unretired(ledger, lead);
                 for name in requests.names() {
-                    if in_flight.contains(&name) {
+                    if in_flight.contains_key(&name) {
                         continue;
                     }
-                    let Some(job) = broker.job(&requests, &name, &replies, stopping) else {
+                    let Some(job) = broker.job(&requests, &name, &replies, &retired) else {
                         continue;
                     };
-                    in_flight.insert(name);
-                    let _ = senders[job.op.lane() as usize].send(job);
+                    let lane = job.op.lane();
+                    if in_flight.values().filter(|&&l| l == lane).count() > LANE_WAITING {
+                        write_reply(&replies, &job.id, &Reply::Refused(lane.busy()));
+                        requests.remove(&name);
+                        continue;
+                    }
+                    in_flight.insert(name, lane);
+                    let _ = senders[lane as usize].send(job);
                 }
             }
             prune(&replies, &in_flight);
@@ -869,11 +889,27 @@ fn unretired(ledger: &dyn Ledger, lead: &str) -> bool {
         .unwrap_or(true)
 }
 
-#[derive(Clone, Copy)]
+/// How many requests a lane holds waiting behind the one it runs.
+const LANE_WAITING: usize = 8;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Lane {
     Quick = 0,
     Herd = 1,
     Status = 2,
+}
+
+impl Lane {
+    fn busy(self) -> String {
+        let queue = match self {
+            Lane::Quick => "quick requests",
+            Lane::Herd => "herd changes",
+            Lane::Status => "status",
+        };
+        format!(
+            "its queue for {queue} already holds {LANE_WAITING} waiting requests; ask again later"
+        )
+    }
 }
 
 /// A request read and waiting in its lane.
@@ -933,6 +969,30 @@ impl Drop for RemovedOnExit {
     }
 }
 
+/// What a serving broker keeps in its lock. Cleared on the way out, so its
+/// start marks mislead no older broker after it, and a cleared record on a
+/// held lock reads as a broker exiting.
+struct LockRecord {
+    path: PathBuf,
+    text: String,
+}
+
+impl LockRecord {
+    fn write(&self) {
+        let _ = std::fs::write(&self.path, &self.text);
+    }
+
+    fn clear(&self) {
+        let _ = std::fs::write(&self.path, "");
+    }
+}
+
+impl Drop for LockRecord {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
 struct Broker<'a> {
     lead: &'a str,
     herd: &'a str,
@@ -944,13 +1004,19 @@ impl Broker<'_> {
     /// Request `name` as a job for its lane, or `None` once it is answered
     /// here: refused unread, or because the lead is retired. A request whose
     /// name can't name a reply is only removed.
-    fn job(&self, requests: &Arc<Dir>, name: &str, replies: &Path, retired: bool) -> Option<Job> {
+    fn job(
+        &self,
+        requests: &Arc<Dir>,
+        name: &str,
+        replies: &Path,
+        retired: &dyn Fn() -> bool,
+    ) -> Option<Job> {
         let Some(id) = name.strip_suffix(".json").filter(|id| is_id(id)) else {
             requests.remove(name);
             return None;
         };
         let reply = match requests.read_request(name) {
-            Ok(_) if retired => Reply::Refused(self.retired()),
+            Ok(_) if retired() => Reply::Refused(self.retired()),
             Ok(op) => {
                 return Some(Job {
                     requests: requests.clone(),
@@ -975,21 +1041,15 @@ impl Broker<'_> {
 
     /// Carries `job` out and answers it, marking it started first so a lead
     /// that gives up can tell; a request withdrawn before then never runs.
-    fn take_up(
-        &self,
-        ledger: &mut dyn Ledger,
-        job: &Job,
-        replies: &Path,
-        retired: &AtomicBool,
-        stopping: &AtomicBool,
-    ) {
+    fn take_up(&self, ledger: &mut dyn Ledger, job: &Job, replies: &Path, stopping: &AtomicBool) {
         let Job {
             requests,
             name,
             id,
             op,
         } = job;
-        if retired.load(Ordering::SeqCst) {
+        // Read now, not the round's: a request written after a retirement is always refused.
+        if !unretired(ledger, self.lead) {
             write_reply(replies, id, &Reply::Refused(self.retired()));
             requests.remove(name);
             return;
@@ -1438,6 +1498,7 @@ impl Client {
                 // Withdrawn before looking for the mark, so a broker that hasn't marked it won't run it.
                 let _ = std::fs::remove_file(self.requests.join(format!("{id}.json")));
                 if reply.exists() {
+                    std::thread::sleep(Duration::from_millis(20));
                     continue;
                 }
                 let waited = humantime::format_duration(answer_within);
@@ -1496,11 +1557,22 @@ const START_TIMEOUT: Duration = Duration::from_secs(5);
 /// Starts `loopherd broker <lead>` detached, in a session of its own, unless
 /// a broker already serves `lead`, and waits until it serves.
 pub fn start(paths: &Paths, lead: &str) -> Result<bool> {
+    start_with(paths, lead, &mut || spawn(paths, lead))
+}
+
+fn start_with(paths: &Paths, lead: &str, spawn: &mut dyn FnMut() -> Result<u32>) -> Result<bool> {
     validate_name(lead)?;
-    if running(paths, lead) {
-        return Ok(false);
+    let lock = lock_file(paths, lead);
+    // A held lock with no record is a broker exiting (or one just starting, or one that records nothing).
+    let given_up = Instant::now() + START_TIMEOUT;
+    while held(&lock) {
+        let recorded = std::fs::metadata(&lock).is_ok_and(|m| m.len() > 0);
+        if recorded || Instant::now() >= given_up {
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
-    spawn(paths, lead)?;
+    spawn()?;
     Ok(true)
 }
 
@@ -1769,7 +1841,7 @@ fn take_lock_at(path: &Path) -> Result<Option<Lock>> {
 
 /// Removes replies and start marks past [`REPLY_KEPT`], but not the mark
 /// of a request still in flight.
-fn prune(replies: &Path, in_flight: &HashSet<String>) {
+fn prune(replies: &Path, in_flight: &HashMap<String, Lane>) {
     let Ok(entries) = std::fs::read_dir(replies) else {
         return;
     };
@@ -1778,7 +1850,7 @@ fn prune(replies: &Path, in_flight: &HashSet<String>) {
             .file_name()
             .to_str()
             .and_then(|name| name.strip_suffix(".started"))
-            .is_some_and(|id| in_flight.contains(&format!("{id}.json")));
+            .is_some_and(|id| in_flight.contains_key(&format!("{id}.json")));
         let old = entry
             .metadata()
             .and_then(|m| m.modified())
@@ -1926,10 +1998,18 @@ mod tests {
         }
 
         fn serve(&self, herdr: FakeHerdr) -> JoinHandle<(Result<Served>, FakeHerdr)> {
+            self.serve_every(herdr, POLL)
+        }
+
+        fn serve_every(
+            &self,
+            herdr: FakeHerdr,
+            poll: Duration,
+        ) -> JoinHandle<(Result<Served>, FakeHerdr)> {
             let paths = self.paths.clone();
             let ledger = self.ledger();
             let serving = std::thread::spawn(move || {
-                let served = serve(&host(&herdr), &ledger, &paths, "lead-h", POLL);
+                let served = serve(&host(&herdr), &ledger, &paths, "lead-h", poll);
                 (served, herdr)
             });
             let given_up = Instant::now() + Duration::from_secs(5);
@@ -3258,6 +3338,130 @@ mod tests {
         world.retire("lead-h");
         let (served, _) = serving.join().unwrap();
         assert_eq!(served.unwrap(), Served::Retired);
+    }
+
+    /// Hands the broker request `id` without waiting for its answer.
+    fn hand_over(world: &World, id: &str, op: &Op) {
+        let request = serde_json::to_vec(&Request { op: op.clone() }).unwrap();
+        write_atomically(&requests_dir(&world.paths, "lead-h"), id, &request).unwrap();
+    }
+
+    fn reply_to(world: &World, id: &str) -> Option<Reply> {
+        let text = std::fs::read(replies_dir(&world.paths, "lead-h").join(format!("{id}.json")));
+        Some(serde_json::from_slice(&text.ok()?).unwrap())
+    }
+
+    #[test]
+    fn a_lane_full_of_waiting_requests_refuses_the_next_as_busy() {
+        let (world, herdr, entered, release) = slow_feed();
+        let serving = world.serve(herdr);
+        let fed = feeding(&world, &entered);
+        // Named to sort before any client's id, so they queue first.
+        let waiting: Vec<String> = (0..LANE_WAITING).map(|n| format!("0-{n:03}")).collect();
+        for id in &waiting {
+            hand_over(&world, id, &release_op("lh-9", false));
+        }
+        let client = Client {
+            answer_within: Some(Duration::from_secs(5)),
+            ..world.client()
+        };
+
+        let refused = client.call(&release_op("lh-9", false)).unwrap_err();
+
+        assert_eq!(
+            format!("{refused:#}"),
+            format!(
+                "lead-h's broker refused release: its queue for herd changes already holds \
+                 {LANE_WAITING} waiting requests; ask again later"
+            )
+        );
+        assert!(waiting.iter().all(|id| reply_to(&world, id).is_none()));
+        drop(release);
+        assert_eq!(fed.join().unwrap().unwrap().2, 0);
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+        assert!(waiting.iter().all(|id| reply_to(&world, id).is_some()));
+    }
+
+    #[test]
+    fn a_broker_that_stopped_leaves_no_start_marks_for_an_older_broker_after_it() {
+        let world = World::new();
+        let serving = world.serve(FakeHerdr::new(&[]));
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+        // An older broker, which writes nothing to its lock.
+        let _held = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+        let client = Client {
+            answer_within: Some(Duration::from_millis(50)),
+            ..world.client()
+        };
+
+        let err = client.call(&tell("lh-1", "hi")).unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "lead-h's broker didn't answer tell within 50ms; it may still be carrying it out, \
+             so check before asking again, and check the broker with loopherd doctor"
+        );
+    }
+
+    #[test]
+    fn a_broker_retiring_idle_answers_the_requests_still_waiting_as_retired() {
+        let world = World::new();
+        world.add(member("lh-1", Some("h")));
+        let serving = world.serve_every(telling_herdr(), Duration::from_secs(1));
+        let client = Client {
+            answer_within: Some(Duration::from_secs(5)),
+            ..world.client()
+        };
+        // Answered in a round, so the broker now sleeps out its poll.
+        assert_eq!(client.call(&tell("lh-1", "hi")).unwrap().2, 0);
+
+        hand_over(&world, "0-001", &tell("lh-1", "late"));
+        world.retire("lead-h");
+
+        assert_eq!(serving.join().unwrap().0.unwrap(), Served::Retired);
+        assert!(
+            matches!(reply_to(&world, "0-001"), Some(Reply::Refused(why)) if why.contains("is retired"))
+        );
+    }
+
+    #[test]
+    fn starting_a_broker_while_the_last_one_exits_waits_for_it_and_starts_one() {
+        let world = World::new();
+        // An exiting broker: it still holds its lock, with its record cleared.
+        let exiting = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+        let exited = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(exiting);
+        });
+        let mut spawned = 0;
+
+        let started = start_with(&world.paths, "lead-h", &mut || {
+            spawned += 1;
+            Ok(1)
+        });
+
+        assert!(started.unwrap());
+        assert_eq!(spawned, 1);
+        exited.join().unwrap();
+    }
+
+    #[test]
+    fn starting_a_broker_while_one_serves_starts_none() {
+        let world = World::new();
+        let serving = world.serve(FakeHerdr::new(&[]));
+        let mut spawned = 0;
+
+        let started = start_with(&world.paths, "lead-h", &mut || {
+            spawned += 1;
+            Ok(1)
+        });
+
+        assert!(!started.unwrap());
+        assert_eq!(spawned, 0);
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
     }
 
     #[test]
