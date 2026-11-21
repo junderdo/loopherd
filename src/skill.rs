@@ -111,11 +111,10 @@ pub fn link_state(real: &Path, link: &Path) -> Link {
     };
     if meta.is_symlink() {
         let target = fs::read_link(&link).unwrap_or_default();
-        let same = target == relative(link.parent().unwrap(), &real)
-            || matches!(
-                (fs::canonicalize(&link), fs::canonicalize(&real)),
-                (Ok(a), Ok(b)) if a == b
-            );
+        let same = matches!(
+            (fs::canonicalize(&link), fs::canonicalize(&real)),
+            (Ok(a), Ok(b)) if a == b
+        );
         return match same {
             true => Link::Ours,
             false => Link::Foreign(format!("points to {}", target.display())),
@@ -157,7 +156,10 @@ pub fn install(layout: &Layout) -> Result<Outcome> {
                 remove(link)?;
             }
             fs::create_dir_all(link).with_context(|| format!("create {}", link.display()))?;
-            std::os::unix::fs::symlink(relative(link, &real.join(NAME)), &at)
+            // The kernel resolves a relative link from its physical dir, so both sides
+            // must be free of symlinks.
+            let (from, to) = (canonical(link)?, canonical(&real.join(NAME))?);
+            std::os::unix::fs::symlink(relative(&from, &to), &at)
                 .with_context(|| format!("link {}", at.display()))?;
             outcome.link = true;
         }
@@ -183,6 +185,10 @@ pub fn uninstall(layout: &Layout) -> Result<Outcome> {
     }
     outcome.skill = remove(real)?;
     Ok(outcome)
+}
+
+fn canonical(path: &Path) -> Result<PathBuf> {
+    fs::canonicalize(path).with_context(|| format!("resolve {}", path.display()))
 }
 
 fn direct(skill: bool) -> Outcome {

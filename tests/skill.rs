@@ -125,6 +125,38 @@ fn the_link_sits_in_claude_config_dirs_skills_dir() {
 }
 
 #[test]
+fn the_link_resolves_when_claudes_dir_is_a_symlink() {
+    let home = tempfile::tempdir().unwrap();
+    let dotfiles = home.path().join("dotfiles/claude");
+    fs::create_dir_all(&dotfiles).unwrap();
+    std::os::unix::fs::symlink(&dotfiles, home.path().join(".claude")).unwrap();
+
+    loopherd(home.path(), &["install-hook"]);
+    let link = home.path().join(".claude/skills/loopherd");
+    assert_eq!(fs::read(link.join("SKILL.md")).unwrap(), skill(home.path()));
+
+    let again = stdout(&loopherd(home.path(), &["install-hook"]));
+    assert!(!again.contains("left"), "{again}");
+    assert_eq!(fs::read(link.join("SKILL.md")).unwrap(), skill(home.path()));
+
+    loopherd(home.path(), &["install-hook", "--remove"]);
+    assert!(fs::symlink_metadata(&link).is_err());
+}
+
+#[test]
+fn the_link_resolves_when_claude_config_dir_is_a_symlink() {
+    let home = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let claude = home.path().join("cfg");
+    std::os::unix::fs::symlink(elsewhere.path(), &claude).unwrap();
+
+    loopherd_in(home.path(), Some(&claude), &["install-hook"]);
+
+    let link = claude.join("skills/loopherd");
+    assert_eq!(fs::read(link.join("SKILL.md")).unwrap(), skill(home.path()));
+}
+
+#[test]
 fn an_old_real_copy_of_the_skill_is_replaced_by_the_link() {
     let home = tempfile::tempdir().unwrap();
     let link = home.path().join(".claude/skills/loopherd");

@@ -998,7 +998,7 @@ fn skill_check(install: &Install) -> Option<Check> {
     let skill = install.skill.skill();
     let fix = install_hook(install);
     Some(match crate::skill::link_state(real, link) {
-        Link::Ours if skill.is_file() => ok(
+        Link::Ours if at.join("SKILL.md").is_file() => ok(
             "skill",
             format!("{} links to {}", at.display(), skill.display()),
         ),
@@ -1526,6 +1526,23 @@ mod tests {
         std::fs::write(skill_link(&m).join("SKILL.md"), crate::skill::SKILL).unwrap();
         let warning = skill_warning(&m);
         assert!(warning.contains("isn't a symlink"), "{warning}");
+        assert!(warning.contains("loopherd install-hook"), "{warning}");
+    }
+
+    #[test]
+    fn a_dangling_skill_link_warns_even_when_its_target_reads_right() {
+        let m = machine(&ALL);
+        let real = m.dir.path().join("dotfiles");
+        std::fs::create_dir_all(real.join("skills")).unwrap();
+        std::fs::remove_file(skill_link(&m)).unwrap();
+        std::fs::remove_dir(m.dir.path().join("skills")).unwrap();
+        std::os::unix::fs::symlink(real.join("skills"), m.dir.path().join("skills")).unwrap();
+        std::os::unix::fs::symlink("../.agents/skills/loopherd", skill_link(&m)).unwrap();
+        assert!(!skill_link(&m).join("SKILL.md").exists());
+
+        let warning = skill_warning(&m);
+
+        assert!(warning.starts_with("warning skill:"), "{warning}");
         assert!(warning.contains("loopherd install-hook"), "{warning}");
     }
 
