@@ -759,6 +759,12 @@ mod tests {
             self.put(Body::Stop(stop));
         }
 
+        /// Leaves lh-1's handoff only at the flat path an older release wrote.
+        fn flat_handoff(&self) {
+            let handoffs = self.state.path().join("handoffs");
+            fs::rename(handoffs.join("lh-1/handoff.md"), handoffs.join("lh-1.md")).unwrap();
+        }
+
         fn put(&self, body: Body) {
             self.put_at("2026-11-02T09:00:00Z", body);
         }
@@ -2295,6 +2301,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_flat_handoff_schedules_a_self_restart_whose_waiter_resumes_from_it() {
+        let w = World::new();
+        w.put(Body::Handoff { text: "x".into() });
+        w.flat_handoff();
+        let scheduled = schedule(&w, Some("w1:p1")).unwrap();
+        let waited = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(30));
+                w.stop(0, None);
+            });
+            w.wait(Duration::from_secs(5))
+        });
+        drop(scheduled);
+        assert!(matches!(waited.unwrap(), Waited::Restarted));
+        let handoffs = w.state.path().join("handoffs");
+        assert!(w.herdr.prompts()[1].1.contains("handoffs/lh-1/prev.md"));
+        assert_eq!(
+            fs::read_to_string(handoffs.join("lh-1/prev.md")).unwrap(),
+            "## State\n"
+        );
+        assert!(!handoffs.join("lh-1.md").exists());
     }
 
     #[test]

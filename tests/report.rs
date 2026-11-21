@@ -827,3 +827,39 @@ fn a_stray_pane_writes_no_handoff() {
     assert_eq!(out.status.code(), Some(1));
     assert!(!state.path().join("loopherd/handoffs").exists());
 }
+
+#[test]
+fn an_empty_handoff_is_refused_and_leaves_the_one_there() {
+    use std::io::Write;
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    let handoff = state.path().join("loopherd/handoffs/lh-2/handoff.md");
+    fs::create_dir_all(handoff.parent().unwrap()).unwrap();
+    fs::write(&handoff, "## State\nat step 3\n").unwrap();
+
+    for stdin in ["", " \n\t\n"] {
+        let mut child = loopherd(state.path(), Some("w1:p2"), &["handoff"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "loopherd handoff: the handoff is empty; nothing was written\n"
+        );
+        assert_eq!(out.status.code(), Some(1));
+        assert_eq!(
+            fs::read_to_string(&handoff).unwrap(),
+            "## State\nat step 3\n"
+        );
+    }
+}

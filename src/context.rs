@@ -189,6 +189,8 @@ fn ask(
         }
         _ => None,
     };
+    let dir = handoff::dir(state, &member.name);
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let handoff = handoff::path(state, &member.name);
     fs::create_dir_all(&asked).with_context(|| format!("create {}", asked.display()))?;
     match fs::OpenOptions::new()
@@ -688,6 +690,7 @@ mod tests {
                 handoff.display()
             )
         );
+        assert!(handoff.parent().unwrap().is_dir());
     }
 
     #[test]

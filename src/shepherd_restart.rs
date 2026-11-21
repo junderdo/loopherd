@@ -770,6 +770,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_flat_handoff_is_the_one_the_paste_line_names() {
+        let w = World::new();
+        let flat = w.path().join("handoffs/shepherd.md");
+        fs::rename(w.path().join("handoffs/shepherd/handoff.md"), &flat).unwrap();
+        w.arm();
+        w.stop(at(ARMED), 0);
+
+        assert_eq!(w.wait(|_| {}), Waited::Fallback);
+
+        let line = format!("continue as the loopherd shepherd from {}", flat.display());
+        assert_eq!(w.sent(), ["/clear".to_string(), line]);
+    }
+
     /// Runs the waiter while `hold` keeps one condition false until `until`,
     /// returning when `/clear` went out.
     fn cleared_at(w: &World, mut hold: impl FnMut(SystemTime, &World)) -> SystemTime {

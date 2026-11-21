@@ -43,28 +43,36 @@ pub fn find(state: &Path, name: &str) -> Option<PathBuf> {
 
 /// Moves `handoff`, as [`find`] gave it, to [`prev`]; returns where it went.
 /// The other layout's file, if any, is older: it moves to the flat
-/// `<name>.prev.md`, so it can't come back as the next handoff.
+/// `<name>.prev.md`, replacing any there, so it can't come back as the next
+/// handoff. That move only warns on failure, so it can't fail a restart.
 pub fn set_aside(state: &Path, name: &str, handoff: &Path) -> Result<PathBuf> {
-    let prev = prev(state, name);
-    let dir = dir(state, name);
-    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    fs::rename(handoff, &prev)
-        .with_context(|| format!("move {} to {}", handoff.display(), prev.display()))?;
     let other = match handoff == path(state, name) {
         true => flat(state, name),
         false => path(state, name),
     };
     let aside = flat_prev(state, name);
     match fs::rename(&other, &aside) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            Err(e).with_context(|| format!("move {} to {}", other.display(), aside.display()))
-        }
-        _ => Ok(prev),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => eprintln!(
+            "warning: couldn't move the older {} to {}: {e}",
+            other.display(),
+            aside.display()
+        ),
+        _ => {}
     }
+    let prev = prev(state, name);
+    let dir = dir(state, name);
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    fs::rename(handoff, &prev)
+        .with_context(|| format!("move {} to {}", handoff.display(), prev.display()))?;
+    Ok(prev)
 }
 
 /// Writes `text` as `name`'s handoff, replacing any there; returns its path.
+/// Refuses a blank `text`, which would only bury a good handoff.
 pub fn write(state: &Path, name: &str, text: &str) -> Result<PathBuf> {
+    if text.trim().is_empty() {
+        anyhow::bail!("the handoff is empty; nothing was written");
+    }
     let dir = dir(state, name);
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = path(state, name);
@@ -177,5 +185,26 @@ mod tests {
         let aside = state.join("handoffs/lh-1.prev.md");
         assert_eq!(fs::read_to_string(aside).unwrap(), "stale");
         assert_eq!(find(state, "lh-1"), None);
+    }
+
+    #[test]
+    fn an_other_file_that_cant_move_aside_doesnt_fail_the_set_aside() {
+        let state = tempfile::tempdir().unwrap();
+        let state = state.path();
+        written_at(
+            &state.join("handoffs/lh-1.md"),
+            "stale",
+            "2026-11-20T10:00:00Z",
+        );
+        written_at(&path(state, "lh-1"), "fresh", "2026-11-20T11:00:00Z");
+        fs::create_dir_all(state.join("handoffs/lh-1.prev.md/x")).unwrap();
+
+        let moved = set_aside(state, "lh-1", &find(state, "lh-1").unwrap()).unwrap();
+
+        assert_eq!(fs::read_to_string(moved).unwrap(), "fresh");
+        assert_eq!(
+            fs::read_to_string(state.join("handoffs/lh-1.md")).unwrap(),
+            "stale"
+        );
     }
 }
