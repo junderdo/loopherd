@@ -4486,16 +4486,23 @@ mod tests {
         });
         let mut said = Kept::default();
 
+        let began = Instant::now();
+        // A bound far past the gap, so a restart that waits on the lock runs into it.
         let restarted = restart_broker_with(
             &world.paths,
             "lead-h",
-            Duration::from_secs(2),
+            Duration::from_secs(60),
             &mut said,
             &mut || Ok(1),
         );
 
         let _revived = revived.join().unwrap();
         restarted.unwrap();
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            began.elapsed()
+        );
         let pid = std::process::id();
         assert_eq!(
             said.out.last().unwrap(),
