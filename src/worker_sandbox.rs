@@ -250,11 +250,12 @@ pub fn spawn(
     Ok((spawned, warnings))
 }
 
-/// Checks running worker `record` against its herd's `[worker] sandbox`
-/// without writing anything: its recorded args must pass it its settings.
-/// Returns why it runs unsandboxed under `prefer`, and the warnings;
-/// `require` refuses one started without them.
-pub fn check_running(paths: &Paths, record: &AgentRecord) -> Result<(Option<String>, Vec<String>)> {
+/// Why running worker `record` is without the sandbox its herd's `[worker]`
+/// turns on, with that herd and its mode; `None` when it has it or needn't.
+pub fn running_unsandboxed(
+    paths: &Paths,
+    record: &AgentRecord,
+) -> Result<Option<(String, String, WorkerSandbox)>> {
     let name = &record.name;
     let (herd, mode) = match Member::kept(paths, name)? {
         Some(member) => {
@@ -267,18 +268,30 @@ pub fn check_running(paths: &Paths, record: &AgentRecord) -> Result<(Option<Stri
                 let mode = herd::worker(paths, herd).map_or(WorkerSandbox::Off, |w| w.sandbox);
                 (herd.clone(), mode)
             }
-            _ => return Ok((None, vec![])),
+            _ => return Ok(None),
         },
     };
     if mode == WorkerSandbox::Off
         || crate::sandbox::launched_with_settings(paths, name, &record.claude_args)
     {
-        return Ok((None, vec![]));
+        return Ok(None);
     }
     let why = record
         .unsandboxed
         .clone()
         .unwrap_or_else(|| "it was started without its sandbox".into());
+    Ok(Some((why, herd, mode)))
+}
+
+/// Checks running worker `record` against its herd's `[worker] sandbox`
+/// without writing anything: its recorded args must pass it its settings.
+/// Returns why it runs unsandboxed under `prefer`, and the warnings;
+/// `require` refuses one started without them.
+pub fn check_running(paths: &Paths, record: &AgentRecord) -> Result<(Option<String>, Vec<String>)> {
+    let name = &record.name;
+    let Some((why, herd, mode)) = running_unsandboxed(paths, record)? else {
+        return Ok((None, vec![]));
+    };
     if mode == WorkerSandbox::Require {
         bail!(
             "{name} can't run sandboxed: {why}; quit its Claude and run loopherd revive --name \

@@ -18,6 +18,7 @@ use crate::ledger::{FileLedger, Ledger};
 use crate::merge_guard::{DEFAULT_BRANCH_RULESET, FORCE_PUSH_RULESET};
 use crate::pause::Reading;
 use crate::sandbox::{SandboxMode, Sockets, Unavailable};
+use crate::worker_sandbox::WorkerSandbox;
 use serde_json::Value;
 
 /// What the install checks read, gathered by the caller.
@@ -177,6 +178,17 @@ pub(crate) fn lead_sandbox_check(paths: &Paths, lead: &AgentRecord) -> Option<Ch
             "quit its Claude and run loopherd revive --name {}",
             lead.name
         ),
+    ))
+}
+
+/// A running worker without the sandbox its herd's `[worker]` turns on.
+fn worker_sandbox_check(paths: &Paths, worker: &AgentRecord) -> Option<Check> {
+    let name = &worker.name;
+    let (why, _, _) = crate::worker_sandbox::running_unsandboxed(paths, worker).ok()??;
+    Some(warning(
+        &format!("worker {name}"),
+        format!("{name} runs unsandboxed ({why})"),
+        format!("quit its Claude and run loopherd revive --name {name}"),
     ))
 }
 
@@ -341,6 +353,16 @@ fn herd_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
                  whenever the sandbox can't start"
                     .into(),
                 format!("loopherd herd set {herd} lead.sandbox '\"require\"'"),
+            ));
+        }
+        if let Ok(worker) = crate::herd::worker(paths, &herd)
+            && worker.sandbox == WorkerSandbox::Prefer
+        {
+            checks.push(warning(
+                &format!("herd {herd} workers"),
+                "sandbox prefer: its workers start unsandboxed whenever their sandbox can't start"
+                    .into(),
+                format!("loopherd herd set {herd} worker.sandbox '\"require\"'"),
             ));
         }
         checks.extend(loosened_checks(paths, &herd));
@@ -732,6 +754,12 @@ fn state_checks(
             .iter()
             .filter(|r| !r.retired && r.is_lead())
             .filter_map(|lead| lead_sandbox_check(&setup.paths, lead)),
+    );
+    checks.extend(
+        members
+            .iter()
+            .filter(|r| !r.retired && !r.may_be_lead())
+            .filter_map(|worker| worker_sandbox_check(&setup.paths, worker)),
     );
     // A lead known to be on another herdr has its broker under that herdr's
     // config dir; one whose herdr can't be told apart is checked, as revive starts it.
@@ -2626,6 +2654,70 @@ mod tests {
             })
             .unwrap();
         serving.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn a_herd_whose_workers_run_on_prefer_is_named_and_one_on_off_or_require_isnt() {
+        let m = machine(&ALL);
+        for (herd, worker) in [("off", "off"), ("pre", "prefer"), ("req", "require")] {
+            let repo = m.herd(herd);
+            m.herd_file(
+                herd,
+                &format!(
+                    "repo = {:?}\n[template.t]\nparams = []\nprompt = \"go\"\n\
+                     [worker]\nsandbox = \"{worker}\"\n",
+                    repo.to_str().unwrap()
+                ),
+            );
+        }
+
+        assert_eq!(
+            problems(&m, &herdr()),
+            [
+                "warning herd pre workers: sandbox prefer: its workers start unsandboxed \
+                 whenever their sandbox can't start; fix: loopherd herd set pre worker.sandbox \
+                 '\"require\"'"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_running_worker_without_its_herds_sandbox_is_named_and_one_in_an_off_herd_isnt() {
+        let m = machine(&ALL);
+        for (herd, worker) in [("h", "require"), ("plain", "off")] {
+            let repo = m.herd(herd);
+            m.herd_file(
+                herd,
+                &format!(
+                    "repo = {:?}\n[template.t]\nparams = []\nprompt = \"go\"\n\
+                     [worker]\nsandbox = \"{worker}\"\n",
+                    repo.to_str().unwrap()
+                ),
+            );
+        }
+        let old = member("w-old", "h", "w1:p1", None);
+        let mut flagged = member("w-pre", "h", "w1:p2", None);
+        flagged.unsandboxed = Some("bubblewrap not installed".into());
+        let settings = crate::sandbox::settings_file(m.paths(), "w-ok");
+        let mut sandboxed = member("w-ok", "h", "w1:p3", None);
+        sandboxed.claude_args = vec!["--settings".into(), settings.display().to_string()];
+        let off = member("w-off", "plain", "w1:p4", None);
+        m.ledger(&[old, flagged, sandboxed, off]);
+
+        let found: Vec<_> = problems(&m, &herdr())
+            .into_iter()
+            .filter(|p| p.starts_with("warning worker "))
+            .collect();
+
+        assert_eq!(
+            found,
+            [
+                "warning worker w-old: w-old runs unsandboxed (it was started without its \
+                 sandbox); fix: quit its Claude and run loopherd revive --name w-old",
+                "warning worker w-pre: w-pre runs unsandboxed (bubblewrap not installed); fix: \
+                 quit its Claude and run loopherd revive --name w-pre",
+            ]
+        );
     }
 
     #[test]
