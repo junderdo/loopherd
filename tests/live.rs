@@ -1366,7 +1366,7 @@ fn a_credentials_lead_reads_only_its_own_key_of_loopherds_config_and_no_windows_
              key = subprocess.run(['ssh-keygen', '-y', '-f', {key:?}], capture_output=True)\n    \
              out.write(f'ssh-keygen\\t{{key.returncode}}\\n')\n    \
              ssh_command = os.environ.get('GIT_SSH_COMMAND', 'ssh')\n    \
-             ssh = subprocess.run(f'{{ssh_command}} -F {ssh_config} -o BatchMode=yes -o ConnectTimeout=15 -vT {remote}', shell=True, capture_output=True, text=True)\n    \
+             ssh = subprocess.run(f'{{ssh_command}} -F {ssh_config} -o BatchMode=yes -o ConnectTimeout=15 -vT git@{alias}', shell=True, capture_output=True, text=True)\n    \
              out.write(f'ssh offered\\t{{(\"Offering public key: \" + {key:?}) in ssh.stderr}}\\n')\n    \
              out.write(f'ssh answered\\t{{\"Permission denied (publickey)\" in ssh.stderr}}\\n')\n    \
              env = dict(os.environ, XDG_STATE_HOME={state:?}, LOOPHERD_CONFIG_DIR={config:?})\n    \
@@ -1375,7 +1375,6 @@ fn a_credentials_lead_reads_only_its_own_key_of_loopherds_config_and_no_windows_
             results = results.display().to_string(),
             key = own_key.display().to_string(),
             ssh_config = ssh_config.display(),
-            remote = format!("git@{alias}"),
             state = state.path().display().to_string(),
             config = config.display().to_string(),
             bin = env!("CARGO_BIN_EXE_loopherd"),
