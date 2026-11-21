@@ -708,19 +708,22 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   A watch that exited `drained` stays down: after `loopherd resume`, re-arm
   yours by hand, and `loopherd tell` a lead that stopped on `<herd> drained`
   to re-arm its own.
-- **After a merge that changes the broker**, once it is installed, run
-  `loopherd broker-restart <lead>` for each lead, from your own shell, never
-  a lead's or an `after_merge`, as a background task: it can wait out a feed. It asks the broker to stop once its request in flight is
-  answered, then starts one on the installed binary, which serves what is
-  still queued; with none running it starts one. A broker still busy after
-  4 hours is left running and the command fails naming its pid. While it
-  drains, every lane stops taking requests, so the lead's `tell`, `read`
-  and `status` wait on the feed in flight, and one that waits past its
-  own bound (2 minutes for `tell`) is withdrawn and must be asked again. A lead's
+- **After a merge that changes the broker**, nothing: once it is
+  installed, each lead's broker moves onto the new `loopherd` on its PATH
+  by itself, between requests (D124).
+  `loopherd broker-restart <lead>` is for when that fails: a note in the
+  lead's mailbox saying its broker couldn't move, a lead's
   `<lead>'s broker predates this loopherd` error, its `can't read` reply
-  error, and `loopherd doctor`'s warning that a broker doesn't run the
-  loopherd on PATH (which `scripts/install` shows) all ask for the same
-  command.
+  error, or `loopherd doctor`'s warning that a broker doesn't run the
+  loopherd on PATH (which `scripts/install` shows). Run it from your own
+  shell, never a lead's or an `after_merge`, as a background task: it can
+  wait out a feed. It asks the broker to stop once its request in flight
+  is answered, then starts one on the installed binary, which serves what
+  is still queued; with none running it starts one. A broker still busy
+  after 4 hours is left running and the command fails naming its pid.
+  While it drains, every lane stops taking requests, so the lead's `tell`,
+  `read` and `status` wait on the feed in flight, and one that waits past
+  its own bound (2 minutes for `tell`) is withdrawn and must be asked again.
 - **After a herdr restart** run `loopherd revive` (`--dry-run` first). It
   resumes non-retired members by session ID, and prompts each lead whose
   watch isn't running to re-arm it. It never prompts workers. It skips a
@@ -792,7 +795,8 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   second Ctrl+C can exit the agent.
 - A `blocked` member waits on a dialog only the human answers (a trust
   prompt, a permission). Tell the human; loopherd and you never answer it,
-  unless you're a lead with `blocked_dialogs` on.
+  unless you're a lead with `blocked_dialogs` on, and never for an attended
+  member, whose pane the human sits in.
 - Verify what a member says it can't cover; that is where blockers hide.
 
 ### Gotchas
@@ -894,6 +898,10 @@ What differs from the shepherd:
   `merge` off, your watch also tells the human of every merge to the repo's
   default branch (`[lead] merge_guard = "hook"`, the default), so expect
   that ping for merges the human makes. Grilling is always the human's.
+- **Attended members** are the human's (D112). Your broker refuses `tell`,
+  `prompt`, `restart`, `retire` and `release` on one, and `add` of an
+  attended template; your watch shows only its `merged` and `gone`. After
+  its merge, move its card to Done and run `feed`, which reaps it.
 - **Sandbox.** Your Claude runs in the Claude Code sandbox, from
   settings loopherd writes for you to `<config dir>/sandbox/<you>.json`
   (D89, building D83; D97, D111). Bash can write only to your own

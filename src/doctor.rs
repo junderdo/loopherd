@@ -37,6 +37,10 @@ pub struct Install {
     pub wsl_interop: bool,
     /// Where `install-hook` puts the skill for these settings.
     pub skill: crate::skill::Layout,
+    /// The lead whose broker runs this doctor, as an `after_merge` of its feed.
+    pub in_broker_of: Option<String>,
+    /// How long a broker not yet on the loopherd on PATH gets to move onto it.
+    pub broker_move_grace: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -783,19 +787,21 @@ fn state_checks(
 struct BrokersOwn {
     path: PathBuf,
     on_path: bool,
+    in_broker_of: Option<String>,
+    move_grace: Duration,
 }
 
 impl BrokersOwn {
     fn of(install: &Install) -> BrokersOwn {
-        match install.on_path.as_ref().map(|p| p.canonicalize()) {
-            Some(Ok(path)) => BrokersOwn {
-                path,
-                on_path: true,
-            },
-            _ => BrokersOwn {
-                path: install.running.clone(),
-                on_path: false,
-            },
+        let (path, on_path) = match install.on_path.as_ref().map(|p| p.canonicalize()) {
+            Some(Ok(path)) => (path, true),
+            _ => (install.running.clone(), false),
+        };
+        BrokersOwn {
+            path,
+            on_path,
+            in_broker_of: install.in_broker_of.clone(),
+            move_grace: install.broker_move_grace,
         }
     }
 
@@ -816,6 +822,24 @@ impl std::fmt::Display for BrokersOwn {
     }
 }
 
+/// The binary `lead`'s broker records, given a moment to move onto `own`
+/// when that is the install on PATH, which brokers follow.
+fn recorded_after_moving(
+    paths: &Paths,
+    lead: &str,
+    own: &BrokersOwn,
+) -> Option<crate::broker::Binary> {
+    let given_up = std::time::Instant::now() + own.move_grace;
+    loop {
+        let recorded = crate::broker::recorded_binary(paths, lead);
+        let moved = recorded.as_ref().is_some_and(|r| own.runs(r));
+        if moved || !own.on_path || std::time::Instant::now() >= given_up {
+            return recorded;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Fails while no broker serves `lead`; warns while one runs another build than `own`.
 fn broker_check(paths: &Paths, lead: &str, own: &BrokersOwn) -> Option<Check> {
     let name = format!("broker {lead}");
@@ -826,7 +850,13 @@ fn broker_check(paths: &Paths, lead: &str, own: &BrokersOwn) -> Option<Check> {
             format!("loopherd revive --name {lead}"),
         ));
     }
-    let runs = match crate::broker::recorded_binary(paths, lead) {
+    if own.on_path && own.in_broker_of.as_deref() == Some(lead) {
+        return Some(ok(
+            &name,
+            format!("{lead}'s broker runs this check, and moves onto {own} once it is answered"),
+        ));
+    }
+    let runs = match recorded_after_moving(paths, lead, own) {
         Some(recorded) if own.runs(&recorded) => return None,
         Some(recorded) if recorded.path == own.path => format!(
             "an earlier build of {} (loopherd {})",
@@ -1503,6 +1533,8 @@ mod tests {
                 sandbox: Ok(Sockets::Blocked),
                 wsl_interop: false,
                 skill: skill.clone(),
+                in_broker_of: None,
+                broker_move_grace: Duration::ZERO,
             },
             setup: Ok(setup),
             dir,
@@ -2518,6 +2550,107 @@ mod tests {
         );
     }
 
+    /// lead-h of herd h, with a broker lock held and recording a rebuild of
+    /// the loopherd on PATH, returned with the lock's path and its record
+    /// once it runs that loopherd.
+    fn lead_on_an_earlier_build(m: &mut Machine) -> (crate::lock::Lock, PathBuf, String) {
+        let on_path = m.dir.path().join("bin/loopherd");
+        std::fs::create_dir_all(on_path.parent().unwrap()).unwrap();
+        std::fs::write(&on_path, "loopherd").unwrap();
+        m.install.on_path = Some(on_path.clone());
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nsandbox = \"prefer\"\n",
+                repo.to_str().unwrap()
+            ),
+        );
+        let kept = crate::sandbox::Lead {
+            herd: "h".into(),
+            args: vec![],
+        };
+        crate::sandbox::prepare(m.paths(), "lead-h", &kept, || {
+            Ok(crate::sandbox::Sockets::Blocked)
+        })
+        .unwrap();
+        let mut lead = member("lead-h", "h", "w1:p1", None);
+        lead.role = Some(crate::ledger::Role::Lead);
+        let settings = crate::sandbox::settings_file(m.paths(), "lead-h");
+        lead.claude_args = vec!["--settings".into(), settings.display().to_string()];
+        m.ledger(&[lead]);
+        let lock = m.paths().config_dir().join("broker/lead-h.lock");
+        std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        let held = crate::lock::Lock::try_take(std::fs::File::create(&lock).unwrap())
+            .unwrap()
+            .unwrap();
+        let meta = std::fs::metadata(&on_path).unwrap();
+        let record = |ino: u64| {
+            format!(
+                "300\nmarks\nversion {}\nbinary {}\nfile {} {ino}\n",
+                env!("LOOPHERD_VERSION"),
+                on_path.display(),
+                meta.dev()
+            )
+        };
+        std::fs::write(&lock, record(meta.ino() + 1)).unwrap();
+        (held, lock, record(meta.ino()))
+    }
+
+    fn broker_problems(m: &Machine) -> Vec<String> {
+        problems(m, &herdr())
+            .into_iter()
+            .filter(|p| p.contains("broker"))
+            .collect()
+    }
+
+    #[test]
+    fn a_broker_that_moves_onto_the_install_within_the_grace_draws_no_warning() {
+        let mut m = machine(&ALL);
+        let (_held, lock, moved) = lead_on_an_earlier_build(&mut m);
+        m.install.broker_move_grace = Duration::from_secs(5);
+        let moving = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            std::fs::write(&lock, moved).unwrap();
+        });
+
+        let brokers = broker_problems(&m);
+
+        moving.join().unwrap();
+        assert_eq!(brokers, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_broker_that_stays_on_an_earlier_build_past_the_grace_is_warned_about() {
+        let mut m = machine(&ALL);
+        let (_held, _, _) = lead_on_an_earlier_build(&mut m);
+        m.install.broker_move_grace = Duration::from_millis(100);
+
+        let brokers = broker_problems(&m);
+
+        assert_eq!(brokers.len(), 1, "{brokers:?}");
+        assert!(
+            brokers[0].ends_with("fix: the shepherd runs loopherd broker-restart lead-h"),
+            "{}",
+            brokers[0]
+        );
+    }
+
+    #[test]
+    fn doctor_run_inside_a_leads_broker_says_that_broker_moves_once_answered() {
+        let mut m = machine(&ALL);
+        let (_held, _, _) = lead_on_an_earlier_build(&mut m);
+        m.install.in_broker_of = Some("lead-h".into());
+
+        let out = text(&m.checks(None, &herdr()).unwrap(), true);
+
+        assert!(broker_problems(&m).is_empty());
+        assert!(
+            out.contains("lead-h's broker runs this check, and moves onto the loopherd on PATH"),
+            "{out}"
+        );
+    }
+
     #[test]
     fn with_no_loopherd_on_path_a_broker_is_checked_against_the_running_binary() {
         let mut m = machine(&ALL);
@@ -2616,8 +2749,10 @@ mod tests {
                 live: |session| session.to_string(),
                 spawn_waiter: |_, _| Ok(()),
                 prs: &crate::github::fake::FakePrs(Ok(crate::github::PrLookup::None)),
+                follow: None,
             };
-            crate::broker::serve(&host, &ledger, &paths, "lead-up", Duration::from_millis(10))
+            let poll = Duration::from_millis(10);
+            crate::broker::serve(&host, &ledger, &paths, "lead-up", poll, None)
         });
         let given_up = std::time::Instant::now() + Duration::from_secs(5);
         while !crate::broker::running(m.paths(), "lead-up") {

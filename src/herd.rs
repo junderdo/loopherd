@@ -863,8 +863,12 @@ pub fn config_file(paths: &Paths) -> PathBuf {
 }
 
 /// Whether `herd`'s file defines `template`.
-pub fn has_template(paths: &Paths, herd: &str, template: &str) -> Result<bool> {
-    Ok(load(&paths.herds, herd)?.template.contains_key(template))
+/// Whether a herd's template is attended; `None` when the herd has no such template.
+pub fn template_attended(paths: &Paths, herd: &str, template: &str) -> Result<Option<bool>> {
+    Ok(load(&paths.herds, herd)?
+        .template
+        .get(template)
+        .map(|t| t.attended))
 }
 
 /// The repo a herd's file names, with a leading `~` expanded, even while a
