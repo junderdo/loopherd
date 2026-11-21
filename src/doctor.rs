@@ -2564,8 +2564,10 @@ mod tests {
                 live: |session| session.to_string(),
                 spawn_waiter: |_, _| Ok(()),
                 prs: &crate::github::fake::FakePrs(Ok(crate::github::PrLookup::None)),
+                follow: None,
             };
-            crate::broker::serve(&host, &ledger, &paths, "lead-up", Duration::from_millis(10))
+            let poll = Duration::from_millis(10);
+            crate::broker::serve(&host, &ledger, &paths, "lead-up", poll, None)
         });
         let given_up = std::time::Instant::now() + Duration::from_secs(5);
         while !crate::broker::running(m.paths(), "lead-up") {

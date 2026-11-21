@@ -1590,6 +1590,7 @@ fn runnable(exe: PathBuf) -> PathBuf {
 }
 
 fn run_broker(lead: &str) -> Result<i32> {
+    let inherited = broker::inherited_lock();
     let paths = Paths::from_env().context("herd")?;
     let mut env =
         broker::lead_env(&paths, lead).with_context(|| format!("{lead}'s broker can't start"))?;
@@ -1607,8 +1608,20 @@ fn run_broker(lead: &str) -> Result<i32> {
         live: live_session,
         spawn_waiter,
         prs: &github::GhCli::default(),
+        follow: Some(broker::Follow {
+            installed: &|| on_path("loopherd")?.canonicalize().ok(),
+            reexec: &broker::reexec,
+            every: Duration::from_secs(30),
+        }),
     };
-    let served = broker::serve(&host, &ledger, &paths, lead, Duration::from_millis(100))?;
+    let served = broker::serve(
+        &host,
+        &ledger,
+        &paths,
+        lead,
+        Duration::from_millis(100),
+        inherited,
+    )?;
     if served == broker::Served::AlreadyRunning {
         eprintln!("loopherd broker: a broker already serves {lead}");
     }
