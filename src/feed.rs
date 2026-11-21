@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 
-use crate::herd::{AddRequest, Paths, Queue, lead_switches, members, queue, resolve};
+use crate::herd::{AddRequest, Paths, Queue, holds_slot, lead_switches, members, queue, resolve};
 use crate::herdr::Herdr;
 use crate::ledger::{AfterMerge, AgentRecord, Ledger, Outcome, Process};
 use crate::lock::Lock;
@@ -114,7 +114,7 @@ pub fn feed(
 
     let held = members(ledger, &req.herd)?;
     let held = if req.dry_run {
-        held.saturating_sub(reaped.retired)
+        held.saturating_sub(reaped.freed)
     } else {
         held
     };
@@ -318,6 +318,8 @@ fn unclaimed(
 
 struct Reaped {
     retired: usize,
+    /// Of those, the slots a dry run counts as freed.
+    freed: usize,
     errors: usize,
     /// Members whose after_merge is recorded as run, to run once feed's lock is released.
     after_merge: Vec<String>,
@@ -339,6 +341,7 @@ fn reap(
 ) -> Result<Reaped> {
     let mut reaped = Reaped {
         retired: 0,
+        freed: 0,
         errors: 0,
         after_merge: vec![],
     };
@@ -438,6 +441,7 @@ fn reap(
             Ok(true) if req.dry_run => {
                 lines.push(format!("would retire {name}"));
                 reaped.retired += 1;
+                reaped.freed += usize::from(holds_slot(&member));
             }
             Ok(true) => {
                 let outcome = if member.after_merge.is_some() {
@@ -2314,6 +2318,36 @@ mod tests {
             [
                 "added zpr-1",
                 "prs: 0 retired, 1 added, 0 skipped, 0 errors"
+            ]
+        );
+    }
+
+    #[test]
+    fn dry_run_counts_no_slot_freed_by_a_finished_attended_member() {
+        let setup = Setup::with_done("printf '1\\n2\\n'", 1, "test -f done-{number}");
+        setup.touch("done-9");
+        let herdr = herdr().with_agent("zpr-1").with_agent("grill-9");
+        let mut worker = member("zpr-1", Some("prs"), false);
+        worker.template = Some("pr".into());
+        worker.params = Some([("number".to_string(), "1".to_string())].into());
+        let grill = AgentRecord {
+            name: "grill-9".into(),
+            attended: Some(Default::default()),
+            params: Some([("number".to_string(), "9".to_string())].into()),
+            ..worker.clone()
+        };
+        let mut ledger = ledger(&[worker, grill]);
+
+        let fed = setup.feed(&herdr, &mut ledger, true).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "would retire grill-9",
+                "still open zpr-1",
+                "skipped: exists zpr-1",
+                "skipped: no slot zpr-2",
+                "prs: 1 would retire, 0 would add, 2 skipped, 0 errors",
             ]
         );
     }
