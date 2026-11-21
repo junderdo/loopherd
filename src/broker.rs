@@ -80,7 +80,7 @@ pub enum Op {
     /// The lead's own report, written to its mailbox; a question also
     /// labels its pane.
     Report {
-        kind: crate::report::Kind,
+        kind: Kind,
         text: String,
     },
     /// `loopherd status`; a lead sees its own herd alone.
@@ -348,34 +348,34 @@ fn status(ctx: &mut Ctx, all: bool, json: bool, color: bool, sink: &mut dyn Sink
 }
 
 /// Writes the lead's report to its own mailbox, then labels its pane for a
-/// question, from the lead's own record.
+/// question, from the lead's own record; a label that fails only warns.
 fn report(ctx: &mut Ctx, kind: Kind, text: &str, sink: &mut dyn Sink) -> Result<i32> {
     let lead = ctx
         .caller
         .lead
         .as_ref()
         .context("only a lead's broker writes its report")?;
-    let record = own_record(ctx.herdr, &*ctx.ledger, &lead.name)?;
     let mailboxes = ctx.paths.state_dir().join("reports");
     let entry = crate::report::Entry::new(SystemTime::now(), Body::report(kind, text));
-    crate::report::append(&mailboxes, &record.name, &entry)?;
+    crate::report::append(&mailboxes, &lead.name, &entry)?;
     if kind != Kind::Question || !crate::notify::labels_panes(&crate::herd::config_file(ctx.paths))
     {
         return Ok(0);
     }
-    let question = text;
-    let pane = &record.pane_id;
-    if let Err(e) = crate::pane_label::lead_asked(
-        ctx.herdr,
-        &*ctx.ledger,
-        &mailboxes,
-        pane,
-        &record.name,
-        question,
-    ) {
-        sink.err(&format!(
-            "loopherd report: warning: label pane {pane}: {e:#}"
-        ));
+    let labelled = match own_record(ctx.herdr, &*ctx.ledger, &lead.name) {
+        Ok(record) => crate::pane_label::lead_asked(
+            ctx.herdr,
+            &*ctx.ledger,
+            &mailboxes,
+            &record.pane_id,
+            &record.name,
+            text,
+        )
+        .with_context(|| format!("label pane {}", record.pane_id)),
+        Err(e) => Err(e.context("the report went out, but its pane gets no label")),
+    };
+    if let Err(e) = labelled {
+        sink.err(&format!("loopherd report: warning: {e:#}"));
     }
     Ok(0)
 }
@@ -1514,7 +1514,6 @@ impl std::fmt::Display for TooOld {
 
 impl std::error::Error for TooOld {}
 
-/// Why a label that failed asks for nothing more: its report went out first.
 /// The lead's side of the transport: writes requests, reads replies.
 pub struct Client {
     lead: String,
@@ -1623,9 +1622,15 @@ impl Client {
                 let waited = humantime::format_duration(answer_within);
                 let started = self.replies.join(format!("{id}.started")).exists();
                 if started || !marks_starts(&self.lock) {
+                    let check = match op {
+                        Op::Report { .. } => {
+                            format!("check loopherd reports --all {lead} before reporting again")
+                        }
+                        _ => "check before asking again".into(),
+                    };
                     bail!(
                         "{lead}'s broker didn't answer {} within {waited}; it may still be carrying it out, \
-                         so check before asking again, and check the broker with loopherd doctor",
+                         so {check}, and check the broker with loopherd doctor",
                         op.command(),
                     );
                 }
@@ -3222,6 +3227,70 @@ mod tests {
         serving.join().unwrap().0.unwrap();
     }
 
+    #[test]
+    fn a_lead_s_report_is_written_even_when_its_record_names_another_herdr() {
+        let world = World::new();
+        let client = world.route_from("p-lead-h");
+        let serving = world.serve(FakeHerdr::new(&[]));
+        world
+            .ledger()
+            .update("lead-h", &mut |r| {
+                r.socket = Some("/elsewhere.sock".into());
+                Ok(())
+            })
+            .unwrap();
+        let report = Op::Report {
+            kind: Kind::Handoff,
+            text: "at step 3".into(),
+        };
+
+        let (_, _, code) = client.unwrap().call(&report).unwrap();
+
+        assert_eq!(code, 0);
+        let mailbox = world.paths.state_dir().join("reports/lead-h/mailbox.jsonl");
+        let mailbox = std::fs::read_to_string(mailbox).unwrap();
+        assert!(mailbox.contains("at step 3"), "{mailbox}");
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_lead_s_question_whose_record_names_another_herdr_is_written_and_warns_of_no_label() {
+        let world = World::new();
+        std::fs::write(
+            crate::herd::config_file(&world.paths),
+            "[notify]\nenabled = true\nherdr = false\npane_label = true\n",
+        )
+        .unwrap();
+        let client = world.route_from("p-lead-h");
+        let serving = world.serve(FakeHerdr::new(&[]));
+        world
+            .ledger()
+            .update("lead-h", &mut |r| {
+                r.socket = Some("/elsewhere.sock".into());
+                Ok(())
+            })
+            .unwrap();
+        let report = Op::Report {
+            kind: Kind::Question,
+            text: "which DB?".into(),
+        };
+
+        let (_, err, code) = client.unwrap().call(&report).unwrap();
+
+        assert_eq!(code, 0);
+        assert_eq!(
+            err,
+            "loopherd report: warning: the report went out, but its pane gets no label: \
+             lead-h runs in another herdr than its broker's"
+        );
+        let mailbox = world.paths.state_dir().join("reports/lead-h/mailbox.jsonl");
+        let mailbox = std::fs::read_to_string(mailbox).unwrap();
+        assert!(mailbox.contains("which DB?"), "{mailbox}");
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
     fn status_op(all: bool, strays: bool) -> Op {
         Op::Status {
             all,
@@ -3556,6 +3625,30 @@ mod tests {
         );
         let lock = lock_file(&world.paths, "lead-h");
         assert_eq!(broker_remote_timeout(&lock), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn a_report_that_timed_out_says_to_check_the_reports_before_reporting_again() {
+        let world = World::new();
+        let _held = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+        let client = Client {
+            answer_within: Some(Duration::from_millis(50)),
+            ..world.client()
+        };
+        std::fs::create_dir_all(requests_dir(&world.paths, "lead-h")).unwrap();
+        let report = Op::Report {
+            kind: Kind::Note,
+            text: "at step 3".into(),
+        };
+
+        let err = client.call(&report).unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "lead-h's broker didn't answer report within 50ms; it may still be carrying it out, \
+             so check loopherd reports --all lead-h before reporting again, and check the broker \
+             with loopherd doctor"
+        );
     }
 
     #[test]

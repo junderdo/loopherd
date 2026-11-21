@@ -37,6 +37,8 @@ pub fn lead(
     inherited_workspace: Option<&str>,
 ) -> Result<(String, Spawned, Vec<String>)> {
     let mut spawn_req = resolve(ledger, paths, req)?;
+    // Spawn's refusals, before the worktree and the launch files they would leave.
+    crate::spawn::preview(herdr, &spawn_req, inherited_workspace)?;
     let kept = sandbox::Lead {
         herd: req.herd.clone(),
         args: spawn_req.claude_args.clone(),
@@ -326,6 +328,67 @@ mod tests {
         FakeHerdr::new(&[("w1", "loopherd")])
     }
 
+    /// Asserts `lead` was refused with `refused`, leaving no launch file or new worktree.
+    fn assert_refused_leaving_nothing(setup: &Setup, result: Result<impl Sized>, refused: &str) {
+        let err = result.err().expect("lead was refused");
+        assert!(format!("{err:#}").contains(refused), "{err:#}");
+        for file in ["lead-h.lead.json", "lead-h.mcp.json", "lead-h.json"] {
+            let file = setup.root.join("config/sandbox").join(file);
+            assert!(!file.exists(), "{} was written", file.display());
+        }
+        assert!(!setup.worktree().exists(), "its worktree was made");
+    }
+
+    #[test]
+    fn a_lead_refused_for_a_missing_workspace_leaves_nothing() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let mut ledger = MemLedger::default();
+
+        let result = lead(
+            &herdr(),
+            &mut ledger,
+            &setup.paths(),
+            &request(&[]),
+            Some("nope"),
+        );
+
+        assert_refused_leaving_nothing(&setup, result, "workspace");
+    }
+
+    #[test]
+    fn a_lead_refused_for_a_name_already_live_in_herdr_leaves_nothing() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let mut ledger = MemLedger::default();
+
+        let result = lead(
+            &herdr().with_agent("lead-h"),
+            &mut ledger,
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        );
+
+        assert_refused_leaving_nothing(&setup, result, "already a live agent");
+    }
+
+    #[test]
+    fn a_lead_refused_for_herdr_naming_no_socket_leaves_nothing() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let mut herdr = herdr();
+        herdr.socket = None;
+        let mut ledger = MemLedger::default();
+
+        let result = lead(
+            &herdr,
+            &mut ledger,
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        );
+
+        assert_refused_leaving_nothing(&setup, result, "socket");
+    }
+
     const PROMPT: &str =
         "prompt = \"{name} leads {herd} in {worktree}:\\n{switches}\"\nmerge = true";
 
@@ -454,13 +517,29 @@ mod tests {
         // Herd g's lead hasn't started: its folder is made now, so a deny on it needs no glob.
         let unstarted = state.join("broker/lead-g");
         assert!(unstarted.is_dir());
-        for path in [&running.join("x"), &unstarted.join("requests/x"), &stray] {
-            assert!(denied_to_sandbox(deny, path), "{} {deny}", path.display());
-        }
         let later = state.join("broker/lead-later/requests/x");
         if cfg!(target_os = "linux") {
-            assert!(denied_to_file_tools(deny, &later), "{deny}");
+            for path in [
+                &running.join("x"),
+                &unstarted.join("requests/x"),
+                &stray,
+                &later,
+            ] {
+                assert!(
+                    denied_to_file_tools(deny, path),
+                    "{} {deny}",
+                    path.display()
+                );
+            }
+            // A named path that later goes missing would get the sandbox's empty placeholder.
+            let named: Vec<String> = edit_rules(deny)
+                .filter(|spec| spec.contains("/state/broker/") && !spec.ends_with("/broker/*"))
+                .collect();
+            assert_eq!(named, Vec::<String>::new());
         } else {
+            for path in [&running.join("x"), &unstarted.join("requests/x"), &stray] {
+                assert!(denied_to_sandbox(deny, path), "{} {deny}", path.display());
+            }
             assert!(!has_broker_glob(deny), "{deny}");
         }
     }

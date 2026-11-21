@@ -1013,7 +1013,6 @@ fn start(
              watch runs outside its sandbox; drop that entry from PATH"
         );
     }
-    keep_launch()?;
     // Before its settings, which name what it makes.
     create_state(paths, name)?;
     let own = settings(paths, name, &lead.herd)?;
@@ -1021,6 +1020,7 @@ fn start(
     if let Some(refusal) = loosened_refusal(paths, name, &lead.herd, &loosened)? {
         return Err(refusal);
     }
+    keep_launch()?;
     let file = settings_file(paths, name);
     let text = serde_json::to_string_pretty(&own)? + "\n";
     write_private(&file, &text).with_context(|| format!("write {}", file.display()))?;
@@ -1854,14 +1854,17 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
         // The shepherd's resume still reads this, which may not exist to be listed below.
         deny.push(file_rule(&handoff::flat(state, crate::context::SHEPHERD)));
     }
-    // On Linux the glob covers the file tools, and a named path that later goes
-    // missing would get the sandbox's empty placeholder, which reads as a handoff.
-    let handoffs = match cfg!(target_os = "linux") {
+    // On Linux the globs cover the file tools, and a named path that later goes
+    // missing would get the sandbox's empty placeholder, which may read as a handoff.
+    let others = match cfg!(target_os = "linux") {
         true => vec![],
-        false => others_in_handoffs(paths, name)?,
+        false => [
+            others_in_broker(paths, name)?,
+            others_in_handoffs(paths, name)?,
+        ]
+        .concat(),
     };
-    let others = others_in_broker(paths, name)?.into_iter().chain(handoffs);
-    deny.extend(others.map(|(path, dir)| match dir {
+    deny.extend(others.into_iter().map(|(path, dir)| match dir {
         true => edit_rule(&path),
         false => file_rule(&path),
     }));
@@ -1959,7 +1962,7 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
 /// What in `<state>/broker/` isn't lead `name`'s `requests/`, each named, as
 /// the file tools' denies. An `Edit` deny is also a sandbox write deny, which
 /// beats `allowWrite`, so one on all of `broker/` would close `requests/`.
-/// On Linux a glob deny covers the rest; elsewhere the sandbox would apply it.
+/// Not on Linux, where a glob deny covers the rest.
 fn others_in_broker(paths: &Paths, name: &str) -> Result<Vec<(PathBuf, bool)>> {
     let broker = paths.state_dir().join("broker");
     let mut found = entries_but(&broker, name)?;
@@ -2112,14 +2115,14 @@ mod tests {
     fn an_edit_rule_is_confined_only_when_no_segment_climbs_and_it_lies_beneath_an_own_write() {
         let home = Path::new("/home/me");
         let worktree = Path::new("/a/wt");
-        let own_writes = [worktree.to_path_buf(), home.join(".local/bin")];
+        let own_writes = [worktree.to_path_buf(), home.join("own")];
         let cases = [
             ("Edit(//a/wt2/**)", false),
             ("Edit(/src/../../**)", false),
             ("Edit(src/*/../../../**)", false),
             ("Edit(src/**/..)", false),
             ("Edit(src/**)", true),
-            ("Edit(~/.local/bin/**)", true),
+            ("Edit(~/own/**)", true),
         ];
         for (rule, confined) in cases {
             let settings = serde_json::json!({"permissions": {"allow": [rule]}});
@@ -2148,6 +2151,32 @@ mod tests {
         procs.add(40, "/usr/bin/loopherd", 30, 400);
 
         assert_eq!(calling_lead(&paths, &procs, 40).unwrap(), None);
+    }
+
+    #[test]
+    fn an_install_leads_own_settings_confine_an_edit_rule_beneath_local_bin() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            home: root.path().join("home"),
+            ..Paths::under(root.path())
+        };
+        std::fs::create_dir_all(&paths.herds).unwrap();
+        std::fs::write(
+            paths.herds.join("h.toml"),
+            "repo = \"/src/repo\"\nworkspace = \"w1\"\n[lead]\nprompt = \"go\"\ninstall = true\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(paths.home.join(".claude")).unwrap();
+        std::fs::write(
+            paths.home.join(".claude/settings.json"),
+            r#"{"permissions": {"allow": ["Edit(~/.local/bin/**)"]}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            loosened(&paths, "lead-h", "h").unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -2254,6 +2283,44 @@ mod tests {
             format!("{err:#}").contains("PATH has an empty entry"),
             "{err:#}"
         );
+        for file in ["lead-h.lead.json", "lead-h.mcp.json", "lead-h.json"] {
+            let file = paths.config_dir().join("sandbox").join(file);
+            assert!(!file.exists(), "{} was written", file.display());
+        }
+    }
+
+    #[test]
+    fn a_credentials_refusal_from_its_settings_leaves_no_launch_file() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        std::fs::create_dir_all(&paths.herds).unwrap();
+        let repo = root.path().join("repo");
+        std::fs::write(
+            paths.herds.join("h.toml"),
+            format!(
+                "repo = {repo:?}\nworkspace = \"w1\"\n[lead]\nprompt = \"go\"\n\
+                 merge_guard = \"credentials\"\ninstall = true\n"
+            ),
+        )
+        .unwrap();
+        let lead = Lead {
+            herd: "h".into(),
+            args: vec![],
+            path: None,
+        };
+
+        let err = start(
+            &paths,
+            "lead-h",
+            &lead,
+            &|| Ok(Sockets::Blocked),
+            ArgsFrom::Fresh,
+            Some("/usr/bin:/bin".as_ref()),
+        )
+        .err()
+        .unwrap();
+
+        assert!(format!("{err:#}").contains("install = true"), "{err:#}");
         for file in ["lead-h.lead.json", "lead-h.mcp.json", "lead-h.json"] {
             let file = paths.config_dir().join("sandbox").join(file);
             assert!(!file.exists(), "{} was written", file.display());
