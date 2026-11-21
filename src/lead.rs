@@ -454,13 +454,29 @@ mod tests {
         // Herd g's lead hasn't started: its folder is made now, so a deny on it needs no glob.
         let unstarted = state.join("broker/lead-g");
         assert!(unstarted.is_dir());
-        for path in [&running.join("x"), &unstarted.join("requests/x"), &stray] {
-            assert!(denied_to_sandbox(deny, path), "{} {deny}", path.display());
-        }
         let later = state.join("broker/lead-later/requests/x");
         if cfg!(target_os = "linux") {
-            assert!(denied_to_file_tools(deny, &later), "{deny}");
+            for path in [
+                &running.join("x"),
+                &unstarted.join("requests/x"),
+                &stray,
+                &later,
+            ] {
+                assert!(
+                    denied_to_file_tools(deny, path),
+                    "{} {deny}",
+                    path.display()
+                );
+            }
+            // A named path that later goes missing would get the sandbox's empty placeholder.
+            let named: Vec<String> = edit_rules(deny)
+                .filter(|spec| spec.contains("/state/broker/") && !spec.ends_with("/broker/*"))
+                .collect();
+            assert_eq!(named, Vec::<String>::new());
         } else {
+            for path in [&running.join("x"), &unstarted.join("requests/x"), &stray] {
+                assert!(denied_to_sandbox(deny, path), "{} {deny}", path.display());
+            }
             assert!(!has_broker_glob(deny), "{deny}");
         }
     }

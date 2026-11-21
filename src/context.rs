@@ -185,10 +185,16 @@ fn ask(
     // Rotate before marking, so a failed rotation leaves the ask for the next stop.
     let moved = match handoff::find(state, &member.name) {
         Some(last) if !written_this_run(&last, state, &member.name)? => {
-            Some(handoff::set_aside(state, &member.name, &last)?)
+            let aside = handoff::set_aside(state, &member.name, &last)?;
+            if let Some(warning) = aside.warning {
+                eprintln!("loopherd stop-hook: warning: {warning}");
+            }
+            Some(aside.prev)
         }
         _ => None,
     };
+    let dir = handoff::dir(state, &member.name);
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let handoff = handoff::path(state, &member.name);
     fs::create_dir_all(&asked).with_context(|| format!("create {}", asked.display()))?;
     match fs::OpenOptions::new()
@@ -688,6 +694,7 @@ mod tests {
                 handoff.display()
             )
         );
+        assert!(handoff.parent().unwrap().is_dir());
     }
 
     #[test]

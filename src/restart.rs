@@ -217,7 +217,8 @@ pub fn restart(
         .session_id
         .unwrap_or(new);
     // Moved aside once the new session is confirmed, so no later restart resumes from it.
-    let read = handoff::set_aside(req.state, name, &handoff)?;
+    let aside = handoff::set_aside(req.state, name, &handoff)?;
+    let read = aside.prev;
     let shell = (current.pane_id != agent.pane_id && current.env_pane_id.is_none())
         .then(|| (req.pane_shell)(&agent.pane_id));
     ledger.update(name, &mut |current| {
@@ -245,7 +246,11 @@ pub fn restart(
         }
         _ => String::new(),
     };
-    let warning: String = warnings.iter().map(|w| format!("\nwarning: {w}")).collect();
+    let warning: String = warnings
+        .iter()
+        .chain(&aside.warning)
+        .map(|w| format!("\nwarning: {w}"))
+        .collect();
     Ok(format!(
         "restarted {name} in session {live}; prompted it to read {}{unread}{warning}",
         read.display()
@@ -757,6 +762,12 @@ mod tests {
                 session: None,
             };
             self.put(Body::Stop(stop));
+        }
+
+        /// Leaves lh-1's handoff only at the flat path an older release wrote.
+        fn flat_handoff(&self) {
+            let handoffs = self.state.path().join("handoffs");
+            fs::rename(handoffs.join("lh-1/handoff.md"), handoffs.join("lh-1.md")).unwrap();
         }
 
         fn put(&self, body: Body) {
@@ -2298,6 +2309,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_flat_handoff_schedules_a_self_restart_whose_waiter_resumes_from_it() {
+        let w = World::new();
+        w.put(Body::Handoff { text: "x".into() });
+        w.flat_handoff();
+        let scheduled = schedule(&w, Some("w1:p1")).unwrap();
+        let waited = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(30));
+                w.stop(0, None);
+            });
+            w.wait(Duration::from_secs(5))
+        });
+        drop(scheduled);
+        assert!(matches!(waited.unwrap(), Waited::Restarted));
+        let handoffs = w.state.path().join("handoffs");
+        assert!(w.herdr.prompts()[1].1.contains("handoffs/lh-1/prev.md"));
+        assert_eq!(
+            fs::read_to_string(handoffs.join("lh-1/prev.md")).unwrap(),
+            "## State\n"
+        );
+        assert!(!handoffs.join("lh-1.md").exists());
     }
 
     #[test]

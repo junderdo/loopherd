@@ -235,3 +235,63 @@ fn a_lead_whose_broker_is_down_writes_no_report_and_is_told_who_revives_it() {
     assert_eq!(world.mailbox("lead-cards"), "");
     assert_eq!(world.calls(), Vec::<String>::new());
 }
+
+#[test]
+fn a_lead_whose_broker_predates_reports_writes_its_own_and_is_told_its_pane_gets_no_label() {
+    use std::os::fd::AsRawFd;
+    let mut world = World::new(ON);
+    world.broker = None;
+    let config = world.root.path().join("config/broker");
+    let lock = fs::File::create(config.join("lead-cards.lock")).unwrap();
+    // SAFETY: flock on a descriptor `lock` keeps open while the old broker "runs".
+    assert_eq!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    let requests = world
+        .root
+        .path()
+        .join("state/loopherd/broker/lead-cards/requests");
+    let replies = config.join("lead-cards/replies");
+    let old = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            let request = fs::read_dir(&requests).ok().and_then(|entries| {
+                entries
+                    .filter_map(|e| e.ok()?.file_name().into_string().ok())
+                    .find(|n| n.ends_with(".json"))
+            });
+            if let Some(request) = request {
+                fs::create_dir_all(&replies).unwrap();
+                let part = replies.join(".part");
+                fs::write(
+                    &part,
+                    r#"{"refused": "malformed request: unknown variant `report`"}"#,
+                )
+                .unwrap();
+                fs::rename(part, replies.join(request)).unwrap();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    });
+
+    let out = world
+        .loopherd("w1:p0", &["report", "--kind", "question", "which DB?"])
+        .output()
+        .unwrap();
+
+    old.join().unwrap();
+    drop(lock);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "loopherd report: warning: lead-cards's broker predates this loopherd, so it can't \
+         report; the shepherd must restart it with loopherd broker-restart lead-cards; writing \
+         the report directly, and its pane gets no label\n"
+    );
+    let mailbox = world.mailbox("lead-cards");
+    assert_eq!(mailbox.lines().count(), 1, "{mailbox}");
+    assert!(mailbox.contains("which DB?"), "{mailbox}");
+    assert_eq!(world.calls(), Vec::<String>::new());
+}

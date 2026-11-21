@@ -1763,7 +1763,13 @@ fn run_report(kind: Kind, as_name: Option<String>, text: &str) -> Result<i32> {
         match run_op(Some(&broker), &op) {
             // A lead still on settings from before its broker wrote reports may write its own.
             Err(e) if e.downcast_ref::<broker::TooOld>().is_some() => {
-                eprintln!("loopherd report: warning: {e:#}; writing the report directly");
+                let unlabelled = match kind {
+                    Kind::Question => ", and its pane gets no label",
+                    _ => "",
+                };
+                eprintln!(
+                    "loopherd report: warning: {e:#}; writing the report directly{unlabelled}"
+                );
                 let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
                 let entry = report::Entry::new(SystemTime::now(), report::Body::report(kind, text));
                 report::append(&ledger.reports_dir()?, broker.lead(), &entry)?;
