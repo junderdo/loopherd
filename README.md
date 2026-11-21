@@ -281,6 +281,14 @@ plain word (`[A-Za-z0-9][A-Za-z0-9._-]*`, no `..`). A `[queue]`, a `[lead]`
 table and the rest are what `init` writes; start from its output or from
 [docs/examples/](docs/examples/).
 
+A template with `attended = true` starts a member the human sits in, such
+as a grill tied to a card (D112). Only `add` starts one: it focuses the new
+pane (`--no-focus` skips that), records the caller's pane and fills a
+`{shepherd_pane}` placeholder with it, and `retire --close` focuses that pane
+again if the human is still in the member's. It holds no `max` slot, is
+never asked to hand off, and is left out of `stats`; a watch wakes on its
+`merged` and `gone` alone.
+
 ## Tour
 
 `loopherd --help` and `loopherd <command> --help` give every flag.
@@ -304,7 +312,7 @@ table and the rest are what `init` writes; start from its output or from
 |---|---|
 | `lead <herd>` | Start the herd's lead, `lead-<herd>`, in a detached worktree. |
 | `feed <herd>` | Retire members whose `done` check passes, then fill free slots from the queue's source (`--dry-run`). |
-| `add <herd> <template> <params…>` | Spawn one member from a template (`--dry-run`). |
+| `add <herd> <template> <params…>` | Spawn one member from a template (`--dry-run`; `--no-focus` for an attended one). |
 | `spawn --name <name>` | Spawn a member without a herd file (`--repo`, `--worktree`, `--prompt`). |
 | `pause <herd>` / `resume <herd>` | Stop `feed` spawning for a herd (`--reason`, `--all`), and lift it. |
 | `report "<text>"` | From a member's pane, leave a report for whoever watches it (`--kind done\|question\|note`). |
