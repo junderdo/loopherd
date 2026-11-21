@@ -534,7 +534,10 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   `claimable unknown (<error>)` (or `unready unknown`) and `status` still
   succeeds. `--json` gives each herd `claimable` and `unready`, integers or
   null without a `backlog`, with `claimable_error` or `unready_error` beside
-  a failed one (D60, D61).
+  a failed one (D60, D61). A member of an `attended = true` template, one
+  the human sits in, reads `(attended)` and `--json` gives it `attended`:
+  it holds no slot, and a watch wakes on its `gone` alone, a lead's watch
+  also on its `merged` (D112).
 - `loopherd reports` prints unread reports, questions first, and marks them
   read; `loopherd reports --all` prints every report and stop and marks
   none read. Both take member names or `--herd <herd>`. `--all` also takes

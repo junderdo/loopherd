@@ -158,12 +158,19 @@ impl Merges for GhCli {
     }
 }
 
+/// The items of a list `gh api --paginate --slurp` read, which it gives as
+/// an array of pages.
+pub fn all_pages<T: serde::de::DeserializeOwned>(slurped: &str) -> serde_json::Result<Vec<T>> {
+    let pages: Vec<Vec<T>> = serde_json::from_str(slurped)?;
+    Ok(pages.into_iter().flatten().collect())
+}
+
 impl crate::doctor::Rulesets for GhCli {
     fn loopherd_rulesets(&self, repo: &Path) -> Result<Vec<serde_json::Value>> {
         let slug = github_com_origin(repo)?.slug;
         let list = format!("repos/{slug}/rulesets?includes_parents=false");
         let listed: Vec<serde_json::Value> =
-            serde_json::from_str(&self.answer(repo, &["api", &list])?)
+            all_pages(&self.answer(repo, &["api", "--paginate", "--slurp", &list])?)
                 .context("read gh's list of rulesets")?;
         let ours = [
             crate::merge_guard::DEFAULT_BRANCH_RULESET,
@@ -615,6 +622,32 @@ mod tests {
 
         assert_eq!(format!("{err:#}"), "origin isn't on GitHub");
         assert!(!dir.path().join("args").exists());
+    }
+
+    #[test]
+    fn doctor_finds_a_loopherd_ruleset_on_a_later_page() {
+        let (dir, gh) = fake_gh("git@github.com:o/r.git", "");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\n\
+             case \"$*\" in\n\
+             *rulesets/7) echo '{{\"id\":7,\"name\":\"loopherd: no force-push\"}}' ;;\n\
+             *) echo '[[{{\"id\":1,\"name\":\"other\"}}],[{{\"id\":7,\"name\":\"loopherd: no force-push\"}}]]' ;;\n\
+             esac\n",
+            dir.path().join("args").display()
+        );
+        crate::test_fakes::executable(&gh.program, script);
+
+        let found = crate::doctor::Rulesets::loopherd_rulesets(&gh, dir.path()).unwrap();
+
+        assert_eq!(
+            found,
+            [serde_json::json!({"id": 7, "name": "loopherd: no force-push"})]
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("args")).unwrap(),
+            "api --paginate --slurp repos/o/r/rulesets?includes_parents=false\n\
+             api repos/o/r/rulesets/7\n"
+        );
     }
 
     #[test]

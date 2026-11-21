@@ -229,6 +229,7 @@ pub fn retire_and_close(
             None
         }
         TabFate::Ours(tab_id) => {
+            out.extend(return_focus(herdr, &record));
             herdr.close_tab(&tab_id)?;
             out.push(format!("closed tab {tab_id}"));
             None
@@ -302,6 +303,23 @@ pub fn retire_and_close(
         });
     }
     Ok(())
+}
+
+/// Focuses an attended member's return pane if the human is looking at the
+/// member's pane: a reap hours after the merge mustn't pull them off other work.
+fn return_focus(herdr: &dyn Herdr, record: &AgentRecord) -> Option<String> {
+    let back = record.attended.as_ref()?.return_pane.as_deref()?;
+    let focused = match herdr.focused_pane() {
+        Ok(focused) => focused,
+        Err(e) => return Some(format!("warning: read the focused pane: {e:#}")),
+    };
+    if focused.as_deref() != Some(&record.pane_id) {
+        return None;
+    }
+    Some(match herdr.focus(back) {
+        Ok(()) => format!("focused {back}"),
+        Err(e) => format!("warning: focus {back}: {e:#}"),
+    })
 }
 
 /// The command that closes `record`'s tab, commented with why it may still
@@ -652,7 +670,7 @@ mod tests {
 
     use super::*;
     use crate::herdr::fake::{FAKE_SOCKET, FakeHerdr};
-    use crate::ledger::{MemLedger, Process};
+    use crate::ledger::{Attended, MemLedger, Process};
     use crate::process::{CLAUDE, FakeProcs};
     use crate::spawn::{SpawnRequest, spawn};
     use crate::worktree::testing::{
@@ -691,6 +709,7 @@ mod tests {
             socket: None,
             process: None,
             role: None,
+            attended: None,
             after_merge: None,
             unsandboxed: None,
             sockets_unblocked: None,
@@ -987,6 +1006,57 @@ mod tests {
         )
         .unwrap();
         out
+    }
+
+    /// An attended `a` whose return pane is the `shepherd` agent's.
+    fn spawned_attended() -> (FakeHerdr, MemLedger, String) {
+        let herdr = FakeHerdr::new(&[("w1", "loopherd")]).with_agent("shepherd");
+        let shepherd = herdr.agents().unwrap()[0].pane_id.clone();
+        let mut ledger = MemLedger::default();
+        let req = SpawnRequest {
+            repo: "/src/repo".into(),
+            name: "a".into(),
+            worktree: None,
+            workspace: None,
+            prompt: None,
+            ready_timeout: Duration::from_secs(60),
+            shell_timeout: crate::spawn::SHELL_TIMEOUT,
+            claude_args: vec![],
+            member_of: None,
+        };
+        spawn(&herdr, &mut ledger, &req, Some("w1")).unwrap();
+        ledger
+            .update("a", &mut |r| {
+                r.attended = Some(Attended {
+                    return_pane: Some(shepherd.clone()),
+                });
+                Ok(())
+            })
+            .unwrap();
+        (herdr, ledger, shepherd)
+    }
+
+    #[test]
+    fn close_of_a_focused_attended_member_focuses_its_return_pane() {
+        let (herdr, mut ledger, shepherd) = spawned_attended();
+        let pane = ledger.0["a"].pane_id.clone();
+        herdr.focus(&pane).unwrap();
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(herdr.focused(), [pane, shepherd.clone()]);
+        assert!(out.contains(&format!("focused {shepherd}")), "{out:?}");
+        assert!(herdr.tabs().iter().all(|t| t.id != "w1:t2"), "{out:?}");
+    }
+
+    #[test]
+    fn close_of_an_attended_member_leaves_focus_on_another_pane() {
+        let (herdr, mut ledger, shepherd) = spawned_attended();
+        herdr.focus(&shepherd).unwrap();
+
+        close(&herdr, &mut ledger);
+
+        assert_eq!(herdr.focused(), [shepherd]);
     }
 
     #[test]

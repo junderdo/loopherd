@@ -13,7 +13,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::context::ShepherdHandoff;
 use crate::feed::{claimable, claimable_count, run_check, run_in_repo, run_source};
 use crate::github::Merges;
-use crate::herd::{self, MemberCheck, MemberChecks, Paths, lead_checks};
+use crate::herd::{self, MemberCheck, MemberChecks, Paths, holds_slot, lead_checks};
 use crate::herd_view::{Member, Options, View};
 use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::{AfterMerge, AgentRecord, Ledger, Process};
@@ -256,6 +256,17 @@ pub fn watch(
             .collect();
         let (members, own) = in_scope(read.view, req, &reader)?;
         let names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
+        // The human is in an attended member's pane: only its `gone` wakes the watch.
+        let attended: HashSet<&str> = members
+            .iter()
+            .filter(|m| m.attended)
+            .map(|m| m.name.as_str())
+            .collect();
+        let reported: Vec<String> = names
+            .iter()
+            .filter(|n| !attended.contains(n.as_str()))
+            .cloned()
+            .collect();
         let mut lines = vec![];
         let mut waiting = vec![];
         let mut pending = vec![];
@@ -301,11 +312,14 @@ pub fn watch(
             // read here has its report visible to the read after it.
             let wakes_read;
             (wakes, wakes_read) = unread_wakes(dir, &names)?;
+            pending.push(wakes_read);
+        }
+        if !reported.is_empty() {
             let (read, reports_read) = peek_reports(
                 ledger,
                 dir,
                 &Filter {
-                    names: &names,
+                    names: &reported,
                     herd: None,
                     all: false,
                     since: None,
@@ -329,9 +343,10 @@ pub fn watch(
                     at: Some(entry.at),
                 })
             }));
-            lines.extend(wakes.iter().flat_map(stop_wakes));
-            pending.extend([wakes_read, reports_read]);
+            pending.push(reports_read);
         }
+        let stopped = wakes.iter().filter(|m| !attended.contains(m.name.as_str()));
+        lines.extend(stopped.flat_map(stop_wakes));
         let mut fired = None;
         if let Some(checks) = checks.as_mut().filter(|c| clock.elapsed() >= c.next) {
             let events = checks.run(ledger, warn)?;
@@ -343,7 +358,8 @@ pub fn watch(
             }
         }
         for mailbox in &wakes {
-            herdr_wakes(mailbox, &mut lines, &mut waiting);
+            let quiet = attended.contains(mailbox.name.as_str());
+            herdr_wakes(mailbox, quiet, &mut lines, &mut waiting);
         }
         // Not on a poll already waking it, so its commands don't hold those lines back.
         if lines.is_empty()
@@ -598,8 +614,10 @@ impl Checks<'_> {
                 Some(AfterMerge::Unknown(_)) => true,
                 None => due && matches!(merged, Some(Ok(true) | Err(_))),
             };
-            freed += usize::from(done == Some(Ok(true)) && !kept);
-            if merged == Some(Ok(true)) && (due || matches!(done, None | Some(Ok(false)))) {
+            freed += usize::from(holds_slot(&worker) && done == Some(Ok(true)) && !kept);
+            // An attended member's stops wake nothing, so its merge must, done or not.
+            let announced = due || worker.attended.is_some();
+            if merged == Some(Ok(true)) && (announced || matches!(done, None | Some(Ok(false)))) {
                 events.push(Event::new(format!("{} {}", worker.name, line::MERGED)));
             }
         }
@@ -1471,10 +1489,15 @@ fn stop_wakes(mailbox: &Mailbox) -> Vec<String> {
     wakes
 }
 
-/// A wake line for each unread `gone` no `moved` retracts, and one for any
-/// unread `blocked`, which also waits on the human.
-fn herdr_wakes(mailbox: &Mailbox, lines: &mut Vec<String>, waiting: &mut Vec<Waiting>) {
-    let mut blocked = false;
+/// A wake line for each unread `gone` no `moved` retracts, and unless
+/// `quiet`, one for any unread `blocked`, which also waits on the human.
+fn herdr_wakes(
+    mailbox: &Mailbox,
+    quiet: bool,
+    lines: &mut Vec<String>,
+    waiting: &mut Vec<Waiting>,
+) {
+    let mut blocked = quiet;
     for (i, entry) in mailbox.entries.iter().enumerate().skip(mailbox.unread) {
         match entry.body {
             Body::Blocked {} if !std::mem::replace(&mut blocked, true) => {
@@ -1593,6 +1616,7 @@ mod tests {
             socket: None,
             process: None,
             role: None,
+            attended: None,
             after_merge: None,
             unsandboxed: None,
             sockets_unblocked: None,
@@ -1957,6 +1981,34 @@ mod tests {
             run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
             ["lh-1 gone"]
         );
+    }
+
+    #[test]
+    fn an_attended_member_wakes_it_only_when_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut grill = member("grill-1", "w9:p1", None);
+        grill.attended = Some(Default::default());
+        let ledger = ledger(vec![grill]);
+        let herdr = FakeHerdr::new(&[]).with_live_agent(Some("grill-1"), None, "w9:p1");
+        herdr.set_status("grill-1", AgentStatus::Working);
+        send(&ledger, dir.path(), "grill-1", Kind::Note, "starting");
+        send(&ledger, dir.path(), "grill-1", Kind::Question, "which DB?");
+        put(dir.path(), "grill-1", stop(0, 0));
+
+        let mut clock = steps(|poll| match poll {
+            1 | 2 => {}
+            3 => herdr.set_status("grill-1", AgentStatus::Blocked),
+            4 | 5 => {}
+            6 => herdr.remove_agent("grill-1"),
+            7 => {}
+            _ => panic!("slept past the wake"),
+        });
+        let wake = watch(&herdr, &ledger, dir.path(), &EVERY, &mut clock, &mut |_| {})
+            .unwrap()
+            .unwrap();
+
+        assert!(waiting(&wake).is_empty(), "{:?}", waiting(&wake));
+        assert_eq!(printed(wake), ["grill-1 gone"]);
     }
 
     fn put(dir: &Path, name: &str, body: Body) {
@@ -4704,6 +4756,32 @@ mod tests {
             clock.elapsed, CHECK_EVERY,
             "woke after the first check past resume"
         );
+    }
+
+    #[test]
+    fn a_leads_watch_wakes_on_an_attended_members_merge_and_frees_no_slot_when_it_is_done() {
+        let mut world = Checked::new();
+        for n in ["2", "9"] {
+            let mut member = AgentRecord {
+                template: Some("card".into()),
+                params: Some([("n".to_string(), n.to_string())].into()),
+                ..member(&format!("lh-{n}"), &format!("w9:p{n}"), Some("cards"))
+            };
+            if n == "9" {
+                member.attended = Some(Default::default());
+            }
+            world.ledger.0.insert(member.name.clone(), member);
+            world.herdr =
+                world
+                    .herdr
+                    .with_live_agent(Some(&format!("lh-{n}")), None, &format!("w9:p{n}"));
+        }
+        world.touch("tasks", "1\n2\n3\n");
+        world.touch("merged-9", "");
+        world.touch("done-9", "");
+
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-9 merged"]);
+        assert_eq!(world.once("w9:p0"), None);
     }
 
     #[test]

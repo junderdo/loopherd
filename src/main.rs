@@ -711,6 +711,9 @@ struct AddArgs {
     /// Seconds to wait for the agent to become idle.
     #[arg(long, default_value_t = 60)]
     ready_timeout: u64,
+    /// Leave focus where it is instead of moving to an attended member's pane.
+    #[arg(long)]
+    no_focus: bool,
     /// Passed to claude after the herd's and the template's args.
     #[arg(last = true)]
     claude_args: Vec<String>,
@@ -2501,6 +2504,7 @@ fn run_add(args: AddArgs) -> Result<i32> {
         claude_args: args.claude_args,
         dry_run: args.dry_run,
         ready_timeout_secs: args.ready_timeout,
+        no_focus: args.no_focus,
     };
     run_op(own_broker().as_ref(), &op)
 }

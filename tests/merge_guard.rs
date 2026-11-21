@@ -18,8 +18,13 @@ struct Setup {
 impl Setup {
     /// Herd `h` on a repo whose origin is acme/widgets, with `lead` as its
     /// `[lead]`, and a `gh` answering the keys and rulesets lists with
-    /// `keys` and `rulesets`.
+    /// `keys` and `rulesets` as their only page.
     fn new(lead: &str, keys: &str, rulesets: &str) -> Setup {
+        Setup::paged(lead, &format!("[{keys}]"), &format!("[{rulesets}]"))
+    }
+
+    /// As `new`, with the lists given as gh's slurped array of pages.
+    fn paged(lead: &str, keys: &str, rulesets: &str) -> Setup {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         let repo = root.join("widgets");
@@ -51,8 +56,8 @@ impl Setup {
                  echo \"gh $*\" >> {calls}\n\
                  case \"$*\" in\n\
                  *--input*) sed 's/^/  /' >> {calls}; echo '{{}}' ;;\n\
-                 'api repos/acme/widgets/keys') echo '{keys}' ;;\n\
-                 'api repos/acme/widgets/rulesets?includes_parents=false') echo '{rulesets}' ;;\n\
+                 'api --paginate --slurp repos/acme/widgets/keys') echo '{keys}' ;;\n\
+                 'api --paginate --slurp repos/acme/widgets/rulesets?includes_parents=false') echo '{rulesets}' ;;\n\
                  esac\n",
                 calls = calls.display()
             ),
@@ -170,9 +175,9 @@ fn makes_the_key_and_its_ssh_host_adds_it_creates_both_rulesets_and_says_how_to_
     assert_eq!(
         setup.calls(),
         format!(
-            "gh api repos/acme/widgets/keys\n\
+            "gh api --paginate --slurp repos/acme/widgets/keys\n\
              gh repo deploy-key add {public} --repo acme/widgets --allow-write --title loopherd lead-h\n\
-             gh api repos/acme/widgets/rulesets?includes_parents=false\n\
+             gh api --paginate --slurp repos/acme/widgets/rulesets?includes_parents=false\n\
              gh api --method POST repos/acme/widgets/rulesets --input -\n\
              {MAIN_RULESET}\
              gh api --method POST repos/acme/widgets/rulesets --input -\n\
@@ -263,8 +268,8 @@ fn a_rerun_keeps_the_key_already_added_and_updates_the_rulesets_in_place() {
     assert_eq!(
         setup.calls(),
         format!(
-            "gh api repos/acme/widgets/keys\n\
-             gh api repos/acme/widgets/rulesets?includes_parents=false\n\
+            "gh api --paginate --slurp repos/acme/widgets/keys\n\
+             gh api --paginate --slurp repos/acme/widgets/rulesets?includes_parents=false\n\
              gh api --method PUT repos/acme/widgets/rulesets/7 --input -\n\
              {MAIN_RULESET}\
              gh api --method PUT repos/acme/widgets/rulesets/8 --input -\n\
@@ -287,6 +292,45 @@ fn a_rerun_keeps_the_key_already_added_and_updates_the_rulesets_in_place() {
     assert!(hosts.ends_with(matched), "{hosts}");
     assert!(!hosts.contains("old.example"), "{hosts}");
     assert_eq!(hosts.matches("loopherd-h\n").count(), 1, "{hosts}");
+}
+
+#[test]
+fn a_key_and_rulesets_on_a_later_page_are_found() {
+    let first = Setup::new(CREDENTIALS, "[]", "[]");
+    assert!(first.run().status.success());
+    let public = fs::read_to_string(format!("{}.pub", first.key().display())).unwrap();
+    let key_text = public
+        .split_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let keys = format!(
+        r#"[[{{"id":1,"key":"ssh-ed25519 AAAAother","read_only":false}}],[{{"id":3,"key":"{key_text}","read_only":false}}]]"#
+    );
+    let rulesets = r#"[[{"id":1,"name":"other"}],[{"id":7,"name":"loopherd: default branch"},{"id":8,"name":"loopherd: no force-push"}]]"#;
+    let setup = Setup::paged(CREDENTIALS, &keys, rulesets);
+    fs::create_dir_all(setup.key().parent().unwrap()).unwrap();
+    fs::copy(first.key(), setup.key()).unwrap();
+    fs::write(format!("{}.pub", setup.key().display()), &public).unwrap();
+
+    let out = setup.run();
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let calls = setup.calls();
+    assert!(!calls.contains("deploy-key add"), "{calls}");
+    assert!(
+        calls.contains("gh api --method PUT repos/acme/widgets/rulesets/7 --input -"),
+        "{calls}"
+    );
+    assert!(
+        calls.contains("gh api --method PUT repos/acme/widgets/rulesets/8 --input -"),
+        "{calls}"
+    );
+    assert!(!calls.contains("--method POST"), "{calls}");
 }
 
 #[test]
@@ -314,7 +358,10 @@ fn a_deploy_key_added_read_only_is_refused_with_how_to_replace_it() {
          push; delete it with gh repo deploy-key delete 3 --repo acme/widgets, then run \
          loopherd merge-guard h again\n"
     );
-    assert_eq!(setup.calls(), "gh api repos/acme/widgets/keys\n");
+    assert_eq!(
+        setup.calls(),
+        "gh api --paginate --slurp repos/acme/widgets/keys\n"
+    );
 }
 
 #[test]
