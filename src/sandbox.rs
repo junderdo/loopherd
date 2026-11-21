@@ -61,13 +61,14 @@ const MIN_CLAUDE: [u64; 3] = [2, 1, 319];
 /// Claude Code has no way to run its own check short of starting a session,
 /// so this tries what that check needs.
 pub fn probe() -> Result<Sockets, Unavailable> {
-    let version = std::process::Command::new("claude")
-        .arg("--version")
-        .output()
-        .map_err(|e| Unavailable {
-            why: format!("claude won't run: {e}"),
-            fix: "install Claude Code".into(),
-        })?;
+    let version = output_within(
+        std::process::Command::new("claude").arg("--version"),
+        PROBE_SECS,
+    )
+    .map_err(|e| Unavailable {
+        why: format!("claude won't run: {e}"),
+        fix: "install Claude Code".into(),
+    })?;
     claude_new_enough(&String::from_utf8_lossy(&version.stdout))?;
     if cfg!(target_os = "macos") {
         return Ok(Sockets::Blocked);
@@ -91,14 +92,16 @@ pub fn probe() -> Result<Sockets, Unavailable> {
         });
     }
     // Catches what PATH can't: WSL1, or user namespaces blocked by AppArmor or sysctl.
-    let tried = std::process::Command::new("bwrap")
-        .args(["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"])
-        .args(["--unshare-pid", "true"])
-        .output();
+    let tried = output_within(
+        std::process::Command::new("bwrap")
+            .args(["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"])
+            .args(["--unshare-pid", "true"]),
+        PROBE_SECS,
+    );
     let fix = "run under WSL2, not WSL1, and let bubblewrap make user namespaces \
                (kernel.unprivileged_userns_clone, or an AppArmor profile for bwrap)";
     match tried {
-        Ok(out) if out.status.success() => Ok(socket_filter()),
+        Ok(out) if out.status.success() => Ok(socket_filter(seccomp_filters())),
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let last = stderr.lines().last().unwrap_or("no message").trim();
@@ -116,6 +119,16 @@ pub fn probe() -> Result<Sockets, Unavailable> {
 
 /// How the human gives Claude Code a seccomp filter where it has none.
 pub const FILTER_FIX: &str = "npm install -g @anthropic-ai/sandbox-runtime";
+
+/// How long each command the probe runs gets before it's killed.
+const PROBE_SECS: u64 = 10;
+
+/// A command that runs a program under a seccomp filter, and the program
+/// that sets the filter up, as a fix names it.
+struct Filter {
+    program: &'static str,
+    command: std::process::Command,
+}
 
 /// What one run of socat under a candidate seccomp filter showed.
 #[derive(Debug, PartialEq, Eq)]
@@ -151,9 +164,9 @@ fn tried(succeeded: bool, stderr: &str) -> Tried {
     }
 }
 
-/// Tries a Unix-socket connect under each seccomp filter Claude Code's
-/// sandbox could apply, with socat, which the sandbox needs anyway.
-fn socket_filter() -> Sockets {
+/// Tries a Unix-socket connect under each of `filters` in turn, with socat,
+/// which the sandbox needs anyway, until one answers.
+fn socket_filter(filters: impl Iterator<Item = Filter>) -> Sockets {
     let open = |why: String, fix: String| Sockets::Open(Unavailable { why, fix });
     let tmp_fix = || "set TMPDIR to a writable dir on a local filesystem".to_string();
     let Ok(dir) = tempfile::tempdir() else {
@@ -167,17 +180,17 @@ fn socket_filter() -> Sockets {
         );
     };
     let mut failed = None;
-    for mut filter in seccomp_filters() {
-        let child = filter
+    for Filter {
+        program,
+        mut command,
+    } in filters
+    {
+        command
             .args(["socat", "-d", "-d", "-u", "OPEN:/dev/null"])
-            .arg(format!("UNIX-CONNECT:{}", socket.display()))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn();
-        let result = match child.ok().and_then(|child| finish(child, 10)) {
-            Some(out) => tried(out.status.success(), &String::from_utf8_lossy(&out.stderr)),
-            None => Tried::NotAFilter,
+            .arg(format!("UNIX-CONNECT:{}", socket.display()));
+        let result = match output_within(&mut command, PROBE_SECS) {
+            Ok(out) => tried(out.status.success(), &String::from_utf8_lossy(&out.stderr)),
+            Err(_) => Tried::NotAFilter,
         };
         match result {
             Tried::Blocked => return Sockets::Blocked,
@@ -188,7 +201,7 @@ fn socket_filter() -> Sockets {
                 );
             }
             Tried::FailedSetup(line) => {
-                failed.get_or_insert(line);
+                failed.get_or_insert((line, program));
             }
             Tried::NotAFilter => {}
         }
@@ -198,68 +211,94 @@ fn socket_filter() -> Sockets {
             "Claude Code finds no seccomp filter to block them with".into(),
             FILTER_FIX.into(),
         ),
-        Some(line) => open(
+        Some((line, program)) => open(
             format!("its seccomp filter can't set itself up: {line}"),
-            "let it make user namespaces, as bubblewrap does \
-             (kernel.unprivileged_userns_clone, or an AppArmor profile for claude)"
-                .into(),
+            format!(
+                "let it make user namespaces, as bubblewrap does \
+                 (kernel.unprivileged_userns_clone, or an AppArmor profile for {program})"
+            ),
         ),
     }
 }
 
-/// Commands that run a program under a seccomp filter Claude Code could
-/// use: its native binary's own, chosen by `ARGV0`, which a version
-/// manager's shim passes on, then an npm install's helper where Claude Code
-/// looks for it.
-fn seccomp_filters() -> Vec<std::process::Command> {
-    let Some(claude) = crate::on_path("claude") else {
+/// The seccomp filters Claude Code could use, looked up lazily: its native
+/// binary's own, chosen by `ARGV0`, which a version manager's shim passes on,
+/// then an npm install's helper where Claude Code looks for it.
+fn seccomp_filters() -> impl Iterator<Item = Filter> {
+    let claude = crate::on_path("claude");
+    let native = claude.clone().map(|claude| {
+        let mut command = std::process::Command::new(claude);
+        command.env("ARGV0", "apply-seccomp");
+        Filter {
+            program: "claude",
+            command,
+        }
+    });
+    let helpers = std::iter::once_with(move || npm_helpers(claude.as_deref())).flatten();
+    native.into_iter().chain(helpers)
+}
+
+/// npm's `apply-seccomp` beside the `claude` on PATH, or in the global sandbox-runtime.
+fn npm_helpers(claude: Option<&Path>) -> Vec<Filter> {
+    let Some(claude) = claude else {
         return vec![];
     };
-    let mut native = std::process::Command::new(&claude);
-    native.env("ARGV0", "apply-seccomp");
     let arch = match std::env::consts::ARCH {
         "x86_64" => "x64",
         "aarch64" => "arm64",
-        _ => return vec![native],
+        _ => return vec![],
     };
     let helper = Path::new("vendor/seccomp").join(arch).join("apply-seccomp");
     let package = claude
         .canonicalize()
         .ok()
         .and_then(|real| real.parent().map(Path::to_path_buf));
-    let global = std::process::Command::new("npm")
-        .args(["root", "-g"])
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
-        .filter(|root| root.is_absolute())
-        .map(|root| root.join("@anthropic-ai/sandbox-runtime"));
-    let near = package
+    let global = output_within(
+        std::process::Command::new("npm").args(["root", "-g"]),
+        PROBE_SECS,
+    )
+    .ok()
+    .filter(|out| out.status.success())
+    .map(|out| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+    .filter(|root| root.is_absolute())
+    .map(|root| root.join("@anthropic-ai/sandbox-runtime"));
+    package
         .into_iter()
-        .flat_map(|dir| [dir.clone(), dir.join("../.."), dir.join("..")]);
-    std::iter::once(native)
-        .chain(
-            near.chain(global)
-                .map(|dir| dir.join(&helper))
-                .filter(|path| path.is_file())
-                .map(std::process::Command::new),
-        )
+        .flat_map(|dir| [dir.clone(), dir.join("../.."), dir.join("..")])
+        .chain(global)
+        .map(|dir| dir.join(&helper))
+        .filter(|path| path.is_file())
+        .map(|path| Filter {
+            program: "apply-seccomp",
+            command: std::process::Command::new(path),
+        })
         .collect()
 }
 
-/// `child`'s output, or `None` once it has run `secs` seconds, when it's killed.
-fn finish(mut child: std::process::Child, secs: u64) -> Option<std::process::Output> {
+/// `command`'s output, with no stdin; once it has run `secs` seconds it's
+/// killed and this errs `TimedOut`. Its output must fit a pipe's buffer.
+fn output_within(
+    command: &mut std::process::Command,
+    secs: u64,
+) -> std::io::Result<std::process::Output> {
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
-    while child.try_wait().ok()?.is_none() {
+    while child.try_wait()?.is_none() {
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return None;
+            return Err(std::io::Error::new(
+                ErrorKind::TimedOut,
+                format!("still running after {secs}s"),
+            ));
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    child.wait_with_output().ok()
+    child.wait_with_output()
 }
 
 /// Whether one of WSL2's binfmt_misc entries for Windows programs is enabled here.
@@ -694,14 +733,20 @@ pub fn prepare(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<L
         paths,
         name,
         lead,
-        probe,
+        &probe,
         ArgsFrom::Fresh,
         std::env::var_os("PATH").as_deref(),
     )
 }
 
 /// [`prepare`] for a lead resuming with the args it was started with.
-pub fn prepare_kept(paths: &Paths, name: &str, lead: &Lead, probe: Probe) -> Result<Launch> {
+/// `probe` is asked at most once, and only for a lead that gets that far.
+pub fn prepare_kept(
+    paths: &Paths,
+    name: &str,
+    lead: &Lead,
+    probe: &dyn Fn() -> Result<Sockets, Unavailable>,
+) -> Result<Launch> {
     start(
         paths,
         name,
@@ -749,7 +794,7 @@ fn start(
     paths: &Paths,
     name: &str,
     lead: &Lead,
-    probe: Probe,
+    probe: &dyn Fn() -> Result<Sockets, Unavailable>,
     from: ArgsFrom,
     path: Option<&std::ffi::OsStr>,
 ) -> Result<Launch> {
@@ -1424,12 +1469,14 @@ pub fn without_launch_flags(args: &[String]) -> Vec<String> {
 /// Checks a running lead was launched with its settings, as `claude_args`
 /// record, that they match its herd's current switches, and what the human's
 /// own settings loosen, and that its args are allowlisted. Under `require` one
-/// launched without them, loosened, or with other args is refused.
+/// launched without them, loosened, with other args, or with Unix sockets
+/// open, as `sockets_unblocked` records, is refused.
 pub fn check_running(
     paths: &Paths,
     name: &str,
     herd: &str,
     claude_args: &[String],
+    sockets_unblocked: Option<&str>,
 ) -> Result<Running> {
     let (_, mode) = herd::lead_sandbox(paths, herd)?;
     let file = settings_file(paths, name);
@@ -1471,6 +1518,29 @@ pub fn check_running(
                 &format!("{why}; {resume} to resume it sandboxed"),
             )),
         };
+    }
+    if let Some(why) = sockets_unblocked
+        && !sockets_open(paths, herd)?
+    {
+        let started =
+            format!("it was started with a sandbox that can't block Unix sockets ({why})");
+        let revive = format!("{resume} to resume it with them blocked");
+        match when_loosened(paths, herd)? {
+            WhenLoosened::Warn => warnings.push(sockets_unblocked_warning(name, why)),
+            WhenLoosened::Refuse => bail!(
+                "{name} can't run sandboxed: {started}; {revive}, or set [lead] sandbox = \
+                 \"prefer\" in herd {herd} to run it with them open"
+            ),
+            WhenLoosened::RefuseForCredentials => {
+                return Err(credentials_refusal(
+                    name,
+                    &format!(
+                        "{started}, so it could use your ssh agent; {revive}, or set [lead] \
+                         merge_guard = \"hook\" in herd {herd}"
+                    ),
+                ));
+            }
+        }
     }
     let current = settings(paths, name, herd)?;
     let on_disk = std::fs::read_to_string(&file)
@@ -1865,7 +1935,7 @@ mod tests {
             &paths,
             "lead-h",
             &lead,
-            || Ok(Sockets::Blocked),
+            &|| Ok(Sockets::Blocked),
             ArgsFrom::Fresh,
             Some("/usr/bin::/bin".as_ref()),
         )
@@ -1951,6 +2021,60 @@ mod tests {
             tried(false, "mise ERROR no tasks defined\n"),
             Tried::NotAFilter
         );
+    }
+
+    /// A filter `program` whose run under the probe prints `stderr` and exits `code`.
+    fn fake_filter(program: &'static str, stderr: &str, code: u8) -> Filter {
+        let mut command = std::process::Command::new("sh");
+        command.args([
+            "-c",
+            &format!("printf '%s' '{stderr}' >&2; exit {code}"),
+            "sh",
+        ]);
+        Filter { program, command }
+    }
+
+    #[test]
+    fn a_filter_that_blocks_ends_the_probe_before_the_next_is_looked_up() {
+        let blocks = fake_filter(
+            "claude",
+            "socat[7] E connect(5, AF=1): Operation not permitted\n",
+            1,
+        );
+        let filters = std::iter::once(blocks).chain(std::iter::once_with(|| -> Filter {
+            panic!("looked up the next filter after one blocked")
+        }));
+
+        assert_eq!(socket_filter(filters), Sockets::Blocked);
+    }
+
+    #[test]
+    fn a_filter_that_fails_its_setup_is_named_in_the_fix() {
+        let failed = fake_filter(
+            "apply-seccomp",
+            "apply-seccomp: unshare(CLONE_NEWUSER): Operation not permitted\n",
+            1,
+        );
+
+        let Sockets::Open(open) = socket_filter(std::iter::once(failed)) else {
+            panic!("a filter that failed its setup blocked");
+        };
+        assert_eq!(
+            open.fix,
+            "let it make user namespaces, as bubblewrap does \
+             (kernel.unprivileged_userns_clone, or an AppArmor profile for apply-seccomp)"
+        );
+    }
+
+    #[test]
+    fn a_probe_command_still_running_at_its_deadline_is_killed() {
+        let started = std::time::Instant::now();
+
+        let err = output_within(std::process::Command::new("sleep").arg("30"), 1).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::TimedOut);
+        assert_eq!(err.to_string(), "still running after 1s");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]
