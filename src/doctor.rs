@@ -2624,8 +2624,8 @@ mod tests {
             problems(&m, &herdr()),
             [
                 "failure herd h lead args: --add-dir /srv, from herd h's args; fix: drop it (a lead \
-              takes only --model, --effort, --verbose and --permission-mode default, auto or \
-              plan), or loopherd herd set h lead.sandbox '\"prefer\"' to start its lead with it \
+              takes only --model, --effort, --verbose and --permission-mode default, manual, auto \
+              or plan), or loopherd herd set h lead.sandbox '\"prefer\"' to start its lead with it \
               as a warning"
             ]
         );
@@ -2635,7 +2635,7 @@ mod tests {
         assert!(
             problems.contains(
                 &"warning herd h lead args: --add-dir /srv, from herd h's args; fix: drop it (a \
-                  lead takes only --model, --effort, --verbose and --permission-mode default, \
+                  lead takes only --model, --effort, --verbose and --permission-mode default, manual, \
                   auto or plan)"
                     .to_string()
             ),
