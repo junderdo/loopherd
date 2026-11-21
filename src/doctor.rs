@@ -2599,6 +2599,7 @@ mod tests {
         let kept = crate::sandbox::Lead {
             herd: "h".into(),
             args: vec![],
+            path: None,
         };
         crate::sandbox::prepare(m.paths(), "lead-h", &kept, || {
             Ok(crate::sandbox::Sockets::Blocked)
