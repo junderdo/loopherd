@@ -262,10 +262,24 @@ fn finish(mut child: std::process::Child, secs: u64) -> Option<std::process::Out
     child.wait_with_output().ok()
 }
 
-/// Whether WSL2's binfmt_misc entry for Windows programs is enabled here.
+/// Whether one of WSL2's binfmt_misc entries for Windows programs is enabled here.
 pub fn wsl_interop() -> bool {
-    std::fs::read_to_string("/proc/sys/fs/binfmt_misc/WSLInterop")
-        .is_ok_and(|text| text.lines().next() == Some("enabled"))
+    wsl_interop_in(Path::new("/proc/sys/fs/binfmt_misc"))
+}
+
+/// Newer WSL registers interop under suffixed names such as `WSLInterop-late`.
+fn wsl_interop_in(binfmt: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(binfmt) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("WSLInterop")
+            && std::fs::read_to_string(entry.path())
+                .is_ok_and(|text| text.lines().next() == Some("enabled"))
+    })
 }
 
 /// Checks `claude --version`'s output against [`MIN_CLAUDE`].
@@ -1080,8 +1094,8 @@ fn refusal_by_mode(
     })
 }
 
-/// Keys that loosen a sandbox when set to anything but `false`.
-const LOOSENING_SWITCHES: [(&str, &str); 9] = [
+/// Keys that loosen a sandbox when set to anything but `false` or an empty list.
+const LOOSENING_SWITCHES: [(&str, &str); 10] = [
     (
         "/sandbox/filesystem/disabled",
         "turns its filesystem rules off",
@@ -1105,6 +1119,10 @@ const LOOSENING_SWITCHES: [(&str, &str); 9] = [
     (
         "/sandbox/network/allowMachLookup",
         "opens macOS services to it",
+    ),
+    (
+        "/sandbox/network/allowUnixSockets",
+        "reopens those socket paths on macOS",
     ),
 ];
 
@@ -1231,9 +1249,9 @@ fn sandbox_loosenings(
         }
     }
     for (pointer, what) in LOOSENING_SWITCHES {
-        let set = user
-            .pointer(pointer)
-            .is_some_and(|v| v != &Value::Bool(false));
+        let set = user.pointer(pointer).is_some_and(|v| {
+            v != &Value::Bool(false) && v.as_array().is_none_or(|v| !v.is_empty())
+        });
         if set && own.pointer(pointer).is_none() {
             let key = pointer.trim_start_matches('/').replace('/', ".");
             found.push(format!("{shown}: {key} {what}"));
@@ -1947,5 +1965,45 @@ mod tests {
             })
         );
         assert!(claude_new_enough("").is_err());
+    }
+    #[test]
+    fn a_unix_socket_allow_list_loosens_the_sandbox_unless_it_is_empty() {
+        let home = Path::new("/home/me");
+        let file = Path::new("settings.json");
+        let own = serde_json::json!({});
+        let opened = serde_json::json!(
+            {"sandbox": {"network": {"allowUnixSockets": ["/var/run/docker.sock"]}}}
+        );
+        let empty = serde_json::json!({"sandbox": {"network": {"allowUnixSockets": []}}});
+
+        assert_eq!(
+            sandbox_loosenings(&opened, file, home, &own, &[]),
+            ["settings.json: sandbox.network.allowUnixSockets reopens those socket paths on macOS"]
+        );
+        assert_eq!(
+            sandbox_loosenings(&empty, file, home, &own, &[]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn any_enabled_wsl_interop_entry_counts_whatever_its_suffix() {
+        let binfmt = tempfile::tempdir().unwrap();
+        assert!(!wsl_interop_in(binfmt.path()));
+
+        std::fs::write(
+            binfmt.path().join("WSLInterop"),
+            "disabled\ninterpreter /init\n",
+        )
+        .unwrap();
+        std::fs::write(binfmt.path().join("status"), "enabled\n").unwrap();
+        assert!(!wsl_interop_in(binfmt.path()));
+
+        std::fs::write(
+            binfmt.path().join("WSLInterop-late"),
+            "enabled\ninterpreter /init\n",
+        )
+        .unwrap();
+        assert!(wsl_interop_in(binfmt.path()));
     }
 }
