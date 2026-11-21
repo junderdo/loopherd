@@ -10,13 +10,13 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read};
 use std::os::fd::AsRawFd;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 const SOCKET: &str = "/run/herdr-test.sock";
 
 /// lead-k leads herd k from pane w1:p1, with worker lh-1 in w1:p2, and a stub
-/// herdr whose `agent read` prints `served`. Dropping it retires lead-k, which
+/// herdr whose `agent read` prints `served`, once no `hold` file sits in the root. Dropping it retires lead-k, which
 /// stops any broker a restart left running, and waits until it has.
 struct World {
     root: tempfile::TempDir,
@@ -40,9 +40,10 @@ impl World {
             format!(
                 "#!/bin/sh\ncase \"$1 $2\" in\n\
                  'agent list') echo '{{\"result\": {{\"agents\": [{}, {}]}}}}' ;;\n\
-                 'agent read') echo served ;;\nesac\n",
+                 'agent read') while [ -e '{}' ]; do sleep 0.05; done; echo served ;;\nesac\n",
                 agent("lead-k", "w1:p1"),
-                agent("lh-1", "w1:p2")
+                agent("lh-1", "w1:p2"),
+                root.path().join("hold").display()
             ),
         );
         World { root }
@@ -77,6 +78,10 @@ impl World {
         };
         cmd.args(args);
         cmd
+    }
+
+    fn hold(&self) -> std::path::PathBuf {
+        self.root.path().join("hold")
     }
 
     fn config(&self) -> std::path::PathBuf {
@@ -125,6 +130,56 @@ fn pid_in(text: &str, before: &str) -> u32 {
 
 fn exited(pid: u32) -> bool {
     !Path::new(&format!("/proc/{pid}")).exists()
+}
+
+fn wait_with_timeout(mut child: Child, within: Duration) -> Output {
+    let given_up = Instant::now() + within;
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= given_up {
+            let _ = child.kill();
+            panic!(
+                "still running after {within:?}: {:?}",
+                child.wait_with_output()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    child.wait_with_output().unwrap()
+}
+
+/// `bwrap` with the filesystem read-only and a pid namespace of its own, as a
+/// lead's sandbox; `None` where bwrap can't make one.
+fn sandboxed() -> Option<Command> {
+    let bwrap = || {
+        let mut bwrap = Command::new("bwrap");
+        bwrap.args([
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev",
+            "/dev",
+            "--proc",
+            "/proc",
+            "--unshare-pid",
+        ]);
+        bwrap
+    };
+    bwrap()
+        .arg("true")
+        .status()
+        .is_ok_and(|s| s.success())
+        .then(bwrap)
+}
+
+fn inside(mut sandbox: Command, loopherd: &Command) -> Command {
+    sandbox
+        .arg("--")
+        .arg(loopherd.get_program())
+        .args(loopherd.get_args())
+        .envs(loopherd.get_envs().filter_map(|(k, v)| Some((k, v?))))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    sandbox
 }
 
 #[test]
@@ -257,24 +312,10 @@ fn broker_restart_run_by_a_brokers_own_request_is_refused() {
 
 #[test]
 fn a_sandboxed_leads_request_waits_out_a_restarts_gap_though_it_cant_see_the_restarts_pid() {
-    let sandboxed = || {
-        let mut bwrap = Command::new("bwrap");
-        bwrap.args([
-            "--ro-bind",
-            "/",
-            "/",
-            "--dev",
-            "/dev",
-            "--proc",
-            "/proc",
-            "--unshare-pid",
-        ]);
-        bwrap
-    };
-    if !sandboxed().arg("true").status().is_ok_and(|s| s.success()) {
+    let Some(mut sandbox) = sandboxed() else {
         eprintln!("skipped: bwrap can't make a pid namespace here");
         return;
-    }
+    };
     let world = World::new();
     let brokers = world.config().join("broker");
     fs::create_dir_all(&brokers).unwrap();
@@ -293,16 +334,10 @@ fn a_sandboxed_leads_request_waits_out_a_restarts_gap_though_it_cant_see_the_res
         0
     );
     fs::write(brokers.join("lead-k.stop"), "999999").unwrap();
-    let lead = world.loopherd(Some("w1:p1"), &["read", "lh-1"]);
     let root = world.root.path().to_str().unwrap();
-    let mut read = sandboxed();
-    read.args(["--bind", root, root, "--"])
-        .arg(lead.get_program())
-        .args(lead.get_args())
-        .envs(lead.get_envs().filter_map(|(k, v)| Some((k, v?))))
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let mut read = read.spawn().unwrap();
+    sandbox.args(["--bind", root, root]);
+    let lead = world.loopherd(Some("w1:p1"), &["read", "lh-1"]);
+    let mut read = inside(sandbox, &lead).spawn().unwrap();
     std::thread::sleep(Duration::from_millis(500));
 
     assert!(
@@ -314,4 +349,97 @@ fn a_sandboxed_leads_request_waits_out_a_restarts_gap_though_it_cant_see_the_res
     fs::remove_file(brokers.join("lead-k.stop")).unwrap();
     drop(restart);
     assert_eq!(stdout(&read.wait_with_output().unwrap()), "served\n");
+}
+
+#[test]
+fn broker_restart_waits_for_the_old_brokers_pid_while_another_broker_takes_its_lock() {
+    let world = World::new();
+    fs::write(world.hold(), "").unwrap();
+    let mut old = world.broker();
+    let old_pid = old.pid();
+    let in_flight = world
+        .loopherd(Some("w1:p1"), &["read", "lh-1"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let restart = world
+        .loopherd(None, &["broker-restart", "lead-k"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stop = world.config().join("broker/lead-k.stop");
+    while !stop.exists() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let second = world.run(None, &["broker-restart", "lead-k"]);
+    // A broker started in the gap, as a revive's would be: it retries the lock a moment.
+    let mut revived = world
+        .loopherd(None, &["broker", "lead-k"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    fs::remove_file(world.hold()).unwrap();
+    let restarted = wait_with_timeout(restart, Duration::from_secs(20));
+
+    assert!(!second.status.success());
+    assert!(
+        String::from_utf8_lossy(&second.stderr)
+            .contains("another loopherd broker-restart lead-k is running"),
+        "{second:?}"
+    );
+    assert_eq!(stdout(&in_flight.wait_with_output().unwrap()), "served\n");
+    assert!(old.wait_exited(Duration::from_secs(5)));
+    let restarted = stdout(&restarted);
+    let serving = pid_in(&restarted, " serves");
+    assert!(
+        restarted.ends_with(&format!(
+            "restarted lead-k's broker: pid {old_pid} stopped, pid {serving} serves\n"
+        )),
+        "{restarted}"
+    );
+    // Either may win the lock; the restart names whichever serves.
+    assert!(!exited(serving));
+    assert!(world.serving());
+    assert!(!stop.exists());
+    drop(world);
+    let _ = revived.kill();
+    let _ = revived.wait();
+}
+
+#[test]
+fn broker_restart_from_inside_a_leads_sandbox_is_refused_with_or_without_its_pane() {
+    let Some(_) = sandboxed() else {
+        eprintln!("skipped: bwrap can't make a pid namespace here");
+        return;
+    };
+    let world = World::new();
+    let mut broker = world.broker();
+    let requests = world
+        .root
+        .path()
+        .join("state/loopherd/broker/lead-k/requests");
+    let requests = requests.to_str().unwrap();
+
+    for pane in [Some("w1:p1"), None] {
+        let mut sandbox = sandboxed().unwrap();
+        sandbox.args(["--bind", requests, requests]);
+        let restart = world.loopherd(pane, &["broker-restart", "lead-k"]);
+        let refused = inside(sandbox, &restart).output().unwrap();
+
+        assert!(!refused.status.success(), "{pane:?}: {refused:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&refused.stderr),
+            "loopherd broker-restart: refused: broker-restart is the shepherd's or the human's, \
+             and a lead runs this loopherd\n",
+            "{pane:?}"
+        );
+    }
+    assert!(!world.config().join("broker/lead-k.stop").exists());
+    assert!(!broker.wait_exited(Duration::from_millis(300)));
+    assert!(world.serving());
 }
