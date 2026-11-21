@@ -8,6 +8,7 @@ struct Member<'a> {
     name: &'a str,
     herd: Option<&'a str>,
     lead: bool,
+    attended: bool,
     created: &'a str,
     retired: bool,
     retired_at: Option<&'a str>,
@@ -21,6 +22,7 @@ impl<'a> Member<'a> {
             name,
             herd: Some("h"),
             lead: false,
+            attended: false,
             created,
             retired: false,
             retired_at: None,
@@ -59,6 +61,11 @@ impl<'a> Member<'a> {
         self
     }
 
+    fn attended(mut self) -> Self {
+        self.attended = true;
+        self
+    }
+
     fn herd(mut self, herd: Option<&'a str>) -> Self {
         self.herd = herd;
         self
@@ -75,6 +82,9 @@ impl<'a> Member<'a> {
         });
         if let Some(outcome) = self.outcome {
             json["outcome"] = outcome.into();
+        }
+        if self.attended {
+            json["attended"] = serde_json::json!({"return_pane": "w1:p0"});
         }
         json
     }
@@ -224,6 +234,26 @@ fn each_herd_gets_a_summary_of_medians_and_maxima() {
         ),
         "{out}"
     );
+}
+
+#[test]
+fn attended_members_are_left_out() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(
+        state.path(),
+        &[
+            Member::new("grill-1", "2026-11-01T00:00:00Z")
+                .template("grill")
+                .attended()
+                .retired("2026-11-01T02:00:00Z"),
+            Member::new("lh-1", "2026-11-01T00:00:00Z").retired("2026-11-01T05:00:00Z"),
+        ],
+    );
+
+    let out = stdout(&run(state.path(), &[]));
+
+    assert!(!out.contains("grill"), "{out}");
+    assert!(out.contains("summary: 1 members: 1 merged;"), "{out}");
 }
 
 #[test]

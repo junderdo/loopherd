@@ -2297,6 +2297,28 @@ mod tests {
     }
 
     #[test]
+    fn an_attended_member_takes_no_slot_in_feed_or_the_claimable_names() {
+        let setup = Setup::new("printf '1\\n'", 1);
+        let herdr = herdr().with_agent("grill-9");
+        let mut grill = member("grill-9", Some("prs"), false);
+        grill.attended = Some(Default::default());
+        let mut ledger = ledger(&[grill]);
+        let queue = crate::herd::queue(&setup.paths(), "prs").unwrap();
+
+        let names = claimable(&ledger, &setup.paths(), &queue, "prs", 0, "1\n").unwrap();
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(names, ["zpr-1"]);
+        assert_eq!(
+            fed.lines,
+            [
+                "added zpr-1",
+                "prs: 0 retired, 1 added, 0 skipped, 0 errors"
+            ]
+        );
+    }
+
+    #[test]
     fn a_member_whose_role_is_from_another_version_is_never_checked_or_retired() {
         let setup = Setup::with_done("printf ''", 1, "touch checked; true");
         let herdr = herdr().with_agent("lh-9");

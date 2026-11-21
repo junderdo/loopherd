@@ -398,7 +398,8 @@ pub fn add(
     })
 }
 
-/// How many unretired ledger entries belong to `herd`, not counting its lead.
+/// How many unretired ledger entries belong to `herd`, not counting its
+/// lead or attended members.
 pub fn members(ledger: &dyn Ledger, herd: &str) -> Result<usize> {
     let entries = ledger.entries().context("ledger")?;
     Ok(entries
@@ -418,7 +419,7 @@ pub fn known(dir: &Path, ledger: &dyn Ledger, herd: &str) -> Result<bool> {
 
 /// Whether `record` counts against its herd's queue `max`.
 pub fn holds_slot(record: &AgentRecord) -> bool {
-    !record.retired && !record.is_lead()
+    !record.retired && !record.is_lead() && record.attended.is_none()
 }
 
 /// What `add` would do, one `key value` line each, then the prompt.

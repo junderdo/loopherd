@@ -13,7 +13,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::context::ShepherdHandoff;
 use crate::feed::{claimable, claimable_count, run_check, run_in_repo, run_source};
 use crate::github::Merges;
-use crate::herd::{self, MemberCheck, MemberChecks, Paths, lead_checks};
+use crate::herd::{self, MemberCheck, MemberChecks, Paths, holds_slot, lead_checks};
 use crate::herd_view::{Member, Options, View};
 use crate::herdr::{AgentStatus, Herdr};
 use crate::ledger::{AfterMerge, AgentRecord, Ledger, Process};
@@ -598,7 +598,7 @@ impl Checks<'_> {
                 Some(AfterMerge::Unknown(_)) => true,
                 None => due && matches!(merged, Some(Ok(true) | Err(_))),
             };
-            freed += usize::from(done == Some(Ok(true)) && !kept);
+            freed += usize::from(holds_slot(&worker) && done == Some(Ok(true)) && !kept);
             if merged == Some(Ok(true)) && (due || matches!(done, None | Some(Ok(false)))) {
                 events.push(Event::new(format!("{} {}", worker.name, line::MERGED)));
             }
