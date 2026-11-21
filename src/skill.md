@@ -649,8 +649,10 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   warn of it, and only the human sets it. Where Claude Code's seccomp
   filter can't block them (doctor says so, naming `npm install -g
   @anthropic-ai/sandbox-runtime`), `require` refuses the lead and
-  `prefer` starts it as `(lead, sockets open)`. What still gets past the
-  sandbox: workers run unsandboxed, so a lead can have one act for it,
+  `prefer` starts it as `(lead, sockets open)`; `restart` applies the
+  same rule. A `merge_guard = "credentials"` lead is refused under both.
+  Under `unix_sockets = "all"` the check refuses and flags nothing. What
+  still gets past the sandbox: workers run unsandboxed, so a lead can have one act for it,
   and most of the state dir stays writable to it. Set `prefer` only
   when the human says so; doctor names those herds and leads.
 - **Change a herd file's values** with `loopherd herd set <herd> <key>

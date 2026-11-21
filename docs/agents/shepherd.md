@@ -104,7 +104,9 @@ herdr socket, ssh agent or WSL2 interop, unless its herd sets
 `[lead] unix_sockets = "all"`, which `lead`, `revive` and doctor warn of
 (D105). Where the sandbox can't block them (no seccomp filter; doctor
 names the npm package), `require` refuses the lead and `prefer` starts it
-as `(lead, sockets open)`; installing the package is the human's. What still gets past the sandbox: workers run unsandboxed (LH-284)
+as `(lead, sockets open)`; `restart` applies the same rule. A `credentials`
+lead is refused under both. Under `unix_sockets = "all"` the check refuses
+and flags nothing; installing the package is the human's. What still gets past the sandbox: workers run unsandboxed (LH-284)
 and most of the state dir is writable (LH-298). A lead's `tell`, `read`, `status`,
 `feed`, `add`, `prompt`, `restart`, `retire` and `release` run in its
 broker, outside the sandbox and only on its own herd (D98); its watch
