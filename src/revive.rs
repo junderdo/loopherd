@@ -2082,7 +2082,7 @@ mod tests {
                 "failed lead-h: sandbox: lead-h can't run sandboxed: its args may loosen its \
                  sandbox or permissions: --dangerously-skip-permissions, from the args it was \
                  started with; a lead takes only --model, --effort, --verbose and \
-                 --permission-mode default, auto or plan, so retire it and start it again with \
+                 --permission-mode default, manual, auto or plan, so retire it and start it again with \
                  loopherd lead h, without those,"
             ),
             "{out}"
