@@ -154,7 +154,9 @@ pub fn restart(
             sandbox::create_state(req.paths, name).context("sandbox")?;
             (None, warnings)
         }
-        Some(Running::HookOnly(why, mut warnings)) => {
+        Some(Running::HookOnly(generic, mut warnings)) => {
+            // /clear doesn't relaunch Claude, so the reason recorded at launch still holds.
+            let why = record.unsandboxed.clone().unwrap_or(generic);
             warnings.push(sandbox::hook_only_warning(name, &why));
             (Some(why), warnings)
         }
@@ -1860,6 +1862,35 @@ mod tests {
         assert_eq!(
             ledger.0["lh-1"].unsandboxed.as_deref(),
             Some("it was started without its sandbox")
+        );
+    }
+
+    #[test]
+    fn a_lead_on_prefer_keeps_its_recorded_reason_for_running_without_its_sandbox() {
+        let w = World::new();
+        w.handed_off();
+        fs::write(
+            w.paths().herds.join("h.toml"),
+            "repo = \"/src/repo\"\n[lead]\nprompt = \"go\"\nsandbox = \"prefer\"\n",
+        )
+        .unwrap();
+
+        let (result, ledger) = w.restart_as(false, true, None, &|r| {
+            unsandboxed(r);
+            r.unsandboxed = Some("bubblewrap not installed".into());
+        });
+
+        let out = result.unwrap();
+        assert!(
+            out.ends_with(
+                "\nwarning: lh-1 runs without its sandbox (bubblewrap not installed), \
+                 guarded by its tool hook alone"
+            ),
+            "{out}"
+        );
+        assert_eq!(
+            ledger.0["lh-1"].unsandboxed.as_deref(),
+            Some("bubblewrap not installed")
         );
     }
 
