@@ -1125,7 +1125,10 @@ pub fn checked_repo(paths: &Paths, herd: &str) -> std::result::Result<PathBuf, S
 fn checked(file: &Path, paths: &Paths) -> std::result::Result<HerdFile, String> {
     std::fs::read_to_string(file)
         .map_err(anyhow::Error::from)
-        .and_then(|text| check(&text, paths))
+        .and_then(|text| {
+            let herd = file.file_stem().unwrap_or_default().to_string_lossy();
+            check(&herd, &text, paths)
+        })
         .map_err(|e| {
             let name = file.file_name().unwrap_or_default().to_string_lossy();
             format!("invalid {name}: {}", format!("{e:#}").trim_end())
@@ -1134,7 +1137,7 @@ fn checked(file: &Path, paths: &Paths) -> std::result::Result<HerdFile, String> 
 
 /// `text` parsed as a herd file and checked as far as `add` and `lead` would
 /// before knowing any params.
-fn check(text: &str, paths: &Paths) -> Result<HerdFile> {
+fn check(herd: &str, text: &str, paths: &Paths) -> Result<HerdFile> {
     let parsed = parse(text)?;
     for (name, template) in &parsed.template {
         check_template(name, template, paths)?;
@@ -1143,8 +1146,32 @@ fn check(text: &str, paths: &Paths) -> Result<HerdFile> {
         let prompt = read_prompt(&lead.prompt, &lead.prompt_file, paths);
         prompt.and_then(|p| check_lead_prompt(&p)).context("lead")?;
         check_mcp_servers(&lead.mcp_servers).context("lead")?;
+        // A broken config.toml is reported on its own; judge the herd with merge off.
+        let merge = lead
+            .switches()
+            .over(&lead_defaults(paths).unwrap_or_default())
+            .merge;
+        if !merge
+            && lead.merge_guard == MergeGuard::Credentials
+            && lead.unix_sockets == Some(UnixSockets::All)
+        {
+            bail!(
+                "lead: can't start with merge_guard = \"credentials\": {}",
+                credentials_with_sockets(herd)
+            );
+        }
     }
     Ok(parsed)
+}
+
+/// Why a credentials lead can't have every Unix socket open, and how to clear either switch.
+pub fn credentials_with_sockets(herd: &str) -> String {
+    format!(
+        "unix_sockets = \"all\" opens your ssh agent, Git Credential Manager through WSL2 \
+         interop and the Secret Service keyring to it, each of which acts as you; run loopherd \
+         herd unset {herd} lead.unix_sockets, or loopherd herd set {herd} lead.merge_guard \
+         '\"hook\"'"
+    )
 }
 
 fn check_mcp_servers(servers: &[String]) -> Result<()> {
@@ -3138,6 +3165,37 @@ args = ["--model", "opus"]
         assert_eq!(shown("none"), "  unix_sockets: none");
         assert!(report.contains("invalid some.toml"), "{report}");
         assert!(report.contains("unknown variant `herdr`"), "{report}");
+    }
+
+    #[test]
+    fn herds_calls_credentials_with_every_unix_socket_open_invalid() {
+        let lead = |lines: &str| format!("{LEAD_HERD}[lead]\nprompt = \"go\"\n{lines}\n");
+        let config = Config::with(&[
+            (
+                "both",
+                &lead("merge_guard = \"credentials\"\nunix_sockets = \"all\""),
+            ),
+            (
+                "merging",
+                &lead("merge = true\nmerge_guard = \"credentials\"\nunix_sockets = \"all\""),
+            ),
+            ("sockets", &lead("unix_sockets = \"all\"")),
+        ]);
+
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+
+        assert_eq!(code, 1, "{report}");
+        assert!(
+            report.contains(
+                "invalid both.toml: lead: can't start with merge_guard = \"credentials\": \
+                 unix_sockets = \"all\" opens your ssh agent, Git Credential Manager \
+                 through WSL2 interop and the Secret Service keyring to it, each of which acts \
+                 as you; run loopherd herd unset both lead.unix_sockets, or loopherd herd set \
+                 both lead.merge_guard '\"hook\"'"
+            ),
+            "{report}"
+        );
+        assert_eq!(report.matches("invalid").count(), 1, "{report}");
     }
 
     #[test]
