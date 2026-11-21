@@ -553,6 +553,10 @@ fn retire(ctx: &mut Ctx, name: &str, close: bool, force: bool, sink: &mut dyn Si
     if !close {
         let record = crate::retire::retire(ctx.ledger, name, now, Outcome::Retired)?;
         sink.out(&format!("retired {name}"));
+        // The lead's Claude may still be running on its settings.
+        for line in ctx.guard().forget_launch(name, false) {
+            sink.out(&line);
+        }
         let warnings = crate::notify::forget_marks(&mailboxes, name)
             .into_iter()
             .chain(crate::usage::record_at_retire(
@@ -2363,6 +2367,104 @@ mod tests {
         let why = "refused: lh-9 isn't a member of lead-h's herd, and lead-h runs this loopherd";
         assert_eq!(format!("{:#}", close.unwrap_err()), why);
         assert_eq!(format!("{:#}", release.unwrap_err()), why);
+    }
+
+    #[test]
+    fn a_plain_retire_of_a_lead_removes_its_mcp_servers_and_keeps_the_settings_its_claude_runs_on()
+    {
+        let world = World::new();
+        let mut lead = member("lead-x", Some("x"));
+        lead.role = Some(Role::Lead);
+        world.add(lead);
+        let sandbox = world.paths.config_dir().join("sandbox");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        for file in ["lead-x.json", "lead-x.mcp.json", "lead-x.lead.json"] {
+            std::fs::write(sandbox.join(file), "{}").unwrap();
+        }
+        let herdr = FakeHerdr::new(&[]);
+        let mut ledger = world.ledger();
+        let mut ctx = Ctx {
+            herdr: &herdr,
+            ledger: &mut ledger,
+            paths: &world.paths,
+            procs: &crate::process::ProcFs,
+            claude_dir: None,
+            caller: Caller {
+                pane: None,
+                socket: None,
+                lineage: vec![],
+                workspace: None,
+                process: me(),
+                lead: None,
+            },
+            live: same_session,
+            spawn_waiter: no_waiter,
+            prs: &NO_PRS,
+        };
+        let mut kept = Kept::default();
+
+        let code = retire_op("lead-x", false, true)
+            .carry_out(&mut ctx, &mut kept)
+            .unwrap();
+
+        let mcp = sandbox.join("lead-x.mcp.json");
+        assert_eq!(
+            (code, kept.out, kept.err),
+            (
+                0,
+                vec![
+                    "retired lead-x".into(),
+                    format!("removed {}", mcp.display())
+                ],
+                vec![]
+            )
+        );
+        assert!(!mcp.exists());
+        assert!(sandbox.join("lead-x.json").exists());
+        assert!(sandbox.join("lead-x.lead.json").exists());
+    }
+
+    #[test]
+    fn a_leads_retire_of_an_entry_forged_as_its_member_leaves_that_names_lead_files() {
+        let world = World::new();
+        world.add(member("lead-x", Some("h")));
+        let sandbox = world.paths.config_dir().join("sandbox");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        for file in ["lead-x.json", "lead-x.mcp.json"] {
+            std::fs::write(sandbox.join(file), "{}").unwrap();
+        }
+        let herdr = FakeHerdr::new(&[]);
+        let mut ledger = world.ledger();
+        let mut ctx = Ctx {
+            herdr: &herdr,
+            ledger: &mut ledger,
+            paths: &world.paths,
+            procs: &crate::process::ProcFs,
+            claude_dir: None,
+            caller: Caller {
+                pane: Some("p-lead-h".into()),
+                socket: None,
+                lineage: vec![],
+                workspace: Some("w1".into()),
+                process: me(),
+                lead: Some(ForLead {
+                    name: "lead-h".into(),
+                    herd: "h".into(),
+                }),
+            },
+            live: same_session,
+            spawn_waiter: no_waiter,
+            prs: &NO_PRS,
+        };
+        let mut kept = Kept::default();
+
+        let code = retire_op("lead-x", false, false)
+            .carry_out(&mut ctx, &mut kept)
+            .unwrap();
+
+        assert_eq!((code, kept.out), (0, vec!["retired lead-x".to_string()]));
+        assert!(sandbox.join("lead-x.mcp.json").exists());
+        assert!(sandbox.join("lead-x.json").exists());
     }
 
     #[test]

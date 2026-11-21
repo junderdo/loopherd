@@ -864,6 +864,12 @@ mod tests {
         let (path, mcp) = started_mcp(&herdr);
         assert_eq!(path, setup.root.join("config/sandbox/lead-h.mcp.json"));
         assert_eq!(mcp, serde_json::json!({"mcpServers": {}}));
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "servers' env and headers can hold secrets"
+        );
     }
 
     fn no_socket_filter() -> Result<Sockets, Unavailable> {
@@ -2288,6 +2294,57 @@ mod tests {
         assert!(ledger.0["lead-h"].retired);
         assert!(herdr.tabs().is_empty(), "{out:?}");
         assert!(!setup.worktree().exists(), "{out:?}");
+        let sandbox = setup.root.join("config/sandbox");
+        assert!(!sandbox.join("lead-h.mcp.json").exists(), "{out:?}");
+        assert!(!sandbox.join("lead-h.json").exists(), "{out:?}");
+        assert!(
+            sandbox.join("lead-h.lead.json").exists(),
+            "revive and guards read it"
+        );
+    }
+
+    #[test]
+    fn retire_close_keeping_a_leads_tab_keeps_the_settings_its_claude_still_runs_on() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        lead(
+            &herdr,
+            &mut ledger,
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+        let pane_id = ledger.0["lead-h"].pane_id.clone();
+        let own_pane = crate::tool_hook::Pane {
+            id: &pane_id,
+            socket: None,
+            lineage: &[],
+        };
+
+        let mut out = vec![];
+        crate::retire::retire_and_close(
+            &herdr,
+            &mut ledger,
+            &crate::sandbox::Guard::new(setup.paths(), None),
+            "lead-h",
+            std::time::SystemTime::now(),
+            crate::ledger::Outcome::Retired,
+            std::path::Path::new("/nonexistent/reports"),
+            None,
+            Some(&own_pane),
+            &mut out,
+        )
+        .unwrap();
+
+        let sandbox = setup.root.join("config/sandbox");
+        assert!(
+            out.iter().any(|line| line.starts_with("kept tab")),
+            "{out:?}"
+        );
+        assert!(!sandbox.join("lead-h.mcp.json").exists(), "{out:?}");
+        assert!(sandbox.join("lead-h.json").exists(), "{out:?}");
     }
 
     #[test]

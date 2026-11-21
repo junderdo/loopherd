@@ -415,6 +415,30 @@ impl Guard {
         Guard { paths, caller }
     }
 
+    /// Removes a retired lead's MCP config, and its settings once `ended`
+    /// says its Claude has, so a running Claude keeps its sandbox. A lead
+    /// caller removes nothing: it could have forged the entry. Returns a line
+    /// per file removed or failed.
+    pub fn forget_launch(&self, name: &str, ended: bool) -> Vec<String> {
+        if self.caller.is_some() {
+            return vec![];
+        }
+        let mcp = self
+            .paths
+            .config_dir()
+            .join("sandbox")
+            .join(format!("{name}.mcp.json"));
+        let settings = ended.then(|| settings_file(&self.paths, name));
+        std::iter::once(mcp)
+            .chain(settings)
+            .filter_map(|file| match std::fs::remove_file(&file) {
+                Ok(()) => Some(format!("removed {}", file.display())),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => Some(format!("warning: kept {}: {e}", file.display())),
+            })
+            .collect()
+    }
+
     /// Why the lead running this loopherd, if one does, may not act on
     /// `record` at all: it isn't a member of the lead's own herd.
     pub fn caller_refusal(&self, record: &AgentRecord) -> Result<Option<String>> {

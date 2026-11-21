@@ -254,6 +254,7 @@ pub fn retire_and_close(
             Some("tab not confirmed closed")
         }
     };
+    out.extend(guard.forget_launch(name, tab_open.is_none()));
     if let Some(path) = &record.worktree {
         if let Some(other) = other_user(ledger, name, path)? {
             out.push(format!("kept {}: in use by {other}", path.display()));
