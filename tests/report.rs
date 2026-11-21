@@ -827,3 +827,31 @@ fn a_stray_pane_writes_no_handoff() {
     assert_eq!(out.status.code(), Some(1));
     assert!(!state.path().join("loopherd/handoffs").exists());
 }
+
+#[test]
+fn a_workers_question_is_recorded_while_pane_labels_are_on_and_herdr_cant_be_reached() {
+    let state = tempfile::tempdir().unwrap();
+    write_ledger(state.path());
+    let config = state.path().join("config");
+    fs::create_dir_all(config.join("herds")).unwrap();
+    fs::write(
+        config.join("config.toml"),
+        "[notify]\nenabled = true\nherdr = false\npane_label = true\n",
+    )
+    .unwrap();
+
+    let out = loopherd(
+        state.path(),
+        Some("w1:p2"),
+        &["report", "--kind", "question", "which base?"],
+    )
+    .env("LOOPHERD_CONFIG_DIR", &config)
+    .output()
+    .unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let out = run(state.path(), None, &["reports"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.starts_with("lh-2 question 20"), "{stdout}");
+    assert!(stdout.ends_with(" which base?\n"), "{stdout}");
+}

@@ -19,7 +19,8 @@ pub fn member(member: &Member, mail: &Mail, time: &str, theme: Theme) -> Vec<Lin
             None => "lead".into(),
         },
         (false, _) if member.attended => "attended".into(),
-        (false, _) => "worker".into(),
+        (false, Some(why)) => format!("worker, unsandboxed: {why}"),
+        (false, None) => "worker".into(),
     };
     let mut lines = vec![
         Line::raw(format!("{status} {time}").trim_end().to_string()),
