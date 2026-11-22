@@ -2024,6 +2024,33 @@ fn context_limit_sets_the_workers_handoff_limit() {
 }
 
 #[test]
+fn a_percentage_context_limit_is_written_and_read_back_by_diff() {
+    let fixture = Fixture::new(&["acme"]);
+
+    assert_ok(&fixture.init(&["--context-limit", "50%"]));
+
+    assert_eq!(
+        herd_toml(&fixture)["template"]["issue"]["context_limit"].as_str(),
+        Some("50%")
+    );
+    assert_ok(&fixture.loopherd(&["herds"]));
+    let out = fixture.init(&["--diff"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
+}
+
+#[test]
+fn a_context_limit_in_k_is_written_as_tokens() {
+    let fixture = Fixture::new(&["acme"]);
+
+    assert_ok(&fixture.init(&["--context-limit", "120k"]));
+
+    assert_eq!(
+        herd_toml(&fixture)["template"]["issue"]["context_limit"].as_integer(),
+        Some(120000)
+    );
+}
+
+#[test]
 fn without_context_limit_the_template_leaves_it_unset() {
     let fixture = Fixture::new(&["acme"]);
 
@@ -2109,8 +2136,8 @@ fn on_a_terminal_init_shows_each_inferred_value_takes_edits_and_re_asks_bad_ones
         "max must be a positive integer, got \"0\"".into(),
         "Give the herd a lead, a member that feeds, watches and verifies its workers? [Y/n]: "
             .into(),
-        "Workers' handoff limit in tokens (context_limit); Enter leaves it unset, so \
-         the default 250000 applies: "
+        "Workers' handoff limit in tokens or a percentage of the window (context_limit); \
+         Enter leaves it unset, so the default 250000 applies: "
             .into(),
         "context_limit 900000 is over 800000, 80% of the 1000000-token context window".into(),
         "gh account (logged in: acme, bot) (acme): ".into(),

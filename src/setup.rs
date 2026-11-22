@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use crate::config::{self, ConfigFile};
-use crate::context::{DEFAULT_LIMIT, LARGEST_WINDOW, check_tokens};
+use crate::context::{self, DEFAULT_LIMIT, LARGEST_WINDOW, Limit};
 use crate::herd::SwitchValues;
 
 /// One group of settings: `None` to ask it only while unset (all of them
@@ -50,8 +50,8 @@ const CONTEXT_FLAG: &str = "--context window=<n>,limit=<n>,shepherd=<n>";
 #[derive(Default)]
 struct Limits {
     window: Option<u64>,
-    limit: Option<u64>,
-    shepherd: Option<u64>,
+    limit: Option<Limit>,
+    shepherd: Option<Limit>,
 }
 
 /// Sets what the flags give, then asks the groups `req` wants on `tty`, or
@@ -120,7 +120,7 @@ pub fn setup(req: Request, tty: Option<Tty>) -> Result<Vec<String>> {
     Ok(lines)
 }
 
-fn shepherd(file: &ConfigFile) -> Option<u64> {
+fn shepherd(file: &ConfigFile) -> Option<Limit> {
     file.shepherd.as_ref().and_then(|s| s.context_limit)
 }
 
@@ -128,40 +128,40 @@ fn cap(window: u64) -> u64 {
     window / 5 * 4
 }
 
-fn over_cap(limit: u64, window: u64) -> Option<String> {
-    (limit > cap(window)).then(|| {
+fn over_cap(limit: Limit, window: u64) -> Option<String> {
+    (limit.of(window) > cap(window)).then(|| {
         format!(
-            "{limit} is over the cap of {}, 80% of the {window}-token window; give {} or less, or a bigger window",
+            "{limit} is over the cap of {}, 80% of the {window}-token window; give {} or 80% or less, or a bigger window",
             cap(window),
             cap(window)
         )
     })
 }
 
-fn tokens(key: &str, text: &str) -> Result<u64> {
-    let value = text
-        .trim()
-        .replace('_', "")
-        .parse()
-        .with_context(|| format!("{key} must be a whole number of tokens, got {text:?}"))?;
-    check_tokens(key, Some(value))?;
-    Ok(value)
-}
-
 /// `--context`'s `window=<n>,limit=<n>,shepherd=<n>`, any subset, each checked.
 fn context_flag(flag: &str, file: &ConfigFile) -> Result<Limits> {
     let mut context = Limits::default();
-    for part in flag.split(',') {
+    // A comma inside a value, as in `window=1,000,000`, is a separator, not the next name.
+    let mut parts: Vec<String> = vec![];
+    for piece in flag.split(',') {
+        match parts.last_mut() {
+            Some(last) if piece.starts_with(|c: char| c.is_ascii_digit()) => {
+                last.push(',');
+                last.push_str(piece);
+            }
+            _ => parts.push(piece.to_string()),
+        }
+    }
+    for part in &parts {
         let (name, value) = part.split_once('=').unwrap_or((part, ""));
-        let (slot, key) = match name.trim() {
-            "window" => (&mut context.window, "context_window"),
-            "limit" => (&mut context.limit, "default_context_limit"),
-            "shepherd" => (&mut context.shepherd, "shepherd.context_limit"),
+        match name.trim() {
+            "window" => context.window = Some(context::tokens("context_window", value)?),
+            "limit" => context.limit = Some(context::limit("default_context_limit", value)?),
+            "shepherd" => context.shepherd = Some(context::limit("shepherd.context_limit", value)?),
             other => bail!(
                 "unknown --context name {other:?}: give window=<n>,limit=<n>,shepherd=<n>, any of them"
             ),
-        };
-        *slot = Some(tokens(key, value)?);
+        }
     }
     let window = context
         .window
@@ -187,7 +187,7 @@ fn context_flag(flag: &str, file: &ConfigFile) -> Result<Limits> {
 fn write_context(config: &Path, context: &Limits) -> Result<Vec<String>> {
     let mut lines = vec![];
     for (key, value) in [
-        ("context_window", context.window),
+        ("context_window", context.window.map(Limit::Tokens)),
         ("default_context_limit", context.limit),
         ("shepherd.context_limit", context.shepherd),
     ] {
@@ -257,64 +257,132 @@ fn ask_lead_defaults(
     Ok(on)
 }
 
-/// Asks one token count until it's valid and, for a limit, under `cap_of`'s
-/// cap; `None` when Enter keeps `shown`.
-fn ask_tokens(
-    term: &mut Terminal,
-    key: &str,
-    help: &str,
-    shown: u64,
-    cap_of: Option<u64>,
-) -> Result<Option<u64>> {
+/// One value to ask until `parse` takes it and, when `capped`, it's under the
+/// cap of `window`; Enter keeps `shown`, which comes to `kept` tokens.
+struct Question<'a> {
+    key: &'a str,
+    help: &'a str,
+    shown: Limit,
+    kept: u64,
+    window: u64,
+    capped: bool,
+    parse: fn(&str, &str) -> Result<Limit>,
+}
+
+/// The answer to `q` once it's valid, after saying what it comes to; `None` for Enter.
+fn ask(term: &mut Terminal, q: Question) -> Result<Option<Limit>> {
     loop {
-        let text = term.answer(&format!("  {key}: {help} [{shown}] "))?;
+        let text = term.answer(&format!("  {}: {} [{}] ", q.key, q.help, q.shown))?;
         if text.is_empty() {
+            term.say(&format!("  = {} tokens", grouped(q.kept)))?;
             return Ok(None);
         }
-        let problem = match tokens(key, &text) {
-            Ok(value) => match cap_of.and_then(|window| over_cap(value, window)) {
-                None => return Ok(Some(value)),
-                Some(over) => over,
-            },
-            Err(e) => format!("{e:#}"),
+        let value = match (q.parse)(q.key, &text) {
+            Ok(value) => value,
+            Err(e) => {
+                term.say(&format!("  {e:#}"))?;
+                continue;
+            }
         };
-        term.say(&format!("  {problem}"))?;
+        if let Some(over) = q.capped.then(|| over_cap(value, q.window)).flatten() {
+            term.say(&format!("  {over}"))?;
+            continue;
+        }
+        let read = match value {
+            Limit::Tokens(tokens) => format!("{} tokens", grouped(tokens)),
+            Limit::Percent(percent) => format!(
+                "{} tokens ({percent}% of {})",
+                grouped(value.of(q.window)),
+                grouped(q.window)
+            ),
+        };
+        term.say(&format!("  = {read}"))?;
+        return Ok(Some(value));
     }
 }
 
+/// `n` with a comma between each group of three digits.
+fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, digit) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// What an unset limit comes to, shown as the whole percentage of `window`
+/// nearest under it.
+fn percent_shown(limit: Option<Limit>, fallback: u64, window: u64) -> (Limit, u64) {
+    let kept = limit.map_or(fallback, |l| l.of(window)).min(cap(window));
+    let shown = match limit {
+        Some(Limit::Tokens(tokens)) if tokens > cap(window) => Limit::Tokens(kept),
+        Some(Limit::Percent(percent)) if percent > 80 => Limit::Percent(80),
+        Some(limit) => limit,
+        None => Limit::Percent((kept * 100 / window).clamp(1, 100) as u8),
+    };
+    (shown, kept)
+}
+
 fn ask_context_values(term: &mut Terminal, file: &ConfigFile) -> Result<Limits> {
-    term.say("Handoffs: past its handoff limit, a member, lead or the shepherd writes a handoff and starts a fresh session. Enter keeps the value shown.")?;
+    term.say("Handoffs: past its handoff limit, a member, lead or the shepherd writes a handoff and starts a fresh session. Give tokens as 250000, 250k or 1.5M, and a limit also as a percentage of the window like 65%. Enter keeps the value shown.")?;
     // Unset, the window comes from each session's model.
     let window = match file.context_window {
-        Some(current) => ask_tokens(
+        Some(current) => ask(
             term,
-            "context_window",
-            "tokens in your model's context window; no limit goes over 80% of it",
-            current,
-            None,
-        )?,
-        None => None,
+            Question {
+                key: "context_window",
+                help: "tokens in your model's context window; no limit goes over 80% of it",
+                shown: Limit::Tokens(current),
+                kept: current,
+                window: current,
+                capped: false,
+                parse: |key, text| context::tokens(key, text).map(Limit::Tokens),
+            },
+        )?
+        .map(|w| w.of(current)),
+        None => {
+            term.say(&format!("  The context window comes from each session's model; a percentage is of that, shown here for the largest, {}.", grouped(LARGEST_WINDOW)))?;
+            None
+        }
     };
     let effective_window = window.or(file.context_window).unwrap_or(LARGEST_WINDOW);
-    let limit = ask_tokens(
+    let shown_for = |limit: Option<Limit>| {
+        let (shown, kept) = percent_shown(limit, DEFAULT_LIMIT, effective_window);
+        match (limit, file.context_window.or(window)) {
+            (None, None) => (Limit::Tokens(kept), kept),
+            _ => (shown, kept),
+        }
+    };
+    let (shown, kept) = shown_for(file.default_context_limit);
+    let limit = ask(
         term,
-        "default_context_limit",
-        "tokens a member or lead uses before handing off, unless its herd file sets its own",
-        file.default_context_limit
-            .unwrap_or(DEFAULT_LIMIT)
-            .min(cap(effective_window)),
-        Some(effective_window),
+        Question {
+            key: "default_context_limit",
+            help: "tokens a member or lead uses before handing off, unless its herd file sets its own",
+            shown,
+            kept,
+            window: effective_window,
+            capped: true,
+            parse: context::limit,
+        },
     )?;
     let effective_limit = limit.or(file.default_context_limit);
-    let shepherd = ask_tokens(
+    let (shown, kept) = shown_for(shepherd(file).or(effective_limit));
+    let shepherd = ask(
         term,
-        "shepherd.context_limit",
-        "tokens the shepherd uses before handing off",
-        shepherd(file)
-            .or(effective_limit)
-            .unwrap_or(DEFAULT_LIMIT)
-            .min(cap(effective_window)),
-        Some(effective_window),
+        Question {
+            key: "shepherd.context_limit",
+            help: "tokens the shepherd uses before handing off",
+            shown,
+            kept,
+            window: effective_window,
+            capped: true,
+            parse: context::limit,
+        },
     )?;
     Ok(Limits {
         window,

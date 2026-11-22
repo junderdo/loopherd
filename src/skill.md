@@ -292,7 +292,8 @@ limit is the template's or `[lead]`'s `context_limit`, else `default_context_lim
 `$LOOPHERD_CONFIG_DIR/config.toml`, else 250000, never over 80% of the
 context window: that file's `context_window` if set, else the session's
 model's (1M for 4.7 and later, else 200000). An unknown model gets 200000
-and a `note` once per session. `loopherd setup --context` sets
+and a `note` once per session. A limit is tokens or a percentage of that
+window (`context_limit = "65%"`). `loopherd setup --context` sets
 the three `config.toml` values and `loopherd config get|set|unset
 <key>` reads or writes one (`context_window`, `default_context_limit`,
 `shepherd.context_limit`); change them only when the human says so. A

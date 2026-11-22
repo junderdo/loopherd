@@ -54,7 +54,7 @@ struct LeadFile {
     blocked_dialogs: Option<bool>,
     follow_ups_ready: Option<bool>,
     review_rounds: Option<NonZeroU32>,
-    context_limit: Option<u64>,
+    context_limit: Option<crate::context::Limit>,
     #[serde(default)]
     merge_guard: MergeGuard,
     #[serde(default)]
@@ -242,7 +242,7 @@ struct TemplateFile {
     /// Like `done`, exiting 0 once a member's work is merged; a lead's
     /// watch wakes on it.
     merged: Option<String>,
-    context_limit: Option<u64>,
+    context_limit: Option<crate::context::Limit>,
     /// The human sits in its member's pane; only `add` starts one (D112).
     #[serde(default)]
     attended: bool,
@@ -878,7 +878,7 @@ pub fn context_limit(
     paths: &Paths,
     member: &AgentRecord,
     model: Option<&str>,
-) -> Result<crate::context::Limit> {
+) -> Result<crate::context::SessionLimit> {
     let own = match (&member.herd, &member.template) {
         (Some(herd), _) if member.is_lead() => load(&paths.herds, herd)?
             .lead
@@ -1550,7 +1550,7 @@ fn parse(text: &str) -> Result<HerdFile> {
     }
     if let Some(lead) = &parsed.lead {
         one_prompt(&lead.prompt, &lead.prompt_file).context("lead")?;
-        crate::context::check_tokens("context_limit", lead.context_limit).context("lead")?;
+        crate::context::check_limit("context_limit", lead.context_limit).context("lead")?;
     }
     Ok(parsed)
 }
@@ -1605,7 +1605,7 @@ fn one_prompt(prompt: &Option<String>, prompt_file: &Option<String>) -> Result<(
 
 fn validate(template: &TemplateFile) -> Result<()> {
     one_prompt(&template.prompt, &template.prompt_file)?;
-    crate::context::check_tokens("context_limit", template.context_limit)?;
+    crate::context::check_limit("context_limit", template.context_limit)?;
     if template.branch.is_some() && template.worktree.is_some() {
         bail!("set one of branch and worktree, not both");
     }
@@ -4240,6 +4240,26 @@ context_limit = 90000
         assert_eq!(limit(Some("cards"), Some("plain")).unwrap(), 70_000);
         assert_eq!(limit(None, None).unwrap(), 70_000);
         assert_eq!(limit(Some("cards"), Some("pr")).unwrap(), 120_000);
+    }
+
+    #[test]
+    fn a_percentage_context_limit_is_of_config_tomls_window() {
+        let herd = "repo = \"/r\"\n[template.t]\nparams = []\nprompt = \"p\"\ncontext_limit = \"50%\"\n\
+                    [lead]\nprompt = \"p\"\ncontext_limit = \"60%\"\n";
+        let config = Config::with(&[("cards", herd)]);
+        let paths = config.paths();
+        let limit = |template, lead| {
+            context_limit(&paths, &record(Some("cards"), template, lead), None).map(|l| l.tokens)
+        };
+        assert_eq!(limit(Some("t"), false).unwrap(), 100_000);
+        assert_eq!(limit(None, true).unwrap(), 120_000);
+        fs::write(
+            config.path().join("config.toml"),
+            "context_window = 1000000\n",
+        )
+        .unwrap();
+        assert_eq!(limit(Some("t"), false).unwrap(), 500_000);
+        assert_eq!(limit(None, true).unwrap(), 600_000);
     }
 
     #[test]

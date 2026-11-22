@@ -54,6 +54,7 @@ impl Sandbox {
             fs::read_to_string(format!("{REPO}/scripts/install")).unwrap(),
         );
         for file in [
+            "install-extras",
             "install-agents.bash",
             "install-skills.bash",
             "install-herdr-plugin.bash",
@@ -423,7 +424,10 @@ fn without_a_terminal_or_the_flag_nothing_is_asked_or_installed() {
     let out = sandbox.install(&[]);
 
     assert!(
-        sandbox.herdr_calls().is_empty(),
+        sandbox
+            .herdr_calls()
+            .iter()
+            .all(|call| call.starts_with("herdr plugin list")),
         "{:?}",
         sandbox.herdr_calls()
     );

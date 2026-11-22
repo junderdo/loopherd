@@ -7,6 +7,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use crate::context::Limit;
 use crate::herd::{self, MergeGuard, Paths};
 use crate::worktree::{checkout_root, same_dir};
 
@@ -89,7 +90,8 @@ pub struct Request<'a> {
     pub max: Option<u64>,
     pub lead: Option<bool>,
     pub merge_guard: Option<MergeGuard>,
-    pub context_limit: Option<u64>,
+    /// Tokens or a percentage of the window, as the human gave it.
+    pub context_limit: Option<String>,
 }
 
 struct GitHub {
@@ -114,7 +116,7 @@ struct Herd {
     switches: String,
     /// How a lead with merge off is kept from merging; `None` with merge on.
     merge_guard: Option<MergeGuard>,
-    context_limit: Option<u64>,
+    context_limit: Option<Limit>,
     /// The limit that applies when `context_limit` is unset.
     config_limit: String,
     docs: Vec<agents::Doc>,
@@ -384,7 +386,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
     let cap = crate::context::limit_cap(&config)?;
     let unset = config_file
         .default_context_limit
-        .unwrap_or(crate::context::DEFAULT_LIMIT);
+        .map_or(crate::context::DEFAULT_LIMIT, |limit| limit.of(cap.window));
     let window = match config_file.context_window {
         Some(_) => "config.toml's",
         None => "the largest known",
@@ -402,12 +404,16 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
     };
     let context_limit = ask.value(
         &format!(
-            "Workers' handoff limit in tokens (context_limit); Enter leaves it unset, \
+            "Workers' handoff limit in tokens or a percentage of the window (context_limit); \
+             Enter leaves it unset, \
              so {config_limit} applies"
         ),
         req.context_limit
-            .or(recorded.as_ref().and_then(|r| r.context_limit))
-            .map(|l| l.to_string())
+            .clone()
+            .or(recorded
+                .as_ref()
+                .and_then(|r| r.context_limit)
+                .map(|l| l.to_string()))
             .as_deref(),
         Some(""),
         "",
@@ -415,11 +421,8 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
             if limit.is_empty() {
                 return Ok(None);
             }
-            let Ok(limit) = limit.parse::<u64>() else {
-                bail!("context_limit must be a whole number of tokens, got {limit:?}");
-            };
-            crate::context::check_tokens("context_limit", Some(limit))?;
-            if limit > cap.limit {
+            let limit = crate::context::limit("context_limit", limit)?;
+            if limit.of(cap.window) > cap.limit {
                 bail!(
                     "context_limit {limit} is over {}, 80% of the {}-token context window",
                     cap.limit,
@@ -792,10 +795,11 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
     let repo_path = toml_string(&repo.to_string_lossy());
     let lead_prompt = toml_string(&format!("{name}-lead.md"));
     let max = herd.max.to_string();
-    let context_limit = herd
-        .context_limit
-        .map(|limit| format!("context_limit = {limit}\n"))
-        .unwrap_or_default();
+    let context_limit = match herd.context_limit {
+        Some(Limit::Tokens(tokens)) => format!("context_limit = {tokens}\n"),
+        Some(percent) => format!("context_limit = \"{percent}\"\n"),
+        None => String::new(),
+    };
     let labels = &tracker.labels;
     let needs_info = prompt_text(&labels.needs_info)?;
     let (ready_for_agent_lc, needs_info_lc, ready_for_human_lc) = (
@@ -1204,7 +1208,7 @@ struct Recorded {
     lead: bool,
     merge_guard: Option<MergeGuard>,
     max: Option<u64>,
-    context_limit: Option<u64>,
+    context_limit: Option<Limit>,
     /// The worker prompt's checklist items that are a bare `check`; a reworded one is skipped.
     checks: Vec<String>,
     /// The default branch the worker prompt names.
@@ -1250,7 +1254,9 @@ impl Recorded {
                 None => None,
             },
             max: number(herd.get("queue").and_then(|q| q.get("max"))),
-            context_limit: number(issue.and_then(|t| t.get("context_limit"))),
+            context_limit: issue
+                .and_then(|t| t.get("context_limit"))
+                .and_then(|limit| limit.clone().try_into().ok()),
             checks,
             github: issue
                 .and_then(|t| t.get("merged"))
