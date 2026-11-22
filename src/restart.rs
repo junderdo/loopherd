@@ -1546,8 +1546,14 @@ mod tests {
         }
     }
 
-    /// A worker running in its sandbox in a worktree whose local settings hold `local`.
-    fn as_worker_in_worktree(w: &World, worker: &str, local: &str) -> impl Fn(&mut AgentRecord) {
+    /// A worker running in its sandbox, kept with `args`, in a worktree whose
+    /// local settings hold `local`.
+    fn as_worker_in_worktree(
+        w: &World,
+        worker: &str,
+        args: &[&str],
+        local: &str,
+    ) -> impl Fn(&mut AgentRecord) {
         let launched = as_worker(w, worker, true);
         let worktree = w.paths().herds.parent().unwrap().join("wt-lh-1");
         fs::create_dir_all(worktree.join(".claude")).unwrap();
@@ -1558,7 +1564,7 @@ mod tests {
             serde_json::json!({
                 "herd": "h",
                 "template": "t",
-                "args": ["--add-dir", "/tmp"],
+                "args": args,
                 "worktree": worktree,
             })
             .to_string(),
@@ -1571,7 +1577,8 @@ mod tests {
     fn a_required_worker_whose_kept_args_or_settings_loosen_its_sandbox_is_refused() {
         let w = World::new();
         w.handed_off();
-        let worker = as_worker_in_worktree(&w, "sandbox = \"require\"", "{}");
+        let worker =
+            as_worker_in_worktree(&w, "sandbox = \"require\"", &["--add-dir", "/tmp"], "{}");
 
         let (result, _) = w.restart_as(false, true, None, &worker);
 
@@ -1587,11 +1594,57 @@ mod tests {
     }
 
     #[test]
+    fn a_required_worker_whose_worktree_settings_loosen_its_sandbox_is_refused() {
+        let w = World::new();
+        w.handed_off();
+        let local = r#"{"permissions": {"allow": ["Write"]}}"#;
+        let worker = as_worker_in_worktree(&w, "sandbox = \"require\"", &[], local);
+
+        let (result, _) = w.restart_as(false, true, None, &worker);
+
+        let file = (w.paths().herds.parent().unwrap()).join("wt-lh-1/.claude/settings.local.json");
+        assert_eq!(
+            format!("{:#}", result.unwrap_err()),
+            format!(
+                "sandbox: lh-1 can't run sandboxed: your Claude settings loosen its sandbox: {}: \
+                 permissions.allow opens Write to writes; remove those, or set [worker] sandbox \
+                 = \"prefer\" in herd h to run it with them as warnings",
+                file.display()
+            )
+        );
+        assert!(w.herdr.prompts().is_empty());
+    }
+
+    #[test]
+    fn a_worker_running_sandboxed_without_its_mcp_lock_is_restarted_with_a_warning() {
+        let w = World::new();
+        w.handed_off();
+        let launched = as_worker(&w, "sandbox = \"require\"", true);
+        let worker = |r: &mut AgentRecord| {
+            launched(r);
+            r.claude_args.retain(|a| a != "--strict-mcp-config");
+        };
+
+        let (result, _) = w.restart_as(false, true, None, &worker);
+
+        let out = result.unwrap();
+        assert!(
+            out.ends_with(
+                "\nwarning: lh-1 was started with every MCP server you configure, not only its \
+                 herd's [worker] mcp_servers; quit its Claude and run loopherd revive --name lh-1"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("unsandboxed"), "{out}");
+    }
+
+    #[test]
     fn a_preferred_worker_whose_worktree_settings_loosen_its_sandbox_is_restarted_with_warnings() {
         let w = World::new();
         w.handed_off();
         let local = r#"{"permissions": {"allow": ["Write"]}}"#;
-        let worker = as_worker_in_worktree(&w, "sandbox = \"prefer\"", local);
+        let worker =
+            as_worker_in_worktree(&w, "sandbox = \"prefer\"", &["--add-dir", "/tmp"], local);
 
         let (result, _) = w.restart_as(false, true, None, &worker);
 
