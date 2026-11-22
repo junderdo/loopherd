@@ -124,7 +124,8 @@ defaults already hold, or an action you already bound, is skipped with a
 line saying why. herdr's keybinds help (`prefix+?`) lists them under
 "custom" by their descriptions. `loopherd install-herdr-keys --remove`
 takes out only those entries, matched by command and description, so a
-binding you wrote by hand from the snippet below stays. `status` gets no key: its output goes to
+binding you wrote by hand from the snippet below, or an earlier
+README's, stays. `status` gets no key: its output goes to
 herdr's plugin log, not the screen.
 
 Or bind it by hand and run `herdr server reload-config`:

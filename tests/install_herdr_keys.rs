@@ -16,13 +16,13 @@ const ADDED: &str = r#"
 key = "prefix+m"
 type = "plugin_action"
 command = "loopherd.view"
-description = "loopherd herd view"
+description = "loopherd: herd view"
 
 [[keys.command]]
 key = "prefix+shift+m"
 type = "plugin_action"
 command = "loopherd.view-beside-shepherd"
-description = "loopherd view beside shepherd"
+description = "loopherd: view beside shepherd"
 "#;
 
 const HUMANS: &str = r#"# my herdr config
@@ -436,4 +436,20 @@ fn a_server_that_doesnt_answer_is_reported_not_called_stopped() {
         stderr.contains("run herdr server reload-config"),
         "{stderr}"
     );
+}
+
+#[test]
+fn remove_keeps_a_binding_written_by_hand_from_the_readme_snippet() {
+    let sandbox = Sandbox::new();
+    let by_hand = [
+        "[[keys.command]]\nkey = \"prefix+m\"\ntype = \"plugin_action\"\ncommand = \"loopherd.view\"\ndescription = \"loopherd herd view\"\n",
+        "[[keys.command]]\nkey = \"f5\"\ntype = \"plugin_action\"\ncommand = \"loopherd.view-beside-shepherd\"\ndescription = \"herd view\"\n",
+    ]
+    .join("\n");
+    sandbox.write_config(&by_hand);
+    sandbox.install(&[]);
+
+    sandbox.install(&["--remove"]);
+
+    assert_eq!(sandbox.read_config(), by_hand);
 }

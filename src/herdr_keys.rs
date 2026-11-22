@@ -21,12 +21,12 @@ pub const BINDINGS: [Binding; 2] = [
     Binding {
         key: "prefix+m",
         action: "loopherd.view",
-        description: "loopherd herd view",
+        description: "loopherd: herd view",
     },
     Binding {
         key: "prefix+shift+m",
         action: "loopherd.view-beside-shepherd",
-        description: "loopherd view beside shepherd",
+        description: "loopherd: view beside shepherd",
     },
 ];
 
