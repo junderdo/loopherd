@@ -2248,7 +2248,8 @@ mod tests {
             out.ends_with(
                 "\nwarning: lh-1's sandbox can't block Unix sockets (Claude Code finds no \
                  seccomp filter), so herdr, your ssh agent and WSL2's Windows interop stay open \
-                 to it"
+                 to it; fix the sandbox check's cause, then quit its Claude and run loopherd \
+                 revive --name lh-1 to resume it with them blocked"
             ),
             "{out}"
         );

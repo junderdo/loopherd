@@ -234,7 +234,8 @@ as its main checkout. Then, in order:
    and the lead isn't started or restarted unless its `[lead]` sets
    `sandbox = "prefer"`; one with `merge_guard = "credentials"` isn't
    started or restarted even then. Under `unix_sockets = "all"` the socket
-   check is skipped: the lead isn't refused or flagged for open sockets.
+   check is skipped: the lead isn't refused or flagged for open sockets,
+   though `require` still refuses it when the sandbox can't start at all.
    What still gets past it: workers run unsandboxed, so a lead can have
    one act for it (LH-284), and most of the state dir stays writable to it
    (LH-298).
