@@ -10,6 +10,7 @@ mod handoff;
 mod herd;
 mod herd_view;
 mod herdr;
+mod herdr_keys;
 mod init;
 mod install_hook;
 mod lead;
@@ -503,6 +504,17 @@ enum Command {
         #[arg(long, value_name = "dir")]
         skills_dir: Option<PathBuf>,
     },
+    /// Bind keys to the herdr plugin's actions in herdr's config.toml
+    /// ($HERDR_CONFIG_PATH, else herdr/config.toml in $XDG_CONFIG_HOME or
+    /// ~/.config): prefix+m opens the herd view, prefix+shift+m the view beside
+    /// the shepherd. Skips an action already bound and a key the config or
+    /// herdr's defaults hold; safe to re-run. Backs the file up before changing
+    /// it and reloads a running herdr server's config.
+    InstallHerdrKeys {
+        /// Take out only the bindings this adds instead.
+        #[arg(long)]
+        remove: bool,
+    },
     /// Block until a member needs the shepherd, print what happened, and exit:
     /// an unread report (marked read), a stop from the Stop hook that leaves a
     /// member paused, finished or failed, or one going blocked or gone in
@@ -871,6 +883,9 @@ fn main() -> ExitCode {
             "install-hook",
             run_install_hook(remove, settings, skills_dir),
         ),
+        Command::InstallHerdrKeys { remove } => {
+            ("install-herdr-keys", run_install_herdr_keys(remove))
+        }
     };
     match result {
         Ok(code) => ExitCode::from(code as u8),
@@ -2446,6 +2461,87 @@ fn run_install_hook(
         }
     }
     Ok(0)
+}
+
+fn run_install_herdr_keys(remove: bool) -> Result<i32> {
+    let path = herdr_keys::config_path()?;
+    let now = SystemTime::now();
+    let written = if remove {
+        let outcome = herdr_keys::remove(&path, now)?;
+        for removed in &outcome.steps {
+            println!("removed the {} binding for {}", removed.key, removed.action);
+        }
+        if outcome.steps.is_empty() {
+            println!("no loopherd key bindings in {}", path.display());
+        }
+        outcome.written
+    } else {
+        let out = std::process::Command::new("herdr")
+            .arg("--default-config")
+            .output()
+            .context("run herdr --default-config")?;
+        if !out.status.success() {
+            bail!(
+                "herdr --default-config failed: {}; left {} unchanged",
+                String::from_utf8_lossy(&out.stderr).trim(),
+                path.display()
+            );
+        }
+        let outcome = herdr_keys::install(&path, &String::from_utf8_lossy(&out.stdout), now)?;
+        for step in &outcome.steps {
+            match step {
+                herdr_keys::Step::Bound(b) => {
+                    println!("bound {} to {} in {}", b.key, b.action, path.display())
+                }
+                herdr_keys::Step::AlreadyBound { action, key } => {
+                    println!("{action} is already bound to {key}; left as is")
+                }
+                herdr_keys::Step::KeyTaken { binding, holder } => println!(
+                    "skipped {}: {} is already bound by {holder}",
+                    binding.action, binding.key
+                ),
+            }
+        }
+        outcome.written
+    };
+    let Some(backup) = written else {
+        return Ok(0);
+    };
+    if let Some(backup) = backup {
+        println!("backup {}", backup.display());
+    }
+    reload_herdr_config();
+    Ok(0)
+}
+
+/// A failed reload is only reported: the bindings are written either way.
+fn reload_herdr_config() {
+    const WAIT: Duration = Duration::from_secs(10);
+    let failed = |why: String| {
+        eprintln!(
+            "loopherd install-herdr-keys: {why}; the bindings are written, run herdr server reload-config once herdr answers"
+        )
+    };
+    match CliHerdr.server(WAIT) {
+        Ok(herdr::Server::Running { .. }) => {
+            let mut reload = std::process::Command::new("herdr");
+            reload.args(["server", "reload-config"]);
+            match shell::run_within(&mut reload, WAIT) {
+                Ok(Some(out)) if out.status.success() => println!("reloaded herdr's config"),
+                Ok(Some(out)) => failed(format!(
+                    "herdr server reload-config failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )),
+                Ok(None) => failed("herdr server reload-config didn't answer".into()),
+                Err(e) => failed(format!("{e:#}")),
+            }
+        }
+        Ok(herdr::Server::NotRunning { .. } | herdr::Server::Missing) => {
+            println!("no herdr server running; herdr reads the bindings when it starts")
+        }
+        Ok(herdr::Server::NoAnswer { .. }) => failed("herdr's server didn't answer".into()),
+        Err(e) => failed(format!("{e:#}")),
+    }
 }
 
 /// The shell herdr started in `pane`, which a moved member's old pane id is kept for.

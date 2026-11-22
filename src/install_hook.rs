@@ -272,7 +272,7 @@ fn edit(
     Ok(Outcome::Changed { backup })
 }
 
-fn back_up(settings: &Path, bytes: &[u8], now: SystemTime) -> Result<PathBuf> {
+pub(crate) fn back_up(settings: &Path, bytes: &[u8], now: SystemTime) -> Result<PathBuf> {
     let mut name = settings.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".{}.bak", humantime::format_rfc3339_nanos(now)));
     let backup = settings.with_file_name(name);
@@ -292,7 +292,7 @@ fn back_up(settings: &Path, bytes: &[u8], now: SystemTime) -> Result<PathBuf> {
 
 /// The file a settings path names, so a symlink (e.g. into dotfiles) is
 /// written through rather than replaced, even when its target doesn't exist yet.
-fn through_symlinks(path: &Path) -> Result<PathBuf> {
+pub(crate) fn through_symlinks(path: &Path) -> Result<PathBuf> {
     let mut path = path.to_path_buf();
     for _ in 0..40 {
         match fs::symlink_metadata(&path) {
@@ -307,8 +307,8 @@ fn through_symlinks(path: &Path) -> Result<PathBuf> {
     bail!("{}: too many levels of symlinks", path.display())
 }
 
-fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
-    let dir = path.parent().context("settings path has no parent")?;
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+    let dir = path.parent().context("path has no parent")?;
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".{}.tmp", std::process::id()));

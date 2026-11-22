@@ -5,15 +5,16 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/install [--no-splash]
                        [[--with-agents] [--with-skills] [--with-herdr-plugin]
-                        [--lead-defaults [<switches>]]
+                        [--with-herdr-keys] [--lead-defaults [<switches>]]
                         [--context [<values>]] | --no-extras]
                        [--settings <file>] [install-hook args...]
 
 Build loopherd, install it as ~/.local/bin/loopherd, and add its Claude
 Stop/StopFailure/SessionStart/PreToolUse/UserPromptSubmit hooks and the loopherd skill.
 On a terminal it then offers loopherd's agent types (builder, reviewer,
-researcher, scout), the mattpocock-skills plugin and loopherd's herdr
-plugin, each default no, then runs `loopherd setup`, which asks, while
+researcher, scout), the mattpocock-skills plugin, loopherd's herdr
+plugin and herdr key bindings for that plugin's actions, each default no,
+then runs `loopherd setup`, which asks, while
 config.toml leaves them unset, which lead switches are on wherever a herd
 file's [lead] doesn't set them, and the context window and handoff limits. Last, unless --remove, it runs
 `loopherd doctor` (against --settings when given), whose failures don't
@@ -26,6 +27,8 @@ Other arguments go to `loopherd install-hook`.
   scripts/install --with-agents        also install the agent types, asking nothing else
   scripts/install --with-skills        also install the mattpocock-skills plugin, asking nothing else
   scripts/install --with-herdr-plugin  also install or update loopherd's herdr plugin, asking nothing else
+  scripts/install --with-herdr-keys    also bind prefix+m and prefix+shift+m to the plugin's views in herdr's
+                                       config.toml, asking nothing else
   scripts/install --lead-defaults      ask about the lead switches again, current values as defaults
   scripts/install --lead-defaults merge,install
                                        turn those lead switches on and the rest off (or: none), asking nothing else
@@ -39,6 +42,8 @@ Values given with --lead-defaults or --context are set right after the
 build, before anything is installed, so a bad one installs nothing.
 loopherd's herdr plugin is offered only when herdr is on PATH and the
 plugin isn't already at this checkout's version, and never with --settings.
+The key bindings are offered only once that plugin is installed, never with
+--settings, and skip a key or action already bound.
 The settings go to config.toml in $LOOPHERD_CONFIG_DIR (default
 $XDG_CONFIG_HOME/loopherd or ~/.config/loopherd), whatever --settings names.
 USAGE
@@ -48,6 +53,7 @@ splash=1
 agents=ask
 skills=ask
 herdr_plugin=ask
+herdr_keys=ask
 setup_args=()
 no_extras=
 settings=
@@ -74,6 +80,7 @@ for arg in "$@"; do
     --with-agents) agents=yes ;;
     --with-skills) skills=yes ;;
     --with-herdr-plugin) herdr_plugin=yes ;;
+    --with-herdr-keys) herdr_keys=yes ;;
     --no-extras) no_extras=1 ;;
     --lead-defaults | --context) setup_args+=("$arg") want_value=$arg ;;
     --lead-defaults=*) setup_args+=("$arg") lead_set=1 lead_list=${arg#--lead-defaults=} ;;
@@ -88,16 +95,17 @@ done
 setup=ask
 [[ ${#setup_args[@]} -eq 0 ]] || setup=given
 if [[ -n "$no_extras" ]]; then
-  [[ "$agents$skills$herdr_plugin$setup" == askaskaskask ]] || { echo "install: --no-extras can't go with --with-agents, --with-skills, --with-herdr-plugin, --lead-defaults or --context" >&2; exit 2; }
-  agents=no skills=no herdr_plugin=no setup=no
-elif [[ "$agents$skills$herdr_plugin$setup" != askaskaskask ]]; then
+  [[ "$agents$skills$herdr_plugin$herdr_keys$setup" == askaskaskaskask ]] || { echo "install: --no-extras can't go with --with-agents, --with-skills, --with-herdr-plugin, --with-herdr-keys, --lead-defaults or --context" >&2; exit 2; }
+  agents=no skills=no herdr_plugin=no herdr_keys=no setup=no
+elif [[ "$agents$skills$herdr_plugin$herdr_keys$setup" != askaskaskaskask ]]; then
   # Naming one extra means just those, with no questions.
   [[ "$agents" == yes ]] || agents=no
   [[ "$skills" == yes ]] || skills=no
   [[ "$herdr_plugin" == yes ]] || herdr_plugin=no
+  [[ "$herdr_keys" == yes ]] || herdr_keys=no
   [[ "$setup" == given ]] || setup=no
 fi
-[[ -z "$removing" ]] || agents=no skills=no herdr_plugin=no setup=no
+[[ -z "$removing" ]] || agents=no skills=no herdr_plugin=no herdr_keys=no setup=no
 
 lead_switches=(merge install rebase new_cards design_escalation blocked_dialogs follow_ups_ready)
 trim() { local s=${1#"${1%%[![:space:]]*}"}; echo "${s%"${s##*[![:space:]]}"}"; }
@@ -121,6 +129,8 @@ source "$root/scripts/install-agents.bash"
 source "$root/scripts/install-skills.bash"
 # shellcheck source=install-herdr-plugin.bash
 source "$root/scripts/install-herdr-plugin.bash"
+# shellcheck source=install-herdr-keys.bash
+source "$root/scripts/install-herdr-keys.bash"
 
 command -v jq >/dev/null || { echo "install: needs jq (to read cargo's build output); install it first" >&2; exit 1; }
 
@@ -168,6 +178,7 @@ else
   offer_skills "$skills" "$claude_dir"
 fi
 offer_herdr_plugin "$herdr_plugin" "$root/herdr-plugin/herdr-plugin.toml" "$settings"
+offer_herdr_keys "$herdr_keys" "$bin_dir/loopherd" "$settings"
 [[ "$setup" != ask ]] || "$bin_dir/loopherd" setup || echo "install: setup failed; run loopherd setup once config.toml is fixed" >&2
 # herdr may not be started yet, so a doctor failure is shown but doesn't fail the install.
 [[ -n "$removing" ]] || "$bin_dir/loopherd" doctor ${settings:+--settings "$settings"} || true
