@@ -907,6 +907,9 @@ fn task_params<'q>(queue: &'q Queue, task: &str) -> Result<(&'q str, Vec<String>
     if queue.attended.contains(template) {
         bail!("template {template} is attended, so only add starts it");
     }
+    if queue.slotless.contains(template) {
+        bail!("template {template} has slot = false, so only add starts it");
+    }
     let params: Vec<String> = words.map(String::from).collect();
     if params.len() != names.len() {
         bail!(
@@ -1181,6 +1184,7 @@ mod tests {
             process: None,
             role: None,
             attended: None,
+            no_slot: false,
             after_merge: None,
             unsandboxed: None,
             sockets_unblocked: None,
@@ -2464,6 +2468,28 @@ mod tests {
     }
 
     #[test]
+    fn a_slot_false_member_takes_no_slot_in_feed_or_the_claimable_names() {
+        let setup = Setup::new("printf '1\\n'", 1);
+        let herdr = herdr().with_agent("groom-prs");
+        let mut groom = member("groom-prs", Some("prs"), false);
+        groom.no_slot = true;
+        let mut ledger = ledger(&[groom]);
+        let queue = crate::herd::queue(&setup.paths(), "prs").unwrap();
+
+        let names = claimable(&ledger, &setup.paths(), &queue, "prs", 0, "1\n").unwrap();
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(names, ["zpr-1"]);
+        assert_eq!(
+            fed.lines,
+            [
+                "added zpr-1",
+                "prs: 0 retired, 1 added, 0 skipped, 0 errors"
+            ]
+        );
+    }
+
+    #[test]
     fn dry_run_counts_no_slot_freed_by_a_finished_attended_member() {
         let setup = Setup::with_done("printf '1\\n2\\n'", 1, "test -f done-{number}");
         setup.touch("done-9");
@@ -2600,6 +2626,31 @@ mod tests {
             fed.lines,
             [
                 "error: research 1: template research is attended, so only add starts it",
+                "added lh-2",
+                "prs: 0 retired, 1 added, 0 skipped, 1 error",
+            ]
+        );
+        assert_eq!(fed.code, LINE_ERRORS_EXIT);
+    }
+
+    #[test]
+    fn a_routed_task_naming_a_slot_false_template_is_a_bad_line() {
+        let setup = Setup::routed("printf 'research 1\\ncard 2\\n'", 5);
+        let herd_file = setup.config.path().join("herds/prs.toml");
+        let herd = fs::read_to_string(&herd_file).unwrap().replace(
+            "[template.research]\n",
+            "[template.research]\nslot = false\n",
+        );
+        fs::write(&herd_file, herd).unwrap();
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "error: research 1: template research has slot = false, so only add starts it",
                 "added lh-2",
                 "prs: 0 retired, 1 added, 0 skipped, 1 error",
             ]

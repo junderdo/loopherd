@@ -262,7 +262,7 @@ pub fn watch(
             .flatten()
             .map(|stray| stray.pane.clone())
             .collect();
-        let (members, own) = in_scope(read.view, req, &reader)?;
+        let (members, own, led_members) = in_scope(read.view, req, &reader)?;
         let names: Vec<String> = members.iter().map(|m| m.name.clone()).collect();
         // The human is in an attended member's pane: only its `gone` wakes the watch.
         let attended: HashSet<&str> = members
@@ -450,7 +450,14 @@ pub fn watch(
                 seen_live: &seen_live,
                 before: &before,
             };
-            lines.extend(drained(ledger, &flight, req, &reader, &members)?);
+            lines.extend(drained(
+                ledger,
+                &flight,
+                req,
+                &reader,
+                &members,
+                &led_members,
+            )?);
         }
         if let (Some(notify_own), Some(merges), Some(checks)) = (
             req.notify_own,
@@ -514,32 +521,40 @@ fn drained(
     req: &Request,
     reader: &Reader,
     members: &[Member],
+    led_members: &[Member],
 ) -> Result<Option<String>> {
     let Some(paths) = req.herd_files else {
         return Ok(None);
     };
     let paused = |herd: &str| matches!(pause::read(&paths.paused, herd), pause::Reading::Paused(_));
-    if let Reader::Lead { herd, .. } = reader {
-        return Ok(
-            (members.is_empty() && paused(herd)).then(|| format!("{herd} {}", line::DRAINED))
-        );
-    }
     let entries = ledger.entries()?;
-    let open_worker = |herd: &str| {
-        entries
-            .values()
-            .any(|e| !e.retired && !e.is_lead() && e.herd.as_deref() == Some(herd))
-    };
+    if let Reader::Lead { herd, .. } = reader {
+        // A slot-less member is no worker, but while it may still work its events need the lead.
+        let drained = paused(herd)
+            && !open(&entries, herd, holds_slot)
+            && !members.iter().any(|m| flight.carries(m));
+        return Ok(drained.then(|| format!("{herd} {}", line::DRAINED)));
+    }
+    let open_worker = |herd: &str| open(&entries, herd, holds_slot);
     let mut herds = 0;
     for member in members {
-        match entries.get(&member.name).and_then(|e| e.herd.as_deref()) {
+        let entry = entries.get(&member.name);
+        match entry.and_then(|e| e.herd.as_deref()) {
             None => {}
+            // Not a worker, but its flight below still counts.
+            Some(_) if entry.is_some_and(|e| e.slotless()) => {}
             Some(herd) if member.lead && paused(herd) && !open_worker(herd) => herds += 1,
             Some(_) => return Ok(None),
         }
     }
+    let slotless_of_led =
+        (led_members.iter()).filter(|m| entries.get(&m.name).is_some_and(|e| e.slotless()));
     // Mailboxes last: most polls end above without reading them.
-    let drained = herds > 0 && !members.iter().any(|m| flight.carries(m));
+    let drained = herds > 0
+        && !members
+            .iter()
+            .chain(slotless_of_led)
+            .any(|m| flight.carries(m));
     Ok(drained.then(|| format!("all {}", line::DRAINED)))
 }
 
@@ -681,7 +696,7 @@ impl Checks<'_> {
                         claimable_count(ledger, self.paths, &queue, &self.herd, &tasks)?;
                     // Read again: a feed may have opened a worker while the source ran.
                     let entries = ledger.entries()?;
-                    let no_worker = !open(&entries, &self.herd, |e| !e.is_lead());
+                    let no_worker = !open(&entries, &self.herd, holds_slot);
                     if queue.backlog.is_none() {
                         low = self.running_low(&entries, claimable, 0, queue.low_at)?;
                         out = (self.fired).out_of_work(
@@ -768,7 +783,7 @@ impl Checks<'_> {
         let herd = &self.herd;
         let key = format!("{herd} {}", line::RUNNING_LOW);
         let counts = format!("{key}  {claimable} claimable, {unready} unready");
-        let no_worker = !open(entries, herd, |e| !e.is_lead());
+        let no_worker = !open(entries, herd, holds_slot);
         let starved = self.fired.since_newest_member(
             format!("{key}, {NO_WORKERS}"),
             format!("{counts}, {NO_WORKERS}"),
@@ -837,7 +852,7 @@ impl Unled<'_> {
         let entries = ledger.entries()?;
         let mut idle = vec![];
         for herd in names {
-            if open(&entries, &herd, |_| true) {
+            if open(&entries, &herd, |e| e.is_lead() || holds_slot(e)) {
                 self.fired.out_of_work(&herd, &entries, false)?;
             } else if self.herds.is_empty() || self.herds.contains(&herd) {
                 idle.push(herd);
@@ -891,7 +906,7 @@ impl Unled<'_> {
             self.failing.remove(&herd);
             // Read again: a feed may have opened a worker while the commands ran.
             let entries = ledger.entries()?;
-            let worker = open(&entries, &herd, |e| !e.is_lead());
+            let worker = open(&entries, &herd, holds_slot);
             let out = claimable == 0 && unready == 0 && !worker;
             let Some(event) = self.fired.out_of_work(&herd, &entries, out)? else {
                 continue;
@@ -1261,7 +1276,7 @@ fn keys_under(text: &str, header: &str) -> Option<HashSet<String>> {
 
 fn since_newest_member(base: &str, herd: &str, entries: &BTreeMap<String, AgentRecord>) -> String {
     let newest = (entries.values())
-        .filter(|e| e.herd.as_deref() == Some(herd))
+        .filter(|e| e.herd.as_deref() == Some(herd) && !e.slotless())
         .map(|e| e.created.as_str())
         .max();
     match newest {
@@ -1601,7 +1616,13 @@ fn herdr_wakes(
 /// and for a lead's watch the lead itself. A herd with a lead, even a gone
 /// one, is the lead's but for the lead itself. Fails once a lead reading is
 /// no longer its herd's lead.
-fn in_scope(view: View, req: &Request, reader: &Reader) -> Result<(Vec<Member>, Option<Member>)> {
+/// The third list holds the shepherd's led herds' non-lead members, which it
+/// doesn't read but whose flight may hold off `all drained`.
+fn in_scope(
+    view: View,
+    req: &Request,
+    reader: &Reader,
+) -> Result<(Vec<Member>, Option<Member>, Vec<Member>)> {
     if let Reader::Lead { name, herd, .. } = reader {
         let own = view.herds.into_iter().find(|h| h.name == *herd);
         let (leads, workers): (Vec<_>, Vec<_>) = own
@@ -1612,19 +1633,22 @@ fn in_scope(view: View, req: &Request, reader: &Reader) -> Result<(Vec<Member>, 
         let Some(lead) = leads.into_iter().find(|m| m.name == *name) else {
             bail!("{name} was retired, so its watch ends");
         };
-        return Ok((workers, Some(lead)));
+        return Ok((workers, Some(lead), vec![]));
     }
     let mut members = vec![];
+    let mut led_members = vec![];
     for herd in view.herds {
         if req.herds.is_empty() || req.herds.contains(&herd.name) {
             let led = herd.members.iter().any(|m| m.lead);
-            members.extend(herd.members.into_iter().filter(|m| m.lead || !led));
+            let (read, unread) = (herd.members.into_iter()).partition(|m| m.lead || !led);
+            members.extend::<Vec<_>>(read);
+            led_members.extend::<Vec<_>>(unread);
         }
     }
     if req.herds.is_empty() {
         members.extend(view.ungrouped);
     }
-    Ok((members, None))
+    Ok((members, None, led_members))
 }
 
 /// `lead`'s unread questions not in `seen`, adding them; its cursor is left
@@ -1696,6 +1720,7 @@ mod tests {
             process: None,
             role: None,
             attended: None,
+            no_slot: false,
             after_merge: None,
             unsandboxed: None,
             sockets_unblocked: None,
@@ -5890,6 +5915,144 @@ mod tests {
             let woke = run(&self.herdr, &self.ledger, &dir, &req, &mut clock);
             (woke, clock.polls)
         }
+    }
+
+    impl Checked {
+        /// Opens an idle member of cards that holds no slot.
+        fn open_groom(&mut self) {
+            let groom = AgentRecord {
+                no_slot: true,
+                created: "2026-11-03T00:00:00Z".into(),
+                ..member("groom-cards", "w9:p4", Some("cards"))
+            };
+            self.add(groom, AgentStatus::Idle);
+        }
+    }
+
+    #[test]
+    fn a_slot_false_member_leaves_its_slot_to_a_claimable_task() {
+        let mut world = Checked::new();
+        world.edit_herd(|h| h.replace("max = 2", "max = 1"));
+        world.retire("lh-1");
+        world.open_groom();
+        world.touch("tasks", "2\n");
+        assert_eq!(world.once("w9:p0").unwrap(), ["lh-2 claimable"]);
+    }
+
+    #[test]
+    fn a_slot_false_member_is_no_open_worker_for_no_workers_open() {
+        let mut world = Checked::with_backlog("7 needs spec\n");
+        world.retire("lh-1");
+        world.open_groom();
+        assert_eq!(world.once("w9:p0").unwrap(), [STARVED]);
+    }
+
+    #[test]
+    fn a_slot_false_member_is_no_open_worker_for_out_of_work() {
+        let mut led = Checked::new();
+        led.retire("lh-1");
+        led.open_groom();
+        assert_eq!(led.once("w9:p0").unwrap(), ["cards out of work"]);
+
+        let mut unled = Checked::unled();
+        unled.open_groom();
+        assert_eq!(unled.shepherd().unwrap(), ["cards out of work"]);
+    }
+
+    #[test]
+    fn a_slot_false_member_opening_starts_no_new_out_of_work_streak() {
+        let mut world = Checked::new();
+        world.retire("lh-1");
+        assert_eq!(world.once("w9:p0").unwrap(), ["cards out of work"]);
+        world.open_groom();
+        assert_eq!(world.once("w9:p0"), None);
+    }
+
+    #[test]
+    fn a_slot_false_member_is_no_open_worker_for_drained() {
+        let mut world = Checked::new();
+        world.retire("lh-1");
+        world.open_groom();
+        world.pause();
+        assert_eq!(world.once("w9:p0").unwrap(), ["cards drained"]);
+    }
+
+    #[test]
+    fn a_slot_false_member_is_no_open_worker_for_all_drained() {
+        let mut world = Checked::drained();
+        world.open_groom();
+        assert_eq!(world.shepherd().unwrap(), ["all drained"]);
+    }
+
+    #[test]
+    fn a_working_slot_false_member_the_shepherd_reads_holds_off_all_drained() {
+        let mut world = Checked::drained();
+        let groom = AgentRecord {
+            no_slot: true,
+            ..member("groom-solo", "w9:p6", Some("solo"))
+        };
+        world.add(groom, AgentStatus::Working);
+        assert_eq!(world.shepherd(), None);
+        world.herdr.set_status("groom-solo", AgentStatus::Idle);
+        assert_eq!(world.shepherd().unwrap(), ["all drained"]);
+    }
+
+    impl Checked {
+        /// A paused herd whose worker retired and whose `name`, holding no
+        /// slot, is `status`; attended when `attended`.
+        fn paused_with_slotless(name: &str, attended: bool, status: AgentStatus) -> Checked {
+            let mut world = Checked::drained();
+            let record = AgentRecord {
+                no_slot: !attended,
+                attended: attended.then(Default::default),
+                created: "2026-11-03T00:00:00Z".into(),
+                ..member(name, "w9:p4", Some("cards"))
+            };
+            world.add(record, status);
+            world
+        }
+    }
+
+    #[test]
+    fn a_working_slot_less_or_attended_member_holds_off_its_leads_drained() {
+        for (name, attended) in [("groom-cards", false), ("grill-cards", true)] {
+            let world = Checked::paused_with_slotless(name, attended, AgentStatus::Working);
+            assert_eq!(world.once("w9:p0"), None, "{name} working");
+            world.herdr.set_status(name, AgentStatus::Idle);
+            assert_eq!(
+                world.once("w9:p0").unwrap(),
+                ["cards drained"],
+                "{name} idle"
+            );
+        }
+    }
+
+    #[test]
+    fn a_working_slot_less_or_attended_member_of_a_led_herd_holds_off_all_drained() {
+        for (name, attended) in [("groom-cards", false), ("grill-cards", true)] {
+            let world = Checked::paused_with_slotless(name, attended, AgentStatus::Working);
+            assert_eq!(world.shepherd(), None, "{name} working");
+            world.herdr.set_status(name, AgentStatus::Idle);
+            assert_eq!(world.shepherd().unwrap(), ["all drained"], "{name} idle");
+        }
+    }
+
+    #[test]
+    fn a_slot_false_members_gone_still_wakes_its_lead() {
+        let mut world = Checked::new();
+        world.open_groom();
+        let dir = world.reports();
+        let req = Request {
+            timeout: Some(Duration::from_secs(10)),
+            ..world.request("w9:p0")
+        };
+        let mut clock = steps(|poll| {
+            if poll == 1 {
+                world.herdr.remove_agent("groom-cards");
+            }
+        });
+        let woke = run(&world.herdr, &world.ledger, &dir, &req, &mut clock);
+        assert_eq!(woke.unwrap(), ["groom-cards gone"]);
     }
 
     #[test]

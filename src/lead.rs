@@ -181,6 +181,7 @@ fn resolve(ledger: &dyn Ledger, paths: &Paths, req: &LeadRequest) -> Result<Spaw
             ],
             role: Some(Role::Lead),
             attended: None,
+            no_slot: false,
         }),
     })
 }
