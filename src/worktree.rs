@@ -125,7 +125,9 @@ fn make_clone(repo: &Path, path: &Path, checkout: &[Vec<&str>]) -> Result<()> {
     let url = origin_url(repo)?;
     let marker = format!("{CLONE_MARKER}={}", repo.canonicalize()?.display());
     let path_str = path.to_str().context("worktree path is not UTF-8")?;
-    let repo_str = repo.to_str().context("repo path is not UTF-8")?;
+    // git refuses a linked worktree as a reference; its common dir works.
+    let reference = common_dir(repo)?;
+    let reference = reference.to_str().context("repo path is not UTF-8")?;
     // The clone reaches origin through the same rewrites the main checkout does.
     let rewrites = git(
         repo,
@@ -142,7 +144,7 @@ fn make_clone(repo: &Path, path: &Path, checkout: &[Vec<&str>]) -> Result<()> {
         "--quiet",
         "--no-checkout",
         "--reference",
-        repo_str,
+        reference,
         "--dissociate",
         "-c",
         &marker,
@@ -1837,6 +1839,30 @@ mod tests {
             !alternates.exists(),
             "the clone still borrows the main checkout's objects"
         );
+    }
+
+    #[test]
+    fn a_herd_whose_repo_is_a_linked_worktree_still_gets_a_clone() {
+        let root = tempfile::tempdir().unwrap();
+        let main = repo_with_origin(root.path());
+        let linked = root.path().join("linked/linked");
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "side",
+                linked.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let wt = ensure_worktree(&linked, "feat/new").unwrap();
+
+        assert!(wt.join(".git").is_dir());
+        assert_eq!(current_branch(&wt), "feat/new");
     }
 
     #[test]
