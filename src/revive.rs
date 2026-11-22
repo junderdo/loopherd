@@ -55,6 +55,8 @@ pub struct ReviveRequest {
     /// Run instead of `broker` for a lead whose recorded `PATH` revive
     /// changed, so a broker already running takes it on.
     pub restart_broker: RestartBroker,
+    /// Only start the brokers of alive leads: resume, prompt and note nothing.
+    pub brokers_only: bool,
 }
 
 /// One line per entry, and whether any entry failed.
@@ -91,7 +93,9 @@ pub fn revive(
     let mut revived = Revived::default();
     let mut startup_warnings = vec![];
     let handoff = match (&req.startup, req.server) {
-        (Some(_), Some(server)) => Handoff::read(herdr, procs, server, &mut startup_warnings),
+        (Some(_), Some(server)) if !req.brokers_only => {
+            Handoff::read(herdr, procs, server, &mut startup_warnings)
+        }
         _ => None,
     };
     revived
@@ -193,18 +197,24 @@ pub fn revive(
             }
         }
         let mut handoff_warnings = vec![];
-        rearm_lead(
-            herdr,
-            req,
-            &record,
-            handoff.as_ref(),
-            &mut outcome,
-            &mut handoff_warnings,
-        );
+        if !req.brokers_only {
+            rearm_lead(
+                herdr,
+                req,
+                &record,
+                handoff.as_ref(),
+                &mut outcome,
+                &mut handoff_warnings,
+            );
+        }
         let line = outcome.line(&record);
         // Nobody reads a startup hook's output, so a lead's line goes to the
         // shepherd's next watch unless its own watch already runs.
-        let noted = req.startup.is_some() && !req.dry_run && record.is_lead() && !record.retired;
+        let noted = req.startup.is_some()
+            && !req.brokers_only
+            && !req.dry_run
+            && record.is_lead()
+            && !record.retired;
         // The shepherd reads leads' mailboxes, so startup warnings reach it there.
         let warned = startup_warnings.iter().chain(&handoff_warnings);
         for text in warned
@@ -222,6 +232,7 @@ pub fn revive(
             && !record.retired
             && !req.dry_run
             && !elsewhere(here.as_deref(), &record)
+            && (!req.brokers_only || matches!(outcome, Outcome::Alive { .. }))
             && let Err(e) = match path_changed {
                 true => (req.restart_broker)(&req.paths, &record.name),
                 false => (req.broker)(&req.paths, &record.name).map(|_| ()),
@@ -660,6 +671,17 @@ pub(crate) fn elsewhere(here: Option<&Path>, record: &AgentRecord) -> bool {
     matches!((here, &record.socket), (Some(here), Some(there)) if !same_dir(here, there))
 }
 
+fn alive(agents: &[Agent], record: &AgentRecord) -> Option<Outcome> {
+    let live = agents
+        .iter()
+        .find(|a| a.session_id.is_some() && a.session_id == record.session_id)?;
+    Some(Outcome::Alive {
+        pane_id: live.pane_id.clone(),
+        blocked: live.status == AgentStatus::Blocked,
+        rearm: Rearm::NotSent,
+    })
+}
+
 fn revive_one(
     herdr: &dyn Herdr,
     req: &ReviveRequest,
@@ -674,6 +696,10 @@ fn revive_one(
     }
     if let Some(there) = record.socket.as_ref().filter(|_| elsewhere(here, record)) {
         return Outcome::Skipped(format!("recorded on {}", there.display()));
+    }
+    if req.brokers_only {
+        return alive(agents, record)
+            .unwrap_or_else(|| Outcome::Skipped("revive on startup is off".into()));
     }
     let lead = match kept_lead(&req.paths, record, req.name.as_deref()) {
         Ok(lead) => lead,
@@ -705,15 +731,8 @@ fn revive_one(
     if !cwd.is_dir() {
         return Outcome::Skipped(format!("cwd {} is gone", cwd.display()));
     }
-    if let Some(live) = agents
-        .iter()
-        .find(|a| a.session_id.is_some() && a.session_id == record.session_id)
-    {
-        return Outcome::Alive {
-            pane_id: live.pane_id.clone(),
-            blocked: live.status == AgentStatus::Blocked,
-            rearm: Rearm::NotSent,
-        };
+    if let Some(alive) = alive(agents, record) {
+        return alive;
     }
     // A pane the human closed before the merge is one they were done with.
     if record.attended.is_some() && req.name.is_none() && last_is_gone(&req.reports_dir, record) {
@@ -925,6 +944,7 @@ mod tests {
             sandbox: || Ok(crate::sandbox::Sockets::Blocked),
             broker: |_, _| Ok(false),
             restart_broker: |_, _| Ok(()),
+            brokers_only: false,
         }
     }
 
@@ -3516,6 +3536,74 @@ mod tests {
         let herdr = dev_herdr();
         let pane = herdr.add_tab("w1", "lead-h", Path::new("/tmp"), false);
         herdr.with_live_agent(Some("lead-h"), Some("sess-lead-h"), &pane)
+    }
+
+    fn record_brokers(paths: &Paths, lead: &str) -> Result<bool> {
+        let file = paths.state_dir().join("brokers-started");
+        let started = std::fs::read_to_string(&file).unwrap_or_default();
+        std::fs::create_dir_all(paths.state_dir())?;
+        std::fs::write(&file, format!("{started}{lead}\n"))?;
+        Ok(true)
+    }
+
+    #[test]
+    fn a_brokers_only_startup_starts_alive_leads_brokers_and_resumes_prompts_and_notes_nothing() {
+        let cwd = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let herdr = alive_lead_herdr();
+        let mut ledger = ledger([
+            dev(lead("lead-h", cwd.path())),
+            dev(lead("lead-d", cwd.path())),
+            dev(AgentRecord {
+                retired: true,
+                ..lead("lead-r", cwd.path())
+            }),
+            dev(record("w", cwd.path())),
+        ]);
+        let req = ReviveRequest {
+            brokers_only: true,
+            broker: record_brokers,
+            ..startup(state.path())
+        };
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(
+            out,
+            "skipped lead-d: revive on startup is off\n\
+             alive lead-h w1:p1\n\
+             skipped lead-r: retired\n\
+             skipped w: revive on startup is off"
+        );
+        let started = std::fs::read_to_string(own_paths().state_dir().join("brokers-started"));
+        assert_eq!(started.unwrap(), "lead-h\n");
+        assert!(herdr.started().is_empty());
+        assert!(herdr.prompts().is_empty());
+        assert!(notes(state.path(), "lead-h").is_empty());
+        assert!(notes(state.path(), "lead-d").is_empty());
+    }
+
+    #[test]
+    fn a_brokers_only_startup_starts_no_broker_on_a_dry_run_or_for_a_lead_on_another_socket() {
+        let cwd = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let herdr = alive_lead_herdr();
+        let elsewhere = on_socket(lead("lead-h", cwd.path()), Some("/run/live.sock"));
+        for (record, dry_run) in [(dev(lead("lead-h", cwd.path())), true), (elsewhere, false)] {
+            let mut ledger = ledger([record]);
+            let req = ReviveRequest {
+                brokers_only: true,
+                dry_run,
+                broker: |_, lead| anyhow::bail!("started a broker for {lead}"),
+                ..startup(state.path())
+            };
+
+            let (out, code) = run(&herdr, &mut ledger, &req);
+
+            assert_eq!(code, 0, "{out}");
+            assert!(herdr.prompts().is_empty());
+        }
     }
 
     #[test]

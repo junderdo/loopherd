@@ -786,13 +786,16 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   never installs loopherd or its hooks; installing stays as above. It
   needs herdr 0.7.5+.
   Its startup hook runs `loopherd revive --startup` each time herdr
-  restores a session or a new server takes over, which does nothing
-  unless `config.toml` sets `[herdr_plugin] revive_on_startup = true`
-  (set it only when the human says so; `loopherd herds` validates it).
-  On, it revives only members recorded on the socket herdr gives the
-  hook (`HERDR_SOCKET_PATH`, never one recorded without a socket), so a
-  dev server's startup never touches the live session's members, and
-  the other way round. herdr shows you nothing of the hook's run, so it
+  restores a session or a new server takes over. It touches only
+  members recorded on the socket herdr gives the hook
+  (`HERDR_SOCKET_PATH`, never one recorded without a socket), so a dev
+  server's startup never touches the live session's members, and the
+  other way round. It always starts a broker for each alive lead there
+  that has none. Only with `[herdr_plugin] revive_on_startup = true`
+  does it also resume members and prompt leads; `loopherd setup` asks
+  the human for it, and `loopherd config set
+  herdr_plugin.revive_on_startup` sets it (only when the human says so).
+  Off, it resumes, prompts and notes nothing. herdr shows you nothing of the hook's run, so it
   copies each lead's line, unless that lead's watch is running, into the
   lead's mailbox as a `note` starting `herdr's startup revive:`; your
   next watch surfaces them. A second revive waits for a running one,

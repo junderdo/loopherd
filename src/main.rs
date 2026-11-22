@@ -152,15 +152,17 @@ enum Command {
     /// layout: `context_window`, `default_context_limit` or
     /// `shepherd.context_limit`, each a number of tokens,
     /// `lead_defaults.review_rounds`, each lead's review-round limit,
-    /// `shepherd.self_restart` (`true` or `false`), or
+    /// `shepherd.self_restart` or `herdr_plugin.revive_on_startup` (`true` or
+    /// `false`), or
     /// `view.theme`, `loopherd view`'s palette: `purple-orange`, `phosphor`
     /// or `catppuccin`.
     Config {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// Set config.toml's machine-wide settings: the lead defaults, then the
-    /// context window and the handoff limits. On a terminal (/dev/tty, so it
+    /// Set config.toml's machine-wide settings: the lead defaults, the
+    /// context window and the handoff limits, then whether herdr's startup
+    /// hook resumes members. On a terminal (/dev/tty, so it
     /// works under `curl … | sh`) it asks each group while config.toml leaves
     /// it unset, current values as defaults, Enter keeping a value. Without
     /// one it asks nothing and names the flags for whatever is unset. Naming
@@ -244,9 +246,10 @@ enum Command {
         /// Only this ledger entry.
         #[arg(long)]
         name: Option<String>,
-        /// As herdr's startup hook: nothing unless config.toml sets
-        /// [herdr_plugin] revive_on_startup = true, then only entries recorded
-        /// on this herdr's socket, noting what it did to each lead whose watch isn't running.
+        /// As herdr's startup hook: only entries recorded on this herdr's socket.
+        /// It starts alive leads' brokers; only with [herdr_plugin]
+        /// revive_on_startup = true in config.toml does it also resume members,
+        /// noting what it did to each lead whose watch isn't running.
         #[arg(long, conflicts_with = "name")]
         startup: bool,
     },
@@ -586,7 +589,7 @@ enum HerdAction {
 #[derive(Args)]
 struct SetupArgs {
     /// Ask every group again, current values as defaults.
-    #[arg(long, conflicts_with_all = ["lead_defaults", "context"])]
+    #[arg(long, conflicts_with_all = ["lead_defaults", "context", "revive_on_startup"])]
     again: bool,
     /// Turn these lead switches on and the rest off: a comma list such as
     /// `merge,install`, or `none`. Alone, ask about them again.
@@ -597,6 +600,11 @@ struct SetupArgs {
     /// A limit over 80% of the window is refused. Alone, ask about them again.
     #[arg(long, value_name = "window=N,limit=N,shepherd=N", num_args = 0..=1)]
     context: Option<Option<String>>,
+    /// Whether herdr's startup hook also resumes members and prompts leads
+    /// (`true` or `false`); alive leads' brokers start either way. Alone,
+    /// ask about it again.
+    #[arg(long, value_name = "true|false", num_args = 0..=1)]
+    revive_on_startup: Option<Option<String>>,
 }
 
 #[derive(Subcommand)]
@@ -1068,6 +1076,7 @@ fn run_setup(args: SetupArgs) -> Result<i32> {
             again: args.again,
             lead_defaults: args.lead_defaults,
             context: args.context,
+            revive_on_startup: args.revive_on_startup,
         },
         terminal
             .as_mut()
@@ -1148,21 +1157,25 @@ fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32>
     if !dry_run && !matches!(caller, Ok(None)) {
         bail!(refusal);
     }
+    let mut brokers_only = false;
     let startup = match startup {
         false => None,
         true => {
             let config = herd::config_file(&Paths::from_env().context("config")?);
-            if !config::revive_on_startup(&config)? {
+            let full = config::revive_on_startup(&config)?;
+            // Never herdr's own answer: outside a hook that is whichever server the CLI reaches.
+            let socket = socket_from_env().context(
+                "refused: HERDR_SOCKET_PATH is unset; --startup revives only the members of the herdr whose startup hook runs it",
+            )?;
+            if !full {
                 println!(
-                    "revive on startup is off; set [herdr_plugin] revive_on_startup = true in {} to turn it on",
+                    "revive on startup is off, so this is for alive leads' brokers only; \
+                     set [herdr_plugin] revive_on_startup = true in {} to resume and prompt members too",
                     config.display()
                 );
-                return Ok(0);
+                brokers_only = true;
             }
-            // Never herdr's own answer: outside a hook that is whichever server the CLI reaches.
-            Some(socket_from_env().context(
-                "refused: HERDR_SOCKET_PATH is unset; --startup revives only the members of the herdr whose startup hook runs it",
-            )?)
+            Some(socket)
         }
     };
     let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
@@ -1182,6 +1195,7 @@ fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32>
         restart_broker: |paths, lead| {
             broker::restart_broker(paths, lead, &runnable_exe()?, &mut Printed)
         },
+        brokers_only,
     };
     let (message, code) = revive(
         &CliHerdr,

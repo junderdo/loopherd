@@ -155,7 +155,7 @@ fn a_first_setup_asks_the_lead_switches_then_the_context_values() {
 
 #[test]
 fn enter_keeps_each_context_value_and_writes_nothing() {
-    let text = "[lead_defaults]\nmerge = true\n";
+    let text = "[lead_defaults]\nmerge = true\n\n[herdr_plugin]\nrevive_on_startup = false\n";
     let config = Config::new(Some(text));
 
     let Some(out) = config.setup_on_terminal(&[], "\n\n\n") else {
@@ -169,8 +169,9 @@ fn enter_keeps_each_context_value_and_writes_nothing() {
 }
 
 #[test]
-fn once_both_groups_are_set_setup_asks_nothing_until_again() {
-    let text = "context_window = 1000000\n\n[lead_defaults]\nmerge = true\n";
+fn once_every_group_is_set_setup_asks_nothing_until_again() {
+    let text = "context_window = 1000000\n\n[lead_defaults]\nmerge = true\n\n\
+                [herdr_plugin]\nrevive_on_startup = false\n";
     let config = Config::new(Some(text));
 
     let Some(out) = config.setup_on_terminal(&[], "") else {
@@ -243,6 +244,8 @@ fn a_bad_flag_is_refused_and_changes_nothing() {
         ["--lead-defaults=merge", "--context=size=500000"],
         ["--lead-defaults=merge", "--context=window=5000"],
         ["--lead-defaults=merge", "--context=window=lots"],
+        ["--lead-defaults=merge", "--revive-on-startup=yes"],
+        ["--context=window=1000000", "--revive-on-startup=yes"],
     ] {
         let config = Config::new(None);
 
@@ -343,6 +346,75 @@ fn an_invalid_config_fails_setup() {
         "{out:?}"
     );
     assert_eq!(config.text().unwrap(), text);
+}
+
+fn revive_on_startup(table: &toml::Table) -> Option<bool> {
+    table
+        .get("herdr_plugin")?
+        .get("revive_on_startup")
+        .and_then(toml::Value::as_bool)
+}
+
+const OTHER_GROUPS_SET: &str = "context_window = 1000000\n\n[lead_defaults]\nmerge = true\n";
+
+#[test]
+fn setup_asks_revive_on_startup_while_unset_saying_brokers_start_regardless() {
+    for (answer, want) in [("y\n", true), ("\n", false)] {
+        let config = Config::new(Some(OTHER_GROUPS_SET));
+
+        let Some(out) = config.setup_on_terminal(&[], answer) else {
+            return;
+        };
+
+        assert!(
+            out.contains("alive leads' brokers start whatever you answer"),
+            "{out}"
+        );
+        assert!(out.contains("revive_on_startup: "), "{out}");
+        assert!(out.contains("[y/N]"), "{out}");
+        assert_eq!(revive_on_startup(&config.values()), Some(want), "{out}");
+
+        let Some(out) = config.setup_on_terminal(&[], "") else {
+            return;
+        };
+        assert!(!out.contains("revive_on_startup"), "{out}");
+    }
+}
+
+#[test]
+fn the_revive_on_startup_flag_sets_it_without_asking_or_asks_alone() {
+    let config = Config::new(None);
+    let out = succeeded(&config.setup(&["--revive-on-startup", "true"]));
+    assert!(out.contains("set revive_on_startup: true"), "{out}");
+    assert_eq!(revive_on_startup(&config.values()), Some(true));
+    assert_eq!(int(&config.values(), "context_window"), None);
+
+    let out = config.setup(&["--revive-on-startup=yes"]);
+    assert!(!out.status.success(), "{out:?}");
+    assert_eq!(revive_on_startup(&config.values()), Some(true));
+
+    let Some(out) = config.setup_on_terminal(&["--revive-on-startup"], "n\n") else {
+        return;
+    };
+    assert!(
+        out.contains("revive_on_startup: ") && out.contains("[Y/n]"),
+        "{out}"
+    );
+    assert!(!out.contains("merge a PR"), "{out}");
+    assert_eq!(revive_on_startup(&config.values()), Some(false));
+}
+
+#[test]
+fn without_a_terminal_setup_names_the_revive_on_startup_flag_while_unset() {
+    let config = Config::new(Some(OTHER_GROUPS_SET));
+    let out = succeeded(&config.setup(&[]));
+    assert!(out.contains("--revive-on-startup <true|false>"), "{out}");
+
+    let config = Config::new(Some(&format!(
+        "{OTHER_GROUPS_SET}\n[herdr_plugin]\nrevive_on_startup = false\n"
+    )));
+    let out = succeeded(&config.setup(&[]));
+    assert!(!out.contains("--revive-on-startup"), "{out}");
 }
 
 #[test]

@@ -318,7 +318,11 @@ fn revive_on_startup_runs_with_a_lead_s_pane_focused() {
 
     let out = run_in_lead_pane(state.path(), &socket, &["revive", "--startup"]);
 
-    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    // Past the refusal it reaches herdr, which isn't on this test's PATH.
+    assert!(
+        String::from_utf8_lossy(&out.stderr).starts_with("loopherd revive: settle:"),
+        "{out:?}"
+    );
     assert!(
         String::from_utf8_lossy(&out.stdout).starts_with("revive on startup is off"),
         "{out:?}"

@@ -108,11 +108,12 @@ pub fn set_lead_defaults(config: &Path, on: &str) -> Result<()> {
 }
 
 /// The keys `config get`, `set` and `unset` take.
-pub const KEYS: [&str; 6] = [
+pub const KEYS: [&str; 7] = [
     "context_window",
     "default_context_limit",
     "shepherd.context_limit",
     "shepherd.self_restart",
+    "herdr_plugin.revive_on_startup",
     "lead_defaults.review_rounds",
     "view.theme",
 ];
@@ -126,6 +127,12 @@ pub fn get(config: &Path, key: &str) -> Result<Option<String>> {
             return Ok(file
                 .shepherd
                 .and_then(|s| s.self_restart)
+                .map(|on| on.to_string()));
+        }
+        "herdr_plugin.revive_on_startup" => {
+            return Ok(file
+                .herdr_plugin
+                .and_then(|p| p.revive_on_startup)
                 .map(|on| on.to_string()));
         }
         "context_window" => file.context_window,
@@ -152,7 +159,9 @@ pub fn set(config: &Path, key: &str, value: &str) -> Result<()> {
                 .map_err(anyhow::Error::msg)?
                 .name(),
         ),
-        "shepherd.self_restart" => Value::from(switch(key, value)?),
+        "shepherd.self_restart" | "herdr_plugin.revive_on_startup" => {
+            Value::from(switch(key, value)?)
+        }
         _ => Value::from(whole_number(key, value)?),
     };
     edit(config, |doc| {
@@ -176,7 +185,7 @@ pub fn set(config: &Path, key: &str, value: &str) -> Result<()> {
     })
 }
 
-fn switch(key: &str, value: &str) -> Result<bool> {
+pub fn switch(key: &str, value: &str) -> Result<bool> {
     match value.trim() {
         "true" => Ok(true),
         "false" => Ok(false),
@@ -757,6 +766,28 @@ mod key_tests {
         assert!(unset(&path, "shepherd.self_restart").unwrap());
         assert_eq!(get(&path, "shepherd.self_restart").unwrap(), None);
         assert!(!self_restart(&path).unwrap());
+    }
+
+    #[test]
+    fn revive_on_startup_round_trips_through_set_get_and_unset() {
+        let (_dir, path) = config_with("");
+        let key = "herdr_plugin.revive_on_startup";
+        assert_eq!(get(&path, key).unwrap(), None);
+
+        set(&path, key, "true").unwrap();
+        assert!(revive_on_startup(&path).unwrap());
+        assert_eq!(get(&path, key).unwrap().as_deref(), Some("true"));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[herdr_plugin]\nrevive_on_startup = true\n"
+        );
+        set(&path, key, "false").unwrap();
+        assert_eq!(get(&path, key).unwrap().as_deref(), Some("false"));
+        assert!(set(&path, key, "yes").is_err());
+
+        assert!(unset(&path, key).unwrap());
+        assert_eq!(get(&path, key).unwrap(), None);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "");
     }
 
     #[test]
