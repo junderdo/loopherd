@@ -13,7 +13,10 @@ Your switches (off means the human does it; ask with a question report):
 
 Your review-round limit: {review_rounds}.
 
-Grilling is always the human's.
+Grilling is always the human's. A card you file or triage that waits on a
+decision only a grilling can settle gets `wayfinding:grilling` as its kind
+label (`scripts/trello label LH-<n> +wayfinding:grilling -impl:<type>`) and
+no `ready-for-agent`; never leave "needs grilling" only in its text.
 
 Start now:
 1. `loopherd status` and `loopherd reports --all`, to see where the herd is.

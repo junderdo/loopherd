@@ -384,13 +384,25 @@ fn herd_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
                 format!("loopherd herd set {herd} lead.sandbox '\"require\"'"),
             ));
         }
-        if let Ok(worker) = crate::herd::worker(paths, &herd)
-            && worker.sandbox == WorkerSandbox::Prefer
-        {
+        let credentials = matches!(
+            crate::herd::merge_guard(paths, &herd),
+            Ok(Some(MergeGuard::Credentials))
+        );
+        let worker_detail = match crate::herd::worker(paths, &herd).map(|w| w.sandbox) {
+            Ok(WorkerSandbox::Off) if credentials => Some(
+                "sandbox off: its lead is kept from your GitHub credentials, but its workers \
+                 run with your gh",
+            ),
+            // Under credentials, prepare refuses rather than starts a worker unsandboxed.
+            Ok(WorkerSandbox::Prefer) if !credentials => Some(
+                "sandbox prefer: its workers start unsandboxed whenever their sandbox can't start",
+            ),
+            _ => None,
+        };
+        if let Some(detail) = worker_detail {
             checks.push(warning(
                 &format!("herd {herd} workers"),
-                "sandbox prefer: its workers start unsandboxed whenever their sandbox can't start"
-                    .into(),
+                detail.into(),
                 format!("loopherd herd set {herd} worker.sandbox '\"require\"'"),
             ));
         }
@@ -2944,6 +2956,42 @@ mod tests {
     }
 
     #[test]
+    fn a_credentials_herd_whose_workers_sandbox_is_off_is_named() {
+        let m = machine(&ALL);
+        for (herd, lines) in [
+            ("off", "[worker]\nsandbox = \"off\"\n"),
+            ("unset", ""),
+            ("req", "[worker]\nsandbox = \"require\"\n"),
+        ] {
+            let repo = m.herd(herd);
+            m.herd_file(
+                herd,
+                &format!(
+                    "repo = {:?}\n[template.t]\nparams = []\nprompt = \"go\"\n\
+                     [lead]\nprompt = \"go\"\nmerge_guard = \"credentials\"\n{lines}",
+                    repo.to_str().unwrap()
+                ),
+            );
+        }
+
+        let checks = m.checks(None, &herdr()).unwrap();
+
+        let workers: Vec<String> = checks
+            .iter()
+            .filter(|c| c.name.ends_with(" workers"))
+            .map(|c| format!("{} {:?}: {}; fix: {:?}", c.name, c.status, c.detail, c.fix))
+            .collect();
+        let warned = |herd: &str| {
+            format!(
+                "herd {herd} workers Warning: sandbox off: its lead is kept from your GitHub \
+                 credentials, but its workers run with your gh; fix: Some(\"loopherd herd set \
+                 {herd} worker.sandbox '\\\"require\\\"'\")"
+            )
+        };
+        assert_eq!(workers, [warned("off"), warned("unset")]);
+    }
+
+    #[test]
     fn a_running_worker_without_its_herds_sandbox_is_named_and_one_in_an_off_herd_isnt() {
         let m = machine(&ALL);
         for (herd, worker) in [("h", "require"), ("plain", "off")] {
@@ -3410,7 +3458,8 @@ mod tests {
         m.herd_file(
             "h",
             &format!(
-                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge_guard = \"credentials\"\n",
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge_guard = \"credentials\"\n\
+                 [worker]\nsandbox = \"require\"\n",
                 repo.to_str().unwrap()
             ),
         );

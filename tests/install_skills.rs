@@ -52,7 +52,11 @@ impl Sandbox {
             &root.join("scripts/install"),
             fs::read_to_string(format!("{REPO}/scripts/install")).unwrap(),
         );
-        for file in ["install-agents.bash", "install-skills.bash"] {
+        for file in [
+            "install-agents.bash",
+            "install-skills.bash",
+            "install-herdr-plugin.bash",
+        ] {
             fs::copy(
                 format!("{REPO}/scripts/{file}"),
                 root.join(format!("scripts/{file}")),

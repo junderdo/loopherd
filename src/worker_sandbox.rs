@@ -7,13 +7,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::handoff;
-use crate::herd::{self, Paths};
+use crate::herd::{self, MergeGuard, Paths};
 use crate::herdr::Herdr;
 use crate::ledger::{AgentRecord, Ledger};
 use crate::sandbox::{
-    ALLOWED_ARGS, Sockets, Unavailable, UnixSockets, disallowed_warning, edit_rule, entries_but,
-    file_rule, launch_flag_refusal, launch_flags_in, loosened_warning, loosenings, mcp_file,
-    outside_allowlist, without_launch_flags, write_private,
+    ALLOWED_ARGS, Sockets, Unavailable, UnixSockets, confine_credentials, disallowed_warning,
+    edit_rule, entries_but, file_rule, launch_flag_refusal, launch_flags_in, loosened_warning,
+    loosenings, mcp_file, outside_allowlist, without_launch_flags, write_private,
 };
 use crate::spawn::{Checkout, MemberOf, SpawnRequest, Spawned};
 
@@ -222,10 +222,18 @@ pub fn prepare(
         }
         (_, Ok(_)) => None,
     };
-    if let (Some((why, _, fix)), true) = (&unavailable, require) {
+    let credentials = herd::merge_guard(paths, herd)? == Some(MergeGuard::Credentials);
+    if credentials && worker.unix_sockets == Some(UnixSockets::All) {
+        let why = herd::credentials_with_sockets(herd, "worker");
         return Err(NotStarted(format!(
-            "{name} can't start sandboxed: {why}; {fix}, or set [worker] sandbox = \"prefer\" \
-             in herd {herd} to start it unsandboxed"
+            "{name} can't start with merge_guard = \"credentials\": {why}"
+        ))
+        .into());
+    }
+    let refused_otherwise = unsandboxed_fix(herd, credentials, worker.sandbox, "start");
+    if let (Some((why, _, fix)), Some(otherwise)) = (&unavailable, refused_otherwise) {
+        return Err(NotStarted(format!(
+            "{name} can't start sandboxed: {why}; {fix}, or {otherwise}"
         ))
         .into());
     }
@@ -593,17 +601,15 @@ pub fn check_running(paths: &Paths, record: &AgentRecord) -> Result<(Option<Stri
         )
     });
     if let Some((why, herd, mode)) = running_unsandboxed(paths, record)? {
-        if mode == WorkerSandbox::Require {
-            bail!(
-                "{name} can't run sandboxed: {why}; {resume} to resume it sandboxed, or set \
-                 [worker] sandbox = \"prefer\" in herd {herd} to run it unsandboxed"
-            );
-        }
-        let warning = format!("{name} runs unsandboxed ({why})");
-        return Ok((
-            Some(why),
-            [warning].into_iter().chain(mcp_warning).collect(),
-        ));
+        let credentials = herd::merge_guard(paths, &herd)? == Some(MergeGuard::Credentials);
+        let Some(otherwise) = unsandboxed_fix(&herd, credentials, mode, "run") else {
+            let warning = format!("{name} runs unsandboxed ({why})");
+            return Ok((
+                Some(why),
+                [warning].into_iter().chain(mcp_warning).collect(),
+            ));
+        };
+        bail!("{name} can't run sandboxed: {why}; {resume} to resume it sandboxed, or {otherwise}");
     }
     let Some(member) = Member::kept(paths, name)? else {
         return Ok((None, vec![]));
@@ -650,6 +656,33 @@ pub fn check_running(paths: &Paths, record: &AgentRecord) -> Result<(Option<Stri
         .chain(mcp_warning)
         .collect();
     Ok((None, warnings))
+}
+
+/// What the human sets in herd `herd` to `verb` a worker unsandboxed, when
+/// its sandbox refuses one; `None` when `prefer` already does. A
+/// credentials herd's worker would hold their gh, so it needs `hook` too.
+fn unsandboxed_fix(
+    herd: &str,
+    credentials: bool,
+    mode: WorkerSandbox,
+    verb: &str,
+) -> Option<String> {
+    let switches = match (credentials, mode) {
+        (true, WorkerSandbox::Require) => {
+            "[lead] merge_guard = \"hook\" and [worker] sandbox = \"prefer\""
+        }
+        (true, _) => "[lead] merge_guard = \"hook\"",
+        (false, WorkerSandbox::Require) => "[worker] sandbox = \"prefer\"",
+        (false, _) => return None,
+    };
+    let with = if credentials {
+        " with your GitHub credentials"
+    } else {
+        ""
+    };
+    Some(format!(
+        "set {switches} in herd {herd} to {verb} it unsandboxed{with}"
+    ))
 }
 
 /// Herd `herd`'s `[worker]`, which worker `name` was kept under.
@@ -731,7 +764,7 @@ fn settings(paths: &Paths, name: &str, herd: &str, worktree: &Path) -> Result<Va
     let paths_of = |list: &[PathBuf]| -> Vec<String> {
         list.iter().map(|p| p.display().to_string()).collect()
     };
-    Ok(json!({
+    let mut settings = json!({
         "sandbox": {
             "enabled": true,
             "failIfUnavailable": true,
@@ -751,7 +784,12 @@ fn settings(paths: &Paths, name: &str, herd: &str, worktree: &Path) -> Result<Va
             "allow": allow,
             "deny": deny,
         },
-    }))
+    });
+    if herd::merge_guard(paths, herd)? == Some(MergeGuard::Credentials) {
+        confine_credentials(paths, name, herd, &mut settings, [])
+            .map_err(|e| NotStarted(format!("{e:#}")))?;
+    }
+    Ok(settings)
 }
 
 #[cfg(test)]
@@ -1483,5 +1521,380 @@ mod tests {
             )]
         );
         assert_eq!(found.disallowed, ["--add-dir /a, from template t's args"]);
+    }
+
+    /// Herd `h` on a GitHub repo, its lead guarded by credentials, with its key and token.
+    fn credentials_herd(worker: &str) -> Herd {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        std::fs::create_dir_all(&paths.herds).unwrap();
+        let repo = crate::worktree::testing::repo_with_origin(root.path());
+        let url = "https://github.com/acme/widgets.git";
+        crate::worktree::testing::git(&repo, &["remote", "set-url", "origin", url]).unwrap();
+        std::fs::write(
+            paths.herds.join("h.toml"),
+            format!(
+                "repo = {repo:?}\n[template.t]\nparams = []\nprompt = \"go\"\n\
+                 [lead]\nprompt = \"go\"\nmerge_guard = \"credentials\"\n[worker]\n{worker}\n"
+            ),
+        )
+        .unwrap();
+        let credentials = paths.config_dir().join("credentials");
+        std::fs::create_dir_all(&credentials).unwrap();
+        std::fs::write(credentials.join("h.key"), "a private key\n").unwrap();
+        std::fs::write(credentials.join("h.token"), "github_pat_pr_only\n").unwrap();
+        Herd {
+            _root: root,
+            paths,
+            repo,
+        }
+    }
+
+    fn worktree_of(h: &Herd) -> PathBuf {
+        h.repo.parent().unwrap().join("worktrees/feat-x")
+    }
+
+    #[test]
+    fn a_sandboxed_worker_in_a_credentials_herd_gets_the_herds_key_and_token_and_not_the_humans() {
+        let h = credentials_herd("sandbox = \"require\"");
+
+        prepare(
+            &h.paths,
+            "w1",
+            &member(Some(&worktree_of(&h))),
+            ArgsFrom::Fresh,
+            &blocked,
+        )
+        .unwrap();
+
+        let settings = read_json(&settings_file(&h.paths, "w1"));
+        let fetch = "url.git@loopherd-h:acme/widgets.git.insteadOf";
+        let push = "url.git@loopherd-h:acme/widgets.git.pushInsteadOf";
+        assert_eq!(
+            settings["env"],
+            json!({
+                "GH_TOKEN": "github_pat_pr_only",
+                "SSH_AUTH_SOCK": "",
+                "GITHUB_TOKEN": "",
+                "GH_ENTERPRISE_TOKEN": "",
+                "GITHUB_ENTERPRISE_TOKEN": "",
+                "GIT_CONFIG_COUNT": "5",
+                "GIT_CONFIG_KEY_0": "credential.helper",
+                "GIT_CONFIG_VALUE_0": "",
+                "GIT_CONFIG_KEY_1": fetch,
+                "GIT_CONFIG_VALUE_1": "https://github.com/acme/widgets.git",
+                "GIT_CONFIG_KEY_2": push,
+                "GIT_CONFIG_VALUE_2": "https://github.com/acme/widgets.git",
+                "GIT_CONFIG_KEY_3": fetch,
+                "GIT_CONFIG_VALUE_3": "git@github.com:acme/widgets.git",
+                "GIT_CONFIG_KEY_4": push,
+                "GIT_CONFIG_VALUE_4": "git@github.com:acme/widgets.git",
+            })
+        );
+        let config = h.paths.config_dir().display().to_string();
+        let under = |path: &str| format!("{config}/{path}");
+        let fs = &settings["sandbox"]["filesystem"];
+        assert_eq!(
+            fs["allowRead"],
+            json!([
+                "/home/me/.ssh/config",
+                "/home/me/.ssh/known_hosts",
+                under("herds"),
+                under("config.toml"),
+                under("trello.env"),
+                under("ssh/config"),
+                under("credentials/h.key"),
+            ])
+        );
+        let deny_read = strings(&fs["denyRead"]);
+        let hidden = [
+            "/home/me/.ssh",
+            "/home/me/.netrc",
+            "/home/me/.config/gh",
+            "/home/me/.git-credentials",
+            "/home/me/.config/git/credentials",
+            "/home/me/.cache/git/credential",
+            &config,
+        ];
+        assert_eq!(deny_read[..7], hidden);
+        let locks = h.paths.locks_dir().display().to_string();
+        assert_eq!(deny_read.last(), Some(&locks));
+        let deny = strings(&settings["permissions"]["deny"]);
+        for rule in [
+            "Read(//home/me/.ssh/**)",
+            "Read(//home/me/.netrc)",
+            "Read(//home/me/.config/gh/**)",
+            "Read(//home/me/.git-credentials)",
+            &format!("Read(/{config}/**)"),
+        ] {
+            assert!(deny.contains(&rule.to_string()), "{rule}: {deny:?}");
+        }
+    }
+
+    #[test]
+    fn a_credentials_herds_worker_without_its_herds_key_or_token_isnt_started_under_either_mode() {
+        for mode in ["require", "prefer"] {
+            for file in ["h.key", "h.token"] {
+                let h = credentials_herd(&format!("sandbox = \"{mode}\""));
+                let missing = h.paths.config_dir().join("credentials").join(file);
+                std::fs::remove_file(&missing).unwrap();
+
+                let err = prepare(
+                    &h.paths,
+                    "w1",
+                    &member(Some(&worktree_of(&h))),
+                    ArgsFrom::Fresh,
+                    &blocked,
+                )
+                .unwrap_err();
+
+                assert!(err.downcast_ref::<NotStarted>().is_some(), "{mode} {file}");
+                let shown = format!("{err:#}");
+                assert!(
+                    shown.starts_with(&format!(
+                        "w1 can't start with merge_guard = \"credentials\": no {} at {}",
+                        if file == "h.key" {
+                            "deploy key"
+                        } else {
+                            "token"
+                        },
+                        missing.display()
+                    )),
+                    "{shown}"
+                );
+                assert!(
+                    !h.paths.config_dir().join("sandbox").exists(),
+                    "{mode} {file}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_credentials_herds_worker_that_would_run_unsandboxed_isnt_started_under_either_mode() {
+        type Probe = fn() -> Result<Sockets, Unavailable>;
+        let cases: [(&str, bool, Probe); 3] = [
+            (
+                "its sandbox can't start: bubblewrap isn't installed; install bubblewrap",
+                true,
+                unavailable,
+            ),
+            (
+                "its sandbox can't block Unix sockets: no seccomp filter; npm install -g \
+                 @anthropic-ai/sandbox-runtime",
+                true,
+                sockets_open,
+            ),
+            (
+                "it has no worktree of its own, and its sandbox won't open the main checkout; \
+                 give herd h's template t a branch",
+                false,
+                blocked,
+            ),
+        ];
+        for (mode, switches) in [
+            (
+                "require",
+                "[lead] merge_guard = \"hook\" and [worker] sandbox = \"prefer\"",
+            ),
+            ("prefer", "[lead] merge_guard = \"hook\""),
+        ] {
+            for (why, has_worktree, probe) in &cases {
+                let h = credentials_herd(&format!("sandbox = \"{mode}\""));
+                let worktree = has_worktree.then(|| worktree_of(&h));
+
+                let err = prepare(
+                    &h.paths,
+                    "w1",
+                    &member(worktree.as_deref()),
+                    ArgsFrom::Fresh,
+                    probe,
+                )
+                .unwrap_err();
+
+                assert!(err.downcast_ref::<NotStarted>().is_some());
+                assert_eq!(
+                    format!("{err:#}"),
+                    format!(
+                        "w1 can't start sandboxed: {why}, or set {switches} in herd h to start \
+                         it unsandboxed with your GitHub credentials"
+                    ),
+                    "{mode}"
+                );
+                assert!(!h.paths.config_dir().join("sandbox").exists(), "{mode}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_credentials_herds_worker_with_every_unix_socket_open_isnt_started_under_either_mode() {
+        for mode in ["require", "prefer"] {
+            let h = credentials_herd(&format!("sandbox = \"{mode}\"\nunix_sockets = \"all\""));
+
+            let err = prepare(
+                &h.paths,
+                "w1",
+                &member(Some(&worktree_of(&h))),
+                ArgsFrom::Fresh,
+                &blocked,
+            )
+            .unwrap_err();
+
+            assert!(err.downcast_ref::<NotStarted>().is_some(), "{mode}");
+            assert_eq!(
+                format!("{err:#}"),
+                "w1 can't start with merge_guard = \"credentials\": unix_sockets = \"all\" opens \
+                 your ssh agent, Git Credential Manager through WSL2 interop and the Secret \
+                 Service keyring to it, each of which acts as you; run loopherd herd unset h \
+                 worker.unix_sockets, or loopherd herd set h lead.merge_guard '\"hook\"'",
+                "{mode}"
+            );
+            assert!(!h.paths.config_dir().join("sandbox").exists(), "{mode}");
+        }
+    }
+
+    /// Runs `script` in bash in `dir` with `env`, a fake `gh` that answers as
+    /// GitHub does for the herd's PR-only token, and a fake `ssh` that serves
+    /// any host from the bare repos under `remotes`, logging each host it's asked for.
+    fn as_worker_shell(
+        dir: &Path,
+        env: &serde_json::Map<String, Value>,
+        remotes: &Path,
+        script: &str,
+    ) -> std::process::Output {
+        let bin = remotes.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fakes = [
+            (
+                "gh",
+                "echo \"$1 $2 as ${GH_TOKEN:-gho_human}\" >> \"$GH_LOG\"\n\
+                 case \"$1 $2\" in\n\
+                 'auth token') echo gho_human ;;\n\
+                 'pr create') echo https://github.com/acme/widgets/pull/1 ;;\n\
+                 'pr merge') [ \"$GH_TOKEN\" = github_pat_pr_only ] || exit 0\n\
+                   echo 'GraphQL: Resource not accessible by personal access token \
+                 (mergePullRequest)' >&2; exit 1 ;;\n\
+                 esac\n",
+            ),
+            (
+                "ssh",
+                "for arg; do case $arg in -*) ;; *) echo \"$arg\" >> \"$SSH_LOG\"; break ;; \
+                 esac; done\ncd \"$REMOTES\" && eval \"${@: -1}\"\n",
+            ),
+        ];
+        for (name, body) in fakes {
+            let file = bin.join(name);
+            std::fs::write(&file, format!("#!/bin/bash\n{body}")).unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+        std::process::Command::new("bash")
+            .args(["-c", script])
+            .current_dir(dir)
+            .env_clear()
+            .env("PATH", path)
+            .env("HOME", remotes)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_SSH_COMMAND", bin.join("ssh"))
+            .env("SSH_LOG", remotes.join("ssh.log"))
+            .env("GH_LOG", remotes.join("gh.log"))
+            .env("REMOTES", remotes)
+            .envs(env.iter().map(|(k, v)| (k, v.as_str().unwrap())))
+            .output()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_credentials_herds_worker_pushes_and_opens_prs_on_the_herds_key_and_token_but_cant_merge() {
+        let h = credentials_herd("sandbox = \"require\"");
+        prepare(
+            &h.paths,
+            "w1",
+            &member(Some(&worktree_of(&h))),
+            ArgsFrom::Fresh,
+            &blocked,
+        )
+        .unwrap();
+        let settings = read_json(&settings_file(&h.paths, "w1"));
+        let env = settings["env"].as_object().unwrap();
+        let remotes = h.repo.parent().unwrap().join("remotes");
+        let bare = remotes.join("acme/widgets.git");
+        crate::worktree::testing::git(
+            h.repo.parent().unwrap(),
+            &["init", "-q", "--bare", bare.to_str().unwrap()],
+        )
+        .unwrap();
+        // As init writes them for a credentials herd.
+        let token = "GH_TOKEN=${GH_TOKEN:-$(gh auth token --user acme)}";
+        let line = |command: &str| format!("{token} {command}");
+
+        let pushed = as_worker_shell(
+            &h.repo,
+            env,
+            &remotes,
+            &line(
+                "git -c credential.helper= -c credential.helper='!gh auth git-credential' \
+                 push -q origin HEAD:refs/heads/feat-x",
+            ),
+        );
+        let created = as_worker_shell(&h.repo, env, &remotes, &line("gh pr create --fill"));
+        let merged = as_worker_shell(&h.repo, env, &remotes, &line("gh pr merge 1 --merge"));
+
+        let shown = |out: &std::process::Output| String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(pushed.status.success(), "{}", shown(&pushed));
+        assert_eq!(
+            std::fs::read_to_string(remotes.join("ssh.log")).unwrap(),
+            "git@loopherd-h\n"
+        );
+        crate::worktree::testing::git(&bare, &["rev-parse", "--verify", "feat-x"]).unwrap();
+        assert!(created.status.success(), "{}", shown(&created));
+        assert_eq!(
+            std::fs::read_to_string(remotes.join("gh.log")).unwrap(),
+            "pr create as github_pat_pr_only\npr merge as github_pat_pr_only\n",
+            "neither asks for the human's token"
+        );
+        assert!(!merged.status.success());
+        assert_eq!(
+            shown(&merged),
+            "GraphQL: Resource not accessible by personal access token (mergePullRequest)\n"
+        );
+        let human = as_worker_shell(
+            &h.repo,
+            &Default::default(),
+            &remotes,
+            &line("gh pr merge 1 --merge"),
+        );
+        assert!(human.status.success(), "the human's own gh merges");
+    }
+
+    #[test]
+    fn a_worker_in_a_hook_or_merging_herd_keeps_the_humans_credentials() {
+        for lead in [
+            "merge_guard = \"hook\"",
+            "merge = true\nmerge_guard = \"credentials\"",
+        ] {
+            let h = herd("sandbox = \"require\"");
+            let toml = h.paths.herds.join("h.toml");
+            let text = std::fs::read_to_string(&toml).unwrap();
+            std::fs::write(&toml, format!("{text}[lead]\nprompt = \"go\"\n{lead}\n")).unwrap();
+
+            prepare(
+                &h.paths,
+                "w1",
+                &member(Some(&worktree_of(&h))),
+                ArgsFrom::Fresh,
+                &blocked,
+            )
+            .unwrap();
+
+            let settings = read_json(&settings_file(&h.paths, "w1"));
+            assert_eq!(settings.get("env"), None, "{lead}");
+            assert_eq!(settings["sandbox"]["filesystem"].get("allowRead"), None);
+            assert!(
+                !settings["permissions"]["deny"]
+                    .to_string()
+                    .contains("Read(")
+            );
+        }
     }
 }
