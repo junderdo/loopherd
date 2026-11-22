@@ -178,6 +178,7 @@ fn settle(
     }
     stop.context = check.measured.map(|m| m.tokens);
     stop.limit = check.measured.map(|m| m.limit);
+    stop.window = check.window;
     append(dir, &name, &Entry::new(now, Body::Stop(stop)))?;
     Ok(Some(Stopped::Filed(name)))
 }
@@ -228,6 +229,7 @@ fn parse(input: &[u8]) -> Stop {
         error,
         context: None,
         limit: None,
+        window: None,
         session,
     }
 }
@@ -1054,7 +1056,13 @@ mod tests {
             transcript.display()
         );
         let handoff = |m: &AgentRecord| {
-            crate::context::handoff_block(m, input.as_bytes(), Ok(100), &state, &|_| Ok(()))
+            crate::context::handoff_block(
+                m,
+                input.as_bytes(),
+                &crate::context::fixed_limit(100),
+                &state,
+                &|_| Ok(()),
+            )
         };
         let mut l = claimed(Some("sess-a"), 30, 300);
 
@@ -1111,7 +1119,13 @@ mod tests {
             transcript.display()
         );
         let handoff = |m: &AgentRecord| {
-            crate::context::handoff_block(m, input.as_bytes(), Ok(100), &state, &|_| Ok(()))
+            crate::context::handoff_block(
+                m,
+                input.as_bytes(),
+                &crate::context::fixed_limit(100),
+                &state,
+                &|_| Ok(()),
+            )
         };
         let mut l = claimed(Some("sess-a"), 30, 300);
         let mut warnings = vec![];
@@ -1141,6 +1155,7 @@ mod tests {
             Check {
                 reason: Ok(Some("hand off".into())),
                 measured: None,
+                window: None,
             }
         };
         let dir = tempfile::tempdir().unwrap();
@@ -1224,6 +1239,7 @@ mod tests {
             &|_| Check {
                 reason: Err(anyhow::anyhow!("config.toml: bad")),
                 measured: None,
+                window: None,
             },
             &mut warnings,
         );

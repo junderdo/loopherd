@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use crate::config::{self, ConfigFile};
-use crate::context::{self, DEFAULT_LIMIT, DEFAULT_WINDOW, Limit};
+use crate::context::{self, DEFAULT_LIMIT, LARGEST_WINDOW, Limit};
 use crate::herd::SwitchValues;
 
 /// One group of settings: `None` to ask it only while unset (all of them
@@ -189,7 +189,7 @@ fn context_flag(flag: &str, file: &ConfigFile) -> Result<Limits> {
     let window = context
         .window
         .or(file.context_window)
-        .unwrap_or(DEFAULT_WINDOW);
+        .unwrap_or(LARGEST_WINDOW);
     for (key, limit) in [
         (
             "default_context_limit",
@@ -365,22 +365,35 @@ fn percent_shown(limit: Option<Limit>, fallback: u64, window: u64) -> (Limit, u6
 
 fn ask_context_values(term: &mut Terminal, file: &ConfigFile) -> Result<Limits> {
     term.say("Handoffs: past its handoff limit, a member, lead or the shepherd writes a handoff and starts a fresh session. Give tokens as 250000, 250k or 1.5M, and a limit also as a percentage of the window like 65%. Enter keeps the value shown.")?;
-    let current_window = file.context_window.unwrap_or(DEFAULT_WINDOW);
-    let window = ask(
-        term,
-        Question {
-            key: "context_window",
-            help: "tokens in your model's context window; no limit goes over 80% of it",
-            shown: Limit::Tokens(current_window),
-            kept: current_window,
-            window: current_window,
-            capped: false,
-            parse: |key, text| context::tokens(key, text).map(Limit::Tokens),
-        },
-    )?
-    .map(|w| w.of(current_window));
-    let effective_window = window.unwrap_or(current_window);
-    let (shown, kept) = percent_shown(file.default_context_limit, DEFAULT_LIMIT, effective_window);
+    // Unset, the window comes from each session's model.
+    let window = match file.context_window {
+        Some(current) => ask(
+            term,
+            Question {
+                key: "context_window",
+                help: "tokens in your model's context window; no limit goes over 80% of it",
+                shown: Limit::Tokens(current),
+                kept: current,
+                window: current,
+                capped: false,
+                parse: |key, text| context::tokens(key, text).map(Limit::Tokens),
+            },
+        )?
+        .map(|w| w.of(current)),
+        None => {
+            term.say(&format!("  The context window comes from each session's model; a percentage is of that, shown here for the largest, {}.", grouped(LARGEST_WINDOW)))?;
+            None
+        }
+    };
+    let effective_window = window.or(file.context_window).unwrap_or(LARGEST_WINDOW);
+    let shown_for = |limit: Option<Limit>| {
+        let (shown, kept) = percent_shown(limit, DEFAULT_LIMIT, effective_window);
+        match (limit, file.context_window.or(window)) {
+            (None, None) => (Limit::Tokens(kept), kept),
+            _ => (shown, kept),
+        }
+    };
+    let (shown, kept) = shown_for(file.default_context_limit);
     let limit = ask(
         term,
         Question {
@@ -394,11 +407,7 @@ fn ask_context_values(term: &mut Terminal, file: &ConfigFile) -> Result<Limits> 
         },
     )?;
     let effective_limit = limit.or(file.default_context_limit);
-    let (shown, kept) = percent_shown(
-        shepherd(file).or(effective_limit),
-        DEFAULT_LIMIT,
-        effective_window,
-    );
+    let (shown, kept) = shown_for(shepherd(file).or(effective_limit));
     let shepherd = ask(
         term,
         Question {

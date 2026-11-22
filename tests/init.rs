@@ -2115,7 +2115,7 @@ fn on_a_terminal_init_shows_each_inferred_value_takes_edits_and_re_asks_bad_ones
         "",        // use the suggested checks
         "0", "4", // max
         "n", // lead
-        "170000", "100000", // context_limit
+        "900000", "100000", // context_limit
         "bot",    // gh account
         "trunk",  // default branch
         "",       // confirm
@@ -2137,9 +2137,9 @@ fn on_a_terminal_init_shows_each_inferred_value_takes_edits_and_re_asks_bad_ones
         "Give the herd a lead, a member that feeds, watches and verifies its workers? [Y/n]: "
             .into(),
         "Workers' handoff limit in tokens or a percentage of the window (context_limit); \
-         Enter leaves it unset, so the default 160000 applies: "
+         Enter leaves it unset, so the default 250000 applies: "
             .into(),
-        "context_limit 170000 is over 160000, 80% of the 200000-token context window".into(),
+        "context_limit 900000 is over 800000, 80% of the 1000000-token context window".into(),
         "gh account (logged in: acme, bot) (acme): ".into(),
         "Default branch (main): ".into(),
         "Herd gadgets:".into(),
@@ -2418,7 +2418,7 @@ fn on_a_terminal_the_summary_says_an_unset_limit_takes_the_default() {
 
     assert_ok(&out);
     assert!(
-        text(&out.stdout).contains("  limit   unset, the default 160000 applies"),
+        text(&out.stdout).contains("  limit   unset, the default 250000 applies"),
         "{}",
         text(&out.stdout)
     );
@@ -2428,18 +2428,18 @@ fn on_a_terminal_the_summary_says_an_unset_limit_takes_the_default() {
 fn on_a_terminal_a_limit_of_exactly_80_percent_is_taken_and_one_more_asked_again() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n160001\n160000\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n800001\n800000\n");
 
     assert_ok(&out);
     let shown = text(&out.stdout);
     assert_eq!(
-        shown.matches("context_limit 160001 is over 160000").count(),
+        shown.matches("context_limit 800001 is over 800000").count(),
         1,
         "{shown}"
     );
     assert_eq!(
         herd_toml(&fixture)["template"]["issue"]["context_limit"].as_integer(),
-        Some(160000)
+        Some(800000)
     );
 }
 
@@ -2761,7 +2761,7 @@ fn on_a_terminal_a_configured_limit_over_the_cap_names_the_cap() {
     let fixture = Fixture::new(&["acme"]);
     fs::write(
         fixture.config().join("config.toml"),
-        "default_context_limit = 500000\n",
+        "default_context_limit = 900000\n",
     )
     .unwrap();
 
@@ -2770,7 +2770,7 @@ fn on_a_terminal_a_configured_limit_over_the_cap_names_the_cap() {
     assert_ok(&out);
     assert!(
         text(&out.stdout).contains(
-            "  limit   unset, the cap of 160000 (80% of the default 200000-token context \
+            "  limit   unset, the cap of 800000 (80% of the largest known 1000000-token context \
              window) applies"
         ),
         "{}",

@@ -149,6 +149,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D134](decisions/D134.md) | `revive --startup` starts a broker for each alive lead on the hook's socket even with `revive_on_startup` off, resuming, prompting and noting nothing then; `setup` asks for the key while unset (`--revive-on-startup`, passed through by `scripts/install`), and `config get\|set\|unset` takes it. Amends D64. |
 | [D135](decisions/D135.md) | `install.sh` runs the same splash and offers as `scripts/install` through `scripts/install-extras`, shipped with the offers, `agents/` and the herdr plugin manifest in each release tarball; the extras ask on `/dev/tty`, skip naming their flag without one, and `install.sh` takes `scripts/install`'s `--no-splash`, `--with-*` and `--no-extras`. Installed extras say so before any no-terminal skip. |
 | [D136](decisions/D136.md) | Token counts in `setup` and `config set` take `250k`, `1.5M` and `_`/`,` separators; a context limit may be a percentage of the window (`"65%"`), resolved where the limit is computed and still capped at 80%; setup echoes each value and shows an unset limit as a percentage. |
+| [D137](decisions/D137.md) | A session's context window comes from its transcript's `message.model` through a built-in table (4.7+ 1M, older 200K); `context_window` in config.toml overrides it; an unknown model falls back to 200K with one note per session; `setup` stops asking for the window. |
 
 ## Emerging model
 

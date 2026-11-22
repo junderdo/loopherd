@@ -872,8 +872,13 @@ pub fn lead_config(paths: &Paths, herd: &str) -> Result<LeadConfig> {
 }
 
 /// The context limit past which `member`'s Stop hook asks for a handoff:
-/// its template's or `[lead]`'s `context_limit`, else `config.toml`'s.
-pub fn context_limit(paths: &Paths, member: &AgentRecord) -> Result<u64> {
+/// its template's or `[lead]`'s `context_limit`, else `config.toml`'s, capped
+/// by the window of `model`, the session's.
+pub fn context_limit(
+    paths: &Paths,
+    member: &AgentRecord,
+    model: Option<&str>,
+) -> Result<crate::context::SessionLimit> {
     let own = match (&member.herd, &member.template) {
         (Some(herd), _) if member.is_lead() => load(&paths.herds, herd)?
             .lead
@@ -884,7 +889,7 @@ pub fn context_limit(paths: &Paths, member: &AgentRecord) -> Result<u64> {
             .and_then(|t| t.context_limit),
         _ => None,
     };
-    crate::context::effective_limit(own, &config_file(paths))
+    crate::context::effective_limit(own, &config_file(paths), model)
 }
 
 pub fn config_file(paths: &Paths) -> PathBuf {
@@ -3349,7 +3354,9 @@ args = ["--model", "opus"]
         assert_eq!(report.matches("invalid").count(), 1, "{report}");
         assert_eq!(code, 1, "{report}");
         assert_eq!(
-            crate::context::effective_limit(None, &file).unwrap(),
+            crate::context::effective_limit(None, &file, None)
+                .unwrap()
+                .tokens,
             240_000
         );
     }
@@ -4209,7 +4216,9 @@ context_limit = 90000
     fn a_members_context_limit_is_its_templates_or_its_leads() {
         let config = Config::with(&[("cards", LIMITED_HERD)]);
         let paths = config.paths();
-        let limit = |herd, template, lead| context_limit(&paths, &record(herd, template, lead));
+        let limit = |herd, template, lead| {
+            context_limit(&paths, &record(herd, template, lead), None).map(|l| l.tokens)
+        };
         assert_eq!(limit(Some("cards"), Some("pr"), false).unwrap(), 120_000);
         assert_eq!(limit(Some("cards"), None, true).unwrap(), 90_000);
     }
@@ -4218,7 +4227,9 @@ context_limit = 90000
     fn without_its_own_limit_a_member_gets_config_tomls_default() {
         let config = Config::with(&[("cards", LIMITED_HERD)]);
         let paths = config.paths();
-        let limit = |herd, template| context_limit(&paths, &record(herd, template, false));
+        let limit = |herd, template| {
+            context_limit(&paths, &record(herd, template, false), None).map(|l| l.tokens)
+        };
         assert_eq!(limit(Some("cards"), Some("plain")).unwrap(), 160_000);
         assert_eq!(limit(None, None).unwrap(), 160_000);
         fs::write(
@@ -4237,7 +4248,9 @@ context_limit = 90000
                     [lead]\nprompt = \"p\"\ncontext_limit = \"60%\"\n";
         let config = Config::with(&[("cards", herd)]);
         let paths = config.paths();
-        let limit = |template, lead| context_limit(&paths, &record(Some("cards"), template, lead));
+        let limit = |template, lead| {
+            context_limit(&paths, &record(Some("cards"), template, lead), None).map(|l| l.tokens)
+        };
         assert_eq!(limit(Some("t"), false).unwrap(), 100_000);
         assert_eq!(limit(None, true).unwrap(), 120_000);
         fs::write(
@@ -4262,8 +4275,12 @@ context_limit = 90000
             ),
         ] {
             let config = Config::with(&[("cards", herd)]);
-            let err = context_limit(&config.paths(), &record(Some("cards"), Some("t"), false))
-                .unwrap_err();
+            let err = context_limit(
+                &config.paths(),
+                &record(Some("cards"), Some("t"), false),
+                None,
+            )
+            .unwrap_err();
             let err = format!("{err:#}");
             assert!(
                 err.contains("cards.toml") && err.ends_with(message),
@@ -4275,8 +4292,12 @@ context_limit = 90000
     #[test]
     fn a_missing_herd_file_fails_the_limit() {
         let config = Config::with(&[]);
-        let err =
-            context_limit(&config.paths(), &record(Some("gone"), Some("pr"), false)).unwrap_err();
+        let err = context_limit(
+            &config.paths(),
+            &record(Some("gone"), Some("pr"), false),
+            None,
+        )
+        .unwrap_err();
         assert!(format!("{err:#}").contains("gone.toml"), "{err:#}");
     }
 }

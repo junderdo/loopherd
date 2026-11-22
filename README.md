@@ -93,9 +93,10 @@ loopherd's herdr plugin (below), each default no. `--with-agents`,
 </table>
 
 `loopherd setup` asks for `config.toml`'s machine-wide settings while
-they're unset: what a lead may do by default, the context window and
-handoff limits, then whether herdr's startup hook also resumes members
-(alive leads' brokers start either way). Run it again with `--again`.
+they're unset: what a lead may do by default, the handoff limits, then
+whether herdr's startup hook also resumes members (alive leads' brokers
+start either way). The context window comes from each session's model; set
+`context_window` only to override it. Run it again with `--again`.
 
 To uninstall:
 
