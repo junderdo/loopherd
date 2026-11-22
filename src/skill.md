@@ -154,7 +154,7 @@ Init never launches an agent.
    |---|---|
    | `<member> done <time> <text>` | A finished member's report, usually with its output's link. Verify it. |
    | `<member> question <time> <text>` | It stopped on a question. Relay it to the human; a lead relays it with its own question report, unless it's a design question and `design_escalation` is on. |
-   | `<member> note <time> <text>` | Information only, except a `self-restart …` note: that member's handoff is still waiting on a restart (see Handoffs). |
+   | `<member> note <time> <text>` | Information only, except a `self-restart …` note: that member's handoff is still waiting on a restart (see Handoffs), and a lead's note naming a follow-up it filed ready: tell the human, who may veto it; on a veto, drop the task's ready label, or retire its worker once one claimed it. |
    | `<member> handoff <time> <text>` | It passed its context limit and wrote its handoff. Restart it (see Handoffs) if you read it; a lead restarts itself. |
    | `<member> paused  1 shell, 1 cron` | Turn ended with work in flight that can wake it again. Another paused stop is quiet. |
    | `<member> paused  background unknown` | Turn ended and Claude didn't say what's in flight (also `crons unknown`, or `1 shell; crons unknown`). |
@@ -881,7 +881,7 @@ What differs from the shepherd:
   decision that isn't yours goes out as `loopherd report --kind question
   "<the exact question>"`, then end your turn; the shepherd's watch sees it
   and relays it. Don't wait in a loop for an answer.
-- **Switches.** Your prompt lists six, each `on` or `off`; off means the
+- **Switches.** Your prompt lists seven, each `on` or `off`; off means the
   human does it, so ask instead. Each comes from your herd file's `[lead]`,
   else `[lead_defaults]` in `$LOOPHERD_CONFIG_DIR/config.toml` (set by
   `scripts/install`), else off; `loopherd herds` shows which:
@@ -894,6 +894,7 @@ What differs from the shepherd:
   | `new_cards` | create follow-up tasks for minor or out-of-scope findings |
   | `design_escalation` | settle a design question a member raises |
   | `blocked_dialogs` | answer a member's blocking dialog |
+  | `follow_ups_ready` | file a qualifying review follow-up ready to claim once its parent card is Done (D116); needs `new_cards` on |
 
   When `merge`, `install` or `rebase` is off, the PreToolUse hook also
   blocks the Bash commands that need it (`gh pr merge` or the merge API, a
@@ -994,8 +995,10 @@ What differs from the shepherd:
   decision (naming it), needs spec (saying what's missing), or stale
   (saying why). Report the result as one `loopherd report --kind question`
   and end your turn. After the `no workers open` form, the question says
-  the herd has no work running. Never mark a task ready yourself, whatever
-  your switches; the shepherd does it once the human approves.
+  the herd has no work running. Never mark a task ready yourself; the
+  shepherd does it once the human approves. The one exception is a
+  qualifying review follow-up with `new_cards` and `follow_ups_ready` on
+  (see Review rounds).
 - **Out of work.** On `<herd> out of work`, send one `loopherd report
   --kind question` asking the human what's next: pause the herd, or file
   and approve work. Then end your turn.
@@ -1017,8 +1020,20 @@ What differs from the shepherd:
   hold the merge: they go to one follow-up task per PR, or, when the
   member has a next PR in the same card's stack, into that PR's scope.
   With `new_cards` off, list the follow-up minors in a question to the
-  human rather than creating a task. From every round's review file, not
-  only the passing one, route the minors as for any minor (the follow-up
+  human rather than creating a task. With `new_cards` and
+  `follow_ups_ready` on, file a qualifying follow-up with `--label
+  ready-for-agent --label blocked` and the line `blocked-by: <parent key>`
+  in its description, in your tracker's key form, so it becomes claimable
+  once the parent card is Done; comment `filed ready: follow-up of PR
+  <n>` on it, and send `loopherd report --kind note` naming it, so the
+  human can veto it through the shepherd. It qualifies only if it holds
+  findings from the parent PR's review files, under the parent card's
+  scope. Its criteria may offer the worker alternatives ("fix X, or D<n>
+  records why not"). It doesn't qualify if any criterion needs the
+  human's decision, changes a decision's direction, or carries a finding
+  the reviewer called out of scope or design. File any other follow-up as
+  with `follow_ups_ready` off. From every round's review file, not only
+  the passing one, route the minors as for any minor (the follow-up
   task, a question with `new_cards` off, or the member's next stacked PR)
   and post the nits as a non-blocking comment: later rounds answer only
   about blockers, so a failed round's minors live only in its file. Each

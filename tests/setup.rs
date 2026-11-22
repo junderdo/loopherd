@@ -125,7 +125,7 @@ fn a_first_setup_asks_the_lead_switches_then_the_context_values() {
 
     // merge yes, install no, rebase yes, the rest by default; a 1M window; a
     // limit over its cap, then one under; Enter for the shepherd.
-    let Some(out) = config.setup_on_terminal(&[], "y\nn\ny\n\n\n\n1000000\n900000\n500000\n\n")
+    let Some(out) = config.setup_on_terminal(&[], "y\nn\ny\n\n\n\n\n1000000\n900000\n500000\n\n")
     else {
         return;
     };
@@ -180,7 +180,7 @@ fn once_both_groups_are_set_setup_asks_nothing_until_again() {
     assert_eq!(config.text().unwrap(), text);
 
     // Keep merge, turn rebase on, the rest by default; keep the window, set the shepherd's limit.
-    let Some(out) = config.setup_on_terminal(&["--again"], "\n\ny\n\n\n\n\n\n300000\n") else {
+    let Some(out) = config.setup_on_terminal(&["--again"], "\n\ny\n\n\n\n\n\n\n300000\n") else {
         return;
     };
     assert!(

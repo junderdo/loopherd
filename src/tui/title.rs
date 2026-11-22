@@ -10,7 +10,9 @@ use crate::herd::{self, Outline, Paths};
 use crate::herd_view::{Herd, View};
 
 /// Short names for [`herd::Switches::named`], in its order.
-const CHIPS: [&str; 6] = ["merge", "install", "rebase", "cards", "design", "dialogs"];
+const CHIPS: [&str; 7] = [
+    "merge", "install", "rebase", "cards", "design", "dialogs", "ready",
+];
 
 /// Each shown herd's outline, or why its herd file couldn't be read.
 #[derive(Debug, Default)]
