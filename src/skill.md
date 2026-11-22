@@ -168,7 +168,7 @@ Init never launches an agent.
    | `<member> interrupted` | Lead's watch only: the feed running the worker's `after_merge` died before noting it. Feed, which notes it, then read the note. |
    | `<member> blocked` | A dialog only the human answers: tell them. loopherd never answers it. |
    | `<member> gone` | Its pane exited or closed, its tab or workspace closed with it inside, or it had no agent for two polls in a row after this watch saw it live. A `gone` recorded when a tab or workspace closed, and then retracted because the member's pane had moved out of it, prints nothing; `reports --all` shows it followed by `moved`. |
-   | `<herd> drained` | Lead's watch only: your herd is paused and has no open (non-retired) worker. A member of an attended or `slot = false` template is no worker here, nor for `no workers open`, `out of work` or `all drained` (D116). Report done, stop, and don't re-arm. |
+   | `<herd> drained` | Lead's watch only: your herd is paused and has no open (non-retired) worker. A member of an attended or `slot = false` template is no worker here, nor for `no workers open`, `out of work` or `all drained` (D116), but while it may still work (as `all drained` says) it holds both drained lines off. Report done, stop, and don't re-arm. |
    | `all drained` | Every herd your watch reads is paused with no open worker, and no member it reads, a slot-less one included, may still work: none is working, blocked or unknown (now or on the poll before), died since the watch started without its `gone` line yet, or last stopped failed or with work in flight. Tell the human; don't re-arm. |
    | `shepherd handoff 171k over 160k` | Your own watch only, once per session: your context is past your limit. Hand off (see Your own handoff). |
 
