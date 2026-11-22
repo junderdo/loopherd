@@ -1654,18 +1654,24 @@ struct Request {
 /// The broker of the lead running this loopherd, process `me`: the lead
 /// whose sandboxed Claude is an ancestor, else the unretired lead the ledger
 /// has in `pane`. Asks herdr nothing; a ledger it can't read names no lead.
-/// A lead from another config dir falls back to the pane alone.
+/// A lead from another config dir falls back to the pane alone. `shepherd`
+/// skips that fallback: the shepherd's pane may carry a dead lead's old id
+/// after a herdr restart, but an ancestor can't be forged.
 pub fn route(
     paths: &Paths,
     ledger: &dyn Ledger,
     procs: &dyn Procs,
     me: u32,
     pane: Option<&tool_hook::Pane>,
+    shepherd: impl FnOnce() -> bool,
 ) -> Option<Client> {
     let lead = sandbox::calling_lead(paths, procs, me)
         .ok()
         .flatten()
         .or_else(|| {
+            if shepherd() {
+                return None;
+            }
             let record = tool_hook::lead_in(ledger, pane?).ok()??;
             (!record.retired).then_some(record.name)
         })?;
@@ -2320,7 +2326,9 @@ mod tests {
                 lineage: &[],
             };
             let procs = procs(&["bwrap", "--unshare-pid"]);
-            route(&self.paths, &self.ledger(), &procs, 50, Some(&pane))
+            route(&self.paths, &self.ledger(), &procs, 50, Some(&pane), || {
+                false
+            })
         }
 
         /// Runs `f` with the state dir read-only, as in a lead's sandbox (D97).
@@ -3434,7 +3442,15 @@ mod tests {
                 socket: Some(socket),
                 lineage: &[],
             };
-            route(&world.paths, &world.ledger(), &procs, 50, Some(&pane)).map(|c| c.lead)
+            route(
+                &world.paths,
+                &world.ledger(),
+                &procs,
+                50,
+                Some(&pane),
+                || false,
+            )
+            .map(|c| c.lead)
         };
 
         assert_eq!(routed("p-lead-h").as_deref(), Some("lead-h"));
@@ -3473,6 +3489,7 @@ mod tests {
             &procs(&["claude"]),
             50,
             Some(&pane),
+            || false,
         );
         let own = FakeHerdr::new(&[]);
 
@@ -3491,6 +3508,40 @@ mod tests {
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
         assert!(herdr.calls() > 0);
+    }
+
+    #[test]
+    fn a_lead_ancestor_routes_to_its_broker_even_in_the_shepherd_s_pane() {
+        let world = World::new();
+        let socket = Path::new("/run/h.sock");
+        world
+            .ledger()
+            .update("lead-h", &mut |r| {
+                r.socket = Some(socket.into());
+                Ok(())
+            })
+            .unwrap();
+        let pane = tool_hook::Pane {
+            id: "p-lead-h",
+            socket: Some(socket),
+            lineage: &[],
+        };
+        let settings = sandbox::settings_file(&world.paths, "lead-h");
+        let lead_ancestor = procs(&["claude", "--settings", settings.to_str().unwrap()]);
+        let routed = |procs: &crate::process::FakeProcs| {
+            route(
+                &world.paths,
+                &world.ledger(),
+                procs,
+                50,
+                Some(&pane),
+                || true,
+            )
+            .map(|c| c.lead)
+        };
+
+        assert_eq!(routed(&lead_ancestor).as_deref(), Some("lead-h"));
+        assert_eq!(routed(&procs(&["claude"])), None);
     }
 
     #[test]
@@ -3531,6 +3582,7 @@ mod tests {
             &procs(&["claude"]),
             50,
             Some(&pane),
+            || false,
         );
 
         assert!(client.is_none());
