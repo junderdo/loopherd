@@ -165,7 +165,12 @@ fn herds_accepts_the_documented_routed_queue_and_its_groom_template() {
     let bin = tempfile::tempdir().unwrap();
     recording_herdr(bin.path());
     let herds = config.path().join("herds");
-    fs::create_dir(&herds).unwrap();
+    fs::create_dir_all(herds.join("docs/agents")).unwrap();
+    fs::write(
+        herds.join("docs/agents/grill-batch-prompt.md"),
+        include_str!("../docs/agents/grill-batch-prompt.md"),
+    )
+    .unwrap();
     fs::write(
         herds.join("cards.toml"),
         format!(

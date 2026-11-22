@@ -114,6 +114,35 @@ loopherd tell grill-<n> --text-file "$background"
 The quoted heredoc keeps the background's backticks and `$(…)` from running in
 your shell; never pass it inline in double quotes.
 
+### Interactive or batch
+
+A grill runs in one of two modes (D132), picked by the human with the
+`grill:batch` label (docs/agents/issue-tracker.md says when each fits):
+
+- **Interactive**, no label: the attended grill above, one question at a
+  time. The human can say "batch the rest" partway.
+- **Batch, attended**: the same `add`, on a card with `grill:batch` or when
+  the human asks for batch (the grill claims the card, which keeps feed's
+  `grill-batch` off it); the grill answers every question, then shows the
+  human the whole list in its pane to accept or override by number.
+- **Batch, unattended**: a `grill:batch` card in Backlog is claimable, and
+  the herd's routed queue
+  ([examples/loopherd-cards-routed.toml](../examples/loopherd-cards-routed.toml))
+  sends it to `grill-batch`, an ordinary member a lead's feed may start. It
+  posts its batch as a card comment, adds `need-human`, moves the card to
+  Backlog and reports a question; its `done` check then passes and feed
+  reaps it. When the human has answered on the card, restart it:
+
+  ```bash
+  scripts/trello label LH-<n> -need-human
+  loopherd release grill-batch-<n>
+  ```
+
+  The next feed starts a fresh `grill-batch-<n>` (feed skips a retired name
+  until it's released), which reads the answer and writes the decision.
+  Never restart it without the human's answer on the card. `loopherd stats`
+  doesn't compare the two modes (D132).
+
 After its PR merges, the grill moves the card to Done, runs
 `scripts/trello unblock` and sends you `LH-<n> merged and closed out: …`. The
 herd's watch prints `grill-<n> merged`; feed's `after_merge` and the reap
