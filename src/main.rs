@@ -47,6 +47,7 @@ mod status;
 mod stop_hook;
 mod subagent_hook;
 mod subagent_view;
+mod subagents;
 mod tell;
 mod template;
 #[cfg(test)]
@@ -1216,6 +1217,10 @@ fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
         queues.as_ref(),
         Options { all, strays },
         format,
+        Some(&status::Subagents {
+            mailboxes: &ledger.reports_dir()?,
+            now: SystemTime::now(),
+        }),
     )?;
     print!("{}", out.stdout);
     for line in out.stderr.lines() {

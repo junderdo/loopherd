@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Result, anyhow, bail};
 use ratatui::backend::Backend;
@@ -25,13 +25,13 @@ use ratatui::widgets::{Block, BorderType, Paragraph, Widget};
 use ratatui::{Frame, Terminal};
 
 use crate::herd;
-use crate::herd_view::{Member, Options, Stray};
+use crate::herd_view::{Member, Options, RunningSubagent, Stray};
 use crate::herdr::Herdr;
 use crate::herdr::events::Subscriber;
 use crate::ledger::Ledger;
 use crate::pause::Pauses;
 use crate::shepherd_pane::{self, Below, Summoned};
-use crate::status::{Read, aligned, read, row, sections, stray_lines, widths};
+use crate::status::{Read, Subagents, aligned, read, row, sections, stray_lines, widths};
 use mail::{Mail, Waiting, waiting};
 use since::{Since, Staleness, staleness};
 use theme::{Palette, Theme};
@@ -97,7 +97,11 @@ pub struct Dirs {
 pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger, dirs: &Dirs) -> Response {
     match request {
         Request::Read(options) => {
-            let read = read(herdr, ledger, &dirs.pauses, options).map(|read| {
+            let subagents = Subagents {
+                mailboxes: &dirs.mailboxes,
+                now: SystemTime::now(),
+            };
+            let read = read(herdr, ledger, &dirs.pauses, options, Some(&subagents)).map(|read| {
                 let mail = Mail::read(&dirs.mailboxes, &read.view);
                 let outlines = Outlines::read(&dirs.herds, &read.view);
                 (read, mail, outlines)
@@ -864,6 +868,10 @@ impl App {
                     target: Some(target),
                 });
                 target += 1;
+                rows.extend(member.subagents.iter().map(|subagent| Row {
+                    line: Line::styled(subagent_row(subagent), Modifier::DIM),
+                    target: None,
+                }));
             }
             panels.push(Panel {
                 title: match view.herds.get(i) {
@@ -950,16 +958,29 @@ fn padded(cells: &[String], widths: &[usize]) -> String {
     cells.join("  ")
 }
 
+/// `   ↳ reviewer  Review PR 325  4m`, under its member's name.
+fn subagent_row(subagent: &RunningSubagent) -> String {
+    let mut cells = vec![format!("   ↳ {}", subagent.agent_type)];
+    cells.extend(subagent.description.clone());
+    cells.push(age(subagent.age));
+    cells.join("  ")
+}
+
+/// `3m`, in the largest whole unit.
+fn age(d: Duration) -> String {
+    match d.as_secs() {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", s / 60),
+        s => format!("{}h", s / 3600),
+    }
+}
+
 /// `for 3m`, in the largest whole unit; blank when no change was seen.
 fn time(since: Option<Duration>) -> String {
     let Some(d) = since else {
         return String::new();
     };
-    match d.as_secs() {
-        s if s < 60 => format!("for {s}s"),
-        s if s < 3600 => format!("for {}m", s / 60),
-        s => format!("for {}h", s / 3600),
-    }
+    format!("for {}", age(d))
 }
 
 static STOP_SIGNAL: AtomicI32 = AtomicI32::new(0);
@@ -1950,6 +1971,54 @@ max = 3
         );
         assert!(dimmed(&terminal, "old   gone"));
         assert!(!dimmed(&terminal, "c     idle"));
+    }
+
+    #[test]
+    fn a_members_running_subagents_are_dim_rows_under_it_that_selection_skips() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        let meta = mail.path().join("agent-a1.meta.json");
+        std::fs::write(&meta, r#"{"description": "Review PR 325 round 1"}"#).unwrap();
+        let started = |ago: u64| {
+            report::Entry::new(SystemTime::now() - Duration::from_secs(ago), Body::Moved {}).at
+        };
+        let reviewer = report::Subagent {
+            id: "a1".into(),
+            agent_type: "reviewer".into(),
+            description: None,
+            session: Some("sess-a".into()),
+            meta: Some(meta),
+        };
+        let scout = report::Subagent {
+            id: "a2".into(),
+            agent_type: "scout".into(),
+            meta: None,
+            ..reviewer.clone()
+        };
+        post_at(
+            mail.path(),
+            "a",
+            &started(270),
+            Body::SubagentStart(reviewer),
+        );
+        post_at(mail.path(), "a", &started(30), Body::SubagentStart(scout));
+
+        let mut app = app_with_mail(&herdr, &ledger, mail.path(), now);
+        let terminal = render_tall(&app, now);
+
+        let rows = text(&terminal);
+        let a = rows.iter().position(|r| r.starts_with("⠋ a ")).unwrap();
+        assert_eq!(
+            rows[a + 1..a + 3],
+            ["↳ reviewer  Review PR 325 round 1  4m", "↳ scout  30s"]
+        );
+        assert!(rows[a + 3].starts_with('╰'), "{rows:#?}");
+        assert!(dimmed(&terminal, "↳ reviewer"));
+
+        app.press(KeyCode::Down, now);
+        assert!(selected(&render_tall(&app, now)).starts_with("⠋ a "));
+        app.press(KeyCode::Down, now);
+        assert!(selected(&render_tall(&app, now)).starts_with("○ c "));
     }
 
     #[test]

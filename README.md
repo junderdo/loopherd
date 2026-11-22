@@ -92,9 +92,10 @@ rm ~/.local/bin/loopherd
 Agent types from `scripts/install` are yours to remove: the files listed in
 `$XDG_STATE_HOME/loopherd/agents.sha256`, then that file.
 
-The hooks act only in a member's pane: they record each stop in its
-mailbox, keep its session current across `/clear` and resume, and deny a
-lead the commands its switches leave to you. `install-hook` backs up
+The hooks act only in a member's pane: they record each stop and each
+subagent it starts or finishes in its mailbox, keep its session current
+across `/clear` and resume, and deny a lead the commands its switches leave
+to you. `install-hook` backs up
 `settings.json` before changing it.
 
 ### herdr plugin
@@ -389,8 +390,8 @@ that file.
 
 ### Hooks
 
-`stop-hook`, `session-hook`, `tool-hook` and `prompt-hook` are the Claude hooks
-`install-hook` sets up. Claude runs them; you don't.
+`stop-hook`, `session-hook`, `tool-hook`, `prompt-hook` and `subagent-hook`
+are the Claude hooks `install-hook` sets up. Claude runs them; you don't.
 
 ## Where it's going
 

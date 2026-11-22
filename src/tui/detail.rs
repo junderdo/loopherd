@@ -240,6 +240,7 @@ mod tests {
             template: None,
             released: false,
             retired: None,
+            subagents: vec![],
         };
 
         let lines = member(&worker, &Mail::default(), "", Theme::from_env(None, true));

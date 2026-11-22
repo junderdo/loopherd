@@ -337,6 +337,10 @@ fn status(ctx: &mut Ctx, all: bool, json: bool, color: bool, sink: &mut dyn Sink
         all,
         format,
         herd,
+        Some(&crate::status::Subagents {
+            mailboxes: &ctx.paths.state_dir().join("reports"),
+            now: SystemTime::now(),
+        }),
     )?;
     if !out.stdout.is_empty() {
         sink.out(out.stdout.trim_end_matches('\n'));
@@ -3365,6 +3369,7 @@ mod tests {
             true,
             crate::status::Format::Text { color: false },
             "h",
+            None,
         )
         .unwrap();
         assert_eq!((code, status.out.join("\n") + "\n"), (0, direct.stdout));

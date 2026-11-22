@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::ser::SerializeMap;
 use serde::{Serialize, Serializer};
@@ -50,6 +51,22 @@ pub struct Member {
     pub released: bool,
     /// When it was retired (RFC 3339, or `unknown` if the ledger has no time); `None` while open.
     pub retired: Option<String>,
+    /// Filled by the caller, since reading them is I/O.
+    pub subagents: Vec<RunningSubagent>,
+}
+
+/// A subagent a member's Claude started and hasn't finished.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RunningSubagent {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub agent_type: String,
+    pub description: Option<String>,
+    /// When it started, RFC 3339.
+    pub started: String,
+    /// How long it has run, as of the read.
+    #[serde(skip)]
+    pub age: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -279,6 +296,7 @@ pub(crate) fn member(
                 .clone()
                 .unwrap_or_else(|| "unknown".into())
         }),
+        subagents: vec![],
     }
 }
 
