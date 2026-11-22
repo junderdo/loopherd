@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -284,7 +284,17 @@ impl Branches {
                 })
                 .ok()
         });
-        branch_in(git.as_ref()?, dir)
+        let command = git
+            .as_ref()?
+            .command(dir)
+            .inspect_err(|e| {
+                self.refusals.borrow_mut().push(format!(
+                    "warning: {}'s branch is unknown: {e:#}",
+                    record.name
+                ))
+            })
+            .ok()?;
+        branch_in(command)
     }
 }
 
@@ -293,13 +303,12 @@ impl Branches {
 /// The worktree may be a lead's to write, so git runs in its guarded form.
 pub(crate) fn branch(record: &AgentRecord) -> Option<String> {
     let dir = record.worktree.as_deref().filter(|d| d.is_dir())?;
-    branch_in(&PinnedGit::new(&record.repo).ok()?, dir)
+    branch_in(PinnedGit::new(&record.repo).ok()?.command(dir).ok()?)
 }
 
-fn branch_in(git: &PinnedGit, dir: &Path) -> Option<String> {
+/// The branch `git`, run guarded in a worktree, says is checked out there.
+fn branch_in(mut git: std::process::Command) -> Option<String> {
     let out = git
-        .command(dir)
-        .ok()?
         .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
         // These override -C, so every row would show the same branch.
         .env_remove("GIT_DIR")
@@ -1432,6 +1441,63 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         let read = read(&herdr, &ledger, &not_paused(), Options::default()).unwrap();
         assert!(read.view.ungrouped.iter().all(|m| m.branch.is_none()));
         assert_eq!(read.view.ungrouped.len(), 2);
+    }
+
+    #[test]
+    fn a_checkout_whose_own_git_dir_a_lead_could_have_set_is_reported_and_shows_no_branch() {
+        use crate::worktree::testing::{git_in, repo_with_origin};
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let linked = root.path().join("proj/worktrees/feat-x");
+        git_in(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feat/x",
+                linked.to_str().unwrap(),
+            ],
+        );
+        git_in(&repo, &["config", "extensions.worktreeConfig", "true"]);
+        let redirected = root.path().join("gd");
+        std::fs::create_dir(&redirected).unwrap();
+        let planted = redirected.join("config.worktree");
+        std::fs::write(&planted, "[core]\n\tfsmonitor = true\n").unwrap();
+        std::fs::write(
+            linked.join(".git"),
+            format!("gitdir: {}\n", redirected.display()),
+        )
+        .unwrap();
+        let mut ledger = MemLedger::default();
+        for e in [
+            checkout("lh-1", &repo, &repo),
+            checkout("lh-2", &repo, &linked),
+        ] {
+            ledger.0.insert(e.name.clone(), e);
+        }
+        let herdr = FakeHerdr::new(&[("w1", "main")]);
+
+        let read = read(&herdr, &ledger, &not_paused(), Options::default()).unwrap();
+
+        let problem = read.problem.unwrap_or_default();
+        assert_eq!(
+            problem.matches("sets core.fsmonitor").count(),
+            1,
+            "{problem}"
+        );
+        assert!(
+            problem.contains(&planted.display().to_string()),
+            "{problem}"
+        );
+        let branches: Vec<_> = read
+            .view
+            .ungrouped
+            .iter()
+            .map(|m| (m.name.as_str(), m.branch.as_deref()))
+            .collect();
+        assert_eq!(branches, [("lh-1", Some("main")), ("lh-2", None)]);
     }
 
     #[test]
