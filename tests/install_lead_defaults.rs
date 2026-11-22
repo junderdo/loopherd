@@ -151,7 +151,8 @@ fn a_first_install_on_a_terminal_asks_each_switch_and_keeps_the_rest_of_config_t
     let sandbox = Sandbox::new();
     sandbox.write_config("# mine\ncontext_window = 1000000\n");
 
-    // No to the agent types, then merge yes, install no, rebase yes, the rest by default.
+    // No to the agent types, then merge yes, install no, rebase yes, the rest
+    // by default, and Enter keeps revive_on_startup off.
     let Some(out) = sandbox.install_on_terminal(&[], "n\ny\nn\ny\n\n\n\n") else {
         return;
     };
@@ -168,14 +169,14 @@ fn a_first_install_on_a_terminal_asks_each_switch_and_keeps_the_rest_of_config_t
         sandbox.read_config().unwrap(),
         "# mine\ncontext_window = 1000000\n\n[lead_defaults]\nmerge = true\ninstall = false\n\
          rebase = true\nnew_cards = false\ndesign_escalation = false\nblocked_dialogs = false\n\
-         follow_ups_ready = false\n"
+         follow_ups_ready = false\n\n[herdr_plugin]\nrevive_on_startup = false\n"
     );
 }
 
 #[test]
 fn once_lead_defaults_exist_a_plain_install_asks_nothing_about_them() {
     let sandbox = Sandbox::new();
-    let text = "[lead_defaults]\nmerge = true\n";
+    let text = "[lead_defaults]\nmerge = true\n\n[herdr_plugin]\nrevive_on_startup = false\n";
     sandbox.write_config(text);
 
     let Some(out) = sandbox.install_on_terminal(&[], "n\n") else {
@@ -330,4 +331,29 @@ fn a_context_flag_passes_through_to_setup_without_asking() {
         sandbox.read_config().unwrap(),
         "context_window = 1000000\ndefault_context_limit = 500000\n"
     );
+}
+
+#[test]
+fn a_revive_on_startup_flag_passes_through_to_setup_without_asking() {
+    let sandbox = Sandbox::new();
+
+    succeeded(&sandbox.install(&["--revive-on-startup", "true"]));
+    assert_eq!(
+        sandbox.read_config().unwrap(),
+        "[herdr_plugin]\nrevive_on_startup = true\n"
+    );
+    succeeded(&sandbox.install(&["--revive-on-startup=false"]));
+    assert_eq!(
+        sandbox.read_config().unwrap(),
+        "[herdr_plugin]\nrevive_on_startup = false\n"
+    );
+
+    let fresh = Sandbox::new();
+    let bad = fresh.install(&["--revive-on-startup", "yes"]);
+    assert_eq!(bad.status.code(), Some(1), "{bad:?}");
+    assert!(!fresh.home.join(".local/bin/loopherd").exists());
+    assert_eq!(fresh.read_config(), None);
+
+    let both = sandbox.install(&["--no-extras", "--revive-on-startup"]);
+    assert_eq!(both.status.code(), Some(2), "{both:?}");
 }

@@ -329,9 +329,10 @@ fn startup_revive_without_socket(config: &Path) -> Command {
 }
 
 #[test]
-fn the_startup_revive_does_nothing_until_config_turns_it_on() {
+fn the_startup_revive_runs_for_alive_leads_brokers_until_config_turns_the_full_revive_on() {
     let config = tempfile::tempdir().unwrap();
     let file = config.path().join("config.toml");
+    let lock = config.path().join("state/loopherd/reports/revive.lock");
     for text in [None, Some("[herdr_plugin]\nrevive_on_startup = false\n")] {
         if let Some(text) = text {
             fs::write(&file, text).unwrap();
@@ -339,15 +340,20 @@ fn the_startup_revive_does_nothing_until_config_turns_it_on() {
 
         let out = startup_revive(config.path());
 
-        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        assert!(
+            !out.status.success(),
+            "it ran without reaching herdr: {out:?}"
+        );
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
             format!(
-                "revive on startup is off; set [herdr_plugin] revive_on_startup = true in {} to turn it on\n",
+                "revive on startup is off, so this is for alive leads' brokers only; \
+                 set [herdr_plugin] revive_on_startup = true in {} to resume and prompt members too\n",
                 file.display()
             )
         );
-        assert!(!config.path().join("state").exists(), "{out:?}");
+        assert!(lock.exists(), "{out:?}");
+        fs::remove_dir_all(config.path().join("state")).unwrap();
     }
 
     fs::write(&file, "[herdr_plugin]\nrevive_on_startup = true\n").unwrap();
@@ -356,12 +362,8 @@ fn the_startup_revive_does_nothing_until_config_turns_it_on() {
         !out.status.success(),
         "it ran without reaching herdr: {out:?}"
     );
-    assert!(
-        config
-            .path()
-            .join("state/loopherd/reports/revive.lock")
-            .exists()
-    );
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("revive on startup is off"));
+    assert!(lock.exists());
 }
 
 #[test]
@@ -385,23 +387,25 @@ fn the_startup_revive_refuses_an_invalid_config() {
 
 #[test]
 fn the_startup_revive_refuses_without_the_hooks_socket() {
-    let config = tempfile::tempdir().unwrap();
-    fs::write(
-        config.path().join("config.toml"),
-        "[herdr_plugin]\nrevive_on_startup = true\n",
-    )
-    .unwrap();
-
-    let out = startup_revive_without_socket(config.path())
-        .output()
+    for full in [true, false] {
+        let config = tempfile::tempdir().unwrap();
+        fs::write(
+            config.path().join("config.toml"),
+            format!("[herdr_plugin]\nrevive_on_startup = {full}\n"),
+        )
         .unwrap();
 
-    assert!(!out.status.success(), "{out:?}");
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("HERDR_SOCKET_PATH is unset"),
-        "{out:?}"
-    );
-    assert!(!config.path().join("state").exists(), "{out:?}");
+        let out = startup_revive_without_socket(config.path())
+            .output()
+            .unwrap();
+
+        assert!(!out.status.success(), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("HERDR_SOCKET_PATH is unset"),
+            "{out:?}"
+        );
+        assert!(!config.path().join("state").exists(), "{out:?}");
+    }
 }
 
 fn one<'a>(m: &'a toml::Table, key: &str, id: &str) -> &'a toml::Value {

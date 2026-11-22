@@ -5,7 +5,8 @@ min_herdr_version = "0.7.5"
 description = "Group coding agents into herds that keep working across sessions. Needs loopherd on PATH."
 platforms = ["linux", "macos"]
 
-# Does nothing unless config.toml sets [herdr_plugin] revive_on_startup = true.
+# Starts alive leads' brokers; only config.toml's [herdr_plugin]
+# revive_on_startup = true also resumes members and prompts leads.
 [[startup]]
 command = ["sh", "loopherd.sh", "revive", "--startup"]
 
