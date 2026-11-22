@@ -312,7 +312,8 @@ A template with `slot = false` (default `true`) starts members that hold no
 `max` slot: `feed` and `add` don't count them, `add` never warns past `max`
 for one, and the watch doesn't count one as an open worker for `no workers
 open`, `out of work`, `drained` or `all drained`. Its own `done`, stop and
-`gone` events still print. `attended = true` implies it (D116).
+`gone` events still print. Only `add` starts one, as `max` can't bound
+it; `attended = true` implies it (D116).
 
 ## Tour
 

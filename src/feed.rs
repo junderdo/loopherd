@@ -907,6 +907,9 @@ fn task_params<'q>(queue: &'q Queue, task: &str) -> Result<(&'q str, Vec<String>
     if queue.attended.contains(template) {
         bail!("template {template} is attended, so only add starts it");
     }
+    if queue.slotless.contains(template) {
+        bail!("template {template} has slot = false, so only add starts it");
+    }
     let params: Vec<String> = words.map(String::from).collect();
     if params.len() != names.len() {
         bail!(
@@ -2623,6 +2626,31 @@ mod tests {
             fed.lines,
             [
                 "error: research 1: template research is attended, so only add starts it",
+                "added lh-2",
+                "prs: 0 retired, 1 added, 0 skipped, 1 error",
+            ]
+        );
+        assert_eq!(fed.code, LINE_ERRORS_EXIT);
+    }
+
+    #[test]
+    fn a_routed_task_naming_a_slot_false_template_is_a_bad_line() {
+        let setup = Setup::routed("printf 'research 1\\ncard 2\\n'", 5);
+        let herd_file = setup.config.path().join("herds/prs.toml");
+        let herd = fs::read_to_string(&herd_file).unwrap().replace(
+            "[template.research]\n",
+            "[template.research]\nslot = false\n",
+        );
+        fs::write(&herd_file, herd).unwrap();
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "error: research 1: template research has slot = false, so only add starts it",
                 "added lh-2",
                 "prs: 0 retired, 1 added, 0 skipped, 1 error",
             ]

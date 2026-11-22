@@ -105,15 +105,6 @@ pub struct AgentRecord {
 }
 
 /// How a retired run ended (D92).
-impl AgentRecord {
-    /// Whether it holds no `max` slot whatever its state: attended, or from
-    /// a `slot = false` template. Records from before `no_slot` existed
-    /// carry only `attended`.
-    pub fn slotless(&self) -> bool {
-        self.no_slot || self.attended.is_some()
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Outcome {
@@ -185,6 +176,13 @@ impl AgentRecord {
                 && self
                     .env_pane_shell
                     .is_some_and(|shell| lineage.contains(&shell)))
+    }
+
+    /// Whether it holds no `max` slot whatever its state: attended, or from
+    /// a `slot = false` template. Records from before `no_slot` existed
+    /// carry only `attended`.
+    pub fn slotless(&self) -> bool {
+        self.no_slot || self.attended.is_some()
     }
 
     pub fn is_lead(&self) -> bool {

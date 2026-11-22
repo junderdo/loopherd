@@ -481,12 +481,13 @@ fn drained(
         return Ok(drained.then(|| format!("{herd} {}", line::DRAINED)));
     }
     let open_worker = |herd: &str| open(&entries, herd, holds_slot);
-    let slotless = |m: &&Member| entries.get(&m.name).is_some_and(|e| e.slotless());
-    let members: Vec<&Member> = members.iter().filter(|m| !slotless(m)).collect();
     let mut herds = 0;
-    for member in &members {
-        match entries.get(&member.name).and_then(|e| e.herd.as_deref()) {
+    for member in members {
+        let entry = entries.get(&member.name);
+        match entry.and_then(|e| e.herd.as_deref()) {
             None => {}
+            // Not a worker, but its flight below still counts.
+            Some(_) if entry.is_some_and(|e| e.slotless()) => {}
             Some(herd) if member.lead && paused(herd) && !open_worker(herd) => herds += 1,
             Some(_) => return Ok(None),
         }
@@ -5684,6 +5685,19 @@ mod tests {
     fn a_slot_false_member_is_no_open_worker_for_all_drained() {
         let mut world = Checked::drained();
         world.open_groom();
+        assert_eq!(world.shepherd().unwrap(), ["all drained"]);
+    }
+
+    #[test]
+    fn a_working_slot_false_member_the_shepherd_reads_holds_off_all_drained() {
+        let mut world = Checked::drained();
+        let groom = AgentRecord {
+            no_slot: true,
+            ..member("groom-solo", "w9:p6", Some("solo"))
+        };
+        world.add(groom, AgentStatus::Working);
+        assert_eq!(world.shepherd(), None);
+        world.herdr.set_status("groom-solo", AgentStatus::Idle);
         assert_eq!(world.shepherd().unwrap(), ["all drained"]);
     }
 

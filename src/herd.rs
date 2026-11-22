@@ -498,6 +498,9 @@ pub struct Queue {
     pub routed: bool,
     /// The listed templates marked `attended`, which feed never spawns.
     pub attended: BTreeSet<String>,
+    /// The listed templates with `slot = false`, which feed never spawns,
+    /// since `max` can't bound them.
+    pub slotless: BTreeSet<String>,
     pub source: String,
     pub backlog: Option<String>,
     pub max: usize,
@@ -539,6 +542,7 @@ fn queue_in(file: &HerdFile, paths: &Paths, herd: &str) -> Result<Option<Queue>>
     };
     let mut templates = BTreeMap::new();
     let mut attended = BTreeSet::new();
+    let mut slotless = BTreeSet::new();
     for name in queue.names() {
         let template = file
             .template
@@ -547,6 +551,8 @@ fn queue_in(file: &HerdFile, paths: &Paths, herd: &str) -> Result<Option<Queue>>
         templates.insert(name.clone(), template.params.clone());
         if template.attended {
             attended.insert(name.clone());
+        } else if !template.slot {
+            slotless.insert(name.clone());
         }
     }
     Ok(Some(Queue {
@@ -556,6 +562,7 @@ fn queue_in(file: &HerdFile, paths: &Paths, herd: &str) -> Result<Option<Queue>>
         templates,
         routed: queue.templates.is_some(),
         attended,
+        slotless,
         source: queue.source.clone(),
         backlog: queue.backlog.clone(),
         max: queue.max as usize,
@@ -1270,8 +1277,12 @@ fn describe(
     );
     let usages = parsed.template.iter().map(|(template, t)| {
         let params: String = t.params.iter().map(|p| format!(" <{p}>")).collect();
-        let attended = if t.attended { "  (attended)" } else { "" };
-        format!("  loopherd add {herd} {template}{params}{attended}")
+        let mark = match (t.attended, t.slot) {
+            (true, _) => "  (attended)",
+            (false, false) => "  (no slot)",
+            (false, true) => "",
+        };
+        format!("  loopherd add {herd} {template}{params}{mark}")
     });
     let feed = parsed.queue.as_ref().map(|q| {
         let template = match &q.templates {
@@ -1337,6 +1348,17 @@ fn describe(
             "  warning: template {name} is attended, so feed never spawns it from [queue] templates"
         )
     });
+    let queued_slotless = parsed.queue.iter().flat_map(|q| q.names()).filter(|name| {
+        parsed
+            .template
+            .get(name.as_str())
+            .is_some_and(|t| !t.attended && !t.slot)
+    });
+    let queued_slotless = queued_slotless.map(|name| {
+        format!(
+            "  warning: template {name} has slot = false, so feed never spawns it from [queue] templates"
+        )
+    });
     std::iter::once(header)
         .chain(usages)
         .chain(lead)
@@ -1346,6 +1368,7 @@ fn describe(
         .chain(after_merge)
         .chain(unmerged)
         .chain(queued_attended)
+        .chain(queued_slotless)
         .collect()
 }
 
@@ -2619,6 +2642,29 @@ args = ["--model", "opus"]
                 "  loopherd add prs grill <key>  (attended)",
                 "  loopherd feed prs  (templates card, grill, max 2)",
                 "  warning: template grill is attended, so feed never spawns it from [queue] templates",
+            ]
+        );
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn herds_marks_a_slot_false_template_and_warns_when_its_queue_lists_it() {
+        let herd = "repo = \"/r\"\n\
+                    [queue]\ntemplates = [\"card\", \"groom\"]\nsource = \"true\"\nmax = 2\n\
+                    [template.card]\nparams = [\"key\"]\nprompt = \"go\"\n\
+                    [template.groom]\nparams = []\nprompt = \"go\"\nslot = false\n";
+        let config = Config::with(&[("prs", herd)]);
+
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+
+        let lines: Vec<&str> = report.lines().skip(1).collect();
+        assert_eq!(
+            lines,
+            [
+                "  loopherd add prs card <key>",
+                "  loopherd add prs groom  (no slot)",
+                "  loopherd feed prs  (templates card, groom, max 2)",
+                "  warning: template groom has slot = false, so feed never spawns it from [queue] templates",
             ]
         );
         assert_eq!(code, 0);
