@@ -340,6 +340,8 @@ fn a_groom_batchs_double_quoted_comment_line_keeps_apostrophes_quotes_and_dollar
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(
         board.writes(),
-        [r#"POST /cards/card3/actions/comments text=Doesn't say which "file" or $HOME path to change"#]
+        [
+            r#"POST /cards/card3/actions/comments text=Doesn't say which "file" or $HOME path to change"#
+        ]
     );
 }

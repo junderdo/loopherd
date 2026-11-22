@@ -196,7 +196,10 @@ fn the_documented_groom_prompt_gives_self_contained_batch_lines_and_a_heredoc_re
         "`scripts/trello archive LH-<n>  # <reason>`",
         "loopherd report --kind done \"$(cat <<'EOF'",
     ] {
-        assert!(groom.contains(form), "groom prompt misses {form:?}: {groom}");
+        assert!(
+            groom.contains(form),
+            "groom prompt misses {form:?}: {groom}"
+        );
     }
     assert!(!groom.contains("curl"), "{groom}");
     assert!(!groom.contains("'<report>'"), "{groom}");
