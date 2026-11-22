@@ -1439,6 +1439,12 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             SubagentStart(subagent("c2", "reviewer", "sess-lh-42", None)),
         );
         post(m, "lh-42", "2026-11-21T10:05:00Z", stop_with(0));
+        post(
+            m,
+            "old",
+            "2026-11-21T10:00:00Z",
+            SubagentStart(subagent("d1", "reviewer", "sess-old", None)),
+        );
         let subagents = Subagents {
             mailboxes: m,
             now: humantime::parse_rfc3339("2026-11-21T10:04:30Z").unwrap(),
@@ -1469,7 +1475,17 @@ gone: no live agent matches it; `loopherd revive` can bring it back
                     "started": "2026-11-21T10:03:00.000000000Z"},
             ])
         );
-        assert_eq!(json["ungrouped"][0]["subagents"], serde_json::json!([]));
+        let ungrouped = json["ungrouped"].as_array().unwrap();
+        let named = |name: &str| {
+            ungrouped
+                .iter()
+                .find(|m| m["name"] == name)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(named("lh-42")["subagents"], serde_json::json!([]));
+        assert_eq!(named("old")["gone"], true);
+        assert_eq!(named("old")["subagents"], serde_json::json!([]));
     }
 
     #[test]

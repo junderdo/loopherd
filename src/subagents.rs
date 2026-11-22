@@ -16,12 +16,14 @@ pub struct Subagents<'a> {
     pub now: SystemTime,
 }
 
-/// Fills each open member's running subagents from its mailbox. A mailbox
-/// that can't be read lists none; `status` and the view warn about it elsewhere.
+/// Fills each open member's running subagents from its mailbox. A gone
+/// member, or one whose mailbox can't be read, lists none.
 pub fn fill(view: &mut View, ledger: &BTreeMap<String, AgentRecord>, from: &Subagents) {
     let members = view.herds.iter_mut().flat_map(|h| h.members.iter_mut());
     for member in members.chain(view.ungrouped.iter_mut()) {
-        fill_member(member, ledger, from);
+        if !member.gone {
+            fill_member(member, ledger, from);
+        }
     }
 }
 
