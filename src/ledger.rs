@@ -81,6 +81,9 @@ pub struct AgentRecord {
     /// Set on a member of an attended template, whose pane the human sits in (D112).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attended: Option<Attended>,
+    /// Set on a member of a `slot = false` template, which holds no `max` slot.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_slot: bool,
     /// Why this lead runs without its sandbox, guarded by its tool hook
     /// alone; `None` when sandboxed, and for a worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -102,6 +105,15 @@ pub struct AgentRecord {
 }
 
 /// How a retired run ended (D92).
+impl AgentRecord {
+    /// Whether it holds no `max` slot whatever its state: attended, or from
+    /// a `slot = false` template. Records from before `no_slot` existed
+    /// carry only `attended`.
+    pub fn slotless(&self) -> bool {
+        self.no_slot || self.attended.is_some()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Outcome {
@@ -626,6 +638,7 @@ mod tests {
             process: None,
             role: None,
             attended: None,
+            no_slot: false,
             after_merge: None,
             unsandboxed: None,
             sockets_unblocked: None,

@@ -94,6 +94,7 @@ mod tests {
             process: None,
             role: None,
             attended: None,
+            no_slot: false,
             after_merge: None,
             unsandboxed: None,
             sockets_unblocked: None,

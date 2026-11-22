@@ -234,6 +234,13 @@ struct TemplateFile {
     /// The human sits in its member's pane; only `add` starts one (D112).
     #[serde(default)]
     attended: bool,
+    /// `false`: its members hold no `max` slot and aren't workers to the watch (D116).
+    #[serde(default = "yes")]
+    slot: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// [`Paths::from_env`]'s herds dir; `None` when it needs `$HOME` and that is unset.
@@ -361,8 +368,8 @@ pub struct Added {
 ///
 /// Into a herd with a `[queue]`, fails while `feed` holds the feed lock
 /// past [`Paths::lock_feed`]'s 1s wait, and adds past the
-/// queue's `max` with a warning: `add` is the human's override. An attended
-/// member holds no slot, so skips both.
+/// queue's `max` with a warning: `add` is the human's override. A member
+/// that holds no slot skips both.
 pub fn add(
     herdr: &dyn Herdr,
     ledger: &mut dyn Ledger,
@@ -371,11 +378,9 @@ pub fn add(
     inherited_workspace: Option<&str>,
 ) -> Result<Added> {
     let spawn_req = resolve(paths, req)?;
-    let attended = spawn_req
-        .member_of
-        .as_ref()
-        .is_some_and(|m| m.attended.is_some());
-    let max = match attended {
+    let member_of = spawn_req.member_of.as_ref();
+    let attended = member_of.is_some_and(|m| m.attended.is_some());
+    let max = match member_of.is_some_and(|m| m.no_slot) {
         true => None,
         false => load(&paths.herds, &req.herd)
             .context("herd")?
@@ -419,7 +424,7 @@ pub fn add(
 }
 
 /// How many unretired ledger entries belong to `herd`, not counting its
-/// lead or attended members.
+/// lead or members that hold no slot.
 pub fn members(ledger: &dyn Ledger, herd: &str) -> Result<usize> {
     let entries = ledger.entries().context("ledger")?;
     Ok(entries
@@ -437,9 +442,10 @@ pub fn known(dir: &Path, ledger: &dyn Ledger, herd: &str) -> Result<bool> {
     Ok(entries.values().any(|e| e.herd.as_deref() == Some(herd)))
 }
 
-/// Whether `record` counts against its herd's queue `max`.
+/// Whether `record` counts against its herd's queue `max`: an open worker
+/// to the watch's herd-level lines.
 pub fn holds_slot(record: &AgentRecord) -> bool {
-    !record.retired && !record.is_lead() && record.attended.is_none()
+    !record.retired && !record.is_lead() && !record.slotless()
 }
 
 /// What `add` would do, one `key value` line each, then the prompt.
@@ -738,6 +744,7 @@ pub fn resolve(paths: &Paths, req: &AddRequest) -> Result<SpawnRequest> {
             params,
             values: shepherd_pane.into_iter().collect(),
             role: None,
+            no_slot: !template.slot || attended.is_some(),
             attended,
         }),
     })
@@ -1877,6 +1884,46 @@ args = ["--model", "opus"]
             Some("prs now has 2 members, past its queue max of 1")
         );
         assert_eq!(herdr.tabs().len(), 2);
+    }
+
+    #[test]
+    fn a_slot_false_member_holds_no_slot_in_add_and_add_never_warns_for_it() {
+        let herd = format!(
+            "{}\n[template.groom]\nparams = []\nname = \"groom-{{herd}}\"\nprompt = \"groom\"\nslot = false\n",
+            queue_herd(1)
+        );
+        let config = Config::with(&[("prs", &herd)]);
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        let mut add_one = |template, params: &[&str]| {
+            add(
+                &herdr,
+                &mut ledger,
+                &config.paths(),
+                &request("prs", template, params),
+                Some("w1"),
+            )
+            .unwrap()
+            .warning
+        };
+
+        assert_eq!(add_one("pr", &["1"]), None);
+        assert_eq!(add_one("groom", &[]), None);
+        assert_eq!(
+            add_one("pr", &["2"]).as_deref(),
+            Some("prs now has 2 members, past its queue max of 1")
+        );
+        let entries = ledger.entries().unwrap();
+        assert!(entries["groom-prs"].no_slot);
+        assert!(!entries["zpr-1"].no_slot, "slot defaults to true");
+        assert_eq!(members(&ledger, "prs").unwrap(), 2);
+    }
+
+    #[test]
+    fn an_attended_template_implies_slot_false() {
+        let config = Config::with(&[("h", GRILL_HERD)]);
+        let (_, ledger, name) = add_ok(&config, &attended_request(None, false));
+        assert!(ledger.entries().unwrap()[&name].no_slot);
     }
 
     #[test]
@@ -3714,6 +3761,7 @@ args = ["--model", "opus"]
             process: None,
             role: lead.then_some(crate::ledger::Role::Lead),
             attended: None,
+            no_slot: false,
             after_merge: None,
             unsandboxed: None,
             sockets_unblocked: None,

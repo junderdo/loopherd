@@ -93,6 +93,8 @@ pub struct MemberOf {
     pub values: Vec<(String, String)>,
     pub role: Option<Role>,
     pub attended: Option<Attended>,
+    /// Holds no `max` slot.
+    pub no_slot: bool,
 }
 
 /// Prompt text and the flag it came from, which errors name.
@@ -234,6 +236,7 @@ pub fn spawn(
         process: None,
         role: req.member_of.as_ref().and_then(|m| m.role.clone()),
         attended: req.member_of.as_ref().and_then(|m| m.attended.clone()),
+        no_slot: req.member_of.as_ref().is_some_and(|m| m.no_slot),
         after_merge: None,
         unsandboxed: None,
         sockets_unblocked: None,
@@ -1117,6 +1120,7 @@ mod tests {
             values: vec![],
             role: None,
             attended: None,
+            no_slot: false,
         }
     }
 
