@@ -420,7 +420,7 @@ mod tests {
             herdr.prompts()[0].1,
             format!(
                 "lead-h leads h in {}:\nmerge on\ninstall off\nrebase off\n\
-                 new_cards off\ndesign_escalation off\nblocked_dialogs off\n\n\
+                 new_cards off\ndesign_escalation off\nblocked_dialogs off\nfollow_ups_ready off\n\n\
                  Your review-round limit: 3.",
                 wt.display()
             )
@@ -2694,7 +2694,7 @@ mod tests {
                 "name lead-h\nbranch none\nworktree {wt}\nworkspace loopherd\n\
                  args --model opus\nrole lead\nprompt\n\
                  lead-h leads h in {wt}:\nmerge on\ninstall off\nrebase off\n\
-                 new_cards off\ndesign_escalation off\nblocked_dialogs off\n\n\
+                 new_cards off\ndesign_escalation off\nblocked_dialogs off\nfollow_ups_ready off\n\n\
                  Your review-round limit: 3.",
                 wt = wt.display()
             )

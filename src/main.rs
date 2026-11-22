@@ -941,23 +941,25 @@ fn refused_to_leads(command: &Command) -> Option<(&'static str, &'static str)> {
 }
 
 /// Refuses the running command, `why` saying whose it is, in a lead's pane
-/// or sandbox. The shepherd's pane may carry a dead lead's old id after a
-/// herdr restart, so it is never a lead's.
+/// or sandbox, as [`own_broker`] places it.
 fn refuse_from_lead(why: &str, by_pane: bool) -> Result<()> {
     let Ok(path) = FileLedger::default_path() else {
         return Ok(());
     };
     let ledger = FileLedger::new(path);
-    let shepherd = ledger
-        .dir()
-        .is_ok_and(|state| shepherd_here(&state, own_pane().as_deref()).is_some());
     let lead = match by_pane {
         true => own_broker(),
         false => Paths::from_env().ok().and_then(|paths| {
-            broker::route(&paths, &ledger, &process::ProcFs, std::process::id(), None)
+            broker::route(
+                &paths,
+                &ledger,
+                &process::ProcFs,
+                std::process::id(),
+                None,
+                || false,
+            )
         }),
     };
-    let lead = lead.filter(|_| !shepherd);
     broker::refuse_from_lead(lead.as_ref(), &ledger, why)
 }
 
@@ -1488,17 +1490,16 @@ impl broker::Sink for Printed {
 
 /// The broker of the lead running this loopherd, if a lead runs it. The
 /// shepherd's pane may carry a dead lead's old id after a herdr restart, so
-/// it is never a lead's.
+/// only a lead ancestor makes it a lead's.
 fn own_broker() -> Option<broker::Client> {
     let paths = Paths::from_env().ok()?;
     let ledger = FileLedger::new(FileLedger::default_path().ok()?);
     let id = own_pane();
-    let shepherd = ledger
-        .dir()
-        .is_ok_and(|state| shepherd_here(&state, id.as_deref()).is_some());
-    if shepherd {
-        return None;
-    }
+    let shepherd = || {
+        ledger
+            .dir()
+            .is_ok_and(|state| shepherd_here(&state, id.as_deref()).is_some())
+    };
     let lineage = own_lineage();
     let socket = socket_from_env();
     let pane = id.as_deref().map(|id| tool_hook::Pane {
@@ -1512,6 +1513,7 @@ fn own_broker() -> Option<broker::Client> {
         &process::ProcFs,
         std::process::id(),
         pane.as_ref(),
+        shepherd,
     )
 }
 
