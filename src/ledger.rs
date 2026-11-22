@@ -236,6 +236,10 @@ pub trait Ledger {
     fn read_only(&self) -> Result<bool> {
         Ok(false)
     }
+    /// The directory whose permissions decide [`Ledger::read_only`].
+    fn dir_shown(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// The ledger entries `remove_herd` changed, by name.
@@ -438,6 +442,10 @@ fn temp_path(path: &Path) -> PathBuf {
 impl Ledger for FileLedger {
     fn read_only(&self) -> Result<bool> {
         Ok(!self.writable()?)
+    }
+
+    fn dir_shown(&self) -> Option<PathBuf> {
+        self.dir().ok()
     }
 
     fn entries(&self) -> Result<BTreeMap<String, AgentRecord>> {
