@@ -1224,6 +1224,10 @@ fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
         REMOTE_TIMEOUT
     });
     let queues = paths.as_ref().map(|paths| Queues { paths, timeout });
+    let subagents = status::Subagents {
+        mailboxes: &ledger.reports_dir()?,
+        now: SystemTime::now(),
+    };
     let out = status::status(
         &CliHerdr,
         &ledger,
@@ -1231,10 +1235,8 @@ fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
         queues.as_ref(),
         Options { all, strays },
         format,
-        Some(&status::Subagents {
-            mailboxes: &ledger.reports_dir()?,
-            now: SystemTime::now(),
-        }),
+        // Only the JSON lists subagents.
+        (format == status::Format::Json).then_some(&subagents),
     )?;
     print!("{}", out.stdout);
     for line in out.stderr.lines() {

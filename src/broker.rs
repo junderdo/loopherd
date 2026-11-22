@@ -337,7 +337,7 @@ fn status(ctx: &mut Ctx, all: bool, json: bool, color: bool, sink: &mut dyn Sink
         all,
         format,
         herd,
-        Some(&crate::status::Subagents {
+        json.then_some(&crate::status::Subagents {
             mailboxes: &ctx.paths.state_dir().join("reports"),
             now: SystemTime::now(),
         }),
