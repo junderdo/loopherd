@@ -926,8 +926,10 @@ pub fn serve<L: Ledger + Clone + Send>(
                 }
                 if let Ok(requests) = Dir::open(paths.state_dir(), &["broker", lead, "requests"]) {
                     let requests = Arc::new(requests);
+                    // A request a relaunch let through is left for the relaunch's broker.
+                    let retired = || retirement(ledger, lead).unwrap_or(true);
                     for name in requests.names() {
-                        broker.job(&requests, &name, &replies, &|| true);
+                        broker.job(&requests, &name, &replies, &retired);
                     }
                 }
                 return Ok(Served::Retired);
@@ -4227,6 +4229,30 @@ mod tests {
         world.retire("lead-h");
         let (served, herdr) = serving.join().unwrap();
         assert_eq!(served.unwrap(), Served::Retired);
+        assert!(herdr.prompts().is_empty());
+    }
+
+    #[test]
+    fn a_relaunch_landing_during_the_final_scan_leaves_its_request_for_the_next_broker() {
+        let world = World::new();
+        world.add(member("lh-1", Some("h")));
+        std::fs::create_dir_all(requests_dir(&world.paths, "lead-h")).unwrap();
+        hand_over(&world, "0-001", &tell("lh-1", "hi"));
+        // The round reads retired, and so does the reread after clearing; the relaunch lands next.
+        let ledger = Scripted::new(&world, vec![Box::new(lead_retired), Box::new(lead_retired)]);
+
+        let (served, herdr) = world
+            .serve_on(telling_herdr(), POLL, ledger)
+            .join()
+            .unwrap();
+
+        assert_eq!(served.unwrap(), Served::Retired);
+        assert!(reply_to(&world, "0-001").is_none());
+        assert!(
+            requests_dir(&world.paths, "lead-h")
+                .join("0-001.json")
+                .exists()
+        );
         assert!(herdr.prompts().is_empty());
     }
 
