@@ -210,6 +210,8 @@ struct QueueFile {
     /// A shell command printing one unready task per line.
     backlog: Option<String>,
     max: i64,
+    /// Claimable at or below this is `running low`; unset is twice `max`.
+    low_at: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -504,6 +506,8 @@ pub struct Queue {
     pub source: String,
     pub backlog: Option<String>,
     pub max: usize,
+    /// The claimable count at or below which the herd is running low.
+    pub low_at: usize,
     pub repo: PathBuf,
     /// Each template's done check, for those that have one.
     pub done: BTreeMap<String, MemberCheck>,
@@ -566,6 +570,7 @@ fn queue_in(file: &HerdFile, paths: &Paths, herd: &str) -> Result<Option<Queue>>
         source: queue.source.clone(),
         backlog: queue.backlog.clone(),
         max: queue.max as usize,
+        low_at: queue.low_at.unwrap_or(2 * queue.max) as usize,
         repo: expand_home(&file.repo, &paths.home),
     }))
 }
@@ -1503,6 +1508,11 @@ fn validate_queue(queue: &QueueFile, templates: &BTreeMap<String, TemplateFile>)
     }
     if queue.max < 1 {
         bail!("max must be at least 1, got {}", queue.max);
+    }
+    if let Some(low_at) = queue.low_at
+        && low_at < queue.max
+    {
+        bail!("low_at must be at least max ({}), got {low_at}", queue.max);
     }
     if queue.source.trim().is_empty() {
         bail!("source is empty; set the shell command that prints the ready tasks");
@@ -3182,13 +3192,17 @@ args = ["--model", "opus"]
     }
 
     #[test]
-    fn a_leads_checks_fail_on_a_queue_setting_both_template_and_templates_or_neither() {
+    fn a_leads_checks_fail_on_an_invalid_queue() {
         for (queue, message) in [
             (
                 "template = \"t\"\ntemplates = [\"t\"]\n",
                 "queue: set one of template and templates, not both",
             ),
             ("", "queue: set one of template and templates"),
+            (
+                "template = \"t\"\nlow_at = 0\n",
+                "queue: low_at must be at least max (1), got 0",
+            ),
         ] {
             let herd = format!(
                 "repo = \"/r\"\n[template.t]\nparams = []\nprompt = \"go\"\n\
@@ -3245,6 +3259,10 @@ args = ["--model", "opus"]
             (
                 "template = \"t\"\nsource = \"echo 1\"\nbacklog = \" \"\nmax = 1",
                 "queue: backlog is empty",
+            ),
+            (
+                "template = \"t\"\nsource = \"echo 1\"\nmax = 3\nlow_at = 2",
+                "queue: low_at must be at least max (3), got 2",
             ),
         ] {
             let (report, code) = herds_line(&format!("prompt = \"go\"\n[queue]\n{queue}"), &[]);

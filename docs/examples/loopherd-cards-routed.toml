@@ -39,6 +39,9 @@ scripts/trello cards --list Backlog | awk -F'\t' '
   { print $1, $4 }'
 '''
 max = 3
+# A lead's watch says `running low` at or below this many claimable cards
+# while `backlog` lists any. Default 2 × max; less than max is an error.
+# low_at = 6
 
 [template.wayfinding]
 params = ["card", "type", "slug"]

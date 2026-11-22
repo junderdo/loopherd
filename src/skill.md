@@ -99,6 +99,9 @@ Init never launches an agent.
    prints one unready task per line (key, then title): every open task
    `source` leaves out but blocked ones, keeping those waiting on the human.
    It changes nothing feed does; `status` counts its lines (D60).
+   An optional `[queue] low_at = <n>`, default `2 × max` and at least
+   `max`, is the claimable count at or below which a lead's watch says the
+   herd is `running low` (D116).
    `loopherd herds` lists herd files, their templates and `after_merge`. Hand-spawn only for
    work outside the queue, with `loopherd add <herd> <template> <params…>`.
    A lead always uses `add`: `loopherd spawn … --prompt-file` records no
@@ -162,7 +165,7 @@ Init never launches an agent.
    | `<name> claimable` | Lead's watch only: feed would spawn this member. Feed. |
    | `<herd> failing  source "<command>": <stderr line>` | Lead's watch only: the herd's source failed (also `<herd> failing  backlog "<command>": …` for its `backlog`, and `<herd> failing  <member> done "<command>": …` for a member's `done` or `merged` check), with its last stderr line. Once per streak; one cut off by the 60s round is no event. Fix the cause, or tell the shepherd. |
    | `<herd> recovered  source` | Lead's watch only: what last printed `failing` passes again (also `<herd> recovered  backlog` and `<herd> recovered  <member> done`). A later failure prints `failing` again. A member that retires mid-streak gets none. |
-   | `<herd> running low  <n> claimable, <m> unready` | Lead's watch only: the herd's `backlog` lists unready tasks and claimable (as `status` counts it) is at or below `max`. Once per streak: it prints again only after claimable rises above `max` or unready reaches 0. A paused herd prints none and keeps its streak. Triage (see Lead). |
+   | `<herd> running low  <n> claimable, <m> unready` | Lead's watch only: the herd's `backlog` lists unready tasks and claimable (as `status` counts it) is at or below `[queue] low_at` (default `2 × max`). Once per streak: it prints again only after claimable rises above `low_at` or unready reaches 0. A paused herd prints none and keeps its streak. Triage (see Lead). |
    | `<herd> running low  0 claimable, <m> unready, no workers open` | Lead's watch only: as above, but claimable is 0 and no worker is open, so nothing runs (D80). Prints even mid-streak of the plain form, and in its place when both start together. Once per streak: it prints again only after a worker opens (even one that opened and retired while no watch ran), claimable rises above 0, or unready reaches 0. A paused herd prints none and keeps its streak. Triage (see Lead). |
    | `<herd> out of work` | The herd isn't paused, claimable is 0, its `backlog` lists nothing unready (or it has none), and no worker is open. A lead's watch prints it for its herd; the shepherd's, every 60s, for each unled herd with a herd file it reads. Once per streak: it prints again only after claimable or unready rises above 0 or a worker opens, even one that opened and retired while no watch ran. The shepherd's doesn't repeat what a retired lead's watch already said. A paused herd prints none and keeps its streak. A lead reports it (see Lead); the shepherd tells the human, who pauses the herd or files and approves work. |
    | `<member> interrupted` | Lead's watch only: the feed running the worker's `after_merge` died before noting it. Feed, which notes it, then read the note. |
@@ -250,7 +253,7 @@ Init never launches an agent.
    approves, mark the ready tasks ready in the tracker, archive the stale
    ones the human confirms, and comment what's missing on each needs-spec
    task. In an unled herd, triage yourself when `status` shows claimable at
-   or below `max` with unready above 0: run the herd's `backlog` and sort
+   or below `low_at` with unready above 0: run the herd's `backlog` and sort
    each task the same way.
 7. **Out of work.** A lead's `<herd> out of work` arrives as its
    `question`, and your own watch prints the line for an unled herd (D72):
@@ -980,8 +983,9 @@ What differs from the shepherd:
   `merged`, reports, stops, `blocked` and `gone` wake you as before, so
   keep verifying and running after-merge steps. On resume your watch
   announces the claimable tasks again within 60s.
-- **Running low.** On `<herd> running low`, have a read-only subagent
-  run your herd's `backlog` and sort each task into ready, needs a
+- **Running low.** On `<herd> running low` (claimable at or below your
+  herd's `low_at`, so triage lands before slots empty), have a read-only
+  subagent run your herd's `backlog` and sort each task into ready, needs a
   decision (naming it), needs spec (saying what's missing), or stale
   (saying why). Report the result as one `loopherd report --kind question`
   and end your turn. After the `no workers open` form, the question says
