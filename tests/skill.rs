@@ -564,3 +564,45 @@ fn with_self_restart_on_the_shepherd_arms_its_own_restart_and_warns_the_human() 
         assert!(own.contains(part), "{part}: {own}");
     }
 }
+
+#[test]
+fn with_follow_ups_ready_on_a_lead_files_a_qualifying_follow_up_ready_and_blocked() {
+    let home = tempfile::tempdir().unwrap();
+    let printed = String::from_utf8(skill(home.path())).unwrap();
+    let lead = flat_section(&printed, "\n## Lead\n", "\n## ");
+    for rule in [
+        "Your prompt lists seven",
+        "| `follow_ups_ready` | file a qualifying review follow-up ready to claim once its parent card is Done (D116); needs `new_cards` on |",
+    ] {
+        assert!(lead.contains(rule), "Lead misses {rule:?}");
+    }
+    let rounds = flat_section(&lead, "**Review rounds.**", "- **Heartbeat.**");
+    for rule in [
+        "With `new_cards` and `follow_ups_ready` on, file a qualifying follow-up with `--label ready-for-agent --label blocked` and the line `blocked-by: <parent key>` in its description, in your tracker's key form",
+        "comment `filed ready: follow-up of PR <n>` on it",
+        "`loopherd report --kind note` naming it",
+        "It qualifies only if it holds findings from the parent PR's review files, under the parent card's scope",
+        "Its criteria may offer the worker alternatives (\"fix X, or D<n> records why not\")",
+        "It doesn't qualify if any criterion needs the human's decision, changes a decision's direction, or carries a finding the reviewer called out of scope or design",
+        "File any other follow-up as with `follow_ups_ready` off",
+    ] {
+        assert!(rounds.contains(rule), "Review rounds misses {rule:?}");
+    }
+    let shepherd = flat_section(&printed, "\n## Shepherd\n", "\n## Lead\n");
+    assert!(
+        shepherd.contains(
+            "a lead's note naming a follow-up it filed ready: tell the human, who may veto it"
+        ),
+        "{shepherd}"
+    );
+    let low = flat_section(&lead, "**Running low.**", "- **Out of work.**");
+    assert!(!low.contains("whatever your switches"), "{low}");
+    assert!(
+        low.contains(
+            "Never mark a task ready yourself; the shepherd does it once the human approves. \
+             The one exception is a qualifying review follow-up with `new_cards` and \
+             `follow_ups_ready` on (see Review rounds)"
+        ),
+        "{low}"
+    );
+}

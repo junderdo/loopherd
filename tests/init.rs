@@ -382,7 +382,7 @@ fn the_lead_takes_its_switches_from_lead_defaults_and_a_prompt_file_beside_the_h
         herds.contains(
             "switches: merge on (herd file), install off (herd file), rebase on (herd file), \
              new_cards off (herd file), design_escalation off (herd file), \
-             blocked_dialogs off (herd file)"
+             blocked_dialogs off (herd file), follow_ups_ready off (herd file)"
         ),
         "{herds}"
     );

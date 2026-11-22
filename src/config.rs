@@ -508,6 +508,7 @@ mod tests {
             new_cards: Some(false),
             design_escalation: Some(false),
             blocked_dialogs: Some(false),
+            follow_ups_ready: Some(false),
             review_rounds: None,
         }
     }
@@ -678,7 +679,7 @@ mod tests {
             fs::read_to_string(&path).unwrap(),
             "# mine\r\ncontext_window = 1000000\r\n\r\n[lead_defaults]\r\n\
              merge = true\r\ninstall = false\r\nrebase = false\r\nnew_cards = false\r\n\
-             design_escalation = false\r\nblocked_dialogs = false\r\n"
+             design_escalation = false\r\nblocked_dialogs = false\r\nfollow_ups_ready = false\r\n"
         );
     }
 

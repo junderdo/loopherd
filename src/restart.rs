@@ -1461,7 +1461,7 @@ mod tests {
         assert!(
             resume.contains(
                 "Your switches: merge on, install off, rebase off, new_cards on, \
-                 design_escalation off, blocked_dialogs off. Your review-round limit: 5."
+                 design_escalation off, blocked_dialogs off, follow_ups_ready off. Your review-round limit: 5."
             ),
             "{resume}"
         );
@@ -1494,7 +1494,7 @@ mod tests {
         let prompt = "lh-1 leads h in /src/worktrees/lead-h.\n\
                       Merge with GH_TOKEN=$(gh auth token --user me) gh pr merge.\n\
                       merge on\ninstall off\nrebase off\nnew_cards off\n\
-                      design_escalation off\nblocked_dialogs off\n\n\
+                      design_escalation off\nblocked_dialogs off\nfollow_ups_ready off\n\n\
                       Your review-round limit: 5.";
         assert!(
             resume.starts_with(&format!(
