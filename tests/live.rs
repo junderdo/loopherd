@@ -2177,7 +2177,8 @@ fn feed_a_branch_member(kind: &str) -> BranchMember {
         .unwrap()
         .to_string();
     assert!(wt.is_dir());
-    assert!(branch_exists(&repo, &branch));
+    assert!(branch_exists(&wt, &branch));
+    assert!(!branch_exists(&repo, &branch));
 
     BranchMember {
         state,
@@ -2268,7 +2269,7 @@ fn feed_reaps_a_member_but_keeps_its_dirty_worktree_and_says_why() {
     );
     assert_eq!(ledger_entry(m.state.path(), &m.name)["retired"], true);
     assert!(m.wt.join("scratch.txt").is_file());
-    assert!(branch_exists(&m.repo, &m.branch));
+    assert!(branch_exists(&m.wt, &m.branch));
 }
 
 /// Closes a tab by id when dropped.
