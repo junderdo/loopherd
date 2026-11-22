@@ -1348,19 +1348,10 @@ fn is_github_name(name: &str) -> bool {
 /// `wanted` if gh is logged in as it, else the logged-in account named
 /// `owner`, asked on a terminal from the logged-in ones.
 fn account(owner: &str, wanted: Option<&str>, ask: &ask::Asker) -> Result<String> {
-    let logins = gh(
-        None,
-        &[
-            "auth",
-            "status",
-            "--json",
-            "hosts",
-            "--jq",
-            r#".hosts["github.com"][]?.login"#,
-        ],
-    )?;
+    let logins = gh_logins()?;
     let logins: Vec<&str> = logins
-        .lines()
+        .iter()
+        .map(String::as_str)
         .filter(|l| is_github_name(l) && !l.starts_with('.'))
         .collect();
     if logins.is_empty() {
@@ -1444,17 +1435,52 @@ fn create_labels(token: &str, slug: &str, labels: &tracker::Labels) -> Result<Ve
     Ok(created)
 }
 
+/// The github.com logins gh holds, unfiltered. A gh too old for
+/// `auth status --json` is read from its plain `auth status` lines instead.
+fn gh_logins() -> Result<Vec<String>> {
+    let args = [
+        "auth",
+        "status",
+        "--json",
+        "hosts",
+        "--jq",
+        r#".hosts["github.com"][]?.login"#,
+    ];
+    let output = gh_output(None, &args)?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(String::from)
+            .collect());
+    }
+    if !stderr.contains("unknown flag: --json") {
+        bail!("gh {}: {}", args.join(" "), stderr.trim());
+    }
+    // Plain auth status exits 1 when any account fails or none is logged in,
+    // and older gh prints it on stderr, so read both streams whatever the exit.
+    let output = gh_output(None, &["auth", "status", "--hostname", "github.com"])?;
+    let text = [output.stdout, output.stderr].concat();
+    Ok(String::from_utf8_lossy(&text)
+        .lines()
+        .filter_map(plain_login)
+        .map(String::from)
+        .collect())
+}
+
+/// The login on a plain `gh auth status` line, in its newer
+/// `Logged in to github.com account <login>` or older `… as <login>` form.
+fn plain_login(line: &str) -> Option<&str> {
+    let (_, rest) = line.split_once("Logged in to github.com ")?;
+    let rest = rest
+        .strip_prefix("account ")
+        .or_else(|| rest.strip_prefix("as "))?;
+    rest.split_whitespace().next()
+}
+
 /// gh's stdout; `token` runs it as that account, else as gh's own login.
 fn gh(token: Option<&str>, args: &[&str]) -> Result<String> {
-    let mut command = Command::new("gh");
-    command.args(args);
-    match token {
-        Some(token) => command.env("GH_TOKEN", token),
-        None => command.env_remove("GH_TOKEN"),
-    };
-    let output = command
-        .output()
-        .context("run gh; is the GitHub CLI installed?")?;
+    let output = gh_output(token, args)?;
     if !output.status.success() {
         bail!(
             "gh {}: {}",
@@ -1463,6 +1489,18 @@ fn gh(token: Option<&str>, args: &[&str]) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn gh_output(token: Option<&str>, args: &[&str]) -> Result<std::process::Output> {
+    let mut command = Command::new("gh");
+    command.args(args);
+    match token {
+        Some(token) => command.env("GH_TOKEN", token),
+        None => command.env_remove("GH_TOKEN"),
+    };
+    command
+        .output()
+        .context("run gh; is the GitHub CLI installed?")
 }
 
 /// `value` as literal text inside the worker prompt, a `'''` TOML string
