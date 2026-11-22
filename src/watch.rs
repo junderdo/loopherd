@@ -639,7 +639,7 @@ impl Checks<'_> {
                     let entries = ledger.entries()?;
                     let no_worker = !open(&entries, &self.herd, |e| !e.is_lead());
                     if queue.backlog.is_none() {
-                        low = self.running_low(&entries, claimable, 0, queue.max)?;
+                        low = self.running_low(&entries, claimable, 0, queue.low_at)?;
                         out = (self.fired).out_of_work(
                             &self.herd,
                             &entries,
@@ -654,7 +654,8 @@ impl Checks<'_> {
                                 passing.push("backlog".into());
                                 let unready = unready.lines().filter(|l| !l.trim().is_empty());
                                 let unready = unready.count();
-                                low = self.running_low(&entries, claimable, unready, queue.max)?;
+                                low =
+                                    self.running_low(&entries, claimable, unready, queue.low_at)?;
                                 out = self.fired.out_of_work(
                                     &self.herd,
                                     &entries,
@@ -708,7 +709,7 @@ impl Checks<'_> {
 }
 
 impl Checks<'_> {
-    /// The `running low` event while claimable is at or below `max` with
+    /// The `running low` event while claimable is at or below `low_at` with
     /// unready tasks waiting. Its key leaves out the counts, so it prints once
     /// per streak; a round that isn't low ends the streak. A herd with no work
     /// and no open worker has a streak of its own, keyed like `out of work`,
@@ -718,7 +719,7 @@ impl Checks<'_> {
         entries: &BTreeMap<String, AgentRecord>,
         claimable: usize,
         unready: usize,
-        max: usize,
+        low_at: usize,
     ) -> Result<Option<Event>> {
         let herd = &self.herd;
         let key = format!("{herd} {}", line::RUNNING_LOW);
@@ -731,7 +732,7 @@ impl Checks<'_> {
             entries,
             claimable == 0 && unready > 0 && no_worker,
         )?;
-        let low = (self.fired).streak(key, counts, claimable <= max && unready > 0)?;
+        let low = (self.fired).streak(key, counts, claimable <= low_at && unready > 0)?;
         match (starved, low) {
             (Some(starved), Some(low)) => Ok(Some(Event {
                 covers: Some(low.key),
@@ -4962,19 +4963,21 @@ mod tests {
     }
 
     #[test]
-    fn the_streak_ends_when_claimable_rises_above_max_or_unready_reaches_zero() {
+    fn the_streak_ends_when_claimable_rises_above_low_at_or_unready_reaches_zero() {
         let world = Checked::with_backlog("7 needs spec\n");
         assert_eq!(
             world.once("w9:p0").unwrap(),
             ["cards running low  0 claimable, 1 unready"]
         );
 
-        world.touch("tasks", "2\n3\n4\n");
+        world.touch("tasks", "2\n3\n4\n5\n");
         assert_eq!(world.once("w9:p0").unwrap(), ["lh-2 claimable"]);
-        world.touch("tasks", "");
+        world.touch("tasks", "2\n3\n4\n5\n6\n");
+        assert_eq!(world.once("w9:p0"), None);
+        world.touch("tasks", "2\n3\n4\n5\n");
         assert_eq!(
             world.once("w9:p0").unwrap(),
-            ["cards running low  0 claimable, 1 unready"]
+            ["cards running low  4 claimable, 1 unready"]
         );
 
         world.touch("unready", "");
@@ -4982,22 +4985,48 @@ mod tests {
         world.touch("unready", "9 stale\n");
         assert_eq!(
             world.once("w9:p0").unwrap(),
-            ["cards running low  0 claimable, 1 unready"]
+            ["cards running low  4 claimable, 1 unready"]
         );
     }
 
     #[test]
-    fn a_herd_at_max_claimable_is_low_and_one_with_no_backlog_or_unready_is_not() {
-        let at_max = Checked::with_backlog("7 needs spec\n");
-        at_max.touch("tasks", "2\n3\n");
+    fn by_default_a_herd_is_low_up_to_twice_max_claimable() {
+        let at_twice_max = Checked::with_backlog("7 needs spec\n");
+        at_twice_max.touch("tasks", "2\n3\n4\n5\n");
         assert_eq!(
-            at_max.once("w9:p0").unwrap(),
+            at_twice_max.once("w9:p0").unwrap(),
             [
-                "cards running low  2 claimable, 1 unready",
+                "cards running low  4 claimable, 1 unready",
                 "lh-2 claimable"
             ]
         );
 
+        let above = Checked::with_backlog("7 needs spec\n");
+        above.touch("tasks", "2\n3\n4\n5\n6\n");
+        assert_eq!(above.once("w9:p0").unwrap(), ["lh-2 claimable"]);
+    }
+
+    #[test]
+    fn a_herd_is_low_up_to_its_low_at_claimable() {
+        let at_low_at = Checked::with_backlog("7 needs spec\n");
+        at_low_at.edit_herd(|h| h.replace("max = 2", "max = 2\nlow_at = 3"));
+        at_low_at.touch("tasks", "2\n3\n4\n");
+        assert_eq!(
+            at_low_at.once("w9:p0").unwrap(),
+            [
+                "cards running low  3 claimable, 1 unready",
+                "lh-2 claimable"
+            ]
+        );
+
+        let above = Checked::with_backlog("7 needs spec\n");
+        above.edit_herd(|h| h.replace("max = 2", "max = 2\nlow_at = 3"));
+        above.touch("tasks", "2\n3\n4\n5\n");
+        assert_eq!(above.once("w9:p0").unwrap(), ["lh-2 claimable"]);
+    }
+
+    #[test]
+    fn a_herd_with_no_backlog_or_unready_is_not_low() {
         assert_eq!(Checked::with_backlog("").once("w9:p0"), None);
         assert_eq!(Checked::new().once("w9:p0"), None);
     }
