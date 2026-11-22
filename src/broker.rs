@@ -953,7 +953,8 @@ pub fn serve<L: Ledger + Clone + Send>(
             if let Ok(requests) = Dir::open(paths.state_dir(), &["broker", lead, "requests"]) {
                 let requests = Arc::new(requests);
                 // Read per request, after listing: a retire or relaunch just before it was written decides it.
-                let retired = || !unretired(ledger, lead);
+                // A failed reread keeps the round's read rather than undo a retirement it saw.
+                let retired = || retirement(ledger, lead).unwrap_or(stopping);
                 for name in requests.names() {
                     if in_flight.contains_key(&name) {
                         continue;
@@ -1020,10 +1021,14 @@ impl Installs<'_> {
 
 /// An unreadable ledger is no proof of retirement.
 fn unretired(ledger: &dyn Ledger, lead: &str) -> bool {
-    ledger
-        .entries()
-        .map(|entries| entries.get(lead).is_some_and(|r| !r.retired))
-        .unwrap_or(true)
+    !retirement(ledger, lead).unwrap_or(false)
+}
+
+/// Whether `lead` reads retired, as it does once gone from the ledger, or
+/// `None` when the ledger can't be read.
+fn retirement(ledger: &dyn Ledger, lead: &str) -> Option<bool> {
+    let entries = ledger.entries().ok()?;
+    Some(entries.get(lead).is_none_or(|r| r.retired))
 }
 
 /// How many requests a lane holds waiting behind the one it runs.
@@ -2355,8 +2360,16 @@ mod tests {
             herdr: FakeHerdr,
             poll: Duration,
         ) -> JoinHandle<(Result<Served>, FakeHerdr)> {
+            self.serve_on(herdr, poll, self.ledger())
+        }
+
+        fn serve_on<L: Ledger + Clone + Send + 'static>(
+            &self,
+            herdr: FakeHerdr,
+            poll: Duration,
+            ledger: L,
+        ) -> JoinHandle<(Result<Served>, FakeHerdr)> {
             let paths = self.paths.clone();
-            let ledger = self.ledger();
             let serving = std::thread::spawn(move || {
                 let served = serve(&host(&herdr), &ledger, &paths, "lead-h", poll, None);
                 (served, herdr)
@@ -3126,6 +3139,15 @@ mod tests {
         )
         .unwrap();
         let serving = world.serve(telling_herdr());
+        // The client's id sorts first, so in a shared round its answer could beat these refusals.
+        let given_up = Instant::now() + Duration::from_secs(5);
+        while std::fs::read_dir(&requests).unwrap().count() > 0 {
+            assert!(
+                Instant::now() < given_up,
+                "the forged requests were never answered"
+            );
+            std::thread::sleep(POLL);
+        }
 
         let (out, _, _) = world.client().call(&tell("lh-1", "hi")).unwrap();
 
@@ -4099,6 +4121,143 @@ mod tests {
         assert!(
             matches!(reply_to(&world, "0-001"), Some(Reply::Refused(why)) if why.contains("is retired"))
         );
+    }
+
+    type Entries = std::collections::BTreeMap<String, AgentRecord>;
+    type NextRead = Box<dyn FnOnce(&FileLedger) -> Result<Entries> + Send>;
+
+    /// The world's ledger, whose reads take the next of `reads` while any are left.
+    #[derive(Clone)]
+    struct Scripted {
+        file: FileLedger,
+        reads: Arc<Mutex<std::collections::VecDeque<NextRead>>>,
+    }
+
+    impl Scripted {
+        fn new(world: &World, reads: Vec<NextRead>) -> Scripted {
+            Scripted {
+                file: world.ledger(),
+                reads: Arc::new(Mutex::new(reads.into())),
+            }
+        }
+
+        fn then(&self, reads: Vec<NextRead>) {
+            self.reads.lock().unwrap().extend(reads);
+        }
+    }
+
+    impl Ledger for Scripted {
+        fn entries(&self) -> Result<Entries> {
+            let next = self.reads.lock().unwrap().pop_front();
+            next.map_or_else(|| self.file.entries(), |read| read(&self.file))
+        }
+        fn record(&mut self, record: AgentRecord) -> Result<()> {
+            self.file.record(record)
+        }
+        fn update(
+            &mut self,
+            name: &str,
+            change: &mut dyn FnMut(&mut AgentRecord) -> Result<()>,
+        ) -> Result<AgentRecord> {
+            self.file.update(name, change)
+        }
+        fn remove_herd(
+            &mut self,
+            herd: &str,
+            before: &mut dyn FnMut(&[String]) -> Result<()>,
+        ) -> Result<crate::ledger::RemovedHerd> {
+            self.file.remove_herd(herd, before)
+        }
+        fn started(&mut self, name: &str, at: SystemTime, resumed: bool) -> Result<()> {
+            self.file.started(name, at, resumed)
+        }
+    }
+
+    fn lead_retired(file: &FileLedger) -> Result<Entries> {
+        let mut entries = file.entries()?;
+        entries.get_mut("lead-h").unwrap().retired = true;
+        Ok(entries)
+    }
+
+    fn answer_to(world: &World, id: &str) -> Reply {
+        let given_up = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(reply) = reply_to(world, id) {
+                return reply;
+            }
+            assert!(Instant::now() < given_up, "{id} was never answered");
+            std::thread::sleep(POLL);
+        }
+    }
+
+    #[test]
+    fn a_retire_landing_between_the_round_s_read_and_its_listing_refuses_the_request() {
+        let world = World::new();
+        world.add(member("lh-1", Some("h")));
+        std::fs::create_dir_all(requests_dir(&world.paths, "lead-h")).unwrap();
+        hand_over(&world, "0-001", &tell("lh-1", "hi"));
+        let readers = Arc::new(Mutex::new(vec![]));
+        let (round, listing) = (readers.clone(), readers.clone());
+        let ledger = Scripted::new(
+            &world,
+            vec![
+                Box::new(move |file| {
+                    round.lock().unwrap().push(std::thread::current().id());
+                    file.entries()
+                }),
+                Box::new(move |file| {
+                    listing.lock().unwrap().push(std::thread::current().id());
+                    lead_retired(file)
+                }),
+            ],
+        );
+
+        let serving = world.serve_on(telling_herdr(), POLL, ledger);
+
+        let answer = answer_to(&world, "0-001");
+        assert!(
+            matches!(&answer, Reply::Refused(why) if why == "lead-h is retired, so its broker takes no new requests"),
+            "{answer:?}"
+        );
+        let readers = readers.lock().unwrap().clone();
+        assert_eq!(
+            readers[0], readers[1],
+            "the retirement was read by a lane, not the listing"
+        );
+        world.retire("lead-h");
+        let (served, herdr) = serving.join().unwrap();
+        assert_eq!(served.unwrap(), Served::Retired);
+        assert!(herdr.prompts().is_empty());
+    }
+
+    #[test]
+    fn a_reread_that_fails_keeps_the_round_s_read_that_the_lead_is_retired() {
+        let (world, herdr, entered, release) = slow_feed();
+        let ledger = Scripted::new(&world, vec![]);
+        let serving = world.serve_on(herdr, POLL, ledger.clone());
+        let fed = feeding(&world, &entered);
+        let (written, handed_over) = mpsc::channel::<()>();
+        // The next round's read waits for the request, so that round lists it and rereads.
+        ledger.then(vec![
+            Box::new(move |file| {
+                handed_over.recv().unwrap();
+                lead_retired(file)
+            }),
+            Box::new(|_| Err(anyhow!("ledger unreadable"))),
+        ]);
+
+        hand_over(&world, "0-001", &tell("lh-1", "hi"));
+        written.send(()).unwrap();
+
+        let answer = answer_to(&world, "0-001");
+        assert!(
+            matches!(&answer, Reply::Refused(why) if why == "lead-h is retired, so its broker takes no new requests"),
+            "{answer:?}"
+        );
+        drop(release);
+        assert_eq!(fed.join().unwrap().unwrap().2, 0);
+        world.retire("lead-h");
+        assert_eq!(serving.join().unwrap().0.unwrap(), Served::Retired);
     }
 
     #[test]

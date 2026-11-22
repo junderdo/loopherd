@@ -690,6 +690,20 @@ pub fn remove_worktree(repo: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Removes the worktree at `path`, then local `branch`, which it had checked out.
+pub fn remove_worktree_and_branch(repo: &Path, path: &Path, branch: &str) -> Result<()> {
+    let head = git(
+        repo,
+        &["rev-parse", "--verify", &format!("refs/heads/{branch}")],
+    )?;
+    remove_worktree(repo, path)?;
+    delete_branch(repo, branch, head.trim())
+}
+
+pub fn has_local_branch(repo: &Path, branch: &str) -> bool {
+    has_ref(repo, &format!("refs/heads/{branch}"))
+}
+
 fn is_worktree(repo: &Path, path: &Path) -> Result<bool> {
     let Ok(wanted) = path.canonicalize() else {
         return Ok(false);

@@ -56,6 +56,7 @@ impl Sandbox {
             "install-agents.bash",
             "install-skills.bash",
             "install-herdr-plugin.bash",
+            "install-herdr-keys.bash",
         ] {
             fs::copy(
                 format!("{REPO}/scripts/{file}"),

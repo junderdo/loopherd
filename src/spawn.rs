@@ -59,7 +59,7 @@ impl Checkout {
         }
     }
 
-    fn ensure(&self, repo: &Path) -> Result<PathBuf> {
+    pub fn ensure(&self, repo: &Path) -> Result<PathBuf> {
         match self {
             Checkout::Branch(branch) => ensure_worktree(repo, branch),
             Checkout::Detached(slug) => ensure_detached_worktree(repo, slug),
