@@ -23,7 +23,7 @@ Kind: a card carries exactly one of these.
 | Label | Resolve it with |
 |---|---|
 | `wayfinding:research` | `research` skill: primary-source investigation written to `docs/research/` |
-| `wayfinding:grilling` | `grilling` skill, live with the human. Always a human session |
+| `wayfinding:grilling` | `grilling` skill with the human, interactive or batch (below) |
 | `wayfinding:prototype` | `prototype` skill: throwaway code that answers one design question |
 | `wayfinding:domain` | `domain-modeling` skill: a decision recorded as an ADR or glossary entry |
 | `impl:feat` | A vertical slice of behavior, built with the `tdd` skill |
@@ -39,7 +39,19 @@ Routing: add these as needed.
 | `need-human` | Stopped on a question, decision, or credential only the human can supply. The latest comment states exactly what is needed. |
 | `blocked` | Waiting on other cards, named by a `blocked-by:` line in the description. |
 
-A card is **claimable** when it sits in Backlog, has `ready-for-agent`, and has neither `need-human` nor `blocked`.
+Mode: add these to a `wayfinding:grilling` card.
+
+| Label | Meaning |
+|---|---|
+| `grill:batch` | Grill in batch mode (D132). The grill answers every question with its own pick, then the human accepts all or overrides by number, in one round. Only the human adds it. |
+
+Without `grill:batch` a grill is interactive: one question at a time, live
+with the human. Pick batch when the human trusts the grill's picks enough to
+review them once; interactive when the questions need the human's thinking.
+Either mode switches partway: "batch the rest" in an interactive grill,
+`discuss <n>` in a batch.
+
+A card is **claimable** when it sits in Backlog, has `ready-for-agent`, and has neither `need-human` nor `blocked`. A `wayfinding:grilling` card with `grill:batch` is claimable without `ready-for-agent`, which a grilling card never carries.
 
 A `blocked` card's description holds one line naming its blockers:
 
@@ -65,7 +77,8 @@ missing card is left and warned about.
 ## Working a card
 
 1. **Pick.** Run `scripts/trello cards --list Backlog --label ready-for-agent`
-   and take the first claimable card. Then run `scripts/trello show LH-<n>`
+   and take the first claimable card (a `grill:batch` grilling card comes to
+   a herd through its routed queue, not this pick). Then run `scripts/trello show LH-<n>`
    and read the description and every comment.
 2. **Claim.** Run `scripts/trello move LH-<n> "In Progress"`, then comment
    `claimed by <agent name or HERDR_PANE_ID>`. A card already in In Progress belongs

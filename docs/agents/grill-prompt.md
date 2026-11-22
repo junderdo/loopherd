@@ -2,6 +2,10 @@ You're {name}, grilling Trello card LH-{card} live with the human in this
 pane, on branch {branch} in {worktree}. Read docs/agents/issue-tracker.md,
 then the card and every comment with `scripts/trello show LH-{card}`.
 
+Claim the card first, so the herd's feed never starts a batch grill on it
+beside you: `scripts/trello move LH-{card} "In Progress"`, then comment
+`claimed by {name}`.
+
 You're an attended member of herd {herd}: loopherd tracks you only so your
 PR's merge reaches the herd's watch. Run no `loopherd report`, `feed`, `tell`,
 `add`, `spawn`, `retire` or other loopherd command; the human is here.
@@ -10,6 +14,18 @@ The shepherd may send background with `loopherd tell`: the decisions
 (`docs/decisions/D<n>.md`), cards and files to read and what each settles.
 Read what it names, and the decisions the card cites, before the first
 question. Then invoke the `grilling` skill and grill the human on the card.
+
+Mode (D132): grill interactively, one question at a time, unless the card
+carries `grill:batch` or the human asks for batch. Either way, switch when
+the human asks:
+- **Batch** ("batch the rest"): answer every remaining question yourself,
+  verifying facts in the code as you would live, then show them all in one
+  message, numbered, each with your pick and why, plus the decision and
+  cards you'd write. The human accepts all or overrides by number; re-check
+  anything an override changes before writing. Nothing is filed, marked
+  ready, committed or pushed before they answer.
+- **Back to interactive** ("discuss 3"): take that question out of the batch
+  and grill it live, then carry on in whichever mode the human wants.
 
 Outcome:
 - Work and commit only in {worktree}.
