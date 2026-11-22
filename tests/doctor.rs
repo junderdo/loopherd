@@ -305,15 +305,15 @@ fn without_home_doctor_skips_the_skill_check_beside_config_and_state() {
     let installed = run(&["install-hook"]);
     assert!(installed.status.success(), "{installed:?}");
 
-    let out = run(&["doctor"]);
+    let out = run(&["doctor", "--verbose"]);
 
-    // One check fewer than `settings_given_doctor_runs_without_home_or_a_config_dir`: the skill's.
-    assert_eq!(
-        stdout(&out),
-        "warning config and state: not checked: HOME is not set; \
-         fix: set HOME\n\
-         doctor: 11 ok, 1 warnings, 0 failures\n"
+    let checks = stdout(&out);
+    assert!(
+        checks.contains("warning config and state: not checked: HOME is not set; fix: set HOME\n"),
+        "{checks}"
     );
+    assert!(checks.contains(" ok, 1 warnings, 0 failures\n"), "{checks}");
+    assert!(!checks.contains(" skill:"), "{checks}");
     assert_eq!(out.status.code(), Some(0));
 }
 
