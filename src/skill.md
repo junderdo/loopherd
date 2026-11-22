@@ -686,7 +686,8 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   `prefer` starts it as `(lead, sockets open)`; `restart` applies the
   same rule. A `merge_guard = "credentials"` lead is refused under both.
   Under `unix_sockets = "all"` the socket check is skipped: the lead isn't
-  refused or flagged for open sockets. What still gets past the sandbox:
+  refused or flagged for open sockets, though `require` still refuses
+  it when the sandbox can't start at all. What still gets past the sandbox:
   workers run unsandboxed unless the herd's `[worker] sandbox` turns
   theirs on, so a lead can have one act for it (a `credentials` lead
   starts only with `[worker] sandbox = "require"`), and most of
