@@ -2,10 +2,11 @@
 # `card` for impl cards, `wayfinding` (on sonnet, its own prompt) for
 # research, domain and prototype cards, and `grill-batch` for grilling cards
 # labelled `grill:batch` (D132). Replace the herd's `[queue]` with this one,
-# and add `[template.wayfinding]` and `[template.grill-batch]` beside its
-# `[template.card]`, whose params must stay ["card", "type", "slug"].
-# `grill-batch` reads docs/agents/grill-batch-prompt.md through the docs/ link
-# described in loopherd-cards-grill.toml.
+# and add `[template.wayfinding]`, `[template.grill-batch]` and
+# `[template.groom]` beside its `[template.card]`, whose params must stay
+# ["card", "type", "slug"]. `grill-batch` reads
+# docs/agents/grill-batch-prompt.md through the docs/ link described in
+# loopherd-cards-grill.toml.
 #
 # With `templates`, the first word of each line `source` prints names the
 # task's template (one of the list) and the rest are its params. A line whose
@@ -89,3 +90,34 @@ branch = "{type}/LH-{card}-{slug}"
 done = "s=$(scripts/trello show LH-{card} | head -4); echo \"$s\" | grep -qx 'list: Done' || (echo \"$s\" | grep -qx 'list: Backlog' && echo \"$s\" | grep -q '^labels: .*need-human')"
 merged = "GH_TOKEN=$(gh auth token --user <gh-user>) gh pr list --head {branch} --state merged --json number --jq length | grep -qx 1"
 prompt_file = "docs/agents/grill-batch-prompt.md"
+
+# The groomer (D116): started on `running low` by the lead (or the shepherd
+# for an unled herd) with `loopherd add <herd> groom`, never by feed, so it
+# stays out of `[queue] templates`. It holds no slot and has no done or merged
+# check; the lead retires it with --close after relaying its report.
+[template.groom]
+params = []
+name = "groom-{herd}"
+worktree = "groom-{herd}"
+slot = false
+args = ["--model", "sonnet"]
+prompt = """
+You're {name}, in a detached worktree at {worktree}, grooming the {herd} herd's unready cards.
+
+Run `loopherd --skill --section groom` and follow it: it gives your rights, your limits and the
+report to send. Read docs/agents/issue-tracker.md and AGENTS.md first. List the unready cards by
+running the command `loopherd herd get {herd} queue.backlog` prints, and read each with
+`scripts/trello show LH-<n>`.
+
+Write each batch line's command in one of these forms, text escaped as the Groom section says:
+- mark ready: `scripts/trello label LH-<n> +ready-for-agent`
+- needs spec: `scripts/trello comment LH-<n> "<what's missing>"`
+- archive: `scripts/trello archive LH-<n>  # <reason>`
+
+Never add ready-for-agent, archive, move a card between lists, or touch need-human or blocked.
+Finish with one report in the Groom section's format, sent through a quoted heredoc:
+loopherd report --kind done "$(cat <<'EOF'
+<report>
+EOF
+)"
+"""

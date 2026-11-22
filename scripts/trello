@@ -32,6 +32,7 @@ Usage: scripts/trello <command> [args]
   show CARD                          Title, url, list, labels, description, comments
   create LIST TITLE [--label NAME]... [--desc TEXT | --desc-file FILE|-]
   move CARD LIST
+  archive CARD                       Close (archive) the card
   label CARD +NAME|-NAME...          Add (+) or remove (-) labels
   comment CARD TEXT|-                Add a comment (- reads stdin)
   unblock [--dry-run]                Unblock blocked cards whose blocked-by: cards are all Done
@@ -162,6 +163,13 @@ cmd_move() {
   echo "moved LH-$(card_number "$1") to $2"
 }
 
+cmd_archive() {
+  local id
+  id=$(card_id "${1:?CARD required}")
+  api PUT "/cards/$id" --data-urlencode "closed=true" >/dev/null
+  echo "archived LH-$(card_number "$1")"
+}
+
 cmd_label() {
   local id
   id=$(card_id "${1:?CARD required}"); shift
@@ -264,6 +272,7 @@ main() {
     show) cmd_show "$@" ;;
     create) cmd_create "$@" ;;
     move) cmd_move "$@" ;;
+    archive) cmd_archive "$@" ;;
     label) cmd_label "$@" ;;
     comment) cmd_comment "$@" ;;
     unblock) cmd_unblock "$@" ;;
