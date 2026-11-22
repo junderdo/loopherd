@@ -3536,6 +3536,18 @@ mod tests {
         assert!(client.is_none());
     }
 
+    fn swap_for_symlink(path: &Path, target: &Path) {
+        // A serving broker recreates a missing folder each round, so move each one aside until the link lands.
+        for aside in 0.. {
+            std::fs::rename(path, path.with_extension(format!("aside-{aside}"))).unwrap();
+            match std::os::unix::fs::symlink(target, path) {
+                Ok(()) => return,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("symlink {}: {e}", path.display()),
+            }
+        }
+    }
+
     #[test]
     fn a_requests_folder_swapped_for_a_symlink_is_never_followed() {
         let world = World::new();
@@ -3543,14 +3555,9 @@ mod tests {
         std::fs::create_dir_all(victim.join("projects")).unwrap();
         std::fs::write(victim.join("notes.json"), "{}").unwrap();
         let serving = world.serve(FakeHerdr::new(&[]));
-        let requests = requests_dir(&world.paths, "lead-h");
-        std::fs::remove_dir_all(&requests).unwrap();
-        std::os::unix::fs::symlink(&victim, &requests).unwrap();
-        let broker = world.dir.path().join("broker");
-        let moved = world.dir.path().join("broker-moved");
+        swap_for_symlink(&requests_dir(&world.paths, "lead-h"), &victim);
         std::thread::sleep(POLL * 10);
-        std::fs::rename(&broker, &moved).unwrap();
-        std::os::unix::fs::symlink(&victim, &broker).unwrap();
+        swap_for_symlink(&world.dir.path().join("broker"), &victim);
         std::fs::create_dir_all(victim.join("lead-h/requests")).unwrap();
         std::fs::write(victim.join("lead-h/requests/kept.json"), "{}").unwrap();
 
