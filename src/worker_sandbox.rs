@@ -406,21 +406,23 @@ fn settings(paths: &Paths, name: &str, herd: &str, worktree: &Path) -> Result<Va
     let claude = paths.home.join(".claude");
     let own = own_dirs(paths, name);
     let allow_write = [worktree.to_path_buf(), own[0].clone(), own[1].clone()];
-    let deny_write = [
-        config.to_path_buf(),
-        claude.clone(),
-        git.join("hooks"),
-        git.join("config"),
-    ];
-    let mut deny = vec![
-        edit_rule(config),
-        edit_rule(&claude),
-        edit_rule(&git.join("hooks")),
-        file_rule(&git.join("config")),
+    // A clone's own git dir; a linked worktree's `.git` is a file naming the shared one.
+    let own_git = worktree.join(".git");
+    let git_dirs = std::iter::once(git).chain((!own_git.is_file()).then_some(own_git));
+    let mut deny_write = vec![config.to_path_buf(), claude.clone()];
+    let mut deny = vec![edit_rule(config), edit_rule(&claude)];
+    for dir in git_dirs {
+        deny_write.extend([dir.join("hooks"), dir.join("config")]);
+        deny.extend([
+            edit_rule(&dir.join("hooks")),
+            file_rule(&dir.join("config")),
+        ]);
+    }
+    deny.extend([
         edit_rule(&state.join("paused")),
         edit_rule(&state.join("broker")),
         edit_rule(&paths.locks_dir()),
-    ];
+    ]);
     deny.extend(
         [
             "ledger.json",
@@ -571,6 +573,37 @@ mod tests {
         assert_eq!(settings["sandbox"]["allowUnsandboxedCommands"], false);
         assert_eq!(settings["sandbox"]["network"]["allowAllUnixSockets"], false);
         assert_eq!(settings["permissions"]["denyInsteadOfPrompting"], true);
+    }
+
+    #[test]
+    fn a_workers_own_clone_has_its_git_hooks_and_config_denied_but_a_linked_worktree_doesnt() {
+        let h = herd("sandbox = \"require\"");
+        let clone = h.repo.parent().unwrap().join("worktrees/feat-x");
+        let linked = h.repo.parent().unwrap().join("worktrees/feat-y");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::write(linked.join(".git"), "gitdir: elsewhere\n").unwrap();
+        let denied = |worktree: &Path| {
+            prepare(&h.paths, "w1", &member(Some(worktree)), &blocked).unwrap();
+            let settings = read_json(&h.paths.config_dir().join("sandbox/w1.json"));
+            let deny_write = strings(&settings["sandbox"]["filesystem"]["denyWrite"]);
+            let deny = strings(&settings["permissions"]["deny"]);
+            (deny_write, deny)
+        };
+
+        let (deny_write, deny) = denied(&clone);
+        for own in ["hooks", "config"].map(|f| clone.join(".git").join(f).display().to_string()) {
+            assert!(deny_write.contains(&own), "{own}: {deny_write:?}");
+            assert!(
+                deny.iter().any(|rule| rule.contains(&own)),
+                "{own}: {deny:?}"
+            );
+        }
+        let (deny_write, _) = denied(&linked);
+        assert!(
+            !deny_write
+                .iter()
+                .any(|p| p.starts_with(&linked.display().to_string()))
+        );
     }
 
     fn read_json(file: &Path) -> Value {

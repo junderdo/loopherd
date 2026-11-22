@@ -76,44 +76,158 @@ fn checkout_above(common: &Path) -> Result<PathBuf> {
         .with_context(|| format!("repo: {}", root.display()))
 }
 
-/// Returns a worktree checked out on `branch`, reusing an existing one.
+/// Returns a tree checked out on `branch`, reusing an existing one: a clone
+/// of origin at [`worktree_path`], or a linked worktree made before members
+/// got clones.
 ///
-/// A branch on origin is checked out; otherwise the branch is created from
-/// origin's default branch.
+/// A local branch of the main checkout, else a branch on origin, is checked
+/// out; otherwise the branch is created from origin's default branch.
 pub fn ensure_worktree(repo: &Path, branch: &str) -> Result<PathBuf> {
     if let Some(existing) = find_worktree(repo, branch)? {
         return Ok(existing);
     }
     fetch(repo)?;
     let path = worktree_path(repo, branch);
-    let path_str = path.to_str().context("worktree path is not UTF-8")?;
+    let local = format!("refs/heads/{branch}");
     let remote = format!("origin/{branch}");
-    if has_ref(repo, &format!("refs/heads/{branch}")) {
-        git(repo, &["worktree", "add", "--quiet", path_str, branch])?;
+    let main = repo.to_str().context("repo path is not UTF-8")?;
+    let refspec = format!("{local}:{local}");
+    let fetch_local = ["fetch", "--quiet", main, &refspec];
+    let base;
+    let checkout: Vec<Vec<&str>> = if has_ref(repo, &local) {
+        vec![fetch_local.to_vec(), vec!["checkout", "--quiet", branch]]
     } else if has_ref(repo, &format!("refs/remotes/{remote}")) {
-        git(
-            repo,
-            &[
-                "worktree", "add", "--quiet", "--track", "-b", branch, path_str, &remote,
-            ],
-        )?;
+        vec![vec![
+            "checkout", "--quiet", "--track", "-b", branch, &remote,
+        ]]
     } else {
-        let base = default_branch(repo)?;
-        git(
-            repo,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "--no-track",
-                "-b",
-                branch,
-                path_str,
-                &base,
-            ],
-        )?;
-    }
+        base = default_branch(repo)?;
+        vec![vec![
+            "checkout",
+            "--quiet",
+            "--no-track",
+            "-b",
+            branch,
+            &base,
+        ]]
+    };
+    make_clone(repo, &path, &checkout)?;
     Ok(path)
+}
+
+/// Names the main checkout a clone was made for, in the clone's config.
+const CLONE_MARKER: &str = "loopherd.checkout";
+
+/// Clones `repo`'s origin to `path`, borrowing `repo`'s objects only while it
+/// copies, then runs each git call of `checkout` in it. Removes the clone if
+/// one fails.
+fn make_clone(repo: &Path, path: &Path, checkout: &[Vec<&str>]) -> Result<()> {
+    let url = origin_url(repo)?;
+    let marker = format!("{CLONE_MARKER}={}", repo.canonicalize()?.display());
+    let path_str = path.to_str().context("worktree path is not UTF-8")?;
+    let repo_str = repo.to_str().context("repo path is not UTF-8")?;
+    // The clone reaches origin through the same rewrites the main checkout does.
+    let rewrites = git(
+        repo,
+        &["config", "--local", "--get-regexp", r"^url\..*insteadof$"],
+    )
+    .unwrap_or_default();
+    let rewrites: Vec<String> = rewrites
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    let mut args = vec![
+        "clone",
+        "--quiet",
+        "--no-checkout",
+        "--reference",
+        repo_str,
+        "--dissociate",
+        "-c",
+        &marker,
+    ];
+    for rewrite in &rewrites {
+        args.extend(["-c", rewrite]);
+    }
+    args.extend([url.as_str(), path_str]);
+    let mut command = plain_git(Path::new("."));
+    command.args(&args);
+    run_remote(repo, command, &args, remote_timeout()?)?;
+    let checked_out = checkout
+        .iter()
+        .try_for_each(|args| clone_git(path, args).map(drop));
+    if let Err(e) = checked_out {
+        let _ = std::fs::remove_dir_all(path);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Origin's URL as `repo` has it, a relative local path made absolute so a
+/// clone made elsewhere reaches the same remote.
+fn origin_url(repo: &Path) -> Result<String> {
+    let url = git(repo, &["config", "--get", "remote.origin.url"])?
+        .trim()
+        .to_string();
+    let local = !url.contains(':') && Path::new(&url).is_relative();
+    Ok(match local {
+        true => std::path::absolute(repo.join(&url))?
+            .to_str()
+            .context("origin path is not UTF-8")?
+            .to_string(),
+        false => url,
+    })
+}
+
+/// git with none of the caller's repo-selecting environment.
+fn plain_git(dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(dir);
+    for var in [
+        "GIT_DIR",
+        "GIT_COMMON_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ] {
+        command.env_remove(var);
+    }
+    command
+}
+
+/// git in a clone loopherd has just made, before any member could write its config.
+fn clone_git(clone: &Path, args: &[&str]) -> Result<String> {
+    let mut command = plain_git(clone);
+    command
+        .env("GIT_DIR", clone.join(".git"))
+        .env("GIT_WORK_TREE", clone)
+        .args(args);
+    output(command, args)
+}
+
+/// Whether `path` is a clone [`make_clone`] made for `repo`: a directory with
+/// its own `.git`, marked for `repo`. Its config is read as data, never by git
+/// working in the clone.
+fn is_clone(repo: &Path, path: &Path) -> Result<bool> {
+    let is_dir = |p: &Path| p.symlink_metadata().is_ok_and(|m| m.is_dir());
+    let config = path.join(".git/config");
+    if !is_dir(path) || !is_dir(&path.join(".git")) || !config.is_file() {
+        return Ok(false);
+    }
+    let marked = config_values(&config, &["--get", CLONE_MARKER])?;
+    Ok(!marked.trim().is_empty() && same_dir(Path::new(marked.trim()), repo))
+}
+
+/// The branch a clone's HEAD names, read from the file, or `None` when detached.
+fn clone_branch(clone: &Path) -> Result<Option<String>> {
+    let head = std::fs::read_to_string(clone.join(".git/HEAD"))
+        .with_context(|| format!("read {}'s HEAD", clone.display()))?;
+    Ok(head
+        .trim()
+        .strip_prefix("ref: refs/heads/")
+        .map(str::to_string))
 }
 
 /// What [`remove_if_merged`] did with a worktree.
@@ -123,14 +237,28 @@ pub enum Removal {
     Kept(String),
 }
 
-/// Removes the linked worktree at `path` when it's clean, with no ignored
-/// files outside build directories, no rebase, merge or bisect in progress, and
-/// either detached or merged into origin's default branch, then
-/// deletes its branch. Never forces.
+/// Removes the clone or linked worktree at `path` when it's clean, with no
+/// ignored files outside build directories, no rebase, merge or bisect in
+/// progress, and either detached or merged into origin's default branch, then
+/// deletes a linked worktree's branch. Never forces.
 pub fn remove_if_merged(repo: &Path, path: &Path) -> Result<Removal> {
+    if is_clone(repo, path)? {
+        let clone = Borrowed::new(repo, path)?;
+        if let Some(op) = clone.operation() {
+            return Ok(Removal::Kept(format!("{op} in progress")));
+        }
+        if let Some(reason) = clone.unclean()? {
+            return Ok(Removal::Kept(reason));
+        }
+        if let Some(reason) = clone.unmerged(repo)? {
+            return Ok(Removal::Kept(reason));
+        }
+        remove_clone(path)?;
+        return Ok(Removal::Removed);
+    }
     let path_str = path.to_str().context("worktree path is not UTF-8")?;
     if !is_linked_worktree(repo, path)? {
-        let reason = format!("not a linked worktree of {}", repo.display());
+        let reason = format!("not a clone or linked worktree of {}", repo.display());
         return Ok(Removal::Kept(reason));
     }
     if let Some(op) = operation_in_progress(repo, path)? {
@@ -246,9 +374,21 @@ pub struct Clearing {
 }
 
 impl Clearing {
-    /// Removes the worktrees, then the local branch, leaving origin alone.
+    /// Removes the clones and worktrees, then the local branch, leaving origin
+    /// alone. A clone that changed since it was planned is left, failing.
     pub fn remove_local(&self) -> Result<()> {
         for (path, _) in &self.worktrees {
+            if is_clone(&self.repo, path)? {
+                let clone = Borrowed::new(&self.repo, path)?;
+                if let Some(why) = clone.operation().map(|op| format!("a {op} in progress")) {
+                    bail!("{} now has {why}", path.display());
+                }
+                if let Some(why) = clone.unclean()? {
+                    bail!("{} now has {why}", path.display());
+                }
+                remove_clone(path)?;
+                continue;
+            }
             let path = path.to_str().context("worktree path is not UTF-8")?;
             git(&self.repo, &["worktree", "remove", path])?;
         }
@@ -342,11 +482,24 @@ pub fn plan_clear(
         if worktrees.iter().any(|w| same_dir(Path::new(&w.path), path)) {
             continue;
         }
-        let Some(listed) = listed_worktree(repo, path)? else {
+        let listed = match listed_worktree(repo, path)? {
+            None if is_clone(repo, path)? => {
+                let clone = Borrowed::new(repo, path)?;
+                Some(ListedWorktree {
+                    path: path.to_str().context("worktree path is not UTF-8")?.into(),
+                    head: clone.head.clone(),
+                    branch: clone.branch.clone(),
+                    locked: None,
+                    clone: Some(clone),
+                })
+            }
+            listed => listed,
+        };
+        let Some(listed) = listed else {
             let in_the_way = std::fs::read_dir(path).is_ok_and(|mut d| d.next().is_some());
             if Some(path) == spawn_path.as_deref() && in_the_way {
                 return Ok(Plan::Taken(format!(
-                    "{} is in the way and isn't a worktree of {}",
+                    "{} is in the way and isn't a clone or worktree of {}",
                     path.display(),
                     repo.display()
                 )));
@@ -412,18 +565,32 @@ pub fn plan_clear(
         if !path.exists() {
             continue;
         }
-        if let Some(op) = operation_in_progress(repo, path)? {
+        let (op, unclean) = match &w.clone {
+            Some(clone) => (clone.operation(), clone.unclean()?),
+            None => (operation_in_progress(repo, path)?, unclean(repo, path)?),
+        };
+        if let Some(op) = op {
             return Ok(Plan::Dirty(format!("{} has a {op} in progress", w.path)));
         }
-        if let Some(reason) = unclean(repo, path)? {
+        if let Some(reason) = unclean {
             return Ok(Plan::Dirty(format!("{} has {reason}", w.path)));
         }
     }
+    let clones: Vec<&Borrowed> = worktrees.iter().filter_map(|w| w.clone.as_ref()).collect();
+    let mut clone_heads = vec![];
+    for clone in &clones {
+        clone_heads.extend(clone.branch_heads()?.into_iter().map(|(_, head)| head));
+    }
+    let objects: Vec<PathBuf> = clones
+        .iter()
+        .map(|c| c.clone.join(".git/objects"))
+        .collect();
     let heads: Vec<&str> = worktrees
         .iter()
         .map(|w| w.head.as_str())
         .chain(branch_head.as_deref())
         .chain(remote_head.as_deref())
+        .chain(clone_heads.iter().map(String::as_str))
         .filter(|h| !h.is_empty())
         .collect();
     fetch(repo)?;
@@ -441,7 +608,7 @@ pub fn plan_clear(
         args.extend(&heads);
         args.push("--not");
         args.extend(not);
-        git(repo, &args)?
+        git_seeing(repo, &objects, &args)?
             .trim()
             .parse()
             .context("git rev-list --count")
@@ -502,6 +669,182 @@ fn unmerged(repo: &Path, branch: &str, head: &str) -> Result<Option<String>> {
     Ok((!is_ancestor(repo, head, &base)?).then(|| format!("{branch} is not merged into {base}")))
 }
 
+/// Deletes a clone's directory; a symlink at `path` is refused, not followed.
+fn remove_clone(path: &Path) -> Result<()> {
+    std::fs::remove_dir_all(path).with_context(|| format!("remove {}", path.display()))
+}
+
+/// A clone's state, read by git through a git dir loopherd makes: copies of
+/// the clone's HEAD, branches and index, its objects borrowed read-only. The
+/// clone's own config, hooks and `commondir`, which its member can write,
+/// never steer that git.
+struct Borrowed {
+    dir: tempfile::TempDir,
+    clone: PathBuf,
+    head: String,
+    branch: Option<String>,
+}
+
+impl Borrowed {
+    /// Borrows `clone`, a clone of `repo`, whose objects it can also read.
+    fn new(repo: &Path, clone: &Path) -> Result<Borrowed> {
+        let dir = tempfile::tempdir().context("make a git dir to read a clone through")?;
+        let own = clone.join(".git");
+        for file in ["HEAD", "packed-refs", "index", "info/exclude"] {
+            copy_regular(&own.join(file), &dir.path().join(file))?;
+        }
+        copy_tree(&own.join("refs/heads"), &dir.path().join("refs/heads"))?;
+        std::fs::create_dir_all(dir.path().join("objects/info"))?;
+        let objects = [own.join("objects"), common_dir(repo)?.join("objects")];
+        let alternates: Vec<String> = objects
+            .iter()
+            .map(|o| std::path::absolute(o).map(|o| o.display().to_string()))
+            .collect::<std::io::Result<_>>()?;
+        std::fs::write(
+            dir.path().join("objects/info/alternates"),
+            alternates.join("\n") + "\n",
+        )?;
+        std::fs::write(
+            dir.path().join("config"),
+            "[core]\n\trepositoryformatversion = 0\n\tbare = false\n",
+        )?;
+        let mut borrowed = Borrowed {
+            dir,
+            clone: clone.to_path_buf(),
+            head: String::new(),
+            branch: clone_branch(clone)?,
+        };
+        borrowed.head = borrowed
+            .git(&["rev-parse", "--verify", "HEAD"])?
+            .trim()
+            .to_string();
+        Ok(borrowed)
+    }
+
+    fn git(&self, args: &[&str]) -> Result<String> {
+        let mut command = plain_git(&self.clone);
+        command
+            .env("GIT_DIR", self.dir.path())
+            .env("GIT_WORK_TREE", &self.clone)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .args([
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args);
+        output(command, args)
+    }
+
+    /// The operation git left part way in the clone, if any.
+    fn operation(&self) -> Option<&'static str> {
+        let own = self.clone.join(".git");
+        IN_PROGRESS
+            .iter()
+            .find(|(marker, _)| own.join(marker).exists())
+            .map(|(_, op)| *op)
+    }
+
+    /// [`unclean`] for the clone. A submodule's git dir is the member's to
+    /// write, so git never enters one, and a clone holding one is never clean.
+    fn unclean(&self) -> Result<Option<String>> {
+        if self.clone.join(".git/modules").exists() {
+            return Ok(Some("a submodule, which loopherd won't look inside".into()));
+        }
+        let status = self.git(&[
+            "status",
+            "--porcelain",
+            "-z",
+            "--ignored=matching",
+            "--ignore-submodules=all",
+        ])?;
+        Ok(unclean_in(&status))
+    }
+
+    /// Why the clone holds a branch, the checked-out one first, not merged
+    /// into origin's default branch; removing the clone would lose it.
+    fn unmerged(&self, repo: &Path) -> Result<Option<String>> {
+        fetch(repo)?;
+        let base = default_branch(repo)?;
+        let base_head = git(
+            repo,
+            &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+        )?;
+        let mut branches = self.branch_heads()?;
+        branches.sort_by_key(|(name, _)| Some(name) != self.branch.as_ref());
+        for (branch, head) in branches {
+            if !self.is_ancestor(&head, base_head.trim())? {
+                return Ok(Some(format!("{branch} is not merged into {base}")));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Each of the clone's branches with its head.
+    fn branch_heads(&self) -> Result<Vec<(String, String)>> {
+        let listed = self.git(&[
+            "for-each-ref",
+            "--format=%(refname:short) %(objectname)",
+            "refs/heads",
+        ])?;
+        Ok(listed
+            .lines()
+            .filter_map(|line| line.split_once(' '))
+            .map(|(name, head)| (name.to_string(), head.to_string()))
+            .collect())
+    }
+
+    fn is_ancestor(&self, commit: &str, of: &str) -> Result<bool> {
+        let mut command = plain_git(&self.clone);
+        command
+            .env("GIT_DIR", self.dir.path())
+            .args(["merge-base", "--is-ancestor", commit, of]);
+        match command.status().context("run git")?.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => bail!("git merge-base --is-ancestor {commit} {of} failed"),
+        }
+    }
+}
+
+/// Copies `from` to `to` when it's a regular file; skips a symlink or a missing one.
+fn copy_regular(from: &Path, to: &Path) -> Result<()> {
+    match from.symlink_metadata() {
+        Ok(meta) if meta.is_file() => {
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(to, std::fs::read(from)?)
+                .with_context(|| format!("copy {}", from.display()))
+        }
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("read {}", from.display())),
+    }
+}
+
+/// [`copy_regular`] for every file under `from`, not following symlinks.
+fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    let entries = match std::fs::read_dir(from) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("read {}", from.display())),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let to = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &to)?;
+        } else {
+            copy_regular(&entry.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
 fn delete_branch(repo: &Path, branch: &str, head: &str) -> Result<()> {
     // `branch -d` judges against the checkout's HEAD, which may lag origin;
     // callers check merging, and the old value guards the delete.
@@ -518,6 +861,8 @@ struct ListedWorktree {
     branch: Option<String>,
     /// `Some` when locked, holding git's reason if it has one.
     locked: Option<Option<String>>,
+    /// Set for a clone rather than a linked worktree.
+    clone: Option<Borrowed>,
 }
 
 /// `repo`'s linked worktree entry at `path`, which may no longer exist.
@@ -536,6 +881,7 @@ fn listed_worktree(repo: &Path, path: &Path) -> Result<Option<ListedWorktree>> {
             head: String::new(),
             branch: None,
             locked: None,
+            clone: None,
         };
         for line in lines {
             if let Some(head) = line.strip_prefix("HEAD ") {
@@ -598,22 +944,27 @@ const BUILD_DIRS: [&str; 2] = ["target", "node_modules"];
 /// Why the worktree at `path` isn't clean: changes, or an ignored file outside
 /// [`BUILD_DIRS`].
 fn unclean(repo: &Path, path: &Path) -> Result<Option<String>> {
-    // -z leaves paths unquoted. Rename entries carry a second path, but any
-    // change returns before that matters.
     let status = git_at(
         repo,
         path,
         &["status", "--porcelain", "-z", "--ignored=matching"],
     )?;
+    Ok(unclean_in(&status))
+}
+
+/// [`unclean`]'s reason from `git status --porcelain -z --ignored=matching`.
+fn unclean_in(status: &str) -> Option<String> {
+    // -z leaves paths unquoted. Rename entries carry a second path, but any
+    // change returns before that matters.
     for entry in status.split('\0').filter(|e| !e.is_empty()) {
         let Some(ignored) = entry.strip_prefix("!! ") else {
-            return Ok(Some("uncommitted or untracked changes".into()));
+            return Some("uncommitted or untracked changes".into());
         };
         if !in_build_dir(ignored) {
-            return Ok(Some(format!("ignored file {ignored}")));
+            return Some(format!("ignored file {ignored}"));
         }
     }
-    Ok(None)
+    None
 }
 
 /// `entry` is a path git reports, with a trailing `/` for a directory.
@@ -666,25 +1017,29 @@ fn is_ancestor(repo: &Path, commit: &str, of: &str) -> Result<bool> {
     }
 }
 
-/// Returns a worktree at `slug`'s path detached at origin's default branch,
-/// reusing a worktree already there. Creates no local branch.
+/// Returns a clone at `slug`'s path detached at origin's default branch,
+/// reusing a clone or linked worktree already there. Creates no branch in the
+/// main checkout.
 pub fn ensure_detached_worktree(repo: &Path, slug: &str) -> Result<PathBuf> {
     let path = worktree_path(repo, slug);
-    if is_worktree(repo, &path)? {
+    if is_worktree(repo, &path)? || is_clone(repo, &path)? {
         return Ok(path);
     }
     fetch(repo)?;
     let base = default_branch(repo)?;
-    let path_str = path.to_str().context("worktree path is not UTF-8")?;
-    git(
+    make_clone(
         repo,
-        &["worktree", "add", "--quiet", "--detach", path_str, &base],
+        &path,
+        &[vec!["checkout", "--quiet", "--detach", &base]],
     )?;
     Ok(path)
 }
 
-/// Removes the worktree at `path`, with whatever it holds.
+/// Removes the clone or linked worktree at `path`, with whatever it holds.
 pub fn remove_worktree(repo: &Path, path: &Path) -> Result<()> {
+    if is_clone(repo, path)? {
+        return remove_clone(path);
+    }
     let path_str = path.to_str().context("worktree path is not UTF-8")?;
     git(repo, &["worktree", "remove", "--force", path_str])?;
     Ok(())
@@ -701,6 +1056,8 @@ fn is_worktree(repo: &Path, path: &Path) -> Result<bool> {
         .any(|p| Path::new(p).canonicalize().is_ok_and(|p| p == wanted)))
 }
 
+/// The tree checked out on `branch`: the main checkout or a linked worktree
+/// git lists, else a clone at `branch`'s [`worktree_path`].
 fn find_worktree(repo: &Path, branch: &str) -> Result<Option<PathBuf>> {
     let list = git(repo, &["worktree", "list", "--porcelain"])?;
     let wanted = format!("branch refs/heads/{branch}");
@@ -711,6 +1068,10 @@ fn find_worktree(repo: &Path, branch: &str) -> Result<Option<PathBuf>> {
         } else if line == wanted {
             return Ok(current);
         }
+    }
+    let path = worktree_path(repo, branch);
+    if is_clone(repo, &path)? && clone_branch(&path)?.as_deref() == Some(branch) {
+        return Ok(Some(path));
     }
     Ok(None)
 }
@@ -907,8 +1268,19 @@ impl std::error::Error for TimedOut {}
 /// helpers after `timeout`.
 fn remote_git_within(repo: &Path, args: &[&str], timeout: Duration) -> Result<String> {
     let mut command = git_command(repo, repo)?;
+    command.args(args);
+    run_remote(repo, command, args, timeout)
+}
+
+/// Runs `command`, git with `args` reaching origin as `repo` would, under
+/// [`remote_git_within`]'s rules.
+fn run_remote(
+    repo: &Path,
+    mut command: Command,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String> {
     command
-        .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         // Untranslated, so the messages matched on below read the same everywhere.
         .env("LC_ALL", "C");
@@ -1156,11 +1528,27 @@ pub(crate) fn git(repo: &Path, args: &[&str]) -> Result<String> {
     git_at(repo, repo, args)
 }
 
+/// [`git`] that can also read the commits in each of `objects`, a clone's
+/// object dir, without running git in the clone.
+fn git_seeing(repo: &Path, objects: &[PathBuf], args: &[&str]) -> Result<String> {
+    let mut command = git_command(repo, repo)?;
+    if !objects.is_empty() {
+        let joined = std::env::join_paths(objects).context("a clone's path holds a ':'")?;
+        command.env("GIT_ALTERNATE_OBJECT_DIRECTORIES", joined);
+    }
+    command.args(args);
+    output(command, args)
+}
+
 fn git_at(repo: &Path, dir: &Path, args: &[&str]) -> Result<String> {
-    let out = git_command(repo, dir)?
-        .args(args)
-        .output()
-        .context("run git")?;
+    let mut command = git_command(repo, dir)?;
+    command.args(args);
+    output(command, args)
+}
+
+/// `command`'s stdout, failing with git's stderr.
+fn output(mut command: Command, args: &[&str]) -> Result<String> {
+    let out = command.output().context("run git")?;
     if !out.status.success() {
         bail!(
             "git {}: {}",
@@ -1268,6 +1656,32 @@ pub mod testing {
         );
         std::fs::remove_dir_all(full).unwrap();
         repo
+    }
+
+    /// A linked worktree of `repo` on `branch` at its spawn path, as members
+    /// got before each had its own clone.
+    pub fn linked_worktree(repo: &Path, branch: &str) -> PathBuf {
+        let wt = super::worktree_path(repo, branch);
+        let remote = format!("origin/{branch}");
+        let on_origin = git(repo, &["rev-parse", "--verify", "--quiet", &remote]).is_ok();
+        let (track, start) = match on_origin {
+            true => ("--track", remote.as_str()),
+            false => ("--no-track", "origin/main"),
+        };
+        run(
+            repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                track,
+                "-b",
+                branch,
+                path(&wt),
+                start,
+            ],
+        );
+        wt
     }
 
     fn path(p: &Path) -> &str {
@@ -1400,6 +1814,90 @@ mod tests {
     }
 
     #[test]
+    fn a_members_tree_is_its_own_clone_of_origin_not_a_worktree_of_the_main_checkout() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+
+        let wt = ensure_worktree(&repo, "feat/new").unwrap();
+
+        assert!(
+            wt.join(".git").is_dir(),
+            "{} has no .git of its own",
+            wt.display()
+        );
+        let origin = git(&wt, &["config", "--get", "remote.origin.url"]).unwrap();
+        assert_eq!(
+            origin.trim(),
+            root.path().join("origin.git").to_str().unwrap()
+        );
+        assert!(!worktree_list(&repo).contains("feat/new"));
+        assert!(!has_branch(&repo, "feat/new"));
+        let alternates = wt.join(".git/objects/info/alternates");
+        assert!(
+            !alternates.exists(),
+            "the clone still borrows the main checkout's objects"
+        );
+    }
+
+    #[test]
+    fn a_clone_at_the_branchs_path_is_found_and_reused() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_worktree(&repo, "feat/new").unwrap();
+        commit(&wt, "work");
+
+        assert_eq!(planned_worktree(&repo, "feat/new").unwrap(), wt);
+        assert_eq!(ensure_worktree(&repo, "feat/new").unwrap(), wt);
+        assert_eq!(
+            git(&wt, &["log", "-1", "--format=%s"]).unwrap().trim(),
+            "work"
+        );
+    }
+
+    #[test]
+    fn an_unmarked_clone_at_the_branchs_path_is_not_taken_for_a_members() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = worktree_path(&repo, "feature/existing");
+        let origin = root.path().join("origin.git");
+        git_in(
+            root.path(),
+            &[
+                "clone",
+                "--quiet",
+                "-b",
+                "feature/existing",
+                path_str(&origin),
+                path_str(&wt),
+            ],
+        );
+
+        assert_eq!(find_worktree(&repo, "feature/existing").unwrap(), None);
+        assert!(ensure_worktree(&repo, "feature/existing").is_err());
+        let removal = remove_if_merged(&repo, &wt).unwrap();
+        assert!(matches!(removal, Removal::Kept(_)), "{removal:?}");
+        assert!(wt.join(".git").is_dir());
+    }
+
+    #[test]
+    fn a_held_config_lock_in_one_clone_blocks_no_config_write_elsewhere() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let held = ensure_worktree(&repo, "feat/a").unwrap();
+        let other = ensure_worktree(&repo, "feat/b").unwrap();
+        std::fs::write(held.join(".git/config.lock"), "").unwrap();
+
+        git(&repo, &["config", "--local", "loopherd.test", "main"]).unwrap();
+        git(&other, &["config", "--local", "loopherd.test", "other"]).unwrap();
+
+        let blocked = git(&held, &["config", "--local", "loopherd.test", "held"]).unwrap_err();
+        assert!(
+            format!("{blocked:#}").contains("could not lock config file"),
+            "{blocked:#}"
+        );
+    }
+
+    #[test]
     fn creates_a_new_branch_from_origins_default_branch() {
         let root = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(root.path());
@@ -1434,10 +1932,34 @@ mod tests {
     }
 
     #[test]
-    fn clearing_a_branch_with_nothing_new_removes_it_and_its_worktree() {
+    fn clearing_a_branch_with_nothing_new_removes_its_clone() {
         let root = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(root.path());
         let wt = ensure_worktree(&repo, "feat/x").unwrap();
+        let start = head(&wt);
+
+        let cleared = clear(&repo, None, Fate::Clear);
+
+        assert_eq!(
+            cleared,
+            Plan::Clear(Clearing {
+                repo: repo.clone(),
+                branch: Some("feat/x".into()),
+                worktrees: vec![(wt.clone(), start.clone())],
+                head: None,
+                remote: None,
+                dropped: 0,
+                base: "origin/main".into(),
+            })
+        );
+        assert!(!wt.exists());
+    }
+
+    #[test]
+    fn clearing_a_branch_with_nothing_new_removes_it_and_its_linked_worktree() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = linked_worktree(&repo, "feat/x");
         let start = head(&wt);
 
         let cleared = clear(&repo, None, Fate::Clear);
@@ -1475,7 +1997,7 @@ mod tests {
             }
         );
         assert!(wt.exists());
-        assert!(has_branch(&repo, "feat/x"));
+        assert!(has_branch(&wt, "feat/x"));
 
         let dropped = clear(&repo, None, Fate::Drop);
 
@@ -1483,7 +2005,7 @@ mod tests {
             matches!(dropped, Plan::Clear(Clearing { dropped: 1, .. })),
             "{dropped:?}"
         );
-        assert!(!has_branch(&repo, "feat/x"));
+        assert!(!has_branch(&wt, "feat/x"));
     }
 
     #[test]
@@ -1500,7 +2022,7 @@ mod tests {
             }
         );
         assert!(wt.exists());
-        assert!(has_branch(&repo, "feat/x"));
+        assert!(has_branch(&wt, "feat/x"));
     }
 
     #[test]
@@ -1520,7 +2042,7 @@ mod tests {
             ))
         );
         assert!(wt.join("notes").exists());
-        assert!(has_branch(&repo, "feat/x"));
+        assert!(has_branch(&wt, "feat/x"));
     }
 
     #[test]
@@ -1565,7 +2087,7 @@ mod tests {
         let repo = repo_with_origin(root.path());
         let wt = ensure_worktree(&repo, "feat/x").unwrap();
         git_in(&wt, &["checkout", "--quiet", "--detach"]);
-        git_in(&repo, &["branch", "--quiet", "-D", "feat/x"]);
+        git_in(&wt, &["branch", "--quiet", "-D", "feat/x"]);
 
         let cleared = clear(&repo, Some(&wt), Fate::Clear);
 
@@ -1599,7 +2121,7 @@ mod tests {
     fn clearing_a_branch_whose_worktree_dir_is_gone_removes_its_record_and_the_branch() {
         let root = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(root.path());
-        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+        let wt = linked_worktree(&repo, "feat/x");
         std::fs::remove_dir_all(&wt).unwrap();
 
         let cleared = clear(&repo, Some(&wt), Fate::Clear);
@@ -1622,8 +2144,8 @@ mod tests {
         commit(&wt, "pushed");
         push_head(&wt, "feat/x");
         let pushed = head(&wt);
-        git_in(repo, &["worktree", "remove", path_str(&wt)]);
-        git_in(repo, &["branch", "--quiet", "-D", "feat/x"]);
+        std::fs::remove_dir_all(&wt).unwrap();
+        git_in(repo, &["fetch", "--quiet"]);
         assert!(on_origin(root, "feat/x"));
         pushed
     }
@@ -1768,7 +2290,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(root.path());
         let recorded = ensure_detached_worktree(&repo, "old").unwrap();
-        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+        let wt = linked_worktree(&repo, "feat/x");
         git_in(
             &repo,
             &["worktree", "lock", "--reason", "on a stick", path_str(&wt)],
@@ -1905,7 +2427,7 @@ mod tests {
             assert_eq!(
                 clear(&repo, Some(&leftover), fate),
                 Plan::Taken(format!(
-                    "{} is in the way and isn't a worktree of {}",
+                    "{} is in the way and isn't a clone or worktree of {}",
                     leftover.display(),
                     repo.display()
                 ))
@@ -2724,7 +3246,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(root.path());
         git(&repo, &["sparse-checkout", "init", "--cone"]).unwrap();
-        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+        let wt = linked_worktree(&repo, "feat/x");
         let Plan::Clear(clearing) =
             plan_clear(&repo, Some(&wt), Some("feat/x"), Fate::Clear, &nobody).unwrap()
         else {
@@ -2753,7 +3275,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(root.path());
         git(&repo, &["sparse-checkout", "init", "--cone"]).unwrap();
-        ensure_worktree(&repo, "feat/x").unwrap();
+        linked_worktree(&repo, "feat/x");
         let worktrees = repo.join(".git/worktrees");
         std::fs::set_permissions(&worktrees, std::fs::Permissions::from_mode(0o100)).unwrap();
 
@@ -2812,7 +3334,7 @@ mod tests {
     fn a_repo_that_reads_config_worktree_files_gets_no_git_run_in_it() {
         let root = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(root.path());
-        let wt = ensure_worktree(&repo, "feat/x").unwrap();
+        let wt = linked_worktree(&repo, "feat/x");
         git(&repo, &["config", "extensions.worktreeConfig", "true"]).unwrap();
         let ran = root.path().join("ran");
         let fsmonitor = format!("core.fsmonitor = touch {}; false\n", ran.display());
@@ -2834,7 +3356,7 @@ mod tests {
     fn repo_root_from_a_linked_worktree_is_the_main_checkout() {
         let root = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(root.path());
-        let wt = ensure_worktree(&repo, "feat/new").unwrap();
+        let wt = linked_worktree(&repo, "feat/new");
         assert_eq!(repo_root(&wt).unwrap(), repo.canonicalize().unwrap());
     }
 
@@ -2882,7 +3404,7 @@ mod tests {
     fn remove_keeps_a_branch_that_moved_after_its_head_was_checked() {
         let root = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(root.path());
-        let wt = ensure_worktree(&repo, "feat/new").unwrap();
+        let wt = linked_worktree(&repo, "feat/new");
         commit(&wt, "work");
         push_head(&wt, "feat/new");
         merge_on_origin(root.path(), "feat/new");

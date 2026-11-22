@@ -674,8 +674,8 @@ mod tests {
     use crate::process::{CLAUDE, FakeProcs};
     use crate::spawn::{SpawnRequest, spawn};
     use crate::worktree::testing::{
-        commit, current_branch, git_in, has_branch, head, head_of, merge_on_origin,
-        move_origin_default, push_head, repo_with_origin, worktree_list,
+        commit, current_branch, git_in, has_branch, head, head_of, linked_worktree,
+        merge_on_origin, move_origin_default, push_head, repo_with_origin, worktree_list,
     };
 
     fn open_guard() -> Guard {
@@ -972,7 +972,10 @@ mod tests {
     }
 
     fn spawned_in_worktree(root: &Path, branch: &str) -> (FakeHerdr, MemLedger, PathBuf) {
-        let repo = repo_with_origin(root);
+        spawned_in(repo_with_origin(root), branch)
+    }
+
+    fn spawned_in(repo: PathBuf, branch: &str) -> (FakeHerdr, MemLedger, PathBuf) {
         let herdr = FakeHerdr::new(&[("w1", "loopherd")]);
         let mut ledger = MemLedger::default();
         let req = SpawnRequest {
@@ -987,6 +990,14 @@ mod tests {
             member_of: None,
         };
         spawn(&herdr, &mut ledger, &req, Some("w1")).unwrap();
+        (herdr, ledger, repo)
+    }
+
+    /// [`spawned_in_worktree`] for a member spawned before members got clones.
+    fn spawned_in_linked_worktree(root: &Path, branch: &str) -> (FakeHerdr, MemLedger, PathBuf) {
+        let repo = repo_with_origin(root);
+        linked_worktree(&repo, branch);
+        let (herdr, ledger, _) = spawned_in(repo.clone(), branch);
         (herdr, ledger, repo)
     }
 
@@ -1124,21 +1135,21 @@ mod tests {
     #[test]
     fn close_keeps_an_unmerged_worktree_and_its_branch() {
         let root = tempfile::tempdir().unwrap();
-        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
         let wt = root.path().join("proj/worktrees/feat-new");
         commit(&wt, "unpushed");
 
         let out = close(&herdr, &mut ledger);
 
         kept_line(&out, &wt, "feat/new is not merged into origin/main");
-        assert!(has_branch(&repo, "feat/new"));
+        assert!(has_branch(&wt, "feat/new"));
         assert!(herdr.tabs().is_empty());
     }
 
     #[test]
     fn close_keeps_a_worktree_with_uncommitted_changes() {
         let root = tempfile::tempdir().unwrap();
-        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
         let wt = root.path().join("proj/worktrees/feat-new");
         std::fs::write(wt.join("f"), "x").unwrap();
         git_in(&wt, &["add", "f"]);
@@ -1146,7 +1157,7 @@ mod tests {
         let out = close(&herdr, &mut ledger);
 
         kept_line(&out, &wt, "uncommitted or untracked changes");
-        assert!(has_branch(&repo, "feat/new"));
+        assert!(has_branch(&wt, "feat/new"));
     }
 
     #[test]
@@ -1163,9 +1174,9 @@ mod tests {
     }
 
     #[test]
-    fn close_removes_a_clean_detached_worktree_even_when_unmerged() {
+    fn close_removes_a_clean_detached_linked_worktree_even_when_unmerged() {
         let root = tempfile::tempdir().unwrap();
-        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let (herdr, mut ledger, repo) = spawned_in_linked_worktree(root.path(), "feat/new");
         let wt = root.path().join("proj/worktrees/feat-new");
         commit(&wt, "unpushed");
         git_in(&wt, &["checkout", "--quiet", "--detach"]);
@@ -1175,6 +1186,33 @@ mod tests {
         assert_eq!(out.last().unwrap(), &format!("removed {}", wt.display()));
         assert!(!wt.exists());
         assert!(has_branch(&repo, "feat/new"));
+    }
+
+    #[test]
+    fn close_keeps_a_detached_clone_whose_branch_is_unmerged() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        commit(&wt, "unpushed");
+        git_in(&wt, &["checkout", "--quiet", "--detach"]);
+
+        let out = close(&herdr, &mut ledger);
+
+        kept_line(&out, &wt, "feat/new is not merged into origin/main");
+    }
+
+    #[test]
+    fn close_removes_a_clean_detached_clone_whose_branches_are_merged() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        git_in(&wt, &["checkout", "--quiet", "--detach"]);
+        commit(&wt, "detached work no branch holds");
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(out.last().unwrap(), &format!("removed {}", wt.display()));
+        assert!(!wt.exists());
     }
 
     #[test]
@@ -1219,7 +1257,7 @@ mod tests {
     #[test]
     fn close_keeps_a_worktree_with_only_a_sequencer_left() {
         let root = tempfile::tempdir().unwrap();
-        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
         let wt = root.path().join("proj/worktrees/feat-new");
         let git = |args: &[&str]| {
             std::process::Command::new("git")
@@ -1243,7 +1281,7 @@ mod tests {
         let picked = git(&["cherry-pick", "side~1", "side"]);
         assert!(!picked.status.success(), "the first pick should conflict");
         git(&["reset", "--quiet", "--merge"]);
-        let git_dir = repo.join(".git/worktrees/feat-new");
+        let git_dir = wt.join(".git");
         assert!(git_dir.join("sequencer").is_dir());
         assert!(!git_dir.join("CHERRY_PICK_HEAD").exists());
 
@@ -1364,7 +1402,7 @@ mod tests {
         kept_line(
             &out,
             &repo,
-            &format!("not a linked worktree of {}", repo.display()),
+            &format!("not a clone or linked worktree of {}", repo.display()),
         );
         assert_eq!(current_branch(&repo), "main");
     }
@@ -1447,13 +1485,13 @@ mod tests {
             ]
         );
         assert_eq!(current_branch(&wt), "feat/new");
-        assert!(has_branch(&repo, "feat/new"));
+        assert!(has_branch(&wt, "feat/new"));
     }
 
-    /// Spawns `b` onto `a`'s worktree after retiring `a`; returns the repo and
-    /// the worktree's real path.
+    /// Spawns `b` onto `a`'s linked worktree after retiring `a`; returns the
+    /// repo and the worktree's real path.
     fn shared_with_b(root: &Path) -> (FakeHerdr, MemLedger, PathBuf, PathBuf) {
-        let (herdr, mut ledger, repo) = spawned_in_worktree(root, "feat/new");
+        let (herdr, mut ledger, repo) = spawned_in_linked_worktree(root, "feat/new");
         retire(&mut ledger, "a", halloween_noon(), Outcome::Retired).unwrap();
         let req = SpawnRequest {
             repo: repo.clone(),
@@ -1614,7 +1652,7 @@ mod tests {
     #[test]
     fn a_leads_close_keeps_a_worktree_the_entry_places_away_from_its_herds_worktrees() {
         let root = tempfile::tempdir().unwrap();
-        let (herdr, mut ledger, repo, guard) = herd_member(root.path(), Some("lead-h"));
+        let (herdr, mut ledger, _, guard) = herd_member(root.path(), Some("lead-h"));
         keep_lead(root.path(), "lead-h", "h");
         let elsewhere = root.path().join("elsewhere/feat-new");
         ledger.0.get_mut("a").unwrap().worktree = Some(elsewhere.clone());
@@ -1629,7 +1667,10 @@ mod tests {
             )),
             "{out:?}"
         );
-        assert!(has_branch(&repo, "feat/new"));
+        assert!(has_branch(
+            &root.path().join("proj/worktrees/feat-new"),
+            "feat/new"
+        ));
     }
 
     #[test]
@@ -1721,9 +1762,91 @@ mod tests {
     }
 
     #[test]
-    fn close_runs_no_command_a_planted_commondir_points_git_at() {
+    fn close_removes_a_linked_member_and_a_cloned_member_of_the_same_herd() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo, guard) = herd_member(root.path(), None);
+        let linked = linked_worktree(&repo, "feat/old");
+        let req = SpawnRequest {
+            repo: repo.clone(),
+            name: "b".into(),
+            worktree: Some("feat/old".into()),
+            workspace: None,
+            prompt: None,
+            ready_timeout: Duration::from_secs(60),
+            shell_timeout: crate::spawn::SHELL_TIMEOUT,
+            claude_args: vec![],
+            member_of: None,
+        };
+        spawn(&herdr, &mut ledger, &req, Some("w1")).unwrap();
+        ledger.0.get_mut("b").unwrap().herd = Some("h".into());
+        let cloned = root.path().join("proj/worktrees/feat-new");
+        assert!(cloned.join(".git").is_dir());
+        assert_eq!(ledger.0["b"].worktree.as_deref(), Some(linked.as_path()));
+
+        let mut out = vec![];
+        for name in ["a", "b"] {
+            retire_and_close(
+                &herdr,
+                &mut ledger,
+                &guard,
+                name,
+                halloween_noon(),
+                Outcome::Retired,
+                Path::new("/nonexistent/reports"),
+                None,
+                None,
+                &mut out,
+            )
+            .unwrap();
+        }
+
+        assert!(
+            out.contains(&format!("removed {}", cloned.display())),
+            "{out:?}"
+        );
+        assert!(
+            out.contains(&format!("removed {}", linked.display())),
+            "{out:?}"
+        );
+        assert!(!worktree_list(&repo).contains("feat-old"));
+        assert!(!has_branch(&repo, "feat/old"));
+    }
+
+    #[test]
+    fn close_runs_no_command_a_clones_own_git_dir_names() {
         let root = tempfile::tempdir().unwrap();
         let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let wt = root.path().join("proj/worktrees/feat-new");
+        std::fs::write(wt.join("f"), "x").unwrap();
+        git_in(&wt, &["add", "f"]);
+        commit(&wt, "f");
+        push_head(&wt, "feat/new");
+        merge_on_origin(root.path(), "feat/new");
+        let ran = root.path().join("ran");
+        let touch = format!("touch {}; false", ran.display());
+        git_in(&wt, &["config", "core.fsmonitor", &touch]);
+        git_in(&wt, &["config", "filter.planted.clean", &touch]);
+        std::fs::write(wt.join(".git/info/attributes"), "* filter=planted\n").unwrap();
+        let hook = format!("#!/bin/sh\ntouch {}\n", ran.display());
+        crate::test_fakes::executable(&wt.join(".git/hooks/post-index-change"), hook);
+        std::fs::write(wt.join("f"), "x").unwrap();
+        let planted = planted_git_dir(root.path(), &repo, &ran);
+        std::fs::write(
+            wt.join(".git/commondir"),
+            format!("{}\n", planted.display()),
+        )
+        .unwrap();
+
+        let out = close(&herdr, &mut ledger);
+
+        assert!(!ran.exists(), "{out:?}");
+        assert_eq!(out.last().unwrap(), &format!("removed {}", wt.display()));
+    }
+
+    #[test]
+    fn close_runs_no_command_a_planted_commondir_points_git_at() {
+        let root = tempfile::tempdir().unwrap();
+        let (herdr, mut ledger, repo) = spawned_in_linked_worktree(root.path(), "feat/new");
         let ran = root.path().join("ran");
         let planted = planted_git_dir(root.path(), &repo, &ran);
         let admin = repo.join(".git/worktrees/feat-new");
@@ -1744,7 +1867,7 @@ mod tests {
     #[test]
     fn close_runs_no_command_a_worktrees_rewritten_git_file_points_git_at() {
         let root = tempfile::tempdir().unwrap();
-        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let (herdr, mut ledger, repo) = spawned_in_linked_worktree(root.path(), "feat/new");
         let wt = root.path().join("proj/worktrees/feat-new");
         let ran = root.path().join("ran");
         let planted = wt.join("planted");
@@ -1779,7 +1902,7 @@ mod tests {
     #[test]
     fn close_runs_no_git_in_a_herdless_entrys_repo_inside_a_leads_worktree() {
         let root = tempfile::tempdir().unwrap();
-        let (herdr, mut ledger, repo, guard) = herd_member(root.path(), None);
+        let (herdr, mut ledger, _, guard) = herd_member(root.path(), None);
         keep_lead(root.path(), "lead-h", "h");
         let lead_wt = root.path().join("proj/worktrees/lead-h");
         let planted = lead_wt.join("planted");
@@ -1800,13 +1923,13 @@ mod tests {
                 lead_wt.display()
             )
         );
-        assert!(worktree_list(&repo).contains("feat-new"));
+        assert!(wt.is_dir());
     }
 
     #[test]
     fn an_unreadable_kept_lead_record_stops_no_retire() {
         let root = tempfile::tempdir().unwrap();
-        let (herdr, mut ledger, repo, guard) = herd_member(root.path(), None);
+        let (herdr, mut ledger, _, guard) = herd_member(root.path(), None);
         let sandbox = root.path().join("loopherd/sandbox");
         std::fs::create_dir_all(&sandbox).unwrap();
         std::fs::write(sandbox.join("lead-x.lead.json"), "not json").unwrap();
@@ -1815,13 +1938,13 @@ mod tests {
         let out = close_guarded(&herdr, &mut ledger, &guard);
 
         assert_eq!(out.last().unwrap(), &format!("removed {}", wt.display()));
-        assert!(!worktree_list(&repo).contains("feat-new"));
+        assert!(!wt.exists());
     }
 
     #[test]
     fn close_does_not_count_the_closed_entry_as_a_sharer_of_its_missing_worktree() {
         let root = tempfile::tempdir().unwrap();
-        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let (herdr, mut ledger, repo) = spawned_in_linked_worktree(root.path(), "feat/new");
         let alias = root.path().join("alias");
         std::os::unix::fs::symlink(root.path().join("proj/worktrees"), &alias).unwrap();
         let aliased = alias.join("feat-new");
@@ -2275,7 +2398,7 @@ mod tests {
     #[test]
     fn close_removes_a_deleted_worktrees_record_and_deletes_its_merged_branch() {
         let root = tempfile::tempdir().unwrap();
-        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let (herdr, mut ledger, repo) = spawned_in_linked_worktree(root.path(), "feat/new");
         let wt = root.path().join("proj/worktrees/feat-new");
         std::fs::remove_dir_all(&wt).unwrap();
 
@@ -2296,7 +2419,7 @@ mod tests {
     #[test]
     fn close_removes_a_deleted_worktrees_record_but_keeps_its_unmerged_branch() {
         let root = tempfile::tempdir().unwrap();
-        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let (herdr, mut ledger, repo) = spawned_in_linked_worktree(root.path(), "feat/new");
         let wt = root.path().join("proj/worktrees/feat-new");
         commit(&wt, "unpushed");
         std::fs::remove_dir_all(&wt).unwrap();
@@ -2317,8 +2440,8 @@ mod tests {
     #[test]
     fn close_of_a_deleted_worktree_leaves_another_missing_worktrees_record() {
         let root = tempfile::tempdir().unwrap();
-        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
-        let other = crate::worktree::ensure_worktree(&repo, "feat/other").unwrap();
+        let (herdr, mut ledger, repo) = spawned_in_linked_worktree(root.path(), "feat/new");
+        let other = linked_worktree(&repo, "feat/other");
         std::fs::remove_dir_all(root.path().join("proj/worktrees/feat-new")).unwrap();
         std::fs::remove_dir_all(&other).unwrap();
 
@@ -2332,7 +2455,7 @@ mod tests {
     #[test]
     fn close_keeps_a_deleted_worktree_that_is_locked_with_its_reason() {
         let root = tempfile::tempdir().unwrap();
-        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let (herdr, mut ledger, repo) = spawned_in_linked_worktree(root.path(), "feat/new");
         let wt = root.path().join("proj/worktrees/feat-new");
         git_in(
             &repo,
@@ -2359,7 +2482,7 @@ mod tests {
     #[test]
     fn close_keeps_a_deleted_worktree_that_is_locked_without_a_reason() {
         let root = tempfile::tempdir().unwrap();
-        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let (herdr, mut ledger, repo) = spawned_in_linked_worktree(root.path(), "feat/new");
         let wt = root.path().join("proj/worktrees/feat-new");
         git_in(&repo, &["worktree", "lock", wt.to_str().unwrap()]);
         std::fs::remove_dir_all(&wt).unwrap();
@@ -2374,7 +2497,7 @@ mod tests {
     #[test]
     fn close_keeps_a_worktree_it_cannot_look_at() {
         let root = tempfile::tempdir().unwrap();
-        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
         let parent = root.path().join("proj/worktrees");
         let wt = parent.join("feat-new");
         let mode = |m| {
@@ -2394,14 +2517,13 @@ mod tests {
             )
         );
         assert!(wt.is_dir());
-        assert!(worktree_list(&repo).contains("feat-new"));
-        assert!(has_branch(&repo, "feat/new"));
+        assert!(has_branch(&wt, "feat/new"));
     }
 
     #[test]
     fn close_keeps_a_deleted_worktrees_record_when_the_fetch_fails() {
         let root = tempfile::tempdir().unwrap();
-        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let (herdr, mut ledger, repo) = spawned_in_linked_worktree(root.path(), "feat/new");
         std::fs::remove_dir_all(root.path().join("proj/worktrees/feat-new")).unwrap();
         let missing = root.path().join("no-origin.git");
         git_in(
@@ -2610,7 +2732,7 @@ mod tests {
     #[test]
     fn close_keeps_a_merged_worktree_holding_ignored_files() {
         let root = tempfile::tempdir().unwrap();
-        let (herdr, mut ledger, repo) = spawned_in_worktree(root.path(), "feat/new");
+        let (herdr, mut ledger, _) = spawned_in_worktree(root.path(), "feat/new");
         let wt = root.path().join("proj/worktrees/feat-new");
         merged_with_ignores(&wt, ".env\n");
         write(&wt.join(".env"));
@@ -2619,7 +2741,7 @@ mod tests {
 
         kept_line(&out, &wt, "ignored file .env");
         assert!(wt.join(".env").exists());
-        assert!(has_branch(&repo, "feat/new"));
+        assert!(has_branch(&wt, "feat/new"));
     }
 
     #[test]

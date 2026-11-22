@@ -1322,6 +1322,18 @@ gone: no live agent matches it; `loopherd revive` can bring it back
     }
 
     #[test]
+    fn shows_the_branch_a_members_clone_has_checked_out() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = crate::worktree::testing::repo_with_origin(root.path());
+        let clone = crate::worktree::ensure_worktree(&repo, "feat/x").unwrap();
+        let mut e = entry("a", None, "x");
+        e.repo = repo;
+        e.worktree = Some(clone);
+
+        assert_eq!(branch(&e).as_deref(), Some("feat/x"));
+    }
+
+    #[test]
     fn a_worktree_whose_git_config_a_lead_could_have_set_shows_no_branch() {
         use crate::worktree::testing::{git_in, repo_with_origin};
         let root = tempfile::tempdir().unwrap();

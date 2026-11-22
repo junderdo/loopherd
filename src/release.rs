@@ -262,7 +262,7 @@ mod tests {
     use crate::report::history;
     use crate::worktree::ensure_worktree;
     use crate::worktree::testing::{
-        commit, git_in, has_branch, head, head_of, push_head, repo_with_origin,
+        commit, git_in, has_branch, head, head_of, linked_worktree, push_head, repo_with_origin,
     };
 
     fn record(name: &str, repo: PathBuf, retired: bool) -> AgentRecord {
@@ -334,6 +334,16 @@ mod tests {
         /// A retired `name` whose worktree is on its own `branch`.
         fn retired_on(&mut self, name: &str, branch: &str) -> PathBuf {
             let wt = ensure_worktree(&self.repo, branch).unwrap();
+            self.retired_in(name, branch, wt)
+        }
+
+        /// [`Setup::retired_on`] for a member spawned before members got clones.
+        fn retired_on_linked(&mut self, name: &str, branch: &str) -> PathBuf {
+            let wt = linked_worktree(&self.repo, branch);
+            self.retired_in(name, branch, wt)
+        }
+
+        fn retired_in(&mut self, name: &str, branch: &str, wt: PathBuf) -> PathBuf {
             let mut r = record(name, self.repo.clone(), true);
             r.worktree = Some(wt.clone());
             r.branch = Some(branch.into());
@@ -400,7 +410,7 @@ mod tests {
             "refused: zpr-1 isn't a member of lead-other's herd, and lead-other runs this loopherd"
         );
         assert!(wt.exists());
-        assert!(has_branch(&s.repo, "feat/x"));
+        assert!(has_branch(&wt, "feat/x"));
     }
 
     /// A retired `name` on `branch`, whose worktree was made by hand outside
@@ -487,7 +497,7 @@ mod tests {
     #[test]
     fn refuses_a_branch_whose_worktree_would_be_a_leads_and_a_leads_drop_branch() {
         let mut s = Setup::new();
-        s.retired_on("zpr-1", "feat/x");
+        let wt = s.retired_on("zpr-1", "feat/x");
         let sandbox = s.root.path().join("loopherd/sandbox");
         std::fs::create_dir_all(&sandbox).unwrap();
         std::fs::write(
@@ -519,7 +529,7 @@ mod tests {
             err.to_string(),
             "refused: --drop-branch deletes commits, so it's the human's, not a lead's"
         );
-        assert!(has_branch(&s.repo, "feat/x"));
+        assert!(has_branch(&wt, "feat/x"));
     }
 
     #[test]
@@ -759,9 +769,27 @@ mod tests {
     }
 
     #[test]
-    fn removes_a_branch_with_nothing_new_and_its_worktree_so_the_next_member_starts_afresh() {
+    fn removes_a_clone_with_nothing_new_so_the_next_member_starts_afresh() {
         let mut s = Setup::new();
         let wt = s.retired_on("zpr-1", "feat/zpr-1");
+        let start = head(&wt);
+
+        let out = s.release("zpr-1", Fate::Clear).unwrap();
+
+        assert_eq!(
+            out,
+            [
+                format!("removed {} (at {})", wt.display(), &start[..12]),
+                "released zpr-1: feed may spawn it again".into(),
+            ]
+        );
+        assert!(!has_branch(&s.repo, "feat/zpr-1"));
+    }
+
+    #[test]
+    fn removes_a_branch_with_nothing_new_and_its_linked_worktree() {
+        let mut s = Setup::new();
+        let wt = s.retired_on_linked("zpr-1", "feat/zpr-1");
         let start = head(&wt);
 
         let out = s.release("zpr-1", Fate::Clear).unwrap();
@@ -790,7 +818,7 @@ mod tests {
             "refused: its worktree, branch or origin/feat/zpr-1 hold 1 commit not on origin/main; pass \
              --keep-branch to start the new member from them, or --drop-branch to delete them"
         );
-        assert!(has_branch(&s.repo, "feat/zpr-1"));
+        assert!(has_branch(&wt, "feat/zpr-1"));
         assert_eq!(s.ledger.0["zpr-1"].released_at, None);
     }
 
@@ -810,7 +838,7 @@ mod tests {
             ]
         );
         assert!(wt.exists());
-        assert!(has_branch(&s.repo, "feat/zpr-1"));
+        assert!(has_branch(&wt, "feat/zpr-1"));
     }
 
     #[test]
@@ -823,14 +851,17 @@ mod tests {
         let out = s.release("zpr-1", Fate::Drop).unwrap();
 
         assert_eq!(
+            out[0],
+            format!("removed {} (at {})", wt.display(), &unpushed[..12])
+        );
+        assert_eq!(
             out[1..],
             [
-                format!("deleted branch feat/zpr-1 (was {})", &unpushed[..12]),
-                "dropped 1 commit not on origin/main or another origin branch".into(),
+                "dropped 1 commit not on origin/main or another origin branch".to_string(),
                 "released zpr-1: feed may spawn it again".into(),
             ]
         );
-        assert!(!has_branch(&s.repo, "feat/zpr-1"));
+        assert!(!wt.exists());
         assert!(s.ledger.0["zpr-1"].released_at.is_some());
     }
 
@@ -847,9 +878,12 @@ mod tests {
 
         assert_eq!(
             format!("{err:#}"),
-            format!("refused: {} is in use by other", wt.unwrap().display())
+            format!(
+                "refused: {} is in use by other",
+                wt.as_ref().unwrap().display()
+            )
         );
-        assert!(has_branch(&s.repo, "feat/zpr-1"));
+        assert!(has_branch(wt.as_deref().unwrap(), "feat/zpr-1"));
     }
 
     #[test]
@@ -877,7 +911,6 @@ mod tests {
         assert_eq!(
             out[1..],
             [
-                format!("deleted branch feat/zpr-1 (was {})", &pushed[..12]),
                 "dropped 1 commit not on origin/main or another origin branch".into(),
                 format!("deleted origin/feat/zpr-1 (was {})", &pushed[..12]),
                 "released zpr-1: feed may spawn it again".into(),
@@ -892,8 +925,8 @@ mod tests {
         let wt = s.retired_on("zpr-1", "feat/zpr-1");
         commit(&wt, "pushed");
         push_head(&wt, "feat/zpr-1");
-        git_in(&s.repo, &["worktree", "remove", wt.to_str().unwrap()]);
-        git_in(&s.repo, &["branch", "--quiet", "-D", "feat/zpr-1"]);
+        std::fs::remove_dir_all(&wt).unwrap();
+        git_in(&s.repo, &["fetch", "--quiet"]);
 
         let out = s.release("zpr-1", Fate::Keep).unwrap();
 
@@ -912,6 +945,7 @@ mod tests {
     fn pushed_on_the_base(s: &mut Setup) -> PathBuf {
         let wt = s.retired_on("zpr-1", "feat/zpr-1");
         push_head(&wt, "feat/zpr-1");
+        git_in(&s.repo, &["fetch", "--quiet"]);
         wt
     }
 
@@ -937,7 +971,7 @@ mod tests {
              --keep-branch to start the new member from it, or --drop-branch to delete it anyway"
         );
         assert!(wt.exists());
-        assert!(has_branch(&s.repo, "feat/zpr-1"));
+        assert!(has_branch(&wt, "feat/zpr-1"));
         assert!(has_branch(&origin(&s), "feat/zpr-1"));
         assert_eq!(s.ledger.0["zpr-1"].released_at, None);
     }
@@ -1003,7 +1037,7 @@ mod tests {
     #[test]
     fn a_failed_local_step_leaves_origin_and_the_ledger_untouched() {
         let mut s = Setup::new();
-        let wt = s.retired_on("zpr-1", "feat/zpr-1");
+        let wt = s.retired_on_linked("zpr-1", "feat/zpr-1");
         let sub = origin(&s);
         git_in(
             &wt,
@@ -1023,6 +1057,37 @@ mod tests {
         let err = s.release("zpr-1", Fate::Drop).unwrap_err();
 
         assert!(format!("{err:#}").contains("submodule"), "{err:#}");
+        assert!(has_branch(&origin(&s), "feat/zpr-1"));
+        assert_eq!(s.ledger.0["zpr-1"].released_at, None);
+    }
+
+    #[test]
+    fn a_clone_holding_a_submodule_is_refused_leaving_origin_and_the_ledger() {
+        let mut s = Setup::new();
+        let wt = s.retired_on("zpr-1", "feat/zpr-1");
+        let sub = origin(&s);
+        git_in(
+            &wt,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "--quiet",
+                sub.to_str().unwrap(),
+                "sub",
+            ],
+        );
+        commit(&wt, "add a submodule");
+        push_head(&wt, "feat/zpr-1");
+
+        let err = s.release("zpr-1", Fate::Drop).unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("a submodule, which loopherd won't look inside"),
+            "{err:#}"
+        );
+        assert!(wt.is_dir());
         assert!(has_branch(&origin(&s), "feat/zpr-1"));
         assert_eq!(s.ledger.0["zpr-1"].released_at, None);
     }
