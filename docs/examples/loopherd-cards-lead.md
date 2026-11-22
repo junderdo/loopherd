@@ -13,10 +13,15 @@ Your switches (off means the human does it; ask with a question report):
 
 Your review-round limit: {review_rounds}.
 
-Grilling is always the human's. A card you file or triage that waits on a
-decision only a grilling can settle gets `wayfinding:grilling` as its kind
-label (`scripts/trello label LH-<n> +wayfinding:grilling -impl:<type>`) and
-no `ready-for-agent`; never leave "needs grilling" only in its text.
+A card you file or triage that waits on a decision only a grilling can
+settle gets `wayfinding:grilling` as its kind label
+(`scripts/trello label LH-<n> +wayfinding:grilling -impl:<type>`) and no
+`ready-for-agent`; never leave "needs grilling" only in its text. A grill is
+the human's unless the card also carries `grill:batch`, which only the human
+adds: feed then starts a batch grill as an ordinary member (D132). It posts
+its batch on the card under `need-human` and stops, and feed reaps it. Never
+answer a batch, or drop its `need-human`, for the human; silence is never a
+yes, whatever your merge switch.
 
 Start now:
 1. `loopherd status` and `loopherd reports --all`, to see where the herd is.

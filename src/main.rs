@@ -45,7 +45,9 @@ mod spawn;
 mod stats;
 mod status;
 mod stop_hook;
+mod subagent_hook;
 mod subagent_view;
+mod subagents;
 mod tell;
 mod template;
 #[cfg(test)]
@@ -438,6 +440,11 @@ enum Command {
     /// a background task's notification keeps it. Elsewhere it does nothing.
     /// Set up by install-hook.
     PromptHook,
+    /// Claude's SubagentStart and SubagentStop hook: records a subagent the
+    /// member in this pane starts or finishes, read from the hook input on stdin,
+    /// in its mailbox, for `view` and `status`. Neither wakes a watch. Outside a
+    /// member's pane it records nothing. Set up by install-hook.
+    SubagentHook,
     /// Claude's PreToolUse hook on Bash: in a lead's pane, denies a merge, install,
     /// rebase or force-push its switches leave to the human, and any
     /// `loopherd restart --force`, `pause`, `resume`, `herd set`, `herd unset`,
@@ -860,6 +867,7 @@ fn main() -> ExitCode {
         Command::HerdrEventHook => ("herdr-event-hook", run_herdr_event_hook()),
         Command::SessionHook => ("session-hook", run_session_hook()),
         Command::PromptHook => ("prompt-hook", run_prompt_hook()),
+        Command::SubagentHook => ("subagent-hook", run_subagent_hook()),
         Command::ToolHook => ("tool-hook", run_tool_hook()),
         Command::NotifyRun {
             member,
@@ -1217,6 +1225,10 @@ fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
         REMOTE_TIMEOUT
     });
     let queues = paths.as_ref().map(|paths| Queues { paths, timeout });
+    let subagents = status::Subagents {
+        mailboxes: &ledger.reports_dir()?,
+        now: SystemTime::now(),
+    };
     let out = status::status(
         &CliHerdr,
         &ledger,
@@ -1224,6 +1236,8 @@ fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
         queues.as_ref(),
         Options { all, strays },
         format,
+        // Only the JSON lists subagents.
+        (format == status::Format::Json).then_some(&subagents),
     )?;
     print!("{}", out.stdout);
     for line in out.stderr.lines() {
@@ -2258,6 +2272,33 @@ fn own_place(pane: Option<&str>) -> Option<shepherd_resume::Place> {
         socket,
         process: ledger::Process { pid, start },
     })
+}
+
+fn run_subagent_hook() -> Result<i32> {
+    let Some(pane) = own_pane() else {
+        return Ok(0);
+    };
+    let mut input = vec![];
+    std::io::stdin()
+        .read_to_end(&mut input)
+        .context("read hook input")?;
+    let socket = socket_from_env();
+    let mut ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    let reports = ledger.reports_dir()?;
+    let pane = subagent_hook::Pane {
+        id: &pane,
+        lineage: &own_lineage(),
+        socket: socket.as_deref(),
+    };
+    subagent_hook::subagent_hook(
+        &mut ledger,
+        &reports,
+        &pane,
+        &input,
+        SystemTime::now(),
+        &live_session,
+    )?;
+    Ok(0)
 }
 
 fn run_prompt_hook() -> Result<i32> {

@@ -92,6 +92,7 @@ mod tests {
             template: None,
             released: false,
             retired: None,
+            subagents: vec![],
         }
     }
 

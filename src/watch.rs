@@ -1559,7 +1559,9 @@ fn stop_wakes(mailbox: &Mailbox) -> Vec<String> {
             | Body::Blocked {}
             | Body::Gone { .. }
             | Body::Moved {}
-            | Body::Usage { .. } => None,
+            | Body::Usage { .. }
+            | Body::SubagentStart(_)
+            | Body::SubagentStop(_) => None,
             Body::Stop(Stop {
                 error: Some(error), ..
             }) => {
@@ -1869,6 +1871,31 @@ mod tests {
         assert_eq!(
             run(&herdr, &ledger, dir.path(), &EVERY, &mut clock).unwrap(),
             ["lh-1 blocked"]
+        );
+    }
+
+    #[test]
+    fn a_subagent_starting_or_stopping_never_wakes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![member("lh-1", "w9:p9", None)]);
+        let herdr = FakeHerdr::new(&[]).with_agent_in("lh-1", AgentStatus::Working);
+        let reviewer = crate::report::Subagent {
+            id: "a1f".into(),
+            agent_type: "reviewer".into(),
+            description: Some("Review PR 325".into()),
+            session: None,
+            meta: None,
+        };
+        put(dir.path(), "lh-1", Body::SubagentStart(reviewer.clone()));
+        put(dir.path(), "lh-1", Body::SubagentStop(reviewer));
+
+        let quiet = Request {
+            timeout: Some(Duration::ZERO),
+            ..EVERY
+        };
+        assert_eq!(
+            run(&herdr, &ledger, dir.path(), &quiet, &mut steps(|_| {})),
+            None
         );
     }
 

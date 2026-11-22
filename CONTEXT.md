@@ -43,8 +43,9 @@ to the shepherd if the herd has no lead.
 
 **Subagent**:
 A short-lived helper an agent launches inside its own session, such as a builder,
-reviewer or researcher. A subagent is not a member: loopherd doesn't track it, and
-it has no pane of its own.
+reviewer or researcher. A subagent is not a member: it has no pane of its own, and
+loopherd only lists a member's running ones, from the starts and stops in its
+mailbox.
 
 ## Herds and work
 
@@ -101,8 +102,8 @@ human.
 
 **Mailbox**:
 Each member's record of what it has said and what has happened to it: its
-reports, its stops, herdr seeing it blocked or gone, and the tokens it
-spent, recorded when it retires. Messages go up only, to
+reports, its stops, the subagents it starts and finishes, herdr seeing it
+blocked or gone, and the tokens it spent, recorded when it retires. Messages go up only, to
 the lead or the shepherd. Nothing is deleted; each reader keeps its place
 instead, so the history survives handoffs and retirement. Messages down to a
 member are typed into its session, not mailed.

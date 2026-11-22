@@ -1050,6 +1050,72 @@ mod tests {
             setup
         }
 
+        /// A herd `prs` running the documented routed queue against a fake
+        /// `scripts/trello` whose `cards` prints `cards` (tab-separated,
+        /// `\\n`-escaped) and whose `show LH-<n>` prints the repo's `show-LH-<n>`.
+        fn documented_routed(cards: &str) -> Setup {
+            let setup = Setup::new("true", 1);
+            let prompts = setup.config.path().join("herds/docs/agents");
+            fs::create_dir_all(&prompts).unwrap();
+            fs::write(
+                prompts.join("grill-batch-prompt.md"),
+                include_str!("../docs/agents/grill-batch-prompt.md"),
+            )
+            .unwrap();
+            let scripts = setup.repo.path().join("scripts");
+            fs::create_dir(&scripts).unwrap();
+            crate::test_fakes::executable(
+                &scripts.join("trello"),
+                format!(
+                    "#!/bin/sh\ncase $1 in show) cat \"show-$2\" ;; *) printf '{cards}' ;; esac\n"
+                ),
+            );
+            fs::write(
+                setup.config.path().join("herds/prs.toml"),
+                format!(
+                    "repo = {:?}\n[template.card]\nparams = [\"card\", \"type\", \"slug\"]\n\
+                     name = \"lh-{{card}}\"\nbranch = \"{{type}}/LH-{{card}}-{{slug}}\"\n\
+                     prompt = \"build {{card}}\"\n{}",
+                    setup.repo.path().display().to_string(),
+                    include_str!("../docs/examples/loopherd-cards-routed.toml")
+                ),
+            )
+            .unwrap();
+            setup
+        }
+
+        /// The worktree each task the queue's `source` prints would check out.
+        fn documented_checkouts(&self) -> Vec<Option<Checkout>> {
+            let queue = crate::herd::queue(&self.paths(), "prs").unwrap();
+            let (output, _) = run_source(&queue, Duration::from_secs(1)).unwrap();
+            output
+                .lines()
+                .map(|task| {
+                    let (template, params) = task_params(&queue, task).unwrap();
+                    let req = FeedRequest {
+                        herd: "prs".into(),
+                        dry_run: true,
+                        ready_timeout: Duration::ZERO,
+                        command_timeout: Duration::from_secs(1),
+                        own_pane: None,
+                        own_lineage: vec![],
+                        own_socket: None,
+                        mailboxes: PathBuf::from("/nonexistent/reports"),
+                        claude_dir: None,
+                        after_merge_timeout: Duration::from_secs(5),
+                        after_merge_wait: Duration::from_secs(5),
+                        owner: OWNER,
+                        procs: &*LIVE,
+                        lead: None,
+                        sandbox: || Ok(crate::sandbox::Sockets::Blocked),
+                    };
+                    task_request(&self.paths(), &req, template, params)
+                        .unwrap()
+                        .worktree
+                })
+                .collect()
+        }
+
         fn tasks(&self, tasks: &str) {
             fs::write(self.repo.path().join("tasks"), tasks).unwrap();
         }
@@ -2731,27 +2797,12 @@ mod tests {
     #[test]
     fn the_documented_routed_queue_sends_wayfinding_cards_to_their_own_template_on_the_herds_branches()
      {
-        let setup = Setup::new("true", 1);
-        let scripts = setup.repo.path().join("scripts");
-        fs::create_dir(&scripts).unwrap();
-        crate::test_fakes::executable(
-            &scripts.join("trello"),
-            "#!/bin/sh\nprintf 'LH-7\\tBacklog\\tready-for-agent,impl:feat\\tA feature\\n\
+        let setup = Setup::documented_routed(
+            "LH-7\\tBacklog\\tready-for-agent,impl:feat\\tA feature\\n\
              LH-8\\tBacklog\\tready-for-agent,wayfinding:research\\tA question\\n\
              LH-9\\tBacklog\\tready-for-agent,wayfinding:grilling\\tA grilling\\n\
-             LH-10\\tBacklog\\tready-for-agent,impl:fix,need-human\\tStuck\\n'\n",
+             LH-10\\tBacklog\\tready-for-agent,impl:fix,need-human\\tStuck\\n",
         );
-        fs::write(
-            setup.config.path().join("herds/prs.toml"),
-            format!(
-                "repo = {:?}\n[template.card]\nparams = [\"card\", \"type\", \"slug\"]\n\
-                 name = \"lh-{{card}}\"\nbranch = \"{{type}}/LH-{{card}}-{{slug}}\"\n\
-                 prompt = \"build {{card}}\"\n{}",
-                setup.repo.path().display().to_string(),
-                include_str!("../docs/examples/loopherd-cards-routed.toml")
-            ),
-        )
-        .unwrap();
 
         let fed = setup
             .feed(&herdr(), &mut MemLedger::default(), true)
@@ -2765,39 +2816,119 @@ mod tests {
                 "prs: 0 would retire, 2 would add, 0 skipped, 0 errors",
             ]
         );
-        let queue = crate::herd::queue(&setup.paths(), "prs").unwrap();
-        let (output, _) = run_source(&queue, Duration::from_secs(1)).unwrap();
-        let checkouts: Vec<_> = output
-            .lines()
-            .map(|task| {
-                let (template, params) = task_params(&queue, task).unwrap();
-                let req = FeedRequest {
-                    herd: "prs".into(),
-                    dry_run: true,
-                    ready_timeout: Duration::ZERO,
-                    command_timeout: Duration::from_secs(1),
-                    own_pane: None,
-                    own_lineage: vec![],
-                    own_socket: None,
-                    mailboxes: PathBuf::from("/nonexistent/reports"),
-                    claude_dir: None,
-                    after_merge_timeout: Duration::from_secs(5),
-                    after_merge_wait: Duration::from_secs(5),
-                    owner: OWNER,
-                    procs: &*LIVE,
-                    lead: None,
-                    sandbox: || Ok(crate::sandbox::Sockets::Blocked),
-                };
-                task_request(&setup.paths(), &req, template, params)
-                    .unwrap()
-                    .worktree
-            })
-            .collect();
         assert_eq!(
-            checkouts,
+            setup.documented_checkouts(),
             [
                 Some(Checkout::Branch("feat/LH-7-a-feature".into())),
                 Some(Checkout::Branch("docs/LH-8-a-question".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_documented_routed_queue_sends_grill_batch_cards_to_the_grill_batch_template_and_leaves_interactive_grills_to_the_human()
+     {
+        let setup = Setup::documented_routed(
+            "LH-9\\tBacklog\\twayfinding:grilling\\tLive grill\\n\
+             LH-11\\tBacklog\\twayfinding:grilling,grill:batch\\tBatch the grill\\n\
+             LH-12\\tBacklog\\twayfinding:grilling,grill:batch,need-human\\tWaiting on the human\\n\
+             LH-13\\tBacklog\\twayfinding:grilling,grill:batch,blocked\\tBlocked grill\\n\
+             LH-14\\tBacklog\\timpl:feat\\tNot ready\\n",
+        );
+
+        let fed = setup
+            .feed(&herdr(), &mut MemLedger::default(), true)
+            .unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "would add grill-batch-11 (template grill-batch)",
+                "prs: 0 would retire, 1 would add, 0 skipped, 0 errors",
+            ]
+        );
+        assert_eq!(
+            setup.documented_checkouts(),
+            [Some(Checkout::Branch("docs/LH-11-batch-the-grill".into()))]
+        );
+    }
+
+    #[test]
+    fn the_documented_grill_batch_template_is_done_once_its_card_waits_on_the_human_in_backlog() {
+        let setup = Setup::documented_routed("");
+        let mut members = vec![];
+        for (card, list, labels) in [
+            (
+                "11",
+                "Backlog",
+                "wayfinding:grilling, grill:batch, need-human",
+            ),
+            ("12", "In Progress", "wayfinding:grilling, grill:batch"),
+            ("13", "Backlog", "wayfinding:grilling, grill:batch"),
+            ("14", "Done", "wayfinding:grilling, grill:batch"),
+        ] {
+            fs::write(
+                setup.repo.path().join(format!("show-LH-{card}")),
+                format!(
+                    "LH-{card}: A grill\nurl: u\nlist: {list}\nlabels: {labels}\n\nneed-human\n"
+                ),
+            )
+            .unwrap();
+            let mut grill = member(&format!("grill-batch-{card}"), Some("prs"), false);
+            grill.template = Some("grill-batch".into());
+            grill.params = Some(
+                [("card", card), ("type", "docs"), ("slug", "a-grill")]
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .into(),
+            );
+            members.push(grill);
+        }
+        let herdr = herdr()
+            .with_agent("grill-batch-11")
+            .with_agent("grill-batch-12")
+            .with_agent("grill-batch-13")
+            .with_agent("grill-batch-14");
+
+        let fed = setup.feed(&herdr, &mut ledger(&members), true).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "would retire grill-batch-11",
+                "still open grill-batch-12",
+                "still open grill-batch-13",
+                "would retire grill-batch-14",
+                "prs: 2 would retire, 0 would add, 0 skipped, 0 errors",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reaped_grill_batch_restarts_on_its_answered_card_only_once_released() {
+        let setup = Setup::documented_routed(
+            "LH-11\\tBacklog\\twayfinding:grilling,grill:batch\\tBatch the grill\\n",
+        );
+        let mut reaped = member("grill-batch-11", Some("prs"), true);
+        reaped.template = Some("grill-batch".into());
+
+        let unreleased = setup
+            .feed(&herdr(), &mut ledger(&[reaped.clone()]), true)
+            .unwrap();
+        reaped.released_at = Some("2026-11-21T12:00:00Z".into());
+        let released = setup.feed(&herdr(), &mut ledger(&[reaped]), true).unwrap();
+
+        assert_eq!(
+            unreleased.lines,
+            [
+                "skipped: exists grill-batch-11",
+                "prs: 0 would retire, 0 would add, 1 skipped, 0 errors",
+            ]
+        );
+        assert_eq!(
+            released.lines,
+            [
+                "would add grill-batch-11 (template grill-batch)",
+                "prs: 0 would retire, 1 would add, 0 skipped, 0 errors",
             ]
         );
     }

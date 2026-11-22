@@ -644,10 +644,15 @@ fn kept_lead(
 }
 
 /// Whether `record`'s last mailbox entry is `gone`; an unreadable mailbox isn't.
+/// A subagent's stop may land after it while Claude shuts down.
 fn last_is_gone(reports: &Path, record: &AgentRecord) -> bool {
-    crate::report::history(reports, &record.name).is_ok_and(
-        |(entries, _)| matches!(entries.last(), Some(e) if matches!(e.body, Body::Gone { .. })),
-    )
+    crate::report::history(reports, &record.name).is_ok_and(|(entries, _)| {
+        let last = entries
+            .iter()
+            .rev()
+            .find(|e| !matches!(e.body, Body::SubagentStart(_) | Body::SubagentStop(_)));
+        matches!(last, Some(e) if matches!(e.body, Body::Gone { .. }))
+    })
 }
 
 /// Whether `record` is on another herdr than `here`, so this revive leaves it alone.
@@ -1473,6 +1478,14 @@ mod tests {
         };
         let at = humantime::parse_rfc3339("2026-11-01T09:00:00Z").unwrap();
         append(&own_reports_dir(), "grill-1", &Entry::new(at, gone)).unwrap();
+        let late = Body::SubagentStop(crate::report::Subagent {
+            id: "a1".into(),
+            agent_type: "reviewer".into(),
+            description: None,
+            session: None,
+            meta: None,
+        });
+        append(&own_reports_dir(), "grill-1", &Entry::new(at, late)).unwrap();
         let mut ledger = ledger([closed]);
 
         let herdr = herdr();

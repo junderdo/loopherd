@@ -353,6 +353,7 @@ mod tests {
             template: None,
             released: false,
             retired: None,
+            subagents: vec![],
         };
         let selected = theme.selected();
         let wordmark = theme.wordmark("ab");

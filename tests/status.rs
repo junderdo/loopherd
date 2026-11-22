@@ -1,11 +1,13 @@
 //! `loopherd status` through the binary, with a stub `herdr` on PATH.
 
+mod common;
 mod fakes;
 
+use common::feed_stdin;
 use fakes::executable;
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 fn run_status(state: &Path, bin: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_loopherd"))
@@ -418,4 +420,88 @@ fn a_task_a_parked_member_holds_is_neither_claimable_nor_unready_but_a_released_
     assert_eq!(json["herds"][0]["claimable"], 2, "only 3 (released) and 4");
     assert_eq!(json["herds"][0]["unready"], 1);
     assert_eq!(out.status.code(), Some(0));
+}
+
+/// Runs `loopherd subagent-hook` in pane w1:p1 as Claude does, with
+/// `input`'s transcript moved under `claude`.
+fn subagent_hook(state: &Path, claude: &Path, input: &str) {
+    let mut input: serde_json::Value = serde_json::from_str(input).unwrap();
+    let session = input["session_id"].as_str().unwrap().to_string();
+    input["transcript_path"] = claude
+        .join(format!("projects/-tmp-project/{session}.jsonl"))
+        .display()
+        .to_string()
+        .into();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .arg("subagent-hook")
+        .env("XDG_STATE_HOME", state)
+        .env("LOOPHERD_CONFIG_DIR", state.join("config"))
+        .env("CLAUDE_CONFIG_DIR", claude)
+        .env("HERDR_PANE_ID", "w1:p1")
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("CLAUDE_PID")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    feed_stdin(child.stdin.take().unwrap(), input.to_string().as_bytes());
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+}
+
+// SubagentStart and SubagentStop inputs captured from Claude Code 2.1.330, paths made generic.
+const SUBAGENT_START: &str = include_str!("fixtures/subagent-hook/start.json");
+const SUBAGENT_STOP: &str = include_str!("fixtures/subagent-hook/stop.json");
+
+#[test]
+fn a_subagent_the_hooks_record_shows_in_status_json_until_it_stops() {
+    let state = tempfile::tempdir().unwrap();
+    let claude = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let session = "49523f06-67b5-4bbb-98c8-e30ffdb21a74";
+    fs::create_dir_all(state.path().join("loopherd")).unwrap();
+    fs::write(
+        state.path().join("loopherd/ledger.json"),
+        format!(
+            r#"{{"lh-1": {{"name": "lh-1", "pane_id": "w1:p1", "session_id": "{session}",
+            "repo": "/nonexistent/repo", "worktree": null, "workspace": "w1",
+            "prompt": null, "prompt_sent": true, "created": "2026-11-01T00:00:00Z",
+            "herd": "prs"}}}}"#
+        ),
+    )
+    .unwrap();
+    stub_herdr(
+        bin.path(),
+        Some(&format!(
+            r#"{{"result": {{"agents": [{{"name": "lh-1", "pane_id": "w1:p1", "tab_id": "w1:t1",
+            "agent_status": "working", "agent_session": {{"value": "{session}"}}}}]}}}}"#
+        )),
+    );
+    let subagents = || {
+        let out = run_status(state.path(), bin.path(), &["--json"]);
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        json["herds"][0]["members"][0]["subagents"].clone()
+    };
+
+    subagent_hook(state.path(), claude.path(), SUBAGENT_START);
+    let meta = claude.path().join(format!(
+        "projects/-tmp-project/{session}/subagents/agent-a634686304bafac61.meta.json"
+    ));
+    fs::create_dir_all(meta.parent().unwrap()).unwrap();
+    fs::write(
+        &meta,
+        r#"{"agentType": "general-purpose", "description": "Say hi probe"}"#,
+    )
+    .unwrap();
+
+    let running = subagents();
+    assert_eq!(running[0]["id"], "a634686304bafac61");
+    assert_eq!(running[0]["type"], "general-purpose");
+    assert_eq!(running[0]["description"], "Say hi probe");
+    assert_eq!(running.as_array().unwrap().len(), 1, "{running}");
+
+    subagent_hook(state.path(), claude.path(), SUBAGENT_STOP);
+    assert_eq!(subagents(), serde_json::json!([]));
 }

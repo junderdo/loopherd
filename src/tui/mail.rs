@@ -85,7 +85,11 @@ impl Mail {
             .flat_map(|m| {
                 let entries = self.boxes.get(&m.name).map_or(&[][..], Vec::as_slice);
                 let shown = |index: usize, entry: &Entry| match &entry.body {
-                    Body::Start { .. } | Body::Moved {} | Body::Usage { .. } => false,
+                    Body::Start { .. }
+                    | Body::Moved {}
+                    | Body::Usage { .. }
+                    | Body::SubagentStart(_)
+                    | Body::SubagentStop(_) => false,
                     Body::Stop(s) => s.error.is_some() || s.in_flight() == (None, None),
                     Body::Gone { .. } => !retracted(&entries[index + 1..]),
                     _ => true,

@@ -86,7 +86,9 @@ impl Entry {
             | Body::Blocked {}
             | Body::Gone { .. }
             | Body::Moved {}
-            | Body::Usage { .. } => None,
+            | Body::Usage { .. }
+            | Body::SubagentStart(_)
+            | Body::SubagentStop(_) => None,
         }
     }
 }
@@ -131,6 +133,12 @@ pub enum Body {
     Usage {
         models: Usage,
     },
+    /// The member's Claude launched a subagent; written only by the subagent hook.
+    #[serde(rename = "subagent-start")]
+    SubagentStart(Subagent),
+    /// One of the member's subagents finished.
+    #[serde(rename = "subagent-stop")]
+    SubagentStop(Subagent),
 }
 
 impl Body {
@@ -162,6 +170,32 @@ pub struct Stop {
     /// The member's context limit, set alongside `context`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Subagent {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub agent_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The member's Claude session that launched it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// Claude's `meta.json` for it, which holds its description; Claude writes
+    /// it only after the start hook has run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<PathBuf>,
+}
+
+impl Subagent {
+    /// `reviewer  Review PR 325`, or the type alone without a description.
+    pub fn label(&self) -> String {
+        match &self.description {
+            Some(description) => format!("{}  {description}", self.agent_type),
+            None => self.agent_type.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -717,6 +751,8 @@ fn render(name: &str, entry: &Entry) -> Vec<String> {
         Body::Blocked {} => return vec![format!("{name} blocked {when}")],
         Body::Gone { .. } => return vec![format!("{name} gone {when}")],
         Body::Moved {} => return vec![format!("{name} moved {when}")],
+        Body::SubagentStart(subagent) => ("subagent-start", subagent.label()),
+        Body::SubagentStop(subagent) => ("subagent-stop", subagent.label()),
         Body::Usage { models } => {
             let sum = crate::usage::total(models);
             let (read, wrote) = (kilo(sum.read()), kilo(sum.output));
@@ -1981,6 +2017,46 @@ mod tests {
                 "lh-1 stop 2026-11-01 09:01 UTC finished",
                 "lh-1 stop 2026-11-01 09:02 UTC finished 149k/150k",
             ]
+        );
+    }
+
+    #[test]
+    fn all_shows_a_subagents_start_and_stop_with_its_type_and_any_description() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![member("lh-1", "w1:p1", None, false)]);
+        let reviewer = |description: Option<&str>| Subagent {
+            id: "a1f".into(),
+            agent_type: "reviewer".into(),
+            description: description.map(str::to_string),
+            session: Some("s1".into()),
+            meta: None,
+        };
+        put(
+            dir.path(),
+            "lh-1",
+            "2026-11-01T09:00:00Z",
+            Body::SubagentStart(reviewer(None)),
+        );
+        put(
+            dir.path(),
+            "lh-1",
+            "2026-11-01T09:04:00Z",
+            Body::SubagentStop(reviewer(Some("Review PR 325 round 1"))),
+        );
+        let all = Filter {
+            all: true,
+            ..UNREAD
+        };
+        assert_eq!(
+            reports(&ledger, dir.path(), &all).unwrap().lines,
+            [
+                "lh-1 subagent-start 2026-11-01 09:00 UTC reviewer",
+                "lh-1 subagent-stop 2026-11-01 09:04 UTC reviewer  Review PR 325 round 1",
+            ]
+        );
+        assert_eq!(
+            reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
+            [] as [&str; 0]
         );
     }
 
