@@ -119,11 +119,14 @@ impl serde::de::Visitor<'_> for LimitVisitor {
 }
 
 impl Limit {
-    /// The token count this limit comes to in a `window`-token context window.
+    /// The token count this limit comes to in a `window`-token context window;
+    /// a percentage never comes to less than [`MIN_TOKENS`].
     pub fn of(self, window: u64) -> u64 {
         match self {
             Limit::Tokens(tokens) => tokens,
-            Limit::Percent(percent) => window.saturating_mul(u64::from(percent)) / 100,
+            Limit::Percent(percent) => {
+                (window.saturating_mul(u64::from(percent)) / 100).max(MIN_TOKENS)
+            }
         }
     }
 }
@@ -691,6 +694,22 @@ mod tests {
             assert_eq!(effective_limit(None, &path).unwrap(), lead, "{window}");
             assert_eq!(shepherd_limit(&path).unwrap(), shepherd, "{window}");
         }
+    }
+
+    #[test]
+    fn a_small_percentage_is_floored_at_the_minimum_whatever_the_window() {
+        for (window, limit) in [("", 10_000), ("context_window = 1000000\n", 10_000)] {
+            let (_dir, path) = config(Some(&format!(
+                "{window}default_context_limit = \"1%\"\n[shepherd]\ncontext_limit = \"1%\"\n"
+            )));
+            assert_eq!(effective_limit(None, &path).unwrap(), limit, "{window}");
+            assert_eq!(shepherd_limit(&path).unwrap(), limit, "{window}");
+        }
+        let (_dir, path) = config(Some("context_window = 2000000\n"));
+        assert_eq!(
+            effective_limit(Some(Limit::Percent(1)), &path).unwrap(),
+            20_000
+        );
     }
 
     #[test]

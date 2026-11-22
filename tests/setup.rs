@@ -255,6 +255,17 @@ fn the_context_flag_takes_k_m_separators_and_percentages() {
 }
 
 #[test]
+fn a_small_percentage_answer_echoes_the_minimum_it_is_floored_at() {
+    let config = Config::new(None);
+
+    let Some(out) = config.setup_on_terminal(&["--context"], "\n1%\n\n") else {
+        return;
+    };
+
+    assert!(out.contains("= 10,000 tokens (1% of 200,000)"), "{out}");
+}
+
+#[test]
 fn a_stored_percentage_over_the_cap_is_shown_as_the_cap() {
     let config = Config::new(Some("default_context_limit = \"100%\"\n"));
 
