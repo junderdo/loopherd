@@ -134,7 +134,10 @@ Why now, links to decisions (docs/decisions/D<n>.md) or other LH- cards.
 
 Add `ready-for-agent` only when every acceptance criterion is checkable
 without asking the human. Fuzzy criteria mean the card needs wayfinding
-first, usually `wayfinding:grilling`.
+first. A card that can't be specified until the human is grilled carries
+`wayfinding:grilling` as its kind label, replacing any `impl:` label, and
+never `ready-for-agent`; "needs grilling" in its text alone isn't enough.
+The grill files the implementation cards once the decision settles.
 
 ```bash
 scripts/trello create Backlog "Spawn a herd member from a template" \
