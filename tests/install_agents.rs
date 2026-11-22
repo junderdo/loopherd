@@ -45,6 +45,11 @@ impl Sandbox {
             root.join("scripts/install-herdr-plugin.bash"),
         )
         .unwrap();
+        fs::copy(
+            format!("{REPO}/scripts/install-herdr-keys.bash"),
+            root.join("scripts/install-herdr-keys.bash"),
+        )
+        .unwrap();
         executable(
             &root.join("scripts/install"),
             fs::read_to_string(format!("{REPO}/scripts/install")).unwrap(),

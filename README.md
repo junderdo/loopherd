@@ -111,20 +111,33 @@ herdr plugin install junderdo/loopherd/herdr-plugin
 
 It adds a `loopherd: herd status` action and a `loopherd: open herd view`
 action, which opens `loopherd view` in a popup over most of the screen;
-`q` or Escape quits the view and closes the popup. To open the popup with
-a key, add a binding to your herdr `config.toml` and run
-`herdr server reload-config`:
+`q` or Escape quits the view and closes the popup.
+
+Once the plugin is installed, a source install asks "Add herdr key
+bindings for loopherd's plugin?", and `scripts/install --with-herdr-keys`
+adds them without asking: `prefix+m` opens the view and `prefix+shift+m`
+opens it beside the shepherd. Both are unbound in herdr 0.9.5's defaults
+(`herdr --default-config`). It writes them as `[[keys.command]]` entries
+at the end of the `config.toml` herdr reads, after backing it up beside
+itself, and reloads a running server. A key your config or herdr's
+defaults already hold, or an action you already bound, is skipped with a
+line saying why. herdr's keybinds help (`prefix+?`) lists them under
+"custom" by their descriptions. `loopherd install-herdr-keys --remove`
+takes out only those entries, matched by command and description, so a
+binding you wrote by hand from the snippet below stays. `status` gets no key: its output goes to
+herdr's plugin log, not the screen.
+
+Or bind it by hand and run `herdr server reload-config`:
 
 ```toml
 [[keys.command]]
 key = "prefix+m"
 type = "plugin_action"
 command = "loopherd.view"
-description = "loopherd herd view"
+description = "herd view"
 ```
 
-`prefix+m` is unbound in herdr 0.9.5's defaults (`herdr --default-config`);
-pick another if your config uses it. A popup that closes as soon as it
+A popup that closes as soon as it
 opens means the view couldn't start; run `loopherd view` in a pane to see
 why.
 
@@ -133,7 +146,7 @@ splits the view into a pane right of the shepherd's, the one its last
 handoff recorded, leaving focus where it was. With no shepherd recorded,
 or its pane gone or no longer the shepherd's, it splits right of the
 focused pane (the popup when that fails too), and the view says why. Bind
-it the same way, with its own key.
+it the same way, with its own key (install uses `prefix+shift+m`).
 
 The plugin's event hooks record a member going blocked, or its pane
 exiting or closing, or its tab or workspace closing, so the next

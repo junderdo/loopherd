@@ -57,6 +57,7 @@ impl Sandbox {
             "install-agents.bash",
             "install-skills.bash",
             "install-herdr-plugin.bash",
+            "install-herdr-keys.bash",
         ] {
             fs::copy(
                 format!("{REPO}/scripts/{file}"),
@@ -83,7 +84,14 @@ impl Sandbox {
             fs::create_dir_all(d).unwrap();
         }
         let built = dir.path().join("built-loopherd");
-        executable(&built, "#!/bin/sh\n");
+        executable(
+            &built,
+            format!(
+                "#!/bin/sh\necho \"loopherd $*\" >> '{}/loopherd-log'\n[ \"$1\" != install-herdr-keys ] || [ ! -e '{}/keys-fail' ] || {{ echo 'loopherd install-herdr-keys: bad toml' >&2; exit 1; }}\n",
+                stub.display(),
+                stub.display()
+            ),
+        );
         executable(
             &fake_bin.join("cargo"),
             format!(
@@ -144,6 +152,15 @@ esac
         fs::read_to_string(self.stub.join("log"))
             .unwrap_or_default()
             .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    fn key_installs(&self) -> Vec<String> {
+        fs::read_to_string(self.stub.join("loopherd-log"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.starts_with("loopherd install-herdr-keys"))
             .map(String::from)
             .collect()
     }
@@ -513,4 +530,203 @@ fn a_linked_plugin_without_a_version_is_still_left_as_is() {
         "{out}"
     );
     assert!(sandbox.changes().is_empty(), "{:?}", sandbox.changes());
+}
+
+const KEYS_QUESTION: &str = "Add herdr key bindings for loopherd's plugin (prefix+m: herd view, prefix+shift+m: view beside shepherd)? [y/N]";
+
+#[test]
+fn yes_to_the_keys_after_installing_the_plugin_binds_them() {
+    let sandbox = Sandbox::new();
+
+    let Some(out) = sandbox.on_terminal_with_path(&sandbox.path(), &[], "n\ny\ny\n") else {
+        return;
+    };
+
+    let plugin = out.find("herdr says: done").unwrap();
+    let keys = out.find(KEYS_QUESTION).expect(&out);
+    assert!(plugin < keys, "{out}");
+    assert_eq!(sandbox.key_installs(), ["loopherd install-herdr-keys"]);
+}
+
+#[test]
+fn the_keys_are_offered_when_the_plugin_is_already_installed() {
+    let sandbox = Sandbox::new();
+    sandbox.installed("0.3.0", "github");
+
+    let Some(out) = sandbox.on_terminal_with_path(&sandbox.path(), &[], "n\ny\n") else {
+        return;
+    };
+
+    assert!(out.contains(KEYS_QUESTION), "{out}");
+    assert_eq!(sandbox.key_installs(), ["loopherd install-herdr-keys"]);
+}
+
+#[test]
+fn no_to_the_keys_binds_nothing() {
+    let sandbox = Sandbox::new();
+    sandbox.installed("0.3.0", "github");
+
+    let Some(out) = sandbox.on_terminal_with_path(&sandbox.path(), &[], "n\n\n") else {
+        return;
+    };
+
+    assert!(out.contains("skipped herdr key bindings"), "{out}");
+    assert!(sandbox.key_installs().is_empty());
+}
+
+#[test]
+fn without_the_plugin_the_keys_are_not_asked() {
+    let sandbox = Sandbox::new();
+
+    let Some(out) = sandbox.on_terminal_with_path(&sandbox.path(), &[], "n\nn\ny\n") else {
+        return;
+    };
+
+    assert!(!out.contains(KEYS_QUESTION), "{out}");
+    assert!(
+        out.contains("skipped herdr key bindings: loopherd's herdr plugin isn't installed"),
+        "{out}"
+    );
+    assert!(sandbox.key_installs().is_empty());
+}
+
+#[test]
+fn without_a_terminal_the_keys_are_not_asked() {
+    let sandbox = Sandbox::new();
+    sandbox.installed("0.3.0", "github");
+
+    let out = sandbox.install(&[]);
+
+    assert!(
+        out.contains("skipped herdr key bindings (no terminal); add --with-herdr-keys to add them"),
+        "{out}"
+    );
+    assert!(sandbox.key_installs().is_empty());
+}
+
+#[test]
+fn without_herdr_on_path_the_keys_are_not_asked() {
+    let sandbox = Sandbox::new();
+    let bare = path_without_herdr(&sandbox.dir.path().join("bare-bin"));
+    fs::remove_file(sandbox.fake_bin.join("herdr")).unwrap();
+    let path = format!("{}:{bare}", sandbox.fake_bin.display());
+
+    let Some(out) = sandbox.on_terminal_with_path(&path, &[], "n\ny\n") else {
+        return;
+    };
+
+    assert!(
+        out.contains("skipped herdr key bindings: no herdr on PATH"),
+        "{out}"
+    );
+    assert!(sandbox.key_installs().is_empty());
+}
+
+#[test]
+fn with_herdr_keys_binds_asking_nothing_else() {
+    let sandbox = Sandbox::new();
+    sandbox.installed("0.3.0", "github");
+
+    let out = sandbox.install(&["--with-herdr-keys"]);
+
+    assert_eq!(sandbox.key_installs(), ["loopherd install-herdr-keys"]);
+    assert!(sandbox.changes().is_empty(), "{:?}", sandbox.changes());
+    assert!(!out.contains("agent types"), "{out}");
+}
+
+#[test]
+fn with_herdr_keys_and_the_plugin_flag_installs_then_binds() {
+    let sandbox = Sandbox::new();
+
+    sandbox.install(&["--with-herdr-plugin", "--with-herdr-keys"]);
+
+    assert_eq!(sandbox.changes(), [format!("{INSTALL} --yes")]);
+    assert_eq!(sandbox.key_installs(), ["loopherd install-herdr-keys"]);
+}
+
+#[test]
+fn with_herdr_keys_skips_them_without_the_plugin() {
+    let sandbox = Sandbox::new();
+
+    let out = sandbox.install(&["--with-herdr-keys"]);
+
+    assert!(
+        out.contains("skipped herdr key bindings: loopherd's herdr plugin isn't installed"),
+        "{out}"
+    );
+    assert!(sandbox.key_installs().is_empty());
+}
+
+#[test]
+fn a_failed_key_binding_is_reported_and_the_install_goes_on() {
+    let sandbox = Sandbox::new();
+    sandbox.installed("0.3.0", "github");
+    fs::write(sandbox.stub.join("keys-fail"), "").unwrap();
+
+    let out = sandbox.run(&["--with-herdr-keys"]);
+
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("bad toml"), "{stderr}");
+    assert!(
+        stderr
+            .contains("install: herdr key bindings failed; the rest of the install is unaffected"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn no_extras_refuses_with_herdr_keys() {
+    let sandbox = Sandbox::new();
+
+    let out = sandbox.run(&["--no-extras", "--with-herdr-keys"]);
+
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--with-herdr-keys"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn remove_skips_the_keys() {
+    let sandbox = Sandbox::new();
+    sandbox.installed("0.3.0", "github");
+
+    sandbox.install(&["--remove", "--with-herdr-keys"]);
+
+    assert!(sandbox.key_installs().is_empty());
+}
+
+#[test]
+fn a_settings_run_never_writes_herdrs_config() {
+    let sandbox = Sandbox::new();
+    sandbox.installed("0.3.0", "github");
+    let settings = sandbox.dir.path().join("claude/settings.json");
+
+    let out = sandbox.install(&[
+        "--with-herdr-keys",
+        "--settings",
+        settings.to_str().unwrap(),
+    ]);
+
+    assert!(sandbox.key_installs().is_empty());
+    assert!(
+        out.contains("skipped herdr key bindings: a --settings run never writes herdr's config"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_plugin_list_herdr_cant_answer_skips_the_keys_saying_so() {
+    let sandbox = Sandbox::new();
+    fs::write(sandbox.stub.join("list-fails"), "").unwrap();
+
+    let out = sandbox.install(&["--with-herdr-keys"]);
+
+    assert!(
+        out.contains("skipped herdr key bindings: herdr couldn't list its plugins"),
+        "{out}"
+    );
+    assert!(sandbox.key_installs().is_empty());
 }
