@@ -52,6 +52,7 @@ struct LeadFile {
     new_cards: Option<bool>,
     design_escalation: Option<bool>,
     blocked_dialogs: Option<bool>,
+    follow_ups_ready: Option<bool>,
     review_rounds: Option<NonZeroU32>,
     context_limit: Option<u64>,
     #[serde(default)]
@@ -95,6 +96,7 @@ pub struct Switches {
     pub new_cards: bool,
     pub design_escalation: bool,
     pub blocked_dialogs: bool,
+    pub follow_ups_ready: bool,
 }
 
 impl MergeGuard {
@@ -114,7 +116,7 @@ impl Switches {
             .join("\n")
     }
 
-    pub fn named(&self) -> [(&'static str, bool); 6] {
+    pub fn named(&self) -> [(&'static str, bool); 7] {
         [
             ("merge", self.merge),
             ("install", self.install),
@@ -122,6 +124,7 @@ impl Switches {
             ("new_cards", self.new_cards),
             ("design_escalation", self.design_escalation),
             ("blocked_dialogs", self.blocked_dialogs),
+            ("follow_ups_ready", self.follow_ups_ready),
         ]
     }
 }
@@ -142,6 +145,7 @@ pub struct SwitchValues {
     pub new_cards: Option<bool>,
     pub design_escalation: Option<bool>,
     pub blocked_dialogs: Option<bool>,
+    pub follow_ups_ready: Option<bool>,
     pub review_rounds: Option<NonZeroU32>,
 }
 
@@ -149,13 +153,14 @@ pub struct SwitchValues {
 const DEFAULT_REVIEW_ROUNDS: u32 = 3;
 
 impl SwitchValues {
-    pub const NAMES: [&str; 6] = [
+    pub const NAMES: [&str; 7] = [
         "merge",
         "install",
         "rebase",
         "new_cards",
         "design_escalation",
         "blocked_dialogs",
+        "follow_ups_ready",
     ];
 
     /// Whether this layer sets any switch; `review_rounds` alone doesn't count.
@@ -163,7 +168,7 @@ impl SwitchValues {
         self.values().iter().any(Option::is_some)
     }
 
-    fn values(&self) -> [Option<bool>; 6] {
+    fn values(&self) -> [Option<bool>; 7] {
         [
             self.merge,
             self.install,
@@ -171,6 +176,7 @@ impl SwitchValues {
             self.new_cards,
             self.design_escalation,
             self.blocked_dialogs,
+            self.follow_ups_ready,
         ]
     }
 
@@ -184,6 +190,7 @@ impl SwitchValues {
             new_cards: on(self.new_cards, defaults.new_cards),
             design_escalation: on(self.design_escalation, defaults.design_escalation),
             blocked_dialogs: on(self.blocked_dialogs, defaults.blocked_dialogs),
+            follow_ups_ready: on(self.follow_ups_ready, defaults.follow_ups_ready),
         }
     }
 
@@ -210,6 +217,8 @@ struct QueueFile {
     /// A shell command printing one unready task per line.
     backlog: Option<String>,
     max: i64,
+    /// Claimable at or below this is `running low`; unset is twice `max`.
+    low_at: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -495,6 +504,8 @@ pub struct Queue {
     pub source: String,
     pub backlog: Option<String>,
     pub max: usize,
+    /// The claimable count at or below which the herd is running low.
+    pub low_at: usize,
     pub repo: PathBuf,
     /// Each template's done check, for those that have one.
     pub done: BTreeMap<String, MemberCheck>,
@@ -553,6 +564,7 @@ fn queue_in(file: &HerdFile, paths: &Paths, herd: &str) -> Result<Option<Queue>>
         source: queue.source.clone(),
         backlog: queue.backlog.clone(),
         max: queue.max as usize,
+        low_at: queue.low_at.unwrap_or(2 * queue.max) as usize,
         repo: expand_home(&file.repo, &paths.home),
     }))
 }
@@ -1006,6 +1018,7 @@ impl LeadFile {
             new_cards: self.new_cards,
             design_escalation: self.design_escalation,
             blocked_dialogs: self.blocked_dialogs,
+            follow_ups_ready: self.follow_ups_ready,
             review_rounds: self.review_rounds,
         }
     }
@@ -1473,6 +1486,11 @@ fn validate_queue(queue: &QueueFile, templates: &BTreeMap<String, TemplateFile>)
     }
     if queue.max < 1 {
         bail!("max must be at least 1, got {}", queue.max);
+    }
+    if let Some(low_at) = queue.low_at
+        && low_at < queue.max
+    {
+        bail!("low_at must be at least max ({}), got {low_at}", queue.max);
     }
     if queue.source.trim().is_empty() {
         bail!("source is empty; set the shell command that prints the ready tasks");
@@ -3089,13 +3107,17 @@ args = ["--model", "opus"]
     }
 
     #[test]
-    fn a_leads_checks_fail_on_a_queue_setting_both_template_and_templates_or_neither() {
+    fn a_leads_checks_fail_on_an_invalid_queue() {
         for (queue, message) in [
             (
                 "template = \"t\"\ntemplates = [\"t\"]\n",
                 "queue: set one of template and templates, not both",
             ),
             ("", "queue: set one of template and templates"),
+            (
+                "template = \"t\"\nlow_at = 0\n",
+                "queue: low_at must be at least max (1), got 0",
+            ),
         ] {
             let herd = format!(
                 "repo = \"/r\"\n[template.t]\nparams = []\nprompt = \"go\"\n\
@@ -3152,6 +3174,10 @@ args = ["--model", "opus"]
             (
                 "template = \"t\"\nsource = \"echo 1\"\nbacklog = \" \"\nmax = 1",
                 "queue: backlog is empty",
+            ),
+            (
+                "template = \"t\"\nsource = \"echo 1\"\nmax = 3\nlow_at = 2",
+                "queue: low_at must be at least max (3), got 2",
             ),
         ] {
             let (report, code) = herds_line(&format!("prompt = \"go\"\n[queue]\n{queue}"), &[]);
@@ -3212,7 +3238,7 @@ args = ["--model", "opus"]
         assert_eq!(
             lead.switches.lines(),
             "merge on\ninstall off\nrebase off\nnew_cards off\n\
-             design_escalation off\nblocked_dialogs off"
+             design_escalation off\nblocked_dialogs off\nfollow_ups_ready off"
         );
     }
 
@@ -3332,7 +3358,7 @@ args = ["--model", "opus"]
         let config = Config::with(&[("h", &herd), ("unled", LEAD_HERD)]);
         fs::write(
             config.path().join("config.toml"),
-            "[lead_defaults]\nmerge = true\ninstall = true\n",
+            "[lead_defaults]\nmerge = true\ninstall = true\nfollow_ups_ready = true\n",
         )
         .unwrap();
 
@@ -3343,7 +3369,7 @@ args = ["--model", "opus"]
             report.contains(
                 "  loopherd lead h\n  switches: merge off (herd file), install on (lead_defaults), \
                  rebase on (herd file), new_cards off (built-in), design_escalation off (built-in), \
-                 blocked_dialogs off (built-in)\n"
+                 blocked_dialogs off (built-in), follow_ups_ready on (lead_defaults)\n"
             ),
             "{report}"
         );
@@ -3628,7 +3654,8 @@ args = ["--model", "opus"]
              \x20 loopherd add a t\n\
              \x20 loopherd lead a\n\
              \x20 switches: merge off (built-in), install off (built-in), rebase off (built-in), \
-             new_cards off (built-in), design_escalation off (built-in), blocked_dialogs off (built-in)\n\
+             new_cards off (built-in), design_escalation off (built-in), blocked_dialogs off (built-in), \
+             follow_ups_ready off (built-in)\n\
              \x20 review_rounds: 3 (built-in)\n\
              \x20 mcp_servers: none\n\
              \x20 unix_sockets: none\n\
@@ -3715,13 +3742,14 @@ args = ["--model", "opus"]
     fn every_switch_maps_to_its_own_line() {
         let herd = format!(
             "{LEAD_HERD}[lead]\nprompt = \"go\"\nmerge = true\ninstall = true\nrebase = true\n\
-             new_cards = true\ndesign_escalation = true\nblocked_dialogs = true\n"
+             new_cards = true\ndesign_escalation = true\nblocked_dialogs = true\n\
+             follow_ups_ready = true\n"
         );
         let config = Config::with(&[("h", &herd)]);
         assert_eq!(
             lead_config(&config.paths(), "h").unwrap().switches.lines(),
             "merge on\ninstall on\nrebase on\nnew_cards on\n\
-             design_escalation on\nblocked_dialogs on"
+             design_escalation on\nblocked_dialogs on\nfollow_ups_ready on"
         );
         for switch in [
             "install",
@@ -3729,6 +3757,7 @@ args = ["--model", "opus"]
             "new_cards",
             "design_escalation",
             "blocked_dialogs",
+            "follow_ups_ready",
         ] {
             let herd = format!("{LEAD_HERD}[lead]\nprompt = \"go\"\n{switch} = true\n");
             let config = Config::with(&[("h", &herd)]);

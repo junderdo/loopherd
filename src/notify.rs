@@ -28,6 +28,9 @@ pub enum Kind {
     /// The shepherd's self-restart was refused or gave up.
     #[serde(rename = "self_restart")]
     SelfRestart,
+    /// A lead with no broker running, so its loopherd commands fail.
+    #[serde(rename = "no_broker")]
+    NoBroker,
 }
 
 impl Kind {
@@ -37,6 +40,7 @@ impl Kind {
             Kind::Blocked => "blocked",
             Kind::MergeAlert => "merge_alert",
             Kind::SelfRestart => "self_restart",
+            Kind::NoBroker => "no_broker",
         }
     }
 }
@@ -143,6 +147,7 @@ fn check(table: Table) -> Result<Option<Config>> {
             Kind::Blocked,
             Kind::MergeAlert,
             Kind::SelfRestart,
+            Kind::NoBroker,
         ]),
         herdr: table.herdr.unwrap_or(true),
         command,
@@ -193,11 +198,15 @@ pub fn send(
         let text = match event.kind {
             Kind::Question => summary(&event.text),
             Kind::Blocked => Kind::Blocked.as_str().to_string(),
+            Kind::NoBroker => "no broker".to_string(),
             Kind::MergeAlert | Kind::SelfRestart => event.text.clone(),
         };
         let marked = match &event.at {
             Some(at) => first_to_notify(mailboxes, &event.member, event.kind, at),
-            None => first_to_notify_blocked(mailboxes, &event.member),
+            None if event.kind == Kind::NoBroker => {
+                first_to_mark(mailboxes, &event.member, NO_BROKER)
+            }
+            None => first_to_mark(mailboxes, &event.member, "blocked"),
         };
         match marked {
             Ok(true) => {}
@@ -316,15 +325,30 @@ pub fn failed(launch: &Launch, mailboxes: &Path, problem: &str, now: SystemTime)
     noted
 }
 
-/// Marks `member` notified as blocked unless a watch already did since it
-/// was last seen unblocked.
-fn first_to_notify_blocked(mailboxes: &Path, member: &str) -> Result<bool> {
+/// Marks `member` notified as blocked, or as having no broker, unless a watch
+/// already did since it was last seen unblocked, or with its broker running.
+fn first_to_mark(mailboxes: &Path, member: &str, mark: &str) -> Result<bool> {
     fs::create_dir_all(mailboxes).with_context(|| format!("create {}", mailboxes.display()))?;
-    let path = mailboxes.join(format!("{member}.blocked"));
+    let path = mailboxes.join(format!("{member}.{mark}"));
     match OpenOptions::new().write(true).create_new(true).open(&path) {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
         Err(e) => Err(e).with_context(|| format!("create {}", path.display())),
+    }
+}
+
+/// The mark a lead's `no_broker` notification leaves until a watch sees its broker running.
+const NO_BROKER: &str = "no-broker";
+
+/// Removes `lead`'s `no_broker` mark, as a watch saw its broker running, so
+/// its next outage is sent.
+pub fn broker_running(mailboxes: &Path, lead: &str) -> Result<()> {
+    let path = mailboxes.join(format!("{lead}.{NO_BROKER}"));
+    match fs::remove_file(&path) {
+        Err(e) if e.kind() != ErrorKind::NotFound => {
+            Err(e).with_context(|| format!("remove {}", path.display()))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -417,6 +441,7 @@ pub fn forget_marks(mailboxes: &Path, member: &str) -> Vec<String> {
     [
         "notified",
         "blocked",
+        NO_BROKER,
         BLOCK_RECORDED,
         "merges",
         "merges.lock",

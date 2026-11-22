@@ -2635,7 +2635,7 @@ mod tests {
     }
 
     #[test]
-    fn a_queue_setting_both_template_and_templates_or_neither_is_an_error() {
+    fn an_invalid_queue_is_an_error() {
         let setup = Setup::new("echo 1", 1);
         for (queue, message) in [
             (
@@ -2643,6 +2643,10 @@ mod tests {
                 "queue: set one of template and templates, not both",
             ),
             ("", "queue: set one of template and templates"),
+            (
+                "template = \"pr\"\nlow_at = 0",
+                "queue: low_at must be at least max (1), got 0",
+            ),
         ] {
             fs::write(
                 setup.config.path().join("herds/prs.toml"),

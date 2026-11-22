@@ -99,7 +99,7 @@ elif [[ "$agents$skills$herdr_plugin$setup" != askaskaskask ]]; then
 fi
 [[ -z "$removing" ]] || agents=no skills=no herdr_plugin=no setup=no
 
-lead_switches=(merge install rebase new_cards design_escalation blocked_dialogs)
+lead_switches=(merge install rebase new_cards design_escalation blocked_dialogs follow_ups_ready)
 trim() { local s=${1#"${1%%[![:space:]]*}"}; echo "${s%"${s##*[![:space:]]}"}"; }
 # Checked here too, so a typo fails before anything is built or installed.
 if [[ -n "$lead_set" && "$(trim "$lead_list")" != none ]]; then
