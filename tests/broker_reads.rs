@@ -204,9 +204,7 @@ fn status_in_a_sandbox_whose_pane_holds_no_lead_is_refused_before_herdr() {
 
     assert!(!out.status.success(), "{out:?}");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains(
-            "refused: this loopherd runs in a sandbox, where it can't run loopherd status itself"
-        ),
+        String::from_utf8_lossy(&out.stderr).contains("so it can't run loopherd status itself"),
         "{out:?}"
     );
     assert_eq!(world.calls(), "");
