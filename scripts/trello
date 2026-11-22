@@ -12,6 +12,7 @@ LABELS=(
   "wayfinding:grilling purple"
   "wayfinding:prototype pink"
   "wayfinding:domain blue"
+  "grill:batch purple_light"
   "impl:feat green"
   "impl:fix red"
   "impl:refactor lime"

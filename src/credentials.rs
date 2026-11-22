@@ -390,6 +390,11 @@ mod tests {
             ]
         );
         assert_eq!(human_credentials(home, &|_| None).len(), 6);
+        let cache_moved = |name: &str| (name == "XDG_CACHE_HOME").then(|| "/home/me/.c".into());
+        assert_eq!(
+            human_credentials(home, &cache_moved)[6..],
+            [(PathBuf::from("/home/me/.c/git/credential"), true)]
+        );
     }
 
     /// Herd `h` on a GitHub repo, with its deploy key and token, kept under `root`.

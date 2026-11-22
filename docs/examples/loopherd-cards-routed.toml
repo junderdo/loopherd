@@ -1,8 +1,12 @@
-# A queue that routes each card to one of two templates: the herd's existing
+# A queue that routes each card to one of three templates: the herd's existing
 # `card` for impl cards, `wayfinding` (on sonnet, its own prompt) for
-# research, domain and prototype cards. Replace the herd's `[queue]` with this
-# one, and add `[template.wayfinding]` and `[template.groom]` beside its
-# `[template.card]`, whose params must stay ["card", "type", "slug"].
+# research, domain and prototype cards, and `grill-batch` for grilling cards
+# labelled `grill:batch` (D132). Replace the herd's `[queue]` with this one,
+# and add `[template.wayfinding]`, `[template.grill-batch]` and
+# `[template.groom]` beside its `[template.card]`, whose params must stay
+# ["card", "type", "slug"]. `grill-batch` reads
+# docs/agents/grill-batch-prompt.md through the docs/ link described in
+# loopherd-cards-grill.toml.
 #
 # With `templates`, the first word of each line `source` prints names the
 # task's template (one of the list) and the rest are its params. A line whose
@@ -10,17 +14,22 @@
 # A member's identity is its rendered name, so a task re-routed to another
 # template while its first member is open gets a second member.
 [queue]
-templates = ["card", "wayfinding"]
-# Prints "card <n> <type> <slug>" or "wayfinding <n> docs <slug>" per
-# claimable card, in board order. impl:<type> cards get <type>; wayfinding
-# cards get docs; grilling needs the human.
+templates = ["card", "wayfinding", "grill-batch"]
+# Prints "card <n> <type> <slug>", "wayfinding <n> docs <slug>" or
+# "grill-batch <n> docs <slug>" per claimable card, in board order.
+# impl:<type> cards get <type>; wayfinding cards get docs. A grilling card
+# never carries ready-for-agent, so a `grill:batch` one is claimable without
+# it; any other grilling needs the human live.
 source = '''
-scripts/trello cards --list Backlog --label ready-for-agent | awk -F'\t' '
+scripts/trello cards --list Backlog | awk -F'\t' '
   $3 ~ /(^|,)(need-human|blocked)(,|$)/ { next }
-  $3 ~ /wayfinding:grilling/ { next }
-  match($3, /impl:[a-z]+/) || $3 ~ /wayfinding:/ {
-    type = RSTART ? substr($3, RSTART + 5, RLENGTH - 5) : "docs"
-    template = RSTART ? "card" : "wayfinding"
+  {
+    if ($3 ~ /wayfinding:grilling/ && $3 ~ /(^|,)grill:batch(,|$)/) template = "grill-batch"
+    else if ($3 ~ /wayfinding:grilling/ || $3 !~ /(^|,)ready-for-agent(,|$)/) next
+    else if (match($3, /impl:[a-z]+/)) template = "card"
+    else if ($3 ~ /wayfinding:/) template = "wayfinding"
+    else next
+    type = template == "card" ? substr($3, RSTART + 5, RLENGTH - 5) : "docs"
     slug = tolower($4); gsub(/[^a-z0-9]+/, "-", slug); gsub(/^-|-$/, "", slug)
     n = split(slug, w, "-"); slug = w[1]
     for (i = 2; i <= n && i <= 5; i++) slug = slug "-" w[i]
@@ -28,14 +37,16 @@ scripts/trello cards --list Backlog --label ready-for-agent | awk -F'\t' '
   }'
 '''
 # Prints "<key> <title>" per Backlog card that isn't blocked and either
-# lacks ready-for-agent or has need-human or wayfinding:grilling. A
-# ready-for-agent card with neither an impl:* nor a wayfinding:* label is in
-# neither this nor `source`. `loopherd status` counts this list's lines as
-# unready.
+# lacks ready-for-agent or has need-human or wayfinding:grilling, leaving out
+# a `grill:batch` grilling card `source` lists. A ready-for-agent card with
+# neither an impl:* nor a wayfinding:* label is in neither this nor `source`.
+# `loopherd status` counts this list's lines as unready.
 backlog = '''
 scripts/trello cards --list Backlog | awk -F'\t' '
   $3 ~ /(^|,)blocked(,|$)/ { next }
-  $3 ~ /(^|,)ready-for-agent(,|$)/ && $3 !~ /(^|,)(need-human|wayfinding:grilling)(,|$)/ { next }
+  $3 ~ /(^|,)need-human(,|$)/ { print $1, $4; next }
+  $3 ~ /wayfinding:grilling/ && $3 ~ /(^|,)grill:batch(,|$)/ { next }
+  $3 ~ /(^|,)ready-for-agent(,|$)/ && $3 !~ /wayfinding:grilling/ { next }
   { print $1, $4 }'
 '''
 max = 3
@@ -65,6 +76,20 @@ If you hit a question only the human can answer, stop cleanly as the card workfl
 Finish every stop with one report: `loopherd report --kind done "<PR link and summary>"`, or
 `--kind question "<the exact question>"`.
 """
+
+# A batch grill (D132): an ordinary member, holding a slot only while it
+# runs. It posts its whole batch on the card, adds need-human, moves the card
+# to Backlog and stops; `done` then passes, so feed reaps it. Once the human
+# answers on the card, the shepherd drops need-human and runs
+# `loopherd release grill-batch-<n>`, and feed starts a fresh member, which
+# reads the answer and writes the decision.
+[template.grill-batch]
+params = ["card", "type", "slug"]
+name = "grill-batch-{card}"
+branch = "{type}/LH-{card}-{slug}"
+done = "s=$(scripts/trello show LH-{card} | head -4); echo \"$s\" | grep -qx 'list: Done' || (echo \"$s\" | grep -qx 'list: Backlog' && echo \"$s\" | grep -q '^labels: .*need-human')"
+merged = "GH_TOKEN=$(gh auth token --user <gh-user>) gh pr list --head {branch} --state merged --json number --jq length | grep -qx 1"
+prompt_file = "docs/agents/grill-batch-prompt.md"
 
 # The groomer (D116): started on `running low` by the lead (or the shepherd
 # for an unled herd) with `loopherd add <herd> groom`, never by feed, so it
