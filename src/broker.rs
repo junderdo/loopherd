@@ -2170,6 +2170,12 @@ pub fn dir(paths: &Paths) -> PathBuf {
     paths.config_dir().join("broker")
 }
 
+/// Holds `lead`'s broker lock, so [`running`] reads true until it drops.
+#[cfg(test)]
+pub fn stand_in(paths: &Paths, lead: &str) -> Lock {
+    take_lock(paths, lead).unwrap().expect("no broker holds it")
+}
+
 fn lock_file(paths: &Paths, lead: &str) -> PathBuf {
     dir(paths).join(format!("{lead}.lock"))
 }

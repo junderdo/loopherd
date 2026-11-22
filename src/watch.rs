@@ -47,8 +47,10 @@ pub mod line {
     pub const DRAINED: &str = "drained";
     /// After a herd's name.
     pub const OUT_OF_WORK: &str = "out of work";
+    /// After a lead's name.
+    pub const NO_BROKER: &str = "no broker";
     #[cfg(test)]
-    pub const ALL: [&str; 13] = [
+    pub const ALL: [&str; 14] = [
         PAUSED,
         FINISHED,
         FAILED,
@@ -62,6 +64,7 @@ pub mod line {
         RUNNING_LOW,
         DRAINED,
         OUT_OF_WORK,
+        NO_BROKER,
     ];
 }
 
@@ -216,6 +219,7 @@ pub fn watch(
         }),
         _ => None,
     };
+    let here = unled.is_some().then(|| herdr.socket()).flatten();
     // Each member's last known status; an unreadable poll keeps it.
     let mut last: HashMap<String, AgentStatus> = HashMap::new();
     let mut gone = Gone::default();
@@ -224,6 +228,10 @@ pub fn watch(
     let mut seen_live: HashSet<String> = HashSet::new();
     let mut code = 0;
     let mut own_questions_seen = HashSet::new();
+    let mut own_no_broker = false;
+    // A broker is briefly down while a lead starts or its broker restarts.
+    let mut own_broker_down = false;
+    let mut broker_down: HashSet<String> = HashSet::new();
     // An unreadable mailbox warns every poll until it's readable; say it once.
     let mut warned: HashSet<String> = HashSet::new();
     // A gone is recorded again every poll until it's written; say each failure once.
@@ -361,14 +369,34 @@ pub fn watch(
             let quiet = attended.contains(mailbox.name.as_str());
             herdr_wakes(mailbox, quiet, &mut lines, &mut waiting);
         }
-        // Not on a poll already waking it, so its commands don't hold those lines back.
-        if lines.is_empty()
-            && let Some(unled) = unled.as_mut().filter(|u| clock.elapsed() >= u.next)
-        {
-            let events = unled.run(ledger, warn)?;
-            unled.next = clock.elapsed() + CHECK_EVERY;
-            if !events.is_empty() {
+        if let Some(unled) = unled.as_mut() {
+            let mut events = vec![];
+            for (lead, event) in no_broker(
+                &mut unled.fired,
+                &mut broker_down,
+                unled.paths,
+                dir,
+                ledger,
+                req.herds,
+                here.as_deref(),
+            )? {
+                lines.push(event.line.clone());
+                waiting.push(Waiting {
+                    herd: None,
+                    member: lead,
+                    kind: notify::Kind::NoBroker,
+                    text: String::new(),
+                    at: None,
+                });
+                events.push(event);
+            }
+            // Not on a poll already waking it, so its commands don't hold those lines back.
+            if lines.is_empty() && clock.elapsed() >= unled.next {
+                events = unled.run(ledger, warn)?;
+                unled.next = clock.elapsed() + CHECK_EVERY;
                 lines.extend(events.iter().map(|e| e.line.clone()));
+            }
+            if !events.is_empty() {
                 fired = Some(unled.fired.with(&events));
             }
         }
@@ -389,6 +417,22 @@ pub fn watch(
             }
             if own.status != AgentStatus::Unknown {
                 last.insert(own.name.clone(), own.status);
+            }
+            if let Some(paths) = req.herd_files {
+                let down = !crate::broker::running(paths, &own.name);
+                let was_down = std::mem::replace(&mut own_broker_down, down);
+                if down && was_down && !std::mem::replace(&mut own_no_broker, true) {
+                    events.push(Waiting {
+                        herd: None,
+                        member: own.name.clone(),
+                        kind: notify::Kind::NoBroker,
+                        text: String::new(),
+                        at: None,
+                    });
+                } else if !down {
+                    own_no_broker = false;
+                    notify::broker_running(dir, &own.name)?;
+                }
             }
             if !events.is_empty() {
                 events.iter_mut().for_each(|e| e.herd = Some(herd.clone()));
@@ -867,6 +911,40 @@ impl Unled<'_> {
             .filter(|e| !self.fired.keys.contains(&e.key))
             .collect())
     }
+}
+
+/// Each unretired lead in `herds` (empty is every herd) on the herdr at `here`
+/// whose broker isn't running on this poll and the last, as `down` holds
+/// them, with its `no broker` event, once per streak. A streak is keyed by
+/// the lead's spawn, so a re-created lead starts afresh.
+fn no_broker(
+    fired: &mut Fired,
+    down: &mut HashSet<String>,
+    paths: &Paths,
+    mailboxes: &Path,
+    ledger: &dyn Ledger,
+    herds: &[String],
+    here: Option<&Path>,
+) -> Result<Vec<(String, Event)>> {
+    let mut events = vec![];
+    for lead in ledger.entries()?.into_values().filter(|e| {
+        !e.retired
+            && e.is_lead()
+            && (herds.is_empty() || e.herd.as_ref().is_some_and(|h| herds.contains(h)))
+            && !crate::revive::elsewhere(here, e)
+    }) {
+        let key = format!("{} {} since {}", lead.name, line::NO_BROKER, lead.created);
+        let line = format!("{} {}", lead.name, line::NO_BROKER);
+        if crate::broker::running(paths, &lead.name) {
+            down.remove(&lead.name);
+            notify::broker_running(mailboxes, &lead.name)?;
+            fired.end(&key)?;
+        } else if !down.insert(lead.name.clone()) && !fired.keys.contains(&key) {
+            let covers = None;
+            events.push((lead.name, Event { key, line, covers }));
+        }
+    }
+    Ok(events)
 }
 
 /// A line a watch's checks print, and the key in its fired file that stops
@@ -3613,13 +3691,14 @@ mod tests {
     }
     /// Herd `cards` led by lead-cards, with worker lh-1 of template `card`,
     /// whose `done` and `merged` checks test for files in the repo and whose
-    /// queue lists the lines of `tasks`, two slots.
+    /// queue lists the lines of `tasks`, two slots; lead-cards' broker runs.
     struct Checked {
         config: tempfile::TempDir,
         repo: tempfile::TempDir,
         paths: crate::herd::Paths,
         ledger: MemLedger,
         herdr: FakeHerdr,
+        broker: Option<Lock>,
     }
 
     impl Checked {
@@ -3655,12 +3734,14 @@ mod tests {
                 herdr = herdr.with_live_agent(Some(name), None, pane);
                 herdr.set_status(name, AgentStatus::Working);
             }
+            let broker = Some(crate::broker::stand_in(&paths, "lead-cards"));
             Checked {
                 config,
                 repo,
                 paths,
                 ledger,
                 herdr,
+                broker,
             }
         }
 
@@ -5412,6 +5493,166 @@ mod tests {
             world.retire("lh-1");
             world
         }
+    }
+
+    impl Checked {
+        /// A fresh shepherd's watch over one poll per entry of `up`, lead-cards'
+        /// broker running on those marked true, sending what it wakes on through `notifier`.
+        fn shepherd_polls(&mut self, notifier: &Notifier, up: &[bool]) -> Option<Vec<String>> {
+            let polls = up.len() as u32 - 1;
+            self.broker = None;
+            let mut clock = steps(broker_on(&self.paths, up));
+            let req = Request {
+                timeout: Some(Duration::from_secs(2) * polls),
+                ..self.shepherd_request()
+            };
+            let wake = watch(
+                &self.herdr,
+                &self.ledger,
+                &self.reports(),
+                &req,
+                &mut clock,
+                &mut |_| {},
+            );
+            drop(clock);
+            let wake = wake.unwrap()?;
+            notifier.send(&wake.waiting);
+            Some(printed(wake))
+        }
+
+        /// A fresh lead's watch over one poll per entry of `up`, as
+        /// [`Checked::shepherd_polls`], sending its own events through `notifier`.
+        fn lead_polls(&mut self, notifier: &Notifier, merges: &dyn Merges, up: &[bool]) {
+            let polls = up.len() as u32 - 1;
+            self.broker = None;
+            let mut clock = steps_from(FIRST, broker_on(&self.paths, up));
+            let own = |events: &[Waiting]| notifier.send(events);
+            let req = Request {
+                timeout: Some(Duration::from_secs(2) * polls),
+                notify_own: Some(&own),
+                merges: Some(merges),
+                ..self.request("w9:p0")
+            };
+            let woke = watch(
+                &self.herdr,
+                &self.ledger,
+                &self.reports(),
+                &req,
+                &mut clock,
+                &mut |_| {},
+            );
+            assert!(woke.unwrap().is_none());
+        }
+    }
+
+    /// Runs lead-cards' broker on the polls `up` marks, from the first.
+    fn broker_on<'a>(paths: &'a crate::herd::Paths, up: &'a [bool]) -> impl FnMut(u32) + 'a {
+        let mut held = vec![];
+        let mut set = move |poll: usize| {
+            held.clear();
+            held.extend(up[poll].then(|| crate::broker::stand_in(paths, "lead-cards")));
+        };
+        set(0);
+        move |poll| set(poll as usize)
+    }
+
+    const DOWN: [bool; 2] = [false, false];
+
+    fn no_broker_sent() -> Vec<String> {
+        ["n", "lead-cards", "no_broker", "no broker"]
+            .map(String::from)
+            .to_vec()
+    }
+
+    #[test]
+    fn a_lead_with_no_broker_for_two_polls_wakes_the_shepherd_once_while_it_stays_down() {
+        let (mut world, notifier, _) = guarded("", vec![]);
+        assert_eq!(
+            world.shepherd_polls(&notifier, &DOWN).unwrap(),
+            ["lead-cards no broker"]
+        );
+        assert_eq!(
+            world.shepherd_polls(&notifier, &DOWN),
+            None,
+            "woke twice while still down"
+        );
+        assert_eq!(notifier.sent(), [no_broker_sent()]);
+    }
+
+    #[test]
+    fn a_broker_down_for_one_poll_wakes_and_sends_nothing() {
+        let (mut world, notifier, gh) = guarded("", vec![]);
+        assert_eq!(world.shepherd_polls(&notifier, &[false, true]), None);
+        assert_eq!(world.shepherd_polls(&notifier, &[true, false, true]), None);
+        world.lead_polls(&notifier, &gh, &[false, true, false, true]);
+        assert!(notifier.sent().is_empty(), "{:?}", notifier.sent());
+    }
+
+    #[test]
+    fn a_leads_own_watch_sends_no_broker_again_after_its_broker_came_back() {
+        let (mut world, notifier, gh) = guarded("", vec![]);
+        world.lead_polls(&notifier, &gh, &[false, false, true, false, false]);
+        assert_eq!(notifier.sent(), [no_broker_sent(), no_broker_sent()]);
+    }
+
+    #[test]
+    fn a_lead_with_no_broker_is_sent_once_a_streak_by_whichever_watch_sees_it_first() {
+        let (mut world, notifier, gh) = guarded("", vec![]);
+        world.lead_polls(&notifier, &gh, &DOWN);
+        assert_eq!(notifier.sent(), [no_broker_sent()]);
+        assert_eq!(
+            world.shepherd_polls(&notifier, &DOWN).unwrap(),
+            ["lead-cards no broker"]
+        );
+        assert_eq!(
+            notifier.sent(),
+            [no_broker_sent()],
+            "sent twice in one streak"
+        );
+
+        assert_eq!(world.shepherd_polls(&notifier, &[true]), None);
+        assert_eq!(
+            world.shepherd_polls(&notifier, &DOWN).unwrap(),
+            ["lead-cards no broker"]
+        );
+        assert_eq!(notifier.sent(), [no_broker_sent(), no_broker_sent()]);
+    }
+
+    #[test]
+    fn a_broker_back_then_down_again_wakes_the_shepherd_again() {
+        let (mut world, notifier, _) = guarded("", vec![]);
+        assert_eq!(
+            world.shepherd_polls(&notifier, &DOWN).unwrap(),
+            ["lead-cards no broker"]
+        );
+        assert_eq!(
+            world
+                .shepherd_polls(&notifier, &[true, false, false])
+                .unwrap(),
+            ["lead-cards no broker"]
+        );
+    }
+
+    #[test]
+    fn a_lead_on_another_herdr_with_no_broker_wakes_nothing() {
+        let (mut world, notifier, _) = guarded("", vec![]);
+        world.ledger.0.get_mut("lead-cards").unwrap().socket = Some("/run/other.sock".into());
+        assert_eq!(world.shepherd_polls(&notifier, &DOWN), None);
+
+        world.herdr.socket = Some("/run/other.sock".into());
+        assert_eq!(
+            world.shepherd_polls(&notifier, &DOWN).unwrap(),
+            ["lead-cards no broker"]
+        );
+    }
+
+    #[test]
+    fn a_retired_lead_with_no_broker_wakes_nothing() {
+        let (mut world, notifier, _) = guarded("", vec![]);
+        world.retire("lead-cards");
+        world.retire("lh-1");
+        world.touch("tasks", "2\n");
+        assert_eq!(world.shepherd_polls(&notifier, &DOWN), None);
     }
 
     #[test]
