@@ -1729,7 +1729,10 @@ pub fn check_running(
             format!("it was started with a sandbox that can't block Unix sockets ({why})");
         let revive = format!("{resume} to resume it with them blocked");
         match when_loosened(paths, herd)? {
-            WhenLoosened::Warn => warnings.push(sockets_unblocked_warning(name, why)),
+            WhenLoosened::Warn => warnings.push(format!(
+                "{}; fix the sandbox check's cause, then {revive}",
+                sockets_unblocked_warning(name, why)
+            )),
             WhenLoosened::Refuse => bail!(
                 "{name} can't run sandboxed: {started}; {revive}, or set [lead] sandbox = \
                  \"prefer\" in herd {herd} to run it with them open"
