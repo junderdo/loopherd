@@ -1535,10 +1535,138 @@ mod tests {
             r.herd = Some("h".into());
             r.template = Some("t".into());
             r.claude_args = match launched {
-                true => vec!["--settings".into(), settings.clone()],
+                true => vec![
+                    "--settings".into(),
+                    settings.clone(),
+                    "--strict-mcp-config".into(),
+                    "--mcp-config".into(),
+                    "w1.mcp.json".into(),
+                ],
                 false => vec![],
             };
         }
+    }
+
+    /// A worker running in its sandbox, kept with `args`, in a worktree whose
+    /// local settings hold `local`.
+    fn as_worker_in_worktree(
+        w: &World,
+        worker: &str,
+        args: &[&str],
+        local: &str,
+    ) -> impl Fn(&mut AgentRecord) {
+        let launched = as_worker(w, worker, true);
+        let worktree = w.paths().herds.parent().unwrap().join("wt-lh-1");
+        fs::create_dir_all(worktree.join(".claude")).unwrap();
+        fs::write(worktree.join(".claude/settings.local.json"), local).unwrap();
+        let dir = w.paths().config_dir().join("sandbox");
+        fs::write(
+            dir.join("lh-1.member.json"),
+            serde_json::json!({
+                "herd": "h",
+                "template": "t",
+                "args": args,
+                "worktree": worktree,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        launched
+    }
+
+    #[test]
+    fn a_required_worker_whose_kept_args_or_settings_loosen_its_sandbox_is_refused() {
+        let w = World::new();
+        w.handed_off();
+        let worker =
+            as_worker_in_worktree(&w, "sandbox = \"require\"", &["--add-dir", "/tmp"], "{}");
+
+        let (result, _) = w.restart_as(false, true, None, &worker);
+
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(
+            err.contains(
+                "lh-1 can't run sandboxed: its args may loosen its sandbox or permissions: \
+                 --add-dir /tmp, from the args it was started with;"
+            ),
+            "{err}"
+        );
+        assert!(w.herdr.prompts().is_empty());
+    }
+
+    #[test]
+    fn a_required_worker_whose_worktree_settings_loosen_its_sandbox_is_refused() {
+        let w = World::new();
+        w.handed_off();
+        let local = r#"{"permissions": {"allow": ["Write"]}}"#;
+        let worker = as_worker_in_worktree(&w, "sandbox = \"require\"", &[], local);
+
+        let (result, _) = w.restart_as(false, true, None, &worker);
+
+        let file = (w.paths().herds.parent().unwrap()).join("wt-lh-1/.claude/settings.local.json");
+        assert_eq!(
+            format!("{:#}", result.unwrap_err()),
+            format!(
+                "sandbox: lh-1 can't run sandboxed: your Claude settings loosen its sandbox: {}: \
+                 permissions.allow opens Write to writes; remove those, or set [worker] sandbox \
+                 = \"prefer\" in herd h to run it with them as warnings",
+                file.display()
+            )
+        );
+        assert!(w.herdr.prompts().is_empty());
+    }
+
+    #[test]
+    fn a_worker_running_sandboxed_without_its_mcp_lock_is_restarted_with_a_warning() {
+        let w = World::new();
+        w.handed_off();
+        let launched = as_worker(&w, "sandbox = \"require\"", true);
+        let worker = |r: &mut AgentRecord| {
+            launched(r);
+            r.claude_args.retain(|a| a != "--strict-mcp-config");
+        };
+
+        let (result, _) = w.restart_as(false, true, None, &worker);
+
+        let out = result.unwrap();
+        assert!(
+            out.ends_with(
+                "\nwarning: lh-1 was started with every MCP server you configure, not only its \
+                 herd's [worker] mcp_servers; quit its Claude and run loopherd revive --name lh-1"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("unsandboxed"), "{out}");
+    }
+
+    #[test]
+    fn a_preferred_worker_whose_worktree_settings_loosen_its_sandbox_is_restarted_with_warnings() {
+        let w = World::new();
+        w.handed_off();
+        let local = r#"{"permissions": {"allow": ["Write"]}}"#;
+        let worker =
+            as_worker_in_worktree(&w, "sandbox = \"prefer\"", &["--add-dir", "/tmp"], local);
+
+        let (result, _) = w.restart_as(false, true, None, &worker);
+
+        let out = result.unwrap();
+        let worktree = w.paths().herds.parent().unwrap().join("wt-lh-1");
+        let file = worktree.join(".claude/settings.local.json");
+        assert!(
+            out.contains(&format!(
+                "warning: lh-1's sandbox is loosened by {}: permissions.allow opens Write to \
+                 writes",
+                file.display()
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "warning: lh-1 starts with an arg that may loosen its sandbox or permissions: \
+                 --add-dir /tmp, from the args it was started with"
+            ),
+            "{out}"
+        );
     }
 
     #[test]
@@ -1596,10 +1724,12 @@ mod tests {
         let (result, _) = w.restart_as(false, true, None, &worker);
 
         assert!(
-            result
-                .as_ref()
-                .unwrap()
-                .ends_with("\nwarning: lh-1 runs unsandboxed (it was started without its sandbox)"),
+            result.as_ref().unwrap().ends_with(
+                "\nwarning: lh-1 runs unsandboxed (it was started without its sandbox)\n\
+                     warning: lh-1 was started with every MCP server you configure, not only its \
+                     herd's [worker] mcp_servers; quit its Claude and run loopherd revive --name \
+                     lh-1"
+            ),
             "{result:?}"
         );
     }
