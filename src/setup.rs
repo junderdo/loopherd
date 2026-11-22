@@ -1,5 +1,6 @@
-//! `loopherd setup`: config.toml's machine-wide settings, the lead defaults
-//! and the handoff limits, asked on a terminal or set by flags (D39).
+//! `loopherd setup`: config.toml's machine-wide settings, the lead defaults,
+//! the handoff limits and the startup revive, asked on a terminal or set by
+//! flags (D39).
 
 use std::io::{BufRead, Write};
 use std::path::Path;
@@ -17,6 +18,7 @@ pub struct Request<'a> {
     pub again: bool,
     pub lead_defaults: Option<Option<String>>,
     pub context: Option<Option<String>>,
+    pub revive_on_startup: Option<Option<String>>,
 }
 
 /// The terminal questions go to and answers come from.
@@ -46,6 +48,8 @@ const SWITCH_HELP: [(&str, &str); 7] = [
 
 const LEAD_FLAG: &str = "--lead-defaults <switches|none>";
 const CONTEXT_FLAG: &str = "--context window=<n>,limit=<n>,shepherd=<n>";
+const REVIVE_FLAG: &str = "--revive-on-startup <true|false>";
+const REVIVE_KEY: &str = "herdr_plugin.revive_on_startup";
 
 #[derive(Default)]
 struct Limits {
@@ -58,7 +62,8 @@ struct Limits {
 /// without one names the flags for those still unset. Returns lines to print.
 pub fn setup(req: Request, tty: Option<Tty>) -> Result<Vec<String>> {
     let file = config::read(req.config)?;
-    let given = req.lead_defaults.is_some() || req.context.is_some();
+    let given =
+        req.lead_defaults.is_some() || req.context.is_some() || req.revive_on_startup.is_some();
     let wants = |group: &Option<Option<String>>, unset: bool| match group {
         Some(value) => value.is_none(),
         None => !given && (req.again || unset),
@@ -72,9 +77,15 @@ pub fn setup(req: Request, tty: Option<Tty>) -> Result<Vec<String>> {
         .is_some_and(SwitchValues::sets_a_switch);
     let ask_lead = wants(&req.lead_defaults, switches_unset);
     let ask_context = wants(&req.context, context_unset);
+    let revive = file.herdr_plugin.as_ref().and_then(|p| p.revive_on_startup);
+    let ask_revive = wants(&req.revive_on_startup, revive.is_none());
 
     let context = match &req.context {
         Some(Some(flag)) => Some(context_flag(flag, &file)?),
+        _ => None,
+    };
+    let revive_given = match &req.revive_on_startup {
+        Some(Some(on)) => Some(config::switch(REVIVE_KEY, on)?),
         _ => None,
     };
     let mut lines = vec![];
@@ -85,6 +96,10 @@ pub fn setup(req: Request, tty: Option<Tty>) -> Result<Vec<String>> {
     if let Some(context) = context {
         lines.extend(write_context(req.config, &context)?);
     }
+    if let Some(on) = revive_given {
+        config::set(req.config, REVIVE_KEY, &on.to_string())?;
+        lines.push(format!("set revive_on_startup: {on}"));
+    }
 
     let Some(tty) = tty else {
         let mut flags = vec![];
@@ -93,6 +108,9 @@ pub fn setup(req: Request, tty: Option<Tty>) -> Result<Vec<String>> {
         }
         if context_unset && !matches!(req.context, Some(Some(_))) {
             flags.push(CONTEXT_FLAG);
+        }
+        if revive.is_none() && revive_given.is_none() {
+            flags.push(REVIVE_FLAG);
         }
         if !flags.is_empty() {
             lines.push(format!(
@@ -116,6 +134,11 @@ pub fn setup(req: Request, tty: Option<Tty>) -> Result<Vec<String>> {
     if ask_context {
         let context = ask_context_values(term, &file)?;
         lines.extend(write_context(req.config, &context)?);
+    }
+    if ask_revive {
+        let on = ask_revive_on_startup(term, revive.unwrap_or(false))?;
+        config::set(req.config, REVIVE_KEY, &on.to_string())?;
+        lines.push(format!("set revive_on_startup: {on}"));
     }
     Ok(lines)
 }
@@ -255,6 +278,19 @@ fn ask_lead_defaults(
         }
     }
     Ok(on)
+}
+
+fn ask_revive_on_startup(term: &mut Terminal, default: bool) -> Result<bool> {
+    term.say("Startup revive: after herdr restores a session, alive leads' brokers start whatever you answer. On, loopherd also resumes the members herdr didn't bring back and prompts each lead to re-arm its watch, unasked.")?;
+    let options = if default { "[Y/n]" } else { "[y/N]" };
+    let question = format!(
+        "  revive_on_startup: resume members and prompt leads when herdr starts? {options} "
+    );
+    Ok(match term.answer(&question)?.chars().next() {
+        Some('y' | 'Y') => true,
+        Some('n' | 'N') => false,
+        _ => default,
+    })
 }
 
 /// One value to ask until `parse` takes it and, when `capped`, it's under the

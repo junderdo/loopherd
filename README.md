@@ -93,9 +93,10 @@ loopherd's herdr plugin (below), each default no. `--with-agents`,
 </table>
 
 `loopherd setup` asks for `config.toml`'s machine-wide settings while
-they're unset: what a lead may do by default, then the handoff limits. The
-context window comes from each session's model; set `context_window` only to
-override it. Run it again with `--again`.
+they're unset: what a lead may do by default, the handoff limits, then
+whether herdr's startup hook also resumes members (alive leads' brokers
+start either way). The context window comes from each session's model; set
+`context_window` only to override it. Run it again with `--again`.
 
 To uninstall:
 
@@ -182,17 +183,21 @@ without one, its commands fail with a pointer here. herdr shows no
 action output on screen: read it, errors included, with
 `herdr plugin log list --plugin loopherd`.
 
-To have herdr run `loopherd revive` by itself after it restores a session,
-add this to `config.toml` in loopherd's config dir:
+After herdr restores a session, the plugin's startup hook starts a broker
+for each alive lead recorded on that herdr server. It does this whatever
+the config says. To have it also run the full `loopherd revive`
+(resuming members herdr didn't bring back and prompting leads to re-arm
+their watch), answer yes when `loopherd setup` asks, or run
+`loopherd config set herdr_plugin.revive_on_startup true`. That writes:
 
 ```toml
 [herdr_plugin]
 revive_on_startup = true
 ```
 
-It revives only the members recorded on the herdr server that started,
-and is off without that key. herdr shows nothing of its run; it leaves a
-`note` in each lead's mailbox instead, which the shepherd's watch shows.
+The full revive is off without that key. herdr shows nothing of its run,
+so the full revive leaves a `note` in each lead's mailbox instead, which
+the shepherd's watch shows.
 Remove the plugin with `herdr plugin uninstall loopherd`.
 
 ## Set up a repo
@@ -360,7 +365,7 @@ it; `attended = true` implies it (D116).
 | `herd get\|set\|unset <herd> <key>` | Read or edit one value in a herd file, keeping its comments (`queue.max`, `lead.merge`). |
 | `herd remove <herd>` | Delete a finished herd's file and every run of it in the ledger; a name holding another herd's run keeps that run and its files. |
 | `lead-defaults` | Show `config.toml`'s lead switches, on or off, for herds whose `[lead]` doesn't set them; `--set` writes them. |
-| `config get\|set\|unset <key>` | Read or edit `context_window`, `default_context_limit`, `shepherd.context_limit`, `shepherd.self_restart`, `lead_defaults.review_rounds` or `view.theme`. |
+| `config get\|set\|unset <key>` | Read or edit `context_window`, `default_context_limit`, `shepherd.context_limit`, `shepherd.self_restart`, `herdr_plugin.revive_on_startup`, `lead_defaults.review_rounds` or `view.theme`. |
 | `install-hook` | Add loopherd's Claude hooks and skill (`--remove` takes them out). |
 
 ### Run

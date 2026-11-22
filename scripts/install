@@ -6,7 +6,8 @@ usage() {
 Usage: scripts/install [--no-splash]
                        [[--with-agents] [--with-skills] [--with-herdr-plugin]
                         [--with-herdr-keys] [--lead-defaults [<switches>]]
-                        [--context [<values>]] | --no-extras]
+                        [--context [<values>]]
+                        [--revive-on-startup [true|false]] | --no-extras]
                        [--settings <file>] [install-hook args...]
 
 Build loopherd, install it as ~/.local/bin/loopherd, and add its Claude
@@ -16,7 +17,9 @@ researcher, scout), the mattpocock-skills plugin, loopherd's herdr
 plugin and herdr key bindings for that plugin's actions, each default no,
 then runs `loopherd setup`, which asks, while
 config.toml leaves them unset, which lead switches are on wherever a herd
-file's [lead] doesn't set them, and the context window and handoff limits. Last, unless --remove, it runs
+file's [lead] doesn't set them, the context window and handoff limits, and
+whether herdr's startup hook also resumes members (alive leads' brokers
+start either way). Last, unless --remove, it runs
 `loopherd doctor` (against --settings when given), whose failures don't
 fail the install.
 Other arguments go to `loopherd install-hook`.
@@ -35,10 +38,13 @@ Other arguments go to `loopherd install-hook`.
   scripts/install --context            ask about the context window and handoff limits again
   scripts/install --context window=1000000,limit=500000,shepherd=400000
                                        set any of those, in tokens, asking nothing else
+  scripts/install --revive-on-startup  ask again whether herdr's startup hook resumes members and prompts leads
+  scripts/install --revive-on-startup true
+                                       set it (or: false), asking nothing else
   scripts/install --no-extras          install no extras and run no setup, without the questions
   scripts/install -h, --help           print this and exit
 
-Values given with --lead-defaults or --context are set right after the
+Values given with --lead-defaults, --context or --revive-on-startup are set right after the
 build, before anything is installed, so a bad one installs nothing.
 loopherd's herdr plugin is offered only when herdr is on PATH and the
 plugin isn't already at this checkout's version, and never with --settings.
@@ -82,9 +88,9 @@ for arg in "$@"; do
     --with-herdr-plugin) herdr_plugin=yes ;;
     --with-herdr-keys) herdr_keys=yes ;;
     --no-extras) no_extras=1 ;;
-    --lead-defaults | --context) setup_args+=("$arg") want_value=$arg ;;
+    --lead-defaults | --context | --revive-on-startup) setup_args+=("$arg") want_value=$arg ;;
     --lead-defaults=*) setup_args+=("$arg") lead_set=1 lead_list=${arg#--lead-defaults=} ;;
-    --context=*) setup_args+=("$arg") ;;
+    --context=* | --revive-on-startup=*) setup_args+=("$arg") ;;
     --settings) want_settings=1; args+=("$arg") ;;
     --remove) removing=1; args+=("$arg") ;;
     --settings=*) settings=${arg#--settings=}; args+=("$arg") ;;
@@ -95,7 +101,7 @@ done
 setup=ask
 [[ ${#setup_args[@]} -eq 0 ]] || setup=given
 if [[ -n "$no_extras" ]]; then
-  [[ "$agents$skills$herdr_plugin$herdr_keys$setup" == askaskaskaskask ]] || { echo "install: --no-extras can't go with --with-agents, --with-skills, --with-herdr-plugin, --with-herdr-keys, --lead-defaults or --context" >&2; exit 2; }
+  [[ "$agents$skills$herdr_plugin$herdr_keys$setup" == askaskaskaskask ]] || { echo "install: --no-extras can't go with --with-agents, --with-skills, --with-herdr-plugin, --with-herdr-keys, --lead-defaults, --context or --revive-on-startup" >&2; exit 2; }
   agents=no skills=no herdr_plugin=no herdr_keys=no setup=no
 elif [[ "$agents$skills$herdr_plugin$herdr_keys$setup" != askaskaskaskask ]]; then
   # Naming one extra means just those, with no questions.
@@ -136,7 +142,7 @@ built=$(cargo build --release --manifest-path "$root/Cargo.toml" \
   --message-format=json-render-diagnostics |
   jq -r 'select(.reason == "compiler-artifact" and .target.name == "loopherd" and .executable != null) | .executable')
 [[ -x "$built" ]] || { echo "install: cargo built no loopherd binary" >&2; exit 1; }
-# Before installing, so a bad --context or --lead-defaults value installs nothing.
+# Before installing, so a bad setup value installs nothing.
 [[ "$setup" != given ]] || "$built" setup "${setup_args[@]}"
 
 mkdir -p "$bin_dir"
