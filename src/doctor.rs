@@ -838,6 +838,9 @@ fn state_checks(
         for member in &members {
             checks.extend(mailbox_check(&dir, &member.name));
         }
+        for member in members.iter().filter(|r| !r.retired) {
+            checks.extend(window_check(&dir, &member.name));
+        }
     }
     checks.extend(
         members
@@ -1017,6 +1020,16 @@ fn mailbox_check(dir: &Path, name: &str) -> Option<Check> {
         }
     };
     Some(failure(&format!("mailbox {name}"), detail, fix))
+}
+
+/// The context window `name`'s last stop was measured against, and its source.
+fn window_check(dir: &Path, name: &str) -> Option<Check> {
+    let (entries, _) = crate::report::history(dir, name).ok()?;
+    let window = entries.iter().rev().find_map(|e| match &e.body {
+        crate::report::Body::Stop(stop) => Some(stop.window.as_ref()),
+        _ => None,
+    })??;
+    Some(ok(&format!("context window {name}"), window.to_string()))
 }
 
 /// Whether `record` is on another herdr than the one at `here`. With herdr's
@@ -3864,6 +3877,57 @@ mod tests {
         assert!(
             problems[0].contains("(and 1 more bad lines)"),
             "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn verbose_shows_each_open_members_window_and_its_source() {
+        use crate::context::{Window, WindowFrom};
+        use crate::report::{Body, Entry, Stop};
+        let m = machine(&ALL);
+        let herdr = herdr()
+            .with_live_agent(Some("a"), None, "w1:p1")
+            .with_live_agent(Some("b"), None, "w1:p2");
+        let mut retired = member("old", "h", "w1:p3", None);
+        retired.retired = true;
+        m.ledger(&[
+            member("a", "h", "w1:p1", None),
+            member("b", "h", "w1:p2", None),
+            retired,
+        ]);
+        let reports = m.state().join("reports");
+        let stop = |window| {
+            let stop = Stop {
+                background: crate::report::Tally::Known(Default::default()),
+                crons: crate::report::Tally::Known(0),
+                error: None,
+                session: None,
+                context: None,
+                limit: None,
+                window,
+            };
+            Entry::new(std::time::SystemTime::now(), Body::Stop(stop))
+        };
+        let opus = Window {
+            tokens: 1_000_000,
+            from: WindowFrom::Model("claude-opus-5-5".into()),
+        };
+        let unknown = Window {
+            tokens: 200_000,
+            from: WindowFrom::UnknownModel("claude-mystery-9".into()),
+        };
+        crate::report::append(&reports, "a", &stop(Some(unknown))).unwrap();
+        crate::report::append(&reports, "a", &stop(Some(opus.clone()))).unwrap();
+        crate::report::append(&reports, "old", &stop(Some(opus))).unwrap();
+        let checks = checks(&m.install, &m.setup, None, &herdr).unwrap();
+        let shown: Vec<_> = text(&checks, true)
+            .lines()
+            .filter(|l| l.contains("context window"))
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            shown,
+            ["ok context window a: 1000000 from its model claude-opus-5-5"]
         );
     }
 

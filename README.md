@@ -79,8 +79,9 @@ loopherd's herdr plugin (below), each default no. `--with-agents`,
 </table>
 
 `loopherd setup` asks for `config.toml`'s machine-wide settings while
-they're unset: what a lead may do by default, then the context window and
-handoff limits. Run it again with `--again`.
+they're unset: what a lead may do by default, then the handoff limits. The
+context window comes from each session's model; set `context_window` only to
+override it. Run it again with `--again`.
 
 To uninstall:
 

@@ -387,7 +387,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         .unwrap_or(crate::context::DEFAULT_LIMIT);
     let window = match config_file.context_window {
         Some(_) => "config.toml's",
-        None => "the default",
+        None => "the largest known",
     };
     let config_limit = match config_file.default_context_limit {
         None if config_file.context_window.is_none() => {

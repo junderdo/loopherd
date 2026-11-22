@@ -760,6 +760,7 @@ mod tests {
                 error: error.map(str::to_string),
                 context: None,
                 limit: None,
+                window: None,
                 session: None,
             };
             self.put(Body::Stop(stop));
@@ -1310,7 +1311,7 @@ mod tests {
         crate::context::handoff_block(
             &record("lh-1"),
             stop.as_bytes(),
-            Ok(100),
+            &crate::context::fixed_limit(100),
             w.state.path(),
             &|_| Ok(()),
         )

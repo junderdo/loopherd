@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::{self, ConfigFile};
@@ -21,6 +22,8 @@ use crate::shepherd_resume;
 pub const SHEPHERD: &str = "shepherd";
 pub const DEFAULT_LIMIT: u64 = 250_000;
 pub const DEFAULT_WINDOW: u64 = 200_000;
+/// The largest window of a model loopherd knows.
+pub const LARGEST_WINDOW: u64 = 1_000_000;
 /// The smallest limit or window a config accepts; below it a member would
 /// hand off before doing any work.
 pub const MIN_TOKENS: u64 = 10_000;
@@ -32,23 +35,85 @@ const FALLBACK_LIMIT: u64 = if DEFAULT_LIMIT < DEFAULT_WINDOW / 5 * 4 {
     DEFAULT_WINDOW / 5 * 4
 };
 
+/// A session's limit, and the window that capped it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Limit {
+    pub tokens: u64,
+    pub window: Window,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Window {
+    pub tokens: u64,
+    pub from: WindowFrom,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowFrom {
+    Config,
+    Model(String),
+    UnknownModel(String),
+    Default,
+}
+
+impl std::fmt::Display for Window {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let tokens = self.tokens;
+        match &self.from {
+            WindowFrom::Config => write!(f, "{tokens} from config.toml's context_window"),
+            WindowFrom::Model(model) => write!(f, "{tokens} from its model {model}"),
+            WindowFrom::UnknownModel(model) => {
+                write!(f, "{tokens} by default, since its model {model} is unknown")
+            }
+            WindowFrom::Default => write!(f, "{tokens} by default, before its first turn"),
+        }
+    }
+}
+
+/// The context window of a Claude model id, `claude-<family>-<major>-<minor>`
+/// with an optional date; before minor versions the date follows the major.
+fn model_window(model: &str) -> Option<u64> {
+    let mut parts = model.strip_prefix("claude-")?.split('-');
+    let family = parts.next()?;
+    if !matches!(family, "opus" | "sonnet" | "haiku" | "fable") {
+        return None;
+    }
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = match parts.next() {
+        Some(minor) if minor.len() <= 2 => minor.parse().ok()?,
+        _ => 0,
+    };
+    // A 4.6 has 1M only when picked as `[1m]`, which the transcript doesn't record.
+    Some(if (major, minor) >= (4, 7) {
+        LARGEST_WINDOW
+    } else {
+        DEFAULT_WINDOW
+    })
+}
+
 /// `own` (a template's or `[lead]`'s `context_limit`), else `config`'s
-/// `default_context_limit`, else [`DEFAULT_LIMIT`]; never over 80% of
-/// `config`'s `context_window`, else of [`DEFAULT_WINDOW`].
-pub fn effective_limit(own: Option<u64>, config: &Path) -> Result<u64> {
-    Ok(config::read(config)?.limit(own))
+/// `default_context_limit`, else [`DEFAULT_LIMIT`]; never over 80% of the
+/// window: `config`'s `context_window`, else `model`'s, else [`DEFAULT_WINDOW`].
+pub fn effective_limit(own: Option<u64>, config: &Path, model: Option<&str>) -> Result<Limit> {
+    let file = config::read(config)?;
+    let window = file.window(model);
+    Ok(Limit {
+        tokens: file.limit(own, window.tokens),
+        window,
+    })
 }
 
 /// The shepherd's limit: `config`'s `[shepherd] context_limit` in place of a
 /// member's own, resolved as [`effective_limit`].
-pub fn shepherd_limit(config: &Path) -> Result<u64> {
+pub fn shepherd_limit(config: &Path, model: Option<&str>) -> Result<u64> {
     let file = config::read(config)?;
     let own = file.shepherd.as_ref().and_then(|s| s.context_limit);
-    Ok(file.limit(own))
+    Ok(file.limit(own, file.window(model).tokens))
 }
 
 /// The highest limit a member may take: 80% of `config`'s `context_window`,
-/// else of [`DEFAULT_WINDOW`].
+/// else of [`LARGEST_WINDOW`], since each session's model caps it again.
 pub struct Cap {
     pub limit: u64,
     pub window: u64,
@@ -57,7 +122,7 @@ pub struct Cap {
 pub fn limit_cap(config: &Path) -> Result<Cap> {
     let window = config::read(config)?
         .context_window
-        .unwrap_or(DEFAULT_WINDOW);
+        .unwrap_or(LARGEST_WINDOW);
     Ok(Cap {
         limit: window / 5 * 4,
         window,
@@ -65,10 +130,35 @@ pub fn limit_cap(config: &Path) -> Result<Cap> {
 }
 
 impl ConfigFile {
-    fn limit(&self, own: Option<u64>) -> u64 {
+    fn limit(&self, own: Option<u64>, window: u64) -> u64 {
         let limit = own.or(self.default_context_limit).unwrap_or(DEFAULT_LIMIT);
-        let window = self.context_window.unwrap_or(DEFAULT_WINDOW);
         limit.min(window / 5 * 4)
+    }
+
+    fn window(&self, model: Option<&str>) -> Window {
+        let (tokens, from) = match (self.context_window, model) {
+            (Some(tokens), _) => (tokens, WindowFrom::Config),
+            (None, Some(model)) => match model_window(model) {
+                Some(tokens) => (tokens, WindowFrom::Model(model.into())),
+                None => (DEFAULT_WINDOW, WindowFrom::UnknownModel(model.into())),
+            },
+            (None, None) => (DEFAULT_WINDOW, WindowFrom::Default),
+        };
+        Window { tokens, from }
+    }
+}
+
+/// A limit of `tokens` for every model, under the default window.
+#[cfg(test)]
+pub fn fixed_limit(tokens: u64) -> impl Fn(Option<&str>) -> Result<Limit> {
+    move |_| {
+        Ok(Limit {
+            tokens,
+            window: Window {
+                tokens: DEFAULT_WINDOW,
+                from: WindowFrom::Default,
+            },
+        })
     }
 }
 
@@ -88,6 +178,8 @@ pub struct Check {
     pub reason: Result<Option<String>>,
     /// `None` when the transcript is missing or has no usage yet.
     pub measured: Option<Measured>,
+    /// The window the limit was capped at; `None` when the limit failed.
+    pub window: Option<Window>,
 }
 
 impl Default for Check {
@@ -95,6 +187,7 @@ impl Default for Check {
         Check {
             reason: Ok(None),
             measured: None,
+            window: None,
         }
     }
 }
@@ -109,12 +202,13 @@ pub struct Measured {
 /// to block it when `member`'s context is over `limit`: once per session,
 /// never on a stop a Stop hook already continued. Before asking, moves any
 /// handoff from last time to its `prev.md`. An attended member is only
-/// measured. A failed `limit` falls back
-/// to the built-in one and is passed to `note` once per session.
+/// measured. `limit` is asked with the model of the transcript's last turn.
+/// A failed `limit` falls back to the built-in one, and it or an unknown
+/// model is passed to `note` once per session.
 pub fn handoff_block(
     member: &AgentRecord,
     input: &[u8],
-    limit: Result<u64>,
+    limit: &dyn Fn(Option<&str>) -> Result<Limit>,
     state: &Path,
     note: &dyn Fn(String) -> Result<()>,
 ) -> Check {
@@ -124,7 +218,11 @@ pub fn handoff_block(
     let live = input["transcript_path"]
         .as_str()
         .map(|t| live_transcript(Path::new(t)));
-    let tokens = live.as_deref().and_then(tokens_in);
+    let turn = live.as_deref().and_then(last_turn);
+    let tokens = turn.as_ref().map(|t| t.tokens);
+    let limit = limit(turn.as_ref().and_then(|t| t.model.as_deref()));
+    let window = limit.as_ref().ok().map(|l| l.window.clone());
+    let limit = limit.map(|l| l.tokens);
     let measured = |limit| tokens.map(|tokens| Measured { tokens, limit });
     let session = input["session_id"].as_str().filter(|s| is_plain_name(s));
     // The human sits in an attended member's pane, so its context is theirs to manage.
@@ -135,6 +233,7 @@ pub fn handoff_block(
         return Check {
             reason: Ok(None),
             measured: measured(*limit.as_ref().unwrap_or(&FALLBACK_LIMIT)),
+            window,
         };
     };
     let session = match &live {
@@ -143,8 +242,11 @@ pub fn handoff_block(
     };
     let session = session.as_str();
     let (limit, noted) = match limit {
-        Ok(limit) => (limit, Ok(())),
-        Err(e) => (FALLBACK_LIMIT, note_once(state, session, &e, note)),
+        Ok(limit) => (
+            limit,
+            note_unknown_model(state, session, window.as_ref(), note),
+        ),
+        Err(e) => (FALLBACK_LIMIT, note_failed_limit(state, session, &e, note)),
     };
     // A failed note must not skip the check; it surfaces only when nothing is asked.
     let deferred = |t: u64| subagents_running(&input) && t * 2 <= limit * 3;
@@ -159,6 +261,7 @@ pub fn handoff_block(
     Check {
         reason,
         measured: measured(limit),
+        window,
     }
 }
 
@@ -240,24 +343,12 @@ fn written_this_run(handoff: &Path, state: &Path, name: &str) -> Result<bool> {
     Ok(written > boundary)
 }
 
-fn note_once(
+fn note_failed_limit(
     state: &Path,
     session: &str,
     error: &anyhow::Error,
     note: &dyn Fn(String) -> Result<()>,
 ) -> Result<()> {
-    let noted = state.join("limit-noted");
-    fs::create_dir_all(&noted).with_context(|| format!("create {}", noted.display()))?;
-    let marker = noted.join(session);
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&marker)
-    {
-        Ok(_) => {}
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(()),
-        Err(e) => return Err(e).with_context(|| format!("create {}", marker.display())),
-    }
     let error = format!("{error:#}");
     let error: Vec<&str> = error
         .lines()
@@ -268,6 +359,46 @@ fn note_once(
         "could not read my context limit, so it is {FALLBACK_LIMIT} until fixed: {}",
         error.join(" ")
     );
+    note_once(&state.join("limit-noted"), session, text, note)
+}
+
+fn note_unknown_model(
+    state: &Path,
+    session: &str,
+    window: Option<&Window>,
+    note: &dyn Fn(String) -> Result<()>,
+) -> Result<()> {
+    let Some(Window {
+        tokens,
+        from: WindowFrom::UnknownModel(model),
+    }) = window
+    else {
+        return Ok(());
+    };
+    let text = format!(
+        "my model {model} has no known context window, so my limit assumes {tokens}; \
+         set the right one with `loopherd config set context_window <tokens>`"
+    );
+    note_once(&state.join("window-noted"), session, text, note)
+}
+
+fn note_once(
+    noted: &Path,
+    session: &str,
+    text: String,
+    note: &dyn Fn(String) -> Result<()>,
+) -> Result<()> {
+    fs::create_dir_all(noted).with_context(|| format!("create {}", noted.display()))?;
+    let marker = noted.join(session);
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+    {
+        Ok(_) => {}
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("create {}", marker.display())),
+    }
     note(text).inspect_err(|_| {
         // Unmarked, so the next stop tries the note again.
         let _ = fs::remove_file(&marker);
@@ -332,7 +463,8 @@ pub struct ShepherdCheck<'a> {
     /// `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
     pub claude_dir: &'a Path,
     pub state: &'a Path,
-    pub limit: u64,
+    /// The limit for the session's model; `None` skips the check.
+    pub limit: &'a dyn Fn(Option<&str>) -> Option<u64>,
     /// `$HERDR_PANE_ID` and `$HERDR_SOCKET_PATH`, recorded with the handoff
     /// so a `/clear` there resumes the shepherd.
     pub pane: Option<&'a str>,
@@ -397,7 +529,9 @@ pub fn shepherd_handoff(check: &ShepherdCheck) -> Option<ShepherdHandoff> {
     if marker.exists() {
         return None;
     }
-    let tokens = tokens_in(&transcript_of(check.claude_dir, &session)?)?;
+    let turn = last_turn(&transcript_of(check.claude_dir, &session)?)?;
+    let limit = (check.limit)(turn.model.as_deref())?;
+    let tokens = turn.tokens;
     let place = || {
         Some(shepherd_resume::Place {
             pane: check.pane?.to_string(),
@@ -408,12 +542,8 @@ pub fn shepherd_handoff(check: &ShepherdCheck) -> Option<ShepherdHandoff> {
             },
         })
     };
-    (tokens > check.limit).then(|| ShepherdHandoff {
-        line: format!(
-            "shepherd handoff {}k over {}k",
-            tokens / 1000,
-            check.limit / 1000
-        ),
+    (tokens > limit).then(|| ShepherdHandoff {
+        line: format!("shepherd handoff {}k over {}k", tokens / 1000, limit / 1000),
         session,
         marker,
         resume: place().map(|place| {
@@ -454,9 +584,14 @@ fn session_of(procs: &dyn Procs, pid: u32, claude_dir: &Path) -> Option<String> 
     is_plain_name(session).then(|| session.to_string())
 }
 
-/// Tokens in context as of the transcript's last main-thread assistant turn
-/// with any usage: its input, cache-creation and cache-read tokens.
-fn tokens_in(transcript: &Path) -> Option<u64> {
+struct Turn {
+    tokens: u64,
+    model: Option<String>,
+}
+
+/// The transcript's last main-thread assistant turn with any usage: its
+/// model, and its input, cache-creation and cache-read tokens.
+fn last_turn(transcript: &Path) -> Option<Turn> {
     let text = fs::read_to_string(transcript).ok()?;
     text.lines()
         .rev()
@@ -469,7 +604,13 @@ fn tokens_in(transcript: &Path) -> Option<u64> {
                 + count("cache_creation_input_tokens")
                 + count("cache_read_input_tokens");
             // A zero is a placeholder record, not a turn the API answered.
-            (tokens > 0).then_some(tokens)
+            (tokens > 0).then(|| Turn {
+                tokens,
+                model: r
+                    .pointer("/message/model")
+                    .and_then(Value::as_str)
+                    .map(Into::into),
+            })
         })
 }
 
@@ -490,23 +631,35 @@ mod tests {
     #[test]
     fn without_a_config_file_the_limit_is_its_own_capped_at_80_percent_of_200k() {
         let (_dir, path) = config(None);
-        assert_eq!(effective_limit(Some(100_000), &path).unwrap(), 100_000);
-        assert_eq!(effective_limit(Some(190_000), &path).unwrap(), 160_000);
-        assert_eq!(effective_limit(None, &path).unwrap(), 160_000);
+        assert_eq!(
+            effective_limit(Some(100_000), &path, None).unwrap().tokens,
+            100_000
+        );
+        assert_eq!(
+            effective_limit(Some(190_000), &path, None).unwrap().tokens,
+            160_000
+        );
+        assert_eq!(effective_limit(None, &path, None).unwrap().tokens, 160_000);
     }
 
     #[test]
     fn the_config_default_applies_only_without_an_own_limit() {
         let (_dir, path) = config(Some("default_context_limit = 90000\n"));
-        assert_eq!(effective_limit(None, &path).unwrap(), 90_000);
-        assert_eq!(effective_limit(Some(120_000), &path).unwrap(), 120_000);
+        assert_eq!(effective_limit(None, &path, None).unwrap().tokens, 90_000);
+        assert_eq!(
+            effective_limit(Some(120_000), &path, None).unwrap().tokens,
+            120_000
+        );
     }
 
     #[test]
     fn the_built_in_limit_applies_under_a_large_window() {
         let (_dir, path) = config(Some("context_window = 1000000\n"));
-        assert_eq!(effective_limit(None, &path).unwrap(), 250_000);
-        assert_eq!(effective_limit(Some(900_000), &path).unwrap(), 800_000);
+        assert_eq!(effective_limit(None, &path, None).unwrap().tokens, 250_000);
+        assert_eq!(
+            effective_limit(Some(900_000), &path, None).unwrap().tokens,
+            800_000
+        );
     }
 
     #[test]
@@ -519,7 +672,7 @@ mod tests {
             "default_context_limit = 9999",
         ] {
             let (_dir, path) = config(Some(text));
-            let err = format!("{:#}", effective_limit(None, &path).unwrap_err());
+            let err = format!("{:#}", effective_limit(None, &path, None).unwrap_err());
             assert!(
                 err.starts_with(&path.display().to_string()),
                 "{text}: {err}"
@@ -530,31 +683,35 @@ mod tests {
     #[test]
     fn the_shepherds_limit_is_its_own_else_the_default_capped_at_80_percent() {
         let (_dir, path) = config(None);
-        assert_eq!(shepherd_limit(&path).unwrap(), 160_000);
+        assert_eq!(shepherd_limit(&path, None).unwrap(), 160_000);
         let (_dir, path) = config(Some("[shepherd]\ncontext_limit = 120000\n"));
-        assert_eq!(shepherd_limit(&path).unwrap(), 120_000);
+        assert_eq!(shepherd_limit(&path, None).unwrap(), 120_000);
         let (_dir, path) = config(Some(
             "default_context_limit = 90000\ncontext_window = 1000000\n",
         ));
-        assert_eq!(shepherd_limit(&path).unwrap(), 90_000);
+        assert_eq!(shepherd_limit(&path, None).unwrap(), 90_000);
         let (_dir, path) = config(Some(
             "default_context_limit = 90000\ncontext_window = 1000000\n[shepherd]\ncontext_limit = 900000\n",
         ));
-        assert_eq!(shepherd_limit(&path).unwrap(), 800_000);
+        assert_eq!(shepherd_limit(&path, None).unwrap(), 800_000);
     }
 
     #[test]
     fn a_notify_value_of_any_shape_leaves_the_limits_readable() {
         for notify in ["notify = true", "[notify]\nkinds = [\"done\"]"] {
             let (_dir, path) = config(Some(&format!("context_window = 1000000\n{notify}\n")));
-            assert_eq!(effective_limit(None, &path).unwrap(), 250_000, "{notify}");
+            assert_eq!(
+                effective_limit(None, &path, None).unwrap().tokens,
+                250_000,
+                "{notify}"
+            );
         }
     }
 
     #[test]
     fn a_members_limit_ignores_the_shepherds() {
         let (_dir, path) = config(Some("[shepherd]\ncontext_limit = 120000\n"));
-        assert_eq!(effective_limit(None, &path).unwrap(), 160_000);
+        assert_eq!(effective_limit(None, &path, None).unwrap().tokens, 160_000);
     }
 
     #[test]
@@ -566,8 +723,8 @@ mod tests {
         ] {
             let (_dir, path) = config(Some(text));
             for err in [
-                shepherd_limit(&path).unwrap_err(),
-                effective_limit(None, &path).unwrap_err(),
+                shepherd_limit(&path, None).unwrap_err(),
+                effective_limit(None, &path, None).unwrap_err(),
             ] {
                 let err = format!("{err:#}");
                 assert!(
@@ -577,7 +734,7 @@ mod tests {
             }
         }
         let (_dir, path) = config(Some("[shepherd]\ncontext_limit = 9999\n"));
-        let err = format!("{:#}", shepherd_limit(&path).unwrap_err());
+        let err = format!("{:#}", shepherd_limit(&path, None).unwrap_err());
         assert!(
             err.ends_with("shepherd.context_limit must be at least 10000, got 9999"),
             "{err}"
@@ -665,7 +822,7 @@ mod tests {
         }
 
         fn block(&self, who: &AgentRecord, input: &[u8], limit: u64) -> Option<String> {
-            handoff_block(who, input, Ok(limit), &self.state(), &|_| Ok(()))
+            handoff_block(who, input, &fixed_limit(limit), &self.state(), &|_| Ok(()))
                 .reason
                 .unwrap()
         }
@@ -792,7 +949,7 @@ mod tests {
         let check = handoff_block(
             &who,
             &w.stop("s1", &t, ""),
-            Ok(100),
+            &fixed_limit(100),
             &w.state(),
             &|_| Ok(()),
         );
@@ -1044,7 +1201,7 @@ mod tests {
             handoff_block(
                 &who,
                 &w.stop("s1", &t, ""),
-                Ok(100),
+                &fixed_limit(100),
                 &w.state(),
                 &|_| Ok(())
             )
@@ -1060,8 +1217,8 @@ mod tests {
         let w = World::new();
         let who = member("lh-1", None);
         let t = w.transcript(&[assistant(0, 0, 160_001, false)]);
-        let broken = || Err(anyhow::anyhow!("config.toml: TOML parse error"));
-        let reason = handoff_block(&who, &w.stop("s1", &t, ""), broken(), &w.state(), &|_| {
+        let broken = |_: Option<&str>| Err(anyhow::anyhow!("config.toml: TOML parse error"));
+        let reason = handoff_block(&who, &w.stop("s1", &t, ""), &broken, &w.state(), &|_| {
             anyhow::bail!("mailbox full")
         })
         .reason
@@ -1078,7 +1235,7 @@ mod tests {
         for _ in 0..2 {
             let stop = w.stop("s1", &t, "");
             assert_eq!(
-                handoff_block(&who, &stop, broken(), &w.state(), &note)
+                handoff_block(&who, &stop, &broken, &w.state(), &note)
                     .reason
                     .unwrap(),
                 None
@@ -1100,7 +1257,7 @@ mod tests {
         let err = handoff_block(
             &who,
             &w.stop("s1", &t, ""),
-            Err(anyhow::anyhow!("bad")),
+            &|_| Err(anyhow::anyhow!("bad")),
             &w.state(),
             &|_| anyhow::bail!("mailbox full"),
         )
@@ -1121,7 +1278,7 @@ mod tests {
         let noted = handoff_block(
             &who,
             &w.stop("s1", &t, ""),
-            Err(anyhow::anyhow!("bad")),
+            &|_| Err(anyhow::anyhow!("bad")),
             &w.state(),
             &|_| anyhow::bail!("mailbox full"),
         );
@@ -1135,7 +1292,7 @@ mod tests {
         let asked = handoff_block(
             &who,
             &w.stop("s2", &t, ""),
-            Ok(100),
+            &fixed_limit(100),
             &w.state(),
             &|_| Ok(()),
         );
@@ -1154,7 +1311,7 @@ mod tests {
         let w = World::new();
         let who = member("lh-1", None);
         let t = w.transcript(&[assistant(0, 0, 120_000, false)]);
-        let measure = |input: &[u8], limit| {
+        let measure = |input: &[u8], limit: &dyn Fn(Option<&str>) -> Result<Limit>| {
             handoff_block(&who, input, limit, &w.state(), &|_| Ok(())).measured
         };
         let at = |limit| {
@@ -1163,13 +1320,167 @@ mod tests {
                 limit,
             })
         };
-        assert_eq!(measure(&w.stop("s1", &t, ""), Ok(150_000)), at(150_000));
+        assert_eq!(
+            measure(&w.stop("s1", &t, ""), &fixed_limit(150_000)),
+            at(150_000)
+        );
         let continued = w.stop("s1", &t, r#","stop_hook_active":true"#);
-        assert_eq!(measure(&continued, Ok(150_000)), at(150_000));
-        let broken = Err(anyhow::anyhow!("bad"));
-        assert_eq!(measure(&continued, broken), at(160_000));
+        assert_eq!(measure(&continued, &fixed_limit(150_000)), at(150_000));
+        assert_eq!(
+            measure(&continued, &|_| Err(anyhow::anyhow!("bad"))),
+            at(160_000)
+        );
         let untranscribed = br#"{"hook_event_name":"Stop","session_id":"s1"}"#;
-        assert_eq!(measure(untranscribed, Ok(150_000)), None);
+        assert_eq!(measure(untranscribed, &fixed_limit(150_000)), None);
+    }
+
+    fn turn(model: &str, tokens: u64) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "isSidechain": false,
+            "message": {"model": model, "usage": {"input_tokens": tokens}},
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn the_window_comes_from_the_last_turns_model_unless_config_sets_one() {
+        let model = |m: &str| WindowFrom::Model(m.into());
+        for (config_text, model_id, window, from) in [
+            (None, "claude-opus-5-5", 1_000_000, model("claude-opus-5-5")),
+            (
+                None,
+                "claude-sonnet-5-5",
+                1_000_000,
+                model("claude-sonnet-5-5"),
+            ),
+            (
+                None,
+                "claude-haiku-5-5",
+                1_000_000,
+                model("claude-haiku-5-5"),
+            ),
+            (
+                None,
+                "claude-fable-5-2",
+                1_000_000,
+                model("claude-fable-5-2"),
+            ),
+            (None, "claude-opus-4-7", 1_000_000, model("claude-opus-4-7")),
+            (None, "claude-opus-4-6", 200_000, model("claude-opus-4-6")),
+            (
+                None,
+                "claude-haiku-4-5-20251001",
+                200_000,
+                model("claude-haiku-4-5-20251001"),
+            ),
+            (
+                None,
+                "claude-opus-4-20250514",
+                200_000,
+                model("claude-opus-4-20250514"),
+            ),
+            (
+                Some("context_window = 300000\n"),
+                "claude-opus-5-5",
+                300_000,
+                WindowFrom::Config,
+            ),
+        ] {
+            let w = World::new();
+            let (_dir, path) = config(config_text);
+            let t = w.transcript(&[
+                turn("claude-haiku-4-5", 10),
+                turn(model_id, 120_000),
+                turn("<synthetic>", 0),
+            ]);
+            let limit = |m: Option<&str>| effective_limit(Some(900_000), &path, m);
+            let check = handoff_block(
+                &member("lh-1", None),
+                &w.stop("s1", &t, ""),
+                &limit,
+                &w.state(),
+                &|_| Ok(()),
+            );
+            assert_eq!(
+                check.measured.map(|m| m.limit),
+                Some(window / 5 * 4),
+                "{model_id}"
+            );
+            assert_eq!(
+                check.window,
+                Some(Window {
+                    tokens: window,
+                    from
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_model_gets_the_default_window_and_one_note_per_session() {
+        let w = World::new();
+        let (_dir, path) = config(None);
+        let t = w.transcript(&[turn("claude-mystery-9", 100)]);
+        let limit = |m: Option<&str>| effective_limit(None, &path, m);
+        let noted = std::cell::RefCell::new(vec![]);
+        let stop = |session| {
+            handoff_block(
+                &member("lh-1", None),
+                &w.stop(session, &t, ""),
+                &limit,
+                &w.state(),
+                &|text| {
+                    noted.borrow_mut().push(text);
+                    Ok(())
+                },
+            )
+        };
+        let check = stop("s1");
+        stop("s1");
+        assert_eq!(check.measured.map(|m| m.limit), Some(160_000));
+        assert_eq!(
+            *noted.borrow(),
+            [
+                "my model claude-mystery-9 has no known context window, so my limit assumes \
+              200000; set the right one with `loopherd config set context_window <tokens>`"
+            ]
+        );
+        stop("s2");
+        assert_eq!(noted.borrow().len(), 2);
+    }
+
+    #[test]
+    fn a_configured_window_leaves_an_unknown_model_unnoted() {
+        let w = World::new();
+        let (_dir, path) = config(Some("context_window = 500000\n"));
+        let t = w.transcript(&[turn("claude-mystery-9", 100)]);
+        let limit = |m: Option<&str>| effective_limit(None, &path, m);
+        let noted = std::cell::RefCell::new(vec![]);
+        handoff_block(
+            &member("lh-1", None),
+            &w.stop("s1", &t, ""),
+            &limit,
+            &w.state(),
+            &|text| {
+                noted.borrow_mut().push(text);
+                Ok(())
+            },
+        );
+        assert!(noted.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_shepherds_limit_follows_its_sessions_model() {
+        let (_dir, path) = config(None);
+        assert_eq!(
+            shepherd_limit(&path, Some("claude-opus-5-5")).unwrap(),
+            250_000
+        );
+        assert_eq!(
+            shepherd_limit(&path, Some("claude-haiku-4-5")).unwrap(),
+            160_000
+        );
     }
 
     #[test]
@@ -1180,7 +1491,7 @@ mod tests {
         let blocked = handoff_block(
             &member("lh-1", None),
             input,
-            Err(anyhow::anyhow!("bad")),
+            &|_| Err(anyhow::anyhow!("bad")),
             &w.state(),
             &|text| {
                 noted.borrow_mut().push(text);
@@ -1274,7 +1585,7 @@ mod shepherd_tests {
                 me: 36,
                 claude_dir: &self.claude(),
                 state: &self.state(),
-                limit,
+                limit: &|_| Some(limit),
                 pane: Some("w1:p1"),
                 socket: Some(Path::new("/run/herdr.sock")),
                 shell_pid: &|| Ok(self.shell_pid),
@@ -1376,7 +1687,7 @@ mod shepherd_tests {
                 me: 36,
                 claude_dir: &claude,
                 state: &state,
-                limit: 160_000,
+                limit: &|_| Some(160_000),
                 pane: Some("w1:p1"),
                 socket: Some(Path::new("/run/herdr.sock")),
                 shell_pid: &shell_pid,
@@ -1413,7 +1724,7 @@ mod shepherd_tests {
                 me: 36,
                 claude_dir: &claude,
                 state: &state,
-                limit: 100_000,
+                limit: &|_| Some(100_000),
                 pane,
                 socket,
                 shell_pid: &|| Ok(Some(20)),
@@ -1438,7 +1749,7 @@ mod shepherd_tests {
             me: 36,
             claude_dir: &claude,
             state: &state,
-            limit: 160_000,
+            limit: &|_| Some(160_000),
             pane: Some("w1:p1"),
             socket: Some(Path::new("/run/herdr.sock")),
             shell_pid: &|| Ok(Some(20)),
@@ -1470,7 +1781,7 @@ mod shepherd_tests {
             me: 36,
             claude_dir: &claude,
             state: &state,
-            limit: 100_000,
+            limit: &|_| Some(100_000),
             pane: None,
             socket: None,
             shell_pid: &|| Ok(Some(20)),

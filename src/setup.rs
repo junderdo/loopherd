@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use crate::config::{self, ConfigFile};
-use crate::context::{DEFAULT_LIMIT, DEFAULT_WINDOW, check_tokens};
+use crate::context::{DEFAULT_LIMIT, LARGEST_WINDOW, check_tokens};
 use crate::herd::SwitchValues;
 
 /// One group of settings: `None` to ask it only while unset (all of them
@@ -166,7 +166,7 @@ fn context_flag(flag: &str, file: &ConfigFile) -> Result<Limits> {
     let window = context
         .window
         .or(file.context_window)
-        .unwrap_or(DEFAULT_WINDOW);
+        .unwrap_or(LARGEST_WINDOW);
     for (key, limit) in [
         (
             "default_context_limit",
@@ -284,14 +284,18 @@ fn ask_tokens(
 
 fn ask_context_values(term: &mut Terminal, file: &ConfigFile) -> Result<Limits> {
     term.say("Handoffs: past its handoff limit, a member, lead or the shepherd writes a handoff and starts a fresh session. Enter keeps the value shown.")?;
-    let window = ask_tokens(
-        term,
-        "context_window",
-        "tokens in your model's context window; no limit goes over 80% of it",
-        file.context_window.unwrap_or(DEFAULT_WINDOW),
-        None,
-    )?;
-    let effective_window = window.or(file.context_window).unwrap_or(DEFAULT_WINDOW);
+    // Unset, the window comes from each session's model.
+    let window = match file.context_window {
+        Some(current) => ask_tokens(
+            term,
+            "context_window",
+            "tokens in your model's context window; no limit goes over 80% of it",
+            current,
+            None,
+        )?,
+        None => None,
+    };
+    let effective_window = window.or(file.context_window).unwrap_or(LARGEST_WINDOW);
     let limit = ask_tokens(
         term,
         "default_context_limit",

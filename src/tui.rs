@@ -1505,6 +1505,7 @@ max = 3
             error: None,
             context: None,
             limit: None,
+            window: None,
             session: None,
         })
     }
@@ -3137,6 +3138,7 @@ max = 3
             crons: report::Tally::Known(0),
             error: None,
             context: None,
+            window: None,
             limit: None,
             session: None,
         })
@@ -3747,6 +3749,7 @@ max = 3
                 }),
                 crons: report::Tally::Known(0),
                 error: error.map(str::to_string),
+                window: None,
                 context: None,
                 limit: None,
                 session: None,
@@ -3935,6 +3938,7 @@ max = 3
             Body::Stop(report::Stop {
                 background,
                 crons,
+                window: None,
                 error: None,
                 context: None,
                 limit: None,

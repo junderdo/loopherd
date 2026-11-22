@@ -2158,6 +2158,7 @@ mod tests {
             error: None,
             context: None,
             limit: None,
+            window: None,
         })
     }
 
@@ -2168,6 +2169,7 @@ mod tests {
             crons: Tally::Unknown(Unknown::Unknown),
             error: Some(error.into()),
             context: None,
+            window: None,
             limit: None,
         })
     }
@@ -2313,6 +2315,7 @@ mod tests {
                 background: Tally::Unknown(Unknown::Unknown),
                 crons: Tally::Known(0),
                 error: None,
+                window: None,
                 context: None,
                 limit: None,
             }),
@@ -6132,6 +6135,7 @@ mod tests {
             session: None,
             background: Tally::Known(Background::default()),
             crons: Tally::Known(0),
+            window: None,
             error: Some("rate_limit".into()),
             context: None,
             limit: None,

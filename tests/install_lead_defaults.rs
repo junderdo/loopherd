@@ -317,7 +317,7 @@ fn a_context_flag_passes_through_to_setup_without_asking() {
     let over = fresh.install(&["--context=limit=900000"]);
     assert_eq!(over.status.code(), Some(1), "{over:?}");
     assert!(
-        String::from_utf8_lossy(&over.stderr).contains("over the cap of 160000"),
+        String::from_utf8_lossy(&over.stderr).contains("over the cap of 800000"),
         "{over:?}"
     );
     assert!(!fresh.home.join(".local/bin/loopherd").exists());

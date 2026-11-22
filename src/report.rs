@@ -170,6 +170,9 @@ pub struct Stop {
     /// The member's context limit, set alongside `context`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
+    /// The context window that capped `limit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<crate::context::Window>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1903,6 +1906,7 @@ mod tests {
             error: error.map(Into::into),
             context: None,
             limit: None,
+            window: None,
         })
     }
 
@@ -2238,6 +2242,7 @@ mod tests {
                     crons: unknown,
                     error: Some("rate_limit".into()),
                     context: None,
+                    window: None,
                     limit: None,
                 }),
                 "error rate_limit; background and crons unknown",
@@ -2265,6 +2270,7 @@ mod tests {
                     background: Tally::Unknown(Unknown::Unknown),
                     crons: Tally::Known(0),
                     error: None,
+                    window: None,
                     context: None,
                     limit: None,
                 }),
@@ -2291,6 +2297,7 @@ mod tests {
                     other: 3,
                 }),
                 crons: Tally::Unknown(Unknown::Unknown),
+                window: None,
                 error: None,
                 context: None,
                 limit: None,
@@ -2338,6 +2345,7 @@ mod tests {
         Stop {
             background: Tally::Known(Background::default()),
             crons: Tally::Known(0),
+            window: None,
             error: None,
             session: None,
             context: None,

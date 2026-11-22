@@ -120,13 +120,12 @@ fn on(table: &toml::Table, switch: &str) -> Option<bool> {
 }
 
 #[test]
-fn a_first_setup_asks_the_lead_switches_then_the_context_values() {
+fn a_first_setup_asks_the_lead_switches_then_the_limits_but_not_the_window() {
     let config = Config::new(Some("# mine\n"));
 
-    // merge yes, install no, rebase yes, the rest by default; a 1M window; a
-    // limit over its cap, then one under; Enter for the shepherd.
-    let Some(out) = config.setup_on_terminal(&[], "y\nn\ny\n\n\n\n\n1000000\n900000\n500000\n\n")
-    else {
+    // merge yes, install no, rebase yes, the rest by default; a limit over
+    // the largest window's cap, then one under; Enter for the shepherd.
+    let Some(out) = config.setup_on_terminal(&[], "y\nn\ny\n\n\n\n\n900000\n500000\n\n") else {
         return;
     };
 
@@ -134,8 +133,8 @@ fn a_first_setup_asks_the_lead_switches_then_the_context_values() {
         out.contains("merge: merge a PR its reviewer verified? [y/N]"),
         "{out}"
     );
-    assert!(out.contains("context_window: "), "{out}");
-    assert!(out.contains("[200000]"), "{out}");
+    assert!(!out.contains("context_window: "), "{out}");
+    assert!(out.contains("[250000]"), "{out}");
     assert!(out.contains("over the cap of 800000"), "{out}");
     assert!(
         out.contains("shepherd.context_limit: ") && out.contains("[500000]"),
@@ -146,7 +145,7 @@ fn a_first_setup_asks_the_lead_switches_then_the_context_values() {
     assert_eq!(on(&values, "install"), Some(false));
     assert_eq!(on(&values, "rebase"), Some(true));
     assert_eq!(on(&values, "blocked_dialogs"), Some(false));
-    assert_eq!(int(&values, "context_window"), Some(1_000_000));
+    assert_eq!(int(&values, "context_window"), None);
     assert_eq!(int(&values, "default_context_limit"), Some(500_000));
     assert_eq!(int(&values, "shepherd.context_limit"), None);
     let text = config.text().unwrap();
@@ -164,7 +163,7 @@ fn enter_keeps_each_context_value_and_writes_nothing() {
 
     assert!(!out.contains("merge a PR"), "{out}");
     assert!(out.contains("default_context_limit: "), "{out}");
-    assert!(out.contains("[160000]"), "{out}");
+    assert!(out.contains("[250000]"), "{out}");
     assert_eq!(config.text().unwrap(), text);
 }
 
@@ -203,12 +202,12 @@ fn once_both_groups_are_set_setup_asks_nothing_until_again() {
 fn a_bare_group_flag_asks_just_that_group() {
     let config = Config::new(None);
 
-    let Some(out) = config.setup_on_terminal(&["--context"], "\n250000\n\n") else {
+    let Some(out) = config.setup_on_terminal(&["--context"], "900000\n\n\n") else {
         return;
     };
 
     assert!(!out.contains("merge a PR"), "{out}");
-    assert!(out.contains("over the cap of 160000"), "{out}");
+    assert!(out.contains("over the cap of 800000"), "{out}");
     assert_eq!(config.text(), None);
 }
 
@@ -239,7 +238,7 @@ fn flags_set_values_without_asking() {
 fn a_bad_flag_is_refused_and_changes_nothing() {
     for args in [
         ["--lead-defaults=merj", "--context=limit=100000"],
-        ["--lead-defaults=merge", "--context=limit=170000"],
+        ["--lead-defaults=merge", "--context=limit=900000"],
         ["--lead-defaults=merge", "--context=size=500000"],
         ["--lead-defaults=merge", "--context=window=5000"],
         ["--lead-defaults=merge", "--context=window=lots"],

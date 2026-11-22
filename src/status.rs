@@ -1381,6 +1381,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             session: Some("sess-lh-42".into()),
             context: None,
             limit: None,
+            window: None,
         })
     }
 

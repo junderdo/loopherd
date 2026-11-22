@@ -2091,10 +2091,12 @@ fn run_notify(member: String, sender: notify::Sender, args: Vec<String>) -> Resu
 /// The shepherd's handoff line when its Claude is past its limit; a failing
 /// check warns and adds no line.
 fn shepherd_handoff(paths: &Paths, state: &Path) -> Option<context::ShepherdHandoff> {
-    let limit = context::shepherd_limit(&paths.herds.with_file_name("config.toml"));
-    let limit = limit
-        .inspect_err(|e| eprintln!("loopherd watch: warning: {e:#}"))
-        .ok()?;
+    let config = paths.herds.with_file_name("config.toml");
+    let limit = |model: Option<&str>| {
+        context::shepherd_limit(&config, model)
+            .inspect_err(|e| eprintln!("loopherd watch: warning: {e:#}"))
+            .ok()
+    };
     let claude_dir = install_hook::claude_dir().ok()?;
     context::shepherd_handoff(&context::ShepherdCheck {
         procs: &process::ProcFs,
@@ -2102,7 +2104,7 @@ fn shepherd_handoff(paths: &Paths, state: &Path) -> Option<context::ShepherdHand
         me: std::process::id(),
         claude_dir: &claude_dir,
         state,
-        limit,
+        limit: &limit,
         pane: own_pane().as_deref(),
         socket: socket_from_env().as_deref(),
         shell_pid: &|| match own_pane() {
@@ -2145,12 +2147,14 @@ fn run_stop_hook() -> Result<i32> {
         eprintln!("loopherd stop-hook: warning: record the shepherd's stop: {e:#}");
     }
     let handoff = |member: &ledger::AgentRecord| {
-        let limit = Paths::from_env().and_then(|paths| herd::context_limit(&paths, member));
+        let limit = |model: Option<&str>| {
+            Paths::from_env().and_then(|paths| herd::context_limit(&paths, member, model))
+        };
         let note = |text| {
             let entry = report::Entry::new(SystemTime::now(), report::Body::Note { text });
             report::append(&reports, &member.name, &entry)
         };
-        context::handoff_block(member, &input, limit, &state, &note)
+        context::handoff_block(member, &input, &limit, &state, &note)
     };
     let stopped = stop_hook::stop_hook(
         &mut ledger,

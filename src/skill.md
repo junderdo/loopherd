@@ -289,9 +289,11 @@ stays, and a revive doesn't count, since it keeps the conversation.
 handoff an older loopherd left flat at `handoffs/<name>.md` is still read,
 and moves to `handoffs/<name>/prev.md` once used. The
 limit is the template's or `[lead]`'s `context_limit`, else `default_context_limit` in
-`$LOOPHERD_CONFIG_DIR/config.toml`, else 250000, never over 80% of that
-file's `context_window` (default 200000). `loopherd setup --context` asks
-for the three `config.toml` values and `loopherd config get|set|unset
+`$LOOPHERD_CONFIG_DIR/config.toml`, else 250000, never over 80% of the
+context window: that file's `context_window` if set, else the session's
+model's (1M for 4.7 and later, else 200000). An unknown model gets 200000
+and a `note` once per session. `loopherd setup --context` sets
+the three `config.toml` values and `loopherd config get|set|unset
 <key>` reads or writes one (`context_window`, `default_context_limit`,
 `shepherd.context_limit`); change them only when the human says so. A
 broken `config.toml` or herd
@@ -396,7 +398,7 @@ and, once per session past your limit, adds `shepherd handoff <n>k over
 <limit>k`. Your limit is `[shepherd] context_limit` in
 `$LOOPHERD_CONFIG_DIR/config.toml`, else that file's
 `default_context_limit`, else 250000, never over 80% of its
-`context_window`. When the line comes:
+`context_window`, else of your model's window. When the line comes:
 
 1. Handle the other lines it came with, but feed nothing new and don't
    re-arm the watch. Members and leads keep working; what they report
