@@ -50,6 +50,19 @@ and checks it against the release's `SHA256SUMS`. To pin a release:
 curl -fsSL https://junderdo.dev/loopherd/install.sh | LOOPHERD_VERSION=v0.1.0 sh
 ```
 
+Like `scripts/install`, it plays the splash and, asking on the terminal,
+offers the agent types, the `mattpocock-skills` plugin, the herdr plugin
+and its key bindings (each default no); without a terminal it skips each
+and names its flag. Flags go after `sh -s --`:
+
+```bash
+curl -fsSL https://junderdo.dev/loopherd/install.sh | sh -s -- --no-splash --with-agents
+```
+
+It takes `--no-splash` (or `LOOPHERD_NO_SPLASH=1`), `--with-agents`,
+`--with-skills`, `--with-herdr-plugin`, `--with-herdr-keys` and
+`--no-extras`, meaning what they mean to `scripts/install`.
+
 The same script is served as
 `https://github.com/junderdo/loopherd/releases/latest/download/install.sh`.
 

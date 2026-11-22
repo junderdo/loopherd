@@ -1,4 +1,4 @@
-# Sourced by scripts/install: offers loopherd's agent types without ever
+# Sourced by scripts/install-extras: offers loopherd's agent types without ever
 # overwriting a file the human owns or edited unasked (docs/decisions/D26.md).
 #
 # The ledger holds "<sha256> <path>" for each file loopherd installed, so a
@@ -112,7 +112,7 @@ agents_place() {
     return
   fi
   if [[ ! -t 0 ]]; then
-    echo "kept $target ($conflict); run scripts/install on a terminal to choose"
+    echo "kept $target ($conflict); rerun the installer on a terminal to choose"
     return
   fi
   local can_overwrite=
@@ -162,19 +162,26 @@ offer_agents() {
   local extras=$1 name answer
   agents_src=$2 agents_dir=$3 agents_ledger=$4
   [[ "$extras" != --no-extras ]] || return 0
-  if [[ "$extras" == ask && ! -t 0 ]]; then
-    echo "skipped loopherd's agent types (no terminal); add --with-agents to install them"
-    return 0
-  fi
   agents_resolve_dir
   agents_tmp=$(mktemp -d)
   trap 'rm -rf "$agents_tmp"' EXIT
-  local overlaps=()
+  local overlaps=() installed=1
   for name in "${agent_names[@]}"; do
     agents_pick "$name"
     agents_check "$pick_want" "$pick_target" "$pick_agent"
     [[ -z "$conflict" ]] || overlaps+=("  $pick_target: $conflict")
+    [[ -z "$conflict" && -f "$pick_target" && "$(agents_sha "$pick_target")" == "$(agents_sha "$pick_want")" ]] || installed=
   done
+  if [[ -n "$installed" && "$extras" == ask ]]; then
+    echo "loopherd's agent types are already installed in $agents_dir; left as is"
+    rm -rf "$agents_tmp"
+    return 0
+  fi
+  if [[ "$extras" == ask && ! -t 0 ]]; then
+    echo "skipped loopherd's agent types (no terminal); add --with-agents to install them"
+    rm -rf "$agents_tmp"
+    return 0
+  fi
   if ((${#overlaps[@]})); then
     echo "loopherd's agent types overlap these files in $agents_dir:"
     printf '%s\n' "${overlaps[@]}"

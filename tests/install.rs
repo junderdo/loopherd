@@ -711,6 +711,11 @@ fn install_without_the_splash_file_still_installs() {
         fs::read_to_string(INSTALL).unwrap(),
     );
     fs::copy(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install-extras"),
+        scripts.join("install-extras"),
+    )
+    .unwrap();
+    fs::copy(
         concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install-agents.bash"),
         scripts.join("install-agents.bash"),
     )

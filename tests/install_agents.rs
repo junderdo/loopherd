@@ -31,6 +31,11 @@ impl Sandbox {
         fs::create_dir_all(root.join("scripts")).unwrap();
         fs::create_dir_all(root.join("agents")).unwrap();
         fs::copy(
+            format!("{REPO}/scripts/install-extras"),
+            root.join("scripts/install-extras"),
+        )
+        .unwrap();
+        fs::copy(
             format!("{REPO}/scripts/install-agents.bash"),
             root.join("scripts/install-agents.bash"),
         )
@@ -279,6 +284,28 @@ fn a_rerun_skips_files_identical_to_loopherds() {
         stdout(&out)
     );
     assert_eq!(sandbox.agent_files(), all_installed());
+}
+
+#[test]
+fn without_a_terminal_installed_agent_types_are_said_to_be_installed() {
+    let sandbox = Sandbox::new();
+    sandbox.install(&["--with-agents"]);
+
+    let out = sandbox.install(&[]);
+
+    assert!(
+        stdout(&out).contains(&format!(
+            "loopherd's agent types are already installed in {}; left as is",
+            sandbox.agents_dir().display()
+        )),
+        "{}",
+        stdout(&out)
+    );
+    assert!(
+        !stdout(&out).contains("add --with-agents"),
+        "{}",
+        stdout(&out)
+    );
 }
 
 #[test]
