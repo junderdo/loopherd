@@ -277,30 +277,18 @@ fn npm_helpers(claude: Option<&Path>) -> Vec<Filter> {
         .collect()
 }
 
-/// `command`'s output, with no stdin; once it has run `secs` seconds it's
-/// killed and this errs `TimedOut`. Its output must fit a pipe's buffer.
+/// `command`'s output, with no stdin, run in its own process group; once it,
+/// or a descendant holding its output, has run `secs` seconds the group is
+/// killed and this errs `TimedOut`.
 fn output_within(
     command: &mut std::process::Command,
     secs: u64,
 ) -> std::io::Result<std::process::Output> {
-    let mut child = command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
-    while child.try_wait()?.is_none() {
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(std::io::Error::new(
-                ErrorKind::TimedOut,
-                format!("still running after {secs}s"),
-            ));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    child.wait_with_output()
+    crate::shell::run_within(command, std::time::Duration::from_secs(secs))
+        .map_err(std::io::Error::other)?
+        .ok_or_else(|| {
+            std::io::Error::new(ErrorKind::TimedOut, format!("still running after {secs}s"))
+        })
 }
 
 /// Whether one of WSL2's binfmt_misc entries for Windows programs is enabled here.
@@ -2528,6 +2516,20 @@ mod tests {
 
         assert_eq!(err.kind(), ErrorKind::TimedOut);
         assert_eq!(err.to_string(), "still running after 1s");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_probe_command_whose_descendant_holds_its_output_returns_by_its_deadline() {
+        let started = std::time::Instant::now();
+
+        let out = output_within(
+            std::process::Command::new("sh").args(["-c", "sleep 30 & echo forked"]),
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "forked\n");
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
