@@ -15,7 +15,7 @@ use crate::sandbox::{
     file_rule, launch_flag_refusal, launch_flags_in, loosened_warning, loosenings, mcp_file,
     outside_allowlist, without_launch_flags, write_private,
 };
-use crate::spawn::{MemberOf, SpawnRequest, Spawned};
+use crate::spawn::{Checkout, MemberOf, SpawnRequest, Spawned};
 
 /// `[worker] sandbox`: whether a herd's workers start sandboxed, and what
 /// happens to one whose sandbox can't start.
@@ -200,37 +200,8 @@ pub fn prepare(
     }
     let herd = &member.herd;
     let require = worker.sandbox == WorkerSandbox::Require;
-    let prefer_instead = format!(
-        "or set [worker] sandbox = \"prefer\" in herd {herd} to start it with them as warnings"
-    );
-    let sources = arg_sources(paths, member, from)?;
-    if let Some(why) = launch_flag_refusals(name, &sources).into_iter().next() {
-        return Err(NotStarted(why).into());
-    }
-    let disallowed = disallowed(&sources);
-    if require && !disallowed.is_empty() {
-        let fix = match from {
-            ArgsFrom::Fresh => "drop those".to_string(),
-            ArgsFrom::Kept => format!(
-                "retire it and add it again from herd {herd}'s template {}, without those",
-                member.template
-            ),
-        };
-        return Err(NotStarted(format!(
-            "{name} can't start sandboxed: its args may loosen its sandbox or permissions: {}; \
-             a sandboxed worker takes only {ALLOWED_ARGS}, so {fix}, {prefer_instead}",
-            disallowed.join("; ")
-        ))
-        .into());
-    }
-    // An unreadable ~/.claude.json refuses this worker alone, so a feed goes on.
-    let mcp_config = crate::sandbox::user_scope_mcp_config(paths, &worker.mcp_servers)
-        .map_err(|e| NotStarted(format!("{name} can't start: its MCP servers: {e:#}")))?
-        .map_err(|server| {
-            NotStarted(crate::sandbox::unknown_mcp_server(
-                paths, name, herd, "[worker]", &server, "a worker",
-            ))
-        })?;
+    let prefer_instead = prefer_instead(herd);
+    let (disallowed, mcp_config) = judge_args_and_mcp(paths, name, member, &worker, from)?;
     // A branch checked out in the main checkout plans the main checkout itself.
     let repo = herd::repo(paths, herd)?;
     let worktree =
@@ -308,6 +279,53 @@ pub fn prepare(
         mcp,
         warnings,
     })
+}
+
+/// The refusals `prepare` makes from worker `name`'s args and MCP servers
+/// alone, before its worktree is read; else its disallowed args and MCP config.
+fn judge_args_and_mcp(
+    paths: &Paths,
+    name: &str,
+    member: &Member,
+    worker: &herd::Worker,
+    from: ArgsFrom,
+) -> Result<(Vec<String>, Value)> {
+    let herd = &member.herd;
+    let require = worker.sandbox == WorkerSandbox::Require;
+    let prefer_instead = prefer_instead(herd);
+    let sources = arg_sources(paths, member, from)?;
+    if let Some(why) = launch_flag_refusals(name, &sources).into_iter().next() {
+        return Err(NotStarted(why).into());
+    }
+    let disallowed = disallowed(&sources);
+    if require && !disallowed.is_empty() {
+        let fix = match from {
+            ArgsFrom::Fresh => "drop those".to_string(),
+            ArgsFrom::Kept => format!(
+                "retire it and add it again from herd {herd}'s template {}, without those",
+                member.template
+            ),
+        };
+        return Err(NotStarted(format!(
+            "{name} can't start sandboxed: its args may loosen its sandbox or permissions: {}; \
+             a sandboxed worker takes only {ALLOWED_ARGS}, so {fix}, {prefer_instead}",
+            disallowed.join("; ")
+        ))
+        .into());
+    }
+    // An unreadable ~/.claude.json refuses this worker alone, so a feed goes on.
+    let mcp_config = crate::sandbox::user_scope_mcp_config(paths, &worker.mcp_servers)
+        .map_err(|e| NotStarted(format!("{name} can't start: its MCP servers: {e:#}")))?
+        .map_err(|server| {
+            NotStarted(crate::sandbox::unknown_mcp_server(
+                paths, name, herd, "[worker]", &server, "a worker",
+            ))
+        })?;
+    Ok((disallowed, mcp_config))
+}
+
+fn prefer_instead(herd: &str) -> String {
+    format!("or set [worker] sandbox = \"prefer\" in herd {herd} to start it with them as warnings")
 }
 
 /// A worker's args split by where they were set, each part named.
@@ -429,17 +447,11 @@ pub fn spawn(
     let fresh = checkout_before_prepare(herdr, paths, req, &member, inherited_workspace)?;
     let launch = match prepare(paths, &req.name, &member, ArgsFrom::Fresh, probe) {
         Ok(launch) => launch,
-        // A retry would reuse the worktree as it is, not as origin then has it.
+        // A retry would reuse the worktree and branch as they are, not as origin then has them.
         Err(e) => {
-            return Err(match fresh {
-                Some(dir) => match crate::worktree::remove_worktree(&req.repo, &dir) {
-                    Ok(()) => e,
-                    Err(left) => e.context(format!(
-                        "its new worktree {} is left: {left:#}",
-                        dir.display()
-                    )),
-                },
-                None => e,
+            return Err(match fresh.map(|f| f.remove(&req.repo)) {
+                Some(Err(left)) => e.context(format!("{left:#}")),
+                _ => e,
             });
         }
     };
@@ -474,23 +486,59 @@ pub fn spawn(
     Ok((spawned, warnings))
 }
 
-/// Checks out a sandboxed worker's worktree, after spawn's own refusals, so
-/// `prepare` reads its project settings. Returns it when it's new.
+/// A worktree `add` or `feed` just checked out, with the local branch it created.
+struct Fresh {
+    dir: PathBuf,
+    branch: Option<String>,
+}
+
+impl Fresh {
+    fn remove(self, repo: &Path) -> Result<()> {
+        let removed = match &self.branch {
+            Some(branch) => crate::worktree::remove_worktree_and_branch(repo, &self.dir, branch),
+            None => crate::worktree::remove_worktree(repo, &self.dir),
+        };
+        removed.with_context(|| match &self.branch {
+            Some(branch) => format!(
+                "its new worktree {} or branch {branch} is left",
+                self.dir.display()
+            ),
+            None => format!("its new worktree {} is left", self.dir.display()),
+        })
+    }
+}
+
+/// Checks out a sandboxed worker's worktree, after spawn's own refusals and
+/// those of its args and MCP servers, so `prepare` reads its project settings.
 fn checkout_before_prepare(
     herdr: &dyn Herdr,
     paths: &Paths,
     req: &SpawnRequest,
     member: &Member,
     inherited_workspace: Option<&str>,
-) -> Result<Option<PathBuf>> {
-    let on = herd::worker(paths, &member.herd).is_ok_and(|w| w.sandbox != WorkerSandbox::Off);
-    let (Some(checkout), Some(planned), true) = (&req.worktree, &member.worktree, on) else {
+) -> Result<Option<Fresh>> {
+    let worker = herd::worker(paths, &member.herd).ok();
+    let (Some(checkout), Some(planned), Some(worker)) = (&req.worktree, &member.worktree, worker)
+    else {
         return Ok(None);
     };
+    if worker.sandbox == WorkerSandbox::Off {
+        return Ok(None);
+    }
     crate::spawn::preview(herdr, req, inherited_workspace)?;
+    judge_args_and_mcp(paths, &req.name, member, &worker, ArgsFrom::Fresh)?;
+    let branch = match checkout {
+        Checkout::Branch(branch) if !crate::worktree::has_local_branch(&req.repo, branch) => {
+            Some(branch.clone())
+        }
+        _ => None,
+    };
     let fresh = !planned.exists();
     checkout.ensure(&req.repo).context("worktree")?;
-    Ok(fresh.then(|| planned.clone()))
+    Ok(fresh.then(|| Fresh {
+        dir: planned.clone(),
+        branch,
+    }))
 }
 
 /// Why running worker `record` is without the sandbox its herd's `[worker]`

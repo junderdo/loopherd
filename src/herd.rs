@@ -1732,8 +1732,85 @@ args = ["--model", "opus"]
             "{err:#}"
         );
         assert!(!worktree.exists(), "the new worktree is removed");
+        assert!(
+            !crate::worktree::has_local_branch(&repo, "feature/existing"),
+            "the branch it created is deleted, so a retry checks out origin's tip"
+        );
         assert!(herdr.started().is_empty());
         assert!(ledger.0.is_empty());
+    }
+
+    /// `worker_config`'s herd with a home whose Claude settings allow Write.
+    fn loosening_home(config: &Config, root: &Path) -> Paths {
+        let mut paths = config.paths();
+        paths.home = root.join("home");
+        fs::create_dir_all(paths.home.join(".claude")).unwrap();
+        fs::write(
+            paths.home.join(".claude/settings.json"),
+            r#"{"permissions": {"allow": ["Write"]}}"#,
+        )
+        .unwrap();
+        paths
+    }
+
+    #[test]
+    fn a_refused_workers_branch_that_was_local_before_is_kept_and_only_its_worktree_removed() {
+        let (config, root) = worker_config("sandbox = \"require\"");
+        let paths = loosening_home(&config, root.path());
+        let repo = root.path().join("proj/proj");
+        crate::worktree::testing::git_in(
+            &repo,
+            &[
+                "branch",
+                "--quiet",
+                "feature/existing",
+                "origin/feature/existing",
+            ],
+        );
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+
+        let err = add(
+            &herdr,
+            &mut ledger,
+            &paths,
+            &request("prs", "pr", &["1050"]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("your Claude settings loosen its sandbox"),
+            "{err:#}"
+        );
+        let worktree = crate::worktree::planned_worktree(&repo, "feature/existing").unwrap();
+        assert!(!worktree.exists(), "the new worktree is removed");
+        assert!(crate::worktree::has_local_branch(&repo, "feature/existing"));
+    }
+
+    #[test]
+    fn a_required_workers_args_refuse_it_before_its_worktree_is_checked_out() {
+        let (config, root) = worker_config("sandbox = \"require\"");
+        let paths = config.paths();
+        let repo = root.path().join("proj/proj");
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        let mut req = request("prs", "pr", &["1050"]);
+        req.claude_args = vec!["--add-dir".into(), "/tmp".into()];
+
+        let err = add(&herdr, &mut ledger, &paths, &req, Some("w1")).unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("its args may loosen its sandbox or permissions"),
+            "{err:#}"
+        );
+        let worktree = crate::worktree::planned_worktree(&repo, "feature/existing").unwrap();
+        assert!(!worktree.exists());
+        assert!(!crate::worktree::has_local_branch(
+            &repo,
+            "feature/existing"
+        ));
+        assert!(!paths.config_dir().join("sandbox").exists());
     }
 
     #[test]
