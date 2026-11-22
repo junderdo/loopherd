@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use toml_edit::{DocumentMut, Item, RawString, Table, TableLike, Value};
 
-use crate::context::check_tokens;
+use crate::context::{self, Limit, check_limit, check_tokens};
 use crate::herd::SwitchValues;
 use crate::line_ending::LineEnding;
 use crate::tui::theme::Palette;
@@ -16,7 +16,7 @@ use crate::tui::theme::Palette;
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigFile {
-    pub default_context_limit: Option<u64>,
+    pub default_context_limit: Option<Limit>,
     pub context_window: Option<u64>,
     pub shepherd: Option<ShepherdConfig>,
     /// Each lead's switches where its herd file's `[lead]` leaves one unset.
@@ -31,7 +31,7 @@ pub struct ConfigFile {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShepherdConfig {
-    pub context_limit: Option<u64>,
+    pub context_limit: Option<Limit>,
     /// The shepherd restarts itself after its handoff; off unless set.
     pub self_restart: Option<bool>,
 }
@@ -122,6 +122,13 @@ pub fn get(config: &Path, key: &str) -> Result<Option<String>> {
     let file = read(config)?;
     let number = match known(key)? {
         "view.theme" => return Ok(file.view.and_then(|v| v.theme)),
+        "default_context_limit" => return Ok(file.default_context_limit.map(|l| l.to_string())),
+        "shepherd.context_limit" => {
+            return Ok(file
+                .shepherd
+                .and_then(|s| s.context_limit)
+                .map(|l| l.to_string()));
+        }
         "shepherd.self_restart" => {
             return Ok(file
                 .shepherd
@@ -129,12 +136,10 @@ pub fn get(config: &Path, key: &str) -> Result<Option<String>> {
                 .map(|on| on.to_string()));
         }
         "context_window" => file.context_window,
-        "default_context_limit" => file.default_context_limit,
-        "lead_defaults.review_rounds" => file
+        _ => file
             .lead_defaults
             .and_then(|d| d.review_rounds)
             .map(|rounds| rounds.get().into()),
-        _ => file.shepherd.and_then(|s| s.context_limit),
     };
     Ok(number.map(|n| n.to_string()))
 }
@@ -153,6 +158,11 @@ pub fn set(config: &Path, key: &str, value: &str) -> Result<()> {
                 .name(),
         ),
         "shepherd.self_restart" => Value::from(switch(key, value)?),
+        "context_window" => Value::from(as_i64(key, context::tokens(key, value)?)?),
+        "default_context_limit" | "shepherd.context_limit" => match context::limit(key, value)? {
+            Limit::Tokens(tokens) => Value::from(as_i64(key, tokens)?),
+            percent => Value::from(percent.to_string()),
+        },
         _ => Value::from(whole_number(key, value)?),
     };
     edit(config, |doc| {
@@ -185,12 +195,15 @@ fn switch(key: &str, value: &str) -> Result<bool> {
 }
 
 fn whole_number(key: &str, value: &str) -> Result<i64> {
-    let number: u64 = value.trim().replace('_', "").parse().with_context(|| {
-        format!(
-            "{key} must be a whole number of {}, got {value:?}",
-            unit(key)
-        )
-    })?;
+    let number: u64 = value
+        .trim()
+        .replace('_', "")
+        .parse()
+        .with_context(|| format!("{key} must be a whole number of rounds, got {value:?}"))?;
+    as_i64(key, number)
+}
+
+fn as_i64(key: &str, number: u64) -> Result<i64> {
     i64::try_from(number).with_context(|| format!("{key}: {number} is too big"))
 }
 
@@ -369,13 +382,6 @@ fn lift_header(doc: &mut DocumentMut) {
     doc.decor_mut().set_prefix(&prefix[..split]);
 }
 
-fn unit(key: &str) -> &'static str {
-    match key {
-        "lead_defaults.review_rounds" => "rounds",
-        _ => "tokens",
-    }
-}
-
 fn known(key: &str) -> Result<&'static str> {
     match KEYS.iter().find(|k| **k == key) {
         Some(key) => Ok(key),
@@ -476,13 +482,9 @@ fn read_text(config: &Path) -> Result<String> {
 fn check(text: &str) -> Result<ConfigFile> {
     let file: ConfigFile = toml::from_str(text)?;
     let shepherd = file.shepherd.as_ref().and_then(|s| s.context_limit);
-    for (key, value) in [
-        ("default_context_limit", file.default_context_limit),
-        ("context_window", file.context_window),
-        ("shepherd.context_limit", shepherd),
-    ] {
-        check_tokens(key, value)?;
-    }
+    check_limit("default_context_limit", file.default_context_limit)?;
+    check_tokens("context_window", file.context_window)?;
+    check_limit("shepherd.context_limit", shepherd)?;
     Ok(file)
 }
 
@@ -1038,6 +1040,87 @@ mod key_tests {
             fs::read_to_string(&path).unwrap(),
             "context_window = 1000000\n"
         );
+    }
+
+    #[test]
+    fn token_values_take_k_and_m_suffixes_decimals_and_separators() {
+        let (_dir, path) = config_with("");
+        for (given, read) in [
+            ("250000", "250000"),
+            ("250k", "250000"),
+            ("250K", "250000"),
+            ("1M", "1000000"),
+            ("1m", "1000000"),
+            ("1.5M", "1500000"),
+            ("12.5k", "12500"),
+            ("1_000_000", "1000000"),
+            ("1,000,000", "1000000"),
+            (" 2,500k ", "2500000"),
+            ("9223372036854775807", "9223372036854775807"),
+        ] {
+            set(&path, "context_window", given).unwrap();
+            assert_eq!(
+                get(&path, "context_window").unwrap().as_deref(),
+                Some(read),
+                "{given}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_token_value_in_another_form_is_refused_naming_the_accepted_forms() {
+        let text = "context_window = 1000000\n";
+        let (_dir, path) = config_with(text);
+        for given in [
+            "",
+            "k",
+            "lots",
+            "250kk",
+            "250g",
+            "1.5",
+            "1.2345k",
+            "-1k",
+            "1.k",
+            ".5M",
+            "25 0k",
+            "999999999999999999999999999999999999999M",
+            "1,5M",
+            "25_0k",
+            "1,0000",
+            "1.5_0M",
+            ",250k",
+        ] {
+            let err = format!("{:#}", set(&path, "context_window", given).unwrap_err());
+            assert!(
+                err.contains("250000, 250k, 1.5M or 1_000_000"),
+                "{given:?}: {err}"
+            );
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    }
+
+    #[test]
+    fn a_limit_may_be_a_percentage_of_the_window_but_the_window_may_not() {
+        let (_dir, path) = config_with("");
+        set(&path, "default_context_limit", "65%").unwrap();
+        set(&path, "shepherd.context_limit", " 50 % ").unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "default_context_limit = \"65%\"\n\n[shepherd]\ncontext_limit = \"50%\"\n"
+        );
+        assert_eq!(
+            get(&path, "default_context_limit").unwrap().as_deref(),
+            Some("65%")
+        );
+        for (key, given, says) in [
+            ("context_window", "65%", "250000, 250k"),
+            ("default_context_limit", "0%", "between 1% and 100%"),
+            ("default_context_limit", "101%", "between 1% and 100%"),
+            ("default_context_limit", "6.5%", "a whole percentage"),
+        ] {
+            let err = format!("{:#}", set(&path, key, given).unwrap_err());
+            assert!(err.contains(says), "{key} {given}: {err}");
+        }
     }
 
     #[test]
