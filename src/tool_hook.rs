@@ -46,8 +46,8 @@ pub enum Switch {
     /// which could turn a lead's own switches on. Not a switch: always the human's.
     LeadDefaults,
     /// `loopherd config set` or `unset`, `loopherd setup`, or `scripts/install
-    /// --context`, which could raise a lead's own handoff or review-round limit
-    /// or switches.
+    /// --context` or `--revive-on-startup`, which could raise a lead's own
+    /// handoff or review-round limit or switches, or turn on the startup revive.
     /// Not a switch: always the human's.
     Config,
 }
@@ -179,7 +179,7 @@ fn decide(
     }
     if needed == Switch::Config {
         return Ok(Some(format!(
-            "loopherd: blocked: {} may not change loopherd's config with `loopherd config set`, `config unset`, `loopherd setup` or `scripts/install --context`, which could raise its own handoff or review-round limit or switches: {}; ask with `loopherd report --kind question`",
+            "loopherd: blocked: {} may not change loopherd's config with `loopherd config set`, `config unset`, `loopherd setup` or `scripts/install --context` or `--revive-on-startup`, which could raise its own handoff or review-round limit or switches, or turn on the startup revive: {}; ask with `loopherd report --kind question`",
             lead.name,
             needed.humans_part()
         )));
@@ -414,7 +414,7 @@ fn needs_one(command: &[String]) -> Option<Switch> {
     if Path::new(program).ends_with("scripts/install") {
         return Some(if flag("--lead-defaults") {
             Switch::LeadDefaults
-        } else if flag("--context") {
+        } else if flag("--context") || flag("--revive-on-startup") {
             Switch::Config
         } else {
             Switch::Install
@@ -1463,6 +1463,8 @@ mod tests {
             "scripts/install --context limit=500000",
             "./scripts/install --no-splash --context=window=1000000",
             "bash scripts/install --context limit=500000",
+            "scripts/install --revive-on-startup true",
+            "./scripts/install --no-splash --revive-on-startup=false",
             "env FOO=1 loopherd setup",
             "command loopherd config unset default_context_limit",
             "/home/u/.local/bin/loopherd setup --again",
@@ -1473,6 +1475,7 @@ mod tests {
                 run(&leads, all_on(), command).unwrap_or_else(|| panic!("{command} was allowed"));
             assert!(
                 message.contains("lead-h may not change loopherd's config")
+                    && message.contains("scripts/install --context` or `--revive-on-startup`")
                     && message.contains("the human sets loopherd's config"),
                 "{message}"
             );

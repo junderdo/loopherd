@@ -999,9 +999,10 @@ What differs from the shepherd:
 - **Herd files and loopherd's config are the human's.** The hook always
   denies `loopherd herd set`, `unset` and `remove` in your pane, and also `loopherd
   lead-defaults --set`, `loopherd config set` and `unset`, `loopherd
-  setup`, and `scripts/install --lead-defaults` or `--context`, whatever
-  your switches, so you can't turn your own switches on or raise your own
-  handoff or review-round limit; `loopherd herd get`, `loopherd config get` and `loopherd
+  setup`, and `scripts/install --lead-defaults`, `--context` or
+  `--revive-on-startup`, whatever your switches, so you can't turn your
+  own switches on, raise your own handoff or review-round limit, or turn
+  on the startup revive; `loopherd herd get`, `loopherd config get` and `loopherd
   lead-defaults` are fine. Ask for a change instead.
 - **Retiring a lead is the shepherd's or the human's.** `loopherd retire`
   refuses to retire you from your own pane, and the hook also denies
