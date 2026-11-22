@@ -53,6 +53,7 @@ impl Sandbox {
             fs::read_to_string(format!("{REPO}/scripts/install")).unwrap(),
         );
         for file in [
+            "install-extras",
             "install-agents.bash",
             "install-skills.bash",
             "install-herdr-plugin.bash",
@@ -499,7 +500,10 @@ fn without_a_terminal_it_is_skipped_and_says_how_to_install_it() {
     let out = sandbox.install(&[]);
 
     assert!(out.contains("add --with-skills"), "{out}");
-    assert_eq!(sandbox.claude_calls(), Vec::<String>::new());
+    assert_eq!(
+        sandbox.claude_calls(),
+        vec!["claude plugin list --json".to_string()]
+    );
 }
 
 #[test]
