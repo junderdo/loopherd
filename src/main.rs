@@ -750,7 +750,7 @@ fn main() -> ExitCode {
             .exit();
     };
     if let Some((name, why)) = refused_to_leads(&command)
-        && let Err(e) = refuse_from_lead(why, by_pane(&command))
+        && let Err(e) = refuse_from_lead(why, by_pane(&command), ledger_free(&command))
     {
         eprintln!("loopherd {name}: {e:#}");
         return ExitCode::FAILURE;
@@ -926,16 +926,16 @@ fn refused_to_leads(command: &Command) -> Option<(&'static str, &'static str)> {
 }
 
 /// Refuses the running command, `why` saying whose it is, in a lead's pane
-/// or sandbox, as [`own_broker`] places it.
-fn refuse_from_lead(why: &str, by_pane: bool) -> Result<()> {
+/// or sandbox, as [`own_lead`] places it.
+fn refuse_from_lead(why: &str, by_pane: bool, ledger_free: bool) -> Result<()> {
     let Ok(path) = FileLedger::default_path() else {
         return Ok(());
     };
     let ledger = FileLedger::new(path);
     let lead = match by_pane {
-        true => own_broker(),
+        true => own_lead(),
         false => Paths::from_env().ok().and_then(|paths| {
-            broker::route(
+            broker::find_lead(
                 &paths,
                 &ledger,
                 &process::ProcFs,
@@ -945,7 +945,21 @@ fn refuse_from_lead(why: &str, by_pane: bool) -> Result<()> {
             )
         }),
     };
-    broker::refuse_from_lead(lead.as_ref(), &ledger, why)
+    broker::refuse_from_lead(lead.as_ref(), &ledger, &process::ProcFs, why, ledger_free)
+}
+
+/// Refused commands that change only config or herd files, never the ledger.
+fn ledger_free(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Herd {
+            action: HerdAction::Set { .. } | HerdAction::Unset { .. },
+        } | Command::Init(_)
+            | Command::LeadDefaults { .. }
+            | Command::Config { .. }
+            | Command::Setup(_)
+            | Command::MergeGuard { .. }
+    )
 }
 
 /// herdr runs `revive --startup` with its focused pane's id, which may be a
@@ -1473,10 +1487,16 @@ impl broker::Sink for Printed {
     }
 }
 
-/// The broker of the lead running this loopherd, if a lead runs it. The
-/// shepherd's pane may carry a dead lead's old id after a herdr restart, so
-/// only a lead ancestor makes it a lead's.
+/// The broker of the lead running this loopherd, if a lead runs it.
 fn own_broker() -> Option<broker::Client> {
+    let paths = Paths::from_env().ok()?;
+    Some(broker::Client::for_lead(&paths, own_lead()?.lead()))
+}
+
+/// The lead running this loopherd, if one does. The shepherd's pane may
+/// carry a dead lead's old id after a herdr restart, so only a lead ancestor
+/// makes it a lead's.
+fn own_lead() -> Option<broker::Found> {
     let paths = Paths::from_env().ok()?;
     let ledger = FileLedger::new(FileLedger::default_path().ok()?);
     let id = own_pane();
@@ -1492,7 +1512,7 @@ fn own_broker() -> Option<broker::Client> {
         socket: socket.as_deref(),
         lineage: &lineage,
     });
-    broker::route(
+    broker::find_lead(
         &paths,
         &ledger,
         &process::ProcFs,
