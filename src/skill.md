@@ -673,14 +673,15 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   own `[lead].args` rather than editing the herd's `args`. A lead has no MCP tools
   unless its herd's `[lead] mcp_servers` names servers from the human's
   user scope (`loopherd herds` shows them); a lead that needs one
-  asks the human to add it. Where Claude Code's seccomp filter is present,
-  a lead has no Unix sockets unless its herd's
+  asks the human to add it. A lead has no Unix sockets (Seatbelt blocks
+  them on macOS; on Linux and WSL2, Claude Code's seccomp filter, where
+  present) unless its herd's
   `[lead] unix_sockets = "all"` (`loopherd herds` shows it), which reopens
   herdr, the ssh agent and WSL2 interop to it; `lead`, `revive` and doctor
   warn of it, and only the human sets it. A `merge_guard = "credentials"`
   lead can't have it: `lead` and `revive` refuse the pair and `loopherd
-  herds` calls the herd file invalid. Where Claude Code's seccomp
-  filter can't block them (doctor says so, naming `npm install -g
+  herds` calls the herd file invalid. Where, on Linux or WSL2, Claude
+  Code's seccomp filter can't block them (doctor says so, naming `npm install -g
   @anthropic-ai/sandbox-runtime`), `require` refuses the lead and
   `prefer` starts it as `(lead, sockets open)`; `restart` applies the
   same rule. A `merge_guard = "credentials"` lead is refused under both.
@@ -972,14 +973,17 @@ What differs from the shepherd:
   `release --drop-branch`, which are the human's.
   `loopherd spawn --worktree` is the human's: its worktree sits beside
   yours, where you can't write; use `loopherd add` instead. Every host is
-  reachable, and gh uses the human's credentials as before, unless your
-  `[lead]` has `merge_guard = "credentials"` (D95): then gh uses a token
+  reachable, and gh and git use the human's credentials as before, except
+  any behind a Unix socket (a keyring, an ssh agent, Git Credential Manager
+  through WSL2 interop), which the sandbox closes and the first failing call
+  shows (D105); ask the human. If your `[lead]` has
+  `merge_guard = "credentials"` (D95), gh instead uses a token
   that can open and update pull requests but not merge or write contents,
   git pushes over ssh with the herd's deploy key, and the files holding the
   human's own GitHub credentials and ssh keys are unreadable. Pushes to the default
-  branch and force-pushes are refused by GitHub; ask the human. Where
-  Claude Code's seccomp filter can block them, the sandbox gives you no
-  Unix sockets, so `herdr`, an ssh agent and WSL2's Windows programs fail
+  branch and force-pushes are refused by GitHub; ask the human. The
+  sandbox gives you no Unix sockets (Seatbelt on macOS; on Linux and WSL2,
+  Claude Code's seccomp filter, where present), so `herdr`, an ssh agent and WSL2's Windows programs fail
   inside it (`Operation not permitted`), unless your herd sets
   `[lead] unix_sockets = "all"`, which only the human does. A lead started
   as `(lead, sockets open)` has them all. Workers
