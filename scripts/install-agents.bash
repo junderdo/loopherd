@@ -173,6 +173,10 @@ offer_agents() {
     [[ -z "$conflict" && -f "$pick_target" && "$(agents_sha "$pick_target")" == "$(agents_sha "$pick_want")" ]] || installed=
   done
   if [[ -n "$installed" && "$extras" == ask ]]; then
+    for name in "${agent_names[@]}"; do
+      agents_pick "$name"
+      [[ -L "$pick_target" ]] || agents_record "$pick_target" "$(agents_sha "$pick_target")"
+    done
     echo "loopherd's agent types are already installed in $agents_dir; left as is"
     rm -rf "$agents_tmp"
     return 0

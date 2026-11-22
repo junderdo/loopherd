@@ -129,6 +129,11 @@ run_extras() {
     [ "$1" = splash ] || say "skipped the extras: they need bash"
     return 0
   fi
+  # The offers read what's installed through jq; without it they'd misreport.
+  if [ "$1" = offers ] && ! command -v jq >/dev/null; then
+    say "skipped the extras: they need jq; install it, then run this installer again"
+    return 0
+  fi
   tty=/dev/null
   # Opening, not -r: without a controlling terminal /dev/tty exists but won't open.
   if (: </dev/tty) 2>/dev/null; then tty=/dev/tty; fi
@@ -136,7 +141,7 @@ run_extras() {
     bash "$extras" splash <"$tty"
   else
     bash "$extras" offers "$agents" "$skills" "$herdr_plugin" "$herdr_keys" "$bin_dir/loopherd" <"$tty" ||
-      say "an extra failed to install; the rest of the install is unaffected"
+      say "an extra failed to install (said above); the rest of the install is unaffected"
   fi
 }
 
@@ -157,6 +162,9 @@ main() {
 
   work=$(mktemp -d)
   trap 'rm -rf "$work"' EXIT
+  # dash runs no EXIT trap on a signal, so Ctrl-C at a question would leave $work.
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   say "downloading $tarball from $url"
   download "$url/$tarball" "$work/$tarball"
   download "$url/SHA256SUMS" "$work/SHA256SUMS"

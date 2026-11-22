@@ -575,3 +575,39 @@ fn without_a_terminal_installed_extras_are_shown_as_installed() {
         assert!(said.contains(&line), "{line}\n---\n{said}");
     }
 }
+
+#[test]
+fn without_jq_the_extras_are_skipped_naming_it_and_the_install_succeeds() {
+    let release = Release::new("Linux", "x86_64");
+    let bin = release.dir.path().join("no-jq-bin");
+    fs::create_dir_all(&bin).unwrap();
+    symlink(release.fake_bin.join("uname"), bin.join("uname")).unwrap();
+    for tool in [
+        "sh",
+        "bash",
+        "curl",
+        "tar",
+        "gzip",
+        "mktemp",
+        "mkdir",
+        "rm",
+        "mv",
+        "cp",
+        "chmod",
+        "awk",
+        "sha256sum",
+    ] {
+        let found = run_ok(
+            Command::new("sh")
+                .arg("-c")
+                .arg(format!("command -v {tool}")),
+        );
+        let found = String::from_utf8(found).unwrap();
+        symlink(found.trim(), bin.join(tool)).unwrap();
+    }
+    let out = release.run(INSTALL_SH, bin.to_str().unwrap(), &[]);
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains("skipped the extras: they need jq"), "{said}");
+    assert!(release.installed().exists());
+}

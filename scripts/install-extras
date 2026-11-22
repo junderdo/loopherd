@@ -40,16 +40,19 @@ run_offers() {
       claude_dir="$PWD/${claude_dir#./}"
     fi
   fi
+  local status=0
   case "$agents" in yes) agents=--with-agents ;; no) agents=--no-extras ;; esac
   offer_agents "$agents" "$root/agents" "$claude_dir/agents" "${XDG_STATE_HOME:-$HOME/.local/state}/loopherd/agents.sha256"
   # The plugin goes into the config dir beside --settings, like the hooks and agents (D27).
+  # A failed install is reported, but the herdr offers still run before it fails the run.
   if [[ -n "$settings" ]]; then
-    CLAUDE_CONFIG_DIR=$claude_dir offer_skills "$skills" "$claude_dir" --name-dir
+    CLAUDE_CONFIG_DIR=$claude_dir offer_skills "$skills" "$claude_dir" --name-dir || status=1
   else
-    offer_skills "$skills" "$claude_dir"
+    offer_skills "$skills" "$claude_dir" || status=1
   fi
   offer_herdr_plugin "$herdr_plugin" "$root/herdr-plugin/herdr-plugin.toml" "$settings"
   offer_herdr_keys "$herdr_keys" "$loopherd" "$settings"
+  return "$status"
 }
 
 case "${1:-}" in

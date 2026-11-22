@@ -37,7 +37,8 @@ fail the install.
 <tr valign="top"><td>
 
 The latest release, with no clone and no Rust. Also needs `curl` (or
-`wget`), `tar`, and `sha256sum` or `shasum`.
+`wget`), `tar`, and `sha256sum` or `shasum`; the offers below also need
+`bash` and [`jq`](https://jqlang.github.io/jq/download/).
 
 ```bash
 curl -fsSL https://junderdo.dev/loopherd/install.sh | sh

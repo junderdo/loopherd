@@ -309,6 +309,27 @@ fn without_a_terminal_installed_agent_types_are_said_to_be_installed() {
 }
 
 #[test]
+fn agent_types_found_installed_are_recorded_so_a_later_change_updates_them() {
+    let sandbox = Sandbox::new();
+    for name in ["builder", "reviewer", "researcher", "scout"] {
+        sandbox.put(&format!("{name}.md"), &sandbox.ours(name));
+    }
+    sandbox.install(&[]);
+    sandbox.set_ours("reviewer", "---\nname: reviewer\n---\nnew text\n");
+
+    let out = sandbox.install(&["--with-agents"]);
+
+    assert!(
+        stdout(&out).contains(&format!(
+            "updated {}",
+            sandbox.installed("reviewer.md").display()
+        )),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
 fn a_file_unchanged_since_loopherd_installed_it_is_updated() {
     let sandbox = Sandbox::new();
     sandbox.install(&["--with-agents"]);
