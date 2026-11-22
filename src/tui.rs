@@ -3705,6 +3705,34 @@ max = 3
     }
 
     #[test]
+    fn the_ticker_leaves_out_subagent_starts_and_stops() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        let reviewer = report::Subagent {
+            id: "a1f".into(),
+            agent_type: "reviewer".into(),
+            description: None,
+            session: None,
+            meta: None,
+        };
+        post_at(mail.path(), "a", "2026-11-16T10:05:00Z", Body::Blocked {});
+        post_at(
+            mail.path(),
+            "a",
+            "2026-11-16T10:06:00Z",
+            Body::SubagentStart(reviewer.clone()),
+        );
+        post_at(
+            mail.path(),
+            "a",
+            "2026-11-16T10:07:00Z",
+            Body::SubagentStop(reviewer),
+        );
+        let terminal = render_ticker(&app_with_mail(&herdr, &ledger, mail.path(), now), now);
+        assert_eq!(ticker(&terminal), ["10:05 a blocked", ""]);
+    }
+
+    #[test]
     fn the_ticker_names_herdrs_blocked_and_gone() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let mail = quiet_mail(&ledger);
