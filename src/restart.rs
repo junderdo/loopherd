@@ -1604,6 +1604,28 @@ mod tests {
     }
 
     #[test]
+    fn a_credentials_herds_worker_started_without_its_sandbox_is_refused_even_under_prefer() {
+        let w = World::new();
+        w.handed_off();
+        let worker = as_worker(
+            &w,
+            "sandbox = \"prefer\"\n[lead]\nprompt = \"go\"\nmerge_guard = \"credentials\"",
+            false,
+        );
+
+        let (result, _) = w.restart_as(false, true, None, &worker);
+
+        assert_eq!(
+            format!("{:#}", result.unwrap_err()),
+            "sandbox: lh-1 can't run sandboxed: it was started without its sandbox; quit its \
+             Claude and run loopherd revive --name lh-1 to resume it sandboxed, or set [lead] \
+             merge_guard = \"hook\" in herd h to run it unsandboxed with your GitHub \
+             credentials"
+        );
+        assert!(w.herdr.prompts().is_empty());
+    }
+
+    #[test]
     fn a_lead_running_in_its_sandbox_is_restarted() {
         let w = World::new();
         w.handed_off();

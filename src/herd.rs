@@ -1200,25 +1200,35 @@ fn check(herd: &str, text: &str, paths: &Paths) -> Result<HerdFile> {
             .switches()
             .over(&lead_defaults(paths).unwrap_or_default())
             .merge;
-        if !merge
-            && lead.merge_guard == MergeGuard::Credentials
-            && lead.unix_sockets == Some(UnixSockets::All)
-        {
+        let credentials = !merge && lead.merge_guard == MergeGuard::Credentials;
+        if credentials && lead.unix_sockets == Some(UnixSockets::All) {
             bail!(
                 "lead: can't start with merge_guard = \"credentials\": {}",
-                credentials_with_sockets(herd)
+                credentials_with_sockets(herd, "lead")
+            );
+        }
+        let worker = parsed.worker.as_ref();
+        if credentials
+            && worker.is_some_and(|w| {
+                w.sandbox != WorkerSandbox::Off && w.unix_sockets == Some(UnixSockets::All)
+            })
+        {
+            bail!(
+                "worker: can't start sandboxed with merge_guard = \"credentials\": {}",
+                credentials_with_sockets(herd, "worker")
             );
         }
     }
     Ok(parsed)
 }
 
-/// Why a credentials lead can't have every Unix socket open, and how to clear either switch.
-pub fn credentials_with_sockets(herd: &str) -> String {
+/// Why a credentials herd's `table` (`lead` or `worker`) can't have every
+/// Unix socket open, and how to clear either switch.
+pub fn credentials_with_sockets(herd: &str, table: &str) -> String {
     format!(
         "unix_sockets = \"all\" opens your ssh agent, Git Credential Manager through WSL2 \
          interop and the Secret Service keyring to it, each of which acts as you; run loopherd \
-         herd unset {herd} lead.unix_sockets, or loopherd herd set {herd} lead.merge_guard \
+         herd unset {herd} {table}.unix_sockets, or loopherd herd set {herd} lead.merge_guard \
          '\"hook\"'"
     )
 }
@@ -3475,6 +3485,48 @@ args = ["--model", "opus"]
             "{report}"
         );
         assert_eq!(report.matches("invalid").count(), 1, "{report}");
+    }
+
+    #[test]
+    fn herds_calls_credentials_with_every_unix_socket_open_to_sandboxed_workers_invalid() {
+        let herd = |lead: &str, worker: &str| {
+            format!("{LEAD_HERD}[lead]\nprompt = \"go\"\n{lead}\n[worker]\n{worker}\n")
+        };
+        let credentials = "merge_guard = \"credentials\"";
+        let config = Config::with(&[
+            (
+                "required",
+                &herd(credentials, "sandbox = \"require\"\nunix_sockets = \"all\""),
+            ),
+            (
+                "preferred",
+                &herd(credentials, "sandbox = \"prefer\"\nunix_sockets = \"all\""),
+            ),
+            (
+                "off",
+                &herd(credentials, "sandbox = \"off\"\nunix_sockets = \"all\""),
+            ),
+            (
+                "hook",
+                &herd("", "sandbox = \"require\"\nunix_sockets = \"all\""),
+            ),
+        ]);
+
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+
+        assert_eq!(code, 1, "{report}");
+        assert!(
+            report.contains(
+                "invalid required.toml: worker: can't start sandboxed with merge_guard = \
+                 \"credentials\": unix_sockets = \"all\" opens your ssh agent, Git Credential \
+                 Manager through WSL2 interop and the Secret Service keyring to it, each of \
+                 which acts as you; run loopherd herd unset required worker.unix_sockets, or \
+                 loopherd herd set required lead.merge_guard '\"hook\"'"
+            ),
+            "{report}"
+        );
+        assert!(report.contains("invalid preferred.toml"), "{report}");
+        assert_eq!(report.matches("invalid").count(), 2, "{report}");
     }
 
     #[test]

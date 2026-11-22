@@ -4816,7 +4816,7 @@ fn diff_reads_back_the_repo_from_a_merged_that_starts_with_gh() {
     assert_ok(&init);
     let herd_file = fixture.herds().join("widgets.toml");
     let bare = fs::read_to_string(&herd_file).unwrap().replace(
-        "merged = \"GH_TOKEN=${GH_TOKEN:-$(gh auth token --user acme)} gh pr list",
+        "merged = \"GH_TOKEN=${{GH_TOKEN:-$(gh auth token --user acme)}} gh pr list",
         "merged = \"gh pr list",
     );
     fs::write(&herd_file, &bare).unwrap();
@@ -5549,12 +5549,23 @@ fn a_credentials_herd_runs_gh_on_the_leads_own_token_where_a_hook_herd_names_the
             "GH_TOKEN=${GH_TOKEN:-$(gh auth token --user acme)} gh ",
         ),
     ] {
+        let herds = fixture.loopherd(&["herds"]);
+        assert!(
+            !text(&herds.stdout).contains("invalid"),
+            "{}",
+            text(&herds.stdout)
+        );
         let herd = herd_toml(fixture);
         for check in [
             &herd["template"]["issue"]["merged"],
             &herd["template"]["issue"]["done"],
         ] {
-            let check = check.as_str().unwrap();
+            // A check is a template, where {{ and }} stand for braces.
+            let check = check
+                .as_str()
+                .unwrap()
+                .replace("{{", "{")
+                .replace("}}", "}");
             assert!(check.starts_with(gh), "{check}");
         }
         for list in [&herd["queue"]["source"], &herd["queue"]["backlog"]] {
@@ -5565,6 +5576,61 @@ fn a_credentials_herd_runs_gh_on_the_leads_own_token_where_a_hook_herd_names_the
     let lead = fs::read_to_string(credentials.herds().join("widgets-lead.md")).unwrap();
     assert!(!lead.contains("gh auth token"), "{lead}");
     assert!(lead.contains("--admin --match-head-commit"), "{lead}");
+}
+
+#[test]
+fn a_credentials_herds_workers_push_and_run_gh_on_the_herds_token_when_their_sandbox_gives_one() {
+    for tracker in ["github", "local"] {
+        let hook = Fixture::new(&["acme"]);
+        hook.push_local_issues_to_plain_origin(LOCAL_ISSUES);
+        assert_ok(&hook.init(&["--tracker", tracker, "--repo", "acme/widgets"]));
+        let credentials = Fixture::new(&["acme"]);
+        credentials.push_local_issues_to_plain_origin(LOCAL_ISSUES);
+        assert_ok(&credentials.init(&[
+            "--tracker",
+            tracker,
+            "--repo",
+            "acme/widgets",
+            "--merge-guard",
+            "credentials",
+        ]));
+
+        for (fixture, token, not) in [
+            (
+                &hook,
+                "GH_TOKEN=$(gh auth token --user acme)",
+                "${GH_TOKEN:-",
+            ),
+            (
+                &credentials,
+                "GH_TOKEN=${GH_TOKEN:-$(gh auth token --user acme)}",
+                "GH_TOKEN=$(gh auth token",
+            ),
+        ] {
+            let herds = fixture.loopherd(&["herds"]);
+            assert!(
+                !text(&herds.stdout).contains("invalid"),
+                "{}",
+                text(&herds.stdout)
+            );
+            let herd = herd_toml(fixture);
+            // The prompt is a template, where {{ and }} stand for braces.
+            let prompt = herd["template"]["issue"]["prompt"]
+                .as_str()
+                .unwrap()
+                .replace("{{", "{")
+                .replace("}}", "}");
+            for line in [
+                format!(
+                    "{token} git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin HEAD"
+                ),
+                format!("{token} gh pr create --repo acme/widgets"),
+            ] {
+                assert!(prompt.contains(&line), "{tracker}: {line}\n{prompt}");
+            }
+            assert!(!prompt.contains(not), "{tracker}: {prompt}");
+        }
+    }
 }
 
 #[test]
