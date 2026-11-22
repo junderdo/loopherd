@@ -28,7 +28,10 @@ supported with migrations.
    the gate (`cargo fmt --check`, `cargo clippy`, `cargo test`, `shellcheck
    scripts/install.sh`), builds `loopherd` for x86_64 and aarch64 Linux
    (static musl) and macOS, and publishes a GitHub Release with:
-   - `loopherd-<target>.tar.gz` per target,
+   - `loopherd-<target>.tar.gz` per target: the binary, plus
+     `scripts/install-extras` and what it runs (the splash, the offers,
+     `agents/`, `herdr-plugin/herdr-plugin.toml`), so `install.sh` offers
+     what `scripts/install` does,
    - `SHA256SUMS`,
    - `install.sh`, stamped with the tag so it installs that release.
 

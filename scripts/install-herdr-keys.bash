@@ -1,4 +1,4 @@
-# Sourced by scripts/install after install-herdr-plugin.bash: offers herdr
+# Sourced by scripts/install-extras after install-herdr-plugin.bash: offers herdr
 # key bindings for the plugin's actions (docs/decisions/D129.md).
 
 # Usage: offer_herdr_keys <ask|yes|no> <installed loopherd> <--settings file, or empty>

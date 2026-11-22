@@ -50,8 +50,14 @@ jobs:
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package
         run: |
-          mkdir dist
-          tar -czf dist/loopherd-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release loopherd
+          mkdir -p dist stage/scripts stage/herdr-plugin
+          cp target/${{ matrix.target }}/release/loopherd stage/
+          # What install.sh runs for the splash and the offers, as scripts/install does.
+          # Members named without ./, so an older install.sh still finds loopherd.
+          cp scripts/install-extras scripts/install-*.bash stage/scripts/
+          cp -R agents stage/
+          cp herdr-plugin/herdr-plugin.toml stage/herdr-plugin/
+          tar -czf dist/loopherd-${{ matrix.target }}.tar.gz -C stage loopherd scripts agents herdr-plugin
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: loopherd-${{ matrix.target }}
