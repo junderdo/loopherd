@@ -2004,9 +2004,11 @@ pub fn confine_credentials(
             ));
         }
     };
-    let confined =
-        crate::credentials::confined(paths, herd, &|name| std::env::var_os(name), &mounts)
-            .map_err(|e| credentials_refusal(name, &format!("{e:#}")))?;
+    // Unit tests run under a fake home, so the runner's real XDG dirs would leak in;
+    // credentials' own tests cover the dirs the env moves.
+    let env = |name: &str| (!cfg!(test)).then(|| std::env::var_os(name)).flatten();
+    let confined = crate::credentials::confined(paths, herd, &env, &mounts)
+        .map_err(|e| credentials_refusal(name, &format!("{e:#}")))?;
     let filesystem = &mut settings["sandbox"]["filesystem"];
     // The file tools run outside the sandbox, so each path is denied to both.
     let mut deny_read: Vec<Value> = confined
