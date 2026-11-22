@@ -12,7 +12,9 @@ use tempfile::TempDir;
 
 /// Answers the gh calls init and the written herd make from JSON fixtures in
 /// its own directory, applying `--jq` with jq, and logs each call with its
-/// GH_TOKEN.
+/// GH_TOKEN. An `auth-plain.out` or `.err` file makes it a gh without
+/// `auth status --json`, printing that file on stdout or stderr instead, and
+/// exiting with the code in `auth-plain.status`, if any.
 const FAKE_GH: &str = r#"#!/bin/sh
 ulimit -S -f unlimited
 dir=$(dirname "$0")
@@ -26,7 +28,17 @@ done
 case "$1 $2" in
   "auth token") echo "tok-$4"; exit 0 ;;
   "label create") exit 0 ;;
-  "auth status") fixture=auth.json ;;
+  "auth status")
+    if [ -f "$dir/auth-fails" ]; then cat "$dir/auth-fails" >&2; exit 1; fi
+    if [ -f "$dir/auth-plain.out" ] || [ -f "$dir/auth-plain.err" ]; then
+      case " $* " in
+        *" --json "*) printf 'unknown flag: --json\n\nUsage:  gh auth status [flags]\n' >&2; exit 1 ;;
+      esac
+      [ -f "$dir/auth-plain.out" ] && cat "$dir/auth-plain.out"
+      [ -f "$dir/auth-plain.err" ] && cat "$dir/auth-plain.err" >&2
+      exit "$(cat "$dir/auth-plain.status" 2>/dev/null || echo 0)"
+    fi
+    fixture=auth.json ;;
   "repo view") fixture=repo.json ;;
   "label list") fixture=labels.json ;;
   "issue list") fixture=issues.json ;;
@@ -897,6 +909,106 @@ fn without_a_logged_in_gh_account_init_says_to_log_in() {
         &fixture.init(&[]),
         "loopherd init: gh has no logged-in account; run `gh auth login`\n",
     );
+}
+
+#[test]
+fn the_logins_come_from_auth_status_json_where_gh_has_it() {
+    let fixture = Fixture::new(&["acme"]);
+
+    assert_ok(&fixture.init(&[]));
+
+    let calls = fixture.gh_calls();
+    assert!(calls.contains("auth status --json hosts"), "{calls}");
+    assert!(!calls.contains("--hostname"), "{calls}");
+}
+
+#[test]
+fn on_a_gh_without_auth_status_json_the_logins_come_from_its_account_lines() {
+    let fixture = Fixture::new(&[]);
+    fixture.gh_json(
+        "auth-plain.out",
+        "github.com\n  \u{2713} Logged in to github.com account someone (keyring)\n  \
+         - Active account: true\n  - Git operations protocol: ssh\n\n  \
+         \u{2713} Logged in to github.com account Acme (keyring)\n  - Active account: false\n",
+    );
+
+    assert_ok(&fixture.init(&[]));
+
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(herd.contains("gh auth token --user Acme)"), "{herd}");
+    let calls = fixture.gh_calls();
+    assert!(
+        calls.contains("auth status --hostname github.com"),
+        "{calls}"
+    );
+}
+
+#[test]
+fn on_an_older_gh_the_logins_come_from_its_logged_in_as_lines_on_stderr() {
+    let fixture = Fixture::new(&[]);
+    fixture.gh_json(
+        "auth-plain.err",
+        "github.com\n  \u{2713} Logged in to github.com as someone (oauth_token)\n  \
+         \u{2713} Git operations for github.com configured to use https protocol.\n  \
+         \u{2713} Token: gho_************************************\n",
+    );
+
+    assert_ok(&fixture.init(&["--gh-account", "someone"]));
+
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(herd.contains("gh auth token --user someone)"), "{herd}");
+}
+
+#[test]
+fn the_plain_auth_status_fallback_keeps_the_login_filter_and_errors() {
+    let fixture = Fixture::new(&[]);
+    fixture.gh_json(
+        "auth-plain.out",
+        "  \u{2713} Logged in to github.com account .hidden (keyring)\n  \
+         \u{2713} Logged in to github.com account -flag (keyring)\n  \
+         \u{2713} Logged in to github.com account someone (keyring)\n",
+    );
+
+    let out = fixture.init(&[]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        "loopherd init: no logged-in gh account matches the remote owner acme \
+         (found: someone); pass --gh-account <login>\n"
+    );
+}
+
+#[test]
+fn the_plain_auth_status_fallback_without_a_login_says_to_log_in() {
+    let fixture = Fixture::new(&[]);
+    fixture.gh_json(
+        "auth-plain.err",
+        "You are not logged into any GitHub hosts. To log in, run: gh auth login\n",
+    );
+    fixture.gh_json("auth-plain.status", "1");
+
+    assert_refused(
+        &fixture,
+        &fixture.init(&[]),
+        "loopherd init: gh has no logged-in account; run `gh auth login`\n",
+    );
+}
+
+#[test]
+fn a_gh_auth_status_failure_other_than_the_unknown_flag_is_its_own_error() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.gh_json("auth-fails", "error connecting to api.github.com\n");
+
+    let out = fixture.init(&[]);
+
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("error connecting to api.github.com"),
+        "{stderr}"
+    );
+    assert!(!fixture.gh_calls().contains("--hostname"));
 }
 
 #[test]
