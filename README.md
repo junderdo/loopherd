@@ -222,13 +222,13 @@ as its main checkout. Then, in order:
    its questions to you. The lead runs in the Claude Code sandbox, which
    limits its writes to its own worktree and loopherd's state dir, so it
    doesn't change herd files, `config.toml` or `~/.claude` by mistake. It
-   is a guard rail, not a cage ([D89](docs/decisions/D89.md)). Where
-   Claude Code's seccomp filter is present it gets no Unix sockets, so
-   herdr, your ssh agent and WSL2's Windows interop are closed to it, unless its `[lead]` sets `unix_sockets = "all"`, which
+   is a guard rail, not a cage ([D89](docs/decisions/D89.md)). It gets
+   no Unix sockets, blocked by Seatbelt on macOS and by Claude Code's
+   seccomp filter on Linux and WSL2, where present, so herdr, your ssh agent and WSL2's Windows interop are closed to it, unless its `[lead]` sets `unix_sockets = "all"`, which
    reopens all three ([D105](docs/decisions/D105.md)); a lead with
    `merge_guard = "credentials"` is refused it
-   ([D114](docs/decisions/D114.md)). Where Claude Code
-   has no seccomp filter to block them, `loopherd doctor` and
+   ([D114](docs/decisions/D114.md)). Where, on Linux or WSL2, Claude
+   Code has no seccomp filter to block them, `loopherd doctor` and
    `loopherd setup` name `npm install -g @anthropic-ai/sandbox-runtime`,
    and the lead isn't started or restarted unless its `[lead]` sets
    `sandbox = "prefer"`; one with `merge_guard = "credentials"` isn't

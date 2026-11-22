@@ -251,13 +251,23 @@ Init never launches an agent.
    done: `git worktree remove --force` each verify worktree under
    `<scratch>/pr<n>/`, then delete that directory. Same for a PR closed
    unmerged.
-6. **Triage** a herd running low on ready work (D60). A lead's triage
-   arrives as its `question`: relay it to the human. Once the human
-   approves, mark the ready tasks ready in the tracker, archive the stale
-   ones the human confirms, and comment what's missing on each needs-spec
-   task. In an unled herd, triage yourself when `status` shows claimable at
-   or below `low_at` with unready above 0: run the herd's `backlog` and sort
+6. **Triage** a herd running low on ready work (D60, D116). A lead's
+   triage arrives as its `question`: relay it to the human. In an unled
+   herd, act when `status` shows claimable at or below `low_at` with
+   unready above 0. If it has a `[template.groom]`, run `loopherd add
+   <herd> groom` (nothing while `groom-<herd>` is open); on its `done`,
+   relay its report to the human, then `loopherd retire --close
+   groom-<herd>`. Without the template, run the herd's `backlog` and sort
    each task the same way.
+
+   A groomer's report ends in a numbered batch, one command per line. The
+   human approves it whole or all but some lines: run the command of each
+   batch line the human approved, as written after its number, and no
+   others. A triage without a batch:
+   once the human approves, mark the ready tasks ready in the tracker,
+   archive the stale ones the human confirms, and comment what's missing
+   on each needs-spec task. Marking ready and archiving stay yours, on the
+   human's word.
 7. **Out of work.** A lead's `<herd> out of work` arrives as its
    `question`, and your own watch prints the line for an unled herd (D72):
    either way, tell the human the herd has nothing left and ask whether to
@@ -663,14 +673,15 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   own `[lead].args` rather than editing the herd's `args`. A lead has no MCP tools
   unless its herd's `[lead] mcp_servers` names servers from the human's
   user scope (`loopherd herds` shows them); a lead that needs one
-  asks the human to add it. Where Claude Code's seccomp filter is present,
-  a lead has no Unix sockets unless its herd's
+  asks the human to add it. A lead has no Unix sockets (Seatbelt blocks
+  them on macOS; on Linux and WSL2, Claude Code's seccomp filter, where
+  present) unless its herd's
   `[lead] unix_sockets = "all"` (`loopherd herds` shows it), which reopens
   herdr, the ssh agent and WSL2 interop to it; `lead`, `revive` and doctor
   warn of it, and only the human sets it. A `merge_guard = "credentials"`
   lead can't have it: `lead` and `revive` refuse the pair and `loopherd
-  herds` calls the herd file invalid. Where Claude Code's seccomp
-  filter can't block them (doctor says so, naming `npm install -g
+  herds` calls the herd file invalid. Where, on Linux or WSL2, Claude
+  Code's seccomp filter can't block them (doctor says so, naming `npm install -g
   @anthropic-ai/sandbox-runtime`), `require` refuses the lead and
   `prefer` starts it as `(lead, sockets open)`; `restart` applies the
   same rule. A `merge_guard = "credentials"` lead is refused under both.
@@ -962,14 +973,17 @@ What differs from the shepherd:
   `release --drop-branch`, which are the human's.
   `loopherd spawn --worktree` is the human's: its worktree sits beside
   yours, where you can't write; use `loopherd add` instead. Every host is
-  reachable, and gh uses the human's credentials as before, unless your
-  `[lead]` has `merge_guard = "credentials"` (D95): then gh uses a token
+  reachable, and gh and git use the human's credentials as before, except
+  any behind a Unix socket (a keyring, an ssh agent, Git Credential Manager
+  through WSL2 interop), which the sandbox closes and the first failing call
+  shows (D105); ask the human. If your `[lead]` has
+  `merge_guard = "credentials"` (D95), gh instead uses a token
   that can open and update pull requests but not merge or write contents,
   git pushes over ssh with the herd's deploy key, and the files holding the
   human's own GitHub credentials and ssh keys are unreadable. Pushes to the default
-  branch and force-pushes are refused by GitHub; ask the human. Where
-  Claude Code's seccomp filter can block them, the sandbox gives you no
-  Unix sockets, so `herdr`, an ssh agent and WSL2's Windows programs fail
+  branch and force-pushes are refused by GitHub; ask the human. The
+  sandbox gives you no Unix sockets (Seatbelt on macOS; on Linux and WSL2,
+  Claude Code's seccomp filter, where present), so `herdr`, an ssh agent and WSL2's Windows programs fail
   inside it (`Operation not permitted`), unless your herd sets
   `[lead] unix_sockets = "all"`, which only the human does. A lead started
   as `(lead, sockets open)` has them all. Workers
@@ -998,16 +1012,24 @@ What differs from the shepherd:
   `merged`, reports, stops, `blocked` and `gone` wake you as before, so
   keep verifying and running after-merge steps. On resume your watch
   announces the claimable tasks again within 60s.
-- **Running low.** On `<herd> running low` (claimable at or below your
-  herd's `low_at`, so triage lands before slots empty), have a read-only
-  subagent run your herd's `backlog` and sort each task into ready, needs a
-  decision (naming it), needs spec (saying what's missing), or stale
-  (saying why). Report the result as one `loopherd report --kind question`
-  and end your turn. After the `no workers open` form, the question says
-  the herd has no work running. Never mark a task ready yourself; the
-  shepherd does it once the human approves. The one exception is a
-  qualifying review follow-up with `new_cards` and `follow_ups_ready` on
-  (see Review rounds).
+- **Running low.** On `<herd> running low`, either form (claimable at or
+  below your herd's `low_at`, so triage lands before slots empty):
+  - If your herd file has a `[template.groom]`, run `loopherd add <herd>
+    groom` and end your turn (D116). Do nothing while `groom-<herd>` is
+    open. On its `done`, relay its report as one `loopherd report --kind
+    question`, batch unchanged, through a quoted heredoc as the Groom
+    section sends it, then `loopherd retire --close groom-<herd>`. It holds no slot, so it isn't a worker for your other
+    lines.
+  - Without the template, have a read-only subagent run your herd's
+    `backlog` and sort each task into ready, needs a decision (naming it),
+    needs spec (saying what's missing), or stale (saying why). Report the
+    result as one `loopherd report --kind question` and end your turn.
+
+  After the `no workers open` form, the question says the herd has no
+  work running. Never mark a task ready yourself; the shepherd does it
+  once the human approves. The one exception is a qualifying review
+  follow-up with `new_cards` and `follow_ups_ready` on (see Review
+  rounds).
 - **Out of work.** On `<herd> out of work`, send one `loopherd report
   --kind question` asking the human what's next: pause the herd, or file
   and approve work. Then end your turn.
@@ -1110,3 +1132,42 @@ What differs from the shepherd:
 - **Your checkout** is detached; refresh it with `git fetch origin && git
   checkout --detach origin/<default branch>` rather than `git pull`, and
   never commit in it.
+
+## Groom
+
+A groomer is member `groom-<herd>`, from the herd file's `[template.groom]`
+(D116), started on `running low` by the lead, or by the shepherd for an
+unled herd. It holds no slot, sits in a detached worktree at origin's
+default branch, and grooms the herd's unready tasks (its `[queue]
+backlog`) so the human can approve them in one go.
+
+- **Rights.** You may edit a card's text, comment on it, mark a duplicate
+  by a comment naming the card it duplicates, and check whether a card is
+  stale against the code.
+- **Limits.** Never add `ready-for-agent`, archive a card, move a card
+  between lists, or add or remove `need-human` or `blocked`. Those are the
+  shepherd's, on the human's word. Commit nothing.
+- **`need-human` cards.** For a `need-human` card, change nothing: restate
+  its open question in your report.
+- **Grilling cards.** On each `wayfinding:grilling` card, post a draft
+  grill prompt as a comment: the decision to settle, the questions to put
+  to the human in order, and what the grill should file once it settles.
+- **Report.** Three parts, in this order:
+  1. Each task sorted into ready, needs a decision (naming it), needs spec
+     (saying what's missing), or stale (saying why), with the `need-human`
+     questions restated.
+  2. The edits you made, one line per card.
+  3. A numbered batch of proposed actions, one per line, each with the
+     exact command that applies it, in your tracker's command form, as
+     your prompt or the project's tracker doc gives it: mark ready,
+     archive, or comment what's missing on a needs-spec card. Each line is
+     `<n>. <command>`, and the command is complete on its own: it needs no
+     setup line, variable or earlier command. Give the reason after the
+     command as a shell comment, `# <reason>`. Double-quote each text
+     argument and escape any `"`, `$`, `` ` `` or `\` inside it with a
+     backslash, so an apostrophe or quote in the text can't end it early.
+
+  Send the report as one `loopherd report --kind done "$(cat <<'EOF'`, the
+  report, then `EOF` and `)"` on their own lines. The quoted heredoc keeps
+  every quote and `$` in the batch as written. End your turn. The lead
+  relays it; the shepherd runs only the lines the human approves.

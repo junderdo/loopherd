@@ -1,8 +1,8 @@
 # A queue that routes each card to one of two templates: the herd's existing
 # `card` for impl cards, `wayfinding` (on sonnet, its own prompt) for
 # research, domain and prototype cards. Replace the herd's `[queue]` with this
-# one, and add `[template.wayfinding]` beside its `[template.card]`, whose
-# params must stay ["card", "type", "slug"].
+# one, and add `[template.wayfinding]` and `[template.groom]` beside its
+# `[template.card]`, whose params must stay ["card", "type", "slug"].
 #
 # With `templates`, the first word of each line `source` prints names the
 # task's template (one of the list) and the rest are its params. A line whose
@@ -64,4 +64,35 @@ link and a three-line summary on the card and move it to Review. Never rebase or
 If you hit a question only the human can answer, stop cleanly as the card workflow describes.
 Finish every stop with one report: `loopherd report --kind done "<PR link and summary>"`, or
 `--kind question "<the exact question>"`.
+"""
+
+# The groomer (D116): started on `running low` by the lead (or the shepherd
+# for an unled herd) with `loopherd add <herd> groom`, never by feed, so it
+# stays out of `[queue] templates`. It holds no slot and has no done or merged
+# check; the lead retires it with --close after relaying its report.
+[template.groom]
+params = []
+name = "groom-{herd}"
+worktree = "groom-{herd}"
+slot = false
+args = ["--model", "sonnet"]
+prompt = """
+You're {name}, in a detached worktree at {worktree}, grooming the {herd} herd's unready cards.
+
+Run `loopherd --skill --section groom` and follow it: it gives your rights, your limits and the
+report to send. Read docs/agents/issue-tracker.md and AGENTS.md first. List the unready cards by
+running the command `loopherd herd get {herd} queue.backlog` prints, and read each with
+`scripts/trello show LH-<n>`.
+
+Write each batch line's command in one of these forms, text escaped as the Groom section says:
+- mark ready: `scripts/trello label LH-<n> +ready-for-agent`
+- needs spec: `scripts/trello comment LH-<n> "<what's missing>"`
+- archive: `scripts/trello archive LH-<n>  # <reason>`
+
+Never add ready-for-agent, archive, move a card between lists, or touch need-human or blocked.
+Finish with one report in the Groom section's format, sent through a quoted heredoc:
+loopherd report --kind done "$(cat <<'EOF'
+<report>
+EOF
+)"
 """

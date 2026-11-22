@@ -1,4 +1,4 @@
-//! `scripts/trello unblock`, run against a stub `curl` that serves a fixture
+//! `scripts/trello`, run against a stub `curl` that serves a fixture
 //! board and logs every write, so no test reaches the real Trello API. The
 //! board carries a stale duplicate `blocked` label ahead of the one cards use.
 
@@ -290,4 +290,58 @@ fn a_malformed_blocked_by_line_is_warned_about_and_left_alone() {
             board.writes()
         );
     }
+}
+
+fn run_line(board: &Board, line: &str) -> Output {
+    Command::new("bash")
+        .args(["-c", line])
+        .current_dir(REPO)
+        .env(
+            "PATH",
+            format!("{}:{}", board.bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("STUB_DIR", &board.stub)
+        .env("TRELLO_API_KEY", "key")
+        .env("TRELLO_TOKEN", "token")
+        .env("XDG_CONFIG_HOME", board.stub.join("no-config"))
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn archive_closes_the_card() {
+    let board = Board::new(&[Card(3, "Backlog", &[], "")]);
+
+    let output = board.trello(&["archive", "LH-3"]);
+
+    assert_eq!(stdout(&output), "archived LH-3\n");
+    assert_eq!(board.writes(), ["PUT /cards/card3 closed=true"]);
+}
+
+#[test]
+fn a_groom_batchs_archive_line_runs_as_written_with_its_reason_as_a_shell_comment() {
+    let board = Board::new(&[Card(3, "Backlog", &[], "")]);
+
+    let output = run_line(&board, "scripts/trello archive LH-3  # superseded by LH-12");
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(board.writes(), ["PUT /cards/card3 closed=true"]);
+}
+
+#[test]
+fn a_groom_batchs_double_quoted_comment_line_keeps_apostrophes_quotes_and_dollars() {
+    let board = Board::new(&[Card(3, "Backlog", &[], "")]);
+
+    let output = run_line(
+        &board,
+        r#"scripts/trello comment LH-3 "Doesn't say which \"file\" or \$HOME path to change""#,
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        board.writes(),
+        [
+            r#"POST /cards/card3/actions/comments text=Doesn't say which "file" or $HOME path to change"#
+        ]
+    );
 }
