@@ -3056,6 +3056,15 @@ mod tests {
         )
         .unwrap();
         let serving = world.serve(telling_herdr());
+        // The client's id sorts first, so in a shared round its answer could beat these refusals.
+        let given_up = Instant::now() + Duration::from_secs(5);
+        while std::fs::read_dir(&requests).unwrap().count() > 0 {
+            assert!(
+                Instant::now() < given_up,
+                "the forged requests were never answered"
+            );
+            std::thread::sleep(POLL);
+        }
 
         let (out, _, _) = world.client().call(&tell("lh-1", "hi")).unwrap();
 
