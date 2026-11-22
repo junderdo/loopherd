@@ -2001,7 +2001,7 @@ max = 3
             &started(270),
             Body::SubagentStart(reviewer),
         );
-        post_at(mail.path(), "a", &started(30), Body::SubagentStart(scout));
+        post_at(mail.path(), "a", &started(150), Body::SubagentStart(scout));
 
         let mut app = app_with_mail(&herdr, &ledger, mail.path(), now);
         let terminal = render_tall(&app, now);
@@ -2010,7 +2010,7 @@ max = 3
         let a = rows.iter().position(|r| r.starts_with("⠋ a ")).unwrap();
         assert_eq!(
             rows[a + 1..a + 3],
-            ["↳ reviewer  Review PR 325 round 1  4m", "↳ scout  30s"]
+            ["↳ reviewer  Review PR 325 round 1  4m", "↳ scout  2m"]
         );
         assert!(rows[a + 3].starts_with('╰'), "{rows:#?}");
         assert!(dimmed(&terminal, "↳ reviewer"));
