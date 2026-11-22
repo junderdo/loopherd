@@ -186,7 +186,8 @@ herdr socket, ssh agent or WSL2 interop, unless its herd sets
 names the npm package), `require` refuses the lead and `prefer` starts it
 as `(lead, sockets open)`; `restart` applies the same rule. A `credentials`
 lead is refused under both. Under `unix_sockets = "all"` the socket check
-is skipped: the lead isn't refused or flagged for open sockets. Installing
+is skipped: the lead isn't refused or flagged for open sockets, though
+`require` still refuses it when the sandbox can't start at all. Installing
 the package is the human's. What still gets past the sandbox: workers run
 unsandboxed (LH-284), which `lead` and `revive` warn of for a
 `credentials` lead, and most of the state dir is writable (LH-298). A lead's
