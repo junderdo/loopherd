@@ -229,6 +229,28 @@ for what 0.7.0 already had, and the changelog.
   `open` switches to the target's tab too. `workspace list` gives each
   workspace's `focused` and `active_tab_id` (LH-290).
 
+## Key bindings in config.toml (0.9.5, LH-424)
+
+Checked 2026-11-21 against herdr 0.9.5's source (`src/config/io.rs`,
+`src/config/keybinds.rs`, `src/input/keybind_help.rs`) and `herdr config
+check`.
+
+- herdr reads `$HERDR_CONFIG_PATH`, else `herdr/config.toml` in
+  `$XDG_CONFIG_HOME`, else `~/.config/herdr/config.toml` (a debug build
+  uses `herdr-dev`). `herdr --default-config` prints the defaults, each
+  `[keys]` binding as a commented `# field = "key"` line.
+- `[[keys.command]]` takes `key`, `type` (`shell`, `pane`, `popup`,
+  `plugin_action`), `command` and an optional `description`.
+- The keybinds help window (`prefix+?`) lists every `[[keys.command]]`
+  under a "custom" group, labelled with its `description`, else "custom
+  command".
+- A key bound twice keeps the first binding and disables the later one,
+  with a diagnostic (`prefix+m: kept keys.goto, disabled
+  keys.command[0].key`). A user binding beats a default silently, so a
+  `[[keys.command]]` on a default's key quietly takes it over.
+- `herdr config check` validates the file at `HERDR_CONFIG_PATH` without a
+  server; `herdr server reload-config` applies it to a running one.
+
 ## Handoff or restart in a startup hook (0.9.5, LH-263)
 
 Checked 2026-11-18 against herdr 0.9.5, the latest release, with its source
@@ -380,5 +402,6 @@ vendor its source.
 - https://www.bitdoze.com/herdr-agent-multiplexer/
 - https://betterstack.com/community/guides/ai/herdr-ai-agent/
 - `herdr --help`, `herdr --skill`, `herdr agent start --help` (0.9.5)
+- herdr v0.9.5 source: https://github.com/herdrdev/herdr/tree/v0.9.5
 - herdr 0.9.5 docs: CLI reference (panes), socket API (`pane.report_metadata`),
   configuration (agent sidebar rows), https://herdr.dev/llms.txt

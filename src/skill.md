@@ -759,11 +759,13 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   whose `status` action runs `loopherd status`; its output and errors go
   only to `herdr plugin log list --plugin loopherd`. Its `view` action
   (`loopherd.view`) opens `loopherd view` in a popup that `q` or Escape
-  closes; the README gives the `[[keys.command]]` snippet that binds it to
-  a key. Its `view-beside-shepherd` action splits the view right of the
+  closes. `scripts/install` offers, default no, to bind it to `prefix+m`
+  and `view-beside-shepherd` to `prefix+shift+m` (`--with-herdr-keys`
+  asks nothing), skipping keys already held; `loopherd install-herdr-keys
+  --remove` takes them out (D129). Its `view-beside-shepherd` action splits the view right of the
   shepherd's pane recorded at its last handoff, leaving focus where it
   was, else right of the focused pane with a note saying why (D87, D94).
-  Never edit the human's herdr config to add it.
+  Never edit the human's herdr config yourself; only the human's install does.
 
   The plugin's event hooks run `loopherd herdr-event-hook`, recording a
   member going `blocked` or `gone` in its mailbox for the next watch, and

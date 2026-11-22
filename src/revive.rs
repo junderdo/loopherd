@@ -770,7 +770,13 @@ fn revive_one(
     match &lead {
         None => {
             if let Some(member) = &worker {
-                match worker_sandbox::prepare(&req.paths, &record.name, member, probe) {
+                match worker_sandbox::prepare(
+                    &req.paths,
+                    &record.name,
+                    member,
+                    worker_sandbox::ArgsFrom::Kept,
+                    probe,
+                ) {
                     Ok(launch) => {
                         warnings.extend(launch.warnings(&record.name));
                         unsandboxed = launch.unsandboxed().map(str::to_string);
@@ -1056,6 +1062,10 @@ mod tests {
         }
     }
 
+    fn mcp_file(req: &ReviveRequest) -> PathBuf {
+        req.paths.config_dir().join("sandbox/w1.mcp.json")
+    }
+
     fn allow_write(req: &ReviveRequest) -> serde_json::Value {
         let settings = req.paths.config_dir().join("sandbox/w1.json");
         let written: serde_json::Value =
@@ -1102,6 +1112,9 @@ mod tests {
                 "opus".into(),
                 "--settings".into(),
                 settings.display().to_string(),
+                "--strict-mcp-config".into(),
+                "--mcp-config".into(),
+                mcp_file(&req).display().to_string(),
             ]
         );
         assert_eq!(allow_write(&req), cwd.path().display().to_string());
@@ -1154,6 +1167,9 @@ mod tests {
             "opus".into(),
             "--settings".into(),
             settings.display().to_string(),
+            "--strict-mcp-config".into(),
+            "--mcp-config".into(),
+            mcp_file(&req).display().to_string(),
         ];
         assert_eq!(
             herdr.started()[0].args,
@@ -1167,6 +1183,203 @@ mod tests {
         let written: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
         assert_eq!(written["sandbox"]["network"]["allowAllUnixSockets"], true);
+    }
+
+    /// Re-keeps [`kept_worker`] `w1` with `args`.
+    fn keep_args(req: &ReviveRequest, cwd: &Path, args: &[&str]) {
+        let member = serde_json::json!({
+            "herd": "h",
+            "template": "t",
+            "args": args,
+            "worktree": cwd,
+        });
+        let file = req.paths.config_dir().join("sandbox/w1.member.json");
+        std::fs::write(file, member.to_string()).unwrap();
+    }
+
+    const STALE_LAUNCH_FLAGS: [&str; 5] = [
+        "--settings",
+        "/old/w1.json",
+        "--strict-mcp-config",
+        "--mcp-config",
+        "/old/w1.mcp.json",
+    ];
+
+    /// `w1`'s resume args: `--model opus`, then its launch flags once, freshly written.
+    fn resumed_with_fresh_launch_flags(req: &ReviveRequest) -> Vec<String> {
+        let settings = req.paths.config_dir().join("sandbox/w1.json");
+        [
+            "--resume".to_string(),
+            "sess-w1".into(),
+            "--model".into(),
+            "opus".into(),
+            "--settings".into(),
+            settings.display().to_string(),
+            "--strict-mcp-config".into(),
+            "--mcp-config".into(),
+            mcp_file(req).display().to_string(),
+        ]
+        .to_vec()
+    }
+
+    #[test]
+    fn a_kept_workers_old_launch_flags_are_dropped_and_written_afresh() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let req = request();
+        let mut ledger = ledger([kept_worker(&req, "sandbox = \"require\"", cwd.path())]);
+        keep_args(
+            &req,
+            cwd.path(),
+            &[&["--model", "opus"][..], &STALE_LAUNCH_FLAGS].concat(),
+        );
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(
+            herdr.started()[0].args,
+            resumed_with_fresh_launch_flags(&req)
+        );
+    }
+
+    #[test]
+    fn an_unkept_workers_recorded_launch_flags_are_dropped_and_written_afresh() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let req = request();
+        let worker = unkept_worker(&req, "sandbox = \"require\"", cwd.path());
+        let worker = AgentRecord {
+            claude_args: [&["--model", "opus"][..], &STALE_LAUNCH_FLAGS]
+                .concat()
+                .iter()
+                .map(|a| a.to_string())
+                .collect(),
+            ..worker
+        };
+        let mut ledger = ledger([worker]);
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(
+            herdr.started()[0].args,
+            resumed_with_fresh_launch_flags(&req)
+        );
+    }
+
+    /// Writes `cwd`'s local Claude settings opening Write, and returns their file.
+    fn loosen_worktree_settings(cwd: &Path) -> PathBuf {
+        std::fs::create_dir_all(cwd.join(".claude")).unwrap();
+        let file = cwd.join(".claude/settings.local.json");
+        std::fs::write(&file, r#"{"permissions": {"allow": ["Write"]}}"#).unwrap();
+        file
+    }
+
+    #[test]
+    fn a_required_worker_whose_worktree_settings_loosen_its_sandbox_isnt_revived() {
+        let cwd = tempfile::tempdir().unwrap();
+        let file = loosen_worktree_settings(cwd.path());
+        let herdr = herdr();
+        let req = request();
+        let mut ledger = ledger([kept_worker(&req, "sandbox = \"require\"", cwd.path())]);
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_ne!(code, 0, "{out}");
+        assert!(
+            out.contains(&format!(
+                "w1 can't start sandboxed: your Claude settings loosen its sandbox: {}: \
+                 permissions.allow opens Write to writes;",
+                file.display()
+            )),
+            "{out}"
+        );
+        assert!(herdr.started().is_empty());
+    }
+
+    #[test]
+    fn a_preferred_worker_whose_worktree_settings_loosen_its_sandbox_is_revived_with_a_warning() {
+        let cwd = tempfile::tempdir().unwrap();
+        let file = loosen_worktree_settings(cwd.path());
+        let herdr = herdr();
+        let req = request();
+        let mut ledger = ledger([kept_worker(&req, "sandbox = \"prefer\"", cwd.path())]);
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            out.contains(&format!(
+                "w1's sandbox is loosened by {}: permissions.allow opens Write to writes",
+                file.display()
+            )),
+            "{out}"
+        );
+        assert_eq!(
+            herdr.started()[0].args,
+            resumed_with_fresh_launch_flags(&req)
+        );
+        assert!(ledger.0["w1"].unsandboxed.is_none());
+    }
+
+    #[test]
+    fn a_required_worker_kept_with_an_arg_outside_the_allowlist_isnt_revived() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let req = request();
+        let mut ledger = ledger([kept_worker(&req, "sandbox = \"require\"", cwd.path())]);
+        keep_args(&req, cwd.path(), &["--add-dir", "/tmp"]);
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_ne!(code, 0, "{out}");
+        assert!(
+            out.contains(
+                "w1 can't start sandboxed: its args may loosen its sandbox or permissions: \
+                 --add-dir /tmp, from the args it was started with;"
+            ),
+            "{out}"
+        );
+        assert!(herdr.started().is_empty());
+    }
+
+    #[test]
+    fn a_preferred_worker_kept_with_an_arg_outside_the_allowlist_is_revived_with_a_warning() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let req = request();
+        let mut ledger = ledger([kept_worker(&req, "sandbox = \"prefer\"", cwd.path())]);
+        keep_args(&req, cwd.path(), &["--add-dir", "/tmp"]);
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(code, 0, "{out}");
+        assert!(
+            out.contains(
+                "w1 starts with an arg that may loosen its sandbox or permissions: --add-dir \
+                 /tmp, from the args it was started with"
+            ),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_worker_whose_herd_names_an_mcp_server_the_user_scope_lacks_isnt_revived_under_prefer() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let req = request();
+        let worker = "sandbox = \"prefer\"\nmcp_servers = [\"nope\"]";
+        let mut ledger = ledger([kept_worker(&req, worker, cwd.path())]);
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_ne!(code, 0, "{out}");
+        assert!(
+            out.contains("w1 can't start: herd h's [worker] mcp_servers names \"nope\""),
+            "{out}"
+        );
+        assert!(herdr.started().is_empty());
     }
 
     #[test]
@@ -1215,7 +1428,15 @@ mod tests {
         );
         assert_eq!(
             herdr.started()[0].args,
-            ["--resume", "sess-w1", "--model", "opus"]
+            [
+                "--resume",
+                "sess-w1",
+                "--model",
+                "opus",
+                "--strict-mcp-config",
+                "--mcp-config",
+                &mcp_file(&req).display().to_string(),
+            ]
         );
         assert_eq!(
             ledger.0["w1"].unsandboxed.as_deref(),

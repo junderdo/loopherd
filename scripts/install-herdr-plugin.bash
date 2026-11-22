@@ -7,7 +7,6 @@ herdr_plugin_source=junderdo/loopherd/herdr-plugin
 # Never fails: the plugin is optional, so a failed install is only reported.
 offer_herdr_plugin() {
   local want=$1 manifest=$2 settings=$3 ours listed version kind root answer
-  local wait=()
   [[ "$want" != no ]] || return 0
   if [[ -n "$settings" ]]; then
     # herdr plugins are global to the user, so a test or manual run must not install one.
@@ -27,16 +26,13 @@ offer_herdr_plugin() {
     echo "skipped loopherd's herdr plugin: no herdr on PATH"
     return 0
   fi
-  # A wedged herdr server mustn't hang the install; macOS has no timeout(1).
-  ! command -v timeout >/dev/null || wait=(timeout 10)
-  if ! listed=$(${wait[@]+"${wait[@]}"} herdr plugin list --plugin loopherd --json 2>/dev/null |
-    jq -er 'first(.result.plugins[] | select(.plugin_id == "loopherd") |
-      [.version // "", .source.kind // "", .plugin_root // ""] | join("\u001f")) // ""' 2>/dev/null); then
+  if ! listed=$(list_herdr_plugin); then
     echo "skipped loopherd's herdr plugin: herdr couldn't list its plugins (herdr plugin list --plugin loopherd)"
     return 0
   fi
   # Not tab: read collapses runs of whitespace separators, shifting an empty field.
   IFS=$'\x1f' read -r version kind root <<<"$listed"
+  [[ -z "$listed" ]] || herdr_plugin_installed=1
   if [[ "$version" == "$ours" ]]; then
     echo "loopherd's herdr plugin $version is already installed; left as is"
     return 0
@@ -63,5 +59,20 @@ offer_herdr_plugin() {
     # Asked nothing, so herdr mustn't stop to confirm its own preview either.
     run+=(--yes)
   fi
-  "${run[@]}" || echo "install: herdr plugin $verb failed; the rest of the install is unaffected" >&2
+  if "${run[@]}"; then
+    herdr_plugin_installed=1
+  else
+    echo "install: herdr plugin $verb failed; the rest of the install is unaffected" >&2
+  fi
+}
+
+# Prints loopherd's version, source kind and root, joined by \x1f, or nothing
+# when herdr lists no loopherd plugin; fails when herdr can't list.
+list_herdr_plugin() {
+  local wait=()
+  # A wedged herdr server mustn't hang the install; macOS has no timeout(1).
+  ! command -v timeout >/dev/null || wait=(timeout 10)
+  ${wait[@]+"${wait[@]}"} herdr plugin list --plugin loopherd --json 2>/dev/null |
+    jq -er 'first(.result.plugins[] | select(.plugin_id == "loopherd") |
+      [.version // "", .source.kind // "", .plugin_root // ""] | join("\u001f")) // ""' 2>/dev/null
 }
