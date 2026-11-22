@@ -485,9 +485,9 @@ force-pushes, writes `Host loopherd-<herd>` into `<config dir>/ssh/config`,
 and prints the rest for the human: `Include <config dir>/ssh/config` as the
 first line of `~/.ssh/config` (once; loopherd never writes `~/.ssh`), and
 the web-UI steps for the token stored at `<herd>.token`. The lead won't
-start without its key and token, or with `install = true`; `loopherd
-doctor` checks the key, the token, the Include, the `Host` block and the
-rulesets.
+start without its key and token, with `install = true`, or unless its
+herd sets `[worker] sandbox = "require"`; `loopherd doctor` checks the
+key, the token, the Include, the `Host` block and the rulesets.
 
 `pane_label = true` (default false) also labels, in herdr's sidebar, the
 pane that must relay or answer: yours when your watch prints a `question`
@@ -673,8 +673,9 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   same rule. A `merge_guard = "credentials"` lead is refused under both.
   Under `unix_sockets = "all"` the socket check is skipped: the lead isn't
   refused or flagged for open sockets. What still gets past the sandbox:
-  workers run unsandboxed, so a lead can have one act for it (a
-  `credentials` lead starts warned of it), and most of
+  workers run unsandboxed unless the herd's `[worker] sandbox` turns
+  theirs on, so a lead can have one act for it (a `credentials` lead
+  starts only with `[worker] sandbox = "require"`), and most of
   the state dir stays writable to it. Set `prefer` only
   when the human says so; doctor names those herds and leads.
 - **Change a herd file's values** with `loopherd herd set <herd> <key>

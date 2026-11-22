@@ -858,6 +858,12 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
     // Checks and worker prompts are templates, which take {{ and }} for braces.
     let member_token = token.replace('{', "{{").replace('}', "}}");
     let switches = match herd.merge_guard {
+        Some(MergeGuard::Credentials) => format!(
+            "{}\nmerge_guard = \"credentials\"\n\n[worker]\n\
+             # A credentials lead starts only while its workers are sandboxed.\n\
+             sandbox = \"require\"",
+            herd.switches
+        ),
         Some(guard) => format!("{}\nmerge_guard = \"{}\"", herd.switches, guard.name()),
         None => herd.switches.clone(),
     };

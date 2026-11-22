@@ -2289,6 +2289,41 @@ mod tests {
     }
 
     #[test]
+    fn a_credentials_lead_whose_workers_sandbox_isnt_required_is_not_revived_under_either_mode() {
+        for worker in ["off", "prefer"] {
+            for mode in ["require", "prefer"] {
+                let cwd = tempfile::tempdir().unwrap();
+                let herdr = herdr();
+                let mut ledger = ledger([lead("lead-h", cwd.path())]);
+                let req = request();
+                std::fs::write(
+                    req.paths.herds.join("h.toml"),
+                    format!(
+                        "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge_guard = \"credentials\"\n\
+                         sandbox = \"{mode}\"\n[worker]\nsandbox = \"{worker}\"\n",
+                        own_repo()
+                    ),
+                )
+                .unwrap();
+
+                let (out, code) = run(&herdr, &mut ledger, &req);
+
+                assert_eq!(code, 1, "{worker} {mode}: {out}");
+                assert!(
+                    out.starts_with(&format!(
+                        "failed lead-h: sandbox: lead-h can't start with merge_guard = \
+                         \"credentials\": its workers must run sandboxed, or it could have one \
+                         merge or force-push as you, and [worker] sandbox is \"{worker}\", not \
+                         \"require\"; run loopherd herd set h worker.sandbox '\"require\"'"
+                    )),
+                    "{worker} {mode}: {out}"
+                );
+                assert!(herdr.started().is_empty(), "{worker} {mode}");
+            }
+        }
+    }
+
+    #[test]
     fn a_revived_worker_keeps_its_own_settings() {
         let cwd = tempfile::tempdir().unwrap();
         let herdr = herdr();
