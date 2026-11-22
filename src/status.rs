@@ -13,6 +13,7 @@ use crate::herd_view::{Herd, Member, Options, QueueTasks, Tasks, View, view};
 use crate::herdr::{Herdr, MalformedReply};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::pause;
+pub use crate::subagents::Subagents;
 use crate::watch::printable;
 use crate::worktree::PinnedGit;
 
@@ -49,14 +50,15 @@ pub fn read(
     ledger: &dyn Ledger,
     pauses: &pause::Pauses,
     options: Options,
+    subagents: Option<&Subagents>,
 ) -> Result<Read> {
-    read_with(herdr, ledger, Some(pauses), options, None, true)
+    read_with(herdr, ledger, Some(pauses), options, None, true, subagents)
 }
 
 /// [`read`] without each member's branch, which costs a git call per member,
 /// or the herds' pauses.
 pub fn read_statuses(herdr: &dyn Herdr, ledger: &dyn Ledger, options: Options) -> Result<Read> {
-    read_with(herdr, ledger, None, options, None, false)
+    read_with(herdr, ledger, None, options, None, false, None)
 }
 
 fn read_with(
@@ -66,6 +68,7 @@ fn read_with(
     options: Options,
     only: Option<&str>,
     branches: bool,
+    subagents: Option<&Subagents>,
 ) -> Result<Read> {
     let mut entries = ledger.entries()?;
     if let Some(herd) = only {
@@ -94,6 +97,9 @@ fn read_with(
     let branch = |record: &AgentRecord| branches.then(|| pinned.of(record)).flatten();
     let mut view = view(&entries, agents.as_deref(), options, branch);
     view.herdr_reachable = agents.is_some() || malformed;
+    if let Some(subagents) = subagents {
+        crate::subagents::fill(&mut view, &entries, subagents);
+    }
     let mut problems: Vec<String> = problem.into_iter().collect();
     problems.extend(pinned.refusals.into_inner());
     if let Some(pauses) = pauses {
@@ -208,12 +214,16 @@ pub fn status(
     queues: Option<&Queues>,
     options: Options,
     format: Format,
+    subagents: Option<&Subagents>,
 ) -> Result<Output> {
-    status_of(herdr, ledger, pauses, queues, options, format, None)
+    status_of(
+        herdr, ledger, pauses, queues, options, format, None, subagents,
+    )
 }
 
 /// [`status`] as a lead sees it: herd `herd` alone, with its retired members
 /// for `all`, and no strays, which belong to no herd.
+#[allow(clippy::too_many_arguments)]
 pub fn herd_status(
     herdr: &dyn Herdr,
     ledger: &dyn Ledger,
@@ -222,11 +232,22 @@ pub fn herd_status(
     all: bool,
     format: Format,
     herd: &str,
+    subagents: Option<&Subagents>,
 ) -> Result<Output> {
     let options = Options { all, strays: false };
-    status_of(herdr, ledger, pauses, queues, options, format, Some(herd))
+    status_of(
+        herdr,
+        ledger,
+        pauses,
+        queues,
+        options,
+        format,
+        Some(herd),
+        subagents,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn status_of(
     herdr: &dyn Herdr,
     ledger: &dyn Ledger,
@@ -235,12 +256,13 @@ fn status_of(
     options: Options,
     format: Format,
     only: Option<&str>,
+    subagents: Option<&Subagents>,
 ) -> Result<Output> {
     let Read {
         mut view,
         problem,
         code,
-    } = read_with(herdr, ledger, Some(pauses), options, only, true)?;
+    } = read_with(herdr, ledger, Some(pauses), options, only, true, subagents)?;
     if let Some(queues) = queues {
         add_tasks(&mut view.herds, queues, ledger, only);
     }
@@ -604,6 +626,7 @@ mod tests {
                 None,
                 Options::default(),
                 PLAIN,
+                None,
             )
             .unwrap();
             assert!(out.stdout.starts_with(header), "{}", out.stdout);
@@ -623,7 +646,16 @@ mod tests {
         std::fs::write(root.path().join("herds/docs.toml"), "repo = \"/r\"\n").unwrap();
         let paths = Pauses::under(root.path());
 
-        let out = status(&herdr(), &ledger, &paths, None, Options::default(), PLAIN).unwrap();
+        let out = status(
+            &herdr(),
+            &ledger,
+            &paths,
+            None,
+            Options::default(),
+            PLAIN,
+            None,
+        )
+        .unwrap();
 
         assert!(
             out.stdout.starts_with(
@@ -641,6 +673,7 @@ mod tests {
             None,
             Options::default(),
             Format::Json,
+            None,
         );
         let json: serde_json::Value = serde_json::from_str(&json.unwrap().stdout).unwrap();
         assert_eq!(json["herds"][1]["name"], "prs");
@@ -661,6 +694,7 @@ mod tests {
             None,
             Options::default(),
             PLAIN,
+            None,
         )
         .unwrap();
 
@@ -674,7 +708,16 @@ mod tests {
         std::fs::write(root.path().join("paused/prs"), "").unwrap();
         let paths = Pauses::under(root.path());
 
-        let out = status(&herdr(), &ledger(), &paths, None, Options::default(), PLAIN).unwrap();
+        let out = status(
+            &herdr(),
+            &ledger(),
+            &paths,
+            None,
+            Options::default(),
+            PLAIN,
+            None,
+        )
+        .unwrap();
 
         assert!(
             out.stdout.starts_with("prs  paused (time unknown)\n"),
@@ -695,6 +738,7 @@ mod tests {
             None,
             Options::default(),
             Format::Json,
+            None,
         );
         let json: serde_json::Value = serde_json::from_str(&json.unwrap().stdout).unwrap();
         assert_eq!(
@@ -716,6 +760,7 @@ mod tests {
             None,
             Options::default(),
             PLAIN,
+            None,
         );
         std::fs::set_permissions(&paused, std::fs::Permissions::from_mode(0o755)).ok();
         out.unwrap()
@@ -785,6 +830,7 @@ mod tests {
             None,
             Options::default(),
             PLAIN,
+            None,
         );
         std::fs::set_permissions(&herds, std::fs::Permissions::from_mode(0o755)).unwrap();
 
@@ -814,6 +860,7 @@ mod tests {
             None,
             Options::default(),
             PLAIN,
+            None,
         )
         .unwrap();
 
@@ -838,6 +885,7 @@ mod tests {
             None,
             Options::default(),
             PLAIN,
+            None,
         )
         .unwrap();
 
@@ -862,6 +910,7 @@ mod tests {
                 None,
                 Options::default(),
                 Format::Json,
+                None,
             )
             .unwrap();
             serde_json::from_str::<serde_json::Value>(&out.stdout).unwrap()["herds"][0]["paused"]
@@ -886,6 +935,7 @@ mod tests {
             None,
             Options::default(),
             PLAIN,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -923,8 +973,17 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         std::fs::write(paused.path().join("paused/other"), pause.to_string()).unwrap();
         let pauses = Pauses::under(paused.path());
 
-        let text = herd_status(&herdr, &ledger, &pauses, None, true, PLAIN, "prs").unwrap();
-        let json = herd_status(&herdr, &ledger, &pauses, None, false, Format::Json, "prs");
+        let text = herd_status(&herdr, &ledger, &pauses, None, true, PLAIN, "prs", None).unwrap();
+        let json = herd_status(
+            &herdr,
+            &ledger,
+            &pauses,
+            None,
+            false,
+            Format::Json,
+            "prs",
+            None,
+        );
         let json: serde_json::Value = serde_json::from_str(&json.unwrap().stdout).unwrap();
 
         assert_eq!(
@@ -959,6 +1018,7 @@ retired
             None,
             Options::default(),
             PLAIN,
+            None,
         )
         .unwrap();
 
@@ -989,6 +1049,7 @@ retired
             None,
             Options::default(),
             PLAIN,
+            None,
         )
         .unwrap();
 
@@ -1020,6 +1081,7 @@ retired
             None,
             Options::default(),
             PLAIN,
+            None,
         )
         .unwrap();
 
@@ -1050,6 +1112,7 @@ retired
             None,
             Options::default(),
             PLAIN,
+            None,
         )
         .unwrap();
 
@@ -1082,6 +1145,7 @@ prs
                 None,
                 Options::default(),
                 format,
+                None,
             );
             out.unwrap().stdout
         };
@@ -1110,6 +1174,7 @@ prs
             None,
             Options::default(),
             PLAIN,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -1145,6 +1210,7 @@ strays unknown (herdr unreachable)
                 strays: true,
             },
             Format::Text { color: true },
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -1182,6 +1248,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             None,
             options,
             Format::Text { color: false },
+            None,
         )
         .unwrap();
         let json = status(
@@ -1191,6 +1258,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             None,
             options,
             Format::Json,
+            None,
         )
         .unwrap();
 
@@ -1215,8 +1283,17 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             strays: false,
         };
 
-        let text = status(&herdr(), &ledger, &not_paused(), None, all, PLAIN).unwrap();
-        let json = status(&herdr(), &ledger, &not_paused(), None, all, Format::Json).unwrap();
+        let text = status(&herdr(), &ledger, &not_paused(), None, all, PLAIN, None).unwrap();
+        let json = status(
+            &herdr(),
+            &ledger,
+            &not_paused(),
+            None,
+            all,
+            Format::Json,
+            None,
+        )
+        .unwrap();
 
         let row = text.stdout.lines().find(|l| l.contains("old")).unwrap();
         assert_eq!(
@@ -1239,7 +1316,16 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             strays: false,
         };
 
-        let json = status(&herdr(), &ledger, &not_paused(), None, all, Format::Json).unwrap();
+        let json = status(
+            &herdr(),
+            &ledger,
+            &not_paused(),
+            None,
+            all,
+            Format::Json,
+            None,
+        )
+        .unwrap();
 
         let json: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
         assert_eq!(json["retired"][0]["retired"], "unknown");
@@ -1255,12 +1341,151 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             all: true,
             strays: false,
         };
-        let out = status(&herdr(), &ledger, &not_paused(), None, all, PLAIN).unwrap();
+        let out = status(&herdr(), &ledger, &not_paused(), None, all, PLAIN, None).unwrap();
         assert!(
             out.stdout.starts_with("prs (retired only)\nungrouped\n"),
             "{}",
             out.stdout
         );
+    }
+
+    fn post(dir: &Path, name: &str, at: &str, body: crate::report::Body) {
+        let at = humantime::parse_rfc3339(at).unwrap();
+        crate::report::append(dir, name, &crate::report::Entry::new(at, body)).unwrap();
+    }
+
+    fn subagent(
+        id: &str,
+        kind: &str,
+        session: &str,
+        meta: Option<&Path>,
+    ) -> crate::report::Subagent {
+        crate::report::Subagent {
+            id: id.into(),
+            agent_type: kind.into(),
+            description: None,
+            session: Some(session.into()),
+            meta: meta.map(Path::to_path_buf),
+        }
+    }
+
+    fn stop_with(subagents: u32) -> crate::report::Body {
+        use crate::report::{Background, Stop, Tally};
+        crate::report::Body::Stop(Stop {
+            background: Tally::Known(Background {
+                subagents,
+                ..Default::default()
+            }),
+            crons: Tally::Known(0),
+            error: None,
+            session: Some("sess-lh-42".into()),
+            context: None,
+            limit: None,
+        })
+    }
+
+    #[test]
+    fn json_lists_each_members_running_subagents_with_their_descriptions_once_claude_wrote_them() {
+        use crate::report::Body::{SubagentStart, SubagentStop};
+        let mail = tempfile::tempdir().unwrap();
+        let meta = mail.path().join("agent-a1.meta.json");
+        std::fs::write(
+            &meta,
+            r#"{"agentType": "reviewer", "description": "Review PR 325 round 1"}"#,
+        )
+        .unwrap();
+        let m = mail.path();
+        post(
+            m,
+            "zpr-1",
+            "2026-11-21T10:00:00Z",
+            SubagentStart(subagent("a1", "reviewer", "sess-zpr-1", Some(&meta))),
+        );
+        post(
+            m,
+            "zpr-1",
+            "2026-11-21T10:01:00Z",
+            SubagentStart(subagent("a2", "builder", "sess-zpr-1", None)),
+        );
+        post(
+            m,
+            "zpr-1",
+            "2026-11-21T10:02:00Z",
+            SubagentStop(subagent("a2", "builder", "sess-zpr-1", None)),
+        );
+        post(
+            m,
+            "zpr-1",
+            "2026-11-21T10:03:00Z",
+            SubagentStart(subagent("a3", "scout", "sess-zpr-1", None)),
+        );
+        post(
+            m,
+            "zpr-2",
+            "2026-11-21T10:00:00Z",
+            SubagentStart(subagent("b1", "reviewer", "before-clear", None)),
+        );
+        post(
+            m,
+            "lh-42",
+            "2026-11-21T10:00:00Z",
+            SubagentStart(subagent("c1", "reviewer", "sess-lh-42", None)),
+        );
+        post(m, "lh-42", "2026-11-21T10:01:00Z", stop_with(1));
+        post(
+            m,
+            "lh-42",
+            "2026-11-21T10:02:00Z",
+            SubagentStart(subagent("c2", "reviewer", "sess-lh-42", None)),
+        );
+        post(m, "lh-42", "2026-11-21T10:05:00Z", stop_with(0));
+        post(
+            m,
+            "old",
+            "2026-11-21T10:00:00Z",
+            SubagentStart(subagent("d1", "reviewer", "sess-old", None)),
+        );
+        let subagents = Subagents {
+            mailboxes: m,
+            now: humantime::parse_rfc3339("2026-11-21T10:04:30Z").unwrap(),
+        };
+
+        let out = status(
+            &herdr(),
+            &ledger(),
+            &not_paused(),
+            None,
+            Options::default(),
+            Format::Json,
+            Some(&subagents),
+        )
+        .unwrap();
+
+        let json: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+        let members = &json["herds"][0]["members"];
+        assert_eq!(members[0]["name"], "zpr-2");
+        assert_eq!(members[0]["subagents"], serde_json::json!([]));
+        assert_eq!(members[1]["name"], "zpr-1");
+        assert_eq!(
+            members[1]["subagents"],
+            serde_json::json!([
+                {"id": "a1", "type": "reviewer", "description": "Review PR 325 round 1",
+                    "started": "2026-11-21T10:00:00.000000000Z"},
+                {"id": "a3", "type": "scout", "description": null,
+                    "started": "2026-11-21T10:03:00.000000000Z"},
+            ])
+        );
+        let ungrouped = json["ungrouped"].as_array().unwrap();
+        let named = |name: &str| {
+            ungrouped
+                .iter()
+                .find(|m| m["name"] == name)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(named("lh-42")["subagents"], serde_json::json!([]));
+        assert_eq!(named("old")["gone"], true);
+        assert_eq!(named("old")["subagents"], serde_json::json!([]));
     }
 
     #[test]
@@ -1280,12 +1505,14 @@ gone: no live agent matches it; `loopherd revive` can bring it back
                 strays: true,
             },
             Format::Json,
+            None,
         )
         .unwrap();
         let json: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
         let member = |name: &str, status: &str, gone: bool, wt: &str, pane: &str, tab| {
             serde_json::json!({"name": name, "status": status, "gone": gone, "branch": null,
-                "worktree": wt, "pane": pane, "tab": tab, "lead": false, "attended": false, "template": null, "released": false, "retired": null})
+                "worktree": wt, "pane": pane, "tab": tab, "lead": false, "attended": false, "template": null, "released": false, "retired": null,
+                "subagents": []})
         };
         let mut zpr_1 = member(
             "zpr-1",
@@ -1320,6 +1547,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             None,
             Options::default(),
             Format::Json,
+            None,
         )
         .unwrap();
         let json: serde_json::Value = serde_json::from_str(&default.stdout).unwrap();
@@ -1343,6 +1571,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
                         None,
                         Options { all, strays },
                         format,
+                        None,
                     )
                     .unwrap();
                     assert_eq!(herdr.mutations(), 0);
@@ -1425,6 +1654,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             None,
             Options::default(),
             PLAIN,
+            None,
         )
         .unwrap();
 
@@ -1439,7 +1669,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             "{}",
             out.stderr
         );
-        let read = read(&herdr, &ledger, &not_paused(), Options::default()).unwrap();
+        let read = read(&herdr, &ledger, &not_paused(), Options::default(), None).unwrap();
         assert!(read.view.ungrouped.iter().all(|m| m.branch.is_none()));
         assert_eq!(read.view.ungrouped.len(), 2);
     }
@@ -1480,7 +1710,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         }
         let herdr = FakeHerdr::new(&[("w1", "main")]);
 
-        let read = read(&herdr, &ledger, &not_paused(), Options::default()).unwrap();
+        let read = read(&herdr, &ledger, &not_paused(), Options::default(), None).unwrap();
 
         let problem = read.problem.unwrap_or_default();
         assert_eq!(
@@ -1522,6 +1752,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             None,
             Options::default(),
             PLAIN,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -1535,6 +1766,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
             None,
             Options::default(),
             Format::Json,
+            None,
         )
         .unwrap();
         let json: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
@@ -1560,7 +1792,7 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         ));
         let member = |read: Read| read.view.ungrouped[0].clone();
 
-        let full = member(read(&herdr, &ledger, &not_paused(), Options::default()).unwrap());
+        let full = member(read(&herdr, &ledger, &not_paused(), Options::default(), None).unwrap());
         let statuses = member(read_statuses(&herdr, &ledger, Options::default()).unwrap());
 
         assert_eq!(full.branch.as_deref(), Some("main"));

@@ -1,6 +1,6 @@
 //! `loopherd install-hook`: merge loopherd's Stop, StopFailure, SessionStart,
-//! PreToolUse and UserPromptSubmit hooks into Claude's user settings, or take
-//! them out with `--remove`.
+//! PreToolUse, UserPromptSubmit, SubagentStart and SubagentStop hooks into
+//! Claude's user settings, or take them out with `--remove`.
 
 use std::fs;
 use std::io::Write;
@@ -20,7 +20,7 @@ struct Hook {
     watched: bool,
 }
 
-const HOOKS: [Hook; 5] = [
+const HOOKS: [Hook; 7] = [
     Hook {
         event: "Stop",
         subcommand: "stop-hook",
@@ -58,6 +58,21 @@ const HOOKS: [Hook; 5] = [
         timeout: 5,
         watched: false,
     },
+    // Only lists running subagents in `view` and `status`.
+    Hook {
+        event: "SubagentStart",
+        subcommand: "subagent-hook",
+        matcher: None,
+        timeout: 5,
+        watched: false,
+    },
+    Hook {
+        event: "SubagentStop",
+        subcommand: "subagent-hook",
+        matcher: None,
+        timeout: 5,
+        watched: false,
+    },
 ];
 
 #[derive(Debug, PartialEq, Eq)]
@@ -86,8 +101,8 @@ pub fn claude_dir() -> Result<PathBuf> {
     )
 }
 
-/// The hook's shell command. `|| true` because exit 2 blocks: a Stop hook
-/// keeps Claude from stopping, a PreToolUse hook the tool call, a
+/// The hook's shell command. `|| true` because exit 2 blocks: a Stop or
+/// SubagentStop hook keeps Claude from stopping, a PreToolUse hook the tool call, a
 /// UserPromptSubmit hook the prompt, and a missing or old binary must never
 /// do that. tool-hook blocks with JSON instead.
 pub fn hook_command(exe: &Path, subcommand: &str) -> Result<String> {
@@ -161,8 +176,9 @@ pub fn remove(settings: &Path, now: SystemTime) -> Result<Outcome> {
 }
 
 /// Whether `settings` has the hooks `watch` needs: Stop, StopFailure and
-/// SessionStart. The PreToolUse hook only guards leads, and the
-/// UserPromptSubmit hook only clears pane labels.
+/// SessionStart. The PreToolUse hook only guards leads, the
+/// UserPromptSubmit hook only clears pane labels, and the subagent hooks only
+/// list running subagents.
 pub fn installed(settings: &Path) -> Result<bool> {
     let Some(root) = read_settings(settings)? else {
         return Ok(false);
@@ -690,6 +706,33 @@ mod tests {
     }
 
     #[test]
+    fn installs_quick_subagent_start_and_stop_hooks_that_watch_does_not_need() {
+        let (_dir, path) = settings_with(USER_SETTINGS);
+        install(&path, Path::new(EXE), now()).unwrap();
+        let subagent_hook = json!({"type": "command", "command": format!("'{EXE}' subagent-hook || true"), "timeout": 5});
+        let after = read(&path);
+        assert_eq!(
+            after["hooks"]["SubagentStart"],
+            json!([{"hooks": [subagent_hook]}])
+        );
+        assert_eq!(
+            after["hooks"]["SubagentStop"],
+            json!([{"hooks": [subagent_hook]}])
+        );
+
+        let mut without = after;
+        let hooks = without["hooks"].as_object_mut().unwrap();
+        hooks.remove("SubagentStart");
+        hooks.remove("SubagentStop");
+        fs::write(&path, without.to_string()).unwrap();
+        assert!(installed(&path).unwrap());
+
+        remove(&path, later()).unwrap();
+        assert!(read(&path)["hooks"].get("SubagentStart").is_none());
+        assert!(read(&path)["hooks"].get("SubagentStop").is_none());
+    }
+
+    #[test]
     fn installed_needs_ours_on_the_three_watched_events() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
@@ -788,6 +831,12 @@ mod tests {
                 "PreToolUse": [{"matcher": "Bash", "hooks": [tool_hook()]}],
                 "UserPromptSubmit": [{"hooks": [
                     json!({"type": "command", "command": format!("'{EXE}' prompt-hook || true"), "timeout": 5})
+                ]}],
+                "SubagentStart": [{"hooks": [
+                    json!({"type": "command", "command": format!("'{EXE}' subagent-hook || true"), "timeout": 5})
+                ]}],
+                "SubagentStop": [{"hooks": [
+                    json!({"type": "command", "command": format!("'{EXE}' subagent-hook || true"), "timeout": 5})
                 ]}],
             }})
         );
