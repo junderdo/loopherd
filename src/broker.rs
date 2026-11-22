@@ -1764,21 +1764,47 @@ pub type RestartBroker = fn(&Paths, &str) -> Result<()>;
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Starts `loopherd broker <lead>` detached, in a session of its own, unless
-/// a broker already serves `lead`, and waits until it serves.
+/// a broker already serves `lead`, and waits until it serves. Fails, naming
+/// the holder, when the lock stays held with nothing recorded in it.
 pub fn start(paths: &Paths, lead: &str) -> Result<bool> {
     let exe = std::env::current_exe().context("find the loopherd binary")?;
-    start_with(paths, lead, &mut || spawn(paths, lead, &exe))
+    start_with(paths, lead, START_TIMEOUT, &mut || spawn(paths, lead, &exe))
 }
 
-fn start_with(paths: &Paths, lead: &str, spawn: &mut dyn FnMut() -> Result<u32>) -> Result<bool> {
+fn start_with(
+    paths: &Paths,
+    lead: &str,
+    wait: Duration,
+    spawn: &mut dyn FnMut() -> Result<u32>,
+) -> Result<bool> {
     validate_name(lead)?;
     let lock = lock_file(paths, lead);
     // A held lock with no record is a broker exiting (or one just starting, or one that records nothing).
-    let given_up = Instant::now() + START_TIMEOUT;
+    let given_up = Instant::now() + wait;
     while held(&lock) {
-        let recorded = std::fs::metadata(&lock).is_ok_and(|m| m.len() > 0);
-        if recorded || Instant::now() >= given_up {
+        if std::fs::metadata(&lock).is_ok_and(|m| m.len() > 0) {
             return Ok(false);
+        }
+        if Instant::now() >= given_up {
+            let (holder, fix) = match serving_pid(paths, lead) {
+                Some(pid) => (
+                    format!("pid {pid}"),
+                    format!("run loopherd broker-restart {lead} to replace it"),
+                ),
+                None => (
+                    "a process that recorded no pid".into(),
+                    format!(
+                        "stop it yourself (pgrep -f 'loopherd broker {lead}' finds it), then run \
+                         loopherd broker-restart {lead}"
+                    ),
+                ),
+            };
+            bail!(
+                "{} is held by {holder}, which records nothing in it, as a broker older than \
+                 this loopherd does, and didn't let it go within {}; {fix}",
+                lock.display(),
+                humantime::format_duration(wait)
+            );
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -4297,7 +4323,7 @@ mod tests {
         });
         let mut spawned = 0;
 
-        let started = start_with(&world.paths, "lead-h", &mut || {
+        let started = start_with(&world.paths, "lead-h", START_TIMEOUT, &mut || {
             spawned += 1;
             Ok(1)
         });
@@ -4308,12 +4334,60 @@ mod tests {
     }
 
     #[test]
+    fn a_lock_held_with_no_record_past_the_wait_fails_the_start_naming_its_holder() {
+        let world = World::new();
+        // A broker that never records, as one older than the lock's record does.
+        let _held = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+        std::fs::write(
+            pid_file(&world.paths, "lead-h"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        let mut spawned = 0;
+
+        let started = start_with(
+            &world.paths,
+            "lead-h",
+            Duration::from_millis(50),
+            &mut || {
+                spawned += 1;
+                Ok(1)
+            },
+        );
+
+        let why = format!("{:#}", started.unwrap_err());
+        assert!(
+            why.contains(&format!("pid {}", std::process::id())),
+            "{why}"
+        );
+        assert!(why.contains("loopherd broker-restart lead-h"), "{why}");
+        assert_eq!(spawned, 0);
+    }
+
+    #[test]
+    fn a_lock_held_with_no_record_or_pid_past_the_wait_says_how_to_find_its_holder() {
+        let world = World::new();
+        let _held = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+
+        let started = start_with(
+            &world.paths,
+            "lead-h",
+            Duration::from_millis(50),
+            &mut || Ok(1),
+        );
+
+        let why = format!("{:#}", started.unwrap_err());
+        assert!(why.contains("recorded no pid"), "{why}");
+        assert!(why.contains("pgrep -f 'loopherd broker lead-h'"), "{why}");
+    }
+
+    #[test]
     fn starting_a_broker_while_one_serves_starts_none() {
         let world = World::new();
         let serving = world.serve(FakeHerdr::new(&[]));
         let mut spawned = 0;
 
-        let started = start_with(&world.paths, "lead-h", &mut || {
+        let started = start_with(&world.paths, "lead-h", START_TIMEOUT, &mut || {
             spawned += 1;
             Ok(1)
         });
