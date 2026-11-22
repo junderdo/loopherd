@@ -399,7 +399,8 @@ fn skill_section_prints_only_that_section() {
     assert!(printed.contains("- **On each wake**"), "{printed}");
     assert!(!printed.contains("## Shepherd"), "{printed}");
     assert!(!printed.contains("name: loopherd"), "{printed}");
-    assert!(printed.ends_with("never commit in it.\n"), "{printed}");
+    assert!(!printed.contains("## Groom"), "{printed}");
+    assert!(printed.ends_with("never commit in it.\n\n"), "{printed}");
 }
 
 #[test]
@@ -605,4 +606,64 @@ fn with_follow_ups_ready_on_a_lead_files_a_qualifying_follow_up_ready_and_blocke
         ),
         "{low}"
     );
+}
+
+fn skill_section(home: &Path, name: &str) -> String {
+    let out = loopherd(home, &["--skill", "--section", name]);
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[test]
+fn the_groom_section_gives_the_groomers_rights_limits_and_report() {
+    let home = tempfile::tempdir().unwrap();
+    let groom = skill_section(home.path(), "groom");
+    for rule in [
+        "You may edit a card's text, comment on it, mark a duplicate by a comment naming the card it duplicates, and check whether a card is stale against the code",
+        "Never add `ready-for-agent`, archive a card, move a card between lists, or add or remove `need-human` or `blocked`",
+        "For a `need-human` card, change nothing: restate its open question in your report",
+        "On each `wayfinding:grilling` card, post a draft grill prompt as a comment",
+        "ready, needs a decision (naming it), needs spec (saying what's missing), or stale (saying why)",
+        "The edits you made",
+        "A numbered batch of proposed actions, one per line, each with the exact command that applies it",
+        "in your tracker's command form, as your prompt or the project's tracker doc gives it",
+        "mark ready, archive (with the reason), or comment what's missing on a needs-spec card",
+        "Send it as one `loopherd report --kind done` and end your turn",
+    ] {
+        assert!(groom.contains(rule), "Groom misses {rule:?}: {groom}");
+    }
+}
+
+#[test]
+fn a_lead_running_low_starts_its_herds_groomer_when_it_has_one() {
+    let home = tempfile::tempdir().unwrap();
+    let lead = skill_section(home.path(), "lead");
+    let (_, low) = lead.split_once("- **Running low.**").expect("Running low");
+    let (low, _) = low.split_once("- **").unwrap();
+    for rule in [
+        "If your herd file has a `[template.groom]`, run `loopherd add <herd> groom` and end your turn",
+        "Do nothing while `groom-<herd>` is open",
+        "On its `done`, relay its report as one `loopherd report --kind question`, batch unchanged, then `loopherd retire --close groom-<herd>`",
+        "Without the template, have a read-only subagent run your herd's `backlog`",
+    ] {
+        assert!(low.contains(rule), "Running low misses {rule:?}: {low}");
+    }
+}
+
+#[test]
+fn the_shepherd_starts_an_unled_herds_groomer_and_runs_only_the_approved_batch_lines() {
+    let home = tempfile::tempdir().unwrap();
+    let printed = String::from_utf8(skill(home.path())).unwrap();
+    let triage = flat_section(&printed, "6. **Triage**", "7. **Out of work.**");
+    for rule in [
+        "If it has a `[template.groom]`, run `loopherd add <herd> groom` (nothing while `groom-<herd>` is open)",
+        "on its `done`, relay its report to the human, then `loopherd retire --close groom-<herd>`",
+        "Without the template, run the herd's `backlog` and sort each task the same way",
+        "run the batch lines the human approved, as written, and no others",
+    ] {
+        assert!(triage.contains(rule), "Triage misses {rule:?}: {triage}");
+    }
 }

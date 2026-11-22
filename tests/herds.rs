@@ -158,3 +158,30 @@ fn herds_warns_of_a_missing_prompt_hook_in_the_settings_it_is_given_until_instal
     );
     assert_eq!(out.status.code(), Some(0));
 }
+
+#[test]
+fn herds_accepts_the_documented_routed_queue_and_its_groom_template() {
+    let config = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    recording_herdr(bin.path());
+    let herds = config.path().join("herds");
+    fs::create_dir(&herds).unwrap();
+    fs::write(
+        herds.join("cards.toml"),
+        format!(
+            "repo = \"/r\"\n[template.card]\nparams = [\"card\", \"type\", \"slug\"]\n\
+             name = \"lh-{{card}}\"\nbranch = \"{{type}}/LH-{{card}}-{{slug}}\"\n\
+             prompt = \"build {{card}}\"\n{}",
+            include_str!("../docs/examples/loopherd-cards-routed.toml")
+        ),
+    )
+    .unwrap();
+
+    let out = run_herds(config.path(), bin.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("loopherd add cards groom  (no slot)\n"),
+        "{stdout}"
+    );
+}

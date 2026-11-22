@@ -1,8 +1,8 @@
 # A queue that routes each card to one of two templates: the herd's existing
 # `card` for impl cards, `wayfinding` (on sonnet, its own prompt) for
 # research, domain and prototype cards. Replace the herd's `[queue]` with this
-# one, and add `[template.wayfinding]` beside its `[template.card]`, whose
-# params must stay ["card", "type", "slug"].
+# one, and add `[template.wayfinding]` and `[template.groom]` beside its
+# `[template.card]`, whose params must stay ["card", "type", "slug"].
 #
 # With `templates`, the first word of each line `source` prints names the
 # task's template (one of the list) and the rest are its params. A line whose
@@ -64,4 +64,30 @@ link and a three-line summary on the card and move it to Review. Never rebase or
 If you hit a question only the human can answer, stop cleanly as the card workflow describes.
 Finish every stop with one report: `loopherd report --kind done "<PR link and summary>"`, or
 `--kind question "<the exact question>"`.
+"""
+
+# The groomer (D116): started on `running low` by the lead (or the shepherd
+# for an unled herd) with `loopherd add <herd> groom`, never by feed, so it
+# stays out of `[queue] templates`. It holds no slot and has no done or merged
+# check; the lead retires it with --close after relaying its report.
+[template.groom]
+params = []
+name = "groom-{herd}"
+worktree = "groom-{herd}"
+slot = false
+args = ["--model", "sonnet"]
+prompt = """
+You're {name}, in a detached worktree at {worktree}, grooming the {herd} herd's unready cards.
+
+Run `loopherd --skill --section groom` and follow it: it gives your rights, your limits and the
+report to send. Read docs/agents/issue-tracker.md and AGENTS.md first. List the unready cards by
+running the command `loopherd herd get {herd} queue.backlog` prints, and read each with
+`scripts/trello show LH-<n>`.
+
+Write each batch line as docs/agents/shepherd.md's Triage part gives it: `scripts/trello label LH-<n>
++ready-for-agent` to mark ready, `scripts/trello comment LH-<n> '<what's missing>'` for needs spec,
+and, to archive, its curl command with the card's shortLink, the reason stated before it on the line.
+
+Never add ready-for-agent, archive, move a card between lists, or touch need-human or blocked.
+Finish with one `loopherd report --kind done '<report>'` in the Groom section's format.
 """

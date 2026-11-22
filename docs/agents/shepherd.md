@@ -64,9 +64,16 @@ Backlog cards into members `lh-<n>` on `<type>/LH-<n>-<slug>`.
   `report` fail, and your watch prints `<lead> no broker`; run
   `loopherd broker-restart <lead>`, which starts one when none runs.
 
-- **Triage** (the skill's Triage, D60): the herd file's `[queue] backlog`
+- **Triage** (the skill's Triage, D60, D116): the herd file's `[queue] backlog`
   (see [examples/loopherd-cards-routed.toml](../examples/loopherd-cards-routed.toml))
-  lists the unready cards. Once the human approves the lead's triage:
+  lists the unready cards. A herd with that file's `[template.groom]` gets
+  a `groom-<herd>` member on `running low`, started by its lead, or by you
+  with `loopherd add <herd> groom` for an unled herd. Its report ends in a
+  numbered batch, each line one of the commands below with its card and
+  text filled in. Relay the report; when the human approves the batch, or
+  all but some lines, run each approved line as written and no other, then
+  `loopherd retire --close groom-<herd>` if no lead did. Without a batch,
+  once the human approves the lead's triage:
 
   ```bash
   scripts/trello label LH-<n> +ready-for-agent      # each ready card
