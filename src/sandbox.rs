@@ -1043,14 +1043,6 @@ fn start(
     if sockets_open(paths, &lead.herd)? {
         warnings.push(sockets_open_warning(name, &lead.herd));
     }
-    let workers_off = herd::worker(paths, &lead.herd)?.sandbox == WorkerSandbox::Off;
-    if by_credentials && workers_off {
-        warnings.push(format!(
-            "{name}'s workers run unsandboxed with your gh credentials, so it could have one \
-             merge or force-push as you; only the lead holds herd {}'s deploy key and token",
-            lead.herd
-        ));
-    }
     if let Some((why, fix)) = &sockets_unblocked {
         warnings.push(format!("{}; {fix}", sockets_unblocked_warning(name, why)));
     }
@@ -1961,6 +1953,13 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
             return Err(credentials_refusal(
                 name,
                 &herd::credentials_with_sockets(herd, "lead"),
+            ));
+        }
+        let workers = herd::worker(paths, herd)?.sandbox;
+        if workers != WorkerSandbox::Require {
+            return Err(credentials_refusal(
+                name,
+                &herd::credentials_with_workers_unrequired(herd, workers),
             ));
         }
     }

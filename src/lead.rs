@@ -1515,7 +1515,7 @@ mod tests {
 
     #[test]
     fn a_credentials_lead_with_a_disallowed_arg_isnt_started_even_under_prefer() {
-        let setup = Setup::with_lead(&format!("{CREDENTIALS}\nsandbox = \"prefer\""));
+        let setup = Setup::with_lead(&credentials("sandbox = \"prefer\""));
         let herdr = herdr();
 
         let err = lead(
@@ -1602,7 +1602,13 @@ mod tests {
         );
     }
 
-    const CREDENTIALS: &str = "prompt = \"go\"\nmerge_guard = \"credentials\"";
+    /// A credentials `[lead]` with `lead` lines added, in a herd whose workers
+    /// are required sandboxed.
+    fn credentials(lead: &str) -> String {
+        format!(
+            "prompt = \"go\"\nmerge_guard = \"credentials\"\n{lead}\n[worker]\nsandbox = \"require\""
+        )
+    }
 
     /// Points origin at GitHub by name while git still fetches the local one.
     fn origin_on_github(setup: &Setup, url: &str) {
@@ -1625,7 +1631,7 @@ mod tests {
 
     #[test]
     fn a_credentials_lead_gets_its_deploy_key_and_token_and_cant_read_the_humans() {
-        let setup = Setup::with_lead(CREDENTIALS);
+        let setup = Setup::with_lead(&credentials(""));
         origin_on_github(&setup, "https://github.com/acme/widgets.git");
         store_credentials(&setup, true, Some("github_pat_1\n"));
         let herdr = herdr();
@@ -1797,11 +1803,11 @@ mod tests {
                 .display()
                 .to_string()
         };
-        let no_key = Setup::with_lead(CREDENTIALS);
+        let no_key = Setup::with_lead(&credentials(""));
         store_credentials(&no_key, false, Some("github_pat_1"));
-        let no_token = Setup::with_lead(CREDENTIALS);
+        let no_token = Setup::with_lead(&credentials(""));
         store_credentials(&no_token, true, None);
-        let empty_token = Setup::with_lead(CREDENTIALS);
+        let empty_token = Setup::with_lead(&credentials(""));
         store_credentials(&empty_token, true, Some("\n"));
         let cases = [
             (
@@ -1849,7 +1855,7 @@ mod tests {
 
     #[test]
     fn a_credentials_lead_isnt_started_without_its_sandbox_even_under_prefer() {
-        let setup = Setup::with_lead(&format!("{CREDENTIALS}\nsandbox = \"prefer\""));
+        let setup = Setup::with_lead(&credentials("sandbox = \"prefer\""));
         origin_on_github(&setup, "https://github.com/acme/widgets.git");
         store_credentials(&setup, true, Some("github_pat_1"));
         let herdr = herdr();
@@ -1884,7 +1890,7 @@ mod tests {
 
     #[test]
     fn a_credentials_lead_that_may_install_isnt_started() {
-        let setup = Setup::with_lead(&format!("{CREDENTIALS}\ninstall = true"));
+        let setup = Setup::with_lead(&credentials("install = true"));
         origin_on_github(&setup, "https://github.com/acme/widgets.git");
         store_credentials(&setup, true, Some("github_pat_1"));
         let herdr = herdr();
@@ -1910,9 +1916,9 @@ mod tests {
     #[test]
     fn a_credentials_lead_with_every_unix_socket_open_isnt_started_under_either_mode() {
         for mode in ["require", "prefer"] {
-            let setup = Setup::with_lead(&format!(
-                "{CREDENTIALS}\nsandbox = \"{mode}\"\nunix_sockets = \"all\""
-            ));
+            let setup = Setup::with_lead(&credentials(&format!(
+                "sandbox = \"{mode}\"\nunix_sockets = \"all\""
+            )));
             origin_on_github(&setup, "https://github.com/acme/widgets.git");
             store_credentials(&setup, true, Some("github_pat_1"));
             let herdr = herdr();
@@ -1940,8 +1946,53 @@ mod tests {
     }
 
     #[test]
-    fn a_credentials_lead_starts_warned_that_its_workers_hold_your_gh() {
-        let setup = Setup::with_lead(CREDENTIALS);
+    fn a_credentials_lead_whose_workers_sandbox_isnt_required_isnt_started_under_either_mode() {
+        for worker in [
+            "",
+            "[worker]\nsandbox = \"off\"",
+            "[worker]\nsandbox = \"prefer\"",
+        ] {
+            for mode in ["require", "prefer"] {
+                let setup = Setup::with_lead(&format!(
+                    "prompt = \"go\"\nmerge_guard = \"credentials\"\nsandbox = \"{mode}\"\n{worker}"
+                ));
+                origin_on_github(&setup, "https://github.com/acme/widgets.git");
+                store_credentials(&setup, true, Some("github_pat_1"));
+                let herdr = herdr();
+
+                let err = lead(
+                    &herdr,
+                    &mut MemLedger::default(),
+                    &setup.paths(),
+                    &request(&[]),
+                    Some("w1"),
+                )
+                .unwrap_err();
+
+                let shown = if worker.contains("prefer") {
+                    "prefer"
+                } else {
+                    "off"
+                };
+                assert_eq!(
+                    format!("{err:#}"),
+                    format!(
+                        "sandbox: lead-h can't start with merge_guard = \"credentials\": its \
+                         workers must run sandboxed, or it could have one merge or force-push as \
+                         you, and [worker] sandbox is \"{shown}\", not \"require\"; run loopherd \
+                         herd set h worker.sandbox '\"require\"', or loopherd herd set h \
+                         lead.merge_guard '\"hook\"'"
+                    ),
+                    "{worker} {mode}"
+                );
+                assert!(herdr.tabs().is_empty(), "{worker} {mode}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_credentials_lead_whose_workers_sandbox_is_required_starts_unwarned() {
+        let setup = Setup::with_lead(&credentials(""));
         origin_on_github(&setup, "https://github.com/acme/widgets.git");
         store_credentials(&setup, true, Some("github_pat_1"));
         let herdr = herdr();
@@ -1955,36 +2006,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            warnings,
-            [
-                "lead-h's workers run unsandboxed with your gh credentials, so it could have \
-              one merge or force-push as you; only the lead holds herd h's deploy key and \
-              token"
-            ]
-        );
-    }
-
-    #[test]
-    fn a_credentials_lead_whose_workers_are_sandboxed_isnt_warned_of_your_gh() {
-        for worker in ["require", "prefer"] {
-            let setup =
-                Setup::with_lead(&format!("{CREDENTIALS}\n[worker]\nsandbox = \"{worker}\""));
-            origin_on_github(&setup, "https://github.com/acme/widgets.git");
-            store_credentials(&setup, true, Some("github_pat_1"));
-            let herdr = herdr();
-
-            let (_, _, warnings) = lead(
-                &herdr,
-                &mut MemLedger::default(),
-                &setup.paths(),
-                &request(&[]),
-                Some("w1"),
-            )
-            .unwrap();
-
-            assert_eq!(warnings, Vec::<String>::new(), "{worker}");
-        }
+        assert_eq!(warnings, Vec::<String>::new());
     }
 
     #[test]
@@ -2218,7 +2240,7 @@ mod tests {
 
     #[test]
     fn a_credentials_lead_whose_user_settings_loosen_its_sandbox_isnt_started_even_under_prefer() {
-        let setup = Setup::with_lead(&format!("{CREDENTIALS}\nsandbox = \"prefer\""));
+        let setup = Setup::with_lead(&credentials("sandbox = \"prefer\""));
         origin_on_github(&setup, "https://github.com/acme/widgets.git");
         store_credentials(&setup, true, Some("github_pat_1"));
         let paths =
