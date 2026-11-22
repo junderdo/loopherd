@@ -10,7 +10,7 @@ use anyhow::Result;
 use serde_json::Value;
 
 use crate::continuation::{follow_recorded, live_for};
-use crate::ledger::{Ledger, Process};
+use crate::ledger::{AgentRecord, Ledger, Process};
 use crate::report::{Body, Entry, Subagent, append, member_of_own_pane};
 
 /// Where the hook runs: `$HERDR_PANE_ID` and `$HERDR_SOCKET_PATH`.
@@ -38,7 +38,17 @@ pub fn subagent_hook(
     let Some(member) = member_of_own_pane(&entries, pane.id, pane.lineage, pane.socket) else {
         return Ok(None);
     };
-    let member = follow_recorded(ledger, &entries, member, live)?.unwrap_or_else(|| member.clone());
+    let member = match follow_recorded(ledger, &entries, member, live) {
+        Ok(followed) => followed.unwrap_or_else(|| member.clone()),
+        // Compared as if moved, so the subagent isn't dropped against a stale session.
+        Err(_) => AgentRecord {
+            session_id: member
+                .session_id
+                .as_deref()
+                .map(|s| live_for(&entries, member, s, live)),
+            ..member.clone()
+        },
+    };
     let session = subagent
         .session
         .as_deref()
