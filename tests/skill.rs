@@ -313,12 +313,11 @@ fn flat_section(printed: &str, start: &str, end: &str) -> String {
     body.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-const SEND_BACK_ONLY_BLOCKING: [&str; 13] = [
+const SEND_BACK_ONLY_BLOCKING: [&str; 12] = [
     "A finding is blocking when it's inside the task's acceptance criteria, or a correctness or safety bug the PR introduces",
     "Every other finding, whatever its severity, is handled as a minor",
     "Only blocking findings fail a round, and only they go back to the member while it fails",
     "in a PR comment holding just those",
-    "Post nits in a separate PR comment marked non-blocking",
     "the follow-up minors in a question to the human",
     "Its `<b> blocking` counts only those",
     "checks the previous round's blocking findings",
@@ -329,25 +328,36 @@ const SEND_BACK_ONLY_BLOCKING: [&str; 13] = [
     "never fails the round",
 ];
 
-const PASS_WHEN_NOTHING_BLOCKS: [&str; 4] = [
+const PASS_WHEN_NOTHING_BLOCKS: [&str; 2] = [
     "`pass <head sha>: <m> minor, <k> nit` when nothing is blocking",
-    "the file only to forward findings, to file minors and nits, or to write a merge question",
-    "From every round's review file, not only the passing one, route the minors as for any minor (the follow-up task, a question with `new_cards` off, or the member's next stacked PR) and post the nits as a non-blocking comment",
-    "later rounds answer only about blockers",
+    "the file only to forward findings, to gather minors and nits, or to write a merge question",
 ];
+
+const GATHER_MINORS_ONCE: [&str; 4] = [
+    "Gather minors and nits once, when the PR passes or you write its merge question: from every round's review file, not only the passing one, into one follow-up and one nit comment",
+    "Later rounds don't repeat earlier rounds' minors and nits, so a failed round's live only in its file",
+    "records each PR whose minors and nits are gathered",
+    "doesn't refile them",
+];
+
+const NITS_COMMENT_ONCE: &str = "comment marked non-blocking";
 
 #[test]
 fn verify_sends_back_only_blocking_findings_narrows_later_rounds_and_caps_rounds() {
     let home = tempfile::tempdir().unwrap();
     let printed = String::from_utf8(skill(home.path())).unwrap();
     let verify = flat_section(&printed, "4. **Verify**", "5. **After merge**");
-    for rule in SEND_BACK_ONLY_BLOCKING.into_iter().chain([
-        "Nits go on the PR as a comment marked non-blocking and are not tasks",
-        "the diff since that round's head, not the whole PR",
-        "After round 3, start no other round",
-        "merge as-is, narrow the scope, or change approach",
-        "the open blocking findings",
-    ]) {
+    for rule in SEND_BACK_ONLY_BLOCKING
+        .into_iter()
+        .chain(GATHER_MINORS_ONCE)
+        .chain([
+            "Nits go on the PR as a comment marked non-blocking and are not tasks",
+            "the diff since that round's head, not the whole PR",
+            "After round 3, start no other round",
+            "merge as-is, narrow the scope, or change approach",
+            "the open blocking findings",
+        ])
+    {
         assert!(verify.contains(rule), "Verify misses {rule:?}");
     }
     assert!(!verify.contains("fits within the task's scope"), "{verify}");
@@ -364,30 +374,54 @@ fn verify_sends_back_only_blocking_findings_narrows_later_rounds_and_caps_rounds
             !text.contains("forward a member's findings"),
             "{section}: {text}"
         );
+        assert_eq!(
+            text.matches(NITS_COMMENT_ONCE).count(),
+            1,
+            "{section}: {text}"
+        );
+    }
+    for rule in [
+        "Gather minors and nits once, when the PR passes or you write its merge question",
+        "from every round's review file, not only the passing one, into one follow-up and one PR comment marked non-blocking for the nits",
+        "one follow-up task per PR, or the member's next PR in the same card's stack",
+        "with `new_cards` off, a question to the human",
+        "Later rounds don't repeat earlier rounds' minors and nits",
+    ] {
+        assert!(brief.contains(rule), "Task life misses {rule:?}");
     }
     assert!(
         brief.contains("forward only a failing round's blocking findings"),
         "{brief}"
     );
     let lead = flat_section(&printed, "\n## Lead\n", "\n## ");
-    for rule in SEND_BACK_ONLY_BLOCKING.into_iter().chain([
-        "**Review rounds.**",
+    let rounds = flat_section(&printed, "- **Review rounds.**", "- **Heartbeat.**");
+    for rule in SEND_BACK_ONLY_BLOCKING.into_iter().chain(GATHER_MINORS_ONCE).chain([
         "Post nits in a separate PR comment marked non-blocking; they are not tasks",
         "After your herd's review-round limit (in your prompt; 3 when unset) start no other round",
         "`loopherd report --kind question`",
     ]) {
-        assert!(lead.contains(rule), "Lead misses {rule:?}");
+        assert!(rounds.contains(rule), "Review rounds misses {rule:?}");
     }
+    assert_eq!(rounds.matches(NITS_COMMENT_ONCE).count(), 1, "{rounds}");
+    assert!(
+        lead.contains(
+            "naming each PR's current review file and whether its minors and nits are gathered"
+        ),
+        "{lead}"
+    );
     assert!(!lead.contains("other in-scope findings go back"), "{lead}");
     assert!(!lead.contains("out-of-scope ones become tasks"), "{lead}");
-    assert!(!printed.contains("out-of-scope gaps"), "{printed}");
     assert!(!lead.contains("After round 3"), "{lead}");
-    assert!(lead.contains(PASS_WHEN_NOTHING_BLOCKS[2]), "{lead}");
-    assert!(!printed.contains("<n> nit"), "{printed}");
-    assert!(
-        !printed.contains("file the minors as the follow-up task"),
-        "{printed}"
-    );
+    let flat = printed.split_whitespace().collect::<Vec<_>>().join(" ");
+    for gone in [
+        "out-of-scope gaps",
+        "<n> nit",
+        "file the minors as the follow-up task",
+        "as for any minor",
+        "later rounds answer only about blockers",
+    ] {
+        assert!(!flat.contains(gone), "skill still says {gone:?}");
+    }
 }
 
 #[test]

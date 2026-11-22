@@ -62,23 +62,50 @@ fn commands_that_reach_herdr_refuse_a_run_that_cannot_write_the_ledger() {
         let err = refused(&out);
         assert!(
             err.contains(&format!(
-                "refused: this loopherd runs in a sandbox, where it can't run loopherd {command} itself"
+                "refused: this loopherd {}, so it can't run loopherd {command} itself",
+                ledger_dir_shown(state.path())
             )),
             "{err}"
         );
     }
 }
 
-/// The ledger a lead's sandbox sees, with `lead-h` in pane `w1:p-lead` on `socket`.
-fn lead_s_state(state: &Path, socket: &Path) {
+/// The ledger a lead's sandbox sees, with `lead-h` in pane `w1:p-lead` on
+/// `socket`, its Claude recorded as `process`.
+fn lead_s_state(state: &Path, socket: &Path, process: Option<serde_json::Value>) {
     let dir = state.join("loopherd");
     fs::create_dir_all(&dir).unwrap();
     let ledger = serde_json::json!({"lead-h": {
         "name": "lead-h", "pane_id": "w1:p-lead", "session_id": null,
         "repo": "/", "worktree": null, "workspace": "w1", "prompt": "lead",
         "prompt_sent": true, "created": "2026-11-01T00:00:00Z",
-        "role": "lead", "herd": "h", "socket": socket}});
+        "role": "lead", "herd": "h", "socket": socket, "process": process}});
     fs::write(dir.join("ledger.json"), ledger.to_string()).unwrap();
+}
+
+/// This test process, as the ledger records a live lead's Claude.
+fn alive() -> Option<serde_json::Value> {
+    let stat = fs::read_to_string("/proc/self/stat").unwrap();
+    let after_name = stat.rsplit_once(')').unwrap().1;
+    let start: u64 = after_name
+        .split_whitespace()
+        .nth(19)
+        .unwrap()
+        .parse()
+        .unwrap();
+    Some(serde_json::json!({"pid": std::process::id(), "start": start}))
+}
+
+/// This test's pid with a start it never had: a lead's Claude that exited.
+fn dead() -> Option<serde_json::Value> {
+    Some(serde_json::json!({"pid": std::process::id(), "start": 1}))
+}
+
+fn ledger_dir_shown(state: &Path) -> String {
+    format!(
+        "can't write the ledger (a lead's sandbox, or permissions on {})",
+        state.join("loopherd").display()
+    )
 }
 
 /// Runs `args` in lead-h's pane, found by its pane and socket alone, since
@@ -150,10 +177,10 @@ const REFUSED_TO_LEADS: &[(&[&str], &str)] = &[
 ];
 
 #[test]
-fn a_lead_s_pane_refuses_the_shepherd_s_and_human_s_commands_naming_why() {
+fn a_live_lead_s_pane_refuses_the_shepherd_s_and_human_s_commands_naming_why() {
     let state = tempfile::tempdir().unwrap();
     let socket = state.path().join("herdr.sock");
-    lead_s_state(state.path(), &socket);
+    lead_s_state(state.path(), &socket, alive());
 
     for (args, why) in REFUSED_TO_LEADS {
         let err = refused(&run_in_lead_pane(state.path(), &socket, args));
@@ -189,7 +216,8 @@ fn a_sandbox_whose_ledger_places_no_lead_in_its_pane_refuses_them_too() {
         let err = refused(&out);
         assert!(
             err.contains(&format!(
-                "refused: this loopherd runs in a sandbox, and {why}"
+                "refused: this loopherd {}, and {why}",
+                ledger_dir_shown(state.path())
             )),
             "{args:?}: {err}"
         );
@@ -197,10 +225,76 @@ fn a_sandbox_whose_ledger_places_no_lead_in_its_pane_refuses_them_too() {
 }
 
 #[test]
+fn a_dead_lead_s_pane_runs_revive_lead_and_pause_for_the_human() {
+    let state = tempfile::tempdir().unwrap();
+    let socket = state.path().join("herdr.sock");
+    lead_s_state(state.path(), &socket, dead());
+
+    for args in [
+        &["revive", "--dry-run"][..],
+        &["lead", "h"],
+        &["pause", "h"],
+    ] {
+        let out = run_in_lead_pane(state.path(), &socket, args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!err.contains("refused"), "{args:?}: {out:?}");
+    }
+}
+
+#[test]
+fn a_lead_s_pane_with_no_recorded_process_says_to_run_it_from_another_pane() {
+    let state = tempfile::tempdir().unwrap();
+    let socket = state.path().join("herdr.sock");
+    lead_s_state(state.path(), &socket, None);
+
+    let err = refused(&run_in_lead_pane(state.path(), &socket, &["pause", "h"]));
+
+    assert!(
+        err.contains(
+            "refused: this is lead lead-h's pane, and pausing a herd is the human's; the ledger \
+             records no process to tell whether lead-h still runs here, so run it from another pane"
+        ),
+        "{err}"
+    );
+}
+
+/// A state dir whose ledger can't be checked for writing: its lock is a directory.
+fn unknowable_state(state: &Path) {
+    fs::create_dir_all(state.join("loopherd/ledger.lock")).unwrap();
+}
+
+#[test]
+fn commands_that_never_touch_the_ledger_run_when_its_writability_is_unknown() {
+    let state = tempfile::tempdir().unwrap();
+    unknowable_state(state.path());
+    let herds = state.path().join("config/herds");
+    fs::create_dir_all(&herds).unwrap();
+    fs::write(
+        herds.join("h.toml"),
+        "repo = \"/\"\n[lead]\nprompt = \"go\"\n",
+    )
+    .unwrap();
+
+    let set = run(state.path(), &["config", "set", "context_window", "200000"]);
+    assert_eq!(set.status.code(), Some(0), "{set:?}");
+    let herd_set = run(state.path(), &["herd", "set", "h", "lead.merge", "true"]);
+    assert_eq!(herd_set.status.code(), Some(0), "{herd_set:?}");
+    for args in [
+        &["init", "--herd", "h"][..],
+        &["setup", "--again"],
+        &["merge-guard", "h"],
+    ] {
+        let out = run(state.path(), args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!err.contains("ledger.lock"), "{args:?}: {out:?}");
+    }
+}
+
+#[test]
 fn a_lead_s_pane_still_runs_the_commands_that_only_read() {
     let state = tempfile::tempdir().unwrap();
     let socket = state.path().join("herdr.sock");
-    lead_s_state(state.path(), &socket);
+    lead_s_state(state.path(), &socket, alive());
     let config = state.path().join("config");
     fs::create_dir_all(config.join("herds")).unwrap();
     fs::write(config.join("config.toml"), "context_window = 200000\n").unwrap();
@@ -220,13 +314,89 @@ fn a_lead_s_pane_still_runs_the_commands_that_only_read() {
 fn revive_on_startup_runs_with_a_lead_s_pane_focused() {
     let state = tempfile::tempdir().unwrap();
     let socket = state.path().join("herdr.sock");
-    lead_s_state(state.path(), &socket);
+    lead_s_state(state.path(), &socket, alive());
 
     let out = run_in_lead_pane(state.path(), &socket, &["revive", "--startup"]);
 
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     assert!(
         String::from_utf8_lossy(&out.stdout).starts_with("revive on startup is off"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn revive_on_startup_turned_on_gets_past_the_refusal_in_a_lead_s_focused_pane() {
+    let state = tempfile::tempdir().unwrap();
+    let socket = state.path().join("herdr.sock");
+    lead_s_state(state.path(), &socket, alive());
+    let config = state.path().join("config");
+    fs::create_dir_all(config.join("herds")).unwrap();
+    fs::write(
+        config.join("config.toml"),
+        "[herdr_plugin]\nrevive_on_startup = true\n",
+    )
+    .unwrap();
+
+    let out = run_in_lead_pane(state.path(), &socket, &["revive", "--startup"]);
+
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("refused"), "{out:?}");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("revive on startup is off"));
+}
+
+#[test]
+fn a_lead_s_own_revive_on_startup_is_refused_where_it_cannot_write_the_ledger() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let state = tempfile::tempdir().unwrap();
+    read_only_state(state.path());
+
+    let out = run(state.path(), &["revive", "--startup"]);
+    fs::set_permissions(
+        state.path().join("loopherd"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+
+    let err = refused(&out);
+    assert!(
+        err.contains(&format!(
+            "refused: this loopherd {}, and reviving members is the shepherd's",
+            ledger_dir_shown(state.path())
+        )),
+        "{err}"
+    );
+}
+
+/// Claude's Bash runs without a controlling terminal, so `/dev/tty` won't
+/// open there; plain setup must then name its flags rather than prompt.
+#[test]
+fn setup_without_a_controlling_terminal_names_its_flags_instead_of_prompting() {
+    use std::os::unix::process::CommandExt;
+    let state = tempfile::tempdir().unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_loopherd"));
+    command
+        .arg("setup")
+        .env("XDG_STATE_HOME", state.path())
+        .env("LOOPHERD_CONFIG_DIR", state.path().join("config"))
+        .env("PATH", "")
+        .env_remove("HERDR_PANE_ID")
+        .stdin(std::process::Stdio::piped());
+    // SAFETY: setsid is async-signal-safe; a new session has no controlling terminal.
+    unsafe {
+        command.pre_exec(|| match libc::setsid() {
+            -1 => Err(std::io::Error::last_os_error()),
+            _ => Ok(()),
+        });
+    }
+
+    let out = command.output().unwrap();
+
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("setup asked nothing (no terminal)"),
         "{out:?}"
     );
 }

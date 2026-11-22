@@ -25,7 +25,7 @@ use crate::herd::{AddRequest, Paths};
 use crate::herdr::Herdr;
 use crate::ledger::{Ledger, Process};
 use crate::lock::Lock;
-use crate::process::Procs;
+use crate::process::{self, Procs};
 use crate::report::{Body, Kind};
 use crate::restart::RestartRequest;
 use crate::sandbox::{self, Guard};
@@ -731,19 +731,43 @@ pub fn refuse_spawn(client: Option<&Client>, ledger: &dyn Ledger) -> Result<()> 
 }
 
 /// Refuses a command that is the shepherd's or the human's, `why` saying so,
-/// from the pane of the lead `client` routes to, or from a sandbox, where the
-/// ledger is read-only, that found no lead to route by.
-pub fn refuse_from_lead(client: Option<&Client>, ledger: &dyn Ledger, why: &str) -> Result<()> {
-    if let Some(client) = client {
-        bail!(
-            "refused: lead {} runs this loopherd, and {why}",
-            client.lead
-        );
-    }
-    if ledger.read_only()? {
-        bail!("refused: this loopherd runs in a sandbox, and {why}");
-    }
-    Ok(())
+/// where `found` places a lead, or from a sandbox, where the ledger is
+/// read-only, that found no lead. A pane alone places a lead only while its
+/// recorded Claude lives, so the human's shell in a dead lead's pane runs it.
+/// `ledger_free` commands run when the ledger's writability can't be told.
+pub fn refuse_from_lead(
+    found: Option<&Found>,
+    ledger: &dyn Ledger,
+    procs: &dyn Procs,
+    why: &str,
+    ledger_free: bool,
+) -> Result<()> {
+    let read_only = || match ledger.read_only() {
+        Err(_) if ledger_free => Ok(false),
+        read_only => read_only,
+    };
+    let lead = match found {
+        None => {
+            if read_only()? {
+                bail!("refused: this loopherd {}, and {why}", cant_write(ledger));
+            }
+            return Ok(());
+        }
+        Some(Found::Lineage(lead)) => lead,
+        Some(Found::Pane { lead, .. }) if read_only()? => lead,
+        Some(Found::Pane {
+            lead,
+            process: None,
+        }) => bail!(
+            "refused: this is lead {lead}'s pane, and {why}; the ledger records no process \
+             to tell whether {lead} still runs here, so run it from another pane"
+        ),
+        Some(Found::Pane { lead, process }) => match process::live(procs, *process) {
+            None => return Ok(()),
+            Some(_) => lead,
+        },
+    };
+    bail!("refused: lead {lead} runs this loopherd, and {why}")
 }
 
 /// Refuses `command` run directly where the ledger is read-only: in a lead's
@@ -751,13 +775,22 @@ pub fn refuse_from_lead(client: Option<&Client>, ledger: &dyn Ledger, why: &str)
 pub fn refuse_unrouted(ledger: &dyn Ledger, command: &str) -> Result<()> {
     if ledger.read_only()? {
         bail!(
-            "refused: this loopherd runs in a sandbox, where it can't run loopherd {command} itself, and the \
+            "refused: this loopherd {}, so it can't run loopherd {command} itself, and the \
              ledger places no lead in this pane (as after the pane moved), so no lead's broker \
              can; if a lead runs here, ask the shepherd to run loopherd revive --name <lead>, \
-             since loopherd doctor doesn't see a moved pane"
+             since loopherd doctor doesn't see a moved pane",
+            cant_write(ledger)
         );
     }
     Ok(())
+}
+
+/// Why a read-only ledger is read-only, as far as loopherd can tell.
+fn cant_write(ledger: &dyn Ledger) -> String {
+    let dir = ledger
+        .dir_shown()
+        .map_or("its dir".into(), |dir| dir.display().to_string());
+    format!("can't write the ledger (a lead's sandbox, or permissions on {dir})")
 }
 
 /// What a broker runs operations with, beside the ledger and paths.
@@ -1662,7 +1695,8 @@ struct Request {
 /// A lead from another config dir falls back to the pane alone. `shepherd`
 /// skips that fallback: the shepherd's pane may carry a dead lead's old id
 /// after a herdr restart, but an ancestor can't be forged.
-pub fn route(
+#[cfg(test)]
+fn route(
     paths: &Paths,
     ledger: &dyn Ledger,
     procs: &dyn Procs,
@@ -1670,17 +1704,52 @@ pub fn route(
     pane: Option<&tool_hook::Pane>,
     shepherd: impl FnOnce() -> bool,
 ) -> Option<Client> {
-    let lead = sandbox::calling_lead(paths, procs, me)
-        .ok()
-        .flatten()
-        .or_else(|| {
-            if shepherd() {
-                return None;
-            }
-            let record = tool_hook::lead_in(ledger, pane?).ok()??;
-            (!record.retired).then_some(record.name)
-        })?;
-    Some(Client::for_lead(paths, &lead))
+    let found = find_lead(paths, ledger, procs, me, pane, shepherd)?;
+    Some(Client::for_lead(paths, found.lead()))
+}
+
+/// How [`find_lead`] placed a lead here.
+pub enum Found {
+    /// A lead's Claude is an ancestor.
+    Lineage(String),
+    /// The ledger has the lead's unretired record in this pane, its Claude
+    /// recorded as `process`.
+    Pane {
+        lead: String,
+        process: Option<Process>,
+    },
+}
+
+impl Found {
+    pub fn lead(&self) -> &str {
+        match self {
+            Found::Lineage(lead) => lead,
+            Found::Pane { lead, .. } => lead,
+        }
+    }
+}
+
+/// The lead whose Claude is an ancestor of `me`, else, unless `shepherd`
+/// says this is the shepherd's pane, the unretired lead the ledger has in `pane`.
+pub fn find_lead(
+    paths: &Paths,
+    ledger: &dyn Ledger,
+    procs: &dyn Procs,
+    me: u32,
+    pane: Option<&tool_hook::Pane>,
+    shepherd: impl FnOnce() -> bool,
+) -> Option<Found> {
+    if let Some(lead) = sandbox::calling_lead(paths, procs, me).ok().flatten() {
+        return Some(Found::Lineage(lead));
+    }
+    if shepherd() {
+        return None;
+    }
+    let record = tool_hook::lead_in(ledger, pane?).ok()??;
+    (!record.retired).then_some(Found::Pane {
+        lead: record.name,
+        process: record.process,
+    })
 }
 
 /// Starts lead `lead`'s broker unless one runs, saying whether it started one.
@@ -4886,7 +4955,9 @@ mod tests {
         ]) {
             assert!(
                 refusal.starts_with(&format!(
-                    "refused: this loopherd runs in a sandbox, where it can't run loopherd {command} itself"
+                    "refused: this loopherd can't write the ledger (a lead's sandbox, or \
+                     permissions on {}), so it can't run loopherd {command} itself",
+                    world.ledger().dir().unwrap().display()
                 )),
                 "{refusal}"
             );
