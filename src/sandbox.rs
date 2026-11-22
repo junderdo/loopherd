@@ -13,6 +13,7 @@ use crate::herd::{self, MergeGuard, Paths};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::process::Procs;
 use crate::spawn::SpawnRequest;
+use crate::worker_sandbox::WorkerSandbox;
 use crate::worktree::{same_dir, worktree_path};
 
 /// `[lead] sandbox`: what happens to a lead whose sandbox can't start.
@@ -1032,7 +1033,8 @@ fn start(
     if sockets_open(paths, &lead.herd)? {
         warnings.push(sockets_open_warning(name, &lead.herd));
     }
-    if by_credentials {
+    let workers_off = herd::worker(paths, &lead.herd)?.sandbox == WorkerSandbox::Off;
+    if by_credentials && workers_off {
         warnings.push(format!(
             "{name}'s workers run unsandboxed with your gh credentials, so it could have one \
              merge or force-push as you; only the lead holds herd {}'s deploy key and token",
@@ -1798,28 +1800,32 @@ pub fn create_state(paths: &Paths, name: &str) -> Result<()> {
     {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     }
-    let brokers = leads.iter().map(|lead| broker.join(lead));
-    for dir in std::iter::once(requests).chain(brokers) {
+    let own = [broker.clone(), broker.join(name), requests.clone()];
+    for dir in &own {
+        create_private_dir(dir).with_context(|| format!("create {}", requests.display()))?;
+    }
+    for dir in leads.iter().map(|lead| broker.join(lead)) {
         create_private_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
     }
     Ok(())
 }
 
-/// Makes `dir` and its missing parents with mode 0700 whatever the umask, as
-/// the broker makes its own; what exists is left as it is.
+/// Makes `dir` with mode 0700, as the broker makes its own, and tightens it
+/// to 0700 if it is already our directory: older installs made these 0755.
 fn create_private_dir(dir: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    if dir.is_dir() {
-        return Ok(());
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::AlreadyExists && dir.is_dir() => {}
+        Err(e) => return Err(e),
     }
-    if let Some(parent) = dir.parent() {
-        create_private_dir(parent)?;
+    let meta = std::fs::symlink_metadata(dir)?;
+    // SAFETY: geteuid has no preconditions.
+    if meta.is_dir() && meta.uid() == unsafe { libc::geteuid() } {
+        // The umask can strip owner bits from a new folder too.
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
-    match std::fs::create_dir(dir) {
-        Ok(()) => std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)),
-        Err(e) if e.kind() == ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
-        Err(e) => Err(e),
-    }
+    Ok(())
 }
 
 /// Lead `name`'s settings, from its herd file alone: its worktree is where
@@ -1896,7 +1902,6 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
     sandbox["excludedCommands"] = json!(excluded);
     let mut allow = vec!["WebFetch(domain:*)".to_string()];
     allow.extend(excluded.iter().map(|command| format!("Bash({command})")));
-    let mut env = None;
     if herd::merge_guard(paths, herd)? == Some(MergeGuard::Credentials) {
         if switches.install {
             return Err(credentials_refusal(
@@ -1911,39 +1916,9 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
         if sockets_open(paths, herd)? {
             return Err(credentials_refusal(
                 name,
-                &herd::credentials_with_sockets(herd),
+                &herd::credentials_with_sockets(herd, "lead"),
             ));
         }
-        let mounts = match std::fs::read("/proc/mounts") {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-            Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
-            Err(e) => {
-                return Err(credentials_refusal(
-                    name,
-                    &format!("its Windows drives can't be found to hide: read /proc/mounts: {e}"),
-                ));
-            }
-        };
-        let confined =
-            crate::credentials::confined(paths, herd, &|name| std::env::var_os(name), &mounts)
-                .map_err(|e| credentials_refusal(name, &format!("{e:#}")))?;
-        // The file tools run outside the sandbox, so each path is denied to both.
-        let mut deny_read: Vec<String> = confined
-            .deny_read
-            .iter()
-            .map(|(path, _)| path.display().to_string())
-            .collect();
-        deny_read.push(paths.locks_dir().display().to_string());
-        // Its broker's lock, stop file and replies, which its own loopherd reads.
-        let mut allow_read = confined.allow_read;
-        allow_read.push(crate::broker::dir(paths));
-        sandbox["filesystem"]["denyRead"] = json!(deny_read);
-        sandbox["filesystem"]["allowRead"] = json!(allow_read);
-        deny.extend(confined.deny_read.iter().map(|(path, is_dir)| {
-            let under = if *is_dir { "/**" } else { "" };
-            format!("Read(/{}{under})", path.display())
-        }));
-        env = Some(confined.env);
     }
     let mut settings = json!({
         "sandbox": sandbox,
@@ -1953,10 +1928,69 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
             "deny": deny,
         },
     });
-    if let Some(env) = env {
-        settings["env"] = Value::Object(env);
+    if herd::merge_guard(paths, herd)? == Some(MergeGuard::Credentials) {
+        // Its broker's lock, stop file and replies, which its own loopherd reads.
+        confine_credentials(
+            paths,
+            name,
+            herd,
+            &mut settings,
+            [crate::broker::dir(paths)],
+        )?;
     }
     Ok(settings)
+}
+
+/// Gives credentials member `name`'s `settings` the environment and read denies
+/// of [`crate::credentials::confined`], ahead of the reads it already denies,
+/// and opens `readable` back to its sandbox.
+pub fn confine_credentials(
+    paths: &Paths,
+    name: &str,
+    herd: &str,
+    settings: &mut Value,
+    readable: impl IntoIterator<Item = PathBuf>,
+) -> Result<()> {
+    let mounts = match std::fs::read("/proc/mounts") {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(credentials_refusal(
+                name,
+                &format!("its Windows drives can't be found to hide: read /proc/mounts: {e}"),
+            ));
+        }
+    };
+    let confined =
+        crate::credentials::confined(paths, herd, &|name| std::env::var_os(name), &mounts)
+            .map_err(|e| credentials_refusal(name, &format!("{e:#}")))?;
+    let filesystem = &mut settings["sandbox"]["filesystem"];
+    // The file tools run outside the sandbox, so each path is denied to both.
+    let mut deny_read: Vec<Value> = confined
+        .deny_read
+        .iter()
+        .map(|(path, _)| json!(path.display().to_string()))
+        .collect();
+    deny_read.extend(
+        filesystem["denyRead"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .cloned(),
+    );
+    let mut allow_read = confined.allow_read;
+    allow_read.extend(readable);
+    filesystem["denyRead"] = json!(deny_read);
+    filesystem["allowRead"] = json!(allow_read);
+    let deny = settings["permissions"]["deny"]
+        .as_array_mut()
+        .context("settings without permissions.deny")?;
+    deny.extend(confined.deny_read.iter().map(|(path, is_dir)| {
+        let under = if *is_dir { "/**" } else { "" };
+        json!(format!("Read(/{}{under})", path.display()))
+    }));
+    settings["env"] = Value::Object(confined.env);
+    Ok(())
 }
 
 /// What in `<state>/broker/` isn't lead `name`'s `requests/`, each named, as
