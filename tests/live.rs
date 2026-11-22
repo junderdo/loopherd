@@ -488,6 +488,23 @@ impl Drop for RemoveWorktree {
     }
 }
 
+/// Whether doctor finds the sandbox able to start and to block Unix sockets.
+fn sandbox_can_start(state: &Path, config: &Path, herd: &str) -> bool {
+    let doctor = dev(env!("CARGO_BIN_EXE_loopherd"))
+        .args(["doctor", "--json", herd])
+        .env("XDG_STATE_HOME", state)
+        .env("LOOPHERD_CONFIG_DIR", config)
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&doctor.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&doctor.stderr)));
+    report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["name"] == "sandbox" && c["status"] == "ok")
+}
+
 /// Doctor's failing `sandbox settings` findings for `herd`'s lead, joined, or
 /// `None` when nothing in the human's settings would refuse it.
 fn sandbox_settings_refusal(state: &Path, config: &Path, herd: &str) -> Option<String> {
@@ -1157,10 +1174,8 @@ fn a_sandboxed_worker_writes_only_its_own_worktree_mailbox_and_handoff() {
         ),
     )
     .unwrap();
-    std::fs::write(
-        &herd_file,
-        format!(
-            "{}[template.probe]\nparams = [\"n\"]\nname = \"{{herd}}-{{n}}\"\n\
+    let herd_text = format!(
+        "{}[template.probe]\nparams = [\"n\"]\nname = \"{{herd}}-{{n}}\"\n\
              branch = {branch:?}\n\
              prompt = \"\"\"This is loopherd's live test of your sandbox, which the human runs: \
              it checks which writes your sandbox refuses, and Read-only file system for most of \
@@ -1169,58 +1184,77 @@ fn a_sandboxed_worker_writes_only_its_own_worktree_mailbox_and_handoff() {
              Then make one Write tool call per path below, in order, each writing the text \
              probe, with the path copied exactly: {} Then reply with what the command printed and what each write \
              returned.\"\"\"\n\
-             [worker]\nsandbox = \"require\"\n",
-            herd_head(repo.to_str().unwrap(), &workspace),
-            probe.display(),
-            write_paths
-                .iter()
-                .enumerate()
-                .map(|(i, p)| format!("({}) {p}", i + 1))
-                .collect::<Vec<_>>()
-                .join(" "),
-        ),
-    )
-    .unwrap();
-    let before = std::fs::read_to_string(&herd_file).unwrap();
+             [worker]\nsandbox = \"{{mode}}\"\n",
+        herd_head(repo.to_str().unwrap(), &workspace),
+        probe.display(),
+        write_paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| format!("({}) {p}", i + 1))
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
     let _cleanup = CloseTab(name.clone());
     // Opens these writes to the file tools, so only blockWritesOutsideWorkingDirectories refuses them.
     let state_rule = format!("Edit(/{}/**)", state_dir.display());
     let repo_rule = format!("Edit(/{}/**)", repo.display());
+    let add = || {
+        dev(env!("CARGO_BIN_EXE_loopherd"))
+            .env("XDG_STATE_HOME", state.path())
+            .env("LOOPHERD_CONFIG_DIR", &config)
+            .args(["add", &herd, "probe", "1", "--"])
+            .args([
+                "--permission-mode",
+                "auto",
+                "--allowedTools",
+                "Bash(python3:*)",
+                &state_rule,
+                &repo_rule,
+            ])
+            .output()
+            .unwrap()
+    };
 
-    let out = dev(env!("CARGO_BIN_EXE_loopherd"))
-        .env("XDG_STATE_HOME", state.path())
-        .env("LOOPHERD_CONFIG_DIR", &config)
-        .args(["add", &herd, "probe", "1", "--"])
-        .args([
-            "--permission-mode",
-            "auto",
-            "--allowedTools",
-            "Bash(python3:*)",
-            &state_rule,
-            &repo_rule,
-        ])
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if stderr.contains("can't start sandboxed") {
-        eprintln!("skipped: {stderr}");
+    // The allowlist refuses those args before the sandbox is probed or a pane opened.
+    std::fs::write(&herd_file, herd_text.replace("{mode}", "require")).unwrap();
+    let out = add();
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(out.status.code(), Some(0), "{said}");
+    assert!(
+        said.contains("its args may loosen its sandbox or permissions: --allowedTools"),
+        "{said}"
+    );
+    if !sandbox_can_start(state.path(), &config, &herd) {
+        eprintln!("skipped: the sandbox can't start here, and prefer would start it without");
         return;
     }
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "{}{stderr}",
-        String::from_utf8_lossy(&out.stdout)
+
+    std::fs::write(&herd_file, herd_text.replace("{mode}", "prefer")).unwrap();
+    let before = std::fs::read_to_string(&herd_file).unwrap();
+    let out = add();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    assert!(!said.contains("runs unsandboxed"), "{said}");
+    assert!(
+        said.contains(
+            "starts with an arg that may loosen its sandbox or permissions: --allowedTools"
+        ),
+        "{said}"
     );
     let settings = config.join(format!("sandbox/{name}.json"));
+    let mcp = config.join(format!("sandbox/{name}.mcp.json"));
     let entry = ledger_entry(state.path(), &name);
+    let args = entry["claude_args"].as_array().unwrap();
     assert!(
-        entry["claude_args"]
-            .as_array()
-            .unwrap()
-            .contains(&settings.display().to_string().into()),
+        args.contains(&settings.display().to_string().into()),
         "{entry}"
     );
+    assert!(args.contains(&"--strict-mcp-config".into()), "{entry}");
+    assert!(args.contains(&mcp.display().to_string().into()), "{entry}");
 
     let given_up = std::time::Instant::now() + std::time::Duration::from_secs(240);
     let done = |probed: &str| probed.lines().count() >= refused.len() + 3;
