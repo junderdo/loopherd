@@ -1,4 +1,4 @@
-# Sourced by scripts/install: offers loopherd's herdr plugin, which herdr
+# Sourced by scripts/install-extras: offers loopherd's herdr plugin, which herdr
 # registers without touching the human's herdr config (docs/decisions/D126.md).
 
 herdr_plugin_source=junderdo/loopherd/herdr-plugin
@@ -13,21 +13,20 @@ offer_herdr_plugin() {
     echo "skipped loopherd's herdr plugin: a --settings run never installs it"
     return 0
   fi
-  if [[ "$want" == ask && ! -t 0 ]]; then
-    echo "skipped loopherd's herdr plugin (no terminal); add --with-herdr-plugin to install it"
-    return 0
-  fi
+  # Without a terminal, whatever stops the offer early, the skip names the flag.
+  herdr_plugin_no_terminal=
+  [[ "$want" != ask || -t 0 ]] || herdr_plugin_no_terminal=1
   ours=$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$manifest" 2>/dev/null | head -n 1) || ours=
   if [[ -z "$ours" ]]; then
-    echo "skipped loopherd's herdr plugin: no version in $manifest"
+    herdr_plugin_skip "no version in $manifest"
     return 0
   fi
   if ! command -v herdr >/dev/null; then
-    echo "skipped loopherd's herdr plugin: no herdr on PATH"
+    herdr_plugin_skip "no herdr on PATH"
     return 0
   fi
   if ! listed=$(list_herdr_plugin); then
-    echo "skipped loopherd's herdr plugin: herdr couldn't list its plugins (herdr plugin list --plugin loopherd)"
+    herdr_plugin_skip "herdr couldn't list its plugins (herdr plugin list --plugin loopherd)"
     return 0
   fi
   # Not tab: read collapses runs of whitespace separators, shifting an empty field.
@@ -43,6 +42,10 @@ offer_herdr_plugin() {
   fi
   if [[ -n "$version" && "$(printf '%s\n' "$version" "$ours" | sort -V | tail -n 1)" == "$version" ]]; then
     echo "loopherd's herdr plugin $version is newer than this checkout's $ours; left as is"
+    return 0
+  fi
+  if [[ -n "$herdr_plugin_no_terminal" ]]; then
+    herdr_plugin_skip
     return 0
   fi
   local verb=install question="Install loopherd's herdr plugin ($herdr_plugin_source)?"
@@ -63,6 +66,15 @@ offer_herdr_plugin() {
     herdr_plugin_installed=1
   else
     echo "install: herdr plugin $verb failed; the rest of the install is unaffected" >&2
+  fi
+}
+
+# Usage: herdr_plugin_skip [<why>]
+herdr_plugin_skip() {
+  if [[ -n "$herdr_plugin_no_terminal" ]]; then
+    echo "skipped loopherd's herdr plugin (no terminal); add --with-herdr-plugin to install it"
+  else
+    echo "skipped loopherd's herdr plugin: $1"
   fi
 }
 

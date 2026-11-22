@@ -1,4 +1,4 @@
-# Sourced by scripts/install: offers the mattpocock-skills plugin, leaving the
+# Sourced by scripts/install-extras: offers the mattpocock-skills plugin, leaving the
 # human's own skills as they are (docs/decisions/D26.md).
 
 skills_plugin=mattpocock-skills
@@ -57,17 +57,17 @@ offer_skills() {
   local want=$1 skills_dir=$2/skills answer where=
   [[ "${3:-}" != --name-dir ]] || where=" in $2"
   [[ "$want" != no ]] || return 0
+  if command -v claude >/dev/null && claude plugin list --json 2>/dev/null | jq -e --arg id "$skills_id" \
+    'any(.[]; .id == $id and (.scope == "user" or .scope == "managed"))' >/dev/null 2>&1; then
+    echo "the $skills_plugin plugin is already installed$where; left as is"
+    return 0
+  fi
   if [[ "$want" == ask && ! -t 0 ]]; then
     echo "skipped the $skills_plugin plugin (no terminal); add --with-skills to install it"
     return 0
   fi
   if ! command -v claude >/dev/null; then
     echo "skipped the $skills_plugin plugin: no claude CLI on PATH"
-    return 0
-  fi
-  if claude plugin list --json 2>/dev/null | jq -e --arg id "$skills_id" \
-    'any(.[]; .id == $id and (.scope == "user" or .scope == "managed"))' >/dev/null 2>&1; then
-    echo "the $skills_plugin plugin is already installed$where; left as is"
     return 0
   fi
   skills_list_overlaps "$skills_dir"
