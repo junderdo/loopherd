@@ -420,7 +420,7 @@ mod tests {
             herdr.prompts()[0].1,
             format!(
                 "lead-h leads h in {}:\nmerge on\ninstall off\nrebase off\n\
-                 new_cards off\ndesign_escalation off\nblocked_dialogs off\n\n\
+                 new_cards off\ndesign_escalation off\nblocked_dialogs off\nfollow_ups_ready off\n\n\
                  Your review-round limit: 3.",
                 wt.display()
             )
@@ -599,6 +599,37 @@ mod tests {
             broker.join("lead-g"),
         ] {
             let mode = fs::metadata(&dir).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{}", dir.display());
+        }
+    }
+
+    #[test]
+    fn a_lead_s_start_tightens_broker_folders_made_open_before() {
+        let setup = Setup::with_lead(PROMPT);
+        setup.copy_herd("g");
+        let broker = setup.root.join("state/broker");
+        let dirs = [
+            broker.clone(),
+            broker.join("lead-h"),
+            broker.join("lead-h/requests"),
+            broker.join("lead-g"),
+        ];
+        for dir in &dirs {
+            fs::create_dir_all(dir).unwrap();
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        for dir in &dirs {
+            let mode = fs::metadata(dir).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o700, "{}", dir.display());
         }
     }
@@ -2663,7 +2694,7 @@ mod tests {
                 "name lead-h\nbranch none\nworktree {wt}\nworkspace loopherd\n\
                  args --model opus\nrole lead\nprompt\n\
                  lead-h leads h in {wt}:\nmerge on\ninstall off\nrebase off\n\
-                 new_cards off\ndesign_escalation off\nblocked_dialogs off\n\n\
+                 new_cards off\ndesign_escalation off\nblocked_dialogs off\nfollow_ups_ready off\n\n\
                  Your review-round limit: 3.",
                 wt = wt.display()
             )

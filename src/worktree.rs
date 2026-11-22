@@ -1083,53 +1083,115 @@ const SPARSE_KEYS: [&str; 3] = [
     "index.sparse",
 ];
 
-/// Fails when git run in `dir`, or a git it starts in another worktree (as
-/// `worktree remove` does), could read a `config.worktree` setting anything
-/// but sparse checkout: a sandboxed lead can write those files.
-fn refuse_worktree_config(common: &Path, dir: &Path) -> Result<()> {
-    let config = common.join("config");
-    let on = config_values(&config, &["--bool", "--get", "extensions.worktreeConfig"])?;
-    if on.trim() != "true" {
-        return Ok(());
-    }
-    let own = dir.canonicalize().ok().and_then(|dir| {
-        dir.ancestors()
-            .find(|d| d.join(".git").exists())
-            .map(Path::to_path_buf)
-    });
-    let mut git_dirs = vec![common.to_path_buf()];
-    if let Some(checkout) = own {
-        git_dirs.push(git_dir(&checkout)?);
-    }
-    let worktrees = common.join("worktrees");
-    match std::fs::read_dir(&worktrees) {
-        Ok(admin) => {
-            for entry in admin {
-                let entry = entry.with_context(|| format!("read {}", worktrees.display()))?;
-                git_dirs.push(entry.path());
+/// git pinned to one repo's common git dir, its `config.worktree` files
+/// checked once (see [`PinnedGit::new`]), for running in many checkouts.
+pub(crate) struct PinnedGit {
+    common: PathBuf,
+    /// Whether git reads `config.worktree` files at all.
+    worktree_config: bool,
+    /// The git dirs whose `config.worktree` [`PinnedGit::new`] checked.
+    checked: Vec<PathBuf>,
+}
+
+impl PinnedGit {
+    /// Fails when git run in a checkout of `repo`, or a git it starts in
+    /// another worktree (as `worktree remove` does), could read a
+    /// `config.worktree` setting anything but sparse checkout: a sandboxed
+    /// lead can write those files.
+    pub(crate) fn new(repo: &Path) -> Result<Self> {
+        let repo =
+            std::path::absolute(repo).with_context(|| format!("repo: {}", repo.display()))?;
+        let common = common_dir(&repo)?;
+        let on = config_values(
+            &common.join("config"),
+            &["--bool", "--get", "extensions.worktreeConfig"],
+        )?;
+        let worktree_config = on.trim() == "true";
+        let mut git_dirs = vec![];
+        if worktree_config {
+            git_dirs.push(common.clone());
+            let worktrees = common.join("worktrees");
+            match std::fs::read_dir(&worktrees) {
+                Ok(admin) => {
+                    for entry in admin {
+                        let entry =
+                            entry.with_context(|| format!("read {}", worktrees.display()))?;
+                        git_dirs.push(entry.path());
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(e).with_context(|| format!("read {}", worktrees.display()));
+                }
+            }
+            for dir in &git_dirs {
+                refuse_config_worktree(
+                    dir,
+                    &format!("loopherd won't run git in {}'s checkouts", repo.display()),
+                )?;
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(e).with_context(|| format!("read {}", worktrees.display()));
-        }
+        Ok(Self {
+            common,
+            worktree_config,
+            checked: git_dirs,
+        })
     }
-    for file in git_dirs.iter().map(|d| d.join("config.worktree")) {
-        if !file
-            .try_exists()
-            .with_context(|| format!("read {}", file.display()))?
-        {
-            continue;
+
+    /// git run in `dir`, a checkout of the repo, reading config and hooks
+    /// from the repo's own common git dir only. A worktree's `.git` file or
+    /// admin dir can't point it at a config, hence a command, of someone
+    /// else's choosing.
+    pub(crate) fn command(&self, dir: &Path) -> Result<Command> {
+        if self.worktree_config {
+            self.refuse_own_config(dir)?;
         }
-        let keys = config_values(&file, &["--name-only", "--list"])?;
-        if let Some(key) = keys.lines().find(|key| !SPARSE_KEYS.contains(key)) {
-            bail!(
-                "{} sets {key}, which a sandboxed lead could have written; \
-                 loopherd won't run git in {}",
-                file.display(),
-                dir.display()
-            );
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(dir)
+            .env("GIT_COMMON_DIR", &self.common);
+        Ok(command)
+    }
+
+    /// [`refuse_config_worktree`] for the git dir `dir`'s `.git` names, which
+    /// [`Self::new`] didn't check when it lies outside the common dir.
+    fn refuse_own_config(&self, dir: &Path) -> Result<()> {
+        let own = dir.canonicalize().ok().and_then(|dir| {
+            dir.ancestors()
+                .find(|d| d.join(".git").exists())
+                .map(Path::to_path_buf)
+        });
+        let Some(checkout) = own else {
+            return Ok(());
+        };
+        let git_dir = git_dir(&checkout)?;
+        if self.checked.contains(&git_dir) {
+            return Ok(());
         }
+        refuse_config_worktree(
+            &git_dir,
+            &format!("loopherd won't run git in {}", dir.display()),
+        )
+    }
+}
+
+/// Fails, with `refusal`, when `git_dir`'s `config.worktree` sets anything
+/// but sparse checkout.
+fn refuse_config_worktree(git_dir: &Path, refusal: &str) -> Result<()> {
+    let file = git_dir.join("config.worktree");
+    if !file
+        .try_exists()
+        .with_context(|| format!("read {}", file.display()))?
+    {
+        return Ok(());
+    }
+    let keys = config_values(&file, &["--name-only", "--list"])?;
+    if let Some(key) = keys.lines().find(|key| !SPARSE_KEYS.contains(key)) {
+        bail!(
+            "{} sets {key}, which a sandboxed lead could have written; {refusal}",
+            file.display()
+        );
     }
     Ok(())
 }
@@ -1154,16 +1216,9 @@ fn config_values(file: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// git run in `dir`, a checkout of `repo`, reading config and hooks from
-/// `repo`'s own common git dir only. A worktree's `.git` file or admin dir
-/// can't point it at a config, hence a command, of someone else's choosing.
+/// [`PinnedGit::command`] for one checkout, `dir`, of `repo`.
 pub(crate) fn git_command(repo: &Path, dir: &Path) -> Result<Command> {
-    let repo = std::path::absolute(repo).with_context(|| format!("repo: {}", repo.display()))?;
-    let common = common_dir(&repo)?;
-    refuse_worktree_config(&common, dir)?;
-    let mut command = Command::new("git");
-    command.arg("-C").arg(dir).env("GIT_COMMON_DIR", common);
-    Ok(command)
+    PinnedGit::new(repo)?.command(dir)
 }
 
 pub(crate) fn git(repo: &Path, args: &[&str]) -> Result<String> {

@@ -25,7 +25,7 @@ pub struct Tty<'a> {
     pub output: &'a mut dyn Write,
 }
 
-const SWITCH_HELP: [(&str, &str); 6] = [
+const SWITCH_HELP: [(&str, &str); 7] = [
     ("merge", "merge a PR its reviewer verified"),
     ("install", "run scripts/install and loopherd install-hook"),
     ("rebase", "have a member rebase and force-push"),
@@ -38,6 +38,10 @@ const SWITCH_HELP: [(&str, &str); 6] = [
         "settle a design question a member raises",
     ),
     ("blocked_dialogs", "answer a member's blocking dialog"),
+    (
+        "follow_ups_ready",
+        "file a qualifying review follow-up ready to claim",
+    ),
 ];
 
 const LEAD_FLAG: &str = "--lead-defaults <switches|none>";

@@ -1844,28 +1844,32 @@ pub fn create_state(paths: &Paths, name: &str) -> Result<()> {
     {
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     }
-    let brokers = leads.iter().map(|lead| broker.join(lead));
-    for dir in std::iter::once(requests).chain(brokers) {
+    let own = [broker.clone(), broker.join(name), requests.clone()];
+    for dir in &own {
+        create_private_dir(dir).with_context(|| format!("create {}", requests.display()))?;
+    }
+    for dir in leads.iter().map(|lead| broker.join(lead)) {
         create_private_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
     }
     Ok(())
 }
 
-/// Makes `dir` and its missing parents with mode 0700 whatever the umask, as
-/// the broker makes its own; what exists is left as it is.
+/// Makes `dir` with mode 0700, as the broker makes its own, and tightens it
+/// to 0700 if it is already our directory: older installs made these 0755.
 fn create_private_dir(dir: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    if dir.is_dir() {
-        return Ok(());
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::AlreadyExists && dir.is_dir() => {}
+        Err(e) => return Err(e),
     }
-    if let Some(parent) = dir.parent() {
-        create_private_dir(parent)?;
+    let meta = std::fs::symlink_metadata(dir)?;
+    // SAFETY: geteuid has no preconditions.
+    if meta.is_dir() && meta.uid() == unsafe { libc::geteuid() } {
+        // The umask can strip owner bits from a new folder too.
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
-    match std::fs::create_dir(dir) {
-        Ok(()) => std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)),
-        Err(e) if e.kind() == ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
-        Err(e) => Err(e),
-    }
+    Ok(())
 }
 
 /// Lead `name`'s settings, from its herd file alone: its worktree is where

@@ -57,6 +57,12 @@ Backlog cards into members `lh-<n>` on `<type>/LH-<n>-<slug>`.
   lead's mailbox: for those, run `loopherd broker-restart <lead>` in the
   background; it waits for the request its broker is serving, then starts
   one on the new binary.
+- **Brokers after a host restart.** On a host that restarts under herdr
+  (WSL shutting down), set `[herdr_plugin] revive_on_startup = true` in
+  `config.toml`: herdr restores each lead's pane and Claude, but only that
+  revive starts its broker. Without one the lead's `feed`, `status` and
+  `report` fail, and your watch prints `<lead> no broker`; run
+  `loopherd broker-restart <lead>`, which starts one when none runs.
 
 - **Triage** (the skill's Triage, D60): the herd file's `[queue] backlog`
   (see [examples/loopherd-cards-routed.toml](../examples/loopherd-cards-routed.toml))
