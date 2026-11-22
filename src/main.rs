@@ -500,7 +500,8 @@ enum Command {
         settings: Option<PathBuf>,
         /// Write the skill straight to <dir>/loopherd/SKILL.md. Without it, the skill goes
         /// in ~/.agents/skills/loopherd, linked from skills/loopherd beside the settings
-        /// file; with --settings, both sit in the settings file's directory.
+        /// file; with --settings outside the claude dir, both sit in the settings file's
+        /// directory. Without HOME, the skill is left out.
         #[arg(long, value_name = "dir")]
         skills_dir: Option<PathBuf>,
     },
@@ -2395,14 +2396,16 @@ fn on_path(name: &str) -> Option<PathBuf> {
         })
 }
 
-/// The skill layout `install-hook` and `doctor` use for these flags.
-fn skill_layout(skills_dir: Option<PathBuf>, settings: Option<&Path>) -> Result<skill::Layout> {
-    let home = || {
-        Ok(PathBuf::from(
-            std::env::var_os("HOME").context("HOME is not set")?,
-        ))
-    };
-    skill::Layout::resolve(skills_dir, settings, home, install_hook::claude_dir)
+/// The skill layout `install-hook` and `doctor` use for these flags; `None`
+/// when it needs a `HOME` that isn't set.
+fn skill_layout(
+    skills_dir: Option<PathBuf>,
+    settings: Option<&Path>,
+) -> Result<Option<skill::Layout>> {
+    let home = std::env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    skill::Layout::resolve(skills_dir, settings, home, install_hook::claude_dir().ok())
 }
 
 fn install_hook_command(settings_given: bool, settings: &Path) -> String {
@@ -2413,6 +2416,44 @@ fn install_hook_command(settings_given: bool, settings: &Path) -> String {
         ),
         false => "loopherd install-hook".into(),
     }
+}
+
+fn install_or_remove_skill(
+    remove: bool,
+    layout: &skill::Layout,
+    settings_given: bool,
+    settings: &Path,
+) -> Result<()> {
+    let skill = layout.skill();
+    let outcome = match remove {
+        true => skill::uninstall(layout)?,
+        false => skill::install(layout)?,
+    };
+    match (remove, outcome.skill) {
+        (true, true) => println!("removed {}", skill.display()),
+        (true, false) => println!("no skill at {}", skill.display()),
+        (false, true) => println!("installed {}", skill.display()),
+        (false, false) => println!("{} already up to date", skill.display()),
+    }
+    if let skill::Layout::Linked { link, .. } = layout {
+        let link = link.join("loopherd");
+        match (outcome.link, &outcome.left_alone, remove) {
+            (true, _, false) => println!(
+                "linked {} to {}",
+                link.display(),
+                skill.parent().unwrap().display()
+            ),
+            (true, _, true) => println!("removed {}", link.display()),
+            (false, Some(why), true) => println!("left {} alone: it {why}", link.display()),
+            (false, Some(why), false) => println!(
+                "left {} alone: it {why}; move it aside, then rerun `{}`",
+                link.display(),
+                install_hook_command(settings_given, settings),
+            ),
+            (false, None, _) => {}
+        }
+    }
+    Ok(())
 }
 
 fn run_install_hook(
@@ -2427,34 +2468,9 @@ fn run_install_hook(
         None => install_hook::default_settings()?,
     };
     // First, so a skill that can't be written leaves the settings untouched.
-    let skill = layout.skill();
-    let outcome = match remove {
-        true => skill::uninstall(&layout)?,
-        false => skill::install(&layout)?,
-    };
-    match (remove, outcome.skill) {
-        (true, true) => println!("removed {}", skill.display()),
-        (true, false) => println!("no skill at {}", skill.display()),
-        (false, true) => println!("installed {}", skill.display()),
-        (false, false) => println!("{} already up to date", skill.display()),
-    }
-    if let skill::Layout::Linked { link, .. } = &layout {
-        let link = link.join("loopherd");
-        match (outcome.link, &outcome.left_alone, remove) {
-            (true, _, false) => println!(
-                "linked {} to {}",
-                link.display(),
-                skill.parent().unwrap().display()
-            ),
-            (true, _, true) => println!("removed {}", link.display()),
-            (false, Some(why), true) => println!("left {} alone: it {why}", link.display()),
-            (false, Some(why), false) => println!(
-                "left {} alone: it {why}; move it aside, then rerun `{}`",
-                link.display(),
-                install_hook_command(settings_given, &settings),
-            ),
-            (false, None, _) => {}
-        }
+    match &layout {
+        Some(layout) => install_or_remove_skill(remove, layout, settings_given, &settings)?,
+        None => println!("HOME is not set, so the skill was left out"),
     }
     let outcome = match remove {
         true => install_hook::remove(&settings, SystemTime::now())?,

@@ -35,8 +35,8 @@ pub struct Install {
     pub sandbox: Result<Sockets, Unavailable>,
     /// WSL2 lets this machine run Windows programs.
     pub wsl_interop: bool,
-    /// Where `install-hook` puts the skill for these settings.
-    pub skill: crate::skill::Layout,
+    /// Where `install-hook` puts the skill for these settings; `None` without `HOME`.
+    pub skill: Option<crate::skill::Layout>,
     /// The lead whose broker runs this doctor, as an `after_merge` of its feed.
     pub in_broker_of: Option<String>,
     /// How long a broker not yet on the loopherd on PATH gets to move onto it.
@@ -1178,12 +1178,24 @@ fn install_hook(install: &Install) -> String {
 /// Whether Claude's skills dir links to the skill `install-hook` writes.
 fn skill_check(install: &Install) -> Option<Check> {
     use crate::skill::{Layout, Link};
-    let Layout::Linked { real, link } = &install.skill else {
+    let layout = install.skill.as_ref()?;
+    let Layout::Linked { real, link } = layout else {
         return None;
     };
     let at = link.join("loopherd");
-    let skill = install.skill.skill();
+    let skill = layout.skill();
     let fix = install_hook(install);
+    let skill_dir = skill.parent().expect("the skill sits in a directory");
+    if std::fs::symlink_metadata(skill_dir).is_ok_and(|m| m.is_symlink()) {
+        return Some(warning(
+            "skill",
+            format!(
+                "{} is a symlink, which install-hook won't write through",
+                skill_dir.display()
+            ),
+            format!("move {} aside, then {fix}", skill_dir.display()),
+        ));
+    }
     Some(match crate::skill::link_state(real, link) {
         Link::Ours if at.join("SKILL.md").is_file() => ok(
             "skill",
@@ -1624,7 +1636,7 @@ mod tests {
                 running: exe,
                 sandbox: Ok(Sockets::Blocked),
                 wsl_interop: false,
-                skill: skill.clone(),
+                skill: Some(skill.clone()),
                 in_broker_of: None,
                 broker_move_grace: Duration::ZERO,
             },
@@ -1734,6 +1746,27 @@ mod tests {
 
         assert!(warning.starts_with("warning skill:"), "{warning}");
         assert!(warning.contains("loopherd install-hook"), "{warning}");
+    }
+
+    #[test]
+    fn a_symlinked_skill_dir_warns_to_move_it_aside() {
+        let m = machine(&ALL);
+        let real = m.dir.path().join(".agents/skills/loopherd");
+        let mine = m.dir.path().join("dotfiles/loopherd");
+        std::fs::create_dir_all(mine.parent().unwrap()).unwrap();
+        std::fs::rename(&real, &mine).unwrap();
+        std::os::unix::fs::symlink(&mine, &real).unwrap();
+
+        let warning = skill_warning(&m);
+
+        assert!(warning.contains("is a symlink"), "{warning}");
+        assert!(
+            warning.contains(&format!(
+                "move {} aside, then loopherd install-hook",
+                real.display()
+            )),
+            "{warning}"
+        );
     }
 
     #[test]

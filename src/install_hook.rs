@@ -80,7 +80,8 @@ pub fn claude_dir() -> Result<PathBuf> {
         match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
             Some(dir) => PathBuf::from(dir),
             None => {
-                PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".claude")
+                let home = std::env::var_os("HOME").filter(|v| !v.is_empty());
+                PathBuf::from(home.context("HOME is not set")?).join(".claude")
             }
         },
     )

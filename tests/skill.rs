@@ -254,6 +254,60 @@ fn settings_keeps_the_real_dir_and_link_in_the_settings_files_dir_and_leaves_hom
 }
 
 #[test]
+fn settings_naming_the_default_settings_file_use_the_home_layout() {
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join(".claude/settings.json");
+    let link = home.path().join(".claude/skills/loopherd");
+
+    loopherd(
+        home.path(),
+        &["install-hook", "--settings", settings.to_str().unwrap()],
+    );
+
+    assert_eq!(
+        fs::read_link(&link).unwrap(),
+        Path::new("../../.agents/skills/loopherd")
+    );
+    assert!(!home.path().join(".claude/.agents").exists());
+    let again = stdout(&loopherd(home.path(), &["install-hook"]));
+    assert!(!again.contains("left"), "{again}");
+}
+
+#[test]
+fn without_home_install_hook_installs_the_hooks_and_leaves_the_skill_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let claude = dir.path().join("claude");
+    let out = Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .arg("install-hook")
+        .env_clear()
+        .env("CLAUDE_CONFIG_DIR", &claude)
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "{out:?}");
+    assert!(stdout(&out).contains("HOME is not set, so the skill was left out"));
+    assert!(hooks_installed(&claude.join("settings.json")));
+    assert!(!claude.join("skills").exists());
+}
+
+#[test]
+fn a_dangling_link_of_ours_is_relinked_by_install_and_removed_by_remove() {
+    let home = tempfile::tempdir().unwrap();
+    let real = home.path().join(".agents/skills/loopherd");
+    let link = home.path().join(".claude/skills/loopherd");
+    loopherd(home.path(), &["install-hook"]);
+    fs::remove_dir_all(&real).unwrap();
+
+    let out = stdout(&loopherd(home.path(), &["install-hook"]));
+    assert!(!out.contains("left"), "{out}");
+    assert_eq!(fs::read(link.join("SKILL.md")).unwrap(), skill(home.path()));
+
+    fs::remove_dir_all(&real).unwrap();
+    loopherd(home.path(), &["install-hook", "--remove"]);
+    assert!(fs::symlink_metadata(&link).is_err());
+}
+
+#[test]
 fn the_skills_lock_file_is_left_untouched() {
     let home = tempfile::tempdir().unwrap();
     let lock = home.path().join(".agents/.skill-lock.json");
