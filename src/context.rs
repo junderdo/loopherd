@@ -1,12 +1,14 @@
 //! A member's context limit, and the handoff its Stop hook asks for once the
 //! member's context is past it (D20).
 
+use std::fmt;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::config::{self, ConfigFile};
@@ -35,7 +37,7 @@ const FALLBACK_LIMIT: u64 = if DEFAULT_LIMIT < DEFAULT_WINDOW / 5 * 4 {
 /// `own` (a template's or `[lead]`'s `context_limit`), else `config`'s
 /// `default_context_limit`, else [`DEFAULT_LIMIT`]; never over 80% of
 /// `config`'s `context_window`, else of [`DEFAULT_WINDOW`].
-pub fn effective_limit(own: Option<u64>, config: &Path) -> Result<u64> {
+pub fn effective_limit(own: Option<Limit>, config: &Path) -> Result<u64> {
     Ok(config::read(config)?.limit(own))
 }
 
@@ -65,17 +67,173 @@ pub fn limit_cap(config: &Path) -> Result<Cap> {
 }
 
 impl ConfigFile {
-    fn limit(&self, own: Option<u64>) -> u64 {
-        let limit = own.or(self.default_context_limit).unwrap_or(DEFAULT_LIMIT);
+    fn limit(&self, own: Option<Limit>) -> u64 {
         let window = self.context_window.unwrap_or(DEFAULT_WINDOW);
-        limit.min(window / 5 * 4)
+        own.or(self.default_context_limit)
+            .map_or(DEFAULT_LIMIT, |limit| limit.of(window))
+            .min(window / 5 * 4)
     }
+}
+
+/// The token counts a context value may be written as.
+pub const TOKEN_FORMS: &str = "250000, 250k, 1.5M or 1_000_000";
+
+/// A context limit: a token count, or a percentage of the context window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Limit {
+    Tokens(u64),
+    Percent(u8),
+}
+
+impl<'de> Deserialize<'de> for Limit {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Limit, D::Error> {
+        deserializer.deserialize_any(LimitVisitor)
+    }
+}
+
+struct LimitVisitor;
+
+impl serde::de::Visitor<'_> for LimitVisitor {
+    type Value = Limit;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "a whole number of tokens like {TOKEN_FORMS}, or a percentage of context_window like \"65%\""
+        )
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, tokens: u64) -> Result<Limit, E> {
+        Ok(Limit::Tokens(tokens))
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, tokens: i64) -> Result<Limit, E> {
+        u64::try_from(tokens)
+            .map(Limit::Tokens)
+            .map_err(|_| E::invalid_value(serde::de::Unexpected::Signed(tokens), &self))
+    }
+
+    fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Limit, E> {
+        parse_limit(text).map_err(|e| E::custom(format!("a limit {e}")))
+    }
+}
+
+impl Limit {
+    /// The token count this limit comes to in a `window`-token context window;
+    /// a percentage never comes to less than [`MIN_TOKENS`].
+    pub fn of(self, window: u64) -> u64 {
+        match self {
+            Limit::Tokens(tokens) => tokens,
+            Limit::Percent(percent) => {
+                (window.saturating_mul(u64::from(percent)) / 100).max(MIN_TOKENS)
+            }
+        }
+    }
+}
+
+impl fmt::Display for Limit {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Limit::Tokens(tokens) => write!(f, "{tokens}"),
+            Limit::Percent(percent) => write!(f, "{percent}%"),
+        }
+    }
+}
+
+/// `text` as a token count in one of [`TOKEN_FORMS`], at least [`MIN_TOKENS`].
+pub fn tokens(key: &str, text: &str) -> Result<u64> {
+    let tokens = whole_tokens(text).ok_or_else(|| {
+        anyhow!("{key} must be a whole number of tokens like {TOKEN_FORMS}, got {text:?}")
+    })?;
+    check_tokens(key, Some(tokens))?;
+    Ok(tokens)
+}
+
+/// `text` as a token count, as [`tokens`], or a percentage of the window like `65%`.
+pub fn limit(key: &str, text: &str) -> Result<Limit> {
+    let limit = parse_limit(text).map_err(|e| anyhow!("{key} {e}"))?;
+    check_limit(key, Some(limit))?;
+    Ok(limit)
+}
+
+fn parse_limit(text: &str) -> Result<Limit, String> {
+    if let Some(percent) = text.trim().strip_suffix('%') {
+        let percent = percent.trim();
+        if percent.is_empty() || !percent.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!(
+                "must be a whole percentage of context_window like 65%, got {text:?}"
+            ));
+        }
+        return match percent.parse::<u8>() {
+            Ok(percent @ 1..=100) => Ok(Limit::Percent(percent)),
+            _ => Err(format!(
+                "must be between 1% and 100% of context_window, got {text:?}"
+            )),
+        };
+    }
+    whole_tokens(text).map(Limit::Tokens).ok_or_else(|| {
+        format!(
+            "must be a whole number of tokens like {TOKEN_FORMS}, or a percentage of \
+             context_window like 65%, got {text:?}"
+        )
+    })
+}
+
+/// Digits, with `_` or `,` between groups of three and optional decimals,
+/// then an optional `k` or `m`; `None` for anything else or a fraction of a token.
+fn whole_tokens(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let (number, scale) = match text.as_bytes().last() {
+        Some(b'k' | b'K') => (&text[..text.len() - 1], 1_000),
+        Some(b'm' | b'M') => (&text[..text.len() - 1], 1_000_000),
+        _ => (text, 1),
+    };
+    let (whole, fraction) = match number.split_once('.') {
+        Some((_, "")) => return None,
+        Some(parts) => parts,
+        None => (number, ""),
+    };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let mut groups = whole.split(['_', ',']);
+    let first = groups.next()?;
+    let mut rest = groups.peekable();
+    let grouped =
+        rest.peek().is_none() || (first.len() <= 3 && rest.all(|g| g.len() == 3 && digits(g)));
+    if !digits(first)
+        || !grouped
+        || !(fraction.is_empty() || digits(fraction))
+        || fraction.len() > 6
+    {
+        return None;
+    }
+    let whole: String = whole.chars().filter(char::is_ascii_digit).collect();
+    let places = 10u128.pow(fraction.len() as u32);
+    let fraction: u128 = fraction.parse().unwrap_or(0);
+    let scaled = whole
+        .parse::<u128>()
+        .ok()?
+        .checked_mul(places)?
+        .checked_add(fraction)?
+        .checked_mul(scale)?;
+    scaled
+        .is_multiple_of(places)
+        .then_some(scaled / places)?
+        .try_into()
+        .ok()
 }
 
 /// Fails when `value` is under [`MIN_TOKENS`], naming `key`.
 pub fn check_tokens(key: &str, value: Option<u64>) -> Result<()> {
     match value {
         Some(v) if v < MIN_TOKENS => anyhow::bail!("{key} must be at least {MIN_TOKENS}, got {v}"),
+        _ => Ok(()),
+    }
+}
+
+/// Fails when `limit` is a token count under [`MIN_TOKENS`], naming `key`.
+pub fn check_limit(key: &str, limit: Option<Limit>) -> Result<()> {
+    match limit {
+        Some(Limit::Tokens(tokens)) => check_tokens(key, Some(tokens)),
         _ => Ok(()),
     }
 }
@@ -490,8 +648,14 @@ mod tests {
     #[test]
     fn without_a_config_file_the_limit_is_its_own_capped_at_80_percent_of_200k() {
         let (_dir, path) = config(None);
-        assert_eq!(effective_limit(Some(100_000), &path).unwrap(), 100_000);
-        assert_eq!(effective_limit(Some(190_000), &path).unwrap(), 160_000);
+        assert_eq!(
+            effective_limit(Some(Limit::Tokens(100_000)), &path).unwrap(),
+            100_000
+        );
+        assert_eq!(
+            effective_limit(Some(Limit::Tokens(190_000)), &path).unwrap(),
+            160_000
+        );
         assert_eq!(effective_limit(None, &path).unwrap(), 160_000);
     }
 
@@ -499,14 +663,62 @@ mod tests {
     fn the_config_default_applies_only_without_an_own_limit() {
         let (_dir, path) = config(Some("default_context_limit = 90000\n"));
         assert_eq!(effective_limit(None, &path).unwrap(), 90_000);
-        assert_eq!(effective_limit(Some(120_000), &path).unwrap(), 120_000);
+        assert_eq!(
+            effective_limit(Some(Limit::Tokens(120_000)), &path).unwrap(),
+            120_000
+        );
     }
 
     #[test]
     fn the_built_in_limit_applies_under_a_large_window() {
         let (_dir, path) = config(Some("context_window = 1000000\n"));
         assert_eq!(effective_limit(None, &path).unwrap(), 250_000);
-        assert_eq!(effective_limit(Some(900_000), &path).unwrap(), 800_000);
+        assert_eq!(
+            effective_limit(Some(Limit::Tokens(900_000)), &path).unwrap(),
+            800_000
+        );
+    }
+
+    #[test]
+    fn a_percentage_limit_resolves_against_the_window_and_stays_under_the_cap() {
+        for (window, own, member, lead, shepherd) in [
+            ("", 50, 100_000, 130_000, 140_000),
+            ("context_window = 1000000\n", 50, 500_000, 650_000, 700_000),
+            ("context_window = 1000000\n", 95, 800_000, 650_000, 700_000),
+        ] {
+            let (_dir, path) = config(Some(&format!(
+                "{window}default_context_limit = \"65%\"\n[shepherd]\ncontext_limit = \"70%\"\n"
+            )));
+            let own = Some(Limit::Percent(own));
+            assert_eq!(effective_limit(own, &path).unwrap(), member, "{window}");
+            assert_eq!(effective_limit(None, &path).unwrap(), lead, "{window}");
+            assert_eq!(shepherd_limit(&path).unwrap(), shepherd, "{window}");
+        }
+    }
+
+    #[test]
+    fn a_small_percentage_is_floored_at_the_minimum_whatever_the_window() {
+        for (window, limit) in [("", 10_000), ("context_window = 1000000\n", 10_000)] {
+            let (_dir, path) = config(Some(&format!(
+                "{window}default_context_limit = \"1%\"\n[shepherd]\ncontext_limit = \"1%\"\n"
+            )));
+            assert_eq!(effective_limit(None, &path).unwrap(), limit, "{window}");
+            assert_eq!(shepherd_limit(&path).unwrap(), limit, "{window}");
+        }
+        let (_dir, path) = config(Some("context_window = 2000000\n"));
+        assert_eq!(
+            effective_limit(Some(Limit::Percent(1)), &path).unwrap(),
+            20_000
+        );
+    }
+
+    #[test]
+    fn a_limit_of_the_wrong_type_names_the_accepted_forms() {
+        for limit in ["-5", "1.5", "true", "\"lots\""] {
+            let (_dir, path) = config(Some(&format!("default_context_limit = {limit}\n")));
+            let err = format!("{:#}", effective_limit(None, &path).unwrap_err());
+            assert!(err.contains(TOKEN_FORMS), "{limit}: {err}");
+        }
     }
 
     #[test]

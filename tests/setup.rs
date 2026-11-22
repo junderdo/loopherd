@@ -164,7 +164,10 @@ fn enter_keeps_each_context_value_and_writes_nothing() {
 
     assert!(!out.contains("merge a PR"), "{out}");
     assert!(out.contains("default_context_limit: "), "{out}");
-    assert!(out.contains("[160000]"), "{out}");
+    assert!(
+        out.contains("[80%]") && out.contains("= 160,000 tokens"),
+        "{out}"
+    );
     assert_eq!(config.text().unwrap(), text);
 }
 
@@ -187,16 +190,91 @@ fn once_both_groups_are_set_setup_asks_nothing_until_again() {
         out.contains("merge: merge a PR its reviewer verified? [Y/n]"),
         "{out}"
     );
-    assert!(
-        out.contains("[1000000]") && out.contains("[250000]"),
-        "{out}"
-    );
+    assert!(out.contains("[1000000]") && out.contains("[25%]"), "{out}");
     let values = config.values();
     assert_eq!(on(&values, "merge"), Some(true));
     assert_eq!(on(&values, "rebase"), Some(true));
     assert_eq!(int(&values, "context_window"), Some(1_000_000));
     assert_eq!(int(&values, "default_context_limit"), None);
     assert_eq!(int(&values, "shepherd.context_limit"), Some(300_000));
+}
+
+#[test]
+fn context_answers_take_k_m_and_percentages_and_echo_what_they_read() {
+    let config = Config::new(None);
+
+    // A 1M window as 1M; a refused limit, then 65%; the shepherd's as 300k.
+    let Some(out) = config.setup_on_terminal(&["--context"], "1M\n65 tokens\n65%\n300k\n") else {
+        return;
+    };
+
+    assert!(out.contains("= 1,000,000 tokens"), "{out}");
+    assert!(out.contains("250000, 250k, 1.5M or 1_000_000"), "{out}");
+    assert!(out.contains("= 650,000 tokens (65% of 1,000,000)"), "{out}");
+    assert!(out.contains("= 300,000 tokens"), "{out}");
+    let values = config.values();
+    assert_eq!(int(&values, "context_window"), Some(1_000_000));
+    assert_eq!(values["default_context_limit"].as_str(), Some("65%"));
+    assert_eq!(int(&values, "shepherd.context_limit"), Some(300_000));
+}
+
+#[test]
+fn a_percentage_over_the_cap_is_asked_again() {
+    let config = Config::new(None);
+
+    let Some(out) = config.setup_on_terminal(&["--context"], "\n90%\n80%\n\n") else {
+        return;
+    };
+
+    assert!(out.contains("90% is over the cap of 160000"), "{out}");
+    assert_eq!(
+        config.values()["default_context_limit"].as_str(),
+        Some("80%")
+    );
+}
+
+#[test]
+fn the_context_flag_takes_k_m_separators_and_percentages() {
+    let config = Config::new(None);
+
+    let out =
+        succeeded(&config.setup(&["--context", "window=1,000,000,limit=65%,shepherd=150.5k"]));
+
+    assert!(out.contains("set default_context_limit = 65%"), "{out}");
+    let values = config.values();
+    assert_eq!(int(&values, "context_window"), Some(1_000_000));
+    assert_eq!(values["default_context_limit"].as_str(), Some("65%"));
+    assert_eq!(int(&values, "shepherd.context_limit"), Some(150_500));
+
+    let out = config.setup(&["--context", "window=1M,limt"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unknown --context name \"limt\""),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_small_percentage_answer_echoes_the_minimum_it_is_floored_at() {
+    let config = Config::new(None);
+
+    let Some(out) = config.setup_on_terminal(&["--context"], "\n1%\n\n") else {
+        return;
+    };
+
+    assert!(out.contains("= 10,000 tokens (1% of 200,000)"), "{out}");
+}
+
+#[test]
+fn a_stored_percentage_over_the_cap_is_shown_as_the_cap() {
+    let config = Config::new(Some("default_context_limit = \"100%\"\n"));
+
+    let Some(out) = config.setup_on_terminal(&["--context"], "\n\n\n") else {
+        return;
+    };
+
+    assert!(out.contains("[80%]") && !out.contains("[100%]"), "{out}");
+    assert!(out.contains("= 160,000 tokens"), "{out}");
 }
 
 #[test]
@@ -243,6 +321,7 @@ fn a_bad_flag_is_refused_and_changes_nothing() {
         ["--lead-defaults=merge", "--context=size=500000"],
         ["--lead-defaults=merge", "--context=window=5000"],
         ["--lead-defaults=merge", "--context=window=lots"],
+        ["--lead-defaults=merge", "--context=window=1M,limt"],
     ] {
         let config = Config::new(None);
 
