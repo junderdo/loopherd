@@ -30,11 +30,11 @@ const MERGED_GITHUB: &str = include_str!("init/merged-github.toml");
 const LEAD: &str = include_str!("init/lead.md");
 
 const LOCAL_GH_NOTE: &str = "\nRun every gh command as @ACCOUNT@, prefixed with
-`GH_TOKEN=$(gh auth token --user @ACCOUNT@)` as in the commands below.
+`@GH_TOKEN@` as in the commands below.
 ";
 const LOCAL_PR_HAND_IN: &str = "6. Push the branch as @ACCOUNT@:
-   `GH_TOKEN=$(gh auth token --user @ACCOUNT@) git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin HEAD`.
-   Open a PR with `GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh pr create --repo @OWNER_REPO@ --base @BRANCH@ --head {branch} --assignee @ACCOUNT@ --title \"<title>\" --body \"<summary>\"`.";
+   `@GH_TOKEN@ git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin HEAD`.
+   Open a PR with `@GH_TOKEN@ gh pr create --repo @OWNER_REPO@ --base @BRANCH@ --head {branch} --assignee @ACCOUNT@ --title \"<title>\" --body \"<summary>\"`.";
 const LOCAL_PUSH_HAND_IN: &str =
     "6. Push the branch with `git push -u origin HEAD`. Open no pull request;
    the human merges the branch into @BRANCH@.";
@@ -57,8 +57,8 @@ the PR link, any PR that must merge first, and the full sha of the head your
 reviewer verified. Your token can't merge, so the human merges from their own
 terminal: `gh pr merge <n> --repo @OWNER_REPO@ --merge --admin --match-head-commit <full sha>`.";
 const OTHER_PR_HAND_IN: &str = "5. Push the branch as @ACCOUNT@:
-   `GH_TOKEN=$(gh auth token --user @ACCOUNT@) git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin HEAD`.
-   Then open a pull request into @BRANCH@ with `GH_TOKEN=$(gh auth token --user @ACCOUNT@) gh pr create --repo @OWNER_REPO@ --base @BRANCH@ --head {branch} --assignee @ACCOUNT@ --title \"<title>\" --body \"<summary>\"`.
+   `@GH_TOKEN@ git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin HEAD`.
+   Then open a pull request into @BRANCH@ with `@GH_TOKEN@ gh pr create --repo @OWNER_REPO@ --base @BRANCH@ --head {branch} --assignee @ACCOUNT@ --title \"<title>\" --body \"<summary>\"`.
    Link it on task {number}, so the task closes when the PR merges. (fill in)";
 const OTHER_PUSH_HAND_IN: &str =
     "5. Push the branch with `git push -u origin HEAD`, open no pull request, and hand it
@@ -850,10 +850,13 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
     // A credentials lead can't read the human's gh login, so its own GH_TOKEN wins; a
     // human shell without one still runs as the account.
     let credentials = herd.merge_guard == Some(MergeGuard::Credentials);
-    let gh = match credentials {
-        true => format!("GH_TOKEN=${{GH_TOKEN:-$(gh auth token --user {account})}} gh"),
-        false => format!("GH_TOKEN=$(gh auth token --user {account}) gh"),
+    let token = match credentials {
+        true => format!("GH_TOKEN=${{GH_TOKEN:-$(gh auth token --user {account})}}"),
+        false => format!("GH_TOKEN=$(gh auth token --user {account})"),
     };
+    let gh = format!("{token} gh");
+    // Checks and worker prompts are templates, which take {{ and }} for braces.
+    let member_token = token.replace('{', "{{").replace('}', "}}");
     let switches = match herd.merge_guard {
         Some(guard) => format!("{}\nmerge_guard = \"{}\"", herd.switches, guard.name()),
         None => herd.switches.clone(),
@@ -862,6 +865,7 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
         ("OWNER_REPO", slug),
         ("ACCOUNT", account),
         ("GH", &gh),
+        ("GH_TOKEN", &member_token),
         ("CHECKOUT_OF", checkout_of),
         ("HERD", name),
         ("REPO", &repo_path),
