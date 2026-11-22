@@ -69,27 +69,21 @@ Backlog cards into members `lh-<n>` on `<type>/LH-<n>-<slug>`.
   lists the unready cards. A herd with that file's `[template.groom]` gets
   a `groom-<herd>` member on `running low`, started by its lead, or by you
   with `loopherd add <herd> groom` for an unled herd. Its report ends in a
-  numbered batch, each line one of the commands below with its card and
-  text filled in. Relay the report; when the human approves the batch, or
-  all but some lines, run each approved line as written and no other, then
-  `loopherd retire --close groom-<herd>` if no lead did. Without a batch,
-  once the human approves the lead's triage:
+  numbered batch, each line `<n>. ` and then one of the commands below,
+  with its card and text filled in. Relay the report; when the human
+  approves the batch, or all but some lines, run each approved line's
+  command, as written after its number, and no other, then `loopherd
+  retire --close groom-<herd>` if no lead did. Without a batch, once the
+  human approves the lead's triage, run the same commands yourself:
 
   ```bash
   scripts/trello label LH-<n> +ready-for-agent      # each ready card
   scripts/trello comment LH-<n> "<what's missing>"  # each needs-spec card
+  scripts/trello archive LH-<n>                     # <reason>: each stale card the human confirms
   ```
 
-  `scripts/trello` can't archive, so archive each stale card the human
-  confirms through the API:
-
-  ```bash
-  set -a; . "${XDG_CONFIG_HOME:-$HOME/.config}/loopherd/trello.env"; set +a
-  curl -fsS -X PUT "https://api.trello.com/1/cards/<shortLink>?closed=true" \
-    -H "Authorization: OAuth oauth_consumer_key=\"$TRELLO_API_KEY\", oauth_token=\"$TRELLO_TOKEN\""
-  ```
-
-  `<shortLink>` is the last part of the card's URL in `scripts/trello show`.
+  Comment text is double-quoted with any `"`, `$`, `` ` `` or `\` inside
+  it escaped by a backslash.
 
 ## Grilling
 

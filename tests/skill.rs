@@ -630,11 +630,15 @@ fn the_groom_section_gives_the_groomers_rights_limits_and_report() {
         "The edits you made",
         "A numbered batch of proposed actions, one per line, each with the exact command that applies it",
         "in your tracker's command form, as your prompt or the project's tracker doc gives it",
-        "mark ready, archive (with the reason), or comment what's missing on a needs-spec card",
-        "Send it as one `loopherd report --kind done` and end your turn",
+        "mark ready, archive, or comment what's missing on a needs-spec card",
+        "Each line is `<n>. <command>`, and the command is complete on its own: it needs no setup line, variable or earlier command",
+        "Give the reason after the command as a shell comment, `# <reason>`",
+        "Double-quote each text argument and escape any `\"`, `$`, `` ` `` or `\\` inside it with a backslash",
+        "Send the report as one `loopherd report --kind done \"$(cat <<'EOF'`",
     ] {
         assert!(groom.contains(rule), "Groom misses {rule:?}: {groom}");
     }
+    assert!(!groom.contains("Single-quote"), "{groom}");
 }
 
 #[test]
@@ -646,7 +650,7 @@ fn a_lead_running_low_starts_its_herds_groomer_when_it_has_one() {
     for rule in [
         "If your herd file has a `[template.groom]`, run `loopherd add <herd> groom` and end your turn",
         "Do nothing while `groom-<herd>` is open",
-        "On its `done`, relay its report as one `loopherd report --kind question`, batch unchanged, then `loopherd retire --close groom-<herd>`",
+        "On its `done`, relay its report as one `loopherd report --kind question`, batch unchanged, through a quoted heredoc as the Groom section sends it, then `loopherd retire --close groom-<herd>`",
         "Without the template, have a read-only subagent run your herd's `backlog`",
     ] {
         assert!(low.contains(rule), "Running low misses {rule:?}: {low}");
@@ -662,7 +666,7 @@ fn the_shepherd_starts_an_unled_herds_groomer_and_runs_only_the_approved_batch_l
         "If it has a `[template.groom]`, run `loopherd add <herd> groom` (nothing while `groom-<herd>` is open)",
         "on its `done`, relay its report to the human, then `loopherd retire --close groom-<herd>`",
         "Without the template, run the herd's `backlog` and sort each task the same way",
-        "run the batch lines the human approved, as written, and no others",
+        "run the command of each batch line the human approved, as written after its number, and no others",
     ] {
         assert!(triage.contains(rule), "Triage misses {rule:?}: {triage}");
     }

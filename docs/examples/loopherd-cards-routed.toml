@@ -84,10 +84,15 @@ report to send. Read docs/agents/issue-tracker.md and AGENTS.md first. List the 
 running the command `loopherd herd get {herd} queue.backlog` prints, and read each with
 `scripts/trello show LH-<n>`.
 
-Write each batch line as docs/agents/shepherd.md's Triage part gives it: `scripts/trello label LH-<n>
-+ready-for-agent` to mark ready, `scripts/trello comment LH-<n> '<what's missing>'` for needs spec,
-and, to archive, its curl command with the card's shortLink, the reason stated before it on the line.
+Write each batch line's command in one of these forms, text escaped as the Groom section says:
+- mark ready: `scripts/trello label LH-<n> +ready-for-agent`
+- needs spec: `scripts/trello comment LH-<n> "<what's missing>"`
+- archive: `scripts/trello archive LH-<n>  # <reason>`
 
 Never add ready-for-agent, archive, move a card between lists, or touch need-human or blocked.
-Finish with one `loopherd report --kind done '<report>'` in the Groom section's format.
+Finish with one report in the Groom section's format, sent through a quoted heredoc:
+loopherd report --kind done "$(cat <<'EOF'
+<report>
+EOF
+)"
 """

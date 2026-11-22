@@ -185,3 +185,19 @@ fn herds_accepts_the_documented_routed_queue_and_its_groom_template() {
         "{stdout}"
     );
 }
+
+#[test]
+fn the_documented_groom_prompt_gives_self_contained_batch_lines_and_a_heredoc_report() {
+    let example = include_str!("../docs/examples/loopherd-cards-routed.toml");
+    let (_, groom) = example.split_once("[template.groom]").unwrap();
+    for form in [
+        "`scripts/trello label LH-<n> +ready-for-agent`",
+        r#"`scripts/trello comment LH-<n> "<what's missing>"`"#,
+        "`scripts/trello archive LH-<n>  # <reason>`",
+        "loopherd report --kind done \"$(cat <<'EOF'",
+    ] {
+        assert!(groom.contains(form), "groom prompt misses {form:?}: {groom}");
+    }
+    assert!(!groom.contains("curl"), "{groom}");
+    assert!(!groom.contains("'<report>'"), "{groom}");
+}
