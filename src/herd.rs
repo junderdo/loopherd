@@ -1267,11 +1267,29 @@ fn check(herd: &str, text: &str, paths: &Paths) -> Result<HerdFile> {
                 credentials_with_sockets(herd, "worker")
             );
         }
+        let workers = worker.map(|w| w.sandbox).unwrap_or_default();
+        if credentials && workers != WorkerSandbox::Require {
+            bail!(
+                "lead: can't start with merge_guard = \"credentials\": {}",
+                credentials_with_workers_unrequired(herd, workers)
+            );
+        }
     }
     if let Some(worker) = &parsed.worker {
         check_mcp_servers(&worker.mcp_servers).context("worker")?;
     }
     Ok(parsed)
+}
+
+/// Why a credentials herd's lead can't start while its `[worker] sandbox` is
+/// `sandbox`, anything but `require`, and how to fix it.
+pub fn credentials_with_workers_unrequired(herd: &str, sandbox: WorkerSandbox) -> String {
+    format!(
+        "its workers must run sandboxed, or it could have one merge or force-push as you, and \
+         [worker] sandbox is \"{}\", not \"require\"; run loopherd herd set {herd} \
+         worker.sandbox '\"require\"', or loopherd herd set {herd} lead.merge_guard '\"hook\"'",
+        sandbox.name()
+    )
 }
 
 /// Why a credentials herd's `table` (`lead` or `worker`) can't have every
@@ -3871,7 +3889,46 @@ args = ["--model", "opus"]
             "{report}"
         );
         assert!(report.contains("invalid preferred.toml"), "{report}");
-        assert_eq!(report.matches("invalid").count(), 2, "{report}");
+        assert!(report.contains("invalid off.toml"), "{report}");
+        assert_eq!(report.matches("invalid").count(), 3, "{report}");
+    }
+
+    #[test]
+    fn herds_calls_credentials_with_workers_not_required_sandboxed_invalid() {
+        let herd = |lead: &str, worker: &str| {
+            format!("{LEAD_HERD}[lead]\nprompt = \"go\"\n{lead}\n{worker}\n")
+        };
+        let credentials = "merge_guard = \"credentials\"";
+        let config = Config::with(&[
+            ("unset", &herd(credentials, "")),
+            ("off", &herd(credentials, "[worker]\nsandbox = \"off\"")),
+            (
+                "preferred",
+                &herd(credentials, "[worker]\nsandbox = \"prefer\""),
+            ),
+            (
+                "required",
+                &herd(credentials, "[worker]\nsandbox = \"require\""),
+            ),
+            ("hook", &herd("", "[worker]\nsandbox = \"off\"")),
+        ]);
+
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+
+        assert_eq!(code, 1, "{report}");
+        assert!(
+            report.contains(
+                "invalid preferred.toml: lead: can't start with merge_guard = \"credentials\": \
+                 its workers must run sandboxed, or it could have one merge or force-push as \
+                 you, and [worker] sandbox is \"prefer\", not \"require\"; run loopherd herd \
+                 set preferred worker.sandbox '\"require\"', or loopherd herd set preferred \
+                 lead.merge_guard '\"hook\"'"
+            ),
+            "{report}"
+        );
+        assert!(report.contains("invalid unset.toml"), "{report}");
+        assert!(report.contains("invalid off.toml"), "{report}");
+        assert_eq!(report.matches("invalid").count(), 3, "{report}");
     }
 
     #[test]
