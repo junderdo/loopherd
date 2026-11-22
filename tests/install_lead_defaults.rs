@@ -143,7 +143,8 @@ fn succeeded(out: &Output) -> String {
 }
 
 const ALL_OFF: &str = "merge = false\ninstall = false\nrebase = false\nnew_cards = false\n\
-                       design_escalation = false\nblocked_dialogs = false\n";
+                       design_escalation = false\nblocked_dialogs = false\n\
+                       follow_ups_ready = false\n";
 
 #[test]
 fn a_first_install_on_a_terminal_asks_each_switch_and_keeps_the_rest_of_config_toml() {
@@ -166,7 +167,8 @@ fn a_first_install_on_a_terminal_asks_each_switch_and_keeps_the_rest_of_config_t
     assert_eq!(
         sandbox.read_config().unwrap(),
         "# mine\ncontext_window = 1000000\n\n[lead_defaults]\nmerge = true\ninstall = false\n\
-         rebase = true\nnew_cards = false\ndesign_escalation = false\nblocked_dialogs = false\n"
+         rebase = true\nnew_cards = false\ndesign_escalation = false\nblocked_dialogs = false\n\
+         follow_ups_ready = false\n"
     );
 }
 
@@ -202,7 +204,7 @@ fn lead_defaults_alone_asks_again_with_the_current_values_as_defaults() {
     assert_eq!(
         sandbox.read_config().unwrap(),
         "[lead_defaults]\nmerge = true\nrebase = false\ninstall = false\nnew_cards = false\n\
-         design_escalation = false\nblocked_dialogs = false\n"
+         design_escalation = false\nblocked_dialogs = false\nfollow_ups_ready = false\n"
     );
 }
 
@@ -214,7 +216,7 @@ fn a_lead_defaults_list_sets_those_on_and_the_rest_off_without_asking() {
     assert_eq!(
         sandbox.read_config().unwrap(),
         "[lead_defaults]\nmerge = true\ninstall = true\nrebase = false\nnew_cards = false\n\
-         design_escalation = false\nblocked_dialogs = false\n"
+         design_escalation = false\nblocked_dialogs = false\nfollow_ups_ready = false\n"
     );
 
     succeeded(&sandbox.install(&["--lead-defaults=none"]));

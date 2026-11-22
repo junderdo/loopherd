@@ -94,7 +94,7 @@ merge.
 
 **Switches**:
 The permissions the human gives a lead: merge, install, rebase, new cards, design
-escalation and blocked dialogs. Anything switched off becomes a question to the
+escalation, blocked dialogs and follow-ups ready. Anything switched off becomes a question to the
 human.
 
 ## Communication

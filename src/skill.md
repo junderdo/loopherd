@@ -139,7 +139,7 @@ Init never launches an agent.
    oldest first within a member; then a lead's `failing` and `recovered`,
    then its `running low` (either form) and `out of work`, then its
    `interrupted` and `merged`, by member in name order, then its
-   `claimable`; then `blocked` and `gone`. The shepherd's own `out of
+   `claimable`; then `blocked` and `gone`; then `no broker`. The shepherd's own `out of
    work` lines for unled herds, and a `drained` line, print only on a poll
    nothing else woke, alone but for a due `shepherd handoff`. The first
    watch after an install, or over members a herd-scoped watch skipped,
@@ -154,7 +154,7 @@ Init never launches an agent.
    |---|---|
    | `<member> done <time> <text>` | A finished member's report, usually with its output's link. Verify it. |
    | `<member> question <time> <text>` | It stopped on a question. Relay it to the human; a lead relays it with its own question report, unless it's a design question and `design_escalation` is on. |
-   | `<member> note <time> <text>` | Information only, except a `self-restart …` note: that member's handoff is still waiting on a restart (see Handoffs). |
+   | `<member> note <time> <text>` | Information only, except a `self-restart …` note: that member's handoff is still waiting on a restart (see Handoffs), and a lead's note naming a follow-up it filed ready: tell the human, who may veto it; on a veto, drop the task's ready label, or retire its worker once one claimed it. |
    | `<member> handoff <time> <text>` | It passed its context limit and wrote its handoff. Restart it (see Handoffs) if you read it; a lead restarts itself. |
    | `<member> paused  1 shell, 1 cron` | Turn ended with work in flight that can wake it again. Another paused stop is quiet. |
    | `<member> paused  background unknown` | Turn ended and Claude didn't say what's in flight (also `crons unknown`, or `1 shell; crons unknown`). |
@@ -171,6 +171,7 @@ Init never launches an agent.
    | `<member> interrupted` | Lead's watch only: the feed running the worker's `after_merge` died before noting it. Feed, which notes it, then read the note. |
    | `<member> blocked` | A dialog only the human answers: tell them. loopherd never answers it. |
    | `<member> gone` | Its pane exited or closed, its tab or workspace closed with it inside, or it had no agent for two polls in a row after this watch saw it live. A `gone` recorded when a tab or workspace closed, and then retracted because the member's pane had moved out of it, prints nothing; `reports --all` shows it followed by `moved`. |
+   | `<lead> no broker` | Your own watch only: an unretired lead on your herdr has had no broker running for two polls in a row (one is a start or `broker-restart` gap), so its `feed`, `status` and `report` fail and it can't even ask. Once per streak: it prints again only after its broker runs again. Run `loopherd broker-restart <lead>`, which starts one when none runs. |
    | `<herd> drained` | Lead's watch only: your herd is paused and has no open (non-retired) worker. A member of an attended or `slot = false` template is no worker here, nor for `no workers open`, `out of work` or `all drained` (D116), but while it may still work (as `all drained` says) it holds both drained lines off. Report done, stop, and don't re-arm. |
    | `all drained` | Every herd your watch reads is paused with no open worker, and no member it reads, a slot-less one included, may still work: none is working, blocked or unknown (now or on the poll before), died since the watch started without its `gone` line yet, or last stopped failed or with work in flight. Tell the human; don't re-arm. |
    | `shepherd handoff 171k over 160k` | Your own watch only, once per session: your context is past your limit. Hand off (see Your own handoff). |
@@ -439,7 +440,7 @@ the lead's, and a mark per event keeps it to one send:
 ```toml
 [notify]
 enabled = true                    # default false: nothing is sent
-kinds = ["question", "blocked", "merge_alert", "self_restart"]   # the default
+kinds = ["question", "blocked", "merge_alert", "self_restart", "no_broker"]   # the default
 herdr = true                      # herdr's toast on the watched socket; default true
 command = "notify-send {herd}/{member} {text}"
 pane_label = true                 # label the relaying pane in herdr; default false
@@ -450,7 +451,7 @@ of arguments for spaces), each placeholder (`{herd}`, `{member}`, `{kind}`,
 `{text}`) filled within its own argument, never through a shell. `{text}`
 is the question's first non-blank line, cut to 200 characters with token-like words
 and URL passwords `[redacted]` (best-effort: a secret in an unknown shape
-gets through), `blocked`, or a merge alert's PR. Each send runs detached
+gets through), `blocked`, `no broker`, or a merge alert's PR. Each send runs detached
 within 30s; a failing one leaves a `note` in the member's mailbox, once until it next succeeds.
 `loopherd herds` reports a broken table, which sends nothing, and warns of
 an enabled one with `herdr = false`, no `command` and no `pane_label`.
@@ -458,6 +459,10 @@ Notifying doesn't replace relaying: still tell the human in your pane. Not
 sent: a question you read with `loopherd reports` before a watch saw it, and
 a member already blocked when every watch started. A lead relaying a worker's
 question as its own sends a second notification.
+
+A `no_broker` is sent once per outage of a lead's broker, by whichever
+watch sees it first: the lead's own, or yours, which prints `<lead> no
+broker`. Any watch seeing the broker run again re-arms it.
 
 A lead's watch also sends `merge_alert`, with `{text}` the PR's number and
 URL, once per PR merged into its repo's default branch, when its `[lead]`
@@ -876,7 +881,7 @@ What differs from the shepherd:
   decision that isn't yours goes out as `loopherd report --kind question
   "<the exact question>"`, then end your turn; the shepherd's watch sees it
   and relays it. Don't wait in a loop for an answer.
-- **Switches.** Your prompt lists six, each `on` or `off`; off means the
+- **Switches.** Your prompt lists seven, each `on` or `off`; off means the
   human does it, so ask instead. Each comes from your herd file's `[lead]`,
   else `[lead_defaults]` in `$LOOPHERD_CONFIG_DIR/config.toml` (set by
   `scripts/install`), else off; `loopherd herds` shows which:
@@ -889,6 +894,7 @@ What differs from the shepherd:
   | `new_cards` | create follow-up tasks for minor or out-of-scope findings |
   | `design_escalation` | settle a design question a member raises |
   | `blocked_dialogs` | answer a member's blocking dialog |
+  | `follow_ups_ready` | file a qualifying review follow-up ready to claim once its parent card is Done (D116); needs `new_cards` on |
 
   When `merge`, `install` or `rebase` is off, the PreToolUse hook also
   blocks the Bash commands that need it (`gh pr merge` or the merge API, a
@@ -989,8 +995,10 @@ What differs from the shepherd:
   decision (naming it), needs spec (saying what's missing), or stale
   (saying why). Report the result as one `loopherd report --kind question`
   and end your turn. After the `no workers open` form, the question says
-  the herd has no work running. Never mark a task ready yourself, whatever
-  your switches; the shepherd does it once the human approves.
+  the herd has no work running. Never mark a task ready yourself; the
+  shepherd does it once the human approves. The one exception is a
+  qualifying review follow-up with `new_cards` and `follow_ups_ready` on
+  (see Review rounds).
 - **Out of work.** On `<herd> out of work`, send one `loopherd report
   --kind question` asking the human what's next: pause the herd, or file
   and approve work. Then end your turn.
@@ -1012,8 +1020,20 @@ What differs from the shepherd:
   hold the merge: they go to one follow-up task per PR, or, when the
   member has a next PR in the same card's stack, into that PR's scope.
   With `new_cards` off, list the follow-up minors in a question to the
-  human rather than creating a task. From every round's review file, not
-  only the passing one, route the minors as for any minor (the follow-up
+  human rather than creating a task. With `new_cards` and
+  `follow_ups_ready` on, file a qualifying follow-up with `--label
+  ready-for-agent --label blocked` and the line `blocked-by: <parent key>`
+  in its description, in your tracker's key form, so it becomes claimable
+  once the parent card is Done; comment `filed ready: follow-up of PR
+  <n>` on it, and send `loopherd report --kind note` naming it, so the
+  human can veto it through the shepherd. It qualifies only if it holds
+  findings from the parent PR's review files, under the parent card's
+  scope. Its criteria may offer the worker alternatives ("fix X, or D<n>
+  records why not"). It doesn't qualify if any criterion needs the
+  human's decision, changes a decision's direction, or carries a finding
+  the reviewer called out of scope or design. File any other follow-up as
+  with `follow_ups_ready` off. From every round's review file, not only
+  the passing one, route the minors as for any minor (the follow-up
   task, a question with `new_cards` off, or the member's next stacked PR)
   and post the nits as a non-blocking comment: later rounds answer only
   about blockers, so a failed round's minors live only in its file. Each

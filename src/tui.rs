@@ -1416,10 +1416,11 @@ max = 3
 
         let app = app_in(root.path(), &herdr(), &ledger(), now);
 
-        let terminal = render_at(&app, now, 120, 30);
+        let terminal = render_at(&app, now, 132, 30);
         assert!(
-            title_row(&terminal, "prs")
-                .starts_with("│╭ prs  merge install rebase cards design dialogs  ⏸ paused — xxx"),
+            title_row(&terminal, "prs").starts_with(
+                "│╭ prs  merge install rebase cards design dialogs ready  ⏸ paused — xxx"
+            ),
             "{:#?}",
             lines(&terminal)
         );
@@ -1437,7 +1438,7 @@ max = 3
         let terminal = render_tall(&app, now);
         assert!(
             title_row(&terminal, "prs")
-                .starts_with("│╭ prs  merge install rebase cards design dialogs ─"),
+                .starts_with("│╭ prs  merge install rebase cards design dialogs ready ─"),
             "{:#?}",
             lines(&terminal)
         );
@@ -1453,7 +1454,7 @@ max = 3
         assert!(on("install"), "from lead_defaults");
         assert!(dim("rebase"), "the herd file over lead_defaults");
         assert!(
-            dim("cards") && dim("design") && dim("dialogs"),
+            dim("cards") && dim("design") && dim("dialogs") && dim("ready"),
             "off when neither sets it"
         );
     }

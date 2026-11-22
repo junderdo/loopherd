@@ -651,7 +651,7 @@ fn last_is_gone(reports: &Path, record: &AgentRecord) -> bool {
 }
 
 /// Whether `record` is on another herdr than `here`, so this revive leaves it alone.
-fn elsewhere(here: Option<&Path>, record: &AgentRecord) -> bool {
+pub(crate) fn elsewhere(here: Option<&Path>, record: &AgentRecord) -> bool {
     matches!((here, &record.socket), (Some(here), Some(there)) if !same_dir(here, there))
 }
 

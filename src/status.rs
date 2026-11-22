@@ -1,5 +1,8 @@
 //! `loopherd status`: ledger members grouped by herd with herdr's live status.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -11,6 +14,7 @@ use crate::herdr::{Herdr, MalformedReply};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::pause;
 use crate::watch::printable;
+use crate::worktree::PinnedGit;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -46,13 +50,13 @@ pub fn read(
     pauses: &pause::Pauses,
     options: Options,
 ) -> Result<Read> {
-    read_with(herdr, ledger, Some(pauses), options, None, branch)
+    read_with(herdr, ledger, Some(pauses), options, None, true)
 }
 
 /// [`read`] without each member's branch, which costs a git call per member,
 /// or the herds' pauses.
 pub fn read_statuses(herdr: &dyn Herdr, ledger: &dyn Ledger, options: Options) -> Result<Read> {
-    read_with(herdr, ledger, None, options, None, |_| None)
+    read_with(herdr, ledger, None, options, None, false)
 }
 
 fn read_with(
@@ -61,7 +65,7 @@ fn read_with(
     pauses: Option<&pause::Pauses>,
     options: Options,
     only: Option<&str>,
-    branch: impl Fn(&AgentRecord) -> Option<String>,
+    branches: bool,
 ) -> Result<Read> {
     let mut entries = ledger.entries()?;
     if let Some(herd) = only {
@@ -86,9 +90,12 @@ fn read_with(
             2,
         ),
     };
+    let pinned = Branches::default();
+    let branch = |record: &AgentRecord| branches.then(|| pinned.of(record)).flatten();
     let mut view = view(&entries, agents.as_deref(), options, branch);
     view.herdr_reachable = agents.is_some() || malformed;
     let mut problems: Vec<String> = problem.into_iter().collect();
+    problems.extend(pinned.refusals.into_inner());
     if let Some(pauses) = pauses {
         let in_ledger = entries.values().filter_map(|e| e.herd.clone());
         let (mut readings, warning) = pauses.of(in_ledger);
@@ -233,7 +240,7 @@ fn status_of(
         mut view,
         problem,
         code,
-    } = read_with(herdr, ledger, Some(pauses), options, only, branch)?;
+    } = read_with(herdr, ledger, Some(pauses), options, only, true)?;
     if let Some(queues) = queues {
         add_tasks(&mut view.herds, queues, ledger, only);
     }
@@ -255,16 +262,53 @@ fn status_of(
     })
 }
 
+/// Members' branches, each repo's git pinned and its worktree config checked
+/// once, and why a repo's were refused, one line per repo.
+#[derive(Default)]
+struct Branches {
+    pinned: RefCell<HashMap<PathBuf, Option<PinnedGit>>>,
+    refusals: RefCell<Vec<String>>,
+}
+
+impl Branches {
+    fn of(&self, record: &AgentRecord) -> Option<String> {
+        let dir = record.worktree.as_deref().filter(|d| d.is_dir())?;
+        let mut pinned = self.pinned.borrow_mut();
+        let git = pinned.entry(record.repo.clone()).or_insert_with(|| {
+            PinnedGit::new(&record.repo)
+                .inspect_err(|e| {
+                    self.refusals.borrow_mut().push(format!(
+                        "warning: branches in {} are unknown: {e:#}",
+                        record.repo.display()
+                    ))
+                })
+                .ok()
+        });
+        let command = git
+            .as_ref()?
+            .command(dir)
+            .inspect_err(|e| {
+                self.refusals.borrow_mut().push(format!(
+                    "warning: {}'s branch is unknown: {e:#}",
+                    record.name
+                ))
+            })
+            .ok()?;
+        branch_in(command)
+    }
+}
+
 /// The worktree's checked-out branch, `detached`, or `None` when there's no
 /// worktree or git can't say. The repo's own branch says nothing about the agent's.
 /// The worktree may be a lead's to write, so git runs in its guarded form.
 pub(crate) fn branch(record: &AgentRecord) -> Option<String> {
-    let dir = record.worktree.as_deref()?;
-    if !dir.is_dir() {
-        return None;
-    }
-    let out = crate::worktree::git_command(&record.repo, dir)
-        .ok()?
+    let dir = record.worktree.as_deref().filter(|d| d.is_dir())?;
+    branch_in(PinnedGit::new(&record.repo).ok()?.command(dir).ok()?)
+}
+
+/// The branch `git`, run guarded in a worktree, says is checked out there.
+fn branch_in(mut git: std::process::Command) -> Option<String> {
+    let out = git
         .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
         // These override -C, so every row would show the same branch.
         .env_remove("GIT_DIR")
@@ -1308,32 +1352,153 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         }
     }
 
-    #[test]
-    fn shows_the_checked_out_branch_or_detached() {
-        let root = tempfile::tempdir().unwrap();
-        let repo = crate::worktree::testing::repo_with_origin(root.path());
-        let mut on_branch = entry("a", None, "x");
-        on_branch.repo = repo.clone();
-        on_branch.worktree = Some(repo.clone());
-        assert_eq!(branch(&on_branch).as_deref(), Some("main"));
-
-        crate::worktree::testing::git_in(&repo, &["checkout", "--quiet", "--detach"]);
-        assert_eq!(branch(&on_branch).as_deref(), Some("detached"));
-        assert_eq!(branch(&entry("b", None, "missing")), None);
+    /// A member of the repo at `repo` checked out at `worktree`.
+    fn checkout(name: &str, repo: &Path, worktree: &Path) -> AgentRecord {
+        let mut e = entry(name, None, "x");
+        e.repo = repo.to_path_buf();
+        e.worktree = Some(worktree.to_path_buf());
+        e
     }
 
     #[test]
-    fn a_worktree_whose_git_config_a_lead_could_have_set_shows_no_branch() {
+    fn shows_the_checked_out_branch_or_detached() {
         use crate::worktree::testing::{git_in, repo_with_origin};
         let root = tempfile::tempdir().unwrap();
         let repo = repo_with_origin(root.path());
-        git_in(&repo, &["config", "extensions.worktreeConfig", "true"]);
-        git_in(&repo, &["config", "--worktree", "core.fsmonitor", "true"]);
-        let mut e = entry("a", None, "x");
-        e.repo = repo.clone();
-        e.worktree = Some(repo);
+        let linked = root.path().join("proj/worktrees/feat-x");
+        git_in(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feat/x",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let on_branch = checkout("a", &repo, &repo);
+        assert_eq!(branch(&on_branch).as_deref(), Some("main"));
+        assert_eq!(
+            branch(&checkout("b", &repo, &linked)).as_deref(),
+            Some("feat/x")
+        );
 
-        assert_eq!(branch(&e), None);
+        git_in(&repo, &["checkout", "--quiet", "--detach"]);
+        assert_eq!(branch(&on_branch).as_deref(), Some("detached"));
+        assert_eq!(branch(&entry("c", None, "missing")), None);
+    }
+
+    #[test]
+    fn a_repo_whose_worktree_config_a_lead_could_have_set_is_reported_once_and_shows_no_branch() {
+        use crate::worktree::testing::{git_in, repo_with_origin};
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let linked = root.path().join("proj/worktrees/feat-x");
+        git_in(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feat/x",
+                linked.to_str().unwrap(),
+            ],
+        );
+        git_in(&repo, &["config", "extensions.worktreeConfig", "true"]);
+        let planted = repo.join(".git/worktrees/feat-x/config.worktree");
+        std::fs::write(&planted, "[core]\n\tfsmonitor = true\n").unwrap();
+        let mut ledger = MemLedger::default();
+        for e in [
+            checkout("lh-1", &repo, &repo),
+            checkout("lh-2", &repo, &linked),
+        ] {
+            ledger.0.insert(e.name.clone(), e);
+        }
+        let herdr = FakeHerdr::new(&[("w1", "main")]);
+
+        let out = status(
+            &herdr,
+            &ledger,
+            &not_paused(),
+            None,
+            Options::default(),
+            PLAIN,
+        )
+        .unwrap();
+
+        assert_eq!(
+            out.stderr.matches("sets core.fsmonitor").count(),
+            1,
+            "{}",
+            out.stderr
+        );
+        assert!(
+            out.stderr.contains(&planted.display().to_string()),
+            "{}",
+            out.stderr
+        );
+        let read = read(&herdr, &ledger, &not_paused(), Options::default()).unwrap();
+        assert!(read.view.ungrouped.iter().all(|m| m.branch.is_none()));
+        assert_eq!(read.view.ungrouped.len(), 2);
+    }
+
+    #[test]
+    fn a_checkout_whose_own_git_dir_a_lead_could_have_set_is_reported_and_shows_no_branch() {
+        use crate::worktree::testing::{git_in, repo_with_origin};
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let linked = root.path().join("proj/worktrees/feat-x");
+        git_in(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feat/x",
+                linked.to_str().unwrap(),
+            ],
+        );
+        git_in(&repo, &["config", "extensions.worktreeConfig", "true"]);
+        let redirected = root.path().join("gd");
+        std::fs::create_dir(&redirected).unwrap();
+        let planted = redirected.join("config.worktree");
+        std::fs::write(&planted, "[core]\n\tfsmonitor = true\n").unwrap();
+        std::fs::write(
+            linked.join(".git"),
+            format!("gitdir: {}\n", redirected.display()),
+        )
+        .unwrap();
+        let mut ledger = MemLedger::default();
+        for e in [
+            checkout("lh-1", &repo, &repo),
+            checkout("lh-2", &repo, &linked),
+        ] {
+            ledger.0.insert(e.name.clone(), e);
+        }
+        let herdr = FakeHerdr::new(&[("w1", "main")]);
+
+        let read = read(&herdr, &ledger, &not_paused(), Options::default()).unwrap();
+
+        let problem = read.problem.unwrap_or_default();
+        assert_eq!(
+            problem.matches("sets core.fsmonitor").count(),
+            1,
+            "{problem}"
+        );
+        assert!(
+            problem.contains(&planted.display().to_string()),
+            "{problem}"
+        );
+        let branches: Vec<_> = read
+            .view
+            .ungrouped
+            .iter()
+            .map(|m| (m.name.as_str(), m.branch.as_deref()))
+            .collect();
+        assert_eq!(branches, [("lh-1", Some("main")), ("lh-2", None)]);
     }
 
     #[test]
