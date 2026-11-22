@@ -945,8 +945,9 @@ fn a_leads_watch_with_no_shepherds_watch_sends_the_leads_own_question_once() {
         "notify-stub",
         &format!("printf '%s|' \"$@\" >> {}; echo >> {0}", out.display()),
     );
+    // Its broker isn't running either, which this test leaves unsent.
     sandbox.notify_config(&format!(
-        "herdr = false\ncommand = '{} {{herd}} {{member}} {{kind}} {{text}}'\n",
+        "herdr = false\nkinds = ['question']\ncommand = '{} {{herd}} {{member}} {{kind}} {{text}}'\n",
         command.display()
     ));
     fs::write(
