@@ -1037,7 +1037,8 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     );
     assert_eq!(ran.get(1).copied(), Some("report\t0\t"), "{probed}");
     assert_eq!(ran.get(2).copied(), Some("restart\t0\t"), "{probed}");
-    // Refused by the lead's pane, since the sandbox hides its Claude from the parent-pid walk.
+    // Refused by main.rs's refuse_from_lead, which finds the lead by its pane: the sandbox
+    // hides its Claude from run_revive's parent-pid walk, so that older refusal never runs.
     assert!(
         ran.get(3).is_some_and(|line| line.starts_with(&format!(
             "revive\t1\tloopherd revive: refused: lead {name} runs this loopherd, and reviving \
