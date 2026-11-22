@@ -42,6 +42,8 @@ fn loopherd_in(state: &Path, pane: Option<(&str, &str)>, args: &[&str]) -> Comma
         .env("XDG_STATE_HOME", state)
         // Never the real ~/.claude/settings.json.
         .env("CLAUDE_CONFIG_DIR", state.join("claude"))
+        // Never the real ~/.agents/skills.
+        .env("HOME", state.join("home"))
         .env("PATH", "")
         // Printed times are UTC whatever the local zone.
         .env("TZ", "America/New_York")

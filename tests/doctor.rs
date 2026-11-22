@@ -299,6 +299,25 @@ fn settings_given_doctor_runs_without_home_or_a_config_dir() {
 }
 
 #[test]
+fn without_home_doctor_skips_the_skill_check_beside_config_and_state() {
+    let s = sandbox(Some("0.9.5"));
+    let run = |args: &[&str]| s.command(args).env_remove("HOME").output().unwrap();
+    let installed = run(&["install-hook"]);
+    assert!(installed.status.success(), "{installed:?}");
+
+    let out = run(&["doctor", "--verbose"]);
+
+    let checks = stdout(&out);
+    assert!(
+        checks.contains("warning config and state: not checked: HOME is not set; fix: set HOME\n"),
+        "{checks}"
+    );
+    assert!(checks.contains(" ok, 1 warnings, 0 failures\n"), "{checks}");
+    assert!(!checks.contains(" skill:"), "{checks}");
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
 fn running_a_binary_other_than_paths_warns_and_exits_0() {
     let s = sandbox(Some("0.9.5"));
     s.install_hooks();

@@ -53,33 +53,36 @@ pub enum Layout {
 }
 
 impl Layout {
-    /// `--skills-dir` wins; `--settings` keeps both dirs in its file's
-    /// directory; otherwise `$HOME/.agents/skills` linked from `<claude dir>/skills`.
+    /// `--skills-dir` wins; `--settings` keeps both dirs in its file's directory,
+    /// unless that is the claude dir; otherwise `$HOME/.agents/skills` linked from
+    /// `<claude dir>/skills`. `None` when that needs a `HOME` that isn't set.
     pub fn resolve(
         skills_dir: Option<PathBuf>,
         settings: Option<&Path>,
-        home: impl FnOnce() -> Result<PathBuf>,
-        claude_dir: impl FnOnce() -> Result<PathBuf>,
-    ) -> Result<Layout> {
+        home: Option<PathBuf>,
+        claude_dir: Option<PathBuf>,
+    ) -> Result<Option<Layout>> {
         if let Some(dir) = skills_dir {
-            return Ok(Layout::Direct(dir));
+            return Ok(Some(Layout::Direct(dir)));
         }
-        let (agents_home, claude) = match settings {
-            Some(settings) => {
-                let settings = std::path::absolute(settings)
-                    .with_context(|| format!("resolve {}", settings.display()))?;
-                let dir = settings
-                    .parent()
-                    .expect("a file has a parent")
-                    .to_path_buf();
-                (dir.clone(), dir)
+        if let Some(settings) = settings {
+            let settings = std::path::absolute(settings)
+                .with_context(|| format!("resolve {}", settings.display()))?;
+            let dir = settings.parent().expect("a file has a parent");
+            if claude_dir
+                .as_deref()
+                .is_none_or(|claude| !same_dir(dir, claude))
+            {
+                return Ok(Some(Layout::Linked {
+                    real: dir.join(".agents/skills"),
+                    link: dir.join("skills"),
+                }));
             }
-            None => (home()?, claude_dir()?),
-        };
-        Ok(Layout::Linked {
-            real: agents_home.join(".agents/skills"),
+        }
+        Ok(home.zip(claude_dir).map(|(home, claude)| Layout::Linked {
+            real: home.join(".agents/skills"),
             link: claude.join("skills"),
-        })
+        }))
     }
 
     /// The skill file loopherd writes.
@@ -111,10 +114,14 @@ pub fn link_state(real: &Path, link: &Path) -> Link {
     };
     if meta.is_symlink() {
         let target = fs::read_link(&link).unwrap_or_default();
-        let same = matches!(
-            (fs::canonicalize(&link), fs::canonicalize(&real)),
-            (Ok(a), Ok(b)) if a == b
-        );
+        let same = match (fs::canonicalize(&link), fs::canonicalize(&real)) {
+            (Ok(a), Ok(b)) => a == b,
+            // The skill is gone, so judge the link by the target install-hook writes.
+            _ if fs::symlink_metadata(&real).is_err() => {
+                target == relative(&resolved(link.parent().unwrap()), &resolved(&real))
+            }
+            _ => false,
+        };
         return match same {
             true => Link::Ours,
             false => Link::Foreign(format!("points to {}", target.display())),
@@ -145,26 +152,61 @@ pub fn install(layout: &Layout) -> Result<Outcome> {
         Layout::Direct(dir) => return Ok(direct(write(dir)?)),
         Layout::Linked { real, link } => (real, link),
     };
-    let skill = write(real)?;
-    let at = link.join(NAME);
-    let mut outcome = direct(skill);
+    refuse_a_symlinked_skill_dir(real)?;
+    fs::create_dir_all(link).with_context(|| format!("create {}", link.display()))?;
+    // Concurrent installs would each see the other's half-made link.
+    let _lock = fs::File::open(link)
+        .and_then(|dir| crate::lock::Lock::wait(dir, crate::lock::BRIEF))
+        .with_context(|| format!("lock {}", link.display()))?;
+    let mut outcome = direct(write(real)?);
     match link_state(real, link) {
         Link::Ours => {}
         Link::Foreign(why) => outcome.left_alone = Some(why),
-        state => {
-            if state == Link::OldCopy {
-                remove(link)?;
-            }
-            fs::create_dir_all(link).with_context(|| format!("create {}", link.display()))?;
-            // The kernel resolves a relative link from its physical dir, so both sides
-            // must be free of symlinks.
-            let (from, to) = (canonical(link)?, canonical(&real.join(NAME))?);
-            std::os::unix::fs::symlink(relative(&from, &to), &at)
-                .with_context(|| format!("link {}", at.display()))?;
-            outcome.link = true;
-        }
+        state => outcome.link = place_link(real, link, state)?,
     }
     Ok(outcome)
+}
+
+/// Links `<link>/loopherd` to the skill in place of a `Missing` or `OldCopy`
+/// `state`. Returns whether it made the link: a writer outside the lock may
+/// have made ours first.
+fn place_link(real: &Path, link: &Path, state: Link) -> Result<bool> {
+    let at = link.join(NAME);
+    // The kernel resolves a relative link from its physical dir, so both sides
+    // must be free of symlinks.
+    let (from, to) = (canonical(link)?, canonical(&real.join(NAME))?);
+    let target = relative(&from, &to);
+    let placed = match state {
+        Link::OldCopy => replace_old_copy(&target, &at),
+        _ => std::os::unix::fs::symlink(&target, &at)
+            .with_context(|| format!("link {}", at.display())),
+    };
+    match placed {
+        Ok(()) => Ok(true),
+        Err(_) if link_state(real, link) == Link::Ours => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Makes the link under a temp name and renames it over the old copy, moved
+/// aside first so a failed rename can put it back.
+fn replace_old_copy(target: &Path, at: &Path) -> Result<()> {
+    let tmp = at.with_file_name(format!(".{NAME}.{}.tmp", unique()));
+    std::os::unix::fs::symlink(target, &tmp).with_context(|| format!("link {}", tmp.display()))?;
+    let aside = at.with_file_name(format!(".{NAME}.{}.old", unique()));
+    let swapped = fs::rename(at, &aside)
+        .with_context(|| format!("move {} aside", at.display()))
+        .and_then(|()| {
+            fs::rename(&tmp, at).or_else(|e| {
+                let _ = fs::rename(&aside, at);
+                Err(e).with_context(|| format!("link {}", at.display()))
+            })
+        });
+    let _ = fs::remove_file(&tmp);
+    swapped?;
+    let _ = fs::remove_file(aside.join("SKILL.md"));
+    let _ = fs::remove_dir(&aside);
+    Ok(())
 }
 
 pub fn uninstall(layout: &Layout) -> Result<Outcome> {
@@ -172,6 +214,7 @@ pub fn uninstall(layout: &Layout) -> Result<Outcome> {
         Layout::Direct(dir) => return Ok(direct(remove(dir)?)),
         Layout::Linked { real, link } => (real, link),
     };
+    refuse_a_symlinked_skill_dir(real)?;
     let at = link.join(NAME);
     let mut outcome = direct(false);
     match link_state(real, link) {
@@ -185,6 +228,50 @@ pub fn uninstall(layout: &Layout) -> Result<Outcome> {
     }
     outcome.skill = remove(real)?;
     Ok(outcome)
+}
+
+/// `<real>/loopherd` as a symlink is the human's; writing or deleting through it
+/// would change whatever it points to.
+fn refuse_a_symlinked_skill_dir(real: &Path) -> Result<()> {
+    let dir = real.join(NAME);
+    if fs::symlink_metadata(&dir).is_ok_and(|m| m.is_symlink()) {
+        anyhow::bail!(
+            "{} is a symlink, so loopherd won't write or delete through it; move it aside and rerun",
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// A name no other install, in this process or another, picks.
+fn unique() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}-{n}", std::process::id())
+}
+
+/// `path` with its longest existing prefix canonicalized, so it compares
+/// equal to the same place reached through symlinks even if its end is missing.
+fn resolved(path: &Path) -> PathBuf {
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut base = path.as_path();
+    let mut rest = Vec::new();
+    loop {
+        if let Ok(canonical) = fs::canonicalize(base) {
+            return rest.iter().rev().fold(canonical, |p, name| p.join(name));
+        }
+        match (base.parent(), base.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_owned());
+                base = parent;
+            }
+            _ => return path,
+        }
+    }
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    resolved(a) == resolved(b)
 }
 
 fn canonical(path: &Path) -> Result<PathBuf> {
@@ -242,7 +329,7 @@ fn write(skills_dir: &Path) -> Result<bool> {
     let dir = path.parent().expect("the skill sits in a directory");
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     // A rename replaces a symlinked SKILL.md rather than writing through to its target.
-    let tmp = dir.join(".SKILL.md.tmp");
+    let tmp = dir.join(format!(".SKILL.md.{}.tmp", unique()));
     fs::write(&tmp, SKILL).with_context(|| format!("write {}", tmp.display()))?;
     fs::rename(&tmp, &path).with_context(|| format!("rename into {}", path.display()))?;
     Ok(true)
@@ -584,5 +671,185 @@ mod tests {
         );
         assert!(uninstall(&layout).unwrap().link);
         assert!(fs::symlink_metadata(&at).is_err());
+    }
+    fn old_copy(dir: &Path) {
+        let at = dir.join(".claude/skills/loopherd");
+        fs::create_dir_all(&at).unwrap();
+        fs::write(at.join("SKILL.md"), "---\nname: loopherd\n---\nold\n").unwrap();
+    }
+
+    fn installs_at_once(layout: &Layout) -> Vec<Outcome> {
+        std::thread::scope(|s| {
+            let runs: Vec<_> = (0..8).map(|_| s.spawn(|| install(layout))).collect();
+            runs.into_iter()
+                .map(|r| r.join().unwrap().unwrap())
+                .collect()
+        })
+    }
+
+    #[test]
+    fn concurrent_installs_all_succeed_and_leave_one_link() {
+        for migrate in [false, true] {
+            for _ in 0..20 {
+                let dir = tempfile::tempdir().unwrap();
+                if migrate {
+                    old_copy(dir.path());
+                }
+                let layout = linked(dir.path());
+
+                let outcomes = installs_at_once(&layout);
+
+                assert!(outcomes.iter().any(|o| o.link), "{outcomes:?}");
+                assert!(outcomes.iter().all(|o| o.left_alone.is_none()));
+                let (real, link) = (
+                    dir.path().join(".agents/skills"),
+                    dir.path().join(".claude/skills"),
+                );
+                assert_eq!(link_state(&real, &link), Link::Ours);
+                let names: Vec<_> = fs::read_dir(&link)
+                    .unwrap()
+                    .map(|e| e.unwrap().file_name())
+                    .collect();
+                assert_eq!(names, ["loopherd"]);
+                let names: Vec<_> = fs::read_dir(real.join("loopherd"))
+                    .unwrap()
+                    .map(|e| e.unwrap().file_name())
+                    .collect();
+                assert_eq!(names, ["SKILL.md"]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_link_made_by_another_writer_after_the_check_counts_as_made() {
+        let dir = tempfile::tempdir().unwrap();
+        install(&linked(dir.path())).unwrap();
+        let (real, link) = (
+            dir.path().join(".agents/skills"),
+            dir.path().join(".claude/skills"),
+        );
+
+        let made = place_link(&real, &link, Link::Missing).unwrap();
+
+        assert!(!made);
+        assert_eq!(link_state(&real, &link), Link::Ours);
+    }
+
+    #[test]
+    fn a_link_that_cant_be_made_over_a_foreign_entry_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join(".claude/skills");
+        fs::create_dir_all(&link).unwrap();
+        fs::write(link.join("loopherd"), "mine").unwrap();
+        let real = dir.path().join(".agents/skills");
+        write(&real).unwrap();
+
+        let err = place_link(&real, &link, Link::Missing).unwrap_err();
+
+        assert!(format!("{err:#}").contains("File exists"), "{err:#}");
+        assert_eq!(fs::read_to_string(link.join("loopherd")).unwrap(), "mine");
+    }
+
+    #[test]
+    fn install_and_remove_refuse_a_symlinked_skill_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mine = dir.path().join("dotfiles/loopherd");
+        fs::create_dir_all(&mine).unwrap();
+        fs::write(mine.join("SKILL.md"), "mine").unwrap();
+        fs::create_dir_all(dir.path().join(".agents/skills")).unwrap();
+        std::os::unix::fs::symlink(&mine, dir.path().join(".agents/skills/loopherd")).unwrap();
+        let layout = linked(dir.path());
+
+        let installed = install(&layout).unwrap_err().to_string();
+        let removed = uninstall(&layout).unwrap_err().to_string();
+
+        for err in [installed, removed] {
+            assert!(err.contains("is a symlink"), "{err}");
+        }
+        assert_eq!(fs::read_to_string(mine.join("SKILL.md")).unwrap(), "mine");
+        assert!(fs::symlink_metadata(dir.path().join(".claude/skills/loopherd")).is_err());
+    }
+
+    #[test]
+    fn our_link_dangling_after_the_skill_is_deleted_is_still_ours_and_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = linked(dir.path());
+        install(&layout).unwrap();
+        fs::remove_dir_all(dir.path().join(".agents/skills/loopherd")).unwrap();
+        let (real, link) = (
+            dir.path().join(".agents/skills"),
+            dir.path().join(".claude/skills"),
+        );
+
+        assert_eq!(link_state(&real, &link), Link::Ours);
+        assert!(uninstall(&layout).unwrap().link);
+        assert!(fs::symlink_metadata(link.join("loopherd")).is_err());
+    }
+
+    #[test]
+    fn another_dangling_link_is_foreign() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join(".claude/skills");
+        fs::create_dir_all(&link).unwrap();
+        std::os::unix::fs::symlink("../../gone/loopherd", link.join("loopherd")).unwrap();
+
+        let state = link_state(&dir.path().join(".agents/skills"), &link);
+
+        assert_eq!(state, Link::Foreign("points to ../../gone/loopherd".into()));
+    }
+
+    fn resolve(
+        settings: Option<&Path>,
+        home: Option<&Path>,
+        claude: Option<&Path>,
+    ) -> Option<Layout> {
+        Layout::resolve(None, settings, home.map(Into::into), claude.map(Into::into)).unwrap()
+    }
+
+    #[test]
+    fn settings_in_the_claude_dir_take_the_home_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let (home, claude) = (dir.path().join("home"), dir.path().join("home/.claude"));
+        fs::create_dir_all(&claude).unwrap();
+
+        let layout = resolve(
+            Some(&claude.join("settings.json")),
+            Some(&home),
+            Some(&claude),
+        );
+
+        assert_eq!(
+            layout,
+            Some(Layout::Linked {
+                real: home.join(".agents/skills"),
+                link: claude.join("skills")
+            })
+        );
+    }
+
+    #[test]
+    fn settings_elsewhere_keep_both_dirs_beside_them_without_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+
+        let layout = resolve(Some(&settings), None, Some(&dir.path().join("claude")));
+
+        assert_eq!(
+            layout,
+            Some(Layout::Linked {
+                real: dir.path().join(".agents/skills"),
+                link: dir.path().join("skills")
+            })
+        );
+    }
+
+    #[test]
+    fn without_home_the_home_layout_is_none() {
+        let claude = Path::new("/cfg/claude");
+        assert_eq!(resolve(None, None, Some(claude)), None);
+        assert_eq!(
+            resolve(Some(&claude.join("settings.json")), None, Some(claude)),
+            None
+        );
     }
 }
