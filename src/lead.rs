@@ -604,6 +604,37 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_s_start_tightens_broker_folders_made_open_before() {
+        let setup = Setup::with_lead(PROMPT);
+        setup.copy_herd("g");
+        let broker = setup.root.join("state/broker");
+        let dirs = [
+            broker.clone(),
+            broker.join("lead-h"),
+            broker.join("lead-h/requests"),
+            broker.join("lead-g"),
+        ];
+        for dir in &dirs {
+            fs::create_dir_all(dir).unwrap();
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap();
+
+        for dir in &dirs {
+            let mode = fs::metadata(dir).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{}", dir.display());
+        }
+    }
+
+    #[test]
     fn a_lead_starts_in_the_sandbox_with_settings_written_outside_its_worktree() {
         let setup = Setup::with_lead(PROMPT);
         let herdr = herdr();

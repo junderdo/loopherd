@@ -1002,7 +1002,12 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     // Absent files alone would pass if the lead skipped these two calls.
     let broker_writes = [&write_other, &write_later].map(|p| p.display().to_string());
     assert_eq!(
-        write_calls(&broker_writes),
+        write_calls(
+            first_session
+                .as_ref()
+                .expect("the probe never paused mid-turn"),
+            &broker_writes
+        ),
         broker_writes.map(|path| (path, true)),
         "each broker Write call, and whether it was refused by permission settings"
     );
@@ -1234,7 +1239,8 @@ fn a_sandboxed_worker_writes_only_its_own_worktree_mailbox_and_handoff() {
         assert!(!path.exists(), "the Write tool wrote {}", path.display());
     }
     // Absent files alone would pass if the worker skipped the calls.
-    let calls: Vec<String> = write_calls(&write_paths)
+    let session = ledger_entry(state.path(), &name)["session_id"].clone();
+    let calls: Vec<String> = write_calls(&session, &write_paths)
         .into_iter()
         .map(|(p, _)| p)
         .collect();
@@ -1295,24 +1301,18 @@ impl Drop for DeleteBranch {
     }
 }
 
-/// The Write tool calls on `paths`, in order, from the Claude transcript
-/// that names the first of them, each with whether permissions refused it.
-fn write_calls(paths: &[String]) -> Vec<(String, bool)> {
+/// The Write tool calls on `paths`, in order, from Claude session `session`'s
+/// transcript, each with whether permissions refused it.
+fn write_calls(session: &Value, paths: &[String]) -> Vec<(String, bool)> {
+    let file = format!("{}.jsonl", session.as_str().expect("no session id"));
     let projects = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".claude/projects");
     let transcript = std::fs::read_dir(&projects)
         .unwrap()
         .flatten()
-        .filter_map(|project| std::fs::read_dir(project.path()).ok())
-        .flatten()
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|e| e == "jsonl"))
-        .find_map(|path| {
-            std::fs::read_to_string(&path)
-                .ok()
-                .filter(|text| text.contains(&paths[0]))
-        })
-        .expect("no Claude transcript names the probe's writes");
+        .map(|project| project.path().join(&file))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| panic!("no Claude transcript {file}"));
+    let transcript = std::fs::read_to_string(transcript).unwrap();
     let blocks: Vec<Value> = transcript
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
