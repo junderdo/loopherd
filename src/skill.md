@@ -290,7 +290,8 @@ handoff an older loopherd left flat at `handoffs/<name>.md` is still read,
 and moves to `handoffs/<name>/prev.md` once used. The
 limit is the template's or `[lead]`'s `context_limit`, else `default_context_limit` in
 `$LOOPHERD_CONFIG_DIR/config.toml`, else 250000, never over 80% of that
-file's `context_window` (default 200000). `loopherd setup --context` asks
+file's `context_window` (default 200000). A limit is tokens or a percentage
+of that window (`context_limit = "65%"`). `loopherd setup --context` asks
 for the three `config.toml` values and `loopherd config get|set|unset
 <key>` reads or writes one (`context_window`, `default_context_limit`,
 `shepherd.context_limit`); change them only when the human says so. A

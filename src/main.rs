@@ -150,7 +150,8 @@ enum Command {
     },
     /// Read or edit one of config.toml's settings, keeping its comments and
     /// layout: `context_window`, `default_context_limit` or
-    /// `shepherd.context_limit`, each a number of tokens,
+    /// `shepherd.context_limit`, each a number of tokens (`250000`, `250k`,
+    /// `1.5M`), the two limits also a percentage of the window (`65%`),
     /// `lead_defaults.review_rounds`, each lead's review-round limit,
     /// `shepherd.self_restart` or `herdr_plugin.revive_on_startup` (`true` or
     /// `false`), or
@@ -596,7 +597,8 @@ struct SetupArgs {
     #[arg(long, value_name = "SWITCHES", num_args = 0..=1)]
     lead_defaults: Option<Option<String>>,
     /// Set any of the context window, the default handoff limit and the
-    /// shepherd's, in tokens: `window=1000000,limit=500000,shepherd=400000`.
+    /// shepherd's, in tokens or, for a limit, a percentage of the window:
+    /// `window=1M,limit=65%,shepherd=400k`.
     /// A limit over 80% of the window is refused. Alone, ask about them again.
     #[arg(long, value_name = "window=N,limit=N,shepherd=N", num_args = 0..=1)]
     context: Option<Option<String>>,
@@ -698,9 +700,10 @@ struct InitArgs {
     /// else hook. credentials needs `loopherd merge-guard <herd>` afterwards.
     #[arg(long, value_enum, conflicts_with = "no_lead")]
     merge_guard: Option<herd::MergeGuard>,
-    /// The workers' handoff limit in tokens; unset, config.toml's default applies.
-    #[arg(long, value_name = "TOKENS")]
-    context_limit: Option<u64>,
+    /// The workers' handoff limit in tokens (`120k`) or a percentage of the
+    /// window (`50%`); unset, config.toml's default applies.
+    #[arg(long, value_name = "LIMIT")]
+    context_limit: Option<String>,
     /// Print a unified diff from the files init wrote to what it would write
     /// now, inferring again; write nothing. Exits 1 when they differ, 2 on error.
     #[arg(long)]

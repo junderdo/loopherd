@@ -148,6 +148,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D133](decisions/D133.md) | `view` and `status --json` list each member's running subagents, recorded in its mailbox by a `subagent-hook` on Claude's `SubagentStart`/`SubagentStop`; the description is read from Claude's `meta.json` for the subagent, written only after the start hook; a missed stop is dropped at the member's next start, a stop with no subagents running, or a session change. |
 | [D134](decisions/D134.md) | `revive --startup` starts a broker for each alive lead on the hook's socket even with `revive_on_startup` off, resuming, prompting and noting nothing then; `setup` asks for the key while unset (`--revive-on-startup`, passed through by `scripts/install`), and `config get\|set\|unset` takes it. Amends D64. |
 | [D135](decisions/D135.md) | `install.sh` runs the same splash and offers as `scripts/install` through `scripts/install-extras`, shipped with the offers, `agents/` and the herdr plugin manifest in each release tarball; the extras ask on `/dev/tty`, skip naming their flag without one, and `install.sh` takes `scripts/install`'s `--no-splash`, `--with-*` and `--no-extras`. Installed extras say so before any no-terminal skip. |
+| [D136](decisions/D136.md) | Token counts in `setup` and `config set` take `250k`, `1.5M` and `_`/`,` separators; a context limit may be a percentage of the window (`"65%"`), resolved where the limit is computed and still capped at 80%; setup echoes each value and shows an unset limit as a percentage. |
 
 ## Emerging model
 

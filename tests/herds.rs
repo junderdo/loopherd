@@ -209,3 +209,35 @@ fn the_documented_groom_prompt_gives_self_contained_batch_lines_and_a_heredoc_re
     assert!(!groom.contains("curl"), "{groom}");
     assert!(!groom.contains("'<report>'"), "{groom}");
 }
+
+#[test]
+fn herds_takes_a_percentage_context_limit_and_flags_a_bad_one() {
+    let config = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    recording_herdr(bin.path());
+    let herds = config.path().join("herds");
+    fs::create_dir(&herds).unwrap();
+    let herd = |limit: &str| {
+        format!(
+            "repo = \"/r\"\n[template.pr]\nparams = []\nprompt = \"go\"\ncontext_limit = {limit}\n\
+             [lead]\nprompt = \"lead\"\ncontext_limit = {limit}\n"
+        )
+    };
+    fs::write(herds.join("prs.toml"), herd("\"65%\"")).unwrap();
+    assert_eq!(run_herds(config.path(), bin.path()).status.code(), Some(0));
+
+    for (limit, says) in [
+        ("\"0%\"", "between 1% and 100%"),
+        ("\"6.5%\"", "a whole percentage"),
+        ("\"lots\"", "250000, 250k, 1.5M or 1_000_000"),
+    ] {
+        fs::write(herds.join("prs.toml"), herd(limit)).unwrap();
+        let out = run_herds(config.path(), bin.path());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.starts_with("invalid prs.toml: ") && stdout.contains(says),
+            "{limit}: {stdout}"
+        );
+        assert_eq!(out.status.code(), Some(1));
+    }
+}

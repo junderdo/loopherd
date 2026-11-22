@@ -404,7 +404,8 @@ options.
 | `retire <name>` | Mark a member finished; `--close` also closes its tab and removes its merged worktree. |
 
 A member past its context limit (`context_limit` in its template or
-`[lead]`, else `config.toml`'s `default_context_limit`) is asked once to
+`[lead]`, else `config.toml`'s `default_context_limit`; tokens, or a
+percentage of `context_window` like `"65%"`) is asked once to
 write a handoff and report `--kind handoff`; `restart` then resumes it from
 that file.
 
