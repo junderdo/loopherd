@@ -139,8 +139,8 @@ A grill runs in one of two modes (D132), picked by the human with the
 
   The next feed starts a fresh `grill-batch-<n>` (feed skips a retired name
   until it's released), which reads the answer and writes the decision.
-  Never restart it without the human's answer on the card. Each round shows
-  in `loopherd stats` as its own run.
+  Never restart it without the human's answer on the card. `loopherd stats`
+  doesn't compare the two modes (D132).
 
 After its PR merges, the grill moves the card to Done, runs
 `scripts/trello unblock` and sends you `LH-<n> merged and closed out: …`. The
