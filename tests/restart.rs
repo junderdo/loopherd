@@ -42,6 +42,8 @@ fn command(state: &Path, args: &[&str]) -> Command {
         .env("XDG_STATE_HOME", state)
         .env("LOOPHERD_CONFIG_DIR", state.join("config"))
         .env("CLAUDE_CONFIG_DIR", state.join("claude"))
+        // install-hook into this claude dir puts the skill under HOME.
+        .env("HOME", state.join("home"))
         .env("PATH", "")
         .env("HERDR_PANE_ID", "w1:p1")
         .env("HERDR_SOCKET_PATH", SOCKET);
@@ -166,6 +168,8 @@ fn as_shepherd(state: &Path, args: &[&str], stdin: &str) -> Output {
         .env("XDG_STATE_HOME", state)
         .env("LOOPHERD_CONFIG_DIR", state.join("config"))
         .env("CLAUDE_CONFIG_DIR", state.join("claude"))
+        // install-hook into this claude dir puts the skill under HOME.
+        .env("HOME", state.join("home"))
         .env("CLAUDE_PID", std::process::id().to_string())
         .env("PATH", "")
         .env("HERDR_PANE_ID", "w1:p1")

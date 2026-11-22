@@ -159,15 +159,18 @@ pub fn install(layout: &Layout) -> Result<Outcome> {
         .and_then(|dir| crate::lock::Lock::wait(dir, crate::lock::BRIEF))
         .with_context(|| format!("lock {}", link.display()))?;
     let mut outcome = direct(write(real)?);
-    let state = link_state(real, link);
-    match &state {
-        Link::Ours => return Ok(outcome),
-        Link::Foreign(why) => {
-            outcome.left_alone = Some(why.clone());
-            return Ok(outcome);
-        }
-        Link::Missing | Link::OldCopy => {}
+    match link_state(real, link) {
+        Link::Ours => {}
+        Link::Foreign(why) => outcome.left_alone = Some(why),
+        state => outcome.link = place_link(real, link, state)?,
     }
+    Ok(outcome)
+}
+
+/// Links `<link>/loopherd` to the skill in place of a `Missing` or `OldCopy`
+/// `state`. Returns whether it made the link: a writer outside the lock may
+/// have made ours first.
+fn place_link(real: &Path, link: &Path, state: Link) -> Result<bool> {
     let at = link.join(NAME);
     // The kernel resolves a relative link from its physical dir, so both sides
     // must be free of symlinks.
@@ -179,12 +182,10 @@ pub fn install(layout: &Layout) -> Result<Outcome> {
             .with_context(|| format!("link {}", at.display())),
     };
     match placed {
-        Ok(()) => outcome.link = true,
-        // Something else made a link there first; ours is as good as made.
-        Err(_) if link_state(real, link) == Link::Ours => {}
-        Err(e) => return Err(e),
+        Ok(()) => Ok(true),
+        Err(_) if link_state(real, link) == Link::Ours => Ok(false),
+        Err(e) => Err(e),
     }
-    Ok(outcome)
 }
 
 /// Makes the link under a temp name and renames it over the old copy, moved
@@ -717,6 +718,36 @@ mod tests {
                 assert_eq!(names, ["SKILL.md"]);
             }
         }
+    }
+
+    #[test]
+    fn a_link_made_by_another_writer_after_the_check_counts_as_made() {
+        let dir = tempfile::tempdir().unwrap();
+        install(&linked(dir.path())).unwrap();
+        let (real, link) = (
+            dir.path().join(".agents/skills"),
+            dir.path().join(".claude/skills"),
+        );
+
+        let made = place_link(&real, &link, Link::Missing).unwrap();
+
+        assert!(!made);
+        assert_eq!(link_state(&real, &link), Link::Ours);
+    }
+
+    #[test]
+    fn a_link_that_cant_be_made_over_a_foreign_entry_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join(".claude/skills");
+        fs::create_dir_all(&link).unwrap();
+        fs::write(link.join("loopherd"), "mine").unwrap();
+        let real = dir.path().join(".agents/skills");
+        write(&real).unwrap();
+
+        let err = place_link(&real, &link, Link::Missing).unwrap_err();
+
+        assert!(format!("{err:#}").contains("File exists"), "{err:#}");
+        assert_eq!(fs::read_to_string(link.join("loopherd")).unwrap(), "mine");
     }
 
     #[test]

@@ -55,6 +55,8 @@ impl Sandbox {
         cmd.args(args)
             .env("XDG_STATE_HOME", self.dir.path().join("state"))
             .env("CLAUDE_CONFIG_DIR", self.dir.path())
+            // install-hook into this claude dir puts the skill under HOME.
+            .env("HOME", self.dir.path().join("home"))
             .env("LOOPHERD_CONFIG_DIR", self.dir.path().join("config"))
             .env_remove("CLAUDE_PID")
             .env("PATH", "")
