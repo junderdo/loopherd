@@ -1230,7 +1230,7 @@ fn checked(file: &Path, paths: &Paths) -> std::result::Result<HerdFile, String> 
         .map_err(anyhow::Error::from)
         .and_then(|text| {
             let herd = file.file_stem().unwrap_or_default().to_string_lossy();
-            check(&herd, &text, paths)
+            check(&herd, &text, paths, Fix::Commands)
         })
         .map_err(|e| {
             let name = file.file_name().unwrap_or_default().to_string_lossy();
@@ -1238,9 +1238,19 @@ fn checked(file: &Path, paths: &Paths) -> std::result::Result<HerdFile, String> 
         })
 }
 
+/// How a refusal from `check` tells its reader to fix the herd.
+#[derive(Clone, Copy)]
+enum Fix {
+    /// Commands that edit the file as it stands.
+    Commands,
+    /// What the edit must leave, for a `herd set` or `herd unset` of a valid
+    /// file, which a refusal leaves unchanged.
+    Edit,
+}
+
 /// `text` parsed as a herd file and checked as far as `add` and `lead` would
 /// before knowing any params.
-fn check(herd: &str, text: &str, paths: &Paths) -> Result<HerdFile> {
+fn check(herd: &str, text: &str, paths: &Paths, fix: Fix) -> Result<HerdFile> {
     let parsed = parse(text)?;
     for (name, template) in &parsed.template {
         check_template(name, template, paths)?;
@@ -1258,7 +1268,7 @@ fn check(herd: &str, text: &str, paths: &Paths) -> Result<HerdFile> {
         if credentials && lead.unix_sockets == Some(UnixSockets::All) {
             bail!(
                 "lead: can't start with merge_guard = \"credentials\": {}",
-                credentials_with_sockets(herd, "lead")
+                sockets_refusal(herd, "lead", fix)
             );
         }
         let worker = parsed.worker.as_ref();
@@ -1269,14 +1279,14 @@ fn check(herd: &str, text: &str, paths: &Paths) -> Result<HerdFile> {
         {
             bail!(
                 "worker: can't start sandboxed with merge_guard = \"credentials\": {}",
-                credentials_with_sockets(herd, "worker")
+                sockets_refusal(herd, "worker", fix)
             );
         }
         let workers = worker.map(|w| w.sandbox).unwrap_or_default();
         if credentials && workers != WorkerSandbox::Require {
             bail!(
                 "lead: can't start with merge_guard = \"credentials\": {}",
-                credentials_with_workers_unrequired(herd, workers)
+                workers_refusal(herd, workers, fix)
             );
         }
     }
@@ -1286,25 +1296,54 @@ fn check(herd: &str, text: &str, paths: &Paths) -> Result<HerdFile> {
     Ok(parsed)
 }
 
+fn workers_refusal(herd: &str, sandbox: WorkerSandbox, fix: Fix) -> String {
+    match fix {
+        Fix::Commands => credentials_with_workers_unrequired(herd, sandbox),
+        Fix::Edit => format!(
+            "{}; make the edit leave lead.merge = true, or worker.sandbox = \"require\" while \
+             lead.merge_guard is \"credentials\"",
+            workers_unrequired(sandbox)
+        ),
+    }
+}
+
+fn sockets_refusal(herd: &str, table: &str, fix: Fix) -> String {
+    match fix {
+        Fix::Commands => credentials_with_sockets(herd, table),
+        Fix::Edit => format!(
+            "{SOCKETS_ACT_AS_YOU}; make the edit leave lead.merge = true, or only one of \
+             {table}.unix_sockets = \"all\" and lead.merge_guard = \"credentials\""
+        ),
+    }
+}
+
 /// Why a credentials herd's lead can't start while its `[worker] sandbox` is
 /// `sandbox`, anything but `require`, and how to fix it.
 pub fn credentials_with_workers_unrequired(herd: &str, sandbox: WorkerSandbox) -> String {
     format!(
+        "{}; run loopherd herd set {herd} worker.sandbox '\"require\"', or loopherd herd set \
+         {herd} lead.merge_guard '\"hook\"'",
+        workers_unrequired(sandbox)
+    )
+}
+
+fn workers_unrequired(sandbox: WorkerSandbox) -> String {
+    format!(
         "its workers must run sandboxed, or it could have one merge or force-push as you, and \
-         [worker] sandbox is \"{}\", not \"require\"; run loopherd herd set {herd} \
-         worker.sandbox '\"require\"', or loopherd herd set {herd} lead.merge_guard '\"hook\"'",
+         [worker] sandbox is \"{}\", not \"require\"",
         sandbox.name()
     )
 }
+
+const SOCKETS_ACT_AS_YOU: &str = "unix_sockets = \"all\" opens your ssh agent, Git Credential \
+     Manager through WSL2 interop and the Secret Service keyring to it, each of which acts as you";
 
 /// Why a credentials herd's `table` (`lead` or `worker`) can't have every
 /// Unix socket open, and how to clear either switch.
 pub fn credentials_with_sockets(herd: &str, table: &str) -> String {
     format!(
-        "unix_sockets = \"all\" opens your ssh agent, Git Credential Manager through WSL2 \
-         interop and the Secret Service keyring to it, each of which acts as you; run loopherd \
-         herd unset {herd} {table}.unix_sockets, or loopherd herd set {herd} lead.merge_guard \
-         '\"hook\"'"
+        "{SOCKETS_ACT_AS_YOU}; run loopherd herd unset {herd} {table}.unix_sockets, or loopherd \
+         herd set {herd} lead.merge_guard '\"hook\"'"
     )
 }
 

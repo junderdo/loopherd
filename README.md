@@ -261,7 +261,9 @@ as its main checkout. Then, in order:
    seccomp filter on Linux and WSL2, where present, so herdr, your ssh agent and WSL2's Windows interop are closed to it, unless its `[lead]` sets `unix_sockets = "all"`, which
    reopens all three ([D105](docs/decisions/D105.md)); a lead with
    `merge_guard = "credentials"` is refused it
-   ([D114](docs/decisions/D114.md)). Where, on Linux or WSL2, Claude
+   ([D114](docs/decisions/D114.md)): `loopherd lead`, `revive` and
+   `restart` refuse the pair, `loopherd herd set` refuses an edit that
+   makes it, and `loopherd doctor` fails the herd. Where, on Linux or WSL2, Claude
    Code has no seccomp filter to block them, `loopherd doctor` and
    `loopherd setup` name `npm install -g @anthropic-ai/sandbox-runtime`,
    and the lead isn't started or restarted unless its `[lead]` sets

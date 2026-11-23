@@ -153,6 +153,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D138](decisions/D138.md) | `view.layout` (`side-by-side` default, or `stacked`) places the view and the shepherd in a tab for both the `view-beside-shepherd` action and `S`; the view takes 40%; left and above come from a split then `pane swap`; a malformed value falls back with a note. |
 | [D139](decisions/D139.md) | `v` in the view re-docks the live shepherd's pane, when it shares the view's tab, to the other `view.layout` and saves it; herdr won't move a pane within its tab, so it leaves through a tab of its own and comes back with `--split`/`--ratio`. |
 | [D140](decisions/D140.md) | An open attended member holds off neither drained line; merge alerts skip its PR (by head branch); `retire --close` returns focus by the pane it closes; startup revive skips it only after a pane, tab or workspace close, which a `gone` now records, not a pane exit or herdr losing it. Amends D112, D116. |
+| [D141](decisions/D141.md) | merge-guard's and doctor's paginated reads drop `--slurp` and parse the one array `gh api --paginate` merges pages into (gh 2.31.0+, not 2.48.0+); doctor's `gh api` errors and timeouts name the endpoint. |
 | [D142](decisions/D142.md) | A lead's question unanswered for 30 minutes (no prompt in its pane, recorded by `prompt-hook` as `answered`) sends a `waiting` notification from its watch, once per stretch; an armed shepherd's watch prints `<lead> waiting <age>`; status and view show the age; doctor warns when a lead runs with `[notify]` off. Amends D32, D57. |
 
 ## Emerging model
