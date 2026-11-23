@@ -158,8 +158,8 @@ Done) then close its pane, worktree and branch.
   `GH_TOKEN=$(gh auth token --user junderdo) gh pr view <pr> --json state --jq .state`
   reads MERGED, then run `loopherd feed loopherd-cards`.
 - **If the grill's pane closed before its close-out**, or the human reports
-  the merge with no line from the grill: find the branch in grill-<n>'s row of
-  `loopherd status loopherd-cards` (or `git worktree list | grep LH-<n>`) and
+  the merge with no line from the grill: find the branch in grill-<n>'s row under
+  loopherd-cards in `loopherd status` (or `git worktree list | grep LH-<n>`) and
   its PR with
   `GH_TOKEN=$(gh auth token --user junderdo) gh pr list --head <branch> --state all`.
   Check `gh pr view <pr> --json state` (as junderdo) reads MERGED, then move

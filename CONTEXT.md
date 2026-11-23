@@ -11,8 +11,9 @@ and merge, and they talk only to the shepherd.
 
 **Shepherd**:
 The agent the human talks to. It looks after every herd and passes questions and
-merge requests up to the human and the human's answers back down. It also does
-the wayfinding and grilling that need the human in the room. For a herd
+merge requests up to the human and the human's answers back down. It also starts
+and closes out the grills and does the wayfinding that need the human in the
+room. For a herd
 without a lead, it also does the lead's job. Past its context limit it writes its
 own handoff and asks the human to clear the session and continue from it.
 _Avoid_: orchestrator, manager
