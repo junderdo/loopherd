@@ -54,6 +54,7 @@ mod template;
 mod test_fakes;
 mod tool_hook;
 mod tui;
+mod update;
 mod usage;
 // build.rs includes it; here only for its tests.
 #[cfg(test)]
@@ -502,6 +503,19 @@ enum Command {
         /// herdr and config checks still run.
         herd: Option<String>,
     },
+    /// Bring a release install (the one-line installer's) up to date by
+    /// running the target release's own install.sh, as install.toml in the
+    /// config dir records it. Never moves to an older release unless
+    /// --version names it; replaces ~/.local/bin/loopherd.
+    Update {
+        /// Only report whether a newer release is out: exits 0 up to date,
+        /// 1 behind, 2 when it couldn't check.
+        #[arg(long, conflicts_with = "version")]
+        check: bool,
+        /// Install this release, older or the current one included.
+        #[arg(long, value_name = "vX.Y.Z")]
+        version: Option<String>,
+    },
     /// Add loopherd's Stop, StopFailure, SessionStart, PreToolUse and UserPromptSubmit hooks to Claude's
     /// user settings, calling this binary, and write the `--skill` guide as the loopherd
     /// skill; safe to re-run. Backs the settings file up before changing it.
@@ -906,6 +920,7 @@ fn main() -> ExitCode {
             "install-hook",
             run_install_hook(remove, settings, skills_dir),
         ),
+        Command::Update { check, version } => ("update", run_update(check, version)),
         Command::InstallHerdrKeys { remove } => {
             ("install-herdr-keys", run_install_herdr_keys(remove))
         }
@@ -2419,6 +2434,25 @@ fn run_doctor(
         false => print!("{}", doctor::text(&checks, verbose)),
     }
     Ok(doctor::exit_code(&checks))
+}
+
+fn run_update(check: bool, version: Option<String>) -> Result<i32> {
+    let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
+    let places = update::Places {
+        config_dir: Paths::from_env()?.config_dir().to_path_buf(),
+        installed: home.join(".local/bin/loopherd"),
+        running: std::env::current_exe().context("find this binary")?,
+        base: std::env::var("LOOPHERD_RELEASE_BASE")
+            .ok()
+            .filter(|base| !base.is_empty()),
+    };
+    let want = match (check, version) {
+        (true, _) => update::Want::Check,
+        (false, Some(version)) => update::Want::Version(version),
+        (false, None) => update::Want::Latest,
+    };
+    let on_path = |name: &str| on_path(name).is_some();
+    update::update(&places, want, &on_path, &mut std::io::stdout())
 }
 
 fn doctor_install(settings: Option<PathBuf>) -> Result<doctor::Install> {
