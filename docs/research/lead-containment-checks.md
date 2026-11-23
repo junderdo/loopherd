@@ -45,7 +45,7 @@ Settings passed with `--settings`: `sandbox.enabled`, `failIfUnavailable`, `allo
 ## Consequences for D83
 
 - No check failed; `credentials` mode stands and `hook` stays the default.
-- Allowing all Unix sockets (needed for herdr) removes the seccomp socket filter, so a lead's Bash can likely reach other sockets the user can, such as an ssh agent (not tested). LH-280 should check whether `sandbox.network.allowUnixSockets` can name just the herdr socket, and test the agent socket.
+- Allowing all Unix sockets (needed for herdr) removes the seccomp socket filter, so a lead's Bash can likely reach other sockets the user can, such as an ssh agent (not tested). LH-280 should check whether `sandbox.network.allowUnixSockets` can name just the herdr socket, and test the agent socket. Answered by LH-363: it can't; Linux and WSL2 ignore the list ([claude-unix-socket-allowlist.md](claude-unix-socket-allowlist.md)).
 - LH-280 should set both the `Read(...)` deny and the `denyRead` filesystem entry: D83 says file tools run outside the sandbox, and each was only tested together.
 - The owner's merge under the `main` ruleset needs the bypass option (`gh pr merge --admin`, or "Merge without waiting for requirements" in the UI). Document it for `init`; the plain merge button reads as blocked.
 - Deleting `main` is refused by git itself; only a non-default protected branch exercises the deletion rule.
