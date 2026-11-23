@@ -1198,7 +1198,12 @@ fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32>
         sandbox: sandbox::probe,
         broker: broker::start,
         restart_broker: |paths, lead| {
-            broker::restart_broker(paths, lead, &broker::runnable_exe()?, &mut Printed)
+            let exe = broker::runnable_exe().with_context(|| {
+                format!(
+                    "{lead}'s broker can't start; run loopherd revive --name {lead} to try again"
+                )
+            })?;
+            broker::restart_broker(paths, lead, &exe, &mut Printed)
         },
         brokers_only,
     };
