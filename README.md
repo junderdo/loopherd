@@ -169,7 +169,9 @@ it the same way, with its own key (install uses `prefix+shift+m`).
 `view.layout` in `config.toml` sets the side, for this action and the
 view's `S` alike: `side-by-side`, the default, puts the shepherd left and
 the view right; `stacked` puts the view on top and the shepherd below.
-The view takes 40% of the split.
+The view takes 40% of the split. `v` in the view switches a shepherd in
+the view's tab to the other layout, moving its pane without restarting
+it, and saves the choice as `view.layout`.
 
 ```sh
 loopherd config set view.layout stacked
@@ -229,7 +231,9 @@ as its main checkout. Then, in order:
    lists every member, sorted by what needs you; Enter focuses the
    selected member's pane, `S` focuses the shepherd (or, with none, starts
    one in a pane split left of the view, or below it with `view.layout`
-   set to `stacked`), and `t` switches between its
+   set to `stacked`), `v` switches the view and the shepherd between side
+   by side and stacked, saving it as `view.layout`, and `t` switches
+   between its
    purple-orange, phosphor and catppuccin themes, remembering the choice as
    `view.theme` in `config.toml`.
 5. **Start the shepherd.** Press `S` in the view, run in a pane rather
@@ -397,7 +401,7 @@ it; `attended = true` implies it (D116).
 | `reports` | Print unread reports, questions first, and mark them read (`--herd`, `--all`). |
 | `status` | Members by herd with herdr's live status (`--all`, `--strays`, `--json`). |
 | `read <member>` | A member's last lines of output, unwrapped (`--lines`, 40 by default, up to 1000). |
-| `view` | The same as a live TUI; Enter focuses the member's pane, `S` focuses the shepherd or starts one beside the view (left of it, or below with `view.layout = "stacked"`), and `t` switches the theme, saving it as `view.theme` in `config.toml`. |
+| `view` | The same as a live TUI; Enter focuses the member's pane, `S` focuses the shepherd or starts one beside the view (left of it, or below with `view.layout = "stacked"`), `v` switches the two between side by side and stacked, saving it as `view.layout`, and `t` switches the theme, saving it as `view.theme` in `config.toml`. |
 | `pr [url]` | The herdr plugin's PR link handler: the member that owns the PR in a popup, else the browser. |
 | `stats` | How each herd's work flowed: time to done, review rounds, time waiting on merge, and each run's outcome (`merged`, `closed`, `released`, `retired`), with medians over merged runs per herd and per template (`--herd`, `--since`, `--until`, `--json`). |
 

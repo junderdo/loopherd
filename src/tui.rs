@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use ratatui::backend::Backend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -30,7 +30,7 @@ use crate::herdr::Herdr;
 use crate::herdr::events::Subscriber;
 use crate::ledger::Ledger;
 use crate::pause::Pauses;
-use crate::shepherd_pane::{self, Summoned, ViewPane};
+use crate::shepherd_pane::{self, Summoned, Switch, ViewPane};
 use crate::status::{Read, Subagents, aligned, read, row, sections, stray_lines, widths};
 use mail::{Mail, Waiting, waiting};
 use since::{Since, Staleness, staleness};
@@ -72,6 +72,7 @@ pub enum Request {
     Focus(String),
     SaveTheme(Palette),
     Shepherd,
+    SwitchLayout,
 }
 
 pub enum Response {
@@ -79,6 +80,7 @@ pub enum Response {
     Focus(String, Result<()>),
     SavedTheme(Result<()>),
     Shepherd(Result<Summoned>),
+    SwitchedLayout(Result<Switch>),
 }
 
 /// Where the reader finds what isn't in herdr or the ledger.
@@ -120,7 +122,19 @@ pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger, dirs: &Di
             dirs.view_pane.as_ref(),
             crate::config::view_layout(&dirs.config).0,
         )),
+        Request::SwitchLayout => Response::SwitchedLayout(switch_layout(herdr, dirs)),
     }
+}
+
+/// Switches the shepherd and the view to the other layout and saves it.
+fn switch_layout(herdr: &dyn Herdr, dirs: &Dirs) -> Result<Switch> {
+    let from = crate::config::view_layout(&dirs.config).0;
+    let switched = shepherd_pane::switch_layout(herdr, dirs.view_pane.as_ref(), from)?;
+    if let Switch::Switched(to) = &switched {
+        crate::config::set(&dirs.config, "view.layout", to.name())
+            .with_context(|| format!("switched to {}, but saving it failed", to.name()))?;
+    }
+    Ok(switched)
 }
 
 /// Serves requests in order on its own thread until the sender drops.
@@ -365,6 +379,13 @@ impl App {
                     Err(e) => format!("shepherd: {e:#}"),
                 })
             }
+            Response::SwitchedLayout(result) => {
+                self.message = Some(match result {
+                    Ok(Switch::Switched(to)) => format!("switched to {}", to.name()),
+                    Ok(Switch::Unswitched(why)) => format!("layout unchanged: {why}"),
+                    Err(e) => format!("switch layout: {e:#}"),
+                })
+            }
         }
         Ok(())
     }
@@ -395,6 +416,7 @@ impl App {
                 self.summoning = true;
                 return Some(Request::Shepherd);
             }
+            KeyCode::Char('v') => return Some(Request::SwitchLayout),
             KeyCode::Down | KeyCode::Char('j') => self.select(self.selected + 1),
             KeyCode::Up | KeyCode::Char('k') => self.select(self.selected.saturating_sub(1)),
             KeyCode::Enter => return self.focus(),
@@ -660,7 +682,8 @@ impl App {
             spans.push(Span::raw(" "));
             spans.push(Span::styled(if on { "on" } else { "off" }, t.toggle(on)));
         }
-        // Last, so a narrow view cuts it before the toggles' state.
+        // Last, so a narrow view cuts them before the toggles' state.
+        key(&mut spans, "v", "layout");
         key(&mut spans, "S", "shepherd");
         Line::from(spans)
     }
@@ -4166,6 +4189,100 @@ max = 3
         let request = app.press(KeyCode::Char('S'), now).unwrap();
         app.apply(serve(request, herdr, ledger, dirs), now).unwrap();
         lines(&render_tall(app, now)).concat()
+    }
+
+    fn press_layout(app: &mut App, herdr: &FakeHerdr, ledger: &MemLedger, dirs: &Dirs) -> String {
+        let now = Instant::now();
+        let request = app.press(KeyCode::Char('v'), now).unwrap();
+        app.apply(serve(request, herdr, ledger, dirs), now).unwrap();
+        lines(&render_tall(app, now)).concat()
+    }
+
+    /// The view's dirs, run in a pane sharing tab `w1:t1` with the live
+    /// shepherd's `w1:p1`, with config.toml holding `config`.
+    fn beside_shepherd(state: &std::path::Path, config: &str) -> (FakeHerdr, Dirs) {
+        let herdr = herdr().with_live_agent(Some("shepherd"), None, "w1:p1");
+        herdr.add_tab("w1", "shepherd", std::path::Path::new("/repo"), true);
+        let view = herdr.split("w1:t1", std::path::Path::new("/repo"));
+        let path = state.join("config.toml");
+        std::fs::write(&path, config).unwrap();
+        let dirs = Dirs {
+            config: path,
+            ..shepherd_dirs(state, Some(&view))
+        };
+        (herdr, dirs)
+    }
+
+    #[test]
+    fn v_switches_the_shepherd_between_the_layouts_and_saves_each_keeping_the_rest() {
+        let (ledger, now) = (ledger(), Instant::now());
+        let state = tempfile::tempdir().unwrap();
+        let (herdr, dirs) = beside_shepherd(state.path(), "context_window = 1000000\n");
+        let mut app = app(&herdr, &ledger, now);
+
+        let shown = press_layout(&mut app, &herdr, &ledger, &dirs);
+
+        let [dock] = herdr.docks().try_into().unwrap();
+        assert_eq!((dock.pane.as_str(), dock.side), ("w1:p1", Side::Below));
+        assert!(shown.contains("switched to stacked"), "{shown}");
+        assert_eq!(
+            std::fs::read_to_string(&dirs.config).unwrap(),
+            "context_window = 1000000\n\n[view]\nlayout = \"stacked\"\n"
+        );
+
+        press_layout(&mut app, &herdr, &ledger, &dirs);
+
+        assert_eq!(herdr.docks()[1].side, Side::Left);
+        assert_eq!(
+            crate::config::view_layout(&dirs.config),
+            (crate::view_pane::Layout::SideBySide, None)
+        );
+        assert!(herdr.started().is_empty());
+        assert!(herdr.focused().is_empty());
+        assert!(!app.quit());
+    }
+
+    #[test]
+    fn v_with_no_shepherd_in_the_views_tab_changes_nothing_and_says_why() {
+        let (ledger, now) = (ledger(), Instant::now());
+        let herdr = herdr().with_live_agent(Some("shepherd"), None, "w1:p9");
+        let view = herdr.add_tab("w1", "view", std::path::Path::new("/repo"), true);
+        let state = tempfile::tempdir().unwrap();
+        let config = state.path().join("config.toml");
+        let dirs = Dirs {
+            config: config.clone(),
+            ..shepherd_dirs(state.path(), Some(&view))
+        };
+        let mut app = app(&herdr, &ledger, now);
+
+        let shown = press_layout(&mut app, &herdr, &ledger, &dirs);
+
+        assert!(shown.contains("isn't in the view's tab"), "{shown}");
+        assert_eq!(herdr.mutations(), 0);
+        assert!(!config.exists());
+    }
+
+    #[test]
+    fn v_when_herdr_fails_part_way_names_the_error_saves_nothing_and_keeps_running() {
+        let (ledger, now) = (ledger(), Instant::now());
+        let state = tempfile::tempdir().unwrap();
+        let (mut herdr, dirs) = beside_shepherd(state.path(), "");
+        herdr.fail_dock = true;
+        let mut app = app(&herdr, &ledger, now);
+
+        let shown = press_layout(&mut app, &herdr, &ledger, &dirs);
+
+        assert!(shown.contains("dock failed"), "{shown}");
+        assert_eq!(std::fs::read_to_string(&dirs.config).unwrap(), "");
+        assert!(!app.quit());
+    }
+
+    #[test]
+    fn the_footer_lists_v_for_the_layout() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let terminal = render_at(&app(&herdr, &ledger, now), now, 100, 14);
+        assert_eq!(at(&terminal, "v layout").fg, LIGHT_ORANGE);
+        assert!(pos(&terminal, "v layout").0 < pos(&terminal, "S shepherd").0);
     }
 
     #[test]
