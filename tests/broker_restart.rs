@@ -173,6 +173,9 @@ fn sandboxed() -> Option<Command> {
 }
 
 fn inside(mut sandbox: Command, loopherd: &Command) -> Command {
+    for (removed, _) in loopherd.get_envs().filter(|(_, v)| v.is_none()) {
+        sandbox.arg("--unsetenv").arg(removed);
+    }
     sandbox
         .arg("--")
         .arg(loopherd.get_program())
@@ -181,6 +184,25 @@ fn inside(mut sandbox: Command, loopherd: &Command) -> Command {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     sandbox
+}
+
+#[test]
+fn a_command_run_inside_a_sandbox_lacks_the_variables_it_removes() {
+    let Some(mut sandbox) = sandboxed() else {
+        eprintln!("skipped: bwrap can't make a pid namespace here");
+        return;
+    };
+    sandbox.env("HERDR_PANE_ID", "w9:p9").env("CLAUDE_PID", "1");
+    let mut env = Command::new("env");
+    env.env_remove("HERDR_PANE_ID").env_remove("CLAUDE_PID");
+
+    let seen = stdout(&inside(sandbox, &env).output().unwrap());
+
+    let kept: Vec<_> = seen
+        .lines()
+        .filter(|line| line.starts_with("HERDR_PANE_ID=") || line.starts_with("CLAUDE_PID="))
+        .collect();
+    assert!(kept.is_empty(), "{kept:?}");
 }
 
 #[test]
