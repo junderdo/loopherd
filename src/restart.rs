@@ -2235,6 +2235,30 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_whose_herd_now_pairs_credentials_with_every_socket_open_is_not_cleared() {
+        let w = World::new();
+        w.handed_off();
+        herd_file(&w, "");
+        w.prepared();
+        herd_file(
+            &w,
+            "merge_guard = \"credentials\"\nunix_sockets = \"all\"\n\
+             [worker]\nsandbox = \"require\"\n",
+        );
+
+        let (result, _) = w.restart_as(false, true, None, &as_lead);
+
+        assert_eq!(
+            format!("{:#}", result.unwrap_err()),
+            "sandbox: lh-1 can't start with merge_guard = \"credentials\": unix_sockets = \
+             \"all\" opens your ssh agent, Git Credential Manager through WSL2 interop and the \
+             Secret Service keyring to it, each of which acts as you; run loopherd herd unset h \
+             lead.unix_sockets, or loopherd herd set h lead.merge_guard '\"hook\"'"
+        );
+        assert!(w.herdr.prompts().is_empty());
+    }
+
+    #[test]
     fn a_lead_on_prefer_started_with_sockets_open_is_restarted_with_a_warning() {
         let w = World::new();
         w.handed_off();
