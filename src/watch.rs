@@ -528,11 +528,13 @@ fn drained(
     };
     let paused = |herd: &str| matches!(pause::read(&paths.paused, herd), pause::Reading::Paused(_));
     let entries = ledger.entries()?;
+    // A slot-less member is no worker, but while it may still work its events need
+    // the watch; an attended one's are the human's, so only a gone not yet printed counts.
+    let attended = |m: &Member| entries.get(&m.name).is_some_and(|e| e.attended.is_some());
+    let carries = |m: &Member| (m.gone || !attended(m)) && flight.carries(m);
     if let Reader::Lead { herd, .. } = reader {
-        // A slot-less member is no worker, but while it may still work its events need the lead.
-        let drained = paused(herd)
-            && !open(&entries, herd, holds_slot)
-            && !members.iter().any(|m| flight.carries(m));
+        let drained =
+            paused(herd) && !open(&entries, herd, holds_slot) && !members.iter().any(carries);
         return Ok(drained.then(|| format!("{herd} {}", line::DRAINED)));
     }
     let open_worker = |herd: &str| open(&entries, herd, holds_slot);
@@ -550,11 +552,7 @@ fn drained(
     let slotless_of_led =
         (led_members.iter()).filter(|m| entries.get(&m.name).is_some_and(|e| e.slotless()));
     // Mailboxes last: most polls end above without reading them.
-    let drained = herds > 0
-        && !members
-            .iter()
-            .chain(slotless_of_led)
-            .any(|m| flight.carries(m));
+    let drained = herds > 0 && !members.iter().chain(slotless_of_led).any(carries);
     Ok(drained.then(|| format!("all {}", line::DRAINED)))
 }
 
@@ -6184,27 +6182,72 @@ mod tests {
     }
 
     #[test]
-    fn a_working_slot_less_or_attended_member_holds_off_its_leads_drained() {
-        for (name, attended) in [("groom-cards", false), ("grill-cards", true)] {
-            let world = Checked::paused_with_slotless(name, attended, AgentStatus::Working);
-            assert_eq!(world.once("w9:p0"), None, "{name} working");
-            world.herdr.set_status(name, AgentStatus::Idle);
+    fn a_working_slot_less_member_holds_off_its_leads_drained() {
+        let world = Checked::paused_with_slotless("groom-cards", false, AgentStatus::Working);
+        assert_eq!(world.once("w9:p0"), None);
+        world.herdr.set_status("groom-cards", AgentStatus::Idle);
+        assert_eq!(world.once("w9:p0").unwrap(), ["cards drained"]);
+    }
+
+    #[test]
+    fn a_working_slot_less_member_of_a_led_herd_holds_off_all_drained() {
+        let world = Checked::paused_with_slotless("groom-cards", false, AgentStatus::Working);
+        assert_eq!(world.shepherd(), None);
+        world.herdr.set_status("groom-cards", AgentStatus::Idle);
+        assert_eq!(world.shepherd().unwrap(), ["all drained"]);
+    }
+
+    #[test]
+    fn an_open_attended_member_holds_off_neither_drained_line_whatever_its_state() {
+        for status in [
+            AgentStatus::Working,
+            AgentStatus::Blocked,
+            AgentStatus::Idle,
+        ] {
+            let world = Checked::paused_with_slotless("grill-cards", true, status);
             assert_eq!(
                 world.once("w9:p0").unwrap(),
                 ["cards drained"],
-                "{name} idle"
+                "{status:?}"
             );
+            assert_eq!(world.shepherd().unwrap(), ["all drained"], "{status:?}");
         }
     }
 
     #[test]
-    fn a_working_slot_less_or_attended_member_of_a_led_herd_holds_off_all_drained() {
-        for (name, attended) in [("groom-cards", false), ("grill-cards", true)] {
-            let world = Checked::paused_with_slotless(name, attended, AgentStatus::Working);
-            assert_eq!(world.shepherd(), None, "{name} working");
-            world.herdr.set_status(name, AgentStatus::Idle);
-            assert_eq!(world.shepherd().unwrap(), ["all drained"], "{name} idle");
-        }
+    fn an_attended_member_going_holds_off_its_leads_drained_until_its_gone_line() {
+        let mut world = Checked::paused_with_slotless("grill-cards", true, AgentStatus::Idle);
+        world.open_groom();
+        world.herdr.set_status("groom-cards", AgentStatus::Working);
+        let dir = world.reports();
+        let req = Request {
+            timeout: Some(Duration::from_secs(10)),
+            ..world.request("w9:p0")
+        };
+        let mut clock = steps(|poll| match poll {
+            1 => world.herdr.set_status("groom-cards", AgentStatus::Idle),
+            2 => world.herdr.remove_agent("grill-cards"),
+            _ => {}
+        });
+        let woke = run(&world.herdr, &world.ledger, &dir, &req, &mut clock);
+        assert_eq!(woke.unwrap(), ["grill-cards gone"]);
+    }
+
+    #[test]
+    fn an_open_attended_member_holds_off_no_out_of_work() {
+        let grill = || AgentRecord {
+            attended: Some(Default::default()),
+            created: "2026-11-03T00:00:00Z".into(),
+            ..member("grill-cards", "w9:p4", Some("cards"))
+        };
+        let mut led = Checked::new();
+        led.retire("lh-1");
+        led.add(grill(), AgentStatus::Working);
+        assert_eq!(led.once("w9:p0").unwrap(), ["cards out of work"]);
+
+        let mut unled = Checked::unled();
+        unled.add(grill(), AgentStatus::Working);
+        assert_eq!(unled.shepherd().unwrap(), ["cards out of work"]);
     }
 
     #[test]
