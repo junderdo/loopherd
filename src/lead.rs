@@ -907,7 +907,9 @@ mod tests {
             "handoffs/lh-9/handoff.md",
             "handoffs/lh-8.md",
         ];
-        assert!(denied_to_sandbox(deny, &state.join("reports/lh-1.jsonl")));
+        for mailbox in ["reports/lh-1.jsonl", "reports/lh-1/mailbox.jsonl"] {
+            assert!(denied_to_sandbox(deny, &state.join(mailbox)), "{mailbox}");
+        }
         for path in named.map(|p| state.join(p)) {
             let denied = denied_to_sandbox(deny, &path);
             assert_eq!(
