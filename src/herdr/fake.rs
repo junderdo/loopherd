@@ -71,6 +71,16 @@ pub struct Split {
     pub env: Vec<(String, String)>,
 }
 
+/// A pane moved beside another by [`Herdr::dock`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dock {
+    pub pane: String,
+    pub target: String,
+    pub side: Side,
+    /// The moved pane's share of the split, in thousandths.
+    pub share: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Started {
     pub name: String,
@@ -93,6 +103,7 @@ struct State {
     prompts: Vec<(String, String)>,
     focused: Vec<String>,
     splits: Vec<Split>,
+    docks: Vec<Dock>,
     plugin_panes: Vec<PluginPane>,
     /// Panes the split plugin panes opened into.
     plugin_pane_ids: Vec<String>,
@@ -130,6 +141,7 @@ pub struct FakeHerdr {
     pub fail_close_tab: bool,
     pub fail_prompt: bool,
     pub fail_focus: bool,
+    pub fail_dock: bool,
     pub fail_wait: bool,
     pub fail_visible_text: bool,
     pub fail_shell_pid: bool,
@@ -182,6 +194,7 @@ impl FakeHerdr {
             fail_close_tab: false,
             fail_prompt: false,
             fail_focus: false,
+            fail_dock: false,
             fail_wait: false,
             fail_visible_text: false,
             fail_shell_pid: false,
@@ -319,6 +332,10 @@ impl FakeHerdr {
 
     pub fn splits(&self) -> Vec<Split> {
         self.state.lock().unwrap().splits.clone()
+    }
+
+    pub fn docks(&self) -> Vec<Dock> {
+        self.state.lock().unwrap().docks.clone()
     }
 
     /// The plugin panes opened as the manifest places them: entrypoint and env.
@@ -759,6 +776,39 @@ impl Herdr for FakeHerdr {
         let mut state = self.state.lock().unwrap();
         state.panes.retain(|p| p.id != pane_id);
         state.agents.retain(|a| a.pane_id != pane_id);
+        Ok(())
+    }
+
+    fn dock(&self, pane_id: &str, target: &str, side: Side, share: f64) -> Result<()> {
+        self.called();
+        self.mutating();
+        if self.is_down() {
+            bail!("herdr server not running");
+        }
+        if self.fail_dock {
+            bail!("herdr pane move {pane_id}: dock failed");
+        }
+        let mut state = self.state.lock().unwrap();
+        let Some(tab) = state
+            .panes
+            .iter()
+            .find(|p| p.id == target)
+            .map(|p| p.tab_id.clone())
+        else {
+            bail!("pane {target} not found");
+        };
+        for pane in state.panes.iter_mut().filter(|p| p.id == pane_id) {
+            pane.tab_id = tab.clone();
+        }
+        for agent in state.agents.iter_mut().filter(|a| a.pane_id == pane_id) {
+            agent.tab_id = tab.clone();
+        }
+        state.docks.push(Dock {
+            pane: pane_id.into(),
+            target: target.into(),
+            side,
+            share: (share * 1000.0).round() as u32,
+        });
         Ok(())
     }
 

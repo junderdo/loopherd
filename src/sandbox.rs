@@ -1470,8 +1470,9 @@ fn sandbox_loosenings(
         }
     }
     // allowRead carves into denyRead. Credentials to hide make any of it suspect;
-    // otherwise only a carve at or beneath a denied path counts: over an ancestor
-    // Claude keeps the narrower deny. A relative entry resolves against ~/.claude.
+    // otherwise only a carve at or beneath a denied path, or a glob that could match
+    // one, counts: over an ancestor Claude keeps the narrower deny. A relative entry
+    // resolves against ~/.claude.
     let credentials = !own["sandbox"]["filesystem"]["allowRead"].is_null();
     let own_reads = entries(&own["sandbox"]["filesystem"]["allowRead"]);
     let denied: Vec<PathBuf> = entries(&own["sandbox"]["filesystem"]["denyRead"])
@@ -1486,7 +1487,17 @@ fn sandbox_loosenings(
             absolute(&path, home)
         };
         let opens = match resolved {
-            Some(path) => denied.iter().any(|deny| path.starts_with(deny)),
+            Some(resolved) => {
+                let glob = |part: &str| part.contains(['*', '?', '[']);
+                let globbed = resolved.iter().any(|part| glob(&part.to_string_lossy()));
+                let literal: PathBuf = resolved
+                    .iter()
+                    .take_while(|part| !glob(&part.to_string_lossy()))
+                    .collect();
+                denied
+                    .iter()
+                    .any(|deny| literal.starts_with(deny) || globbed && deny.starts_with(&literal))
+            }
             // A `..` or a `~user` could land anywhere.
             None => true,
         };
@@ -2205,6 +2216,32 @@ mod tests {
                 &own_writes,
             );
             assert_eq!(found.is_empty(), confined, "{rule}: {found:?}");
+        }
+    }
+
+    #[test]
+    fn an_allow_read_counts_when_it_or_a_glob_it_holds_could_match_a_denied_path() {
+        let home = Path::new("/home/me");
+        let own = serde_json::json!({"sandbox": {"filesystem": {"denyRead": [
+            "/home/me/.local/state/loopherd/locks",
+            "/home/me/.claude/secret",
+        ]}}});
+        let cases = [
+            ("~/.local/state/loopherd/*", true),
+            ("~/.local/state/loopherd/lock?", true),
+            ("~/.local/state/loopherd/[l]ocks", true),
+            ("~/.local/state/*/locks", true),
+            ("~/.local/state/loopherd/locks/*.lock", true),
+            ("~/.local/state/loopherd/other/*", false),
+            ("/srv/*", false),
+            // Relative entries resolve against ~/.claude, not the worktree.
+            ("secret", true),
+            ("notes", false),
+        ];
+        for (entry, counts) in cases {
+            let user = serde_json::json!({"sandbox": {"filesystem": {"allowRead": [entry]}}});
+            let found = sandbox_loosenings(&user, Path::new("settings.json"), home, &own, &[]);
+            assert_eq!(!found.is_empty(), counts, "{entry}: {found:?}");
         }
     }
 

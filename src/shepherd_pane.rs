@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::context::SHEPHERD;
 use crate::herdr::{Herdr, wait_for_shell_prompt};
@@ -103,6 +103,45 @@ pub fn summon(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Switch {
+    Switched(Layout),
+    /// Nothing moved, for the reason given.
+    Unswitched(String),
+}
+
+/// Moves the live shepherd's pane, when it shares the view's tab, from `from`
+/// to the other layout, without restarting either pane.
+pub fn switch_layout(herdr: &dyn Herdr, view: Option<&ViewPane>, from: Layout) -> Result<Switch> {
+    let Some(view) = view else {
+        return Ok(Switch::Unswitched(
+            "the view is in a popup, with no split to switch".into(),
+        ));
+    };
+    let agents = herdr.agents()?;
+    let Some(shepherd) = agents.iter().find(|a| a.name.as_deref() == Some(SHEPHERD)) else {
+        return Ok(Switch::Unswitched(
+            "no live shepherd to switch the layout with".into(),
+        ));
+    };
+    if shepherd.tab_id != herdr.pane(&view.pane)?.tab_id {
+        return Ok(Switch::Unswitched(format!(
+            "the shepherd's pane {} isn't in the view's tab",
+            shepherd.pane_id
+        )));
+    }
+    let to = from.other();
+    herdr
+        .dock(
+            &shepherd.pane_id,
+            &view.pane,
+            to.shepherd_side(),
+            1.0 - view_pane::SHARE,
+        )
+        .with_context(|| format!("move the shepherd's pane {}", shepherd.pane_id))?;
+    Ok(Switch::Switched(to))
+}
+
 /// Starts the shepherd in `pane`, giving the handoff back when the start fails.
 fn start_in(herdr: &dyn Herdr, state: &Path, pane: &str) -> Result<()> {
     wait_for_shell_prompt(herdr, pane, SHELL_TIMEOUT, SHELL_POLL)?;
@@ -126,7 +165,7 @@ mod tests {
     use super::*;
     use crate::herdr::Side;
     use crate::herdr::fake::Startup;
-    use crate::herdr::fake::{FAKE_SOCKET, FakeHerdr, Split};
+    use crate::herdr::fake::{Dock, FAKE_SOCKET, FakeHerdr, Split};
     use crate::ledger::Process;
     use crate::process::{FakeProcs, PANE_SHELL};
 
@@ -612,5 +651,98 @@ mod tests {
         );
         assert!(herdr.has_pane(&split.pane));
         assert_eq!(herdr.started().len(), 1);
+    }
+
+    /// A herdr whose tab `w1:t1` holds the live shepherd, `w1:p1`, and a view pane.
+    fn shepherd_beside_view() -> (FakeHerdr, String) {
+        let herdr =
+            FakeHerdr::new(&[("w1", "main")]).with_live_agent(Some("shepherd"), None, "w1:p1");
+        let shepherd = herdr.add_tab("w1", "shepherd", Path::new("/repo"), true);
+        assert_eq!(shepherd, "w1:p1");
+        let view = herdr.split("w1:t1", Path::new("/repo"));
+        (herdr, view)
+    }
+
+    #[test]
+    fn switching_from_side_by_side_docks_the_shepherd_below_the_view_keeping_two_fifths() {
+        let (herdr, view) = shepherd_beside_view();
+
+        let switched = switch_layout(&herdr, Some(&view_pane(&view)), Layout::SideBySide).unwrap();
+
+        assert_eq!(switched, Switch::Switched(Layout::Stacked));
+        let [dock] = herdr.docks().try_into().unwrap();
+        assert_eq!(
+            dock,
+            Dock {
+                pane: "w1:p1".into(),
+                target: view,
+                side: Side::Below,
+                share: 600,
+            }
+        );
+        assert_eq!(herdr.started().len(), 0);
+        assert_eq!(herdr.focused(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn switching_from_stacked_docks_the_shepherd_left_of_the_view() {
+        let (herdr, view) = shepherd_beside_view();
+
+        let switched = switch_layout(&herdr, Some(&view_pane(&view)), Layout::Stacked).unwrap();
+
+        assert_eq!(switched, Switch::Switched(Layout::SideBySide));
+        let [dock] = herdr.docks().try_into().unwrap();
+        assert_eq!((dock.side, dock.share), (Side::Left, 600));
+    }
+
+    #[test]
+    fn with_no_shepherd_pane_in_the_views_tab_nothing_moves_and_it_says_why() {
+        let elsewhere =
+            FakeHerdr::new(&[("w1", "main")]).with_live_agent(Some("shepherd"), None, "w1:p9");
+        let none = FakeHerdr::new(&[("w1", "main")]);
+        for (herdr, says) in [
+            (
+                &elsewhere,
+                "the shepherd's pane w1:p9 isn't in the view's tab",
+            ),
+            (&none, "no live shepherd"),
+        ] {
+            let view = herdr.add_tab("w1", "view", Path::new("/repo"), true);
+
+            let switched =
+                switch_layout(herdr, Some(&view_pane(&view)), Layout::SideBySide).unwrap();
+
+            let Switch::Unswitched(why) = switched else {
+                panic!("{switched:?}");
+            };
+            assert!(why.contains(says), "{why}");
+            assert_eq!(herdr.mutations(), 0);
+        }
+    }
+
+    #[test]
+    fn a_view_with_no_pane_of_its_own_switches_nothing() {
+        let herdr =
+            FakeHerdr::new(&[("w1", "main")]).with_live_agent(Some("shepherd"), None, "w1:p1");
+
+        let switched = switch_layout(&herdr, None, Layout::SideBySide).unwrap();
+
+        let Switch::Unswitched(why) = switched else {
+            panic!("{switched:?}");
+        };
+        assert!(why.contains("popup"), "{why}");
+        assert_eq!(herdr.mutations(), 0);
+    }
+
+    #[test]
+    fn a_failing_move_is_an_error_naming_it() {
+        let (mut herdr, view) = shepherd_beside_view();
+        herdr.fail_dock = true;
+
+        let err = switch_layout(&herdr, Some(&view_pane(&view)), Layout::SideBySide).unwrap_err();
+
+        let err = format!("{err:#}");
+        assert!(err.contains("w1:p1"), "{err}");
+        assert!(err.contains("dock failed"), "{err}");
     }
 }

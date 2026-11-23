@@ -288,7 +288,7 @@ pub fn append_unless(
     already: impl Fn(&[Entry]) -> bool,
 ) -> Result<bool> {
     let (path, mut file) = open_mailbox(dir, name)?;
-    let bytes = complete_lines(dir, name)?;
+    let bytes = whole_mailbox(dir, name)?;
     let mut found = vec![];
     parse(dir, name, &bytes, &mut found, &mut vec![]);
     let entries: Vec<Entry> = found.into_iter().map(|(_, e)| e).collect();
@@ -561,9 +561,11 @@ pub fn since_handoff(dir: &Path, name: &str) -> Result<SinceHandoff> {
     if !has_mailbox(dir, name) {
         return Ok(SinceHandoff::None);
     }
-    let bytes = complete_lines(dir, name)?;
+    let bytes = whole_mailbox(dir, name)?;
     let mut entries = vec![];
     parse(dir, name, &bytes, &mut entries, &mut vec![]);
+    // An older release may still append to the flat file, which reads first.
+    entries.sort_by(|(_, a), (_, b)| a.at.cmp(&b.at));
     let mut last = None;
     for (_, entry) in entries.into_iter().rev() {
         match entry.body {
@@ -584,9 +586,9 @@ pub fn history(dir: &Path, name: &str) -> Result<(Vec<Entry>, Vec<String>)> {
     if !has_mailbox(dir, name) {
         return Ok((vec![], vec![]));
     }
-    let bytes = complete_lines(dir, name)?;
+    let (bytes, unreadable) = complete_lines(dir, name)?;
     let mut found = vec![];
-    let mut warnings = vec![];
+    let mut warnings: Vec<String> = unreadable.into_iter().collect();
     parse(dir, name, &bytes, &mut found, &mut warnings);
     Ok((found.into_iter().map(|(_, e)| e).collect(), warnings))
 }
@@ -653,7 +655,10 @@ fn read_all(dir: &Path, names: &[String]) -> Found {
     let mut warnings = vec![];
     for name in names {
         match complete_lines(dir, name) {
-            Ok(bytes) => parse(dir, name, &bytes, &mut found, &mut warnings),
+            Ok((bytes, unreadable)) => {
+                warnings.extend(unreadable);
+                parse(dir, name, &bytes, &mut found, &mut warnings);
+            }
             Err(e) => warnings.push(format!("{e:#}")),
         }
     }
@@ -661,13 +666,21 @@ fn read_all(dir: &Path, names: &[String]) -> Found {
     (found, warnings)
 }
 
-/// The mailbox's complete lines, each file's in turn; a line still being
-/// appended has no newline yet.
-fn complete_lines(dir: &Path, name: &str) -> Result<Vec<u8>> {
-    Ok(segments(dir, name)?
-        .into_iter()
-        .flat_map(|segment| segment.bytes)
-        .collect())
+/// The mailbox's complete lines, each file's in turn, and any warning about
+/// an unreadable flat file; a line still being appended has no newline yet.
+fn complete_lines(dir: &Path, name: &str) -> Result<(Vec<u8>, Option<String>)> {
+    let (segments, warning) = segments(dir, name)?;
+    let bytes = segments.into_iter().flat_map(|s| s.bytes).collect();
+    Ok((bytes, warning))
+}
+
+/// The mailbox's complete lines for a reader that decides on them, so an
+/// unreadable flat file is an error rather than a gap.
+fn whole_mailbox(dir: &Path, name: &str) -> Result<Vec<u8>> {
+    match complete_lines(dir, name)? {
+        (_, Some(unreadable)) => Err(anyhow!(unreadable)),
+        (bytes, None) => Ok(bytes),
+    }
 }
 
 /// One file of a mailbox, cut at its last complete line, under its own
@@ -677,9 +690,10 @@ struct Segment {
     bytes: Vec<u8>,
 }
 
-/// The flat file an older release wrote, if any, then the new one; with
-/// neither, the new one's read error.
-fn segments(dir: &Path, name: &str) -> Result<Vec<Segment>> {
+/// The flat file an older release wrote, if any, then the new one, and a
+/// warning when the flat file can't be read beside a new one; with neither
+/// readable, the read error.
+fn segments(dir: &Path, name: &str) -> Result<(Vec<Segment>, Option<String>)> {
     let read = |path: &Path, key: String| {
         let mut bytes =
             fs::read(path).with_context(|| format!("could not read {}", path.display()))?;
@@ -688,14 +702,19 @@ fn segments(dir: &Path, name: &str) -> Result<Vec<Segment>> {
     };
     let (flat, path) = (flat_mailbox_path(dir, name), mailbox_path(dir, name));
     let mut found = vec![];
+    let mut warning = None;
     if flat.exists() {
-        found.push(read(&flat, name.to_string())?);
+        match read(&flat, name.to_string()) {
+            Ok(segment) => found.push(segment),
+            Err(e) if path.exists() => warning = Some(format!("{e:#}")),
+            Err(e) => return Err(e),
+        }
     }
     if !flat.exists() || path.exists() {
         // Agent names hold no `/`, so this key can't be another agent's.
         found.push(read(&path, format!("{name}/mailbox.jsonl"))?);
     }
-    Ok(found)
+    Ok((found, warning))
 }
 
 fn parse(
@@ -875,7 +894,7 @@ impl Cursor {
 
     /// Calls `visit` with each of `names`' complete lines split at the
     /// cursor, already read then unread; returns the move past them, and a
-    /// warning per unreadable mailbox, whose cursor stays put.
+    /// warning per unreadable mailbox or flat file, whose cursor stays put.
     fn peek(
         self,
         dir: &Path,
@@ -897,7 +916,10 @@ impl Cursor {
         };
         for name in names {
             let segments = match segments(dir, name) {
-                Ok(segments) => segments,
+                Ok((segments, warning)) => {
+                    unreadable.extend(warning);
+                    segments
+                }
                 Err(e) => {
                     unreadable.push(format!("{e:#}"));
                     continue;
@@ -1653,6 +1675,164 @@ mod tests {
         );
 
         assert_eq!(unread_texts(&ledger, dir.path()), ["new-two"]);
+    }
+
+    #[test]
+    fn an_unreadable_flat_mailbox_is_a_warning_and_the_new_one_is_still_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![member("lh-1", "w1:p1", None, false)]);
+        let flat = flat_mailbox_path(dir.path(), "lh-1");
+        std::fs::create_dir(&flat).unwrap();
+        send(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            Kind::Note,
+            "new-one",
+            "2026-11-01T09:10:00Z",
+        );
+        put(
+            dir.path(),
+            "lh-1",
+            "2026-11-01T09:20:00Z",
+            stop(0, Tally::Known(0), None),
+        );
+
+        let read = reports(&ledger, dir.path(), &UNREAD).unwrap();
+        assert_eq!(read.lines, ["lh-1 note 2026-11-01 09:10 UTC new-one"]);
+        assert_eq!(read.warnings.len(), 1, "{:?}", read.warnings);
+        assert!(
+            read.warnings[0].contains(&flat.display().to_string()),
+            "{:?}",
+            read.warnings
+        );
+        let (history, warnings) = history(dir.path(), "lh-1").unwrap();
+        assert_eq!((history.len(), warnings.len()), (2, 1), "{warnings:?}");
+        assert_eq!(read_stops(dir.path(), &["lh-1".to_string()]).len(), 1);
+    }
+
+    #[test]
+    fn an_unreadable_flat_mailbox_fails_the_reads_that_decide_on_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let flat = flat_mailbox_path(dir.path(), "lh-1");
+        std::fs::create_dir(&flat).unwrap();
+        put(
+            dir.path(),
+            "lh-1",
+            "2026-11-01T09:00:00Z",
+            stop(0, Tally::Known(0), None),
+        );
+        let entry = Entry::new(at("2026-11-01T10:00:00Z"), Body::report(Kind::Note, "once"));
+
+        let appended = append_unless(dir.path(), "lh-1", &entry, |_| false);
+        let handoff = since_handoff(dir.path(), "lh-1");
+
+        let shown = flat.display().to_string();
+        assert!(format!("{:#}", appended.unwrap_err()).contains(&shown));
+        assert!(format!("{:#}", handoff.unwrap_err()).contains(&shown));
+        assert_eq!(history(dir.path(), "lh-1").unwrap().0.len(), 1);
+    }
+
+    #[test]
+    fn an_older_reader_beside_a_new_one_has_each_report_delivered_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![member("lh-1", "w1:p1", None, false)]);
+        let flat = flat_mailbox_path(dir.path(), "lh-1");
+        std::fs::write(&flat, note("2026-11-01T09:00:00Z", "flat-one")).unwrap();
+        send(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            Kind::Note,
+            "new-one",
+            "2026-11-01T09:10:00Z",
+        );
+        assert_eq!(unread_texts(&ledger, dir.path()), ["flat-one", "new-one"]);
+
+        // An older release reads only the flat file, under the `<name>` key,
+        // and saves back every key it loaded.
+        append(&flat, &note("2026-11-01T09:20:00Z", "flat-two"));
+        let cursor = dir.path().join(".cursor");
+        let mut offsets: BTreeMap<String, usize> =
+            serde_json::from_slice(&std::fs::read(&cursor).unwrap()).unwrap();
+        offsets.insert(
+            "lh-1".into(),
+            std::fs::metadata(&flat).unwrap().len() as usize,
+        );
+        std::fs::write(&cursor, serde_json::to_vec(&offsets).unwrap()).unwrap();
+        send(
+            &ledger,
+            dir.path(),
+            "lh-1",
+            Kind::Note,
+            "new-two",
+            "2026-11-01T09:30:00Z",
+        );
+
+        assert_eq!(unread_texts(&ledger, dir.path()), ["new-two"]);
+    }
+
+    fn stop_line(at: &str) -> String {
+        format!(
+            "{{\"at\":\"{at}\",\"kind\":\"stop\",\"crons\":0,\"background\":{{\"shells\":0,\"subagents\":0,\"other\":0}}}}\n"
+        )
+    }
+
+    #[test]
+    fn the_watch_reads_an_older_release_s_flat_appends_once_each() {
+        let dir = tempfile::tempdir().unwrap();
+        let names = ["lh-1".to_string()];
+        let flat = flat_mailbox_path(dir.path(), "lh-1");
+        std::fs::write(&flat, stop_line("2026-11-01T09:00:00Z")).unwrap();
+        put(
+            dir.path(),
+            "lh-1",
+            "2026-11-01T09:10:00Z",
+            stop(0, Tally::Known(0), None),
+        );
+        assert_eq!(read_stops(dir.path(), &names)[0].unread, 0);
+
+        append(&flat, &stop_line("2026-11-01T09:20:00Z"));
+        put(
+            dir.path(),
+            "lh-1",
+            "2026-11-01T09:30:00Z",
+            stop(0, Tally::Known(0), None),
+        );
+
+        let stops = read_stops(dir.path(), &names);
+        let unread: Vec<&str> = stops[0].entries[stops[0].unread..]
+            .iter()
+            .map(|e| &e.at[..16])
+            .collect();
+        assert_eq!(unread, ["2026-11-01T09:20", "2026-11-01T09:30"]);
+        assert!(read_stops(dir.path(), &names).is_empty());
+    }
+
+    #[test]
+    fn a_handoff_an_older_release_appends_after_a_newer_stop_reads_as_not_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let flat = flat_mailbox_path(dir.path(), "lh-1");
+        std::fs::write(
+            &flat,
+            r#"{"at":"2026-11-01T08:00:00Z","kind":"start"}"#.to_string() + "\n",
+        )
+        .unwrap();
+        put(
+            dir.path(),
+            "lh-1",
+            "2026-11-01T09:00:00Z",
+            stop(0, Tally::Known(0), None),
+        );
+        append(
+            &flat,
+            &(r#"{"at":"2026-11-01T09:30:00Z","kind":"handoff","text":"bye"}"#.to_string() + "\n"),
+        );
+
+        assert_eq!(
+            since_handoff(dir.path(), "lh-1").unwrap(),
+            SinceHandoff::NotStopped
+        );
     }
 
     #[test]

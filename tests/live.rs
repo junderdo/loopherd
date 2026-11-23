@@ -3475,7 +3475,8 @@ fn capital_s_in_a_view_pane_starts_the_shepherd_beside_it_then_focuses_it() {
 }
 
 /// Presses `S` in a view in a new tab, with `view.layout` set to `layout`,
-/// checks the shepherd starts on its side, then that `S` focuses it.
+/// checks the shepherd starts on its side, that `S` then focuses it, and
+/// that `v` moves it to the other side with its Claude still running.
 fn s_starts_the_shepherd_then_focuses_it(layout: Option<&str>) {
     let label = assert_dev_session();
     let shepherd_before = dev("herdr").args(["agent", "get", "shepherd"]).output();
@@ -3574,6 +3575,45 @@ fn s_starts_the_shepherd_then_focuses_it(layout: Option<&str>) {
         in_tab.filter(|p| p["tab_id"] == *tab_id).count(),
         2,
         "{panes}"
+    );
+
+    let claude = claude_in(started);
+    herdr_quiet(&["pane", "send-keys", &view, "v"]);
+
+    let switched_to = match layout {
+        None => "stacked",
+        Some(_) => "side-by-side",
+    };
+    poll(15, || {
+        visible(&view)
+            .contains(&format!("switched to {switched_to}"))
+            .then_some(())
+    })
+    .unwrap_or_else(|| panic!("{}", visible(&view)));
+    let tab_layout = herdr_ok(&["pane", "layout", "--pane", &view]);
+    let panes = tab_layout["result"]["layout"]["panes"].as_array().unwrap();
+    let rect = |pane: &str| panes.iter().find(|p| p["pane_id"] == pane).unwrap()["rect"].clone();
+    let (shepherd, view_rect) = (rect(started), rect(&view));
+    let (along, across, size) = match layout {
+        None => ("y", "x", "height"),
+        Some(_) => ("x", "y", "width"),
+    };
+    assert_eq!(shepherd[across], view_rect[across], "{tab_layout}");
+    let shepherd_first = shepherd[along].as_u64() < view_rect[along].as_u64();
+    assert_eq!(shepherd_first, layout.is_some(), "{tab_layout}");
+    assert!(
+        view_rect[size].as_u64() < shepherd[size].as_u64(),
+        "{tab_layout}"
+    );
+    assert_eq!(
+        claude_in(started),
+        claude,
+        "the shepherd's Claude restarted"
+    );
+    let saved = std::fs::read_to_string(config.path().join("config.toml")).unwrap();
+    assert!(
+        saved.contains(&format!("layout = \"{switched_to}\"")),
+        "{saved}"
     );
 }
 

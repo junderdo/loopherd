@@ -149,6 +149,9 @@ pub trait Herdr {
         env: &[(&str, &str)],
     ) -> Result<String>;
     fn close_pane(&self, pane_id: &str) -> Result<()>;
+    /// Moves `pane_id` beside `target` on `side`, taking `share` of the split,
+    /// keeping its process and leaving focus where it was.
+    fn dock(&self, pane_id: &str, target: &str, side: Side, share: f64) -> Result<()>;
     /// Starts a Claude agent named `name` in `pane_id`.
     fn start_claude(
         &self,
@@ -225,6 +228,19 @@ impl Side {
     fn swaps(self) -> bool {
         matches!(self, Side::Left | Side::Above)
     }
+}
+
+/// herdr's `--ratio` for a pane on `side` of its target taking `share`: the
+/// target's share, which a swap hands to the pane.
+fn target_ratio(side: Side, share: f64) -> Result<String> {
+    if !(share > 0.0 && share < 1.0) {
+        bail!("a split pane's share must be between 0 and 1, not {share}");
+    }
+    Ok(match side.swaps() {
+        true => share,
+        false => 1.0 - share,
+    }
+    .to_string())
 }
 
 /// How to resize a split's target after a split, which opens at half, so
@@ -707,16 +723,8 @@ impl Herdr for CliHerdr {
         cwd: &Path,
         env: &[(&str, &str)],
     ) -> Result<String> {
-        if !(share > 0.0 && share < 1.0) {
-            bail!("a split pane's share must be between 0 and 1, not {share}");
-        }
+        let ratio = target_ratio(side, share)?;
         let cwd = cwd.to_str().context("cwd is not UTF-8")?;
-        // herdr's ratio is the target's share, which the swap hands to the new pane.
-        let ratio = match side.swaps() {
-            true => share,
-            false => 1.0 - share,
-        }
-        .to_string();
         let env: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
         let mut argv = vec![
             "pane",
@@ -746,6 +754,45 @@ impl Herdr for CliHerdr {
 
     fn close_pane(&self, pane_id: &str) -> Result<()> {
         self.call_ok(&["pane", "close", pane_id]).map(drop)
+    }
+
+    fn dock(&self, pane_id: &str, target: &str, side: Side, share: f64) -> Result<()> {
+        let ratio = target_ratio(side, share)?;
+        let tab = self.pane(target)?.tab_id;
+        let moved = |args: &[&str], step: &str| -> Result<()> {
+            let result = self.call_ok(args).with_context(|| step.to_string())?;
+            match result["move_result"]["changed"].as_bool() {
+                Some(true) => Ok(()),
+                _ => bail!("{step}: herdr left it where it was"),
+            }
+        };
+        // herdr won't re-dock a pane within its own tab, so it leaves through a tab of its own.
+        moved(
+            &["pane", "move", pane_id, "--new-tab", "--no-focus"],
+            &format!("move {pane_id} out to a tab of its own"),
+        )?;
+        moved(
+            &[
+                "pane",
+                "move",
+                pane_id,
+                "--tab",
+                &tab,
+                "--target-pane",
+                target,
+                "--split",
+                side.direction(),
+                "--ratio",
+                &ratio,
+                "--no-focus",
+            ],
+            &format!("move {pane_id} back beside {target}"),
+        )?;
+        if side.swaps() {
+            self.swap(target, pane_id, false)
+                .with_context(|| format!("swap {pane_id} to the {side:?} of {target}"))?;
+        }
+        Ok(())
     }
 
     fn start_claude(
