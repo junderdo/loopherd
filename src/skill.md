@@ -783,7 +783,10 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   was, else beside the focused pane with a note saying why (D87, D94).
   `view.layout` in config.toml sets the side for it and for the view's
   `S`: `side-by-side`, the default, puts the shepherd left and the view
-  right; `stacked` puts the view above the shepherd (D138).
+  right; `stacked` puts the view above the shepherd (D138). `v` in the
+  view moves the shepherd's pane, when it shares the view's tab, to the
+  other layout without restarting either, and saves it as `view.layout`
+  (D139).
   Never edit the human's herdr config yourself; only the human's install does.
 
   The plugin's event hooks run `loopherd herdr-event-hook`, recording a
