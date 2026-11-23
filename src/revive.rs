@@ -1539,19 +1539,28 @@ mod tests {
     #[test]
     fn startup_revive_skips_an_attended_member_the_human_closed_but_not_one_herdr_lost() {
         let at = humantime::parse_rfc3339("2026-11-01T09:00:00Z").unwrap();
-        // The herdr event recording the gone, or none for a watch seeing the agent vanish.
+        // What recorded the gone: a herdr event's hook, or a watch seeing the
+        // agent vanish with its pane closed or still there.
+        enum By {
+            Hook(&'static str, &'static str),
+            Watch { closed: bool },
+        }
         let cases = [
             (
                 "pane-closed",
-                Some(("pane.closed", r#"{"pane_id":"w1:p1"}"#)),
+                By::Hook("pane.closed", r#"{"pane_id":"w1:p1"}"#),
             ),
-            ("tab-closed", Some(("tab.closed", r#"{"tab_id":"w1:t1"}"#))),
+            (
+                "tab-closed",
+                By::Hook("tab.closed", r#"{"tab_id":"w1:t1"}"#),
+            ),
             (
                 "ws-closed",
-                Some(("workspace.closed", r#"{"workspace_id":"w1"}"#)),
+                By::Hook("workspace.closed", r#"{"workspace_id":"w1"}"#),
             ),
-            ("exited", Some(("pane.exited", r#"{"pane_id":"w1:p1"}"#))),
-            ("unseen", None),
+            ("watch-closed", By::Watch { closed: true }),
+            ("exited", By::Hook("pane.exited", r#"{"pane_id":"w1:p1"}"#)),
+            ("watch-shell", By::Watch { closed: false }),
         ];
         for (how, gone) in cases {
             let cwd = tempfile::tempdir().unwrap();
@@ -1564,7 +1573,7 @@ mod tests {
             let mut ledger = ledger([grill]);
             let dir = own_reports_dir();
             match gone {
-                Some((event, data)) => {
+                By::Hook(event, data) => {
                     let json = format!(r#"{{"data":{data}}}"#);
                     let no_shell = |_: &str| Ok(None);
                     crate::pane_event::event_hook(
@@ -1578,8 +1587,9 @@ mod tests {
                     )
                     .unwrap();
                 }
-                None => {
-                    crate::pane_event::record_gone_after(&dir, &name, at, at).unwrap();
+                By::Watch { closed } => {
+                    let pane = closed.then_some("w1:p1");
+                    crate::pane_event::record_gone_after(&dir, &name, at, at, pane).unwrap();
                 }
             }
 
@@ -1588,7 +1598,7 @@ mod tests {
                 .unwrap()
                 .report();
             let expected = match how {
-                "exited" | "unseen" => format!("resumed {name} w1:p1"),
+                "exited" | "watch-shell" => format!("resumed {name} w1:p1"),
                 _ => format!("skipped {name}: attended, and the human closed it"),
             };
             assert_eq!(out, expected, "{how}");

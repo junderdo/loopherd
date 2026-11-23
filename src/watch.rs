@@ -284,9 +284,16 @@ pub fn watch(
         }
         for member in &members {
             if member.gone {
+                // herdr was up for both polls, so a pane it no longer lists was closed.
+                let closed = |pane: &str| herdr.pane(pane).is_err();
                 if let Some(seen_live) = gone.confirm(member, &occupied)
-                    && let Err(e) =
-                        record_gone_after(dir, &member.name, SystemTime::now(), seen_live)
+                    && let Err(e) = record_gone_after(
+                        dir,
+                        &member.name,
+                        SystemTime::now(),
+                        seen_live,
+                        closed(&member.pane).then_some(member.pane.as_str()),
+                    )
                 {
                     let warning = format!("warning: record {} gone: {e:#}", member.name);
                     if unrecorded.insert(warning.clone()) {
@@ -6254,6 +6261,42 @@ mod tests {
         });
         let woke = run(&world.herdr, &world.ledger, &dir, &req, &mut clock);
         assert_eq!(woke.unwrap(), ["grill-cards gone"]);
+    }
+
+    #[test]
+    fn a_watch_records_a_gone_as_a_close_only_when_herdr_lists_its_pane_no_more() {
+        for pane_stays in [false, true] {
+            let mut world = Checked::new();
+            let pane = match pane_stays {
+                true => world.herdr.add_tab("w9", "grill", world.repo.path(), true),
+                false => "w9:p4".to_string(),
+            };
+            let grill = AgentRecord {
+                attended: Some(Default::default()),
+                ..member("grill-cards", &pane, Some("cards"))
+            };
+            world.add(grill, AgentStatus::Idle);
+            let dir = world.reports();
+            let req = Request {
+                timeout: Some(Duration::from_secs(10)),
+                ..world.request("w9:p0")
+            };
+            let mut clock = steps(|poll| {
+                if poll == 1 {
+                    world.herdr.remove_agent("grill-cards");
+                }
+            });
+            let woke = run(&world.herdr, &world.ledger, &dir, &req, &mut clock);
+            assert_eq!(woke.unwrap(), ["grill-cards gone"], "{pane_stays}");
+
+            let (entries, _) = crate::report::history(&dir, "grill-cards").unwrap();
+            let closed = match &entries.last().unwrap().body {
+                Body::Gone { pane, .. } => pane.clone(),
+                other => panic!("{other:?}"),
+            };
+            let expected = (!pane_stays).then_some(pane);
+            assert_eq!(closed, expected, "{pane_stays}");
+        }
     }
 
     #[test]

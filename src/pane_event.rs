@@ -300,19 +300,21 @@ pub fn retracted(later: &[Entry]) -> bool {
         .is_some_and(|e| matches!(e.body, Body::Moved {}))
 }
 
-/// Appends a `gone` entry to `name`'s mailbox unless one is there from
-/// `seen_live` on, when a watch last saw the member live: a member back
-/// in its pane without a start can go again. A retracted `gone` doesn't count.
+/// Appends a `gone` entry to `name`'s mailbox, holding `closed` when its
+/// pane was closed, unless one is there from `seen_live` on, when a watch
+/// last saw the member live: a member back in its pane without a start can
+/// go again. A retracted `gone` doesn't count.
 pub fn record_gone_after(
     dir: &Path,
     name: &str,
     now: SystemTime,
     seen_live: SystemTime,
+    closed: Option<&str>,
 ) -> Result<bool> {
     let gone = Entry::new(
         now,
         Body::Gone {
-            pane: None,
+            pane: closed.map(Into::into),
             tab: None,
             workspace: None,
         },
@@ -540,7 +542,7 @@ mod tests {
         )
         .unwrap();
 
-        let recorded = record_gone_after(dir.path(), "lh-1", then, seen_live).unwrap();
+        let recorded = record_gone_after(dir.path(), "lh-1", then, seen_live, None).unwrap();
 
         assert!(recorded);
         assert_eq!(kinds(dir.path()), [r#""gone""#, r#""moved""#, r#""gone""#]);
