@@ -1739,13 +1739,8 @@ mod tests {
             .iter()
             .collect::<Vec<_>>()[..]
         );
-        let environ = ["Read(//proc/*/environ)", "Read(//proc/*/task/*/environ)"];
-        assert_eq!(
-            reads[reads.len() - 2..],
-            environ.map(serde_json::Value::from).each_ref()
-        );
-        // Between are this machine's drvfs mounts, each denied to both.
-        assert_eq!(reads.len() - 13, deny_read.len() - 12, "{deny_read:?}");
+        // The rest are this machine's drvfs mounts, each denied to both.
+        assert_eq!(reads.len() - 11, deny_read.len() - 12, "{deny_read:?}");
         let mode = fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "the settings hold the token");
     }

@@ -2045,12 +2045,6 @@ pub fn confine_credentials(
         let under = if *is_dir { "/**" } else { "" };
         json!(format!("Read(/{}{under})", path.display()))
     }));
-    // Each process's starting environment, which still holds the tokens env blanks.
-    // Globs, so Linux keeps them from the sandbox, where loopherd reads /proc/self/exe.
-    deny.extend([
-        json!("Read(//proc/*/environ)"),
-        json!("Read(//proc/*/task/*/environ)"),
-    ]);
     settings["env"] = Value::Object(confined.env);
     Ok(())
 }

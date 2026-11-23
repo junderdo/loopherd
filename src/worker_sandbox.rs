@@ -1642,7 +1642,6 @@ mod tests {
             "Read(//home/me/.config/gh/**)",
             "Read(//home/me/.git-credentials)",
             "Read(//home/me/.claude.json)",
-            "Read(//proc/*/environ)",
             &format!("Read(/{config}/**)"),
         ] {
             assert!(deny.contains(&rule.to_string()), "{rule}: {deny:?}");

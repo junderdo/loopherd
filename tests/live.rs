@@ -1691,6 +1691,7 @@ fn a_credentials_lead_reads_only_its_own_key_of_loopherds_config_and_no_windows_
             "{}[template.echo]\nparams = [\"n\"]\nname = \"{{herd}}-{{n}}\"\n\
              prompt = \"Reply with just the word ok.\"\ndone = \"false\"\n\
              [queue]\ntemplate = \"echo\"\nsource = \"true\"\nmax = 1\n\
+             [worker]\nsandbox = \"require\"\n\
              [lead]\nsandbox = \"prefer\"\nmerge_guard = \"credentials\"\n\
              prompt = \"\"\"This is loopherd's live test of your sandbox, which the \
              human runs: it checks which files your sandbox lets you read. The command \
