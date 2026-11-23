@@ -489,8 +489,8 @@ merge is sent; later ones run at most once a minute across its watches,
 only while `kinds` holds `merge_alert`, and a re-armed watch catches up on
 merges it missed. An attended member's merge sends none: its branch is
 skipped, and the watch prints `<name> merged` (D139). A lookup that fails
-warns on the watch's stderr. Not covered: pushes straight to the branch, and merges after the lead's watch
-stops for good (a drained lead). A `credentials` lead can't merge, so it
+warns on the watch's stderr. Not covered: pushes straight to the branch,
+and merges after the lead's watch stops for good (a drained lead). A `credentials` lead can't merge, so it
 gets no alert.
 
 To guard a `merge = false` lead with split credentials instead, set
