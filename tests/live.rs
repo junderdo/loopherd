@@ -2873,7 +2873,7 @@ fn the_beside_shepherd_action_splits_the_view_right_of_the_recorded_shepherd() {
     if !live_enabled() {
         return;
     }
-    view_opens_beside_the_recorded_shepherd(false);
+    view_opens_beside_the_recorded_shepherd(false, None);
 }
 
 #[test]
@@ -2881,15 +2881,30 @@ fn a_recorded_shell_running_an_agent_counts_as_the_shepherds_pane() {
     if !live_enabled() {
         return;
     }
-    view_opens_beside_the_recorded_shepherd(true);
+    view_opens_beside_the_recorded_shepherd(true, None);
+}
+
+#[test]
+fn stacked_the_beside_shepherd_action_splits_the_view_above_the_shepherd_leaving_focus_put() {
+    if !live_enabled() {
+        return;
+    }
+    view_opens_beside_the_recorded_shepherd(true, Some("stacked"));
 }
 
 /// Records `w1:p2` as the shepherd's, its Claude a `sleep` herdr detects as
 /// one by its name, with the pane's shell when `with_shell`, then checks the
-/// action splits the view right of it and the view's pane closes with it.
-fn view_opens_beside_the_recorded_shepherd(with_shell: bool) {
+/// action splits the view off it as `layout` places it, leaving focus on
+/// `w1:p1`, and the view's pane closes with it.
+fn view_opens_beside_the_recorded_shepherd(with_shell: bool, layout: Option<&str>) {
     let server = IsolatedServer::start();
     two_panes(&server);
+    if let Some(layout) = layout {
+        let config = server.home.path().join("loopherd-config");
+        std::fs::create_dir_all(&config).unwrap();
+        let text = format!("[view]\nlayout = \"{layout}\"\n");
+        std::fs::write(config.join("config.toml"), text).unwrap();
+    }
     let state = server.home.path().join(".local/state/loopherd");
     std::fs::create_dir_all(&state).unwrap();
     let bin = server.home.path().join("bin");
@@ -2920,17 +2935,53 @@ fn view_opens_beside_the_recorded_shepherd(with_shell: bool) {
 
     let (pid, env) = server.view();
     assert_eq!(var(&env, "LOOPHERD_VIEW_NOTE"), None);
-    let panes = panes_across(&server);
-    let [
-        (p1, _, true),
-        (shepherd, shepherd_w, false),
-        (_, view_w, false),
-    ] = panes.as_slice()
-    else {
-        panic!("{panes:?}");
-    };
-    assert_eq!((p1.as_str(), shepherd.as_str()), ("w1:p1", "w1:p2"));
-    assert!(view_w < shepherd_w, "{panes:?}");
+    match layout {
+        None => {
+            let panes = panes_across(&server);
+            let [
+                (p1, _, true),
+                (shepherd, shepherd_w, false),
+                (_, view_w, false),
+            ] = panes.as_slice()
+            else {
+                panic!("{panes:?}");
+            };
+            assert_eq!((p1.as_str(), shepherd.as_str()), ("w1:p1", "w1:p2"));
+            assert!(view_w < shepherd_w, "{panes:?}");
+        }
+        Some(_) => {
+            // The view starts before the action has swapped and resized it.
+            let stacked = |layout: &Value| {
+                let panes = layout["result"]["layout"]["panes"].as_array()?;
+                let rect =
+                    |id: &str| Some(panes.iter().find(|p| p["pane_id"] == id)?["rect"].clone());
+                let view = panes
+                    .iter()
+                    .find(|p| !["w1:p1", "w1:p2"].contains(&p["pane_id"].as_str().unwrap()))?;
+                let (shepherd, view) = (rect("w1:p2")?, view["rect"].clone());
+                (view["x"] == shepherd["x"]
+                    && view["y"].as_u64() < shepherd["y"].as_u64()
+                    && view["height"].as_u64() < shepherd["height"].as_u64())
+                .then_some(())
+            };
+            let mut layout = server.json(&["pane", "layout"]);
+            for _ in 0..50 {
+                if stacked(&layout).is_some() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                layout = server.json(&["pane", "layout"]);
+            }
+            assert!(
+                stacked(&layout).is_some(),
+                "view not above a taller shepherd: {layout}"
+            );
+            assert_eq!(
+                layout["result"]["layout"]["focused_pane_id"], "w1:p1",
+                "{layout}"
+            );
+        }
+    }
 
     // SAFETY: kill takes no pointers.
     unsafe { libc::kill(pid as i32, libc::SIGTERM) };
@@ -3414,10 +3465,18 @@ fn visible(pane: &str) -> String {
 }
 
 #[test]
-fn capital_s_in_a_view_pane_starts_the_shepherd_below_it_then_focuses_it() {
+fn capital_s_in_a_view_pane_starts_the_shepherd_beside_it_then_focuses_it() {
     if !live_enabled() {
         return;
     }
+    // One after the other: each starts the dev session's one `shepherd`.
+    s_starts_the_shepherd_then_focuses_it(None);
+    s_starts_the_shepherd_then_focuses_it(Some("stacked"));
+}
+
+/// Presses `S` in a view in a new tab, with `view.layout` set to `layout`,
+/// checks the shepherd starts on its side, then that `S` focuses it.
+fn s_starts_the_shepherd_then_focuses_it(layout: Option<&str>) {
     let label = assert_dev_session();
     let shepherd_before = dev("herdr").args(["agent", "get", "shepherd"]).output();
     assert!(
@@ -3435,6 +3494,10 @@ fn capital_s_in_a_view_pane_starts_the_shepherd_below_it_then_focuses_it() {
         .unwrap()
         .to_string();
     let (state, config) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    if let Some(layout) = layout {
+        let text = format!("[view]\nlayout = \"{layout}\"\n");
+        std::fs::write(config.path().join("config.toml"), text).unwrap();
+    }
     let tab = herdr_ok(&[
         "tab",
         "create",
@@ -3471,17 +3534,23 @@ fn capital_s_in_a_view_pane_starts_the_shepherd_below_it_then_focuses_it() {
         out.status.success().then(|| json(&out))
     })
     .expect("no shepherd started");
-    let below = shepherd["result"]["agent"]["pane_id"].as_str().unwrap();
-    let layout = herdr_ok(&["pane", "layout", "--pane", &view]);
+    let started = shepherd["result"]["agent"]["pane_id"].as_str().unwrap();
+    let tab_layout = herdr_ok(&["pane", "layout", "--pane", &view]);
     let rect = |pane: &str| {
-        let panes = layout["result"]["layout"]["panes"].as_array().unwrap();
+        let panes = tab_layout["result"]["layout"]["panes"].as_array().unwrap();
         panes.iter().find(|p| p["pane_id"] == pane).unwrap()["rect"].clone()
     };
-    let (top, bottom) = (rect(&view), rect(below));
-    assert_eq!(top["x"], bottom["x"], "{layout}");
+    let (shepherd, view_rect) = (rect(started), rect(&view));
+    let (along, across, size) = match layout {
+        None => ("x", "y", "width"),
+        Some(_) => ("y", "x", "height"),
+    };
+    assert_eq!(shepherd[across], view_rect[across], "{tab_layout}");
+    let shepherd_first = shepherd[along].as_u64() < view_rect[along].as_u64();
+    assert_eq!(shepherd_first, layout.is_none(), "{tab_layout}");
     assert!(
-        bottom["y"].as_u64() > top["y"].as_u64(),
-        "shepherd not below the view: {layout}"
+        view_rect[size].as_u64() < shepherd[size].as_u64(),
+        "{tab_layout}"
     );
     poll(90, || {
         visible(&view)

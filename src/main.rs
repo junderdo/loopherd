@@ -154,9 +154,9 @@ enum Command {
     /// `1.5M`), the two limits also a percentage of the window (`65%`),
     /// `lead_defaults.review_rounds`, each lead's review-round limit,
     /// `shepherd.self_restart` or `herdr_plugin.revive_on_startup` (`true` or
-    /// `false`), or
-    /// `view.theme`, `loopherd view`'s palette: `purple-orange`, `phosphor`
-    /// or `catppuccin`.
+    /// `false`), `view.theme`, `loopherd view`'s palette: `purple-orange`,
+    /// `phosphor` or `catppuccin`, or `view.layout`, how the view and the
+    /// shepherd share a tab: `side-by-side` (the default) or `stacked`.
     Config {
         #[command(subcommand)]
         action: ConfigAction,
@@ -305,7 +305,8 @@ enum Command {
     /// The herd view as a live TUI, refreshed every 2s. Read-only except that
     /// Enter focuses the selected agent's pane in herdr, `t` saves the theme it
     /// switches to as `view.theme` in config.toml, and `S` focuses the
-    /// shepherd or, run in a pane, starts one below the view.
+    /// shepherd or, run in a pane, starts one beside the view as `view.layout`
+    /// places it.
     View {
         /// Start with retired entries shown (toggle with `a`).
         #[arg(long)]
@@ -313,8 +314,9 @@ enum Command {
         /// Start with strays listed (toggle with `s`).
         #[arg(long)]
         strays: bool,
-        /// Open the view in a herdr pane right of the shepherd's (else of
-        /// $HERDR_PANE_ID's, else in the plugin's popup) instead of here.
+        /// Open the view in a herdr pane beside the shepherd's, on the side
+        /// `view.layout` picks (else beside $HERDR_PANE_ID's, else in the
+        /// plugin's popup) instead of here.
         #[arg(long, conflicts_with_all = ["all", "strays"])]
         beside_shepherd: bool,
     },
@@ -1302,10 +1304,10 @@ fn run_view(all: bool, strays: bool) -> Result<i32> {
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
     let subscriber = SocketSubscriber::new(CliHerdr.socket());
     let (herds, state, config) = (Paths::from_env()?, ledger.dir()?, config_path()?);
-    let below = match own_pane() {
+    let view_pane = match own_pane() {
         // The split pane gets the herdr server's environment, so pin the
         // roots this view resolved, set in its own environment or not.
-        Some(pane) => Some(shepherd_pane::Below {
+        Some(pane) => Some(shepherd_pane::ViewPane {
             pane,
             cwd: workspace_cwd()?,
             env: vec![
@@ -1321,7 +1323,7 @@ fn run_view(all: bool, strays: bool) -> Result<i32> {
         mailboxes: ledger.reports_dir()?,
         config,
         state,
-        below,
+        view_pane,
     };
     tui::run(
         CliHerdr,
@@ -1364,11 +1366,14 @@ fn run_view_beside_shepherd() -> Result<i32> {
     let current = std::env::var("HERDR_PANE_ID")
         .ok()
         .filter(|p| !p.is_empty());
+    // A malformed layout's warning is the opened view's to show.
+    let layout = config_path().map_or(Default::default(), |c| config::view_layout(&c).0);
     match view_pane::open(
         &CliHerdr,
         &process::ProcFs,
         &ledger.dir()?,
         current.as_deref(),
+        layout,
     )? {
         view_pane::Opened::BesideShepherd { pane, how } => {
             println!("{} beside the shepherd's pane {pane}", view_outcome(&how))
