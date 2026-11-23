@@ -161,10 +161,10 @@ Init never launches an agent.
    | `<member> finished` | Turn ended with nothing in flight, after a `done` or `question`. |
    | `<member> finished  no report` | The same, with no `done` or `question` since its last finish or start. |
    | `<member> failed  rate_limit` | Turn ended on an API error; it may need a nudge once that clears. |
-   | `<member> merged` | Lead's watch only: the worker's template `merged` check passes and its `done` doesn't, or its herd's after_merge is still due. Run the after-merge steps. |
+   | `<member> merged` | Lead's watch: the worker's template `merged` check passes and its `done` doesn't, or its herd's after_merge is still due. Run the after-merge steps. The shepherd's watch, in its 60s round of checks, prints it for an attended member of an unled herd it reads, done or not, with that check's `failing` and `recovered` lines; it runs no other member check (D112). |
    | `<name> claimable` | Lead's watch only: feed would spawn this member. Feed. |
-   | `<herd> failing  source "<command>": <stderr line>` | Lead's watch only: the herd's source failed (also `<herd> failing  backlog "<command>": …` for its `backlog`, and `<herd> failing  <member> done "<command>": …` for a member's `done` or `merged` check), with its last stderr line. Once per streak; one cut off by the 60s round is no event. Fix the cause, or tell the shepherd. |
-   | `<herd> recovered  source` | Lead's watch only: what last printed `failing` passes again (also `<herd> recovered  backlog` and `<herd> recovered  <member> done`). A later failure prints `failing` again. A member that retires mid-streak gets none. |
+   | `<herd> failing  source "<command>": <stderr line>` | Lead's watch (the shepherd's prints only its `<member> merged` form, as that row says): the herd's source failed (also `<herd> failing  backlog "<command>": …` for its `backlog`, and `<herd> failing  <member> done "<command>": …` for a member's `done` or `merged` check), with its last stderr line. Once per streak; one cut off by the 60s round is no event. Fix the cause, or tell the shepherd. |
+   | `<herd> recovered  source` | Lead's watch (the shepherd's, as for `failing`): what last printed `failing` passes again (also `<herd> recovered  backlog` and `<herd> recovered  <member> done`). A later failure prints `failing` again. A member that retires mid-streak gets none. |
    | `<herd> running low  <n> claimable, <m> unready` | Lead's watch only: the herd's `backlog` lists unready tasks and claimable (as `status` counts it) is at or below `[queue] low_at` (default `2 × max`). Once per streak: it prints again only after claimable rises above `low_at` or unready reaches 0. A paused herd prints none and keeps its streak. Triage (see Lead). |
    | `<herd> running low  0 claimable, <m> unready, no workers open` | Lead's watch only: as above, but claimable is 0 and no worker is open, so nothing runs (D80). Prints even mid-streak of the plain form, and in its place when both start together. Once per streak: it prints again only after a worker opens (even one that opened and retired while no watch ran), claimable rises above 0, or unready reaches 0. A paused herd prints none and keeps its streak. Triage (see Lead). |
    | `<herd> out of work` | The herd isn't paused, claimable is 0, its `backlog` lists nothing unready (or it has none), and no worker is open. A lead's watch prints it for its herd; the shepherd's, every 60s, for each unled herd with a herd file it reads. Once per streak: it prints again only after claimable or unready rises above 0 or a worker opens, even one that opened and retired while no watch ran. The shepherd's doesn't repeat what a retired lead's watch already said. A paused herd prints none and keeps its streak. A lead reports it (see Lead); the shepherd tells the human, who pauses the herd or files and approves work. |
@@ -560,8 +560,8 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   null without a `backlog`, with `claimable_error` or `unready_error` beside
   a failed one (D60, D61). A member of an `attended = true` template, one
   the human sits in, reads `(attended)` and `--json` gives it `attended`:
-  it holds no slot, and a watch wakes on its `gone` alone, a lead's watch
-  also on its `merged` (D112).
+  it holds no slot, and a watch wakes on its `gone` alone, and on its
+  `merged` the lead's watch, or the shepherd's for an unled herd (D112).
 - `loopherd reports` prints unread reports, questions first, and marks them
   read; `loopherd reports --all` prints every report and stop and marks
   none read. Both take member names or `--herd <herd>`. `--all` also takes
