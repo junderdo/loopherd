@@ -259,19 +259,19 @@ pub struct Machine<'a> {
 }
 
 /// The human's `credential.helper` values from their global and system git
-/// config, empty when git can't say.
+/// config, one per line, empty when git can't say.
 pub fn git_credential_helpers(home: &Path) -> String {
     std::process::Command::new("git")
         .current_dir(home)
-        .args(["config", "--get-regexp", r"^credential\..*helper$"])
+        .args(["config", "-z", "--get-regexp", r"^credential\..*helper$"])
         .env_remove("GIT_DIR")
         .output()
         .ok()
         .filter(|out| out.status.success())
         .map(|out| {
             String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .filter_map(|line| line.split_once(' ').map(|(_, value)| value.to_string()))
+                .split('\0')
+                .filter_map(|entry| entry.split_once('\n').map(|(_, value)| value.to_string()))
                 .collect::<Vec<_>>()
                 .join("\n")
         })
@@ -332,8 +332,12 @@ pub fn human_credentials(
 
 /// The file a `store --file <path>` credential helper keeps tokens in.
 fn store_file(home: &Path, helper: &str) -> Option<PathBuf> {
-    let mut words = helper.split_whitespace();
-    if !matches!(words.next()?, "store" | "git-credential-store") {
+    let words = shell_words(helper);
+    let mut words = words.iter().map(String::as_str);
+    let program = words.next()?;
+    let store = program == "store"
+        || Path::new(program).file_name() == Some("git-credential-store".as_ref());
+    if !store {
         return None;
     }
     let file = loop {
@@ -345,11 +349,58 @@ fn store_file(home: &Path, helper: &str) -> Option<PathBuf> {
             break words.next()?;
         }
     };
-    let file = file.trim_matches(['"', '\'']);
     match file.strip_prefix("~/") {
         Some(under) => Some(home.join(under)),
         None => Path::new(file).is_absolute().then(|| PathBuf::from(file)),
     }
+}
+
+/// `line` split into words as sh would, quotes and backslashes undone.
+fn shell_words(line: &str) -> Vec<String> {
+    let mut words = vec![];
+    let mut word: Option<String> = None;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_whitespace() => words.extend(word.take()),
+            '\'' => word
+                .get_or_insert_default()
+                .extend(chars.by_ref().take_while(|&c| c != '\'')),
+            '"' => {
+                let word = word.get_or_insert_default();
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => break,
+                        '\\' => word.extend(chars.next()),
+                        c => word.push(c),
+                    }
+                }
+            }
+            '\\' => word.get_or_insert_default().extend(chars.next()),
+            c => word.get_or_insert_default().push(c),
+        }
+    }
+    words.extend(word);
+    words
+}
+
+/// The copies Claude Code leaves beside `.claude.json` in `dir` as it
+/// rewrites it (`.claude.json.tmp.<pid>.<hex>`, `.claude.json.backup`), each
+/// holding the user-scope MCP servers.
+fn claude_json_copies(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
+    let mut copies: Vec<PathBuf> = entries
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name();
+            name.to_str()?
+                .starts_with(".claude.json.")
+                .then(|| dir.join(name))
+        })
+        .collect();
+    copies.sort();
+    copies
 }
 
 /// What ssh still reads under a denied `~/.ssh` to reach a `Host` alias.
@@ -380,6 +431,18 @@ pub fn confined(paths: &Paths, herd: &str, machine: &Machine) -> Result<Confined
     let config = paths.config_dir();
     let helpers = (machine.credential_helpers)(&paths.home);
     let mut deny_read = human_credentials(&paths.home, machine.env, &helpers);
+    let claude_dirs = [
+        Some(paths.home.clone()),
+        (machine.env)("CLAUDE_CONFIG_DIR").map(PathBuf::from),
+    ];
+    // Literal paths: a glob here is expanded at each sandbox start, and one renamed away fails it.
+    for dir in claude_dirs.into_iter().flatten() {
+        deny_read.extend(
+            claude_json_copies(&dir)
+                .into_iter()
+                .map(|copy| (copy, false)),
+        );
+    }
     deny_read.push((config.to_path_buf(), true));
     for dir in drvfs_mounts(&mounts) {
         match dir.into_string() {
@@ -513,7 +576,9 @@ mod tests {
 store --file=/srv/tokens
 cache --timeout=3600
 store --file ~/.my-credentials
-git-credential-store --file=\"/srv/quoted\"
+/usr/lib/git-core/git-credential-store --file=\"/srv/quoted\"
+store --file \"/srv/with space\"
+store --file '/srv/single quoted'
 store
 store --file=relative
 !f() { echo; }; f
@@ -527,6 +592,8 @@ store --file=relative
                 (PathBuf::from("/srv/tokens"), false),
                 (PathBuf::from("/home/me/.my-credentials"), false),
                 (PathBuf::from("/srv/quoted"), false),
+                (PathBuf::from("/srv/with space"), false),
+                (PathBuf::from("/srv/single quoted"), false),
             ]
         );
     }
@@ -631,6 +698,33 @@ server:/share /mnt/nfs 9p rw,aname=other 0 0
         assert!(
             err(&unreadable)
                 .starts_with("its Windows drives can't be found to hide: read /proc/mounts"),
+        );
+    }
+
+    #[test]
+    fn the_copies_claude_leaves_beside_its_config_are_denied_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = credentials_herd(dir.path());
+        paths.home = dir.path().join("home");
+        std::fs::create_dir_all(&paths.home).unwrap();
+        for file in [
+            ".claude.json",
+            ".claude.json.tmp.12.ab",
+            ".claude.json.backup",
+            ".claude",
+        ] {
+            std::fs::write(paths.home.join(file), "{}").unwrap();
+        }
+        let none = || Ok(vec![]);
+
+        let confined = confined(&paths, "h", &machine(&none)).unwrap();
+
+        assert_eq!(
+            confined.deny_read[10..12],
+            [
+                (paths.home.join(".claude.json.backup"), false),
+                (paths.home.join(".claude.json.tmp.12.ab"), false),
+            ]
         );
     }
 

@@ -2467,7 +2467,7 @@ mod tests {
         std::fs::write(credentials.join("h.token"), "github_pat_1\n").unwrap();
         let machine = crate::credentials::Machine {
             env: &|_| None,
-            mounts: &|| Ok(b"C:\\134 /mnt/c 9p rw,aname=drvfs;path=C:\\ 0 0\n".to_vec()),
+            mounts: &|| Ok(b"Z: /mnt/zz drvfs rw 0 0\n".to_vec()),
             credential_helpers: &|_| String::new(),
         };
 
@@ -2476,9 +2476,19 @@ mod tests {
         let deny_read = settings["sandbox"]["filesystem"]["denyRead"]
             .as_array()
             .unwrap();
-        assert!(deny_read.contains(&json!("/mnt/c")), "{deny_read:?}");
+        assert!(deny_read.contains(&json!("/mnt/zz")), "{deny_read:?}");
         let deny = settings["permissions"]["deny"].as_array().unwrap();
-        assert!(deny.contains(&json!("Read(//mnt/c/**)")), "{deny:?}");
+        assert!(deny.contains(&json!("Read(//mnt/zz/**)")), "{deny:?}");
+    }
+
+    #[test]
+    fn this_machines_mounts_are_read_from_proc() {
+        let read = |m: &crate::credentials::Machine| (m.mounts)().map_err(|e| e.kind());
+
+        assert_eq!(
+            read(&THIS_MACHINE),
+            std::fs::read("/proc/mounts").map_err(|e| e.kind())
+        );
     }
 
     #[test]
