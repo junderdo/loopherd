@@ -152,6 +152,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D137](decisions/D137.md) | A session's context window comes from its transcript's `message.model` through a built-in table (4.7+ 1M, older 200K); `context_window` in config.toml overrides it; an unknown model falls back to 200K with one note per session; `setup` stops asking for the window. |
 | [D138](decisions/D138.md) | `view.layout` (`side-by-side` default, or `stacked`) places the view and the shepherd in a tab for both the `view-beside-shepherd` action and `S`; the view takes 40%; left and above come from a split then `pane swap`; a malformed value falls back with a note. |
 | [D139](decisions/D139.md) | `v` in the view re-docks the live shepherd's pane, when it shares the view's tab, to the other `view.layout` and saves it; herdr won't move a pane within its tab, so it leaves through a tab of its own and comes back with `--split`/`--ratio`. |
+| [D142](decisions/D142.md) | Amends D124. A moving broker probes the new install with `broker <lead> --check` (its startup config checks), passes the new image the install's path and dev/ino so a late install is still followed, notes a non-executable install once, and doctor waits once for brokers under one shared 3 s deadline, only for those following the `PATH` install. |
 
 ## Emerging model
 
