@@ -1771,15 +1771,19 @@ const START_TIMEOUT: Duration = Duration::from_secs(5);
 /// a broker already serves `lead`, and waits until it serves. Fails, naming
 /// the holder, when the lock stays held with nothing recorded in it.
 pub fn start(paths: &Paths, lead: &str) -> Result<bool> {
-    let exe = std::env::current_exe().context("find the loopherd binary")?;
-    start_with(paths, lead, START_TIMEOUT, &mut || spawn(paths, lead, &exe))
+    let exe = std::env::current_exe().with_context(|| {
+        format!("find the loopherd binary; run loopherd revive --name {lead} to try again")
+    })?;
+    start_with(paths, lead, START_TIMEOUT, &mut || {
+        spawn(paths, lead, &exe).map(|_| ())
+    })
 }
 
 fn start_with(
     paths: &Paths,
     lead: &str,
     wait: Duration,
-    spawn: &mut dyn FnMut() -> Result<u32>,
+    spawn: &mut dyn FnMut() -> Result<()>,
 ) -> Result<bool> {
     validate_name(lead)?;
     let lock = lock_file(paths, lead);
@@ -1799,7 +1803,8 @@ fn start_with(
                     "a process that recorded no pid".into(),
                     format!(
                         "stop it yourself (pgrep -f 'loopherd broker {lead}' finds it), then run \
-                         loopherd broker-restart {lead}"
+                         loopherd broker-restart {lead}; with none to find, the lock is held by \
+                         a lead's loopherd, so try again once that command ends"
                     ),
                 ),
             };
@@ -1816,8 +1821,16 @@ fn start_with(
     Ok(true)
 }
 
-/// Starts `loopherd broker <lead>` detached and waits until it serves, returning its pid.
-fn spawn(paths: &Paths, lead: &str, exe: &Path) -> Result<u32> {
+/// The broker serving once a start returns.
+#[derive(Debug, Clone, Copy)]
+enum Started {
+    Own(u32),
+    /// Another broker took the lock first, as a `revive` or `lead` may in a restart's gap.
+    Another(u32),
+}
+
+/// Starts `loopherd broker <lead>` detached and waits until it, or another, serves.
+fn spawn(paths: &Paths, lead: &str, exe: &Path) -> Result<Started> {
     use std::os::unix::process::CommandExt;
     let mut command = std::process::Command::new(exe);
     command
@@ -1834,22 +1847,29 @@ fn spawn(paths: &Paths, lead: &str, exe: &Path) -> Result<u32> {
             _ => Ok(()),
         });
     }
-    let child = command
-        .spawn()
-        .with_context(|| format!("start {} broker {lead}", exe.display()))?;
+    let child = command.spawn().with_context(|| {
+        format!(
+            "start {} broker {lead}; run loopherd broker-restart {lead} to try again",
+            exe.display()
+        )
+    })?;
     serving_once_started(paths, lead, child)
 }
 
-/// Waits until `child`, started as `lead`'s broker, serves, returning its pid.
-fn serving_once_started(paths: &Paths, lead: &str, mut child: std::process::Child) -> Result<u32> {
+/// Waits until `child`, started as `lead`'s broker, or another broker serves.
+fn serving_once_started(
+    paths: &Paths,
+    lead: &str,
+    mut child: std::process::Child,
+) -> Result<Started> {
     let given_up = Instant::now() + START_TIMEOUT;
     loop {
         let serving = serving_pid(paths, lead).filter(|_| running(paths, lead));
         let exited = child.try_wait()?;
         match (serving, exited) {
-            (Some(pid), _) if pid == child.id() => return Ok(pid),
+            (Some(pid), _) if pid == child.id() => return Ok(Started::Own(pid)),
             // Another broker serves, as when this one lost the lock to it.
-            (Some(pid), Some(_)) => return Ok(pid),
+            (Some(pid), Some(_)) => return Ok(Started::Another(pid)),
             (None, Some(status)) if !running(paths, lead) => bail!(
                 "it exited at once ({status}); run loopherd broker {lead} to see why, \
                  then loopherd broker-restart {lead} to start it"
@@ -1858,7 +1878,8 @@ fn serving_once_started(paths: &Paths, lead: &str, mut child: std::process::Chil
         }
         if Instant::now() >= given_up {
             bail!(
-                "it didn't take {} within {}; run loopherd broker-restart {lead} to try again",
+                "it didn't take {} within {}, which a lead's loopherd may hold; run loopherd \
+                 broker-restart {lead} to try again",
                 lock_file(paths, lead).display(),
                 humantime::format_duration(START_TIMEOUT)
             );
@@ -1961,7 +1982,7 @@ fn adopt_lock(paths: &Paths, lead: &str, file: std::fs::File) -> Option<Lock> {
 /// one running, after as long as its lead waits on a feed. `exe` is resolved
 /// by the caller up front, since a reinstall during the wait renames over it.
 pub fn restart_broker(paths: &Paths, lead: &str, exe: &Path, sink: &mut dyn Sink) -> Result<()> {
-    restart_broker_with(paths, lead, FEED_WITHIN, sink, &mut || {
+    restart_broker_with(paths, lead, FEED_WITHIN, exe, sink, &mut || {
         spawn(paths, lead, exe)
     })
 }
@@ -1970,8 +1991,9 @@ fn restart_broker_with(
     paths: &Paths,
     lead: &str,
     within: Duration,
+    exe: &Path,
     sink: &mut dyn Sink,
-    start: &mut dyn FnMut() -> Result<u32>,
+    start: &mut dyn FnMut() -> Result<Started>,
 ) -> Result<()> {
     validate_name(lead)?;
     // Held until it returns: what makes its stop live, to brokers and to leads in any pid namespace.
@@ -1990,8 +2012,9 @@ fn restart_broker_with(
     let given_up = Instant::now() + START_TIMEOUT;
     let old = loop {
         if !running(paths, lead) {
-            let pid = start().with_context(|| format!("start {lead}'s broker"))?;
-            sink.out(&format!("started {lead}'s broker: pid {pid}"));
+            let started = start().with_context(|| format!("start {lead}'s broker"))?;
+            sink.out(&format!("started {lead}'s broker: pid {}", started.pid()));
+            warn_of_another_binary(paths, lead, started, exe, sink);
             return Ok(());
         }
         if let Some(pid) = serving_pid(paths, lead) {
@@ -1999,9 +2022,11 @@ fn restart_broker_with(
         }
         if Instant::now() >= given_up {
             bail!(
-                "{lead}'s broker predates loopherd broker-restart, so it can't be asked to stop; \
-                 stop it yourself (pgrep -f 'loopherd broker {lead}' finds it), then run \
-                 loopherd broker-restart {lead}"
+                "{lead}'s broker lock is held by a process that recorded no pid: a broker that \
+                 predates loopherd broker-restart, which can't be asked to stop, or a lead's \
+                 loopherd that holds it locked. Stop such a broker yourself (pgrep -f 'loopherd \
+                 broker {lead}' finds it); with none to find, the lock is the lead's, so run \
+                 loopherd broker-restart {lead} again once its loopherd command ends"
             );
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -2038,9 +2063,47 @@ fn restart_broker_with(
         format!("{lead}'s broker (pid {old}) stopped, but none started in its place")
     })?;
     sink.out(&format!(
-        "restarted {lead}'s broker: pid {old} stopped, pid {new} serves"
+        "restarted {lead}'s broker: pid {old} stopped, pid {} serves",
+        new.pid()
     ));
+    warn_of_another_binary(paths, lead, new, exe, sink);
     Ok(())
+}
+
+impl Started {
+    fn pid(self) -> u32 {
+        match self {
+            Started::Own(pid) | Started::Another(pid) => pid,
+        }
+    }
+}
+
+/// Warns when the broker that took the lock before the restart's own runs another binary than
+/// `exe`; silent when `exe` is a bare name, as a reinstalled binary's is, since it can't be compared.
+fn warn_of_another_binary(
+    paths: &Paths,
+    lead: &str,
+    started: Started,
+    exe: &Path,
+    sink: &mut dyn Sink,
+) {
+    let Started::Another(pid) = started else {
+        return;
+    };
+    let runs = match recorded_binary(paths, lead) {
+        Some(b) if FileId::of(exe).is_none_or(|file| file == b.file) => return,
+        Some(b) => format!(
+            "runs {} ({}), not {}",
+            b.path.display(),
+            b.version,
+            exe.display()
+        ),
+        None => "records no binary, as a loopherd older than this one does".into(),
+    };
+    sink.err(&format!(
+        "warning: pid {pid} took {lead}'s broker lock first and {runs}; run loopherd \
+         broker-restart {lead} again to replace it"
+    ));
 }
 
 /// How long a restart past its bound still waits for the broker to let go of its lock.
@@ -4330,7 +4393,7 @@ mod tests {
 
         let started = start_with(&world.paths, "lead-h", START_TIMEOUT, &mut || {
             spawned += 1;
-            Ok(1)
+            Ok(())
         });
 
         assert!(started.unwrap());
@@ -4356,7 +4419,7 @@ mod tests {
             Duration::from_millis(50),
             &mut || {
                 spawned += 1;
-                Ok(1)
+                Ok(())
             },
         );
 
@@ -4378,7 +4441,7 @@ mod tests {
             &world.paths,
             "lead-h",
             Duration::from_millis(50),
-            &mut || Ok(1),
+            &mut || Ok(()),
         );
 
         let why = format!("{:#}", started.unwrap_err());
@@ -4394,7 +4457,7 @@ mod tests {
 
         let started = start_with(&world.paths, "lead-h", START_TIMEOUT, &mut || {
             spawned += 1;
-            Ok(1)
+            Ok(())
         });
 
         assert!(!started.unwrap());
@@ -5421,6 +5484,7 @@ mod tests {
                     &world.paths,
                     "lead-h",
                     Duration::from_secs(10),
+                    &std::env::current_exe().unwrap(),
                     &mut said,
                     &mut || {
                         // A gap between the old broker's exit and the new one's lock.
@@ -5429,7 +5493,7 @@ mod tests {
                         let stop = stop_file(&world.paths, "lead-h");
                         write_replacing(&stop, "0").unwrap();
                         new = Some(world.serve(reading_herdr("new", None)));
-                        Ok(4242)
+                        Ok(Started::Own(4242))
                     },
                 )
             });
@@ -5545,10 +5609,11 @@ mod tests {
             &world.paths,
             "lead-h",
             Duration::from_secs(10),
+            &std::env::current_exe().unwrap(),
             &mut said,
             &mut || {
                 started = Some(world.serve(FakeHerdr::new(&[])));
-                Ok(4242)
+                Ok(Started::Own(4242))
             },
         )
         .unwrap();
@@ -5570,10 +5635,11 @@ mod tests {
             &world.paths,
             "lead-h",
             Duration::from_secs(10),
+            &std::env::current_exe().unwrap(),
             &mut Kept::default(),
             &mut || {
                 stop_at_start = Some(stop.exists());
-                Ok(4242)
+                Ok(Started::Own(4242))
             },
         )
         .unwrap();
@@ -5594,12 +5660,20 @@ mod tests {
             &world.paths,
             "lead-h",
             Duration::from_secs(10),
+            &std::env::current_exe().unwrap(),
             &mut Kept::default(),
             &mut || panic!("no new broker starts while the old one runs"),
         )
         .unwrap_err();
 
-        assert!(format!("{err:#}").contains("predates"), "{err:#}");
+        assert_eq!(
+            format!("{err:#}"),
+            "lead-h's broker lock is held by a process that recorded no pid: a broker that \
+             predates loopherd broker-restart, which can't be asked to stop, or a lead's \
+             loopherd that holds it locked. Stop such a broker yourself (pgrep -f 'loopherd \
+             broker lead-h' finds it); with none to find, the lock is the lead's, so run \
+             loopherd broker-restart lead-h again once its loopherd command ends"
+        );
         assert!(!stop.exists());
     }
 
@@ -5618,8 +5692,9 @@ mod tests {
             &world.paths,
             "lead-h",
             Duration::from_secs(10),
+            &std::env::current_exe().unwrap(),
             &mut said,
-            &mut || Ok(4242),
+            &mut || Ok(Started::Own(4242)),
         )
         .unwrap();
 
@@ -5630,48 +5705,137 @@ mod tests {
     #[test]
     fn a_broker_restart_waits_for_the_old_broker_to_exit_not_for_the_lock_to_be_free() {
         let world = World::new();
-        let old = take_lock(&world.paths, "lead-h").unwrap().unwrap();
+        let held = take_lock(&world.paths, "lead-h").unwrap().unwrap();
         let pid_file = pid_file(&world.paths, "lead-h");
         std::fs::write(&pid_file, std::process::id().to_string()).unwrap();
-        let (lock_file, stop_file) = (
-            lock_file(&world.paths, "lead-h"),
-            stop_file(&world.paths, "lead-h"),
-        );
-        // Once asked to stop, the old broker exits and a revive's broker, pid 1, takes the lock.
+        let stop_file = stop_file(&world.paths, "lead-h");
+        // Once asked to stop, the old broker hands its lock to a revive's broker, pid 1,
+        // with no gap in which a restart waiting on the lock could see it free.
         let revived = std::thread::spawn(move || {
             while !stop_file.exists() {
                 std::thread::sleep(POLL);
             }
-            std::fs::remove_file(&pid_file).unwrap();
-            drop(old);
-            let revived = take_lock_at(&lock_file).unwrap().unwrap();
-            std::fs::write(&pid_file, "1").unwrap();
-            revived
+            write_replacing(&pid_file, "1").unwrap();
+            held
         });
-        let mut said = Kept::default();
+        let (done, restarted) = mpsc::channel();
+        let paths = world.paths.clone();
+        std::thread::spawn(move || {
+            let mut said = Kept::default();
+            // A bound far past the deadline below, so a restart that waits on the lock misses it.
+            let result = restart_broker_with(
+                &paths,
+                "lead-h",
+                Duration::from_secs(60),
+                &std::env::current_exe().unwrap(),
+                &mut said,
+                &mut || Ok(Started::Another(1)),
+            );
+            let _ = done.send((result, said));
+        });
 
-        let began = Instant::now();
-        // A bound far past the gap, so a restart that waits on the lock runs into it.
-        let restarted = restart_broker_with(
-            &world.paths,
-            "lead-h",
-            Duration::from_secs(60),
-            &mut said,
-            &mut || Ok(1),
-        );
+        let (result, said) = restarted
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the restart waited for the lock, not for the old broker");
 
         let _revived = revived.join().unwrap();
-        restarted.unwrap();
-        assert!(
-            began.elapsed() < Duration::from_secs(5),
-            "{:?}",
-            began.elapsed()
-        );
+        result.unwrap();
         let pid = std::process::id();
         assert_eq!(
             said.out.last().unwrap(),
             &format!("restarted lead-h's broker: pid {pid} stopped, pid 1 serves")
         );
+    }
+
+    #[test]
+    fn a_broker_that_cant_be_spawned_names_how_to_start_it() {
+        let world = World::new();
+
+        let err = spawn(&world.paths, "lead-h", Path::new("/nonexistent/loopherd")).unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("; run loopherd broker-restart lead-h to try again"),
+            "{err:#}"
+        );
+    }
+
+    /// Takes lead-h's broker lock as a broker running `binary` would record it.
+    fn locked_by(paths: &Paths, binary: Option<(&str, FileId)>) -> Lock {
+        let lock = take_lock(paths, "lead-h").unwrap().unwrap();
+        let binary = binary.map_or(String::new(), |(path, file)| {
+            format!(
+                "{VERSION}v0\n{BINARY}{path}\n{FILE}{} {}\n",
+                file.dev, file.ino
+            )
+        });
+        std::fs::write(lock_file(paths, "lead-h"), format!("\n{MARKS}\n{binary}")).unwrap();
+        lock
+    }
+
+    fn restarted_with(world: &World, started: Started, binary: Option<(&str, FileId)>) -> Kept {
+        let exe = std::env::current_exe().unwrap();
+        let mut said = Kept::default();
+        let mut lock = None;
+        restart_broker_with(
+            &world.paths,
+            "lead-h",
+            Duration::from_secs(10),
+            &exe,
+            &mut said,
+            &mut || {
+                lock = Some(locked_by(&world.paths, binary));
+                Ok(started)
+            },
+        )
+        .unwrap();
+        said
+    }
+
+    #[test]
+    fn a_restart_another_broker_beat_on_another_binary_warns_naming_that_binary() {
+        let world = World::new();
+        let other = FileId::of(Path::new("/")).unwrap();
+
+        let said = restarted_with(&world, Started::Another(7), Some(("/old/loopherd", other)));
+
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(
+            said.err,
+            [format!(
+                "warning: pid 7 took lead-h's broker lock first and runs /old/loopherd (v0), \
+                 not {}; run loopherd broker-restart lead-h again to replace it",
+                exe.display()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_restart_another_broker_beat_that_records_no_binary_warns_it_is_older() {
+        let world = World::new();
+
+        let said = restarted_with(&world, Started::Another(7), None);
+
+        assert_eq!(
+            said.err,
+            [
+                "warning: pid 7 took lead-h's broker lock first and records no binary, as a \
+              loopherd older than this one does; run loopherd broker-restart lead-h again to \
+              replace it"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_restart_another_broker_beat_on_this_binary_or_its_own_broker_warns_nothing() {
+        let world = World::new();
+        let this = FileId::of(&std::env::current_exe().unwrap()).unwrap();
+        let other = FileId::of(Path::new("/")).unwrap();
+
+        let same = restarted_with(&world, Started::Another(7), Some(("/any/loopherd", this)));
+        let own = restarted_with(&world, Started::Own(7), Some(("/old/loopherd", other)));
+
+        assert!(same.err.is_empty(), "{:?}", same.err);
+        assert!(own.err.is_empty(), "{:?}", own.err);
     }
 
     #[test]
@@ -5688,7 +5852,7 @@ mod tests {
 
         let serving = serving_once_started(&world.paths, "lead-h", lost);
 
-        assert_eq!(serving.unwrap(), std::process::id());
+        assert!(matches!(serving.unwrap(), Started::Another(pid) if pid == std::process::id()));
     }
 
     #[test]
@@ -5704,6 +5868,7 @@ mod tests {
             &world.paths,
             "lead-h",
             Duration::from_millis(200),
+            &std::env::current_exe().unwrap(),
             &mut Kept::default(),
             &mut || panic!("no new broker starts while the old one runs"),
         )
@@ -5815,8 +5980,9 @@ mod tests {
             &world.paths,
             "lead-h",
             Duration::from_millis(200),
+            &std::env::current_exe().unwrap(),
             &mut said,
-            &mut || Ok(4242),
+            &mut || Ok(Started::Own(4242)),
         )
         .unwrap();
 

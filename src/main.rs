@@ -1196,7 +1196,10 @@ fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32>
         sandbox: sandbox::probe,
         broker: broker::start,
         restart_broker: |paths, lead| {
-            broker::restart_broker(paths, lead, &runnable_exe()?, &mut Printed)
+            let exe = std::env::current_exe().with_context(|| {
+                format!("find the loopherd binary; run loopherd revive --name {lead} to try again")
+            })?;
+            broker::restart_broker(paths, lead, &runnable(exe), &mut Printed)
         },
         brokers_only,
     };
