@@ -100,7 +100,12 @@ fn edit(
         return Ok(false);
     }
     let text = LineEnding::of(&original).apply(&doc.to_string());
-    check(herd, &text, paths, Fix::Edit)
+    // A file that was already invalid needs its own fix, whatever the edit.
+    let fix = match check(herd, &original, paths, Fix::Commands) {
+        Ok(_) => Fix::Edit,
+        Err(_) => Fix::Commands,
+    };
+    check(herd, &text, paths, fix)
         .with_context(|| format!("refused, {} is unchanged", file.display()))?;
     let written = || format!("write {}", file.display());
     let dir = file.parent().context("herd file has no directory")?;
@@ -297,8 +302,9 @@ sandbox = "require"
             assert!(err.contains("is unchanged"), "{err}");
             assert!(
                 err.contains(&format!(
-                    "each of which acts as you; keep {table}.unix_sockets = \"all\" or \
-                     lead.merge_guard = \"credentials\", not both"
+                    "each of which acts as you; make the edit leave lead.merge = true, or only \
+                     one of {table}.unix_sockets = \"all\" and lead.merge_guard = \
+                     \"credentials\""
                 )),
                 "{err}"
             );
@@ -318,7 +324,8 @@ sandbox = "require"
         );
         assert!(
             err.contains(
-                "keep lead.unix_sockets = \"all\" or lead.merge_guard = \"credentials\", not both"
+                "make the edit leave lead.merge = true, or only one of lead.unix_sockets = \
+                 \"all\" and lead.merge_guard = \"credentials\""
             ),
             "{err}"
         );
@@ -335,13 +342,63 @@ sandbox = "require"
         );
         assert!(
             err.contains(
-                "[worker] sandbox is \"prefer\", not \"require\"; keep worker.sandbox = \
-                 \"require\" while lead.merge_guard is \"credentials\""
+                "[worker] sandbox is \"prefer\", not \"require\"; make the edit leave \
+                 lead.merge = true, or worker.sandbox = \"require\" while lead.merge_guard is \
+                 \"credentials\""
             ),
             "{err}"
         );
         assert!(!err.contains("run loopherd"), "{err}");
         assert_eq!(text(&paths), CREDENTIALS_HERD);
+    }
+
+    #[test]
+    fn set_refuses_turning_merge_off_beside_the_pair_with_advice_naming_merge() {
+        let paired = CREDENTIALS_HERD.replace(
+            "merge = false\nmerge_guard = \"credentials\"",
+            "merge = true\nmerge_guard = \"credentials\"\nunix_sockets = \"all\"",
+        );
+        let (_dir, paths) = herds(&paired);
+        let refusals = [
+            set(&paths, "h", "lead.merge", "false").unwrap_err(),
+            unset(&paths, "h", "lead.merge").unwrap_err(),
+        ];
+        for err in refusals {
+            let err = format!("{err:#}");
+            assert!(
+                err.contains(
+                    "make the edit leave lead.merge = true, or only one of lead.unix_sockets = \
+                     \"all\" and lead.merge_guard = \"credentials\""
+                ),
+                "{err}"
+            );
+            assert_eq!(text(&paths), paired);
+        }
+    }
+
+    #[test]
+    fn an_unrelated_set_on_an_already_invalid_credentials_herd_gives_the_files_fix() {
+        let paired = CREDENTIALS_HERD.replace(
+            "merge_guard = \"credentials\"",
+            "merge_guard = \"credentials\"\nunix_sockets = \"all\"",
+        );
+        let unrequired = CREDENTIALS_HERD.replace("\n[worker]\nsandbox = \"require\"\n", "");
+        for (file, fix) in [
+            (paired, "run loopherd herd unset h lead.unix_sockets"),
+            (
+                unrequired,
+                "run loopherd herd set h worker.sandbox '\"require\"'",
+            ),
+        ] {
+            let (_dir, paths) = herds(&file);
+            let err = format!(
+                "{:#}",
+                set(&paths, "h", "lead.prompt", "\"x {herd}\"").unwrap_err()
+            );
+            assert!(err.contains(fix), "{err}");
+            assert!(!err.contains("make the edit"), "{err}");
+            assert_eq!(text(&paths), file);
+        }
     }
 
     #[test]

@@ -1243,7 +1243,8 @@ fn checked(file: &Path, paths: &Paths) -> std::result::Result<HerdFile, String> 
 enum Fix {
     /// Commands that edit the file as it stands.
     Commands,
-    /// What the edit must keep, for `herd set` and `herd unset`, which leave the file unchanged.
+    /// What the edit must leave, for a `herd set` or `herd unset` of a valid
+    /// file, which a refusal leaves unchanged.
     Edit,
 }
 
@@ -1299,7 +1300,8 @@ fn workers_refusal(herd: &str, sandbox: WorkerSandbox, fix: Fix) -> String {
     match fix {
         Fix::Commands => credentials_with_workers_unrequired(herd, sandbox),
         Fix::Edit => format!(
-            "{}; keep worker.sandbox = \"require\" while lead.merge_guard is \"credentials\"",
+            "{}; make the edit leave lead.merge = true, or worker.sandbox = \"require\" while \
+             lead.merge_guard is \"credentials\"",
             workers_unrequired(sandbox)
         ),
     }
@@ -1309,8 +1311,8 @@ fn sockets_refusal(herd: &str, table: &str, fix: Fix) -> String {
     match fix {
         Fix::Commands => credentials_with_sockets(herd, table),
         Fix::Edit => format!(
-            "{SOCKETS_ACT_AS_YOU}; keep {table}.unix_sockets = \"all\" or lead.merge_guard = \
-             \"credentials\", not both"
+            "{SOCKETS_ACT_AS_YOU}; make the edit leave lead.merge = true, or only one of \
+             {table}.unix_sockets = \"all\" and lead.merge_guard = \"credentials\""
         ),
     }
 }
