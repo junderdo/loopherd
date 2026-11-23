@@ -890,7 +890,7 @@ impl BrokersOwn {
     fn of(install: &Install) -> BrokersOwn {
         let (path, on_path) = match install.on_path.as_ref().map(|p| p.canonicalize()) {
             Some(Ok(path)) => (path, true),
-            _ => (install.running.clone(), false),
+            _ => (canonical(&install.running), false),
         };
         BrokersOwn {
             path,
@@ -903,9 +903,18 @@ impl BrokersOwn {
     fn runs(&self, recorded: &crate::broker::Binary) -> bool {
         match crate::broker::FileId::of(&self.path) {
             Some(file) => recorded.file == file,
-            None => recorded.path == self.path,
+            None => self.is_at(&recorded.path),
         }
     }
+
+    fn is_at(&self, path: &Path) -> bool {
+        canonical(path) == self.path
+    }
+}
+
+/// `path` with links resolved, or as given when it no longer exists.
+fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 impl std::fmt::Display for BrokersOwn {
@@ -953,7 +962,7 @@ fn broker_check(paths: &Paths, lead: &str, own: &BrokersOwn) -> Option<Check> {
     }
     let runs = match recorded_after_moving(paths, lead, own) {
         Some(recorded) if own.runs(&recorded) => return None,
-        Some(recorded) if recorded.path == own.path => format!(
+        Some(recorded) if own.is_at(&recorded.path) => format!(
             "an earlier build of {} (loopherd {})",
             own.path.display(),
             recorded.version
@@ -2707,18 +2716,26 @@ mod tests {
         let version = env!("LOOPHERD_VERSION");
         let meta = std::fs::metadata(&on_path).unwrap();
         let (dev, ino) = (meta.dev(), meta.ino());
-        let on_path = on_path.display();
+        let linked_bin = m.dir.path().join("linked-bin");
+        std::os::unix::fs::symlink(on_path.parent().unwrap(), &linked_bin).unwrap();
+        let linked = linked_bin.join("loopherd");
         lock(
             "lead-new",
-            format!("version {version}\nbinary {on_path}\nfile {dev} {ino}\n"),
+            format!(
+                "version {version}\nbinary {}\nfile {dev} {ino}\n",
+                on_path.display()
+            ),
         );
         lock(
             "lead-rebuilt",
             format!(
-                "version {version}\nbinary {on_path}\nfile {dev} {}\n",
+                "version {version}\nbinary {}\nfile {dev} {}\n",
+                linked.display(),
                 ino + 1
             ),
         );
+        let on_path = on_path.canonicalize().unwrap();
+        let on_path = on_path.display();
         lock(
             "lead-other",
             "version 0.0.1 (abc1234)\nbinary /old/loopherd\nfile 1 2\n".into(),
