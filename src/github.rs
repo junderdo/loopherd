@@ -23,6 +23,14 @@ pub struct Pr {
     pub url: String,
 }
 
+/// A pull request merged into the default branch, with its head branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Merged {
+    pub number: u64,
+    pub url: String,
+    pub head: String,
+}
+
 /// What GitHub said about a branch's pull requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrLookup {
@@ -48,7 +56,7 @@ pub trait Merges {
 
     /// The pull requests merged into `branch` of `repo`'s GitHub repo at or
     /// after `since`, an RFC 3339 time, most recently updated first.
-    fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Pr>>;
+    fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Merged>>;
 }
 
 /// Asks GitHub through the `gh` program.
@@ -127,7 +135,7 @@ impl Merges for GhCli {
         Ok(self.answer(repo, &view)?.trim().to_string())
     }
 
-    fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Pr>> {
+    fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Merged>> {
         let full = full_name(repo)?;
         let search = format!("merged:>={since} sort:updated-desc");
         let list = [
@@ -144,15 +152,16 @@ impl Merges for GhCli {
             "--limit",
             &MERGED_LIMIT.to_string(),
             "--json",
-            "number,url",
+            "number,url,headRefName",
         ];
-        let prs: Vec<RawPr> =
+        let prs: Vec<RawMerged> =
             serde_json::from_str(&self.answer(repo, &list)?).context("read gh pr list's JSON")?;
         Ok(prs
             .into_iter()
-            .map(|pr| Pr {
+            .map(|pr| Merged {
                 number: pr.number,
                 url: pr.url,
+                head: pr.head_ref_name,
             })
             .collect())
     }
@@ -390,6 +399,14 @@ struct RawPr {
     url: String,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawMerged {
+    number: u64,
+    url: String,
+    head_ref_name: String,
+}
+
 #[cfg(test)]
 pub mod fake {
     use super::*;
@@ -404,7 +421,7 @@ pub mod fake {
     }
 
     /// `repo`'s pull requests merged into `main`, each with its RFC 3339
-    /// merge time, counting the lookups asked of it.
+    /// merge time and head branch `pr-<number>`, counting the lookups asked of it.
     pub struct FakeMerges {
         pub repo: PathBuf,
         pub merged: std::cell::RefCell<Vec<(&'static str, u64)>>,
@@ -441,16 +458,17 @@ pub mod fake {
             Ok("main".into())
         }
 
-        fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Pr>> {
+        fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Merged>> {
             self.known(repo)?;
             assert_eq!(branch, "main");
             let since = humantime::parse_rfc3339(since)?;
             let mut prs = vec![];
             for (at, number) in self.merged.borrow().iter() {
                 if humantime::parse_rfc3339(at)? >= since {
-                    prs.push(Pr {
+                    prs.push(Merged {
                         number: *number,
                         url: format!("https://github.com/o/r/pull/{number}"),
+                        head: format!("pr-{number}"),
                     });
                 }
             }
@@ -593,7 +611,8 @@ mod tests {
 
     #[test]
     fn asks_for_prs_merged_into_the_default_branch_since_a_time() {
-        let listed = r#"[{"number":7,"url":"https://github.com/o/r/pull/7"}]"#;
+        let listed =
+            r#"[{"number":7,"url":"https://github.com/o/r/pull/7","headRefName":"feat/x"}]"#;
         let (dir, gh) = fake_gh_merges("git@github.com:o/r.git", listed);
 
         let branch = gh.default_branch(dir.path()).unwrap();
@@ -601,16 +620,17 @@ mod tests {
 
         assert_eq!(
             merged,
-            [Pr {
+            [Merged {
                 number: 7,
-                url: "https://github.com/o/r/pull/7".into()
+                url: "https://github.com/o/r/pull/7".into(),
+                head: "feat/x".into(),
             }]
         );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("args")).unwrap(),
             "repo view github.com/o/r --json defaultBranchRef --jq .defaultBranchRef.name\n\
              pr list -R github.com/o/r --state merged --base main \
-             --search merged:>=2026-11-01T00:00:00Z sort:updated-desc --limit 100 --json number,url\n"
+             --search merged:>=2026-11-01T00:00:00Z sort:updated-desc --limit 100 --json number,url,headRefName\n"
         );
     }
 

@@ -152,6 +152,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D137](decisions/D137.md) | A session's context window comes from its transcript's `message.model` through a built-in table (4.7+ 1M, older 200K); `context_window` in config.toml overrides it; an unknown model falls back to 200K with one note per session; `setup` stops asking for the window. |
 | [D138](decisions/D138.md) | `view.layout` (`side-by-side` default, or `stacked`) places the view and the shepherd in a tab for both the `view-beside-shepherd` action and `S`; the view takes 40%; left and above come from a split then `pane swap`; a malformed value falls back with a note. |
 | [D139](decisions/D139.md) | `v` in the view re-docks the live shepherd's pane, when it shares the view's tab, to the other `view.layout` and saves it; herdr won't move a pane within its tab, so it leaves through a tab of its own and comes back with `--split`/`--ratio`. |
+| [D140](decisions/D140.md) | An open attended member holds off neither drained line; merge alerts skip its PR (by head branch); `retire --close` returns focus by the pane it closes; startup revive skips it only after a pane, tab or workspace close, which a `gone` now records, not a pane exit or herdr losing it. Amends D112, D116. |
 
 ## Emerging model
 
