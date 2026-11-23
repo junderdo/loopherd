@@ -536,30 +536,9 @@ fn a_release_without_extras_still_installs_and_says_so() {
 #[test]
 fn without_a_terminal_installed_extras_are_shown_as_installed() {
     let release = Release::new("Linux", "x86_64");
-    for name in AGENTS {
-        fs::create_dir_all(release.agents_dir()).unwrap();
-        fs::copy(
-            format!("{REPO}/agents/{name}.md"),
-            release.agents_dir().join(format!("{name}.md")),
-        )
-        .unwrap();
-    }
-    executable(
-        &release.fake_bin.join("claude"),
-        "#!/bin/sh\n[ \"$*\" != 'plugin list --json' ] || echo '[{\"id\":\"mattpocock-skills@claude-plugins-official\",\"scope\":\"user\"}]'\n",
-    );
-    let manifest = fs::read_to_string(format!("{REPO}/herdr-plugin/herdr-plugin.toml")).unwrap();
-    let version = manifest
-        .lines()
-        .find_map(|line| line.strip_prefix("version = \""))
-        .unwrap()
-        .trim_end_matches('"');
-    executable(
-        &release.fake_bin.join("herdr"),
-        format!(
-            "#!/bin/sh\n[ \"$1 $2\" = 'plugin list' ] || exit 1\necho '{{\"result\":{{\"plugins\":[{{\"plugin_id\":\"loopherd\",\"version\":\"{version}\",\"source\":{{\"kind\":\"github\"}},\"plugin_root\":\"/x\"}}]}}}}'\n"
-        ),
-    );
+    release.agents_and_skills_installed();
+    let version = shipped_plugin_version();
+    release.herdr_lists_plugin(&version, "github");
 
     let out = release.install(&[]);
     let said = text(&out);
@@ -574,6 +553,17 @@ fn without_a_terminal_installed_extras_are_shown_as_installed() {
     ] {
         assert!(said.contains(&line), "{line}\n---\n{said}");
     }
+}
+
+/// The herdr plugin version a release ships, which is loopherd's own.
+fn shipped_plugin_version() -> String {
+    let manifest = fs::read_to_string(format!("{REPO}/herdr-plugin/herdr-plugin.toml")).unwrap();
+    manifest
+        .lines()
+        .find_map(|line| line.strip_prefix("version = \""))
+        .unwrap()
+        .trim_end_matches('"')
+        .to_string()
 }
 
 #[test]
@@ -610,4 +600,142 @@ fn without_jq_the_extras_are_skipped_naming_it_and_the_install_succeeds() {
     assert!(out.status.success(), "{said}");
     assert!(said.contains("skipped the extras: they need jq"), "{said}");
     assert!(release.installed().exists());
+}
+
+impl Release {
+    /// The agent types and the skills plugin already installed, so neither is asked about.
+    fn agents_and_skills_installed(&self) {
+        fs::create_dir_all(self.agents_dir()).unwrap();
+        for name in AGENTS {
+            fs::copy(
+                format!("{REPO}/agents/{name}.md"),
+                self.agents_dir().join(format!("{name}.md")),
+            )
+            .unwrap();
+        }
+        executable(
+            &self.fake_bin.join("claude"),
+            "#!/bin/sh\n[ \"$*\" != 'plugin list --json' ] || echo '[{\"id\":\"mattpocock-skills@claude-plugins-official\",\"scope\":\"user\"}]'\n",
+        );
+    }
+
+    /// A `herdr` on PATH that logs its arguments and lists loopherd's plugin
+    /// at `version` from `kind` ("github" or "local").
+    fn herdr_lists_plugin(&self, version: &str, kind: &str) {
+        executable(
+            &self.fake_bin.join("herdr"),
+            format!(
+                "#!/bin/sh\necho \"herdr $*\" >> '{log}'\n[ \"$1 $2\" = 'plugin list' ] || exit 0\necho '{{\"result\":{{\"plugins\":[{{\"plugin_id\":\"loopherd\",\"version\":\"{version}\",\"source\":{{\"kind\":\"{kind}\"}},\"plugin_root\":\"/plugins/loopherd\"}}]}}}}'\n",
+                log = self.herdr_log().display(),
+            ),
+        );
+    }
+
+    fn herdr_log(&self) -> PathBuf {
+        self.dir.path().join("herdr-log")
+    }
+
+    fn herdr_changes(&self) -> Vec<String> {
+        fs::read_to_string(self.herdr_log())
+            .unwrap_or_default()
+            .lines()
+            .filter(|call| !call.starts_with("herdr plugin list"))
+            .map(String::from)
+            .collect()
+    }
+}
+
+#[test]
+fn without_a_terminal_an_older_herdr_plugin_is_skipped_naming_the_flag_that_updates_it() {
+    let release = Release::new("Linux", "x86_64");
+    release.herdr_lists_plugin("0.1.1", "github");
+
+    let out = release.install(&[]);
+
+    let said = text(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains(
+            "skipped loopherd's herdr plugin 0.1.1 (no terminal); add --with-herdr-plugin to update it"
+        ),
+        "{said}"
+    );
+    assert_eq!(release.herdr_changes(), Vec::<String>::new());
+}
+
+#[test]
+fn on_a_terminal_yes_updates_an_older_herdr_plugin() {
+    let release = Release::new("Linux", "x86_64");
+    release.agents_and_skills_installed();
+    release.herdr_lists_plugin("0.1.1", "github");
+
+    let Some(said) = release.install_on_terminal(&["--no-splash"], &[], "y\n") else {
+        eprintln!("skipped: needs util-linux script");
+        return;
+    };
+
+    let ours = shipped_plugin_version();
+    assert!(
+        said.contains(&format!(
+            "Update loopherd's herdr plugin (installed 0.1.1, this checkout {ours})? [y/N]"
+        )),
+        "{said}"
+    );
+    assert_eq!(
+        release.herdr_changes(),
+        vec!["herdr plugin update loopherd".to_string()],
+        "{said}"
+    );
+}
+
+#[test]
+fn on_a_terminal_an_older_herdr_plugin_is_left_by_default() {
+    let release = Release::new("Linux", "x86_64");
+    release.agents_and_skills_installed();
+    release.herdr_lists_plugin("0.1.1", "github");
+
+    let Some(said) = release.install_on_terminal(&["--no-splash"], &[], "\n") else {
+        eprintln!("skipped: needs util-linux script");
+        return;
+    };
+
+    assert!(said.contains("skipped loopherd's herdr plugin"), "{said}");
+    assert_eq!(release.herdr_changes(), Vec::<String>::new(), "{said}");
+}
+
+#[test]
+fn on_a_terminal_a_current_newer_or_linked_herdr_plugin_is_left_as_is() {
+    let ours = shipped_plugin_version();
+    for (version, kind, line) in [
+        (
+            ours.as_str(),
+            "github",
+            format!("loopherd's herdr plugin {ours} is already installed; left as is"),
+        ),
+        (
+            "999.0.0",
+            "github",
+            format!(
+                "loopherd's herdr plugin 999.0.0 is newer than this checkout's {ours}; left as is"
+            ),
+        ),
+        (
+            "0.1.1",
+            "local",
+            "loopherd's herdr plugin is linked from /plugins/loopherd; left as is".to_string(),
+        ),
+    ] {
+        let release = Release::new("Linux", "x86_64");
+        release.agents_and_skills_installed();
+        release.herdr_lists_plugin(version, kind);
+
+        let Some(said) = release.install_on_terminal(&["--no-splash"], &[], "y\n") else {
+            eprintln!("skipped: needs util-linux script");
+            return;
+        };
+
+        assert!(said.contains(&line), "{line}\n---\n{said}");
+        assert!(!said.contains("Update loopherd's herdr plugin"), "{said}");
+        assert_eq!(release.herdr_changes(), Vec::<String>::new(), "{said}");
+    }
 }
