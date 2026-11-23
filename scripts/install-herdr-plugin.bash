@@ -45,7 +45,11 @@ offer_herdr_plugin() {
     return 0
   fi
   if [[ -n "$herdr_plugin_no_terminal" ]]; then
-    herdr_plugin_skip
+    if [[ -n "$version" ]]; then
+      echo "skipped loopherd's herdr plugin $version (no terminal); add --with-herdr-plugin to update it"
+    else
+      herdr_plugin_skip
+    fi
     return 0
   fi
   local verb=install question="Install loopherd's herdr plugin ($herdr_plugin_source)?"
