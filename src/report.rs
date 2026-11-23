@@ -288,7 +288,7 @@ pub fn append_unless(
     already: impl Fn(&[Entry]) -> bool,
 ) -> Result<bool> {
     let (path, mut file) = open_mailbox(dir, name)?;
-    let (bytes, _) = complete_lines(dir, name)?;
+    let bytes = whole_mailbox(dir, name)?;
     let mut found = vec![];
     parse(dir, name, &bytes, &mut found, &mut vec![]);
     let entries: Vec<Entry> = found.into_iter().map(|(_, e)| e).collect();
@@ -561,7 +561,7 @@ pub fn since_handoff(dir: &Path, name: &str) -> Result<SinceHandoff> {
     if !has_mailbox(dir, name) {
         return Ok(SinceHandoff::None);
     }
-    let (bytes, _) = complete_lines(dir, name)?;
+    let bytes = whole_mailbox(dir, name)?;
     let mut entries = vec![];
     parse(dir, name, &bytes, &mut entries, &mut vec![]);
     // An older release may still append to the flat file, which reads first.
@@ -672,6 +672,15 @@ fn complete_lines(dir: &Path, name: &str) -> Result<(Vec<u8>, Option<String>)> {
     let (segments, warning) = segments(dir, name)?;
     let bytes = segments.into_iter().flat_map(|s| s.bytes).collect();
     Ok((bytes, warning))
+}
+
+/// The mailbox's complete lines for a reader that decides on them, so an
+/// unreadable flat file is an error rather than a gap.
+fn whole_mailbox(dir: &Path, name: &str) -> Result<Vec<u8>> {
+    match complete_lines(dir, name)? {
+        (_, Some(unreadable)) => Err(anyhow!(unreadable)),
+        (bytes, None) => Ok(bytes),
+    }
 }
 
 /// One file of a mailbox, cut at its last complete line, under its own
@@ -1700,6 +1709,28 @@ mod tests {
         let (history, warnings) = history(dir.path(), "lh-1").unwrap();
         assert_eq!((history.len(), warnings.len()), (2, 1), "{warnings:?}");
         assert_eq!(read_stops(dir.path(), &["lh-1".to_string()]).len(), 1);
+    }
+
+    #[test]
+    fn an_unreadable_flat_mailbox_fails_the_reads_that_decide_on_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let flat = flat_mailbox_path(dir.path(), "lh-1");
+        std::fs::create_dir(&flat).unwrap();
+        put(
+            dir.path(),
+            "lh-1",
+            "2026-11-01T09:00:00Z",
+            stop(0, Tally::Known(0), None),
+        );
+        let entry = Entry::new(at("2026-11-01T10:00:00Z"), Body::report(Kind::Note, "once"));
+
+        let appended = append_unless(dir.path(), "lh-1", &entry, |_| false);
+        let handoff = since_handoff(dir.path(), "lh-1");
+
+        let shown = flat.display().to_string();
+        assert!(format!("{:#}", appended.unwrap_err()).contains(&shown));
+        assert!(format!("{:#}", handoff.unwrap_err()).contains(&shown));
+        assert_eq!(history(dir.path(), "lh-1").unwrap().0.len(), 1);
     }
 
     #[test]
