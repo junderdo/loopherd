@@ -487,7 +487,8 @@ with the human's credentials, so a merge the human didn't make shows up.
 The lead's first lookup only marks where its window starts, so no earlier
 merge is sent; later ones run at most once a minute across its watches,
 only while `kinds` holds `merge_alert`, and a re-armed watch catches up on
-merges it missed. A lookup that fails warns on the watch's stderr. Not
+merges it missed. An attended member's merge sends none: its branch is
+skipped, and the watch prints `<name> merged` (D138). A lookup that fails warns on the watch's stderr. Not
 covered: pushes straight to the branch, and merges after the lead's watch
 stops for good (a drained lead). A `credentials` lead can't merge, so it
 gets no alert.
@@ -939,7 +940,8 @@ What differs from the shepherd:
   --abort`, and check merges with `gh pr view <n> --json state`. With
   `merge` off, your watch also tells the human of every merge to the repo's
   default branch (`[lead] merge_guard = "hook"`, the default), so expect
-  that ping for merges the human makes. Grilling is always the human's.
+  that ping for merges the human makes, but not for an attended member's
+  (D138). Grilling is always the human's.
 - **Attended members** are the human's (D112). Your broker refuses `tell`,
   `prompt`, `restart`, `retire` and `release` on one, and `add` of an
   attended template; your watch shows only its `merged` and `gone`. After

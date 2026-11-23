@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::github::{self, Merges};
 use crate::herd::{self, Paths};
+use crate::ledger::Ledger;
 use crate::lock::Lock;
 use crate::notify::{self, Kind, Waiting};
 use crate::report::{self, Body};
@@ -80,16 +81,18 @@ impl MergeAlerts {
     /// over [`STALE_AFTER`] without a successful one, the merges not yet sent
     /// come as one summary. On a `waking` round a lookup waits, up to
     /// [`WAKES_HOLD_OFF`]. Repeats are left to `notify::send`'s marks. A
-    /// failure warns once a streak.
+    /// merge from the branch of an attended member of the herd in `ledger`,
+    /// retired or not, sends nothing. A failure warns once a streak.
     pub fn poll(
         &mut self,
         paths: &Paths,
+        ledger: &dyn Ledger,
         merges: &dyn Merges,
         now: SystemTime,
         waking: bool,
         warn: &mut dyn FnMut(&str),
     ) -> Vec<Waiting> {
-        match self.try_poll(paths, merges, now, waking) {
+        match self.try_poll(paths, ledger, merges, now, waking) {
             Ok(Some(found)) => {
                 self.failing = false;
                 found
@@ -103,6 +106,7 @@ impl MergeAlerts {
     fn try_poll(
         &mut self,
         paths: &Paths,
+        ledger: &dyn Ledger,
         merges: &dyn Merges,
         now: SystemTime,
         waking: bool,
@@ -146,17 +150,27 @@ impl MergeAlerts {
             state.branch = Some(branch.clone());
             merges.merged_since(&repo, &branch, &seconds(since))
         });
-        let prs = match found {
-            Ok(prs) => prs,
+        let entries = ledger.entries().context("ledger");
+        let found = found.and_then(|prs| Ok((prs, entries?)));
+        let (prs, entries) = match found {
+            Ok(found) => found,
             Err(e) => {
                 self.save(&state)?;
                 return Err(e);
             }
         };
+        let total = prs.len();
+        let attended = |head: &str| {
+            entries.values().any(|e| {
+                e.attended.is_some()
+                    && e.herd.as_deref() == Some(self.herd.as_str())
+                    && e.branch.as_deref() == Some(head)
+            })
+        };
+        let prs: Vec<_> = prs.into_iter().filter(|pr| !attended(&pr.head)).collect();
         let stale = now
             .duration_since(since)
             .is_ok_and(|gap| gap > SEARCH_LAG + STALE_AFTER);
-        let total = prs.len();
         state.since = since.max(now - SEARCH_LAG);
         self.save(&state)?;
         if !stale {
@@ -320,8 +334,9 @@ mod tests {
     use std::thread;
 
     use super::*;
-    use crate::github::Pr;
+    use crate::github::Merged;
     use crate::github::fake::FakeMerges;
+    use crate::ledger::MemLedger;
 
     const CREATED: &str = "2026-11-01T08:00:00Z";
     const FIRST: &str = "2026-11-01T09:00:00Z";
@@ -359,11 +374,14 @@ mod tests {
         /// What one watch's lookup at `at` sends and warns.
         fn poll(&self, merges: &dyn Merges, at: &str) -> (Vec<String>, Vec<String>) {
             let mut warned = vec![];
-            let sent =
-                self.watch()
-                    .poll(&self.paths, merges, parse(at).unwrap(), false, &mut |w| {
-                        warned.push(w.to_string())
-                    });
+            let sent = self.watch().poll(
+                &self.paths,
+                &MemLedger::default(),
+                merges,
+                parse(at).unwrap(),
+                false,
+                &mut |w| warned.push(w.to_string()),
+            );
             (sent.into_iter().map(|w| w.text).collect(), warned)
         }
     }
@@ -380,7 +398,7 @@ mod tests {
             self.0.default_branch(repo)
         }
 
-        fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Pr>> {
+        fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Merged>> {
             let prs = self.0.merged_since(repo, branch, since);
             self.1.wait();
             prs

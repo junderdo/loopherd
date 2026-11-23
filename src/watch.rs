@@ -466,7 +466,8 @@ pub fn watch(
         ) {
             checks.merges_due = false;
             let waking = !lines.is_empty();
-            let merged = (checks.alerts).poll(checks.paths, merges, clock.now(), waking, warn);
+            let merged =
+                (checks.alerts).poll(checks.paths, ledger, merges, clock.now(), waking, warn);
             if !merged.is_empty() {
                 notify_own(&merged);
             }
@@ -4046,6 +4047,7 @@ mod tests {
             (
                 "2026-11-01T09:20:00Z",
                 Body::Gone {
+                    pane: None,
                     tab: None,
                     workspace: None,
                 },
