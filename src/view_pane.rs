@@ -1,11 +1,12 @@
 //! Opening the herd view in a pane beside the shepherd's, the one its
-//! handoff record names, rather than in the plugin's popup.
+//! handoff record names, rather than in the plugin's popup, on the side
+//! `view.layout` picks.
 
 use std::path::Path;
 
 use anyhow::{Result, bail};
 
-use crate::herdr::{Herdr, Pane, Placement};
+use crate::herdr::{Herdr, Pane, Placement, Side};
 use crate::ledger::Process;
 use crate::process::{self, Procs};
 use crate::shepherd_resume::{self, Place};
@@ -15,8 +16,59 @@ const VIEW: &str = "view";
 const VIEW_TITLE: &str = "loopherd view";
 /// Set on a view opened anywhere but beside the shepherd, saying why.
 pub const NOTE: &str = "LOOPHERD_VIEW_NOTE";
-/// The view's share of the width it splits off.
-const SHARE: f64 = 0.4;
+/// The view's share of the split it makes or is made beside.
+pub const SHARE: f64 = 0.4;
+
+/// How the view and the shepherd share a tab, set as `view.layout`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Layout {
+    /// The shepherd left, the view right.
+    #[default]
+    SideBySide,
+    /// The view on top, the shepherd below.
+    Stacked,
+}
+
+impl Layout {
+    const ALL: [Layout; 2] = [Layout::SideBySide, Layout::Stacked];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Layout::SideBySide => "side-by-side",
+            Layout::Stacked => "stacked",
+        }
+    }
+
+    /// Where the view goes relative to the shepherd's pane.
+    fn view_side(self) -> Side {
+        match self {
+            Layout::SideBySide => Side::Right,
+            Layout::Stacked => Side::Above,
+        }
+    }
+
+    /// Where a shepherd goes relative to the view's pane.
+    pub fn shepherd_side(self) -> Side {
+        match self {
+            Layout::SideBySide => Side::Left,
+            Layout::Stacked => Side::Below,
+        }
+    }
+}
+
+impl std::str::FromStr for Layout {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Layout, String> {
+        Layout::ALL
+            .into_iter()
+            .find(|l| l.name() == name)
+            .ok_or_else(|| {
+                let names: Vec<_> = Layout::ALL.map(Layout::name).into();
+                format!("unknown layout {name:?}: name one of {}", names.join(", "))
+            })
+    }
+}
 
 #[derive(Debug, PartialEq)]
 pub enum Opened {
@@ -35,21 +87,24 @@ pub enum How {
     Focused { view: String },
 }
 
-/// Opens the view right of the shepherd's recorded pane in `state`, else
-/// right of `current`, the pane the action ran from, else in the popup.
+/// Opens the view beside the shepherd's recorded pane in `state`, else
+/// beside `current`, the pane the action ran from, else in the popup;
+/// `layout` says which side.
 pub fn open(
     herdr: &dyn Herdr,
     procs: &dyn Procs,
     state: &Path,
     current: Option<&str>,
+    layout: Layout,
 ) -> Result<Opened> {
+    let side = layout.view_side();
     let why = match shepherd_resume::recorded_place_and_shell(state) {
         None => "no shepherd recorded yet; its first handoff records its pane".to_string(),
         Some((place, _)) if herdr.socket().as_ref() != Some(&place.socket) => format!(
             "the recorded shepherd ({}) is in another herdr session",
             place.pane
         ),
-        Some((place, shell)) => match beside_shepherd(herdr, procs, &place, shell) {
+        Some((place, shell)) => match beside_shepherd(herdr, procs, &place, shell, side) {
             Ok(how) => {
                 return Ok(Opened::BesideShepherd {
                     pane: place.pane,
@@ -60,7 +115,7 @@ pub fn open(
         },
     };
     let why = match current {
-        Some(pane) => match beside(herdr, pane, &[(NOTE, &why)]) {
+        Some(pane) => match beside(herdr, pane, side, &[(NOTE, &why)]) {
             Ok(how) => {
                 return Ok(Opened::Beside {
                     pane: pane.into(),
@@ -84,6 +139,7 @@ fn beside_shepherd(
     procs: &dyn Procs,
     place: &Place,
     recorded_shell: Option<Process>,
+    side: Side,
 ) -> Result<How> {
     let Some(shell) = herdr.shell_pid(&place.pane)? else {
         bail!("its pane has no shell yet, as while herdr resumes its agent");
@@ -117,12 +173,12 @@ fn beside_shepherd(
             }
         }
     }
-    beside(herdr, &place.pane, &[])
+    beside(herdr, &place.pane, side, &[])
 }
 
-/// Focuses a view already in `pane`'s tab, else splits one right of it,
-/// focused when the human isn't looking at that tab.
-fn beside(herdr: &dyn Herdr, pane: &str, env: &[(&str, &str)]) -> Result<How> {
+/// Focuses a view already in `pane`'s tab, else splits one off it on
+/// `side`, focused when the human isn't looking at that tab.
+fn beside(herdr: &dyn Herdr, pane: &str, side: Side, env: &[(&str, &str)]) -> Result<How> {
     let target = herdr.pane(pane)?;
     // A shell pane can carry the view's name; herdr refuses to plugin-focus it.
     if let Some(view) = views_in_tab_of(herdr, &target)
@@ -137,7 +193,13 @@ fn beside(herdr: &dyn Herdr, pane: &str, env: &[(&str, &str)]) -> Result<How> {
         .ok()
         .flatten()
         .is_some_and(|tab| tab != target.tab_id);
-    herdr.open_plugin_pane(VIEW, &right_of(pane, off_screen), env)?;
+    let placement = Placement::Split {
+        pane: pane.into(),
+        side,
+        share: SHARE,
+        focus: off_screen,
+    };
+    herdr.open_plugin_pane(VIEW, &placement, env)?;
     Ok(match off_screen {
         true => How::OpenedFocused,
         false => How::Opened,
@@ -151,14 +213,6 @@ fn views_in_tab_of(herdr: &dyn Herdr, target: &Pane) -> Vec<String> {
         .filter(|p| p.tab_id == target.tab_id && p.label.as_deref() == Some(VIEW_TITLE))
         .map(|p| p.id)
         .collect()
-}
-
-fn right_of(pane: &str, focus: bool) -> Placement {
-    Placement::RightOf {
-        pane: pane.into(),
-        share: SHARE,
-        focus,
-    }
 }
 
 #[cfg(test)]
@@ -212,6 +266,15 @@ mod tests {
         why
     }
 
+    fn placed(pane: &str, side: Side, focus: bool) -> Placement {
+        Placement::Split {
+            pane: pane.into(),
+            side,
+            share: 0.4,
+            focus,
+        }
+    }
+
     fn beside_current_why(opened: Opened, current: &str) -> String {
         let Opened::Beside { pane, why, .. } = opened else {
             panic!("{opened:?}");
@@ -227,7 +290,14 @@ mod tests {
         let current = herdr.split("w1:t1", Path::new("/src"));
         record_shepherd(state.path(), &shepherd, FAKE_SOCKET);
 
-        let opened = open(&herdr, &FakeProcs::pane(), state.path(), Some(&current)).unwrap();
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            Some(&current),
+            Layout::SideBySide,
+        )
+        .unwrap();
 
         assert_eq!(
             opened,
@@ -238,7 +308,11 @@ mod tests {
         );
         assert_eq!(
             herdr.plugin_panes(),
-            [(VIEW.to_string(), right_of(&shepherd, false), vec![])]
+            [(
+                VIEW.to_string(),
+                placed(&shepherd, Side::Right, false),
+                vec![]
+            )]
         );
     }
 
@@ -247,10 +321,24 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let (herdr, shepherd) = herdr_with_tab();
         record_shepherd(state.path(), &shepherd, FAKE_SOCKET);
-        open(&herdr, &FakeProcs::pane(), state.path(), None).unwrap();
+        open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            None,
+            Layout::SideBySide,
+        )
+        .unwrap();
         let view = herdr.plugin_pane_ids()[0].clone();
 
-        let opened = open(&herdr, &FakeProcs::pane(), state.path(), None).unwrap();
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            None,
+            Layout::SideBySide,
+        )
+        .unwrap();
 
         assert_eq!(
             opened,
@@ -267,10 +355,24 @@ mod tests {
     fn run_from_its_own_view_the_action_focuses_that_view() {
         let state = tempfile::tempdir().unwrap();
         let (herdr, current) = herdr_with_tab();
-        open(&herdr, &FakeProcs::pane(), state.path(), Some(&current)).unwrap();
+        open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            Some(&current),
+            Layout::SideBySide,
+        )
+        .unwrap();
         let view = herdr.plugin_pane_ids()[0].clone();
 
-        let opened = open(&herdr, &FakeProcs::pane(), state.path(), Some(&view)).unwrap();
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            Some(&view),
+            Layout::SideBySide,
+        )
+        .unwrap();
 
         let Opened::Beside { how, .. } = opened else {
             panic!("{opened:?}");
@@ -284,10 +386,24 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let (herdr, shepherd) = herdr_with_tab();
         let other = herdr.add_tab("w1", "other", Path::new("/src"), true);
-        open(&herdr, &FakeProcs::pane(), state.path(), Some(&other)).unwrap();
+        open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            Some(&other),
+            Layout::SideBySide,
+        )
+        .unwrap();
         record_shepherd(state.path(), &shepherd, FAKE_SOCKET);
 
-        let opened = open(&herdr, &FakeProcs::pane(), state.path(), None).unwrap();
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            None,
+            Layout::SideBySide,
+        )
+        .unwrap();
 
         assert_eq!(
             opened,
@@ -307,7 +423,14 @@ mod tests {
         herdr.show_tab_of(&elsewhere);
         record_shepherd(state.path(), &shepherd, FAKE_SOCKET);
 
-        let opened = open(&herdr, &FakeProcs::pane(), state.path(), None).unwrap();
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            None,
+            Layout::SideBySide,
+        )
+        .unwrap();
 
         assert_eq!(
             opened,
@@ -316,7 +439,10 @@ mod tests {
                 how: How::OpenedFocused
             }
         );
-        assert_eq!(herdr.plugin_panes()[0].1, right_of(&shepherd, true));
+        assert_eq!(
+            herdr.plugin_panes()[0].1,
+            placed(&shepherd, Side::Right, true)
+        );
     }
 
     #[test]
@@ -342,10 +468,24 @@ mod tests {
         let decoy = herdr.split("w1:t1", Path::new("/src"));
         herdr.set_label(&decoy, VIEW_TITLE);
         record_shepherd(state.path(), &shepherd, FAKE_SOCKET);
-        open(&herdr, &FakeProcs::pane(), state.path(), None).unwrap();
+        open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            None,
+            Layout::SideBySide,
+        )
+        .unwrap();
         let view = herdr.plugin_pane_ids()[0].clone();
 
-        let opened = open(&herdr, &FakeProcs::pane(), state.path(), None).unwrap();
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            None,
+            Layout::SideBySide,
+        )
+        .unwrap();
 
         assert_eq!(
             opened,
@@ -365,7 +505,14 @@ mod tests {
         herdr.show_tab_of(&shepherd);
         record_shepherd(state.path(), &shepherd, FAKE_SOCKET);
 
-        let opened = open(&herdr, &FakeProcs::pane(), state.path(), None).unwrap();
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            None,
+            Layout::SideBySide,
+        )
+        .unwrap();
 
         assert_eq!(
             opened,
@@ -374,7 +521,10 @@ mod tests {
                 how: How::Opened
             }
         );
-        assert_eq!(herdr.plugin_panes()[0].1, right_of(&shepherd, false));
+        assert_eq!(
+            herdr.plugin_panes()[0].1,
+            placed(&shepherd, Side::Right, false)
+        );
         assert!(herdr.focused().is_empty());
     }
 
@@ -389,7 +539,14 @@ mod tests {
             .replace("\"used\": false", "\"used\": true");
         std::fs::write(&path, used).unwrap();
 
-        let opened = open(&herdr, &FakeProcs::pane(), state.path(), None).unwrap();
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            None,
+            Layout::SideBySide,
+        )
+        .unwrap();
 
         assert_eq!(
             opened,
@@ -405,11 +562,21 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let (herdr, current) = herdr_with_tab();
 
-        let opened = open(&herdr, &FakeProcs::pane(), state.path(), Some(&current)).unwrap();
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            Some(&current),
+            Layout::SideBySide,
+        )
+        .unwrap();
 
         let why = beside_current_why(opened, &current);
         assert!(why.contains("no shepherd recorded"), "{why}");
-        assert_eq!(herdr.plugin_panes()[0].1, right_of(&current, false));
+        assert_eq!(
+            herdr.plugin_panes()[0].1,
+            placed(&current, Side::Right, false)
+        );
         assert_eq!(note(&herdr), why);
     }
 
@@ -419,7 +586,14 @@ mod tests {
         let (herdr, current) = herdr_with_tab();
         record_shepherd(state.path(), "w1:p99", FAKE_SOCKET);
 
-        let opened = open(&herdr, &FakeProcs::pane(), state.path(), Some(&current)).unwrap();
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            Some(&current),
+            Layout::SideBySide,
+        )
+        .unwrap();
 
         let why = beside_current_why(opened, &current);
         assert!(why.contains("w1:p99 not found"), "{why}");
@@ -436,7 +610,14 @@ mod tests {
         let mut procs = FakeProcs::pane();
         procs.add(21, "/bin/bash", 10, 210);
 
-        let opened = open(&herdr, &procs, state.path(), Some(&current)).unwrap();
+        let opened = open(
+            &herdr,
+            &procs,
+            state.path(),
+            Some(&current),
+            Layout::SideBySide,
+        )
+        .unwrap();
 
         let why = beside_current_why(opened, &current);
         assert!(why.contains("its shell changed (pid 21"), "{why}");
@@ -458,7 +639,14 @@ mod tests {
             record_shepherd_with(state.path(), &shepherd, FAKE_SOCKET, shell);
 
             let restarted = FakeProcs::restarted_pane();
-            let opened = open(&herdr, &restarted, state.path(), Some(&current)).unwrap();
+            let opened = open(
+                &herdr,
+                &restarted,
+                state.path(),
+                Some(&current),
+                Layout::SideBySide,
+            )
+            .unwrap();
 
             let why = beside_current_why(opened, &current);
             assert!(why.contains(said), "{why}");
@@ -474,7 +662,7 @@ mod tests {
         resumed.add(10, "/usr/bin/herdr", 1, 100);
         resumed.add(20, "/bin/bash", 10, 200);
 
-        let opened = open(&herdr, &resumed, state.path(), None).unwrap();
+        let opened = open(&herdr, &resumed, state.path(), None, Layout::SideBySide).unwrap();
 
         assert_eq!(
             opened,
@@ -493,7 +681,14 @@ mod tests {
         herdr.malformed_agents = true;
         record_shepherd(state.path(), &shepherd, FAKE_SOCKET);
 
-        let opened = open(&herdr, &FakeProcs::pane(), state.path(), Some(&current)).unwrap();
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            Some(&current),
+            Layout::SideBySide,
+        )
+        .unwrap();
 
         let why = beside_current_why(opened, &current);
         assert!(
@@ -514,7 +709,14 @@ mod tests {
         quit.add(10, "/usr/bin/herdr", 1, 100);
         quit.add(20, "/bin/bash", 10, 200);
 
-        let opened = open(&herdr, &quit, state.path(), Some(&current)).unwrap();
+        let opened = open(
+            &herdr,
+            &quit,
+            state.path(),
+            Some(&current),
+            Layout::SideBySide,
+        )
+        .unwrap();
 
         let why = beside_current_why(opened, &current);
         assert!(why.contains("runs no agent"), "{why}");
@@ -531,7 +733,7 @@ mod tests {
         execed.add(10, "/usr/bin/herdr", 1, 100);
         execed.add(30, CLAUDE, 10, 300);
 
-        let opened = open(&herdr, &execed, state.path(), None).unwrap();
+        let opened = open(&herdr, &execed, state.path(), None, Layout::SideBySide).unwrap();
 
         assert_eq!(
             opened,
@@ -550,7 +752,14 @@ mod tests {
         herdr.set_shell_pid(&shepherd, None);
         record_shepherd(state.path(), &shepherd, FAKE_SOCKET);
 
-        let opened = open(&herdr, &FakeProcs::pane(), state.path(), Some(&current)).unwrap();
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            Some(&current),
+            Layout::SideBySide,
+        )
+        .unwrap();
 
         let why = beside_current_why(opened, &current);
         assert!(why.contains("has no shell"), "{why}");
@@ -564,7 +773,13 @@ mod tests {
             let state = tempfile::tempdir().unwrap();
             record_shepherd_with(state.path(), &shepherd, FAKE_SOCKET, shell);
 
-            let opened = open(&herdr, &FakeProcs::default(), state.path(), Some(&current));
+            let opened = open(
+                &herdr,
+                &FakeProcs::default(),
+                state.path(),
+                Some(&current),
+                Layout::SideBySide,
+            );
 
             let why = beside_current_why(opened.unwrap(), &current);
             assert!(why.contains("can't read"), "{why}");
@@ -577,7 +792,14 @@ mod tests {
         let (herdr, current) = herdr_with_tab();
         record_shepherd(state.path(), &current, "/run/other/herdr.sock");
 
-        let opened = open(&herdr, &FakeProcs::pane(), state.path(), Some(&current)).unwrap();
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            Some(&current),
+            Layout::SideBySide,
+        )
+        .unwrap();
 
         let why = beside_current_why(opened, &current);
         assert!(why.contains("another herdr session"), "{why}");
@@ -588,7 +810,14 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let herdr = FakeHerdr::new(&[("w1", "loopherd")]);
 
-        let opened = open(&herdr, &FakeProcs::pane(), state.path(), None).unwrap();
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            None,
+            Layout::SideBySide,
+        )
+        .unwrap();
 
         let Opened::Popup { why } = opened else {
             panic!("{opened:?}");
@@ -605,13 +834,188 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let herdr = FakeHerdr::new(&[("w1", "loopherd")]);
 
-        let opened = open(&herdr, &FakeProcs::pane(), state.path(), Some("w1:p77")).unwrap();
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            Some("w1:p77"),
+            Layout::SideBySide,
+        )
+        .unwrap();
 
         let Opened::Popup { why } = opened else {
             panic!("{opened:?}");
         };
         assert!(why.contains("no shepherd recorded"), "{why}");
         assert!(why.contains("w1:p77 not found"), "{why}");
+        assert_eq!(
+            herdr.popups(),
+            [(VIEW.to_string(), vec![(NOTE.to_string(), why)])]
+        );
+    }
+
+    #[test]
+    fn stacked_the_view_opens_above_the_recorded_shepherd_pane_leaving_focus_put() {
+        let state = tempfile::tempdir().unwrap();
+        let (herdr, shepherd) = herdr_with_tab();
+        herdr.show_tab_of(&shepherd);
+        record_shepherd(state.path(), &shepherd, FAKE_SOCKET);
+
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            None,
+            Layout::Stacked,
+        )
+        .unwrap();
+
+        assert_eq!(
+            opened,
+            Opened::BesideShepherd {
+                pane: shepherd.clone(),
+                how: How::Opened
+            }
+        );
+        assert_eq!(
+            herdr.plugin_panes(),
+            [(
+                VIEW.to_string(),
+                placed(&shepherd, Side::Above, false),
+                vec![]
+            )]
+        );
+        assert!(herdr.focused().is_empty());
+    }
+
+    #[test]
+    fn stacked_a_shepherd_off_screen_gets_its_view_opened_above_it_with_focus() {
+        let state = tempfile::tempdir().unwrap();
+        let (herdr, shepherd) = herdr_with_tab();
+        let elsewhere = herdr.add_tab("w1", "elsewhere", Path::new("/src"), true);
+        herdr.show_tab_of(&elsewhere);
+        record_shepherd(state.path(), &shepherd, FAKE_SOCKET);
+
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            None,
+            Layout::Stacked,
+        )
+        .unwrap();
+
+        assert_eq!(
+            opened,
+            Opened::BesideShepherd {
+                pane: shepherd.clone(),
+                how: How::OpenedFocused
+            }
+        );
+        assert_eq!(
+            herdr.plugin_panes()[0].1,
+            placed(&shepherd, Side::Above, true)
+        );
+    }
+
+    #[test]
+    fn stacked_a_second_open_focuses_the_view_already_above_the_shepherd() {
+        let state = tempfile::tempdir().unwrap();
+        let (herdr, shepherd) = herdr_with_tab();
+        record_shepherd(state.path(), &shepherd, FAKE_SOCKET);
+        open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            None,
+            Layout::Stacked,
+        )
+        .unwrap();
+        let view = herdr.plugin_pane_ids()[0].clone();
+
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            None,
+            Layout::Stacked,
+        )
+        .unwrap();
+
+        assert_eq!(
+            opened,
+            Opened::BesideShepherd {
+                pane: shepherd,
+                how: How::Focused { view: view.clone() }
+            }
+        );
+        assert_eq!(herdr.plugin_panes().len(), 1);
+        assert_eq!(herdr.focused(), [view]);
+    }
+
+    #[test]
+    fn stacked_with_no_shepherd_recorded_the_view_opens_above_the_current_pane_saying_why() {
+        let state = tempfile::tempdir().unwrap();
+        let (herdr, current) = herdr_with_tab();
+
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            Some(&current),
+            Layout::Stacked,
+        )
+        .unwrap();
+
+        let why = beside_current_why(opened, &current);
+        assert!(why.contains("no shepherd recorded"), "{why}");
+        assert_eq!(
+            herdr.plugin_panes()[0].1,
+            placed(&current, Side::Above, false)
+        );
+        assert_eq!(note(&herdr), why);
+    }
+
+    #[test]
+    fn stacked_a_shepherd_pane_gone_opens_above_the_current_pane_saying_why() {
+        let state = tempfile::tempdir().unwrap();
+        let (herdr, current) = herdr_with_tab();
+        record_shepherd(state.path(), "w1:p99", FAKE_SOCKET);
+
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            Some(&current),
+            Layout::Stacked,
+        )
+        .unwrap();
+
+        let why = beside_current_why(opened, &current);
+        assert!(why.contains("w1:p99 not found"), "{why}");
+        assert_eq!(
+            herdr.plugin_panes()[0].1,
+            placed(&current, Side::Above, false)
+        );
+    }
+
+    #[test]
+    fn stacked_with_no_shepherd_and_no_current_pane_the_view_opens_in_the_popup() {
+        let state = tempfile::tempdir().unwrap();
+        let herdr = FakeHerdr::new(&[("w1", "loopherd")]);
+
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            None,
+            Layout::Stacked,
+        )
+        .unwrap();
+
+        let Opened::Popup { why } = opened else {
+            panic!("{opened:?}");
+        };
         assert_eq!(
             herdr.popups(),
             [(VIEW.to_string(), vec![(NOTE.to_string(), why)])]

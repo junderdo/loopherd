@@ -358,7 +358,7 @@ Checked 2026-11-19 against herdr 0.9.5 on the `loopherd-dev` server through
 - **Focusing by ID.** `agent focus <pane-id>` takes a pane ID as its target
   and brings that pane's agent to the front, as the view's Enter already
   does. `pane focus` only moves to a neighbor by direction.
-- **Splitting below.** `pane split <pane> --direction down --cwd <dir>
+- **Splitting off the view.** `pane split <pane> --direction down --cwd <dir>
   --no-focus` answers the new pane as `.result.pane.pane_id`. Its shell
   gets the server's environment plus each `--env K=V`, not the caller's: a
   variable set on the calling `herdr` was unset in the new pane, and one
@@ -367,8 +367,18 @@ Checked 2026-11-19 against herdr 0.9.5 on the `loopherd-dev` server through
   <new> -- <prompt>` once the new shell is at its prompt. The prompt resumes
   from `handoffs/shepherd.md` when it was written after `shepherd.json`'s
   time, or when there's no record; otherwise it is the plain shepherd start.
-  The live test shows the stacked layout in `pane layout`: the shepherd's
-  pane has the view's `x` and a larger `y`.
+  The live tests show the layout in `pane layout`: side by side, the
+  shepherd's pane has the view's `y` and a smaller `x`; stacked, the view's
+  `x` and a larger `y`.
+- **Left of or above (0.9.5, LH-410).** herdr splits only `right` or
+  `down`. `pane split --ratio r` gives the target (first slot) `r`.
+  `pane swap --source-pane a --target-pane b` trades their places, the
+  ratio staying with the slot, and focuses `a`, bringing its workspace and
+  tab forward. `pane move` within one tab changes nothing. `agent focus`
+  refuses a pane with no agent; `pane neighbor --pane p --direction d`
+  answers `.result.neighbor.neighbor_pane_id`, and `pane focus --pane p
+  --direction d` focuses that neighbor. `plugin pane open` answers its new
+  pane as `.result.plugin_pane.pane.pane_id`.
 
 ## Oldest supported herdr (LH-247)
 

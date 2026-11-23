@@ -22,7 +22,8 @@ title = "loopherd: open herd view"
 contexts = ["workspace"]
 command = ["sh", "open-view.sh"]
 
-# Splits the view right of the shepherd's pane, else the current one.
+# Splits the view beside the shepherd's pane, else the current one, on the
+# side config.toml's view.layout picks.
 [[actions]]
 id = "view-beside-shepherd"
 title = "loopherd: open view beside shepherd"

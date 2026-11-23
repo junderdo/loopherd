@@ -778,9 +778,12 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   closes. `scripts/install` offers, default no, to bind it to `prefix+m`
   and `view-beside-shepherd` to `prefix+shift+m` (`--with-herdr-keys`
   asks nothing), skipping keys already held; `loopherd install-herdr-keys
-  --remove` takes them out (D129). Its `view-beside-shepherd` action splits the view right of the
+  --remove` takes them out (D129). Its `view-beside-shepherd` action splits the view beside the
   shepherd's pane recorded at its last handoff, leaving focus where it
-  was, else right of the focused pane with a note saying why (D87, D94).
+  was, else beside the focused pane with a note saying why (D87, D94).
+  `view.layout` in config.toml sets the side for it and for the view's
+  `S`: `side-by-side`, the default, puts the shepherd left and the view
+  right; `stacked` puts the view above the shepherd (D138).
   Never edit the human's herdr config yourself; only the human's install does.
 
   The plugin's event hooks run `loopherd herdr-event-hook`, recording a
