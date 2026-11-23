@@ -1771,8 +1771,22 @@ const START_TIMEOUT: Duration = Duration::from_secs(5);
 /// a broker already serves `lead`, and waits until it serves. Fails, naming
 /// the holder, when the lock stays held with nothing recorded in it.
 pub fn start(paths: &Paths, lead: &str) -> Result<bool> {
-    let exe = std::env::current_exe().context("find the loopherd binary")?;
+    let exe = runnable_exe()?;
     start_with(paths, lead, START_TIMEOUT, &mut || spawn(paths, lead, &exe))
+}
+
+/// This binary, or `loopherd` on PATH once a reinstall has moved a new one over it.
+pub fn runnable_exe() -> Result<PathBuf> {
+    Ok(runnable(
+        std::env::current_exe().context("find the loopherd binary")?,
+    ))
+}
+
+fn runnable(exe: PathBuf) -> PathBuf {
+    match exe.to_string_lossy().ends_with(" (deleted)") {
+        true => PathBuf::from("loopherd"),
+        false => exe,
+    }
 }
 
 fn start_with(
@@ -2316,6 +2330,15 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn a_binary_a_reinstall_replaced_runs_as_loopherd_on_path() {
+        let gone = PathBuf::from("/home/u/.local/bin/loopherd (deleted)");
+        let here = PathBuf::from("/home/u/.local/bin/loopherd");
+
+        assert_eq!(runnable(gone), PathBuf::from("loopherd"));
+        assert_eq!(runnable(here.clone()), here);
+    }
     use crate::herdr::fake::FakeHerdr;
     use crate::ledger::{AgentRecord, FileLedger, Role};
     use crate::sandbox::{self, Unavailable};
