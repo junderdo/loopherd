@@ -146,13 +146,16 @@ built=$(cargo build --release --manifest-path "$root/Cargo.toml" \
 [[ "$setup" != given ]] || "$built" setup "${setup_args[@]}"
 
 mkdir -p "$bin_dir"
-tmp=$(mktemp "$bin_dir/.loopherd.XXXXXX")
-trap 'rm -f "$tmp"' EXIT
-cp "$built" "$tmp"
-chmod 755 "$tmp"
-# A rename, so a running loopherd or a hook mid-call never sees a half-copied file.
-mv -f "$tmp" "$bin_dir/loopherd"
-trap - EXIT
+# An unchanged build keeps the installed file, whose dev/ino doctor reads to spot stale brokers.
+if ! [[ -x "$bin_dir/loopherd" ]] || ! cmp -s "$built" "$bin_dir/loopherd"; then
+  tmp=$(mktemp "$bin_dir/.loopherd.XXXXXX")
+  trap 'rm -f "$tmp"' EXIT
+  cp "$built" "$tmp"
+  chmod 755 "$tmp"
+  # A rename, so a running loopherd or a hook mid-call never sees a half-copied file.
+  mv -f "$tmp" "$bin_dir/loopherd"
+  trap - EXIT
+fi
 
 # The ${..+..} form: bash before 4.4 calls an empty array unbound under set -u.
 "$bin_dir/loopherd" install-hook ${args[@]+"${args[@]}"}
