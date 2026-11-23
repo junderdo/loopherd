@@ -39,8 +39,9 @@ Outcome:
 - Comment a three-line summary of the outcome on LH-{card}.
 - Push and open the PR only when the human asks. Push as junderdo:
   `GH_TOKEN=$(gh auth token --user junderdo) git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin HEAD`.
-  The PR is titled `docs(LH-{card}): <summary>`, with `--assignee @me` and the
-  card URL as the first line. Comment the PR link on the card and move the
+  Open it as junderdo too:
+  `GH_TOKEN=$(gh auth token --user junderdo) gh pr create --assignee @me --title "docs(LH-{card}): <summary>" --body-file <file>`,
+  the body's first line the card URL. Comment the PR link on the card and move the
   card to Review.
 
 When the conversation ends (cards approved, PR open), tell the human you're
@@ -48,12 +49,24 @@ done and that this pane stays open until the merge, then run
 `herdr agent focus {shepherd_pane}` to send them back. If that names no
 pane, tell them to switch back themselves.
 
-Close-out, once the PR merges: poll
-`GH_TOKEN=$(gh auth token --user junderdo) gh pr view <pr> --json state`, or
-on the human's word, check it the same way. When it reads MERGED:
+Close-out, once the PR merges. Wait for it with this loop, run in the
+background (your shell tool's background mode, not a trailing `&`), so its
+exit wakes you:
+
+```bash
+while :; do
+  state=$(GH_TOKEN=$(gh auth token --user junderdo) gh pr view <pr> --json state --jq .state)
+  case $state in MERGED|CLOSED) echo "$state"; break ;; esac
+  sleep 60
+done
+```
+
+If the human says it merged first, check with the same `gh pr view` instead.
+On CLOSED, tell the human the PR closed unmerged and close nothing out. On
+MERGED:
 1. `scripts/trello move LH-{card} Done`, then `scripts/trello unblock`.
 2. Send the shepherd one line:
    `herdr agent prompt shepherd "LH-{card} merged and closed out: <PR URL>, D<n>, filed <cards or none>"`.
    If that fails, tell the human to relay the line.
-Leave the worktree and branch: the herd's reap removes them and closes this
-pane.
+Leave the worktree and branch: the shepherd's `loopherd feed` after your line
+reaps them and closes this pane.

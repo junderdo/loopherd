@@ -11,8 +11,9 @@ and merge, and they talk only to the shepherd.
 
 **Shepherd**:
 The agent the human talks to. It looks after every herd and passes questions and
-merge requests up to the human and the human's answers back down. It also does
-the wayfinding and grilling that need the human in the room. For a herd
+merge requests up to the human and the human's answers back down. It also starts
+and closes out the grills and does the wayfinding that need the human in the
+room. For a herd
 without a lead, it also does the lead's job. Past its context limit it writes its
 own handoff and asks the human to clear the session and continue from it.
 _Avoid_: orchestrator, manager
@@ -72,9 +73,12 @@ prototype, a recorded decision, or grilling. Its output is a decision or a
 document, not a feature.
 
 **Grilling**:
-A live session in which the shepherd questions the human about a plan until the
-open questions are settled. Grilling always needs the human, so no worker takes
-it on.
+Questioning the human about a plan until the open questions are settled. A
+grill, an attended member in its own pane, runs it live, one question at a
+time or as one batch the human accepts or overrides; a batch grill can also
+run unattended and post its batch on the card. The shepherd starts and closes
+out a grill but never grills in its own pane. Grilling always needs the
+human's answers.
 
 **Template**:
 The pattern that turns a task into a worker: its name, its branch, its prompt,

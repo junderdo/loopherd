@@ -107,14 +107,17 @@ each settles, from a file:
 
 ```bash
 background=$(mktemp)
-cat > "$background" <<'BACKGROUND'
+cat > "$background" <<'LOOPHERD_GRILL_BACKGROUND_END'
 <the background>
-BACKGROUND
+LOOPHERD_GRILL_BACKGROUND_END
 loopherd tell grill-<n> --text-file "$background"
+rm -f "$background"
 ```
 
 The quoted heredoc keeps the background's backticks and `$(…)` from running in
-your shell; never pass it inline in double quotes.
+your shell; never pass it inline in double quotes. A line of the background
+that is exactly the delimiter would end it early and run the rest as shell, so
+check for one before sending.
 
 ### Interactive or batch
 
@@ -147,10 +150,24 @@ A grill runs in one of two modes (D132), picked by the human with the
 
 After its PR merges, the grill moves the card to Done, runs
 `scripts/trello unblock` and sends you `LH-<n> merged and closed out: …`. The
-herd's watch prints `grill-<n> merged`; feed's `after_merge` and the reap
-(`retire --close`) close its pane, worktree and branch. If the grill's pane
-closed before its close-out, move the card to Done and run
-`scripts/trello unblock` yourself; the reap still runs.
+herd's watch prints `grill-<n> merged`. Close out either way below; feed's
+`after_merge` and the reap (`retire --close grill-<n>`, once the card is in
+Done) then close its pane, worktree and branch.
+
+- **On the grill's line**: check
+  `GH_TOKEN=$(gh auth token --user junderdo) gh pr view <pr> --json state --jq .state`
+  reads MERGED, then run `loopherd feed loopherd-cards`.
+- **If the grill's pane closed before its close-out**, or the human reports
+  the merge with no line from the grill: find the branch in grill-<n>'s row under
+  loopherd-cards in `loopherd status` (or `git worktree list | grep LH-<n>`) and
+  its PR with
+  `GH_TOKEN=$(gh auth token --user junderdo) gh pr list --head <branch> --state all`.
+  Check `gh pr view <pr> --json state` (as junderdo) reads MERGED, then move
+  the card to Done, run `scripts/trello unblock`, then
+  `loopherd feed loopherd-cards`.
+
+Neither path needs the tab ID: the reap finds grill-<n>'s tab from its record.
+If the PR reads anything but MERGED, close nothing out.
 
 ## Lead
 
