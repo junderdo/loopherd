@@ -3814,6 +3814,7 @@ max = 3
             "c",
             "2026-11-16T10:06:00Z",
             Body::Gone {
+                pane: None,
                 tab: None,
                 workspace: None,
             },
@@ -3827,6 +3828,7 @@ max = 3
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let mail = quiet_mail(&ledger);
         let gone = || Body::Gone {
+            pane: None,
             tab: Some("w1:t1".into()),
             workspace: None,
         };

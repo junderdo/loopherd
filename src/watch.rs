@@ -3990,6 +3990,25 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_sends_no_merge_alert_for_its_attended_members_merge() {
+        let (mut world, notifier, gh) = guarded("", vec![]);
+        let grill = AgentRecord {
+            attended: Some(Default::default()),
+            branch: Some("pr-7".into()),
+            retired: true,
+            ..member("grill-7", "w9:p7", Some("cards"))
+        };
+        world.ledger.0.insert(grill.name.clone(), grill);
+
+        world.lead_at(&notifier, &gh, FIRST);
+        gh.merged.borrow_mut().push(("2026-11-01T09:05:00Z", 7));
+        gh.merged.borrow_mut().push(("2026-11-01T09:06:00Z", 8));
+        world.lead_at(&notifier, &gh, LATER);
+
+        assert_eq!(notifier.sent(), [merge_sent(8)]);
+    }
+
+    #[test]
     fn a_new_lead_ignores_its_predecessors_merge_window_and_mailbox() {
         let predecessors = ("2026-10-20T00:00:00Z", 6);
         let (world, notifier, gh) = guarded("", vec![predecessors]);
@@ -4000,6 +4019,7 @@ mod tests {
             (
                 "2026-10-02T00:00:00Z",
                 Body::Gone {
+                    pane: None,
                     tab: None,
                     workspace: None,
                 },
@@ -4232,6 +4252,7 @@ mod tests {
             (
                 "2026-11-01T11:00:00Z",
                 Body::Gone {
+                    pane: None,
                     tab: None,
                     workspace: None,
                 },

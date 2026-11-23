@@ -654,15 +654,25 @@ fn kept_lead(
     Ok(Some((lead, worktree)))
 }
 
-/// Whether `record`'s last mailbox entry is `gone`; an unreadable mailbox isn't.
-/// A subagent's stop may land after it while Claude shuts down.
-fn last_is_gone(reports: &Path, record: &AgentRecord) -> bool {
+/// Whether `record`'s last mailbox entry is a `gone` from closing its pane,
+/// tab or workspace, rather than its pane exiting or herdr losing it; an
+/// unreadable mailbox isn't. A subagent's stop may land after it while Claude
+/// shuts down.
+fn last_is_closed(reports: &Path, record: &AgentRecord) -> bool {
     crate::report::history(reports, &record.name).is_ok_and(|(entries, _)| {
         let last = entries
             .iter()
             .rev()
             .find(|e| !matches!(e.body, Body::SubagentStart(_) | Body::SubagentStop(_)));
-        matches!(last, Some(e) if matches!(e.body, Body::Gone { .. }))
+        let closed = |body: &Body| match body {
+            Body::Gone {
+                pane,
+                tab,
+                workspace,
+            } => pane.is_some() || tab.is_some() || workspace.is_some(),
+            _ => false,
+        };
+        last.is_some_and(|e| closed(&e.body))
     })
 }
 
@@ -735,8 +745,8 @@ fn revive_one(
         return alive;
     }
     // A pane the human closed before the merge is one they were done with.
-    if record.attended.is_some() && req.name.is_none() && last_is_gone(&req.reports_dir, record) {
-        return Outcome::Skipped("attended, and its pane was closed".into());
+    if record.attended.is_some() && req.name.is_none() && last_is_closed(&req.reports_dir, record) {
+        return Outcome::Skipped("attended, and the human closed it".into());
     }
     if let Some(holder) = agents
         .iter()
@@ -1493,6 +1503,7 @@ mod tests {
             ..stub("grill-1", cwd.path())
         };
         let gone = Body::Gone {
+            pane: Some("w1:p1".into()),
             tab: None,
             workspace: None,
         };
@@ -1512,7 +1523,7 @@ mod tests {
         let (out, _) = revive(&herdr, &herdr_server(), &mut ledger, &request(), &continued)
             .unwrap()
             .report();
-        assert_eq!(out, "skipped grill-1: attended, and its pane was closed");
+        assert_eq!(out, "skipped grill-1: attended, and the human closed it");
         assert!(herdr.started().is_empty());
 
         let named = ReviveRequest {
@@ -1523,6 +1534,65 @@ mod tests {
             .unwrap()
             .report();
         assert_eq!(out, "resumed grill-1 w1:p1");
+    }
+
+    #[test]
+    fn startup_revive_skips_an_attended_member_the_human_closed_but_not_one_herdr_lost() {
+        let at = humantime::parse_rfc3339("2026-11-01T09:00:00Z").unwrap();
+        // The herdr event recording the gone, or none for a watch seeing the agent vanish.
+        let cases = [
+            (
+                "pane-closed",
+                Some(("pane.closed", r#"{"pane_id":"w1:p1"}"#)),
+            ),
+            ("tab-closed", Some(("tab.closed", r#"{"tab_id":"w1:t1"}"#))),
+            (
+                "ws-closed",
+                Some(("workspace.closed", r#"{"workspace_id":"w1"}"#)),
+            ),
+            ("exited", Some(("pane.exited", r#"{"pane_id":"w1:p1"}"#))),
+            ("unseen", None),
+        ];
+        for (how, gone) in cases {
+            let cwd = tempfile::tempdir().unwrap();
+            let name = format!("grill-{how}");
+            let grill = AgentRecord {
+                attended: Some(Default::default()),
+                tab_id: Some("w1:t1".into()),
+                ..stub(&name, cwd.path())
+            };
+            let mut ledger = ledger([grill]);
+            let dir = own_reports_dir();
+            match gone {
+                Some((event, data)) => {
+                    let json = format!(r#"{{"data":{data}}}"#);
+                    let no_shell = |_: &str| Ok(None);
+                    crate::pane_event::event_hook(
+                        &mut ledger,
+                        &dir,
+                        event,
+                        &json,
+                        None,
+                        at,
+                        &no_shell,
+                    )
+                    .unwrap();
+                }
+                None => {
+                    crate::pane_event::record_gone_after(&dir, &name, at, at).unwrap();
+                }
+            }
+
+            let herdr = herdr();
+            let (out, _) = revive(&herdr, &herdr_server(), &mut ledger, &request(), &continued)
+                .unwrap()
+                .report();
+            let expected = match how {
+                "exited" | "unseen" => format!("resumed {name} w1:p1"),
+                _ => format!("skipped {name}: attended, and the human closed it"),
+            };
+            assert_eq!(out, expected, "{how}");
+        }
     }
 
     #[test]

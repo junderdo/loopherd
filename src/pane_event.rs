@@ -179,8 +179,11 @@ fn pane_event(
         ("pane.agent_status_changed", Some("working" | "idle" | "done")) => {
             notify::forget_block(dir, &member.name)?;
         }
-        ("pane.exited" | "pane.closed", _) => {
-            record_gone(dir, &member.name, now)?;
+        ("pane.exited", _) => {
+            record_gone(dir, &member.name, None, now)?;
+        }
+        ("pane.closed", _) => {
+            record_gone(dir, &member.name, Some(pane), now)?;
         }
         _ => {}
     }
@@ -205,12 +208,14 @@ pub fn record_blocked(dir: &Path, name: &str, now: SystemTime) -> Result<bool> {
     Ok(true)
 }
 
-/// Appends a `gone` entry to `name`'s mailbox unless one is there with no
-/// sign of life after it. Returns whether it appended.
-pub fn record_gone(dir: &Path, name: &str, now: SystemTime) -> Result<bool> {
+/// Appends a `gone` entry to `name`'s mailbox, holding `closed` when its
+/// pane was closed, unless one is there with no sign of life after it.
+/// Returns whether it appended.
+fn record_gone(dir: &Path, name: &str, closed: Option<&str>, now: SystemTime) -> Result<bool> {
     let gone = Entry::new(
         now,
         Body::Gone {
+            pane: closed.map(Into::into),
             tab: None,
             workspace: None,
         },
@@ -236,6 +241,7 @@ fn record_closed_gone(
     let (body, still_in): (_, fn(&AgentRecord, &str) -> bool) = match closed {
         Closed::Tab(tab) => (
             Body::Gone {
+                pane: None,
                 tab: Some(tab.into()),
                 workspace: None,
             },
@@ -243,6 +249,7 @@ fn record_closed_gone(
         ),
         Closed::Workspace(workspace) => (
             Body::Gone {
+                pane: None,
                 tab: None,
                 workspace: Some(workspace.into()),
             },
@@ -305,6 +312,7 @@ pub fn record_gone_after(
     let gone = Entry::new(
         now,
         Body::Gone {
+            pane: None,
             tab: None,
             workspace: None,
         },
