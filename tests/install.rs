@@ -144,6 +144,38 @@ fn install_copies_the_build_into_place_then_runs_install_hook() {
 }
 
 #[test]
+fn rerunning_install_on_an_unchanged_build_leaves_the_installed_file_alone() {
+    use std::os::unix::fs::MetadataExt;
+    let sandbox = Sandbox::new(false);
+    let first = sandbox.install(&["--no-extras", "--settings", "/tmp/s.json"]);
+    assert!(first.status.success(), "{first:?}");
+    let before = fs::metadata(sandbox.installed()).unwrap();
+
+    let again = sandbox.install(&["--no-extras", "--settings", "/tmp/s.json"]);
+
+    assert!(again.status.success(), "{again:?}");
+    let after = fs::metadata(sandbox.installed()).unwrap();
+    assert_eq!((after.dev(), after.ino()), (before.dev(), before.ino()));
+    assert_eq!(sandbox.bin_dir_entries(), ["loopherd"]);
+}
+
+#[test]
+fn install_replaces_an_installed_binary_that_differs_from_the_build() {
+    let sandbox = Sandbox::new(false);
+    fs::create_dir_all(sandbox.installed().parent().unwrap()).unwrap();
+    executable(&sandbox.installed(), "#!/bin/sh\necho old\n");
+
+    let out = sandbox.install(&["--no-extras", "--settings", "/tmp/s.json"]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        fs::read_to_string(sandbox.installed())
+            .unwrap()
+            .contains("echo \"new $*\"")
+    );
+}
+
+#[test]
 fn install_prints_a_failing_doctor_last_and_still_succeeds() {
     let sandbox = Sandbox::new(false);
 
