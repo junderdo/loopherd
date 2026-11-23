@@ -39,6 +39,13 @@ impl Layout {
         }
     }
 
+    pub fn other(self) -> Layout {
+        match self {
+            Layout::SideBySide => Layout::Stacked,
+            Layout::Stacked => Layout::SideBySide,
+        }
+    }
+
     /// Where the view goes relative to the shepherd's pane.
     fn view_side(self) -> Side {
         match self {
