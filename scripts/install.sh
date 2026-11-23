@@ -9,7 +9,8 @@
 # /dev/tty, runs `loopherd setup` and, last, `loopherd doctor`. The flags
 # mean what they mean to scripts/install; LOOPHERD_NO_SPLASH=1 is --no-splash.
 # LOOPHERD_VERSION=vX.Y.Z pins a release; LOOPHERD_RELEASE_BASE replaces
-# https://github.com/junderdo/loopherd/releases.
+# https://github.com/junderdo/loopherd/releases. Unless it does, the installed
+# tag is recorded in <config dir>/install.toml for `loopherd update`.
 set -eu
 
 # A release's copy carries its tag, so it installs that release, not the latest.
@@ -71,6 +72,21 @@ verify() {
   actual=$(cd "$1" && $sha256 "$2" | awk '{ print $1 }')
   [ "$expected" = "$actual" ] ||
     die "checksum mismatch for $2 (expected $expected, got $actual); installed nothing"
+}
+
+# Usage: record_install <tag or empty for the latest>.
+record_install() {
+  [ -z "${LOOPHERD_RELEASE_BASE:-}" ] || return 0
+  tag=$1
+  [ -n "$tag" ] || tag=$("$bin_dir/loopherd" --version </dev/null | awk '{ print $2 }')
+  case "$tag" in
+    v*) ;;
+    *) tag=v$tag ;;
+  esac
+  config=${LOOPHERD_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/loopherd}
+  mkdir -p "$config"
+  printf 'kind = "release"\ntag = "%s"\n' "$tag" >"$config/install.toml.tmp"
+  mv -f "$config/install.toml.tmp" "$config/install.toml"
 }
 
 warn_missing() {
@@ -181,6 +197,7 @@ main() {
   # A rename, so a running loopherd or a hook mid-call never sees a half-copied file.
   mv -f "$tmp" "$bin_dir/loopherd"
   say "installed $bin_dir/loopherd"
+  record_install "$version"
 
   # </dev/null: under `curl | sh` stdin is this script. Setup reads /dev/tty.
   "$bin_dir/loopherd" install-hook </dev/null
