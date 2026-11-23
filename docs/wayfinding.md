@@ -154,7 +154,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D139](decisions/D139.md) | `v` in the view re-docks the live shepherd's pane, when it shares the view's tab, to the other `view.layout` and saves it; herdr won't move a pane within its tab, so it leaves through a tab of its own and comes back with `--split`/`--ratio`. |
 | [D140](decisions/D140.md) | An open attended member holds off neither drained line; merge alerts skip its PR (by head branch); `retire --close` returns focus by the pane it closes; startup revive skips it only after a pane, tab or workspace close, which a `gone` now records, not a pane exit or herdr losing it. Amends D112, D116. |
 | [D141](decisions/D141.md) | merge-guard's and doctor's paginated reads drop `--slurp` and parse the one array `gh api --paginate` merges pages into (gh 2.31.0+, not 2.48.0+); doctor's `gh api` errors and timeouts name the endpoint. |
-| [D142](decisions/D142.md) | Amends D114, D121. A credentials member is also denied `~/.claude.json`, docker's and npm's configs, `github-copilot/` and `store --file` helpers' files (`/proc/<pid>/environ` stays open: a `Read` deny there breaks the sandbox); five more GitHub token variables are blanked; a GUID-tagged virtiofs share counts as a Windows drive, and an unnameable one refuses the member. |
+| [D143](decisions/D143.md) | Amends D114, D121. A credentials member is also denied `~/.claude.json`, docker's and npm's configs, `github-copilot/` and `store --file` helpers' files (`/proc/<pid>/environ` stays open: a `Read` deny there breaks the sandbox); five more GitHub token variables are blanked; a GUID-tagged virtiofs share counts as a Windows drive, and an unnameable one refuses the member. |
 
 ## Emerging model
 
