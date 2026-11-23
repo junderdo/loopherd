@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use toml_edit::{DocumentMut, Item, Key, Table, TableLike, Value};
 
-use super::{Paths, check, file_of};
+use super::{Fix, Paths, check, file_of};
 use crate::line_ending::LineEnding;
 use crate::lock::Lock;
 
@@ -100,7 +100,7 @@ fn edit(
         return Ok(false);
     }
     let text = LineEnding::of(&original).apply(&doc.to_string());
-    check(herd, &text, paths)
+    check(herd, &text, paths, Fix::Edit)
         .with_context(|| format!("refused, {} is unchanged", file.display()))?;
     let written = || format!("write {}", file.display());
     let dir = file.parent().context("herd file has no directory")?;
@@ -277,6 +277,73 @@ merge = false
         }
     }
 
+    const CREDENTIALS_HERD: &str = r#"repo = "/src/repo"
+
+[lead]
+prompt = "lead {herd}"
+merge = false
+merge_guard = "credentials"
+
+[worker]
+sandbox = "require"
+"#;
+
+    #[test]
+    fn set_refuses_opening_every_socket_to_a_credentials_lead_with_advice_for_the_edit() {
+        let (_dir, paths) = herds(CREDENTIALS_HERD);
+        for table in ["lead", "worker"] {
+            let key = format!("{table}.unix_sockets");
+            let err = format!("{:#}", set(&paths, "h", &key, "\"all\"").unwrap_err());
+            assert!(err.contains("is unchanged"), "{err}");
+            assert!(
+                err.contains(&format!(
+                    "each of which acts as you; keep {table}.unix_sockets = \"all\" or \
+                     lead.merge_guard = \"credentials\", not both"
+                )),
+                "{err}"
+            );
+            assert!(!err.contains("run loopherd"), "{err}");
+            assert_eq!(text(&paths), CREDENTIALS_HERD, "{key}");
+        }
+    }
+
+    #[test]
+    fn set_refuses_guarding_credentials_with_every_socket_open_with_advice_for_the_edit() {
+        let open =
+            CREDENTIALS_HERD.replace("merge_guard = \"credentials\"", "unix_sockets = \"all\"");
+        let (_dir, paths) = herds(&open);
+        let err = format!(
+            "{:#}",
+            set(&paths, "h", "lead.merge_guard", "\"credentials\"").unwrap_err()
+        );
+        assert!(
+            err.contains(
+                "keep lead.unix_sockets = \"all\" or lead.merge_guard = \"credentials\", not both"
+            ),
+            "{err}"
+        );
+        assert!(!err.contains("run loopherd"), "{err}");
+        assert_eq!(text(&paths), open);
+    }
+
+    #[test]
+    fn set_refuses_unrequiring_a_credentials_herds_worker_sandbox_with_advice_for_the_edit() {
+        let (_dir, paths) = herds(CREDENTIALS_HERD);
+        let err = format!(
+            "{:#}",
+            set(&paths, "h", "worker.sandbox", "\"prefer\"").unwrap_err()
+        );
+        assert!(
+            err.contains(
+                "[worker] sandbox is \"prefer\", not \"require\"; keep worker.sandbox = \
+                 \"require\" while lead.merge_guard is \"credentials\""
+            ),
+            "{err}"
+        );
+        assert!(!err.contains("run loopherd"), "{err}");
+        assert_eq!(text(&paths), CREDENTIALS_HERD);
+    }
+
     #[test]
     fn unset_removes_a_key_and_keeps_the_rest_of_the_file() {
         let (_dir, paths) = herds(HERD);
@@ -439,6 +506,6 @@ merge = false
                 format!("\"lead {{herd}} {round}\"")
             );
         }
-        crate::herd::check("h", &text(&paths), &paths).unwrap();
+        crate::herd::check("h", &text(&paths), &paths, crate::herd::Fix::Edit).unwrap();
     }
 }
