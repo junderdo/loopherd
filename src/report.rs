@@ -118,9 +118,11 @@ pub enum Body {
     },
     /// herdr showed the member waiting on a dialog.
     Blocked {},
-    /// herdr lost the member's pane; `tab` or `workspace` when it was found
-    /// by that closing.
+    /// herdr lost the member's pane; `pane`, `tab` or `workspace` when it was
+    /// found by that closing, none when the pane exited or a watch saw it go.
     Gone {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tab: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -23,6 +23,14 @@ pub struct Pr {
     pub url: String,
 }
 
+/// A pull request merged into the default branch, with its head branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Merged {
+    pub number: u64,
+    pub url: String,
+    pub head: String,
+}
+
 /// What GitHub said about a branch's pull requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrLookup {
@@ -48,7 +56,7 @@ pub trait Merges {
 
     /// The pull requests merged into `branch` of `repo`'s GitHub repo at or
     /// after `since`, an RFC 3339 time, most recently updated first.
-    fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Pr>>;
+    fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Merged>>;
 }
 
 /// Asks GitHub through the `gh` program.
@@ -127,7 +135,7 @@ impl Merges for GhCli {
         Ok(self.answer(repo, &view)?.trim().to_string())
     }
 
-    fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Pr>> {
+    fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Merged>> {
         let full = full_name(repo)?;
         let search = format!("merged:>={since} sort:updated-desc");
         let list = [
@@ -144,25 +152,31 @@ impl Merges for GhCli {
             "--limit",
             &MERGED_LIMIT.to_string(),
             "--json",
-            "number,url",
+            "number,url,headRefName",
         ];
-        let prs: Vec<RawPr> =
+        let prs: Vec<RawMerged> =
             serde_json::from_str(&self.answer(repo, &list)?).context("read gh pr list's JSON")?;
         Ok(prs
             .into_iter()
-            .map(|pr| Pr {
+            .map(|pr| Merged {
                 number: pr.number,
                 url: pr.url,
+                head: pr.head_ref_name,
             })
             .collect())
     }
 }
 
-/// The items of a list `gh api --paginate --slurp` read, which it gives as
-/// an array of pages.
-pub fn all_pages<T: serde::de::DeserializeOwned>(slurped: &str) -> serde_json::Result<Vec<T>> {
-    let pages: Vec<Vec<T>> = serde_json::from_str(slurped)?;
-    Ok(pages.into_iter().flatten().collect())
+/// What `gh` with `args` is called in errors: `gh api <endpoint>` for API
+/// calls, else the subcommand.
+fn shown(args: &[&str]) -> String {
+    match args {
+        ["api", rest @ ..] => match rest.iter().find(|a| !a.starts_with('-')) {
+            Some(endpoint) => format!("gh api {endpoint}"),
+            None => "gh api".into(),
+        },
+        _ => format!("gh {}", args[..2].join(" ")),
+    }
 }
 
 impl crate::doctor::Rulesets for GhCli {
@@ -170,7 +184,7 @@ impl crate::doctor::Rulesets for GhCli {
         let slug = github_com_origin(repo)?.slug;
         let list = format!("repos/{slug}/rulesets?includes_parents=false");
         let listed: Vec<serde_json::Value> =
-            all_pages(&self.answer(repo, &["api", "--paginate", "--slurp", &list])?)
+            serde_json::from_str(&self.answer(repo, &["api", "--paginate", &list])?)
                 .context("read gh's list of rulesets")?;
         let ours = [
             crate::merge_guard::DEFAULT_BRANCH_RULESET,
@@ -249,7 +263,7 @@ impl GhCli {
         gh.args(args)
             .current_dir(repo)
             .env("GH_PROMPT_DISABLED", "1");
-        let shown = format!("gh {}", args[..2].join(" "));
+        let shown = shown(args);
         match run_within(&mut gh, deadline) {
             Err(e) if is_not_found(&e) => Ok(None),
             Err(e) => Err(e.context(format!("run {shown}"))),
@@ -268,7 +282,7 @@ impl GhCli {
         };
         if !output.status.success() {
             let said = String::from_utf8_lossy(&output.stderr);
-            bail!("gh {}: {}", args[..2].join(" "), said.trim());
+            bail!("{}: {}", shown(args), said.trim());
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
@@ -390,6 +404,14 @@ struct RawPr {
     url: String,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawMerged {
+    number: u64,
+    url: String,
+    head_ref_name: String,
+}
+
 #[cfg(test)]
 pub mod fake {
     use super::*;
@@ -404,7 +426,7 @@ pub mod fake {
     }
 
     /// `repo`'s pull requests merged into `main`, each with its RFC 3339
-    /// merge time, counting the lookups asked of it.
+    /// merge time and head branch `pr-<number>`, counting the lookups asked of it.
     pub struct FakeMerges {
         pub repo: PathBuf,
         pub merged: std::cell::RefCell<Vec<(&'static str, u64)>>,
@@ -441,16 +463,17 @@ pub mod fake {
             Ok("main".into())
         }
 
-        fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Pr>> {
+        fn merged_since(&self, repo: &Path, branch: &str, since: &str) -> Result<Vec<Merged>> {
             self.known(repo)?;
             assert_eq!(branch, "main");
             let since = humantime::parse_rfc3339(since)?;
             let mut prs = vec![];
             for (at, number) in self.merged.borrow().iter() {
                 if humantime::parse_rfc3339(at)? >= since {
-                    prs.push(Pr {
+                    prs.push(Merged {
                         number: *number,
                         url: format!("https://github.com/o/r/pull/{number}"),
+                        head: format!("pr-{number}"),
                     });
                 }
             }
@@ -593,7 +616,8 @@ mod tests {
 
     #[test]
     fn asks_for_prs_merged_into_the_default_branch_since_a_time() {
-        let listed = r#"[{"number":7,"url":"https://github.com/o/r/pull/7"}]"#;
+        let listed =
+            r#"[{"number":7,"url":"https://github.com/o/r/pull/7","headRefName":"feat/x"}]"#;
         let (dir, gh) = fake_gh_merges("git@github.com:o/r.git", listed);
 
         let branch = gh.default_branch(dir.path()).unwrap();
@@ -601,16 +625,17 @@ mod tests {
 
         assert_eq!(
             merged,
-            [Pr {
+            [Merged {
                 number: 7,
-                url: "https://github.com/o/r/pull/7".into()
+                url: "https://github.com/o/r/pull/7".into(),
+                head: "feat/x".into(),
             }]
         );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("args")).unwrap(),
             "repo view github.com/o/r --json defaultBranchRef --jq .defaultBranchRef.name\n\
              pr list -R github.com/o/r --state merged --base main \
-             --search merged:>=2026-11-01T00:00:00Z sort:updated-desc --limit 100 --json number,url\n"
+             --search merged:>=2026-11-01T00:00:00Z sort:updated-desc --limit 100 --json number,url,headRefName\n"
         );
     }
 
@@ -631,7 +656,7 @@ mod tests {
             "#!/bin/sh\necho \"$@\" >> '{}'\n\
              case \"$*\" in\n\
              *rulesets/7) echo '{{\"id\":7,\"name\":\"loopherd: no force-push\"}}' ;;\n\
-             *) echo '[[{{\"id\":1,\"name\":\"other\"}}],[{{\"id\":7,\"name\":\"loopherd: no force-push\"}}]]' ;;\n\
+             *) echo '[{{\"id\":1,\"name\":\"other\"}},{{\"id\":7,\"name\":\"loopherd: no force-push\"}}]' ;;\n\
              esac\n",
             dir.path().join("args").display()
         );
@@ -645,8 +670,37 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("args")).unwrap(),
-            "api --paginate --slurp repos/o/r/rulesets?includes_parents=false\n\
+            "api --paginate repos/o/r/rulesets?includes_parents=false\n\
              api repos/o/r/rulesets/7\n"
+        );
+    }
+
+    #[test]
+    fn a_failed_ruleset_listing_names_its_endpoint() {
+        let (dir, gh) = fake_gh("git@github.com:o/r.git", "");
+        crate::test_fakes::executable(&gh.program, "#!/bin/sh\necho 'HTTP 403' >&2\nexit 1\n");
+
+        let err = crate::doctor::Rulesets::loopherd_rulesets(&gh, dir.path()).unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "gh api repos/o/r/rulesets?includes_parents=false: HTTP 403"
+        );
+    }
+
+    #[test]
+    fn a_gh_api_call_out_of_time_names_its_endpoint() {
+        let (dir, gh) = fake_gh("git@github.com:o/r.git", "");
+        crate::test_fakes::executable(&gh.program, "#!/bin/sh\nexec sleep 5\n");
+        let args = ["api", "--paginate", "repos/o/r/keys"];
+
+        let err = gh
+            .run(dir.path(), &args, Duration::from_millis(50))
+            .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "gh api repos/o/r/keys didn't answer in time"
         );
     }
 

@@ -172,8 +172,8 @@ Init never launches an agent.
    | `<member> blocked` | A dialog only the human answers: tell them. loopherd never answers it. |
    | `<member> gone` | Its pane exited or closed, its tab or workspace closed with it inside, or it had no agent for two polls in a row after this watch saw it live. A `gone` recorded when a tab or workspace closed, and then retracted because the member's pane had moved out of it, prints nothing; `reports --all` shows it followed by `moved`. |
    | `<lead> no broker` | Your own watch only: an unretired lead on your herdr has had no broker running for two polls in a row (one is a start or `broker-restart` gap), so its `feed`, `status` and `report` fail and it can't even ask. Once per streak: it prints again only after its broker runs again. Run `loopherd broker-restart <lead>`, which starts one when none runs. |
-   | `<herd> drained` | Lead's watch only: your herd is paused and has no open (non-retired) worker. A member of an attended or `slot = false` template is no worker here, nor for `no workers open`, `out of work` or `all drained` (D116), but while it may still work (as `all drained` says) it holds both drained lines off. Report done, stop, and don't re-arm. |
-   | `all drained` | Every herd your watch reads is paused with no open worker, and no member it reads, a slot-less one included, may still work: none is working, blocked or unknown (now or on the poll before), died since the watch started without its `gone` line yet, or last stopped failed or with work in flight. Tell the human; don't re-arm. |
+   | `<herd> drained` | Lead's watch only: your herd is paused and has no open (non-retired) worker. A member of an attended or `slot = false` template is no worker here, nor for `no workers open`, `out of work` or `all drained` (D116), but while a `slot = false` one may still work (as `all drained` says) it holds both drained lines off; an attended one only until its `gone` line prints (D140). Report done, stop, and don't re-arm. |
+   | `all drained` | Every herd your watch reads is paused with no open worker, and no member it reads, a slot-less one included but not an attended one, may still work: none is working, blocked or unknown (now or on the poll before), died since the watch started without its `gone` line yet, or last stopped failed or with work in flight. Tell the human; don't re-arm. |
    | `shepherd handoff 171k over 160k` | Your own watch only, once per session: your context is past your limit. Hand off (see Your own handoff). |
 
    A report's text runs on in indented lines. A turn you prompt into a member
@@ -487,9 +487,10 @@ with the human's credentials, so a merge the human didn't make shows up.
 The lead's first lookup only marks where its window starts, so no earlier
 merge is sent; later ones run at most once a minute across its watches,
 only while `kinds` holds `merge_alert`, and a re-armed watch catches up on
-merges it missed. A lookup that fails warns on the watch's stderr. Not
-covered: pushes straight to the branch, and merges after the lead's watch
-stops for good (a drained lead). A `credentials` lead can't merge, so it
+merges it missed. An attended member's merge sends none: its branch is
+skipped, and the watch prints `<name> merged` (D140). A lookup that fails
+warns on the watch's stderr. Not covered: pushes straight to the branch,
+and merges after the lead's watch stops for good (a drained lead). A `credentials` lead can't merge, so it
 gets no alert.
 
 To guard a `merge = false` lead with split credentials instead, set
@@ -945,7 +946,8 @@ What differs from the shepherd:
   --abort`, and check merges with `gh pr view <n> --json state`. With
   `merge` off, your watch also tells the human of every merge to the repo's
   default branch (`[lead] merge_guard = "hook"`, the default), so expect
-  that ping for merges the human makes. Grilling is always the human's.
+  that ping for merges the human makes, but not for an attended member's
+  (D140). Grilling is always the human's.
 - **Attended members** are the human's (D112). Your broker refuses `tell`,
   `prompt`, `restart`, `retire` and `release` on one, and `add` of an
   attended template; your watch shows only its `merged` and `gone`. After
