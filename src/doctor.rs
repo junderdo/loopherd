@@ -2744,7 +2744,7 @@ mod tests {
 
         let brokers: Vec<String> = problems(&m, &herdr())
             .into_iter()
-            .filter(|p| p.contains("broker"))
+            .filter(|p| is_broker_check(p))
             .collect();
 
         let fix = |lead: &str| format!("fix: the shepherd runs loopherd broker-restart {lead}");
@@ -2820,10 +2820,18 @@ mod tests {
         (held, lock, record(meta.ino()))
     }
 
+    /// Matched on the check's name, as a temp dir's path may itself say "broker".
+    fn is_broker_check(problem: &str) -> bool {
+        problem
+            .split(':')
+            .next()
+            .is_some_and(|name| name.contains(" broker "))
+    }
+
     fn broker_problems(m: &Machine) -> Vec<String> {
         problems(m, &herdr())
             .into_iter()
-            .filter(|p| p.contains("broker"))
+            .filter(|p| is_broker_check(p))
             .collect()
     }
 
@@ -2916,7 +2924,7 @@ mod tests {
 
         let brokers: Vec<String> = problems(&m, &herdr())
             .into_iter()
-            .filter(|p| p.contains("broker"))
+            .filter(|p| is_broker_check(p))
             .collect();
 
         assert_eq!(
@@ -2925,7 +2933,7 @@ mod tests {
                 "warning broker lead-h: lead-h's broker runs loopherd 0.0.1 (abc1234) at \
                  /old/loopherd, not this one ({}), so its lead's commands may fail; \
                  fix: the shepherd runs loopherd broker-restart lead-h",
-                running.display()
+                running.canonicalize().unwrap().display()
             )]
         );
     }
