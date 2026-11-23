@@ -228,8 +228,8 @@ pub fn retire_and_close(
             out.push("tab already gone".into());
             None
         }
-        TabFate::Ours(tab_id) => {
-            out.extend(return_focus(herdr, &record));
+        TabFate::Ours { tab_id, pane_id } => {
+            out.extend(return_focus(herdr, &record, &pane_id));
             herdr.close_tab(&tab_id)?;
             out.push(format!("closed tab {tab_id}"));
             None
@@ -305,15 +305,15 @@ pub fn retire_and_close(
     Ok(())
 }
 
-/// Focuses an attended member's return pane if the human is looking at the
-/// member's pane: a reap hours after the merge mustn't pull them off other work.
-fn return_focus(herdr: &dyn Herdr, record: &AgentRecord) -> Option<String> {
+/// Focuses an attended member's return pane if the human is looking at its
+/// pane `pane_id`: a reap hours after the merge mustn't pull them off other work.
+fn return_focus(herdr: &dyn Herdr, record: &AgentRecord, pane_id: &str) -> Option<String> {
     let back = record.attended.as_ref()?.return_pane.as_deref()?;
     let focused = match herdr.focused_pane() {
         Ok(focused) => focused,
         Err(e) => return Some(format!("warning: read the focused pane: {e:#}")),
     };
-    if focused.as_deref() != Some(&record.pane_id) {
+    if focused.as_deref() != Some(pane_id) {
         return None;
     }
     Some(match herdr.focus(back) {
@@ -344,7 +344,7 @@ pub fn open_tab(
     };
     Ok(match agent_tab(herdr, record, others, None)? {
         TabFate::Gone | TabFate::Taken { .. } | TabFate::NoWorkspace { tab: None, .. } => None,
-        TabFate::Ours(tab_id) => Some(format!(
+        TabFate::Ours { tab_id, .. } => Some(format!(
             "loopherd retire --close {name}  # tab {tab_id} is open"
         )),
         TabFate::Kept { tab_id, reason } => {
@@ -403,7 +403,11 @@ fn other_user(ledger: &dyn Ledger, name: &str, path: &Path) -> Result<Option<Str
 
 enum TabFate {
     Gone,
-    Ours(String),
+    /// The tab to close and the member's pane in it.
+    Ours {
+        tab_id: String,
+        pane_id: String,
+    },
     Kept {
         tab_id: String,
         reason: String,
@@ -541,7 +545,10 @@ fn agent_tab(
         (Some(pane), _) if pane.is_in(cwd) => {
             // Closing a tab closes every pane in it, not just the agent's.
             match panes.iter().filter(|p| p.tab_id == pane.tab_id).count() {
-                1 => Ok(TabFate::Ours(pane.tab_id)),
+                1 => Ok(TabFate::Ours {
+                    tab_id: pane.tab_id,
+                    pane_id: pane.id,
+                }),
                 n => kept(&pane.tab_id, format!("it has {n} panes")),
             }
         }
@@ -1048,6 +1055,19 @@ mod tests {
         assert_eq!(herdr.focused(), [pane, shepherd.clone()]);
         assert!(out.contains(&format!("focused {shepherd}")), "{out:?}");
         assert!(herdr.tabs().iter().all(|t| t.id != "w1:t2"), "{out:?}");
+    }
+
+    #[test]
+    fn close_of_a_focused_attended_member_whose_pane_moved_focuses_its_return_pane() {
+        let (herdr, mut ledger, shepherd) = spawned_attended();
+        let pane = ledger.0["a"].pane_id.clone();
+        ledger.0.get_mut("a").unwrap().pane_id = "w1:p9".into();
+        herdr.focus(&pane).unwrap();
+
+        let out = close(&herdr, &mut ledger);
+
+        assert_eq!(herdr.focused(), [pane, shepherd.clone()]);
+        assert!(out.contains(&format!("focused {shepherd}")), "{out:?}");
     }
 
     #[test]
