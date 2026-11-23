@@ -806,7 +806,8 @@ impl Checks<'_> {
 const NO_WORKERS: &str = "no workers open";
 
 /// The shepherd's check, every [`CHECK_EVERY`], of each herd it reads that
-/// has a herd file and no open lead: whether it is out of work.
+/// has a herd file and no open lead: whether its attended members merged,
+/// and whether it is out of work.
 struct Unled<'a> {
     paths: &'a Paths,
     /// Where the leads' fired files are.
@@ -837,10 +838,10 @@ fn open(
 
 impl Unled<'_> {
     /// Each `out of work` event not fired before, nor by a retired lead of
-    /// its herd. Any herd with a lead or worker open ends its streak, in
-    /// scope or not. A paused herd keeps its streak, and one whose herd
-    /// file, source or backlog fails or runs out of the round's time is no
-    /// event; a failure warns once a streak.
+    /// its herd, after its attended members' merged events. Any herd with a
+    /// lead or worker open ends its streak, in scope or not. A paused herd
+    /// keeps its streak, and one whose herd file, source or backlog fails or
+    /// runs out of the round's time is no event; a failure warns once a streak.
     fn run(&mut self, ledger: &dyn Ledger, warn: &mut dyn FnMut(&str)) -> Result<Vec<Event>> {
         let names = herd::names(&self.paths.herds);
         let problem = (names.as_ref().err()).map(|e| format!("warning: list herd files: {e:#}"));
@@ -850,15 +851,20 @@ impl Unled<'_> {
         };
         self.fired.reload()?;
         let entries = ledger.entries()?;
-        let mut idle = vec![];
+        let mut unled = vec![];
         for herd in names {
-            if open(&entries, &herd, |e| e.is_lead() || holds_slot(e)) {
+            let led = open(&entries, &herd, |e| e.is_lead());
+            let worker = open(&entries, &herd, holds_slot);
+            if led || worker {
                 self.fired.out_of_work(&herd, &entries, false)?;
-            } else if self.herds.is_empty() || self.herds.contains(&herd) {
-                idle.push(herd);
+            }
+            let attended = open(&entries, &herd, |e| e.attended.is_some());
+            let in_scope = self.herds.is_empty() || self.herds.contains(&herd);
+            if in_scope && !led && (attended || !worker) {
+                unled.push((herd, !worker, attended));
             }
         }
-        if idle.is_empty() {
+        if unled.is_empty() {
             return Ok(vec![]);
         }
         let timeout = (self.check_timeout)();
@@ -872,30 +878,41 @@ impl Unled<'_> {
             each,
         };
         let mut events = vec![];
-        for herd in idle {
-            if pause::read(&self.paths.paused, &herd).pause().is_some() {
+        for (herd, idle, attended) in unled {
+            let paused = pause::read(&self.paths.paused, &herd).pause().is_some();
+            if paused && !attended {
                 continue;
             }
+            let (checks, queue) = match lead_checks(self.paths, &herd) {
+                Ok(loaded) => loaded,
+                Err(e) => {
+                    if self.failing.insert(herd.clone()) {
+                        warn(&format!("warning: {herd}: {e:#}"));
+                    }
+                    continue;
+                }
+            };
+            events.extend(self.attended_merges(&entries, &herd, &checks, &budget));
+            let Some(queue) = queue.filter(|_| idle && !paused) else {
+                self.failing.remove(&herd);
+                continue;
+            };
             let counted = (|| {
-                let Some(queue) = lead_checks(self.paths, &herd)?.1 else {
-                    return Ok(None);
-                };
                 let timeout = budget.left().context("out of time")?;
                 let (tasks, _) =
                     run_source(&queue, timeout).with_context(|| why(&queue.source, "failed"))?;
                 let claimable = claimable_count(ledger, self.paths, &queue, &herd, &tasks)?;
                 let Some(backlog) = &queue.backlog else {
-                    return Ok(Some((claimable, 0)));
+                    return Ok((claimable, 0));
                 };
                 let timeout = budget.left().context("out of time")?;
                 let (unready, _) = run_in_repo(backlog, &queue.repo, timeout)
                     .with_context(|| why(backlog, "failed"))?;
                 let unready = unready.lines().filter(|l| !l.trim().is_empty()).count();
-                Ok::<_, anyhow::Error>(Some((claimable, unready)))
+                Ok::<_, anyhow::Error>((claimable, unready))
             })();
             let (claimable, unready) = match counted {
-                Ok(Some(counts)) => counts,
-                Ok(None) => continue,
+                Ok(counts) => counts,
                 Err(e) => {
                     if budget.left().is_some() && self.failing.insert(herd.clone()) {
                         warn(&format!("warning: {herd}: {e:#}"));
@@ -925,6 +942,53 @@ impl Unled<'_> {
             .into_iter()
             .filter(|e| !self.fired.keys.contains(&e.key))
             .collect())
+    }
+
+    /// Each open attended member's `merged` event once its check passes, done
+    /// or not, since its stops wake nothing; and that check's `failing` or
+    /// `recovered` event. Keyed by the member's spawn, so a later member of the
+    /// same name starts afresh.
+    fn attended_merges(
+        &self,
+        entries: &BTreeMap<String, AgentRecord>,
+        herd: &str,
+        checks: &MemberChecks,
+        budget: &Budget,
+    ) -> Vec<Event> {
+        let mut events = vec![];
+        let attended = entries
+            .values()
+            .filter(|e| !e.retired && e.attended.is_some() && e.herd.as_deref() == Some(herd));
+        for member in attended {
+            let what = format!("{} {}", member.name, line::MERGED);
+            let since = format!("{what} since {}", member.created);
+            let failing = format!("{herd} {} {since}", line::FAILING);
+            match run_member_check(&checks.merged, checks, member, budget) {
+                Some(Err(Unchecked::Failed(why))) => events.push(Event {
+                    key: failing,
+                    line: format!("{herd} {}  {what} {why}", line::FAILING),
+                    covers: None,
+                }),
+                Some(Err(Unchecked::OutOfTime)) | None => {}
+                Some(Ok(merged)) => {
+                    if self.fired.keys.contains(&failing) {
+                        events.push(Event {
+                            key: format!("{herd} {} {since}", line::RECOVERED),
+                            line: format!("{herd} {}  {what}", line::RECOVERED),
+                            covers: None,
+                        });
+                    }
+                    if merged {
+                        events.push(Event {
+                            key: since,
+                            line: what,
+                            covers: None,
+                        });
+                    }
+                }
+            }
+        }
+        events
     }
 }
 
@@ -5789,6 +5853,82 @@ mod tests {
 
         world.spawn_and_retire("lh-2");
         assert_eq!(world.shepherd().unwrap(), ["cards out of work"]);
+    }
+
+    impl Checked {
+        /// lh-1 attended, its herd unled and holding a claimable task, so never out of work.
+        fn attended(mut self, led: bool) -> Checked {
+            if !led {
+                self.retire("lead-cards");
+            }
+            self.ledger.0.get_mut("lh-1").unwrap().attended = Some(Default::default());
+            self.touch("tasks", "2\n");
+            self
+        }
+    }
+
+    #[test]
+    fn the_shepherd_says_an_unled_herds_attended_member_merged_once_done_or_not() {
+        let world = Checked::new().attended(false);
+        assert_eq!(world.shepherd(), None);
+
+        world.touch("merged-1", "");
+        world.touch("done-1", "");
+        assert_eq!(world.shepherd().unwrap(), ["lh-1 merged"]);
+        assert_eq!(world.shepherd(), None, "said it twice");
+    }
+
+    #[test]
+    fn the_shepherd_says_a_paused_unled_herds_attended_member_merged() {
+        let world = Checked::new().attended(false);
+        world.touch("tasks", "");
+        world.pause();
+        world.touch("merged-1", "");
+        assert_eq!(world.shepherd().unwrap(), ["lh-1 merged"]);
+        assert_eq!(world.shepherd(), None, "said out of work for a paused herd");
+    }
+
+    #[test]
+    fn the_shepherd_says_a_readded_attended_member_merged_again() {
+        let mut world = Checked::new().attended(false);
+        world.touch("merged-1", "");
+        assert_eq!(world.shepherd().unwrap(), ["lh-1 merged"]);
+
+        world.ledger.0.get_mut("lh-1").unwrap().created = "2026-11-02T09:00:00Z".into();
+        assert_eq!(world.shepherd().unwrap(), ["lh-1 merged"]);
+    }
+
+    #[test]
+    fn the_shepherd_runs_no_member_check_for_a_led_herd_or_an_ordinary_worker() {
+        let led = Checked::new().attended(true);
+        led.touch("merged-1", "");
+        assert_eq!(led.shepherd(), None, "a led herd is its lead's");
+
+        let mut worker = Checked::new();
+        worker.retire("lead-cards");
+        worker.touch("tasks", "2\n");
+        worker.touch("merged-1", "");
+        assert_eq!(worker.shepherd(), None, "an ordinary worker");
+    }
+
+    #[test]
+    fn the_shepherd_says_an_attended_merged_check_failing_once_then_recovered() {
+        let world =
+            Checked::with_template("merged = \"test ! -f broken || exit 3\"\n").attended(false);
+        world.touch("broken", "");
+        let failing = world.shepherd().unwrap();
+        assert_eq!(failing.len(), 1);
+        assert!(
+            failing[0].starts_with("cards failing  lh-1 merged ") && failing[0].ends_with("exit 3"),
+            "{failing:?}"
+        );
+        assert_eq!(world.shepherd(), None, "said failing twice");
+
+        fs::remove_file(world.repo.path().join("broken")).unwrap();
+        assert_eq!(
+            world.shepherd().unwrap(),
+            ["cards recovered  lh-1 merged", "lh-1 merged"]
+        );
     }
 
     #[test]
