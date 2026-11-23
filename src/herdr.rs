@@ -137,9 +137,17 @@ pub trait Herdr {
     /// Creates a tab without focusing it.
     fn create_tab(&self, workspace_id: &str, cwd: &Path, label: &str) -> Result<NewTab>;
     fn close_tab(&self, tab_id: &str) -> Result<()>;
-    /// Splits `pane_id` with a new shell pane below it, without focusing it,
-    /// with `env` set for its shell. Returns the new pane's ID.
-    fn split_down(&self, pane_id: &str, cwd: &Path, env: &[(&str, &str)]) -> Result<String>;
+    /// Splits `pane_id` with a new shell pane on `side` taking `share` of the
+    /// split, leaving focus where it was, with `env` set for its shell.
+    /// Returns the new pane's ID.
+    fn split(
+        &self,
+        pane_id: &str,
+        side: Side,
+        share: f64,
+        cwd: &Path,
+        env: &[(&str, &str)],
+    ) -> Result<String>;
     fn close_pane(&self, pane_id: &str) -> Result<()>;
     /// Starts a Claude agent named `name` in `pane_id`.
     fn start_claude(
@@ -184,24 +192,56 @@ pub trait Herdr {
 pub enum Placement {
     /// As the plugin's manifest declares it.
     Manifest,
-    /// Split right of `pane` with `share` of their width, at most half, and
-    /// focus on the new pane only when `focus` is set.
-    RightOf {
+    /// Split off `pane` on `side`, the new pane taking `share` of the split,
+    /// at most half. Focus moves to the new pane only when `focus` is set;
+    /// otherwise it stays where it was, as far as herdr allows.
+    Split {
         pane: String,
+        side: Side,
         share: f64,
         focus: bool,
     },
 }
 
-/// The amount to resize a split's target `right` by after a split, which opens
-/// at half, so the new pane gets `share`. Only shrinking the new pane is
-/// supported: growing it means moving the target's left edge, which is an
-/// outer divider when the target already sits inside a split.
-pub fn split_resize(share: f64) -> Result<f64> {
+/// The side of its target a split's new pane takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+    Above,
+    Below,
+}
+
+impl Side {
+    /// herdr splits only right or down, so a pane left of or above its
+    /// target opens on the far side, then swaps with it.
+    fn direction(self) -> &'static str {
+        match self {
+            Side::Left | Side::Right => "right",
+            Side::Above | Side::Below => "down",
+        }
+    }
+
+    fn swaps(self) -> bool {
+        matches!(self, Side::Left | Side::Above)
+    }
+}
+
+/// How to resize a split's target after a split, which opens at half, so
+/// the new pane gets `share`: the direction toward the new pane and the
+/// amount. Only shrinking the new pane is supported: growing it means moving
+/// the target's far edge, an outer divider when the target sits in a split.
+pub fn split_resize(side: Side, share: f64) -> Result<(&'static str, f64)> {
     if !(0.0..=0.5).contains(&share) {
         bail!("a split pane's share must be at most half, not {share}");
     }
-    Ok(0.5 - share)
+    let toward_new = match side {
+        Side::Left => "left",
+        Side::Right => "right",
+        Side::Above => "up",
+        Side::Below => "down",
+    };
+    Ok((toward_new, 0.5 - share))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,6 +305,62 @@ impl CliHerdr {
 
     fn call_ok(&self, args: &[&str]) -> Result<Value> {
         ok_reply(args, self.call(args)?)
+    }
+
+    /// Swaps a pane just split off `target` into its place, focusing the new
+    /// pane only when `focus_new` is set.
+    fn swap(&self, target: &str, new: &str, focus_new: bool) -> Result<()> {
+        let focused = match focus_new {
+            true => None,
+            false => self
+                .call_ok(&["pane", "layout", "--pane", target])
+                .ok()
+                .and_then(|r| r["layout"]["focused_pane_id"].as_str().map(String::from)),
+        };
+        // herdr's swap focuses its source and brings that pane's tab forward.
+        let (source, other) = match focus_new {
+            true => (new, target),
+            false => (target, new),
+        };
+        let args = [
+            "pane",
+            "swap",
+            "--source-pane",
+            source,
+            "--target-pane",
+            other,
+        ];
+        self.call_ok(&args)?;
+        if let Some(focused) = focused.filter(|f| f != source) {
+            // Best effort: the layout is right whether or not focus goes back.
+            let _ = self.focus_through_neighbor(&focused);
+        }
+        Ok(())
+    }
+
+    /// Focuses `pane` by moving focus from a neighbor toward it, herdr having
+    /// no focus by ID for a shell's pane.
+    fn focus_through_neighbor(&self, pane: &str) -> Result<()> {
+        let neighbor = |of: &str, direction: &str| {
+            self.call_ok(&["pane", "neighbor", "--pane", of, "--direction", direction])
+                .ok()
+                .and_then(|r| r["neighbor"]["neighbor_pane_id"].as_str().map(String::from))
+        };
+        for (out, back) in [
+            ("left", "right"),
+            ("right", "left"),
+            ("up", "down"),
+            ("down", "up"),
+        ] {
+            let Some(next) = neighbor(pane, out) else {
+                continue;
+            };
+            if neighbor(&next, back).as_deref() == Some(pane) {
+                let args = ["pane", "focus", "--pane", &next, "--direction", back];
+                return self.call_ok(&args).map(drop);
+            }
+        }
+        bail!("no neighbor of {pane} leads back to it")
     }
 
     fn call_ok_within(&self, args: &[&str], timeout: Duration) -> Result<Value> {
@@ -603,15 +699,33 @@ impl Herdr for CliHerdr {
         self.call_ok(&["tab", "close", tab_id]).map(drop)
     }
 
-    fn split_down(&self, pane_id: &str, cwd: &Path, env: &[(&str, &str)]) -> Result<String> {
+    fn split(
+        &self,
+        pane_id: &str,
+        side: Side,
+        share: f64,
+        cwd: &Path,
+        env: &[(&str, &str)],
+    ) -> Result<String> {
+        if !(share > 0.0 && share < 1.0) {
+            bail!("a split pane's share must be between 0 and 1, not {share}");
+        }
         let cwd = cwd.to_str().context("cwd is not UTF-8")?;
+        // herdr's ratio is the target's share, which the swap hands to the new pane.
+        let ratio = match side.swaps() {
+            true => share,
+            false => 1.0 - share,
+        }
+        .to_string();
         let env: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
         let mut argv = vec![
             "pane",
             "split",
             pane_id,
             "--direction",
-            "down",
+            side.direction(),
+            "--ratio",
+            &ratio,
             "--cwd",
             cwd,
             "--no-focus",
@@ -620,7 +734,14 @@ impl Herdr for CliHerdr {
             argv.extend(["--env", pair]);
         }
         let result = self.call_ok(&argv)?;
-        parse(&result["pane"]["pane_id"], "pane split")
+        let new: String = parse(&result["pane"]["pane_id"], "pane split")?;
+        if side.swaps()
+            && let Err(e) = self.swap(pane_id, &new, false)
+        {
+            let _ = self.close_pane(&new);
+            return Err(e);
+        }
+        Ok(new)
     }
 
     fn close_pane(&self, pane_id: &str) -> Result<()> {
@@ -744,15 +865,21 @@ impl Herdr for CliHerdr {
             entrypoint,
         ];
         let mut resize = None;
-        if let Placement::RightOf { pane, share, focus } = placement {
-            resize = Some(split_resize(*share)?.to_string());
+        if let Placement::Split {
+            pane,
+            side,
+            share,
+            focus,
+        } = placement
+        {
+            resize = Some(split_resize(*side, *share)?);
             argv.extend([
                 "--placement",
                 "split",
                 "--target-pane",
                 pane,
                 "--direction",
-                "right",
+                side.direction(),
                 if *focus { "--focus" } else { "--no-focus" },
             ]);
         }
@@ -779,21 +906,47 @@ impl Herdr for CliHerdr {
                 ),
             }
         }
-        if let (Placement::RightOf { pane, .. }, Some(amount)) = (placement, resize) {
-            // Resizing the target, not the new pane, moves the divider between them.
-            let args = [
-                "pane",
-                "resize",
-                "--pane",
-                pane,
-                "--direction",
-                "right",
-                "--amount",
-                &amount,
-            ];
-            if let Err(e) = self.call_ok(&args) {
-                eprintln!("loopherd: the plugin pane opened at half width: {e:#}");
+        let (
+            Placement::Split {
+                pane, side, focus, ..
+            },
+            Some((toward_new, amount)),
+        ) = (placement, resize)
+        else {
+            return Ok(());
+        };
+        if side.swaps() {
+            let opened = serde_json::from_slice::<Value>(&out.stdout)
+                .context("herdr plugin pane open: a reply that isn't JSON")
+                .and_then(|reply| {
+                    parse::<String>(
+                        &reply["result"]["plugin_pane"]["pane"]["pane_id"],
+                        "plugin pane open",
+                    )
+                });
+            if let Err(e) = opened.and_then(|new| self.swap(pane, &new, *focus)) {
+                let instead = match side.direction() {
+                    "down" => "below",
+                    _ => "right of",
+                };
+                eprintln!("loopherd: the plugin pane opened {instead} its target instead: {e:#}");
+                return Ok(());
             }
+        }
+        // Resizing the target, not the new pane, moves the divider between them.
+        let amount = amount.to_string();
+        let args = [
+            "pane",
+            "resize",
+            "--pane",
+            pane,
+            "--direction",
+            toward_new,
+            "--amount",
+            &amount,
+        ];
+        if let Err(e) = self.call_ok(&args) {
+            eprintln!("loopherd: the plugin pane opened at half the split: {e:#}");
         }
         Ok(())
     }
@@ -875,17 +1028,27 @@ mod tests {
     use fake::FakeHerdr;
 
     #[test]
-    fn a_split_shrinks_the_new_pane_from_half_by_resizing_its_target() {
-        assert!((split_resize(0.4).unwrap() - 0.1).abs() < 1e-9);
-        assert_eq!(split_resize(0.5).unwrap(), 0.0);
+    fn a_split_shrinks_the_new_pane_from_half_by_growing_its_target_toward_it() {
+        for (side, toward_new) in [
+            (Side::Right, "right"),
+            (Side::Left, "left"),
+            (Side::Above, "up"),
+            (Side::Below, "down"),
+        ] {
+            let (direction, amount) = split_resize(side, 0.4).unwrap();
+            assert_eq!(direction, toward_new);
+            assert!((amount - 0.1).abs() < 1e-9, "{side:?}: {amount}");
+        }
+        assert_eq!(split_resize(Side::Above, 0.5).unwrap(), ("up", 0.0));
     }
 
     #[test]
     fn a_split_wider_than_half_is_refused_and_opens_nothing() {
         let herdr = FakeHerdr::new(&[("w1", "loopherd")]);
         let pane = herdr.add_tab("w1", "t", Path::new("/src"), true);
-        let wide = Placement::RightOf {
+        let wide = Placement::Split {
             pane,
+            side: Side::Above,
             share: 0.6,
             focus: false,
         };

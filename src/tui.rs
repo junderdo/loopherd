@@ -30,7 +30,7 @@ use crate::herdr::Herdr;
 use crate::herdr::events::Subscriber;
 use crate::ledger::Ledger;
 use crate::pause::Pauses;
-use crate::shepherd_pane::{self, Below, Summoned};
+use crate::shepherd_pane::{self, Summoned, ViewPane};
 use crate::status::{Read, Subagents, aligned, read, row, sections, stray_lines, widths};
 use mail::{Mail, Waiting, waiting};
 use since::{Since, Staleness, staleness};
@@ -90,8 +90,8 @@ pub struct Dirs {
     pub config: PathBuf,
     /// loopherd's state, where the shepherd's handoff and record are.
     pub state: PathBuf,
-    /// Where `S` starts a shepherd; `None` in a popup, which has no pane.
-    pub below: Option<Below>,
+    /// The pane `S` splits a shepherd off; `None` in a popup, which has no pane.
+    pub view_pane: Option<ViewPane>,
 }
 
 pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger, dirs: &Dirs) -> Response {
@@ -117,7 +117,8 @@ pub fn serve(request: Request, herdr: &dyn Herdr, ledger: &dyn Ledger, dirs: &Di
             herdr,
             &crate::process::ProcFs,
             &dirs.state,
-            dirs.below.as_ref(),
+            dirs.view_pane.as_ref(),
+            crate::config::view_layout(&dirs.config).0,
         )),
     }
 }
@@ -140,11 +141,30 @@ where
     (requests, responses)
 }
 
-/// The app in `config`'s saved palette, noting why when it falls back.
+/// The app in `config`'s saved palette, noting why when it or the layout
+/// falls back.
 fn opening(options: Options, theme: Theme, config: &std::path::Path) -> App {
-    let (palette, warning) = crate::config::view_theme(config);
+    let (palette, theme_warning) = crate::config::view_theme(config);
+    let (layout, layout_warning) = crate::config::view_layout(config);
     let mut app = App::new(options, theme.with_palette(palette));
-    app.message = warning.map(|w| format!("{w}; using {}", palette.name()));
+    app.message = match (theme_warning, layout_warning) {
+        // An unreadable config is both settings' warning; say it once.
+        (Some(read), Some(again)) if read == again => Some(format!(
+            "{read}; using {} and {}",
+            palette.name(),
+            layout.name()
+        )),
+        (theme_warning, layout_warning) => {
+            let warnings: Vec<String> = [
+                theme_warning.map(|w| format!("{w}; using {}", palette.name())),
+                layout_warning.map(|w| format!("{w}; using {}", layout.name())),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            (!warnings.is_empty()).then(|| warnings.join("; "))
+        }
+    };
     app
 }
 
@@ -329,9 +349,9 @@ impl App {
                 self.quit = self.quit_after_summon;
                 self.message = Some(match result {
                     Ok(Summoned::Focused(pane)) => format!("focused the shepherd in {pane}"),
-                    Ok(Summoned::Started(pane)) => format!("started the shepherd below, in {pane}"),
+                    Ok(Summoned::Started(pane)) => format!("started the shepherd in {pane}"),
                     Ok(Summoned::Unfocused(pane, e)) => {
-                        format!("started the shepherd below, in {pane}; focus failed: {e}")
+                        format!("started the shepherd in {pane}; focus failed: {e}")
                     }
                     Ok(Summoned::Elsewhere(place)) => format!(
                         "the shepherd's Claude (pid {}) runs in {} on {}; not starting another",
@@ -1169,7 +1189,7 @@ mod tests {
 
     use super::*;
     use crate::herdr::fake::{FakeHerdr, FakeSubscriber, Which};
-    use crate::herdr::{Agent, AgentStatus};
+    use crate::herdr::{Agent, AgentStatus, Side};
     use crate::ledger::{AgentRecord, MemLedger};
     use crate::report::{self, Body, Entry};
     use std::os::unix::fs::PermissionsExt;
@@ -1533,7 +1553,7 @@ max = 3
             herds: plain_herds(),
             config: "/nonexistent/config.toml".into(),
             state: "/nonexistent/state".into(),
-            below: None,
+            view_pane: None,
         }
     }
 
@@ -2280,6 +2300,48 @@ max = 3
             "{shown}"
         );
         assert!(shown.contains("using purple-orange"), "{shown}");
+    }
+
+    #[test]
+    fn a_malformed_layout_says_so_in_the_notes_beside_a_theme_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "[view]\ntheme = \"solarized\"\nlayout = \"diagonal\"\n",
+        )
+        .unwrap();
+
+        let app = opening(Options::default(), truecolor(), &config);
+
+        let message = app.message.unwrap();
+        assert!(message.contains("using purple-orange"), "{message}");
+        assert!(
+            message.contains("view.layout: unknown layout \"diagonal\""),
+            "{message}"
+        );
+        assert!(message.ends_with("; using side-by-side"), "{message}");
+    }
+
+    #[test]
+    fn an_unreadable_config_is_noted_once_for_the_theme_and_the_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "[view]\nlayout = 3\n").unwrap();
+
+        let message = opening(Options::default(), truecolor(), &config)
+            .message
+            .unwrap();
+
+        assert_eq!(
+            message.matches(&config.display().to_string()).count(),
+            1,
+            "{message}"
+        );
+        assert!(
+            message.ends_with("; using purple-orange and side-by-side"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -4090,7 +4152,7 @@ max = 3
     fn shepherd_dirs(state: &std::path::Path, pane: Option<&str>) -> Dirs {
         Dirs {
             state: state.into(),
-            below: pane.map(|pane| Below {
+            view_pane: pane.map(|pane| ViewPane {
                 pane: pane.into(),
                 cwd: "/repo".into(),
                 env: vec![],
@@ -4126,7 +4188,7 @@ max = 3
     }
 
     #[test]
-    fn capital_s_with_no_shepherd_starts_one_below_the_view_then_focuses_it() {
+    fn capital_s_with_no_shepherd_starts_one_left_of_the_view_then_focuses_it() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let view = herdr.add_tab("w1", "view", std::path::Path::new("/repo"), true);
         let state = tempfile::tempdir().unwrap();
@@ -4136,12 +4198,40 @@ max = 3
         let shown = press_shepherd(&mut app, &herdr, &ledger, &dirs);
 
         let [split] = herdr.splits().try_into().unwrap();
-        assert_eq!(split.from, view);
-        assert!(shown.contains("started the shepherd below"), "{shown}");
+        assert_eq!(
+            (split.from.as_str(), split.side),
+            (view.as_str(), Side::Left)
+        );
+        assert!(
+            shown.contains(&format!("started the shepherd in {}", split.pane)),
+            "{shown}"
+        );
         let shown = press_shepherd(&mut app, &herdr, &ledger, &dirs);
         assert_eq!(herdr.started().len(), 1);
         assert_eq!(herdr.focused().last(), Some(&split.pane));
         assert!(shown.contains("focused the shepherd"), "{shown}");
+    }
+
+    #[test]
+    fn capital_s_with_the_layout_stacked_starts_the_shepherd_below_the_view() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let view = herdr.add_tab("w1", "view", std::path::Path::new("/repo"), true);
+        let state = tempfile::tempdir().unwrap();
+        let config = state.path().join("config.toml");
+        std::fs::write(&config, "[view]\nlayout = \"stacked\"\n").unwrap();
+        let dirs = Dirs {
+            config,
+            ..shepherd_dirs(state.path(), Some(&view))
+        };
+        let mut app = app(&herdr, &ledger, now);
+
+        press_shepherd(&mut app, &herdr, &ledger, &dirs);
+
+        let [split] = herdr.splits().try_into().unwrap();
+        assert_eq!(
+            (split.from.as_str(), split.side),
+            (view.as_str(), Side::Below)
+        );
     }
 
     #[test]

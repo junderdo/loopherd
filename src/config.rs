@@ -12,6 +12,7 @@ use crate::context::{self, Limit, check_limit, check_tokens};
 use crate::herd::SwitchValues;
 use crate::line_ending::LineEnding;
 use crate::tui::theme::Palette;
+use crate::view_pane::Layout;
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -47,6 +48,8 @@ pub struct HerdrPluginConfig {
 pub struct ViewConfig {
     /// Checked by `view_theme`, so a theme it doesn't know can't cost the rest.
     pub theme: Option<String>,
+    /// Checked by `view_layout`, so a layout it doesn't know can't cost the rest.
+    pub layout: Option<String>,
 }
 
 /// `config` parsed and checked; a missing file is an empty one.
@@ -89,6 +92,20 @@ pub fn view_theme(config: &Path) -> (Palette, Option<String>) {
     }
 }
 
+/// How the view and the shepherd share a tab, with a warning when `config`
+/// can't be read or names another layout; both fall back to side by side.
+pub fn view_layout(config: &Path) -> (Layout, Option<String>) {
+    let layout = match read(config) {
+        Ok(file) => file.view.and_then(|v| v.layout),
+        Err(e) => return (Layout::default(), Some(format!("{e:#}"))),
+    };
+    match layout.map(|name| name.parse::<Layout>()) {
+        Some(Ok(layout)) => (layout, None),
+        Some(Err(e)) => (Layout::default(), Some(format!("view.layout: {e}"))),
+        None => (Layout::default(), None),
+    }
+}
+
 /// Writes `[lead_defaults]` with the switches in `on` (comma-separated, or
 /// `none`) on and the rest off, keeping the file's other keys and comments.
 /// Refuses, changing nothing, when the result would be an invalid config.
@@ -108,7 +125,7 @@ pub fn set_lead_defaults(config: &Path, on: &str) -> Result<()> {
 }
 
 /// The keys `config get`, `set` and `unset` take.
-pub const KEYS: [&str; 7] = [
+pub const KEYS: [&str; 8] = [
     "context_window",
     "default_context_limit",
     "shepherd.context_limit",
@@ -116,6 +133,7 @@ pub const KEYS: [&str; 7] = [
     "herdr_plugin.revive_on_startup",
     "lead_defaults.review_rounds",
     "view.theme",
+    "view.layout",
 ];
 
 /// `key`'s value in `config`, `None` when unset.
@@ -123,6 +141,7 @@ pub fn get(config: &Path, key: &str) -> Result<Option<String>> {
     let file = read(config)?;
     let number = match known(key)? {
         "view.theme" => return Ok(file.view.and_then(|v| v.theme)),
+        "view.layout" => return Ok(file.view.and_then(|v| v.layout)),
         "default_context_limit" => return Ok(file.default_context_limit.map(|l| l.to_string())),
         "shepherd.context_limit" => {
             return Ok(file
@@ -152,8 +171,8 @@ pub fn get(config: &Path, key: &str) -> Result<Option<String>> {
 }
 
 /// Writes `key = value`, keeping the file's other keys and comments.
-/// Refuses, changing nothing, an unknown key, an unknown theme, or a value
-/// under the minimum.
+/// Refuses, changing nothing, an unknown key, an unknown theme or layout, or
+/// a value under the minimum.
 pub fn set(config: &Path, key: &str, value: &str) -> Result<()> {
     let key = known(key)?;
     let value = match key {
@@ -161,6 +180,13 @@ pub fn set(config: &Path, key: &str, value: &str) -> Result<()> {
             value
                 .trim()
                 .parse::<Palette>()
+                .map_err(anyhow::Error::msg)?
+                .name(),
+        ),
+        "view.layout" => Value::from(
+            value
+                .trim()
+                .parse::<Layout>()
                 .map_err(anyhow::Error::msg)?
                 .name(),
         ),
@@ -1071,6 +1097,60 @@ mod key_tests {
             fs::read_to_string(&path).unwrap(),
             "context_window = 1000000\n"
         );
+    }
+
+    #[test]
+    fn view_layout_round_trips_through_set_get_and_unset_and_is_side_by_side_unless_set() {
+        let (_dir, path) = config_with("context_window = 1000000\n");
+        assert_eq!(view_layout(&path), (Layout::SideBySide, None));
+        assert_eq!(get(&path, "view.layout").unwrap(), None);
+
+        set(&path, "view.layout", " stacked ").unwrap();
+
+        assert_eq!(
+            get(&path, "view.layout").unwrap().as_deref(),
+            Some("stacked")
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "context_window = 1000000\n\n[view]\nlayout = \"stacked\"\n"
+        );
+        assert_eq!(view_layout(&path), (Layout::Stacked, None));
+        set(&path, "view.layout", "side-by-side").unwrap();
+        assert_eq!(view_layout(&path), (Layout::SideBySide, None));
+        assert!(unset(&path, "view.layout").unwrap());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "context_window = 1000000\n"
+        );
+    }
+
+    #[test]
+    fn a_view_layout_other_than_the_two_is_refused_and_changes_nothing() {
+        let text = "[view]\nlayout = \"stacked\"\n";
+        let (_dir, path) = config_with(text);
+        for given in ["sideways", "", "Stacked", "side_by_side"] {
+            let err = format!("{:#}", set(&path, "view.layout", given).unwrap_err());
+            assert!(err.contains("side-by-side, stacked"), "{given:?}: {err}");
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    }
+
+    #[test]
+    fn a_malformed_view_layout_warns_and_falls_back_to_side_by_side() {
+        for (text, says) in [
+            (
+                "[view]\nlayout = \"diagonal\"\n",
+                "view.layout: unknown layout \"diagonal\"",
+            ),
+            ("[view]\nlayout = 3\n", "layout"),
+        ] {
+            let (_dir, path) = config_with(text);
+            let (layout, warning) = view_layout(&path);
+            assert_eq!(layout, Layout::SideBySide, "{text}");
+            let warning = warning.unwrap();
+            assert!(warning.contains(says), "{text}: {warning}");
+        }
     }
 
     #[test]

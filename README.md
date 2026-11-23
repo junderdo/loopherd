@@ -160,11 +160,20 @@ opens means the view couldn't start; run `loopherd view` in a pane to see
 why.
 
 `loopherd: open view beside shepherd` (`loopherd.view-beside-shepherd`)
-splits the view into a pane right of the shepherd's, the one its last
+splits the view into a pane beside the shepherd's, the one its last
 handoff recorded, leaving focus where it was. With no shepherd recorded,
-or its pane gone or no longer the shepherd's, it splits right of the
+or its pane gone or no longer the shepherd's, it splits beside the
 focused pane (the popup when that fails too), and the view says why. Bind
 it the same way, with its own key (install uses `prefix+shift+m`).
+
+`view.layout` in `config.toml` sets the side, for this action and the
+view's `S` alike: `side-by-side`, the default, puts the shepherd left and
+the view right; `stacked` puts the view on top and the shepherd below.
+The view takes 40% of the split.
+
+```sh
+loopherd config set view.layout stacked
+```
 
 The plugin's event hooks record a member going blocked, or its pane
 exiting or closing, or its tab or workspace closing, so the next
@@ -219,11 +228,12 @@ as its main checkout. Then, in order:
 4. **Open the herd view.** In a new herdr tab, run `loopherd view`. It
    lists every member, sorted by what needs you; Enter focuses the
    selected member's pane, `S` focuses the shepherd (or, with none, starts
-   one in a pane split below the view), and `t` switches between its
+   one in a pane split left of the view, or below it with `view.layout`
+   set to `stacked`), and `t` switches between its
    purple-orange, phosphor and catppuccin themes, remembering the choice as
    `view.theme` in `config.toml`.
 5. **Start the shepherd.** Press `S` in the view, run in a pane rather
-   than the plugin's popup, to start it below the view, in the view's
+   than the plugin's popup, to start it beside the view, in the view's
    directory (a plugin pane's workspace directory, not the plugin's). Or in
    another herdr tab, `cd` to the main checkout, run `claude`, and give it
    this first prompt; the skill has it name its herdr agent `shepherd`, so
@@ -365,7 +375,7 @@ it; `attended = true` implies it (D116).
 | `herd get\|set\|unset <herd> <key>` | Read or edit one value in a herd file, keeping its comments (`queue.max`, `lead.merge`). |
 | `herd remove <herd>` | Delete a finished herd's file and every run of it in the ledger; a name holding another herd's run keeps that run and its files. |
 | `lead-defaults` | Show `config.toml`'s lead switches, on or off, for herds whose `[lead]` doesn't set them; `--set` writes them. |
-| `config get\|set\|unset <key>` | Read or edit `context_window`, `default_context_limit`, `shepherd.context_limit`, `shepherd.self_restart`, `herdr_plugin.revive_on_startup`, `lead_defaults.review_rounds` or `view.theme`. |
+| `config get\|set\|unset <key>` | Read or edit `context_window`, `default_context_limit`, `shepherd.context_limit`, `shepherd.self_restart`, `herdr_plugin.revive_on_startup`, `lead_defaults.review_rounds`, `view.theme` or `view.layout`. |
 | `install-hook` | Add loopherd's Claude hooks and skill (`--remove` takes them out). |
 
 ### Run
@@ -387,7 +397,7 @@ it; `attended = true` implies it (D116).
 | `reports` | Print unread reports, questions first, and mark them read (`--herd`, `--all`). |
 | `status` | Members by herd with herdr's live status (`--all`, `--strays`, `--json`). |
 | `read <member>` | A member's last lines of output, unwrapped (`--lines`, 40 by default, up to 1000). |
-| `view` | The same as a live TUI; Enter focuses the member's pane, `S` focuses the shepherd or starts one below the view, and `t` switches the theme, saving it as `view.theme` in `config.toml`. |
+| `view` | The same as a live TUI; Enter focuses the member's pane, `S` focuses the shepherd or starts one beside the view (left of it, or below with `view.layout = "stacked"`), and `t` switches the theme, saving it as `view.theme` in `config.toml`. |
 | `pr [url]` | The herdr plugin's PR link handler: the member that owns the PR in a popup, else the browser. |
 | `stats` | How each herd's work flowed: time to done, review rounds, time waiting on merge, and each run's outcome (`merged`, `closed`, `released`, `retired`), with medians over merged runs per herd and per template (`--herd`, `--since`, `--until`, `--json`). |
 
