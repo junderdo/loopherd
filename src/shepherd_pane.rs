@@ -1,5 +1,5 @@
 //! Bringing up the shepherd from the herd view: its pane when it's alive,
-//! else a new one split below the view's.
+//! else a new one split off the view's on the side `view.layout` picks.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -10,6 +10,7 @@ use crate::context::SHEPHERD;
 use crate::herdr::{Herdr, wait_for_shell_prompt};
 use crate::process::{self, Procs};
 use crate::shepherd_resume::{self, Place};
+use crate::view_pane::{self, Layout};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Summoned {
@@ -24,10 +25,10 @@ pub enum Summoned {
     NoPane,
 }
 
-/// Where a shepherd started from the view goes: split below the view's
-/// `pane`, in `cwd`, with `env` for loopherd's state and config.
+/// The view's own pane, which a shepherd started from the view splits off,
+/// in `cwd`, with `env` for loopherd's state and config.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Below {
+pub struct ViewPane {
     pub pane: String,
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
@@ -40,13 +41,15 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 const START_PROMPT: &str = "You're the loopherd shepherd. Run `loopherd --skill` and follow its \
      Shepherd section: feed the herds, watch them, verify members' work, and clean up after merges.";
 
-/// Focuses the live shepherd, or starts one `below` the view; `None` is a
-/// view with no pane of its own. A failed start closes the pane it split.
+/// Focuses the live shepherd, or starts one beside the view's pane as
+/// `layout` places it; `None` is a view with no pane of its own. A failed
+/// start closes the pane it split.
 pub fn summon(
     herdr: &dyn Herdr,
     procs: &dyn Procs,
     state: &Path,
-    below: Option<&Below>,
+    view: Option<&ViewPane>,
+    layout: Layout,
 ) -> Result<Summoned> {
     let agents = herdr.agents()?;
     let named = agents.iter().find(|a| a.name.as_deref() == Some(SHEPHERD));
@@ -75,15 +78,21 @@ pub fn summon(
         herdr.focus(&pane)?;
         return Ok(Summoned::Focused(pane));
     }
-    let Some(below) = below else {
+    let Some(view) = view else {
         return Ok(Summoned::NoPane);
     };
-    let env: Vec<(&str, &str)> = below
+    let env: Vec<(&str, &str)> = view
         .env
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    let pane = herdr.split_down(&below.pane, &below.cwd, &env)?;
+    let pane = herdr.split(
+        &view.pane,
+        layout.shepherd_side(),
+        1.0 - view_pane::SHARE,
+        &view.cwd,
+        &env,
+    )?;
     if let Err(e) = start_in(herdr, state, &pane) {
         let _ = herdr.close_pane(&pane);
         return Err(e);
@@ -115,13 +124,14 @@ fn start_in(herdr: &dyn Herdr, state: &Path, pane: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::herdr::Side;
     use crate::herdr::fake::Startup;
     use crate::herdr::fake::{FAKE_SOCKET, FakeHerdr, Split};
     use crate::ledger::Process;
     use crate::process::{FakeProcs, PANE_SHELL};
 
-    fn below(pane: &str) -> Below {
-        Below {
+    fn view_pane(pane: &str) -> ViewPane {
+        ViewPane {
             pane: pane.into(),
             cwd: "/repo".into(),
             env: vec![("XDG_STATE_HOME".into(), "/state".into())],
@@ -167,7 +177,14 @@ mod tests {
     fn started_prompt(state: &Path) -> String {
         let herdr = FakeHerdr::new(&[("w1", "main")]);
         let view = herdr.add_tab("w1", "view", Path::new("/repo"), true);
-        summon(&herdr, &FakeProcs::default(), state, Some(&below(&view))).unwrap();
+        summon(
+            &herdr,
+            &FakeProcs::default(),
+            state,
+            Some(&view_pane(&view)),
+            Layout::Stacked,
+        )
+        .unwrap();
         let [started] = herdr.started().try_into().unwrap();
         let [prompt] = started.args.try_into().unwrap();
         prompt
@@ -183,7 +200,8 @@ mod tests {
             &herdr,
             &shepherd_alive(),
             state.path(),
-            Some(&below("w1:p1")),
+            Some(&view_pane("w1:p1")),
+            Layout::Stacked,
         )
         .unwrap();
 
@@ -202,7 +220,8 @@ mod tests {
             &herdr,
             &shepherd_alive(),
             state.path(),
-            Some(&below("w1:p1")),
+            Some(&view_pane("w1:p1")),
+            Layout::Stacked,
         )
         .unwrap();
 
@@ -211,13 +230,43 @@ mod tests {
     }
 
     #[test]
+    fn side_by_side_a_shepherd_starts_left_of_the_view_with_the_view_keeping_two_fifths() {
+        let state = tempfile::tempdir().unwrap();
+        let herdr = FakeHerdr::new(&[("w1", "main")]);
+        let view = herdr.add_tab("w1", "view", Path::new("/repo"), true);
+
+        let summoned = summon(
+            &herdr,
+            &shepherd_alive(),
+            state.path(),
+            Some(&view_pane(&view)),
+            Layout::SideBySide,
+        )
+        .unwrap();
+
+        let [split] = herdr.splits().try_into().unwrap();
+        assert_eq!(
+            (split.from.as_str(), split.side, split.share),
+            (view.as_str(), Side::Left, 600)
+        );
+        assert_eq!(summoned, Summoned::Started(split.pane.clone()));
+        assert_eq!(herdr.focused(), vec![split.pane]);
+    }
+
+    #[test]
     fn with_no_live_shepherd_it_starts_below_the_view_and_a_second_press_focuses_it() {
         let state = tempfile::tempdir().unwrap();
         let herdr = FakeHerdr::new(&[("w1", "main")]);
         let view = herdr.add_tab("w1", "view", Path::new("/repo"), true);
 
-        let summoned =
-            summon(&herdr, &shepherd_alive(), state.path(), Some(&below(&view))).unwrap();
+        let summoned = summon(
+            &herdr,
+            &shepherd_alive(),
+            state.path(),
+            Some(&view_pane(&view)),
+            Layout::Stacked,
+        )
+        .unwrap();
 
         let [split] = herdr.splits().try_into().unwrap();
         let Split { pane, .. } = &split;
@@ -226,6 +275,8 @@ mod tests {
             Split {
                 from: view.clone(),
                 pane: pane.clone(),
+                side: Side::Below,
+                share: 600,
                 cwd: "/repo".into(),
                 env: vec![("XDG_STATE_HOME".into(), "/state".into())],
             }
@@ -241,7 +292,14 @@ mod tests {
         assert!(prompt.contains("Shepherd section"), "{prompt}");
         assert_eq!(herdr.focused(), vec![pane.clone()]);
 
-        let again = summon(&herdr, &shepherd_alive(), state.path(), Some(&below(&view))).unwrap();
+        let again = summon(
+            &herdr,
+            &shepherd_alive(),
+            state.path(),
+            Some(&view_pane(&view)),
+            Layout::Stacked,
+        )
+        .unwrap();
 
         assert_eq!(again, Summoned::Focused(pane.clone()));
         assert_eq!(herdr.started().len(), 1);
@@ -252,7 +310,14 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let herdr = FakeHerdr::new(&[("w1", "main")]);
 
-        let summoned = summon(&herdr, &shepherd_alive(), state.path(), None).unwrap();
+        let summoned = summon(
+            &herdr,
+            &shepherd_alive(),
+            state.path(),
+            None,
+            Layout::SideBySide,
+        )
+        .unwrap();
 
         assert_eq!(summoned, Summoned::NoPane);
         assert_eq!(herdr.mutations(), 0);
@@ -269,8 +334,14 @@ mod tests {
             let herdr = FakeHerdr::new(&[("w1", "main")]).with_live_agent(None, None, agent_pane);
             let view = herdr.add_tab("w1", "view", Path::new("/repo"), true);
 
-            let summoned =
-                summon(&herdr, &shepherd_alive(), state.path(), Some(&below(&view))).unwrap();
+            let summoned = summon(
+                &herdr,
+                &shepherd_alive(),
+                state.path(),
+                Some(&view_pane(&view)),
+                Layout::Stacked,
+            )
+            .unwrap();
 
             let Summoned::Elsewhere(place) = summoned else {
                 panic!("{record_socket} {agent_pane}: {summoned:?}");
@@ -358,7 +429,14 @@ mod tests {
         let mut restarted = FakeProcs::default();
         restarted.add(4242, "/usr/bin/claude", 1, 8);
 
-        let summoned = summon(&herdr, &restarted, state.path(), Some(&below(&view))).unwrap();
+        let summoned = summon(
+            &herdr,
+            &restarted,
+            state.path(),
+            Some(&view_pane(&view)),
+            Layout::Stacked,
+        )
+        .unwrap();
 
         assert!(matches!(summoned, Summoned::Started(_)), "{summoned:?}");
     }
@@ -405,7 +483,8 @@ mod tests {
             &herdr,
             &only_the_pane_shell(),
             state.path(),
-            Some(&below(&view)),
+            Some(&view_pane(&view)),
+            Layout::Stacked,
         )
         .unwrap();
 
@@ -425,7 +504,8 @@ mod tests {
             &herdr,
             &only_the_pane_shell(),
             state.path(),
-            Some(&below(&view)),
+            Some(&view_pane(&view)),
+            Layout::Stacked,
         )
         .unwrap();
 
@@ -447,7 +527,14 @@ mod tests {
             herdr.set_shell_pid(&shepherd, Some(shell_pid));
             let view = herdr.add_tab("w1", "view", Path::new("/repo"), true);
 
-            let summoned = summon(&herdr, &procs, state.path(), Some(&below(&view))).unwrap();
+            let summoned = summon(
+                &herdr,
+                &procs,
+                state.path(),
+                Some(&view_pane(&view)),
+                Layout::Stacked,
+            )
+            .unwrap();
 
             assert!(
                 matches!(summoned, Summoned::Started(_)),
@@ -469,7 +556,8 @@ mod tests {
             &herdr,
             &only_the_pane_shell(),
             state.path(),
-            Some(&below(&view)),
+            Some(&view_pane(&view)),
+            Layout::Stacked,
         );
 
         let error = format!("{:#}", failed.unwrap_err());
@@ -490,7 +578,8 @@ mod tests {
             &herdr,
             &FakeProcs::default(),
             state.path(),
-            Some(&below(&view)),
+            Some(&view_pane(&view)),
+            Layout::Stacked,
         );
 
         assert!(failed.is_err());
@@ -511,7 +600,8 @@ mod tests {
             &herdr,
             &FakeProcs::default(),
             state.path(),
-            Some(&below(&view)),
+            Some(&view_pane(&view)),
+            Layout::Stacked,
         )
         .unwrap();
 

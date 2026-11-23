@@ -11,7 +11,7 @@ use anyhow::{Result, anyhow, bail};
 
 use super::events::{Connection, OnPush, PaneNotFound, Pushed, Subscriber, Subscription};
 use super::{
-    Agent, AgentStatus, Herdr, MalformedReply, NewTab, Pane, Placement, Plugin, Server,
+    Agent, AgentStatus, Herdr, MalformedReply, NewTab, Pane, Placement, Plugin, Server, Side,
     StartOutcome, Tab, WaitOutcome, Workspace,
 };
 
@@ -64,6 +64,9 @@ impl FakePane {
 pub struct Split {
     pub from: String,
     pub pane: String,
+    pub side: Side,
+    /// The new pane's share of the split, in thousandths.
+    pub share: u32,
     pub cwd: PathBuf,
     pub env: Vec<(String, String)>,
 }
@@ -714,7 +717,14 @@ impl Herdr for FakeHerdr {
         Ok(())
     }
 
-    fn split_down(&self, pane_id: &str, cwd: &Path, env: &[(&str, &str)]) -> Result<String> {
+    fn split(
+        &self,
+        pane_id: &str,
+        side: Side,
+        share: f64,
+        cwd: &Path,
+        env: &[(&str, &str)],
+    ) -> Result<String> {
         self.called();
         self.mutating();
         if self.is_down() {
@@ -732,6 +742,8 @@ impl Herdr for FakeHerdr {
         state.splits.push(Split {
             from: pane_id.to_string(),
             pane: new.clone(),
+            side,
+            share: (share * 1000.0).round() as u32,
             cwd: cwd.to_path_buf(),
             env: env
                 .iter()
@@ -932,13 +944,19 @@ impl Herdr for FakeHerdr {
             Placement::Manifest if state.refuse_popup => {
                 bail!("herdr plugin pane open: another modal is open (ui_busy)")
             }
-            Placement::RightOf { pane, .. } if !state.panes.iter().any(|p| p.id == *pane) => {
+            Placement::Split { pane, .. } if !state.panes.iter().any(|p| p.id == *pane) => {
                 bail!("herdr plugin pane open: pane {pane} not found (pane_not_found)")
             }
             _ => {}
         }
-        if let Placement::RightOf { pane, share, focus } = placement {
-            super::split_resize(*share)?;
+        if let Placement::Split {
+            pane,
+            side,
+            share,
+            focus,
+        } = placement
+        {
+            super::split_resize(*side, *share)?;
             let target = state.panes.iter().find(|p| p.id == *pane).unwrap().clone();
             state.next_id += 1;
             let id = format!("{}:p{}", target.workspace_id, state.next_id);
