@@ -1196,7 +1196,7 @@ fn run_revive(dry_run: bool, name: Option<String>, startup: bool) -> Result<i32>
         sandbox: sandbox::probe,
         broker: broker::start,
         restart_broker: |paths, lead| {
-            broker::restart_broker(paths, lead, &runnable_exe()?, &mut Printed)
+            broker::restart_broker(paths, lead, &broker::runnable_exe()?, &mut Printed)
         },
         brokers_only,
     };
@@ -1625,7 +1625,7 @@ fn spawn_waiter(name: &str, waiter: lock::Lock) -> Result<()> {
     if unsafe { libc::fcntl(fd, libc::F_SETFD, 0) } != 0 {
         return Err(std::io::Error::last_os_error()).context("pass the waiter its lock");
     }
-    let exe = runnable_exe()?;
+    let exe = broker::runnable_exe()?;
     let mut command = std::process::Command::new(&exe);
     command
         .args(["restart-wait", name])
@@ -1649,20 +1649,6 @@ fn spawn_waiter(name: &str, waiter: lock::Lock) -> Result<()> {
     // A broker outlives its waiters; reaping each leaves no zombie behind.
     std::thread::spawn(move || child.wait());
     Ok(())
-}
-
-/// This binary, or `loopherd` on PATH once a reinstall has moved a new one over it.
-fn runnable_exe() -> Result<PathBuf> {
-    Ok(runnable(
-        std::env::current_exe().context("find the loopherd binary")?,
-    ))
-}
-
-fn runnable(exe: PathBuf) -> PathBuf {
-    match exe.to_string_lossy().ends_with(" (deleted)") {
-        true => PathBuf::from("loopherd"),
-        false => exe,
-    }
 }
 
 fn run_broker(lead: &str) -> Result<i32> {
@@ -1714,7 +1700,7 @@ fn installed_as(exe: &Path) -> Option<PathBuf> {
 
 fn run_broker_restart(lead: &str) -> Result<i32> {
     // Before anything else: a reinstall after this still leaves a path to start the new broker from.
-    let exe = runnable_exe()?;
+    let exe = broker::runnable_exe()?;
     let paths = Paths::from_env()?;
     let caller = sandbox::calling_lead(&paths, &process::ProcFs, std::process::id());
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
@@ -2059,7 +2045,7 @@ fn notify_waiting(waiting: &[notify::Waiting], config: &Path, mailboxes: &Path) 
             return;
         }
     };
-    let exe = runnable_exe().unwrap_or_else(|_| PathBuf::from("loopherd"));
+    let exe = broker::runnable_exe().unwrap_or_else(|_| PathBuf::from("loopherd"));
     let sent = notify::send(&config, mailboxes, waiting, &mut |launch| {
         let sender = match launch.sender {
             notify::Sender::Herdr => "herdr",
@@ -2830,15 +2816,6 @@ fn inherited_workspace(ledger: &dyn Ledger) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_binary_a_reinstall_replaced_runs_as_loopherd_on_path() {
-        let gone = PathBuf::from("/home/u/.local/bin/loopherd (deleted)");
-        let here = PathBuf::from("/home/u/.local/bin/loopherd");
-
-        assert_eq!(runnable(gone), PathBuf::from("loopherd"));
-        assert_eq!(runnable(here.clone()), here);
-    }
 
     #[test]
     fn merges_are_looked_up_only_while_notify_sends_merge_alerts() {
