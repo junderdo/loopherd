@@ -34,7 +34,7 @@ impl Lock {
                     format!(
                         "held past {}{}",
                         humantime::format_duration(bound),
-                        held_by(&file)
+                        held_by(&file, || std::fs::read_to_string("/proc/locks"))
                     ),
                 ));
             }
@@ -74,7 +74,7 @@ fn try_flock(file: &File) -> io::Result<bool> {
 }
 
 #[cfg(target_os = "linux")]
-fn held_by(file: &File) -> String {
+fn held_by(file: &File, proc_locks: impl FnOnce() -> io::Result<String>) -> String {
     use std::os::unix::fs::MetadataExt;
     let Ok(meta) = file.metadata() else {
         return "; holder unknown".to_string();
@@ -86,12 +86,12 @@ fn held_by(file: &File) -> String {
         libc::minor(dev),
         meta.ino()
     );
-    let listed = std::fs::read_to_string("/proc/locks").map(|locks| holders(&locks, &id));
+    let listed = proc_locks().map(|locks| holders(&locks, &id));
     named(listed, meta.ino())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn held_by(_: &File) -> String {
+fn held_by(_: &File, _: impl FnOnce() -> io::Result<String>) -> String {
     "; holder unknown".to_string()
 }
 
@@ -112,8 +112,9 @@ fn holders(locks: &str, id: &str) -> Vec<u32> {
         .collect()
 }
 
-/// A holder can drop the lock, or hold it from another pid namespace, between
-/// the failed try and the read of `/proc/locks`.
+/// How the timeout names the holders: their pids, or why there are none. The
+/// list can be empty because the holder let go after the failed try, or because
+/// `/proc/locks` always hides holders in another pid namespace.
 #[cfg(target_os = "linux")]
 fn named(listed: io::Result<Vec<u32>>, inode: u64) -> String {
     match listed {
@@ -211,6 +212,27 @@ mod tests {
             assert!(e.to_string().contains(&holder), "{e}");
         }
         assert!(e.to_string().starts_with("held past 100ms"), "{e}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_files_holder_is_looked_up_by_its_device_and_inode() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = open(&dir.path().join("x.lock"));
+        let meta = file.metadata().unwrap();
+        let (dev, ino) = (meta.dev(), meta.ino());
+        let id = format!("{:02x}:{:02x}:{ino}", libc::major(dev), libc::minor(dev));
+        let listing = format!("1: FLOCK  ADVISORY  WRITE 4242 {id} 0 EOF\n");
+
+        let found = held_by(&file, || Ok(listing.clone()));
+        let missing = held_by(&file, || Ok(String::new()));
+
+        assert_eq!(found, " by pid 4242");
+        assert_eq!(
+            missing,
+            format!("; holder not found in /proc/locks for inode {ino}")
+        );
     }
 
     #[cfg(target_os = "linux")]
