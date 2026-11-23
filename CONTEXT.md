@@ -72,9 +72,12 @@ prototype, a recorded decision, or grilling. Its output is a decision or a
 document, not a feature.
 
 **Grilling**:
-A live session in which the shepherd questions the human about a plan until the
-open questions are settled. Grilling always needs the human, so no worker takes
-it on.
+Questioning the human about a plan until the open questions are settled. A
+grill, an attended member in its own pane, runs it live, one question at a
+time or as one batch the human accepts or overrides; a batch grill can also
+run unattended and post its batch on the card. The shepherd starts and closes
+out a grill but never grills in its own pane. Grilling always needs the
+human's answers.
 
 **Template**:
 The pattern that turns a task into a worker: its name, its branch, its prompt,
