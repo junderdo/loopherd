@@ -579,11 +579,12 @@ fn reason(
     handoff: &Path,
     moved: Option<&Path>,
 ) -> String {
-    // A lead's watch is a background shell; left running, its stop reads
-    // paused and restart refuses it.
+    // Any background shell left running, its watch or not, makes a lead's
+    // stop read paused, and restart refuses it.
     let (save, how, plan, restart) = match member.is_lead() {
         true => (
-            "stop your own `loopherd watch` (TaskStop it, or kill it) so your stop reads finished, then ",
+            "stop every background shell and Monitor you started (TaskStop each, or kill it), \
+             your `loopherd watch` among them, so your stop reads finished, then ",
             " with `loopherd handoff <<'EOF'`, since your sandbox refuses your file tools there",
             "your plan as next steps, re-arming your watch first",
             ", then `loopherd restart --self`, and end your turn. It restarts you fresh from that file \
@@ -1104,7 +1105,7 @@ mod tests {
     }
 
     #[test]
-    fn a_leads_reason_has_it_stop_its_watch_not_push_a_branch() {
+    fn a_leads_reason_has_it_stop_every_background_shell_not_push_a_branch() {
         let w = World::new();
         let t = w.transcript(&[assistant(0, 0, 200, false)]);
         let reason = w
@@ -1116,8 +1117,9 @@ mod tests {
             .unwrap();
         assert!(
             reason.contains(
-                "Stop your current work: stop your own `loopherd watch` (TaskStop it, or kill it) \
-                 so your stop reads finished, then write your handoff to"
+                "Stop your current work: stop every background shell and Monitor you started \
+                 (TaskStop each, or kill it), your `loopherd watch` among them, so your stop \
+                 reads finished, then write your handoff to"
             ),
             "{reason}"
         );

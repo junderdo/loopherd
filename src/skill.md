@@ -380,9 +380,10 @@ restart failed after its `/clear`, the handoff is still in place, so a plain
 revive, the human forces it). Only a lead runs `--self`; for any other
 member it refuses, and whoever reads its `handoff` line restarts it.
 
-A lead's `loopherd watch` is a background shell, so a lead stops its own
-watch before ending its handoff turn; otherwise its stop reads `paused`
-and restart refuses it. After a herdr restart, `revive`'s start makes
+A lead stops every background shell and Monitor it started (TaskStop
+each), its `loopherd watch` among them, before ending its handoff turn:
+any one left running, a wait loop as much as the watch, makes its stop read
+`paused`, and restart refuses it. After a herdr restart, `revive`'s start makes
 restart refuse a member that handed off before it: check `loopherd reports
 --all <name>` for its `handoff`, and with the handoff file still there, the
 human runs `loopherd restart <name> --force`. With the plugin's startup
@@ -905,8 +906,8 @@ Shepherd section has the detail):
    the outline under Handoffs (`## State`, `## Next steps`, `## Gotchas`),
    listing each `<scratch>/pr<n>/` still in use and naming each PR's
    current review file and whether its minors and nits are gathered.
-   Then report `--kind handoff`, stop your watch, run
-   `loopherd restart --self`, and end your turn: you restart in this pane
+   Then report `--kind handoff`, stop every background shell and Monitor
+   you started (your watch among them), run `loopherd restart --self`, and end your turn: you restart in this pane
    once your stop reads finished, with no shepherd needed (see Handoffs).
 
 What differs from the shepherd:
@@ -964,7 +965,10 @@ What differs from the shepherd:
   so write your handoff with `loopherd handoff`. A plain `loopherd reports`
   fails too, since it marks reports read in `reports/`; `--all` works. Processes a
   command leaves behind end with it, so keep long waits as background
-  tasks. `loopherd report`, `tell`, `read`, `status`, `restart` (`--self`
+  tasks. When one waits on a process, note that `pgrep -f <pattern>`
+  matches the waiting shell's own command line, which holds the pattern, so
+  `until ! pgrep -f …` never ends: bracket a letter (`pgrep -f "[t]arget-…"`)
+  or wait on its pid (`while kill -0 <pid>; do sleep 3; done`). `loopherd report`, `tell`, `read`, `status`, `restart` (`--self`
   included), `prompt`, `feed`, `add`, `retire` and `release` don't call
   herdr or write your mailbox themselves: they hand the operation to your broker, a process
   outside the sandbox that `loopherd lead` started for you, in any form.
@@ -1141,8 +1145,9 @@ What differs from the shepherd:
   re-read the Lead section too (`loopherd --skill --section lead`, not the
   whole skill).
 - **Your own handoff.** Past your limit, your Stop hook asks you for a
-  handoff like any member's (see Handoffs): stop your own watch (TaskStop
-  it, or kill it), write it, report `--kind handoff`, run `loopherd restart
+  handoff like any member's (see Handoffs): stop every background shell
+  and Monitor you started (TaskStop each, or kill it), your watch among
+  them, write it, report `--kind handoff`, run `loopherd restart
   --self`, and end your turn; you restart in this pane once that turn
   stops. Restart your workers when they hand off; never with `--force`.
 - **Your checkout** is detached; refresh it with `git fetch origin && git

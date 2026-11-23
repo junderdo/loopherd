@@ -519,6 +519,35 @@ mod tests {
     }
 
     #[test]
+    fn a_leads_handoff_stops_every_background_shell_not_only_its_watch() {
+        let handoffs = section("\n### Handoffs\n", "\n### Your own handoff\n");
+        let own = section("- **Your own handoff.**", "- **Your checkout**");
+        let step = section("6. **Handoff:**", "What differs from the shepherd:");
+        for (name, text) in [
+            ("Handoffs", handoffs),
+            ("Your own handoff", own),
+            ("Handoff step", step),
+        ] {
+            assert!(
+                text.contains("every background shell and Monitor"),
+                "{name} names only the watch: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn waiting_on_a_process_warns_pgrep_f_matches_its_own_shell() {
+        let skill = SKILL.split_whitespace().collect::<Vec<_>>().join(" ");
+        for rule in [
+            "`pgrep -f <pattern>` matches the waiting shell's own command line",
+            "`pgrep -f \"[t]arget-…\"`",
+            "wait on its pid",
+        ] {
+            assert!(skill.contains(rule), "the skill misses {rule:?}");
+        }
+    }
+
+    #[test]
     fn names_nothing_from_this_repo() {
         // init writes these into any repo, so the skill may name them.
         let skill = ["docs/agents/issue-tracker.md", "docs/agents/loopherd.md"]
