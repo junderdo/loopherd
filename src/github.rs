@@ -167,11 +167,16 @@ impl Merges for GhCli {
     }
 }
 
-/// The items of a list `gh api --paginate --slurp` read, which it gives as
-/// an array of pages.
-pub fn all_pages<T: serde::de::DeserializeOwned>(slurped: &str) -> serde_json::Result<Vec<T>> {
-    let pages: Vec<Vec<T>> = serde_json::from_str(slurped)?;
-    Ok(pages.into_iter().flatten().collect())
+/// What `gh` with `args` is called in errors: `gh api <endpoint>` for API
+/// calls, else the subcommand.
+fn shown(args: &[&str]) -> String {
+    match args {
+        ["api", rest @ ..] => match rest.iter().find(|a| !a.starts_with('-')) {
+            Some(endpoint) => format!("gh api {endpoint}"),
+            None => "gh api".into(),
+        },
+        _ => format!("gh {}", args[..2].join(" ")),
+    }
 }
 
 impl crate::doctor::Rulesets for GhCli {
@@ -179,7 +184,7 @@ impl crate::doctor::Rulesets for GhCli {
         let slug = github_com_origin(repo)?.slug;
         let list = format!("repos/{slug}/rulesets?includes_parents=false");
         let listed: Vec<serde_json::Value> =
-            all_pages(&self.answer(repo, &["api", "--paginate", "--slurp", &list])?)
+            serde_json::from_str(&self.answer(repo, &["api", "--paginate", &list])?)
                 .context("read gh's list of rulesets")?;
         let ours = [
             crate::merge_guard::DEFAULT_BRANCH_RULESET,
@@ -258,7 +263,7 @@ impl GhCli {
         gh.args(args)
             .current_dir(repo)
             .env("GH_PROMPT_DISABLED", "1");
-        let shown = format!("gh {}", args[..2].join(" "));
+        let shown = shown(args);
         match run_within(&mut gh, deadline) {
             Err(e) if is_not_found(&e) => Ok(None),
             Err(e) => Err(e.context(format!("run {shown}"))),
@@ -277,7 +282,7 @@ impl GhCli {
         };
         if !output.status.success() {
             let said = String::from_utf8_lossy(&output.stderr);
-            bail!("gh {}: {}", args[..2].join(" "), said.trim());
+            bail!("{}: {}", shown(args), said.trim());
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
@@ -651,7 +656,7 @@ mod tests {
             "#!/bin/sh\necho \"$@\" >> '{}'\n\
              case \"$*\" in\n\
              *rulesets/7) echo '{{\"id\":7,\"name\":\"loopherd: no force-push\"}}' ;;\n\
-             *) echo '[[{{\"id\":1,\"name\":\"other\"}}],[{{\"id\":7,\"name\":\"loopherd: no force-push\"}}]]' ;;\n\
+             *) echo '[{{\"id\":1,\"name\":\"other\"}},{{\"id\":7,\"name\":\"loopherd: no force-push\"}}]' ;;\n\
              esac\n",
             dir.path().join("args").display()
         );
@@ -665,8 +670,37 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("args")).unwrap(),
-            "api --paginate --slurp repos/o/r/rulesets?includes_parents=false\n\
+            "api --paginate repos/o/r/rulesets?includes_parents=false\n\
              api repos/o/r/rulesets/7\n"
+        );
+    }
+
+    #[test]
+    fn a_failed_ruleset_listing_names_its_endpoint() {
+        let (dir, gh) = fake_gh("git@github.com:o/r.git", "");
+        crate::test_fakes::executable(&gh.program, "#!/bin/sh\necho 'HTTP 403' >&2\nexit 1\n");
+
+        let err = crate::doctor::Rulesets::loopherd_rulesets(&gh, dir.path()).unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "gh api repos/o/r/rulesets?includes_parents=false: HTTP 403"
+        );
+    }
+
+    #[test]
+    fn a_gh_api_call_out_of_time_names_its_endpoint() {
+        let (dir, gh) = fake_gh("git@github.com:o/r.git", "");
+        crate::test_fakes::executable(&gh.program, "#!/bin/sh\nexec sleep 5\n");
+        let args = ["api", "--paginate", "repos/o/r/keys"];
+
+        let err = gh
+            .run(dir.path(), &args, Duration::from_millis(50))
+            .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "gh api repos/o/r/keys didn't answer in time"
         );
     }
 

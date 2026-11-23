@@ -10,7 +10,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::credentials;
-use crate::github::all_pages;
 use crate::herd::{self, MergeGuard, Paths};
 
 pub const DEFAULT_BRANCH_RULESET: &str = "loopherd: default branch";
@@ -55,13 +54,8 @@ pub fn setup(paths: &Paths, herd: &str) -> Result<Vec<String>> {
         ),
         read => read.with_context(|| format!("read {public}"))?,
     };
-    let added: Vec<DeployKey> = all_pages(&gh(
-        &[
-            "api",
-            "--paginate",
-            "--slurp",
-            &format!("repos/{slug}/keys"),
-        ],
+    let added: Vec<DeployKey> = serde_json::from_str(&gh(
+        &["api", "--paginate", &format!("repos/{slug}/keys")],
         None,
     )?)
     .context("read gh's list of deploy keys")?;
@@ -92,11 +86,10 @@ pub fn setup(paths: &Paths, herd: &str) -> Result<Vec<String>> {
         lines.push(format!("added it to {slug} as a write deploy key"));
     }
 
-    let listed: Vec<Ruleset> = all_pages(&gh(
+    let listed: Vec<Ruleset> = serde_json::from_str(&gh(
         &[
             "api",
             "--paginate",
-            "--slurp",
             &format!("repos/{slug}/rulesets?includes_parents=false"),
         ],
         None,
