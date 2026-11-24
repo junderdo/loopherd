@@ -161,7 +161,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D146](decisions/D146.md) | Amends D88. A shepherd whose session-start rename herdr refuses with `agent_launch_pending` checks its `herdr agent list` entry: already named `shepherd` (as when `S` started it) carries on with no warning; otherwise it retries once `launch_pending` clears. |
 | [D147](decisions/D147.md) | The view keeps the detail panel beside the list while the list's 55% share fits the widest herd table, else draws it at full width under the selected member's table, scrolled in with the selected row but never past it; no detail box without a selection. |
 | [D148](decisions/D148.md) | `loopherd init` always writes an attended `[template.grill]` with a `<herd>-grill.md` prompt per tracker (decision where the repo says, else `docs/adr/`, via a PR that closes the issue; no post-merge close-out); `init --grill` adds it to an existing herd; `grill-batch` stays opt-in; the skill routes grill requests to `add` and tells grill from wayfinding. |
-| [D149](decisions/D149.md) | The herdr plugin offer reads `herdr --version` and, below 0.9.4, prints the by-hand reinstall instead of offering `plugin update`; without a terminal `--with-herdr-plugin` runs install/update under `timeout 300` where it exists; after an update it re-lists and says the new version, or that it didn't move. |
+| [D150](decisions/D150.md) | The herdr plugin offer reads `herdr --version` and, below 0.9.4, prints the by-hand reinstall instead of offering `plugin update`; without a terminal `--with-herdr-plugin` runs install/update under `timeout 300` where it exists; after an update it re-lists and says the new version, or that it didn't move. |
 
 ## Emerging model
 
