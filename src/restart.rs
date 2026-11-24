@@ -387,7 +387,20 @@ fn poll_then_restart(
         let waiting = match waiting_on(herdr, req) {
             Ok(Some(why)) => why,
             Ok(None) => match restart(herdr, ledger, req, SystemTime::now()) {
-                Ok(_) => return Ok(Ok(Waited::Restarted)),
+                Ok(restarted) => {
+                    // Nobody reads a waiter's output, so its warnings go to the mailbox.
+                    if restarted.contains("\nwarning: ") {
+                        let note = Entry::new(
+                            SystemTime::now(),
+                            Body::Note {
+                                text: format!("self-restart: {restarted}"),
+                            },
+                        );
+                        // The restart is done; a lost note mustn't read as a failed one.
+                        let _ = append(&req.state.join("reports"), name, &note);
+                    }
+                    return Ok(Ok(Waited::Restarted));
+                }
                 Err(e) => match e.downcast_ref::<Refusal>() {
                     Some(Refusal::Busy(_)) => {
                         saw_busy = true;
@@ -2604,6 +2617,43 @@ mod tests {
             "## State\n"
         );
         assert!(!handoffs.join("lh-1.md").exists());
+    }
+
+    #[test]
+    fn a_self_restart_notes_the_older_handoff_it_couldnt_move_aside() {
+        let w = World::new();
+        w.put(Body::Handoff { text: "x".into() });
+        let handoffs = w.state.path().join("handoffs");
+        fs::write(handoffs.join("lh-1.md"), "older").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(handoffs.join("lh-1.md"))
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        fs::create_dir_all(handoffs.join("lh-1.prev.md/x")).unwrap();
+        let waited = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(30));
+                w.stop(0, None);
+            });
+            w.wait(Duration::from_secs(5))
+        });
+        assert!(matches!(waited.unwrap(), Waited::Restarted));
+        let notes = w.notes();
+        let [note] = notes.as_slice() else {
+            panic!("{notes:?}");
+        };
+        let unmoved = format!(
+            "\nwarning: couldn't move the older {} to {}",
+            handoffs.join("lh-1.md").display(),
+            handoffs.join("lh-1.prev.md").display()
+        );
+        assert!(
+            note.starts_with("self-restart: restarted lh-1 in session "),
+            "{note}"
+        );
+        assert!(note.contains(&unmoved), "{note}");
     }
 
     #[test]
