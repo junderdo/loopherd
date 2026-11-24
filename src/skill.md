@@ -683,8 +683,9 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   `[lead] unix_sockets = "all"` (`loopherd herds` shows it), which reopens
   herdr, the ssh agent and WSL2 interop to it; `lead`, `revive` and doctor
   warn of it, and only the human sets it. A `merge_guard = "credentials"`
-  lead can't have it: `lead` and `revive` refuse the pair and `loopherd
-  herds` calls the herd file invalid. Where, on Linux or WSL2, Claude
+  lead can't have it: `lead`, `revive` and `restart` refuse the pair,
+  `herd set` and `herd unset` refuse an edit that makes it, `loopherd
+  herds` calls the herd file invalid, and doctor fails it. Where, on Linux or WSL2, Claude
   Code's seccomp filter can't block them (doctor says so, naming `npm install -g
   @anthropic-ai/sandbox-runtime`), `require` refuses the lead and
   `prefer` starts it as `(lead, sockets open)`; `restart` applies the

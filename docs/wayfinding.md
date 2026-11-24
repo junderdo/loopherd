@@ -155,6 +155,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D140](decisions/D140.md) | An open attended member holds off neither drained line; merge alerts skip its PR (by head branch); `retire --close` returns focus by the pane it closes; startup revive skips it only after a pane, tab or workspace close, which a `gone` now records, not a pane exit or herdr losing it. Amends D112, D116. |
 | [D141](decisions/D141.md) | merge-guard's and doctor's paginated reads drop `--slurp` and parse the one array `gh api --paginate` merges pages into (gh 2.31.0+, not 2.48.0+); doctor's `gh api` errors and timeouts name the endpoint. |
 | [D142](decisions/D142.md) | Amends D124. A moving broker probes the new install with `broker <lead> --check` (its startup config checks), passes the new image the install's path and dev/ino so a late install is still followed, notes a non-executable install once, and doctor waits once for brokers under one shared 3 s deadline, only for those following the `PATH` install. |
+| [D143](decisions/D143.md) | A lead's question unanswered for 30 minutes (no prompt in its pane, recorded by `prompt-hook` as `answered`) sends a `waiting` notification from its watch, once per stretch; an armed shepherd's watch prints `<lead> waiting <age>`; status and view show the age; doctor warns when a lead runs with `[notify]` off. Amends D32, D57. |
 
 ## Emerging model
 
