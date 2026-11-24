@@ -510,7 +510,8 @@ impl Guard {
     /// sandboxed worker's settings, MCP config and kept record, once ended. A lead caller
     /// removes no lead's files: it could have forged the entry. Returns a
     /// line per file removed or failed.
-    pub fn forget_launch(&self, name: &str, ended: bool) -> Vec<String> {
+    pub fn forget_launch(&self, record: &AgentRecord, ended: bool) -> Vec<String> {
+        let name = record.name.as_str();
         // A lead can't write the config dir, so a member record there is no forgery of its.
         let member = crate::worker_sandbox::member_file(&self.paths, name);
         if member.is_file() {
@@ -527,8 +528,8 @@ impl Guard {
         if self.caller.is_some() {
             return vec![];
         }
-        // A name like `lead-x.lead` would otherwise map to lead-x's files.
-        if !lead_file(&self.paths, name).is_file() {
+        // A plain spawn may reuse a retired lead's name, whose files outlive a plain retire.
+        if !record.may_be_lead() || !lead_file(&self.paths, name).is_file() {
             return vec![];
         }
         let mcp = mcp_file(&self.paths, name);
@@ -2162,6 +2163,44 @@ pub fn file_rule(file: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ledger::Role;
+
+    fn entry(name: &str, role: Option<Role>) -> AgentRecord {
+        AgentRecord {
+            name: name.into(),
+            pane_id: "p1".into(),
+            env_pane_id: None,
+            env_pane_shell: None,
+            tab_id: None,
+            session_id: None,
+            repo: "/src/repo".into(),
+            worktree: None,
+            branch: None,
+            workspace: "w1".into(),
+            workspace_label: None,
+            claude_args: vec![],
+            prompt: None,
+            prompt_sent: true,
+            created: "2026-11-01T00:00:00Z".into(),
+            retired: true,
+            retired_at: None,
+            outcome: None,
+            released_at: None,
+            herd: None,
+            template: None,
+            params: None,
+            socket: None,
+            process: None,
+            role,
+            attended: None,
+            no_slot: false,
+            after_merge: None,
+            unsandboxed: None,
+            sockets_unblocked: None,
+            earlier: vec![],
+            unknown: Default::default(),
+        }
+    }
 
     #[test]
     fn every_allowed_permission_mode_passes_in_both_forms_and_no_other_does() {
@@ -2197,7 +2236,7 @@ mod tests {
             }
 
             assert_eq!(
-                guard.forget_launch(name, true),
+                guard.forget_launch(&entry(name, Some(Role::Lead)), true),
                 Vec::<String>::new(),
                 "{name}"
             );
@@ -2206,7 +2245,7 @@ mod tests {
             }
         }
 
-        let removed = guard.forget_launch("lead-x", true);
+        let removed = guard.forget_launch(&entry("lead-x", Some(Role::Lead)), true);
 
         assert_eq!(
             removed,
@@ -2216,6 +2255,26 @@ mod tests {
             ]
         );
         assert!(dir.join("lead-x.lead.json").exists());
+    }
+
+    #[test]
+    fn retiring_a_plain_spawn_that_reuses_a_retired_leads_name_leaves_the_leads_files() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        let dir = paths.config_dir().join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = ["lead-h.json", "lead-h.mcp.json", "lead-h.lead.json"];
+        for file in files {
+            std::fs::write(dir.join(file), "{}").unwrap();
+        }
+        let guard = Guard::new(paths, None);
+
+        let removed = guard.forget_launch(&entry("lead-h", None), true);
+
+        assert_eq!(removed, Vec::<String>::new());
+        for file in files {
+            assert!(dir.join(file).exists(), "{file}");
+        }
     }
 
     #[test]
@@ -2231,12 +2290,15 @@ mod tests {
         }
 
         let guard = Guard::new(paths.clone(), Some("lead-h".into()));
-        assert_eq!(guard.forget_launch("w1", false), Vec::<String>::new());
+        assert_eq!(
+            guard.forget_launch(&entry("w1", None), false),
+            Vec::<String>::new()
+        );
         for file in files {
             assert!(dir.join(file).exists(), "{file}");
         }
 
-        let removed = guard.forget_launch("w1", true);
+        let removed = guard.forget_launch(&entry("w1", None), true);
 
         assert_eq!(
             removed,

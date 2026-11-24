@@ -265,7 +265,7 @@ pub fn retire_and_close(
     };
     // Another session's herdr can't see the lead's tab, so it can't tell it has ended.
     let here = record.socket.is_none() || record.socket == herdr.socket();
-    out.extend(guard.forget_launch(name, here && tab_open.is_none()));
+    out.extend(guard.forget_launch(&record, here && tab_open.is_none()));
     if let Some(path) = &record.worktree {
         if let Some(other) = other_user(ledger, name, path)? {
             out.push(format!("kept {}: in use by {other}", path.display()));
