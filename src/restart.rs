@@ -318,13 +318,27 @@ pub fn wait_then_restart(
     give_up: Duration,
     every: Duration,
 ) -> Result<Waited> {
+    let pause = || std::thread::sleep(every);
+    wait_paced(herdr, ledger, req, give_up, &pause, &|| {})
+}
+
+/// [`wait_then_restart`], calling `pause` between polls and `between_reads`
+/// between its reports read and handoff read.
+fn wait_paced(
+    herdr: &dyn Herdr,
+    ledger: &mut dyn Ledger,
+    req: &RestartRequest,
+    give_up: Duration,
+    pause: &dyn Fn(),
+    between_reads: &dyn Fn(),
+) -> Result<Waited> {
     let req = RestartRequest {
         force: false,
         own_pane: None,
         own_lineage: &[],
         ..*req
     };
-    match poll_then_restart(herdr, ledger, &req, give_up, every) {
+    match poll_then_restart(herdr, ledger, &req, give_up, pause, between_reads) {
         Ok(Ok(waited)) => Ok(waited),
         Ok(Err(why)) => gave_up(&req, why),
         Err(e) => gave_up(&req, format!("self-restart failed: {e:#}")),
@@ -337,7 +351,8 @@ fn poll_then_restart(
     ledger: &mut dyn Ledger,
     req: &RestartRequest,
     give_up: Duration,
-    every: Duration,
+    pause: &dyn Fn(),
+    between_reads: &dyn Fn(),
 ) -> Result<Result<Waited, String>> {
     let name = req.name;
     let waiting_handoff = || handoff::find(req.state, name);
@@ -369,14 +384,15 @@ fn poll_then_restart(
                     ))));
                 }
                 None => {
-                    std::thread::sleep(every);
+                    pause();
                     continue;
                 }
             }
         }
-        // Reports before the handoff: a restart sets the handoff aside before
-        // its new session reports a start, so a start then reads as a revive.
+        // Reports first: a restart moves the handoff aside before it logs the
+        // start, so a start seen here means the handoff is gone.
         let since = since_handoff(&req.state.join("reports"), name)?;
+        between_reads();
         let Some(handoff) = waiting_handoff() else {
             return Ok(Ok(Waited::RestartedElsewhere));
         };
@@ -419,7 +435,7 @@ fn poll_then_restart(
         if Instant::now() >= deadline {
             return Ok(Err(gave_up(&waiting)));
         }
-        std::thread::sleep(every);
+        pause();
     }
 }
 
@@ -890,6 +906,20 @@ mod tests {
             fails_start: bool,
             before_restart: Option<&dyn Fn()>,
         ) -> Result<Waited> {
+            let pause = || std::thread::sleep(Duration::from_millis(1));
+            self.wait_paced(give_up, fails_start, before_restart, &pause, &|| {})
+        }
+
+        /// Runs the waiter with `pause` between its polls and `between_reads`
+        /// between its reports read and handoff read.
+        fn wait_paced(
+            &self,
+            give_up: Duration,
+            fails_start: bool,
+            before_restart: Option<&dyn Fn()>,
+            pause: &dyn Fn(),
+            between_reads: &dyn Fn(),
+        ) -> Result<Waited> {
             let member = record("lh-1");
             let mut ledger = Clearing {
                 recorded: member.session_id.clone(),
@@ -914,12 +944,13 @@ mod tests {
                 poll: Duration::from_millis(1),
                 live: &|s| s.to_string(),
             };
-            wait_then_restart(
+            wait_paced(
                 &self.herdr,
                 &mut ledger,
                 &req,
                 give_up,
-                Duration::from_millis(1),
+                pause,
+                between_reads,
             )
         }
 
@@ -2797,18 +2828,16 @@ mod tests {
         let w = World::new();
         w.handed_off();
         let running = take(w.state.path(), "lh-1", "restart").unwrap().unwrap();
-        let (reached, restarting) = std::sync::mpsc::channel();
-        let reached_restart = move || reached.send(()).unwrap();
-        let waited = std::thread::scope(|s| {
-            s.spawn(move || {
-                // Timed from the waiter's own restart, so a slow first poll
-                // can't outlast the running restart and take the lock itself.
-                restarting.recv().unwrap();
-                std::thread::sleep(Duration::from_millis(500));
-                drop(running);
-            });
-            w.wait_with(Duration::from_secs(5), false, Some(&reached_restart))
-        });
+        // The first pause follows the waiter's own restart refusing as busy.
+        let running = std::cell::Cell::new(Some(running));
+        let other_restart_ends = || drop(running.take());
+        let waited = w.wait_paced(
+            Duration::from_secs(5),
+            false,
+            None,
+            &other_restart_ends,
+            &|| {},
+        );
         assert!(matches!(waited.unwrap(), Waited::GaveUp));
         assert!(w.herdr.prompts().is_empty());
         let notes = w.notes();
@@ -2853,15 +2882,45 @@ mod tests {
         let w = World::new();
         w.handed_off();
         let woken = || w.herdr.set_status("lh-1", AgentStatus::Working);
-        let waited = std::thread::scope(|s| {
-            s.spawn(|| {
-                std::thread::sleep(Duration::from_millis(30));
-                assert!(w.herdr.prompts().is_empty(), "restarted while working");
-                w.herdr.set_status("lh-1", AgentStatus::Idle);
-            });
-            w.wait_with(Duration::from_secs(5), false, Some(&woken))
-        });
+        let paused = std::cell::Cell::new(false);
+        let idles = || {
+            assert!(w.herdr.prompts().is_empty(), "restarted while working");
+            paused.set(true);
+            w.herdr.set_status("lh-1", AgentStatus::Idle);
+        };
+        let waited = w.wait_paced(Duration::from_secs(5), false, Some(&woken), &idles, &|| {});
+        assert!(
+            paused.get(),
+            "restarted without waiting out the busy member"
+        );
         assert!(matches!(waited.unwrap(), Waited::Restarted));
+        assert!(w.notes().is_empty());
+    }
+
+    #[test]
+    fn a_self_restart_reads_the_reports_before_the_handoff_so_another_restarts_start_isnt_a_revive()
+    {
+        let w = World::new();
+        w.put(Body::Handoff { text: "x".into() });
+        w.stop(1, None);
+        let another_restart = || {
+            if w.state.path().join("handoffs/lh-1/handoff.md").exists() {
+                fs::rename(
+                    w.state.path().join("handoffs/lh-1/handoff.md"),
+                    w.state.path().join("handoffs/lh-1/prev.md"),
+                )
+                .unwrap();
+                w.put(Body::Start { resumed: false });
+            }
+        };
+        let waited = w.wait_paced(
+            Duration::from_secs(5),
+            false,
+            None,
+            &|| {},
+            &another_restart,
+        );
+        assert!(matches!(waited.unwrap(), Waited::RestartedElsewhere));
         assert!(w.notes().is_empty());
     }
 
