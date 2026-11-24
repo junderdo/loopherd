@@ -697,7 +697,7 @@ impl Release {
         executable(
             &self.fake_bin.join("herdr"),
             format!(
-                "#!/bin/sh\necho \"herdr $*\" >> '{log}'\n[ \"$1 $2\" = 'plugin list' ] || exit 0\necho '{{\"result\":{{\"plugins\":[{{\"plugin_id\":\"loopherd\",\"version\":\"{version}\",\"source\":{{\"kind\":\"{kind}\"}},\"plugin_root\":\"/plugins/loopherd\"}}]}}}}'\n",
+                "#!/bin/sh\necho \"herdr $*\" >> '{log}'\n[ \"$1\" != --version ] || {{ echo 'herdr 0.9.5'; exit 0; }}\n[ \"$1 $2\" = 'plugin list' ] || exit 0\necho '{{\"result\":{{\"plugins\":[{{\"plugin_id\":\"loopherd\",\"version\":\"{version}\",\"source\":{{\"kind\":\"{kind}\"}},\"plugin_root\":\"/plugins/loopherd\"}}]}}}}'\n",
                 log = self.herdr_log().display(),
             ),
         );
@@ -711,7 +711,7 @@ impl Release {
         fs::read_to_string(self.herdr_log())
             .unwrap_or_default()
             .lines()
-            .filter(|call| !call.starts_with("herdr plugin list"))
+            .filter(|call| !call.starts_with("herdr plugin list") && *call != "herdr --version")
             .map(String::from)
             .collect()
     }

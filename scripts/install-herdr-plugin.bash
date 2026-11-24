@@ -2,6 +2,9 @@
 # registers without touching the human's herdr config (docs/decisions/D126.md).
 
 herdr_plugin_source=junderdo/loopherd/herdr-plugin
+herdr_plugin_reinstall="herdr plugin uninstall loopherd && herdr plugin install $herdr_plugin_source"
+# Long enough for herdr to clone the plugin from GitHub.
+herdr_plugin_timeout=300
 
 # Usage: offer_herdr_plugin <ask|yes|no> <the checkout's herdr-plugin.toml> <--settings file, or empty>
 # Never fails: the plugin is optional, so a failed install is only reported.
@@ -44,6 +47,12 @@ offer_herdr_plugin() {
     echo "loopherd's herdr plugin $version is newer than this checkout's $ours; left as is"
     return 0
   fi
+  if [[ -n "$version" ]] && ! herdr_has_plugin_update; then
+    local herdr_says
+    herdr_says=$(herdr --version 2>/dev/null | head -n 1) || herdr_says=
+    echo "loopherd's herdr plugin $version is older than this checkout's $ours, and ${herdr_says:-this herdr} has no plugin update (0.9.4 or later); reinstall it by hand: $herdr_plugin_reinstall"
+    return 0
+  fi
   if [[ -n "$herdr_plugin_no_terminal" ]]; then
     if [[ -n "$version" ]]; then
       echo "skipped loopherd's herdr plugin $version (no terminal); add --with-herdr-plugin to update it"
@@ -66,11 +75,42 @@ offer_herdr_plugin() {
     # Asked nothing, so herdr mustn't stop to confirm its own preview either.
     run+=(--yes)
   fi
-  if "${run[@]}"; then
-    herdr_plugin_installed=1
-  else
-    echo "install: herdr plugin $verb failed; the rest of the install is unaffected" >&2
+  local timed=
+  # Without a terminal a hung clone or wedged server mustn't hang the install;
+  # on one, timeout(1) would swallow Ctrl-C.
+  if [[ ! -t 0 ]] && command -v timeout >/dev/null; then
+    timed=1
+    run=(timeout "$herdr_plugin_timeout" "${run[@]}")
   fi
+  local status=0
+  "${run[@]}" || status=$?
+  if [[ -n "$timed" ]] && ((status == 124)); then
+    echo "install: herdr plugin $verb timed out after ${herdr_plugin_timeout}s; the rest of the install is unaffected" >&2
+  elif ((status != 0)); then
+    echo "install: herdr plugin $verb failed; the rest of the install is unaffected" >&2
+  else
+    herdr_plugin_installed=1
+    [[ "$verb" != update ]] || say_updated_herdr_plugin "$version"
+  fi
+}
+
+# Usage: say_updated_herdr_plugin <the version before the update>
+say_updated_herdr_plugin() {
+  local listed now
+  listed=$(list_herdr_plugin) || return 0
+  IFS=$'\x1f' read -r now _ <<<"$listed"
+  if [[ "$now" == "$1" ]]; then
+    echo "loopherd's herdr plugin is still $1 after the update; herdr updates from the ref it installed, so reinstall it by hand: $herdr_plugin_reinstall"
+  elif [[ -n "$now" ]]; then
+    echo "loopherd's herdr plugin is now $now"
+  fi
+}
+
+# True when herdr is 0.9.4 or later, the first with `herdr plugin update`.
+herdr_has_plugin_update() {
+  local have
+  have=$(herdr --version 2>/dev/null | sed -n 's/^herdr \([0-9][0-9.]*\).*/\1/p' | head -n 1)
+  [[ -n "$have" && "$(printf '%s\n' 0.9.4 "$have" | sort -V | head -n 1)" == 0.9.4 ]]
 }
 
 # Usage: herdr_plugin_skip [<why>]
