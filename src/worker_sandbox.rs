@@ -198,31 +198,12 @@ pub fn prepare(
     if worker.sandbox == WorkerSandbox::Off {
         return Ok(Launch::Off);
     }
-    let herd = &member.herd;
-    let require = worker.sandbox == WorkerSandbox::Require;
-    let prefer_instead = prefer_instead(herd);
     let Judged {
         disallowed,
         mcp_config,
-        worktree,
         unavailable,
+        own,
     } = judge(paths, name, member, &worker, from, probe)?;
-    let own = match (&unavailable, worktree) {
-        (None, Some(worktree)) => {
-            let own = settings(paths, name, herd, worktree)?;
-            let loosened = loosenings(&paths.home, worktree, &own);
-            if require && !loosened.is_empty() {
-                return Err(NotStarted(format!(
-                    "{name} can't start sandboxed: your Claude settings loosen its sandbox: {}; \
-                     remove those, {prefer_instead}",
-                    loosened.join("; ")
-                ))
-                .into());
-            }
-            Some((own, loosened))
-        }
-        _ => None,
-    };
     let dir = paths.config_dir().join("sandbox");
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let kept = member_file(paths, name);
@@ -260,22 +241,23 @@ pub fn prepare(
 }
 
 /// What `prepare` finds before writing anything, past its refusals.
-struct Judged<'a> {
+struct Judged {
     disallowed: Vec<String>,
     mcp_config: Value,
-    worktree: Option<&'a Path>,
     /// Why its sandbox can't start, as the ledger flags it, and the fix.
     unavailable: Option<(String, String)>,
+    /// Its settings and what the human's settings loosen in them, when it starts sandboxed.
+    own: Option<(Value, Vec<String>)>,
 }
 
-fn judge<'a>(
+fn judge(
     paths: &Paths,
     name: &str,
-    member: &'a Member,
+    member: &Member,
     worker: &herd::Worker,
     from: ArgsFrom,
     probe: &dyn Fn() -> Result<Sockets, Unavailable>,
-) -> Result<Judged<'a>> {
+) -> Result<Judged> {
     let herd = &member.herd;
     let (disallowed, mcp_config) = judge_args_and_mcp(paths, name, member, worker, from)?;
     // A branch checked out in the main checkout plans the main checkout itself.
@@ -313,12 +295,44 @@ fn judge<'a>(
         ))
         .into());
     }
+    let own = match (&unavailable, worktree) {
+        (None, Some(worktree)) => {
+            let own = settings(paths, name, herd, worktree)?;
+            // A worktree not yet checked out has no project settings to read.
+            let loosened = loosenings(&paths.home, worktree, &own);
+            if worker.sandbox == WorkerSandbox::Require && !loosened.is_empty() {
+                return Err(NotStarted(format!(
+                    "{name} can't start sandboxed: your Claude settings loosen its sandbox: {}; \
+                     remove those, {}",
+                    loosened.join("; "),
+                    prefer_instead(herd)
+                ))
+                .into());
+            }
+            Some((own, loosened))
+        }
+        _ => None,
+    };
     Ok(Judged {
         disallowed,
         mcp_config,
-        worktree,
         unavailable: unavailable.map(|(_, why, fix)| (why, fix)),
+        own,
     })
+}
+
+/// Refuses a worker a `lead-*` name in any mode: a lead's kept record and
+/// settings under that name would be taken as the worker's, or the worker's as the lead's.
+fn refuse_lead_name(name: &str, herd: &str, template: &str) -> Result<()> {
+    if name.starts_with("lead-") {
+        return Err(NotStarted(format!(
+            "{name} can't start as a worker: lead-* names are herd leads', whose sandbox files \
+             a worker's would replace or be taken for; give herd {herd}'s template {template} \
+             another name"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 /// Why `add` or `feed` would see herd member `req` refused by its sandbox
@@ -336,6 +350,9 @@ pub fn refusal(
     else {
         return Ok(None);
     };
+    if let Err(e) = refuse_lead_name(&req.name, herd, template) {
+        return Ok(Some(e.to_string()));
+    }
     let worker = herd::worker(paths, herd)?;
     if worker.sandbox == WorkerSandbox::Off {
         return Ok(None);
@@ -365,15 +382,7 @@ fn judge_args_and_mcp(
     from: ArgsFrom,
 ) -> Result<(Vec<String>, Value)> {
     let herd = &member.herd;
-    // Its settings and kept record would replace a lead's and hide it from calling_lead.
-    if name.starts_with("lead-") {
-        return Err(NotStarted(format!(
-            "{name} can't start as a worker: lead-* names are herd leads', whose sandbox files \
-             a worker's would replace; give herd {herd}'s template {} another name",
-            member.template
-        ))
-        .into());
-    }
+    refuse_lead_name(name, herd, &member.template)?;
     let require = worker.sandbox == WorkerSandbox::Require;
     let prefer_instead = prefer_instead(herd);
     let sources = arg_sources(paths, member, from)?;
@@ -507,6 +516,14 @@ pub fn spawn(
         let entries = ledger.entries().context("ledger")?;
         Ok(entries.get(&req.name).is_some_and(|r| !r.retired))
     };
+    if let Some(MemberOf {
+        herd,
+        template: Some(template),
+        ..
+    }) = &req.member_of
+    {
+        refuse_lead_name(&req.name, herd, template)?;
+    }
     let sandbox_off =
         |herd: &str| herd::worker(paths, herd).is_ok_and(|w| w.sandbox == WorkerSandbox::Off);
     let member = match &req.member_of {
@@ -1208,7 +1225,7 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             "lead-h can't start as a worker: lead-* names are herd leads', whose sandbox files a \
-             worker's would replace; give herd h's template t another name"
+             worker's would replace or be taken for; give herd h's template t another name"
         );
         assert!(!h.paths.config_dir().join("sandbox").exists());
     }

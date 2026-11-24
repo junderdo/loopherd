@@ -1634,6 +1634,81 @@ mod tests {
     }
 
     #[test]
+    fn a_dry_run_says_a_required_worker_the_users_settings_loosen_would_not_start() {
+        let setup = Setup::new("printf '1\\n'", 5);
+        let root = tempfile::tempdir().unwrap();
+        let repo = crate::worktree::testing::repo_with_origin(root.path());
+        let file = setup.config.path().join("herds/prs.toml");
+        let herd = fs::read_to_string(&file).unwrap().replace(
+            &format!("repo = {:?}\n", setup.repo.path().display().to_string()),
+            &format!("repo = {repo:?}\n"),
+        );
+        let herd = herd.replace(
+            "[queue]",
+            "branch = \"feat/{number}\"\n[worker]\nsandbox = \"require\"\n[queue]",
+        );
+        fs::write(file, herd).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(home.path().join(".claude")).unwrap();
+        fs::write(
+            home.path().join(".claude/settings.json"),
+            r#"{"sandbox":{"excludedCommands":["docker"]}}"#,
+        )
+        .unwrap();
+        let paths = Paths {
+            home: home.path().to_path_buf(),
+            ..setup.paths()
+        };
+        let req = FeedRequest {
+            sandbox: || Ok(crate::sandbox::Sockets::Blocked),
+            ..setup.request(true, None)
+        };
+
+        let fed = feed(
+            &herdr(),
+            &mut MemLedger::default(),
+            &paths,
+            &req,
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert!(
+            fed.lines[0].starts_with(
+                "would not start: 1: zpr-1 can't start sandboxed: your Claude settings loosen \
+                 its sandbox: "
+            ),
+            "{:?}",
+            fed.lines
+        );
+        assert!(fed.lines[0].contains("excludedCommands"), "{:?}", fed.lines);
+        assert!(!setup.config.path().join("sandbox").exists());
+    }
+
+    #[test]
+    fn a_lead_named_worker_is_refused_in_an_off_herd_by_a_dry_run_and_a_feed() {
+        let setup = Setup::new("printf 'b\\n'", 5);
+        let file = setup.config.path().join("herds/prs.toml");
+        let herd = fs::read_to_string(&file)
+            .unwrap()
+            .replace("name = \"zpr-{number}\"", "name = \"lead-{number}\"");
+        fs::write(file, herd).unwrap();
+        let refused = "lead-b can't start as a worker: lead-* names are herd leads', whose \
+                       sandbox files a worker's would replace or be taken for; give herd prs's \
+                       template pr another name";
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+
+        let dry = setup.feed(&herdr, &mut ledger, true).unwrap();
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(dry.lines[0], format!("would not start: b: {refused}"));
+        assert_eq!(fed.lines[0], format!("not started: b: {refused}"));
+        assert!(herdr.tabs().is_empty());
+        assert!(ledger.0.is_empty());
+    }
+
+    #[test]
     fn a_dry_run_still_says_would_add_for_a_preferred_worker_its_sandbox_cant_start() {
         let setup = worker_setup("printf '1\\n'", "sandbox = \"prefer\"");
         let req = FeedRequest {
