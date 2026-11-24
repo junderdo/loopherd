@@ -595,6 +595,7 @@ fn retire(ctx: &mut Ctx, name: &str, close: bool, force: bool, sink: &mut dyn Si
     let mut lines = vec![];
     let result = retire_and_close(
         ctx.herdr,
+        ctx.procs,
         ctx.ledger,
         &guard,
         name,
