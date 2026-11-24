@@ -60,12 +60,12 @@ skills_installed() {
 # --name-dir names the config dir in what it prints, for a dir that isn't the human's default.
 # update installs nothing: Claude updates its own plugins, so it only prints how.
 offer_skills() {
-  local want=$1 skills_dir=$2/skills answer where=
-  [[ "${3:-}" != --name-dir ]] || where=" in $2"
+  local want=$1 skills_dir=$2/skills answer where= env=
+  [[ "${3:-}" != --name-dir ]] || where=" in $2" env="CLAUDE_CONFIG_DIR=$2 "
   [[ "$want" != no ]] || return 0
   if [[ "$want" == update ]]; then
     skills_installed || return 0
-    echo "the $skills_plugin plugin$where updates through Claude: claude plugin update $skills_id"
+    echo "the $skills_plugin plugin$where updates through Claude: ${env}claude plugin update $skills_id"
     return 0
   fi
   if skills_installed; then

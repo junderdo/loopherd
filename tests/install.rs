@@ -1582,3 +1582,22 @@ fn update_installs_no_agent_types_where_the_ledger_names_only_another_dir() {
     assert!(out.status.success(), "{out:?}");
     assert!(!sandbox.home.join(".claude/agents").exists());
 }
+
+#[test]
+fn update_with_settings_names_the_config_dir_in_the_skills_plugin_update_command() {
+    let sandbox = Sandbox::new(false);
+    let claude = sandbox.dir.path().join("claude");
+    fs::create_dir_all(&claude).unwrap();
+    let settings = claude.join("settings.json");
+
+    let out = sandbox.install(&["--update", "--settings", settings.to_str().unwrap()]);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!(
+            "CLAUDE_CONFIG_DIR={} claude plugin update mattpocock-skills@claude-plugins-official",
+            claude.display()
+        )),
+        "{stdout}"
+    );
+}
