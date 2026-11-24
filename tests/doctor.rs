@@ -71,6 +71,11 @@ fn sandbox_with(status: &str) -> Sandbox {
         "context_window = 200000\n[lead_defaults]\nmerge = false\n",
     )
     .unwrap();
+    fs::write(
+        dir.path().join("config/install.toml"),
+        "kind = \"release\"\ntag = \"v0.2.0\"\n",
+    )
+    .unwrap();
     let sandbox = Sandbox {
         settings: dir.path().join("settings.json"),
         dir,
@@ -152,8 +157,31 @@ fn a_sound_install_prints_one_line_and_exits_0() {
     let s = sandbox(Some("0.9.5"));
     s.install_hooks();
     let out = s.doctor(&[]);
-    assert_eq!(stdout(&out), "doctor: 18 ok, 0 warnings, 0 failures\n");
+    assert_eq!(stdout(&out), "doctor: 19 ok, 0 warnings, 0 failures\n");
     assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn a_missing_install_record_warns_naming_both_installers() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    fs::remove_file(s.dir.path().join("config/install.toml")).unwrap();
+    let out = s.doctor(&[]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    let record = s.dir.path().join("config/install.toml");
+    assert!(
+        said.contains(&format!(
+            "warning install record: no install record at {}",
+            record.display()
+        )),
+        "{said}"
+    );
+    assert!(
+        said.contains("releases/latest/download/install.sh | sh"),
+        "{said}"
+    );
+    assert!(said.contains("`scripts/install` from a checkout"), "{said}");
 }
 
 #[test]

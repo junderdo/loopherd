@@ -221,10 +221,22 @@ fn lead_path_check(paths: &Paths, lead: &str) -> Option<Check> {
     })
 }
 
+/// Only ever warns: loopherd runs without its record; only update needs it.
+fn install_record_check(paths: &Paths) -> Check {
+    let record = crate::update::record_path(paths.config_dir());
+    match record.exists() {
+        true => ok("install record", record.display().to_string()),
+        false => {
+            let (why, fix) = crate::update::no_record(&record);
+            warning("install record", why, fix)
+        }
+    }
+}
+
 fn config_checks(paths: &Paths, settings: &Path) -> Vec<Check> {
     let config = crate::herd::config_file(paths);
     let by_hand = format!("fix {} by hand", config.display());
-    let mut checks = vec![];
+    let mut checks = vec![install_record_check(paths)];
     let file = match crate::config::read(&config) {
         Ok(file) => {
             checks.push(ok("config", config.display().to_string()));
@@ -1641,6 +1653,11 @@ mod tests {
         write_hooks(&settings, &exe, events);
         std::fs::create_dir_all(dir.path().join("config")).unwrap();
         std::fs::write(dir.path().join("config/config.toml"), CONFIG).unwrap();
+        std::fs::write(
+            dir.path().join("config/install.toml"),
+            "kind = \"release\"\ntag = \"v0.2.0\"\n",
+        )
+        .unwrap();
         let skill = crate::skill::Layout::Linked {
             real: dir.path().join(".agents/skills"),
             link: dir.path().join("skills"),
@@ -1720,7 +1737,7 @@ mod tests {
         let m = machine(&ALL);
         assert_eq!(
             run(&m, &herdr()),
-            ("doctor: 18 ok, 0 warnings, 0 failures\n".into(), 0)
+            ("doctor: 19 ok, 0 warnings, 0 failures\n".into(), 0)
         );
     }
 
@@ -1828,7 +1845,7 @@ mod tests {
                 out,
                 format!(
                     "failure {missing} hook: not in {}; fix: loopherd install-hook\n\
-                     doctor: 17 ok, 0 warnings, 1 failures\n",
+                     doctor: 18 ok, 0 warnings, 1 failures\n",
                     m.install.settings.display()
                 ),
             );
@@ -1849,7 +1866,7 @@ mod tests {
                 out,
                 format!(
                     "warning {missing} hook: not in {}; fix: loopherd install-hook\n\
-                     doctor: 17 ok, 1 warnings, 0 failures\n",
+                     doctor: 18 ok, 1 warnings, 0 failures\n",
                     m.install.settings.display()
                 ),
             );
@@ -1867,7 +1884,7 @@ mod tests {
         assert_eq!(
             run(&m, &herdr()),
             (
-                format!("warning {line}doctor: 17 ok, 1 warnings, 0 failures\n"),
+                format!("warning {line}doctor: 18 ok, 1 warnings, 0 failures\n"),
                 0
             )
         );
@@ -1875,7 +1892,7 @@ mod tests {
         assert_eq!(
             run(&m, &herdr()),
             (
-                format!("failure {line}doctor: 17 ok, 0 warnings, 1 failures\n"),
+                format!("failure {line}doctor: 18 ok, 0 warnings, 1 failures\n"),
                 1
             )
         );
@@ -1901,7 +1918,7 @@ mod tests {
         m.install.settings = m.dir.path().join("absent.json");
         let (out, code) = run(&m, &herdr());
         assert!(
-            out.ends_with("doctor: 11 ok, 3 warnings, 4 failures\n"),
+            out.ends_with("doctor: 12 ok, 3 warnings, 4 failures\n"),
             "{out}"
         );
         assert_eq!(code, 1);
@@ -1921,7 +1938,7 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.ends_with("doctor: 10 ok, 0 warnings, 1 failures\n"),
+            out.ends_with("doctor: 11 ok, 0 warnings, 1 failures\n"),
             "{out}"
         );
         assert_eq!(code, 1);
@@ -1946,7 +1963,7 @@ mod tests {
             format!(
                 "failure hook binary: hooks call {}, not the loopherd on PATH ({}); \
                  fix: loopherd install-hook\n\
-                 doctor: 17 ok, 0 warnings, 1 failures\n",
+                 doctor: 18 ok, 0 warnings, 1 failures\n",
                 old.display(),
                 path_exe.display()
             )
@@ -1968,7 +1985,7 @@ mod tests {
                  fix: put {running_dir} before {stale_dir} on PATH, then '{running}' install-hook\n\
                  warning running binary: this is {running}, not the loopherd on PATH ({stale}); \
                  fix: run the loopherd on PATH\n\
-                 doctor: 16 ok, 1 warnings, 1 failures\n",
+                 doctor: 17 ok, 1 warnings, 1 failures\n",
                 running = running.display(),
                 stale = stale.display(),
                 running_dir = running.parent().unwrap().display(),
@@ -2004,7 +2021,7 @@ mod tests {
             format!(
                 "warning running binary: this is {}, not the loopherd on PATH ({}); \
                  fix: run the loopherd on PATH\n\
-                 doctor: 17 ok, 1 warnings, 0 failures\n",
+                 doctor: 18 ok, 1 warnings, 0 failures\n",
                 dev.display(),
                 m.install.on_path.as_ref().unwrap().display()
             )
@@ -2022,7 +2039,7 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         m.install.on_path = Some(link);
         assert_eq!(run(&m, &herdr()).1, 0);
-        assert!(run(&m, &herdr()).0.starts_with("doctor: 18 ok"));
+        assert!(run(&m, &herdr()).0.starts_with("doctor: 19 ok"));
     }
 
     #[test]
@@ -2034,7 +2051,7 @@ mod tests {
         assert_eq!(
             out,
             "failure herdr: no herdr server answers on /run/fake/herdr.sock; fix: herdr\n\
-             doctor: 15 ok, 0 warnings, 1 failures\n"
+             doctor: 16 ok, 0 warnings, 1 failures\n"
         );
         assert_eq!(code, 1);
     }
@@ -2059,7 +2076,7 @@ mod tests {
                     format!(
                         "failure herdr version: {version} is older than {MIN_HERDR}; \
                          fix: upgrade herdr to {MIN_HERDR} or later and restart its server\n\
-                         doctor: 17 ok, 0 warnings, 1 failures\n"
+                         doctor: 18 ok, 0 warnings, 1 failures\n"
                     )
                 ),
             }
@@ -2091,11 +2108,12 @@ mod tests {
                  ok herdr: answers on /run/fake/herdr.sock\n\
                  ok herdr version: 0.9.5\n\
                  ok herdr plugin: {VERSION}, enabled\n\
+                 ok install record: {dir}/config/install.toml\n\
                  ok config: {config}\n\
                  ok lead defaults: set in {config}\n\
                  ok context limits: set in {config}\n\
                  ok ledger: 0 entries\n\
-                 doctor: 18 ok, 0 warnings, 0 failures\n"
+                 doctor: 19 ok, 0 warnings, 0 failures\n"
             )
         );
     }
@@ -2107,9 +2125,9 @@ mod tests {
         let data: Value = serde_json::from_str(&json(&checks)).unwrap();
         assert_eq!(
             (&data["ok"], &data["warnings"], &data["failures"]),
-            (&json!(17), &json!(1), &json!(0))
+            (&json!(18), &json!(1), &json!(0))
         );
-        assert_eq!(data["checks"].as_array().unwrap().len(), 18);
+        assert_eq!(data["checks"].as_array().unwrap().len(), 19);
         assert_eq!(
             data["checks"][4],
             json!({
@@ -2164,7 +2182,7 @@ mod tests {
             out,
             format!(
                 "failure Stop hook: not in {}; fix: loopherd install-hook\n\
-                 doctor: 17 ok, 0 warnings, 1 failures\n",
+                 doctor: 18 ok, 0 warnings, 1 failures\n",
                 m.install.settings.display()
             )
         );
@@ -2212,7 +2230,7 @@ mod tests {
                 "warning herdr plugin: loopherd's herdr plugin isn't installed, so its \
                  actions, popups and event hooks are unavailable; \
                  fix: herdr plugin install junderdo/loopherd/herdr-plugin\n\
-                 doctor: 17 ok, 1 warnings, 0 failures\n"
+                 doctor: 18 ok, 1 warnings, 0 failures\n"
                     .into(),
                 0
             )
@@ -2227,7 +2245,7 @@ mod tests {
                 "warning herdr plugin: loopherd's herdr plugin is disabled, so its \
                  actions, popups and event hooks are unavailable; \
                  fix: herdr plugin enable loopherd\n\
-                 doctor: 17 ok, 1 warnings, 0 failures\n"
+                 doctor: 18 ok, 1 warnings, 0 failures\n"
                     .into(),
                 0
             )
@@ -2242,7 +2260,7 @@ mod tests {
             format!(
                 "warning herdr plugin: plugin 0.0.1 differs from loopherd {VERSION}; \
                  fix: herdr plugin update loopherd\n\
-                 doctor: 17 ok, 1 warnings, 0 failures\n"
+                 doctor: 18 ok, 1 warnings, 0 failures\n"
             )
         );
         assert_eq!(code, 0);
@@ -2265,7 +2283,7 @@ mod tests {
                 format!(
                     "warning herdr plugin: plugin 999.0.0 differs from loopherd {VERSION}; \
                      fix: update loopherd to 999.0.0\n\
-                     doctor: 17 ok, 1 warnings, 0 failures\n"
+                     doctor: 18 ok, 1 warnings, 0 failures\n"
                 )
             );
             assert_eq!(code, 0);
@@ -2406,7 +2424,7 @@ mod tests {
                 format!(
                     "warning lead defaults: unset in {config}; fix: loopherd setup\n\
                      warning context limits: unset in {config}; fix: loopherd setup\n\
-                     doctor: 16 ok, 2 warnings, 0 failures\n"
+                     doctor: 17 ok, 2 warnings, 0 failures\n"
                 ),
                 0
             )
@@ -3972,7 +3990,7 @@ mod tests {
             (
                 "warning member gone: no live agent matches it (pane w1:p2) on /run/fake/herdr.sock; \
                  fix: loopherd revive --name gone, or loopherd retire gone\n\
-                 doctor: 19 ok, 1 warnings, 0 failures\n"
+                 doctor: 20 ok, 1 warnings, 0 failures\n"
                     .into(),
                 0
             )
@@ -4001,7 +4019,7 @@ mod tests {
     fn strays_are_not_reported() {
         let m = machine(&ALL);
         let herdr = herdr().with_live_agent(Some("stray"), None, "w1:p9");
-        assert_eq!(run(&m, &herdr).0, "doctor: 18 ok, 0 warnings, 0 failures\n");
+        assert_eq!(run(&m, &herdr).0, "doctor: 19 ok, 0 warnings, 0 failures\n");
     }
 
     #[test]

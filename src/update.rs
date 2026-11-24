@@ -35,13 +35,18 @@ enum Record {
     Source,
 }
 
-/// The refusal both `update` and doctor give when `install.toml` is missing.
-pub fn no_record(path: &Path) -> String {
-    format!(
-        "no install record at {}, so loopherd can't tell how it was installed; install it \
-         again with `curl -fsSL {RELEASES}/latest/download/install.sh | sh`, or \
-         `scripts/install` from a checkout",
-        path.display()
+/// Why a missing `install.toml` stops `update`, and its fix, as doctor
+/// warns about it too.
+pub fn no_record(path: &Path) -> (String, String) {
+    (
+        format!(
+            "no install record at {}, so loopherd update can't tell how loopherd was installed",
+            path.display()
+        ),
+        format!(
+            "install it again with `curl -fsSL {RELEASES}/latest/download/install.sh | sh`, \
+             or `scripts/install` from a checkout"
+        ),
     )
 }
 
@@ -125,7 +130,10 @@ fn run(
 fn recorded_tag(config_dir: &Path) -> Result<String> {
     let path = record_path(config_dir);
     let text = match std::fs::read_to_string(&path) {
-        Err(e) if e.kind() == ErrorKind::NotFound => bail!("refused: {}", no_record(&path)),
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            let (why, fix) = no_record(&path);
+            bail!("refused: {why}; {fix}")
+        }
         text => text.with_context(|| format!("read {}", path.display()))?,
     };
     match toml::from_str(&text).with_context(|| format!("read {}", path.display()))? {
