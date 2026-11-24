@@ -167,6 +167,12 @@ if ! [[ -x "$bin_dir/loopherd" ]] || ! cmp -s "$built" "$bin_dir/loopherd"; then
   trap - EXIT
 fi
 
+# The ${..+..} form: bash before 4.4 calls an empty array unbound under set -u.
+"$bin_dir/loopherd" install-hook ${args[@]+"${args[@]}"}
+
+"$root/scripts/install-extras" offers "$agents" "$skills" "$herdr_plugin" "$herdr_keys" "$bin_dir/loopherd" "$settings"
+
+# Only once hook and extras succeed, so a failed install leaves the old record and update retries it.
 # Last install wins, so this replaces a release record; --settings runs (tests) write none.
 if [[ -z "$settings" ]]; then
   config=${LOOPHERD_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/loopherd}
@@ -174,16 +180,11 @@ if [[ -z "$settings" ]]; then
   mkdir -p "$config"
   {
     printf 'kind = "source"\ncheckout = "%s"\n' "${checkout//\"/\\\"}"
-    # The commit installed, so loopherd update can retry an install that failed after its pull.
     ! commit=$(git -C "$root" rev-parse HEAD 2>/dev/null) || printf 'commit = "%s"\n' "$commit"
   } >"$config/install.toml.tmp"
   mv -f "$config/install.toml.tmp" "$config/install.toml"
 fi
 
-# The ${..+..} form: bash before 4.4 calls an empty array unbound under set -u.
-"$bin_dir/loopherd" install-hook ${args[@]+"${args[@]}"}
-
-"$root/scripts/install-extras" offers "$agents" "$skills" "$herdr_plugin" "$herdr_keys" "$bin_dir/loopherd" "$settings"
 [[ "$setup" != ask ]] || "$bin_dir/loopherd" setup || echo "install: setup failed; run loopherd setup once config.toml is fixed" >&2
 # herdr may not be started yet, so a doctor failure is shown but doesn't fail the install.
 [[ -n "$removing" ]] || "$bin_dir/loopherd" doctor ${settings:+--settings "$settings"} || true

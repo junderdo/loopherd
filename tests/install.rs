@@ -1606,3 +1606,21 @@ fn update_with_settings_names_the_config_dir_in_the_skills_plugin_update_command
         "{stdout}"
     );
 }
+
+#[test]
+fn a_failed_install_hook_after_the_rename_leaves_the_install_record_as_it_was() {
+    let sandbox = Sandbox::new(false);
+    let before = format!(
+        "kind = \"source\"\ncheckout = \"{}\"\ncommit = \"0000000000000000000000000000000000000000\"\n",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    fs::create_dir_all(sandbox.config()).unwrap();
+    fs::write(sandbox.config().join("install.toml"), &before).unwrap();
+    sandbox.exits("install-hook", 1);
+
+    let out = sandbox.install(&["--no-extras"]);
+
+    assert!(!out.status.success(), "{out:?}");
+    assert!(sandbox.installed().exists());
+    assert_eq!(sandbox.record().unwrap(), before);
+}
