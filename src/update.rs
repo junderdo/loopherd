@@ -32,8 +32,15 @@ pub struct Places {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 enum Record {
-    Release { tag: String },
-    Source { checkout: PathBuf },
+    Release {
+        tag: String,
+    },
+    Source {
+        checkout: PathBuf,
+        /// The commit `scripts/install` last installed, which a record
+        /// written before it was recorded lacks.
+        commit: Option<String>,
+    },
 }
 
 /// Why a missing `install.toml` stops `update`, and its fix, as doctor
@@ -81,7 +88,7 @@ fn run(
 ) -> Result<i32> {
     match read_record(&places.config_dir)? {
         Record::Release { tag } => update_release(places, tag, want, on_path, out),
-        Record::Source { checkout } => update_source(places, &checkout, want, out),
+        Record::Source { checkout, commit } => update_source(places, &checkout, commit, want, out),
     }
 }
 
@@ -127,7 +134,13 @@ fn update_release(
     Ok(0)
 }
 
-fn update_source(places: &Places, checkout: &Path, want: Want, out: &mut dyn Write) -> Result<i32> {
+fn update_source(
+    places: &Places,
+    checkout: &Path,
+    installed: Option<String>,
+    want: Want,
+    out: &mut dyn Write,
+) -> Result<i32> {
     let refuse = |why: String| {
         anyhow!(
             "refused: {why}; update by hand with `git pull && scripts/install` in {}",
@@ -152,60 +165,72 @@ fn update_source(places: &Places, checkout: &Path, want: Want, out: &mut dyn Wri
         )));
     }
     let git = Git(checkout);
-    let default = git
-        .output(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
-        .map_err(|e| refuse(format!("can't tell origin's default branch: {e:#}")))?;
-    let default = default.strip_prefix("origin/").unwrap_or(&default);
-    let upstream = format!("origin/{default}");
-    let checking = matches!(want, Want::Check);
-    if !checking {
+    let default = default_branch(&git).map_err(|e| refuse(format!("{e:#}")))?;
+    let local = format!("refs/heads/{default}");
+    let upstream = format!("refs/remotes/origin/{default}");
+    let blocker = {
         let branch = git
-            .output(&["symbolic-ref", "--short", "-q", "HEAD"])
+            .output(&["symbolic-ref", "-q", "HEAD"])
             .unwrap_or_default();
-        if branch != default {
-            let what = match branch.is_empty() {
-                true => "a detached HEAD".to_string(),
-                false => branch,
-            };
-            return Err(refuse(format!("{what} is checked out, not {default}")));
-        }
-        if !git
+        if branch != local {
+            let what = branch
+                .strip_prefix("refs/heads/")
+                .unwrap_or("a detached HEAD");
+            Some(format!("{what} is checked out, not {default}"))
+        } else if !git
             .output(&["status", "--porcelain", "--untracked-files=no"])?
             .is_empty()
         {
-            return Err(refuse("the checkout has uncommitted changes".to_string()));
+            Some("the checkout has uncommitted changes".to_string())
+        } else {
+            None
         }
+    };
+    let checking = matches!(want, Want::Check);
+    if let Some(why) = &blocker
+        && !checking
+    {
+        return Err(refuse(why.clone()));
     }
     git.output(&["fetch", "-q", "origin"])?;
-    let old = git.output(&["rev-parse", "--short", default])?;
-    let new = git.output(&["rev-parse", "--short", &upstream])?;
+    let target = git.output(&["rev-parse", "--verify", &format!("{upstream}^{{commit}}")])?;
+    // A failed install leaves the record on the commit before the pull.
+    let installed = match installed {
+        Some(commit) if git.succeeds(&["cat-file", "-e", &format!("{commit}^{{commit}}")])? => {
+            commit
+        }
+        _ => git.output(&["rev-parse", "--verify", &format!("{local}^{{commit}}")])?,
+    };
+    let short = |sha: &str| git.output(&["rev-parse", "--short", sha]);
     let behind: usize = git
-        .output(&["rev-list", "--count", &format!("{default}..{upstream}")])?
+        .output(&["rev-list", "--count", &format!("{installed}..{target}")])?
         .parse()
         .context("count the commits behind")?;
     if behind == 0 {
-        writeln!(out, "loopherd is up to date ({old})")?;
+        writeln!(out, "loopherd is up to date ({})", short(&installed)?)?;
         return Ok(0);
     }
     let commits = match behind {
         1 => "1 commit".to_string(),
         n => format!("{n} commits"),
     };
+    let (old, new) = (short(&installed)?, short(&target)?);
     if checking {
-        writeln!(
-            out,
-            "{old} → {new}: {default} is {commits} behind; run loopherd update"
-        )?;
+        let next = match &blocker {
+            Some(why) => format!("loopherd update would refuse: {why}"),
+            None => "run loopherd update".to_string(),
+        };
+        writeln!(out, "{old} → {new}: {commits} behind; {next}")?;
         return Ok(1);
     }
-    if !git.succeeds(&["merge-base", "--is-ancestor", default, &upstream])? {
+    if !git.succeeds(&["merge-base", "--is-ancestor", &local, &target])? {
         return Err(refuse(format!(
-            "{default} has commits {upstream} doesn't, so the pull isn't a fast-forward"
+            "{default} has commits origin/{default} doesn't, so the pull isn't a fast-forward"
         )));
     }
     writeln!(out, "{old} → {new}, {commits}")?;
     say_which_loopherd(places, out)?;
-    git.output(&["pull", "-q", "--ff-only", "origin", default])
+    git.output(&["pull", "-q", "--ff-only", "origin", &default])
         .map_err(|e| refuse(format!("{e:#}")))?;
     let status = Command::new(checkout.join("scripts/install"))
         .arg("--update")
@@ -214,12 +239,29 @@ fn update_source(places: &Places, checkout: &Path, want: Want, out: &mut dyn Wri
         .context("run scripts/install --update")?;
     if !status.success() {
         bail!(
-            "scripts/install --update failed ({status}) after pulling {new} into {}",
+            "scripts/install --update failed ({status}) in {}; fix it and run loopherd update again",
             checkout.display()
         );
     }
     after_install(places, out)?;
     Ok(0)
+}
+
+/// origin's default branch: from `origin/HEAD`, else by asking origin.
+fn default_branch(git: &Git) -> Result<String> {
+    if let Ok(head) = git.output(&["symbolic-ref", "-q", "refs/remotes/origin/HEAD"])
+        && let Some(branch) = head.strip_prefix("refs/remotes/origin/")
+    {
+        return Ok(branch.to_string());
+    }
+    git.output(&["ls-remote", "--symref", "origin", "HEAD"])?
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("ref: refs/heads/")?
+                .strip_suffix("\tHEAD")
+        })
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("can't tell origin's default branch"))
 }
 
 /// Runs git in one checkout.

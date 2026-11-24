@@ -172,7 +172,11 @@ if [[ -z "$settings" ]]; then
   config=${LOOPHERD_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/loopherd}
   checkout=${root//\\/\\\\}
   mkdir -p "$config"
-  printf 'kind = "source"\ncheckout = "%s"\n' "${checkout//\"/\\\"}" >"$config/install.toml.tmp"
+  {
+    printf 'kind = "source"\ncheckout = "%s"\n' "${checkout//\"/\\\"}"
+    # The commit installed, so loopherd update can retry an install that failed after its pull.
+    ! commit=$(git -C "$root" rev-parse HEAD 2>/dev/null) || printf 'commit = "%s"\n' "$commit"
+  } >"$config/install.toml.tmp"
   mv -f "$config/install.toml.tmp" "$config/install.toml"
 fi
 

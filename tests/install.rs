@@ -245,11 +245,16 @@ fn install_records_a_source_install_of_its_checkout_over_a_release_record() {
     let out = sandbox.install(&["--no-extras"]);
 
     assert!(out.status.success(), "{out:?}");
+    let head = Command::new("git")
+        .args(["-C", env!("CARGO_MANIFEST_DIR"), "rev-parse", "HEAD"])
+        .output()
+        .unwrap();
     assert_eq!(
         sandbox.record().unwrap(),
         format!(
-            "kind = \"source\"\ncheckout = \"{}\"\n",
-            env!("CARGO_MANIFEST_DIR")
+            "kind = \"source\"\ncheckout = \"{}\"\ncommit = \"{}\"\n",
+            env!("CARGO_MANIFEST_DIR"),
+            String::from_utf8_lossy(&head.stdout).trim()
         )
     );
 }

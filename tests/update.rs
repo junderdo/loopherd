@@ -552,9 +552,14 @@ impl Source {
         executable(
             &upstream.join("scripts/install"),
             format!(
-                "#!/bin/sh\necho \"scripts/install $*\" >> '{log}'\nexit \"$(cat '{exit}' 2>/dev/null || echo 0)\"\n",
+                "#!/bin/sh\n\
+                 echo \"scripts/install $* in $(pwd) at $(git rev-parse HEAD)\" >> '{log}'\n\
+                 code=$(cat '{exit}' 2>/dev/null || echo 0)\n\
+                 [ \"$code\" != 0 ] || printf 'kind = \"source\"\\ncheckout = \"%s\"\\ncommit = \"%s\"\\n' \"$(pwd)\" \"$(git rev-parse HEAD)\" > '{record}'\n\
+                 exit \"$code\"\n",
                 log = source.releases.log_file().display(),
                 exit = source.dir().join("install-exit").display(),
+                record = source.releases.config().join("install.toml").display(),
             ),
         );
         source.git(&upstream, &["init", "-q", "-b", "main"]);
@@ -567,10 +572,19 @@ impl Source {
         source.git(&upstream, &["remote", "add", "origin", "../origin.git"]);
         source.git(source.dir(), &["clone", "-q", "origin.git", "checkout"]);
         source.releases.record(&format!(
-            "kind = \"source\"\ncheckout = \"{}\"\n",
-            source.checkout().display()
+            "kind = \"source\"\ncheckout = \"{}\"\ncommit = \"{}\"\n",
+            source.checkout().display(),
+            source.head(&source.checkout())
         ));
         source
+    }
+
+    /// What the fake `scripts/install --update` logs when run at `sha`.
+    fn installed_at(&self, sha: &str) -> String {
+        format!(
+            "scripts/install --update in {} at {sha}\n",
+            self.checkout().display()
+        )
     }
 
     fn dir(&self) -> &Path {
@@ -659,7 +673,7 @@ fn a_source_install_behind_names_both_shas_then_pulls_and_runs_scripts_install_u
         stdout(&out)
     );
     assert_eq!(source.head(&source.checkout()), new);
-    assert_eq!(source.log(), "scripts/install --update\n");
+    assert_eq!(source.log(), source.installed_at(&new));
 }
 
 #[test]
@@ -717,7 +731,10 @@ fn untracked_files_dont_stop_a_source_update() {
     let out = source.run(&[]);
 
     assert!(out.status.success(), "{out:?}");
-    assert_eq!(source.log(), "scripts/install --update\n");
+    assert_eq!(
+        source.log(),
+        source.installed_at(&source.head(&source.upstream()))
+    );
 }
 
 #[test]
@@ -835,4 +852,113 @@ fn check_exits_2_when_the_recorded_checkout_is_missing() {
     let out = source.run(&["--check"]);
 
     assert_eq!(out.status.code(), Some(2), "{out:?}");
+}
+
+#[test]
+fn after_a_failed_install_the_next_update_installs_the_pulled_commits() {
+    let source = Source::new();
+    let old = source.head(&source.checkout());
+    source.upstream_moves(2);
+    let new = source.head(&source.upstream());
+    source.install_exits(3);
+    source.run(&[]);
+    source.install_exits(0);
+
+    let out = source.run(&[]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        stdout(&out).starts_with(&format!(
+            "{} → {}, 2 commits\n",
+            source.short(&old),
+            source.short(&new)
+        )),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!(
+        source.log(),
+        format!("{}{}", source.installed_at(&new), source.installed_at(&new))
+    );
+}
+
+#[test]
+fn check_after_a_failed_install_reports_the_commits_not_installed() {
+    let source = Source::new();
+    source.upstream_moves(2);
+    source.install_exits(3);
+    source.run(&[]);
+
+    let out = source.run(&["--check"]);
+
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        stdout(&out).contains("2 commits behind"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn a_record_without_a_commit_counts_the_checkout_as_installed() {
+    let source = Source::new();
+    source.releases.record(&format!(
+        "kind = \"source\"\ncheckout = \"{}\"\n",
+        source.checkout().display()
+    ));
+    source.upstream_moves(1);
+    let new = source.head(&source.upstream());
+
+    let out = source.run(&[]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(source.log(), source.installed_at(&new));
+}
+
+#[test]
+fn without_origin_head_it_asks_origin_for_its_default_branch() {
+    let source = Source::new();
+    source.git(&source.checkout(), &["remote", "set-head", "origin", "-d"]);
+    source.upstream_moves(1);
+    let new = source.head(&source.upstream());
+
+    let out = source.run(&[]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(source.log(), source.installed_at(&new));
+}
+
+#[test]
+fn a_tag_named_like_the_default_branch_doesnt_confuse_it() {
+    let source = Source::new();
+    let old = source.head(&source.checkout());
+    source.upstream_moves(1);
+    let new = source.head(&source.upstream());
+    source.git(&source.checkout(), &["tag", "main", &old]);
+
+    let out = source.run(&[]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(source.log(), source.installed_at(&new));
+}
+
+#[test]
+fn check_behind_on_another_branch_names_why_update_would_refuse() {
+    let source = Source::new();
+    source.upstream_moves(1);
+    source.git(&source.checkout(), &["switch", "-q", "-c", "mine"]);
+
+    let out = source.run(&["--check"]);
+
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        stdout(&out).contains("mine is checked out, not main"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(
+        !stdout(&out).contains("run loopherd update"),
+        "{}",
+        stdout(&out)
+    );
 }
